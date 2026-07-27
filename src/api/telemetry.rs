@@ -7,7 +7,9 @@
 
 use crate::api::AppState;
 use crate::authn::TenantInfo;
-use crate::storage::schema::variant::{variant_as_json, variant_varchar};
+use crate::storage::schema::variant::{
+    parse_projected_json_value, variant_as_json, variant_varchar,
+};
 use axum::extract::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -702,7 +704,14 @@ fn rows_to_objects(columns: &[String], rows: &[Vec<Value>]) -> Vec<Value> {
         .map(|row| {
             let mut object = Map::new();
             for (idx, column) in columns.iter().enumerate() {
-                object.insert(column.clone(), row.get(idx).cloned().unwrap_or(Value::Null));
+                let raw = row.get(idx).cloned().unwrap_or(Value::Null);
+                // VARIANT projections use CAST(... AS JSON); DuckDB returns text — parse so
+                // clients keep object-valued attributes/resource_attributes.
+                let value = match column.as_str() {
+                    "attributes" | "resource_attributes" => parse_projected_json_value(raw),
+                    _ => raw,
+                };
+                object.insert(column.clone(), value);
             }
             Value::Object(object)
         })

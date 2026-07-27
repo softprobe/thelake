@@ -55,6 +55,20 @@ pub fn variant_as_json(column: &str) -> String {
     format!("CAST({column} AS JSON) AS {column}")
 }
 
+/// DuckDB returns `CAST(... AS JSON)` as text; parse to object/array when possible.
+///
+/// Leaves non-JSON strings and non-string values unchanged so callers can treat
+/// VARIANT projections as nested JSON without double-encoding in HTTP responses.
+pub fn parse_projected_json_value(value: Value) -> Value {
+    match value {
+        Value::String(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(parsed @ (Value::Object(_) | Value::Array(_))) => parsed,
+            _ => Value::String(text),
+        },
+        other => other,
+    }
+}
+
 /// DuckLake SELECT list that casts staged JSON columns to VARIANT.
 ///
 /// Example: `SELECT * REPLACE (attributes::JSON::VARIANT AS attributes) FROM ...`
@@ -134,5 +148,16 @@ mod tests {
             "SELECT * REPLACE (attributes::JSON::VARIANT AS attributes, resource_attributes::JSON::VARIANT AS resource_attributes)"
         );
         assert_eq!(parquet_select_with_variant_casts("scores"), "SELECT *");
+    }
+
+    #[test]
+    fn parse_projected_json_value_objects_and_leaves_plain_text() {
+        let obj = parse_projected_json_value(Value::String(
+            r#"{"logger_name":"agent.transform"}"#.to_string(),
+        ));
+        assert_eq!(obj["logger_name"], "agent.transform");
+
+        let plain = parse_projected_json_value(Value::String("not-json".to_string()));
+        assert_eq!(plain, Value::String("not-json".to_string()));
     }
 }

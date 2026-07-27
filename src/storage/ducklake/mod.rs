@@ -1031,12 +1031,15 @@ impl DuckLakeWriter {
                         )
                     };
                     conn.execute_batch("BEGIN TRANSACTION;")?;
-                    let write_ok = (|| -> Result<()> {
-                        conn.execute_batch(&ddl)
-                            .map_err(|e| anyhow!("CREATE TABLE failed: {e}"))?;
-                        ensure_variant_column_types(conn, qualified_table, &variant_table_name)?;
-                        conn.execute_batch(&insert)
-                            .map_err(|e| anyhow!("INSERT failed: {e}"))?;
+                    let write_ok = (|| -> Result<(), WriteAttemptError> {
+                        conn.execute_batch(&ddl).map_err(|e| {
+                            WriteAttemptError::Retryable(anyhow!("CREATE TABLE failed: {e}"))
+                        })?;
+                        ensure_variant_column_types(conn, qualified_table, &variant_table_name)
+                            .map_err(WriteAttemptError::from_variant_guard)?;
+                        conn.execute_batch(&insert).map_err(|e| {
+                            WriteAttemptError::Retryable(anyhow!("INSERT failed: {e}"))
+                        })?;
                         Ok(())
                     })();
                     match write_ok {
@@ -1056,7 +1059,14 @@ impl DuckLakeWriter {
                             }
                             return Ok(());
                         }
-                        Err(err) => {
+                        Err(WriteAttemptError::Fatal(err)) => {
+                            let _ = conn.execute_batch("ROLLBACK;");
+                            // Legacy MAP / schema mismatch must not fall through to catalog.table —
+                            // that would create a second VARIANT table while queries still read the
+                            // unchanged three-part legacy table.
+                            return Err(err);
+                        }
+                        Err(WriteAttemptError::Retryable(err)) => {
                             let _ = conn.execute_batch("ROLLBACK;");
                             last_err = Some(anyhow!(
                                 "DuckLake write failed for {}: {}",
@@ -1256,6 +1266,26 @@ impl DuckLakeWriter {
 
 fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
+}
+
+/// Write attempt outcome: only qualification/engine errors may try the next table name candidate.
+enum WriteAttemptError {
+    /// Schema incompatibility (legacy MAP, missing VARIANT column) — fail the write immediately.
+    Fatal(anyhow::Error),
+    /// Likely three-part name / catalog issues — try `catalog.table` fallback.
+    Retryable(anyhow::Error),
+}
+
+impl WriteAttemptError {
+    fn from_variant_guard(err: anyhow::Error) -> Self {
+        let msg = err.to_string();
+        if msg.contains("expected VARIANT") || msg.contains("missing required VARIANT") {
+            Self::Fatal(err)
+        } else {
+            // DESCRIBE / prepare failures can mean the three-part name is unsupported.
+            Self::Retryable(err)
+        }
+    }
 }
 
 /// Fail fast when an existing DuckLake table still uses MAP for hot VARIANT columns.
