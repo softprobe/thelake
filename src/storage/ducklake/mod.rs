@@ -18,6 +18,7 @@ use crate::promotion::{
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::storage::schema::arrow;
 use crate::storage::schema::tables::{OtlpLogsTable, OtlpMetricsTable, ScoreTable, TraceTable};
+use crate::storage::schema::variant::{hot_variant_columns, parquet_select_with_variant_casts};
 use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
 use anyhow::{anyhow, Result};
@@ -969,6 +970,8 @@ impl DuckLakeWriter {
         let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
         let candidates = self.table_name_candidates_for(table_name, dk);
         let order_clause = self.insert_order_clause(table_name);
+        let select_prefix = parquet_select_with_variant_casts(table_name);
+        let variant_table_name = table_name.to_string();
         let deduplicate_scores = table_name == ScoreTable::table_name();
         let option_stmts: Vec<String> = candidates
             .iter()
@@ -994,8 +997,9 @@ impl DuckLakeWriter {
                 let mut last_err: Option<anyhow::Error> = None;
                 for (i, qualified_table) in candidates.iter().enumerate() {
                     let ddl = format!(
-                        "CREATE TABLE IF NOT EXISTS {table} AS SELECT * FROM read_parquet('{path}') LIMIT 0;",
+                        "CREATE TABLE IF NOT EXISTS {table} AS {select} FROM read_parquet('{path}') LIMIT 0;",
                         table = qualified_table,
+                        select = select_prefix,
                         path = escaped_path
                     );
                     // BY NAME keeps ingest shrink-safe: physical promoted columns absent from the
@@ -1004,29 +1008,38 @@ impl DuckLakeWriter {
                     let insert = if deduplicate_scores {
                         format!(
                             "INSERT INTO {table} BY NAME
-                             SELECT incoming.* FROM read_parquet('{path}') incoming
+                             SELECT incoming.* FROM (
+                               {select} FROM read_parquet('{path}')
+                             ) incoming
                              WHERE NOT EXISTS (
                                SELECT 1 FROM {table} existing
                                WHERE existing.score_id = incoming.score_id
                              )
                              {order_clause};",
                             table = qualified_table,
+                            select = select_prefix,
                             path = escaped_path,
                             order_clause = order_clause,
                         )
                     } else {
                         format!(
-                            "INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{path}') {order_clause};",
+                            "INSERT INTO {table} BY NAME {select} FROM read_parquet('{path}') {order_clause};",
                             table = qualified_table,
+                            select = select_prefix,
                             path = escaped_path,
                             order_clause = order_clause,
                         )
                     };
                     conn.execute_batch("BEGIN TRANSACTION;")?;
-                    match conn
-                        .execute_batch(&ddl)
-                        .and_then(|_| conn.execute_batch(&insert))
-                    {
+                    let write_ok = (|| -> Result<()> {
+                        conn.execute_batch(&ddl)
+                            .map_err(|e| anyhow!("CREATE TABLE failed: {e}"))?;
+                        ensure_variant_column_types(conn, qualified_table, &variant_table_name)?;
+                        conn.execute_batch(&insert)
+                            .map_err(|e| anyhow!("INSERT failed: {e}"))?;
+                        Ok(())
+                    })();
+                    match write_ok {
                         Ok(_) => {
                             conn.execute_batch("COMMIT;")?;
                             // Apply options for this table (two stmts per candidate).
@@ -1243,6 +1256,53 @@ impl DuckLakeWriter {
 
 fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
+}
+
+/// Fail fast when an existing DuckLake table still uses MAP for hot VARIANT columns.
+fn ensure_variant_column_types(
+    conn: &Connection,
+    qualified_table: &str,
+    table_name: &str,
+) -> Result<()> {
+    let expected = hot_variant_columns(table_name);
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let sql = format!("DESCRIBE {qualified_table};");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| anyhow!("DESCRIBE {qualified_table} failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let name: String = row.get(0)?;
+            let dtype: String = row.get(1)?;
+            Ok((name, dtype))
+        })
+        .map_err(|e| anyhow!("DESCRIBE {qualified_table} query failed: {e}"))?;
+
+    let mut found: HashMap<String, String> = HashMap::new();
+    for row in rows {
+        let (name, dtype) = row.map_err(|e| anyhow!("DESCRIBE row failed: {e}"))?;
+        found.insert(name, dtype);
+    }
+
+    for col in expected {
+        let Some(dtype) = found.get(*col) else {
+            return Err(anyhow!(
+                "table {qualified_table} is missing required VARIANT column '{col}'"
+            ));
+        };
+        let normalized = dtype.to_ascii_uppercase();
+        if normalized != "VARIANT" {
+            return Err(anyhow!(
+                "table {qualified_table} column '{col}' has type {dtype}, expected VARIANT. \
+                 Hot MAP columns were migrated to Iceberg/DuckLake VARIANT shredding; \
+                 rebuild/migrate this DuckLake table via operations (do not auto-drop in-process), \
+                 then re-ingest."
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn catalog_is_attached(conn: &Connection, alias: &str) -> bool {
