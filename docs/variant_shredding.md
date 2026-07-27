@@ -45,8 +45,9 @@ SELECT COALESCE(CAST(attributes['sp.observation.type'] AS VARCHAR), 'span')
 SELECT CAST(attributes AS JSON) AS attributes FROM traces
 ```
 
-Runtime SQL compilers (`llm/query`, `telemetry`, `capture_export`) already emit
-these casts.
+Runtime SQL compilers (`llm/query`, `telemetry`) already emit
+these casts. SoftProbe product adapters (`ThelakeSql`) must use the same
+`CAST(col['key'] AS VARCHAR)` form when querying via `/v1/query/sql`.
 
 ## Operator migration
 
