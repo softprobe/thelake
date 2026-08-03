@@ -18,6 +18,13 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ENV DUCKDB_DOWNLOAD_LIB=1
+# Cap compiler parallelism. Rust's peak RSS scales with concurrent codegen
+# units, and an emulated amd64 build on a small VM will thrash or stall
+# outright long before it OOMs -- the symptom is a build that stops emitting
+# output with the buildkit container near 0% CPU, which reads like a hang
+# rather than memory pressure. Empty = cargo's default (one job per core).
+ARG CARGO_BUILD_JOBS=""
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 # Must be present before `cook`: otherwise cook uses the image default Rust and
 # `cargo build` (after COPY) switches to rust-toolchain.toml → second full compile.
 COPY --from=planner /app/rust-toolchain.toml rust-toolchain.toml
