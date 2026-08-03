@@ -5,7 +5,7 @@ use crate::api::sql_support::{
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreDataType, ScoreSource};
-use crate::storage::schema::variant::{variant_as_json, variant_try_cast, variant_varchar};
+use crate::storage::schema::variant::{variant_as_json, variant_try_cast, variant_varchar, parse_projected_json_value};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -878,7 +878,22 @@ fn observation_projection(include_payload: bool) -> String {
     ];
     if include_payload {
         cols.push(variant_as_json("attributes"));
-        cols.push("events".to_string());
+        // Not a bare `events`. The column is LIST<STRUCT<..., MAP<..>>>, and
+        // returning that nested shape through DuckDB's Arrow result path
+        // crashes on rows stored as inlined DuckLake data:
+        //   INTERNAL Error: Attempted to access index 0 within vector of size 0
+        // ...which then invalidates the whole database, so every later query on
+        // that connection fails too. That is the 2026-08-03 outage: 84% of
+        // production rows were inlined, so opening any session detail took the
+        // query layer down for everyone.
+        //
+        // The crash is in materialising the value, not reading it: on the same
+        // rows, len(events), events[1].name and CAST(events AS JSON) all
+        // succeed while SELECT events dies. Casting to JSON server-side keeps
+        // the nested value off the Arrow path entirely -- the same treatment
+        // `attributes` already gets on the line above. map_events() accepts the
+        // parsed array either way.
+        cols.push(variant_as_json("events"));
     }
     cols.join(", ")
 }
@@ -1216,7 +1231,14 @@ fn map_string_map(value: Option<&Value>) -> HashMap<String, String> {
 }
 
 fn map_events(value: Option<&Value>) -> Vec<Value> {
-    match value {
+    // `events` is projected as CAST(... AS JSON) (see observation_projection),
+    // so DuckDB hands it back as text. Parse first: the match below falls
+    // through to Vec::new() for a string, which would silently turn every
+    // event list into an empty one -- a quieter failure than the crash this
+    // projection exists to avoid. Still accepts an already-parsed array so a
+    // bare projection elsewhere keeps working.
+    let parsed = value.cloned().map(parse_projected_json_value);
+    match parsed.as_ref() {
         Some(Value::Array(items)) => items
             .iter()
             .map(|item| match item {
@@ -1417,6 +1439,34 @@ mod tests {
         ));
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body.0["retryable"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn events_are_projected_as_json_and_parsed_back() {
+        // The `events` column is LIST<STRUCT<..., MAP<..>>>. Returning that
+        // nested shape through DuckDB's Arrow path crashes on inlined DuckLake
+        // rows and invalidates the database (2026-08-03 outage), so it must be
+        // cast to JSON server-side like `attributes` already is.
+        let sql = observation_projection(true);
+        assert!(
+            sql.contains("CAST(events AS JSON) AS events"),
+            "events must not be projected bare: {sql}"
+        );
+
+        // And the text that cast produces has to survive mapping. Without the
+        // parse step map_events falls through to Vec::new(), turning every
+        // event list into an empty one -- a quieter failure than the crash.
+        let raw = serde_json::json!(
+            "[{\"name\":\"gen_ai.content.completion\",\"attributes\":{\"content\":\"hi\"}}]"
+        );
+        let events = map_events(Some(&raw));
+        assert_eq!(events.len(), 1, "JSON text was dropped: {events:?}");
+        assert_eq!(events[0]["name"], "gen_ai.content.completion");
+
+        // Already-parsed arrays must still work.
+        let arr = serde_json::json!([{"name": "x"}]);
+        assert_eq!(map_events(Some(&arr)).len(), 1);
+        assert!(map_events(None).is_empty());
     }
 
     #[test]
