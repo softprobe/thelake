@@ -2,7 +2,7 @@ use crate::config::DuckLakeConfig;
 use anyhow::Result;
 use duckdb::Connection;
 
-use super::util::escape_sql_literal;
+use super::util::{escape_sql_literal, size_literal};
 
 pub(super) fn catalog_is_attached(conn: &Connection, alias: &str) -> bool {
     let sql = format!(
@@ -117,6 +117,63 @@ pub(crate) fn ducklake_set_option_scope_for_qualified(qualified_table: &str) -> 
     }
 }
 
+/// Durable DuckLake Parquet codec (overrides DuckLake's Snappy default).
+pub(crate) const DUCKLAKE_PARQUET_COMPRESSION: &str = "zstd";
+
+/// Catalog-global DuckLake option: Parquet codec for durable `data_path` files.
+///
+/// Must be set after ATTACH (no table required). Table-scoped
+/// `parquet_compression` cannot run before the table exists; writer applies
+/// that reinforcer only after a successful commit.
+pub(crate) fn ducklake_global_parquet_compression_stmt(catalog_alias: &str) -> String {
+    format!(
+        "CALL {}.set_option('parquet_compression', '{}');",
+        catalog_alias, DUCKLAKE_PARQUET_COMPRESSION
+    )
+}
+
+/// Indices into [`ducklake_table_write_option_stmts`] — keep in lockstep with
+/// that vec order and with compaction's fail/skip/warn policy.
+pub(crate) const DUCKLAKE_OPT_TARGET_FILE_SIZE: usize = 0;
+pub(crate) const DUCKLAKE_OPT_HIVE_FILE_PATTERN: usize = 1;
+pub(crate) const DUCKLAKE_OPT_PARQUET_COMPRESSION: usize = 2;
+
+/// Per-table DuckLake write options (fixed order; see `DUCKLAKE_OPT_*`).
+///
+/// Policy:
+/// - `target_file_size`: compaction fail-closed
+/// - `hive_file_pattern`: soft-warn (writer + compaction)
+/// - `parquet_compression`: writer soft-warn post-commit; compaction **skips
+///   merge** on failure (no Snappy rewrite)
+///
+/// Timing: writer applies these **after COMMIT**; compaction applies them
+/// immediately before merge.
+pub(crate) fn ducklake_table_write_option_stmts(
+    catalog_alias: &str,
+    target_file_size_bytes: usize,
+    qualified_table: &str,
+) -> Vec<String> {
+    let scope = ducklake_set_option_scope_for_qualified(qualified_table);
+    let stmts = vec![
+        format!(
+            "CALL {}.set_option('target_file_size', '{}', {});",
+            catalog_alias,
+            size_literal(target_file_size_bytes),
+            scope
+        ),
+        format!(
+            "CALL {}.set_option('hive_file_pattern', true, {});",
+            catalog_alias, scope
+        ),
+        format!(
+            "CALL {}.set_option('parquet_compression', '{}', {});",
+            catalog_alias, DUCKLAKE_PARQUET_COMPRESSION, scope
+        ),
+    ];
+    debug_assert_eq!(stmts.len() - 1, DUCKLAKE_OPT_PARQUET_COMPRESSION);
+    stmts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +187,30 @@ mod tests {
         assert_eq!(
             ducklake_set_option_scope_for_qualified("softprobe.tenant_a.traces"),
             "schema => 'tenant_a', table_name => 'traces'"
+        );
+    }
+
+    #[test]
+    fn global_and_table_write_options_include_zstd_compression() {
+        assert_eq!(DUCKLAKE_PARQUET_COMPRESSION, "zstd");
+        assert_eq!(
+            ducklake_global_parquet_compression_stmt("softprobe"),
+            format!(
+                "CALL softprobe.set_option('parquet_compression', '{}');",
+                DUCKLAKE_PARQUET_COMPRESSION
+            )
+        );
+        let stmts =
+            ducklake_table_write_option_stmts("softprobe", 64 * 1024 * 1024, "softprobe.traces");
+        assert_eq!(stmts.len(), 3);
+        assert!(stmts[0].contains("target_file_size"));
+        assert!(stmts[1].contains("hive_file_pattern"));
+        assert_eq!(
+            stmts[2],
+            format!(
+                "CALL softprobe.set_option('parquet_compression', '{}', table_name => 'traces');",
+                DUCKLAKE_PARQUET_COMPRESSION
+            )
         );
     }
 }

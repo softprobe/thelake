@@ -58,6 +58,15 @@ DuckLake data inlining decides where committed rows live:
   metadata catalog;
 - larger writes become Parquet files under `ducklake.data_path`.
 
+Non-inlined Parquet data files use **ZSTD** compression. Softprobe sets
+catalog-global `parquet_compression=zstd` on writer ATTACH (DuckLake’s default
+is Snappy) so the first insert is compressed. After each successful commit,
+Softprobe re-asserts per-table write options (`target_file_size`,
+`hive_file_pattern`, `parquet_compression`). Maintenance ATTACH does **not**
+set the codec (so expire/orphan still run if merge setup fails); immediately
+before `ducklake_merge_adjacent_files`, compaction sets global + per-table
+ZSTD and **skips that merge** if the codec option fails (no Snappy rewrite).
+
 Both forms are committed DuckLake data and are queried through the same
 attached catalog.
 
@@ -227,6 +236,9 @@ Important DuckLake settings:
 - `metadata_schema`
 - `data_inlining_row_limit` (default `10000`)
 - `writer_pool_size` (default `4`, clamped to `1..=16`)
+- writer ATTACH sets catalog-global `parquet_compression=zstd` (load-bearing for
+  first insert); per-table options after commit / before merge:
+  `target_file_size`, `hive_file_pattern=true`, `parquet_compression=zstd`
 
 Non-secret object-store settings live in the `object_store` section (`region`
 and an optional custom `endpoint` for MinIO/R2). Object-store credentials are

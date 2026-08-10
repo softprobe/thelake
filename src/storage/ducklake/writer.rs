@@ -19,13 +19,11 @@ use tracing::{info, warn};
 
 use super::attach::{
     apply_ducklake_retry_settings, catalog_is_attached, ducklake_attach_options,
-    ducklake_attach_target, ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified,
-    prepare_local_ducklake_paths,
+    ducklake_attach_target, ducklake_global_parquet_compression_stmt,
+    ducklake_qualified_table_name, ducklake_table_write_option_stmts, prepare_local_ducklake_paths,
 };
 use super::object_store::configure_object_store;
-use super::util::{
-    ensure_variant_column_types, escape_sql_literal, size_literal, WriteAttemptError,
-};
+use super::util::{ensure_variant_column_types, escape_sql_literal, WriteAttemptError};
 
 pub(super) struct WriterPool {
     conns: Vec<Mutex<Connection>>,
@@ -271,22 +269,14 @@ impl DuckLakeWriter {
         } else {
             Some("score_id")
         };
-        let option_stmts: Vec<String> = candidates
+        let option_stmts: Vec<Vec<String>> = candidates
             .iter()
-            .flat_map(|qualified_table| {
-                let scope = ducklake_set_option_scope_for_qualified(qualified_table);
-                [
-                    format!(
-                        "CALL {}.set_option('target_file_size', '{}', {});",
-                        self.ducklake.catalog_alias,
-                        size_literal(self.config.maintenance.target_file_size_bytes),
-                        scope
-                    ),
-                    format!(
-                        "CALL {}.set_option('hive_file_pattern', true, {});",
-                        self.ducklake.catalog_alias, scope
-                    ),
-                ]
+            .map(|qualified_table| {
+                ducklake_table_write_option_stmts(
+                    &self.ducklake.catalog_alias,
+                    self.config.maintenance.target_file_size_bytes,
+                    qualified_table,
+                )
             })
             .collect();
         let pool = self.get_or_create_pool(dk)?;
@@ -344,16 +334,16 @@ impl DuckLakeWriter {
                     match write_ok {
                         Ok(_) => {
                             conn.execute_batch("COMMIT;")?;
-                            // Apply options for this table (two stmts per candidate).
-                            let base = i * 2;
-                            if let Some(stmt) = option_stmts.get(base) {
-                                if let Err(err) = conn.execute_batch(stmt) {
-                                    warn!("DuckLake table option optimization skipped: {}", err);
-                                }
-                            }
-                            if let Some(stmt) = option_stmts.get(base + 1) {
-                                if let Err(err) = conn.execute_batch(stmt) {
-                                    warn!("DuckLake table option optimization skipped: {}", err);
+                            // Outside the data txn: set_option aborts the writer txn on failure.
+                            // Catalog-global zstd is already set at ATTACH for the insert above.
+                            if let Some(stmts) = option_stmts.get(i) {
+                                for stmt in stmts {
+                                    if let Err(err) = conn.execute_batch(stmt) {
+                                        warn!(
+                                            "DuckLake table option optimization skipped: {}",
+                                            err
+                                        );
+                                    }
                                 }
                             }
                             return Ok(());
@@ -401,6 +391,8 @@ impl DuckLakeWriter {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         let file = std::fs::File::create(&temp_path)?;
+        // Staging only (deleted after INSERT). Durable codec is DuckLake
+        // `parquet_compression` set at ATTACH — not this WriterProperties default.
         let mut writer = ArrowWriter::try_new(
             file,
             batches[0].schema(),
@@ -440,31 +432,35 @@ impl DuckLakeWriter {
             opts = options.join(", ")
         );
         match conn.execute_batch(&sql) {
-            Ok(()) => Ok(()),
+            Ok(()) => {}
             Err(err) => {
                 let message = err.to_string();
-                if catalog_is_attached(conn, &dk.catalog_alias) {
-                    return Ok(());
-                }
-                // Writer-pool bootstrap can race DuckLake metadata CREATE TABLE on the same
-                // Postgres schema. Retry once after the first connection finishes initializing.
-                let retryable = message.to_lowercase().contains("already exists")
-                    || message.contains("ducklake_metadata");
-                if retryable {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    match conn.execute_batch(&sql) {
-                        Ok(()) => return Ok(()),
-                        Err(err2) if catalog_is_attached(conn, &dk.catalog_alias) => return Ok(()),
-                        Err(err2) => {
-                            return Err(anyhow!(
-                                "DuckLake attach failed after retry: {err2} (first: {message})"
-                            ));
+                if !catalog_is_attached(conn, &dk.catalog_alias) {
+                    // Writer-pool bootstrap can race DuckLake metadata CREATE TABLE on the same
+                    // Postgres schema. Retry once after the first connection finishes initializing.
+                    let retryable = message.to_lowercase().contains("already exists")
+                        || message.contains("ducklake_metadata");
+                    if retryable {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        match conn.execute_batch(&sql) {
+                            Ok(()) => {}
+                            Err(err2) if catalog_is_attached(conn, &dk.catalog_alias) => {}
+                            Err(err2) => {
+                                return Err(anyhow!(
+                                    "DuckLake attach failed after retry: {err2} (first: {message})"
+                                ));
+                            }
                         }
+                    } else {
+                        return Err(anyhow!("DuckLake attach failed: {message}"));
                     }
                 }
-                Err(anyhow!("DuckLake attach failed: {message}"))
             }
         }
+        // Catalog-global: applies to the first Parquet write (table-scoped options need CREATE first).
+        conn.execute_batch(&ducklake_global_parquet_compression_stmt(&dk.catalog_alias))
+            .map_err(|e| anyhow!("DuckLake set parquet_compression=zstd failed: {e}"))?;
+        Ok(())
     }
 
     pub(super) fn ensure_schema_for(&self, conn: &Connection, dk: &DuckLakeConfig) -> Result<()> {

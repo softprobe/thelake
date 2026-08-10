@@ -1027,6 +1027,190 @@ async fn spans_without_events_are_readable() {
     );
 }
 
+fn collect_parquet_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "parquet") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+fn assert_parquet_files_are_zstd(files: &[std::path::PathBuf]) {
+    assert!(
+        !files.is_empty(),
+        "expected at least one DuckLake Parquet data file"
+    );
+    let conn = duckdb::Connection::open_in_memory().expect("duckdb");
+    for parquet_path in files {
+        let escaped = parquet_path.to_string_lossy().replace('\'', "''");
+        let codecs: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT DISTINCT compression FROM parquet_metadata('{escaped}')"
+            ))
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        assert_eq!(
+            codecs,
+            vec!["ZSTD".to_string()],
+            "DuckLake data file compression for {}: {:?}",
+            parquet_path.display(),
+            codecs
+        );
+    }
+}
+
+/// Durable DuckLake Parquet under `data_path` must use ZSTD (not DuckLake's
+/// Snappy default). Inlining is forced off so the batch lands as Parquet.
+#[tokio::test]
+async fn parquet_data_files_use_zstd_compression() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut config = file_backed_test_config(&temp);
+    config.ducklake.data_inlining_row_limit = Some(0);
+    let config = Arc::new(config);
+    let (router, state) = softprobe_runtime::api::create_router(
+        config,
+        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
+        None,
+    )
+    .await
+    .expect("router");
+
+    let mut buf = Vec::new();
+    llm_generation_request("sess-zstd", [0x52; 16], [0x62; 8])
+        .encode(&mut buf)
+        .expect("encode");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header(header::CONTENT_TYPE, "application/x-protobuf")
+        .body(Body::from(buf))
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("ingest");
+    let status = resp.status();
+    let body = resp.into_body().collect().await.expect("body").to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ingest body={}",
+        String::from_utf8_lossy(&body)
+    );
+    state
+        .engine_for_id("")
+        .await
+        .expect("engine")
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush spans");
+
+    let data_dir = temp.path().join("ducklake").join("data");
+    assert_parquet_files_are_zstd(&collect_parquet_files(&data_dir));
+}
+
+/// Compaction/merge must keep writing ZSTD (maintenance sets codec before merge,
+/// without fail-closing the whole maintenance ATTACH on codec errors).
+#[tokio::test]
+async fn compaction_keeps_parquet_zstd_compression() {
+    use softprobe_runtime::compaction::executor::{CompactionStatus, MaintenanceExecutor};
+
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut config = file_backed_test_config(&temp);
+    config.ducklake.data_inlining_row_limit = Some(0);
+    // Large enough that two small ingest files are merged into one new Parquet.
+    config.maintenance.target_file_size_bytes = 64 * 1024 * 1024;
+    config.maintenance.enabled = true;
+    config.maintenance.metadata_enabled = true;
+    let config = Arc::new(config);
+    let (router, state) = softprobe_runtime::api::create_router(
+        config.clone(),
+        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
+        None,
+    )
+    .await
+    .expect("router");
+
+    for (i, (trace, span)) in [([0x53u8; 16], [0x63u8; 8]), ([0x54u8; 16], [0x64u8; 8])]
+        .into_iter()
+        .enumerate()
+    {
+        let mut buf = Vec::new();
+        llm_generation_request(&format!("sess-zstd-compact-{i}"), trace, span)
+            .encode(&mut buf)
+            .expect("encode");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header(header::CONTENT_TYPE, "application/x-protobuf")
+            .body(Body::from(buf))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.expect("ingest");
+        assert_eq!(resp.status(), StatusCode::OK);
+        state
+            .engine_for_id("")
+            .await
+            .expect("engine")
+            .ingest
+            .force_flush_spans()
+            .await
+            .expect("flush spans");
+    }
+
+    let data_dir = temp.path().join("ducklake").join("data");
+    let before = collect_parquet_files(&data_dir);
+    assert!(
+        before.len() >= 2,
+        "need ≥2 Parquet files before merge; found {}",
+        before.len()
+    );
+    assert_parquet_files_are_zstd(&before);
+    let before_names: std::collections::HashSet<_> = before
+        .iter()
+        .map(|p| p.file_name().unwrap().to_owned())
+        .collect();
+
+    let maintenance = MaintenanceExecutor::new(config.as_ref(), None, None)
+        .await
+        .expect("maintenance");
+    let summary = maintenance.run_once().await.expect("maintenance run");
+    let traces = summary
+        .tables
+        .iter()
+        .find(|t| t.table.ends_with(".traces") || t.table == "traces" || t.table.ends_with("traces"))
+        .unwrap_or_else(|| panic!("missing traces maintenance row: {summary:?}"));
+    assert_eq!(
+        traces.compaction.status,
+        CompactionStatus::Completed,
+        "expected merge to complete so post-merge codec is exercised: {summary:?}"
+    );
+
+    let after = collect_parquet_files(&data_dir);
+    let new_files: Vec<_> = after
+        .iter()
+        .filter(|p| !before_names.contains(p.file_name().unwrap()))
+        .cloned()
+        .collect();
+    assert!(
+        !new_files.is_empty(),
+        "merge Completed but produced no new Parquet file (before={before:?}, after={after:?})"
+    );
+    // Pre-merge files may remain on disk until orphan cleanup; pin the merge output codec.
+    assert_parquet_files_are_zstd(&new_files);
+}
+
 /// Pins DuckLake data-inlining behavior across a maintenance pass -- the
 /// 2026-08-03 production outage shape. Collector-sized batches are meant to
 /// be inlined into the catalog (`data_inlining_row_limit`, default 10_000),
