@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 use crate::util::config::file_backed_test_config;
-use crate::util::otlp::{double_kv, int_kv, string_kv};
+use crate::util::otlp::{int_kv, llm_generation_request, string_kv};
 
 async fn build_router() -> (Router, tempfile::TempDir) {
     let (router, _state, temp) = build_router_and_state().await;
@@ -50,57 +50,6 @@ async fn response_json(resp: Response<Body>) -> Value {
         .expect("read body")
         .to_bytes();
     serde_json::from_slice(&body).expect("json body")
-}
-
-fn llm_generation_request(
-    session_id: &str,
-    trace_id: [u8; 16],
-    span_id: [u8; 8],
-) -> ExportTraceServiceRequest {
-    let generation = Span {
-        trace_id: trace_id.to_vec(),
-        span_id: span_id.to_vec(),
-        parent_span_id: vec![],
-        name: "chat.completions".to_string(),
-        kind: span::SpanKind::Client as i32,
-        start_time_unix_nano: 1_721_349_720_000_000_000,
-        end_time_unix_nano: 1_721_349_721_500_000_000,
-        attributes: vec![
-            string_kv("sp.session.id", session_id),
-            string_kv("sp.observation.type", "generation"),
-            string_kv("sp.user.id", "user-llm-1"),
-            string_kv("gen_ai.provider.name", "openai"),
-            string_kv("gen_ai.request.model", "gpt-4o"),
-            string_kv("gen_ai.operation.name", "chat"),
-            int_kv("gen_ai.usage.input_tokens", 12),
-            int_kv("gen_ai.usage.output_tokens", 34),
-            int_kv("gen_ai.usage.total_tokens", 46),
-            double_kv("sp.cost.total", 0.0123),
-        ],
-        status: Some(Status {
-            code: 1,
-            message: String::new(),
-        }),
-        ..Default::default()
-    };
-
-    ExportTraceServiceRequest {
-        resource_spans: vec![ResourceSpans {
-            resource: Some(Resource {
-                attributes: vec![string_kv("service.name", "llm-gateway")],
-                ..Default::default()
-            }),
-            scope_spans: vec![ScopeSpans {
-                scope: Some(InstrumentationScope {
-                    name: "softprobe.llm".to_string(),
-                    ..Default::default()
-                }),
-                spans: vec![generation],
-                schema_url: String::new(),
-            }],
-            schema_url: String::new(),
-        }],
-    }
 }
 
 fn telemetry_trace_request(session_id: &str, trace_id: [u8; 16]) -> ExportTraceServiceRequest {
@@ -1045,22 +994,8 @@ async fn spans_without_events_are_readable() {
 ///   the live inlined read/write path this test exercises across maintenance.
 #[tokio::test]
 async fn inlined_data_stays_readable_across_maintenance() {
+    use crate::util::zstd_compression_contract::parquet_count;
     use softprobe_runtime::compaction::executor::MaintenanceExecutor;
-
-    fn parquet_count(dir: &std::path::Path) -> usize {
-        let mut n = 0;
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    n += parquet_count(&path);
-                } else if path.extension().is_some_and(|e| e == "parquet") {
-                    n += 1;
-                }
-            }
-        }
-        n
-    }
 
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut config = file_backed_test_config(&temp);

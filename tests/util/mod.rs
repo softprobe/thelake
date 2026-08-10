@@ -3,6 +3,7 @@ pub mod otlp;
 pub mod promotion_contract;
 pub mod sp_llm_manifests;
 pub mod tenant;
+pub mod zstd_compression_contract;
 
 // E2E-only helpers. `integration_perf` needs pipeline + storage_config; the rest
 // are for `integration-e2e` modules in the main `tests` binary.

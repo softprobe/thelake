@@ -238,11 +238,8 @@ clean-cache:
 # ---- infra ----
 setup:
 	@echo "starting MinIO + DuckLake Postgres..."
-	@$(COMPOSE) up -d minio ducklake-postgres
-	@sleep 5
-	@curl -sf http://localhost:9000/minio/health/live > /dev/null || (echo "MinIO not ready" && exit 1)
+	@$(COMPOSE) up -d --wait minio ducklake-postgres
 	@$(MAKE) --no-print-directory _minio-bucket
-	@docker exec ducklake-postgres pg_isready -U ducklake -d ducklake > /dev/null 2>&1 || (echo "Postgres not ready" && exit 1)
 	@echo "setup ok"
 
 teardown:

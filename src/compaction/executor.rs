@@ -242,6 +242,9 @@ impl MaintenanceExecutor {
             ducklake.catalog_alias,
             opts.join(", ")
         );
+        // Do not set parquet_compression here: a codec option failure must not
+        // skip expire-snapshots / orphan cleanup for the whole maintenance scope.
+        // Merge path sets codec in `ducklake_compact_table`.
         conn.execute_batch(&attach_sql)?;
         Ok(())
     }
@@ -254,31 +257,83 @@ impl MaintenanceExecutor {
     ) -> Result<CompactionStatus> {
         // Match qualified name used for tables (see ducklake_qualified_table_name).
         let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
-        let scope = crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
-        let target_file_size =
-            crate::storage::ducklake::size_literal(self.config.maintenance.target_file_size_bytes);
-        let set_target = format!(
-            "CALL {}.set_option('target_file_size', '{}', {});",
-            ducklake.catalog_alias, target_file_size, scope
+        // Codec is merge-local (not on maintenance ATTACH) so expire/orphan still
+        // run if only compression setup fails. Do not merge after a codec failure —
+        // that would allow Snappy durable rewrite (writer fail-closes codec instead).
+        let global_zstd = crate::storage::ducklake::ducklake_global_parquet_compression_stmt(
+            &ducklake.catalog_alias,
         );
         if let Err(err) = execute_batch_with_serialization_retry(
             conn,
-            &set_target,
+            &global_zstd,
             3,
-            &format!("ducklake set_option target_file_size {}", qualified),
+            &format!(
+                "ducklake set_option parquet_compression {}",
+                ducklake.catalog_alias
+            ),
         ) {
             if is_ducklake_serialization_conflict(&err) {
                 warn!(
                     "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
                     qualified, err
                 );
-                return Ok(CompactionStatus::Skipped);
+            } else {
+                warn!(
+                    "DuckLake compaction skipped for {}: parquet_compression=zstd failed: {}",
+                    qualified, err
+                );
             }
-            return Err(anyhow!(
-                "DuckLake set_option failed for {}: {}",
-                qualified,
-                err
-            ));
+            return Ok(CompactionStatus::Skipped);
+        }
+        let option_stmts = crate::storage::ducklake::ducklake_table_write_option_stmts(
+            &ducklake.catalog_alias,
+            self.config.maintenance.target_file_size_bytes,
+            &qualified,
+        );
+        for (idx, stmt) in option_stmts.iter().enumerate() {
+            if let Err(err) = execute_batch_with_serialization_retry(
+                conn,
+                stmt,
+                3,
+                &format!("ducklake set_option {}", qualified),
+            ) {
+                if is_ducklake_serialization_conflict(&err) {
+                    warn!(
+                        "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
+                        qualified, err
+                    );
+                    return Ok(CompactionStatus::Skipped);
+                }
+                match idx {
+                    crate::storage::ducklake::DUCKLAKE_OPT_TARGET_FILE_SIZE => {
+                        return Err(anyhow!(
+                            "DuckLake set_option failed for {}: {}",
+                            qualified,
+                            err
+                        ));
+                    }
+                    crate::storage::ducklake::DUCKLAKE_OPT_PARQUET_COMPRESSION => {
+                        warn!(
+                            "DuckLake compaction skipped for {}: parquet_compression failed: {}",
+                            qualified, err
+                        );
+                        return Ok(CompactionStatus::Skipped);
+                    }
+                    crate::storage::ducklake::DUCKLAKE_OPT_HIVE_FILE_PATTERN => {
+                        warn!(
+                            "DuckLake table option optimization skipped for {}: {}",
+                            qualified, err
+                        );
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "DuckLake set_option index {} out of range for {}",
+                            idx,
+                            qualified
+                        ));
+                    }
+                }
+            }
         }
         let sql = format!(
             "CALL ducklake_merge_adjacent_files('{}', '{}', schema => '{}');",

@@ -18,13 +18,11 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use crate::util::config::TEST_DUCKLAKE_POSTGRES_DSN;
 use crate::util::promotion_contract::{
     contract_apply_ingest_query, contract_business_compatibility, contract_shrink_safe,
     contract_update_and_idempotency, PromotionContractBackend,
 };
-
-const POSTGRES_DSN: &str =
-    "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake";
 
 struct PostgresBackend {
     _temp: TempDir,
@@ -54,7 +52,7 @@ async fn setup() -> PostgresBackend {
     config.maintenance.metadata_enabled = false;
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
     config.ducklake.catalog_type = "postgres".to_string();
-    config.ducklake.metadata_path = POSTGRES_DSN.to_string();
+    config.ducklake.metadata_path = TEST_DUCKLAKE_POSTGRES_DSN.to_string();
     config.ducklake.catalog_alias = "softprobe".to_string();
     config.ducklake.metadata_schema = format!("sp_promo_reg_{short}");
     config.ducklake.data_path = data_path.clone();
@@ -125,7 +123,7 @@ impl PostgresBackend {
     }
 
     async fn count_specs(&self, status: &str) -> i64 {
-        let (client, connection) = tokio_postgres::connect(POSTGRES_DSN, NoTls)
+        let (client, connection) = tokio_postgres::connect(TEST_DUCKLAKE_POSTGRES_DSN, NoTls)
             .await
             .expect("postgres");
         tokio::spawn(async move {
