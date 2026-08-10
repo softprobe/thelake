@@ -1,12 +1,6 @@
-use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
-
-#[cfg(feature = "integration-e2e")]
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-#[cfg(feature = "integration-e2e")]
-use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
-#[cfg(feature = "integration-e2e")]
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
-#[cfg(feature = "integration-e2e")]
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span, Status};
 
 pub fn string_kv(key: &str, value: &str) -> KeyValue {
@@ -33,6 +27,75 @@ pub fn double_kv(key: &str, value: f64) -> KeyValue {
         value: Some(AnyValue {
             value: Some(any_value::Value::DoubleValue(value)),
         }),
+    }
+}
+
+/// LLM generation span fixture shared by http_api and ZSTD compression contracts.
+pub fn llm_generation_request(
+    session_id: &str,
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+) -> ExportTraceServiceRequest {
+    llm_generation_request_named(
+        session_id,
+        trace_id,
+        span_id,
+        "llm-gateway",
+        "softprobe.llm",
+    )
+}
+
+pub fn llm_generation_request_named(
+    session_id: &str,
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+    service_name: &str,
+    scope_name: &str,
+) -> ExportTraceServiceRequest {
+    let generation = Span {
+        trace_id: trace_id.to_vec(),
+        span_id: span_id.to_vec(),
+        parent_span_id: vec![],
+        name: "chat.completions".to_string(),
+        kind: span::SpanKind::Client as i32,
+        start_time_unix_nano: 1_721_349_720_000_000_000,
+        end_time_unix_nano: 1_721_349_721_500_000_000,
+        attributes: vec![
+            string_kv("sp.session.id", session_id),
+            string_kv("sp.observation.type", "generation"),
+            string_kv("sp.user.id", "user-llm-1"),
+            string_kv("gen_ai.provider.name", "openai"),
+            string_kv("gen_ai.request.model", "gpt-4o"),
+            string_kv("gen_ai.operation.name", "chat"),
+            int_kv("gen_ai.usage.input_tokens", 12),
+            int_kv("gen_ai.usage.output_tokens", 34),
+            int_kv("gen_ai.usage.total_tokens", 46),
+            double_kv("sp.cost.total", 0.0123),
+        ],
+        status: Some(Status {
+            code: 1,
+            message: String::new(),
+        }),
+        ..Default::default()
+    };
+
+    ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![string_kv("service.name", service_name)],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: scope_name.to_string(),
+                    version: "1.0.0".to_string(),
+                    ..Default::default()
+                }),
+                spans: vec![generation],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
     }
 }
 

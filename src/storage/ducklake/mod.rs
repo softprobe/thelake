@@ -19,6 +19,7 @@ pub use writer::DuckLakeWriter;
 pub(crate) use attach::{
     ducklake_attach_options, ducklake_attach_target, ducklake_global_parquet_compression_stmt,
     ducklake_qualified_table_name, ducklake_table_write_option_stmts, prepare_local_ducklake_paths,
-    DUCKLAKE_OPT_HIVE_FILE_PATTERN, DUCKLAKE_OPT_PARQUET_COMPRESSION, DUCKLAKE_OPT_TARGET_FILE_SIZE,
+    DUCKLAKE_OPT_HIVE_FILE_PATTERN, DUCKLAKE_OPT_PARQUET_COMPRESSION,
+    DUCKLAKE_OPT_TARGET_FILE_SIZE,
 };
 pub(crate) use util::escape_sql_literal;

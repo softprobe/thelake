@@ -260,13 +260,17 @@ impl MaintenanceExecutor {
         // Codec is merge-local (not on maintenance ATTACH) so expire/orphan still
         // run if only compression setup fails. Do not merge after a codec failure —
         // that would allow Snappy durable rewrite (writer fail-closes codec instead).
-        let global_zstd =
-            crate::storage::ducklake::ducklake_global_parquet_compression_stmt(&ducklake.catalog_alias);
+        let global_zstd = crate::storage::ducklake::ducklake_global_parquet_compression_stmt(
+            &ducklake.catalog_alias,
+        );
         if let Err(err) = execute_batch_with_serialization_retry(
             conn,
             &global_zstd,
             3,
-            &format!("ducklake set_option parquet_compression {}", ducklake.catalog_alias),
+            &format!(
+                "ducklake set_option parquet_compression {}",
+                ducklake.catalog_alias
+            ),
         ) {
             if is_ducklake_serialization_conflict(&err) {
                 warn!(
