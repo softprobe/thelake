@@ -657,6 +657,9 @@ pub fn compile_session_search_sql(
         format!("timestamp <= {}", timestamp_literal(&request.to)),
         // Spans without a session id cannot belong to a session row.
         "session_id IS NOT NULL AND session_id <> ''".to_string(),
+        // Web recording shares session_id with LLM spans but is not an LLM
+        // observation — keep it off list aggregates / trace counts.
+        exclude_recording_observation_sql(),
     ];
     if let Some(user_id) = request.user_id.as_deref().filter(|v| !v.trim().is_empty()) {
         predicates.push(format!(
@@ -944,7 +947,8 @@ pub fn compile_session_aggregate_sql(
          FROM union_spans \
          WHERE session_id = {session} \
            AND timestamp >= {from_ts} \
-           AND timestamp <= {to_ts}",
+           AND timestamp <= {to_ts} \
+           AND {not_recording}",
         input_tokens = expr_input_tokens(),
         output_tokens = expr_output_tokens(),
         total_tokens = expr_total_tokens(),
@@ -953,6 +957,7 @@ pub fn compile_session_aggregate_sql(
         session = sql_string_literal(session_id),
         from_ts = timestamp_literal(&from),
         to_ts = timestamp_literal(&to),
+        not_recording = exclude_recording_observation_sql(),
     ))
 }
 
@@ -967,10 +972,11 @@ pub fn compile_session_traces_sql(
         return Err("`from` must be <= `to`".to_string());
     }
     let where_sql = format!(
-        "session_id = {} AND timestamp >= {} AND timestamp <= {}",
+        "session_id = {} AND timestamp >= {} AND timestamp <= {} AND {}",
         sql_string_literal(session_id),
         timestamp_literal(&from),
-        timestamp_literal(&to)
+        timestamp_literal(&to),
+        exclude_recording_observation_sql(),
     );
     // Cursor applies to aggregated start_time/trace_id, so filter after GROUP BY.
     let inner = format!(
@@ -989,6 +995,15 @@ pub fn compile_session_traces_sql(
         "SELECT * FROM ({inner}) AS t{outer_cursor} ORDER BY start_time DESC, trace_id DESC LIMIT {fetch}",
         fetch = limit + 1
     ))
+}
+
+/// Recording spans share `session_id` with LLM work but must not inflate
+/// session list / detail LLM aggregates or crowd out conversation traces.
+fn exclude_recording_observation_sql() -> String {
+    format!(
+        "COALESCE({}, '') <> 'recording'",
+        variant_varchar("attributes", "sp.observation.type")
+    )
 }
 
 pub fn compile_scores_for_span_sql(span_id: &str) -> String {
@@ -1752,6 +1767,8 @@ mod tests {
         assert!(sql.contains("timestamp <="));
         // spans with no session id must not become a session row
         assert!(sql.contains("session_id IS NOT NULL AND session_id <> ''"));
+        // recording spans share session_id but must not inflate LLM session rows
+        assert!(sql.contains("<> 'recording'"));
         // one extra row is what tells us another page exists
         assert!(sql.contains("LIMIT 51"));
     }
@@ -1996,6 +2013,20 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert!(compile_session_recording_sql("sess-1", from, to, 10).is_err());
+    }
+
+    #[test]
+    fn session_llm_sql_excludes_recording_observation_type() {
+        let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let agg = compile_session_aggregate_sql("sess-1", from, to).expect("agg");
+        let traces = compile_session_traces_sql("sess-1", from, to, 50, None).expect("traces");
+        assert!(agg.contains("<> 'recording'"));
+        assert!(traces.contains("<> 'recording'"));
     }
 
     #[test]
