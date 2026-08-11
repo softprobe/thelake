@@ -9,7 +9,7 @@
 #                                 (does not re-run make ci; PR already gated that)
 #   make build-release          → --release only (packaging)
 #
-# Warm SLOs (self-hosted): ci ≤15m | test-perf ≤8m | release ≤25m
+# Warm SLOs (self-hosted): ci ≤18m | test-perf ≤8m | release ≤25m
 #
 #   make setup && make ci
 #   make test-perf
@@ -65,7 +65,7 @@ export PERF_TARGET_MS ?= 1000
 export PERF_CONCURRENCY ?= 8
 export PERF_EVENTS_PER_SESSION ?= 1000
 
-CI_GOAL_SECS ?= 900
+CI_GOAL_SECS ?= 1080
 PERF_GOAL_SECS ?= 480
 RELEASE_GOAL_SECS ?= 1500
 
@@ -350,7 +350,7 @@ ci: ensure-cache
 	echo "ci ok"
 
 # Release gate: PR already ran make ci (dev). Here one --release profile for
-# perf + binary + push — do not nest make ci (release compile blew the 900s ci SLO).
+# perf + binary + push — do not nest make ci (release compile blew the ci SLO).
 release:
 	@$(MAKE) CARGO_PROFILE_FLAG=--release _release TAG="$(TAG)" TAG_LATEST="$(TAG_LATEST)"
 

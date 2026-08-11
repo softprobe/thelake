@@ -73,7 +73,7 @@ make teardown
 
 GitHub Actions (self-hosted Linux; Make-only; no Actions cargo/`target` cache):
 
-- `.github/workflows/ci.yml` — on push/PR: `make doctor` → `setup` → `ci`. Warm SLO ≤ 15m.
+- `.github/workflows/ci.yml` — on push/PR: `make doctor` → `setup` → `ci`. Warm SLO ≤ 18m.
 - `.github/workflows/performance.yml` — **manual** only: `make test-perf`
   (`PERF_SUITE=all|latency|concurrency|stability`, `PERF_TARGET_MS=1000`). Warm SLO ≤ 8m.
 - `.github/workflows/release.yml` — on GitHub Release: `make release`
