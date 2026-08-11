@@ -347,6 +347,9 @@ pub struct SessionRecording {
     pub session_id: String,
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
+    /// True when the batch LIMIT was hit; more recording spans may exist.
+    #[serde(default)]
+    pub truncated: bool,
     pub batches: Vec<RecordingBatch>,
     pub events: Vec<Value>,
 }
@@ -378,14 +381,16 @@ pub async fn get_session_recording(
         .iter()
         .filter_map(|row| map_recording_batch(&result.columns, row))
         .collect::<Vec<_>>();
-    // Ascending by start_time then batch_index for stable replay order.
+    // Prefer producer batch_index; fall back to start_time / span_id.
     batches.sort_by(|a, b| {
-        a.start_time
-            .cmp(&b.start_time)
-            .then_with(|| a.batch_index.unwrap_or(0).cmp(&b.batch_index.unwrap_or(0)))
+        a.batch_index
+            .unwrap_or(0)
+            .cmp(&b.batch_index.unwrap_or(0))
+            .then_with(|| a.start_time.cmp(&b.start_time))
             .then_with(|| a.span_id.cmp(&b.span_id))
     });
 
+    let truncated = batches.len() >= limit;
     let mut events = Vec::new();
     for batch in &batches {
         events.extend(batch.events.iter().cloned());
@@ -400,6 +405,7 @@ pub async fn get_session_recording(
         session_id,
         from: params.from,
         to: params.to,
+        truncated,
         batches,
         events,
     }))
@@ -468,12 +474,14 @@ pub fn extract_recording_events(span_events: &[Value]) -> Vec<Value> {
         };
         let raw = match attrs {
             Value::Object(map) => map.get(RECORDING_EVENTS_ATTR).cloned(),
-            Value::String(text) => serde_json::from_str::<Value>(text)
-                .ok()
-                .and_then(|parsed| match parsed {
-                    Value::Object(map) => map.get(RECORDING_EVENTS_ATTR).cloned(),
-                    _ => None,
-                }),
+            Value::String(text) => {
+                serde_json::from_str::<Value>(text)
+                    .ok()
+                    .and_then(|parsed| match parsed {
+                        Value::Object(map) => map.get(RECORDING_EVENTS_ATTR).cloned(),
+                        _ => None,
+                    })
+            }
             _ => None,
         };
         let Some(raw) = raw else {
@@ -1992,7 +2000,8 @@ mod tests {
 
     #[test]
     fn extract_recording_events_parses_json_string_payload() {
-        let events_json = r#"[{"type":4,"timestamp":100},{"type":2,"timestamp":200,"isCompressed":true}]"#;
+        let events_json =
+            r#"[{"type":4,"timestamp":100},{"type":2,"timestamp":200,"isCompressed":true}]"#;
         let span_events = vec![serde_json::json!({
             "name": "sp.recording.batch",
             "timestamp": "2026-07-18T00:00:01.000Z",
