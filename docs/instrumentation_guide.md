@@ -411,6 +411,25 @@ span.setAttribute('sp.session.id', sessionId);
 // If no sp.session.id is set, trace_id is used as grouping key
 ```
 
+## Web session recording (rrweb)
+
+Browser DOM recordings are ingested as ordinary OTLP spans (no separate write API).
+
+| Field | Value |
+|---|---|
+| span name | `softprobe.web.recording` |
+| attribute `sp.observation.type` | `recording` |
+| attribute `sp.session.id` | correlation id (same as LLM session when linked) |
+| attribute `sp.recording.batch_index` | monotonic batch counter |
+| event name | `sp.recording.batch` |
+| event attribute `sp.recording.events` | JSON string of rrweb events (FullSnapshots may set `isCompressed`) |
+
+Query: `GET /v1/llm/sessions/{session_id}/recording?from=&to=` returns ordered
+`batches` and flattened `events` for the player.
+
+Keep searchable metadata (browser, URL, visitor id) on span attributes; keep the
+large rrweb payload on the span event — same pattern as HTTP bodies.
+
 ## Next Steps
 
 1. **Validate Instrumentation**: Use the OTLP endpoint at `http://localhost:8090/v1/traces`.
