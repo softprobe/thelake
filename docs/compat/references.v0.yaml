@@ -9,10 +9,12 @@ references:
   loki:
     image: grafana/loki
     tag: "3.1.1"
+    digest: "sha256:e689cc634841c937de4d7ea6157f17e29cf257d6a320f1c293ab18d46cfea986"
     notes: Phase 2 query API oracle for the supported LogQL subset
   tempo:
     image: grafana/tempo
     tag: "2.6.1"
+    digest: "sha256:ef4384fce6e8ad22b95b243d8fc165628cda655376fd50e7850536ad89d71d50"
     notes: Trace query/search oracle
   grafana:
     image: grafana/grafana

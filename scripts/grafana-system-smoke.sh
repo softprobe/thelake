@@ -357,7 +357,7 @@ elif signal == "loki":
         })]],
     })
 else:
-    obj["traces"] = [{"traceID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "rootServiceName": tenant, "datasource_uid": uid}]
+    obj["traces"] = [{"traceID": "qqqqqqqqqqqqqqqqqqqqqg==", "rootServiceName": tenant, "datasource_uid": uid}]
 print(json.dumps(obj))
 PY
 }
@@ -422,10 +422,14 @@ import json
 import re
 import sys
 trace_id, tenant = sys.argv[1:]
-if not re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
-    raise SystemExit("mock Tempo trace lookup requires an exact 16-byte hex trace ID")
-trace_bytes = bytes.fromhex(trace_id)
-trace_wire_id = base64.b64encode(trace_bytes).decode("ascii")
+if re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+    trace_bytes = bytes.fromhex(trace_id)
+    trace_wire_id = base64.b64encode(trace_bytes).decode("ascii")
+else:
+    trace_bytes = base64.b64decode(trace_id, validate=True)
+    trace_wire_id = base64.b64encode(trace_bytes).decode("ascii")
+    if len(trace_bytes) != 16 or trace_wire_id != trace_id:
+        raise SystemExit("mock Tempo trace lookup requires canonical padded Base64")
 span_wire_id = base64.b64encode(bytes.fromhex("01" * 8)).decode("ascii")
 parent_wire_id = base64.b64encode(bytes.fromhex("00" * 8)).decode("ascii")
 link_wire_id = base64.b64encode(bytes.fromhex("02" * 8)).decode("ascii")
@@ -447,6 +451,19 @@ print(json.dumps({
                 "links": [{"traceId": trace_wire_id, "spanId": link_wire_id}]
             }]
         }],
+    }, {
+        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": tenant}}]},
+        "scopeSpans": [{
+            "scope": {"name": "grafana-secondary", "version": "1.0.0"},
+            "spans": [{
+                "traceId": trace_wire_id,
+                "spanId": base64.b64encode(bytes.fromhex("03" * 8)).decode("ascii"),
+                "name": "checkout.child",
+                "startTimeUnixNano": "1700000011000000000",
+                "endTimeUnixNano": "1700000012000000000",
+                "status": {"code": "STATUS_CODE_UNSET"}
+            }]
+        }]
     }],
 }))
 PY
@@ -1528,8 +1545,23 @@ check_panel_rejection() {
   fi
 }
 
+validate_credential_rejection() {
+  local artifact="$1" expected_error="$2" code
+  code="$(tr -d '[:space:]' < "$artifact.status")"
+  if [[ "$code" == 2* ]]; then
+    validate_error_response "$artifact" "$expected_error" || return 1
+  elif [[ "$code" != 401 && "$code" != 403 ]]; then
+    echo "credential probe returned an unexpected HTTP status: $code" >&2
+    return 1
+  fi
+  validate_json "$artifact" 2>/dev/null || {
+    [[ "$code" == 401 || "$code" == 403 ]] || return 1
+  }
+}
+
 check_errors() {
-  local case_id=G8 signal tenant uid other payload artifact status
+  local case_id=G8 signal tenant uid other payload artifact request_artifact status
+  local credential scope expected_scope valid_credential expected_error probe
   local bundle_args=()
   for signal in prometheus loki tempo; do
     for tenant in a b; do
@@ -1576,6 +1608,53 @@ check_errors() {
     validate_json "$artifact" || return 1
     validate_error_response "$artifact" datasource || return 1
     bundle_args+=("${signal}_invalid=$artifact" "${signal}_invalid_request=$ARTIFACT_DIR/.work/G8-${signal}-invalid-datasource.request.json")
+  done
+  for signal in prometheus loki tempo; do
+    for tenant in a b; do
+      if [[ "$tenant" == a ]]; then
+        uid="softprobe-$signal-a"
+        other="$TENANT_B_ID"
+        expected_scope="$TENANT_A_ID"
+        valid_credential="${GRAFANA_TEST_TENANT_A_API_KEY:-grafana-phase4-tenant-a}"
+      else
+        uid="softprobe-$signal-b"
+        other="$TENANT_A_ID"
+        expected_scope="$TENANT_B_ID"
+        valid_credential="${GRAFANA_TEST_TENANT_B_API_KEY:-grafana-phase4-tenant-b}"
+      fi
+      for probe in missing_credentials invalid_credentials mismatched_tenant; do
+        case "$probe" in
+          missing_credentials) credential="__missing__"; scope="$expected_scope"; expected_error=missing ;;
+          invalid_credentials) credential="invalid-credential"; scope="$expected_scope"; expected_error=invalid ;;
+          mismatched_tenant)
+            credential="$valid_credential"
+            scope="$([[ "$tenant" == a ]] && printf '%s' "$TENANT_B_ID" || printf '%s' "$TENANT_A_ID")"
+            expected_error=mismatched
+            ;;
+        esac
+        payload="$(query_payload "$signal" "$uid" "${probe}_credential_probe")"
+        artifact="$ARTIFACT_DIR/.work/G8-${signal}-${tenant}-${probe}.json"
+        request_artifact="$ARTIFACT_DIR/.work/G8-${signal}-${tenant}-${probe}.request.json"
+        write_request_artifact "$request_artifact" POST /api/ds/query "$payload"
+        if api_post_credentials /api/ds/query "$payload" "$artifact" "$credential" "$scope"; then
+          :
+        else
+          status=$?
+          if (( status == 2 )); then
+            return 2
+          fi
+        fi
+        validate_credential_rejection "$artifact" "$expected_error" || return 1
+        if grep -Fq "$other" "$artifact"; then
+          echo "credential rejection leaked the other tenant marker" >&2
+          return 1
+        fi
+        bundle_args+=(
+          "${signal}_${tenant}_${probe}=$artifact"
+          "${signal}_${tenant}_${probe}_request=$request_artifact"
+        )
+      done
+    done
   done
   for signal in prometheus loki tempo; do
     for tenant in a b; do

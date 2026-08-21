@@ -23,7 +23,7 @@ SHELL := /bin/bash
 	lint fmt check-fmt \
 	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
-	compat-reference-image grafana-reference-version grafana-reference-image grafana-reference-digest \
+	compat-reference-image compat-reference-version grafana-reference-version grafana-reference-image grafana-reference-digest \
 	test-grafana-system test-compat \
 	stress test-deploy \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
@@ -78,7 +78,7 @@ RELEASE_GOAL_SECS ?= 1500
 # drift before a differential gate runs.
 COMPAT_REFERENCE_MANIFEST ?= $(CURDIR)/docs/compat/references.v0.yaml
 define compat_reference_image
-$(shell awk -v key="$(1)" '$$0 ~ "^  " key ":" {in_ref=1; next} in_ref && $$0 ~ "^  [[:alnum:]_]+:" {in_ref=0} in_ref && $$1=="image:" {image=$$2; gsub(/"/,"",image)} in_ref && $$1=="tag:" {tag=$$2; gsub(/"/,"",tag); print image ":" tag; exit}' "$(COMPAT_REFERENCE_MANIFEST)")
+$(shell awk -v key="$(1)" '$$0 ~ "^  " key ":" {in_ref=1; next} in_ref && $$0 ~ "^  [[:alnum:]_]+:" {exit} in_ref && $$1=="image:" {image=$$2; gsub(/"/,"",image)} in_ref && $$1=="tag:" {tag=$$2; gsub(/"/,"",tag)} in_ref && $$1=="digest:" {digest=$$2; gsub(/"/,"",digest)} END {if (image != "") {if (digest != "") print image "@" digest; else print image ":" tag}}' "$(COMPAT_REFERENCE_MANIFEST)")
 endef
 define compat_reference_version
 $(shell awk -v key="$(1)" '$$0 ~ "^  " key ":" {in_ref=1; next} in_ref && $$0 ~ "^  [[:alnum:]_]+:" {in_ref=0} in_ref && $$1=="tag:" {tag=$$2; gsub(/"/,"",tag); print tag; exit}' "$(COMPAT_REFERENCE_MANIFEST)")
@@ -388,6 +388,8 @@ check-compat-reference-pins:
 	test "$(LOKI_REFERENCE_IMAGE)" = "$$loki_manifest" || { echo "Loki reference drift: Make=$(LOKI_REFERENCE_IMAGE) manifest=$$loki_manifest" >&2; exit 1; }; \
 	test "$(TEMPO_REFERENCE_IMAGE)" = "$$tempo_manifest" || { echo "Tempo reference drift: Make=$(TEMPO_REFERENCE_IMAGE) manifest=$$tempo_manifest" >&2; exit 1; }; \
 	test "$(GRAFANA_REFERENCE_IMAGE)" = "$$grafana_manifest" || { echo "Grafana reference drift: Make=$(GRAFANA_REFERENCE_IMAGE) manifest=$$grafana_manifest" >&2; exit 1; }; \
+	test "$$loki_manifest" = *"@sha256:"* || { echo "Loki reference is not immutable: $$loki_manifest" >&2; exit 1; }; \
+	test "$$tempo_manifest" = *"@sha256:"* || { echo "Tempo reference is not immutable: $$tempo_manifest" >&2; exit 1; }; \
 	test -n "$$grafana_digest_manifest" && [[ "$$grafana_digest_manifest" =~ ^sha256:[0-9a-fA-F]{64}$$ ]] || { echo "Grafana manifest is missing an immutable sha256 digest" >&2; exit 1; }; \
 	test "$(GRAFANA_REFERENCE_DIGEST)" = "$$grafana_digest_manifest" || { echo "Grafana digest drift: Make=$(GRAFANA_REFERENCE_DIGEST) manifest=$$grafana_digest_manifest" >&2; exit 1; }; \
 	echo "compatibility reference pins match $(COMPAT_REFERENCE_MANIFEST)"; \
@@ -406,6 +408,10 @@ compat-reference-image:
 		grafana) printf '%s\n' "$(GRAFANA_REFERENCE_IMAGE)" ;; \
 		*) echo "usage: make compat-reference-image SIGNAL=loki|tempo|grafana" >&2; exit 2 ;; \
 	esac
+
+compat-reference-version:
+	@test -n "$(call compat_reference_version,$(SIGNAL))" || { echo "missing reference tag in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }
+	@printf '%s\n' "$(call compat_reference_version,$(SIGNAL))"
 
 grafana-reference-version:
 	@test -n "$(GRAFANA_REFERENCE_VERSION)" || { echo "missing Grafana tag in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }
