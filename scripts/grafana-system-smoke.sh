@@ -209,6 +209,56 @@ PY
   redact "$payload" > "$ARTIFACT_DIR/summary.json"
 }
 
+normalize_tempo_trace_id() {
+  python3 - "$1" <<'PY'
+import base64
+import re
+import sys
+
+value = sys.argv[1]
+if re.fullmatch(r"[0-9a-fA-F]{32}", value):
+    print(base64.b64encode(bytes.fromhex(value)).decode())
+    raise SystemExit(0)
+try:
+    decoded = base64.b64decode(value, validate=True)
+except Exception as exc:
+    raise SystemExit(f"invalid Tempo trace ID: {value!r}") from exc
+if len(decoded) != 16 or base64.b64encode(decoded).decode() != value:
+    raise SystemExit(f"Tempo trace ID is not canonical padded Base64: {value!r}")
+print(value)
+PY
+}
+
+extract_tempo_search_id() {
+  python3 - "$1" <<'PY'
+import base64
+import json
+import pathlib
+import re
+import sys
+
+obj = json.loads(pathlib.Path(sys.argv[1]).read_text())
+traces = obj.get("traces")
+if not isinstance(traces, list):
+    raise SystemExit("Tempo search response has no traces list")
+for item in traces:
+    if not isinstance(item, dict):
+        continue
+    value = item.get("traceID", item.get("traceId"))
+    if re.fullmatch(r"[0-9a-fA-F]{32}", value or ""):
+        print(value)
+        raise SystemExit(0)
+    try:
+        decoded = base64.b64decode(value or "", validate=True)
+    except Exception:
+        continue
+    if len(decoded) == 16 and base64.b64encode(decoded).decode() == value:
+        print(value)
+        raise SystemExit(0)
+raise SystemExit("Tempo search returned no exact trace ID")
+PY
+}
+
 finish_skip() {
   local reason="$1"
   write_outcome "environment_skip" "$reason"
@@ -452,22 +502,33 @@ PY
 }
 
 mock_response_post() {
-  local endpoint="$1" payload="$2"
+  local endpoint="$1" payload="$2" credential="${3:-}" scope="${4:-}"
   if [[ "$endpoint" != /api/ds/query ]]; then
     return 1
   fi
-  python3 - "$MOCK_FIXTURE_DIR" "$payload" "$TENANT_A_ID" "$TENANT_B_ID" <<'PY'
+  python3 - "$MOCK_FIXTURE_DIR" "$payload" "$TENANT_A_ID" "$TENANT_B_ID" "$credential" "$scope" <<'PY'
 import json
 import pathlib
 import sys
 
-fixture_dir, payload, tenant_a, tenant_b = sys.argv[1:]
+fixture_dir, payload, tenant_a, tenant_b, credential, scope = sys.argv[1:]
 request = json.loads(payload)
 query = request.get("queries", [{}])[0]
 uid = query.get("datasource", {}).get("uid", "")
 tenant = tenant_a if uid.endswith("-a") else tenant_b
 signal = "prometheus" if "prom" in uid else "loki" if "loki" in uid else "tempo"
 text = json.dumps(query).lower()
+if "credential_probe" in text:
+    if credential == "__missing__":
+        message = "missing credentials"
+    elif credential == "invalid-credential":
+        message = "invalid credentials"
+    elif scope and scope != tenant:
+        message = "mismatched tenant X-Scope-OrgID"
+    else:
+        message = "credential probe unexpectedly succeeded"
+    print(json.dumps({"results": {"A": {"error": message, "errorSource": "auth"}}}))
+    raise SystemExit
 if uid.endswith("-invalid"):
     print(json.dumps({"results": {"A": {"error": "datasource authentication failed", "errorSource": "downstream"}}}))
     raise SystemExit
@@ -511,7 +572,7 @@ api_request() {
   : > "$artifact.status"
   if [[ "$MOCK_MODE" == "1" ]]; then
     if [[ "$method" == POST ]]; then
-      if ! mock_response_post "$endpoint" "$payload" | redact > "$artifact"; then
+      if ! mock_response_post "$endpoint" "$payload" "${5:-}" "${6:-}" | redact > "$artifact"; then
         redact "mock response unavailable for $endpoint" > "$artifact"
         rm -f "$response_tmp" "$stderr_tmp"
         return 1
@@ -527,11 +588,21 @@ api_request() {
     rm -f "$response_tmp" "$stderr_tmp"
     return 0
   fi
+  local credential="${5:-}" scope="${6:-}" auth_args=()
+  local scope_args=()
+  if [[ -n "$scope" ]]; then
+    scope_args=(--header "X-Scope-OrgID: $scope")
+  fi
+  if [[ -z "$credential" ]]; then
+    auth_args=(--user "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD")
+  elif [[ "$credential" != "__missing__" ]]; then
+    auth_args=(--header "Authorization: Bearer $credential")
+  fi
   if [[ "$method" == POST ]]; then
     if status="$(curl --silent --show-error --location \
         --connect-timeout "${CURL_CONNECT_TIMEOUT:-3}" \
         --max-time "${CURL_MAX_TIME:-15}" \
-        --user "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD" \
+        "${auth_args[@]}" "${scope_args[@]}" \
         --header 'Accept: application/json' --header 'Content-Type: application/json' \
         --data "$payload" --output "$response_tmp" --write-out '%{http_code}' \
         "$GRAFANA_URL$endpoint" 2> "$stderr_tmp")"; then
@@ -543,7 +614,7 @@ api_request() {
     if status="$(curl --silent --show-error --location \
         --connect-timeout "${CURL_CONNECT_TIMEOUT:-3}" \
         --max-time "${CURL_MAX_TIME:-15}" \
-        --user "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD" \
+        "${auth_args[@]}" "${scope_args[@]}" \
         --header 'Accept: application/json' \
         --output "$response_tmp" --write-out '%{http_code}' \
         "$GRAFANA_URL$endpoint" 2> "$stderr_tmp")"; then
@@ -569,6 +640,7 @@ api_request() {
 
 api_get() { api_request GET "$1" "" "$2"; }
 api_post() { api_request POST "$1" "$2" "$3"; }
+api_post_credentials() { api_request POST "$1" "$2" "$3" "$4" "$5"; }
 
 http_get_artifact() {
   local url="$1" artifact="$2" status curl_status
