@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SCRIPT="$ROOT_DIR/scripts/grafana-system-smoke.sh"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grafana-redaction-test.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+export GRAFANA_ADMIN_USER="grafana-smoke-user"
+export GRAFANA_ADMIN_PASSWORD="grafana-admin-password-123"
+export SOFTPROBE_API_KEY="softprobe-global-api-key-456"
+export SOFTPROBE_TENANT_A_API_KEY="softprobe-tenant-a-api-key-789"
+export SOFTPROBE_TENANT_B_API_KEY="softprobe-tenant-b-api-key-012"
+export SOFTPROBE_TENANT_A_TOKEN="softprobe-tenant-a-token-345"
+export SOFTPROBE_TENANT_B_TOKEN="softprobe-tenant-b-token-678"
+
+ci_dashboard_checks="$(CI=1 MOCK=1 ARTIFACT_DIR="$TMP_DIR/ci-defaults" bash -c 'source "$1"; printf "%s" "$GRAFANA_CHECK_DASHBOARD_QUERIES"' _ "$SCRIPT")"
+if [[ "$ci_dashboard_checks" != "1" ]]; then
+    printf 'expected CI Grafana smoke to enable dashboard/query assertions, got %q\n' "$ci_dashboard_checks" >&2
+    exit 1
+fi
+local_dashboard_checks="$(env -u CI MOCK=1 ARTIFACT_DIR="$TMP_DIR/local-defaults" bash -c 'source "$1"; printf "%s" "$GRAFANA_CHECK_DASHBOARD_QUERIES"' _ "$SCRIPT")"
+if [[ "$local_dashboard_checks" != "0" ]]; then
+    printf 'expected local Grafana smoke default to remain opt-in, got %q\n' "$local_dashboard_checks" >&2
+    exit 1
+fi
+
+sample="$TMP_DIR/sample-artifact.txt"
+cat >"$sample" <<'EOF'
+{"fixture_id":"grafana-redaction-fixture","authorization":"Bearer softprobe-tenant-a-token-345","api_key":"softprobe-tenant-a-api-key-789","password":"grafana-admin-password-123","nested":{"client_secret":"softprobe-global-api-key-456","tenant_token":"softprobe-tenant-b-token-678"},"url":"https://grafana.invalid/api/query?api_key=softprobe-global-api-key-456&access_token=softprobe-tenant-a-token-345&tenant_id=tenant-a","tenant_id":"tenant-a"}
+Authorization: Bearer softprobe-tenant-b-token-678
+query=https://grafana.invalid/api/query?password=grafana-admin-password-123&tenant_id=tenant-b
+X-API-Key: softprobe-global-api-key-456
+EOF
+
+redacted="$TMP_DIR/redacted.txt"
+ARTIFACT_DIR="$TMP_DIR/redaction-artifacts" bash -c 'source "$1"; redact < "$2"' _ "$SCRIPT" "$sample" >"$redacted"
+
+python3 - "$redacted" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+secrets = (
+    "grafana-admin-password-123",
+    "softprobe-global-api-key-456",
+    "softprobe-tenant-a-api-key-789",
+    "softprobe-tenant-b-api-key-012",
+    "softprobe-tenant-a-token-345",
+    "softprobe-tenant-b-token-678",
+)
+leaked = [secret for secret in secrets if secret in text]
+if leaked:
+    raise SystemExit(f"redaction leaked credential values: {', '.join(leaked)}")
+for marker in ('grafana-redaction-fixture', '[REDACTED]'):
+    if marker not in text:
+        raise SystemExit(f"redaction did not preserve or emit expected marker: {marker}")
+if '"tenant_id":"tenant-a"' not in text and '"tenant_id": "tenant-a"' not in text:
+    raise SystemExit("redaction did not preserve the tenant-a marker")
+if 'tenant_id=tenant-b' not in text:
+    raise SystemExit("redaction did not preserve the tenant-b query marker")
+PY
+
+invalid_pin_dir="$TMP_DIR/invalid-pin"
+set +e
+MOCK=1 GRAFANA_REFERENCE_IMAGE="grafana/grafana:11.1.0" ARTIFACT_DIR="$invalid_pin_dir" \
+    bash -c 'source "$1"; validate_grafana_reference_pin' _ "$SCRIPT"
+invalid_pin_status=$?
+set -e
+if (( invalid_pin_status != 1 )); then
+    printf 'expected invalid Grafana image pin to fail with exit 1, got exit %d\n' "$invalid_pin_status" >&2
+    exit 1
+fi
+
+mock_dir="$TMP_DIR/mock"
+set +e
+MOCK=1 ARTIFACT_DIR="$mock_dir" bash "$SCRIPT"
+mock_status=$?
+set -e
+if (( mock_status != 0 )); then
+    printf 'expected MOCK Grafana smoke to pass, got exit %d\n' "$mock_status" >&2
+    exit 1
+fi
+
+python3 - "$mock_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+for case_id in ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8"):
+    path = root / f"{case_id}.outcome.json"
+    if not path.is_file():
+        raise SystemExit(f"missing mock outcome artifact: {path}")
+    outcome = json.loads(path.read_text()).get("outcome")
+    if outcome != "pass":
+        raise SystemExit(f"mock {case_id} was not a strict pass: {outcome!r}")
+
+if json.loads((root / "outcome.json").read_text()).get("outcome") != "pass":
+    raise SystemExit("mock overall outcome was not pass")
+unsupported = (root / ".work/G8-prometheus-a.json").read_text()
+invalid = (root / ".work/G8-prometheus-invalid-datasource.json").read_text()
+if "unsupported" not in unsupported or "datasource" not in invalid:
+    raise SystemExit("mock G8 did not retain its required explicit failure evidence")
+if "sorted-json-response-envelope" not in (root / "G1.normalized.json").read_text():
+    raise SystemExit("normalized evidence lost its normalization marker")
+PY
+
+failure_dir="$TMP_DIR/mock-failure"
+set +e
+MOCK=1 ARTIFACT_DIR="$failure_dir" MOCK_FIXTURE_DIR="$TMP_DIR/missing-fixtures" bash "$SCRIPT"
+failure_status=$?
+set -e
+if (( failure_status != 1 )); then
+    printf 'expected broken mock Grafana smoke to fail with exit 1, got exit %d\n' "$failure_status" >&2
+    exit 1
+fi
+python3 - "$failure_dir/outcome.json" <<'PY'
+import json
+import pathlib
+import sys
+
+outcome = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if outcome.get("outcome") != "failure":
+    raise SystemExit(f"broken mock was not recorded as failure: {outcome}")
+PY
+
+printf 'artifact redaction and strict mock G1-G8 regression: PASS\n'

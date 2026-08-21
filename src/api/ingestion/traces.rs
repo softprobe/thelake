@@ -158,8 +158,24 @@ pub async fn process_traces(
         let resource_attributes = SpanData::extract_resource_attributes(&resource_spans);
 
         for scope_spans in resource_spans.scope_spans {
+            let instrumentation_scope = scope_spans
+                .scope
+                .as_ref()
+                .map(crate::models::span::encode_instrumentation_scope);
             for span in scope_spans.spans {
-                let span_data = SpanData::from_otlp(span, &resource_attributes)?;
+                let links = crate::models::span::encode_links(&span.links);
+                let mut span_data = SpanData::from_otlp(span, &resource_attributes)?;
+                if let Some(scope) = &instrumentation_scope {
+                    span_data.attributes.insert(
+                        crate::models::span::INSTRUMENTATION_SCOPE_ATTRIBUTE.into(),
+                        scope.clone(),
+                    );
+                }
+                if links != "[]" {
+                    span_data
+                        .attributes
+                        .insert(crate::models::span::LINKS_ATTRIBUTE.into(), links);
+                }
                 spans.push(span_data);
             }
         }

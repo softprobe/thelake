@@ -1,0 +1,61 @@
+#!/bin/sh
+# Run a command with a bounded wall-clock duration on Linux, macOS, and CI
+# images without requiring a particular timeout package to be installed.
+
+set -eu
+
+if [ "$#" -lt 2 ]; then
+	echo "usage: $0 SECONDS COMMAND [ARG ...]" >&2
+	exit 2
+fi
+
+duration=$1
+shift
+
+case "$duration" in
+	''|*[!0-9.]*|*.*.*)
+		echo "ERROR: timeout duration must be a positive number of seconds: $duration" >&2
+		exit 2
+		;;
+esac
+
+# Prefer GNU coreutils. Homebrew installs it as gtimeout on macOS, while
+# Linux distributions normally expose it as timeout.
+for candidate in timeout gtimeout; do
+	if command -v "$candidate" >/dev/null 2>&1 \
+		&& "$candidate" --version 2>&1 | grep -q 'GNU coreutils'; then
+		exec "$candidate" "$duration" "$@"
+	fi
+done
+
+python_bin=
+for candidate in python3 python; do
+	if command -v "$candidate" >/dev/null 2>&1; then
+		python_bin=$candidate
+		break
+	fi
+done
+
+if [ -n "$python_bin" ]; then
+	exec "$python_bin" - "$duration" "$@" <<'PY'
+import subprocess
+import sys
+
+duration = float(sys.argv[1])
+command = sys.argv[2:]
+
+try:
+    completed = subprocess.run(command, timeout=duration)
+except subprocess.TimeoutExpired:
+    print(
+        f"ERROR: command exceeded the {duration:g}-second timeout",
+        file=sys.stderr,
+    )
+    raise SystemExit(124)
+
+raise SystemExit(completed.returncode)
+PY
+fi
+
+echo "ERROR: no GNU timeout/gtimeout or Python interpreter is available" >&2
+exit 127
