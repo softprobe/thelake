@@ -921,9 +921,18 @@ import base64
 path, trace_id, expected, other = sys.argv[1:]
 obj = json.loads(pathlib.Path(path).read_text())
 text = json.dumps(obj, sort_keys=True)
-if not re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
-    raise SystemExit("Tempo lookup trace ID must be exactly 32 hexadecimal characters")
-requested_trace = bytes.fromhex(trace_id)
+if re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+    requested_trace = bytes.fromhex(trace_id)
+else:
+    try:
+        requested_trace = base64.b64decode(trace_id, validate=True)
+    except Exception as exc:
+        raise SystemExit("Tempo lookup trace ID is malformed") from exc
+    if len(requested_trace) != 16 or base64.b64encode(requested_trace).decode("ascii") != trace_id:
+        raise SystemExit("Tempo lookup trace ID is not canonical padded Base64")
+canonical_trace_id = base64.b64encode(requested_trace).decode("ascii")
+if trace_id not in text and canonical_trace_id not in text:
+    raise SystemExit(f"Tempo trace response does not contain requested trace {trace_id}")
 if expected and expected not in text:
     raise SystemExit(f"Tempo trace response is missing tenant marker {expected}")
 if other and other in text:
@@ -933,7 +942,7 @@ if not isinstance(groups, list) or not groups:
     raise SystemExit("Tempo trace response contains no spans")
 
 def valid_id(value, byte_length):
-    if not isinstance(value, str) or not value or re.fullmatch(r"[0-9a-fA-F]+", value):
+    if not isinstance(value, str) or not value:
         return None
     try:
         decoded = base64.b64decode(value, validate=True)
@@ -947,6 +956,11 @@ def timestamp(value):
     return isinstance(value, (int, str)) and bool(re.fullmatch(r"[0-9]+", str(value)))
 
 matched = 0
+group_signatures = set()
+parent_seen = False
+status_seen = False
+events_seen = False
+links_seen = False
 for group in groups:
     resource = group.get("resource")
     attrs = resource.get("attributes") if isinstance(resource, dict) else None
@@ -959,6 +973,7 @@ for group in groups:
         scope = scope_group.get("scope")
         if not isinstance(scope, dict) or not scope.get("name"):
             raise SystemExit("Tempo trace response is missing instrumentation scope")
+        group_signatures.add((json.dumps(attrs, sort_keys=True), scope.get("name"), scope.get("version")))
         spans = scope_group.get("spans")
         if not isinstance(spans, list) or not spans:
             raise SystemExit("Tempo trace response is missing spans in a ScopeSpans group")
@@ -976,28 +991,38 @@ for group in groups:
             parent = span.get("parentSpanId", span.get("parentSpanID"))
             if parent is not None and parent != "" and valid_id(parent, 8) is None:
                 raise SystemExit("Tempo trace response has a malformed parent span ID")
+            if parent:
+                parent_seen = True
             start = span.get("startTimeUnixNano")
             end = span.get("endTimeUnixNano")
             if not timestamp(start) or not timestamp(end) or int(end) <= int(start):
                 raise SystemExit("Tempo trace response has invalid nanosecond timing")
             status = span.get("status")
-            if status is not None:
-                if not isinstance(status, dict) or status.get("code") not in {"STATUS_CODE_UNSET", "STATUS_CODE_OK", "STATUS_CODE_ERROR"}:
-                    raise SystemExit("Tempo trace response has an invalid status enum")
+            if not isinstance(status, dict) or status.get("code") not in {"STATUS_CODE_UNSET", "STATUS_CODE_OK", "STATUS_CODE_ERROR"}:
+                raise SystemExit("Tempo trace response has an invalid or missing status enum")
+            status_seen = True
             events = span.get("events")
-            if events is not None:
-                if not isinstance(events, list):
-                    raise SystemExit("Tempo trace response events are not a list")
-                for event in events:
-                    if not isinstance(event, dict) or not event.get("name") or not timestamp(event.get("timeUnixNano")):
-                        raise SystemExit("Tempo trace response has an invalid event")
+            if not isinstance(events, list):
+                raise SystemExit("Tempo trace response events are not a list")
+            if events:
+                events_seen = True
+            for event in events:
+                if not isinstance(event, dict) or not event.get("name") or not timestamp(event.get("timeUnixNano")):
+                    raise SystemExit("Tempo trace response has an invalid event")
             links = span.get("links")
-            if links is not None:
-                if not isinstance(links, list):
-                    raise SystemExit("Tempo trace response links are not a list")
-                for link in links:
-                    if not isinstance(link, dict) or valid_id(link.get("traceId", link.get("traceID")), 16) is None or valid_id(link.get("spanId", link.get("spanID")), 8) is None:
-                        raise SystemExit("Tempo trace response has an invalid link")
+            if not isinstance(links, list):
+                raise SystemExit("Tempo trace response links are not a list")
+            if links:
+                links_seen = True
+            for link in links:
+                if not isinstance(link, dict) or valid_id(link.get("traceId", link.get("traceID")), 16) is None or valid_id(link.get("spanId", link.get("spanID")), 8) is None:
+                    raise SystemExit("Tempo trace response has an invalid link")
+if matched < 2:
+    raise SystemExit("Tempo trace response collapsed distinct spans/groups")
+if len(group_signatures) < 2:
+    raise SystemExit("Tempo trace response collapsed distinct ResourceSpans/ScopeSpans groups")
+if not parent_seen or not status_seen or not events_seen or not links_seen:
+    raise SystemExit("Tempo trace response did not preserve topology, status, events, and links")
 if matched == 0:
     raise SystemExit("Tempo trace response contains no span for the requested trace")
 PY

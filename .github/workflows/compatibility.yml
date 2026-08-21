@@ -757,17 +757,12 @@ jobs:
       DRIFT_GRAFANA_IMAGE: ${{ inputs.drift_grafana_image || vars.COMPAT_DRIFT_GRAFANA_IMAGE || secrets.COMPAT_DRIFT_GRAFANA_IMAGE }}
       DRIFT_GRAFANA_VERSION: ${{ inputs.drift_grafana_version || vars.COMPAT_DRIFT_GRAFANA_VERSION || secrets.COMPAT_DRIFT_GRAFANA_VERSION }}
       DRIFT_GRAFANA_DIGEST: ${{ inputs.drift_grafana_digest || vars.COMPAT_DRIFT_GRAFANA_DIGEST || secrets.COMPAT_DRIFT_GRAFANA_DIGEST }}
-      BASELINE_PROMETHEUS_IMAGE: prom/prometheus
-      BASELINE_PROMETHEUS_VERSION: v2.54.1
-      BASELINE_LOKI_IMAGE: grafana/loki
-      BASELINE_LOKI_VERSION: 3.1.1
-      BASELINE_TEMPO_IMAGE: grafana/tempo
-      BASELINE_TEMPO_VERSION: 2.6.1
-      BASELINE_GRAFANA_IMAGE: grafana/grafana
-      BASELINE_GRAFANA_VERSION: 11.2.0
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Load baseline references from manifest
+        run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
 
       - name: Initialize drift metadata after checkout
         if: always()
@@ -797,10 +792,10 @@ jobs:
           python3 - <<'PY'
           import os, re
           pairs = (
-              ("PROMETHEUS", "prom/prometheus", "v2.54.1"),
-              ("LOKI", "grafana/loki", "3.1.1"),
-              ("TEMPO", "grafana/tempo", "2.6.1"),
-              ("GRAFANA", "grafana/grafana", "11.2.0"),
+              ("PROMETHEUS", os.environ["BASELINE_PROMETHEUS_IMAGE"], os.environ["BASELINE_PROMETHEUS_VERSION"]),
+              ("LOKI", os.environ["BASELINE_LOKI_IMAGE"], os.environ["BASELINE_LOKI_VERSION"]),
+              ("TEMPO", os.environ["BASELINE_TEMPO_IMAGE"], os.environ["BASELINE_TEMPO_VERSION"]),
+              ("GRAFANA", os.environ["BASELINE_GRAFANA_IMAGE"], os.environ["BASELINE_GRAFANA_VERSION"]),
           )
           for name, baseline_image, baseline_version in pairs:
               image = os.environ.get(f"DRIFT_{name}_IMAGE", "")
@@ -870,11 +865,11 @@ jobs:
     env:
       DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
       DRIFT_CANDIDATE_VERSION: ${{ inputs.drift_prometheus_version || vars.COMPAT_DRIFT_PROMETHEUS_VERSION || secrets.COMPAT_DRIFT_PROMETHEUS_VERSION }}
-      DRIFT_BASELINE_IMAGE: prom/prometheus
-      DRIFT_BASELINE_VERSION: v2.54.1
       OUT: ${{ github.workspace }}/target/compat/drift/prometheus
     steps:
       - uses: actions/checkout@v5
+      - name: Load baseline references from manifest
+        run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
       - name: Run Prometheus drift contract
         run: scripts/compat/conformance.sh --drift --protocol prometheus --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
       - name: Upload Prometheus drift evidence
@@ -894,11 +889,11 @@ jobs:
     env:
       DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_loki_image || vars.COMPAT_DRIFT_LOKI_IMAGE || secrets.COMPAT_DRIFT_LOKI_IMAGE }}
       DRIFT_CANDIDATE_VERSION: ${{ inputs.drift_loki_version || vars.COMPAT_DRIFT_LOKI_VERSION || secrets.COMPAT_DRIFT_LOKI_VERSION }}
-      DRIFT_BASELINE_IMAGE: grafana/loki
-      DRIFT_BASELINE_VERSION: 3.1.1
       OUT: ${{ github.workspace }}/target/compat/drift/loki
     steps:
       - uses: actions/checkout@v5
+      - name: Load baseline references from manifest
+        run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
       - name: Run Loki drift contract
         run: scripts/compat/conformance.sh --drift --protocol loki --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
       - name: Upload Loki drift evidence
@@ -918,11 +913,11 @@ jobs:
     env:
       DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_tempo_image || vars.COMPAT_DRIFT_TEMPO_IMAGE || secrets.COMPAT_DRIFT_TEMPO_IMAGE }}
       DRIFT_CANDIDATE_VERSION: ${{ inputs.drift_tempo_version || vars.COMPAT_DRIFT_TEMPO_VERSION || secrets.COMPAT_DRIFT_TEMPO_VERSION }}
-      DRIFT_BASELINE_IMAGE: grafana/tempo
-      DRIFT_BASELINE_VERSION: 2.6.1
       OUT: ${{ github.workspace }}/target/compat/drift/tempo
     steps:
       - uses: actions/checkout@v5
+      - name: Load baseline references from manifest
+        run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
       - name: Run Tempo drift contract
         run: scripts/compat/conformance.sh --drift --protocol tempo --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
       - name: Upload Tempo drift evidence

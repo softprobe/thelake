@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 MANIFEST=$(printenv MANIFEST 2>/dev/null || printf '%s' 'tests/compat/manifests/cases.v0.yaml')
+REFERENCE_MANIFEST=$(printenv COMPAT_REFERENCE_MANIFEST 2>/dev/null || printf '%s' 'docs/compat/references.v0.yaml')
 OUT=$(printenv OUT 2>/dev/null || printf '%s' 'target/compat/conformance')
 RUN_ID=$(printenv RUN_ID 2>/dev/null || date -u +%Y%m%dT%H%M%SZ)
 PROTOCOL_FILTER=
@@ -89,12 +90,14 @@ resolve_path() {
 }
 
 MANIFEST_PATH=$(resolve_path "$MANIFEST")
+REFERENCE_MANIFEST_PATH=$(resolve_path "$REFERENCE_MANIFEST")
 OUT_PATH=$(resolve_path "$OUT")
 TMP_BASE=$(printenv TMPDIR 2>/dev/null || printf '%s' /tmp)
 TMP_DIR=$(mktemp -d "$TMP_BASE/compat-conformance.XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 [ -f "$MANIFEST_PATH" ] || { echo "ERROR: manifest does not exist: $MANIFEST_PATH" >&2; exit 2; }
+[ -f "$REFERENCE_MANIFEST_PATH" ] || { echo "ERROR: reference manifest does not exist: $REFERENCE_MANIFEST_PATH" >&2; exit 2; }
 
 if ! ruby -ryaml -rjson - "$MANIFEST_PATH" "$PROTOCOL_FILTER" "$CASE_FILTER" "$ROOT_DIR" >"$TMP_DIR/selected.json" <<'RUBY'
 manifest_path, protocol_filter, case_filter, repo_root = ARGV
@@ -363,12 +366,14 @@ monotonic_seconds() {
 }
 
 reference_image_for_protocol() {
-	case "$1" in
-		prometheus) printf '%s\n' prom/prometheus ;;
-		loki) printf '%s\n' grafana/loki ;;
-		tempo) printf '%s\n' grafana/tempo ;;
-		*) return 1 ;;
-	esac
+	ruby -ryaml - "$REFERENCE_MANIFEST_PATH" "$1" <<'RUBY'
+manifest = YAML.load_file(ARGV.fetch(0))
+reference = manifest.fetch("references").fetch(ARGV.fetch(1))
+image = reference.fetch("image")
+tag = reference.fetch("tag")
+digest = reference["digest"]
+puts(digest && !digest.empty? ? "#{image}@#{digest}" : "#{image}:#{tag}")
+RUBY
 }
 
 redact_file() {
@@ -1043,10 +1048,10 @@ self_check_drift() {
 		else
 			write_json "$case_dir/outcome.json" "$(printf '{\"mode\":\"drift\",\"status\":\"drift\",\"classification\":\"drift\",\"review_status\":\"needs_review\",\"baseline\":{\"image\":\"%s\"},\"candidate\":{\"image\":\"%s\"},\"release_evidence\":false}' "$baseline" "$candidate")"
 		fi
-	done <<'EOF'
-prometheus|prom/prometheus:v2.54.1|prom/prometheus:v2.55.0
-loki|grafana/loki:3.1.1|grafana/loki:3.2.0
-tempo|grafana/tempo:2.6.1|grafana/tempo:2.7.0
+done <<EOF
+prometheus|$(reference_image_for_protocol prometheus)|prom/prometheus:v2.55.0
+loki|$(reference_image_for_protocol loki)|grafana/loki:3.2.0
+tempo|$(reference_image_for_protocol tempo)|grafana/tempo:2.7.0
 EOF
 
 	ruby -rjson - "$self_out" <<'RUBY'
@@ -1368,15 +1373,11 @@ while IFS= read -r case_id; do
 	esac
 done < <(ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0))).fetch("cases").each { |entry| puts entry.fetch("id") }' "$TMP_DIR/selected.json")
 
-write_json "$OUT_PATH/versions.json" "$(ruby -rjson - "$TMP_DIR/selected.json" "$TMP_DIR/durations" "$OUT_PATH/suite" "$RUN_ID" "$MANIFEST_PATH" "$mode" <<'RUBY'
-selected_path, duration_dir, suite_dir, run_id, manifest_path, mode = ARGV
+write_json "$OUT_PATH/versions.json" "$(ruby -ryaml -rjson - "$TMP_DIR/selected.json" "$TMP_DIR/durations" "$OUT_PATH/suite" "$RUN_ID" "$MANIFEST_PATH" "$mode" "$REFERENCE_MANIFEST_PATH" <<'RUBY'
+selected_path, duration_dir, suite_dir, run_id, manifest_path, mode, reference_manifest_path = ARGV
 document = JSON.parse(File.read(selected_path))
 cases = document.fetch("cases")
-image_names = {
-  "prometheus" => "prom/prometheus",
-  "loki" => "grafana/loki",
-  "tempo" => "grafana/tempo"
-}
+references = YAML.load_file(reference_manifest_path).fetch("references")
 protocols = cases.map { |entry| entry.fetch("protocol") }.uniq
 runner_records = protocols.to_h do |protocol|
   command_path = File.join(suite_dir, protocol, "command.txt")
@@ -1388,15 +1389,18 @@ end
   reference_records = cases.map do |entry|
   reference = entry.fetch("reference")
   protocol = entry.fetch("protocol")
-  image = image_names.fetch(protocol)
+  reference_pin = references.fetch(protocol)
+  image = reference_pin.fetch("image")
+  digest = reference_pin["digest"]
+  image_reference = digest && !digest.empty? ? "#{image}@#{digest}" : "#{image}:#{reference_pin.fetch("tag")}" 
   record = {
     "case_id" => entry.fetch("id"),
     "fixture_id" => entry.fetch("fixture").fetch("id"),
     "protocol" => protocol,
     "service" => reference.fetch("service"),
     "version" => reference.fetch("version"),
-    "image" => image,
-    "image_tag" => "#{image}:#{reference.fetch("version")}" 
+    "image" => image_reference,
+    "image_tag" => image_reference
   }
   if mode == "drift"
     record["baseline"] = { "image" => ENV.fetch("DRIFT_BASELINE_IMAGE"), "version" => ENV.fetch("DRIFT_BASELINE_VERSION") }

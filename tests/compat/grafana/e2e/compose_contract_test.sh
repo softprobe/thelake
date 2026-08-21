@@ -39,7 +39,7 @@ fi
 
 tempo_fixture="$(mktemp "${TMPDIR:-/tmp}/grafana-tempo-contract.XXXXXX.json")"
 trap 'rm -f "$tempo_fixture"' EXIT
-printf '%s\n' '{"batches":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"tenant-a"}}]},"scopeSpans":[{"scope":{"name":"grafana-seeder"},"spans":[{"traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","spanId":"ERINVALID","startTimeUnixNano":"1700000010000000000","endTimeUnixNano":"1700000011000000000","status":{"code":42},"events":[{"name":"checkout","timeUnixNano":"1700000010500000000"}],"links":[{"traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","spanId":"0000000000000001"}]}]}]}]}' > "$tempo_fixture"
+printf '%s\n' '{"batches":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"tenant-a"}}]},"scopeSpans":[{"scope":{"name":"grafana-seeder"},"spans":[{"traceId":"qqqqqqqqqqqqqqqqqqqqqg==","spanId":"ERINVALID","startTimeUnixNano":"1700000010000000000","endTimeUnixNano":"1700000011000000000","status":{"code":42},"events":[{"name":"checkout","timeUnixNano":"1700000010500000000"}],"links":[{"traceId":"qqqqqqqqqqqqqqqqqqqqqg==","spanId":"AQEBAQEBAQE="}]}]}]}]}' > "$tempo_fixture"
 if GRAFANA_RICH_TEMPO_ASSERTIONS=1 bash -c 'source "$1"; validate_tempo_trace_response "$2" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa tenant-a tenant-b' _ "$ROOT_DIR/scripts/grafana-system-smoke.sh" "$tempo_fixture"; then
   echo 'Tempo rich-response contract did not reject an invalid span ID/status enum' >&2
   exit 1
