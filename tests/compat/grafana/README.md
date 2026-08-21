@@ -87,14 +87,13 @@ container artifact for the Phase 4 smoke lane. It pins
 [`dashboards/`](dashboards/) read-only, and reports readiness through
 `GET /api/health` on port `3000`.
 
-The CI compose file requires `GRAFANA_REFERENCE_IMAGE`; `make test-grafana-system`
-exports it from `docs/compat/references.v0.yaml`. Set
-`GRAFANA_REFERENCE_DIGEST` to the immutable digest recorded for that manifest
-image for every real run.
+The CI compose file receives `GRAFANA_COMPOSE_IMAGE` as the immutable
+`image@digest` derived from `docs/compat/references.v0.yaml`; `make
+test-grafana-system` validates the tag and digest before starting the stack.
+The compose seeder provisions both fixed tenants, sends deterministic OTLP
+metrics/logs/traces, and must report all three signals queryable before Grafana
+starts.
 `scripts/grafana-system-smoke.sh` derives the expected image/tag from the
-manifest, rejects image drift, and verifies that the locally resolved image
-contains the supplied digest before running G1–G8. Only `MOCK=1` validation
-runs may omit the digest.
 
 Set `SOFTPROBE_URL`, `SOFTPROBE_API_KEY`,
 `SOFTPROBE_TENANT_A_API_KEY`, `SOFTPROBE_TENANT_B_API_KEY`,

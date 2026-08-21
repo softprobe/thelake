@@ -450,7 +450,6 @@ jobs:
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
-      GRAFANA_REFERENCE_DIGEST: ${{ secrets.GRAFANA_REFERENCE_DIGEST }}
       SOFTPROBE_URL: ${{ secrets.SOFTPROBE_URL }}
       SOFTPROBE_API_KEY: ${{ secrets.SOFTPROBE_API_KEY }}
       SOFTPROBE_TENANT_A_API_KEY: ${{ secrets.SOFTPROBE_TENANT_A_API_KEY }}
@@ -510,7 +509,7 @@ jobs:
       - name: Run real Grafana system harness
         if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
         env:
-          GRAFANA_REFERENCE_DIGEST: ${{ secrets.GRAFANA_REFERENCE_DIGEST }}
+          GRAFANA_REFERENCE_MANIFEST: docs/compat/references.v0.yaml
           SOFTPROBE_URL: ${{ secrets.SOFTPROBE_URL }}
           SOFTPROBE_API_KEY: ${{ secrets.SOFTPROBE_API_KEY }}
           SOFTPROBE_TENANT_A_API_KEY: ${{ secrets.SOFTPROBE_TENANT_A_API_KEY }}
@@ -975,6 +974,7 @@ jobs:
               "grafana" => [ENV.fetch("DRIFT_GRAFANA_IMAGE"), ENV.fetch("DRIFT_GRAFANA_VERSION")]
             }
             values.each { |key, (image, tag)| refs.fetch(key).merge!("image" => image, "tag" => tag) }
+            refs.fetch("grafana").merge!("digest" => ENV.fetch("DRIFT_GRAFANA_DIGEST"))
             File.write("target/compat/drift/references.yaml", YAML.dump(document))
           '
       - name: Run Grafana drift system lane

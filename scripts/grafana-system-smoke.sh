@@ -367,25 +367,34 @@ PY
 mock_tempo_trace_response() {
   local trace_id="$1" tenant="$2"
   python3 - "$trace_id" "$tenant" <<'PY'
+import base64
 import json
+import re
 import sys
 trace_id, tenant = sys.argv[1:]
+if not re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+    raise SystemExit("mock Tempo trace lookup requires an exact 16-byte hex trace ID")
+trace_bytes = bytes.fromhex(trace_id)
+trace_wire_id = base64.b64encode(trace_bytes).decode("ascii")
+span_wire_id = base64.b64encode(bytes.fromhex("01" * 8)).decode("ascii")
+parent_wire_id = base64.b64encode(bytes.fromhex("00" * 8)).decode("ascii")
+link_wire_id = base64.b64encode(bytes.fromhex("02" * 8)).decode("ascii")
 print(json.dumps({
-    "traceID": trace_id,
+    "traceID": trace_wire_id,
     "batches": [{
         "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": tenant}}]},
         "scopeSpans": [{
             "scope": {"name": "grafana-seeder", "version": "1.0.0"},
             "spans": [{
-                "traceId": trace_id,
-                "spanId": "0000000000000001",
-                "parentSpanId": "0000000000000000",
+                "traceId": trace_wire_id,
+                "spanId": span_wire_id,
+                "parentSpanId": parent_wire_id,
                 "name": "checkout",
                 "startTimeUnixNano": "1700000010000000000",
                 "endTimeUnixNano": "1700000011000000000",
                 "status": {"code": "STATUS_CODE_OK"},
                 "events": [{"name": "checkout.started", "timeUnixNano": "1700000010500000000"}],
-                "links": [{"traceId": trace_id, "spanId": "0000000000000002"}]
+                "links": [{"traceId": trace_wire_id, "spanId": link_wire_id}]
             }]
         }],
     }],
@@ -600,6 +609,31 @@ check_composition_readiness() {
 }
 
 run_deterministic_seed() {
+  if [[ "${GRAFANA_SEED_IN_COMPOSE:-0}" == "1" ]]; then
+    local receipt="$ARTIFACT_DIR/seed-receipt.json"
+    [[ -s "$receipt" ]] || {
+      echo "compose Grafana seed did not write $receipt" >&2
+      return 1
+    }
+    python3 - "$receipt" "$TENANT_A_ID" "$TENANT_B_ID" <<'PY'
+import json
+import pathlib
+import sys
+
+receipt = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if receipt.get("status") != "pass":
+    raise SystemExit(f"compose seed status is not pass: {receipt.get('status')!r}")
+tenants = {item.get("tenant_id"): item for item in receipt.get("tenants", [])}
+for tenant_id in sys.argv[2:]:
+    item = tenants.get(tenant_id)
+    if not item or not all(item.get(key) is True for key in (
+        "scope_provisioned", "metrics_sent", "logs_sent", "traces_sent",
+        "metrics_queryable", "logs_queryable", "traces_queryable",
+    )):
+        raise SystemExit(f"compose seed is not queryable for tenant {tenant_id}")
+PY
+    return 0
+  fi
   local seed_bin="${GRAFANA_SEED_BIN:-${CARGO_TARGET_DIR:-target}/debug/grafana_seed_otlp}"
   if [[ ! -x "$seed_bin" ]]; then
     DUCKDB_DOWNLOAD_LIB=1 cargo build --quiet --bin grafana_seed_otlp || return 1
@@ -794,11 +828,13 @@ import json
 import pathlib
 import re
 import sys
+import base64
 path, trace_id, expected, other = sys.argv[1:]
 obj = json.loads(pathlib.Path(path).read_text())
 text = json.dumps(obj, sort_keys=True)
-if trace_id not in text:
-    raise SystemExit(f"Tempo trace response does not contain requested trace {trace_id}")
+if not re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+    raise SystemExit("Tempo lookup trace ID must be exactly 32 hexadecimal characters")
+requested_trace = bytes.fromhex(trace_id)
 if expected and expected not in text:
     raise SystemExit(f"Tempo trace response is missing tenant marker {expected}")
 if other and other in text:
@@ -808,16 +844,15 @@ if not isinstance(groups, list) or not groups:
     raise SystemExit("Tempo trace response contains no spans")
 
 def valid_id(value, byte_length):
-    if not isinstance(value, str) or not value:
-        return False
-    if re.fullmatch(r"[0-9a-fA-F]+", value) and len(value) == byte_length * 2:
-        return True
-    import base64
+    if not isinstance(value, str) or not value or re.fullmatch(r"[0-9a-fA-F]+", value):
+        return None
     try:
         decoded = base64.b64decode(value, validate=True)
     except Exception:
-        return False
-    return len(decoded) == byte_length and base64.b64encode(decoded).decode() == value
+        return None
+    if len(decoded) != byte_length or base64.b64encode(decoded).decode("ascii") != value:
+        return None
+    return decoded
 
 def timestamp(value):
     return isinstance(value, (int, str)) and bool(re.fullmatch(r"[0-9]+", str(value)))
@@ -840,14 +875,17 @@ for group in groups:
             raise SystemExit("Tempo trace response is missing spans in a ScopeSpans group")
         for span in spans:
             span_trace_id = span.get("traceId", span.get("traceID"))
-            if span_trace_id not in (trace_id, trace_id.lower()):
+            decoded_trace_id = valid_id(span_trace_id, 16)
+            if decoded_trace_id is None:
+                raise SystemExit("Tempo trace response has a malformed/noncanonical trace ID")
+            if decoded_trace_id != requested_trace:
                 continue
             matched += 1
             span_id = span.get("spanId", span.get("spanID"))
-            if not valid_id(span_id, 8):
+            if valid_id(span_id, 8) is None:
                 raise SystemExit("Tempo trace response has a malformed span ID")
             parent = span.get("parentSpanId", span.get("parentSpanID"))
-            if parent is not None and parent != "" and not valid_id(parent, 8):
+            if parent is not None and parent != "" and valid_id(parent, 8) is None:
                 raise SystemExit("Tempo trace response has a malformed parent span ID")
             start = span.get("startTimeUnixNano")
             end = span.get("endTimeUnixNano")
@@ -869,7 +907,7 @@ for group in groups:
                 if not isinstance(links, list):
                     raise SystemExit("Tempo trace response links are not a list")
                 for link in links:
-                    if not isinstance(link, dict) or not valid_id(link.get("traceId", link.get("traceID")), 16) or not valid_id(link.get("spanId", link.get("spanID")), 8):
+                    if not isinstance(link, dict) or valid_id(link.get("traceId", link.get("traceID")), 16) is None or valid_id(link.get("spanId", link.get("spanID")), 8) is None:
                         raise SystemExit("Tempo trace response has an invalid link")
 if matched == 0:
     raise SystemExit("Tempo trace response contains no span for the requested trace")

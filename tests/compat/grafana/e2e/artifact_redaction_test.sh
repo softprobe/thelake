@@ -74,7 +74,7 @@ fi
 
 mock_dir="$TMP_DIR/mock"
 set +e
-MOCK=1 ARTIFACT_DIR="$mock_dir" bash "$SCRIPT"
+MOCK=1 GRAFANA_CHECK_DASHBOARD_QUERIES=1 ARTIFACT_DIR="$mock_dir" bash "$SCRIPT"
 mock_status=$?
 set -e
 if (( mock_status != 0 )); then
@@ -104,6 +104,27 @@ if "unsupported" not in unsupported or "datasource" not in invalid:
     raise SystemExit("mock G8 did not retain its required explicit failure evidence")
 if "sorted-json-response-envelope" not in (root / "G1.normalized.json").read_text():
     raise SystemExit("normalized evidence lost its normalization marker")
+
+tempo = json.loads((root / ".work/G6-a-trace.json").read_text())
+groups = tempo.get("batches") or tempo.get("resourceSpans")
+if not isinstance(groups, list) or len(groups) < 2:
+    raise SystemExit("mock Tempo trace did not preserve distinct ResourceSpans groups")
+scope_groups = [scope for group in groups for scope in group.get("scopeSpans", [])]
+spans = [span for scope in scope_groups for span in scope.get("spans", [])]
+if len(scope_groups) < 2 or len(spans) < 2:
+    raise SystemExit("mock Tempo trace did not preserve distinct ScopeSpans/spans")
+if not any(span.get("parentSpanId") for span in spans):
+    raise SystemExit("mock Tempo trace did not preserve span parent topology")
+if not any(span.get("events") for span in spans):
+    raise SystemExit("mock Tempo trace did not preserve span events")
+if not any(span.get("links") for span in spans):
+    raise SystemExit("mock Tempo trace did not preserve span links")
+if not all(span.get("status", {}).get("code") in {"STATUS_CODE_UNSET", "STATUS_CODE_OK", "STATUS_CODE_ERROR"} for span in spans):
+    raise SystemExit("mock Tempo trace did not preserve wire status enum values")
+if not all(group.get("resource", {}).get("attributes") for group in groups):
+    raise SystemExit("mock Tempo trace did not preserve resource attributes")
+if not all(scope.get("scope", {}).get("name") for scope in scope_groups):
+    raise SystemExit("mock Tempo trace did not preserve instrumentation scopes")
 PY
 
 failure_dir="$TMP_DIR/mock-failure"
