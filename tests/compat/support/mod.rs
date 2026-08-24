@@ -159,7 +159,12 @@ pub mod conformance {
         };
         let available = differential
             .iter()
-            .map(|selected| selected.descriptor.case_id.as_str())
+            .flat_map(|selected| {
+                [
+                    selected.descriptor.case_id.as_str(),
+                    selected.descriptor.source_id.as_str(),
+                ]
+            })
             .collect::<BTreeSet<_>>();
         let missing = selection
             .iter()
@@ -174,7 +179,10 @@ pub mod conformance {
         }
         let selected = differential
             .into_iter()
-            .filter(|selected| selection.contains(&selected.descriptor.case_id))
+            .filter(|selected| {
+                selection.contains(&selected.descriptor.case_id)
+                    || selection.contains(&selected.descriptor.source_id)
+            })
             .map(|selected| SelectedCase {
                 case: selected.case,
                 descriptor: selected.descriptor.clone(),
@@ -564,6 +572,8 @@ pub mod conformance {
     #[derive(Debug, Clone, serde::Deserialize)]
     pub struct ManifestCase {
         pub id: String,
+        #[serde(default)]
+        pub runner_case_id: Option<String>,
         pub protocol: String,
         pub endpoint: ManifestEndpoint,
         pub request: ManifestRequest,
@@ -604,6 +614,17 @@ pub mod conformance {
             std::env::var(name)
                 .ok()
                 .is_some_and(|value| !value.trim().is_empty())
+        })
+    }
+
+    fn selection_contains(case_id: &str) -> bool {
+        ["COMPAT_CASE_ID", "COMPAT_CASE_IDS"].iter().any(|name| {
+            std::env::var(name).ok().is_some_and(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .any(|selected| selected == case_id)
+            })
         })
     }
 
@@ -685,13 +706,14 @@ pub mod conformance {
             .iter()
             .filter(|case| {
                 case.protocol == protocol
-                    && case.id == source_case_id
+                    && (case.id == source_case_id
+                        || case.runner_case_id.as_deref() == Some(source_case_id))
                     && case.endpoint.method == method
                     && case.endpoint.path == path
             })
             .collect::<Vec<_>>();
 
-        if selection_is_requested() {
+        if selection_is_requested() && selection_contains(source_case_id) {
             return match source_matches.as_slice() {
                 [case] => Ok(descriptor_from_manifest_case(
                     case,

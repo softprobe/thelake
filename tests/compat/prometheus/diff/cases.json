@@ -23,5 +23,29 @@
       "end": "1700000120",
       "step": "60"
     }
+  },
+  {
+    "id": "labels",
+    "path": "/api/v1/labels",
+    "params": { "match[]": "http_requests{job=\"api\"}" }
+  },
+  {
+    "id": "label_values",
+    "path": "/api/v1/label/job/values",
+    "params": { "match[]": "http_requests{job=\"api\"}" }
+  },
+  {
+    "id": "series",
+    "path": "/api/v1/series",
+    "params": {
+      "match[]": "http_requests{job=\"api\"}",
+      "start": "1700000000",
+      "end": "1700000120"
+    }
+  },
+  {
+    "id": "metadata",
+    "path": "/api/v1/metadata",
+    "params": { "metric": "http_requests", "limit": "10" }
   }
 ]

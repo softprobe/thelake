@@ -45,6 +45,41 @@ fn load_diff_cases() -> Vec<PromDiffCase> {
     .unwrap_or_else(|error| panic!("parse {path:?}: {error}"))
 }
 
+/// Keep runner selection one-to-one with manifest `runner_case_id` values.
+/// An explicit selection is applied before descriptor resolution because the
+/// fixture directory also contains an unmapped local PromQL fixture.
+fn runner_cases_for_selection(
+    cases: Vec<PromDiffCase>,
+    selection: Option<&BTreeSet<String>>,
+) -> Vec<PromDiffCase> {
+    let cases = match selection {
+        Some(selection) => cases
+            .into_iter()
+            .filter(|case| selection.contains(&case.id))
+            .collect(),
+        None => cases,
+    };
+
+    if selection.is_some() {
+        return cases;
+    }
+
+    cases
+        .into_iter()
+        .filter(|case| {
+            descriptor_for_case(
+                "prometheus",
+                &case.id,
+                "GET",
+                &case.path,
+                case.params.clone(),
+                true,
+            )
+            .is_ok_and(|descriptor| descriptor.case_id != descriptor.source_id)
+        })
+        .collect()
+}
+
 fn write_prometheus_artifacts(
     case: &PromDiffCase,
     lake_raw: Option<&Value>,
@@ -73,9 +108,10 @@ async fn mini_diff_vs_pinned_prometheus() {
         std::env::var("COMPAT_CASE_ID").ok().as_deref(),
     )
     .unwrap_or_else(|error| panic!("invalid Prometheus differential case selection: {error}"));
+    let runner_cases = runner_cases_for_selection(cases, selection.as_ref());
     let selected_cases = select_cases(
         "prometheus",
-        &cases,
+        &runner_cases,
         selection.as_ref(),
         |_| true,
         |case| {
@@ -227,9 +263,7 @@ async fn mini_diff_vs_pinned_prometheus() {
 
         let oracle_n = normalize_prom_response(oracle_raw.clone());
         let lake_n = normalize_prom_response(lake_raw.clone());
-        if lake_n["data"]["resultType"] != oracle_n["data"]["resultType"]
-            || lake_n["data"]["result"] != oracle_n["data"]["result"]
-        {
+        if lake_n != oracle_n {
             let artifacts = write_prometheus_artifacts(&case, Some(&lake_raw), Some(&oracle_raw))
                 .expect("write Prometheus failure artifacts");
             recorder
@@ -320,9 +354,49 @@ mod tests {
     }
 
     #[test]
+    fn runner_fixture_selection_resolves_to_manifest_case_and_preserves_mapping() {
+        let cases = load_diff_cases();
+        let selection = BTreeSet::from(["labels".to_string()]);
+        let runner_cases = runner_cases_for_selection(cases, Some(&selection));
+        assert_eq!(
+            runner_cases
+                .iter()
+                .map(|case| case.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["labels"],
+            "selected runner IDs must be filtered before descriptor resolution"
+        );
+        let selected = select_cases(
+            "Prometheus",
+            &runner_cases,
+            Some(&selection),
+            |_| true,
+            |case| {
+                descriptor_for_case(
+                    "prometheus",
+                    &case.id,
+                    "GET",
+                    &case.path,
+                    case.params.clone(),
+                    true,
+                )
+            },
+        )
+        .expect("runner fixture selection");
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].case.id, "labels");
+        assert_eq!(
+            selected[0].descriptor.case_id,
+            "prometheus-labels-discovery"
+        );
+        assert_eq!(selected[0].descriptor.source_id, "labels");
+    }
+
+    #[test]
     fn selectors_reject_unknown_and_non_differential_manifest_cases() {
         let cases = load_diff_cases();
-        for case_id in ["missing-prometheus-case", "prometheus-labels-discovery"] {
+        for case_id in ["missing-prometheus-case", "not-a-prometheus-fixture"] {
             let selection = BTreeSet::from([case_id.to_string()]);
             let error = select_differential_cases("Prometheus", &cases, Some(&selection), |case| {
                 descriptor_for_case(
@@ -347,7 +421,8 @@ mod tests {
     #[test]
     fn absent_selector_preserves_all_prometheus_differential_requests() {
         let cases = load_diff_cases();
-        let selected = select_differential_cases("Prometheus", &cases, None, |case| {
+        let runner_cases = runner_cases_for_selection(cases, None);
+        let selected = select_differential_cases("Prometheus", &runner_cases, None, |case| {
             descriptor_for_case(
                 "prometheus",
                 &case.id,
@@ -360,13 +435,22 @@ mod tests {
             .map(|descriptor| descriptor.case_id)
         })
         .expect("all differential cases");
-        assert_eq!(selected.len(), 3);
+        assert_eq!(selected.len(), 8);
         assert_eq!(
             selected
                 .iter()
                 .map(|case| case.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["selector_instant", "sum_by_job", "range_selector"]
+            vec![
+                "selector_instant",
+                "sum_by_job",
+                "rate_counter",
+                "range_selector",
+                "labels",
+                "label_values",
+                "series",
+                "metadata"
+            ]
         );
     }
 }
