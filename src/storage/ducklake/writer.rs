@@ -413,10 +413,19 @@ impl DuckLakeWriter {
     ) -> Result<PathBuf> {
         let base_dir = std::env::temp_dir().join("splake-ducklake");
         std::fs::create_dir_all(&base_dir)?;
+        // The staging dir is shared by every engine in the process (and other
+        // processes on the host). Nanosecond timestamps alone collided under
+        // concurrent writers, truncating a peer's open parquet mid-write and
+        // failing its CREATE TABLE with "TProtocolException: Invalid data";
+        // PID + monotonic sequence make the name collision-free.
+        static TEMP_PARQUET_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = TEMP_PARQUET_SEQ.fetch_add(1, Ordering::Relaxed);
         let temp_path = base_dir.join(format!(
-            "{}-{}.parquet",
+            "{}-{}-{}-{}.parquet",
             table_name,
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            seq
         ));
         let file = std::fs::File::create(&temp_path)?;
         let mut writer = ArrowWriter::try_new(
