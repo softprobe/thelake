@@ -1,6 +1,8 @@
 # Grafana compatibility
 
-Pinned Grafana image: `grafana/grafana:11.2.0` (see `docs/compat/references.v0.yaml`).
+Pinned Grafana image: `grafana/grafana:11.2.0` at the immutable digest in
+`docs/compat/references.v0.yaml`. Compose never falls back to a tag-only
+Grafana or WireMock image.
 
 ## Manual stack (team-reproducible)
 
@@ -13,6 +15,9 @@ make grafana-up      # Softprobe + Grafana + OpenTelemetry Demo (Astronomy Shop)
 # Store UI:    http://127.0.0.1:8080
 make grafana-down
 ```
+
+`make grafana-up` validates the checked-in manual compose image pins and passes
+the manifest-derived `GRAFANA_COMPOSE_IMAGE=image@sha256:...` to Compose.
 
 What it starts:
 
@@ -104,7 +109,7 @@ must not be written to artifacts.
 From the repository root:
 
 ```bash
-GRAFANA_REFERENCE_IMAGE="$(make -s grafana-reference-image)" \
+GRAFANA_COMPOSE_IMAGE="$(make -s grafana-reference-image)" \
   docker compose -f tests/compat/grafana/docker-compose.ci.yml up -d --wait
 docker compose -f tests/compat/grafana/docker-compose.ci.yml ps
 docker compose -f tests/compat/grafana/docker-compose.ci.yml down --volumes

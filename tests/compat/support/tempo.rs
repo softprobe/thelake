@@ -17,6 +17,7 @@ use tower::ServiceExt;
 
 #[cfg(feature = "integration-e2e")]
 use crate::compat_support::lifecycle;
+use crate::compat_support::loki::{candidate_reference_image, manifest_reference_image};
 use crate::compat_support::prometheus::encode_query_owned;
 use crate::compat_support::prometheus_oracle::build_tenant_router_with_state;
 
@@ -167,12 +168,11 @@ pub fn reference_image_from_manifest() -> String {
     let manifest: serde_yaml::Value =
         serde_yaml::from_str(include_str!("../../../docs/compat/references.v0.yaml"))
             .expect("references.v0.yaml parses");
-    let tempo = &manifest["references"]["tempo"];
-    format!(
-        "{}:{}",
-        tempo["image"].as_str().expect("tempo image"),
-        tempo["tag"].as_str().expect("tempo tag")
-    )
+    std::env::var("TEMPO_REFERENCE_IMAGE")
+        .ok()
+        .filter(|image| !image.trim().is_empty())
+        .map(|image| candidate_reference_image("TEMPO_REFERENCE_IMAGE", &image))
+        .unwrap_or_else(|| manifest_reference_image(&manifest, "tempo"))
 }
 
 /// Reuse the shared local tenant router and lifecycle used by the Loki contracts.

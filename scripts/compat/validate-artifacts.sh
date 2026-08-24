@@ -12,9 +12,13 @@ set -euo pipefail
 usage() {
 	cat >&2 <<'EOF'
 Usage: validate-artifacts.sh --root DIR [--release-gate]
+       validate-artifacts.sh --conformance-root DIR [--release-gate]
 
   --root DIR        artifact root containing artifact-index.json,
                     execution-receipt.json, and outcome.json
+  --conformance-root DIR
+                    consolidated compatibility report root containing
+                    report.json and downloaded release evidence
   --release-gate    require the set to certify a release; mock, validation,
                     and drift artifacts never satisfy release evidence
 EOF
@@ -22,6 +26,7 @@ EOF
 }
 
 ROOT=
+CONFORMANCE_ROOT=
 GATE=0
 
 while [ "$#" -gt 0 ]; do
@@ -29,6 +34,11 @@ while [ "$#" -gt 0 ]; do
 		--root)
 			[ "$#" -ge 2 ] || usage
 			ROOT=$2
+			shift 2
+			;;
+		--conformance-root)
+			[ "$#" -ge 2 ] || usage
+			CONFORMANCE_ROOT=$2
 			shift 2
 			;;
 		--release-gate)
@@ -41,9 +51,223 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
-if [ -z "$ROOT" ]; then
-	echo "validate-artifacts: ERROR: --root DIR is required" >&2
+if [ -n "$ROOT" ] && [ -n "$CONFORMANCE_ROOT" ]; then
+	echo "validate-artifacts: ERROR: --root and --conformance-root are mutually exclusive" >&2
 	usage
+fi
+
+if [ -z "$ROOT" ] && [ -z "$CONFORMANCE_ROOT" ]; then
+	echo "validate-artifacts: ERROR: --root DIR or --conformance-root DIR is required" >&2
+	usage
+fi
+
+if [ -n "$CONFORMANCE_ROOT" ]; then
+	if [ ! -d "$CONFORMANCE_ROOT" ]; then
+		echo "validate-artifacts: ERROR: conformance root is not a directory: $CONFORMANCE_ROOT" >&2
+		exit 2
+	fi
+
+	python3 - "$CONFORMANCE_ROOT" "$GATE" <<'PY'
+import json
+import os
+import re
+import sys
+from urllib.parse import unquote
+from pathlib import Path
+
+root = Path(sys.argv[1])
+release_gate = sys.argv[2] == "1"
+errors = []
+
+
+def error(path, message):
+    errors.append("%s: %s" % (path, message))
+
+
+BEARER = re.compile(r"\bBearer\s+([^\s,}]+)", re.IGNORECASE)
+KV_SECRET = re.compile(
+    r"\b(?:authorization|proxy[_-]?authorization|x-api-key|api-key|cookie|set-cookie|access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|api[_-]?key|apikey|client[_-]?secret)[=:]\s*(\S+)",
+    re.IGNORECASE,
+)
+URL_SECRET = re.compile(
+    r"(?i)[?&](?:authorization|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|client[_-]?secret|session(?:[_-]?id)?)=([^&#\s\"'<]+)"
+)
+SECRET_KEY = re.compile(
+    r"(?i)\b(?:authorization|proxy[_-]?authorization|x-api-key|api-key|cookie|set-cookie|password|passwd|secret|token|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret)\b"
+)
+PLACEHOLDER = re.compile(r"^\[?REDACTED\]?$", re.IGNORECASE)
+
+
+def is_redacted(value):
+    value = unquote(value.strip().strip("\"'[],;"))
+    return bool(PLACEHOLDER.fullmatch(value) or re.fullmatch(r"Bearer\s+\[?REDACTED\]?", value, re.IGNORECASE))
+
+
+def scan_string(value, path, where):
+    for match in BEARER.finditer(value):
+        token = match.group(1).strip("\"'[],")
+        if not PLACEHOLDER.fullmatch(token):
+            error(path, "credential leak: %s embeds an unredacted Bearer token" % where)
+    for match in KV_SECRET.finditer(value):
+        token = match.group(1).strip("\"'[],;")
+        if not PLACEHOLDER.fullmatch(token):
+            error(path, "credential leak: %s embeds an unredacted secret" % where)
+    for match in URL_SECRET.finditer(value):
+        if not is_redacted(match.group(1)):
+            error(path, "credential leak: %s embeds an unredacted URL credential" % where)
+
+
+def scan_value(value, path, where, depth=0):
+    if depth > 64:
+        error(path, "credential scan nesting exceeds the safety limit")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            location = "%s.%s" % (where, key)
+            if isinstance(item, str):
+                if SECRET_KEY.search(str(key)) and not is_redacted(item):
+                    error(path, "credential leak: %s is not redacted" % location)
+                scan_string(item, path, location)
+            else:
+                scan_value(item, path, location, depth + 1)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            scan_value(item, path, "%s[%d]" % (where, index), depth + 1)
+
+
+json_values = {}
+for file_path in sorted(path for path in root.rglob("*") if path.is_file()):
+    relative = file_path.relative_to(root).as_posix()
+    try:
+        raw = file_path.read_bytes()
+        text = raw.decode("utf-8")
+    except OSError as exc:
+        error(relative, "cannot read evidence: %s" % exc)
+        continue
+    except UnicodeDecodeError:
+        error(relative, "unexpected binary artifact is not allowed")
+        continue
+    if b"\x00" in raw:
+        error(relative, "unexpected binary artifact is not allowed")
+        continue
+    scan_string(text, relative, relative)
+    if file_path.suffix == ".json":
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            error(relative, "invalid JSON: %s" % exc)
+            continue
+        json_values[relative] = value
+        scan_value(value, relative, relative)
+
+
+report = json_values.get("report.json")
+if report is None:
+    error("report.json", "missing required consolidated report")
+elif not isinstance(report, dict):
+    error("report.json", "consolidated report must be a JSON object")
+
+
+def nonempty(value):
+    return value not in (None, False, 0, "", [], {})
+
+
+if isinstance(report, dict):
+    if release_gate and report.get("mode") != "real":
+        error("report.json", "release gate requires a real consolidated report")
+    if release_gate and report.get("release_evidence") is not True:
+        error("report.json", "release gate requires release_evidence=true")
+    for key in ("jobs", "required_jobs", "errors", "product_regressions", "unapproved_differences"):
+        if key not in report:
+            error("report.json", "missing required field '%s'" % key)
+
+    jobs = report.get("jobs")
+    required_jobs = report.get("required_jobs")
+    if not isinstance(jobs, dict):
+        error("report.json", "jobs must be an object")
+        jobs = {}
+    if not isinstance(required_jobs, list):
+        error("report.json", "required_jobs must be an array")
+        required_jobs = []
+    elif release_gate and not required_jobs:
+        error("report.json", "required_jobs must be a non-empty array for the release gate")
+    for job_name in required_jobs:
+        if not isinstance(job_name, str) or not job_name:
+            error("report.json", "required_jobs entries must be non-empty strings")
+        elif jobs.get(job_name) != "success":
+            error("report.json", "required job %r is not successful" % job_name)
+
+    for key in ("errors", "product_regressions", "infrastructure_skips"):
+        if release_gate and nonempty(report.get(key)):
+            error("report.json", "release gate rejects non-empty %s" % key)
+    if release_gate and nonempty(report.get("unapproved_differences")):
+        error("report.json", "release gate rejects unapproved_differences")
+
+    expected = {}
+    required = set(item for item in required_jobs if isinstance(item, str))
+    if "prometheus-diff" in required:
+        expected["prometheus-differential-evidence"] = ("raw.json", "normalized.json")
+    if "loki-diff" in required:
+        expected["loki-differential-evidence"] = ("raw.json", "normalized.json")
+    if "tempo-diff" in required:
+        expected["tempo-differential-evidence"] = ("raw.json", "normalized.json")
+    if "grafana-system" in required:
+        expected["grafana-system-real-evidence"] = (
+            "outcome.json", "summary.json", "G1.outcome.json", "G2.outcome.json",
+            "G3.outcome.json", "G4.outcome.json", "G5.outcome.json", "G6.outcome.json",
+            "G7.outcome.json", "G8.outcome.json",
+        )
+    if "manifest-conformance" in required:
+        for protocol in ("prometheus", "loki", "tempo"):
+            expected["manifest-conformance-%s-real-evidence" % protocol] = ("report.jsonl", "versions.json")
+    if "fast-pr" in required:
+        expected["fast-pr-compatibility-evidence"] = ("report.txt",)
+
+    for artifact_name, required_files in (expected.items() if release_gate else []):
+        artifact_root = root / artifact_name
+        if not artifact_root.is_dir():
+            error(artifact_name, "missing required release evidence directory")
+            continue
+        files = [path for path in artifact_root.rglob("*") if path.is_file()]
+        if not files:
+            error(artifact_name, "required release evidence directory is empty")
+            continue
+        for required_file in required_files:
+            matches = [path for path in artifact_root.rglob(required_file) if path.is_file()]
+            if not matches:
+                error(artifact_name, "missing required evidence file %s" % required_file)
+            elif any(path.stat().st_size == 0 for path in matches):
+                error(artifact_name, "required evidence file %s is empty" % required_file)
+
+
+for relative, value in json_values.items():
+    values = value if isinstance(value, list) else [value]
+    stack = list(values)
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if "release_evidence" in item and not isinstance(item["release_evidence"], bool):
+                error(relative, "release_evidence must be boolean")
+            if release_gate and item.get("release_evidence") is False:
+                error(relative, "release gate rejects release_evidence=false record")
+            if release_gate and item.get("mode") in ("mock", "validation", "drift"):
+                error(relative, "release gate rejects mode %r" % item.get("mode"))
+            if release_gate and item.get("validation_only") is True:
+                error(relative, "release gate rejects validation-only record")
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+
+if not release_gate:
+    print("validate-artifacts: conformance evidence structurally valid (release gate not requested)")
+
+for message in errors:
+    print("validate-artifacts: %s" % message, file=sys.stderr)
+if errors:
+    print("validate-artifacts: FAILED with %d error(s)" % len(errors), file=sys.stderr)
+    raise SystemExit(1)
+PY
+	exit 0
 fi
 
 if [ ! -d "$ROOT" ]; then
@@ -56,6 +280,7 @@ import json
 import os
 import re
 import sys
+from urllib.parse import unquote
 
 root = sys.argv[1]
 release_gate = sys.argv[2] == "1"
@@ -85,11 +310,14 @@ KNOWN_CLASSIFICATIONS = frozenset(
 PLACEHOLDER = re.compile(r"^\[?REDACTED\]?$", re.IGNORECASE)
 BEARER = re.compile(r"\bBearer\s+([^\s,}]+)", re.IGNORECASE)
 KV_SECRET = re.compile(
-    r"\b(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|api[_-]?key|apikey|client[_-]?secret)[=:]\s*(\S+)",
+    r"\b(?:authorization|proxy[_-]?authorization|x-api-key|api-key|cookie|set-cookie|access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|api[_-]?key|apikey|client[_-]?secret)[=:]\s*(\S+)",
     re.IGNORECASE,
 )
+URL_SECRET = re.compile(
+    r"(?i)[?&](?:authorization|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|client[_-]?secret|session(?:[_-]?id)?)=([^&#\s\"'<]+)"
+)
 SECRET_KEY = re.compile(
-    r"(?i)\b(?:authorization|proxy[_-]?authorization|password|passwd|secret|token|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret)\b"
+    r"(?i)\b(?:authorization|proxy[_-]?authorization|x-api-key|api-key|cookie|set-cookie|password|passwd|secret|token|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret)\b"
 )
 
 REQUIRED_CASE_FILES = [
@@ -137,7 +365,7 @@ def load_json(rel):
 
 
 def is_redacted(value):
-    value = value.strip()
+    value = unquote(value.strip().strip("\"'[],;"))
     if re.match(r"(?i)^Bearer\s+\[?REDACTED\]?$", value):
         return True
     return bool(PLACEHOLDER.match(value))
@@ -145,13 +373,16 @@ def is_redacted(value):
 
 def scan_string(value, path, where):
     for match in BEARER.finditer(value):
-        token = match.group(1).strip("\"'[,]")
+        token = match.group(1).strip("\"'[],")
         if not PLACEHOLDER.match(token):
             error(path, "credential leak: %s embeds a Bearer token that is not redacted" % where)
     for match in KV_SECRET.finditer(value):
-        token = match.group(1).strip("\"'[,]")
+        token = match.group(1).strip("\"'[],;")
         if not PLACEHOLDER.match(token):
             error(path, "credential leak: %s embeds a secret value that is not redacted: %s" % (where, match.group(0)))
+    for match in URL_SECRET.finditer(value):
+        if not is_redacted(match.group(1)):
+            error(path, "credential leak: %s embeds an unredacted URL credential" % where)
 
 
 def scan_value(value, path, where, depth=0):
@@ -163,8 +394,7 @@ def scan_value(value, path, where, depth=0):
                 if SECRET_KEY.search(key):
                     if not is_redacted(item):
                         error(path, "credential leak: %s.%s=%r is not redacted" % (where, key, item))
-                else:
-                    scan_string(item, path, "%s.%s" % (where, key))
+                scan_string(item, path, "%s.%s" % (where, key))
             else:
                 scan_value(item, path, "%s.%s" % (where, key), depth + 1)
     elif isinstance(value, list):
@@ -315,7 +545,7 @@ def validate_case(cdir, suite_run_id, suite_protocol):
 
     if suite_run_id is not None and run_id != suite_run_id:
         error(rels["case.json"], "run_id %r does not match suite run_id %r" % (run_id, suite_run_id))
-    if suite_protocol is not None and protocol != suite_protocol:
+    if suite_protocol is not None and suite_protocol not in ("multi", "all") and protocol != suite_protocol:
         error(rels["case.json"], "protocol %r does not match suite protocol %r" % (protocol, suite_protocol))
 
     expected_meta = {
@@ -451,8 +681,14 @@ for rel in all_regular_files():
         continue
     full = os.path.join(root, rel)
     try:
-        with open(full, "r", encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
+        with open(full, "rb") as handle:
+            raw = handle.read()
+        text = raw.decode("utf-8")
+        if b"\x00" in raw:
+            raise UnicodeError("NUL byte")
+    except UnicodeError:
+        error(rel, "unexpected binary artifact is not allowed")
+        continue
     except OSError as exc:
         error(rel, "cannot read artifact for credential scan: %s" % exc)
         continue

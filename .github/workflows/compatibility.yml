@@ -29,6 +29,11 @@ on:
         required: false
         default: ""
         type: string
+      drift_prometheus_digest:
+        description: Candidate Prometheus immutable digest for drift mode
+        required: false
+        default: ""
+        type: string
       drift_loki_image:
         description: Candidate Loki repository for drift mode
         required: false
@@ -39,6 +44,11 @@ on:
         required: false
         default: ""
         type: string
+      drift_loki_digest:
+        description: Candidate Loki immutable digest for drift mode
+        required: false
+        default: ""
+        type: string
       drift_tempo_image:
         description: Candidate Tempo repository for drift mode
         required: false
@@ -46,6 +56,11 @@ on:
         type: string
       drift_tempo_version:
         description: Candidate Tempo version for drift mode
+        required: false
+        default: ""
+        type: string
+      drift_tempo_digest:
+        description: Candidate Tempo immutable digest for drift mode
         required: false
         default: ""
         type: string
@@ -483,6 +498,9 @@ jobs:
               > target/compat/grafana/NOTICE.txt
           fi
 
+      - name: Run static Grafana Phase 4 contracts
+        run: make test-grafana-static
+
       - name: Require successful protocol prerequisites for real validation
         if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
         env:
@@ -525,9 +543,6 @@ jobs:
           root=target/compat/grafana
           test -d "$root"
           test -s "$root/outcome.json"
-          for case_id in G1 G2 G3 G4 G5 G6 G7 G8; do
-            test -s "$root/${case_id}.outcome.json"
-          done
           python3 - "$root" <<'PY'
           import json, pathlib, sys
           bad = {"skipped", "environment_skip", "infrastructure_failure", "product_regression"}
@@ -541,7 +556,11 @@ jobs:
                   raise SystemExit("environment-skipped Grafana run unexpectedly produced G-case results")
               print(f"Grafana system lane permitted environment skip: {reason}")
               raise SystemExit(0)
-          paths = [root / "outcome.json", *sorted(root.glob("G*.outcome.json"))]
+          case_paths = [root / f"G{case_id}.outcome.json" for case_id in range(1, 9)]
+          missing = [str(path) for path in case_paths if not path.is_file() or path.stat().st_size == 0]
+          if missing:
+              raise SystemExit("missing Grafana case evidence: " + ", ".join(missing))
+          paths = [root / "outcome.json", *case_paths]
           for path in paths:
               obj = json.loads(path.read_text())
               outcome = obj.get("outcome")
@@ -553,6 +572,7 @@ jobs:
         if: ${{ inputs.selector == 'mock' }}
         env:
           MOCK: "1"
+          GRAFANA_CHECK_DASHBOARD_QUERIES: "1"
           ARTIFACT_DIR: target/compat/grafana
         run: scripts/grafana-system-smoke.sh
 
@@ -682,20 +702,25 @@ jobs:
           ids = cases.map { |entry| entry.fetch("id") }
           grouped = rows.group_by { |row| row.fetch("case_id") }
           abort "duplicate, missing, or extra conformance cases" unless ids.sort == grouped.keys.sort && grouped.values.all? { |values| values.one? }
-          rows.each { |row| abort "non-passing real conformance result" unless row["mode"] == "real" && row["status"] == "pass" }
+          rows.each { |row| abort "non-passing or non-release real conformance result" unless row["mode"] == "real" && row["status"] == "pass" && row["release_evidence"] == true }
           versions = JSON.parse(File.read(File.join(root, "versions.json")))
           abort "conformance mode is not real" unless versions["mode"] == "real"
+          abort "conformance release evidence is not asserted" unless versions["release_evidence"] == true
           ids.each do |id|
             dir = File.join(root, id)
-            required = %w[case.json request.raw.json request.normalized.json softprobe.raw.json softprobe.normalized.json reference.raw.json reference.normalized.json diff.json outcome.json]
+            required = %w[case.json case_provenance.json request.raw.json request.normalized.json softprobe.raw.json softprobe.normalized.json reference.raw.json reference.normalized.json diff.json outcome.json suite.evidence.json]
             missing = required.reject { |name| File.file?(File.join(dir, name)) }
             abort "#{id}: missing #{missing.join(', ')}" unless missing.empty?
             outcome = JSON.parse(File.read(File.join(dir, "outcome.json")))
-            abort "#{id}: incomplete real evidence" unless outcome["mode"] == "real" && outcome["status"] == "pass" && outcome["evidence_scope"] == "case"
+            abort "#{id}: incomplete real evidence" unless outcome["mode"] == "real" && outcome["status"] == "pass" && outcome["evidence_scope"] == "case" && outcome["release_evidence"] == true
             diff = JSON.parse(File.read(File.join(dir, "diff.json")))
-            abort "#{id}: normalized comparison failed" unless diff["equal"] == true
+            abort "#{id}: normalized comparison failed or is not release evidence" unless diff["equal"] == true && diff["release_evidence"] == true
           end
           RUBY
+
+      - name: Validate real conformance artifact set
+        if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
+        run: scripts/compat/validate-artifacts.sh --root "$OUT" --release-gate
 
       - name: Run explicit mock manifest conformance selector
         if: ${{ inputs.selector == 'mock' }}
@@ -713,6 +738,10 @@ jobs:
           test -s "$OUT/NOTICE.txt"
           rg -qi 'MOCK-ONLY|not service-backed|not.*compatibility evidence' "$OUT/NOTICE.txt"
           rg -qi 'mock' "$OUT/versions.json"
+
+      - name: Validate mock conformance artifact set
+        if: ${{ inputs.selector == 'mock' }}
+        run: scripts/compat/validate-artifacts.sh --root "$OUT"
 
       - name: Stage sanitized conformance evidence
         if: always()
@@ -750,10 +779,13 @@ jobs:
     env:
       DRIFT_PROMETHEUS_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
       DRIFT_PROMETHEUS_VERSION: ${{ inputs.drift_prometheus_version || vars.COMPAT_DRIFT_PROMETHEUS_VERSION || secrets.COMPAT_DRIFT_PROMETHEUS_VERSION }}
+      DRIFT_PROMETHEUS_DIGEST: ${{ inputs.drift_prometheus_digest || vars.COMPAT_DRIFT_PROMETHEUS_DIGEST || secrets.COMPAT_DRIFT_PROMETHEUS_DIGEST }}
       DRIFT_LOKI_IMAGE: ${{ inputs.drift_loki_image || vars.COMPAT_DRIFT_LOKI_IMAGE || secrets.COMPAT_DRIFT_LOKI_IMAGE }}
       DRIFT_LOKI_VERSION: ${{ inputs.drift_loki_version || vars.COMPAT_DRIFT_LOKI_VERSION || secrets.COMPAT_DRIFT_LOKI_VERSION }}
+      DRIFT_LOKI_DIGEST: ${{ inputs.drift_loki_digest || vars.COMPAT_DRIFT_LOKI_DIGEST || secrets.COMPAT_DRIFT_LOKI_DIGEST }}
       DRIFT_TEMPO_IMAGE: ${{ inputs.drift_tempo_image || vars.COMPAT_DRIFT_TEMPO_IMAGE || secrets.COMPAT_DRIFT_TEMPO_IMAGE }}
       DRIFT_TEMPO_VERSION: ${{ inputs.drift_tempo_version || vars.COMPAT_DRIFT_TEMPO_VERSION || secrets.COMPAT_DRIFT_TEMPO_VERSION }}
+      DRIFT_TEMPO_DIGEST: ${{ inputs.drift_tempo_digest || vars.COMPAT_DRIFT_TEMPO_DIGEST || secrets.COMPAT_DRIFT_TEMPO_DIGEST }}
       DRIFT_GRAFANA_IMAGE: ${{ inputs.drift_grafana_image || vars.COMPAT_DRIFT_GRAFANA_IMAGE || secrets.COMPAT_DRIFT_GRAFANA_IMAGE }}
       DRIFT_GRAFANA_VERSION: ${{ inputs.drift_grafana_version || vars.COMPAT_DRIFT_GRAFANA_VERSION || secrets.COMPAT_DRIFT_GRAFANA_VERSION }}
       DRIFT_GRAFANA_DIGEST: ${{ inputs.drift_grafana_digest || vars.COMPAT_DRIFT_GRAFANA_DIGEST || secrets.COMPAT_DRIFT_GRAFANA_DIGEST }}
@@ -776,8 +808,8 @@ jobs:
               "release_evidence": False,
               "status": "pending",
               "candidate": {key.removeprefix("DRIFT_").lower(): os.environ.get(key, "") for key in (
-                  "DRIFT_PROMETHEUS_IMAGE", "DRIFT_PROMETHEUS_VERSION", "DRIFT_LOKI_IMAGE", "DRIFT_LOKI_VERSION",
-                  "DRIFT_TEMPO_IMAGE", "DRIFT_TEMPO_VERSION", "DRIFT_GRAFANA_IMAGE", "DRIFT_GRAFANA_VERSION", "DRIFT_GRAFANA_DIGEST")},
+                  "DRIFT_PROMETHEUS_IMAGE", "DRIFT_PROMETHEUS_VERSION", "DRIFT_PROMETHEUS_DIGEST", "DRIFT_LOKI_IMAGE", "DRIFT_LOKI_VERSION", "DRIFT_LOKI_DIGEST",
+                  "DRIFT_TEMPO_IMAGE", "DRIFT_TEMPO_VERSION", "DRIFT_TEMPO_DIGEST", "DRIFT_GRAFANA_IMAGE", "DRIFT_GRAFANA_VERSION", "DRIFT_GRAFANA_DIGEST")},
               "baseline": {key.removeprefix("BASELINE_").lower(): os.environ.get(key, "") for key in (
                   "BASELINE_PROMETHEUS_IMAGE", "BASELINE_PROMETHEUS_VERSION", "BASELINE_LOKI_IMAGE", "BASELINE_LOKI_VERSION",
                   "BASELINE_TEMPO_IMAGE", "BASELINE_TEMPO_VERSION", "BASELINE_GRAFANA_IMAGE", "BASELINE_GRAFANA_VERSION")},
@@ -808,21 +840,23 @@ jobs:
                   raise SystemExit(f"mutable candidate {name.lower()} version")
               if version == baseline_version:
                   raise SystemExit(f"candidate {name.lower()} version is unchanged from baseline")
-          digest = os.environ.get("DRIFT_GRAFANA_DIGEST", "")
-          if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
-              raise SystemExit("Grafana drift candidate requires an immutable sha256 digest")
+          for name in ("PROMETHEUS", "LOKI", "TEMPO", "GRAFANA"):
+              digest = os.environ.get(f"DRIFT_{name}_DIGEST", "")
+              if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
+                  raise SystemExit(f"{name.lower()} drift candidate requires an immutable sha256 digest")
           PY
           for signal in prometheus loki tempo grafana; do
             upper=$(printf '%s' "$signal" | tr '[:lower:]' '[:upper:]')
             image_var="DRIFT_${upper}_IMAGE"
-            version_var="DRIFT_${upper}_VERSION"
-            docker pull "${!image_var}:${!version_var}" >/dev/null
+            digest_var="DRIFT_${upper}_DIGEST"
+            candidate_reference="${!image_var}@${!digest_var}"
+            docker pull "$candidate_reference" >/dev/null
+            repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' "$candidate_reference")
+            printf '%s' "$repo_digests" | grep -Fq -- "$candidate_reference" || {
+              echo "$signal candidate digest does not match the pulled immutable reference" >&2
+              exit 1
+            }
           done
-          repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' "${DRIFT_GRAFANA_IMAGE}:${DRIFT_GRAFANA_VERSION}")
-          printf '%s' "$repo_digests" | grep -Fq "@${DRIFT_GRAFANA_DIGEST}" || {
-            echo 'Grafana candidate digest does not match the pulled image' >&2
-            exit 1
-          }
           python3 - <<'PY'
           import json
           data = json.load(open("target/compat/drift/preflight/metadata.json"))
@@ -865,13 +899,14 @@ jobs:
     env:
       DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
       DRIFT_CANDIDATE_VERSION: ${{ inputs.drift_prometheus_version || vars.COMPAT_DRIFT_PROMETHEUS_VERSION || secrets.COMPAT_DRIFT_PROMETHEUS_VERSION }}
+      DRIFT_CANDIDATE_DIGEST: ${{ inputs.drift_prometheus_digest || vars.COMPAT_DRIFT_PROMETHEUS_DIGEST || secrets.COMPAT_DRIFT_PROMETHEUS_DIGEST }}
       OUT: ${{ github.workspace }}/target/compat/drift/prometheus
     steps:
       - uses: actions/checkout@v5
       - name: Load baseline references from manifest
         run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
       - name: Run Prometheus drift contract
-        run: scripts/compat/conformance.sh --drift --protocol prometheus --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
+        run: scripts/compat/conformance.sh --drift --protocol prometheus --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --candidate-digest "$DRIFT_CANDIDATE_DIGEST" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
       - name: Upload Prometheus drift evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -889,13 +924,14 @@ jobs:
     env:
       DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_loki_image || vars.COMPAT_DRIFT_LOKI_IMAGE || secrets.COMPAT_DRIFT_LOKI_IMAGE }}
       DRIFT_CANDIDATE_VERSION: ${{ inputs.drift_loki_version || vars.COMPAT_DRIFT_LOKI_VERSION || secrets.COMPAT_DRIFT_LOKI_VERSION }}
+      DRIFT_CANDIDATE_DIGEST: ${{ inputs.drift_loki_digest || vars.COMPAT_DRIFT_LOKI_DIGEST || secrets.COMPAT_DRIFT_LOKI_DIGEST }}
       OUT: ${{ github.workspace }}/target/compat/drift/loki
     steps:
       - uses: actions/checkout@v5
       - name: Load baseline references from manifest
         run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
       - name: Run Loki drift contract
-        run: scripts/compat/conformance.sh --drift --protocol loki --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
+        run: scripts/compat/conformance.sh --drift --protocol loki --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --candidate-digest "$DRIFT_CANDIDATE_DIGEST" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
       - name: Upload Loki drift evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -913,13 +949,14 @@ jobs:
     env:
       DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_tempo_image || vars.COMPAT_DRIFT_TEMPO_IMAGE || secrets.COMPAT_DRIFT_TEMPO_IMAGE }}
       DRIFT_CANDIDATE_VERSION: ${{ inputs.drift_tempo_version || vars.COMPAT_DRIFT_TEMPO_VERSION || secrets.COMPAT_DRIFT_TEMPO_VERSION }}
+      DRIFT_CANDIDATE_DIGEST: ${{ inputs.drift_tempo_digest || vars.COMPAT_DRIFT_TEMPO_DIGEST || secrets.COMPAT_DRIFT_TEMPO_DIGEST }}
       OUT: ${{ github.workspace }}/target/compat/drift/tempo
     steps:
       - uses: actions/checkout@v5
       - name: Load baseline references from manifest
         run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
       - name: Run Tempo drift contract
-        run: scripts/compat/conformance.sh --drift --protocol tempo --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
+        run: scripts/compat/conformance.sh --drift --protocol tempo --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --candidate-digest "$DRIFT_CANDIDATE_DIGEST" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
       - name: Upload Tempo drift evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -937,10 +974,13 @@ jobs:
     env:
       DRIFT_PROMETHEUS_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
       DRIFT_PROMETHEUS_VERSION: ${{ inputs.drift_prometheus_version || vars.COMPAT_DRIFT_PROMETHEUS_VERSION || secrets.COMPAT_DRIFT_PROMETHEUS_VERSION }}
+      DRIFT_PROMETHEUS_DIGEST: ${{ inputs.drift_prometheus_digest || vars.COMPAT_DRIFT_PROMETHEUS_DIGEST || secrets.COMPAT_DRIFT_PROMETHEUS_DIGEST }}
       DRIFT_LOKI_IMAGE: ${{ inputs.drift_loki_image || vars.COMPAT_DRIFT_LOKI_IMAGE || secrets.COMPAT_DRIFT_LOKI_IMAGE }}
       DRIFT_LOKI_VERSION: ${{ inputs.drift_loki_version || vars.COMPAT_DRIFT_LOKI_VERSION || secrets.COMPAT_DRIFT_LOKI_VERSION }}
+      DRIFT_LOKI_DIGEST: ${{ inputs.drift_loki_digest || vars.COMPAT_DRIFT_LOKI_DIGEST || secrets.COMPAT_DRIFT_LOKI_DIGEST }}
       DRIFT_TEMPO_IMAGE: ${{ inputs.drift_tempo_image || vars.COMPAT_DRIFT_TEMPO_IMAGE || secrets.COMPAT_DRIFT_TEMPO_IMAGE }}
       DRIFT_TEMPO_VERSION: ${{ inputs.drift_tempo_version || vars.COMPAT_DRIFT_TEMPO_VERSION || secrets.COMPAT_DRIFT_TEMPO_VERSION }}
+      DRIFT_TEMPO_DIGEST: ${{ inputs.drift_tempo_digest || vars.COMPAT_DRIFT_TEMPO_DIGEST || secrets.COMPAT_DRIFT_TEMPO_DIGEST }}
       DRIFT_GRAFANA_IMAGE: ${{ inputs.drift_grafana_image || vars.COMPAT_DRIFT_GRAFANA_IMAGE || secrets.COMPAT_DRIFT_GRAFANA_IMAGE }}
       DRIFT_GRAFANA_VERSION: ${{ inputs.drift_grafana_version || vars.COMPAT_DRIFT_GRAFANA_VERSION || secrets.COMPAT_DRIFT_GRAFANA_VERSION }}
       DRIFT_GRAFANA_DIGEST: ${{ inputs.drift_grafana_digest || vars.COMPAT_DRIFT_GRAFANA_DIGEST || secrets.COMPAT_DRIFT_GRAFANA_DIGEST }}
@@ -963,23 +1003,25 @@ jobs:
             document = YAML.load_file(path)
             refs = document.fetch("references")
             values = {
-              "prometheus" => [ENV.fetch("DRIFT_PROMETHEUS_IMAGE"), ENV.fetch("DRIFT_PROMETHEUS_VERSION")],
-              "loki" => [ENV.fetch("DRIFT_LOKI_IMAGE"), ENV.fetch("DRIFT_LOKI_VERSION")],
-              "tempo" => [ENV.fetch("DRIFT_TEMPO_IMAGE"), ENV.fetch("DRIFT_TEMPO_VERSION")],
-              "grafana" => [ENV.fetch("DRIFT_GRAFANA_IMAGE"), ENV.fetch("DRIFT_GRAFANA_VERSION")]
+              "prometheus" => [ENV.fetch("DRIFT_PROMETHEUS_IMAGE"), ENV.fetch("DRIFT_PROMETHEUS_VERSION"), ENV.fetch("DRIFT_PROMETHEUS_DIGEST")],
+              "loki" => [ENV.fetch("DRIFT_LOKI_IMAGE"), ENV.fetch("DRIFT_LOKI_VERSION"), ENV.fetch("DRIFT_LOKI_DIGEST")],
+              "tempo" => [ENV.fetch("DRIFT_TEMPO_IMAGE"), ENV.fetch("DRIFT_TEMPO_VERSION"), ENV.fetch("DRIFT_TEMPO_DIGEST")],
+              "grafana" => [ENV.fetch("DRIFT_GRAFANA_IMAGE"), ENV.fetch("DRIFT_GRAFANA_VERSION"), ENV.fetch("DRIFT_GRAFANA_DIGEST")]
             }
-            values.each { |key, (image, tag)| refs.fetch(key).merge!("image" => image, "tag" => tag) }
-            refs.fetch("grafana").merge!("digest" => ENV.fetch("DRIFT_GRAFANA_DIGEST"))
+            values.each { |key, (image, tag, digest)| refs.fetch(key).merge!("image" => image, "tag" => tag, "digest" => digest) }
             File.write("target/compat/drift/references.yaml", YAML.dump(document))
           '
+      - name: Run static Grafana Phase 4 contracts
+        run: make test-grafana-static
       - name: Run Grafana drift system lane
         run: |
           set -euo pipefail
           make test-grafana-system \
             COMPAT_REFERENCE_MANIFEST="$GITHUB_WORKSPACE/target/compat/drift/references.yaml" \
-            LOKI_REFERENCE_IMAGE="$DRIFT_LOKI_IMAGE:$DRIFT_LOKI_VERSION" \
-            TEMPO_REFERENCE_IMAGE="$DRIFT_TEMPO_IMAGE:$DRIFT_TEMPO_VERSION" \
-            GRAFANA_REFERENCE_IMAGE="$DRIFT_GRAFANA_IMAGE:$DRIFT_GRAFANA_VERSION" \
+            GRAFANA_REFERENCE_MANIFEST="$GITHUB_WORKSPACE/target/compat/drift/references.yaml" \
+            COMPAT_REFERENCE_ALLOW_MANIFEST_OVERRIDE=1 \
+            LOKI_REFERENCE_IMAGE="$(make --no-print-directory compat-reference-image SIGNAL=loki COMPAT_REFERENCE_MANIFEST="$GITHUB_WORKSPACE/target/compat/drift/references.yaml")" \
+            TEMPO_REFERENCE_IMAGE="$(make --no-print-directory compat-reference-image SIGNAL=tempo COMPAT_REFERENCE_MANIFEST="$GITHUB_WORKSPACE/target/compat/drift/references.yaml")" \
             GRAFANA_REFERENCE_VERSION="$DRIFT_GRAFANA_VERSION" \
             GRAFANA_REFERENCE_DIGEST="$DRIFT_GRAFANA_DIGEST" \
             GRAFANA_SYSTEM_ARTIFACT_DIR="$GRAFANA_SYSTEM_ARTIFACT_DIR"
@@ -1078,6 +1120,24 @@ jobs:
                           if not list(path.rglob(name)):
                               errors.append(f"missing drift semantic artifact {name} in {artifact}")
           jobs = {name: os.environ.get(name, "unknown") for name in ("PREFLIGHT_RESULT", "PROMETHEUS_RESULT", "LOKI_RESULT", "TEMPO_RESULT", "GRAFANA_RESULT")}
+          drift_only = True
+          mock = False
+          result_names = jobs
+          required = set(result_names)
+          infrastructure_skips = [
+              name for name, status in result_names.items()
+              if status in {"skipped", "environment_skip", "infrastructure_failure"}
+          ]
+          product_regressions = [
+              name for name, status in result_names.items()
+              if status == "product_regression"
+          ]
+          unapproved_differences = 0
+          release_evidence = (
+              not drift_only and not mock and not infrastructure_skips and
+              not product_regressions and unapproved_differences == 0 and
+              all(result_names[name] == "success" for name in required)
+          )
           for name, status in jobs.items():
               if status != "success":
                   errors.append(f"{name} finished with {status}")
@@ -1143,6 +1203,10 @@ jobs:
               "candidate": metadata.get("candidate"),
               "baseline": metadata.get("baseline"),
               "jobs": jobs,
+              "required_jobs": sorted(required),
+              "infrastructure_skips": sorted(set(infrastructure_skips)),
+              "product_regressions": sorted(set(product_regressions)),
+              "unapproved_differences": unapproved_differences,
               "drift_cases": sorted(drift_cases),
               "review_status": "needs_review" if drift_cases else "no_semantic_drift_observed",
               "errors": errors,
@@ -1192,6 +1256,7 @@ jobs:
       - name: Run compatibility contract and fixture checks
         run: |
           set -euo pipefail
+          bash tests/compat/conformance_artifacts_test.sh
           cargo test --test tests compat_phase0:: -- --test-threads=1
           cargo test --test tests compat_prometheus:: -- --test-threads=1
           cargo test --test tests compat_loki::loki_phase2_contract_cases -- --test-threads=1
@@ -1273,6 +1338,7 @@ jobs:
           import json
           import os
           import pathlib
+          import shutil
           import sys
 
           evidence_root = pathlib.Path(sys.argv[1])
@@ -1349,10 +1415,14 @@ jobs:
 
           for job_name in sorted(required):
               status = result_names[job_name]
+              if has_explicit_skip_marker(job_name):
+                  infrastructure_skips.append(job_name)
+                  errors.append(f"required job {job_name} emitted an explicit skip marker")
               if status == "success":
                   continue
               if status in {"skipped", "environment_skip", "infrastructure_failure"}:
-                  infrastructure_skips.append(job_name)
+                  if job_name not in infrastructure_skips:
+                      infrastructure_skips.append(job_name)
               errors.append(f"required job {job_name} finished with {status}")
 
           product_regressions = []
@@ -1380,25 +1450,70 @@ jobs:
                   status = outcome.get("status", outcome.get("outcome"))
                   if status == "product_regression":
                       product_regressions.append(str(path))
+                  if status == "environment_skip":
+                      infrastructure_skips.append(str(path))
+
+          # The release-gate artifact is self-contained: package every
+          # sanitized protocol/Grafana evidence bundle alongside the report so
+          # the downstream validator never has to reconstruct a multi-artifact
+          # handoff from the producing jobs.
+          evidence_artifacts = []
+          if evidence_root.exists():
+              for source in sorted(evidence_root.iterdir()):
+                  if not source.is_dir():
+                      continue
+                  shutil.copytree(source, report_root / source.name, dirs_exist_ok=True)
+                  evidence_artifacts.append(source.name)
+
+          if not mock and not drift_only:
+              for path in evidence_root.rglob("*.json") if evidence_root.exists() else []:
+                  try:
+                      value = json.loads(path.read_text())
+                  except (OSError, ValueError):
+                      continue
+                  stack = [value]
+                  while stack:
+                      item = stack.pop()
+                      if isinstance(item, dict):
+                          if item.get("release_evidence") is False:
+                              errors.append(f"real evidence is marked release_evidence=false: {path}")
+                          stack.extend(item.values())
+                      elif isinstance(item, list):
+                          stack.extend(item)
 
           if product_regressions:
               errors.append("unexpected product regressions: " + ", ".join(sorted(set(product_regressions))))
           if unapproved_differences:
               errors.append(f"unapproved normalized differences: {unapproved_differences}")
 
+          # Consolidated reports are validation artifacts.  In particular, the
+          # scheduled drift report must never become release evidence, even
+          # when every candidate job completed successfully.
+          release_evidence = False
+
           report = {
               "event": event_name,
               "selector": selector,
               "mode": "drift" if drift_only else ("mock" if mock else "real"),
+              "release_evidence": release_evidence,
               "jobs": result_names,
               "required_jobs": sorted(required),
               "infrastructure_skips": infrastructure_skips,
               "product_regressions": sorted(set(product_regressions)),
               "approved_differences": approved_differences,
               "unapproved_differences": unapproved_differences,
+              "evidence_validated": not errors,
+              "evidence_artifacts": evidence_artifacts,
               "errors": errors,
           }
           (report_root / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+          (report_root / "release_evidence.json").write_text(json.dumps({
+              "schema_version": "compat-release-evidence.v1",
+              "release_evidence": report["release_evidence"],
+              "validated": report["evidence_validated"],
+              "mode": report["mode"],
+              "artifacts": evidence_artifacts,
+          }, indent=2) + "\n")
           lines = [
               ("# Drift-only compatibility report" if drift_only else "# Consolidated compatibility report"), "", f"- Mode: {report['mode']}",
               f"- Event: {event_name}", f"- Product regressions: {len(report['product_regressions'])}",
@@ -1429,12 +1544,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Checkout compatibility validators
+        uses: actions/checkout@v5
+
       - name: Download consolidated report
         uses: actions/download-artifact@v4
         with:
           pattern: compatibility-consolidated-report
           path: target/compat/release-gate
           merge-multiple: true
+
+      - name: Validate conformance release artifacts
+        run: scripts/compat/validate-artifacts.sh --conformance-root target/compat/release-gate --release-gate
 
       - name: Require zero product regressions and unapproved differences
         env:
@@ -1453,6 +1574,8 @@ jobs:
           import json
           import sys
           report = json.load(open(sys.argv[1]))
+          if report.get("release_evidence") is not True or report.get("evidence_validated") is not True:
+              raise SystemExit("release gate requires validated release evidence metadata")
           jobs = report.get("jobs", {})
           if report.get("mode") == "real":
               required = report.get("required_jobs", [])

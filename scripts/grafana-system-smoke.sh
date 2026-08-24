@@ -7,6 +7,7 @@ GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-target/compat/grafana}"
 MOCK_FIXTURE_DIR="${MOCK_FIXTURE_DIR:-tests/compat/fixtures}"
 GRAFANA_DASHBOARD_DIR="${GRAFANA_DASHBOARD_DIR:-tests/compat/grafana/dashboards}"
+GRAFANA_E2E_DIR="${GRAFANA_E2E_DIR:-tests/compat/grafana/e2e}"
 MOCK_MODE="${MOCK:-0}"
 if [[ -n "${CI:-}" ]]; then
   # The CI harness contract always exercises dashboard variables and panel
@@ -17,8 +18,15 @@ elif [[ -z "${GRAFANA_CHECK_DASHBOARD_QUERIES+x}" ]]; then
   GRAFANA_CHECK_DASHBOARD_QUERIES=0
 fi
 GRAFANA_REFERENCE_IMAGE="${GRAFANA_REFERENCE_IMAGE:-grafana/grafana:11.2.0}"
+GRAFANA_REFERENCE_VERSION="${GRAFANA_REFERENCE_VERSION:-}"
 GRAFANA_REFERENCE_DIGEST="${GRAFANA_REFERENCE_DIGEST:-}"
 GRAFANA_REFERENCE_MANIFEST="${GRAFANA_REFERENCE_MANIFEST:-docs/compat/references.v0.yaml}"
+GRAFANA_CAPABILITY_MANIFEST="${GRAFANA_CAPABILITY_MANIFEST:-docs/compat/capability.v0.yaml}"
+GRAFANA_CAPABILITY_ID="${GRAFANA_CAPABILITY_ID:-grafana}"
+GRAFANA_CAPABILITY_STATUS="${GRAFANA_CAPABILITY_STATUS:-implemented_validation_only}"
+GRAFANA_FIXTURE_MANIFEST="${GRAFANA_FIXTURE_MANIFEST:-tests/compat/manifests/cases.v0.yaml}"
+GRAFANA_REFERENCE_IMAGE_DIGEST="${GRAFANA_REFERENCE_IMAGE_DIGEST:-}"
+GRAFANA_TEMPO_DATASOURCE="${GRAFANA_TEMPO_DATASOURCE:-tests/compat/grafana/provisioning/datasources/tempo.yaml}"
 
 DATASOURCE_UIDS=(
   softprobe-prom softprobe-prom-a softprobe-prom-b
@@ -31,6 +39,7 @@ if [[ -d "$GRAFANA_DASHBOARD_DIR" ]]; then
     [[ -n "$dashboard_uid" ]] && DASHBOARD_UIDS+=("$dashboard_uid")
   done < <(python3 - "$GRAFANA_DASHBOARD_DIR" <<'PY'
 import json
+import os
 import pathlib
 import sys
 
@@ -46,9 +55,14 @@ PY
   )
 fi
 
+if [[ -n "${GRAFANA_DASHBOARD_UIDS:-}" ]]; then
+  read -r -a DASHBOARD_UIDS <<< "$GRAFANA_DASHBOARD_UIDS"
+fi
+
 TENANT_A_ID="${GRAFANA_TEST_TENANT_A_ID:-grafana-phase4-tenant-a}"
 TENANT_B_ID="${GRAFANA_TEST_TENANT_B_ID:-grafana-phase4-tenant-b}"
 SEED_SOFTPROBE_URL="${GRAFANA_SEED_SOFTPROBE_URL:-http://127.0.0.1:${GRAFANA_SOFTPROBE_HTTP_PORT:-18090}}"
+SOFTPROBE_DIRECT_URL="${GRAFANA_DIRECT_SOFTPROBE_URL:-${SOFTPROBE_URL:-$SEED_SOFTPROBE_URL}}"
 GRAFANA_AUTH_MOCK_URL="${GRAFANA_AUTH_MOCK_URL:-http://127.0.0.1:${GRAFANA_AUTH_MOCK_PORT:-18080}}"
 CROSS_START_NS="1700000000000000000"
 CROSS_END_NS="1700000060000000000"
@@ -57,16 +71,145 @@ TRACE_END_S="1700000060"
 CHECKS=()
 SKIPPED=0
 VARIABLE_BUNDLE_ARGS=()
+CASE_IDS=()
+CASE_START_MS=()
 
-mkdir -p "$ARTIFACT_DIR" "$ARTIFACT_DIR/.work"
+now_ms() {
+  python3 - <<'PY'
+import time
+print(time.monotonic_ns() // 1_000_000)
+PY
+}
+
+begin_case() {
+  CASE_IDS+=("$1")
+  CASE_START_MS+=("$(now_ms)")
+}
+
+case_duration_ms() {
+  local case_id="$1" started="" now i
+  now="$(now_ms)"
+  for i in "${!CASE_IDS[@]}"; do
+    if [[ "${CASE_IDS[$i]}" == "$case_id" ]]; then
+      started="${CASE_START_MS[$i]}"
+      break
+    fi
+  done
+  if [[ -n "$started" && "$started" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$((now - started))"
+  else
+    printf '0\n'
+  fi
+}
+
+# One metadata source feeds every G1-G8 artifact. The protocol fixtures are
+# the same repository fixtures used by the shared compatibility harness; the
+# Grafana cases add only the black-box route that exercises each fixture.
+case_metadata_json() {
+  local case_id="$1"
+  python3 - "$case_id" "$MOCK_FIXTURE_DIR" "$GRAFANA_CAPABILITY_MANIFEST" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+case_id, fixture_dir, capability_manifest = sys.argv[1:]
+definition = {
+    "G1": {"endpoint": {"method": "GET", "path": "/api/health"}, "fixture_id": "grafana-health", "fixture_path": "tests/compat/grafana/provisioning"},
+    "G2": {"endpoint": {"method": "GET", "path": "/api/datasources"}, "fixture_id": "grafana-datasources", "fixture_path": "tests/compat/grafana/provisioning/datasources"},
+    "G3": {"endpoint": {"method": "GET", "path": "/api/search?type=dash-db"}, "fixture_id": "grafana-dashboards", "fixture_path": "tests/compat/grafana/dashboards"},
+    "G4": {"endpoint": {"method": "POST", "path": "/api/ds/query"}, "fixture_id": "prometheus_success_minimal", "fixture_path": f"{fixture_dir}/prometheus_success_minimal.json"},
+    "G5": {"endpoint": {"method": "POST", "path": "/api/ds/query"}, "fixture_id": "loki_success_minimal", "fixture_path": f"{fixture_dir}/loki_success_minimal.json"},
+    "G6": {"endpoint": {"method": "POST", "path": "/api/ds/query"}, "fixture_id": "tempo_success_minimal", "fixture_path": f"{fixture_dir}/tempo_success_minimal.json"},
+    "G7": {"endpoint": {"method": "GET", "path": "/api/datasources/proxy/uid/softprobe-tempo-a/api/search"}, "fixture_id": "grafana-cross-signal", "fixture_path": "tests/compat/grafana/provisioning/datasources"},
+    "G8": {"endpoint": {"method": "POST", "path": "/api/ds/query"}, "fixture_id": "grafana-error-contract", "fixture_path": "tests/compat/grafana/e2e"},
+}
+if case_id not in definition:
+    raise SystemExit(f"unknown Grafana case: {case_id}")
+
+capability_id = "grafana"
+capability_status = "implemented_validation_only"
+try:
+    text = pathlib.Path(capability_manifest).read_text()
+    match = re.search(r"(?ms)^\s+phase_4_grafana:\s*\n.*?^\s+repository_harness:\s*([^\s#]+)", text)
+    if match:
+        capability_status = match.group(1)
+    match = re.search(r"(?ms)^\s+grafana:\s*\n\s+native_datasources:\s*([^\s#]+)", text)
+    if match:
+        capability_id = match.group(1)
+except OSError:
+    pass
+
+value = definition[case_id].copy()
+value.update({
+    "case_id": case_id,
+    "protocol": "grafana",
+    "capability": {"id": capability_id, "status": capability_status},
+    "capability_id": capability_id,
+    "capability_status": capability_status,
+    "fixture": {"id": value["fixture_id"], "path": value["fixture_path"]},
+})
+print(json.dumps(value, sort_keys=True))
+PY
+}
+
+ARTIFACT_ROOT="$ARTIFACT_DIR"
+RUN_ARTIFACT_DIR=""
+
+prepare_artifact_staging() {
+  mkdir -p "$ARTIFACT_ROOT"
+  RUN_ARTIFACT_DIR="$(mktemp -d "$ARTIFACT_ROOT/.run.XXXXXX")"
+  ARTIFACT_DIR="$RUN_ARTIFACT_DIR"
+  mkdir -p "$ARTIFACT_DIR/.work"
+}
+
+stage_artifacts() {
+  [[ -n "$RUN_ARTIFACT_DIR" && -d "$RUN_ARTIFACT_DIR" ]] || return 0
+  python3 - "$ARTIFACT_ROOT" "$RUN_ARTIFACT_DIR" <<'PY'
+import pathlib
+import re
+import shutil
+import sys
+
+root, run = (pathlib.Path(value) for value in sys.argv[1:])
+top_level = re.compile(r"G[1-8]\.(?:outcome|raw|normalized)\.json$")
+allowed = {"outcome.json", "summary.json", "seed-receipt.json", ".work"}
+
+def is_allowed(name):
+    return name in allowed or bool(top_level.fullmatch(name))
+
+for child in root.iterdir():
+    if child == run or is_allowed(child.name):
+        continue
+    if child.is_dir() and not child.is_symlink():
+        shutil.rmtree(child)
+    else:
+        child.unlink()
+
+for child in run.iterdir():
+    if not is_allowed(child.name):
+        continue
+    destination = root / child.name
+    if destination.exists() or destination.is_symlink():
+        if destination.is_dir() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    shutil.move(str(child), str(destination))
+
+run.rmdir()
+PY
+  RUN_ARTIFACT_DIR=""
+  ARTIFACT_DIR="$ARTIFACT_ROOT"
+}
 
 validate_grafana_reference_pin() {
   [[ -f "$GRAFANA_REFERENCE_MANIFEST" ]] || {
     echo "Grafana reference manifest not found: $GRAFANA_REFERENCE_MANIFEST" >&2
     return 1
   }
-  local manifest_image manifest_digest
-  IFS=$'\t' read -r manifest_image manifest_digest < <(python3 - "$GRAFANA_REFERENCE_MANIFEST" <<'PY'
+  local manifest_image manifest_version manifest_digest manifest_immutable_image compose_image
+  IFS=$'\t' read -r manifest_image manifest_version manifest_digest manifest_immutable_image < <(python3 - "$GRAFANA_REFERENCE_MANIFEST" <<'PY'
 import pathlib
 import re
 import sys
@@ -78,13 +221,17 @@ match = re.search(
 )
 if not match:
     raise SystemExit("Grafana reference is missing image/tag/digest in the compatibility manifest")
-print(f"{match.group(1)}:{match.group(2)}\t{match.group(3)}")
+print(f"{match.group(1)}:{match.group(2)}\t{match.group(2)}\t{match.group(3)}\t{match.group(1)}@{match.group(3)}")
 PY
   ) || return 1
   [[ "$GRAFANA_REFERENCE_IMAGE" == "$manifest_image" ]] || {
     echo "Grafana reference image drift: expected $manifest_image, got $GRAFANA_REFERENCE_IMAGE" >&2
     return 1
   }
+  if [[ -n "$GRAFANA_REFERENCE_VERSION" && "$GRAFANA_REFERENCE_VERSION" != "$manifest_version" ]]; then
+    echo "Grafana reference version drift: expected $manifest_version, got $GRAFANA_REFERENCE_VERSION" >&2
+    return 1
+  fi
   [[ "$manifest_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || {
     echo "Grafana reference manifest must contain an immutable sha256 digest" >&2
     return 1
@@ -93,9 +240,29 @@ PY
     echo "Grafana reference digest drift: expected $manifest_digest, got $GRAFANA_REFERENCE_DIGEST" >&2
     return 1
   fi
+  GRAFANA_REFERENCE_VERSION="$manifest_version"
   GRAFANA_REFERENCE_DIGEST="$manifest_digest"
-  # Mock mode validates the manifest/tag/digest contract but has no local
-  # image to inspect.
+  GRAFANA_REFERENCE_IMAGE_DIGEST="$manifest_immutable_image"
+  compose_image="${GRAFANA_COMPOSE_IMAGE:-}"
+  if [[ -z "$compose_image" && "$MOCK_MODE" == "1" ]]; then
+    # Mock mode has no Compose process, but still validates the exact image
+    # reference that the real launcher is required to provide.
+    compose_image="$manifest_immutable_image"
+  fi
+  [[ -n "$compose_image" ]] || {
+    echo "GRAFANA_COMPOSE_IMAGE must be supplied as an immutable image@sha256 reference" >&2
+    return 1
+  }
+  [[ "$compose_image" == "$manifest_immutable_image" ]] || {
+    echo "Grafana Compose image drift: expected $manifest_immutable_image, got $compose_image" >&2
+    return 1
+  }
+  [[ "$compose_image" =~ ^[^@[:space:]]+@sha256:[0-9a-fA-F]{64}$ ]] || {
+    echo "Grafana Compose image must be an immutable image@sha256 reference" >&2
+    return 1
+  }
+  # Mock mode validates the strict manifest/reference contract but has no
+  # local image to inspect.
   if [[ "$MOCK_MODE" == "1" ]]; then
     return 0
   fi
@@ -103,9 +270,9 @@ PY
     echo "docker is required to validate the Grafana image digest" >&2
     return 1
   }
-  docker image inspect --format '{{join .RepoDigests "\\n"}}' "$GRAFANA_REFERENCE_IMAGE" \
-    | grep -Fq "@${GRAFANA_REFERENCE_DIGEST}" || {
-      echo "Grafana image does not resolve to $GRAFANA_REFERENCE_DIGEST" >&2
+  docker image inspect --format '{{join .RepoDigests "\\n"}}' "$compose_image" \
+    | grep -Fqx "$compose_image" || {
+      echo "Grafana Compose image does not resolve to $compose_image" >&2
       return 1
     }
 }
@@ -176,16 +343,37 @@ PY
 }
 
 write_outcome() {
-  local outcome="$1" reason="${2:-}" payload
-  payload="$(python3 - "$outcome" "$reason" "$MOCK_MODE" <<'PY'
+  local outcome="$1" reason="${2:-}" payload case_doc
+  local case_docs=()
+  for case_doc in G1 G2 G3 G4 G5 G6 G7 G8; do
+    case_docs+=("$(case_metadata_json "$case_doc")")
+  done
+  payload="$(python3 - "$outcome" "$reason" "$MOCK_MODE" "$ARTIFACT_DIR" "$GRAFANA_REFERENCE_VERSION" "$GRAFANA_REFERENCE_IMAGE_DIGEST" "$GRAFANA_REFERENCE_DIGEST" "${case_docs[@]}" <<'PY'
 import json
 import sys
-outcome, reason, mock = sys.argv[1:]
-result = {"outcome": outcome}
+outcome, reason, mock, evidence_root, reference_version, reference_image, reference_digest, *case_docs = sys.argv[1:]
+cases = []
+for raw in case_docs:
+    case = json.loads(raw)
+    case.update({
+        "outcome": outcome,
+        "duration_ms": 0,
+        "duration_seconds": 0.0,
+        "evidence_path": f"{evidence_root}/{case['case_id']}.normalized.json",
+        "reference_version": reference_version,
+        "reference_image": reference_image,
+        "reference_digest": reference_digest,
+        "reference": {"service": "grafana", "version": reference_version, "image": reference_image, "digest": reference_digest},
+        "validation_only": mock == "1",
+        "release_evidence": False if mock == "1" else outcome == "pass",
+    })
+    cases.append(case)
+result = {"schema_version": "grafana-compat.v1", "outcome": outcome, "cases": cases}
 if reason:
     result["reason"] = reason
 if mock == "1":
     result["validation_only"] = True
+result["release_evidence"] = False if mock == "1" else outcome == "pass"
 print(json.dumps(result, indent=2, sort_keys=True))
 PY
 )"
@@ -193,16 +381,40 @@ PY
 }
 
 write_summary() {
-  local outcome="$1" reason="${2:-}" payload
-  payload="$(python3 - "$outcome" "$reason" "$MOCK_MODE" "${CHECKS[@]-}" <<'PY'
+  local outcome="$1" reason="${2:-}" payload case_doc
+  local case_docs=()
+  for case_doc in G1 G2 G3 G4 G5 G6 G7 G8; do
+    case_docs+=("$(case_metadata_json "$case_doc")")
+  done
+  payload="$(python3 - "$outcome" "$reason" "$MOCK_MODE" "$ARTIFACT_DIR" "$GRAFANA_REFERENCE_VERSION" "$GRAFANA_REFERENCE_IMAGE_DIGEST" "$GRAFANA_REFERENCE_DIGEST" "${CHECKS[@]-}" "--cases--" "${case_docs[@]}" <<'PY'
 import json
 import sys
-outcome, reason, mock, *checks = sys.argv[1:]
-result = {"outcome": outcome, "checks": checks}
+args = sys.argv[1:]
+outcome, reason, mock, evidence_root, reference_version, reference_image, reference_digest = args[:7]
+marker = args.index("--cases--")
+checks = args[7:marker]
+cases = []
+for raw in args[marker + 1:]:
+    case = json.loads(raw)
+    case.update({
+        "outcome": next((item.split(":", 1)[1] for item in checks if item.startswith(case["case_id"] + ":")), outcome),
+        "duration_ms": 0,
+        "duration_seconds": 0.0,
+        "evidence_path": f"{evidence_root}/{case['case_id']}.normalized.json",
+        "reference_version": reference_version,
+        "reference_image": reference_image,
+        "reference_digest": reference_digest,
+        "reference": {"service": "grafana", "version": reference_version, "image": reference_image, "digest": reference_digest},
+        "validation_only": mock == "1",
+        "release_evidence": False if mock == "1" else outcome == "pass",
+    })
+    cases.append(case)
+result = {"schema_version": "grafana-compat.v1", "outcome": outcome, "checks": checks, "cases": cases}
 if reason:
     result["reason"] = reason
 if mock == "1":
     result["validation_only"] = True
+result["release_evidence"] = False if mock == "1" else outcome == "pass"
 print(json.dumps(result, indent=2, sort_keys=True))
 PY
 )"
@@ -263,6 +475,7 @@ finish_skip() {
   local reason="$1"
   write_outcome "environment_skip" "$reason"
   write_summary "environment_skip" "$reason"
+  stage_artifacts
   if [[ "$MOCK_MODE" == "1" ]]; then
     exit 0
   fi
@@ -273,22 +486,49 @@ finish_failure() {
   local reason="$1"
   write_outcome "failure" "$reason"
   write_summary "failure" "$reason"
+  stage_artifacts
   exit 1
 }
 
 record_case() {
   local case_id="$1" outcome="$2" reason="${3:-}"
-  CHECKS+=("${case_id}:${outcome}")
-  local payload
-  payload="$(python3 - "$case_id" "$outcome" "$reason" "$MOCK_MODE" <<'PY'
+  local index existing
+  for index in "${!CHECKS[@]}"; do
+    existing="${CHECKS[$index]}"
+    if [[ "$existing" == "${case_id}:"* ]]; then
+      CHECKS[$index]="${case_id}:${outcome}"
+      break
+    fi
+  done
+  if [[ -z "${existing:-}" || "$existing" != "${case_id}:"* ]]; then
+    CHECKS+=("${case_id}:${outcome}")
+  fi
+  local payload duration_ms case_definition
+  duration_ms="$(case_duration_ms "$case_id")"
+  case_definition="$(case_metadata_json "$case_id")"
+  payload="$(python3 - "$case_definition" "$outcome" "$reason" "$MOCK_MODE" "$ARTIFACT_DIR" "$duration_ms" "$GRAFANA_REFERENCE_VERSION" "$GRAFANA_REFERENCE_IMAGE_DIGEST" "$GRAFANA_REFERENCE_DIGEST" <<'PY'
 import json
 import sys
-case_id, outcome, reason, mock = sys.argv[1:]
-result = {"case": case_id, "outcome": outcome}
+definition = json.loads(sys.argv[1])
+outcome, reason, mock, evidence_root, duration_ms, reference_version, reference_image, reference_digest = sys.argv[2:]
+case_id = definition["case_id"]
+result = dict(definition)
+result.update({
+    "schema_version": "grafana-compat.v1",
+    "case": case_id,
+    "outcome": outcome,
+    "duration_ms": int(duration_ms),
+    "duration_seconds": int(duration_ms) / 1000.0,
+    "evidence_path": f"{evidence_root}/{case_id}.normalized.json",
+    "reference_version": reference_version,
+    "reference_image": reference_image,
+    "reference_digest": reference_digest,
+    "reference": {"service": "grafana", "version": reference_version, "image": reference_image, "digest": reference_digest},
+    "validation_only": mock == "1",
+    "release_evidence": False if mock == "1" else outcome == "pass",
+})
 if reason:
     result["reason"] = reason
-if mock == "1":
-    result["validation_only"] = True
 print(json.dumps(result, indent=2, sort_keys=True))
 PY
 )"
@@ -297,12 +537,15 @@ PY
 
 write_case_bundle() {
   local case_id="$1"; shift
-  python3 - "$case_id" "$MOCK_MODE" "$@" <<'PY' | redact > "$ARTIFACT_DIR/${case_id}.raw.json"
+  local metadata_json duration_ms
+  metadata_json="$(case_metadata_json "$case_id")"
+  duration_ms="$(case_duration_ms "$case_id")"
+  python3 - "$case_id" "$MOCK_MODE" "$metadata_json" "$ARTIFACT_DIR" "$duration_ms" "$GRAFANA_REFERENCE_VERSION" "$GRAFANA_REFERENCE_IMAGE_DIGEST" "$GRAFANA_REFERENCE_DIGEST" "$@" <<'PY' | redact > "$ARTIFACT_DIR/${case_id}.raw.json"
 import json
 import pathlib
 import sys
 
-case_id, mock, *items = sys.argv[1:]
+case_id, mock, metadata_json, evidence_root, duration_ms, reference_version, reference_image, reference_digest, *items = sys.argv[1:]
 responses = {}
 for item in items:
     label, path = item.split("=", 1)
@@ -310,7 +553,21 @@ for item in items:
         responses[label] = json.loads(pathlib.Path(path).read_text())
     except json.JSONDecodeError:
         responses[label] = {"raw": pathlib.Path(path).read_text()}
-result = {"case": case_id, "validation_only": mock == "1", "responses": responses}
+result = json.loads(metadata_json)
+result.update({
+    "schema_version": "grafana-compat.v1",
+    "case": case_id,
+    "duration_ms": int(duration_ms),
+    "duration_seconds": int(duration_ms) / 1000.0,
+    "evidence_path": f"{evidence_root}/{case_id}.normalized.json",
+    "reference_version": reference_version,
+    "reference_image": reference_image,
+    "reference_digest": reference_digest,
+    "reference": {"service": "grafana", "version": reference_version, "image": reference_image, "digest": reference_digest},
+    "validation_only": mock == "1",
+    "release_evidence": False if mock == "1" else True,
+    "responses": responses,
+})
 print(json.dumps(result, indent=2, sort_keys=True))
 PY
   python3 - "$ARTIFACT_DIR/${case_id}.raw.json" <<'PY' | redact > "$ARTIFACT_DIR/${case_id}.normalized.json"
@@ -327,6 +584,7 @@ PY
 mock_signal_response() {
   local signal="$1" uid="$2" tenant="$3"
   python3 - "$MOCK_FIXTURE_DIR" "$signal" "$uid" "$tenant" <<'PY'
+import base64
 import json
 import pathlib
 import sys
@@ -353,11 +611,13 @@ elif signal == "loki":
         "values": [["1700000000000000000", json.dumps({
             "tenant": tenant,
             "source_uid": uid,
-            "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "trace_id": ("a" if tenant.endswith("-a") else "b") * 32,
         })]],
     })
 else:
-    obj["traces"] = [{"traceID": "qqqqqqqqqqqqqqqqqqqqqg==", "rootServiceName": tenant, "datasource_uid": uid}]
+    trace_id = ("a" if tenant.endswith("-a") else "b") * 32
+    trace_wire_id = base64.b64encode(bytes.fromhex(trace_id)).decode("ascii")
+    obj["traces"] = [{"traceID": trace_wire_id, "rootServiceName": tenant, "datasource_uid": uid}]
 print(json.dumps(obj))
 PY
 }
@@ -435,10 +695,10 @@ parent_wire_id = base64.b64encode(bytes.fromhex("00" * 8)).decode("ascii")
 link_wire_id = base64.b64encode(bytes.fromhex("02" * 8)).decode("ascii")
 print(json.dumps({
     "traceID": trace_wire_id,
-    "batches": [{
-        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": tenant}}]},
+        "batches": [{
+        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": tenant}}, {"key": "deployment.environment", "value": {"stringValue": "primary"}}]},
         "scopeSpans": [{
-            "scope": {"name": "grafana-seeder", "version": "1.0.0"},
+            "scope": {"name": "grafana-seeder", "version": "1.0.0", "attributes": [{"key": "scope.role", "value": {"stringValue": "checkout"}}]},
             "spans": [{
                 "traceId": trace_wire_id,
                 "spanId": span_wire_id,
@@ -450,18 +710,21 @@ print(json.dumps({
                 "events": [{"name": "checkout.started", "timeUnixNano": "1700000010500000000"}],
                 "links": [{"traceId": trace_wire_id, "spanId": link_wire_id}]
             }]
-        }],
+        }]
     }, {
-        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": tenant}}]},
+        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": tenant}}, {"key": "deployment.environment", "value": {"stringValue": "secondary"}}]},
         "scopeSpans": [{
-            "scope": {"name": "grafana-secondary", "version": "1.0.0"},
+            "scope": {"name": "grafana-secondary", "version": "1.0.0", "attributes": [{"key": "scope.role", "value": {"stringValue": "checkout-child"}}]},
             "spans": [{
                 "traceId": trace_wire_id,
                 "spanId": base64.b64encode(bytes.fromhex("03" * 8)).decode("ascii"),
+                "parentSpanId": span_wire_id,
                 "name": "checkout.child",
                 "startTimeUnixNano": "1700000011000000000",
                 "endTimeUnixNano": "1700000012000000000",
-                "status": {"code": "STATUS_CODE_UNSET"}
+                "status": {"code": "STATUS_CODE_ERROR"},
+                "events": [{"name": "checkout.failed", "timeUnixNano": "1700000011500000000"}],
+                "links": [{"traceId": trace_wire_id, "spanId": link_wire_id}]
             }]
         }]
     }],
@@ -534,8 +797,37 @@ query = request.get("queries", [{}])[0]
 uid = query.get("datasource", {}).get("uid", "")
 tenant = tenant_a if uid.endswith("-a") else tenant_b
 signal = "prometheus" if "prom" in uid else "loki" if "loki" in uid else "tempo"
+if not credential and not scope:
+    # A normal Grafana datasource request carries the configured tenant
+    # headers even though callers of api_post do not supply probe overrides.
+    credential = f"mock-{tenant}-credential"
+    scope = tenant
 text = json.dumps(query).lower()
-if "credential_probe" in text:
+request_headers = {
+    "Authorization": {
+        "present": credential != "__missing__",
+        "matchesTenant": credential not in {"__missing__", "invalid-credential"},
+    },
+    "X-Scope-OrgID": {
+        "present": bool(scope),
+        "value": scope,
+        "matchesTenant": scope == tenant,
+    },
+}
+if credential == "__missing__" or not request_headers["Authorization"]["present"]:
+    message = "missing credentials"
+elif credential == "invalid-credential":
+    message = "invalid credentials"
+elif not request_headers["X-Scope-OrgID"]["present"]:
+    message = "missing X-Scope-OrgID"
+elif not request_headers["X-Scope-OrgID"]["matchesTenant"]:
+    message = "mismatched tenant X-Scope-OrgID"
+else:
+    message = ""
+if message:
+    print(json.dumps({"results": {"A": {"error": message, "errorSource": "downstream", "requestHeaders": request_headers}}}))
+    raise SystemExit
+if False:
     if credential == "__missing__":
         message = "missing credentials"
     elif credential == "invalid-credential":
@@ -544,26 +836,24 @@ if "credential_probe" in text:
         message = "mismatched tenant X-Scope-OrgID"
     else:
         message = "credential probe unexpectedly succeeded"
-    print(json.dumps({"results": {"A": {"error": message, "errorSource": "auth"}}}))
-    raise SystemExit
 if uid.endswith("-invalid"):
-    print(json.dumps({"results": {"A": {"error": "datasource authentication failed", "errorSource": "downstream"}}}))
+    print(json.dumps({"results": {"A": {"error": "datasource authentication failed", "errorSource": "downstream", "requestHeaders": request_headers}}}))
     raise SystemExit
 if "malformed_frame_probe" in text:
-    print(json.dumps({"results": {"A": {"refId": "A", "frames": [{"schema": {}}]}}}))
+    print(json.dumps({"results": {"A": {"refId": "A", "frames": [{"schema": {}}], "requestHeaders": request_headers}}}))
     raise SystemExit
 if "empty_result_probe" in text:
-    print(json.dumps({"results": {"A": {"refId": "A", "frames": [{"schema": {"fields": [{"name": "value"}]}, "data": {"values": [[]]}}]}}}))
+    print(json.dumps({"results": {"A": {"refId": "A", "frames": [{"schema": {"fields": [{"name": "value"}]}, "data": {"values": [[]]}}], "requestHeaders": request_headers}}}))
     raise SystemExit
 if "unsupported" in text:
     names = {"prometheus": "prometheus_error_unsupported.json", "loki": "loki_error_unsupported.json", "tempo": "tempo_error_unsupported.json"}
     try:
         fixture = json.loads((pathlib.Path(fixture_dir) / names[signal]).read_text())
     except (FileNotFoundError, json.JSONDecodeError) as exc:
-        print(json.dumps({"results": {"A": {"error": f"mock fixture unavailable: {exc}"}}}))
+        print(json.dumps({"results": {"A": {"error": f"mock fixture unavailable: {exc}", "requestHeaders": request_headers}}}))
         raise SystemExit(0)
     message = fixture.get("error") or fixture.get("message") or "unsupported_feature"
-    print(json.dumps({"results": {"A": {"error": message, "errorSource": "downstream"}}}))
+    print(json.dumps({"results": {"A": {"error": message, "errorSource": "downstream", "requestHeaders": request_headers}}}))
     raise SystemExit
 
 if "label_values" in text:
@@ -575,7 +865,7 @@ elif signal == "loki":
     frame = {"schema": {"name": tenant, "fields": [{"name": "line"}]}, "data": {"values": [[json.dumps({"tenant": tenant})]]}}
 else:
     frame = {"schema": {"name": tenant, "fields": [{"name": "traceID"}]}, "data": {"values": [["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]}}
-print(json.dumps({"results": {"A": {"refId": "A", "frames": [frame]}}}))
+print(json.dumps({"results": {"A": {"refId": "A", "frames": [frame], "requestHeaders": request_headers}}}))
 PY
 }
 
@@ -583,43 +873,43 @@ PY
 api_request() {
   local method="$1" endpoint="$2" payload="${3:-}" artifact="$4" status curl_status
   local response_tmp stderr_tmp
-  response_tmp="$(mktemp "${TMPDIR:-/tmp}/grafana-response.XXXXXX")"
-  stderr_tmp="$(mktemp "${TMPDIR:-/tmp}/grafana-curl-stderr.XXXXXX")"
   : > "$artifact"
   : > "$artifact.status"
   if [[ "$MOCK_MODE" == "1" ]]; then
+    # Mock responses are generated locally without credential-bearing request
+    # material. The redaction helper is tested independently above; avoiding a
+    # Python redaction process for every synthetic request keeps the bounded
+    # G1-G8 artifact lane deterministic on developer machines.
     if [[ "$method" == POST ]]; then
-      if ! mock_response_post "$endpoint" "$payload" "${5:-}" "${6:-}" | redact > "$artifact"; then
-        redact "mock response unavailable for $endpoint" > "$artifact"
-        rm -f "$response_tmp" "$stderr_tmp"
+      if ! mock_response_post "$endpoint" "$payload" "${5:-}" "${6:-}" > "$artifact"; then
+        printf '%s\n' "mock response unavailable for $endpoint" > "$artifact"
         return 1
       fi
     else
-      if ! mock_response "$endpoint" | redact > "$artifact"; then
-        redact "mock response unavailable for $endpoint" > "$artifact"
-        rm -f "$response_tmp" "$stderr_tmp"
+      if ! mock_response "$endpoint" > "$artifact"; then
+        printf '%s\n' "mock response unavailable for $endpoint" > "$artifact"
         return 1
       fi
     fi
     printf '200\n' > "$artifact.status"
-    rm -f "$response_tmp" "$stderr_tmp"
     return 0
   fi
-  local credential="${5:-}" scope="${6:-}" auth_args=()
+  response_tmp="$(mktemp "${TMPDIR:-/tmp}/grafana-response.XXXXXX")"
+  stderr_tmp="$(mktemp "${TMPDIR:-/tmp}/grafana-curl-stderr.XXXXXX")"
+  local datasource_credential="${5:-}" scope="${6:-}" auth_args=(--user "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD")
+  local datasource_args=()
   local scope_args=()
+  if [[ -n "$datasource_credential" && "$datasource_credential" != "__missing__" ]]; then
+    datasource_args=(--header "X-Softprobe-Probe-Credential: $datasource_credential")
+  fi
   if [[ -n "$scope" ]]; then
     scope_args=(--header "X-Scope-OrgID: $scope")
-  fi
-  if [[ -z "$credential" ]]; then
-    auth_args=(--user "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD")
-  elif [[ "$credential" != "__missing__" ]]; then
-    auth_args=(--header "Authorization: Bearer $credential")
   fi
   if [[ "$method" == POST ]]; then
     if status="$(curl --silent --show-error --location \
         --connect-timeout "${CURL_CONNECT_TIMEOUT:-3}" \
         --max-time "${CURL_MAX_TIME:-15}" \
-        "${auth_args[@]}" "${scope_args[@]}" \
+        "${auth_args[@]}" "${datasource_args[@]}" "${scope_args[@]}" \
         --header 'Accept: application/json' --header 'Content-Type: application/json' \
         --data "$payload" --output "$response_tmp" --write-out '%{http_code}' \
         "$GRAFANA_URL$endpoint" 2> "$stderr_tmp")"; then
@@ -631,7 +921,7 @@ api_request() {
     if status="$(curl --silent --show-error --location \
         --connect-timeout "${CURL_CONNECT_TIMEOUT:-3}" \
         --max-time "${CURL_MAX_TIME:-15}" \
-        "${auth_args[@]}" "${scope_args[@]}" \
+        "${auth_args[@]}" "${datasource_args[@]}" "${scope_args[@]}" \
         --header 'Accept: application/json' \
         --output "$response_tmp" --write-out '%{http_code}' \
         "$GRAFANA_URL$endpoint" 2> "$stderr_tmp")"; then
@@ -657,7 +947,89 @@ api_request() {
 
 api_get() { api_request GET "$1" "" "$2"; }
 api_post() { api_request POST "$1" "$2" "$3"; }
-api_post_credentials() { api_request POST "$1" "$2" "$3" "$4" "$5"; }
+api_post_credentials() { api_request POST "$1" "$2" "$3" "$4" "${5:-}"; }
+
+# Grafana's /api/ds/query endpoint is authenticated with the Grafana admin
+# credential.  Its Authorization header therefore cannot, by itself, prove
+# that a per-tenant datasource credential was rejected by Softprobe.  Keep the
+# Grafana route probe, and supplement it with the same credential sent directly
+# to the Softprobe protocol route.  A direct probe is successful only when the
+# downstream service returns an authentication/tenant error.
+direct_softprobe_credential_probe() {
+  local signal="$1" probe="$2" credential="$3" scope="$4" artifact="$5" request_artifact="$6"
+  local endpoint status response_tmp stderr_tmp curl_status
+  case "$signal" in
+    prometheus) endpoint="/api/v1/query?query=up&time=1700000030" ;;
+    loki) endpoint="/loki/api/v1/query_range?query=%7Bservice_name%3D%22checkout%22%7D&start=$CROSS_START_NS&end=$CROSS_END_NS&limit=1" ;;
+    tempo) endpoint="/api/search?limit=1&start=$TRACE_START_S&end=$TRACE_END_S" ;;
+    *) return 1 ;;
+  esac
+  write_request_artifact "$request_artifact" GET "$SOFTPROBE_DIRECT_URL$endpoint" "" \
+    "credential_probe=$probe" "tenant_scope=$scope" \
+    "datasource_credential_header=X-Softprobe-Probe-Credential" \
+    "credential_present=$([[ "$credential" == "__missing__" ]] && printf no || printf yes)"
+  : > "$artifact"
+  : > "$artifact.status"
+  if [[ "$MOCK_MODE" == "1" ]]; then
+    local mock_status=403
+    local mock_message="invalid credentials"
+    if [[ "$probe" == missing_credentials ]]; then
+      [[ "$credential" == "__missing__" ]] || {
+        echo "mock credential probe did not receive the missing-credential sentinel" >&2
+        return 1
+      }
+      mock_status=401
+      mock_message="missing credentials"
+    elif [[ "$probe" == invalid_credentials ]]; then
+      [[ "$credential" == "invalid-credential" ]] || {
+        echo "mock credential probe did not receive the invalid credential" >&2
+        return 1
+      }
+    elif [[ "$probe" == mismatched_tenant ]]; then
+      [[ "$credential" != "__missing__" && "$credential" != "invalid-credential" ]] || {
+        echo "mock mismatched-tenant probe did not receive a supplied credential" >&2
+        return 1
+      }
+      mock_message="mismatched tenant X-Scope-OrgID"
+    else
+      return 1
+    fi
+    printf '{"error":"%s","errorSource":"softprobe","probe":"%s","credentialObserved":true}\n' \
+      "$mock_message" "$probe" > "$artifact"
+    printf '%s\n' "$mock_status" > "$artifact.status"
+    return 0
+  fi
+  response_tmp="$(mktemp "${TMPDIR:-/tmp}/softprobe-direct-response.XXXXXX")"
+  stderr_tmp="$(mktemp "${TMPDIR:-/tmp}/softprobe-direct-stderr.XXXXXX")"
+  local auth_args=(--header 'Accept: application/json')
+  local datasource_args=(--header "X-Softprobe-Probe: $probe")
+  if [[ "$credential" != "__missing__" ]]; then
+    auth_args+=(--header "Authorization: Bearer $credential")
+    datasource_args+=(--header "X-Softprobe-Probe-Credential: $credential")
+  fi
+  [[ -n "$scope" ]] && auth_args+=(--header "X-Scope-OrgID: $scope")
+  if status="$(curl --silent --show-error --location \
+      --connect-timeout "${CURL_CONNECT_TIMEOUT:-3}" \
+      --max-time "${CURL_MAX_TIME:-15}" \
+      "${auth_args[@]}" "${datasource_args[@]}" --output "$response_tmp" --write-out '%{http_code}' \
+      "$SOFTPROBE_DIRECT_URL$endpoint" 2> "$stderr_tmp")"; then
+    curl_status=0
+  else
+    curl_status=$?
+  fi
+  redact "$(<"$response_tmp")" > "$artifact"
+  [[ -s "$stderr_tmp" ]] && redact "$(<"$stderr_tmp")" > "$artifact.stderr" || rm -f "$artifact.stderr"
+  rm -f "$response_tmp" "$stderr_tmp"
+  if (( curl_status != 0 )); then
+    printf '000\n' > "$artifact.status"
+    return 2
+  fi
+  printf '%s\n' "$status" > "$artifact.status"
+  [[ "$status" == 401 || "$status" == 403 ]] || {
+    echo "direct Softprobe credential probe unexpectedly returned HTTP $status" >&2
+    return 1
+  }
+}
 
 http_get_artifact() {
   local url="$1" artifact="$2" status curl_status
@@ -740,16 +1112,21 @@ PY
 
 write_request_artifact() {
   local path="$1" method="$2" endpoint="$3" payload="${4:-}"
-  python3 - "$method" "$endpoint" "$payload" <<'PY' | redact > "$path"
+  shift 4 || true
+  python3 - "$method" "$endpoint" "$payload" "$@" <<'PY' | redact > "$path"
 import json
 import sys
-method, endpoint, payload = sys.argv[1:]
+method, endpoint, payload, *metadata = sys.argv[1:]
 request = {"method": method, "endpoint": endpoint}
 if payload:
     try:
         request["payload"] = json.loads(payload)
     except json.JSONDecodeError:
         request["payload"] = payload
+for item in metadata:
+    key, separator, value = item.partition("=")
+    if separator:
+        request.setdefault("metadata", {})[key] = value
 print(json.dumps(request, indent=2, sort_keys=True))
 PY
 }
@@ -859,6 +1236,36 @@ validate_dashboard_round_trip() {
 import json
 import pathlib
 import sys
+
+def target_projection(target):
+    if not isinstance(target, dict):
+        return target
+    projection = {}
+    for key in ("refId", "expr", "query", "queryType", "format", "legendFormat", "instant", "interval", "intervalMs", "maxDataPoints"):
+        if key in target:
+            projection[key] = target[key]
+    datasource = target.get("datasource")
+    if isinstance(datasource, dict):
+        projection["datasource"] = {key: datasource[key] for key in ("type", "uid") if key in datasource}
+    elif datasource is not None:
+        projection["datasource"] = datasource
+    return projection
+
+def panel_projection(panel):
+    if not isinstance(panel, dict):
+        return panel
+    return {
+        key: panel[key]
+        for key in ("type", "title", "description", "repeat", "repeatDirection", "targets")
+        if key in panel
+    } | {
+        "targets": [target_projection(target) for target in panel.get("targets", [])],
+        "panels": [panel_projection(child) for child in panel.get("panels", [])],
+    }
+
+def panel_structure(dashboard):
+    return [panel_projection(panel) for panel in dashboard.get("panels", [])]
+
 obj = json.loads(pathlib.Path(sys.argv[1]).read_text())
 uid = sys.argv[2]
 fixture = json.loads((pathlib.Path(sys.argv[3]) / f"{uid}.json").read_text())
@@ -866,11 +1273,13 @@ dashboard = obj.get("dashboard", {})
 meta = obj.get("meta", {})
 if dashboard.get("uid") != uid:
     raise SystemExit(f"dashboard round-trip UID mismatch: expected {uid}")
-for key in ("uid", "version", "refresh", "time", "templating"):
+for key in ("uid", "refresh", "time", "templating"):
     if dashboard.get(key) != fixture.get(key):
         raise SystemExit(f"{uid} dashboard {key} differs from checked-in fixture")
 if not isinstance(dashboard.get("version"), int) or dashboard["version"] < 1:
     raise SystemExit(f"{uid} dashboard version is missing or invalid")
+if panel_structure(dashboard) != panel_structure(fixture):
+    raise SystemExit(f"{uid} dashboard panel/target structure differs from checked-in fixture")
 if meta.get("folderTitle") != "Softprobe" or not meta.get("folderUid"):
     raise SystemExit(f"{uid} dashboard is not provisioned in the Softprobe folder")
 variables = dashboard.get("templating", {}).get("list")
@@ -912,13 +1321,15 @@ PY
 }
 
 validate_tempo_trace_response() {
-  python3 - "$1" "$2" "$3" "$4" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "${5:-}" <<'PY'
 import json
+import os
 import pathlib
 import re
 import sys
 import base64
-path, trace_id, expected, other = sys.argv[1:]
+path, trace_id, expected, other, expected_wire = sys.argv[1:]
+rich = os.environ.get("GRAFANA_RICH_TEMPO_ASSERTIONS", "1") == "1"
 obj = json.loads(pathlib.Path(path).read_text())
 text = json.dumps(obj, sort_keys=True)
 if re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
@@ -933,6 +1344,8 @@ else:
 canonical_trace_id = base64.b64encode(requested_trace).decode("ascii")
 if trace_id not in text and canonical_trace_id not in text:
     raise SystemExit(f"Tempo trace response does not contain requested trace {trace_id}")
+if expected_wire and expected_wire not in text:
+    raise SystemExit("Tempo trace response does not contain the expected wire trace ID")
 if expected and expected not in text:
     raise SystemExit(f"Tempo trace response is missing tenant marker {expected}")
 if other and other in text:
@@ -952,13 +1365,16 @@ def valid_id(value, byte_length):
         return None
     return decoded
 
+response_trace_id = obj.get("traceID", obj.get("traceId"))
+if response_trace_id is not None and valid_id(response_trace_id, 16) is None:
+    raise SystemExit("Tempo trace response has a malformed/noncanonical trace ID")
+
 def timestamp(value):
     return isinstance(value, (int, str)) and bool(re.fullmatch(r"[0-9]+", str(value)))
 
 matched = 0
 group_signatures = set()
 parent_seen = False
-status_seen = False
 events_seen = False
 links_seen = False
 for group in groups:
@@ -999,30 +1415,31 @@ for group in groups:
                 raise SystemExit("Tempo trace response has invalid nanosecond timing")
             status = span.get("status")
             if not isinstance(status, dict) or status.get("code") not in {"STATUS_CODE_UNSET", "STATUS_CODE_OK", "STATUS_CODE_ERROR"}:
-                raise SystemExit("Tempo trace response has an invalid or missing status enum")
-            status_seen = True
-            events = span.get("events")
+                raise SystemExit("Tempo trace response has an invalid status enum")
+            events = span.get("events", [])
             if not isinstance(events, list):
                 raise SystemExit("Tempo trace response events are not a list")
-            if events:
-                events_seen = True
             for event in events:
                 if not isinstance(event, dict) or not event.get("name") or not timestamp(event.get("timeUnixNano")):
                     raise SystemExit("Tempo trace response has an invalid event")
-            links = span.get("links")
+            if events:
+                events_seen = True
+            links = span.get("links", [])
             if not isinstance(links, list):
                 raise SystemExit("Tempo trace response links are not a list")
-            if links:
-                links_seen = True
             for link in links:
                 if not isinstance(link, dict) or valid_id(link.get("traceId", link.get("traceID")), 16) is None or valid_id(link.get("spanId", link.get("spanID")), 8) is None:
                     raise SystemExit("Tempo trace response has an invalid link")
-if matched < 2:
+            if links:
+                links_seen = True
+if rich and len(groups) < 2:
+    raise SystemExit("Tempo trace response collapsed distinct ResourceSpans groups")
+if rich and matched < 2:
     raise SystemExit("Tempo trace response collapsed distinct spans/groups")
-if len(group_signatures) < 2:
+if rich and len(group_signatures) < 2:
     raise SystemExit("Tempo trace response collapsed distinct ResourceSpans/ScopeSpans groups")
-if not parent_seen or not status_seen or not events_seen or not links_seen:
-    raise SystemExit("Tempo trace response did not preserve topology, status, events, and links")
+if rich and (not parent_seen or not events_seen or not links_seen):
+    raise SystemExit("Tempo trace response did not preserve topology, events, and links")
 if matched == 0:
     raise SystemExit("Tempo trace response contains no span for the requested trace")
 PY
@@ -1053,29 +1470,62 @@ for path, expected in ((tempo_a, "softprobe-loki-a"), (tempo_b, "softprobe-loki-
 PY
 }
 
+validate_loki_trace_link() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import base64
+import json
+import pathlib
+import re
+import sys
+
+path, source_trace_id, wire_trace_id = sys.argv[1:]
+obj = json.loads(pathlib.Path(path).read_text())
+results = obj.get("data", {}).get("result", [])
+if not isinstance(results, list):
+    raise SystemExit("Loki trace-to-log response has no stream result list")
+
+def values_in_streams():
+    for stream in results:
+        if not isinstance(stream, dict) or not isinstance(stream.get("values"), list):
+            continue
+        for entry in stream["values"]:
+            if isinstance(entry, list) and len(entry) >= 2:
+                yield entry[1]
+
+def candidate_texts(line):
+    yield line if isinstance(line, str) else ""
+    if isinstance(line, str):
+        try:
+            decoded = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        yield json.dumps(decoded, sort_keys=True)
+
+for line in values_in_streams():
+    for text in candidate_texts(line):
+        lowered = text.lower()
+        if source_trace_id.lower() in lowered or wire_trace_id.lower() in lowered:
+            raise SystemExit(0)
+        for value in re.findall(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])", lowered):
+            if base64.b64encode(bytes.fromhex(value)).decode("ascii").lower() == wire_trace_id.lower():
+                raise SystemExit(0)
+raise SystemExit("Loki trace-to-log response does not link to the source Tempo trace in stream values")
+PY
+}
+
 resolve_cross_signal_links() {
-  local tenant uid other trace_id log_trace_id loki_artifact trace_artifact status loki_endpoint trace_endpoint
+  local tenant uid other trace_id trace_wire_id log_trace_id log_trace_wire_id loki_artifact trace_artifact status loki_endpoint trace_endpoint
   for tenant in a b; do
     if [[ "$tenant" == "a" ]]; then
       uid="softprobe-tempo-a"; other="$TENANT_B_ID"
     else
       uid="softprobe-tempo-b"; other="$TENANT_A_ID"
     fi
-    trace_id="$(python3 - "$ARTIFACT_DIR/.work/G6-${tenant}-direct.json" <<'PY'
-import json
-import pathlib
-import re
-import sys
-text = pathlib.Path(sys.argv[1]).read_text()
-match = re.search(r"[0-9a-fA-F]{32}", json.dumps(json.loads(text), sort_keys=True))
-if not match:
-    raise SystemExit("cross-signal trace-to-log source has no trace ID")
-print(match.group(0))
-PY
-    )"
+    trace_id="$(extract_tempo_search_id "$ARTIFACT_DIR/.work/G6-${tenant}-direct.json")"
+    trace_wire_id="$(normalize_tempo_trace_id "$trace_id")"
     loki_artifact="$ARTIFACT_DIR/.work/G7-${tenant}-trace-to-log.json"
-    loki_endpoint="/api/datasources/proxy/uid/softprobe-loki-${tenant}/loki/api/v1/query_range?query=%7Bservice_name%3D%22checkout%22%7D%20%7C%3D%20%22error%22&start=$CROSS_START_NS&end=$CROSS_END_NS&limit=10"
-    [[ "$loki_endpoint" == *"start=$CROSS_START_NS"* && "$loki_endpoint" == *"end=$CROSS_END_NS"* ]] || return 1
+    loki_endpoint="$(expand_tempo_trace_to_logs "$tenant" "$trace_id")" || return 1
+    [[ "$loki_endpoint" == *"start="* && "$loki_endpoint" == *"end="* ]] || return 1
     write_request_artifact "$ARTIFACT_DIR/.work/G7-${tenant}-trace-to-log.request.json" GET "$loki_endpoint"
     if api_get "$loki_endpoint" "$loki_artifact"; then
       :
@@ -1085,20 +1535,35 @@ PY
     fi
     validate_json "$loki_artifact" || return 1
     validate_signal_response "$loki_artifact" loki "$([[ "$tenant" == "a" ]] && printf '%s' "$TENANT_A_ID" || printf '%s' "$TENANT_B_ID")" "$other" "softprobe-loki-${tenant}" || return 1
+    validate_loki_trace_link "$loki_artifact" "$trace_id" "$trace_wire_id" || return 1
 
     log_trace_id="$(python3 - "$loki_artifact" <<'PY'
 import json
 import pathlib
 import re
 import sys
-text = pathlib.Path(sys.argv[1]).read_text()
-obj = json.loads(text)
-match = re.search(r"[0-9a-fA-F]{32}", json.dumps(obj, sort_keys=True))
-if not match:
-    raise SystemExit("cross-signal log-to-trace source has no trace ID")
-print(match.group(0))
+obj = json.loads(pathlib.Path(sys.argv[1]).read_text())
+for stream in obj.get("data", {}).get("result", []):
+    for entry in stream.get("values", []):
+        if not isinstance(entry, list) or len(entry) < 2:
+            continue
+        line = entry[1]
+        texts = [line] if isinstance(line, str) else []
+        if isinstance(line, str):
+            try:
+                texts.append(json.dumps(json.loads(line), sort_keys=True))
+            except json.JSONDecodeError:
+                pass
+        for text in texts:
+            match = re.search(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])", text)
+            if match:
+                print(match.group(0))
+                raise SystemExit(0)
+raise SystemExit("cross-signal log-to-trace source has no trace ID in stream values")
 PY
     )"
+    log_trace_wire_id="$(normalize_tempo_trace_id "$log_trace_id")"
+    [[ "$trace_wire_id" == "$log_trace_wire_id" ]] || return 1
     trace_artifact="$ARTIFACT_DIR/.work/G7-${tenant}-log-to-trace.json"
     trace_endpoint="/api/datasources/proxy/uid/$uid/api/traces/$log_trace_id?start=$TRACE_START_S&end=$TRACE_END_S"
     [[ "$trace_endpoint" == *"/$log_trace_id?"* && "$trace_endpoint" == *"start=$TRACE_START_S"* && "$trace_endpoint" == *"end=$TRACE_END_S"* ]] || return 1
@@ -1110,23 +1575,61 @@ PY
       return "$status"
     fi
     validate_json "$trace_artifact" || return 1
-    validate_tempo_trace_response "$trace_artifact" "$log_trace_id" "$([[ "$tenant" == "a" ]] && printf '%s' "$TENANT_A_ID" || printf '%s' "$TENANT_B_ID")" "$other" || return 1
-    [[ "$trace_id" == "$log_trace_id" ]] || return 1
+    validate_tempo_trace_response "$trace_artifact" "$log_trace_id" "$([[ "$tenant" == "a" ]] && printf '%s' "$TENANT_A_ID" || printf '%s' "$TENANT_B_ID")" "$other" "$trace_wire_id" || return 1
   done
+}
+
+expand_tempo_trace_to_logs() {
+  python3 - "$GRAFANA_TEMPO_DATASOURCE" "$1" "$2" "$TRACE_START_S" "$TRACE_END_S" <<'PY'
+import pathlib
+import re
+import sys
+from urllib.parse import urlencode
+
+path, tenant, trace_id, start_s, end_s = sys.argv[1:]
+text = pathlib.Path(path).read_text()
+uid = f"softprobe-tempo-{tenant}"
+try:
+    block = text.split(f"uid: {uid}", 1)[1].split("\n  - name:", 1)[0]
+except IndexError as exc:
+    raise SystemExit(f"Tempo datasource {uid} is missing") from exc
+start_match = re.search(r"spanStartTimeShift:\s*(-?\d+)m", block)
+end_match = re.search(r"spanEndTimeShift:\s*\+?(\d+)m", block)
+query_match = re.search(r"^\s*query:\s*['\"]?(.*?)['\"]?\s*$", block, re.MULTILINE)
+if not start_match or not end_match or not query_match:
+    raise SystemExit(f"Tempo datasource {uid} has incomplete trace-to-logs configuration")
+query = query_match.group(1).replace("${__tags}", 'service_name="checkout"')
+query = query.replace("${__span.traceId}", trace_id)
+start_ns = (int(start_s) + int(start_match.group(1)) * 60) * 1_000_000_000
+end_ns = (int(end_s) + int(end_match.group(1)) * 60) * 1_000_000_000
+endpoint = f"/api/datasources/proxy/uid/softprobe-loki-{tenant}/loki/api/v1/query_range"
+print(endpoint + "?" + urlencode({"query": query, "start": str(start_ns), "end": str(end_ns), "limit": "10"}))
+PY
 }
 
 validate_signal_response() {
   python3 - "$1" "$2" "$3" "$4" "$5" "$MOCK_MODE" <<'PY'
+import base64
 import json
 import pathlib
+import re
 import sys
 path, signal, expected, other, uid, mock = sys.argv[1:]
 obj = json.loads(pathlib.Path(path).read_text())
 text = json.dumps(obj, sort_keys=True)
 if other and other in text:
     raise SystemExit(f"{uid} response contains the other tenant marker")
-if mock == "1" and expected not in text:
-    raise SystemExit(f"mock {uid} response is missing its tenant marker")
+def has_expected_tenant():
+    if expected and expected in text:
+        return True
+    if signal != "tempo":
+        return False
+    suffix = "b" if expected.endswith("-b") else "a"
+    raw_trace_id = suffix * 32
+    canonical_trace_id = base64.b64encode(bytes.fromhex(raw_trace_id)).decode()
+    return raw_trace_id in text or canonical_trace_id in text
+if not has_expected_tenant():
+    raise SystemExit(f"{uid} response has no positive evidence for requested tenant {expected}")
 if signal == "prometheus":
     if obj.get("status") != "success" or obj.get("data", {}).get("resultType") not in {"vector", "matrix", "scalar", "string"}:
         raise SystemExit(f"{uid} is not a Prometheus success response")
@@ -1145,17 +1648,25 @@ PY
 }
 
 validate_explore_response() {
-  python3 - "$1" "$2" "$3" "$4" "$MOCK_MODE" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import base64
 import json
 import pathlib
+import re
 import sys
-path, expected, other, uid, mock = sys.argv[1:]
+path, expected, other, uid, signal = sys.argv[1:]
 obj = json.loads(pathlib.Path(path).read_text())
 text = json.dumps(obj, sort_keys=True)
 if other and other in text:
     raise SystemExit(f"Explore response for {uid} contains the other tenant marker")
-if mock == "1" and expected not in text:
-    raise SystemExit(f"mock Explore response for {uid} is missing its tenant marker")
+if expected not in text:
+    if signal != "tempo":
+        raise SystemExit(f"Explore response for {uid} has no positive evidence for requested tenant {expected}")
+    suffix = "b" if expected.endswith("-b") else "a"
+    raw_trace_id = suffix * 32
+    canonical_trace_id = base64.b64encode(bytes.fromhex(raw_trace_id)).decode()
+    if raw_trace_id not in text and canonical_trace_id not in text:
+        raise SystemExit(f"Explore response for {uid} has no positive evidence for requested tenant {expected}")
 result = obj.get("results", {}).get("A", {})
 if not isinstance(obj.get("results"), dict) or result.get("error"):
     raise SystemExit(f"Explore query for {uid} returned an error")
@@ -1313,7 +1824,7 @@ PY
 }
 
 check_dashboard_panels() {
-  local detail="$1" uid="$2" panel_id panel_type target payload artifact status signal target_uid
+  local detail="$1" uid="$2" panel_id panel_type target payload artifact status signal target_uid panel_count=0
   while IFS=$'\t' read -r panel_id panel_type target; do
     [[ -n "$target" ]] || continue
     signal="$(python3 - "$target" <<'PY'
@@ -1337,6 +1848,10 @@ PY
     validate_json "$artifact" || return 1
     validate_panel_response "$artifact" "$signal" "$target_uid" || return 1
     VARIABLE_BUNDLE_ARGS+=("panel_${panel_id}=$artifact")
+    panel_count=$((panel_count + 1))
+    if [[ "$MOCK_MODE" == "1" && "${GRAFANA_MOCK_PANEL_LIMIT:-0}" != "0" && "$panel_count" -ge "${GRAFANA_MOCK_PANEL_LIMIT}" ]]; then
+      break
+    fi
   done < <(python3 - "$detail" <<'PY'
 import json
 import pathlib
@@ -1464,19 +1979,7 @@ run_signal_case() {
     bundle_args+=("${tenant}_direct=$direct" "${tenant}_direct_request=$ARTIFACT_DIR/.work/${case_id}-${tenant}-direct.request.json")
     if [[ "$signal" == "tempo" ]]; then
       local trace_id trace_artifact
-      trace_id="$(python3 - "$direct" <<'PY'
-import json
-import pathlib
-import re
-import sys
-text = pathlib.Path(sys.argv[1]).read_text()
-obj = json.loads(text)
-match = re.search(r"[0-9a-fA-F]{32}", json.dumps(obj, sort_keys=True))
-if not match:
-    raise SystemExit("Tempo search returned no trace ID")
-print(match.group(0))
-PY
-)"
+      trace_id="$(extract_tempo_search_id "$direct")"
       trace_artifact="$ARTIFACT_DIR/.work/${case_id}-${tenant}-trace.json"
       local trace_endpoint="/api/datasources/proxy/uid/$uid/api/traces/$trace_id?start=$TRACE_START_S&end=$TRACE_END_S"
       write_request_artifact "$ARTIFACT_DIR/.work/${case_id}-${tenant}-trace.request.json" GET "$trace_endpoint"
@@ -1508,7 +2011,7 @@ PY
       return "$status"
     fi
     validate_json "$explore" || return 1
-    validate_explore_response "$explore" "$expected" "$other" "$uid" || return 1
+    validate_explore_response "$explore" "$expected" "$other" "$uid" "$signal" || return 1
     local repeat="$ARTIFACT_DIR/.work/${case_id}-${tenant}-repeat.json"
     if api_post /api/ds/query "$payload" "$repeat"; then
       :
@@ -1517,7 +2020,7 @@ PY
       return "$status"
     fi
     validate_json "$repeat" || return 1
-    validate_explore_response "$repeat" "$expected" "$other" "$uid" || return 1
+    validate_explore_response "$repeat" "$expected" "$other" "$uid" "$signal" || return 1
     validate_repeat_response "$explore" "$repeat" || return 1
     bundle_args+=("${tenant}_explore=$explore" "${tenant}_repeat=$repeat" "${tenant}_explore_request=$ARTIFACT_DIR/.work/${case_id}-${tenant}-explore.request.json")
   done
@@ -1575,13 +2078,44 @@ validate_credential_rejection() {
   code="$(tr -d '[:space:]' < "$artifact.status")"
   if [[ "$code" == 2* ]]; then
     validate_error_response "$artifact" "$expected_error" || return 1
-  elif [[ "$code" != 401 && "$code" != 403 ]]; then
-    echo "credential probe returned an unexpected HTTP status: $code" >&2
+    grep -Eq '"errorSource"[[:space:]]*:[[:space:]]*"(downstream|auth)"' "$artifact" || {
+      echo "credential probe is missing downstream protocol error source" >&2
+      return 1
+    }
+  else
+    echo "credential probe must return a 2xx protocol error envelope, got HTTP $code" >&2
     return 1
   fi
-  validate_json "$artifact" 2>/dev/null || {
-    [[ "$code" == 401 || "$code" == 403 ]] || return 1
+}
+
+validate_direct_credential_rejection() {
+  local artifact="$1" expected_probe="$2" expected_error="$3" code
+  code="$(tr -d '[:space:]' < "$artifact.status")"
+  [[ "$code" == 401 || "$code" == 403 ]] || {
+    echo "direct Softprobe credential probe did not return 401/403: $code" >&2
+    return 1
   }
+  validate_error_response "$artifact" || return 1
+  grep -Eq '"errorSource"[[:space:]]*:[[:space:]]*"softprobe"' "$artifact" || {
+    echo "direct credential evidence is missing the Softprobe error source" >&2
+    return 1
+  }
+  if [[ "$MOCK_MODE" == "1" ]]; then
+    grep -Fq "\"probe\":\"$expected_probe\"" "$artifact" || {
+      echo "mock credential evidence does not identify the expected downstream probe" >&2
+      return 1
+    }
+    grep -Fq '"credentialObserved":true' "$artifact" || {
+      echo "mock credential evidence did not observe the supplied credential" >&2
+      return 1
+    }
+  fi
+  if [[ "$expected_error" == missing && "$code" != 401 ]]; then
+    return 1
+  fi
+  if [[ "$expected_error" != missing && "$code" != 403 ]]; then
+    return 1
+  fi
 }
 
 check_errors() {
@@ -1661,7 +2195,7 @@ check_errors() {
         artifact="$ARTIFACT_DIR/.work/G8-${signal}-${tenant}-${probe}.json"
         request_artifact="$ARTIFACT_DIR/.work/G8-${signal}-${tenant}-${probe}.request.json"
         write_request_artifact "$request_artifact" POST /api/ds/query "$payload"
-        if api_post_credentials /api/ds/query "$payload" "$artifact" "$credential" "$scope"; then
+      if api_post_credentials /api/ds/query "$payload" "$artifact" "$credential" "$scope"; then
           :
         else
           status=$?
@@ -1674,9 +2208,26 @@ check_errors() {
           echo "credential rejection leaked the other tenant marker" >&2
           return 1
         fi
+        local direct_artifact="$ARTIFACT_DIR/.work/G8-${signal}-${tenant}-${probe}-softprobe.json"
+        local direct_request_artifact="$ARTIFACT_DIR/.work/G8-${signal}-${tenant}-${probe}-softprobe.request.json"
+        if direct_softprobe_credential_probe "$signal" "$probe" "$credential" "$scope" \
+            "$direct_artifact" "$direct_request_artifact"; then
+          :
+        else
+          status=$?
+          (( status == 2 )) && return 2
+          return "$status"
+        fi
+        validate_direct_credential_rejection "$direct_artifact" "$probe" "$expected_error" || return 1
+        if [[ "$probe" != mismatched_tenant ]] && grep -Fq "$other" "$direct_artifact"; then
+          echo "direct credential rejection leaked the other tenant marker" >&2
+          return 1
+        fi
         bundle_args+=(
           "${signal}_${tenant}_${probe}=$artifact"
           "${signal}_${tenant}_${probe}_request=$request_artifact"
+          "${signal}_${tenant}_${probe}_softprobe=$direct_artifact"
+          "${signal}_${tenant}_${probe}_softprobe_request=$direct_request_artifact"
         )
       done
     done
@@ -1704,8 +2255,34 @@ check_errors() {
   record_case G8 pass
 }
 
+run_static_contracts() {
+  [[ "${GRAFANA_SKIP_STATIC_CONTRACTS:-0}" == "1" ]] && return 0
+
+  local contract
+  for contract in \
+    compose_contract_test.sh \
+    phase4_contract_test.sh \
+    tempo_tenant_contract_test.sh \
+    cross_signal_link_contract_test.sh \
+    datasource_auth_contract_test.sh \
+    manual_digest_contract_test.sh; do
+    [[ -f "$GRAFANA_E2E_DIR/$contract" ]] || {
+      echo "missing Grafana static contract: $GRAFANA_E2E_DIR/$contract" >&2
+      return 1
+    }
+    if ! GRAFANA_SKIP_STATIC_CONTRACTS=1 bash "$GRAFANA_E2E_DIR/$contract"; then
+      echo "Grafana static contract failed: $contract" >&2
+      return 1
+    fi
+  done
+}
+
 main() {
   local status
+  prepare_artifact_staging
+  if ! run_static_contracts; then
+    finish_failure "Grafana static Phase 4 contract validation failed"
+  fi
   if ! validate_grafana_reference_pin; then
     finish_failure "Grafana reference image/digest validation failed"
   fi
@@ -1717,44 +2294,84 @@ main() {
       finish_failure "Deterministic OTLP seed failed or detected tenant leakage"
     fi
   fi
+  begin_case G1
   if check_health; then :; else
     status=$?
-    (( status == 2 )) && finish_skip "Grafana health endpoint unavailable"
+    if (( status == 2 )); then
+      record_case G1 environment_skip "Grafana health endpoint unavailable"
+      finish_skip "Grafana health endpoint unavailable"
+    fi
+    record_case G1 failure "Grafana health API failure"
     finish_failure "Grafana health API failure"
   fi
+  begin_case G2
   if check_datasources; then :; else
     status=$?
-    (( status == 2 )) && finish_skip "Grafana datasource API unavailable"
+    if (( status == 2 )); then
+      record_case G2 environment_skip "Grafana datasource API unavailable"
+      finish_skip "Grafana datasource API unavailable"
+    fi
+    record_case G2 failure "Grafana datasource API failure or credential/header assertion"
     finish_failure "Grafana datasource API failure or credential/header assertion"
   fi
+  begin_case G3
   if check_dashboards; then :; else
     status=$?
-    (( status == 2 )) && finish_skip "Grafana dashboard API unavailable"
+    if (( status == 2 )); then
+      record_case G3 environment_skip "Grafana dashboard API unavailable"
+      finish_skip "Grafana dashboard API unavailable"
+    fi
+    record_case G3 failure "Grafana dashboard API failure or panel datasource assertion"
     finish_failure "Grafana dashboard API failure or panel datasource assertion"
   fi
+  begin_case G4
   if run_signal_case G4 prometheus grafana_phase4_requests_total; then :; else
     status=$?
-    (( status == 2 )) && finish_skip "Grafana Prometheus datasource unavailable"
+    if (( status == 2 )); then
+      record_case G4 environment_skip "Grafana Prometheus datasource unavailable"
+      finish_skip "Grafana Prometheus datasource unavailable"
+    fi
+    record_case G4 failure "Grafana Prometheus query or tenant-isolation assertion"
     finish_failure "Grafana Prometheus query or tenant-isolation assertion"
   fi
+  begin_case G5
   if run_signal_case G5 loki '{service_name="checkout"} |= "error"'; then :; else
     status=$?
-    (( status == 2 )) && finish_skip "Grafana Loki datasource unavailable"
+    if (( status == 2 )); then
+      record_case G5 environment_skip "Grafana Loki datasource unavailable"
+      finish_skip "Grafana Loki datasource unavailable"
+    fi
+    record_case G5 failure "Grafana Loki query or tenant-isolation assertion"
     finish_failure "Grafana Loki query or tenant-isolation assertion"
   fi
+  begin_case G6
   if run_signal_case G6 tempo '{}'; then :; else
     status=$?
-    (( status == 2 )) && finish_skip "Grafana Tempo datasource unavailable"
+    if (( status == 2 )); then
+      record_case G6 environment_skip "Grafana Tempo datasource unavailable"
+      finish_skip "Grafana Tempo datasource unavailable"
+    fi
+    record_case G6 failure "Grafana Tempo query or tenant-isolation assertion"
     finish_failure "Grafana Tempo query or tenant-isolation assertion"
   fi
+  begin_case G7
   if check_cross_signal; then :; else
     status=$?
-    (( status == 2 )) && finish_skip "Grafana cross-signal datasource unavailable"
+    if (( status == 2 )); then
+      record_case G7 environment_skip "Grafana cross-signal datasource unavailable"
+      finish_skip "Grafana cross-signal datasource unavailable"
+    fi
+    record_case G7 failure "Grafana cross-signal link assertion"
     finish_failure "Grafana cross-signal link assertion"
   fi
+  begin_case G8
   if check_errors; then :; else
     status=$?
-    (( status == 2 )) && finish_skip "Grafana error/query API unavailable"
+    if (( status == 2 )); then
+      record_case G8 environment_skip "Grafana error/query API unavailable"
+      finish_skip "Grafana error/query API unavailable"
+    fi
+    record_case G8 failure "Grafana explicit error assertion"
     finish_failure "Grafana explicit error assertion"
   fi
   if (( SKIPPED )); then
@@ -1764,6 +2381,7 @@ main() {
     write_outcome pass
     write_summary pass
   fi
+  stage_artifacts
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

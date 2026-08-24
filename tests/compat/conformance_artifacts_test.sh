@@ -215,6 +215,8 @@ elif expression == "evidence-unindexed":
     value["evidence"]["notes"] = "notes.txt"
 elif expression == "index-non-json-log":
     value["artifacts"].append("suite/case-logs-001/access.log")
+elif expression == "index-binary":
+    value["artifacts"].append("suite/case-logs-001/payload.bin")
 else:
     raise SystemExit(f"unknown fixture mutation: {expression}")
 
@@ -361,6 +363,111 @@ cp -R "$BASE" "$REDACT_NONJSON"
 printf '%s\n' '[2026-08-15T00:00:00Z] INFO request Authorization: Bearer super-secret-token' >"$REDACT_NONJSON/suite/case-logs-001/access.log"
 mutate_json "$REDACT_NONJSON/artifact-index.json" index-non-json-log
 expect_result "credential redaction covers non-JSON log artifacts" 1 "$REDACT_NONJSON" --release-gate
+
+BINARY="$TMP_DIR/indexed-binary"
+cp -R "$BASE" "$BINARY"
+printf '\000\001\002\003' >"$BINARY/suite/case-logs-001/payload.bin"
+mutate_json "$BINARY/artifact-index.json" index-binary
+expect_result "unexpected binary artifacts are rejected before upload" 1 "$BINARY" --release-gate
+
+# Every externally pulled image in the Phase 4 CI compose stack must resolve
+# immutably.  The Grafana image is supplied by the canonical reference-pin
+# check; the Rust builder may be overridden only with an immutable digest.
+COMPOSE_PIN_FILE="$ROOT_DIR/tests/compat/grafana/docker-compose.ci.yml"
+grafana_compose_image=$(make --no-print-directory grafana-reference-image)
+builder_image=$(make --no-print-directory compat-builder-image)
+if GRAFANA_COMPOSE_IMAGE="$grafana_compose_image" \
+	SOFTPROBE_BUILDER_IMAGE="$builder_image" \
+	"$ROOT_DIR/scripts/compat/check-compose-image-pins.sh" "$COMPOSE_PIN_FILE"
+then
+	pass "all CI compose images are immutable"
+else
+	fail "all CI compose images are immutable" "one or more external compose image references are mutable"
+fi
+
+# The Grafana image is an interpolated Compose value, so the checker must
+# validate the resolved environment value instead of treating the placeholder
+# as an exemption.  This is intentionally a mutable-tag fixture: the contract
+# must fail before an unpinned image can reach Compose.
+GRAFANA_PLACEHOLDER_COMPOSE="$TMP_DIR/grafana-placeholder-compose.yml"
+printf '%s\n' 'services:' '  grafana:' '    image: ${GRAFANA_COMPOSE_IMAGE:?GRAFANA_COMPOSE_IMAGE is required}' >"$GRAFANA_PLACEHOLDER_COMPOSE"
+if GRAFANA_COMPOSE_IMAGE='grafana/grafana:11.2.0' \
+	"$ROOT_DIR/scripts/compat/check-compose-image-pins.sh" "$GRAFANA_PLACEHOLDER_COMPOSE" >/dev/null 2>&1
+then
+	fail "interpolated Grafana image must be immutable" "mutable GRAFANA_COMPOSE_IMAGE was accepted"
+else
+	pass "interpolated Grafana image must be immutable"
+fi
+
+CI_WORKFLOW="$ROOT_DIR/.github/workflows/compatibility.yml"
+if grep -Fq 'row["release_evidence"] == true' "$CI_WORKFLOW" && \
+	grep -Fq 'versions["release_evidence"] == true' "$CI_WORKFLOW" && \
+	grep -Fq 'outcome["release_evidence"] == true' "$CI_WORKFLOW"; then
+	pass "real conformance release-evidence guards are enforced"
+else
+	fail "real conformance release-evidence guards are enforced" "CI must reject real output that is not marked release evidence"
+fi
+
+# The protocol runner consumes its own case IDs.  The manifest ID is a
+# reporting/artifact name and must not be sent as COMPAT_CASE_IDS.
+if grep -F 'COMPAT_CASE_IDS=' "$ROOT_DIR/scripts/compat/conformance.sh" | grep -Fq 'runner_case_id'; then
+	pass "protocol runners receive manifest runner_case_id values"
+else
+	fail "protocol runners receive manifest runner_case_id values" "COMPAT_CASE_IDS must be built from runner_case_id"
+fi
+
+# The consolidated workflow must turn release evidence into an explicit value
+# and reject textual infrastructure/environment skip markers, even if the
+# corresponding job result was incorrectly reported as success.
+if python3 - "$CI_WORKFLOW" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+report_block = text[text.index("report_root = pathlib.Path(sys.argv[2])"):]
+report_block = report_block[:report_block.index("      - name: Upload consolidated compatibility report")]
+if "release_evidence = (" not in report_block:
+    raise SystemExit("consolidated report does not compute release_evidence")
+if "has_explicit_skip_marker(job_name)" not in report_block:
+    raise SystemExit("consolidated report does not reject explicit skip markers")
+PY
+then
+	pass "consolidated report propagates release evidence and rejects skips"
+else
+	fail "consolidated report propagates release evidence and rejects skips" "report aggregation must assert both conditions"
+fi
+
+# The recursive Grafana pin check must inherit the exact reference values that
+# the system lane will use.  Keep the exports before the recursive make call so
+# a command-line or drift-manifest override cannot be silently ignored.
+if python3 - "$ROOT_DIR/Makefile" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index("test-grafana-system:")
+block = text[start : start + 5000]
+pin = block.index("$(MAKE) --no-print-directory check-grafana-reference-pin")
+for name in ("GRAFANA_REFERENCE_IMAGE", "GRAFANA_REFERENCE_VERSION", "GRAFANA_REFERENCE_DIGEST", "GRAFANA_REFERENCE_MANIFEST", "GRAFANA_COMPOSE_IMAGE"):
+    marker = f"export {name}="
+    if block.find(marker) < 0 or block.find(marker) > pin:
+        raise SystemExit(f"{name} is not exported before the recursive Grafana pin check")
+PY
+then
+	pass "Grafana pin-check receives propagated reference environment"
+else
+	fail "Grafana pin-check receives propagated reference environment" "recursive pin check must inherit all Grafana reference variables"
+fi
+
+# The OTel collector entry is explicitly non-runtime metadata.  It must not
+# be exported as a baseline pull, regardless of the tag/digest fields present
+# in a local manifest override.
+otel_env=$(COMPAT_REFERENCE_MANIFEST="$ROOT_DIR/docs/compat/references.v0.yaml" "$ROOT_DIR/scripts/compat/export-reference-env.sh")
+if grep -Fq 'BASELINE_OTEL_COLLECTOR_' <<<"$otel_env"; then
+	fail "otel_collector is excluded from runtime reference exports" "non-runtime collector was exported"
+else
+	pass "otel_collector is excluded from runtime reference exports"
+fi
 
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
 if [ "$failed" -ne 0 ]; then

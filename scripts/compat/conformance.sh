@@ -3,23 +3,34 @@
 set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SCRIPT_PATH=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")
+ORIGINAL_ARGS=("$@")
 MANIFEST=$(printenv MANIFEST 2>/dev/null || printf '%s' 'tests/compat/manifests/cases.v0.yaml')
 REFERENCE_MANIFEST=$(printenv COMPAT_REFERENCE_MANIFEST 2>/dev/null || printf '%s' 'docs/compat/references.v0.yaml')
 OUT=$(printenv OUT 2>/dev/null || printf '%s' 'target/compat/conformance')
 RUN_ID=$(printenv RUN_ID 2>/dev/null || date -u +%Y%m%dT%H%M%SZ)
 PROTOCOL_FILTER=
 CASE_FILTER=
+SHARD_INDEX=${COMPAT_CONFORMANCE_SHARD_INDEX:-}
+SHARD_COUNT=${COMPAT_CONFORMANCE_SHARD_COUNT:-}
 MOCK=false
 DRIFT=false
+CONFORMANCE_TOTAL_TIMEOUT_SECS=${COMPAT_CONFORMANCE_TOTAL_TIMEOUT_SECS:-3600}
+PROTOCOL_TIMEOUT_SECS=${COMPAT_PROTOCOL_TIMEOUT_SECS:-900}
+RUNNER_MAX_ATTEMPTS=${COMPAT_RUNNER_MAX_ATTEMPTS:-2}
+RUNNER_RETRY_DELAY_SECS=${COMPAT_RUNNER_RETRY_DELAY_SECS:-2}
 DRIFT_CANDIDATE_IMAGE=${DRIFT_CANDIDATE_IMAGE:-}
 DRIFT_CANDIDATE_VERSION=${DRIFT_CANDIDATE_VERSION:-}
+DRIFT_CANDIDATE_DIGEST=${DRIFT_CANDIDATE_DIGEST:-${COMPAT_DRIFT_CANDIDATE_DIGEST:-}}
 DRIFT_BASELINE_IMAGE=${DRIFT_BASELINE_IMAGE:-}
 DRIFT_BASELINE_VERSION=${DRIFT_BASELINE_VERSION:-}
+TIMEOUT_ACTIVE=false
 
 usage() {
 	cat <<'EOF'
 Usage: scripts/compat/conformance.sh [--mock|--drift] [--protocol PROTOCOL] [--case CASE_ID] [--out DIRECTORY]
-       [--candidate-image IMAGE] [--candidate-version VERSION]
+       [--shard-index INDEX --shard-count COUNT]
+       [--candidate-image IMAGE] [--candidate-version VERSION] [--candidate-digest DIGEST]
        [--baseline-image IMAGE] [--baseline-version VERSION]
 EOF
 }
@@ -36,6 +47,14 @@ while [ "$#" -gt 0 ]; do
 			[ "$#" -ge 2 ] || { echo "ERROR: --case requires a value" >&2; exit 2; }
 			CASE_FILTER=$2; shift 2 ;;
 		--case=*) CASE_FILTER=$(printf '%s' "$1" | cut -d= -f2-); shift ;;
+		--shard-index)
+			[ "$#" -ge 2 ] || { echo "ERROR: --shard-index requires a value" >&2; exit 2; }
+			SHARD_INDEX=$2; shift 2 ;;
+		--shard-index=*) SHARD_INDEX=$(printf '%s' "$1" | cut -d= -f2-); shift ;;
+		--shard-count)
+			[ "$#" -ge 2 ] || { echo "ERROR: --shard-count requires a value" >&2; exit 2; }
+			SHARD_COUNT=$2; shift 2 ;;
+		--shard-count=*) SHARD_COUNT=$(printf '%s' "$1" | cut -d= -f2-); shift ;;
 		--out)
 			[ "$#" -ge 2 ] || { echo "ERROR: --out requires a directory" >&2; exit 2; }
 			OUT=$2; shift 2 ;;
@@ -48,6 +67,10 @@ while [ "$#" -gt 0 ]; do
 			[ "$#" -ge 2 ] || { echo "ERROR: --candidate-version requires a value" >&2; exit 2; }
 			DRIFT_CANDIDATE_VERSION=$2; shift 2 ;;
 		--candidate-version=*) DRIFT_CANDIDATE_VERSION=$(printf '%s' "$1" | cut -d= -f2-); shift ;;
+		--candidate-digest)
+			[ "$#" -ge 2 ] || { echo "ERROR: --candidate-digest requires a value" >&2; exit 2; }
+			DRIFT_CANDIDATE_DIGEST=$2; shift 2 ;;
+		--candidate-digest=*) DRIFT_CANDIDATE_DIGEST=$(printf '%s' "$1" | cut -d= -f2-); shift ;;
 		--baseline-image)
 			[ "$#" -ge 2 ] || { echo "ERROR: --baseline-image requires a value" >&2; exit 2; }
 			DRIFT_BASELINE_IMAGE=$2; shift 2 ;;
@@ -56,30 +79,80 @@ while [ "$#" -gt 0 ]; do
 			[ "$#" -ge 2 ] || { echo "ERROR: --baseline-version requires a value" >&2; exit 2; }
 			DRIFT_BASELINE_VERSION=$2; shift 2 ;;
 		--baseline-version=*) DRIFT_BASELINE_VERSION=$(printf '%s' "$1" | cut -d= -f2-); shift ;;
+		--__timeout-active) TIMEOUT_ACTIVE=true; shift ;;
 		--help|-h) usage; exit 0 ;;
 		*) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
-	esac
+		esac
 done
+
+if [ -z "$SHARD_INDEX" ] && [ -z "$SHARD_COUNT" ]; then
+	:
+elif [ -z "$SHARD_INDEX" ] || [ -z "$SHARD_COUNT" ]; then
+	echo "ERROR: --shard-index and --shard-count must be supplied together" >&2
+	exit 2
+elif ! printf '%s' "$SHARD_INDEX" | grep -Eq '^[0-9]+$' || ! printf '%s' "$SHARD_COUNT" | grep -Eq '^[1-9][0-9]*$'; then
+	echo "ERROR: shard index must be >= 0 and shard count must be a positive integer" >&2
+	exit 2
+elif [ "$SHARD_INDEX" -ge "$SHARD_COUNT" ]; then
+	echo "ERROR: shard index must be less than shard count" >&2
+	exit 2
+fi
+
+if [ "$TIMEOUT_ACTIVE" = false ]; then
+	exec "$ROOT_DIR/scripts/compat/run-with-timeout" "$CONFORMANCE_TOTAL_TIMEOUT_SECS" \
+		"$SCRIPT_PATH" --__timeout-active "${ORIGINAL_ARGS[@]}"
+fi
 
 if [ "$MOCK" = true ] && [ "$DRIFT" = true ]; then
 	echo "ERROR: --mock and --drift are mutually exclusive" >&2
 	exit 2
 fi
+
+canonical_image_reference() {
+	local raw_image=$1
+	local explicit_digest=$2
+	local role=$3
+	ruby -rjson - "$raw_image" "$explicit_digest" "$role" <<'RUBY'
+raw_image, explicit_digest, role = ARGV
+digest_pattern = /\Asha256:[0-9a-f]{64}\z/
+abort "#{role} image is required" if raw_image.nil? || raw_image.empty?
+abort "#{role} digest is invalid" unless explicit_digest.empty? || explicit_digest.match?(digest_pattern)
+
+if raw_image.include?("@")
+  image, embedded_digest = raw_image.split("@", 2)
+  abort "#{role} image must contain one immutable digest" if image.empty? || embedded_digest.nil? || !embedded_digest.match?(digest_pattern)
+  abort "#{role} digest disagrees with the image digest" unless explicit_digest.empty? || explicit_digest == embedded_digest
+  digest = embedded_digest
+else
+  image = raw_image
+  last_component = image.split("/").last
+  abort "#{role} image must be an immutable digest-form reference" if explicit_digest.empty? || last_component.include?(":")
+  digest = explicit_digest
+end
+
+abort "#{role} image must not contain a tag" if image.include?("@")
+STDOUT.write(JSON.generate("image" => image, "digest" => digest, "reference" => "#{image}@#{digest}"))
+RUBY
+}
+
 if [ "$DRIFT" = true ]; then
 	for drift_value in DRIFT_CANDIDATE_IMAGE DRIFT_CANDIDATE_VERSION DRIFT_BASELINE_IMAGE DRIFT_BASELINE_VERSION; do
 		[ -n "${!drift_value}" ] || { echo "ERROR: $drift_value is required in drift mode" >&2; exit 2; }
 	done
-	case "$DRIFT_CANDIDATE_IMAGE" in
-		*latest|*@*|*:latest) echo "ERROR: candidate image must be a mutable-tag-free repository name" >&2; exit 2 ;;
-	esac
 	case "$DRIFT_CANDIDATE_VERSION" in
 		""|latest|*latest*) echo "ERROR: candidate version must be immutable and non-latest" >&2; exit 2 ;;
 	esac
-	[ "$DRIFT_CANDIDATE_IMAGE" != "$DRIFT_BASELINE_IMAGE" ] || [ "$DRIFT_CANDIDATE_VERSION" != "$DRIFT_BASELINE_VERSION" ] || {
+	candidate_metadata=$(canonical_image_reference "$DRIFT_CANDIDATE_IMAGE" "$DRIFT_CANDIDATE_DIGEST" candidate)
+	DRIFT_CANDIDATE_IMAGE=$(ruby -rjson -e 'puts JSON.parse(ARGV.fetch(0)).fetch("image")' "$candidate_metadata")
+	DRIFT_CANDIDATE_DIGEST=$(ruby -rjson -e 'puts JSON.parse(ARGV.fetch(0)).fetch("digest")' "$candidate_metadata")
+	DRIFT_CANDIDATE_REFERENCE=$(ruby -rjson -e 'puts JSON.parse(ARGV.fetch(0)).fetch("reference")' "$candidate_metadata")
+	baseline_metadata=$(canonical_image_reference "$DRIFT_BASELINE_IMAGE" "" baseline)
+	DRIFT_BASELINE_IMAGE=$(ruby -rjson -e 'puts JSON.parse(ARGV.fetch(0)).fetch("reference")' "$baseline_metadata")
+	[ "$DRIFT_CANDIDATE_REFERENCE" != "$DRIFT_BASELINE_IMAGE" ] || [ "$DRIFT_CANDIDATE_VERSION" != "$DRIFT_BASELINE_VERSION" ] || {
 		echo "ERROR: candidate reference must differ from the baseline reference" >&2
 		exit 2
 	}
-	export DRIFT_CANDIDATE_IMAGE DRIFT_CANDIDATE_VERSION DRIFT_BASELINE_IMAGE DRIFT_BASELINE_VERSION
+	export DRIFT_CANDIDATE_IMAGE DRIFT_CANDIDATE_VERSION DRIFT_CANDIDATE_DIGEST DRIFT_CANDIDATE_REFERENCE DRIFT_BASELINE_IMAGE DRIFT_BASELINE_VERSION
 fi
 
 resolve_path() {
@@ -91,6 +164,7 @@ resolve_path() {
 
 MANIFEST_PATH=$(resolve_path "$MANIFEST")
 REFERENCE_MANIFEST_PATH=$(resolve_path "$REFERENCE_MANIFEST")
+CAPABILITY_MANIFEST_PATH=$(resolve_path "${CAPABILITY_MANIFEST:-docs/compat/capability.v0.yaml}")
 OUT_PATH=$(resolve_path "$OUT")
 TMP_BASE=$(printenv TMPDIR 2>/dev/null || printf '%s' /tmp)
 TMP_DIR=$(mktemp -d "$TMP_BASE/compat-conformance.XXXXXX")
@@ -98,17 +172,104 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 [ -f "$MANIFEST_PATH" ] || { echo "ERROR: manifest does not exist: $MANIFEST_PATH" >&2; exit 2; }
 [ -f "$REFERENCE_MANIFEST_PATH" ] || { echo "ERROR: reference manifest does not exist: $REFERENCE_MANIFEST_PATH" >&2; exit 2; }
+[ -f "$CAPABILITY_MANIFEST_PATH" ] || { echo "ERROR: capability manifest does not exist: $CAPABILITY_MANIFEST_PATH" >&2; exit 2; }
 
-if ! ruby -ryaml -rjson - "$MANIFEST_PATH" "$PROTOCOL_FILTER" "$CASE_FILTER" "$ROOT_DIR" >"$TMP_DIR/selected.json" <<'RUBY'
-manifest_path, protocol_filter, case_filter, repo_root = ARGV
+if ! ruby -ryaml -rjson - "$MANIFEST_PATH" "$PROTOCOL_FILTER" "$CASE_FILTER" "$ROOT_DIR" "$REFERENCE_MANIFEST_PATH" "$CAPABILITY_MANIFEST_PATH" "$SHARD_INDEX" "$SHARD_COUNT" >"$TMP_DIR/selected.json" <<'RUBY'
+manifest_path, protocol_filter, case_filter, repo_root, reference_manifest_path, capability_manifest_path, shard_index, shard_count = ARGV
 begin
   document = YAML.safe_load(File.read(manifest_path), permitted_classes: [], permitted_symbols: [], aliases: false)
 rescue StandardError => e
   warn "ERROR: invalid YAML manifest: #{e.message}"
   exit 2
 end
+begin
+  reference_document = YAML.safe_load(File.read(reference_manifest_path), permitted_classes: [], permitted_symbols: [], aliases: false)
+  canonical_references = reference_document.fetch("references")
+rescue StandardError => e
+  warn "ERROR: invalid reference manifest: #{e.message}"
+  exit 2
+end
+begin
+  capability_document = YAML.safe_load(File.read(capability_manifest_path), permitted_classes: [], permitted_symbols: [], aliases: false)
+  canonical_capability_ids = capability_document.fetch("capability_ids")
+  unless canonical_capability_ids.is_a?(Array) && canonical_capability_ids.all? { |id| id.is_a?(String) && !id.empty? } && canonical_capability_ids.uniq == canonical_capability_ids
+    raise "capability_ids must be a unique sequence of non-empty strings"
+  end
+  canonical_unsupported_features = capability_document.fetch("unsupported_feature_ids")
+  unless canonical_unsupported_features.is_a?(Hash)
+    raise "unsupported_feature_ids must be a mapping"
+  end
+  canonical_unsupported_features.each do |capability_id, features|
+    raise "unsupported_feature_ids references unknown capability #{capability_id.inspect}" unless canonical_capability_ids.include?(capability_id)
+    unless features.is_a?(Array) && features.all? { |feature| feature.is_a?(String) && !feature.empty? } && features.uniq == features
+      raise "unsupported_feature_ids.#{capability_id} must be a unique sequence of non-empty strings"
+    end
+  end
+rescue StandardError => e
+  warn "ERROR: invalid capability manifest: #{e.message}"
+  exit 2
+end
 
 errors = []
+tenant_isolation = document.is_a?(Hash) ? document.dig("metadata", "tenant_isolation") : nil
+tenant_evidence_by_protocol = {}
+unless tenant_isolation.is_a?(Hash)
+  errors << "metadata.tenant_isolation must declare shared_helper and protocol contracts"
+else
+  shared_helper = tenant_isolation["shared_helper"]
+  shared_helper_path = shared_helper.is_a?(String) ? File.expand_path(shared_helper, repo_root) : nil
+  if !shared_helper.is_a?(String) || shared_helper.empty? || shared_helper.start_with?("/") || shared_helper.include?("..") || shared_helper_path.nil? || !shared_helper_path.start_with?(File.expand_path(repo_root) + "/") || !File.file?(shared_helper_path)
+    errors << "metadata.tenant_isolation.shared_helper must be an existing repository-relative file"
+  elsif !File.read(shared_helper_path).include?("authenticated_router")
+    errors << "metadata.tenant_isolation.shared_helper must reference the shared authenticated tenant helper"
+  end
+  contracts = tenant_isolation["contracts"]
+  unless contracts.is_a?(Hash)
+    errors << "metadata.tenant_isolation.contracts must be a mapping"
+  else
+    %w[prometheus loki tempo].each do |protocol|
+      contract = contracts[protocol]
+      path = contract.is_a?(Hash) ? contract["path"] : nil
+      command = contract.is_a?(Hash) ? contract["command"] : nil
+      path_value = path.is_a?(String) ? File.expand_path(path, repo_root) : nil
+      expected_command = "cargo test --lib compat::#{protocol}"
+      if !path.is_a?(String) || path.empty? || path.start_with?("/") || path.include?("..") || path_value.nil? || !path_value.start_with?(File.expand_path(repo_root) + "/") || !File.file?(path_value)
+        errors << "metadata.tenant_isolation.contracts.#{protocol}.path must be an existing repository-relative file"
+      elsif !File.read(path_value).match?(/tenant/i)
+        errors << "metadata.tenant_isolation.contracts.#{protocol}.path must contain tenant-isolation coverage"
+      end
+      unless command == expected_command
+        errors << "metadata.tenant_isolation.contracts.#{protocol}.command must be #{expected_command.inspect}"
+      end
+      tenant_evidence_by_protocol[protocol] = {"shared_helper" => shared_helper, "contract_path" => path, "contract_command" => command}
+    end
+  end
+end
+%w[prometheus loki tempo grafana].each do |protocol|
+  reference = canonical_references[protocol]
+  unless reference.is_a?(Hash) &&
+         reference["image"].is_a?(String) && !reference["image"].empty? &&
+         reference["tag"].is_a?(String) && !reference["tag"].empty? &&
+         reference["digest"].is_a?(String) && reference["digest"].match?(/\Asha256:[0-9a-f]{64}\z/)
+    errors << "canonical #{protocol.capitalize} reference must contain an immutable sha256 digest"
+  end
+end
+case_reference_pins = document.dig("metadata", "reference_pins", "protocols") if document.is_a?(Hash)
+unless case_reference_pins.is_a?(Hash)
+  errors << "metadata.reference_pins.protocols must declare compatibility reference pins"
+else
+  %w[prometheus loki tempo].each do |protocol|
+    canonical = canonical_references[protocol]
+    declared = case_reference_pins[protocol]
+    if !declared.is_a?(Hash)
+      errors << "metadata.reference_pins.protocols missing #{protocol}"
+      next
+    end
+    %w[image tag digest].each do |field|
+      errors << "metadata.reference_pins.protocols.#{protocol}.#{field} drift" unless declared[field] == canonical[field]
+    end
+  end
+end
 errors << "manifest root must be a mapping" unless document.is_a?(Hash)
 cases = document.is_a?(Hash) ? document["cases"] : nil
 errors << "manifest cases must be a non-empty sequence" unless cases.is_a?(Array) && !cases.empty?
@@ -117,16 +278,15 @@ required = %w[id protocol endpoint request fixture capability expected normaliza
 allowed_protocols = %w[prometheus loki tempo]
 allowed_methods = %w[GET POST]
 allowed_capability_statuses = %w[phase_1 supported supported_subset ignored unsupported_feature]
-capability_ids = Array(cases).each_with_object([]) do |entry, ids|
-  capability_id = entry.is_a?(Hash) && entry.dig("capability", "id")
-  ids << capability_id if capability_id
-end
+capability_ids = canonical_capability_ids
+declared_features = canonical_unsupported_features
 normalization_policies = {
   "prometheus" => "src/compat/prometheus/diff_normalize.rs::normalize_prom_response",
   "loki" => "tests/compat/support/loki.rs::normalize_loki_response",
   "tempo" => "tests/compat/support/tempo.rs::normalize_tempo_response"
 }
 seen = {}
+runner_seen = {}
 validated = []
 
 safe_repo_relative_path = lambda do |path|
@@ -142,13 +302,20 @@ existing_repo_file = lambda do |path|
   inside_repo && File.file?(full_path)
 end
 
-validate_unsupported_allowlist = lambda do |value, prefix|
+validate_unsupported_allowlist = lambda do |value, prefix, expected_capability = nil|
   next if value.nil?
   unless value.is_a?(Array) || value.is_a?(Hash)
     errors << "#{prefix} unsupported-feature allowlist must be a sequence or mapping"
     next
   end
-  entries = value.is_a?(Hash) ? value.to_a : value.map { |item| [nil, item] }
+  entries = if value.is_a?(Hash) &&
+               (value.key?("capability") || value.key?("capability_id") || value.key?("id"))
+    [[nil, value]]
+  elsif value.is_a?(Hash)
+    value.to_a
+  else
+    value.map { |item| [nil, item] }
+  end
   entries.each do |capability_key, item|
     capability_id = capability_key
     features = item
@@ -159,9 +326,27 @@ validate_unsupported_allowlist = lambda do |value, prefix|
     unless capability_id.is_a?(String) && capability_ids.include?(capability_id)
       errors << "#{prefix} unsupported-feature entry references unknown capability: #{capability_id.inspect}"
     end
+    if expected_capability && capability_id != expected_capability
+      errors << "#{prefix} unsupported-feature entry must target capability #{expected_capability}"
+    end
+    feature_values = features.is_a?(Array) ? features : [features]
     unless (features.is_a?(String) && !features.empty?) ||
            (features.is_a?(Array) && !features.empty? && features.all? { |feature| feature.is_a?(String) && !feature.empty? })
       errors << "#{prefix} unsupported-feature entry must contain a non-empty feature or features list"
+      next
+    end
+    feature_values.each do |feature|
+      if feature.include?("*") || feature.match?(/\A\s|\s\z/)
+        errors << "#{prefix} unsupported-feature names must be exact declared feature names"
+      elsif !declared_features.fetch(capability_id, []).include?(feature)
+        errors << "#{prefix} unsupported-feature #{feature.inspect} is not declared for capability #{capability_id}"
+      end
+    end
+    if item.is_a?(Hash) && (path = item["path"] || item["diff_path"])
+      unless path.is_a?(String) && path.match?(/\A\$/) && !path.include?("*") &&
+             !path.include?("..") && !path.match?(/(?:\.\*|\[\*\]|\.$)/)
+        errors << "#{prefix} unsupported-feature diff paths must be exact, non-wildcard JSON paths"
+      end
     end
   end
 end
@@ -186,6 +371,24 @@ Array(cases).each_with_index do |entry, index|
     seen[id] = true
   end
   protocol = entry["protocol"]
+  if tenant_evidence_by_protocol.key?(protocol)
+    entry["tenant_isolation_evidence"] = tenant_evidence_by_protocol.fetch(protocol)
+  else
+    errors << "#{prefix} must reference a validated tenant-isolation contract"
+  end
+  runner_case_id = entry["runner_case_id"]
+  if runner_case_id.nil?
+    exclusion = entry["conformance_exclusion"]
+    unless exclusion.is_a?(Hash) && exclusion["reason"].is_a?(String) && !exclusion["reason"].empty? && exclusion["release_evidence"] == false
+      errors << "#{prefix} missing runner_case_id requires an explicit non-release conformance_exclusion reason"
+    end
+  elsif !runner_case_id.is_a?(String) || !runner_case_id.match?(/\A[A-Za-z0-9][A-Za-z0-9_.-]*\z/) || runner_case_id == "__suite__"
+    errors << "#{prefix} runner_case_id must be a safe non-sentinel ID"
+  elsif runner_seen.key?([protocol, runner_case_id])
+    errors << "duplicate runner_case_id for #{protocol}: #{runner_case_id}"
+  else
+    runner_seen[[protocol, runner_case_id]] = id
+  end
   errors << "#{prefix} protocol must be one of #{allowed_protocols.join(', ')}" unless allowed_protocols.include?(protocol)
   endpoint = entry["endpoint"]
   unless endpoint.is_a?(Hash) && allowed_methods.include?(endpoint["method"]) &&
@@ -210,6 +413,9 @@ Array(cases).each_with_index do |entry, index|
          allowed_capability_statuses.include?(capability["status"])
     errors << "#{prefix} capability.status must be one of: #{allowed_capability_statuses.join(', ')}"
   end
+  if capability.is_a?(Hash) && capability["id"].is_a?(String) && !capability_ids.include?(capability["id"])
+    errors << "#{prefix} unknown canonical capability: #{capability["id"]}"
+  end
   expected = entry["expected"]
   unless expected.is_a?(Hash) && expected["status"].is_a?(Integer) && expected["status"].between?(100, 599) &&
          expected["envelope"].is_a?(String) && expected["envelope"].match?(/\A[A-Za-z0-9_.-]+\z/)
@@ -223,6 +429,14 @@ Array(cases).each_with_index do |entry, index|
   unless reference.is_a?(Hash) && reference["service"].is_a?(String) && !reference["service"].empty? &&
          reference["version"].is_a?(String) && !reference["version"].empty?
     errors << "#{prefix} reference must contain service and version"
+  else
+    canonical = canonical_references[protocol]
+    if !canonical.is_a?(Hash) || !canonical["tag"].is_a?(String) || canonical["tag"].empty?
+      errors << "#{prefix} has no canonical reference pin for #{protocol}"
+    else
+      errors << "#{prefix} reference service drift: expected #{protocol}, got #{reference["service"]}" unless reference["service"] == protocol
+      errors << "#{prefix} reference version drift: expected #{canonical["tag"]}, got #{reference["version"]}" unless reference["version"] == canonical["tag"]
+    end
   end
   evidence = entry["evidence"]
   errors << "#{prefix} evidence must contain boolean retain" unless evidence.is_a?(Hash) && [true, false].include?(evidence["retain"])
@@ -234,9 +448,10 @@ Array(cases).each_with_index do |entry, index|
       errors << "#{prefix} evidence.path does not exist in the repository: #{evidence_path}"
     end
   end
-  validate_unsupported_allowlist.call(entry["unsupported_features"], prefix)
-  validate_unsupported_allowlist.call(entry["unsupported_feature_allowlist"], prefix)
-  validate_unsupported_allowlist.call(capability["unsupported_features"], "#{prefix} capability") if capability.is_a?(Hash)
+  expected_capability = capability.is_a?(Hash) ? capability["id"] : nil
+  validate_unsupported_allowlist.call(entry["unsupported_features"], prefix, expected_capability)
+  validate_unsupported_allowlist.call(entry["unsupported_feature_allowlist"], prefix, expected_capability)
+  validate_unsupported_allowlist.call(capability["unsupported_features"], "#{prefix} capability", expected_capability) if capability.is_a?(Hash)
   validated << entry if missing.empty? && safe_id && allowed_protocols.include?(protocol)
 end
 
@@ -245,18 +460,44 @@ unless errors.empty?
   exit 2
 end
 
-selected = validated.select do |entry|
+manifest_filtered = validated.select do |entry|
   (protocol_filter.empty? || entry["protocol"] == protocol_filter) &&
     (case_filter.empty? || entry["id"] == case_filter)
+end
+if case_filter == "__suite__"
+  errors << "case selector __suite__ is a reserved suite sentinel"
+elsif !case_filter.empty? && manifest_filtered.empty?
+  errors << "unknown manifest case selector: #{case_filter}"
+end
+unless errors.empty?
+  errors.each { |error| warn "ERROR: #{error}" }
+  exit 2
+end
+filtered = manifest_filtered
+selected = if shard_index.empty?
+  filtered
+else
+  filtered.each_with_index.select { |_entry, index| (index % shard_count.to_i) == shard_index.to_i }.map(&:first)
 end
 if selected.empty?
   filters = []
   filters << "protocol=#{protocol_filter}" unless protocol_filter.empty?
   filters << "case=#{case_filter}" unless case_filter.empty?
+  filters << "shard=#{shard_index}/#{shard_count}" unless shard_index.empty?
   warn "ERROR: no cases selected#{filters.empty? ? '' : " (#{filters.join(', ')})"}"
   exit 2
 end
-STDOUT.write(JSON.generate("version" => document["version"], "cases" => selected))
+selection = {
+  "protocol" => (protocol_filter.empty? ? nil : protocol_filter),
+  "case" => (case_filter.empty? ? nil : case_filter),
+  "shard_index" => (shard_index.empty? ? nil : shard_index.to_i),
+  "shard_count" => (shard_count.empty? ? nil : shard_count.to_i),
+  "filtered_case_count" => filtered.length,
+  "selected_case_count" => selected.length,
+  "selected_case_ids" => selected.map { |entry| entry.fetch("id") },
+  "selected_runner_case_ids" => selected.map { |entry| entry["runner_case_id"] }
+}
+STDOUT.write(JSON.generate("version" => document["version"], "selection" => selection, "cases" => selected))
 RUBY
 then
 	exit 2
@@ -265,29 +506,49 @@ fi
 write_json() {
 	local destination=$1
 	local json=$2
-	printf '%s' "$json" | ruby -rjson -e '
-destination = ARGV.fetch(0)
-object = JSON.parse(STDIN.read)
-def redact_text(value)
-  value
-    .gsub(/(?i)\bBearer\s+[^\s"'"'"']+/) { "Bearer [REDACTED]" }
-    .gsub(/(?i)(["'"'"']?\b(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret)\b["'"'"']?\s*[:=]\s*)(["'"'"']?)([^"'"'"'",\s}\]]+)\2/) { "#{$1}#{$2}[REDACTED]#{$2}" }
-end
-def redact(value, key = nil)
-  if key && key.to_s.match?(/(?:token|password|passwd|secret)/i)
-    "[REDACTED]"
-  elsif value.is_a?(Hash)
-    value.each_with_object({}) { |(k, v), result| result[k] = redact(v, k) }
-  elsif value.is_a?(Array)
-    value.map { |v| redact(v) }
-  elsif value.is_a?(String)
-    redact_text(value)
-  else
-    value
-  end
-end
-File.open(destination, "w") { |file| file.write(JSON.pretty_generate(redact(object)) + "\n") }
-' "$destination"
+	python3 - "$destination" "$json" <<'PY'
+import json
+import re
+import sys
+
+destination, serialized = sys.argv[1:]
+object = json.loads(serialized)
+secret_key = re.compile(
+    r"(?:authorization|proxy[_-]?authorization|token|password|passwd|secret|api[_-]?key|apikey|client[_-]?secret|cookie|set-cookie)",
+    re.IGNORECASE,
+)
+bearer = re.compile(r"Bearer\s+[^\s]+", re.IGNORECASE)
+header = re.compile(
+    r"(\b(?:authorization|proxy[_-]?authorization|x-api-key|api-key|cookie|set-cookie)\s*[:=]\s*)[^\r\n]*",
+    re.IGNORECASE,
+)
+query = re.compile(
+    r"([?&](?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|api[_-]?key|apikey|client[_-]?secret|session(?:[_-]?id)?)=)([^&#\s\"']+)",
+    re.IGNORECASE,
+)
+
+
+def redact_text(value):
+    value = bearer.sub("Bearer [REDACTED]", value)
+    value = header.sub(r"\1[REDACTED]", value)
+    return query.sub(r"\1[REDACTED]", value)
+
+
+def redact(value, key=None):
+    if key is not None and secret_key.search(str(key)):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {k: redact(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    if isinstance(value, str):
+        return redact_text(value)
+    return value
+
+
+with open(destination, "w") as file:
+    file.write(json.dumps(redact(object), indent=2) + "\n")
+PY
 }
 
 json_value() {
@@ -341,9 +602,23 @@ mock_payload() {
 ' "$1"
 }
 
+reference_only_payload() {
+	ruby -rjson -e '
+  entry = JSON.parse(ARGV.fetch(0))
+  exclusion = entry.fetch("conformance_exclusion")
+  STDOUT.write(JSON.generate(
+    "case_id" => entry.fetch("id"),
+    "protocol" => entry.fetch("protocol"),
+    "status" => "skipped",
+    "reason" => exclusion.fetch("reason"),
+    "release_evidence" => false
+  ))
+' "$1"
+}
+
 runner_for_protocol() {
 	case "$1" in
-		prometheus) printf '%s\n' 'make test-prom-compat' ;;
+		prometheus) printf '%s\n' 'make test-prom-diff' ;;
 		loki) printf '%s\n' 'make test-loki-diff' ;;
 		tempo) printf '%s\n' 'make test-tempo-diff' ;;
 		*) return 1 ;;
@@ -361,6 +636,11 @@ classify_failure() {
 	fi
 }
 
+is_retryable_readiness_failure() {
+	local output=$1
+	printf '%s' "$output" | ruby -e 'exit(ARGF.read.match?(/readiness|health check|connection refused|cannot connect to (?:the )?docker daemon|docker daemon is not running|service unavailable|temporarily unavailable|waiting for .* to become ready/i) ? 0 : 1)'
+}
+
 monotonic_seconds() {
 	ruby -e 'printf "%.6f\n", Process.clock_gettime(Process::CLOCK_MONOTONIC)'
 }
@@ -368,11 +648,14 @@ monotonic_seconds() {
 reference_image_for_protocol() {
 	ruby -ryaml - "$REFERENCE_MANIFEST_PATH" "$1" <<'RUBY'
 manifest = YAML.load_file(ARGV.fetch(0))
-reference = manifest.fetch("references").fetch(ARGV.fetch(1))
+protocol = ARGV.fetch(1)
+reference = manifest.fetch("references").fetch(protocol)
 image = reference.fetch("image")
-tag = reference.fetch("tag")
 digest = reference["digest"]
-puts(digest && !digest.empty? ? "#{image}@#{digest}" : "#{image}:#{tag}")
+unless digest.is_a?(String) && digest.match?(/\Asha256:[0-9a-f]{64}\z/)
+  abort "#{protocol.capitalize} reference must use an immutable sha256 digest"
+end
+puts("#{image}@#{digest}")
 RUBY
 }
 
@@ -384,6 +667,8 @@ def redact_text(value)
   value
     .gsub(/(?i)\bBearer\s+[^\s"']+/) { "Bearer [REDACTED]" }
     .gsub(/(?i)(["']?\b(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret)\b["']?\s*[:=]\s*)(["']?)([^"'\s},\]]+)\2/) { "#{$1}#{$2}[REDACTED]#{$2}" }
+    .gsub(/(?i)(\b(?:authorization|proxy[_-]?authorization|x-api-key|api-key|cookie|set-cookie)\s*[:=]\s*)[^\r\n]*/) { "#{$1}[REDACTED]" }
+    .gsub(/(?i)([?&](?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|api[_-]?key|apikey|client[_-]?secret|session(?:[_-]?id)?)=)([^&#\s"']+)/) { "#{$1}[REDACTED]" }
 end
 File.open(ARGV.fetch(1), "w") { |file| file.write(redact_text(File.read(ARGV.fetch(0)))) }
 RUBY
@@ -393,6 +678,15 @@ copy_redacted_artifact() {
 	local source=$1
 	local destination=$2
 	mkdir -p "$(dirname "$destination")"
+	if ! ruby - "$source" <<'RUBY'
+bytes = File.binread(ARGV.fetch(0))
+text = bytes.force_encoding(Encoding::UTF_8)
+abort "binary artifact" if bytes.include?("\x00") || !text.valid_encoding?
+RUBY
+	then
+		echo "ERROR: refusing to copy unexpected binary artifact: $source" >&2
+		return 2
+	fi
 	if [ "${source##*.}" = json ]; then
 		write_json "$destination" "$(cat "$source")"
 	else
@@ -451,6 +745,8 @@ reference = case_document.fetch("reference")
 STDOUT.write(JSON.generate(
   "case_id" => case_document.fetch("id"),
   "protocol" => protocol,
+  "runner_case_id" => case_document["runner_case_id"],
+  "tenant_isolation_evidence" => case_document["tenant_isolation_evidence"],
   "endpoint" => { "method" => endpoint.fetch("method"), "path" => endpoint.fetch("path") },
   "canonical_request_json" => canonical_request,
   "canonical_request_json_text" => canonical_request_json,
@@ -482,8 +778,8 @@ STDOUT.write(JSON.generate(
 ))
 RUBY
 	)
-	if [ "${COMPAT_DRIFT_MODE:-}" = drift ]; then
-		provenance_json=$(ruby -rjson -e 'value = JSON.parse(STDIN.read); value["release_evidence"] = false; puts JSON.generate(value)' <<<"$provenance_json")
+	if [ "${COMPAT_DRIFT_MODE:-}" != real ]; then
+		provenance_json=$(ruby -rjson -e 'value = JSON.parse(STDIN.read); value["release_evidence"] = false; value["validation_only"] = true; puts JSON.generate(value)' <<<"$provenance_json")
 	fi
 	write_json "$case_dir/case_provenance.json" "$provenance_json"
 }
@@ -525,6 +821,8 @@ expected_fingerprint = Digest::SHA256.hexdigest(canonical_request_json)
 errors = []
 errors << "case_id" unless provenance["case_id"] == case_document["id"]
 errors << "protocol" unless provenance["protocol"] == case_document["protocol"]
+errors << "runner_case_id" unless provenance["runner_case_id"] == case_document["runner_case_id"]
+errors << "tenant_isolation_evidence" unless provenance["tenant_isolation_evidence"] == case_document["tenant_isolation_evidence"]
 errors << "canonical_request_json" unless provenance["canonical_request_json"] == canonical_request
 errors << "canonical_request_json_text" unless provenance["canonical_request_json_text"] == canonical_request_json
 errors << "request_fingerprint" unless provenance["request_fingerprint"] == expected_fingerprint
@@ -584,12 +882,18 @@ end
 selected_cases = selected_document.fetch("cases")
 expected_case_ids = selected_cases.map { |entry| entry.fetch("id") }
 expected_fixture_ids = selected_cases.map { |entry| entry.fetch("fixture").fetch("id") }
+expected_runner_case_ids = selected_cases.map { |entry| entry.fetch("runner_case_id") }
 errors = []
 mismatch(errors, "run_id", receipt["run_id"], expected_run_id)
 mismatch(errors, "protocol", receipt["protocol"], protocol)
 mismatch(errors, "status", receipt["status"], expected_runner_status)
 mismatch(errors, "selected_case_ids", receipt["selected_case_ids"], expected_case_ids)
 mismatch(errors, "selected_fixture_ids", receipt["selected_fixture_ids"], expected_fixture_ids)
+receipt_runner_case_ids = receipt["selected_runner_case_ids"]
+if receipt_runner_case_ids.nil?
+  receipt_runner_case_ids = Array(receipt["cases"]).map { |record| record.is_a?(Hash) ? (record["runner_case_id"] || record["source_id"]) : nil }
+end
+mismatch(errors, "selected_runner_case_ids", receipt_runner_case_ids, expected_runner_case_ids)
 
 executed_case_ids = receipt["executed_case_ids"]
 executed_fixture_ids = receipt["executed_fixture_ids"]
@@ -630,6 +934,7 @@ selected_cases.each_with_index do |entry, index|
   end
   case_id = entry.fetch("id")
   fixture_id = entry.fetch("fixture").fetch("id")
+  runner_case_id = entry.fetch("runner_case_id")
   endpoint = entry.fetch("endpoint")
   params = entry.fetch("request").fetch("params")
   expected_request = canonical(
@@ -640,6 +945,8 @@ selected_cases.each_with_index do |entry, index|
   expected_text = JSON.generate(expected_request)
   expected_fingerprint = Digest::SHA256.hexdigest(expected_text)
   mismatch(errors, "case_#{index}_case_id", record["case_id"], case_id)
+  mismatch(errors, "case_#{index}_runner_case_id", record["runner_case_id"] || record["source_id"], runner_case_id)
+  mismatch(errors, "case_#{index}_tenant_isolation_evidence", record["tenant_isolation_evidence"], entry["tenant_isolation_evidence"])
   mismatch(errors, "case_#{index}_fixture_id", record["fixture_id"], fixture_id)
   mismatch(errors, "case_#{index}_canonical_request", record["canonical_request"], expected_request)
   mismatch(errors, "case_#{index}_canonical_text", record["canonical_text"], expected_text)
@@ -708,7 +1015,7 @@ self_check_receipt() {
 	local receipt_path="$self_dir/execution-receipt.json"
 	local validation
 	mkdir -p "$self_dir"
-	write_json "$self_dir/selected.json" '{"version":"compat.v0","cases":[{"id":"receipt-case-a","endpoint":{"method":"GET","path":"/api/v1/query"},"request":{"params":{"query":"up"}},"fixture":{"id":"fixture-a"}},{"id":"receipt-case-b","endpoint":{"method":"GET","path":"/api/v1/labels"},"request":{"params":{}},"fixture":{"id":"fixture-b"}}]}'
+	write_json "$self_dir/selected.json" '{"version":"compat.v0","cases":[{"id":"receipt-case-a","runner_case_id":"runner-a","endpoint":{"method":"GET","path":"/api/v1/query"},"request":{"params":{"query":"up"}},"fixture":{"id":"fixture-a"}},{"id":"receipt-case-b","runner_case_id":"runner-b","endpoint":{"method":"GET","path":"/api/v1/labels"},"request":{"params":{}},"fixture":{"id":"fixture-b"}}]}'
 	ruby -rjson -rdigest - "$self_dir/selected.json" "$receipt_path" <<'RUBY'
 selected_path, receipt_path = ARGV
 selected = JSON.parse(File.read(selected_path))
@@ -729,6 +1036,7 @@ records = selected.fetch("cases").map do |entry|
   fingerprint = Digest::SHA256.hexdigest(text)
   {
     "case_id" => entry.fetch("id"),
+    "runner_case_id" => entry.fetch("runner_case_id"),
     "source_id" => entry.fetch("id"),
     "fixture_id" => entry.fetch("fixture").fetch("id"),
     "canonical_request" => request,
@@ -744,6 +1052,7 @@ File.write(receipt_path, JSON.generate(
   "run_id" => "receipt-self-check-run",
   "protocol" => "prometheus",
   "selected_case_ids" => selected.fetch("cases").map { |entry| entry.fetch("id") },
+  "selected_runner_case_ids" => selected.fetch("cases").map { |entry| entry.fetch("runner_case_id") },
   "executed_case_ids" => selected.fetch("cases").map { |entry| entry.fetch("id") },
   "selected_fixture_ids" => selected.fetch("cases").map { |entry| entry.fetch("fixture").fetch("id") },
   "executed_fixture_ids" => selected.fetch("cases").map { |entry| entry.fetch("fixture").fetch("id") },
@@ -773,10 +1082,11 @@ RUBY
 case_artifact_dir() {
 	local protocol=$1
 	local case_id=$2
+	local runner_case_id=${3:-$case_id}
 	local candidate
 	for candidate in \
-		"$RUN_ARTIFACT_DIR/$protocol/$case_id" \
-		"$RUN_ARTIFACT_DIR/$case_id"; do
+		"$RUN_ARTIFACT_DIR/$protocol/$runner_case_id" \
+		"$RUN_ARTIFACT_DIR/$runner_case_id"; do
 		if [ -d "$candidate" ]; then
 			printf '%s\n' "$candidate"
 			return 0
@@ -871,12 +1181,15 @@ ingest_case_artifacts() {
 	local protocol=$1
 	local case_id=$2
 	local case_dir=$3
+	local case_json=$case_dir/case.json
 	local source_dir
+	local runner_case_id
 	ARTIFACT_COUNT=0
 	EVIDENCE_SCOPE=none
 	EVIDENCE_SOURCE=
 
-	source_dir=$(case_artifact_dir "$protocol" "$case_id" 2>/dev/null || true)
+	runner_case_id=$(json_value 'object.fetch("runner_case_id")' "$(cat "$case_json")" | tr -d '"' 2>/dev/null || printf '%s' "$case_id")
+	source_dir=$(case_artifact_dir "$protocol" "$case_id" "$runner_case_id" 2>/dev/null || true)
 	if [ -n "$source_dir" ] && ingest_from_source "$source_dir" "$case_dir"; then
 		EVIDENCE_SCOPE=case
 		EVIDENCE_SOURCE=$source_dir
@@ -914,11 +1227,7 @@ def path_for_key(path, key)
 end
 
 def approved_path?(path, allowlist)
-  allowlist.any? do |entry|
-    entry == "*" || entry == path ||
-      (entry.end_with?(".*") && path.start_with?(entry[0...-1])) ||
-      path.start_with?(entry + ".") || path.start_with?(entry + "[")
-  end
+  allowlist.include?(path)
 end
 
 def collect_differences(left, right, path, allowlist, differences)
@@ -948,13 +1257,97 @@ puts JSON.generate(
   "differences" => differences,
   "approved_differences" => differences.count { |difference| difference["approved"] },
   "unapproved_differences" => unapproved.length,
-  "release_evidence" => (ENV["COMPAT_DRIFT_MODE"] == "drift" ? false : true)
+  "classification" => (unapproved.empty? ? "pass" : "product_regression"),
+  "release_evidence" => (ENV["COMPAT_DRIFT_MODE"] == "real" && unapproved.empty?),
+  "validation_only" => (ENV["COMPAT_DRIFT_MODE"] != "real")
 )
 RUBY
 	)
 	equal=$(printf '%s' "$diff_json" | ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("equal")')
 	write_json "$case_dir/diff.json" "$diff_json"
 	[ "$equal" = true ]
+}
+
+canonicalize_case_artifacts() {
+	local case_dir=$1
+	local mode=$2
+	ruby -rjson -rdigest - "$case_dir" "$mode" <<'RUBY'
+case_dir, mode = ARGV
+case_path = File.join(case_dir, "case.json")
+manifest_case = JSON.parse(File.read(case_path))
+outcome_path = File.join(case_dir, "outcome.json")
+outcome = JSON.parse(File.read(outcome_path))
+endpoint = manifest_case.fetch("endpoint")
+request = manifest_case.fetch("request")
+canonical = lambda do |value|
+  case value
+  when Hash
+    value.keys.map(&:to_s).sort.each_with_object({}) { |key, result| result[key] = canonical.call(value[key]) }
+  when Array
+    value.map { |item| canonical.call(item) }
+  else
+    value
+  end
+end
+canonical_request = canonical.call(
+  "method" => endpoint.fetch("method"),
+  "path" => endpoint.fetch("path"),
+  "params" => request.fetch("params", {})
+)
+fingerprint = Digest::SHA256.hexdigest(JSON.generate(canonical_request))
+release = mode == "real" &&
+  outcome.fetch("status") == "pass" &&
+  outcome.fetch("evidence_scope", "none") == "case" &&
+  outcome.fetch("artifact_count", 0) == 4 &&
+  outcome.fetch("provenance_status", "") == "pass" &&
+  outcome.fetch("execution_receipt_status", "") == "pass"
+meta = {
+  "run_id" => ENV.fetch("RUN_ID"),
+  "case_id" => manifest_case.fetch("id"),
+  "protocol" => manifest_case.fetch("protocol"),
+  "fixture_id" => manifest_case.fetch("fixture").fetch("id"),
+  "runner_case_id" => manifest_case.fetch("runner_case_id"),
+  "tenant_isolation_evidence" => manifest_case["tenant_isolation_evidence"],
+  "request_fingerprint" => fingerprint,
+  "fingerprint_algorithm" => "SHA-256",
+  "release_evidence" => release,
+  "validation_only" => (mode != "real")
+}
+case_document = meta.merge(
+  "schema_version" => "compat-case.v1",
+  "endpoint" => endpoint,
+  "request" => request,
+  "canonical_request" => canonical_request,
+  "capability" => manifest_case.fetch("capability"),
+  "expected" => manifest_case.fetch("expected"),
+  "normalization" => manifest_case.fetch("normalization"),
+  "reference" => manifest_case.fetch("reference"),
+  "fixture" => manifest_case.fetch("fixture")
+)
+File.write(case_path, JSON.pretty_generate(case_document) + "\n")
+
+def read_json(path)
+  JSON.parse(File.read(path))
+end
+
+def write_json(path, value)
+  File.write(path, JSON.pretty_generate(value) + "\n")
+end
+
+%w[request.raw.json request.normalized.json softprobe.raw.json softprobe.normalized.json reference.raw.json reference.normalized.json diff.json].each do |name|
+  path = File.join(case_dir, name)
+  payload = read_json(path)
+  artifact = meta.merge("schema_version" => "compat-case-artifact.v1", "artifact_kind" => name.delete_suffix(".json"), "payload" => payload)
+  artifact["classification"] = payload.fetch("classification") if name == "diff.json"
+  write_json(path, artifact)
+end
+
+provenance_path = File.join(case_dir, "case_provenance.json")
+provenance = read_json(provenance_path)
+write_json(provenance_path, provenance.merge(meta).merge("schema_version" => "compat-case-provenance.v1"))
+
+write_json(outcome_path, outcome.merge(meta).merge("schema_version" => "compat-case-outcome.v1"))
+RUBY
 }
 
 copy_artifact_tree() {
@@ -984,7 +1377,7 @@ run_protocol_target() {
 				"PROMETHEUS_DIFF_NORMALIZED_ARTIFACT=$artifact_dir/normalized.json"
 			)
 			if [ "$DRIFT" = true ]; then
-				protocol_env+=("PROMETHEUS_REFERENCE_IMAGE=$DRIFT_CANDIDATE_IMAGE:$DRIFT_CANDIDATE_VERSION")
+				protocol_env+=("PROMETHEUS_REFERENCE_IMAGE=$DRIFT_CANDIDATE_REFERENCE")
 			fi
 			;;
 		loki)
@@ -995,8 +1388,11 @@ run_protocol_target() {
 				"LOKI_DIFF_RAW_ARTIFACT=$artifact_dir/raw.json"
 				"LOKI_DIFF_NORMALIZED_ARTIFACT=$artifact_dir/normalized.json"
 			)
+			if [ "$DRIFT" = true ]; then
+				protocol_env+=("LOKI_REFERENCE_IMAGE=$DRIFT_CANDIDATE_REFERENCE")
+			fi
 			;;
-			tempo)
+		tempo)
 			protocol_env=(
 				"TEMPO_DIFF_ARTIFACT_DIR=$artifact_dir"
 				"TEMPO_RAW_ARTIFACT=$artifact_dir/raw.json"
@@ -1004,6 +1400,9 @@ run_protocol_target() {
 				"TEMPO_DIFF_RAW_ARTIFACT=$artifact_dir/raw.json"
 				"TEMPO_DIFF_NORMALIZED_ARTIFACT=$artifact_dir/normalized.json"
 			)
+			if [ "$DRIFT" = true ]; then
+				protocol_env+=("TEMPO_REFERENCE_IMAGE=$DRIFT_CANDIDATE_REFERENCE")
+			fi
 			;;
 		*) return 2 ;;
 	esac
@@ -1011,14 +1410,13 @@ run_protocol_target() {
 		cd "$ROOT_DIR"
 		env "${protocol_env[@]}" \
 			"SOFTPROBE_COMPAT_ARTIFACT_DIR=$artifact_dir" \
-			COMPAT_CASE_ID=__suite__ \
 			"COMPAT_PROTOCOL=$protocol" \
 			"COMPAT_CASE_JSON=$selected_cases" \
-			"COMPAT_CASE_IDS=$(ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0))).fetch(\"cases\").map { |entry| entry.fetch(\"id\") }.join(\",\")' \"$selected_cases\")" \
+			"COMPAT_CASE_IDS=$(ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0))).fetch(\"cases\").select { |entry| entry[\"runner_case_id\"].is_a?(String) }.map { |entry| entry[\"runner_case_id\"] }.join(\",\")' \"$selected_cases\")" \
 			"COMPAT_CONFORMANCE_OUT=$artifact_dir" \
 			"COMPAT_RUN_ID=$RUN_ID" \
 			COMPAT_RUN_SCOPE=suite \
-			bash -c "$command"
+			"$ROOT_DIR/scripts/compat/run-with-timeout" "$PROTOCOL_TIMEOUT_SECS" bash -c "$command"
 	)
 }
 
@@ -1044,9 +1442,9 @@ self_check_drift() {
 		fi
 		write_json "$case_dir/case_provenance.json" "$(printf '{\"mode\":\"drift\",\"protocol\":\"%s\",\"baseline\":\"%s\",\"candidate\":\"%s\",\"release_evidence\":false}' "$protocol" "$baseline" "$candidate")"
 		if [ "$protocol" = prometheus ]; then
-			write_json "$case_dir/outcome.json" "$(printf '{\"mode\":\"drift\",\"status\":\"drift\",\"classification\":\"drift\",\"review_status\":\"needs_review\",\"reference_image\":\"%s\",\"baseline\":{\"image\":\"%s\"},\"candidate\":{\"image\":\"%s\"},\"release_evidence\":false}' "$candidate" "$baseline" "$candidate")"
+			write_json "$case_dir/outcome.json" "$(printf '{\"mode\":\"drift\",\"status\":\"drift\",\"classification\":\"drift\",\"review_status\":\"needs_review\",\"reference_image\":\"%s\",\"baseline\":{\"image\":\"%s\"},\"candidate\":{\"image\":\"%s\",\"version\":\"%s\",\"digest\":\"%s\"},\"release_evidence\":false}' "$candidate" "$baseline" "$candidate" "$DRIFT_CANDIDATE_VERSION" "$DRIFT_CANDIDATE_DIGEST")"
 		else
-			write_json "$case_dir/outcome.json" "$(printf '{\"mode\":\"drift\",\"status\":\"drift\",\"classification\":\"drift\",\"review_status\":\"needs_review\",\"baseline\":{\"image\":\"%s\"},\"candidate\":{\"image\":\"%s\"},\"release_evidence\":false}' "$baseline" "$candidate")"
+			write_json "$case_dir/outcome.json" "$(printf '{\"mode\":\"drift\",\"status\":\"drift\",\"classification\":\"drift\",\"review_status\":\"needs_review\",\"baseline\":{\"image\":\"%s\"},\"candidate\":{\"image\":\"%s\",\"version\":\"%s\",\"digest\":\"%s\"},\"release_evidence\":false}' "$baseline" "$candidate" "$DRIFT_CANDIDATE_VERSION" "$DRIFT_CANDIDATE_DIGEST")"
 		fi
 done <<EOF
 prometheus|$(reference_image_for_protocol prometheus)|prom/prometheus:v2.55.0
@@ -1095,6 +1493,7 @@ mkdir -p "$OUT_PATH"
 : >"$OUT_PATH/report.jsonl"
 mode=$([ "$MOCK" = true ] && printf mock || { [ "$DRIFT" = true ] && printf drift || printf real; })
 export COMPAT_DRIFT_MODE="$mode"
+export RUN_ID
 mkdir -p "$TMP_DIR/durations"
 if [ "$MOCK" = true ]; then
 	cat >"$OUT_PATH/NOTICE.txt" <<'EOF'
@@ -1115,7 +1514,7 @@ environment_skips=0
 	echo "- Run ID: $RUN_ID"
 	echo "- Mode: $mode"
 	if [ "$DRIFT" = true ]; then
-		echo "- Candidate: $DRIFT_CANDIDATE_IMAGE:$DRIFT_CANDIDATE_VERSION"
+		echo "- Candidate: $DRIFT_CANDIDATE_REFERENCE (version $DRIFT_CANDIDATE_VERSION)"
 		echo "- Baseline: $DRIFT_BASELINE_IMAGE:$DRIFT_BASELINE_VERSION"
 		echo "- Classification: semantic differences are drift; review_status=needs_review"
 	fi
@@ -1136,33 +1535,44 @@ if [ "$MOCK" != true ]; then
 		if [ -z "$runner_command" ]; then
 			runner_command=$(runner_for_protocol "$protocol" || true)
 		fi
-		if [ "$DRIFT" = true ] && [ "$protocol" != prometheus ]; then
-			runner_command="unsupported: $protocol candidate reference override is not supported by the repository runner; reference is compile-time manifest data"
-		fi
 		printf '%s\n' "$runner_command" >"$suite_dir/command.txt"
-		protocol_cases="$TMP_DIR/$protocol.selected.json"
-		ruby -rjson -e '
+			protocol_cases="$TMP_DIR/$protocol.selected.json"
+			ruby -rjson -e '
   document = JSON.parse(File.read(ARGV.fetch(0)))
   protocol = ARGV.fetch(1)
-  selected = document.fetch("cases").select { |entry| entry.fetch("protocol") == protocol }
+  selected = document.fetch("cases").select { |entry| entry.fetch("protocol") == protocol && entry["runner_case_id"].is_a?(String) }
   STDOUT.write(JSON.generate("version" => document.fetch("version"), "cases" => selected))
 ' "$TMP_DIR/selected.json" "$protocol" >"$protocol_cases"
-		stdout_file="$TMP_DIR/$protocol.stdout"
-		stderr_file="$TMP_DIR/$protocol.stderr"
+			runner_case_count=$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("cases").length' "$protocol_cases")
+			stdout_file="$TMP_DIR/$protocol.stdout"
+			stderr_file="$TMP_DIR/$protocol.stderr"
 		runner_exit_code=127
-		runner_started=$(monotonic_seconds)
-		if [ "$DRIFT" = true ] && [ "$protocol" != prometheus ]; then
-			: >"$stdout_file"
-			printf '%s\n' "$runner_command" >"$stderr_file"
-			runner_exit_code=125
-			protocol_status=infrastructure_failure
-			write_json "$suite_dir/configuration_failure.json" "$(printf '{\"classification\":\"infrastructure_failure\",\"reason\":\"candidate_reference_override_unsupported\",\"protocol\":\"%s\",\"candidate_image\":\"%s\",\"candidate_version\":\"%s\",\"release_evidence\":false}' "$protocol" "$DRIFT_CANDIDATE_IMAGE" "$DRIFT_CANDIDATE_VERSION")"
-		elif [ -n "$runner_command" ]; then
-			set +e
-			run_protocol_target "$protocol" "$RUN_ARTIFACT_DIR" "$protocol_cases" "$runner_command" \
-				>"$stdout_file" 2>"$stderr_file"
-			runner_exit_code=$?
-			set -e
+			runner_started=$(monotonic_seconds)
+			if [ "$runner_case_count" -eq 0 ]; then
+				runner_command="reference-only selection; no differential runner invoked"
+				runner_exit_code=0
+				printf '%s\n' 'reference-only selection has no executable runner cases' >"$stderr_file"
+				: >"$stdout_file"
+			elif [ -n "$runner_command" ]; then
+			runner_attempt=1
+			while :; do
+				: >"$stdout_file"
+				: >"$stderr_file"
+				set +e
+				run_protocol_target "$protocol" "$RUN_ARTIFACT_DIR" "$protocol_cases" "$runner_command" \
+					>"$stdout_file" 2>"$stderr_file"
+				runner_exit_code=$?
+				set -e
+				if [ "$runner_exit_code" -eq 0 ] || [ "$runner_attempt" -ge "$RUNNER_MAX_ATTEMPTS" ]; then
+					break
+				fi
+				attempt_output=$(cat "$stdout_file" "$stderr_file")
+				if ! is_retryable_readiness_failure "$attempt_output"; then
+					break
+				fi
+				runner_attempt=$((runner_attempt + 1))
+				sleep "$RUNNER_RETRY_DELAY_SECS"
+			done
 		else
 			printf '%s\n' "no differential target configured for protocol $protocol" >"$stderr_file"
 			: >"$stdout_file"
@@ -1185,21 +1595,27 @@ if [ "$MOCK" != true ]; then
 		fi
 		receipt_validation_status=not_applicable
 		receipt_validation_reason=drift_mode
-		if [ "$DRIFT" != true ]; then
-			expected_receipt_status=$([ "$runner_exit_code" -eq 0 ] && printf '%s' pass || printf '%s' failure)
-			receipt_validation=$(validate_execution_receipt \
-				"$RUN_ARTIFACT_DIR/execution-receipt.json" "$protocol_cases" "$protocol" "$RUN_ID" "$expected_receipt_status")
-			receipt_validation_status=${receipt_validation%%|*}
-			receipt_validation_reason=${receipt_validation#*|}
-			if [ "$receipt_validation_status" != pass ] && [ "$protocol_status" = pass ]; then
-				protocol_status=$receipt_validation_status
-			fi
+		if [ "$DRIFT" != true ] && [ "$runner_case_count" -gt 0 ]; then
+				expected_receipt_status=$([ "$runner_exit_code" -eq 0 ] && printf '%s' pass || printf '%s' failure)
+				receipt_validation=$(validate_execution_receipt \
+					"$RUN_ARTIFACT_DIR/execution-receipt.json" "$protocol_cases" "$protocol" "$RUN_ID" "$expected_receipt_status")
+				receipt_validation_status=${receipt_validation%%|*}
+				receipt_validation_reason=${receipt_validation#*|}
+				if [ "$receipt_validation_status" != pass ] && [ "$protocol_status" = pass ]; then
+					protocol_status=$receipt_validation_status
+				fi
+		elif [ "$DRIFT" = true ]; then
+			receipt_validation_status=not_applicable
+			receipt_validation_reason=drift_mode
+		else
+			receipt_validation_status=not_applicable
+			receipt_validation_reason=reference_only_selection
 		fi
 		redact_file "$stdout_file" "$suite_dir/runner.stdout"
 		redact_file "$stderr_file" "$suite_dir/runner.stderr"
 		candidate_reference_image=
-		if [ "$DRIFT" = true ] && [ "$protocol" = prometheus ]; then
-			candidate_reference_image="$DRIFT_CANDIDATE_IMAGE:$DRIFT_CANDIDATE_VERSION"
+		if [ "$DRIFT" = true ]; then
+			candidate_reference_image="$DRIFT_CANDIDATE_REFERENCE"
 		fi
 		suite_outcome=$(ruby -rjson -e '
   puts JSON.generate(
@@ -1214,8 +1630,13 @@ if [ "$MOCK" != true ]; then
 	    "mode" => ARGV[7],
 	    "classification" => (ARGV[2] == "drift" ? "drift" : ARGV[2]),
 	    "review_status" => (ARGV[2] == "drift" ? "needs_review" : "not_required"),
-	    "release_evidence" => (ARGV[7] == "drift" ? false : true),
+		    "release_evidence" => (ARGV[7] == "real" && ARGV[2] == "pass" && ARGV[9] == "pass"),
+		    "validation_only" => (ARGV[7] != "real"),
 	    "reference_image" => (ARGV[8].empty? ? nil : ARGV[8]),
+	    "candidate" => (ARGV[7] == "drift" ? {
+	      "image" => ARGV[8], "version" => ENV.fetch("DRIFT_CANDIDATE_VERSION"),
+	      "digest" => ENV.fetch("DRIFT_CANDIDATE_DIGEST")
+	    } : nil),
 	    "execution_receipt_path" => (ARGV[9] == "not_applicable" ? nil : "execution-receipt.json"),
 	    "execution_receipt_status" => ARGV[9],
 	    "execution_receipt_reason" => ARGV[10]
@@ -1247,9 +1668,11 @@ while IFS= read -r case_id; do
 	reference_version=$(printf '%s' "$reference_version" | tr -d '"')
 	reference_image=$(reference_image_for_protocol "$protocol")
 	if [ "$DRIFT" = true ]; then
-		reference_image="$DRIFT_CANDIDATE_IMAGE"
+		reference_image="$DRIFT_CANDIDATE_REFERENCE"
 		reference_version="$DRIFT_CANDIDATE_VERSION"
-		case_json=$(ruby -rjson -e 'value = JSON.parse(STDIN.read); value["release_evidence"] = false; puts JSON.generate(value)' <<<"$case_json")
+	fi
+	if [ "$mode" != real ]; then
+		case_json=$(ruby -rjson -e 'value = JSON.parse(STDIN.read); value["release_evidence"] = false; value["validation_only"] = true; puts JSON.generate(value)' <<<"$case_json")
 	fi
 	case_dir="$OUT_PATH/$case_id"
 	mkdir -p "$case_dir"
@@ -1266,15 +1689,26 @@ while IFS= read -r case_id; do
 	artifact_count=0
 	evidence_scope=none
 	evidence_source=
-	receipt_validation_status=not_applicable
-	receipt_validation_reason=mock_mode
-	if [ "$MOCK" = true ]; then
+		receipt_validation_status=not_applicable
+		receipt_validation_reason=mock_mode
+		runner_case_id=$(json_value 'object["runner_case_id"]' "$case_json")
+		if [ "$runner_case_id" = null ]; then
+			status=skipped
+			reason=conformance_exclusion
+			payload=$(reference_only_payload "$case_json")
+			write_json "$case_dir/softprobe.raw.json" "$payload"
+			write_json "$case_dir/softprobe.normalized.json" "$payload"
+			write_json "$case_dir/reference.raw.json" "$payload"
+			write_json "$case_dir/reference.normalized.json" "$payload"
+			diff_json='{"equal":true,"differences":[],"classification":"skipped","release_evidence":false}'
+			write_json "$case_dir/diff.json" "$diff_json"
+		elif [ "$MOCK" = true ]; then
 		payload=$(mock_payload "$case_json")
 		write_json "$case_dir/softprobe.raw.json" "$payload"
 		write_json "$case_dir/softprobe.normalized.json" "$payload"
 		write_json "$case_dir/reference.raw.json" "$payload"
 		write_json "$case_dir/reference.normalized.json" "$payload"
-		diff_json='{"equal":true,"differences":[]}'
+		diff_json='{"equal":true,"differences":[],"classification":"pass","release_evidence":false}'
 		write_json "$case_dir/diff.json" "$diff_json"
 	else
 		RUN_ARTIFACT_DIR="$OUT_PATH/.differential/$protocol/$RUN_ID"
@@ -1337,8 +1771,14 @@ while IFS= read -r case_id; do
 		review_status=needs_review
 	fi
 
-	outcome_json=$(ruby -rjson -e '
-  STDOUT.write(JSON.generate("run_id" => ARGV[0], "case_id" => ARGV[1], "protocol" => ARGV[2],
+outcome_json=$(ruby -rjson -e '
+  case_document = JSON.parse(ARGV.fetch(22))
+  endpoint = case_document.fetch("endpoint")
+  request = case_document.fetch("request")
+  release = ARGV[3] == "real" && ARGV[4] == "pass" && ARGV[9] == "case" && Integer(ARGV[8]) == 4 && ARGV[16] == "pass" && ARGV[20] == "pass"
+  STDOUT.write(JSON.generate("run_id" => ARGV[0], "case_id" => ARGV[1],
+                              "runner_case_id" => case_document["runner_case_id"], "protocol" => ARGV[2],
+                              "tenant_isolation_evidence" => case_document["tenant_isolation_evidence"],
                               "mode" => ARGV[3], "status" => ARGV[4], "runner_command" => ARGV[5],
                               "runner_exit_code" => Integer(ARGV[6]), "reason" => ARGV[7],
                               "artifact_count" => Integer(ARGV[8]),
@@ -1347,20 +1787,65 @@ while IFS= read -r case_id; do
 	                              "provenance_status" => ARGV[16], "provenance_reason" => ARGV[17],
 	                              "classification" => ARGV[18], "review_status" => ARGV[19],
 	                              "execution_receipt_status" => ARGV[20], "execution_receipt_reason" => ARGV[21],
-	                              "release_evidence" => (ARGV[3] == "drift" ? false : true),
+                              "release_evidence" => release,
+                              "validation_only" => (ARGV[3] != "real"),
+                              "endpoint" => endpoint,
+                              "query" => request.fetch("params", {})["query"],
+                              "capability" => case_document.fetch("capability"),
+                              "normalization" => case_document.fetch("normalization"),
                               "fixture_id" => ARGV[11], "reference" => {
                                 "service" => ARGV[12], "version" => ARGV[13], "image" => ARGV[14]
-                              }, "runner_duration_seconds" => Float(ARGV[15])))
-' "$RUN_ID" "$case_id" "$protocol" "$mode" "$status" "$runner_command" "$runner_exit_code" "$reason" "$artifact_count" "$evidence_scope" "$evidence_source" "$fixture_id" "$reference_service" "$reference_version" "$reference_image" "$runner_duration" "$provenance_status" "$provenance_reason" "$classification" "$review_status" "$receipt_validation_status" "$receipt_validation_reason")
+                              }, "candidate" => (ARGV[3] == "drift" ? {
+                                "image" => ARGV[14], "version" => ARGV[13],
+                                "digest" => ENV.fetch("DRIFT_CANDIDATE_DIGEST")
+                              } : nil), "runner_duration_seconds" => Float(ARGV[15])))
+' "$RUN_ID" "$case_id" "$protocol" "$mode" "$status" "$runner_command" "$runner_exit_code" "$reason" "$artifact_count" "$evidence_scope" "$evidence_source" "$fixture_id" "$reference_service" "$reference_version" "$reference_image" "$runner_duration" "$provenance_status" "$provenance_reason" "$classification" "$review_status" "$receipt_validation_status" "$receipt_validation_reason" "$case_json")
 	write_json "$case_dir/outcome.json" "$outcome_json"
-	report_line=$(ruby -rjson -e '
-  puts JSON.generate("run_id" => ARGV[0], "case_id" => ARGV[1], "protocol" => ARGV[2],
-                     "fixture_id" => ARGV[3], "status" => ARGV[4], "mode" => ARGV[5],
-                     "reference_version" => ARGV[6], "outcome" => ARGV[7],
-                     "classification" => ARGV[8], "review_status" => ARGV[9],
-                     "release_evidence" => (ARGV[5] == "drift" ? false : true),
-                     "provenance_path" => "case_provenance.json")
-' "$RUN_ID" "$case_id" "$protocol" "$fixture_id" "$status" "$mode" "$reference_version" "$reason" "$classification" "$review_status")
+	canonicalize_case_artifacts "$case_dir" "$mode"
+report_line=$(ruby -rjson -e '
+  case_document = JSON.parse(ARGV.fetch(10))
+  endpoint = case_document.fetch("endpoint")
+  request = case_document.fetch("request")
+  release = ARGV[5] == "real" && ARGV[4] == "pass" && ARGV[15] == "case" && Integer(ARGV[14]) == 4 && ARGV[16] == "pass" && ARGV[17] == "pass"
+  payload = {
+    "run_id" => ARGV[0],
+    "case_id" => ARGV[1],
+    "runner_case_id" => case_document["runner_case_id"],
+    "tenant_isolation_evidence" => case_document["tenant_isolation_evidence"],
+    "protocol" => ARGV[2],
+    "fixture_id" => ARGV[3],
+    "status" => ARGV[4],
+    "mode" => ARGV[5],
+    "reference_version" => ARGV[6],
+    "outcome" => ARGV[7],
+    "classification" => ARGV[8],
+    "review_status" => ARGV[9],
+    "release_evidence" => release,
+    "validation_only" => (ARGV[5] != "real"),
+    "endpoint" => endpoint,
+    "query" => request.fetch("params", {})["query"],
+    "capability" => case_document.fetch("capability"),
+    "normalization" => case_document.fetch("normalization"),
+    "reference" => {
+      "service" => case_document.fetch("reference").fetch("service"),
+      "version" => ARGV[6],
+      "image" => ARGV[11]
+    },
+    "candidate" => (ARGV[5] == "drift" ? {
+      "image" => ARGV[11],
+      "version" => ARGV[6],
+      "digest" => ENV.fetch("DRIFT_CANDIDATE_DIGEST")
+    } : nil),
+    "provenance_path" => "case_provenance.json",
+    "duration_seconds" => Float(ARGV[12]),
+    "runner_duration_seconds" => Float(ARGV[12]),
+    "runner_exit_code" => Integer(ARGV[13]),
+    "artifact_count" => Integer(ARGV[14]),
+    "evidence_scope" => ARGV[15],
+    "provenance_status" => ARGV[16]
+  }
+  puts JSON.generate(payload)
+' "$RUN_ID" "$case_id" "$protocol" "$fixture_id" "$status" "$mode" "$reference_version" "$reason" "$classification" "$review_status" "$case_json" "$reference_image" "$runner_duration" "$runner_exit_code" "$artifact_count" "$evidence_scope" "$provenance_status" "$receipt_validation_status" "$receipt_validation_reason")
 	printf '%s\n' "$report_line" >>"$OUT_PATH/report.jsonl"
 	printf '| %s | %s | %s | %s |\n' "$case_id" "$fixture_id" "$protocol" "$status" >>"$OUT_PATH/summary.md"
 	case_count=$((case_count + 1))
@@ -1373,10 +1858,11 @@ while IFS= read -r case_id; do
 	esac
 done < <(ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0))).fetch("cases").each { |entry| puts entry.fetch("id") }' "$TMP_DIR/selected.json")
 
-write_json "$OUT_PATH/versions.json" "$(ruby -ryaml -rjson - "$TMP_DIR/selected.json" "$TMP_DIR/durations" "$OUT_PATH/suite" "$RUN_ID" "$MANIFEST_PATH" "$mode" "$REFERENCE_MANIFEST_PATH" <<'RUBY'
-selected_path, duration_dir, suite_dir, run_id, manifest_path, mode, reference_manifest_path = ARGV
+write_json "$OUT_PATH/versions.json" "$(ruby -ryaml -rjson - "$TMP_DIR/selected.json" "$TMP_DIR/durations" "$OUT_PATH/suite" "$OUT_PATH" "$RUN_ID" "$MANIFEST_PATH" "$mode" "$REFERENCE_MANIFEST_PATH" <<'RUBY'
+selected_path, duration_dir, suite_dir, out_path, run_id, manifest_path, mode, reference_manifest_path = ARGV
 document = JSON.parse(File.read(selected_path))
 cases = document.fetch("cases")
+selection = document.fetch("selection")
 references = YAML.load_file(reference_manifest_path).fetch("references")
 protocols = cases.map { |entry| entry.fetch("protocol") }.uniq
 runner_records = protocols.to_h do |protocol|
@@ -1391,8 +1877,9 @@ end
   protocol = entry.fetch("protocol")
   reference_pin = references.fetch(protocol)
   image = reference_pin.fetch("image")
-  digest = reference_pin["digest"]
-  image_reference = digest && !digest.empty? ? "#{image}@#{digest}" : "#{image}:#{reference_pin.fetch("tag")}" 
+  digest = reference_pin.fetch("digest")
+  abort "#{protocol} reference must use an immutable sha256 digest" unless digest.match?(/\Asha256:[0-9a-f]{64}\z/)
+  image_reference = "#{image}@#{digest}"
   record = {
     "case_id" => entry.fetch("id"),
     "fixture_id" => entry.fetch("fixture").fetch("id"),
@@ -1400,14 +1887,25 @@ end
     "service" => reference.fetch("service"),
     "version" => reference.fetch("version"),
     "image" => image_reference,
-    "image_tag" => image_reference
+    "image_tag" => image_reference,
+    "release_evidence" => (mode == "real" && File.file?(File.join(out_path, entry.fetch("id"), "outcome.json")) && JSON.parse(File.read(File.join(out_path, entry.fetch("id"), "outcome.json")))["release_evidence"] == true),
+    "validation_only" => (mode != "real")
   }
   if mode == "drift"
     record["baseline"] = { "image" => ENV.fetch("DRIFT_BASELINE_IMAGE"), "version" => ENV.fetch("DRIFT_BASELINE_VERSION") }
-    record["candidate"] = { "image" => ENV.fetch("DRIFT_CANDIDATE_IMAGE"), "version" => ENV.fetch("DRIFT_CANDIDATE_VERSION") }
+    record["candidate"] = {
+      "image" => ENV.fetch("DRIFT_CANDIDATE_REFERENCE"),
+      "version" => ENV.fetch("DRIFT_CANDIDATE_VERSION"),
+      "digest" => ENV.fetch("DRIFT_CANDIDATE_DIGEST")
+    }
   end
   record
 end
+case_release_evidence = cases.all? do |entry|
+  outcome_path = File.join(out_path, entry.fetch("id"), "outcome.json")
+  File.file?(outcome_path) && JSON.parse(File.read(outcome_path))["release_evidence"] == true
+end
+release_evidence = mode == "real" && case_release_evidence
 puts JSON.generate(
   "run_id" => run_id,
   "manifest" => manifest_path,
@@ -1416,14 +1914,100 @@ puts JSON.generate(
   "selected_protocols" => protocols,
   "selected_case_ids" => cases.map { |entry| entry.fetch("id") },
   "selected_fixture_ids" => cases.map { |entry| entry.fetch("fixture").fetch("id") },
+  "selection" => selection,
   "references" => reference_records,
   "runners" => runner_records,
-  "release_evidence" => (mode != "drift"),
-  "candidate" => (mode == "drift" ? { "image" => ENV.fetch("DRIFT_CANDIDATE_IMAGE"), "version" => ENV.fetch("DRIFT_CANDIDATE_VERSION") } : nil),
+  "release_evidence" => release_evidence,
+  "validation_only" => (mode != "real"),
+  "candidate" => (mode == "drift" ? {
+    "image" => ENV.fetch("DRIFT_CANDIDATE_REFERENCE"),
+    "version" => ENV.fetch("DRIFT_CANDIDATE_VERSION"),
+    "digest" => ENV.fetch("DRIFT_CANDIDATE_DIGEST")
+  } : nil),
   "baseline" => (mode == "drift" ? { "image" => ENV.fetch("DRIFT_BASELINE_IMAGE"), "version" => ENV.fetch("DRIFT_BASELINE_VERSION") } : nil)
 )
 RUBY
 )"
+
+ruby -rjson - "$OUT_PATH" "$TMP_DIR/selected.json" "$RUN_ID" "$mode" <<'RUBY'
+out_path, selected_path, run_id, mode = ARGV
+selected = JSON.parse(File.read(selected_path))
+cases = selected.fetch("cases")
+protocols = cases.map { |entry| entry.fetch("protocol") }.uniq
+protocol = protocols.length == 1 ? protocols.fetch(0) : "multi"
+case_ids = cases.map { |entry| entry.fetch("id") }
+fixture_ids = cases.map { |entry| entry.fetch("fixture").fetch("id") }
+case_records = cases.map do |entry|
+  case_id = entry.fetch("id")
+  case_document = JSON.parse(File.read(File.join(out_path, case_id, "case.json")))
+  outcome = JSON.parse(File.read(File.join(out_path, case_id, "outcome.json")))
+  {
+    "run_id" => run_id,
+    "case_id" => case_id,
+    "runner_case_id" => entry["runner_case_id"],
+    "tenant_isolation_evidence" => entry["tenant_isolation_evidence"],
+    "fixture_id" => entry.fetch("fixture").fetch("id"),
+    "request_fingerprint" => case_document.fetch("request_fingerprint"),
+    "fingerprint" => case_document.fetch("request_fingerprint"),
+    "fingerprint_algorithm" => "SHA-256",
+    "status" => outcome.fetch("status"),
+    "outcome" => outcome.fetch("status"),
+    "reason" => outcome.fetch("reason", "completed"),
+    "release_evidence" => outcome.fetch("release_evidence", false),
+    "validation_only" => outcome.fetch("validation_only", mode != "real")
+  }
+end
+statuses = case_records.map { |record| record.fetch("status") }
+suite_status = statuses.all? { |status| status == "pass" } ? "pass" : (statuses.find { |status| status != "pass" } || "infrastructure_failure")
+classification = %w[pass drift product_regression infrastructure_failure environment_skip unsupported skipped].include?(suite_status) ? suite_status : "infrastructure_failure"
+release = mode == "real" && suite_status == "pass" && case_records.all? { |record| record.fetch("release_evidence") == true }
+write = lambda do |name, value|
+  File.write(File.join(out_path, name), JSON.pretty_generate(value) + "\n")
+end
+write.call("outcome.json", {
+  "schema_version" => "compat-suite-outcome.v1",
+  "run_id" => run_id,
+  "protocol" => protocol,
+  "scope" => "suite",
+  "mode" => mode,
+  "status" => suite_status,
+  "classification" => classification,
+  "selected_case_ids" => case_ids,
+  "selected_fixture_ids" => fixture_ids,
+  "release_evidence" => release,
+  "validation_only" => (mode != "real")
+})
+write.call("execution-receipt.json", {
+  "schema_version" => "compat-execution-receipt.v1",
+  "run_id" => run_id,
+  "protocol" => protocol,
+  "status" => suite_status,
+  "outcome" => suite_status,
+  "selected_case_ids" => case_ids,
+  "selected_runner_case_ids" => cases.map { |entry| entry["runner_case_id"] },
+  "executed_case_ids" => case_ids,
+  "executed_runner_case_ids" => cases.map { |entry| entry["runner_case_id"] },
+  "selected_fixture_ids" => fixture_ids,
+  "executed_fixture_ids" => fixture_ids,
+  "release_evidence" => release,
+  "validation_only" => (mode != "real"),
+  "cases" => case_records
+})
+artifacts = Dir.glob(File.join(out_path, "**", "*")).select { |path| File.file?(path) }.map { |path| path.delete_prefix(out_path + "/") }.reject { |path| path == "artifact-index.json" }.sort
+write.call("artifact-index.json", {
+  "schema_version" => "compat-artifact-index.v1",
+  "run_id" => run_id,
+  "protocol" => protocol,
+  "mode" => mode,
+  "release_evidence" => release,
+  "validation_only" => (mode != "real"),
+  "selected_case_ids" => case_ids,
+  "selected_fixture_ids" => fixture_ids,
+  "artifacts" => artifacts
+})
+RUBY
+
+"$ROOT_DIR/scripts/compat/validate-artifacts.sh" --root "$OUT_PATH"
 
 {
 	echo

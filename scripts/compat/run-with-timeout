@@ -18,15 +18,10 @@ case "$duration" in
 		exit 2
 		;;
 esac
-
-# Prefer GNU coreutils. Homebrew installs it as gtimeout on macOS, while
-# Linux distributions normally expose it as timeout.
-for candidate in timeout gtimeout; do
-	if command -v "$candidate" >/dev/null 2>&1 \
-		&& "$candidate" --version 2>&1 | grep -q 'GNU coreutils'; then
-		exec "$candidate" "$duration" "$@"
-	fi
-done
+if [ "$duration" = 0 ] || [ "$duration" = 0.0 ] || [ "$duration" = 0.00 ]; then
+	echo "ERROR: timeout duration must be a positive number of seconds: $duration" >&2
+	exit 2
+fi
 
 python_bin=
 for candidate in python3 python; do
@@ -38,22 +33,59 @@ done
 
 if [ -n "$python_bin" ]; then
 	exec "$python_bin" - "$duration" "$@" <<'PY'
+import os
+import signal
 import subprocess
 import sys
+import time
 
 duration = float(sys.argv[1])
 command = sys.argv[2:]
+if duration <= 0:
+    print(f"ERROR: timeout duration must be positive: {duration:g}", file=sys.stderr)
+    raise SystemExit(2)
+process = None
+
+
+def terminate_group(signum, _frame):
+    if process is not None and process.poll() is None:
+        try:
+            os.killpg(process.pid, signum)
+        except ProcessLookupError:
+            pass
+    raise SystemExit(128 + signum)
 
 try:
-    completed = subprocess.run(command, timeout=duration)
-except subprocess.TimeoutExpired:
-    print(
-        f"ERROR: command exceeded the {duration:g}-second timeout",
-        file=sys.stderr,
-    )
-    raise SystemExit(124)
+    signal.signal(signal.SIGTERM, terminate_group)
+    signal.signal(signal.SIGINT, terminate_group)
+    signal.signal(signal.SIGHUP, terminate_group)
+    process = subprocess.Popen(command, start_new_session=True)
+    try:
+        completed = process.wait(timeout=duration)
+    except subprocess.TimeoutExpired:
+        print(
+            f"ERROR: command exceeded the {duration:g}-second timeout",
+            file=sys.stderr,
+        )
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 2.0
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait()
+        raise SystemExit(124)
+except OSError as exc:
+    print(f"ERROR: unable to start command: {exc}", file=sys.stderr)
+    raise SystemExit(127)
 
-raise SystemExit(completed.returncode)
+raise SystemExit(completed)
 PY
 fi
 

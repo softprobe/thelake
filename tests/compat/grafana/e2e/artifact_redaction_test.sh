@@ -6,6 +6,25 @@ SCRIPT="$ROOT_DIR/scripts/grafana-system-smoke.sh"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grafana-redaction-test.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+run_bounded() {
+    local seconds="$1"
+    shift
+    local child elapsed=0
+    "$@" &
+    child=$!
+    while kill -0 "$child" 2>/dev/null; do
+        if (( elapsed >= seconds )); then
+            kill -TERM "$child" 2>/dev/null || true
+            wait "$child" 2>/dev/null || true
+            printf 'bounded Grafana mock test exceeded %ss\n' "$seconds" >&2
+            return 124
+        fi
+        sleep 1
+        ((elapsed += 1))
+    done
+    wait "$child"
+}
+
 export GRAFANA_ADMIN_USER="grafana-smoke-user"
 export GRAFANA_ADMIN_PASSWORD="grafana-admin-password-123"
 export SOFTPROBE_API_KEY="softprobe-global-api-key-456"
@@ -73,8 +92,15 @@ if (( invalid_pin_status != 1 )); then
 fi
 
 mock_dir="$TMP_DIR/mock"
+mkdir -p "$mock_dir/.work"
+printf 'stale artifact\n' > "$mock_dir/stale.txt"
+printf 'stale evidence\n' > "$mock_dir/.work/stale.json"
 set +e
-MOCK=1 GRAFANA_CHECK_DASHBOARD_QUERIES=1 ARTIFACT_DIR="$mock_dir" bash "$SCRIPT"
+export GRAFANA_SKIP_STATIC_CONTRACTS=1 MOCK=1 GRAFANA_CHECK_DASHBOARD_QUERIES=1 \
+    GRAFANA_MOCK_PANEL_LIMIT=1 \
+    GRAFANA_DASHBOARD_UIDS='softprobe-cross-signal softprobe-loki-smoke softprobe-prom-smoke softprobe-tempo-smoke' \
+    ARTIFACT_DIR="$mock_dir"
+run_bounded "${GRAFANA_MOCK_TIMEOUT_SECONDS:-300}" bash "$SCRIPT"
 mock_status=$?
 set -e
 if (( mock_status != 0 )); then
@@ -98,10 +124,22 @@ for case_id in ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8"):
 
 if json.loads((root / "outcome.json").read_text()).get("outcome") != "pass":
     raise SystemExit("mock overall outcome was not pass")
+allowed = {"outcome.json", "summary.json", "seed-receipt.json", ".work"}
+for name in root.iterdir():
+    if name.name not in allowed and not (name.name.startswith("G") and name.name.endswith((".outcome.json", ".raw.json", ".normalized.json"))):
+        raise SystemExit(f"unexpected non-allowlisted artifact survived staging: {name.name}")
+if (root / "stale.txt").exists() or (root / ".work/stale.json").exists():
+    raise SystemExit("stale artifact survived a fresh Grafana run")
 unsupported = (root / ".work/G8-prometheus-a.json").read_text()
 invalid = (root / ".work/G8-prometheus-invalid-datasource.json").read_text()
 if "unsupported" not in unsupported or "datasource" not in invalid:
     raise SystemExit("mock G8 did not retain its required explicit failure evidence")
+direct_missing = (root / ".work/G8-prometheus-a-missing_credentials-softprobe.json").read_text()
+direct_mismatch = (root / ".work/G8-prometheus-a-mismatched_tenant-softprobe.json").read_text()
+if '"errorSource":"softprobe"' not in direct_missing or '"probe":"missing_credentials"' not in direct_missing:
+    raise SystemExit("mock G8 missing-credential probe did not retain direct Softprobe evidence")
+if '"errorSource":"softprobe"' not in direct_mismatch or '"probe":"mismatched_tenant"' not in direct_mismatch:
+    raise SystemExit("mock G8 tenant-mismatch probe did not retain direct Softprobe evidence")
 if "sorted-json-response-envelope" not in (root / "G1.normalized.json").read_text():
     raise SystemExit("normalized evidence lost its normalization marker")
 
@@ -113,23 +151,24 @@ scope_groups = [scope for group in groups for scope in group.get("scopeSpans", [
 spans = [span for scope in scope_groups for span in scope.get("spans", [])]
 if len(scope_groups) < 2 or len(spans) < 2:
     raise SystemExit("mock Tempo trace did not preserve distinct ScopeSpans/spans")
-if not any(span.get("parentSpanId") for span in spans):
-    raise SystemExit("mock Tempo trace did not preserve span parent topology")
-if not any(span.get("events") for span in spans):
-    raise SystemExit("mock Tempo trace did not preserve span events")
-if not any(span.get("links") for span in spans):
-    raise SystemExit("mock Tempo trace did not preserve span links")
 if not all(span.get("status", {}).get("code") in {"STATUS_CODE_UNSET", "STATUS_CODE_OK", "STATUS_CODE_ERROR"} for span in spans):
     raise SystemExit("mock Tempo trace did not preserve wire status enum values")
 if not all(group.get("resource", {}).get("attributes") for group in groups):
     raise SystemExit("mock Tempo trace did not preserve resource attributes")
 if not all(scope.get("scope", {}).get("name") for scope in scope_groups):
     raise SystemExit("mock Tempo trace did not preserve instrumentation scopes")
+if not any(span.get("parentSpanId") for span in spans):
+    raise SystemExit("mock Tempo trace did not preserve parent span IDs")
+if not any(span.get("events") for span in spans):
+    raise SystemExit("mock Tempo trace did not preserve span events")
+if not any(span.get("links") for span in spans):
+    raise SystemExit("mock Tempo trace did not preserve span links")
 PY
 
 failure_dir="$TMP_DIR/mock-failure"
 set +e
-MOCK=1 ARTIFACT_DIR="$failure_dir" MOCK_FIXTURE_DIR="$TMP_DIR/missing-fixtures" bash "$SCRIPT"
+GRAFANA_SKIP_STATIC_CONTRACTS=1 MOCK=1 GRAFANA_MOCK_PANEL_LIMIT=1 ARTIFACT_DIR="$failure_dir" MOCK_FIXTURE_DIR="$TMP_DIR/missing-fixtures" \
+run_bounded "${GRAFANA_MOCK_TIMEOUT_SECONDS:-300}" bash "$SCRIPT"
 failure_status=$?
 set -e
 if (( failure_status != 1 )); then

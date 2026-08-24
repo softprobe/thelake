@@ -108,6 +108,19 @@ fn tempo_success_minimal_fixture_matches_helper() {
 }
 
 #[test]
+fn tempo_phase3_fixture_reference_image_tracks_immutable_manifest_pin() {
+    let fixture = fixture();
+    assert_eq!(
+        fixture.evidence.reference_image,
+        reference_image_from_manifest()
+    );
+    assert!(
+        fixture.evidence.reference_image.contains("@sha256:"),
+        "Tempo evidence must identify the immutable manifest reference"
+    );
+}
+
+#[test]
 fn tempo_phase3_fixture_has_issue_evidence_capabilities_and_full_get_matrix() {
     let fixture = fixture();
     assert_eq!(fixture.evidence.issue, "#31");
@@ -115,10 +128,6 @@ fn tempo_phase3_fixture_has_issue_evidence_capabilities_and_full_get_matrix() {
     assert_eq!(
         fixture.evidence.reference_manifest,
         "docs/compat/references.v0.yaml"
-    );
-    assert_eq!(
-        fixture.evidence.reference_image,
-        reference_image_from_manifest()
     );
     assert!(fixture
         .evidence

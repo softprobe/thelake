@@ -3,7 +3,7 @@
     "issue": "#31",
     "phase": "Phase 3",
     "reference_manifest": "docs/compat/references.v0.yaml",
-    "reference_image": "grafana/tempo:2.6.1",
+    "reference_image": "grafana/tempo@sha256:ef4384fce6e8ad22b95b243d8fc165628cda655376fd50e7850536ad89d71d50",
     "normalization": "tests/compat/support/tempo.rs::normalize_tempo_response"
   },
   "capability": {

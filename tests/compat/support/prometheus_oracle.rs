@@ -17,20 +17,44 @@ use crate::compat_support::prometheus::encode_query_owned;
 use crate::util::config::file_backed_test_config;
 use crate::util::tenant::inject_local_sqlite_tenant;
 
-/// Pinned image used by mini-diff and curated promqltest.
-pub const PROM_IMAGE: &str = "prom/prometheus:v2.54.1";
-
 /// Shared timeline base (unix seconds) for OpenMetrics / lake sample alignment.
 pub const EVAL_BASE_SECS: u64 = 1_700_000_000;
 
 /// Shared timeline base (unix milliseconds).
 pub const EVAL_BASE_MS: i64 = (EVAL_BASE_SECS as i64) * 1_000;
 
+fn prometheus_manifest_reference_image() -> String {
+    let manifest: serde_yaml::Value =
+        serde_yaml::from_str(include_str!("../../../docs/compat/references.v0.yaml"))
+            .expect("references.v0.yaml parses");
+    let reference = &manifest["references"]["prometheus"];
+    let image = reference["image"]
+        .as_str()
+        .expect("Prometheus reference image is declared");
+    let digest = reference["digest"]
+        .as_str()
+        .expect("Prometheus reference digest is declared");
+    let digest_hex = digest
+        .strip_prefix("sha256:")
+        .expect("Prometheus reference digest uses sha256")
+        .to_ascii_lowercase();
+    assert_eq!(
+        digest_hex.len(),
+        64,
+        "Prometheus reference digest must contain 64 hexadecimal characters"
+    );
+    assert!(
+        digest_hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "Prometheus reference digest must contain only hexadecimal characters"
+    );
+    format!("{image}@sha256:{digest_hex}")
+}
+
 pub fn prometheus_reference_image() -> String {
     std::env::var("PROMETHEUS_REFERENCE_IMAGE")
         .ok()
         .filter(|image| !image.is_empty())
-        .unwrap_or_else(|| PROM_IMAGE.to_string())
+        .unwrap_or_else(prometheus_manifest_reference_image)
 }
 
 pub fn require_docker() {
@@ -193,14 +217,26 @@ mod tests {
     }
 
     #[test]
-    fn reference_image_defaults_to_pinned_image() {
+    fn reference_image_defaults_to_canonical_manifest_image() {
         let _lock = reference_image_env_lock();
         {
             let _env = set_reference_image_env(None);
-            assert_eq!(prometheus_reference_image(), PROM_IMAGE);
+            let manifest: serde_yaml::Value =
+                serde_yaml::from_str(include_str!("../../../docs/compat/references.v0.yaml"))
+                    .expect("references.v0.yaml parses");
+            let reference = &manifest["references"]["prometheus"];
+            let expected = format!(
+                "{}@{}",
+                reference["image"].as_str().expect("Prometheus image"),
+                reference["digest"].as_str().expect("Prometheus digest")
+            );
+            assert_eq!(prometheus_reference_image(), expected);
         }
         let _env = set_reference_image_env(Some(""));
-        assert_eq!(prometheus_reference_image(), PROM_IMAGE);
+        assert_eq!(
+            prometheus_reference_image(),
+            prometheus_manifest_reference_image()
+        );
     }
 
     #[test]

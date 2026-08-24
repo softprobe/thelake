@@ -43,6 +43,18 @@ records the supported Prometheus, Loki, and Tempo image/tag set under
 `metadata.reference_pins` for review visibility; changes must keep those values
 aligned with the canonical pin file and each case's `reference` field.
 
+## Tenant-isolation evidence
+
+Each selected release case inherits the protocol entry in
+`metadata.tenant_isolation`. The entry points to the shared authenticated tenant
+helper at `tests/compat/support/auth.rs` and to the existing protocol contract
+suite that exercises tenant-scoped behavior. The conformance validator rejects
+missing helpers, missing protocol contract files, or commands that are not the
+declared `cargo test --lib compat::<protocol>` suite. Reports and case
+provenance retain this reference so release evidence can be traced to the
+shared contract without copying its setup or assertions into the differential
+harness.
+
 ## Drift review
 
 Review compatibility drift as a data change with this sequence:

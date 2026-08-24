@@ -23,8 +23,8 @@ SHELL := /bin/bash
 	lint fmt check-fmt \
 	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
-	compat-reference-image compat-reference-version grafana-reference-version grafana-reference-image grafana-reference-digest \
-	test-grafana-system test-compat \
+	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
+	test-grafana-static test-grafana-system test-compat \
 	stress test-deploy \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
 	grafana-up grafana-down
@@ -77,19 +77,38 @@ RELEASE_GOAL_SECS ?= 1500
 # Override only for a local experiment; check-compat-reference-pins rejects
 # drift before a differential gate runs.
 COMPAT_REFERENCE_MANIFEST ?= $(CURDIR)/docs/compat/references.v0.yaml
-define compat_reference_image
-$(shell awk -v key="$(1)" '$$0 ~ "^  " key ":" {in_ref=1; next} in_ref && $$0 ~ "^  [[:alnum:]_]+:" {exit} in_ref && $$1=="image:" {image=$$2; gsub(/"/,"",image)} in_ref && $$1=="tag:" {tag=$$2; gsub(/"/,"",tag)} in_ref && $$1=="digest:" {digest=$$2; gsub(/"/,"",digest)} END {if (image != "") {if (digest != "") print image "@" digest; else print image ":" tag}}' "$(COMPAT_REFERENCE_MANIFEST)")
-endef
-define compat_reference_version
-$(shell awk -v key="$(1)" '$$0 ~ "^  " key ":" {in_ref=1; next} in_ref && $$0 ~ "^  [[:alnum:]_]+:" {in_ref=0} in_ref && $$1=="tag:" {tag=$$2; gsub(/"/,"",tag); print tag; exit}' "$(COMPAT_REFERENCE_MANIFEST)")
-endef
-define compat_reference_digest
-$(shell awk -v key="$(1)" '$$0 ~ "^  " key ":" {in_ref=1; next} in_ref && $$0 ~ "^  [[:alnum:]_]+:" {in_ref=0} in_ref && $$1=="digest:" {digest=$$2; gsub(/"/,"",digest); print digest; exit}' "$(COMPAT_REFERENCE_MANIFEST)")
-endef
+COMPAT_REFERENCE_CANONICAL_MANIFEST ?= $(CURDIR)/docs/compat/references.v0.yaml
+# One YAML parse for the selected manifest. Fields are emitted in stable
+# protocol order, three tab-delimited values per protocol: image, tag, digest.
+COMPAT_REFERENCE_FIELDS := $(shell ruby -ryaml -e 'references = YAML.safe_load(File.read(ARGV.fetch(0))).fetch("references"); %w[prometheus loki tempo grafana].each { |name| reference = references.fetch(name); puts [reference["image"], reference["tag"], reference["digest"]].join("\t") }' "$(COMPAT_REFERENCE_MANIFEST)")
+COMPAT_REFERENCE_PROMETHEUS_IMAGE := $(word 1,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_PROMETHEUS_TAG := $(word 2,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_PROMETHEUS_DIGEST := $(word 3,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_LOKI_IMAGE := $(word 4,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_LOKI_TAG := $(word 5,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_LOKI_DIGEST := $(word 6,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_TEMPO_IMAGE := $(word 7,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_TEMPO_TAG := $(word 8,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_TEMPO_DIGEST := $(word 9,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_GRAFANA_IMAGE := $(word 10,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_GRAFANA_TAG := $(word 11,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_GRAFANA_DIGEST := $(word 12,$(COMPAT_REFERENCE_FIELDS))
+
+COMPAT_REFERENCE_PROMETHEUS_MANIFEST := $(COMPAT_REFERENCE_PROMETHEUS_IMAGE)@$(COMPAT_REFERENCE_PROMETHEUS_DIGEST)
+COMPAT_REFERENCE_LOKI_MANIFEST := $(COMPAT_REFERENCE_LOKI_IMAGE)@$(COMPAT_REFERENCE_LOKI_DIGEST)
+COMPAT_REFERENCE_TEMPO_MANIFEST := $(COMPAT_REFERENCE_TEMPO_IMAGE)@$(COMPAT_REFERENCE_TEMPO_DIGEST)
+COMPAT_REFERENCE_GRAFANA_MANIFEST := $(COMPAT_REFERENCE_GRAFANA_IMAGE)@$(COMPAT_REFERENCE_GRAFANA_DIGEST)
+COMPAT_REFERENCE_GRAFANA_TAG_IMAGE := $(COMPAT_REFERENCE_GRAFANA_IMAGE):$(COMPAT_REFERENCE_GRAFANA_TAG)
+# Loki Phase 2 differential evidence. The test helper writes failure evidence
+# below SOFTPROBE_COMPAT_ARTIFACT_DIR/loki/<case>/.
+PROMETHEUS_REFERENCE_IMAGE := $(COMPAT_REFERENCE_PROMETHEUS_MANIFEST)
+PROMETHEUS_REFERENCE_VERSION := $(COMPAT_REFERENCE_PROMETHEUS_TAG)
+PROMETHEUS_REFERENCE_DIGEST ?= $(COMPAT_REFERENCE_PROMETHEUS_DIGEST)
 
 # Loki Phase 2 differential evidence. The test helper writes failure evidence
 # below SOFTPROBE_COMPAT_ARTIFACT_DIR/loki/<case>/.
-LOKI_REFERENCE_IMAGE ?= $(call compat_reference_image,loki)
+LOKI_REFERENCE_IMAGE := $(COMPAT_REFERENCE_LOKI_MANIFEST)
+LOKI_REFERENCE_DIGEST ?= $(COMPAT_REFERENCE_LOKI_DIGEST)
 LOKI_DIFF_ARTIFACT_DIR ?= $(CURDIR)/target/compat/loki
 LOKI_RAW_ARTIFACT ?= $(LOKI_DIFF_ARTIFACT_DIR)/raw.json
 LOKI_NORMALIZED_ARTIFACT ?= $(LOKI_DIFF_ARTIFACT_DIR)/normalized.json
@@ -99,7 +118,8 @@ LOKI_DIFF_TIMEOUT_SECS ?= 900
 
 # Tempo Phase 3 differential evidence. The test helper writes failure evidence
 # below SOFTPROBE_COMPAT_ARTIFACT_DIR/tempo/<case>/.
-TEMPO_REFERENCE_IMAGE ?= $(call compat_reference_image,tempo)
+TEMPO_REFERENCE_IMAGE := $(COMPAT_REFERENCE_TEMPO_MANIFEST)
+TEMPO_REFERENCE_DIGEST ?= $(COMPAT_REFERENCE_TEMPO_DIGEST)
 TEMPO_DIFF_ARTIFACT_DIR ?= $(CURDIR)/target/compat/tempo
 TEMPO_RAW_ARTIFACT ?= $(TEMPO_DIFF_ARTIFACT_DIR)/raw.json
 TEMPO_NORMALIZED_ARTIFACT ?= $(TEMPO_DIFF_ARTIFACT_DIR)/normalized.json
@@ -109,10 +129,11 @@ TEMPO_DIFF_TIMEOUT_SECS ?= 900
 
 # Grafana Phase 4 system evidence. The immutable digest is part of the same
 # manifest as the image/tag and is derived for every run.
-GRAFANA_REFERENCE_IMAGE ?= $(call compat_reference_image,grafana)
-GRAFANA_REFERENCE_VERSION ?= $(call compat_reference_version,grafana)
-GRAFANA_REFERENCE_DIGEST ?= $(call compat_reference_digest,grafana)
-GRAFANA_COMPOSE_IMAGE ?= $(GRAFANA_REFERENCE_IMAGE)@$(GRAFANA_REFERENCE_DIGEST)
+GRAFANA_REFERENCE_IMAGE := $(COMPAT_REFERENCE_GRAFANA_TAG_IMAGE)
+GRAFANA_REFERENCE_VERSION := $(COMPAT_REFERENCE_GRAFANA_TAG)
+GRAFANA_REFERENCE_DIGEST ?= $(COMPAT_REFERENCE_GRAFANA_DIGEST)
+GRAFANA_COMPOSE_IMAGE := $(COMPAT_REFERENCE_GRAFANA_MANIFEST)
+SOFTPROBE_BUILDER_IMAGE ?= rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4
 GRAFANA_SYSTEM_ARTIFACT_DIR ?= $(CURDIR)/target/compat/grafana
 GRAFANA_SYSTEM_COMPOSE_FILE ?= $(CURDIR)/tests/compat/grafana/docker-compose.ci.yml
 GRAFANA_SYSTEM_COMPOSE_PROJECT ?= thelake-grafana-system
@@ -341,15 +362,15 @@ test: ensure-cache
 
 # Phase 1 mini differential vs pinned Prometheus (requires Docker).
 test-prom-diff: ensure-cache
-	@echo "prometheus mini-diff vs pinned prom/prometheus:v2.54.1 (Docker)..."
+	@echo "prometheus mini-diff vs pinned $(PROMETHEUS_REFERENCE_IMAGE) (Docker)..."
 	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker required for test-prom-diff"; exit 1)
-	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::diff::mini_diff_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
+	PROMETHEUS_REFERENCE_IMAGE="$(PROMETHEUS_REFERENCE_IMAGE)" cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::diff::mini_diff_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
 
 # Curated upstream promqltest subset vs pinned Prometheus (requires Docker).
 test-promqltest: ensure-cache
-	@echo "curated promqltest vs pinned prom/prometheus:v2.54.1 (Docker)..."
+	@echo "curated promqltest vs pinned $(PROMETHEUS_REFERENCE_IMAGE) (Docker)..."
 	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker required for test-promqltest"; exit 1)
-	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::promqltest::curated_promqltest_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
+	PROMETHEUS_REFERENCE_IMAGE="$(PROMETHEUS_REFERENCE_IMAGE)" cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::promqltest::curated_promqltest_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
 
 # All Prometheus differential gates (mini-diff + curated promqltest).
 test-prom-compat: test-prom-diff test-promqltest
@@ -373,26 +394,63 @@ test-compat: ensure-cache check-compat-reference-pins
 	esac; \
 	if [ -n "$(COMPAT_CONFORMANCE_PROTOCOL)" ]; then args+=(--protocol "$(COMPAT_CONFORMANCE_PROTOCOL)"); fi; \
 	if [ -n "$(COMPAT_CONFORMANCE_CASE)" ]; then args+=(--case "$(COMPAT_CONFORMANCE_CASE)"); fi; \
-	"$(CURDIR)/scripts/compat/conformance.sh" "$${args[@]}"
+	"$(CURDIR)/scripts/compat/conformance.sh" "$${args[@]}"; \
+	if [ "$(COMPAT_CONFORMANCE_MODE)" = real ]; then \
+		"$(CURDIR)/scripts/compat/validate-artifacts.sh" --root "$(COMPAT_CONFORMANCE_OUT)" --release-gate; \
+	else \
+		"$(CURDIR)/scripts/compat/validate-artifacts.sh" --root "$(COMPAT_CONFORMANCE_OUT)"; \
+	fi
 
 # Verify every differential image used by Make is sourced from the pinned
 # compatibility manifest. CI calls this target before pulling either image.
 check-compat-reference-pins:
 	@set -euo pipefail; \
 	test -f "$(COMPAT_REFERENCE_MANIFEST)" || { echo "missing compatibility reference manifest: $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }; \
-	loki_manifest="$(call compat_reference_image,loki)"; \
-	tempo_manifest="$(call compat_reference_image,tempo)"; \
-	grafana_manifest="$(call compat_reference_image,grafana)"; \
-	grafana_digest_manifest="$(call compat_reference_digest,grafana)"; \
-	test -n "$$loki_manifest" && test -n "$$tempo_manifest" && test -n "$$grafana_manifest" || { echo "missing Loki, Tempo, or Grafana reference in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }; \
+	test -f "$(COMPAT_REFERENCE_CANONICAL_MANIFEST)" || { echo "missing canonical compatibility reference manifest: $(COMPAT_REFERENCE_CANONICAL_MANIFEST)" >&2; exit 1; }; \
+	PROMETHEUS_REFERENCE_IMAGE="$(PROMETHEUS_REFERENCE_IMAGE)"; \
+	prometheus_manifest="$(COMPAT_REFERENCE_PROMETHEUS_MANIFEST)"; \
+	loki_manifest="$(COMPAT_REFERENCE_LOKI_MANIFEST)"; \
+	tempo_manifest="$(COMPAT_REFERENCE_TEMPO_MANIFEST)"; \
+	grafana_manifest="$(COMPAT_REFERENCE_GRAFANA_MANIFEST)"; \
+	prometheus_image="$(COMPAT_REFERENCE_PROMETHEUS_IMAGE)"; \
+	loki_image="$(COMPAT_REFERENCE_LOKI_IMAGE)"; \
+	tempo_image="$(COMPAT_REFERENCE_TEMPO_IMAGE)"; \
+	grafana_image="$(COMPAT_REFERENCE_GRAFANA_IMAGE)"; \
+	prometheus_tag="$(COMPAT_REFERENCE_PROMETHEUS_TAG)"; \
+	loki_tag="$(COMPAT_REFERENCE_LOKI_TAG)"; \
+	tempo_tag="$(COMPAT_REFERENCE_TEMPO_TAG)"; \
+	grafana_tag="$(COMPAT_REFERENCE_GRAFANA_TAG)"; \
+	prometheus_digest_manifest="$(COMPAT_REFERENCE_PROMETHEUS_DIGEST)"; \
+	loki_digest_manifest="$(COMPAT_REFERENCE_LOKI_DIGEST)"; \
+	tempo_digest_manifest="$(COMPAT_REFERENCE_TEMPO_DIGEST)"; \
+	grafana_tag_manifest="$(COMPAT_REFERENCE_GRAFANA_TAG_IMAGE)"; \
+	grafana_digest_manifest="$(COMPAT_REFERENCE_GRAFANA_DIGEST)"; \
+	test -n "$$prometheus_image" && test -n "$$prometheus_tag" || { echo "prometheus reference requires a non-empty image and tag" >&2; exit 1; }; \
+	test -n "$$loki_image" && test -n "$$loki_tag" || { echo "loki reference requires a non-empty image and tag" >&2; exit 1; }; \
+	test -n "$$tempo_image" && test -n "$$tempo_tag" || { echo "tempo reference requires a non-empty image and tag" >&2; exit 1; }; \
+	test -n "$$grafana_image" && test -n "$$grafana_tag" || { echo "grafana reference requires a non-empty image and tag" >&2; exit 1; }; \
+	test -n "$$prometheus_manifest" && test -n "$$loki_manifest" && test -n "$$tempo_manifest" && test -n "$$grafana_manifest" || { echo "missing Prometheus, Loki, Tempo, or Grafana reference in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }; \
+	for reference in \
+		"prometheus|$$prometheus_manifest|$$prometheus_digest_manifest|$(PROMETHEUS_REFERENCE_IMAGE)" \
+		"loki|$$loki_manifest|$$loki_digest_manifest|$(LOKI_REFERENCE_IMAGE)" \
+		"tempo|$$tempo_manifest|$$tempo_digest_manifest|$(TEMPO_REFERENCE_IMAGE)" \
+		"grafana|$$grafana_manifest|$$grafana_digest_manifest|$(GRAFANA_COMPOSE_IMAGE)"; do \
+		IFS='|' read -r name manifest digest make_image <<<"$$reference"; \
+		[[ "$$digest" =~ ^sha256:[0-9a-f]{64}$$ ]] || { echo "$$name reference is missing a valid immutable sha256 digest: $$digest" >&2; exit 1; }; \
+		[[ "$$manifest" == *@"$$digest" ]] || { echo "$$name manifest image does not resolve to its declared digest: $$manifest" >&2; exit 1; }; \
+		test "$$make_image" = "$$manifest" || { echo "$$name reference drift: Make=$$make_image manifest=$$manifest" >&2; exit 1; }; \
+	done; \
+	test "$(PROMETHEUS_REFERENCE_IMAGE)" = "$$prometheus_manifest" || { echo "Prometheus reference drift: Make=$(PROMETHEUS_REFERENCE_IMAGE) manifest=$$prometheus_manifest" >&2; exit 1; }; \
 	test "$(LOKI_REFERENCE_IMAGE)" = "$$loki_manifest" || { echo "Loki reference drift: Make=$(LOKI_REFERENCE_IMAGE) manifest=$$loki_manifest" >&2; exit 1; }; \
 	test "$(TEMPO_REFERENCE_IMAGE)" = "$$tempo_manifest" || { echo "Tempo reference drift: Make=$(TEMPO_REFERENCE_IMAGE) manifest=$$tempo_manifest" >&2; exit 1; }; \
-	test "$(GRAFANA_REFERENCE_IMAGE)" = "$$grafana_manifest" || { echo "Grafana reference drift: Make=$(GRAFANA_REFERENCE_IMAGE) manifest=$$grafana_manifest" >&2; exit 1; }; \
-	test "$$loki_manifest" = *"@sha256:"* || { echo "Loki reference is not immutable: $$loki_manifest" >&2; exit 1; }; \
-	test "$$tempo_manifest" = *"@sha256:"* || { echo "Tempo reference is not immutable: $$tempo_manifest" >&2; exit 1; }; \
-	test -n "$$grafana_digest_manifest" && [[ "$$grafana_digest_manifest" =~ ^sha256:[0-9a-fA-F]{64}$$ ]] || { echo "Grafana manifest is missing an immutable sha256 digest" >&2; exit 1; }; \
+	test "$(GRAFANA_REFERENCE_IMAGE)" = "$$grafana_tag_manifest" || { echo "Grafana tag drift: Make=$(GRAFANA_REFERENCE_IMAGE) manifest=$$grafana_tag_manifest" >&2; exit 1; }; \
+	test "$(GRAFANA_COMPOSE_IMAGE)" = "$$grafana_manifest" || { echo "Grafana compose image drift: Make=$(GRAFANA_COMPOSE_IMAGE) manifest=$$grafana_manifest" >&2; exit 1; }; \
 	test "$(GRAFANA_REFERENCE_DIGEST)" = "$$grafana_digest_manifest" || { echo "Grafana digest drift: Make=$(GRAFANA_REFERENCE_DIGEST) manifest=$$grafana_digest_manifest" >&2; exit 1; }; \
+	if [ "$${COMPAT_REFERENCE_ALLOW_MANIFEST_OVERRIDE:-0}" != 1 ]; then \
+		ruby -ryaml -e 'canonical = YAML.load_file(ARGV.fetch(0)).fetch("references"); selected = YAML.load_file(ARGV.fetch(1)).fetch("references"); %w[prometheus loki tempo grafana].each { |name| abort "#{name.capitalize} reference drift from canonical manifest" unless selected.fetch(name) == canonical.fetch(name) }' "$(COMPAT_REFERENCE_CANONICAL_MANIFEST)" "$(COMPAT_REFERENCE_MANIFEST)"; \
+	fi; \
 	echo "compatibility reference pins match $(COMPAT_REFERENCE_MANIFEST)"; \
+	echo "  prometheus: $$prometheus_manifest"; \
 	echo "  loki:  $$loki_manifest"; \
 	echo "  tempo: $$tempo_manifest"; \
 	echo "  grafana: $$grafana_manifest"; \
@@ -403,40 +461,77 @@ check-compat-reference-pins:
 
 compat-reference-image:
 	@case "$(SIGNAL)" in \
+		prometheus) printf '%s\n' "$(PROMETHEUS_REFERENCE_IMAGE)" ;; \
 		loki) printf '%s\n' "$(LOKI_REFERENCE_IMAGE)" ;; \
 		tempo) printf '%s\n' "$(TEMPO_REFERENCE_IMAGE)" ;; \
 		grafana) printf '%s\n' "$(GRAFANA_REFERENCE_IMAGE)" ;; \
-		*) echo "usage: make compat-reference-image SIGNAL=loki|tempo|grafana" >&2; exit 2 ;; \
+		*) echo "usage: make compat-reference-image SIGNAL=prometheus|loki|tempo|grafana" >&2; exit 2 ;; \
 	esac
 
 compat-reference-version:
-	@test -n "$(call compat_reference_version,$(SIGNAL))" || { echo "missing reference tag in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }
-	@printf '%s\n' "$(call compat_reference_version,$(SIGNAL))"
+	@case "$(SIGNAL)" in \
+		prometheus) value="$(COMPAT_REFERENCE_PROMETHEUS_TAG)" ;; \
+		loki) value="$(COMPAT_REFERENCE_LOKI_TAG)" ;; \
+		tempo) value="$(COMPAT_REFERENCE_TEMPO_TAG)" ;; \
+		grafana) value="$(COMPAT_REFERENCE_GRAFANA_TAG)" ;; \
+		*) echo "usage: make compat-reference-version SIGNAL=prometheus|loki|tempo|grafana" >&2; exit 2 ;; \
+	esac; \
+	test -n "$$value" || { echo "missing reference tag in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }; \
+	printf '%s\n' "$$value"
+
+compat-builder-image:
+	@test -n "$(SOFTPROBE_BUILDER_IMAGE)" || { echo "missing immutable builder image" >&2; exit 1; }
+	@printf '%s\n' "$(SOFTPROBE_BUILDER_IMAGE)"
 
 grafana-reference-version:
 	@test -n "$(GRAFANA_REFERENCE_VERSION)" || { echo "missing Grafana tag in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }
 	@printf '%s\n' "$(GRAFANA_REFERENCE_VERSION)"
 
 grafana-reference-image:
-	@test -n "$(GRAFANA_REFERENCE_IMAGE)" || { echo "missing Grafana image/tag in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }
-	@printf '%s\n' "$(GRAFANA_REFERENCE_IMAGE)"
+	@test -n "$(GRAFANA_COMPOSE_IMAGE)" || { echo "missing immutable Grafana image in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }
+	@printf '%s\n' "$(GRAFANA_COMPOSE_IMAGE)"
 
 grafana-reference-digest:
 	@[[ "$(GRAFANA_REFERENCE_DIGEST)" =~ ^sha256:[0-9a-fA-F]{64}$$ ]] || { echo "missing Grafana digest in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }
 	@printf '%s\n' "$(GRAFANA_REFERENCE_DIGEST)"
 
 # Validate the manifest-derived immutable digest against the pulled Grafana
-# image before the compose harness runs.
+# image before the compose harness runs. Inspect the tag image
+# ($(GRAFANA_REFERENCE_IMAGE)), not the bare repository, which Docker resolves
+# to a possibly-absent :latest tag.
 check-grafana-reference-pin:
 	@set -euo pipefail; \
-	image="$(GRAFANA_REFERENCE_IMAGE)"; digest="$(GRAFANA_REFERENCE_DIGEST)"; \
+	image="$(GRAFANA_REFERENCE_IMAGE)"; \
+	case "$$image" in *@*) repository="$${image%@*}" ;; *) repository="$${image%:*}" ;; esac; \
+	digest="$(GRAFANA_REFERENCE_DIGEST)"; \
 	test -n "$$image" && test -n "$(GRAFANA_REFERENCE_VERSION)" || { echo "missing Grafana image/version in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }; \
 	[[ "$$digest" =~ ^sha256:[0-9a-fA-F]{64}$$ ]] || { echo "GRAFANA_REFERENCE_DIGEST must be an immutable sha256 digest" >&2; exit 1; }; \
-	docker pull "$$image@$$digest" >/dev/null; \
+	docker pull "$$repository@$$digest" >/dev/null; \
 	repo_digests="$$(docker image inspect --format '{{json .RepoDigests}}' "$$image")"; \
-	expected_repo_digest="$${image%:*}@$$digest"; \
+	expected_repo_digest="$$repository@$$digest"; \
 	echo "$$repo_digests" | grep -Fq -- "$$expected_repo_digest" || { echo "Grafana digest mismatch: $$image does not resolve to $$digest" >&2; exit 1; }; \
 	echo "Grafana reference validated: $$image@$$digest"
+
+# Phase 4 static contracts. Keep these independent of Docker so path,
+# provisioning, dashboard, and artifact-redaction regressions fail before the
+# service-backed Grafana lane starts.
+test-grafana-static: check-compat-reference-pins
+	@set -euo pipefail; \
+	SOFTPROBE_BUILDER_IMAGE="$(SOFTPROBE_BUILDER_IMAGE)" \
+	GRAFANA_COMPOSE_IMAGE="$(GRAFANA_COMPOSE_IMAGE)" \
+	"$(CURDIR)/scripts/compat/check-compose-image-pins.sh" "$(CURDIR)/tests/compat/grafana/docker-compose.ci.yml"; \
+	for contract in \
+		compose_contract_test.sh \
+		phase4_contract_test.sh \
+		tempo_tenant_contract_test.sh \
+		cross_signal_link_contract_test.sh \
+		datasource_auth_contract_test.sh \
+		manual_digest_contract_test.sh \
+		artifact_redaction_test.sh; do \
+		path="$(CURDIR)/tests/compat/grafana/e2e/$$contract"; \
+		test -f "$$path" || { echo "missing Grafana static contract: $$path" >&2; exit 1; }; \
+		GRAFANA_SKIP_STATIC_CONTRACTS=1 bash "$$path"; \
+	done
 
 # Phase 4 deterministic compose system lane. The shell harness owns G1-G3 and
 # writes structured outcome evidence; compose lifecycle evidence is collected
@@ -453,14 +548,20 @@ test-grafana-system: ensure-cache check-compat-reference-pins
 	fi; \
 	timeout_ok=0; for candidate in timeout gtimeout; do if command -v "$$candidate" >/dev/null 2>&1 && "$$candidate" --version 2>&1 | grep -q 'GNU coreutils'; then timeout_ok=1; break; fi; done; \
 	if [ "$$timeout_ok" -ne 1 ]; then skip_environment "GNU timeout unavailable"; fi; \
+	SOFTPROBE_BUILDER_IMAGE="$(SOFTPROBE_BUILDER_IMAGE)" \
+	GRAFANA_COMPOSE_IMAGE="$(GRAFANA_COMPOSE_IMAGE)" \
+	"$(CURDIR)/scripts/compat/check-compose-image-pins.sh" "$$compose_file"; \
+	export GRAFANA_REFERENCE_IMAGE="$(GRAFANA_REFERENCE_IMAGE)"; \
+	export GRAFANA_REFERENCE_VERSION="$(GRAFANA_REFERENCE_VERSION)"; \
+	export GRAFANA_REFERENCE_DIGEST="$(GRAFANA_REFERENCE_DIGEST)"; \
+	export GRAFANA_REFERENCE_MANIFEST="$(GRAFANA_REFERENCE_MANIFEST)"; \
+	export GRAFANA_COMPOSE_IMAGE="$(GRAFANA_COMPOSE_IMAGE)"; \
+	export SOFTPROBE_BUILDER_IMAGE="$(SOFTPROBE_BUILDER_IMAGE)"; \
 	$(MAKE) --no-print-directory check-grafana-reference-pin; \
 	command -v curl >/dev/null 2>&1 || { echo "FAIL: curl unavailable" | tee "$$artifact_dir/summary.txt"; exit 1; }; \
 	command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 unavailable" | tee "$$artifact_dir/summary.txt"; exit 1; }; \
 	test -f "$(CURDIR)/scripts/grafana-system-smoke.sh" || { echo "FAIL: missing Grafana smoke harness" | tee "$$artifact_dir/summary.txt"; exit 1; }; \
 	test -f "$$compose_file" || { echo "FAIL: missing compose harness $$compose_file" | tee "$$artifact_dir/summary.txt"; exit 1; }; \
-	export GRAFANA_REFERENCE_IMAGE="$(GRAFANA_REFERENCE_IMAGE)"; \
-	export GRAFANA_REFERENCE_DIGEST="$(GRAFANA_REFERENCE_DIGEST)"; \
-	export GRAFANA_COMPOSE_IMAGE="$(GRAFANA_COMPOSE_IMAGE)"; \
 	export GRAFANA_SEED_ARTIFACT_DIR="$$artifact_dir"; \
 	export GRAFANA_SEED_IN_COMPOSE=1; \
 	compose=( $(COMPOSE) --project-name "$$compose_project" --file "$$compose_file" ); \
@@ -479,6 +580,7 @@ test-grafana-system: ensure-cache check-compat-reference-pins
 	"$${compose[@]}" up -d --wait || { echo "FAIL: compose harness failed to start" | tee "$$artifact_dir/summary.txt"; exit 1; }; \
 	GRAFANA_URL="$$grafana_url" \
 	GRAFANA_CHECK_DASHBOARD_QUERIES=1 \
+	GRAFANA_RICH_TEMPO_ASSERTIONS=1 \
 	GRAFANA_ADMIN_USER="$${GF_SECURITY_ADMIN_USER:-admin}" \
 	GRAFANA_ADMIN_PASSWORD="$${GF_SECURITY_ADMIN_PASSWORD:-admin}" \
 	ARTIFACT_DIR="$$artifact_dir" \
@@ -530,7 +632,9 @@ test-grafana-prom-smoke: ensure-cache
 # Open http://127.0.0.1:3000 (admin/admin) → Softprobe → Softprobe Prometheus smoke.
 grafana-up: ensure-cache
 	@chmod +x scripts/grafana-manual-up.sh scripts/grafana-manual-down.sh
-	./scripts/grafana-manual-up.sh
+	GRAFANA_COMPOSE_IMAGE="$(GRAFANA_COMPOSE_IMAGE)" \
+		"$(CURDIR)/scripts/compat/check-compose-image-pins.sh" "$(CURDIR)/tests/compat/grafana/docker-compose.manual.yml"
+	GRAFANA_COMPOSE_IMAGE="$(GRAFANA_COMPOSE_IMAGE)" ./scripts/grafana-manual-up.sh
 
 grafana-down:
 	@chmod +x scripts/grafana-manual-down.sh

@@ -1,5 +1,33 @@
 version: compat.v0
 otlp_write_canonical: true
+# Stable capability identifiers consumed by the conformance manifest.  Keep
+# this list canonical; per-case allowlists may only reference these IDs.
+capability_ids:
+  - prometheus.query
+  - prometheus.query_range
+  - prometheus.labels
+  - prometheus.series
+  - prometheus.metadata
+  - loki.query
+  - loki.query_range
+  - loki.labels
+  - loki.label_values
+  - loki.series
+  - tempo.v1_trace
+  - tempo.v2_trace
+  - tempo.search
+  - tempo.search_tags
+  - tempo.tag_values
+# Only features listed here may be used by a conformance allowlist to approve
+# a normalized difference.  Keep this registry aligned with the documented
+# unsupported-feature entries in each protocol section below.
+unsupported_feature_ids:
+  prometheus.query:
+    - native_histogram_functions
+  loki.query_range:
+    - interval_sampling
+  tempo.search:
+    - tag_query_filters
 status:
   phase_0_baseline: approved_contract
   phase_1_prometheus: implemented_subset
