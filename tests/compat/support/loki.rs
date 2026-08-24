@@ -149,16 +149,66 @@ pub fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/compat/loki")
 }
 
+pub(crate) fn manifest_reference_image(manifest: &serde_yaml::Value, protocol: &str) -> String {
+    let reference = &manifest["references"][protocol];
+    let image = reference["image"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{protocol} image"));
+    let tag = reference["tag"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{protocol} tag"));
+    match reference["digest"]
+        .as_str()
+        .filter(|digest| digest.strip_prefix("sha256:").is_some_and(is_sha256_digest))
+    {
+        Some(digest) => format!("{}@{}", image, digest),
+        None => format!("{}:{}", image, tag),
+    }
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub(crate) fn candidate_reference_image(variable: &str, image: &str) -> String {
+    let image = image.trim();
+    assert!(!image.is_empty(), "{variable} must not be empty");
+    assert!(
+        !image.chars().any(char::is_whitespace),
+        "{variable} must not contain whitespace"
+    );
+
+    if let Some((repository, digest)) = image.rsplit_once("@sha256:") {
+        assert!(!repository.is_empty(), "{variable} repository is required");
+        assert!(
+            is_sha256_digest(digest),
+            "{variable} must use a 64-character sha256 digest"
+        );
+        return image.to_owned();
+    }
+
+    let (repository, tag) = image
+        .rsplit_once(':')
+        .unwrap_or_else(|| panic!("{variable} must be repository@sha256:digest or repository:tag"));
+    assert!(!repository.is_empty(), "{variable} repository is required");
+    assert!(!tag.is_empty(), "{variable} tag is required");
+    assert_ne!(
+        tag, "latest",
+        "{variable} candidate image must not use the latest tag"
+    );
+    assert!(!tag.contains('@'), "{variable} tag must be a candidate tag");
+    image.to_owned()
+}
+
 pub fn reference_image_from_manifest() -> String {
     let manifest: serde_yaml::Value =
         serde_yaml::from_str(include_str!("../../../docs/compat/references.v0.yaml"))
             .expect("references.v0.yaml parses");
-    let loki = &manifest["references"]["loki"];
-    format!(
-        "{}:{}",
-        loki["image"].as_str().expect("loki image"),
-        loki["tag"].as_str().expect("loki tag")
-    )
+    std::env::var("LOKI_REFERENCE_IMAGE")
+        .ok()
+        .filter(|image| !image.trim().is_empty())
+        .map(|image| candidate_reference_image("LOKI_REFERENCE_IMAGE", &image))
+        .unwrap_or_else(|| manifest_reference_image(&manifest, "loki"))
 }
 
 #[cfg(feature = "integration-e2e")]
@@ -233,7 +283,19 @@ pub async fn ingest_records_with_bearer(
         .await
         .expect("log ingest request");
     let status = response.status();
-    assert_eq!(status, StatusCode::OK, "log ingest status={status}");
+    if status != StatusCode::OK {
+        // Include the response body (e.g. DuckLake write failure details) in
+        // the panic message; the bare status code is rarely enough to debug.
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "log ingest status={status} body={body}"
+        );
+    }
 }
 
 pub async fn flush_logs(state: &softprobe_runtime::api::AppState, tenant_id: &str) {

@@ -3,7 +3,7 @@
     "issue": "#29",
     "phase": "Phase 2",
     "reference_manifest": "docs/compat/references.v0.yaml",
-    "reference_image": "grafana/loki:3.1.1",
+    "reference_image": "grafana/loki@sha256:e689cc634841c937de4d7ea6157f17e29cf257d6a320f1c293ab18d46cfea986",
     "normalization": "tests/compat/support/loki.rs::normalize_loki_response"
   },
   "capability": {
@@ -77,8 +77,8 @@
         "data_shape": "streams",
         "entry_count": 2,
         "entry_lines": [
-          "{\"level\":\"info\",\"msg\":\"checkout finished\",\"duration_ms\":18}",
-          "{\"level\":\"info\",\"msg\":\"checkout started\",\"duration_ms\":12}"
+          "{\"level\":\"info\",\"msg\":\"checkout started\",\"duration_ms\":12}",
+          "{\"level\":\"info\",\"msg\":\"checkout finished\",\"duration_ms\":18}"
         ]
       },
       "differential": true
@@ -120,9 +120,9 @@
         "data_shape": "streams",
         "entry_count": 3,
         "entry_lines": [
-          "level=warn msg=\"checkout retry\" duration_ms=25",
           "{\"level\":\"info\",\"msg\":\"checkout started\",\"duration_ms\":12}",
-          "{\"level\":\"info\",\"msg\":\"checkout finished\",\"duration_ms\":18}"
+          "{\"level\":\"info\",\"msg\":\"checkout finished\",\"duration_ms\":18}",
+          "level=warn msg=\"checkout retry\" duration_ms=25"
         ]
       },
       "differential": true

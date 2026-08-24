@@ -84,6 +84,19 @@ fn loki_success_minimal_fixture_matches_helper() {
 }
 
 #[test]
+fn loki_phase2_fixture_reference_image_tracks_immutable_manifest_pin() {
+    let fixture = fixture();
+    assert_eq!(
+        fixture.evidence.reference_image,
+        reference_image_from_manifest()
+    );
+    assert!(
+        fixture.evidence.reference_image.contains("@sha256:"),
+        "Loki evidence must identify the immutable manifest reference"
+    );
+}
+
+#[test]
 fn loki_phase2_fixture_has_issue_evidence_and_full_get_matrix() {
     let fixture = fixture();
     assert_eq!(fixture.evidence.issue, "#29");
@@ -91,10 +104,6 @@ fn loki_phase2_fixture_has_issue_evidence_and_full_get_matrix() {
     assert_eq!(
         fixture.evidence.reference_manifest,
         "docs/compat/references.v0.yaml"
-    );
-    assert_eq!(
-        fixture.evidence.reference_image,
-        reference_image_from_manifest()
     );
     assert!(fixture
         .evidence
@@ -295,15 +304,23 @@ async fn loki_phase2_contract_cases_cover_envelopes_results_and_boundaries() {
         .find(|case| case.id == "loki-query-forward-duplicate-nanoseconds")
         .expect("duplicate timestamp case");
     let (_, body) = query_case(&router, forward, None).await;
-    let values = body["data"]["result"][0]["values"]
-        .as_array()
-        .expect("values");
-    assert_eq!(values.len(), 2);
+    // Pinned Loki 3.1.1 splits parsed pipelines into one stream per distinct
+    // label set (parsed fields + structured metadata join the stream object)
+    // and keeps insertion order for equal timestamps; mirror that exactly.
+    let streams = body["data"]["result"].as_array().expect("streams");
+    assert_eq!(streams.len(), 2);
     let expected_timestamp = (PHASE2_EPOCH_NS + 1).to_string();
-    assert_eq!(values[0][0], expected_timestamp);
-    assert_eq!(values[1][0], expected_timestamp);
-    assert_eq!(values[0][2]["request_id"], "r2");
-    assert_eq!(values[1][2]["request_id"], "r1");
+    assert_eq!(streams[0]["stream"]["request_id"], "r1");
+    assert_eq!(streams[1]["stream"]["request_id"], "r2");
+    for stream in streams {
+        assert_eq!(stream["values"][0][0], expected_timestamp);
+        assert_eq!(stream["values"][0].as_array().unwrap().len(), 2);
+    }
+    assert_eq!(
+        streams[0]["values"][0][1], fixture.records[0].line,
+        "equal timestamps keep insertion order"
+    );
+    assert_eq!(streams[1]["values"][0][1], fixture.records[1].line);
 }
 
 #[tokio::test]
@@ -368,24 +385,26 @@ async fn loki_phase2_tenant_isolation_keeps_streams_and_metadata_scoped() {
     let (status_b, body_b) = query_case_bearer(&router_b, &case, "tenant-b-key").await;
     assert_eq!(status_a, StatusCode::OK);
     assert_eq!(status_b, StatusCode::OK);
-    assert_eq!(body_a["data"]["result"].as_array().unwrap().len(), 1);
-    assert_eq!(body_b["data"]["result"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        body_a["data"]["result"][0]["stream"]["service_name"],
-        "checkout"
-    );
-    assert_eq!(
-        body_b["data"]["result"][0]["stream"]["service_name"],
-        "payments"
-    );
-    assert_eq!(
-        body_a["data"]["result"][0]["values"][0][2]["request_id"],
-        "r2"
-    );
-    assert_eq!(
-        body_b["data"]["result"][0]["values"][0][2]["request_id"],
-        "r4"
-    );
+    // Pinned Loki 3.1.1 surfaces structured metadata (request_id/user_id) in
+    // the stream object and splits streams per distinct metadata set; tenant A
+    // therefore sees its two checkout streams and never tenant B's payments.
+    let streams_a = body_a["data"]["result"].as_array().unwrap();
+    assert_eq!(streams_a.len(), 2);
+    for stream in streams_a {
+        assert_eq!(stream["stream"]["service_name"], "checkout");
+        assert_eq!(stream["stream"]["deployment_environment"], "prod");
+    }
+    let mut request_ids: Vec<&str> = streams_a
+        .iter()
+        .map(|stream| stream["stream"]["request_id"].as_str().unwrap())
+        .collect();
+    request_ids.sort_unstable();
+    assert_eq!(request_ids, vec!["r1", "r2"]);
+    let streams_b = body_b["data"]["result"].as_array().unwrap();
+    assert_eq!(streams_b.len(), 1);
+    assert_eq!(streams_b[0]["stream"]["service_name"], "payments");
+    assert_eq!(streams_b[0]["stream"]["deployment_environment"], "staging");
+    assert_eq!(streams_b[0]["stream"]["request_id"], "r4");
 }
 
 #[tokio::test]
