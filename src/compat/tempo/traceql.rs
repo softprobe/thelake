@@ -230,26 +230,26 @@ impl<'a> Parser<'a> {
 
     fn parse_value(&mut self) -> Result<ParsedValue, CompatError> {
         if self.take(b'"') {
-            let start = self.pos;
-            let mut value = String::new();
+            // Accumulate bytes and decode once so multi-byte UTF-8 literals
+            // (e.g. `{ span.customer = "José" }`) survive intact.
+            let mut value: Vec<u8> = Vec::new();
             while self.pos < self.input.len() {
                 let ch = self.input[self.pos];
                 self.pos += 1;
                 match ch {
                     b'"' => {
                         return Ok(ParsedValue {
-                            value,
+                            value: String::from_utf8_lossy(&value).into_owned(),
                             quoted: true,
                         })
                     }
                     b'\\' if self.pos < self.input.len() => {
-                        value.push(self.input[self.pos] as char);
+                        value.push(self.input[self.pos]);
                         self.pos += 1;
                     }
-                    _ => value.push(ch as char),
+                    _ => value.push(ch),
                 }
             }
-            let _ = start;
             return Err(bad("unterminated TraceQL string"));
         }
         Ok(ParsedValue {

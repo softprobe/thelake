@@ -165,6 +165,13 @@ pub async fn process_traces(
             for span in scope_spans.spans {
                 let links = crate::models::span::encode_links(&span.links);
                 let mut span_data = SpanData::from_otlp(span, &resource_attributes)?;
+                // The __softprobe.* namespace is reserved for internal
+                // carriers persisted in dedicated columns; drop client-supplied
+                // keys in that namespace so they can neither leak into user
+                // attributes nor shadow internal metadata.
+                span_data
+                    .attributes
+                    .retain(|key, _| !key.starts_with(crate::models::span::RESERVED_ATTRIBUTE_PREFIX));
                 if let Some(scope) = &instrumentation_scope {
                     span_data.attributes.insert(
                         crate::models::span::INSTRUMENTATION_SCOPE_ATTRIBUTE.into(),

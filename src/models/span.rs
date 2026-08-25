@@ -6,6 +6,8 @@ use std::collections::HashMap;
 /// They keep OTLP scope/link metadata out of the user attribute namespace on read.
 pub const INSTRUMENTATION_SCOPE_ATTRIBUTE: &str = "__softprobe.instrumentation_scope";
 pub const LINKS_ATTRIBUTE: &str = "__softprobe.links";
+/// Namespace prefix reserved for internal carriers; client telemetry must not use it.
+pub const RESERVED_ATTRIBUTE_PREFIX: &str = "__softprobe.";
 
 pub fn encode_instrumentation_scope(
     scope: &opentelemetry_proto::tonic::common::v1::InstrumentationScope,
@@ -147,6 +149,26 @@ impl Span {
         otlp_span: opentelemetry_proto::tonic::trace::v1::Span,
         resource_attributes: &HashMap<String, String>,
     ) -> Result<Self> {
+        // Reject timestamps outside the signed-nanosecond range so they can
+        // never silently persist as epoch/null downstream.
+        for label in [
+            ("start_time_unix_nano", otlp_span.start_time_unix_nano),
+            ("end_time_unix_nano", otlp_span.end_time_unix_nano),
+        ] {
+            anyhow::ensure!(
+                label.1 <= i64::MAX as u64,
+                "span {} exceeds signed nanosecond range ({})",
+                label.0,
+                label.1
+            );
+        }
+        for event in &otlp_span.events {
+            anyhow::ensure!(
+                event.time_unix_nano <= i64::MAX as u64,
+                "span event time exceeds signed nanosecond range ({})",
+                event.time_unix_nano
+            );
+        }
         let attributes = crate::models::key_values_to_map(&otlp_span.attributes);
 
         // Extract events

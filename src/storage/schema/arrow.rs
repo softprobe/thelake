@@ -747,11 +747,21 @@ fn build_span_attributes_array(
     spans: &[Span],
     attributes_field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef> {
-    build_variant_json_array(
-        &spans.iter().map(|s| &s.attributes).collect::<Vec<_>>(),
-        attributes_field,
-        "attributes",
-    )
+    // Internal carriers live in dedicated columns; keep them out of the
+    // user-facing attributes JSON.
+    let filtered: Vec<std::collections::HashMap<String, String>> = spans
+        .iter()
+        .map(|s| {
+            s.attributes
+                .iter()
+                .filter(|(key, _)| !key.starts_with(crate::models::span::RESERVED_ATTRIBUTE_PREFIX))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .collect();
+    let refs: Vec<&std::collections::HashMap<String, String>> =
+        filtered.iter().collect();
+    build_variant_json_array(&refs, attributes_field, "attributes")
 }
 
 fn build_variant_json_array(

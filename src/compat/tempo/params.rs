@@ -155,19 +155,20 @@ fn parse_tags(raw: &str) -> Result<BTreeMap<String, String>, CompatError> {
         pos += 1;
         let value = if bytes.get(pos) == Some(&b'"') {
             pos += 1;
-            let mut value = String::new();
+            // Decode once at the end so multi-byte UTF-8 values survive.
+            let mut raw: Vec<u8> = Vec::new();
             while pos < bytes.len() && bytes[pos] != b'"' {
                 if bytes[pos] == b'\\' && pos + 1 < bytes.len() {
                     pos += 1;
                 }
-                value.push(bytes[pos] as char);
+                raw.push(bytes[pos]);
                 pos += 1;
             }
             if bytes.get(pos) != Some(&b'"') {
                 return Err(bad("unterminated tag value"));
             }
             pos += 1;
-            value
+            String::from_utf8_lossy(&raw).into_owned()
         } else {
             let start = pos;
             while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
