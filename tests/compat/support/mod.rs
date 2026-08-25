@@ -48,6 +48,87 @@ pub mod conformance {
         }
     }
 
+    /// Load per-case canonical descriptors straight from the conformance
+    /// manifest so runner receipts can carry manifest-static requests even
+    /// when execution uses shifted fixtures. Returns (id, runner_id, descriptor).
+    pub fn load_manifest_descriptors(
+        path: &str,
+    ) -> Result<Vec<(String, Option<String>, CompatCaseDescriptor)>, String> {
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(path).map_err(|error| format!("read {path}: {error}"))?,
+        )
+        .map_err(|error| format!("parse {path}: {error}"))?;
+        let mut out = Vec::new();
+        for entry in doc
+            .get("cases")
+            .and_then(|cases| cases.as_array())
+            .ok_or_else(|| format!("{path} has no cases array"))?
+        {
+            let id = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("{path}: case without id"))?
+                .to_string();
+            let runner = entry
+                .get("runner_case_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let endpoint = entry
+                .get("endpoint")
+                .ok_or_else(|| format!("{id}: no endpoint"))?;
+            let method = endpoint
+                .get("method")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("{id}: no method"))?
+                .to_string();
+            let path_field = endpoint
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("{id}: no path"))?
+                .to_string();
+            let params: BTreeMap<String, String> = entry
+                .pointer("/request/params")
+                .and_then(|v| v.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(key, value)| {
+                            value.as_str().map(|value| (key.clone(), value.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let fixture_id = entry
+                .pointer("/fixture/id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let protocol = entry
+                .get("protocol")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let descriptor = CompatCaseDescriptor::new(
+                &protocol,
+                &id,
+                &id,
+                &fixture_id,
+                &path_field,
+                params,
+                true,
+            );
+            out.push((
+                entry
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                runner,
+                descriptor,
+            ));
+        }
+        Ok(out)
+    }
+
     pub fn parse_case_selection(
         protocol: &str,
         case_ids: Option<&str>,

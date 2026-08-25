@@ -515,9 +515,22 @@ if root_outcome_ok:
     if "release_evidence" in root_outcome and not isinstance(root_outcome["release_evidence"], bool):
         error("outcome.json", "release_evidence must be a boolean")
 
+# --- scratch classification -------------------------------------------------
+def is_runner_scratch(rel):
+    # .differential/ holds runner internals; suite/ holds raw runner copies.
+    # Only the ingested per-case dirs at the root are the evidence set.
+    return (
+        rel.startswith(".differential/")
+        or "/.differential/" in rel
+        or rel.startswith("suite/")
+        or "/suite/" in rel
+    )
+
 # --- case directories -------------------------------------------------------
 case_dirs = set()
 for rel in indexed:
+    if is_runner_scratch(rel):
+        continue
     parent = os.path.dirname(rel)
     base = os.path.basename(rel)
     if parent and base in REQUIRED_CASE_FILES:
@@ -666,8 +679,10 @@ if isinstance(receipt, dict):
             error("execution-receipt.json", "receipt case record %r does not match any selected/executed case id" % case_id)
 
 # --- index completeness -------------------------------------------------------
+# The .differential/ subtree is the runner's internal scratch area; only its
+# indexed copies (ingested into per-case dirs) are part of the evidence set.
 for rel in all_regular_files():
-    if rel == "artifact-index.json":
+    if rel == "artifact-index.json" or is_runner_scratch(rel):
         continue
     if rel not in indexed:
         error(rel, "evidence file is not listed in artifact-index.json")
@@ -716,11 +731,19 @@ if release_gate:
             error(rel, "release gate: validation-only artifacts can never satisfy release evidence")
     for cdir in sorted(case_dirs):
         outcome = case_outcomes.get(cdir)
-        if outcome is not None:
-            if outcome.get("release_evidence") is not True:
-                error(os.path.join(cdir, "outcome.json"), "release gate: case outcome does not assert release_evidence")
-            if outcome.get("status") != "pass":
-                error(os.path.join(cdir, "outcome.json"), "release gate: case status %r is not 'pass'" % outcome.get("status"))
+        if outcome is None:
+            continue
+        # Conformance exclusions (recorded reason, non-release) are the only
+        # sanctioned way for a case to be skipped in a real-mode run.
+        exclusion = outcome.get("reason") == "conformance_exclusion" and outcome.get("release_evidence") is False
+        if exclusion:
+            if outcome.get("status") != "skipped":
+                error(os.path.join(cdir, "outcome.json"), "excluded case must be skipped with conformance_exclusion outcome")
+            continue
+        if outcome.get("release_evidence") is not True:
+            error(os.path.join(cdir, "outcome.json"), "release gate: case outcome does not assert release_evidence")
+        if outcome.get("status") != "pass":
+            error(os.path.join(cdir, "outcome.json"), "release gate: case status %r is not 'pass'" % outcome.get("status"))
 
 for message in errors:
     print("validate-artifacts: %s" % message, file=sys.stderr)

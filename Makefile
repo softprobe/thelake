@@ -609,7 +609,7 @@ test-loki-diff: ensure-cache
 	LOKI_NORMALIZED_ARTIFACT="$(LOKI_NORMALIZED_ARTIFACT)" \
 	LOKI_DIFF_RAW_ARTIFACT="$(LOKI_DIFF_RAW_ARTIFACT)" \
 	LOKI_DIFF_NORMALIZED_ARTIFACT="$(LOKI_DIFF_NORMALIZED_ARTIFACT)" \
-	SOFTPROBE_COMPAT_ARTIFACT_DIR="$(LOKI_DIFF_ARTIFACT_DIR)" \
+	SOFTPROBE_COMPAT_ARTIFACT_DIR="$${SOFTPROBE_COMPAT_ARTIFACT_DIR:-$(LOKI_DIFF_ARTIFACT_DIR)}" \
 	"$(CURDIR)/scripts/compat/run-with-timeout" "$(LOKI_DIFF_TIMEOUT_SECS)" cargo test $(CARGO_PROFILE_FLAG) --features integration-e2e --test tests compat_loki::loki_phase2_differential_vs_pinned_loki -- --ignored --test-threads=1 --nocapture
 
 # Phase 3 differential vs the pinned Tempo reference (explicit Docker gate).
@@ -627,7 +627,7 @@ test-tempo-diff: ensure-cache
 	TEMPO_NORMALIZED_ARTIFACT="$(TEMPO_NORMALIZED_ARTIFACT)" \
 	TEMPO_DIFF_RAW_ARTIFACT="$(TEMPO_DIFF_RAW_ARTIFACT)" \
 	TEMPO_DIFF_NORMALIZED_ARTIFACT="$(TEMPO_DIFF_NORMALIZED_ARTIFACT)" \
-	SOFTPROBE_COMPAT_ARTIFACT_DIR="$(TEMPO_DIFF_ARTIFACT_DIR)" \
+	SOFTPROBE_COMPAT_ARTIFACT_DIR="$${SOFTPROBE_COMPAT_ARTIFACT_DIR:-$(TEMPO_DIFF_ARTIFACT_DIR)}" \
 	"$(CURDIR)/scripts/compat/run-with-timeout" "$(TEMPO_DIFF_TIMEOUT_SECS)" cargo test $(CARGO_PROFILE_FLAG) --features integration-e2e --test tests compat_tempo::tempo_phase3_differential_vs_pinned_tempo -- --ignored --test-threads=1 --nocapture
 
 # Grafana Prometheus datasource smoke (#27 Prom-only slice; also covered by `make test`).

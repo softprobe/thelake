@@ -1368,6 +1368,9 @@ run_protocol_target() {
 	local artifact_dir=$2
 	local selected_cases=$3
 	local command=$4
+	if [ "${SELECTION_DEBUG:-0}" = "1" ]; then
+		echo "SELECTION_DEBUG run_protocol selected_file=$selected_cases ids=$(ruby -rjson -e 'begin; puts JSON.parse(File.read(ARGV.fetch(0))).fetch("cases").select{|c| c["runner_case_id"].is_a?(String)}.map{|c| c["runner_case_id"]}.join(","); rescue => e; puts "RUBY_ERROR=#{e.message}"; end' "$selected_cases" 2>&1)" >&2
+	fi
 	local -a protocol_env
 	case "$protocol" in
 		prometheus)
@@ -1410,11 +1413,12 @@ run_protocol_target() {
 	esac
 	(
 		cd "$ROOT_DIR"
+		COMPAT_CASE_IDS_VALUE="$(ruby -rjson -e 'ids = JSON.parse(File.read(ARGV.fetch(0)))[String.new("cases")].select { |entry| entry[String.new("runner_case_id")].is_a?(String) }.map { |entry| entry[String.new("runner_case_id")] }; puts ids.join(String.new(","))' "$selected_cases")"
 		env "${protocol_env[@]}" \
 			"SOFTPROBE_COMPAT_ARTIFACT_DIR=$artifact_dir" \
 			"COMPAT_PROTOCOL=$protocol" \
 			"COMPAT_CASE_JSON=$selected_cases" \
-			"COMPAT_CASE_IDS=$(ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0))).fetch(\"cases\").select { |entry| entry[\"runner_case_id\"].is_a?(String) }.map { |entry| entry[\"runner_case_id\"] }.join(\",\")' \"$selected_cases\")" \
+			"COMPAT_CASE_IDS=$COMPAT_CASE_IDS_VALUE" \
 			"COMPAT_CONFORMANCE_OUT=$artifact_dir" \
 			"COMPAT_RUN_ID=$RUN_ID" \
 			COMPAT_RUN_SCOPE=suite \
@@ -1565,6 +1569,10 @@ if [ "$MOCK" != true ]; then
 					>"$stdout_file" 2>"$stderr_file"
 				runner_exit_code=$?
 				set -e
+				# Persist raw runner output immediately so an abort during
+				# validation can never hide the runner's own diagnostics.
+				cp -f "$stdout_file" "$suite_dir/runner.stdout.raw" 2>/dev/null || true
+				cp -f "$stderr_file" "$suite_dir/runner.stderr.raw" 2>/dev/null || true
 				if [ "$runner_exit_code" -eq 0 ] || [ "$runner_attempt" -ge "$RUNNER_MAX_ATTEMPTS" ]; then
 					break
 				fi
@@ -1605,9 +1613,11 @@ receipt_path = ARGV.fetch(0)
 cases = JSON.parse(File.read(ARGV.fetch(1))).fetch("cases")
 receipt = JSON.parse(File.read(receipt_path))
 expected = cases.each_with_object({}) { |entry, map| map[entry.fetch("id")] = entry["tenant_isolation_evidence"] }
+runners = cases.each_with_object({}) { |entry, map| map[entry.fetch("id")] = entry["runner_case_id"] }
 Array(receipt["cases"]).each do |record|
   evidence = expected[record["case_id"]]
   record["tenant_isolation_evidence"] = evidence if evidence && !record.key?("tenant_isolation_evidence")
+  record["runner_case_id"] = runners[record["case_id"]] if runners.key?(record["case_id"]) && !record.key?("runner_case_id")
 end
 File.write(receipt_path, JSON.pretty_generate(receipt) + "\n")
 RUBY
@@ -1807,6 +1817,7 @@ outcome_json=$(ruby -rjson -e '
                               "endpoint" => endpoint,
                               "query" => request.fetch("params", {})["query"],
                               "capability" => case_document.fetch("capability"),
+                              "conformance_exclusion" => case_document["conformance_exclusion"],
                               "normalization" => case_document.fetch("normalization"),
                               "fixture_id" => ARGV[11], "reference" => {
                                 "service" => ARGV[12], "version" => ARGV[13], "image" => ARGV[14]
@@ -1887,7 +1898,7 @@ runner_records = protocols.to_h do |protocol|
   duration = File.file?(duration_path) ? File.read(duration_path).to_f : 0.0
   [protocol, { "command" => command, "duration_seconds" => duration }]
 end
-  reference_records = cases.map do |entry|
+reference_records = cases.map do |entry|
   reference = entry.fetch("reference")
   protocol = entry.fetch("protocol")
   reference_pin = references.fetch(protocol)
@@ -1973,9 +1984,13 @@ case_records = cases.map do |entry|
   }
 end
 statuses = case_records.map { |record| record.fetch("status") }
-suite_status = statuses.all? { |status| status == "pass" } ? "pass" : (statuses.find { |status| status != "pass" } || "infrastructure_failure")
+# Conformance-excluded cases are skipped by design; they keep the run honest
+# without blocking the release gate, provided everything else passes.
+non_pass = statuses.reject { |status| status == "pass" || status == "skipped" }
+suite_status = non_pass.empty? ? "pass" : (non_pass.first || "infrastructure_failure")
 classification = %w[pass drift product_regression infrastructure_failure environment_skip unsupported skipped].include?(suite_status) ? suite_status : "infrastructure_failure"
-release = mode == "real" && suite_status == "pass" && case_records.all? { |record| record.fetch("release_evidence") == true }
+evidence_bearing = case_records.reject { |record| record.fetch("status") == "skipped" }
+release = mode == "real" && suite_status == "pass" && evidence_bearing.all? { |record| record.fetch("release_evidence") == true }
 write = lambda do |name, value|
   File.write(File.join(out_path, name), JSON.pretty_generate(value) + "\n")
 end

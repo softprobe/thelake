@@ -26,7 +26,18 @@ use crate::compat_support::prometheus::{encode_query_owned, get_json_as, get_jso
 use crate::compat_support::prometheus_oracle::build_tenant_router_with_state;
 
 pub const PHASE2_EPOCH_NS: i64 = 1_786_827_600_000_000_000;
-const FIXTURE_LAG_NS: i64 = 1_000_000_000;
+pub const FIXTURE_LAG_NS: i64 = 1_000_000_000;
+
+/// Current UNIX epoch nanoseconds (test-clock helper for time-shift math).
+pub fn system_time_now_ns() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before UNIX epoch")
+            .as_nanos(),
+    )
+    .expect("nanoseconds fit i64")
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LokiFixture {

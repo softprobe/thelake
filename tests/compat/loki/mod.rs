@@ -471,7 +471,13 @@ async fn loki_phase2_missing_and_invalid_auth_are_denied_on_all_get_endpoints() 
 #[ignore = "requires the pinned Loki oracle; run the compatibility lane with --ignored"]
 async fn loki_phase2_pinned_fixture_first_query_is_nonempty_and_schema_compatible() {
     require_docker();
-    let fixture = fixture_for_now();
+    // Under the conformance harness the manifest carries static timestamps;
+    // using them keeps receipt canonical requests comparable byte-for-byte.
+    let fixture = if std::env::var_os("COMPAT_CASE_JSON").is_some() {
+        fixture()
+    } else {
+        fixture_for_now()
+    };
     let first_case = fixture
         .cases
         .iter()
@@ -520,13 +526,31 @@ async fn loki_phase2_pinned_fixture_first_query_is_nonempty_and_schema_compatibl
 #[ignore = "requires the pinned Loki oracle; run the compatibility lane with --ignored"]
 async fn loki_phase2_differential_vs_pinned_loki() {
     require_docker();
-    let fixture = fixture_for_now();
+    // Under the conformance harness the manifest carries static timestamps;
+    // using them keeps receipt canonical requests comparable byte-for-byte.
+    let fixture = if std::env::var_os("COMPAT_CASE_JSON").is_some() {
+        fixture()
+    } else {
+        fixture_for_now()
+    };
     let selection = parse_case_selection(
         "Loki",
         std::env::var("COMPAT_CASE_IDS").ok().as_deref(),
         std::env::var("COMPAT_CASE_ID").ok().as_deref(),
     )
     .unwrap_or_else(|error| panic!("invalid Loki differential case selection: {error}"));
+    if std::env::var_os("SELECTION_DEBUG").is_some() {
+        eprintln!(
+            "SELECTION_DEBUG loki raw_ids={:?} resolved={} compat_keys={:?}",
+            std::env::var("COMPAT_CASE_IDS").unwrap_or_default(),
+            selection.as_ref().map(|s| s.len()).unwrap_or(0),
+            std::env::vars()
+                .filter(|(k, _)| k.contains("COMPAT")
+                    || k.contains("RUN_ID")
+                    || k.contains("SOFTPROBE"))
+                .collect::<Vec<_>>()
+        );
+    }
     let selected_cases = select_cases(
         "loki",
         &fixture.cases,
@@ -548,6 +572,30 @@ async fn loki_phase2_differential_vs_pinned_loki() {
         !selected_cases.is_empty(),
         "Loki differential selection resolved to no cases"
     );
+    // Under conformance, receipts must carry manifest-static canonical
+    // requests; swap runtime (shifted) descriptors for manifest ones.
+    let manifest_descriptors = std::env::var("COMPAT_CASE_JSON")
+        .ok()
+        .and_then(|path| crate::compat_support::conformance::load_manifest_descriptors(&path).ok())
+        .unwrap_or_default();
+    let selected_cases: Vec<crate::compat_support::conformance::SelectedCase<LokiCase>> =
+        selected_cases
+            .iter()
+            .map(|selected| {
+                let descriptor = manifest_descriptors
+                    .iter()
+                    .find(|(id, runner, _)| {
+                        Some(id.as_str()) == Some(selected.descriptor.case_id.as_str())
+                            || runner.as_deref() == Some(selected.descriptor.case_id.as_str())
+                    })
+                    .map(|(_, _, descriptor)| descriptor.clone())
+                    .unwrap_or_else(|| selected.descriptor.clone());
+                crate::compat_support::conformance::SelectedCase {
+                    case: selected.case,
+                    descriptor,
+                }
+            })
+            .collect();
     let descriptors = selected_cases
         .iter()
         .map(|selected| selected.descriptor.clone())
@@ -558,14 +606,39 @@ async fn loki_phase2_differential_vs_pinned_loki() {
         .collect::<BTreeSet<_>>();
     let mut recorder = CompatExecutionRecorder::new("loki", &descriptors, None)
         .expect("create Loki execution receipt");
+
+    // Under the conformance harness the receipt must carry manifest-static
+    // canonical requests, but real Loki cannot serve week-old samples, so
+    // execution uses a time-shifted copy of the fixture while canonical
+    // descriptors stay static.
+    let exec_fixture = if std::env::var_os("COMPAT_CASE_JSON").is_some() {
+        let delta = crate::compat_support::loki::system_time_now_ns()
+            - crate::compat_support::loki::FIXTURE_LAG_NS
+            - PHASE2_EPOCH_NS;
+        Some(fixture.shifted_by(delta))
+    } else {
+        None
+    };
     let readiness_case = selected_cases
         .iter()
         .find(|selected| selected.case.path == "/loki/api/v1/query_range")
         .or_else(|| selected_cases.first())
         .expect("selected differential case");
-    let oracle = start_loki_oracle(&fixture.records, readiness_case.case);
+    let exec_records = exec_fixture
+        .as_ref()
+        .map(|f| f.records.as_slice())
+        .unwrap_or(fixture.records.as_slice());
+    let readiness_exec = exec_fixture
+        .as_ref()
+        .and_then(|f| {
+            f.cases
+                .iter()
+                .find(|candidate| candidate.id == readiness_case.case.id)
+        })
+        .unwrap_or(readiness_case.case);
+    let oracle = start_loki_oracle(exec_records, readiness_exec);
     let (router, state, _temp) = build_loki_router().await;
-    ingest_records(&router, &fixture.records, None).await;
+    ingest_records(&router, exec_records, None).await;
     flush_logs(&state, "local-sqlite-tenant").await;
 
     let mut executed = BTreeSet::new();
@@ -573,8 +646,13 @@ async fn loki_phase2_differential_vs_pinned_loki() {
         let case = selected.case;
         let descriptor = &selected.descriptor;
         executed.insert(descriptor.case_id.clone());
-        let oracle_body = query_loki_oracle(&oracle.base, case);
-        let (status, lake_body) = query_case(&router, case, None).await;
+        let exec_case = exec_fixture
+            .as_ref()
+            .and_then(|f| f.cases.iter().find(|candidate| candidate.id == case.id))
+            .cloned()
+            .unwrap_or_else(|| case.clone());
+        let oracle_body = query_loki_oracle(&oracle.base, &exec_case);
+        let (status, lake_body) = query_case(&router, &exec_case, None).await;
         if status != StatusCode::OK || lake_body["status"] != "success" {
             let artifacts = write_failure_artifacts(case, Some(&lake_body), Some(&oracle_body))
                 .expect("write Loki failure artifacts");

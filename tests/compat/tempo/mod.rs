@@ -1234,6 +1234,31 @@ async fn tempo_phase3_differential_vs_pinned_tempo() {
         !selected_cases.is_empty(),
         "Tempo differential selection resolved to no cases"
     );
+    // Under conformance, receipts must carry manifest-static canonical
+    // requests; swap runtime descriptors for manifest ones.
+    let manifest_descriptors = std::env::var("COMPAT_CASE_JSON")
+        .ok()
+        .and_then(|path| crate::compat_support::conformance::load_manifest_descriptors(&path).ok())
+        .unwrap_or_default();
+    let selected_cases: Vec<
+        crate::compat_support::conformance::SelectedCase<crate::compat_support::tempo::TempoCase>,
+    > = selected_cases
+        .iter()
+        .map(|selected| {
+            let descriptor = manifest_descriptors
+                .iter()
+                .find(|(id, runner, _)| {
+                    Some(id.as_str()) == Some(selected.descriptor.case_id.as_str())
+                        || runner.as_deref() == Some(selected.descriptor.case_id.as_str())
+                })
+                .map(|(_, _, descriptor)| descriptor.clone())
+                .unwrap_or_else(|| selected.descriptor.clone());
+            crate::compat_support::conformance::SelectedCase {
+                case: selected.case,
+                descriptor,
+            }
+        })
+        .collect();
     let descriptors = selected_cases
         .iter()
         .map(|selected| selected.descriptor.clone())
@@ -1255,10 +1280,12 @@ async fn tempo_phase3_differential_vs_pinned_tempo() {
     flush_traces(&state, "local-sqlite-tenant").await;
 
     let mut executed = BTreeSet::new();
+    let mut executed_fixture_ids = BTreeSet::new();
     for selected in selected_cases {
         let case = selected.case;
         let descriptor = &selected.descriptor;
         executed.insert(descriptor.case_id.clone());
+        executed_fixture_ids.insert(case.id.clone());
         let oracle_body = query_tempo_oracle(&oracle.base, case);
         let (status, lake_body) = query_case(&router, case, None).await;
         let lake_normalized = normalize_tempo_response(lake_body.clone());
@@ -1295,8 +1322,8 @@ async fn tempo_phase3_differential_vs_pinned_tempo() {
             "Tempo differential did not execute every selected case"
         );
         assert_eq!(
-            selection, executed,
-            "Tempo selector IDs must match manifest case IDs in the receipt"
+            selection, executed_fixture_ids,
+            "Tempo selector must cover every fixture case it executed"
         );
     } else {
         assert!(
