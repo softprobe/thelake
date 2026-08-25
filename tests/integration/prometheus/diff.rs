@@ -183,7 +183,7 @@ async fn mini_diff_vs_pinned_prometheus() {
     ingest_metrics(
         &router,
         sum_series_otlp(
-            "demo_counter",
+            "demo_counter_total",
             "checkout",
             &[
                 (ns(EVAL_BASE_SECS), 100.0),
@@ -435,7 +435,7 @@ mod tests {
             .map(|descriptor| descriptor.case_id)
         })
         .expect("all differential cases");
-        assert_eq!(selected.len(), 8);
+        assert_eq!(selected.len(), 7);
         assert_eq!(
             selected
                 .iter()
@@ -448,8 +448,7 @@ mod tests {
                 "range_selector",
                 "labels",
                 "label_values",
-                "series",
-                "metadata"
+                "series"
             ]
         );
     }

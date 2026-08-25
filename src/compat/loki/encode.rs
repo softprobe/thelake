@@ -5,6 +5,33 @@ use axum::Json;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
+/// Instant-metric vector response for literal LogQL metric expressions
+/// (e.g. Grafana's `vector(1) + vector(1)` datasource health probe).
+/// Wire shape matches pinned Loki 3.1.1: timestamp is a JSON *number*, the
+/// sample value a JSON *string* (`[4000000000,"2"]`).
+pub fn instant_metric_vector_response(
+    value: f64,
+    timestamp_ns: i64,
+    max_bytes: usize,
+) -> Result<Response, CompatError> {
+    if !value.is_finite() {
+        return Err(CompatError::new(
+            CompatErrorCode::UnsupportedFeature,
+            "metric expression evaluated to a non-finite value",
+        ));
+    }
+    success_response(
+        json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {},
+                "value": [timestamp_ns, format!("{value}")]
+            }]
+        }),
+        max_bytes,
+    )
+}
+
 pub fn streams_response(hits: &[LogHit], max_bytes: usize) -> Result<Response, CompatError> {
     let mut grouped: BTreeMap<BTreeMap<String, String>, Vec<&LogHit>> = BTreeMap::new();
     for hit in hits {

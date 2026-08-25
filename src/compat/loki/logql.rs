@@ -283,9 +283,258 @@ fn unsupported(message: impl Into<String>) -> CompatError {
     CompatError::new(CompatErrorCode::UnsupportedFeature, message)
 }
 
+/// Minimal instant-metric expression support for Grafana datasource health
+/// checks, which probe Loki datasources with `vector(1) + vector(1)`.
+/// Literal vectors/scalars combined with `+ - * /`; anything else is not a
+/// metric expression and falls through to the log-query path.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MetricExpr {
+    Number(f64),
+    Binary(Box<MetricExpr>, char, Box<MetricExpr>),
+}
+
+impl MetricExpr {
+    pub fn eval(&self) -> f64 {
+        match self {
+            MetricExpr::Number(value) => *value,
+            MetricExpr::Binary(left, op, right) => {
+                let (l, r) = (left.eval(), right.eval());
+                match op {
+                    '+' => l + r,
+                    '-' => l - r,
+                    '*' => l * r,
+                    '/' => l / r,
+                    _ => f64::NAN,
+                }
+            }
+        }
+    }
+}
+
+/// Returns `Ok(Some(expr))` for a pure metric expression, `Ok(None)` when the
+/// input is not metric-shaped (caller continues with log parsing), and `Err`
+/// for metric-shaped input that uses unsupported syntax.
+pub fn parse_metric_expression(query: &str) -> Result<Option<MetricExpr>, CompatError> {
+    let query = query.trim();
+    if query.is_empty() || query.starts_with('{') || query.contains('|') {
+        return Ok(None);
+    }
+    let tokens = tokenize_metric(query)?;
+    let mut parser = MetricParser {
+        tokens: &tokens,
+        pos: 0,
+    };
+    match parser.parse_sum() {
+        Ok(expr) if parser.pos == parser.tokens.len() => Ok(Some(expr)),
+        _ => Err(unsupported("LogQL metric expression")),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum MetricToken {
+    Number(f64),
+    Vector,
+    Op(char),
+    Paren(char),
+}
+
+fn tokenize_metric(query: &str) -> Result<Vec<MetricToken>, CompatError> {
+    let mut tokens = Vec::new();
+    let bytes: Vec<char> = query.chars().collect();
+    let mut index = 0;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        match ch {
+            ' ' | '\t' => index += 1,
+            '+' | '-' | '*' | '/' => {
+                // Unary minus binds to the following number literal.
+                if ch == '-'
+                    && matches!(
+                        tokens.last(),
+                        None | Some(MetricToken::Op(_)) | Some(MetricToken::Paren('('))
+                    )
+                {
+                    index += 1;
+                    let start = index;
+                    while index < bytes.len()
+                        && (bytes[index].is_ascii_digit() || bytes[index] == '.')
+                    {
+                        index += 1;
+                    }
+                    if start == index {
+                        return Err(unsupported("LogQL metric expression"));
+                    }
+                    tokens.push(MetricToken::Number(-parse_metric_number(
+                        &bytes[start..index],
+                    )?));
+                } else {
+                    tokens.push(MetricToken::Op(ch));
+                    index += 1;
+                }
+            }
+            '(' => {
+                tokens.push(MetricToken::Paren('('));
+                index += 1;
+            }
+            ')' => {
+                tokens.push(MetricToken::Paren(')'));
+                index += 1;
+            }
+            'v' if bytes[index..].starts_with(&['v', 'e', 'c', 't', 'o', 'r']) => {
+                index += "vector".len();
+                tokens.push(MetricToken::Vector);
+            }
+            _ if ch.is_ascii_digit() => {
+                let start = index;
+                while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == '.')
+                {
+                    index += 1;
+                }
+                tokens.push(MetricToken::Number(parse_metric_number(
+                    &bytes[start..index],
+                )?));
+            }
+            _ => return Err(unsupported("LogQL metric expression")),
+        }
+    }
+    Ok(tokens)
+}
+
+fn parse_metric_number(chars: &[char]) -> Result<f64, CompatError> {
+    chars
+        .iter()
+        .collect::<String>()
+        .parse::<f64>()
+        .map_err(|_| unsupported("LogQL metric expression"))
+}
+
+struct MetricParser<'a> {
+    tokens: &'a [MetricToken],
+    pos: usize,
+}
+
+impl<'a> MetricParser<'a> {
+    fn peek(&self) -> Option<&MetricToken> {
+        self.tokens.get(self.pos)
+    }
+
+    fn parse_sum(&mut self) -> Result<MetricExpr, CompatError> {
+        let mut left = self.parse_product()?;
+        loop {
+            match self.peek() {
+                Some(MetricToken::Op(op @ '+')) | Some(MetricToken::Op(op @ '-')) => {
+                    let op = *op;
+                    self.pos += 1;
+                    let right = self.parse_product()?;
+                    left = MetricExpr::Binary(Box::new(left), op, Box::new(right));
+                }
+                _ => return Ok(left),
+            }
+        }
+    }
+
+    fn parse_product(&mut self) -> Result<MetricExpr, CompatError> {
+        let mut left = self.parse_atom()?;
+        loop {
+            match self.peek() {
+                Some(MetricToken::Op(op @ '*')) | Some(MetricToken::Op(op @ '/')) => {
+                    let op = *op;
+                    self.pos += 1;
+                    let right = self.parse_atom()?;
+                    left = MetricExpr::Binary(Box::new(left), op, Box::new(right));
+                }
+                _ => return Ok(left),
+            }
+        }
+    }
+
+    fn parse_atom(&mut self) -> Result<MetricExpr, CompatError> {
+        match self.peek() {
+            Some(MetricToken::Number(value)) => {
+                let value = *value;
+                self.pos += 1;
+                Ok(MetricExpr::Number(value))
+            }
+            Some(MetricToken::Vector) => {
+                self.pos += 1;
+                match (
+                    self.peek(),
+                    self.tokens.get(self.pos + 1),
+                    self.tokens.get(self.pos + 2),
+                ) {
+                    (
+                        Some(MetricToken::Paren('(')),
+                        Some(MetricToken::Number(value)),
+                        Some(MetricToken::Paren(')')),
+                    ) => {
+                        let value = *value;
+                        self.pos += 3;
+                        Ok(MetricExpr::Number(value))
+                    }
+                    _ => Err(unsupported(
+                        "vector() requires a numeric literal in LogQL metric expressions",
+                    )),
+                }
+            }
+            Some(MetricToken::Paren('(')) => {
+                self.pos += 1;
+                let expr = self.parse_sum()?;
+                match self.peek() {
+                    Some(MetricToken::Paren(')')) => {
+                        self.pos += 1;
+                        Ok(expr)
+                    }
+                    _ => Err(unsupported("LogQL metric expression")),
+                }
+            }
+            _ => Err(unsupported("LogQL metric expression")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_literal_vector_metric_expressions() {
+        let expr = parse_metric_expression("vector(1) + vector(1)")
+            .expect("metric expression")
+            .expect("vector expression");
+        assert_eq!(expr.eval(), 2.0);
+
+        let expr = parse_metric_expression("vector(2.5) * 4 - vector(1)")
+            .expect("metric expression")
+            .expect("vector expression");
+        assert_eq!(expr.eval(), 9.0);
+
+        // Scalar literals and parentheses are part of the same minimal grammar.
+        assert_eq!(
+            parse_metric_expression("(3 - 1) / 2")
+                .expect("metric expression")
+                .expect("scalar expression")
+                .eval(),
+            1.0
+        );
+    }
+
+    #[test]
+    fn log_selectors_are_not_metric_expressions() {
+        assert!(parse_metric_expression(r#"{job="api"} |= "x""#)
+            .expect("fall through")
+            .is_none());
+        assert!(parse_metric_expression("").expect("empty").is_none());
+    }
+
+    #[test]
+    fn unsupported_vector_forms_are_explicit_errors() {
+        let err = parse_metric_expression("vector({job=\"api\"})")
+            .expect_err("selector inside vector must not fall through");
+        assert_eq!(err.code, CompatErrorCode::UnsupportedFeature);
+        let err = parse_metric_expression("vector(sum(rate({job=\"api\"}[5m])))")
+            .expect_err("nested functions stay unsupported");
+        assert_eq!(err.code, CompatErrorCode::UnsupportedFeature);
+    }
 
     #[test]
     fn parses_selector_filters_and_json_parser() {

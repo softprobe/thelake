@@ -498,7 +498,8 @@ grafana-reference-digest:
 # Validate the manifest-derived immutable digest against the pulled Grafana
 # image before the compose harness runs. Inspect the tag image
 # ($(GRAFANA_REFERENCE_IMAGE)), not the bare repository, which Docker resolves
-# to a possibly-absent :latest tag.
+# to a possibly-absent :latest tag; retag the digest-pulled image first so the
+# check also heals local state after a docker prune.
 check-grafana-reference-pin:
 	@set -euo pipefail; \
 	image="$(GRAFANA_REFERENCE_IMAGE)"; \
@@ -507,6 +508,7 @@ check-grafana-reference-pin:
 	test -n "$$image" && test -n "$(GRAFANA_REFERENCE_VERSION)" || { echo "missing Grafana image/version in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }; \
 	[[ "$$digest" =~ ^sha256:[0-9a-fA-F]{64}$$ ]] || { echo "GRAFANA_REFERENCE_DIGEST must be an immutable sha256 digest" >&2; exit 1; }; \
 	docker pull "$$repository@$$digest" >/dev/null; \
+	case "$$image" in *@*) ;; *) docker tag "$$repository@$$digest" "$$image" ;; esac; \
 	repo_digests="$$(docker image inspect --format '{{json .RepoDigests}}' "$$image")"; \
 	expected_repo_digest="$$repository@$$digest"; \
 	echo "$$repo_digests" | grep -Fq -- "$$expected_repo_digest" || { echo "Grafana digest mismatch: $$image does not resolve to $$digest" >&2; exit 1; }; \
@@ -571,14 +573,18 @@ test-grafana-system: ensure-cache check-compat-reference-pins
 	collect() { \
 		"$${compose[@]}" ps > "$$artifact_dir/compose-ps.raw" 2>&1 || true; \
 		"$${compose[@]}" logs --no-color grafana > "$$artifact_dir/compose-logs.raw" 2>&1 || true; \
+		"$${compose[@]}" logs --no-color grafana-seed > "$$artifact_dir/compose-seed-logs.raw" 2>&1 || true; \
 		redact < "$$artifact_dir/compose-ps.raw" > "$$artifact_dir/compose-ps.txt"; \
 		redact < "$$artifact_dir/compose-logs.raw" > "$$artifact_dir/compose-logs.txt"; \
-		rm -f "$$artifact_dir/compose-ps.raw" "$$artifact_dir/compose-logs.raw"; \
+		redact < "$$artifact_dir/compose-seed-logs.raw" > "$$artifact_dir/compose-seed-logs.txt"; \
+		rm -f "$$artifact_dir/compose-ps.raw" "$$artifact_dir/compose-logs.raw" "$$artifact_dir/compose-seed-logs.raw"; \
 	}; \
 	cleanup() { status=$$?; collect; "$${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true; exit $$status; }; \
 	trap cleanup EXIT; \
 	"$${compose[@]}" up -d --wait || { echo "FAIL: compose harness failed to start" | tee "$$artifact_dir/summary.txt"; exit 1; }; \
 	GRAFANA_URL="$$grafana_url" \
+	GRAFANA_DASHBOARD_DIR="tests/compat/grafana/dashboards/compose" \
+	GRAFANA_DASHBOARD_UIDS="compose-cross-signal compose-loki compose-prom compose-tempo" \
 	GRAFANA_CHECK_DASHBOARD_QUERIES=1 \
 	GRAFANA_RICH_TEMPO_ASSERTIONS=1 \
 	GRAFANA_ADMIN_USER="$${GF_SECURITY_ADMIN_USER:-admin}" \

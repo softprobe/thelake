@@ -175,7 +175,10 @@ fn seed(
         receipt.tenants[index].traces_sent = true;
     }
 
-    for attempt in 0..60 {
+    // Cold-start DuckLake flush (first Parquet write + catalog DDL) can take
+    // minutes; poll well past that instead of failing right after ingest.
+    let last_attempt = 299;
+    for attempt in 0..=last_attempt {
         let mut all_queryable = true;
         for (index, (tenant_id, api_key, suffix)) in tenants.iter().enumerate() {
             let result = query_tenant(&client, base_url, api_key, tenant_id, suffix, receipt);
@@ -185,7 +188,7 @@ fn seed(
                     receipt.tenants[index].logs_queryable = true;
                     receipt.tenants[index].traces_queryable = true;
                 }
-                Err(error) if attempt == 59 => {
+                Err(error) if attempt == last_attempt => {
                     return Err(anyhow!("tenant {tenant_id} queryability timeout: {error}"));
                 }
                 Err(_) => {
@@ -296,6 +299,15 @@ fn query_tenant(
         .send()
         .context("query seeded metrics")?;
     let metrics = read_json_success(metrics, "/api/v1/query")?;
+    if std::env::var("SEED_DEBUG").ok().as_deref() == Some("1") {
+        // Non-fatal probe trace: show what the server actually returned so
+        // warm-up read inconsistencies are observable without aborting the
+        // retry loop.
+        eprintln!(
+            "SEED_DEBUG tenant={tenant_id} metrics body={}",
+            &metrics.to_string()[..metrics.to_string().len().min(240)]
+        );
+    }
     assert_tenant_scope(&metrics, tenant_id, other)?;
 
     let logs = headers(client.get(format!("{base_url}/loki/api/v1/query_range")))
@@ -309,6 +321,12 @@ fn query_tenant(
         .send()
         .context("query seeded logs")?;
     let logs = read_json_success(logs, "/loki/api/v1/query_range")?;
+    if std::env::var("SEED_DEBUG").ok().as_deref() == Some("1") {
+        eprintln!(
+            "SEED_DEBUG tenant={tenant_id} logs body={}",
+            &logs.to_string()[..logs.to_string().len().min(240)]
+        );
+    }
     assert_tenant_scope(&logs, tenant_id, other)?;
 
     let traces = headers(client.get(format!("{base_url}/api/search")))
@@ -321,9 +339,22 @@ fn query_tenant(
         .send()
         .context("query seeded traces")?;
     let traces = read_json_success(traces, "/api/search")?;
-    assert_tenant_scope(&traces, tenant_id, other)?;
-    if !traces.to_string().contains(&trace_id_for(suffix)) {
-        return Err(anyhow!("trace query did not return deterministic trace"));
+    // Tempo search results carry trace metadata, not tenant labels, so the
+    // tenant-id scope assertion used for metrics/logs does not apply here.
+    // Isolation is still proven deterministically: every tenant seeds its own
+    // fixed trace ID and must see exactly that one, never the other's.
+    let traces_text = traces.to_string();
+    let own_trace_id = trace_id_for(suffix);
+    let other_trace_id = trace_id_for(if suffix == "a" { "b" } else { "a" });
+    if traces_text.contains(&other_trace_id) {
+        return Err(anyhow!(
+            "cross-tenant leakage detected for {tenant_id}: found trace {other_trace_id}"
+        ));
+    }
+    if !traces_text.contains(&own_trace_id) {
+        return Err(anyhow!(
+            "response did not contain expected trace {own_trace_id}"
+        ));
     }
     Ok(())
 }
@@ -425,24 +456,96 @@ fn tenant_payloads(tenant: &str) -> TenantPayloads {
     }
     .encode_to_vec();
     let traces = ExportTraceServiceRequest {
-        resource_spans: vec![ResourceSpans {
-            resource: Some(resource),
-            scope_spans: vec![ScopeSpans {
-                scope: Some(scope("grafana-seeder")),
-                spans: vec![Span {
-                    trace_id: hex::decode(&trace_id).unwrap(),
-                    span_id,
-                    name: "checkout".into(),
-                    kind: span::SpanKind::Server as i32,
-                    start_time_unix_nano: START_NS + 10_000_000_000,
-                    end_time_unix_nano: START_NS + 11_000_000_000,
-                    attributes: vec![kv("tenant.marker", tenant)],
-                    ..Default::default()
+        resource_spans: vec![
+            ResourceSpans {
+                resource: Some(resource.clone()),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(scope("grafana-seeder")),
+                    spans: vec![
+                        Span {
+                            trace_id: hex::decode(&trace_id).unwrap(),
+                            span_id: span_id.clone(),
+                            name: "checkout".into(),
+                            kind: span::SpanKind::Server as i32,
+                            start_time_unix_nano: START_NS + 10_000_000_000,
+                            end_time_unix_nano: START_NS + 11_000_000_000,
+                            attributes: vec![kv("tenant.marker", tenant)],
+                            status: Some(opentelemetry_proto::tonic::trace::v1::Status {
+                                message: String::new(),
+                                code: opentelemetry_proto::tonic::trace::v1::status::StatusCode::Ok
+                                    as i32,
+                            }),
+                            ..Default::default()
+                        },
+                        {
+                            // Child DB call with an event, proving topology and
+                            // event preservation through the lake.
+                            let child_span_id = span_id.iter().map(|b| b.wrapping_add(1)).collect();
+                            Span {
+                                trace_id: hex::decode(&trace_id).unwrap(),
+                                span_id: child_span_id,
+                                parent_span_id: span_id.clone(),
+                                name: "db.query".into(),
+                                kind: span::SpanKind::Client as i32,
+                                start_time_unix_nano: START_NS + 10_100_000_000,
+                                end_time_unix_nano: START_NS + 10_900_000_000,
+                                attributes: vec![
+                                    kv("tenant.marker", tenant),
+                                    kv("db.system", "postgres"),
+                                ],
+                                events: vec![opentelemetry_proto::tonic::trace::v1::span::Event {
+                                    time_unix_nano: START_NS + 10_500_000_000,
+                                    name: "cache.miss".into(),
+                                    ..Default::default()
+                                }],
+                                ..Default::default()
+                            }
+                        },
+                    ],
+                    schema_url: String::new(),
                 }],
                 schema_url: String::new(),
-            }],
-            schema_url: String::new(),
-        }],
+            },
+            {
+                // Second service in the same trace so rich assertions can prove
+                // multi-ResourceSpans preservation (payments calls checkout).
+                let mut payment_resource = resource.clone();
+                payment_resource
+                    .attributes
+                    .push(kv("peer.service", "checkout"));
+                ResourceSpans {
+                    resource: Some(payment_resource),
+                    scope_spans: vec![ScopeSpans {
+                        scope: Some(scope("grafana-seeder")),
+                        spans: vec![{
+                            let child_span_id = span_id.iter().map(|b| b.wrapping_add(2)).collect();
+                            Span {
+                                trace_id: hex::decode(&trace_id).unwrap(),
+                                span_id: child_span_id,
+                                parent_span_id: span_id.clone(),
+                                name: "charge".into(),
+                                kind: span::SpanKind::Client as i32,
+                                start_time_unix_nano: START_NS + 10_200_000_000,
+                                end_time_unix_nano: START_NS + 10_800_000_000,
+                                attributes: vec![
+                                    kv("tenant.marker", tenant),
+                                    kv("http.request.method", "POST"),
+                                ],
+                                links: vec![opentelemetry_proto::tonic::trace::v1::span::Link {
+                                    trace_id: hex::decode(&trace_id).unwrap(),
+                                    span_id: span_id.iter().map(|b| b.wrapping_add(1)).collect(),
+                                    attributes: vec![kv("link.type", "cached_call")],
+                                    ..Default::default()
+                                }],
+                                ..Default::default()
+                            }
+                        }],
+                        schema_url: String::new(),
+                    }],
+                    schema_url: String::new(),
+                }
+            },
+        ],
     }
     .encode_to_vec();
     TenantPayloads {

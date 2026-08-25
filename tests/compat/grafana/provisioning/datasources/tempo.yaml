@@ -25,7 +25,7 @@ datasources:
         filterByTraceID: true
         filterBySpanID: false
         customQuery: true
-        query: '{${__tags}} | trace_id = "${__span.traceId}"'
+        query: '{${__tags}} | json | trace_id = "${__span.traceId}"'
     secureJsonData:
       httpHeaderValue1: "Bearer ${SOFTPROBE_TENANT_A_API_KEY}"
       httpHeaderValue2: "${SOFTPROBE_TENANT_A_ID}"
@@ -50,7 +50,7 @@ datasources:
         filterByTraceID: true
         filterBySpanID: false
         customQuery: true
-        query: '{${__tags}} | trace_id = "${__span.traceId}"'
+        query: '{${__tags}} | json | trace_id = "${__span.traceId}"'
     secureJsonData:
       httpHeaderValue1: "Bearer ${SOFTPROBE_TENANT_B_API_KEY}"
       httpHeaderValue2: "${SOFTPROBE_TENANT_B_ID}"

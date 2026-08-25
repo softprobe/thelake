@@ -32,11 +32,16 @@ end
 release_cases.each do |entry|
   runner_case_id = entry["runner_case_id"]
   case_id = entry.fetch("id")
-  abort "release-selected case lacks runner_case_id: #{case_id}" unless runner_case_id.is_a?(String) && !runner_case_id.empty?
+  # Conformance exclusions (with a recorded reason and release_evidence=false)
+  # are allowed to skip differential execution; anything else must map 1:1 to
+  # a protocol-runner case.
+  excluded = entry["conformance_exclusion"].is_a?(Hash) && entry["conformance_exclusion"]["release_evidence"] == false
+  abort "release-selected case lacks runner_case_id: #{case_id}" unless excluded || (runner_case_id.is_a?(String) && !runner_case_id.empty?)
 end
-runner_pairs = release_cases.map { |entry| [entry.fetch("id"), entry.fetch("runner_case_id")] }
+executable = release_cases.select { |entry| entry["runner_case_id"].is_a?(String) && !entry["runner_case_id"].empty? }
+runner_pairs = executable.map { |entry| [entry.fetch("id"), entry["runner_case_id"]] }
 abort "release-selected runner_case_id mapping is not one-to-one" unless runner_pairs.map(&:last).uniq.length == runner_pairs.length
-prometheus = release_cases.select { |entry| entry.fetch("protocol") == "prometheus" }
+prometheus = executable.select { |entry| entry.fetch("protocol") == "prometheus" }
 expected_prometheus = {
   "prometheus-query-selector-instant" => "selector_instant",
   "prometheus-query-aggregation" => "sum_by_job",
@@ -44,11 +49,12 @@ expected_prometheus = {
   "prometheus-query-range-selector" => "range_selector",
   "prometheus-labels-discovery" => "labels",
   "prometheus-label-values-discovery" => "label_values",
-  "prometheus-series-discovery" => "series",
-  "prometheus-metadata-discovery" => "metadata"
+  "prometheus-series-discovery" => "series"
 }
-actual_prometheus = prometheus.to_h { |entry| [entry.fetch("id"), entry.fetch("runner_case_id")] }
+actual_prometheus = prometheus.to_h { |entry| [entry.fetch("id"), entry["runner_case_id"]] }
 abort "Prometheus release mapping drift: #{actual_prometheus.inspect}" unless actual_prometheus == expected_prometheus
+metadata_entry = release_cases.find { |entry| entry.fetch("id") == "prometheus-metadata-discovery" }
+abort "prometheus metadata case lost its conformance exclusion" unless metadata_entry && metadata_entry.dig("conformance_exclusion", "reason").is_a?(String)
 RUBY
 if grep -Fq "make test-prom-compat" "$ROOT_DIR/scripts/compat/conformance.sh"; then
 	echo "conformance must not use the broad Prometheus compatibility suite" >&2
@@ -91,9 +97,10 @@ protocol_label() {
 	esac
 }
 
-# The Prometheus manifest contains eight executable cases. Exercise the
-# selector path so discovery cases cannot be silently dropped and every mapped
-# runner ID stays aligned with the manifest.
+# The Prometheus manifest contains eight cases; metadata carries a canonical
+# conformance exclusion (reference cannot serve block-preloaded metadata).
+# Exercise the selector path so discovery cases cannot be silently dropped and
+# every mapped runner ID stays aligned with the manifest.
 prometheus_selection_dir="$tmp_dir/prometheus-selection"
 scripts/compat/conformance.sh --mock --protocol prometheus --out "$prometheus_selection_dir" >/dev/null
 ruby -rjson - "$prometheus_selection_dir" <<'RUBY'
@@ -108,13 +115,14 @@ expected_case_ids = %w[
   prometheus-series-discovery
   prometheus-metadata-discovery
 ]
-expected_runner_ids = %w[selector_instant sum_by_job rate_counter range_selector labels label_values series metadata]
-report = File.readlines(File.join(root, "report.jsonl"), chomp: true).reject(&:empty?).map { |line| JSON.parse(line) }
+expected_runner_ids = %w[selector_instant sum_by_job rate_counter range_selector labels label_values series]
+report = File.readlines(File.join(root, "report.jsonl"), chomp: true).map { |line| JSON.parse(line) }
 actual_case_ids = report.map { |entry| entry.fetch("case_id") }
 abort "Prometheus selector dropped manifest cases: #{actual_case_ids.inspect}" unless actual_case_ids == expected_case_ids
 actual_runner_ids = report.map { |entry| entry["runner_case_id"] }.compact.uniq
 abort "Prometheus runner mapping drifted: #{actual_runner_ids.inspect}" unless actual_runner_ids == expected_runner_ids
-abort "Prometheus selector unexpectedly excluded cases" unless report.count { |entry| entry["reason"] == "conformance_exclusion" } == 0
+excluded = report.select { |entry| entry["outcome"] == "conformance_exclusion" }
+abort "unexpected conformance exclusion set: #{excluded.map { |entry| entry["case_id"] }.inspect}" unless excluded.map { |entry| entry["case_id"] } == ["prometheus-metadata-discovery"]
 RUBY
 
 case_dir="$tmp_dir/prometheus-case-prometheus-query-selector-instant"
@@ -316,7 +324,9 @@ receipt = JSON.parse(File.read(ARGV.fetch(0)))
 selected = receipt.fetch("selected_case_ids")
 runner = receipt.fetch("selected_runner_case_ids")
 records = receipt.fetch("cases")
-abort "selection receipt lost runner_case_id mapping" unless runner.all? { |id| id.is_a?(String) && !id.empty? }
+abort "selection receipt lost runner_case_id mapping" unless runner.zip(selected).all? { |id, case_id|
+  case_id == "prometheus-metadata-discovery" ? id.nil? : (id.is_a?(String) && !id.empty?)
+}
 abort "selection receipt case/runner mapping length mismatch" unless selected.length == runner.length
 records.each_with_index do |record, index|
   abort "selection receipt lost manifest case_id" unless record.fetch("case_id") == selected.fetch(index)

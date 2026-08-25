@@ -172,7 +172,8 @@ PY
 # tolerating Grafana's response metadata.
 round_trip_tmp="$(mktemp -d "${TMPDIR:-/tmp}/grafana-round-trip-contract.XXXXXX")"
 trap 'rm -rf "$round_trip_tmp"' EXIT
-python3 "$DASHBOARDS/softprobe-cross-signal.json" "$round_trip_tmp" <<'PY'
+# "-" reads the validation script from stdin; argv[1] is the dashboard fixture.
+python3 - "$DASHBOARDS/softprobe-cross-signal.json" "$round_trip_tmp" <<'PY'
 import copy
 import json
 import pathlib

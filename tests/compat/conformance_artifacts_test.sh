@@ -426,8 +426,13 @@ import sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 report_block = text[text.index("report_root = pathlib.Path(sys.argv[2])"):]
 report_block = report_block[:report_block.index("      - name: Upload consolidated compatibility report")]
-if "release_evidence = (" not in report_block:
-    raise SystemExit("consolidated report does not compute release_evidence")
+# Consolidated reports are deliberately never release evidence themselves;
+# they must still propagate the explicit flag and reject textual
+# infrastructure/environment skip markers.
+if '"release_evidence": release_evidence' not in report_block:
+    raise SystemExit("consolidated report does not propagate release_evidence")
+if "release_evidence.json" not in report_block:
+    raise SystemExit("consolidated report does not emit release_evidence.json")
 if "has_explicit_skip_marker(job_name)" not in report_block:
     raise SystemExit("consolidated report does not reject explicit skip markers")
 PY

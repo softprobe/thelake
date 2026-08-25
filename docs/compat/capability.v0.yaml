@@ -170,13 +170,13 @@ protocols:
         applies_to: [label_values, series]
         name: match[]
       interval:
-        status: unsupported_feature
+        status: accepted_no_op
         applies_to: [query_range]
-        notes: Stream responses are not sampled into interval points.
+        notes: Parameter is accepted (Grafana always sends a step); stream responses are currently returned unsampled. Downsampling is Phase 2 follow-up work.
       step:
-        status: unsupported_feature
+        status: accepted_no_op
         applies_to: [query_range]
-        notes: Stream responses are not sampled into step points.
+        notes: Parameter is accepted (Grafana always sends a step); stream responses are currently returned unsampled. Downsampling is Phase 2 follow-up work.
       timeout:
         status: ignored
         notes: The server uses query_timeout_seconds.

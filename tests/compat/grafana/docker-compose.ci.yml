@@ -60,9 +60,12 @@ services:
       minio:
         condition: service_healthy
     entrypoint: ["/bin/sh", "-ec"]
-    command: >-
-      mc alias set local http://minio:9000 minioadmin minioadmin;
-      mc mb --ignore-existing local/warehouse
+    # Single-element list so compose passes the whole script as one sh argument;
+    # a plain string is shell-lexed into separate args and `sh -ec mc` prints usage.
+    command:
+      - >-
+        mc alias set local http://minio:9000 minioadmin minioadmin;
+        mc mb --ignore-existing local/warehouse
     networks: [grafana_compat]
 
   softprobe:
@@ -93,10 +96,13 @@ services:
       - -ec
       - |
         apt-get update -qq
-        apt-get install -y -qq build-essential pkg-config libssl-dev cmake clang >/dev/null
+        apt-get install -y -qq build-essential pkg-config libssl-dev cmake clang mold >/dev/null
         cargo run --locked --bin softprobe-runtime
     volumes:
-      - ../..:/workspace:ro
+      - ../../..:/workspace:ro
+      # Shared warm cargo target: the seed binary reuses softprobe's compiled
+      # dependency tree instead of paying a second full cold build.
+      - grafana-cargo-target:/tmp/thelake-grafana-target
     ports:
       - "${GRAFANA_SOFTPROBE_HTTP_PORT:-18090}:8090"
       - "${GRAFANA_SOFTPROBE_GRPC_PORT:-14317}:4317"
@@ -104,8 +110,8 @@ services:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8090/ready >/dev/null"]
       interval: 3s
       timeout: 5s
-      retries: 60
-      start_period: 20s
+      retries: 300
+      start_period: 600s
     networks: [grafana_compat]
 
   grafana-seed:
@@ -123,17 +129,19 @@ services:
       SOFTPROBE_TENANT_B_API_KEY: grafana-phase4-tenant-b
       SOFTPROBE_TENANT_A_ID: grafana-phase4-tenant-a
       SOFTPROBE_TENANT_B_ID: grafana-phase4-tenant-b
-      CARGO_TARGET_DIR: /tmp/thelake-grafana-seed-target
+      CARGO_TARGET_DIR: /tmp/thelake-grafana-target
+      SEED_DEBUG: ${SEED_DEBUG:-}
     working_dir: /workspace
     command:
       - /bin/bash
       - -ec
       - |
         apt-get update -qq
-        apt-get install -y -qq build-essential pkg-config libssl-dev cmake clang >/dev/null
+        apt-get install -y -qq build-essential pkg-config libssl-dev cmake clang mold >/dev/null
         cargo run --locked --bin grafana_seed_otlp
     volumes:
-      - ../..:/workspace:ro
+      - ../../..:/workspace:ro
+      - grafana-cargo-target:/tmp/thelake-grafana-target
       - ${GRAFANA_SEED_ARTIFACT_DIR:-../../../target/compat/grafana}:/artifacts
     networks: [grafana_compat]
 
@@ -172,6 +180,7 @@ services:
 volumes:
   grafana-postgres-data:
   grafana-minio-data:
+  grafana-cargo-target:
 
 networks:
   grafana_compat:

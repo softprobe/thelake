@@ -69,7 +69,7 @@ cases:
     runner_case_id: rate_counter
     endpoint: {method: GET, path: /api/v1/query}
     request:
-      params: {query: 'rate(demo_counter[2m])', time: "1700000120"}
+      params: {query: 'rate(demo_counter_total[2m])', time: "1700000120"}
     fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
     capability: {id: prometheus.query, status: phase_1}
     expected: {status: 200, envelope: success}
@@ -128,7 +128,6 @@ cases:
 
   - id: prometheus-metadata-discovery
     protocol: prometheus
-    runner_case_id: metadata
     endpoint: {method: GET, path: /api/v1/metadata}
     request: {params: {metric: http_requests, limit: "10"}}
     fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
@@ -137,6 +136,14 @@ cases:
     normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
     reference: {service: prometheus, version: "v2.54.1"}
     evidence: {retain: true}
+    # Differential runs preload samples as TSDB blocks via promtool, which
+    # drops scrape-time HELP/TYPE metadata, so the reference always answers
+    # with empty data here while Softprobe legitimately reports ingested
+    # metric metadata. Lake-side contract coverage still exercises this
+    # endpoint; revisit if the reference harness gains a scraping setup.
+    conformance_exclusion:
+      reason: "block-preloaded Prometheus cannot serve /api/v1/metadata (no scrape-time metadata)"
+      release_evidence: false
 
   - id: loki-query-forward-duplicate-nanoseconds
     protocol: loki

@@ -12,7 +12,7 @@
   {
     "id": "rate_counter",
     "path": "/api/v1/query",
-    "params": { "query": "rate(demo_counter[2m])", "time": "1700000120" }
+    "params": { "query": "rate(demo_counter_total[2m])", "time": "1700000120" }
   },
   {
     "id": "range_selector",
@@ -42,10 +42,5 @@
       "start": "1700000000",
       "end": "1700000120"
     }
-  },
-  {
-    "id": "metadata",
-    "path": "/api/v1/metadata",
-    "params": { "metric": "http_requests", "limit": "10" }
   }
 ]

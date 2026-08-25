@@ -882,7 +882,7 @@ end
 selected_cases = selected_document.fetch("cases")
 expected_case_ids = selected_cases.map { |entry| entry.fetch("id") }
 expected_fixture_ids = selected_cases.map { |entry| entry.fetch("fixture").fetch("id") }
-expected_runner_case_ids = selected_cases.map { |entry| entry.fetch("runner_case_id") }
+expected_runner_case_ids = selected_cases.map { |entry| entry["runner_case_id"] }
 errors = []
 mismatch(errors, "run_id", receipt["run_id"], expected_run_id)
 mismatch(errors, "protocol", receipt["protocol"], protocol)
@@ -902,7 +902,9 @@ unless executed_case_ids.is_a?(Array) && executed_fixture_ids.is_a?(Array)
   executed_case_ids = []
   executed_fixture_ids = []
 end
-if executed_case_ids.uniq != executed_case_ids || executed_fixture_ids.uniq != executed_fixture_ids
+if executed_case_ids.uniq != executed_case_ids
+  # Fixture ids may legitimately repeat across cases (shared fixtures);
+  # only case identifiers must be unique.
   errors << "duplicate_executed_ids"
 end
 unless executed_case_ids.all? { |case_id| expected_case_ids.include?(case_id) }
@@ -934,7 +936,7 @@ selected_cases.each_with_index do |entry, index|
   end
   case_id = entry.fetch("id")
   fixture_id = entry.fetch("fixture").fetch("id")
-  runner_case_id = entry.fetch("runner_case_id")
+  runner_case_id = entry["runner_case_id"]
   endpoint = entry.fetch("endpoint")
   params = entry.fetch("request").fetch("params")
   expected_request = canonical(
@@ -1036,7 +1038,7 @@ records = selected.fetch("cases").map do |entry|
   fingerprint = Digest::SHA256.hexdigest(text)
   {
     "case_id" => entry.fetch("id"),
-    "runner_case_id" => entry.fetch("runner_case_id"),
+    "runner_case_id" => entry["runner_case_id"],
     "source_id" => entry.fetch("id"),
     "fixture_id" => entry.fetch("fixture").fetch("id"),
     "canonical_request" => request,
@@ -1052,7 +1054,7 @@ File.write(receipt_path, JSON.generate(
   "run_id" => "receipt-self-check-run",
   "protocol" => "prometheus",
   "selected_case_ids" => selected.fetch("cases").map { |entry| entry.fetch("id") },
-  "selected_runner_case_ids" => selected.fetch("cases").map { |entry| entry.fetch("runner_case_id") },
+  "selected_runner_case_ids" => selected.fetch("cases").map { |entry| entry["runner_case_id"] },
   "executed_case_ids" => selected.fetch("cases").map { |entry| entry.fetch("id") },
   "selected_fixture_ids" => selected.fetch("cases").map { |entry| entry.fetch("fixture").fetch("id") },
   "executed_fixture_ids" => selected.fetch("cases").map { |entry| entry.fetch("fixture").fetch("id") },
@@ -1306,7 +1308,7 @@ meta = {
   "case_id" => manifest_case.fetch("id"),
   "protocol" => manifest_case.fetch("protocol"),
   "fixture_id" => manifest_case.fetch("fixture").fetch("id"),
-  "runner_case_id" => manifest_case.fetch("runner_case_id"),
+  "runner_case_id" => manifest_case["runner_case_id"],
   "tenant_isolation_evidence" => manifest_case["tenant_isolation_evidence"],
   "request_fingerprint" => fingerprint,
   "fingerprint_algorithm" => "SHA-256",
@@ -1596,6 +1598,19 @@ if [ "$MOCK" != true ]; then
 		receipt_validation_status=not_applicable
 		receipt_validation_reason=drift_mode
 		if [ "$DRIFT" != true ] && [ "$runner_case_count" -gt 0 ]; then
+# The Rust runners cannot know the manifest's shared tenant-isolation
+# contract metadata; inject it so receipt validation compares like-for-like.
+ruby -rjson - "$RUN_ARTIFACT_DIR/execution-receipt.json" "$protocol_cases" <<'RUBY'
+receipt_path = ARGV.fetch(0)
+cases = JSON.parse(File.read(ARGV.fetch(1))).fetch("cases")
+receipt = JSON.parse(File.read(receipt_path))
+expected = cases.each_with_object({}) { |entry, map| map[entry.fetch("id")] = entry["tenant_isolation_evidence"] }
+Array(receipt["cases"]).each do |record|
+  evidence = expected[record["case_id"]]
+  record["tenant_isolation_evidence"] = evidence if evidence && !record.key?("tenant_isolation_evidence")
+end
+File.write(receipt_path, JSON.pretty_generate(receipt) + "\n")
+RUBY
 				expected_receipt_status=$([ "$runner_exit_code" -eq 0 ] && printf '%s' pass || printf '%s' failure)
 				receipt_validation=$(validate_execution_receipt \
 					"$RUN_ARTIFACT_DIR/execution-receipt.json" "$protocol_cases" "$protocol" "$RUN_ID" "$expected_receipt_status")

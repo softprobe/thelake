@@ -1,5 +1,7 @@
-use super::encode::{labels_response, series_response, streams_response};
-use super::logql::{parse_logql, parse_selector};
+use super::encode::{
+    instant_metric_vector_response, labels_response, series_response, streams_response,
+};
+use super::logql::{parse_logql, parse_metric_expression, parse_selector};
 use super::params::{parse_loki_params_with_limits, LokiParams};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
@@ -85,6 +87,16 @@ async fn run_query(
         Some(query) => query,
         None => return error_response(PROTOCOL, bad("missing query parameter")),
     };
+    // Grafana probes Loki datasources with literal metric expressions such as
+    // `vector(1) + vector(1)`; evaluate them without touching log storage.
+    if let Ok(Some(expr)) = parse_metric_expression(query) {
+        let value = expr.eval();
+        let timestamp_ns = params
+            .time_ns
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        return instant_metric_vector_response(value, timestamp_ns, ctx.limits.max_response_bytes)
+            .unwrap_or_else(|err| error_response(PROTOCOL, err));
+    }
     let mut request = match parse_logql(query) {
         Ok(request) => request,
         Err(err) => return error_response(PROTOCOL, err),

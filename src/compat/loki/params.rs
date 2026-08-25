@@ -90,11 +90,9 @@ pub fn parse_loki_params_with_limits(
     if range && end_ns.is_none() && since_ns.is_none() {
         return Err(bad("missing end parameter"));
     }
-    if interval_ns.is_some() || step_ns.is_some() {
-        return Err(unsupported(
-            "Loki interval/step sampling is unsupported for stream results",
-        ));
-    }
+    // interval/step are accepted for wire compatibility (Grafana always sends
+    // a step for range queries). Stream results are currently returned
+    // unsampled; true downsampling is tracked as Phase 2 follow-up work.
     Ok(LokiParams {
         query,
         start_ns,
@@ -169,10 +167,6 @@ fn bad(message: impl Into<String>) -> CompatError {
     CompatError::new(CompatErrorCode::BadRequest, message)
 }
 
-fn unsupported(message: impl Into<String>) -> CompatError {
-    CompatError::new(CompatErrorCode::UnsupportedFeature, message)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,8 +222,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_stream_sampling_parameters_as_unsupported() {
-        let err = parse_loki_params(
+    fn accepts_stream_sampling_parameters_without_sampling() {
+        // Grafana always sends step for range queries; the lake must accept it
+        // (results are currently unsampled — see capability manifest note).
+        let params = parse_loki_params(
             &[
                 ("query".into(), "{service_name=\"api\"}".into()),
                 ("start".into(), "1".into()),
@@ -238,7 +234,7 @@ mod tests {
             ],
             true,
         )
-        .unwrap_err();
-        assert_eq!(err.code, CompatErrorCode::UnsupportedFeature);
+        .expect("step is accepted");
+        assert_eq!(params.step_ns, Some(1_000_000_000));
     }
 }
