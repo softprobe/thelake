@@ -137,6 +137,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
 
       - name: Verify pinned compatibility references
         run: make check-compat-reference-pins
@@ -252,6 +254,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
 
       - name: Verify Docker and pinned Loki reference
         run: |
@@ -365,6 +369,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
 
       - name: Verify Docker and pinned Tempo reference
         run: |
@@ -484,6 +490,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
 
       - name: Initialize Grafana evidence directory
         run: |
@@ -638,6 +646,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
 
       - name: Initialize conformance evidence directory
         run: |
@@ -792,6 +802,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
 
       - name: Load baseline references from manifest
         run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
@@ -903,6 +915,8 @@ jobs:
       OUT: ${{ github.workspace }}/target/compat/drift/prometheus
     steps:
       - uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
       - name: Load baseline references from manifest
         run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
       - name: Run Prometheus drift contract
@@ -928,6 +942,8 @@ jobs:
       OUT: ${{ github.workspace }}/target/compat/drift/loki
     steps:
       - uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
       - name: Load baseline references from manifest
         run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
       - name: Run Loki drift contract
@@ -953,6 +969,8 @@ jobs:
       OUT: ${{ github.workspace }}/target/compat/drift/tempo
     steps:
       - uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
       - name: Load baseline references from manifest
         run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
       - name: Run Tempo drift contract
@@ -994,6 +1012,8 @@ jobs:
       GRAFANA_SYSTEM_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/drift/grafana
     steps:
       - uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
       - name: Create candidate reference manifest
         run: |
           set -euo pipefail
@@ -1227,7 +1247,7 @@ jobs:
   fast-pr:
     name: Fast PR compatibility lane
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux]
     timeout-minutes: 20
     env:
       CI: "true"
@@ -1237,6 +1257,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
 
       - name: Initialize fast-lane evidence
         run: mkdir -p target/compat/fast-pr
@@ -1546,6 +1568,8 @@ jobs:
     steps:
       - name: Checkout compatibility validators
         uses: actions/checkout@v5
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
 
       - name: Download consolidated report
         uses: actions/download-artifact@v4
