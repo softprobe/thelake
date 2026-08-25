@@ -134,6 +134,7 @@ jobs:
       CI: "true"
       CARGO_INCREMENTAL: "0"
       PROMETHEUS_DIFF_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/prometheus
+      SOFTPROBE_COMPAT_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/prometheus
       PROMETHEUS_RAW_ARTIFACT: ${{ github.workspace }}/target/compat/prometheus/raw.json
       PROMETHEUS_NORMALIZED_ARTIFACT: ${{ github.workspace }}/target/compat/prometheus/normalized.json
       DUCKDB_DOWNLOAD_LIB: "1"
