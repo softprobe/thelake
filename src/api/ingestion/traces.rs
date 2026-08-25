@@ -169,9 +169,9 @@ pub async fn process_traces(
                 // carriers persisted in dedicated columns; drop client-supplied
                 // keys in that namespace so they can neither leak into user
                 // attributes nor shadow internal metadata.
-                span_data
-                    .attributes
-                    .retain(|key, _| !key.starts_with(crate::models::span::RESERVED_ATTRIBUTE_PREFIX));
+                span_data.attributes.retain(|key, _| {
+                    !key.starts_with(crate::models::span::RESERVED_ATTRIBUTE_PREFIX)
+                });
                 if let Some(scope) = &instrumentation_scope {
                     span_data.attributes.insert(
                         crate::models::span::INSTRUMENTATION_SCOPE_ATTRIBUTE.into(),

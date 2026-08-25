@@ -759,8 +759,7 @@ fn build_span_attributes_array(
                 .collect()
         })
         .collect();
-    let refs: Vec<&std::collections::HashMap<String, String>> =
-        filtered.iter().collect();
+    let refs: Vec<&std::collections::HashMap<String, String>> = filtered.iter().collect();
     build_variant_json_array(&refs, attributes_field, "attributes")
 }
 
