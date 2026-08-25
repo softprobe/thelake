@@ -99,6 +99,11 @@ jobs:
       DOCKER_CLIENT_TIMEOUT: "30"
       COMPOSE_HTTP_TIMEOUT: "30"
     steps:
+      - uses: actions/checkout@v5
+
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
       - name: Verify real runtime and required Grafana inputs
         run: |
           set -euo pipefail
