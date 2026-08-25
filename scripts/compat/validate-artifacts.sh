@@ -517,14 +517,9 @@ if root_outcome_ok:
 
 # --- scratch classification -------------------------------------------------
 def is_runner_scratch(rel):
-    # .differential/ holds runner internals; suite/ holds raw runner copies.
-    # Only the ingested per-case dirs at the root are the evidence set.
-    return (
-        rel.startswith(".differential/")
-        or "/.differential/" in rel
-        or rel.startswith("suite/")
-        or "/suite/" in rel
-    )
+    # .differential/ holds the runner's internal scratch tree; its per-case
+    # copies are re-ingested at the root, so it never validates directly.
+    return rel.startswith(".differential/") or "/.differential/" in rel
 
 # --- case directories -------------------------------------------------------
 case_dirs = set()

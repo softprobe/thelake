@@ -324,8 +324,18 @@ receipt = JSON.parse(File.read(ARGV.fetch(0)))
 selected = receipt.fetch("selected_case_ids")
 runner = receipt.fetch("selected_runner_case_ids")
 records = receipt.fetch("cases")
+excluded_ids = %w[
+  prometheus-metadata-discovery
+  tempo-search-span-selector
+  tempo-search-tags
+  tempo-tag-values-peer-service
+]
 abort "selection receipt lost runner_case_id mapping" unless runner.zip(selected).all? { |id, case_id|
-  case_id == "prometheus-metadata-discovery" ? id.nil? : (id.is_a?(String) && !id.empty?)
+  if excluded_ids.include?(case_id)
+    id.nil?
+  else
+    id.is_a?(String) && !id.empty?
+  end
 }
 abort "selection receipt case/runner mapping length mismatch" unless selected.length == runner.length
 records.each_with_index do |record, index|

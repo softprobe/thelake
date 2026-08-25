@@ -410,7 +410,9 @@ fi
 
 # The protocol runner consumes its own case IDs.  The manifest ID is a
 # reporting/artifact name and must not be sent as COMPAT_CASE_IDS.
-if grep -F 'COMPAT_CASE_IDS=' "$ROOT_DIR/scripts/compat/conformance.sh" | grep -Fq 'runner_case_id'; then
+# The selection is precomputed into COMPAT_CASE_IDS_VALUE (manifest runner
+# ids) next to the env assignment; keep both halves pinned to the contract.
+if grep -F 'COMPAT_CASE_IDS_VALUE=' "$ROOT_DIR/scripts/compat/conformance.sh" | grep -Fq 'runner_case_id' && grep -F '"COMPAT_CASE_IDS=$COMPAT_CASE_IDS_VALUE"' "$ROOT_DIR/scripts/compat/conformance.sh" >/dev/null; then
 	pass "protocol runners receive manifest runner_case_id values"
 else
 	fail "protocol runners receive manifest runner_case_id values" "COMPAT_CASE_IDS must be built from runner_case_id"
