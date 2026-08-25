@@ -813,7 +813,6 @@ jobs:
       DRIFT_GRAFANA_VERSION: ${{ inputs.drift_grafana_version || vars.COMPAT_DRIFT_GRAFANA_VERSION || secrets.COMPAT_DRIFT_GRAFANA_VERSION }}
       DRIFT_GRAFANA_DIGEST: ${{ inputs.drift_grafana_digest || vars.COMPAT_DRIFT_GRAFANA_DIGEST || secrets.COMPAT_DRIFT_GRAFANA_DIGEST }}
     steps:
-      - name: Checkout
       - name: Pre-clean workspace permissions
         run: |
           set -euo pipefail
@@ -822,7 +821,7 @@ jobs:
             sudo rm -rf "$WS/warehouse" || true
             sudo chown -R "$(id -u):$(id -g)" "$WS" || true
           fi
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
 
@@ -1308,7 +1307,6 @@ jobs:
       CARGO_BUILD_JOBS: "2"
       RUST_TEST_THREADS: "1"
     steps:
-      - name: Checkout
       - name: Pre-clean workspace permissions
         run: |
           set -euo pipefail
@@ -1317,7 +1315,7 @@ jobs:
             sudo rm -rf "$WS/warehouse" || true
             sudo chown -R "$(id -u):$(id -g)" "$WS" || true
           fi
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
 
