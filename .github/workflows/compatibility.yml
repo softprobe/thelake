@@ -99,6 +99,14 @@ jobs:
       DOCKER_CLIENT_TIMEOUT: "30"
       COMPOSE_HTTP_TIMEOUT: "30"
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
       - uses: actions/checkout@v5
 
       - name: Ensure compatibility toolchain
@@ -806,6 +814,14 @@ jobs:
       DRIFT_GRAFANA_DIGEST: ${{ inputs.drift_grafana_digest || vars.COMPAT_DRIFT_GRAFANA_DIGEST || secrets.COMPAT_DRIFT_GRAFANA_DIGEST }}
     steps:
       - name: Checkout
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
         uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
@@ -919,6 +935,14 @@ jobs:
       DRIFT_CANDIDATE_DIGEST: ${{ inputs.drift_prometheus_digest || vars.COMPAT_DRIFT_PROMETHEUS_DIGEST || secrets.COMPAT_DRIFT_PROMETHEUS_DIGEST }}
       OUT: ${{ github.workspace }}/target/compat/drift/prometheus
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
       - uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
@@ -946,6 +970,14 @@ jobs:
       DRIFT_CANDIDATE_DIGEST: ${{ inputs.drift_loki_digest || vars.COMPAT_DRIFT_LOKI_DIGEST || secrets.COMPAT_DRIFT_LOKI_DIGEST }}
       OUT: ${{ github.workspace }}/target/compat/drift/loki
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
       - uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
@@ -973,6 +1005,14 @@ jobs:
       DRIFT_CANDIDATE_DIGEST: ${{ inputs.drift_tempo_digest || vars.COMPAT_DRIFT_TEMPO_DIGEST || secrets.COMPAT_DRIFT_TEMPO_DIGEST }}
       OUT: ${{ github.workspace }}/target/compat/drift/tempo
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
       - uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
@@ -1016,6 +1056,14 @@ jobs:
       GRAFANA_REFERENCE_DIGEST: ${{ inputs.drift_grafana_digest || vars.COMPAT_DRIFT_GRAFANA_DIGEST || secrets.COMPAT_DRIFT_GRAFANA_DIGEST }}
       GRAFANA_SYSTEM_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/drift/grafana
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
       - uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
@@ -1261,6 +1309,14 @@ jobs:
       RUST_TEST_THREADS: "1"
     steps:
       - name: Checkout
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
         uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
@@ -1572,6 +1628,14 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout compatibility validators
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
         uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
