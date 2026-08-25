@@ -1625,7 +1625,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout compatibility validators
       - name: Pre-clean workspace permissions
         run: |
           set -euo pipefail
@@ -1634,6 +1633,7 @@ jobs:
             sudo rm -rf "$WS/warehouse" || true
             sudo chown -R "$(id -u):$(id -g)" "$WS" || true
           fi
+      - name: Checkout compatibility validators
         uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
