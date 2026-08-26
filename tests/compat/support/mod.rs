@@ -1028,8 +1028,8 @@ pub mod lifecycle {
     }
 
     fn wait_http_status(url: &str, timeout: Duration, accepts: impl Fn(u16) -> bool) {
-        wait_http_status_with_probe(url, timeout, POLL_INTERVAL, accepts, curl_probe).unwrap_or_else(
-            |error| {
+        wait_http_status_with_probe(url, timeout, POLL_INTERVAL, accepts, curl_probe)
+            .unwrap_or_else(|error| {
                 // Best-effort: surface oracle container logs on readiness
                 // timeouts so CI can show the crash reason.
                 for arg in std::env::args().collect::<Vec<_>>() {
@@ -1039,8 +1039,7 @@ pub mod lifecycle {
                     print_container_logs(&name);
                 }
                 panic!("{error}")
-            },
-        );
+            });
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
