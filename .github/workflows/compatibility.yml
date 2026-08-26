@@ -396,6 +396,9 @@ jobs:
           make check-compat-reference-pins
           docker pull "$(make --no-print-directory compat-reference-image SIGNAL=tempo)"
 
+      - name: Pre-pull pinned reference image
+        run: docker pull "$TEMPO_REFERENCE_IMAGE"
+
       - name: Run Tempo differential gate
         run: make test-tempo-diff
 

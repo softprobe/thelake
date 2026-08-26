@@ -806,7 +806,8 @@ query_frontend:
         "3200",
         &["4318"],
         "/ready",
-        std::time::Duration::from_secs(60),
+        // First CI run pulls the pinned image; allow slow starts.
+        std::time::Duration::from_secs(180),
         "Docker is required for Tempo differential tests",
     );
 
@@ -841,8 +842,8 @@ query_frontend:
         _work: work,
         base,
     };
-    oracle.wait_for_known_trace(&known_trace_id, std::time::Duration::from_secs(60));
-    oracle.wait_for_search_case(search_case, std::time::Duration::from_secs(60));
+    oracle.wait_for_known_trace(&known_trace_id, std::time::Duration::from_secs(180));
+    oracle.wait_for_search_case(search_case, std::time::Duration::from_secs(180));
     oracle
 }
 
