@@ -90,7 +90,7 @@ impl DuckLakeLogsBackend {
             "SELECT CAST(epoch_ns(timestamp) AS BIGINT) AS timestamp_ns, body, \
              CAST(attributes AS JSON) AS attributes, \
              CAST(resource_attributes AS JSON) AS resource_attributes \
-             FROM union_logs WHERE 1=1{} ORDER BY timestamp ASC LIMIT {}",
+             FROM union_logs WHERE 1=1{} ORDER BY timestamp ASC, body ASC, attributes ASC LIMIT {}",
             Self::sql_window(start_ns, end_ns),
             cap.saturating_add(1)
         );
