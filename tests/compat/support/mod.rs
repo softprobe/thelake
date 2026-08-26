@@ -936,8 +936,10 @@ pub mod lifecycle {
 
     fn run_container(name: &str, args: &[String]) -> ContainerGuard {
         let _ = Command::new("docker").args(["rm", "-f", name]).status();
+        // Keep the container after exit (--rm would discard logs we need
+        // when readiness fails); ContainerGuard removes it explicitly.
         let run = Command::new("docker")
-            .args(["run", "-d", "--rm", "--name", name])
+            .args(["run", "-d", "--name", name])
             .args(args)
             .status()
             .unwrap_or_else(|error| panic!("docker run {name}: {error}"));
