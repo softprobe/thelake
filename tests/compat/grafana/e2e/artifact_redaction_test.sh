@@ -100,7 +100,7 @@ export GRAFANA_SKIP_STATIC_CONTRACTS=1 MOCK=1 GRAFANA_CHECK_DASHBOARD_QUERIES=1 
     GRAFANA_MOCK_PANEL_LIMIT=1 \
     GRAFANA_DASHBOARD_UIDS='softprobe-cross-signal softprobe-loki-smoke softprobe-prom-smoke softprobe-tempo-smoke' \
     ARTIFACT_DIR="$mock_dir"
-run_bounded "${GRAFANA_MOCK_TIMEOUT_SECONDS:-300}" bash "$SCRIPT"
+run_bounded "${GRAFANA_MOCK_TIMEOUT_SECONDS:-300}" bash -x "$SCRIPT"
 mock_status=$?
 set -e
 if (( mock_status != 0 )); then
@@ -168,7 +168,7 @@ PY
 failure_dir="$TMP_DIR/mock-failure"
 set +e
 GRAFANA_SKIP_STATIC_CONTRACTS=1 MOCK=1 GRAFANA_MOCK_PANEL_LIMIT=1 ARTIFACT_DIR="$failure_dir" MOCK_FIXTURE_DIR="$TMP_DIR/missing-fixtures" \
-run_bounded "${GRAFANA_MOCK_TIMEOUT_SECONDS:-300}" bash "$SCRIPT"
+run_bounded "${GRAFANA_MOCK_TIMEOUT_SECONDS:-300}" bash -x "$SCRIPT"
 failure_status=$?
 set -e
 if (( failure_status != 1 )); then
