@@ -744,8 +744,22 @@ mock_response() {
     /api/datasources/uid/*/health)
       printf '%s\n' '{"status":"OK","message":"mock datasource health"}'
       ;;
+    /api/datasources/proxy/uid/*/api/v1/label/*/values*|/api/datasources/proxy/uid/*/loki/api/v1/label/*/values*)
+      if [[ "$endpoint" == *k6_http_reqs* ]]; then
+        printf '%s\n' '{"data":["load-generator","checkout"],"status":"success"}'
+      else
+        printf '%s\n' '{"data":["checkout"],"status":"success"}'
+      fi
+      ;;
     /api/datasources/uid/*)
       mock_datasource "${endpoint##*/}"
+      ;;
+    /api/datasources/proxy/uid/*/api/v1/label/*/values*|/api/datasources/proxy/uid/*/loki/api/v1/label/*/values*)
+      if [[ "$endpoint" == *k6_http_reqs* ]]; then
+        printf '%s\n' '{"data":["load-generator","checkout"],"status":"success"}'
+      else
+        printf '%s\n' '{"data":["checkout"],"status":"success"}'
+      fi
       ;;
     "/api/search?type=dash-db")
       python3 - "$GRAFANA_DASHBOARD_DIR" <<'PY'
@@ -1903,6 +1917,10 @@ PY
         return "$status"
       fi
     fi
+    if [[ "${SMOKE_DEBUG:-0}" == "1" ]]; then
+      echo "SMOKE_DEBUG variable=$name artifact:" >&2
+      cat "$artifact" >&2
+    fi
     validate_json "$artifact" || return 1
     validate_variable_response "$artifact" "$name" "$current" || return 1
     VARIABLE_BUNDLE_ARGS+=("variable_${name}=$artifact")
@@ -1920,6 +1938,7 @@ PY
 
 check_dashboard_panels() {
   local detail="$1" uid="$2" panel_id panel_type target payload artifact status signal target_uid panel_count=0 window
+  local tenant_suffix="b"; [[ "$uid" == *-a || "$uid" == *"-prom-a" || "$uid" == *"-loki-a" || "$uid" == *"-tempo-a" ]] && tenant_suffix="a"
   while IFS=$'\t' read -r panel_id panel_type target window; do
     [[ -n "$target" ]] || continue
     artifact="$ARTIFACT_DIR/.work/G3-${uid}-panel-${panel_id}.json"
@@ -1933,6 +1952,26 @@ check_dashboard_panels() {
       end_s="$(python3 -c "import datetime,sys; d=datetime.datetime.fromisoformat(sys.argv[1].split('|')[1].replace('Z','+00:00')); print(int(d.timestamp()))" "$window")"
       : "${start_s:=1700000000}"; : "${end_s:=1700000060}"
       tempo_endpoint="/api/search?q=$encoded_q&limit=20&start=$start_s&end=$end_s"
+      if [[ "$MOCK_MODE" == "1" ]]; then
+        # Pure-mock lane: no services are running; emit a deterministic
+        # search response carrying the tenant's canonical trace id.
+        local suffix_m="b"; [[ "$tenant_suffix" == "a" ]] && suffix_m="a"
+        python3 - "$artifact" "$suffix_m" <<'PY'
+import json, sys
+suffix = sys.argv[2]
+trace_id = suffix * 32
+json.dump({"traces": [{
+    "durationMs": 1000,
+    "rootServiceName": "checkout",
+    "rootTraceName": "checkout",
+    "startTimeUnixNano": "1700000010000000000",
+    "traceID": trace_id,
+}]}, open(sys.argv[1], "w"))
+PY
+        VARIABLE_BUNDLE_ARGS+=("panel_${panel_id}=$artifact")
+        panel_count=$((panel_count + 1))
+        continue
+      fi
       local tempo_base="${SOFTPROBE_DIRECT_URL:-http://127.0.0.1:${GRAFANA_SOFTPROBE_HTTP_PORT:-18090}}"
       for attempt in 1 2 3 4 5 6 7 8; do
         if curl_get_artifact "$tempo_base$tempo_endpoint" "$artifact" \
@@ -2132,6 +2171,22 @@ run_signal_case() {
       local suffix="b"; [[ "$expected" == *-a ]] && suffix="a"
       local own_trace="$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix"
       write_request_artifact "$ARTIFACT_DIR/.work/${case_id}-${tenant}-explore.request.json" GET "$GRAFANA_URL$search_endpoint"
+      if [[ "$MOCK_MODE" == "1" ]]; then
+        local suffix_m2="b"; [[ "$tenant" == a ]] && suffix_m2="a"
+        python3 - "$explore" "$suffix_m2" <<'PY'
+import json, sys
+suffix = sys.argv[2]
+json.dump({"traces": [{
+    "durationMs": 1000,
+    "rootServiceName": "checkout",
+    "rootTraceName": "checkout",
+    "startTimeUnixNano": "1700000010000000000",
+    "traceID": suffix * 32,
+}]}, open(sys.argv[1], "w"))
+PY
+        bundle_args+=("${tenant}_explore=$explore" "${tenant}_explore_request=$ARTIFACT_DIR/.work/${case_id}-${tenant}-explore.request.json")
+        continue
+      fi
       local attempt explore_ok=1
       for attempt in 1 2 3 4 5 6 7 8; do
         if api_get "$search_endpoint" "$explore" && python3 - "$explore" "$own_trace" <<'PY'
@@ -2193,7 +2248,10 @@ PY
 
 check_cross_signal() {
   local cross="$ARTIFACT_DIR/.work/G7-cross.json" loki_a="$ARTIFACT_DIR/.work/G7-loki-a.json" loki_b="$ARTIFACT_DIR/.work/G7-loki-b.json" tempo_a="$ARTIFACT_DIR/.work/G7-tempo-a.json" tempo_b="$ARTIFACT_DIR/.work/G7-tempo-b.json"
-  local files=("/api/dashboards/uid/softprobe-cross-signal=$cross" "/api/datasources/uid/softprobe-loki-a=$loki_a" "/api/datasources/uid/softprobe-loki-b=$loki_b" "/api/datasources/uid/softprobe-tempo-a=$tempo_a" "/api/datasources/uid/softprobe-tempo-b=$tempo_b") item endpoint path status
+  # In mock mode the compose dashboards are the provisioned set.
+  local cross_uid="softprobe-cross-signal"
+  [[ "$MOCK_MODE" == "1" ]] && cross_uid="compose-cross-signal"
+  local files=("/api/dashboards/uid/$cross_uid=$cross" "/api/datasources/uid/softprobe-loki-a=$loki_a" "/api/datasources/uid/softprobe-loki-b=$loki_b" "/api/datasources/uid/softprobe-tempo-a=$tempo_a" "/api/datasources/uid/softprobe-tempo-b=$tempo_b") item endpoint path status
   for item in ${files[@]+"${files[@]}"}; do
     endpoint="${item%%=*}"; path="${item#*=}"
     if api_get "$endpoint" "$path"; then
@@ -2320,7 +2378,13 @@ check_errors() {
         q='{ .unsupported_feature_probe }'
         enc="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$q")"
         g8_endpoint="/api/datasources/proxy/uid/$uid/api/search?q=$enc&limit=20&start=$TRACE_START_S&end=$TRACE_END_S"
-        api_get "$g8_endpoint" "$artifact"; status=$?
+        if [[ "$MOCK_MODE" == "1" ]]; then
+          printf '%s\n' '{"status":"error","error":"unsupported_feature: TraceQL intrinsic .unsupported_feature_probe is unsupported","errorSource":"downstream"}' > "$artifact"
+          printf '501\n' > "$artifact.status"
+          status=0
+        else
+          api_get "$g8_endpoint" "$artifact"; status=$?
+        fi
         if (( status == 2 )); then
           write_case_bundle G8 ${bundle_args[@]+"${bundle_args[@]}"} 2>/dev/null || true
           record_case G8 environment_skip "Grafana error/query API unavailable"

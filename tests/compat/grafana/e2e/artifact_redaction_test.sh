@@ -98,7 +98,8 @@ printf 'stale evidence\n' > "$mock_dir/.work/stale.json"
 set +e
 export GRAFANA_SKIP_STATIC_CONTRACTS=1 MOCK=1 GRAFANA_CHECK_DASHBOARD_QUERIES=1 \
     GRAFANA_MOCK_PANEL_LIMIT=1 \
-    GRAFANA_DASHBOARD_UIDS='softprobe-cross-signal softprobe-loki-smoke softprobe-prom-smoke softprobe-tempo-smoke' \
+    GRAFANA_DASHBOARD_DIR="$ROOT_DIR/tests/compat/grafana/dashboards/compose" \
+    GRAFANA_DASHBOARD_UIDS='compose-cross-signal compose-loki compose-prom compose-tempo' \
     ARTIFACT_DIR="$mock_dir"
 run_bounded "${GRAFANA_MOCK_TIMEOUT_SECONDS:-300}" bash -x "$SCRIPT"
 mock_status=$?
