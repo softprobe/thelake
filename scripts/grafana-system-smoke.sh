@@ -1941,6 +1941,7 @@ check_dashboard_panels() {
   local tenant_suffix="b"; [[ "$uid" == *-a || "$uid" == *"-prom-a" || "$uid" == *"-loki-a" || "$uid" == *"-tempo-a" ]] && tenant_suffix="a"
   while IFS=$'\t' read -r panel_id panel_type target window; do
     [[ -n "$target" ]] || continue
+    signal="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('datasource',{}).get('type','prometheus'))" "$target")"
     artifact="$ARTIFACT_DIR/.work/G3-${uid}-panel-${panel_id}.json"
     if [[ "$target" == *'"type": "tempo"'* || "$target" == *'"type":"tempo"'* ]]; then
       # Tempo panels: Grafana's QueryData/proxy paths are not scriptable here,
