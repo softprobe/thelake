@@ -581,7 +581,11 @@ test-grafana-system: ensure-cache check-compat-reference-pins
 	}; \
 	cleanup() { status=$$?; collect; "$${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true; exit $$status; }; \
 	trap cleanup EXIT; \
-	"$${compose[@]}" up -d --wait || { echo "FAIL: compose harness failed to start" | tee "$$artifact_dir/summary.txt"; exit 1; }; \
+	"$${compose[@]}" up -d --wait || { \
+		echo "FAIL: compose harness failed to start" | tee "$$artifact_dir/summary.txt"; \
+		echo "--- grafana-seed logs ---" >&2; "$${compose[@]}" logs --no-color grafana-seed >&2 || true; \
+		echo "--- softprobe logs (tail) ---" >&2; "$${compose[@]}" logs --no-color --tail 50 softprobe >&2 || true; \
+		exit 1; }; \
 	GRAFANA_URL="$$grafana_url" \
 	GRAFANA_DASHBOARD_DIR="tests/compat/grafana/dashboards/compose" \
 	GRAFANA_DASHBOARD_UIDS="compose-cross-signal compose-loki compose-prom compose-tempo" \
