@@ -942,9 +942,19 @@ pub mod lifecycle {
             .status()
             .unwrap_or_else(|error| panic!("docker run {name}: {error}"));
         assert!(run.success(), "failed to start oracle container {name}");
+        // Expose for readiness-timeout diagnostics.
+        std::env::set_var("COMPAT_ORACLE_CONTAINER", &name);
         ContainerGuard {
             name: name.to_string(),
         }
+    }
+
+    /// Dump `docker logs` for a reference container (used on readiness
+    /// timeouts so CI shows why the oracle never came up).
+    pub fn print_container_logs(name: &str) {
+        let _ = Command::new("docker")
+            .args(["logs", "--tail", "80", name])
+            .status();
     }
 
     fn docker_port(name: &str, container_port: &str) -> String {
@@ -1018,8 +1028,19 @@ pub mod lifecycle {
     }
 
     fn wait_http_status(url: &str, timeout: Duration, accepts: impl Fn(u16) -> bool) {
-        wait_http_status_with_probe(url, timeout, POLL_INTERVAL, accepts, curl_probe)
-            .unwrap_or_else(|error| panic!("{error}"));
+        wait_http_status_with_probe(url, timeout, POLL_INTERVAL, accepts, curl_probe).unwrap_or_else(
+            |error| {
+                // Best-effort: surface oracle container logs on readiness
+                // timeouts so CI can show the crash reason.
+                for arg in std::env::args().collect::<Vec<_>>() {
+                    let _ = arg; // no-op; container name passed via env below
+                }
+                if let Ok(name) = std::env::var("COMPAT_ORACLE_CONTAINER") {
+                    print_container_logs(&name);
+                }
+                panic!("{error}")
+            },
+        );
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
