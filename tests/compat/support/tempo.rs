@@ -750,6 +750,13 @@ impl TempoOracle {
 #[cfg(feature = "integration-e2e")]
 pub fn start_tempo_oracle(records: &[TempoRecord], search_case: &TempoCase) -> TempoOracle {
     let work = TempDir::new().expect("tempo work");
+    {
+        // The Tempo image runs as an arbitrary uid; on Linux bind mounts the
+        // host dir must be world-writable or `mkdir /tmp/tempo/blocks` fails.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(work.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("chmod tempo work dir");
+    }
     let payload_path = work.path().join("traces.pb");
     std::fs::write(&payload_path, build_trace_request(records).encode_to_vec())
         .expect("tempo payload");
