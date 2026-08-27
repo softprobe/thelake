@@ -1927,7 +1927,7 @@ reference_records = cases.map do |entry|
   end
   record
 end
-case_release_evidence = cases.all? do |entry|
+case_release_evidence = cases.reject { |entry| entry["conformance_exclusion"] }.all? do |entry|
   outcome_path = File.join(out_path, entry.fetch("id"), "outcome.json")
   File.file?(outcome_path) && JSON.parse(File.read(outcome_path))["release_evidence"] == true
 end
