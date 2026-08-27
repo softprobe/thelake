@@ -264,14 +264,37 @@ fn send_protobuf(
     path: &str,
     body: &[u8],
 ) -> Result<()> {
-    let response = client
-        .post(format!("{base_url}{path}"))
-        .header("authorization", format!("Bearer {api_key}"))
-        .header("content-type", "application/x-protobuf")
-        .body(body.to_vec())
-        .send()
-        .with_context(|| format!("POST {path}"))?;
-    ensure_success(response, path)
+    // Retry transient failures: the OTLP ingest port may not be ready the
+    // instant /ready returns, and network errors are intermittent under load.
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=8 {
+        match client
+            .post(format!("{base_url}{path}"))
+            .header("authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/x-protobuf")
+            .body(body.to_vec())
+            .send()
+        {
+            Ok(response) => match ensure_success(response, path) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let retryable = e.to_string().contains("HTTP 5");
+                    last_err = Some(e);
+                    if !retryable {
+                        return Err(last_err.unwrap());
+                    }
+                }
+            },
+            Err(e) => {
+                last_err = Some(e.into());
+            }
+        }
+        if attempt < 8 {
+            eprintln!("retrying POST {path} (attempt {attempt})");
+            thread::sleep(Duration::from_secs(2));
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("POST {path} failed")))
 }
 
 fn query_tenant(
