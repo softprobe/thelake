@@ -1920,7 +1920,9 @@ reference_records = cases.map do |entry|
     "version" => reference.fetch("version"),
     "image" => image_reference,
     "image_tag" => image_reference,
-    "release_evidence" => (mode == "real" && File.file?(File.join(out_path, entry.fetch("id"), "outcome.json")) && JSON.parse(File.read(File.join(out_path, entry.fetch("id"), "outcome.json")))["release_evidence"] == true),
+    "conformance_exclusion" => entry["conformance_exclusion"],
+    "reason" => (entry["conformance_exclusion"] ? "conformance_exclusion" : nil),
+    "release_evidence" => (mode == "real" && (entry["conformance_exclusion"] ? false : (File.file?(File.join(out_path, entry.fetch("id"), "outcome.json")) && JSON.parse(File.read(File.join(out_path, entry.fetch("id"), "outcome.json")))["release_evidence"] == true))),
     "validation_only" => (mode != "real")
   }
   if mode == "drift"

@@ -1574,11 +1574,14 @@ jobs:
               manifest_path = pathlib.Path("tests/compat/manifests/cases.v0.yaml")
               if manifest_path.exists():
                   try:
-                      import yaml
-                      manifest = yaml.safe_load(manifest_path.read_text())
-                      for entry in manifest.get("cases", []):
-                          if entry.get("conformance_exclusion"):
-                              excluded_cases.add(entry["id"])
+                      lines = manifest_path.read_text().splitlines()
+                      current_id = None
+                      for line in lines:
+                          trimmed = line.strip()
+                          if trimmed.startswith("- id:"):
+                              current_id = trimmed.split(":", 1)[1].strip()
+                          elif "conformance_exclusion:" in trimmed and current_id:
+                              excluded_cases.add(current_id)
                   except Exception:
                       pass
 
@@ -1596,7 +1599,13 @@ jobs:
                           case_id = item.get("case_id")
                           if case_id and case_id in excluded_cases:
                               continue
-                          if item.get("release_evidence") is False and item.get("reason") != "conformance_exclusion" and item.get("classification") != "skipped":
+                          is_excluded = bool(
+                              item.get("conformance_exclusion")
+                              or item.get("reason") == "conformance_exclusion"
+                              or item.get("classification") == "skipped"
+                              or item.get("outcome") == "conformance_exclusion"
+                          )
+                          if item.get("release_evidence") is False and not is_excluded:
                               errors.append(f"real evidence is marked release_evidence=false: {path}")
                           stack.extend(item.values())
                       elif isinstance(item, list):
