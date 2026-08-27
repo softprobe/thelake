@@ -519,7 +519,13 @@ if root_outcome_ok:
 def is_runner_scratch(rel):
     # .differential/ holds the runner's internal scratch tree; its per-case
     # copies are re-ingested at the root, so it never validates directly.
-    return rel.startswith(".differential/") or "/.differential/" in rel
+    # suite/*/artifacts/ also holds raw intermediate artifacts.
+    return (
+        rel.startswith(".differential/")
+        or "/.differential/" in rel
+        or "/artifacts/" in rel
+        or rel.startswith("artifacts/")
+    )
 
 # --- case directories -------------------------------------------------------
 case_dirs = set()
@@ -528,7 +534,7 @@ for rel in indexed:
         continue
     parent = os.path.dirname(rel)
     base = os.path.basename(rel)
-    if parent and base in REQUIRED_CASE_FILES:
+    if parent and base == "case.json":
         case_dirs.add(parent)
 
 case_meta = {}
