@@ -1774,6 +1774,9 @@ while IFS= read -r case_id; do
 				fi
 			fi
 		fi
+	fi
+
+	if [ "$mode" = real ] && [ -f "$OUT_PATH/suite/$protocol/outcome.json" ]; then
 		copy_redacted_artifact "$OUT_PATH/suite/$protocol/outcome.json" "$case_dir/suite.evidence.json"
 	fi
 
