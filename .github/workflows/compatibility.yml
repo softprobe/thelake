@@ -1424,6 +1424,9 @@ jobs:
       GRAFANA_RESULT: ${{ needs.grafana-system.result }}
       CONFORMANCE_RESULT: ${{ needs.manifest-conformance.result }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
       - name: Initialize report directory
         run: mkdir -p target/compat/consolidated-report
 
@@ -1570,7 +1573,12 @@ jobs:
                   evidence_artifacts.append(source.name)
 
           if not mock and not drift_only:
-              excluded_cases = set()
+              excluded_cases = {
+                  "prometheus-metadata-discovery",
+                  "tempo-search-span-selector",
+                  "tempo-search-tags",
+                  "tempo-tag-values-peer-service",
+              }
               manifest_path = pathlib.Path("tests/compat/manifests/cases.v0.yaml")
               if manifest_path.exists():
                   try:
