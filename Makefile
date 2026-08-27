@@ -581,6 +581,7 @@ test-grafana-system: ensure-cache check-compat-reference-pins
 	}; \
 	cleanup() { status=$$?; collect; "$${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true; exit $$status; }; \
 	trap cleanup EXIT; \
+	"$${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true; \
 	"$${compose[@]}" up -d --wait || { \
 		echo "FAIL: compose harness failed to start" | tee "$$artifact_dir/summary.txt"; \
 		echo "--- grafana-seed logs ---" >&2; "$${compose[@]}" logs --no-color grafana-seed >&2 || true; \
