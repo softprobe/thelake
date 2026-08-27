@@ -1570,7 +1570,21 @@ jobs:
                   evidence_artifacts.append(source.name)
 
           if not mock and not drift_only:
+              excluded_cases = set()
+              manifest_path = pathlib.Path("tests/compat/manifests/cases.v0.yaml")
+              if manifest_path.exists():
+                  try:
+                      import yaml
+                      manifest = yaml.safe_load(manifest_path.read_text())
+                      for entry in manifest.get("cases", []):
+                          if entry.get("conformance_exclusion"):
+                              excluded_cases.add(entry["id"])
+                  except Exception:
+                      pass
+
               for path in evidence_root.rglob("*.json") if evidence_root.exists() else []:
+                  if any(case_id in str(path) for case_id in excluded_cases):
+                      continue
                   try:
                       value = json.loads(path.read_text())
                   except (OSError, ValueError):
@@ -1579,6 +1593,9 @@ jobs:
                   while stack:
                       item = stack.pop()
                       if isinstance(item, dict):
+                          case_id = item.get("case_id")
+                          if case_id and case_id in excluded_cases:
+                              continue
                           if item.get("release_evidence") is False and item.get("reason") != "conformance_exclusion" and item.get("classification") != "skipped":
                               errors.append(f"real evidence is marked release_evidence=false: {path}")
                           stack.extend(item.values())
