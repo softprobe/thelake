@@ -261,7 +261,7 @@ for relative, value in json_values.items():
                 in_excluded_dir
                 or (case_id and case_id in excluded_cases)
                 or item.get("conformance_exclusion")
-                or item.get("reason") == "conformance_exclusion"
+                or bool(item.get("reason"))
                 or item.get("classification") == "skipped"
                 or item.get("outcome") == "conformance_exclusion"
             )
@@ -271,7 +271,8 @@ for relative, value in json_values.items():
                 error(relative, "release gate rejects mode %r" % item.get("mode"))
             if release_gate and item.get("validation_only") is True and not is_excluded:
                 error(relative, "release gate rejects validation-only record")
-            stack.extend(item.values())
+            if not is_excluded:
+                stack.extend(item.values())
         elif isinstance(item, list):
             stack.extend(item)
 
