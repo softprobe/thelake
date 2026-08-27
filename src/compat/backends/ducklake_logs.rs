@@ -90,7 +90,7 @@ impl DuckLakeLogsBackend {
             "SELECT CAST(epoch_ns(timestamp) AS BIGINT) AS timestamp_ns, body, \
              CAST(attributes AS JSON) AS attributes, \
              CAST(resource_attributes AS JSON) AS resource_attributes \
-             FROM union_logs WHERE 1=1{} ORDER BY timestamp ASC, body ASC, attributes ASC LIMIT {}",
+             FROM union_logs WHERE 1=1{} ORDER BY timestamp ASC LIMIT {}",
             Self::sql_window(start_ns, end_ns),
             cap.saturating_add(1)
         );
@@ -231,13 +231,7 @@ impl LogsQueryBackend for DuckLakeLogsBackend {
             .flatten()
             .collect::<Vec<_>>();
         enforce_stream_cap(&hits, ctx.limits.max_series)?;
-        hits.sort_by(|a, b| {
-            a.timestamp_ns
-                .cmp(&b.timestamp_ns)
-                .then_with(|| a.labels.cmp(&b.labels))
-                .then_with(|| a.line.cmp(&b.line))
-                .then_with(|| a.structured_metadata.cmp(&b.structured_metadata))
-        });
+        hits.sort_by(|a, b| a.timestamp_ns.cmp(&b.timestamp_ns));
         if request.direction == LogDirection::Backward {
             hits.reverse();
         }

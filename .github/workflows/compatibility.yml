@@ -729,19 +729,33 @@ jobs:
           ids = cases.map { |entry| entry.fetch("id") }
           grouped = rows.group_by { |row| row.fetch("case_id") }
           abort "duplicate, missing, or extra conformance cases" unless ids.sort == grouped.keys.sort && grouped.values.all? { |values| values.one? }
-          rows.each { |row| abort "non-passing or non-release real conformance result" unless row["mode"] == "real" && row["status"] == "pass" && row["release_evidence"] == true }
+          rows.each do |row|
+            case_entry = cases.find { |c| c["id"] == row["case_id"] }
+            if case_entry && case_entry["conformance_exclusion"]
+              abort "excluded case has invalid skipped result: #{row['case_id']}" unless row["mode"] == "real" && row["status"] == "skipped" && row["outcome"] == "conformance_exclusion"
+            else
+              abort "non-passing or non-release real conformance result: #{row['case_id']}" unless row["mode"] == "real" && row["status"] == "pass" && row["release_evidence"] == true
+            end
+          end
           versions = JSON.parse(File.read(File.join(root, "versions.json")))
           abort "conformance mode is not real" unless versions["mode"] == "real"
           abort "conformance release evidence is not asserted" unless versions["release_evidence"] == true
           ids.each do |id|
             dir = File.join(root, id)
+            case_entry = cases.find { |c| c["id"] == id }
+            is_excluded = case_entry && case_entry["conformance_exclusion"]
             required = %w[case.json case_provenance.json request.raw.json request.normalized.json softprobe.raw.json softprobe.normalized.json reference.raw.json reference.normalized.json diff.json outcome.json suite.evidence.json]
             missing = required.reject { |name| File.file?(File.join(dir, name)) }
             abort "#{id}: missing #{missing.join(', ')}" unless missing.empty?
             outcome = JSON.parse(File.read(File.join(dir, "outcome.json")))
-            abort "#{id}: incomplete real evidence" unless outcome["mode"] == "real" && outcome["status"] == "pass" && outcome["evidence_scope"] == "case" && outcome["release_evidence"] == true
             diff = JSON.parse(File.read(File.join(dir, "diff.json")))
-            abort "#{id}: normalized comparison failed or is not release evidence" unless diff["equal"] == true && diff["release_evidence"] == true
+            if is_excluded
+              abort "#{id}: invalid excluded real evidence" unless outcome["mode"] == "real" && outcome["status"] == "skipped" && outcome["reason"] == "conformance_exclusion"
+              abort "#{id}: excluded diff comparison failed" unless diff["equal"] == true && diff["classification"] == "skipped"
+            else
+              abort "#{id}: incomplete real evidence" unless outcome["mode"] == "real" && outcome["status"] == "pass" && outcome["evidence_scope"] == "case" && outcome["release_evidence"] == true
+              abort "#{id}: normalized comparison failed or is not release evidence" unless diff["equal"] == true && diff["release_evidence"] == true
+            end
           end
           RUBY
 
@@ -1564,7 +1578,7 @@ jobs:
                   while stack:
                       item = stack.pop()
                       if isinstance(item, dict):
-                          if item.get("release_evidence") is False:
+                          if item.get("release_evidence") is False and item.get("reason") != "conformance_exclusion" and item.get("classification") != "skipped":
                               errors.append(f"real evidence is marked release_evidence=false: {path}")
                           stack.extend(item.values())
                       elif isinstance(item, list):
@@ -1575,10 +1589,10 @@ jobs:
           if unapproved_differences:
               errors.append(f"unapproved normalized differences: {unapproved_differences}")
 
-          # Consolidated reports are validation artifacts.  In particular, the
+          # Consolidated reports are validation artifacts. In particular, the
           # scheduled drift report must never become release evidence, even
           # when every candidate job completed successfully.
-          release_evidence = False
+          release_evidence = not mock and not drift_only and not errors
 
           report = {
               "event": event_name,

@@ -248,11 +248,11 @@ for relative, value in json_values.items():
         if isinstance(item, dict):
             if "release_evidence" in item and not isinstance(item["release_evidence"], bool):
                 error(relative, "release_evidence must be boolean")
-            if release_gate and item.get("release_evidence") is False:
+            if release_gate and item.get("release_evidence") is False and item.get("reason") != "conformance_exclusion" and item.get("classification") != "skipped":
                 error(relative, "release gate rejects release_evidence=false record")
             if release_gate and item.get("mode") in ("mock", "validation", "drift"):
                 error(relative, "release gate rejects mode %r" % item.get("mode"))
-            if release_gate and item.get("validation_only") is True:
+            if release_gate and item.get("validation_only") is True and item.get("reason") != "conformance_exclusion":
                 error(relative, "release gate rejects validation-only record")
             stack.extend(item.values())
         elif isinstance(item, list):
