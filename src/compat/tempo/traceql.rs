@@ -191,15 +191,19 @@ impl<'a> Parser<'a> {
                 | "span.kind"
                 | "status"
                 | "span:status"
+                | "span.status"
                 | "status_code"
                 | "span:status_code"
                 | "span.status_code"
                 | "statusMessage"
                 | "span:statusMessage"
+                | "span.statusMessage"
                 | "duration"
                 | "span:duration"
+                | "span.duration"
                 | "traceDuration"
                 | "trace:duration"
+                | "trace.duration"
         ) {
             Ok(TraceField::Intrinsic(raw))
         } else {
@@ -305,24 +309,36 @@ struct ParsedValue {
 }
 
 fn predicate_value(field: &TraceField, parsed: ParsedValue) -> Result<TraceValue, CompatError> {
-    if is_numeric_field(field) || is_duration_field(field) {
+    if is_duration_field(field) {
+        if parsed.quoted {
+            return Err(bad(
+                "duration predicates require an unquoted duration value",
+            ));
+        }
+        if parse_duration_ns(&parsed.value).is_none() {
+            return Err(bad(
+                "duration predicates require a numeric duration with a supported unit",
+            ));
+        }
+        Ok(TraceValue::Number(parsed.value))
+    } else if is_numeric_field(field) {
         if parsed.quoted {
             return Err(bad(
                 "numeric TraceQL predicates require an unquoted numeric value",
             ));
         }
-        if is_duration_field(field) {
-            if parse_duration_ns(&parsed.value).is_none() {
-                return Err(bad(
-                    "duration predicates require a numeric duration with a supported unit",
-                ));
-            }
-        } else if parsed.value.parse::<i64>().is_err() {
+        if parsed.value.parse::<i64>().is_err() {
             return Err(bad(
                 "numeric TraceQL predicates require an unquoted integer value",
             ));
         }
         Ok(TraceValue::Number(parsed.value))
+    } else if is_status_field(field) {
+        if parsed.value.parse::<i64>().is_ok() {
+            Ok(TraceValue::Number(parsed.value))
+        } else {
+            Ok(TraceValue::String(parsed.value))
+        }
     } else {
         Ok(TraceValue::String(parsed.value))
     }
@@ -366,17 +382,44 @@ fn validate_predicate_types(predicate: &TracePredicate) -> Result<(), CompatErro
     Ok(())
 }
 
+pub fn is_status_field(field: &TraceField) -> bool {
+    match field {
+        TraceField::Span(key) => matches!(key.as_str(), "status" | "status_code"),
+        TraceField::Intrinsic(key) => matches!(
+            key.as_str(),
+            "status"
+                | "span:status"
+                | "span.status"
+                | "status_code"
+                | "span:status_code"
+                | "span.status_code"
+        ),
+        TraceField::Resource(_) | TraceField::Instrumentation(_) => false,
+    }
+}
+
+pub fn canonical_status_code(value: &str) -> Option<i64> {
+    let trimmed = value.trim();
+    if let Ok(num) = trimmed.parse::<i64>() {
+        return Some(num);
+    }
+    match trimmed.to_ascii_uppercase().as_str() {
+        "UNSET" | "STATUS_CODE_UNSET" => Some(0),
+        "OK" | "STATUS_CODE_OK" => Some(1),
+        "ERROR" | "STATUS_CODE_ERROR" => Some(2),
+        _ => None,
+    }
+}
+
 pub fn is_numeric_field(field: &TraceField) -> bool {
     match field {
         TraceField::Span(key) => matches!(
             key.as_str(),
-            "status_code" | "http.status_code" | "http.response.status_code"
+            "http.status_code" | "http.response.status_code"
         ),
-        TraceField::Intrinsic(key) => matches!(
-            key.as_str(),
-            "status_code" | "span:status_code" | "span.status_code"
-        ),
-        TraceField::Resource(_) | TraceField::Instrumentation(_) => false,
+        TraceField::Intrinsic(_) | TraceField::Resource(_) | TraceField::Instrumentation(_) => {
+            false
+        }
     }
 }
 
@@ -384,13 +427,22 @@ pub fn is_duration_field(field: &TraceField) -> bool {
     matches!(
         field,
         TraceField::Intrinsic(key)
-            if matches!(key.as_str(), "duration" | "span:duration" | "span.duration" | "traceDuration" | "trace:duration")
+            if matches!(
+                key.as_str(),
+                "duration"
+                    | "span:duration"
+                    | "span.duration"
+                    | "traceDuration"
+                    | "trace:duration"
+                    | "trace.duration"
+            )
     )
 }
 
 pub fn parse_duration_ns(value: &str) -> Option<i64> {
+    let value = value.trim();
     let (number, multiplier) = [
-        ("ns", 1i64),
+        ("ns", 1i128),
         ("us", 1_000),
         ("µs", 1_000),
         ("ms", 1_000_000),
@@ -400,11 +452,15 @@ pub fn parse_duration_ns(value: &str) -> Option<i64> {
     ]
     .into_iter()
     .find_map(|(suffix, multiplier)| value.strip_suffix(suffix).map(|n| (n, multiplier)))?;
-    let number = number.parse::<i64>().ok()?;
-    if number <= 0 {
+    let float_val = number.parse::<f64>().ok()?;
+    if !float_val.is_finite() || float_val <= 0.0 {
         return None;
     }
-    number.checked_mul(multiplier)
+    let ns = (float_val * multiplier as f64).round();
+    if ns > i64::MAX as f64 {
+        return None;
+    }
+    Some(ns as i64)
 }
 
 #[cfg(test)]
@@ -473,28 +529,36 @@ mod tests {
     fn rejects_mixed_duration_types_before_sql_generation() {
         let err = parse_traceql(r#"{ duration > "slow" }"#).unwrap_err();
         assert_eq!(err.code, CompatErrorCode::BadRequest);
-        let err = parse_traceql(r#"{ duration >= 1.5ms }"#).unwrap_err();
+        let err = parse_traceql(r#"{ duration >= 1500xyz }"#).unwrap_err();
         assert_eq!(err.code, CompatErrorCode::BadRequest);
         parse_traceql(r#"{ duration >= 1500us }"#).expect("typed duration");
+        parse_traceql(r#"{ duration >= 1.5ms }"#).expect("fractional duration");
+        parse_traceql(r#"{ traceDuration < 2.5s }"#).expect("trace duration");
+    }
+
+    #[test]
+    fn parses_status_predicates_unquoted_and_quoted() {
+        parse_traceql(r#"{ status = error }"#).expect("unquoted error status");
+        parse_traceql(r#"{ status = "error" }"#).expect("quoted error status");
+        parse_traceql(r#"{ status = ok }"#).expect("unquoted ok status");
+        parse_traceql(r#"{ status != unset }"#).expect("unquoted unset status");
+        parse_traceql(r#"{ span:status = error }"#).expect("span:status");
+        parse_traceql(r#"{ span.status = error }"#).expect("span.status");
+        parse_traceql(r#"{ status_code >= 2 }"#).expect("numeric status code");
+        parse_traceql(r#"{ span.status_code >= 500 }"#).expect("span status code");
     }
 
     #[test]
     fn rejects_non_numeric_values_for_numeric_span_fields() {
-        let err = parse_traceql(r#"{ span.status_code >= "slow" }"#).unwrap_err();
+        let err = parse_traceql(r#"{ span.http.status_code >= "slow" }"#).unwrap_err();
         assert_eq!(err.code, CompatErrorCode::BadRequest);
         parse_traceql(r#"{ span.http.status_code >= 500 }"#).expect("numeric status code");
-        parse_traceql(r#"{ status_code >= 500 }"#).expect("numeric status intrinsic");
     }
 
     #[test]
-    fn rejects_fractional_numeric_and_duration_predicates() {
-        for query in [
-            r#"{ span.http.status_code >= 500.5 }"#,
-            r#"{ duration >= 1.5ms }"#,
-        ] {
-            let err = parse_traceql(query).expect_err("fractional numeric predicate");
-            assert_eq!(err.code, CompatErrorCode::BadRequest, "{query}");
-        }
-        assert!(parse_traceql(r#"{ duration >= 1500us }"#).is_ok());
+    fn rejects_fractional_numeric_predicates() {
+        let err = parse_traceql(r#"{ span.http.status_code >= 500.5 }"#)
+            .expect_err("fractional numeric predicate");
+        assert_eq!(err.code, CompatErrorCode::BadRequest);
     }
 }

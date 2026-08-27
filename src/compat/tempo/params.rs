@@ -226,28 +226,7 @@ fn parse_tempo_time_ns(raw: &str) -> Result<i64, CompatError> {
 }
 
 fn parse_duration_ns(raw: &str) -> Result<i64, CompatError> {
-    let raw = raw.trim();
-    let (number, multiplier) = [
-        ("ns", 1i128),
-        ("us", 1_000),
-        ("µs", 1_000),
-        ("ms", 1_000_000),
-        ("s", 1_000_000_000),
-        ("m", 60_000_000_000),
-        ("h", 3_600_000_000_000),
-    ]
-    .into_iter()
-    .find_map(|(suffix, multiplier)| raw.strip_suffix(suffix).map(|n| (n, multiplier)))
-    .ok_or_else(|| bad("invalid duration"))?;
-    let value = number.parse::<f64>().map_err(|_| bad("invalid duration"))?;
-    if !value.is_finite() || value <= 0.0 {
-        return Err(bad("duration must be positive"));
-    }
-    let ns = (value * multiplier as f64).round();
-    if ns > i64::MAX as f64 {
-        return Err(bad("duration is out of range"));
-    }
-    Ok(ns as i64)
+    super::traceql::parse_duration_ns(raw).ok_or_else(|| bad("invalid duration"))
 }
 
 fn bad(message: impl Into<String>) -> CompatError {

@@ -41,20 +41,23 @@ pub struct TraceData {
     pub spans: Vec<TraceSpan>,
 }
 
-pub(crate) const PERSISTED_OTLP_STATUS_CODES: [(&str, i64); 6] = [
+pub(crate) const PERSISTED_OTLP_STATUS_CODES: [(&str, i64); 12] = [
     ("STATUS_CODE_UNSET", 0),
     ("STATUS_CODE_OK", 1),
     ("STATUS_CODE_ERROR", 2),
     ("UNSET", 0),
     ("OK", 1),
     ("ERROR", 2),
+    ("unset", 0),
+    ("ok", 1),
+    ("error", 2),
+    ("status_code_unset", 0),
+    ("status_code_ok", 1),
+    ("status_code_error", 2),
 ];
 
 pub(crate) fn persisted_status_code_numeric_value(value: &str) -> Option<i64> {
-    PERSISTED_OTLP_STATUS_CODES
-        .iter()
-        .find_map(|(name, code)| (*name == value).then_some(*code))
-        .or_else(|| value.parse::<i64>().ok())
+    crate::compat::tempo::traceql::canonical_status_code(value)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,15 +205,7 @@ fn persisted_status_code_numeric_sql(value: &str) -> String {
 }
 
 fn is_persisted_status_code_field(field: &crate::compat::tempo::traceql::TraceField) -> bool {
-    use crate::compat::tempo::traceql::TraceField;
-    match field {
-        TraceField::Span(key) => key == "status_code",
-        TraceField::Intrinsic(key) => matches!(
-            key.as_str(),
-            "status_code" | "span:status_code" | "span.status_code"
-        ),
-        TraceField::Resource(_) | TraceField::Instrumentation(_) => false,
-    }
+    crate::compat::tempo::traceql::is_status_field(field)
 }
 
 fn tag_value_sql(key: &str) -> String {
@@ -261,7 +256,7 @@ fn predicate_sql(predicate: &crate::compat::tempo::traceql::TracePredicate) -> S
         TracePredicate::LessOrEqual(field, expected) => (field, "<=", expected),
     };
     let actual = match field {
-        TraceField::Span(key) if key == "status_code" => span_status_code_sql(),
+        TraceField::Span(key) if key == "status_code" || key == "status" => span_status_code_sql(),
         TraceField::Span(key) => json_string("attributes", key),
         TraceField::Resource(key) => {
             if key == "service.name" {
@@ -277,52 +272,76 @@ fn predicate_sql(predicate: &crate::compat::tempo::traceql::TracePredicate) -> S
         TraceField::Intrinsic(key) => match key.as_str() {
             "name" | "span:name" | "span.name" => "message_type".into(),
             "kind" | "span:kind" | "span.kind" => "span_kind".into(),
-            "status" | "span:status" => "status_code".into(),
-            "status_code" | "span:status_code" | "span.status_code" => "status_code".into(),
-            "statusMessage" | "span:statusMessage" => "status_message".into(),
-            "duration" | "span:duration" | "traceDuration" | "trace:duration" => {
+            "status" | "span:status" | "span.status" => span_status_code_sql(),
+            "status_code" | "span:status_code" | "span.status_code" => span_status_code_sql(),
+            "statusMessage" | "span:statusMessage" | "span.statusMessage" => {
+                "status_message".into()
+            }
+            "duration" | "span:duration" | "span.duration" | "traceDuration" | "trace:duration"
+            | "trace.duration" => {
                 "COALESCE(end_time_unix_nano, start_time_unix_nano) - start_time_unix_nano".into()
             }
             _ => "NULL".into(),
         },
     };
+    let is_status = is_persisted_status_code_field(field);
     let numeric = is_numeric_field(field);
-    let actual = if numeric && is_persisted_status_code_field(field) {
+    let actual_numeric = if is_status || numeric {
         persisted_status_code_numeric_sql(&actual)
-    } else if numeric {
-        format!("TRY_CAST({actual} AS BIGINT)")
     } else {
-        actual
+        actual.clone()
     };
     let missing_guard = format!("{actual} IS NOT NULL");
     match operator {
-        "regex" => format!(
-            "{missing_guard} AND regexp_matches(CAST({actual} AS VARCHAR), {})",
-            sql_literal(expected.as_str())
-        ),
-        "not_regex" => format!(
-            "NOT regexp_matches(COALESCE(CAST({actual} AS VARCHAR), ''), {})",
-            sql_literal(expected.as_str())
-        ),
+        "regex" => {
+            if is_status {
+                format!(
+                    "{missing_guard} AND (regexp_matches(CAST({actual} AS VARCHAR), {}) OR regexp_matches(CASE {actual_numeric} WHEN 0 THEN 'unset' WHEN 1 THEN 'ok' WHEN 2 THEN 'error' ELSE '' END, {}))",
+                    sql_literal(expected.as_str()),
+                    sql_literal(expected.as_str())
+                )
+            } else {
+                format!(
+                    "{missing_guard} AND regexp_matches(CAST({actual} AS VARCHAR), {})",
+                    sql_literal(expected.as_str())
+                )
+            }
+        }
+        "not_regex" => {
+            if is_status {
+                format!(
+                    "NOT ({missing_guard} AND (regexp_matches(CAST({actual} AS VARCHAR), {}) OR regexp_matches(CASE {actual_numeric} WHEN 0 THEN 'unset' WHEN 1 THEN 'ok' WHEN 2 THEN 'error' ELSE '' END, {})))",
+                    sql_literal(expected.as_str()),
+                    sql_literal(expected.as_str())
+                )
+            } else {
+                format!(
+                    "NOT regexp_matches(COALESCE(CAST({actual} AS VARCHAR), ''), {})",
+                    sql_literal(expected.as_str())
+                )
+            }
+        }
         comparison => {
-            let right = if is_duration_field(field) {
-                parse_duration_ns(expected.as_str())
+            if is_duration_field(field) {
+                let right = parse_duration_ns(expected.as_str())
                     .map(|value| value.to_string())
-                    .unwrap_or_else(|| "NULL".into())
+                    .unwrap_or_else(|| "NULL".into());
+                format!("{missing_guard} AND CAST(({actual}) AS BIGINT) {comparison} {right}")
+            } else if is_status {
+                let right = crate::compat::tempo::traceql::canonical_status_code(expected.as_str())
+                    .map(|c| c.to_string())
+                    .or_else(|| expected.as_str().parse::<i64>().ok().map(|c| c.to_string()))
+                    .unwrap_or_else(|| "NULL".into());
+                format!("{missing_guard} AND {actual_numeric} {comparison} {right}")
             } else if numeric {
-                expected
+                let right = expected
                     .as_str()
                     .parse::<i64>()
                     .map(|value| value.to_string())
-                    .unwrap_or_else(|_| "NULL".into())
+                    .unwrap_or_else(|_| "NULL".into());
+                format!("{missing_guard} AND {actual_numeric} {comparison} {right}")
             } else {
-                sql_literal(expected.as_str())
-            };
-            if is_duration_field(field) {
-                format!("{missing_guard} AND CAST(({actual}) AS BIGINT) {comparison} {right}")
-            } else if numeric {
-                format!("{missing_guard} AND {actual} {comparison} {right}")
-            } else {
+                let right = sql_literal(expected.as_str());
                 format!("{missing_guard} AND CAST({actual} AS VARCHAR) {comparison} {right}")
             }
         }
@@ -514,8 +533,8 @@ mod tests {
             None,
         );
 
-        assert!(sql.contains(
-            "CASE COALESCE(json_extract_string(CAST(attributes AS JSON), '$.\"status_code\"'), status_code) WHEN 'STATUS_CODE_UNSET' THEN 0 WHEN 'STATUS_CODE_OK' THEN 1 WHEN 'STATUS_CODE_ERROR' THEN 2 WHEN 'UNSET' THEN 0 WHEN 'OK' THEN 1 WHEN 'ERROR' THEN 2 ELSE TRY_CAST(COALESCE(json_extract_string(CAST(attributes AS JSON), '$.\"status_code\"'), status_code) AS BIGINT) END >= 2"
-        ));
+        assert!(sql.contains("WHEN 'STATUS_CODE_ERROR' THEN 2"));
+        assert!(sql.contains("WHEN 'error' THEN 2"));
+        assert!(sql.contains(">= 2"));
     }
 }

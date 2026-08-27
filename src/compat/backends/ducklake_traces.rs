@@ -128,6 +128,8 @@ impl DuckLakeTraceBackend {
     }
 
     fn matches_predicate(predicate: &TracePredicate, span: &TraceSpan) -> bool {
+        use crate::compat::tempo::traceql::{canonical_status_code, is_status_field};
+
         let (field, operation, expected) = match predicate {
             TracePredicate::Eq(field, value) => (field, "eq", value),
             TracePredicate::NotEq(field, value) => (field, "ne", value),
@@ -139,37 +141,94 @@ impl DuckLakeTraceBackend {
             TracePredicate::LessOrEqual(field, value) => (field, "lte", value),
         };
         let actual = field_value(field, span);
-        match operation {
-            "eq" => actual.as_deref() == Some(expected.as_str()),
-            "ne" => actual
-                .as_deref()
-                .is_some_and(|value| value != expected.as_str()),
-            "regex" | "not_regex" => {
-                let matched = actual
-                    .as_deref()
-                    .and_then(|value| {
-                        regex::Regex::new(expected.as_str())
-                            .ok()
-                            .map(|re| re.is_match(value))
-                    })
-                    .unwrap_or(false);
-                if operation == "regex" {
-                    matched
-                } else {
-                    !matched
+        if is_status_field(field) {
+            let actual_val = actual.as_deref().unwrap_or_default();
+            let actual_code = canonical_status_code(actual_val);
+            let expected_code = canonical_status_code(expected.as_str());
+            match operation {
+                "eq" => {
+                    if let (Some(a), Some(e)) = (actual_code, expected_code) {
+                        a == e
+                    } else if let Some(a) = actual_val.strip_prefix("STATUS_CODE_") {
+                        a.eq_ignore_ascii_case(expected.as_str())
+                    } else {
+                        actual_val.eq_ignore_ascii_case(expected.as_str())
+                    }
                 }
+                "ne" => {
+                    if let (Some(a), Some(e)) = (actual_code, expected_code) {
+                        a != e
+                    } else if let Some(a) = actual_val.strip_prefix("STATUS_CODE_") {
+                        !a.eq_ignore_ascii_case(expected.as_str())
+                    } else {
+                        !actual_val.eq_ignore_ascii_case(expected.as_str())
+                    }
+                }
+                "regex" | "not_regex" => {
+                    let canonical_name = match actual_code {
+                        Some(0) => "unset",
+                        Some(1) => "ok",
+                        Some(2) => "error",
+                        _ => actual_val,
+                    };
+                    let matched = regex::Regex::new(expected.as_str())
+                        .ok()
+                        .map(|re| re.is_match(actual_val) || re.is_match(canonical_name))
+                        .unwrap_or(false);
+                    if operation == "regex" {
+                        matched
+                    } else {
+                        !matched
+                    }
+                }
+                "gt" | "gte" | "lt" | "lte" => {
+                    let a = actual_code.or_else(|| actual_val.parse::<i64>().ok());
+                    let e = expected_code.or_else(|| expected.as_str().parse::<i64>().ok());
+                    match (a, e) {
+                        (Some(a), Some(e)) => match operation {
+                            "gt" => a > e,
+                            "gte" => a >= e,
+                            "lt" => a < e,
+                            _ => a <= e,
+                        },
+                        _ => false,
+                    }
+                }
+                _ => false,
             }
-            "gt" | "gte" | "lt" | "lte" => actual
-                .as_deref()
-                .and_then(|value| compare_value(field, value, expected.as_str()))
-                .map(|ordering| match operation {
-                    "gt" => ordering.is_gt(),
-                    "gte" => ordering.is_ge(),
-                    "lt" => ordering.is_lt(),
-                    _ => ordering.is_le(),
-                })
-                .unwrap_or(false),
-            _ => false,
+        } else {
+            match operation {
+                "eq" => actual.as_deref() == Some(expected.as_str()),
+                "ne" => actual
+                    .as_deref()
+                    .is_some_and(|value| value != expected.as_str()),
+                "regex" | "not_regex" => {
+                    let matched = actual
+                        .as_deref()
+                        .and_then(|value| {
+                            regex::Regex::new(expected.as_str())
+                                .ok()
+                                .map(|re| re.is_match(value))
+                        })
+                        .unwrap_or(false);
+                    if operation == "regex" {
+                        matched
+                    } else {
+                        !matched
+                    }
+                }
+                "gt" | "gte" | "lt" | "lte" => actual
+                    .as_deref()
+                    .and_then(|value| compare_value(field, value, expected.as_str()))
+                    .map(|ordering| match operation {
+                        "gt" => ordering.is_gt(),
+                        "gte" => ordering.is_ge(),
+                        "lt" => ordering.is_lt(),
+                        _ => ordering.is_le(),
+                    })
+                    .unwrap_or(false),
+                _ => false,
+            }
         }
     }
 }
@@ -553,7 +612,9 @@ fn strict_json_value(value: &Value, row_index: usize, field: &str) -> Result<Val
 
 fn field_value(field: &TraceField, span: &TraceSpan) -> Option<String> {
     match field {
-        TraceField::Span(key) if key == "status_code" => span_status_code_value(span),
+        TraceField::Span(key) if key == "status_code" || key == "status" => {
+            span_status_code_value(span)
+        }
         TraceField::Span(key) => span
             .attributes
             .iter()
@@ -575,11 +636,13 @@ fn field_value(field: &TraceField, span: &TraceSpan) -> Option<String> {
         TraceField::Intrinsic(key) => match key.as_str() {
             "name" | "span:name" | "span.name" => Some(span.name.clone()),
             "kind" | "span:kind" | "span.kind" => span.kind.clone(),
-            "status" | "span:status" | "status_code" | "span:status_code" | "span.status_code" => {
-                span_status_code_value(span)
+            "status" | "span:status" | "span.status" | "status_code" | "span:status_code"
+            | "span.status_code" => span_status_code_value(span),
+            "statusMessage" | "span:statusMessage" | "span.statusMessage" => {
+                span.status_message.clone()
             }
-            "statusMessage" | "span:statusMessage" => span.status_message.clone(),
-            "duration" | "span:duration" | "traceDuration" | "trace:duration" => Some(
+            "duration" | "span:duration" | "span.duration" | "traceDuration" | "trace:duration"
+            | "trace.duration" => Some(
                 span.end_time_unix_nano
                     .unwrap_or(span.start_time_unix_nano)
                     .saturating_sub(span.start_time_unix_nano)
@@ -593,7 +656,7 @@ fn field_value(field: &TraceField, span: &TraceSpan) -> Option<String> {
 fn span_status_code_value(span: &TraceSpan) -> Option<String> {
     span.attributes
         .iter()
-        .find(|attribute| attribute.key == "status_code")
+        .find(|attribute| attribute.key == "status_code" || attribute.key == "status")
         .map(|attribute| attribute.value.clone())
         .or_else(|| span.status_code.clone())
 }
@@ -631,14 +694,7 @@ fn compare_value(field: &TraceField, actual: &str, expected: &str) -> Option<std
 }
 
 fn is_persisted_status_code_field(field: &TraceField) -> bool {
-    match field {
-        TraceField::Span(key) => key == "status_code",
-        TraceField::Intrinsic(key) => matches!(
-            key.as_str(),
-            "status_code" | "span:status_code" | "span.status_code"
-        ),
-        TraceField::Resource(_) | TraceField::Instrumentation(_) => false,
-    }
+    crate::compat::tempo::traceql::is_status_field(field)
 }
 
 fn parse_timestamp_value(value: &Value, _fallback: i64) -> Option<i64> {
@@ -776,6 +832,104 @@ mod tests {
                 "query should match: {query}"
             );
         }
+    }
+
+    #[test]
+    fn status_and_duration_filters_match_in_memory() {
+        let error_span = TraceSpan {
+            trace_id: "t1".into(),
+            span_id: "s1".into(),
+            parent_span_id: None,
+            name: "checkout".into(),
+            kind: Some("SPAN_KIND_SERVER".into()),
+            start_time_unix_nano: 1_000_000_000,
+            end_time_unix_nano: Some(2_500_000_000), // 1.5s duration
+            attributes: Vec::new(),
+            status_code: Some("STATUS_CODE_ERROR".into()),
+            status_message: Some("timeout".into()),
+            events: Vec::new(),
+            service_name: Some("api".into()),
+            resource_attributes: Vec::new(),
+            instrumentation_scope: None,
+            links: Vec::new(),
+        };
+
+        let ok_span = TraceSpan {
+            trace_id: "t2".into(),
+            span_id: "s2".into(),
+            parent_span_id: None,
+            name: "query".into(),
+            kind: Some("SPAN_KIND_CLIENT".into()),
+            start_time_unix_nano: 1_000_000_000,
+            end_time_unix_nano: Some(1_100_000_000), // 100ms duration
+            attributes: Vec::new(),
+            status_code: Some("STATUS_CODE_OK".into()),
+            status_message: None,
+            events: Vec::new(),
+            service_name: Some("api".into()),
+            resource_attributes: Vec::new(),
+            instrumentation_scope: None,
+            links: Vec::new(),
+        };
+
+        // Status filters
+        for query in [
+            r#"{ status = error }"#,
+            r#"{ status = "error" }"#,
+            r#"{ status = "ERROR" }"#,
+            r#"{ status != ok }"#,
+            r#"{ span:status = error }"#,
+            r#"{ span.status = error }"#,
+            r#"{ status_code = 2 }"#,
+            r#"{ span.status_code >= 2 }"#,
+        ] {
+            let selector = crate::compat::tempo::traceql::parse_traceql(query).unwrap();
+            assert!(
+                DuckLakeTraceBackend::matches_selector(&selector, &error_span),
+                "error span should match: {query}"
+            );
+            assert!(
+                !DuckLakeTraceBackend::matches_selector(&selector, &ok_span),
+                "ok span should NOT match error query: {query}"
+            );
+        }
+
+        // OK status filters
+        for query in [
+            r#"{ status = ok }"#,
+            r#"{ status = "ok" }"#,
+            r#"{ status = "OK" }"#,
+            r#"{ status != error }"#,
+            r#"{ span.status = ok }"#,
+            r#"{ status_code = 1 }"#,
+        ] {
+            let selector = crate::compat::tempo::traceql::parse_traceql(query).unwrap();
+            assert!(
+                DuckLakeTraceBackend::matches_selector(&selector, &ok_span),
+                "ok span should match: {query}"
+            );
+            assert!(
+                !DuckLakeTraceBackend::matches_selector(&selector, &error_span),
+                "error span should NOT match ok query: {query}"
+            );
+        }
+
+        // Duration filters
+        let slow_sel =
+            crate::compat::tempo::traceql::parse_traceql(r#"{ duration >= 1.5s }"#).unwrap();
+        assert!(DuckLakeTraceBackend::matches_selector(
+            &slow_sel,
+            &error_span
+        ));
+        assert!(!DuckLakeTraceBackend::matches_selector(&slow_sel, &ok_span));
+
+        let fast_sel =
+            crate::compat::tempo::traceql::parse_traceql(r#"{ duration < 500ms }"#).unwrap();
+        assert!(!DuckLakeTraceBackend::matches_selector(
+            &fast_sel,
+            &error_span
+        ));
+        assert!(DuckLakeTraceBackend::matches_selector(&fast_sel, &ok_span));
     }
 
     #[test]

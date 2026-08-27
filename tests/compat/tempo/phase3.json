@@ -243,6 +243,27 @@
       "expect": {"status": 200, "envelope": "search", "trace_count": 1}
     },
     {
+      "id": "tempo-search-status-unquoted-error",
+      "provenance": "issue-31/phase-3/status-unquoted-error",
+      "path": "/api/search",
+      "params": {"q": "{ status = error }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-status-unquoted-ok",
+      "provenance": "issue-31/phase-3/status-unquoted-ok",
+      "path": "/api/search",
+      "params": {"q": "{ status = ok }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
+      "id": "tempo-search-traceql-fractional-duration",
+      "provenance": "issue-31/phase-3/traceql-fractional-duration",
+      "path": "/api/search",
+      "params": {"q": "{ duration >= 1.5s }"},
+      "expect": {"status": 200, "envelope": "search", "trace_count": 1}
+    },
+    {
       "id": "tempo-search-span-status-code-gte-2",
       "provenance": "issue-31/phase-3/status-code-intrinsic",
       "path": "/api/search",
