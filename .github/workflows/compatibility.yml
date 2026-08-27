@@ -749,12 +749,13 @@ jobs:
             abort "#{id}: missing #{missing.join(', ')}" unless missing.empty?
             outcome = JSON.parse(File.read(File.join(dir, "outcome.json")))
             diff = JSON.parse(File.read(File.join(dir, "diff.json")))
+            diff_equal = diff.key?("equal") ? (diff["equal"] == true) : (diff.dig("payload", "equal") == true)
             if is_excluded
               abort "#{id}: invalid excluded real evidence" unless outcome["mode"] == "real" && outcome["status"] == "skipped" && outcome["reason"] == "conformance_exclusion"
-              abort "#{id}: excluded diff comparison failed" unless diff["equal"] == true && diff["classification"] == "skipped"
+              abort "#{id}: excluded diff comparison failed" unless diff_equal && diff["classification"] == "skipped"
             else
               abort "#{id}: incomplete real evidence" unless outcome["mode"] == "real" && outcome["status"] == "pass" && outcome["evidence_scope"] == "case" && outcome["release_evidence"] == true
-              abort "#{id}: normalized comparison failed or is not release evidence" unless diff["equal"] == true && diff["release_evidence"] == true
+              abort "#{id}: normalized comparison failed or is not release evidence" unless diff_equal && diff["release_evidence"] == true
             end
           end
           RUBY

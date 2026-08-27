@@ -1340,7 +1340,10 @@ end
   path = File.join(case_dir, name)
   payload = read_json(path)
   artifact = meta.merge("schema_version" => "compat-case-artifact.v1", "artifact_kind" => name.delete_suffix(".json"), "payload" => payload)
-  artifact["classification"] = payload.fetch("classification") if name == "diff.json"
+  if name == "diff.json"
+    artifact["classification"] = payload.fetch("classification")
+    artifact["equal"] = payload.fetch("equal", true)
+  end
   write_json(path, artifact)
 end
 
