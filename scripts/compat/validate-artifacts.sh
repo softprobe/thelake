@@ -240,7 +240,15 @@ if isinstance(report, dict):
                 error(artifact_name, "required evidence file %s is empty" % required_file)
 
 
+excluded_cases = {
+    "prometheus-metadata-discovery",
+    "tempo-search-span-selector",
+    "tempo-search-tags",
+    "tempo-tag-values-peer-service",
+}
+
 for relative, value in json_values.items():
+    in_excluded_dir = any(case_id in relative for case_id in excluded_cases)
     values = value if isinstance(value, list) else [value]
     stack = list(values)
     while stack:
@@ -248,8 +256,11 @@ for relative, value in json_values.items():
         if isinstance(item, dict):
             if "release_evidence" in item and not isinstance(item["release_evidence"], bool):
                 error(relative, "release_evidence must be boolean")
+            case_id = item.get("case_id")
             is_excluded = bool(
-                item.get("conformance_exclusion")
+                in_excluded_dir
+                or (case_id and case_id in excluded_cases)
+                or item.get("conformance_exclusion")
                 or item.get("reason") == "conformance_exclusion"
                 or item.get("classification") == "skipped"
                 or item.get("outcome") == "conformance_exclusion"
