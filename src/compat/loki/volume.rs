@@ -218,7 +218,9 @@ mod tests {
         assert_eq!(parsed.request.matchers[0].name, "service_name");
         assert_eq!(
             parsed.request.line_filters,
-            vec![crate::compat::backends::logs::LogLineFilter::Contains(String::new())]
+            vec![crate::compat::backends::logs::LogLineFilter::Contains(
+                String::new()
+            )]
         );
     }
 
