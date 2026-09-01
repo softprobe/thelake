@@ -784,12 +784,12 @@ impl PrefetchBackend {
             }
         }
 
-        // Short panels (≤24h): skip Grafana step-bucketing on prefetch when step is
+        // Short panels (<24h): skip Grafana step-bucketing on prefetch when step is
         // coarse vs scrape cadence or vs a range-vector window — preserves PromQL
-        // parity for 30s scrapes at 1m steps and *_over_time windows. Long panels
-        // still bucket at range/4 when step exceeds [range] to protect the SLO.
+        // parity for 30s scrapes at 1m steps and *_over_time windows. Exactly 24h
+        // must bucket (Grafana step ~78s); unbucketed k6 raw scans exceed scan_cap.
         let query_span_ms = (end_ms - start_ms).abs();
-        let effective_step = if query_span_ms <= crate::compat::backends::grain::RAW_RANGE_MS
+        let effective_step = if query_span_ms < crate::compat::backends::grain::RAW_RANGE_MS
             && (min_range_window.is_some() || step_ms > 30_000)
         {
             None
