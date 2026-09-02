@@ -2269,10 +2269,17 @@ mod tests {
         );
         assert!(posting_name_values("http_server_duration_sum")
             .contains(&"http_server_duration_sum".to_string()));
-        assert!(posting_name_values("http_server_duration_sum")
-            .contains(&"http_server_duration".to_string()));
+        assert!(
+            !posting_name_values("http_server_duration_sum")
+                .contains(&"http_server_duration".to_string()),
+            "classic suffix selectors must not also resolve the native histogram base series"
+        );
         assert_eq!(posting_name_values("k6_vus"), vec!["k6_vus".to_string()]);
-        assert!(posting_name_values("queue_count").contains(&"queue_count".to_string()));
+        assert_eq!(
+            posting_name_values("queue_count"),
+            vec!["queue_count".to_string()],
+            "gauges named *_count/_sum/_bucket must keep their exact name"
+        );
     }
 
     #[test]

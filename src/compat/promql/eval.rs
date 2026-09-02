@@ -2301,6 +2301,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn range_prefetch_keeps_client_window_when_lookback_expands() {
+        struct CaptureBackend {
+            last: std::sync::Mutex<Option<MetricsQueryRequest>>,
+        }
+        #[async_trait]
+        impl MetricsQueryBackend for CaptureBackend {
+            async fn query_range(
+                &self,
+                _ctx: &TenantContext,
+                request: MetricsQueryRequest,
+            ) -> Result<Vec<MetricSeries>, CompatError> {
+                *self.last.lock().unwrap() = Some(request);
+                Ok(vec![])
+            }
+            async fn label_names(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn label_values(
+                &self,
+                _: &TenantContext,
+                _: &str,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<String>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn series(
+                &self,
+                _: &TenantContext,
+                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
+            ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
+                Err(CompatError::unsupported("n/a"))
+            }
+            async fn metadata(
+                &self,
+                _: &TenantContext,
+                _: Option<&str>,
+                _: Option<usize>,
+                _: Option<i64>,
+                _: Option<i64>,
+            ) -> Result<Vec<crate::compat::backends::metrics::MetricMetadata>, CompatError>
+            {
+                Err(CompatError::unsupported("n/a"))
+            }
+        }
+
+        let backend = CaptureBackend {
+            last: std::sync::Mutex::new(None),
+        };
+        let expr = parse_promql("http_requests").unwrap();
+        let start = 0i64;
+        let end = 86_400_000; // 24h
+        let step = 60_000;
+        let _ = eval_range(&backend, &ctx(), &expr, start, end, step)
+            .await
+            .unwrap();
+        let req = backend.last.lock().unwrap().clone().expect("prefetch");
+        assert_eq!(req.client_start_ms, Some(start));
+        assert_eq!(req.client_end_ms, Some(end));
+        let fetch_start = req.start_ms.expect("fetch start");
+        assert!(
+            fetch_start < start,
+            "lookback must expand the storage window, got {fetch_start}"
+        );
+        assert_eq!(req.end_ms, Some(end));
+    }
+
+    #[tokio::test]
     async fn prefetch_buckets_at_24h_but_not_just_under() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct CaptureBackend {
@@ -2993,19 +3064,22 @@ mod tests {
                     let mut labels = BTreeMap::new();
                     labels.insert("__name__".into(), m.clone());
                     labels.insert("job".into(), "api".into());
-                    return Ok(vec![MetricSeries {
-                        labels,
-                        samples: vec![
-                            Sample {
-                                timestamp_ms: request.start_ms.unwrap_or(0),
-                                value: 100.0,
-                            },
-                            Sample {
-                                timestamp_ms: request.end_ms.unwrap_or(0),
-                                value: 200.0,
-                            },
-                        ],
-                    }]);
+                    // Collapse is hourly grain; rate() still needs ≥2 points in the
+                    // 2h evaluation window, so emit the actual 1h cadence.
+                    let start = request.start_ms.unwrap_or(0);
+                    let end = request.end_ms.unwrap_or(0);
+                    let mut samples = Vec::new();
+                    let mut ts = start - (start % 3_600_000);
+                    let mut value = 100.0;
+                    while ts <= end {
+                        samples.push(Sample {
+                            timestamp_ms: ts,
+                            value,
+                        });
+                        value += 10.0;
+                        ts += 3_600_000;
+                    }
+                    return Ok(vec![MetricSeries { labels, samples }]);
                 }
                 Ok(vec![])
             }

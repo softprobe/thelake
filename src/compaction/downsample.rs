@@ -372,9 +372,11 @@ mod tests {
         let from_raw = downsample_1h_from_raw_sql("softprobe");
         assert!(from_raw.contains("FROM softprobe.metric_samples raw"));
         assert!(from_raw.contains("INTERVAL '1 hour'"));
+        assert!(from_raw.contains("NOT EXISTS"));
         assert!(
-            from_raw
-                .contains("time_bucket(INTERVAL '1 hour', timestamp) <= now() - INTERVAL '1 hour'"),
+            from_raw.contains(
+                "time_bucket(INTERVAL '1 hour', raw.timestamp) <= now() - INTERVAL '1 hour'"
+            ),
             "1h from raw must wait for closed hours"
         );
     }
