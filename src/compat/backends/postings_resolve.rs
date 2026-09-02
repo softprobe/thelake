@@ -1711,7 +1711,8 @@ mod tests {
         let end = 1_700_000_000_000i64;
         let hour = 3_600_000i64;
         let day = 24 * hour;
-        let cases: &[(i64, Option<i64>, &str, fn(&str) -> bool)] = &[
+        type HistPromSqlCase<'a> = (i64, Option<i64>, &'a str, fn(&str) -> bool);
+        let cases: &[HistPromSqlCase<'_>] = &[
             (
                 3 * hour,
                 Some(20_000),

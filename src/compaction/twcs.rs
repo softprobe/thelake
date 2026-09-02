@@ -535,10 +535,6 @@ mod tests {
     /// AC-F8: 64 × 256 files/wave can compact ~10k leftover closed-day files.
     #[test]
     fn closed_day_wave_budget_covers_ten_thousand_files() {
-        assert!(
-            TWCS_CLOSED_DAY_MAX_COMPACTED_FILES >= TWCS_MAX_COMPACTED_FILES_PER_WAVE,
-            "closed-day files/wave must be ≥ open-day 32"
-        );
         let p = policy();
         let cap = closed_day_file_capacity(&p);
         assert!(

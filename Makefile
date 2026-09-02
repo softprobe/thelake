@@ -298,7 +298,7 @@ test-publish-tags:
 	echo "publish tag plan ok"
 
 lint: ensure-cache
-	cargo clippy $(CARGO_PROFILE_FLAG) --lib --bin softprobe-runtime -- -D warnings
+	cargo clippy $(CARGO_PROFILE_FLAG) --all-targets -- -D warnings
 
 fmt:
 	cargo fmt

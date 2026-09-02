@@ -2346,7 +2346,7 @@ mod tests {
             value: "http_requests".into(),
         }];
         assert_eq!(
-            pushdown_distinct_metric_matchers(&[group.clone()]),
+            pushdown_distinct_metric_matchers(std::slice::from_ref(&group)),
             Some(group.as_slice())
         );
         assert_eq!(

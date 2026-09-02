@@ -1352,7 +1352,7 @@ jobs:
         run: cargo check --lib
 
       - name: Run lint
-        run: cargo clippy --lib --bin softprobe-runtime -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run unit tests without containers
         run: cargo test --lib -- --test-threads=1

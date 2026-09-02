@@ -1225,7 +1225,6 @@ mod tests {
 
     #[test]
     fn parquet_warn_threshold_is_sane() {
-        assert!(PARQUET_FILE_WARN_THRESHOLD >= 50);
         assert_eq!(COMPACTION_SERIALIZATION_ATTEMPTS, 8);
     }
 

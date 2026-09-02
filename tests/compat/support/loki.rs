@@ -29,6 +29,7 @@ pub const PHASE2_EPOCH_NS: i64 = 1_786_827_600_000_000_000;
 pub const FIXTURE_LAG_NS: i64 = 1_000_000_000;
 
 /// Current UNIX epoch nanoseconds (test-clock helper for time-shift math).
+#[cfg(feature = "integration-e2e")]
 pub fn system_time_now_ns() -> i64 {
     i64::try_from(
         SystemTime::now()
