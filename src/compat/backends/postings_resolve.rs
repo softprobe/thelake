@@ -786,8 +786,8 @@ pub struct PostingCacheKey {
     pub label_value: String,
 }
 
-/// Short TTL: Grafana refresh storms hit warm sets; ingest-on stays eventual.
-pub const POSTING_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Grafana refresh storms hit warm sets; long dashboard sweeps need ≥5m TTL.
+pub const POSTING_CACHE_TTL: Duration = Duration::from_secs(300);
 const POSTING_CACHE_MAX: usize = 8192;
 
 #[derive(Clone)]
