@@ -99,7 +99,9 @@ fi
 
 # --- 3. live ingest + Grafana 100ms SLO ---
 log "slo: global warmup"
-python3 "$PY" --warmup-all 2>&1 | tee -a "$LOG" || true
+if ! python3 "$PY" --warmup-all 2>&1 | tee -a "$LOG"; then
+  fail "Grafana global warmup failed (see $LOG)"
+fi
 slo_rc=0
 slo_out="$(python3 "$PY" --slo-ms 100 --repeats 3 --workers 1 2>&1)" || slo_rc=$?
 printf '%s\n' "$slo_out" | tee -a "$LOG" >&2
