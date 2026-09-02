@@ -38,8 +38,11 @@ pub fn parse_logql(query: &str) -> Result<LogsQueryRequest, CompatError> {
             }
             s if s.starts_with("drop ") => {
                 let label = s["drop ".len()..].trim();
-                if label.is_empty() || !valid_name(label) {
+                if label.is_empty() {
                     return Err(bad("drop requires a label name"));
+                }
+                if label != "__error__" {
+                    return Err(unsupported("LogQL drop"));
                 }
                 // Grafana Explore logs volume appends `| drop __error__` after
                 // builder filters. Parser errors are not surfaced as labels yet,
@@ -633,5 +636,12 @@ mod tests {
             request.line_filters,
             vec![LogLineFilter::Contains(String::new())]
         );
+    }
+
+    #[test]
+    fn rejects_drop_of_non_error_labels() {
+        let err = parse_logql(r#"{job="api"} | drop service_name"#).unwrap_err();
+        assert_eq!(err.code, CompatErrorCode::UnsupportedFeature);
+        assert_eq!(err.message, "LogQL drop");
     }
 }

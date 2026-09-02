@@ -2216,16 +2216,9 @@ mod tests {
             last_step: std::sync::Mutex::new(None),
             series: series.clone(),
         };
-        let _ = eval_range(
-            &under,
-            &ctx(),
-            &expr,
-            end - day_ms + 1,
-            end,
-            step_ms,
-        )
-        .await
-        .unwrap();
+        let _ = eval_range(&under, &ctx(), &expr, end - day_ms + 1, end, step_ms)
+            .await
+            .unwrap();
         assert_eq!(*under.last_step.lock().unwrap(), None);
 
         let at = CaptureBackend {

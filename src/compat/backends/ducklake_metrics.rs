@@ -2403,17 +2403,15 @@ mod tests {
         let start = end - day_ms;
         let base = DuckLakeMetricsBackend::scan_cap(&ctx, None, None, None, 200);
         assert_eq!(base, 100_000);
-        let grid = DuckLakeMetricsBackend::scan_cap(
-            &ctx,
-            Some(start),
-            Some(end),
-            Some(step_ms),
-            200,
-        );
+        let grid =
+            DuckLakeMetricsBackend::scan_cap(&ctx, Some(start), Some(end), Some(step_ms), 200);
         let points = (day_ms / step_ms + 1) as usize;
         assert_eq!(
             grid,
-            200_usize.saturating_mul(points).saturating_add(1).max(100_000)
+            200_usize
+                .saturating_mul(points)
+                .saturating_add(1)
+                .max(100_000)
         );
     }
 
