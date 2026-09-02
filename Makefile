@@ -9,7 +9,7 @@
 #                                 (does not re-run make ci; PR already gated that)
 #   make build-release          → --release only (packaging)
 #
-# Warm SLOs (self-hosted): ci ≤18m | test-perf ≤8m | release ≤25m
+# Warm SLOs (ubuntu-latest): ci ≤18m | test-perf ≤8m | release ≤25m
 #
 #   make setup && make ci
 #   make test-perf

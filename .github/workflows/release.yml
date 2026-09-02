@@ -3,7 +3,7 @@ name: Build and Push TheLake Docker Image
 # Softprobe convention: GitHub Release vX.Y.Z → make release
 # (test-perf + build-release + publish; all --release. PR make ci already gated.)
 # Warm SLO: ≤ 25m (hard timeout 35m).
-# Cache: ~/.cache/thelake via Make — no actions/cache for target/.
+# Cache: ~/.cache/thelake via Make + actions/cache on registry + target.
 on:
   release:
     types: [published]
@@ -33,6 +33,9 @@ jobs:
           fi
 
       - uses: actions/checkout@v5
+
+      - name: Restore build cache
+        uses: ./.github/actions/thelake-cache
 
       - name: Bootstrap ubuntu runner
         uses: ./.github/actions/ubuntu-runner
