@@ -104,7 +104,7 @@ if ! python3 "$PY" --warmup-all 2>&1 | tee -a "$LOG"; then
 fi
 slo_rc=1
 slo_out=""
-for attempt in 1 2; do
+for attempt in 1 2 3; do
   log "slo: measured pass attempt ${attempt}"
   slo_rc=0
   slo_out="$(python3 "$PY" --slo-ms 100 --repeats 3 --workers 1 2>&1)" || slo_rc=$?

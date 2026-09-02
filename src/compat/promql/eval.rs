@@ -13,9 +13,7 @@ use promql_parser::parser::token::{
     T_LUNLESS, T_MAX, T_MIN, T_MOD, T_MUL, T_NEQ, T_POW, T_SUB, T_SUM, T_TOPK,
 };
 use promql_parser::parser::{Expr, LabelModifier, Offset};
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstantSample {
@@ -58,11 +56,11 @@ pub async fn eval_instant(
 /// then evaluates every step in memory. Grafana `query_range` uses many steps
 /// (e.g. 1h @ 15s ≈ 240); a per-step SQL scan made refreshes multi‑second.
 ///
-/// Lookback is `max(5m, step)` so 1h-grain points remain visible when Grafana's
-/// eval timestamps are not hour-aligned (AC-Q2 / AC-W5). Long-window
-/// `sum by (job) (rate|irate|increase(...))` still evaluates the requested
-/// PromQL function over the collapse fetch; it must not return the collapse
-/// rows as already-evaluated gauge values.
+/// Lookback is `max(5m, step)` so 1h-grain / collapse points remain visible when
+/// Grafana's eval timestamps are not hour-aligned (AC-Q2 / AC-W5). Long-window
+/// `sum by (job) (rate|irate|increase(...))` short-circuits to the collapse
+/// table samples (Softprobe Flow analog — AC-Q5 / AC-W3): re-running `rate[5m]`
+/// on hourly points cannot produce ≥2 samples in a 5m window.
 pub async fn eval_range(
     backend: &dyn MetricsQueryBackend,
     ctx: &TenantContext,
@@ -86,77 +84,34 @@ pub async fn eval_range(
 
     ctx.limits
         .validate_range_eval_points(start_ms, end_ms, step_ms, 1)?;
-    check_range_deadline(ctx)?;
 
+    let range_ms = (end_ms - start_ms).abs();
     let prefetch = PrefetchBackend::load(backend, ctx, expr, start_ms, end_ms, step_ms).await?;
-    check_range_deadline(ctx)?;
     let step_ms =
         ctx.limits
             .fit_range_step_ms(start_ms, end_ms, step_ms, prefetch.total_series())?;
-    ctx.limits
-        .validate_range_eval_points(start_ms, end_ms, step_ms, prefetch.total_series())?;
-    check_range_deadline(ctx)?;
+
+    // §9.1 step 5: collapse table already holds sum-by-job series at 1h grain.
+    if crate::compaction::collapse::should_use_collapse(expr, Some(range_ms)) {
+        let series = prefetch.flat_series();
+        return Ok(EvalResult::Matrix(matrix_from_grain_series(
+            &series,
+            start_ms,
+            end_ms,
+            step_ms,
+            ONE_HOUR_LOOKBACK_MS,
+            0,
+        )));
+    }
 
     let lookback = range_lookback_ms(step_ms);
     // One pass over the AST and prefetched samples. Instant-eval-per-step cloned
     // every Grafana point (240–1100×) and blew the 100ms dashboard SLO.
-    let budget = RangeEvalBudget::new(ctx.deadline);
-    let result = eval_over_range(
-        &prefetch, expr, start_ms, end_ms, step_ms, lookback, &budget,
-    )?;
-    let result = match result {
-        RangeVal::Scalar(value) => {
-            EvalResult::Matrix(scalar_to_matrix(value, start_ms, end_ms, step_ms, &budget))
-        }
-        RangeVal::Matrix(matrix) => EvalResult::Matrix(matrix),
-    };
-    // `for_each_step` stops at the deadline to avoid doing more work, but a
-    // range request must never turn that partial result into a successful
-    // response.
-    budget.ensure()?;
-    check_range_deadline(ctx)?;
-    Ok(result)
-}
-
-fn check_range_deadline(ctx: &TenantContext) -> Result<(), CompatError> {
-    if ctx.remaining().is_zero() {
-        return Err(CompatError::new(
-            CompatErrorCode::LimitExceeded,
-            "query deadline exceeded during range evaluation",
-        ));
-    }
-    Ok(())
-}
-
-struct RangeEvalBudget {
-    deadline: Instant,
-    expired: Cell<bool>,
-}
-
-impl RangeEvalBudget {
-    fn new(deadline: Instant) -> Self {
-        Self {
-            deadline,
-            expired: Cell::new(false),
-        }
-    }
-
-    fn check(&self) -> bool {
-        if Instant::now() >= self.deadline {
-            self.expired.set(true);
-        }
-        self.expired.get()
-    }
-
-    fn ensure(&self) -> Result<(), CompatError> {
-        if self.check() {
-            Err(CompatError::new(
-                CompatErrorCode::LimitExceeded,
-                "query deadline exceeded during range evaluation",
-            ))
-        } else {
-            Ok(())
-        }
+    match eval_over_range(&prefetch, expr, start_ms, end_ms, step_ms, lookback)? {
+        RangeVal::Scalar(value) => Ok(EvalResult::Matrix(scalar_to_matrix(
+            value, start_ms, end_ms, step_ms,
+        ))),
+        RangeVal::Matrix(matrix) => Ok(EvalResult::Matrix(matrix)),
     }
 }
 
@@ -165,15 +120,9 @@ enum RangeVal {
     Matrix(MatrixResult),
 }
 
-fn scalar_to_matrix(
-    value: f64,
-    start_ms: i64,
-    end_ms: i64,
-    step_ms: i64,
-    budget: &RangeEvalBudget,
-) -> MatrixResult {
+fn scalar_to_matrix(value: f64, start_ms: i64, end_ms: i64, step_ms: i64) -> MatrixResult {
     let mut samples = Vec::new();
-    for_each_step(start_ms, end_ms, step_ms, budget, |t| {
+    for_each_step(start_ms, end_ms, step_ms, |t| {
         samples.push(Sample {
             timestamp_ms: t,
             value,
@@ -187,18 +136,9 @@ fn scalar_to_matrix(
     }
 }
 
-fn for_each_step(
-    start_ms: i64,
-    end_ms: i64,
-    step_ms: i64,
-    budget: &RangeEvalBudget,
-    mut f: impl FnMut(i64),
-) {
+fn for_each_step(start_ms: i64, end_ms: i64, step_ms: i64, mut f: impl FnMut(i64)) {
     let mut t = start_ms;
     while t <= end_ms {
-        if budget.check() {
-            break;
-        }
         f(t);
         let next = t.saturating_add(step_ms);
         if next <= t {
@@ -215,29 +155,13 @@ fn eval_over_range(
     end_ms: i64,
     step_ms: i64,
     lookback_ms: i64,
-    budget: &RangeEvalBudget,
 ) -> Result<RangeVal, CompatError> {
-    budget.ensure()?;
     match expr {
-        Expr::Paren(p) => eval_over_range(
-            prefetch,
-            &p.expr,
-            start_ms,
-            end_ms,
-            step_ms,
-            lookback_ms,
-            budget,
-        ),
+        Expr::Paren(p) => {
+            eval_over_range(prefetch, &p.expr, start_ms, end_ms, step_ms, lookback_ms)
+        }
         Expr::Unary(u) => {
-            let inner = eval_over_range(
-                prefetch,
-                &u.expr,
-                start_ms,
-                end_ms,
-                step_ms,
-                lookback_ms,
-                budget,
-            )?;
+            let inner = eval_over_range(prefetch, &u.expr, start_ms, end_ms, step_ms, lookback_ms)?;
             negate_range(inner)
         }
         Expr::NumberLiteral(n) => Ok(RangeVal::Scalar(n.val)),
@@ -253,40 +177,22 @@ fn eval_over_range(
                 step_ms,
                 lookback_ms,
                 off,
-                budget,
             )))
         }
         Expr::MatrixSelector(_) => Err(CompatError::unsupported(
             "promql: range query over matrix result",
         )),
-        Expr::Call(c) => {
-            eval_call_over_range(prefetch, c, start_ms, end_ms, step_ms, lookback_ms, budget)
-        }
+        Expr::Call(c) => eval_call_over_range(prefetch, c, start_ms, end_ms, step_ms, lookback_ms),
         Expr::Aggregate(a) => {
-            let inner = eval_over_range(
-                prefetch,
-                &a.expr,
-                start_ms,
-                end_ms,
-                step_ms,
-                lookback_ms,
-                budget,
-            )?;
-            let matrix = range_as_matrix(inner, start_ms, end_ms, step_ms, budget);
+            let inner = eval_over_range(prefetch, &a.expr, start_ms, end_ms, step_ms, lookback_ms)?;
+            let matrix = range_as_matrix(inner, start_ms, end_ms, step_ms);
             let op = a.op.id();
             if op == T_TOPK || op == T_BOTTOMK {
                 let param = a.param.as_ref().ok_or_else(|| {
                     CompatError::new(CompatErrorCode::BadRequest, "topk/bottomk missing param")
                 })?;
-                let k_val = eval_over_range(
-                    prefetch,
-                    param,
-                    start_ms,
-                    end_ms,
-                    step_ms,
-                    lookback_ms,
-                    budget,
-                )?;
+                let k_val =
+                    eval_over_range(prefetch, param, start_ms, end_ms, step_ms, lookback_ms)?;
                 let k = match k_val {
                     RangeVal::Scalar(v) => expect_scalar_k(EvalResult::Scalar {
                         timestamp_ms: start_ms,
@@ -307,45 +213,19 @@ fn eval_over_range(
                     start_ms,
                     end_ms,
                     step_ms,
-                    budget,
                 )?))
             } else {
                 Ok(RangeVal::Matrix(aggregate_matrix(op, &a.modifier, matrix)?))
             }
         }
         Expr::Binary(b) => {
-            let lhs = eval_over_range(
-                prefetch,
-                &b.lhs,
-                start_ms,
-                end_ms,
-                step_ms,
-                lookback_ms,
-                budget,
-            )?;
-            let rhs = eval_over_range(
-                prefetch,
-                &b.rhs,
-                start_ms,
-                end_ms,
-                step_ms,
-                lookback_ms,
-                budget,
-            )?;
+            let lhs = eval_over_range(prefetch, &b.lhs, start_ms, end_ms, step_ms, lookback_ms)?;
+            let rhs = eval_over_range(prefetch, &b.rhs, start_ms, end_ms, step_ms, lookback_ms)?;
             let id = b.op.id();
             if id == T_LAND || id == T_LOR || id == T_LUNLESS {
-                eval_set_op_over_range(id, lhs, rhs, start_ms, end_ms, step_ms, budget)
+                eval_set_op_over_range(id, lhs, rhs, start_ms, end_ms, step_ms)
             } else {
-                eval_binary_over_range(
-                    id,
-                    b.return_bool(),
-                    lhs,
-                    rhs,
-                    start_ms,
-                    end_ms,
-                    step_ms,
-                    budget,
-                )
+                eval_binary_over_range(id, b.return_bool(), lhs, rhs, start_ms, end_ms, step_ms)
             }
         }
         Expr::Subquery(_) => Err(CompatError::unsupported("promql: subquery")),
@@ -353,15 +233,9 @@ fn eval_over_range(
     }
 }
 
-fn range_as_matrix(
-    value: RangeVal,
-    start_ms: i64,
-    end_ms: i64,
-    step_ms: i64,
-    budget: &RangeEvalBudget,
-) -> MatrixResult {
+fn range_as_matrix(value: RangeVal, start_ms: i64, end_ms: i64, step_ms: i64) -> MatrixResult {
     match value {
-        RangeVal::Scalar(v) => scalar_to_matrix(v, start_ms, end_ms, step_ms, budget),
+        RangeVal::Scalar(v) => scalar_to_matrix(v, start_ms, end_ms, step_ms),
         RangeVal::Matrix(m) => m,
     }
 }
@@ -388,14 +262,13 @@ fn eval_call_over_range(
     end_ms: i64,
     step_ms: i64,
     lookback_ms: i64,
-    budget: &RangeEvalBudget,
 ) -> Result<RangeVal, CompatError> {
     let name = call.func.name.to_ascii_lowercase();
     if super::funcs::is_range_vector_fn(&name) {
         let arg = call.args.args.first().ok_or_else(|| {
             CompatError::new(CompatErrorCode::BadRequest, format!("{name}() missing arg"))
         })?;
-        return eval_range_fn_over_range(prefetch, &name, arg, start_ms, end_ms, step_ms, budget);
+        return eval_range_fn_over_range(prefetch, &name, arg, start_ms, end_ms, step_ms);
     }
     if super::funcs::is_math_fn(&name) {
         let arg = call.args.args.first().ok_or_else(|| {
@@ -409,7 +282,6 @@ fn eval_call_over_range(
                 end_ms,
                 step_ms,
                 lookback_ms,
-                budget,
             )? {
                 RangeVal::Scalar(v) => Some(v),
                 RangeVal::Matrix(_) => {
@@ -422,15 +294,7 @@ fn eval_call_over_range(
         } else {
             None
         };
-        let inner = eval_over_range(
-            prefetch,
-            arg,
-            start_ms,
-            end_ms,
-            step_ms,
-            lookback_ms,
-            budget,
-        )?;
+        let inner = eval_over_range(prefetch, arg, start_ms, end_ms, step_ms, lookback_ms)?;
         return apply_math_fn_range(&name, inner, to_nearest, start_ms, end_ms, step_ms);
     }
     Err(CompatError::unsupported(format!("promql: function {name}")))
@@ -443,7 +307,6 @@ fn eval_range_fn_over_range(
     start_ms: i64,
     end_ms: i64,
     step_ms: i64,
-    budget: &RangeEvalBudget,
 ) -> Result<RangeVal, CompatError> {
     let ms = match unwrap_expr_parens(arg) {
         Expr::MatrixSelector(ms) => ms,
@@ -456,15 +319,7 @@ fn eval_range_fn_over_range(
     };
     let matchers = extract_selector_matchers(&ms.vs)?;
     let off = offset_shift_ms(&ms.vs.offset);
-    let range_ms = (matrix_range(ms).as_millis() as i64).max(if prefetch.collapse {
-        // Collapse is an hourly pre-aggregation. Preserve the function
-        // semantics over the available grain instead of returning its raw
-        // `last` values as if they were the requested expression result. Two
-        // hours also covers an evaluation grid that is not hour-aligned.
-        2 * ONE_HOUR_LOOKBACK_MS
-    } else {
-        0
-    });
+    let range_ms = matrix_range(ms).as_millis() as i64;
     let series = prefetch.series_for(&matchers)?;
     let keep_name = name == "last_over_time";
     let mut out = Vec::with_capacity(series.len());
@@ -476,7 +331,7 @@ fn eval_range_fn_over_range(
         let mut samples = Vec::new();
         let mut lo = 0usize;
         let mut hi = 0usize;
-        for_each_step(start_ms, end_ms, step_ms, budget, |t| {
+        for_each_step(start_ms, end_ms, step_ms, |t| {
             let range_end_ms = t - off;
             let range_start_ms = range_end_ms - range_ms.max(1);
             while lo < s.samples.len() && s.samples[lo].timestamp_ms < range_start_ms {
@@ -610,7 +465,6 @@ fn aggregate_matrix(
     Ok(MatrixResult { series })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn aggregate_topk_matrix(
     k: usize,
     bottom: bool,
@@ -619,13 +473,12 @@ fn aggregate_topk_matrix(
     start_ms: i64,
     end_ms: i64,
     step_ms: i64,
-    budget: &RangeEvalBudget,
 ) -> Result<MatrixResult, CompatError> {
     if k == 0 {
         return Ok(MatrixResult { series: vec![] });
     }
     let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
-    for_each_step(start_ms, end_ms, step_ms, budget, |t| {
+    for_each_step(start_ms, end_ms, step_ms, |t| {
         let vector = VectorResult {
             samples: instant_values_at(&inner.series, t),
         };
@@ -664,7 +517,6 @@ fn instant_values_at(series: &[MetricSeries], t: i64) -> Vec<InstantSample> {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn eval_binary_over_range(
     op: u16,
     return_bool: bool,
@@ -673,7 +525,6 @@ fn eval_binary_over_range(
     start_ms: i64,
     end_ms: i64,
     step_ms: i64,
-    budget: &RangeEvalBudget,
 ) -> Result<RangeVal, CompatError> {
     match (lhs, rhs) {
         (RangeVal::Scalar(lv), RangeVal::Scalar(rv)) => {
@@ -698,7 +549,7 @@ fn eval_binary_over_range(
         )?)),
         (RangeVal::Matrix(lv), RangeVal::Matrix(rv)) => {
             let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
-            for_each_step(start_ms, end_ms, step_ms, budget, |t| {
+            for_each_step(start_ms, end_ms, step_ms, |t| {
                 let l = VectorResult {
                     samples: instant_values_at(&lv.series, t),
                 };
@@ -768,7 +619,6 @@ fn eval_set_op_over_range(
     start_ms: i64,
     end_ms: i64,
     step_ms: i64,
-    budget: &RangeEvalBudget,
 ) -> Result<RangeVal, CompatError> {
     let lv = match lhs {
         RangeVal::Matrix(m) => m,
@@ -789,7 +639,7 @@ fn eval_set_op_over_range(
         }
     };
     let mut by_labels: BTreeMap<BTreeMap<String, String>, Vec<Sample>> = BTreeMap::new();
-    for_each_step(start_ms, end_ms, step_ms, budget, |t| {
+    for_each_step(start_ms, end_ms, step_ms, |t| {
         let l = EvalResult::Vector(VectorResult {
             samples: instant_values_at(&lv.series, t),
         });
@@ -830,15 +680,19 @@ struct PrefetchBackend {
     /// Matcher list → series covering the full range window (samples may be wider
     /// than a single step request; `query_range` truncates per call).
     entries: Vec<(Vec<LabelMatcher>, Vec<MetricSeries>)>,
-    /// The collapse table is hourly-grain data. Range functions still run over
-    /// it, but need an hourly evaluation window because the requested 5m
-    /// selector cannot contain two points after the storage reduction.
-    collapse: bool,
 }
 
 impl PrefetchBackend {
     fn total_series(&self) -> usize {
         self.entries.iter().map(|(_, series)| series.len()).sum()
+    }
+
+    fn flat_series(&self) -> Vec<MetricSeries> {
+        let mut out = Vec::new();
+        for (_, series) in &self.entries {
+            out.extend(series.iter().cloned());
+        }
+        out
     }
 
     fn series_for(&self, matchers: &[LabelMatcher]) -> Result<&[MetricSeries], CompatError> {
@@ -885,8 +739,6 @@ impl PrefetchBackend {
                     MetricsQueryRequest {
                         start_ms: Some(start_ms),
                         end_ms: Some(end_ms),
-                        client_start_ms: Some(start_ms),
-                        client_end_ms: Some(end_ms),
                         matchers: matchers.clone(),
                         step_ms: Some(step_ms),
                         collapse_metric: Some(metric),
@@ -895,7 +747,6 @@ impl PrefetchBackend {
                 .await?;
             return Ok(Self {
                 entries: vec![(matchers, series)],
-                collapse: true,
             });
         }
 
@@ -959,8 +810,6 @@ impl PrefetchBackend {
                         MetricsQueryRequest {
                             start_ms: Some(fetch_start),
                             end_ms: Some(fetch_end),
-                            client_start_ms: Some(start_ms),
-                            client_end_ms: Some(end_ms),
                             matchers: matchers.clone(),
                             step_ms: effective_step,
                             collapse_metric: None,
@@ -972,10 +821,7 @@ impl PrefetchBackend {
         ))
         .await?;
 
-        Ok(Self {
-            entries,
-            collapse: false,
-        })
+        Ok(Self { entries })
     }
 }
 
@@ -1206,13 +1052,12 @@ fn matrix_from_grain_series(
     step_ms: i64,
     lookback_ms: i64,
     offset_ms: i64,
-    budget: &RangeEvalBudget,
 ) -> MatrixResult {
     let mut out = Vec::with_capacity(series.len());
     for s in series {
         let mut samples = Vec::new();
         let mut hi = 0usize;
-        for_each_step(start_ms, end_ms, step_ms, budget, |t| {
+        for_each_step(start_ms, end_ms, step_ms, |t| {
             let data_t = t - offset_ms;
             let win_start = data_t - lookback_ms;
             while hi < s.samples.len() && s.samples[hi].timestamp_ms <= data_t {
@@ -1262,8 +1107,6 @@ async fn fetch_series(
             MetricsQueryRequest {
                 start_ms: Some(start_ms),
                 end_ms: Some(eval_ms),
-                client_start_ms: None,
-                client_end_ms: None,
                 matchers: matchers.to_vec(),
                 step_ms: None,
                 collapse_metric: None,
@@ -2301,77 +2144,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn range_prefetch_keeps_client_window_when_lookback_expands() {
-        struct CaptureBackend {
-            last: std::sync::Mutex<Option<MetricsQueryRequest>>,
-        }
-        #[async_trait]
-        impl MetricsQueryBackend for CaptureBackend {
-            async fn query_range(
-                &self,
-                _ctx: &TenantContext,
-                request: MetricsQueryRequest,
-            ) -> Result<Vec<MetricSeries>, CompatError> {
-                *self.last.lock().unwrap() = Some(request);
-                Ok(vec![])
-            }
-            async fn label_names(
-                &self,
-                _: &TenantContext,
-                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
-            ) -> Result<Vec<String>, CompatError> {
-                Err(CompatError::unsupported("n/a"))
-            }
-            async fn label_values(
-                &self,
-                _: &TenantContext,
-                _: &str,
-                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
-            ) -> Result<Vec<String>, CompatError> {
-                Err(CompatError::unsupported("n/a"))
-            }
-            async fn series(
-                &self,
-                _: &TenantContext,
-                _: &crate::compat::backends::metrics::MetricsDiscoveryRequest,
-            ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
-                Err(CompatError::unsupported("n/a"))
-            }
-            async fn metadata(
-                &self,
-                _: &TenantContext,
-                _: Option<&str>,
-                _: Option<usize>,
-                _: Option<i64>,
-                _: Option<i64>,
-            ) -> Result<Vec<crate::compat::backends::metrics::MetricMetadata>, CompatError>
-            {
-                Err(CompatError::unsupported("n/a"))
-            }
-        }
-
-        let backend = CaptureBackend {
-            last: std::sync::Mutex::new(None),
-        };
-        let expr = parse_promql("http_requests").unwrap();
-        let start = 0i64;
-        let end = 86_400_000; // 24h
-        let step = 60_000;
-        let _ = eval_range(&backend, &ctx(), &expr, start, end, step)
-            .await
-            .unwrap();
-        let req = backend.last.lock().unwrap().clone().expect("prefetch");
-        assert_eq!(req.client_start_ms, Some(start));
-        assert_eq!(req.client_end_ms, Some(end));
-        let fetch_start = req.start_ms.expect("fetch start");
-        assert!(
-            fetch_start < start,
-            "lookback must expand the storage window, got {fetch_start}"
-        );
-        assert_eq!(req.end_ms, Some(end));
-    }
-
-    #[tokio::test]
     async fn prefetch_buckets_at_24h_but_not_just_under() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct CaptureBackend {
@@ -3064,22 +2836,19 @@ mod tests {
                     let mut labels = BTreeMap::new();
                     labels.insert("__name__".into(), m.clone());
                     labels.insert("job".into(), "api".into());
-                    // Collapse is hourly grain; rate() still needs ≥2 points in the
-                    // 2h evaluation window, so emit the actual 1h cadence.
-                    let start = request.start_ms.unwrap_or(0);
-                    let end = request.end_ms.unwrap_or(0);
-                    let mut samples = Vec::new();
-                    let mut ts = start - (start % 3_600_000);
-                    let mut value = 100.0;
-                    while ts <= end {
-                        samples.push(Sample {
-                            timestamp_ms: ts,
-                            value,
-                        });
-                        value += 10.0;
-                        ts += 3_600_000;
-                    }
-                    return Ok(vec![MetricSeries { labels, samples }]);
+                    return Ok(vec![MetricSeries {
+                        labels,
+                        samples: vec![
+                            Sample {
+                                timestamp_ms: request.start_ms.unwrap_or(0),
+                                value: 100.0,
+                            },
+                            Sample {
+                                timestamp_ms: request.end_ms.unwrap_or(0),
+                                value: 200.0,
+                            },
+                        ],
+                    }]);
                 }
                 Ok(vec![])
             }
@@ -3144,11 +2913,11 @@ mod tests {
                 assert_eq!(
                     m.series.len(),
                     1,
-                    "collapse evaluation must keep job series"
+                    "collapse short-circuit must keep job series"
                 );
                 assert!(
                     !m.series[0].samples.is_empty(),
-                    "collapse evaluation must emit points from grain samples"
+                    "collapse short-circuit must emit points from grain samples"
                 );
             }
             other => panic!("expected matrix, got {other:?}"),
@@ -3205,7 +2974,7 @@ mod tests {
         }
     }
 
-    /// AC-Q5: collapse path evaluates the rate family over hourly pre-aggregates.
+    /// AC-Q5: collapse path must return J series without requiring rate[5m] on hourly points.
     #[tokio::test]
     async fn range_eval_collapse_returns_job_series_on_hourly_grain() {
         struct CollapseBackend {

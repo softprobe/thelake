@@ -388,7 +388,7 @@ maintenance:
 ducklake:
   catalog_type: "postgres"
   metadata_path: "host=$PG_HOST port=$PG_PORT dbname=ducklake user=ducklake password=ducklake"
-  data_path: "$STATE_DIR/data/"
+  data_path: "$STATE_DIR/data/$TENANT_ID/"
   catalog_alias: "softprobe"
   metadata_schema: "$PG_SCHEMA"
   data_inlining_row_limit: 0

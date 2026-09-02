@@ -193,6 +193,8 @@ async fn http_otlp_histogram_ingest_then_sql_and_prom_query() {
         .expect("SQL read summary count/sum");
     assert_eq!(qcount, Some(100));
     assert_eq!(qsum, Some(500.0));
+    // Quantile expansion stays out of scope for metric_hist_samples (§6.4).
+
     // AC-H1 Prom path: classic `_count` / `_bucket` query_range over hist table.
     // Fixture timestamp is 2022-01-01T00:00:00Z (1_640_995_200s).
     // Short (30m) and mid (3h) windows must both return series — mid used to divert
@@ -282,7 +284,6 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
         explicit_bounds: Some(vec![10.0, 50.0]),
         quantiles: None,
         aggregation_temporality: Some("CUMULATIVE".into()),
-        is_monotonic: None,
         exemplars_json: Some(r#"[{"value":1.5}]"#.into()),
     };
 
@@ -310,7 +311,6 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
             },
         ]),
         aggregation_temporality: None,
-        is_monotonic: None,
         exemplars_json: None,
     };
 
@@ -360,38 +360,6 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
         .expect("query summary");
     assert_eq!(qcount, Some(100));
     assert_eq!(qsum, Some(500.0));
-
-    let exemplars: Option<String> = conn
-        .query_row(
-            "SELECT h.exemplars_json \
-             FROM softprobe.metric_hist_samples h \
-             JOIN softprobe.metric_series s \
-               ON h.series_id = s.series_id AND h.record_date = s.record_date \
-             WHERE s.metric_name = 'http.server.duration'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("query histogram exemplars");
-    assert!(
-        exemplars.as_deref().unwrap_or("").contains("1.5"),
-        "histogram exemplars must persist, got {exemplars:?}"
-    );
-
-    let quantiles: Option<String> = conn
-        .query_row(
-            "SELECT h.quantiles \
-             FROM softprobe.metric_hist_samples h \
-             JOIN softprobe.metric_series s \
-               ON h.series_id = s.series_id AND h.record_date = s.record_date \
-             WHERE s.metric_name = 'rpc.latency'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("query summary quantiles");
-    assert!(
-        quantiles.as_deref().unwrap_or("").contains("0.99"),
-        "summary quantiles must persist, got {quantiles:?}"
-    );
 }
 
 #[tokio::test]
@@ -605,4 +573,48 @@ async fn http_otlp_nested_attributes_round_trip_ducklake() {
     let parsed: serde_json::Value = serde_json::from_str(&attrs_json).unwrap();
     assert_eq!(parsed["tags"], serde_json::json!(["a", 1]));
     assert_eq!(parsed["meta"]["region"], "us");
+}
+
+#[tokio::test]
+async fn legacy_metrics_table_widens_on_gauge_ingest() {
+    use async_trait::async_trait;
+    use softprobe_runtime::ingest_engine::IngestPipeline;
+
+    use crate::util::metrics_fidelity_contract::{
+        contract_legacy_metrics_table_widens_on_gauge_ingest, MetricsFidelityBackend,
+    };
+
+    struct SqliteBackend {
+        _temp: TempDir,
+        pipeline: IngestPipeline,
+        metadata_path: String,
+        data_path: String,
+    }
+
+    #[async_trait]
+    impl MetricsFidelityBackend for SqliteBackend {
+        fn attach(&self) -> duckdb::Connection {
+            attach(&self.metadata_path, &self.data_path)
+        }
+
+        async fn write_metric_batches(
+            &self,
+            batches: Vec<Vec<softprobe_runtime::models::Metric>>,
+        ) -> anyhow::Result<()> {
+            self.pipeline.write_metric_batches(batches).await
+        }
+    }
+
+    let temp = TempDir::new().expect("temp");
+    let config = file_backed_test_config(&temp);
+    let metadata_path = config.ducklake.metadata_path.clone();
+    let data_path = config.ducklake.data_path.clone();
+    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let backend = SqliteBackend {
+        _temp: temp,
+        pipeline,
+        metadata_path,
+        data_path,
+    };
+    contract_legacy_metrics_table_widens_on_gauge_ingest(&backend).await;
 }

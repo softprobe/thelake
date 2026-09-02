@@ -97,49 +97,6 @@ pub fn project_prometheus_metric_type(otel_type: &str) -> &'static str {
     }
 }
 
-/// Project a metric type without claiming Prometheus counter semantics for an
-/// OTel Sum that is delta or non-monotonic. Missing Sum metadata is deliberately
-/// treated as unknown rather than silently becoming a counter.
-pub fn project_prometheus_metric_type_with_semantics(
-    otel_type: &str,
-    aggregation_temporality: Option<&str>,
-    is_monotonic: Option<bool>,
-) -> &'static str {
-    if otel_type.eq_ignore_ascii_case("sum")
-        && (aggregation_temporality != Some("CUMULATIVE") || is_monotonic != Some(true))
-    {
-        return "unknown";
-    }
-    project_prometheus_metric_type(otel_type)
-}
-
-/// Classic Prom `_bucket` / `_sum` / `_count` suffix on a `__name__` matcher.
-pub fn classic_prom_suffix_base(prom_name: &str) -> Option<&str> {
-    prom_name
-        .strip_suffix("_bucket")
-        .or_else(|| prom_name.strip_suffix("_count"))
-        .or_else(|| prom_name.strip_suffix("_sum"))
-}
-
-/// Dual-write classic suffix gauges at ingest for Grafana GOLD / demo families.
-/// Other histograms stay native and expand at query time.
-pub fn classic_prom_dual_write_allowed(base_name: &str) -> bool {
-    base_name.starts_with("k6_")
-        || base_name.starts_with("demo_")
-        || base_name.starts_with("http_")
-        || base_name.starts_with("rpc_")
-        || base_name.starts_with("traces_span_metrics_")
-        || base_name.starts_with("layout_")
-}
-
-/// `_bucket`/`_sum`/`_count` selector with no dual-written gauge series.
-pub fn classic_suffix_uses_native_hist(prom_name: &str) -> bool {
-    match classic_prom_suffix_base(prom_name) {
-        Some(base) => !classic_prom_dual_write_allowed(base),
-        None => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,35 +163,5 @@ mod tests {
         assert_eq!(project_prometheus_metric_type("histogram"), "histogram");
         assert_eq!(project_prometheus_metric_type("summary"), "summary");
         assert_eq!(project_prometheus_metric_type("other"), "unknown");
-    }
-
-    #[test]
-    fn only_cumulative_monotonic_sums_are_counters() {
-        assert_eq!(
-            project_prometheus_metric_type_with_semantics("sum", Some("CUMULATIVE"), Some(true)),
-            "counter"
-        );
-        assert_eq!(
-            project_prometheus_metric_type_with_semantics("sum", Some("DELTA"), Some(true)),
-            "unknown"
-        );
-        assert_eq!(
-            project_prometheus_metric_type_with_semantics("sum", Some("CUMULATIVE"), Some(false)),
-            "unknown"
-        );
-    }
-
-    #[test]
-    fn classic_suffix_native_hist_skips_dual_write_families() {
-        assert_eq!(
-            classic_prom_suffix_base("db_client_operation_duration_bucket"),
-            Some("db_client_operation_duration")
-        );
-        assert!(classic_suffix_uses_native_hist(
-            "db_client_operation_duration_bucket"
-        ));
-        assert!(!classic_suffix_uses_native_hist("http_duration_bucket"));
-        assert!(!classic_suffix_uses_native_hist("layout_latency_count"));
-        assert!(!classic_suffix_uses_native_hist("k6_vus"));
     }
 }

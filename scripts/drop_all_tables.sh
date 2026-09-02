@@ -18,20 +18,11 @@ python3 "${ROOT}/scripts/duckdb_ducklake_render_init.py" --root "$ROOT" --meta "
 source "$M"
 P="$SOFTPROBE_DL_QUALIFIED_PREFIX"
 
-echo "=== Dropping DuckLake tables: ${P}.(traces|logs|metric_samples|metric_hist_samples|metric_summary_samples|metric_postings) ==="
+echo "=== Dropping DuckLake tables: ${P}.(traces|logs|metrics) ==="
 duckdb -init "$R" -c "
 DROP TABLE IF EXISTS ${P}.traces;
 DROP TABLE IF EXISTS ${P}.logs;
-DROP TABLE IF EXISTS ${P}.metric_samples;
-DROP TABLE IF EXISTS ${P}.metric_hist_samples;
-DROP TABLE IF EXISTS ${P}.metric_summary_samples;
-DROP TABLE IF EXISTS ${P}.metric_samples_5m;
-DROP TABLE IF EXISTS ${P}.metric_samples_1h;
-DROP TABLE IF EXISTS ${P}.metric_samples_1d;
-DROP TABLE IF EXISTS ${P}.metric_hist_samples_5m;
-DROP TABLE IF EXISTS ${P}.metric_hist_samples_1h;
-DROP TABLE IF EXISTS ${P}.metric_hist_samples_1d;
-DROP TABLE IF EXISTS ${P}.metric_postings;
+DROP TABLE IF EXISTS ${P}.metrics;
 SELECT 'drop complete' AS status;
 "
 echo "=== Done ==="

@@ -44,10 +44,6 @@ pub struct MetricsDiscoveryRequest {
 pub struct MetricsQueryRequest {
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
-    /// Original client window used for request limits when `start_ms`/`end_ms`
-    /// are internally expanded for PromQL lookback.
-    pub client_start_ms: Option<i64>,
-    pub client_end_ms: Option<i64>,
     /// Single selector matchers (AND).
     pub matchers: Vec<LabelMatcher>,
     /// Grafana/Prom `step` for grain selection (§9.1: step ≥ 1h → prefer 1h).
@@ -247,8 +243,6 @@ mod tests {
                 MetricsQueryRequest {
                     start_ms: None,
                     end_ms: None,
-                    client_start_ms: None,
-                    client_end_ms: None,
                     matchers: vec![],
                     step_ms: None,
                     collapse_metric: None,

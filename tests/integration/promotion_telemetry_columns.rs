@@ -65,7 +65,7 @@ async fn create_minimal_trace_tables(client: &tokio_postgres::Client, schema: &s
         .execute(&format!(r#"CREATE SCHEMA "{}";"#, schema), &[])
         .await
         .expect("create schema");
-    for table in ["traces", "logs", "metric_samples"] {
+    for table in ["traces", "logs", "metrics"] {
         client
             .execute(
                 &format!(

@@ -17,9 +17,8 @@ pub struct SummaryQuantile {
 
 /// Metric data model representing an OTLP metric data point.
 ///
-/// The model is decoded into the skinny metric layout: scalar samples go to
-/// `metric_samples`, histogram samples to `metric_hist_samples`, and series
-/// metadata is maintained separately.
+/// Matches `OtlpMetricsTable` in `src/storage/schema/tables.rs`. Gauge/sum use
+/// `value`; classic histogram/summary also populate fidelity columns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metric {
     pub metric_name: String,
@@ -41,8 +40,6 @@ pub struct Metric {
     pub quantiles: Option<Vec<SummaryQuantile>>,
     /// OTLP AggregationTemporality name: "DELTA" | "CUMULATIVE" | "UNSPECIFIED"
     pub aggregation_temporality: Option<String>,
-    /// OTLP Sum monotonicity. `None` for gauges, histograms, and summaries.
-    pub is_monotonic: Option<bool>,
     /// JSON array of exemplar objects (trace_id, span_id, value, time, attrs).
     pub exemplars_json: Option<String>,
 }
@@ -64,13 +61,19 @@ impl Default for Metric {
             explicit_bounds: None,
             quantiles: None,
             aggregation_temporality: None,
-            is_monotonic: None,
             exemplars_json: None,
         }
     }
 }
 
 impl Metric {
+    pub fn to_record_batch(
+        metrics: &[Metric],
+        schema: &arrow::datatypes::Schema,
+    ) -> anyhow::Result<arrow::record_batch::RecordBatch> {
+        crate::storage::schema::arrow::metrics_to_record_batch(metrics, schema)
+    }
+
     pub fn from_otlp(
         otlp_metric: &opentelemetry_proto::tonic::metrics::v1::Metric,
         resource_attributes: &HashMap<String, String>,
@@ -83,7 +86,6 @@ impl Metric {
 
         use opentelemetry_proto::tonic::metrics::v1::metric::Data;
         if let Some(data) = &otlp_metric.data {
-            validate_metric_timestamps(data)?;
             match data {
                 Data::Gauge(gauge) => {
                     for data_point in &gauge.data_points {
@@ -94,7 +96,6 @@ impl Metric {
                             &unit,
                             "gauge",
                             resource_attributes,
-                            None,
                             None,
                         ) {
                             metrics.push(metric);
@@ -112,7 +113,6 @@ impl Metric {
                             "sum",
                             resource_attributes,
                             Some(temporality),
-                            Some(sum.is_monotonic),
                         ) {
                             metrics.push(metric);
                         }
@@ -170,7 +170,6 @@ impl Metric {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn from_number_data_point(
         data_point: &opentelemetry_proto::tonic::metrics::v1::NumberDataPoint,
         metric_name: &str,
@@ -179,7 +178,6 @@ impl Metric {
         metric_type: &str,
         resource_attributes: &HashMap<String, String>,
         aggregation_temporality: Option<&str>,
-        is_monotonic: Option<bool>,
     ) -> Option<Self> {
         let timestamp = timestamp_from_unix_nano(data_point.time_unix_nano);
 
@@ -214,7 +212,6 @@ impl Metric {
             explicit_bounds: None,
             quantiles: None,
             aggregation_temporality: aggregation_temporality.map(str::to_string),
-            is_monotonic,
             exemplars_json,
         })
     }
@@ -249,7 +246,6 @@ impl Metric {
             explicit_bounds: Some(data_point.explicit_bounds.clone()),
             quantiles: None,
             aggregation_temporality: Some(aggregation_temporality.to_string()),
-            is_monotonic: None,
             exemplars_json,
         })
     }
@@ -288,7 +284,6 @@ impl Metric {
             explicit_bounds: None,
             quantiles: Some(quantiles),
             aggregation_temporality: None,
-            is_monotonic: None,
             exemplars_json: None,
         })
     }
@@ -324,46 +319,6 @@ fn timestamp_from_unix_nano(time_unix_nano: u64) -> DateTime<Utc> {
     } else {
         Utc::now()
     }
-}
-
-fn validate_metric_timestamps(
-    data: &opentelemetry_proto::tonic::metrics::v1::metric::Data,
-) -> Result<()> {
-    let timestamps = match data {
-        opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(v) => v
-            .data_points
-            .iter()
-            .map(|p| p.time_unix_nano)
-            .collect::<Vec<_>>(),
-        opentelemetry_proto::tonic::metrics::v1::metric::Data::Sum(v) => v
-            .data_points
-            .iter()
-            .map(|p| p.time_unix_nano)
-            .collect::<Vec<_>>(),
-        opentelemetry_proto::tonic::metrics::v1::metric::Data::Histogram(v) => v
-            .data_points
-            .iter()
-            .map(|p| p.time_unix_nano)
-            .collect::<Vec<_>>(),
-        opentelemetry_proto::tonic::metrics::v1::metric::Data::Summary(v) => v
-            .data_points
-            .iter()
-            .map(|p| p.time_unix_nano)
-            .collect::<Vec<_>>(),
-        opentelemetry_proto::tonic::metrics::v1::metric::Data::ExponentialHistogram(v) => v
-            .data_points
-            .iter()
-            .map(|p| p.time_unix_nano)
-            .collect::<Vec<_>>(),
-    };
-    for timestamp in timestamps {
-        anyhow::ensure!(timestamp != 0, "metric timestamp must be non-zero");
-        anyhow::ensure!(
-            timestamp <= i64::MAX as u64,
-            "metric timestamp exceeds signed nanosecond range ({timestamp})"
-        );
-    }
-    Ok(())
 }
 
 fn temporality_name(v: i32) -> &'static str {
@@ -520,49 +475,6 @@ mod tests {
         assert_eq!(m.bucket_counts.as_deref(), Some(&[2, 5, 3][..]));
         assert_eq!(m.explicit_bounds.as_deref(), Some(&[10.0, 50.0][..]));
         assert_eq!(m.aggregation_temporality.as_deref(), Some("CUMULATIVE"));
-    }
-
-    #[test]
-    fn sum_preserves_temporality_and_monotonicity() {
-        use opentelemetry_proto::tonic::metrics::v1::{
-            number_data_point::Value, NumberDataPoint, Sum,
-        };
-        let otlp = OtlpMetric {
-            name: "queue.depth".into(),
-            data: Some(Data::Sum(Sum {
-                data_points: vec![NumberDataPoint {
-                    time_unix_nano: 1_640_995_200_000_000_000,
-                    value: Some(Value::AsDouble(3.0)),
-                    ..Default::default()
-                }],
-                aggregation_temporality: 1,
-                is_monotonic: false,
-            })),
-            ..Default::default()
-        };
-        let row = &Metric::from_otlp(&otlp, &HashMap::new()).unwrap()[0];
-        assert_eq!(row.aggregation_temporality.as_deref(), Some("DELTA"));
-        assert_eq!(row.is_monotonic, Some(false));
-    }
-
-    #[test]
-    fn zero_metric_timestamp_is_rejected_before_partitioning() {
-        use opentelemetry_proto::tonic::metrics::v1::{
-            number_data_point::Value, Gauge, NumberDataPoint,
-        };
-        let otlp = OtlpMetric {
-            name: "bad.timestamp".into(),
-            data: Some(Data::Gauge(Gauge {
-                data_points: vec![NumberDataPoint {
-                    time_unix_nano: 0,
-                    value: Some(Value::AsDouble(1.0)),
-                    ..Default::default()
-                }],
-            })),
-            ..Default::default()
-        };
-        let err = Metric::from_otlp(&otlp, &HashMap::new()).unwrap_err();
-        assert!(err.to_string().contains("non-zero"));
     }
 
     #[test]
