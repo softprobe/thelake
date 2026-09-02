@@ -673,7 +673,7 @@ fn wait_loki_result_with_probe(
     mut probe: impl FnMut(&str) -> LokiProbeObservation,
 ) -> Result<(), String> {
     let start = std::time::Instant::now();
-    let mut last_observed = String::from("no response");
+    let mut last_observed;
 
     loop {
         let observation = probe(url);
