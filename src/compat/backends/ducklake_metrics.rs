@@ -23,6 +23,7 @@ use crate::compat::tenant::TenantContext;
 use crate::promotion::telemetry_manifest_from_row;
 use crate::query::duckdb::QueryResult;
 use crate::query::QueryEngine;
+use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
 use crate::storage::schema::variant::variant_varchar;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -1332,21 +1333,8 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
             Some(n) => n.max(1),
             None => ctx.limits.max_series.max(1),
         };
-        let sample_time = time.replace("timestamp", "sm.timestamp");
-        let hist_time = time.replace("timestamp", "hs.timestamp");
-        let sql = format!(
-            "SELECT metric_name, \
-             any_value(description) AS description, \
-             any_value(unit) AS unit, \
-             any_value(metric_type) AS metric_type, \
-             any_value(aggregation_temporality) AS aggregation_temporality, \
-             any_value(is_monotonic) AS is_monotonic \
-             FROM metric_series \
-             WHERE EXISTS (SELECT 1 FROM metric_samples sm WHERE sm.series_id = metric_series.series_id{sample_time}) \
-                OR EXISTS (SELECT 1 FROM metric_hist_samples hs WHERE hs.series_id = metric_series.series_id{hist_time}) \
-             GROUP BY metric_name \
-             ORDER BY metric_name"
-        );
+        let catalog = self.layout_catalog();
+        let sql = metadata_scan_sql(&catalog, &time);
         let result = self.execute_soft(ctx, &sql).await?;
         Self::check_deadline(ctx)?;
         let want = metric
@@ -1866,6 +1854,27 @@ fn format_le(bound: f64) -> String {
     }
 }
 
+fn metadata_scan_sql(catalog: &str, time: &str) -> String {
+    let series = qualified_metrics_layout_table(catalog, "metric_series");
+    let samples = qualified_metrics_layout_table(catalog, "metric_samples");
+    let hist = qualified_metrics_layout_table(catalog, "metric_hist_samples");
+    let sample_time = time.replace("timestamp", "sm.timestamp");
+    let hist_time = time.replace("timestamp", "hs.timestamp");
+    format!(
+        "SELECT metric_name, \
+         any_value(description) AS description, \
+         any_value(unit) AS unit, \
+         any_value(metric_type) AS metric_type, \
+         any_value(aggregation_temporality) AS aggregation_temporality, \
+         any_value(is_monotonic) AS is_monotonic \
+         FROM {series} \
+         WHERE EXISTS (SELECT 1 FROM {samples} sm WHERE sm.series_id = {series}.series_id{sample_time}) \
+            OR EXISTS (SELECT 1 FROM {hist} hs WHERE hs.series_id = {series}.series_id{hist_time}) \
+         GROUP BY metric_name \
+         ORDER BY metric_name"
+    )
+}
+
 fn scan_cap_exceeded(cap: usize) -> CompatError {
     CompatError::new(
         CompatErrorCode::LimitExceeded,
@@ -2280,6 +2289,24 @@ mod tests {
             vec!["queue_count".to_string()],
             "gauges named *_count/_sum/_bucket must keep their exact name"
         );
+    }
+
+    #[test]
+    fn metadata_sql_uses_catalog_qualified_skinny_tables() {
+        let sql = metadata_scan_sql("softprobe", "");
+        assert!(
+            sql.contains("FROM softprobe.metric_series"),
+            "metadata must qualify metric_series, got {sql}"
+        );
+        assert!(sql.contains("FROM softprobe.metric_samples"));
+        assert!(sql.contains("FROM softprobe.metric_hist_samples"));
+        assert!(
+            !sql.contains("FROM metric_series "),
+            "unqualified metric_series is swallowed as empty by execute_soft, got {sql}"
+        );
+        assert!(sql.contains("aggregation_temporality"));
+        assert!(sql.contains("is_monotonic"));
+        assert!(!sql.contains("FROM union_metrics"));
     }
 
     #[test]
