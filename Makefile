@@ -23,7 +23,9 @@ SHELL := /bin/bash
 	lint fmt check-fmt \
 	test test-e2e test-perf ci release _release \
 	stress test-deploy \
-	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen
+	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
+	grafana-up grafana-down \
+	bench-prom-baseline bench-prom-down
 
 COMPOSE ?= $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo "docker compose")
 
@@ -65,6 +67,11 @@ export PERF_TARGET_MS ?= 1000
 export PERF_CONCURRENCY ?= 8
 export PERF_EVENTS_PER_SESSION ?= 1000
 
+# Metrics-layout gate (§10.3): PERF_SUITE=metrics-layout under make test-perf.
+METRICS_LAYOUT_PROFILE ?= pr_floor
+COMPARE_GREPTIME ?= 0
+PERF_LAYOUT_GOAL_SECS ?= 1200
+
 CI_GOAL_SECS ?= 1080
 PERF_GOAL_SECS ?= 480
 RELEASE_GOAL_SECS ?= 1500
@@ -89,6 +96,8 @@ help:
 	@echo "Infra:    setup | teardown | doctor"
 	@echo "Stress:   stress BACKEND=local|r2|gcs"
 	@echo "Extras:   duckdb-shell | demo-session | drop-tables | generate-telemetry | test-deploy | telemetrygen"
+	@echo "Grafana:  grafana-up | grafana-down | test-grafana-prom-smoke"
+	@echo "Bench:    bench-prom-baseline | bench-prom-down"
 	@echo ""
 	@echo "Cache:    $(THELAKE_CACHE_ROOT)  (override THELAKE_CACHE_ROOT=...)"
 	@echo "          make clean keeps cache; make clean-cache wipes it"
@@ -285,7 +294,51 @@ _export-minio-aws = \
 # ---- tests ----
 test: ensure-cache
 	@echo "unit + lightweight tests (no e2e infra)..."
-	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests -- --test-threads=1
+	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compat_phase0 -- --test-threads=1
+	@echo "metrics-layout result validator unit tests..."
+	python3 -m unittest scripts.test_validate_metrics_layout_results -v
+
+# Phase 1 mini differential vs pinned Prometheus (requires Docker).
+test-prom-diff: ensure-cache
+	@echo "prometheus mini-diff vs pinned prom/prometheus:v2.54.1 (Docker)..."
+	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker required for test-prom-diff"; exit 1)
+	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::diff::mini_diff_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
+
+# Curated upstream promqltest subset vs pinned Prometheus (requires Docker).
+test-promqltest: ensure-cache
+	@echo "curated promqltest vs pinned prom/prometheus:v2.54.1 (Docker)..."
+	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker required for test-promqltest"; exit 1)
+	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::promqltest::curated_promqltest_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
+
+# All Prometheus differential gates (mini-diff + curated promqltest).
+test-prom-compat: test-prom-diff test-promqltest
+	@echo "prometheus compatibility gates green"
+
+# Grafana Prometheus datasource smoke (#27 Prom-only slice; also covered by `make test`).
+test-grafana-prom-smoke: ensure-cache
+	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::grafana_prom_smoke -- --nocapture
+
+# Manual Grafana inspection: host Softprobe + pinned Grafana 11.2.0 + seeded demo metrics.
+# Open http://127.0.0.1:3000 (admin/admin) → Softprobe → Softprobe Prometheus smoke.
+grafana-up: ensure-cache
+	@chmod +x scripts/grafana-manual-up.sh scripts/grafana-manual-down.sh
+	./scripts/grafana-manual-up.sh
+
+grafana-down:
+	@chmod +x scripts/grafana-manual-down.sh
+	./scripts/grafana-manual-down.sh
+
+# Softprobe-only Prom micro-benchmark (Option A): hostmetrics OTLP + curated PromQL.
+# Writes docs/perf/results/<stamp>-<label>.{json,md}. Override: BENCH_LABEL=… LEAVE_UP=1
+# Small-file stress: BENCH_FORCE_PARQUET=1 BENCH_LABEL=small-files make bench-prom-baseline
+# Short smoke: BENCH_WARMUP_SECS=15 BENCH_MEASURE_SECS=20 make bench-prom-baseline
+bench-prom-baseline: ensure-cache
+	@chmod +x scripts/bench-prom-baseline.sh scripts/bench-prom-down.sh
+	./scripts/bench-prom-baseline.sh
+
+bench-prom-down:
+	@chmod +x scripts/bench-prom-down.sh
+	./scripts/bench-prom-down.sh
 
 test-e2e: ensure-cache check-infra
 	@set -e; \
@@ -314,7 +367,7 @@ test-e2e: ensure-cache check-infra
 		*) echo "unknown E2E_BACKEND=$$backend (local|gcs|r2)"; exit 1 ;; \
 	esac
 
-test-perf: ensure-cache check-infra
+test-perf: ensure-cache
 	@set -e; \
 	t0=$$(date +%s); \
 	case "$(PERF_SUITE)" in \
@@ -322,14 +375,26 @@ test-perf: ensure-cache check-infra
 		latency) tests="performance::perf_union_read_latency" ;; \
 		concurrency) tests="performance::perf_union_read_concurrency" ;; \
 		stability) tests="performance::perf_view_recreate_stability" ;; \
+		metrics-layout) tests="" ;; \
 		*) echo "unknown PERF_SUITE=$(PERF_SUITE)"; exit 1 ;; \
 	esac; \
-	$(_export-minio-aws); \
-	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local; \
-	./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) --test integration_perf --tests $$tests; \
+	if [ "$(PERF_SUITE)" = "metrics-layout" ]; then \
+		chmod +x scripts/bench-metrics-layout.sh; \
+		export METRICS_LAYOUT_PROFILE="$(METRICS_LAYOUT_PROFILE)"; \
+		export COMPARE_GREPTIME="$(COMPARE_GREPTIME)"; \
+		export CARGO_PROFILE_FLAG="$(CARGO_PROFILE_FLAG)"; \
+		./scripts/bench-metrics-layout.sh; \
+		goal="$(PERF_LAYOUT_GOAL_SECS)"; \
+	else \
+		$(MAKE) check-infra; \
+		$(_export-minio-aws); \
+		export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local; \
+		./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) --test integration_perf --tests $$tests; \
+		goal="$(PERF_GOAL_SECS)"; \
+	fi; \
 	total=$$(($$(date +%s) - t0)); \
-	echo "TOTAL=$${total}s goal=$(PERF_GOAL_SECS)s (test-perf)"; \
-	$(call enforce-slo,$$total,$(PERF_GOAL_SECS),test-perf)
+	echo "TOTAL=$${total}s goal=$${goal}s (test-perf PERF_SUITE=$(PERF_SUITE))"; \
+	$(call enforce-slo,$$total,$$goal,test-perf)
 
 ci: ensure-cache
 	@set -e; \

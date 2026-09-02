@@ -273,6 +273,25 @@ columns:
       key: service.name
 ```
 
+### Recommended metrics hot labels (Prometheus / Grafana)
+
+For Prom-compatible dashboards, apply the versioned manifest
+[`docs/promotion/metrics-prom-hot-labels.yaml`](./metrics-prom-hot-labels.yaml)
+via `POST /v1/promotions/apply` **before** ingest. It promotes frequent Prom
+dimensions (`service_name` ← `service.name`, `instance_id` ←
+`service.instance.id`, `host_name`, `deployment_environment`, `http_method`,
+`http_route`) onto the `metrics` table.
+
+Bench (`make bench-prom-baseline`) and Grafana manual (`make grafana-up`)
+scripts apply this manifest automatically. Softprobe still does **not**
+auto-promote arbitrary attribute keys; merge this document with any other
+`telemetry_columns` fragment before apply (one active telemetry spec per
+tenant).
+
+The Prometheus query path prefers these typed columns and falls back to
+per-key `CAST(attributes['k'] AS VARCHAR)` / resource VARIANT access. It never
+`CAST(... AS JSON)` whole attribute blobs on the sample scan.
+
 ### Lifecycle
 
 ```text
@@ -362,6 +381,14 @@ Promoted telemetry column names must not collide with canonical columns such
 as `session_id`, `trace_id`, `span_id`, `attributes`, `events`,
 `http_request_body`, `record_date`, and the other base fields defined in
 `src/storage/schema/tables.rs` / `src/promotion.rs`.
+
+For **metrics**, Phase 0 also reserves classic histogram / summary fidelity
+columns owned by `src/metrics_fidelity.rs`: `count`, `sum`, `bucket_counts`,
+`explicit_bounds`, `quantiles`, `aggregation_temporality`, `exemplars_json`.
+Apply-time validation rejects new manifests that declare those names. If an
+already-active promotion still collides after upgrade, metrics ingest fails
+loud via `ensure_promoted_columns_not_reserved` until the promotion is
+deactivated or rebuilt.
 
 ### Query examples
 
