@@ -107,27 +107,37 @@ pub fn twcs_merge_sql(
     )
 }
 
+/// Inputs for [`plan_twcs_merges`].
+#[derive(Debug, Clone, Copy)]
+pub struct TwcsMergePlan<'a> {
+    pub table: &'a str,
+    pub catalog_alias: &'a str,
+    pub schema: &'a str,
+    pub partitions: &'a [PartitionFileStats],
+    pub today: NaiveDate,
+    pub size_pressure: bool,
+    pub max_compacted_files: u64,
+    pub policy: &'a TwcsPolicy,
+}
+
 /// Build per-day merge actions for one table. Each action covers exactly one
 /// `record_date` — planning never combines two days into one intent (AC-F6).
-pub fn plan_twcs_merges(
-    table: &str,
-    catalog_alias: &str,
-    schema: &str,
-    partitions: &[PartitionFileStats],
-    today: NaiveDate,
-    size_pressure: bool,
-    max_compacted_files: u64,
-    policy: &TwcsPolicy,
-) -> Vec<TwcsMergeAction> {
-    let sql = twcs_merge_sql(catalog_alias, table, schema, max_compacted_files, policy);
+pub fn plan_twcs_merges(plan: &TwcsMergePlan<'_>) -> Vec<TwcsMergeAction> {
+    let sql = twcs_merge_sql(
+        plan.catalog_alias,
+        plan.table,
+        plan.schema,
+        plan.max_compacted_files,
+        plan.policy,
+    );
     let mut actions = Vec::new();
-    for stats in partitions {
-        let kind = day_kind(stats.record_date, today);
-        if !should_merge_partition(stats, kind, size_pressure, policy) {
+    for stats in plan.partitions {
+        let kind = day_kind(stats.record_date, plan.today);
+        if !should_merge_partition(stats, kind, plan.size_pressure, plan.policy) {
             continue;
         }
         actions.push(TwcsMergeAction {
-            table: table.to_string(),
+            table: plan.table.to_string(),
             record_date: stats.record_date,
             sql: sql.clone(),
         });
@@ -433,16 +443,16 @@ mod tests {
             },
         ];
         let p = policy();
-        let actions = plan_twcs_merges(
-            "metric_samples",
-            "softprobe",
-            "main",
-            &parts,
+        let actions = plan_twcs_merges(&TwcsMergePlan {
+            table: "metric_samples",
+            catalog_alias: "softprobe",
+            schema: "main",
+            partitions: &parts,
             today,
-            false,
-            TWCS_MAX_COMPACTED_FILES_PER_WAVE,
-            &p,
-        );
+            size_pressure: false,
+            max_compacted_files: TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+            policy: &p,
+        });
         assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].record_date, d(2026, 8, 13));
         assert_eq!(actions[1].record_date, d(2026, 8, 14));
@@ -470,16 +480,16 @@ mod tests {
                 "do not emit unused record_date= filter theater"
             );
         }
-        let closed_actions = plan_twcs_merges(
-            "metric_samples",
-            "softprobe",
-            "main",
-            &parts,
+        let closed_actions = plan_twcs_merges(&TwcsMergePlan {
+            table: "metric_samples",
+            catalog_alias: "softprobe",
+            schema: "main",
+            partitions: &parts,
             today,
-            false,
-            TWCS_CLOSED_DAY_MAX_COMPACTED_FILES,
-            &p,
-        );
+            size_pressure: false,
+            max_compacted_files: TWCS_CLOSED_DAY_MAX_COMPACTED_FILES,
+            policy: &p,
+        });
         assert_eq!(
             closed_actions.len(),
             2,
@@ -509,16 +519,16 @@ mod tests {
             live_file_count: 1,
             total_bytes: 100,
         }];
-        let actions = plan_twcs_merges(
-            "metric_samples",
-            "softprobe",
-            "main",
-            &parts,
+        let actions = plan_twcs_merges(&TwcsMergePlan {
+            table: "metric_samples",
+            catalog_alias: "softprobe",
+            schema: "main",
+            partitions: &parts,
             today,
-            false,
-            32,
-            &policy(),
-        );
+            size_pressure: false,
+            max_compacted_files: 32,
+            policy: &policy(),
+        });
         assert!(actions.is_empty());
     }
 

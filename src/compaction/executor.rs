@@ -10,7 +10,7 @@ use crate::compaction::twcs::{
     closed_day_live_file_count, closed_days_need_complete_merge, day_kind,
     ducklake_merge_adjacent_files_sql, live_file_count_sql, open_day_files_for_merge,
     open_day_max_compacted_files, partition_live_file_stats_sql, plan_twcs_merges,
-    should_merge_partition, DayKind, PartitionFileStats, TwcsPolicy,
+    should_merge_partition, DayKind, PartitionFileStats, TwcsMergePlan, TwcsPolicy,
 };
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
@@ -558,16 +558,16 @@ impl MaintenanceExecutor {
                     && p.live_file_count > 1
                     && p.total_bytes < policy.max_merge_file_size_bytes
             });
-            let actions = plan_twcs_merges(
+            let actions = plan_twcs_merges(&TwcsMergePlan {
                 table,
-                &ducklake.catalog_alias,
-                &ducklake.metadata_schema,
-                &partitions,
+                catalog_alias: &ducklake.catalog_alias,
+                schema: &ducklake.metadata_schema,
+                partitions: &partitions,
                 today,
                 size_pressure,
-                policy.closed_day_max_compacted_files,
+                max_compacted_files: policy.closed_day_max_compacted_files,
                 policy,
-            );
+            });
             let files_before = closed_day_live_file_count(&partitions, today);
             info!(
                 "TWCS closed-day wave {}/{}: {} day(s) need work for {}.{} ({} closed files); max_compacted_files={}",
