@@ -516,7 +516,7 @@ fn telemetry_table_bare_name(table: &TelemetryTable) -> &'static str {
     match table {
         TelemetryTable::Traces => "traces",
         TelemetryTable::Logs => "logs",
-        TelemetryTable::Metrics => "metrics",
+        TelemetryTable::Metrics => "metric_samples",
     }
 }
 
@@ -570,6 +570,14 @@ fn reserved_telemetry_column_names(table: &TelemetryTable) -> &'static [&'static
             "value",
             "attributes",
             "resource_attributes",
+            // Canonical metric sample columns.
+            "count",
+            "sum",
+            "bucket_counts",
+            "explicit_bounds",
+            "quantiles",
+            "aggregation_temporality",
+            "exemplars_json",
             "record_date",
         ],
     }
@@ -781,7 +789,7 @@ fn validate_business_table_additive(
 /// idempotently; a column repeated with a *different* definition is rejected as
 /// `merge_conflicting_duplicate_column`. The merged manifest is validated the same way a
 /// single-source manifest is (`validate_telemetry_column_additive`), so collisions with reserved
-/// base `traces`/`logs`/`metrics` columns are still rejected.
+/// base `traces`/`logs`/`metric_samples` columns are still rejected.
 pub fn merge_telemetry_columns_manifests(
     manifests: &[TelemetryColumnsManifest],
 ) -> Result<TelemetryColumnsManifest, PromotionValidationError> {
@@ -947,6 +955,29 @@ pub fn validate_telemetry_column_additive(
                     format!("column {} is already defined on {:?}", col.name, table),
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Fail loud when an already-active promotion collides with canonical columns
+/// (e.g. a prior metric promotion named `count` after schema evolution).
+pub fn ensure_promoted_columns_not_reserved(
+    table: TelemetryTable,
+    columns: &[PromotionColumn],
+) -> Result<(), PromotionValidationError> {
+    let reserved = reserved_telemetry_column_names(&table);
+    for col in columns {
+        if reserved.contains(&col.name.as_str()) {
+            return Err(PromotionValidationError::new(
+                "column_already_exists",
+                format!("active_promotion.{}", col.name),
+                format!(
+                    "active promotion column '{}' collides with canonical {:?} columns; \
+                     deactivate or rebuild the promotion manifest before ingesting",
+                    col.name, table
+                ),
+            ));
         }
     }
     Ok(())
@@ -1345,12 +1376,12 @@ fn validate_telemetry_target(
         let parsed = match table.as_str() {
             "traces" => TelemetryTable::Traces,
             "logs" => TelemetryTable::Logs,
-            "metrics" => TelemetryTable::Metrics,
+            "metric_samples" => TelemetryTable::Metrics,
             _ => {
                 return Err(PromotionValidationError::new(
                     "invalid_telemetry_table",
                     format!("target.tables[{idx}]"),
-                    "telemetry tables must be one of traces, logs, metrics",
+                    "telemetry tables must be one of traces, logs, metric_samples",
                 ))
             }
         };

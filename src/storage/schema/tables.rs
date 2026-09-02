@@ -11,6 +11,12 @@ fn ts_utc() -> DataType {
     DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()))
 }
 
+fn ts_utc_nanos() -> DataType {
+    // DuckDB's timezone-bearing TIMESTAMP is microsecond precision. Loki and Tempo
+    // expose Unix nanoseconds, so those tables use timezone-free TIMESTAMP_NS.
+    DataType::Timestamp(TimeUnit::Nanosecond, None)
+}
+
 fn string_map() -> DataType {
     DataType::Map(
         Arc::new(Field::new(
@@ -78,7 +84,7 @@ impl TraceTable {
     pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> Schema {
         let events_element = DataType::Struct(Fields::from(vec![
             req("name", utf8()),
-            req("timestamp", ts_utc()),
+            req("timestamp", ts_utc_nanos()),
             opt("attributes", string_map()),
         ]));
         let mut fields = vec![
@@ -91,9 +97,12 @@ impl TraceTable {
             opt("tenant_id", utf8()),
             req("message_type", utf8()),
             opt("span_kind", utf8()),
-            req("timestamp", ts_utc()),
-            opt("end_timestamp", ts_utc()),
+            req("timestamp", ts_utc_nanos()),
+            opt("end_timestamp", ts_utc_nanos()),
             opt_hot_variant("traces", "attributes"),
+            opt_hot_variant("traces", "resource_attributes"),
+            opt_hot_variant("traces", "instrumentation_scope"),
+            opt_hot_variant("traces", "links"),
             opt(
                 "events",
                 DataType::List(Arc::new(Field::new("item", events_element, true))),
@@ -185,8 +194,9 @@ impl OtlpLogsTable {
     pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> Schema {
         let mut fields = vec![
             opt("session_id", utf8()),
-            req("timestamp", ts_utc()),
-            opt("observed_timestamp", ts_utc()),
+            // Loki's public log contract is nanoseconds since Unix epoch.
+            req("timestamp", ts_utc_nanos()),
+            opt("observed_timestamp", ts_utc_nanos()),
             req("severity_number", DataType::Int32),
             req("severity_text", utf8()),
             req("body", utf8()),
@@ -201,39 +211,10 @@ impl OtlpLogsTable {
     }
 }
 
-/// OTLP metrics table
-pub struct OtlpMetricsTable;
-
-impl OtlpMetricsTable {
-    pub fn table_name() -> &'static str {
-        "metrics"
-    }
-
-    pub fn schema() -> Schema {
-        Self::schema_with_promoted_columns(&[])
-    }
-
-    pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> Schema {
-        let mut fields = vec![
-            req("metric_name", utf8()),
-            req("description", utf8()),
-            req("unit", utf8()),
-            req("metric_type", utf8()),
-            req("timestamp", ts_utc()),
-            req("value", DataType::Float64),
-            opt_hot_variant("metrics", "attributes"),
-            opt_hot_variant("metrics", "resource_attributes"),
-            req("record_date", DataType::Date32),
-        ];
-        fields.extend(promoted_fields(columns));
-        Schema::new(fields)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::datatypes::DataType;
+    use arrow::datatypes::{DataType, TimeUnit};
 
     #[test]
     fn hot_attribute_columns_use_utf8_json_staging() {
@@ -265,19 +246,6 @@ mod tests {
             DataType::Utf8
         ));
 
-        let metrics = OtlpMetricsTable::schema();
-        assert!(matches!(
-            metrics.field_with_name("attributes").unwrap().data_type(),
-            DataType::Utf8
-        ));
-        assert!(matches!(
-            metrics
-                .field_with_name("resource_attributes")
-                .unwrap()
-                .data_type(),
-            DataType::Utf8
-        ));
-
         // Scores metadata stays MAP (out of hot-column scope).
         let scores = ScoreTable::schema();
         assert!(matches!(
@@ -293,7 +261,6 @@ mod tests {
         for (table, schema) in [
             ("traces", TraceTable::schema()),
             ("logs", OtlpLogsTable::schema()),
-            ("metrics", OtlpMetricsTable::schema()),
         ] {
             for col in hot_variant_columns(table) {
                 let field = schema
@@ -305,5 +272,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn logs_timestamps_use_nanosecond_contract() {
+        let schema = OtlpLogsTable::schema();
+
+        assert_eq!(
+            schema.field_with_name("timestamp").unwrap().data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(
+            schema
+                .field_with_name("observed_timestamp")
+                .unwrap()
+                .data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
     }
 }

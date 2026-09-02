@@ -73,6 +73,23 @@ impl Log {
         // Extract session_id from log record or resource attributes
         let session_id = Self::extract_session_id(&log_record, resource_attributes);
 
+        // Reject timestamps outside the signed-nanosecond range so they can
+        // never silently persist as epoch/null downstream.
+        for label in [
+            ("time_unix_nano", log_record.time_unix_nano),
+            (
+                "observed_time_unix_nano",
+                log_record.observed_time_unix_nano,
+            ),
+        ] {
+            anyhow::ensure!(
+                label.1 <= i64::MAX as u64,
+                "log {} exceeds signed nanosecond range ({})",
+                label.0,
+                label.1
+            );
+        }
+
         // Extract timestamp (nanoseconds since epoch)
         let timestamp = if log_record.time_unix_nano > 0 {
             chrono::DateTime::from_timestamp_nanos(log_record.time_unix_nano as i64)
@@ -99,28 +116,7 @@ impl Log {
         // Extract body
         let body = Self::extract_log_body(&log_record).unwrap_or_default();
 
-        // Extract log record attributes
-        let mut attributes = HashMap::new();
-        for attr in &log_record.attributes {
-            if let Some(value) = &attr.value {
-                let value_str = match value.value.as_ref() {
-                    Some(
-                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
-                    ) => s.clone(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => {
-                        i.to_string()
-                    }
-                    Some(
-                        opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d),
-                    ) => d.to_string(),
-                    Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(
-                        b,
-                    )) => b.to_string(),
-                    _ => continue,
-                };
-                attributes.insert(attr.key.clone(), value_str);
-            }
-        }
+        let attributes = crate::models::key_values_to_map(&log_record.attributes);
 
         // Extract trace context
         let trace_id = if !log_record.trace_id.is_empty() {
@@ -167,36 +163,10 @@ impl Log {
     pub fn extract_resource_attributes(
         resource_logs: &opentelemetry_proto::tonic::logs::v1::ResourceLogs,
     ) -> HashMap<String, String> {
-        let mut attributes = HashMap::new();
-
-        if let Some(resource) = &resource_logs.resource {
-            for attr in &resource.attributes {
-                if let Some(value) = &attr.value {
-                    let value_str = match value.value.as_ref() {
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                                s,
-                            ),
-                        ) => s.clone(),
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i),
-                        ) => i.to_string(),
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(
-                                d,
-                            ),
-                        ) => d.to_string(),
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b),
-                        ) => b.to_string(),
-                        _ => continue,
-                    };
-                    attributes.insert(attr.key.clone(), value_str);
-                }
-            }
+        match &resource_logs.resource {
+            Some(resource) => crate::models::key_values_to_map(&resource.attributes),
+            None => HashMap::new(),
         }
-
-        attributes
     }
 
     /// Extract session_id from log record or resource attributes
@@ -226,27 +196,20 @@ impl Log {
             .cloned()
     }
 
-    /// Extract log body as string
+    /// Extract log body as string (preserves non-scalar AnyValues as JSON text).
     fn extract_log_body(
         log_record: &opentelemetry_proto::tonic::logs::v1::LogRecord,
     ) -> Option<String> {
         log_record
             .body
             .as_ref()
-            .and_then(|body| match body.value.as_ref() {
-                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s)) => {
-                    Some(s.clone())
-                }
-                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i)) => {
-                    Some(i.to_string())
-                }
-                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d)) => {
-                    Some(d.to_string())
-                }
-                Some(opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b)) => {
-                    Some(b.to_string())
-                }
-                _ => None,
+            .and_then(|value| match value.value.as_ref() {
+                Some(
+                    opentelemetry_proto::tonic::common::v1::any_value::Value::ArrayValue(_)
+                    | opentelemetry_proto::tonic::common::v1::any_value::Value::KvlistValue(_),
+                ) => crate::models::any_value_to_json(value)
+                    .and_then(|json| serde_json::to_string(&json).ok()),
+                _ => crate::models::any_value_to_stored_string(value),
             })
     }
 }
@@ -343,6 +306,34 @@ mod tests {
         let ra = HashMap::new();
         let log = Log::from_otlp(lr, &ra).expect("from_otlp");
         assert_eq!(log.body, "body");
+    }
+
+    #[test]
+    fn from_otlp_structured_body_is_plain_json() {
+        use opentelemetry_proto::tonic::common::v1::{
+            any_value, AnyValue, ArrayValue, KeyValue, KeyValueList,
+        };
+        let lr = LogRecord {
+            time_unix_nano: 1,
+            body: Some(AnyValue {
+                value: Some(any_value::Value::KvlistValue(KeyValueList {
+                    values: vec![KeyValue {
+                        key: "attempt".into(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::ArrayValue(ArrayValue {
+                                values: vec![AnyValue {
+                                    value: Some(any_value::Value::IntValue(1)),
+                                }],
+                            })),
+                        }),
+                    }],
+                })),
+            }),
+            ..Default::default()
+        };
+        let log = Log::from_otlp(lr, &HashMap::new()).expect("from_otlp");
+        assert_eq!(log.body, r#"{"attempt":[1]}"#);
+        assert!(!log.body.starts_with(crate::models::NESTED_JSON_PREFIX));
     }
 
     #[test]

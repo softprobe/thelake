@@ -19,9 +19,14 @@ pub const VARIANT_FLOAT64_KEYS: &[&str] = &["sp.cost.total"];
 /// Telemetry columns stored as DuckLake `VARIANT` (staged as JSON Utf8).
 pub fn hot_variant_columns(table_name: &str) -> &'static [&'static str] {
     match table_name {
-        "traces" => &["attributes"],
+        "traces" => &[
+            "attributes",
+            "resource_attributes",
+            "instrumentation_scope",
+            "links",
+        ],
         "logs" => &["attributes", "resource_attributes"],
-        "metrics" => &["attributes", "resource_attributes"],
+        "metric_samples" => &["attributes", "resource_attributes"],
         _ => &[],
     }
 }
@@ -69,6 +74,30 @@ pub fn parse_projected_json_value(value: Value) -> Value {
     }
 }
 
+/// Flatten a JSON object (or JSON-text object) into string map entries for label projection.
+///
+/// Empty keys and JSON null values are dropped. Non-object input yields an empty map.
+pub fn variant_json_to_string_map(value: &Value) -> HashMap<String, String> {
+    let parsed = parse_projected_json_value(value.clone());
+    let map = match parsed {
+        Value::Object(map) => map,
+        _ => return HashMap::new(),
+    };
+    map.iter()
+        .filter_map(|(k, v)| {
+            if k.is_empty() {
+                return None;
+            }
+            let s = match v {
+                Value::Null => return None,
+                Value::String(t) => t.clone(),
+                other => other.to_string(),
+            };
+            Some((k.clone(), s))
+        })
+        .collect()
+}
+
 /// DuckLake SELECT list that casts staged JSON columns to VARIANT.
 ///
 /// Example: `SELECT * REPLACE (attributes::JSON::VARIANT AS attributes) FROM ...`
@@ -107,6 +136,15 @@ fn typed_json_value(key: &str, value: &str) -> Value {
             }
         }
     }
+    // Only rehydrate values explicitly tagged by any_value encoding (arrays/kvlists).
+    // Plain OTLP StringValues that look like JSON stay strings.
+    if let Some(payload) = crate::models::strip_nested_json_prefix(value) {
+        match serde_json::from_str::<Value>(payload) {
+            Ok(parsed @ (Value::Object(_) | Value::Array(_))) => return parsed,
+            Ok(other) => return other,
+            Err(_) => return Value::String(value.to_string()),
+        }
+    }
     Value::String(value.to_string())
 }
 
@@ -141,7 +179,7 @@ mod tests {
         );
         assert_eq!(
             parquet_select_with_variant_casts("traces"),
-            "SELECT * REPLACE (attributes::JSON::VARIANT AS attributes)"
+            "SELECT * REPLACE (attributes::JSON::VARIANT AS attributes, resource_attributes::JSON::VARIANT AS resource_attributes, instrumentation_scope::JSON::VARIANT AS instrumentation_scope, links::JSON::VARIANT AS links)"
         );
         assert_eq!(
             parquet_select_with_variant_casts("logs"),
@@ -159,5 +197,19 @@ mod tests {
 
         let plain = parse_projected_json_value(Value::String("not-json".to_string()));
         assert_eq!(plain, Value::String("not-json".to_string()));
+    }
+
+    #[test]
+    fn encode_attributes_json_rehydrates_only_tagged_nested() {
+        let mut map = HashMap::new();
+        map.insert("tags".into(), r#"sp.json:["a",1]"#.into());
+        map.insert("meta".into(), r#"sp.json:{"k":false}"#.into());
+        map.insert("plain".into(), "hello".into());
+        map.insert("looks_like_json".into(), r#"{"a":1}"#.into());
+        let json: Value = serde_json::from_str(&encode_attributes_json(&map)).unwrap();
+        assert_eq!(json["tags"], serde_json::json!(["a", 1]));
+        assert_eq!(json["meta"], serde_json::json!({"k": false}));
+        assert_eq!(json["plain"], "hello");
+        assert_eq!(json["looks_like_json"], r#"{"a":1}"#);
     }
 }

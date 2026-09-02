@@ -1,9 +1,9 @@
-use crate::models::{Log, Metric, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
+use crate::models::{Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
 use crate::storage::schema::variant::encode_attributes_json;
 use anyhow::Result;
 use arrow::array::{
     ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array, ListArray, MapArray,
-    StringArray, StructArray, TimestampMicrosecondArray,
+    StringArray, StructArray, TimestampMicrosecondArray, TimestampNanosecondArray,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
@@ -325,6 +325,9 @@ const TRACES_BASE_FIELDS: &[&str] = &[
     "timestamp",
     "end_timestamp",
     "attributes",
+    "resource_attributes",
+    "instrumentation_scope",
+    "links",
     "events",
     "status_code",
     "status_message",
@@ -349,18 +352,6 @@ const LOGS_BASE_FIELDS: &[&str] = &[
     "resource_attributes",
     "trace_id",
     "span_id",
-    "record_date",
-];
-
-const METRICS_BASE_FIELDS: &[&str] = &[
-    "metric_name",
-    "description",
-    "unit",
-    "metric_type",
-    "timestamp",
-    "value",
-    "attributes",
-    "resource_attributes",
     "record_date",
 ];
 
@@ -544,29 +535,58 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
             .collect::<Vec<_>>(),
     ));
 
-    // Convert timestamps to microseconds since epoch (TIMESTAMPTZ)
-    let timestamps: ArrayRef = Arc::new(
-        TimestampMicrosecondArray::from(
-            spans
-                .iter()
-                .map(|s| s.timestamp.timestamp_micros())
-                .collect::<Vec<_>>(),
-        )
-        .with_timezone_utc(),
-    );
+    // Tempo exposes Unix nanoseconds and the trace table preserves them as TIMESTAMP_NS.
+    let timestamps: ArrayRef = Arc::new(TimestampNanosecondArray::from(
+        spans
+            .iter()
+            .map(|s| s.timestamp.timestamp_nanos_opt().unwrap_or(0))
+            .collect::<Vec<_>>(),
+    ));
 
-    let end_timestamps: ArrayRef = Arc::new(
-        TimestampMicrosecondArray::from(
-            spans
-                .iter()
-                .map(|s| s.end_timestamp.map(|t| t.timestamp_micros()))
-                .collect::<Vec<_>>(),
-        )
-        .with_timezone_utc(),
-    );
+    let end_timestamps: ArrayRef = Arc::new(TimestampNanosecondArray::from(
+        spans
+            .iter()
+            .map(|s| s.end_timestamp.and_then(|t| t.timestamp_nanos_opt()))
+            .collect::<Vec<_>>(),
+    ));
 
     // Build attributes JSON (Utf8) for DuckLake VARIANT cast on write
     let attributes_array = build_span_attributes_array(spans, &attributes_field)?;
+
+    let resource_attributes_field = Arc::new(
+        arrow_schema
+            .field_with_name("resource_attributes")
+            .map_err(|e| anyhow::anyhow!("resource_attributes field not found in schema: {e}"))?
+            .clone(),
+    );
+    let resource_attributes_array = build_variant_json_array(
+        &spans
+            .iter()
+            .map(|span| &span.resource_attributes)
+            .collect::<Vec<_>>(),
+        &resource_attributes_field,
+        "resource_attributes",
+    )?;
+
+    let instrumentation_scope_field = Arc::new(
+        arrow_schema
+            .field_with_name("instrumentation_scope")
+            .map_err(|e| anyhow::anyhow!("instrumentation_scope field not found in schema: {e}"))?
+            .clone(),
+    );
+    let instrumentation_scope_array = build_reserved_metadata_array(
+        spans,
+        "__softprobe.instrumentation_scope",
+        &instrumentation_scope_field,
+    )?;
+
+    let links_field = Arc::new(
+        arrow_schema
+            .field_with_name("links")
+            .map_err(|e| anyhow::anyhow!("links field not found in schema: {e}"))?
+            .clone(),
+    );
+    let links_array = build_reserved_metadata_array(spans, "__softprobe.links", &links_field)?;
 
     // Build events LIST<STRUCT> for each span
     let events_array = build_events_array(spans, &events_field)?;
@@ -677,6 +697,9 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
         timestamps,
         end_timestamps,
         attributes_array,
+        resource_attributes_array,
+        instrumentation_scope_array,
+        links_array,
         events_array,
         status_codes,
         status_messages,
@@ -705,11 +728,20 @@ fn build_span_attributes_array(
     spans: &[Span],
     attributes_field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef> {
-    build_variant_json_array(
-        &spans.iter().map(|s| &s.attributes).collect::<Vec<_>>(),
-        attributes_field,
-        "attributes",
-    )
+    // Internal carriers live in dedicated columns; keep them out of the
+    // user-facing attributes JSON.
+    let filtered: Vec<std::collections::HashMap<String, String>> = spans
+        .iter()
+        .map(|s| {
+            s.attributes
+                .iter()
+                .filter(|(key, _)| !key.starts_with(crate::models::span::RESERVED_ATTRIBUTE_PREFIX))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .collect();
+    let refs: Vec<&std::collections::HashMap<String, String>> = filtered.iter().collect();
+    build_variant_json_array(&refs, attributes_field, "attributes")
 }
 
 fn build_variant_json_array(
@@ -784,7 +816,7 @@ fn build_events_array(
     for span in spans {
         for event in &span.events {
             all_event_names.push(event.name.as_str());
-            all_event_timestamps.push(event.timestamp.timestamp_micros());
+            all_event_timestamps.push(event.timestamp.timestamp_nanos_opt().unwrap_or(0));
 
             for (key, value) in &event.attributes {
                 all_event_attr_keys.push(key.as_str());
@@ -798,8 +830,7 @@ fn build_events_array(
     }
 
     let names_array: ArrayRef = Arc::new(StringArray::from(all_event_names));
-    let timestamps_array: ArrayRef =
-        Arc::new(TimestampMicrosecondArray::from(all_event_timestamps).with_timezone_utc());
+    let timestamps_array: ArrayRef = Arc::new(TimestampNanosecondArray::from(all_event_timestamps));
 
     let event_attr_keys_array: ArrayRef = Arc::new(StringArray::from(all_event_attr_keys));
     let event_attr_values_array: ArrayRef = Arc::new(StringArray::from(all_event_attr_values));
@@ -866,23 +897,20 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
             .collect::<Vec<_>>(),
     ));
 
-    let timestamps: ArrayRef = Arc::new(
-        TimestampMicrosecondArray::from(
-            logs.iter()
-                .map(|l| l.timestamp.timestamp_micros())
-                .collect::<Vec<_>>(),
-        )
-        .with_timezone_utc(),
-    );
+    let timestamps: ArrayRef = Arc::new(TimestampNanosecondArray::from(
+        logs.iter()
+            .map(|l| l.timestamp.timestamp_nanos_opt().unwrap_or(0))
+            .collect::<Vec<_>>(),
+    ));
 
-    let observed_timestamps: ArrayRef = Arc::new(
-        TimestampMicrosecondArray::from(
-            logs.iter()
-                .map(|l| l.observed_timestamp.map(|t| t.timestamp_micros()))
-                .collect::<Vec<_>>(),
-        )
-        .with_timezone_utc(),
-    );
+    let observed_timestamps: ArrayRef = Arc::new(TimestampNanosecondArray::from(
+        logs.iter()
+            .map(|l| {
+                l.observed_timestamp
+                    .map(|t| t.timestamp_nanos_opt().unwrap_or(0))
+            })
+            .collect::<Vec<_>>(),
+    ));
 
     let severity_numbers: ArrayRef = Arc::new(Int32Array::from(
         logs.iter().map(|l| l.severity_number).collect::<Vec<_>>(),
@@ -993,140 +1021,169 @@ fn build_log_map_array(
     build_variant_json_array(maps, map_field, map_field.name())
 }
 
-/// Convert Metric batch to Arrow RecordBatch using telemetry Arrow schema
-pub fn metrics_to_record_batch(metrics: &[Metric], schema: &Schema) -> Result<RecordBatch> {
-    let arrow_schema = Arc::new(schema.clone());
+fn build_reserved_metadata_array(
+    spans: &[Span],
+    key: &str,
+    field: &arrow::datatypes::FieldRef,
+) -> Result<ArrayRef> {
+    use arrow::datatypes::DataType;
 
-    let num_metrics = metrics.len();
-    debug!("Converting {} metrics to Arrow RecordBatch", num_metrics);
+    if !matches!(field.data_type(), DataType::Utf8) {
+        return Err(anyhow::anyhow!(
+            "Expected Utf8 JSON staging type for {}, got {:?}",
+            field.name(),
+            field.data_type()
+        ));
+    }
+    Ok(Arc::new(StringArray::from(
+        spans
+            .iter()
+            .map(|span| span.attributes.get(key).map(String::as_str))
+            .collect::<Vec<_>>(),
+    )))
+}
 
-    // Validate all metrics have the same partition key (date)
-    if num_metrics > 0 {
-        let first_date = metrics[0].timestamp.date_naive();
-        for metric in metrics.iter().skip(1) {
-            let metric_date = metric.timestamp.date_naive();
-            if metric_date != first_date {
-                return Err(anyhow::anyhow!(
-                    "All metrics in batch must have same record_date. Found {} and {}",
-                    first_date,
-                    metric_date
-                ));
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Span, SpanEvent};
+    use crate::storage::schema::tables::OtlpLogsTable;
+    use arrow::array::TimestampNanosecondArray;
+    use std::collections::HashMap;
+
+    fn span_at(start_ns: i64, event_ns: i64) -> Span {
+        Span {
+            session_id: "session".into(),
+            trace_id: "trace".into(),
+            span_id: "span".into(),
+            parent_span_id: None,
+            app_id: "api".into(),
+            organization_id: None,
+            tenant_id: Some("tenant".into()),
+            message_type: "GET /".into(),
+            span_kind: Some("SPAN_KIND_SERVER".into()),
+            timestamp: chrono::DateTime::from_timestamp_nanos(start_ns),
+            end_timestamp: Some(chrono::DateTime::from_timestamp_nanos(
+                start_ns + 2_000_000_001,
+            )),
+            attributes: HashMap::new(),
+            resource_attributes: HashMap::from([
+                ("service.name".into(), "api".into()),
+                ("deployment.environment".into(), "prod".into()),
+            ]),
+            events: vec![SpanEvent {
+                name: "exception".into(),
+                timestamp: chrono::DateTime::from_timestamp_nanos(event_ns),
+                attributes: HashMap::new(),
+            }],
+            status_code: None,
+            status_message: None,
+            http_request_method: None,
+            http_request_path: None,
+            http_request_headers: None,
+            http_request_body: None,
+            http_response_status_code: None,
+            http_response_headers: None,
+            http_response_body: None,
         }
     }
 
-    // Extract field definitions from schema to preserve field IDs
-    let attributes_field = Arc::new(
-        arrow_schema
-            .field_with_name("attributes")
-            .map_err(|e| anyhow::anyhow!("attributes field not found in schema: {}", e))?
-            .clone(),
-    );
-
-    let resource_attributes_field = Arc::new(
-        arrow_schema
-            .field_with_name("resource_attributes")
-            .map_err(|e| anyhow::anyhow!("resource_attributes field not found in schema: {}", e))?
-            .clone(),
-    );
-
-    // Build arrays for each column
-    let metric_names: ArrayRef = Arc::new(StringArray::from(
-        metrics
-            .iter()
-            .map(|m| m.metric_name.as_str())
-            .collect::<Vec<_>>(),
-    ));
-
-    let descriptions: ArrayRef = Arc::new(StringArray::from(
-        metrics
-            .iter()
-            .map(|m| m.description.as_str())
-            .collect::<Vec<_>>(),
-    ));
-
-    let units: ArrayRef = Arc::new(StringArray::from(
-        metrics.iter().map(|m| m.unit.as_str()).collect::<Vec<_>>(),
-    ));
-
-    let metric_types: ArrayRef = Arc::new(StringArray::from(
-        metrics
-            .iter()
-            .map(|m| m.metric_type.as_str())
-            .collect::<Vec<_>>(),
-    ));
-
-    // Convert timestamps to microseconds since epoch (TIMESTAMPTZ)
-    let timestamps: ArrayRef = Arc::new(
-        TimestampMicrosecondArray::from(
-            metrics
-                .iter()
-                .map(|m| m.timestamp.timestamp_micros())
-                .collect::<Vec<_>>(),
+    #[test]
+    fn traces_round_trip_nanosecond_timestamps_and_metadata_columns() {
+        let start_ns = 1_700_000_000_000_000_001;
+        let event_ns = 1_700_000_000_000_000_999;
+        let batch = spans_to_record_batch(
+            &[span_at(start_ns, event_ns)],
+            &crate::storage::schema::tables::TraceTable::schema(),
         )
-        .with_timezone_utc(),
-    );
+        .unwrap();
 
-    // Convert values to Float64Array
-    use arrow::array::Float64Array;
-    let values: ArrayRef = Arc::new(Float64Array::from(
-        metrics.iter().map(|m| m.value).collect::<Vec<_>>(),
-    ));
+        let start = batch
+            .column(9)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .expect("trace timestamp must use nanoseconds");
+        assert_eq!(start.value(0), start_ns);
+        let events = batch.column(15);
+        let list = events
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("events must be a list");
+        let values = list.values();
+        let event_struct = values
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("event values must be structs");
+        let event_timestamp = event_struct
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .expect("event timestamp must use nanoseconds");
+        assert_eq!(event_timestamp.value(0), event_ns);
+        assert_eq!(batch.schema().field(12).name(), "resource_attributes");
+        assert_eq!(batch.schema().field(13).name(), "instrumentation_scope");
+        assert_eq!(batch.schema().field(14).name(), "links");
+    }
 
-    // Build attributes JSON (Utf8) for DuckLake VARIANT cast on write
-    let attributes_maps: Vec<&std::collections::HashMap<String, String>> =
-        metrics.iter().map(|m| &m.attributes).collect();
-    let attributes_array = build_metric_map_array(&attributes_maps, &attributes_field)?;
+    fn log_at(timestamp_ns: i64, observed_timestamp_ns: Option<i64>, body: &str) -> Log {
+        Log {
+            session_id: None,
+            timestamp: chrono::DateTime::from_timestamp_nanos(timestamp_ns),
+            observed_timestamp: observed_timestamp_ns.map(chrono::DateTime::from_timestamp_nanos),
+            severity_number: 9,
+            severity_text: "INFO".into(),
+            body: body.into(),
+            attributes: HashMap::new(),
+            resource_attributes: HashMap::new(),
+            trace_id: None,
+            span_id: None,
+        }
+    }
 
-    // Build resource_attributes JSON (Utf8) for DuckLake VARIANT cast on write
-    let resource_attributes_maps: Vec<&std::collections::HashMap<String, String>> =
-        metrics.iter().map(|m| &m.resource_attributes).collect();
-    let resource_attributes_array =
-        build_metric_map_array(&resource_attributes_maps, &resource_attributes_field)?;
+    #[test]
+    fn logs_round_trip_nanosecond_timestamps() {
+        let timestamp_ns = 1_700_000_000_000_000_001;
+        let observed_timestamp_ns = 1_700_000_000_000_000_002;
+        let batch = logs_to_record_batch(
+            &[log_at(timestamp_ns, Some(observed_timestamp_ns), "one")],
+            &OtlpLogsTable::schema(),
+        )
+        .unwrap();
 
-    // Convert dates to days since epoch (Date32)
-    let record_dates: ArrayRef = Arc::new(Date32Array::from(
-        metrics
-            .iter()
-            .map(|m| {
-                let date = m.timestamp.date_naive();
-                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-                date.signed_duration_since(epoch).num_days() as i32
-            })
-            .collect::<Vec<_>>(),
-    ));
-    let promoted_arrays = build_promoted_columns_from_attribute_maps(
-        metrics
-            .iter()
-            .map(|m| &m.attributes)
-            .collect::<Vec<_>>()
-            .as_slice(),
-        &arrow_schema,
-        METRICS_BASE_FIELDS,
-    );
+        let timestamps = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .expect("log timestamp column must use nanoseconds");
+        let observed_timestamps = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .expect("observed log timestamp column must use nanoseconds");
 
-    // Create RecordBatch with columns matching schema field order
-    let mut arrays = vec![
-        metric_names,
-        descriptions,
-        units,
-        metric_types,
-        timestamps,
-        values,
-        attributes_array,
-        resource_attributes_array,
-        record_dates,
-    ];
-    arrays.extend(promoted_arrays);
-    let record_batch = RecordBatch::try_new(arrow_schema.clone(), arrays)?;
+        assert_eq!(timestamps.value(0), timestamp_ns);
+        assert_eq!(observed_timestamps.value(0), observed_timestamp_ns);
+    }
 
-    Ok(record_batch)
-}
+    #[test]
+    fn logs_preserve_distinct_timestamps_within_one_microsecond() {
+        let first_ns = 1_700_000_000_000_000_001;
+        let second_ns = 1_700_000_000_000_000_999;
+        let batch = logs_to_record_batch(
+            &[
+                log_at(first_ns, None, "first"),
+                log_at(second_ns, None, "second"),
+            ],
+            &OtlpLogsTable::schema(),
+        )
+        .unwrap();
 
-/// Build a JSON (Utf8) array for metric VARIANT attribute columns.
-fn build_metric_map_array(
-    maps: &[&std::collections::HashMap<String, String>],
-    map_field: &arrow::datatypes::FieldRef,
-) -> Result<ArrayRef> {
-    build_variant_json_array(maps, map_field, map_field.name())
+        let timestamps = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .expect("log timestamp column must use nanoseconds");
+
+        assert_eq!(timestamps.values(), &[first_ns, second_ns]);
+    }
 }

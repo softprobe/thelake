@@ -55,7 +55,8 @@ staged durability tier.
 DuckLake data inlining decides where committed rows live:
 
 - batches at or below `ducklake.data_inlining_row_limit` may stay in the
-  metadata catalog;
+  metadata catalog (default is **0** so skinny metrics tables write Parquet
+  TWCS can merge; VARIANT shredding already required Parquet);
 - larger writes become Parquet files under `ducklake.data_path`.
 
 Both forms are committed DuckLake data and are queried through the same
@@ -134,10 +135,30 @@ Rows are inserted ordered by `record_date`, `app_id`, `session_id`, and
 Core columns include `session_id`, timestamps, severity, body, attributes,
 resource attributes, trace/span correlation, and `record_date`.
 
-### `metrics`
+### Metric samples and rollups
 
+Raw samples live in `metric_samples` and are partitioned by `record_date`.
 Core columns include metric name, description, unit, type, timestamp, value,
-attributes, resource attributes, and `record_date`.
+attributes, resource attributes, and the OTLP fidelity fields. Asynchronous
+workers populate the explicitly date-partitioned 5m/1h/1d scalar and histogram
+rollup tables plus the separate series postings index.
+
+Phase 0 also stores nullable classic histogram / summary fidelity columns on
+the same row shape (gauge/sum leave them `NULL`):
+
+- `count`, `sum`
+- `bucket_counts`, `explicit_bounds` (classic histogram)
+- `quantiles` (summary: list of `{quantile, value}`)
+- `aggregation_temporality`
+- `exemplars_json`
+
+When OTLP omits histogram `sum` (valid for negative observations), the fidelity
+`sum` column is stored as SQL `NULL`. The scalar `value` column still uses
+`0.0` in that case for backward SQL compatibility — adapters reconstructing
+Prometheus `_sum` must read the fidelity `sum` column, not `value`.
+
+Exponential / native histograms are not stored; those datapoints are skipped
+with a stable `unsupported_feature` log.
 
 ### `scores`
 
@@ -162,7 +183,7 @@ SQLite supports promotion in its configured local single-scope DuckLake
 catalog.
 
 - **Telemetry columns:** additive nullable columns on `traces` / `logs` /
-  `metrics`. Future ingest extracts declared sources into those columns;
+  `metric_samples`. Future ingest extracts declared sources into those columns;
   historical rows stay `NULL`.
 - **Business tables:** versioned `<table>_vN` tables plus `<table>_current`
   views with evidence anchors. Apply provisions schema today; automatic OTLP
@@ -180,12 +201,14 @@ ATTACHes the same DuckLake scope used by its tenant-bound writer.
 
 Public query names remain:
 
-- `union_spans`, `union_logs`, `union_metrics`
-- `committed_spans`, `committed_logs`, `committed_metrics`
+- `union_spans`, `union_logs`
+- `committed_spans`, `committed_logs`
 
 Because ingest is flush-through, union and committed names resolve to the same
 DuckLake tables. Historical `buffer_*`, `staged_*`, and `iceberg_*` aliases are
 compatibility spellings only; there are no corresponding runtime tiers.
+Metric queries target `metric_samples` and the explicitly named rollup tables
+directly.
 
 Query surfaces include:
 
@@ -199,15 +222,29 @@ interactive workflow.
 
 ## Maintenance
 
-The scheduler runs when compaction or metadata maintenance is enabled. It
-walks the default DuckLake scope and all registered tenant scopes.
+The scheduler runs when compaction or metadata maintenance is enabled
+(default interval **300s**). It walks the default DuckLake scope and all
+registered tenant scopes. **Metrics are compacted first**, then traces,
+logs, and scores. Merge calls retry through serialization conflicts (8
+attempts × 2 waves). After each scope pass, Softprobe logs when Parquet
+file counts remain high (≥200).
 
-For `traces`, `logs`, and `metrics`, it can:
+For `traces`, `logs`, `metric_samples`, and configured metric rollup tables, it can:
 
 - set the configured target file size;
 - call `ducklake_merge_adjacent_files`;
 - expire old DuckLake snapshots;
 - clean old DuckLake files.
+
+Operators should still batch OTLP upstream (collector `batch` processor) so
+flush-through ingest does not create one tiny file per export. See
+[`perf/prometheus-query-findings.md`](perf/prometheus-query-findings.md)
+Phase B.
+
+**Proposed** metrics physical layout (not current code): day-sharded postings,
+skinny samples, 5m/1h ladder, and `job` collapse — goals and the 39-id
+acceptance suite are in
+[`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
 
 When enabled, the Postgres dropdown catalog is pruned by its active-value
 retention. Iceberg manifest rewrite and Iceberg REST catalog maintenance do not
@@ -225,7 +262,7 @@ Important DuckLake settings:
 - `data_path`: local, `s3://`, or `gs://` data location
 - `catalog_alias`
 - `metadata_schema`
-- `data_inlining_row_limit` (default `10000`)
+- `data_inlining_row_limit` (default `0`; opt-in `10000` for scores/inlined-reader tests)
 - `writer_pool_size` (default `4`, clamped to `1..=16`)
 
 Non-secret object-store settings live in the `object_store` section (`region`
@@ -273,6 +310,12 @@ CI on GitHub runs the same Make entry points (`make ci` after
 `make setup`; see `.github/workflows/ci.yml` — fmt, lint, `test`, and `test-e2e`;
 release packaging is `make release` / `release.yml`). Performance suites are
 manual (`make test-perf` / `.github/workflows/performance.yml`).
+Prometheus/Grafana storage-path findings, improvement phases, and the open
+`prometheus-benchmark` compare plan live in
+[`perf/prometheus-query-findings.md`](perf/prometheus-query-findings.md).
+The proposed metrics layout (DuckLake-only, 30d/90d windows, snapshot/file
+bounds) is [`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
+The proposed 39-id acceptance suite is in
 
 `make test` is unit/lightweight; `make test-e2e` is isolated MinIO/PostgreSQL
 integration. `make duckdb-shell` is the supported manual ATTACH smoke.

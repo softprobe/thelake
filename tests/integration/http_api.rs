@@ -571,6 +571,88 @@ async fn telemetry_search_sessions_returns_summary_rows() {
 }
 
 #[tokio::test]
+async fn timestamp_ns_span_queries_work_through_http_paths() {
+    let (router, state, _t) = build_router_and_state().await;
+    let session_id = "sess-timestamp-ns-regression";
+    let trace_id = [0x42; 16];
+    let span_hex = hex::encode([0x43; 8]);
+
+    let body =
+        serde_json::to_string(&llm_generation_request(session_id, trace_id, [0x43; 8])).unwrap();
+    let ingest = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let response = router.clone().oneshot(ingest).await.expect("ingest");
+    assert_eq!(response.status(), StatusCode::OK);
+    state
+        .engine_for_id("")
+        .await
+        .expect("engine")
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush spans");
+
+    let search = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/observations/search")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "from": "2024-07-18T00:00:00Z",
+                "to": "2024-07-20T00:00:00Z",
+                "session_id": session_id,
+                "limit": 10
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        router.clone().oneshot(search).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    for uri in [
+        format!("/v1/llm/observations/{span_hex}"),
+        format!("/v1/llm/traces/{}", hex::encode(trace_id)),
+        format!("/v1/llm/sessions/{session_id}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let telemetry = Request::builder()
+        .method("POST")
+        .uri("/v1/telemetry/search")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "version": 1,
+                "scope": "traces",
+                "timeRange": {
+                    "from": "2024-07-18T00:00:00Z",
+                    "to": "2024-07-20T00:00:00Z"
+                },
+                "filter": { "field": "trace_id", "op": "eq", "value": hex::encode(trace_id) },
+                "limit": 10
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        router.oneshot(telemetry).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
 async fn telemetry_session_details_returns_spans_logs_and_metrics() {
     let (router, state, _t) = build_router_and_state().await;
     let session_id = "sess-details-e2e";
@@ -1081,8 +1163,9 @@ async fn spans_without_events_are_readable() {
 }
 
 /// Pins DuckLake data-inlining behavior across a maintenance pass -- the
-/// 2026-08-03 production outage shape. Collector-sized batches are meant to
-/// be inlined into the catalog (`data_inlining_row_limit`, default 10_000),
+/// 2026-08-03 production outage shape. Collector-sized batches can be inlined
+/// into the catalog (`data_inlining_row_limit`, opt-in 10_000; production
+/// default is 0 so skinny metrics write Parquet TWCS can merge),
 /// and reads of inlined rows go through the ducklake extension's inlined-data
 /// reader; in production (postgres catalog) that reader crashed with
 /// "INTERNAL Error: Attempted to access index 0 within vector of size 0" and
@@ -1090,7 +1173,7 @@ async fn spans_without_events_are_readable() {
 /// ever read inlined data back, let alone after maintenance ran over it.
 ///
 /// Two facts are pinned, discovered while writing this test:
-/// - Tables with a VARIANT column (traces/logs/metrics since the VARIANT
+/// - Tables with a VARIANT column (traces/logs/metric_samples since the VARIANT
 ///   attribute migration) are NOT inlined at all -- tiny span batches write
 ///   Parquet despite the config. If a ducklake upgrade starts inlining
 ///   VARIANT tables, the first assertion fails and forces a conscious look.

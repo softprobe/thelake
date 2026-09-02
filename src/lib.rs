@@ -6,6 +6,7 @@ pub mod api;
 pub mod authn;
 pub mod catalog;
 pub mod compaction;
+pub mod compat;
 pub mod config;
 pub mod control_plane;
 pub mod grpc_otlp;

@@ -13,6 +13,10 @@ pub(crate) mod sql_support;
 pub mod telemetry;
 
 use crate::authn::TenantInfo;
+use crate::compat::loki::loki_routes;
+use crate::compat::prometheus::prometheus_routes;
+use crate::compat::stubs::compat_stub_routes;
+use crate::compat::tempo::tempo_routes;
 use crate::config::Config;
 use crate::ingest_engine::IngestPipeline;
 use crate::query::{self as query_engine, QueryEngine};
@@ -61,7 +65,7 @@ impl AppState {
                 let msg = err.to_string();
                 if msg.contains("Table with name traces does not exist")
                     || msg.contains("Table with name logs does not exist")
-                    || msg.contains("Table with name metrics does not exist")
+                    || msg.contains("Table with name metric_samples does not exist")
                     || msg.contains("Table with name scores does not exist")
                     || msg.contains("Table with name score_configs does not exist")
                 {
@@ -160,6 +164,10 @@ pub async fn create_router(
             "/v1/telemetry/traces/{trace_id}",
             get(telemetry::trace_details),
         )
+        .merge(prometheus_routes())
+        .merge(loki_routes())
+        .merge(tempo_routes())
+        .merge(compat_stub_routes())
         .with_state(state.clone());
 
     Ok((router, state))
