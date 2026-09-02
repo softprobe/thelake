@@ -876,9 +876,10 @@ async fn test_iceberg_writer_bulk_metric_samples_roundtrip() {
     write_metrics.print_report();
     write_metrics.assert_performance_target(5000, "Multi-metric add time");
     println!("✅ Metric samples flushed to DuckLake");
-    println!("✅ Querying back each metric name via metric_samples...");
+    println!("✅ Querying back each metric name via union_metrics...");
 
-    // Query each metric name individually to verify canonical-table isolation.
+    // Query each metric name individually through the compatibility relation
+    // over skinny samples + series (histograms are not in metric_samples.value).
     let mut total_query_duration = std::time::Duration::ZERO;
 
     for (metric_idx, metric_name) in metric_names.iter().enumerate() {
@@ -891,7 +892,7 @@ async fn test_iceberg_writer_bulk_metric_samples_roundtrip() {
 
         let escaped = metric_name.replace('\'', "''");
         let sql = format!(
-            "SELECT COUNT(*) AS count, SUM(value) AS total FROM metric_samples WHERE metric_name = '{}'",
+            "SELECT COUNT(*) AS count, SUM(value) AS total FROM union_metrics WHERE metric_name = '{}'",
             escaped
         );
 
@@ -934,7 +935,7 @@ async fn test_iceberg_writer_bulk_metric_samples_roundtrip() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     println!(
-        "\n✅ Canonical metric_samples reads validated for {} metric names",
+        "\n✅ union_metrics compatibility reads validated for {} metric names",
         num_metric_names
     );
 }
