@@ -80,6 +80,7 @@ fn runner_cases_for_selection(
         .collect()
 }
 
+#[allow(clippy::needless_borrow)]
 fn write_prometheus_artifacts(
     case: &PromDiffCase,
     lake_raw: &Value,
@@ -278,7 +279,7 @@ async fn mini_diff_vs_pinned_prometheus() {
             );
         }
 
-        write_prometheus_artifacts(&case, &lake_raw, &oracle_raw)
+        write_prometheus_artifacts(case, &lake_raw, &oracle_raw)
             .expect("write Prometheus differential artifacts");
         recorder
             .record_case(descriptor, "pass", "matched")
