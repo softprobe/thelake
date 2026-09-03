@@ -1,7 +1,7 @@
 //! Shared helpers to locate sibling `sp-llm/manifests/*.yaml` promotion contracts.
 //!
-//! `promotion_llm_v1` loads `llm-v1.yaml` from the sibling `sp-llm` checkout instead of
-//! duplicating manifest content in thelake.
+//! Softprobe product profiles (llm-v1, mocker-v1) are SSOT in softprobe/sp-llm — not
+//! duplicated under thelake. Tests load them from the sibling checkout (or env override).
 
 use std::path::PathBuf;
 
@@ -15,4 +15,14 @@ pub fn sp_llm_manifest_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../sp-llm/manifests")
         .join(name)
+}
+
+/// Resolve the canonical mocker-v1 telemetry_columns manifest (Softprobe Rolling).
+///
+/// `SP_MOCKER_MANIFEST` overrides; otherwise `sp-llm/manifests/mocker-v1.yaml`.
+pub fn mocker_v1_manifest_path() -> PathBuf {
+    if let Ok(path) = std::env::var("SP_MOCKER_MANIFEST") {
+        return PathBuf::from(path);
+    }
+    sp_llm_manifest_path("mocker-v1.yaml")
 }

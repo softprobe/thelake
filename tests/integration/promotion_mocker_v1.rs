@@ -18,13 +18,12 @@ use softprobe_runtime::promotion::{
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::util::mocker_manifests::mocker_v1_manifest_path;
 use crate::util::otlp::{int_kv, string_kv};
 use crate::util::promotion_file_backed::{
     apply_promotion_yaml, assert_traces_columns_exist, attach_softprobe_ducklake,
     ingest_otlp_protobuf, setup_file_backed_promotion_env,
 };
-use crate::util::sp_llm_manifests::sp_llm_manifest_path;
+use crate::util::sp_llm_manifests::{mocker_v1_manifest_path, sp_llm_manifest_path};
 
 fn load_mocker_v1_manifest() -> String {
     std::fs::read_to_string(mocker_v1_manifest_path()).expect("mocker-v1 manifest readable")
@@ -183,7 +182,7 @@ async fn canonical_mocker_v1_manifest_promotes_record_fields_and_http_bodies() {
             "record_category",
             "record_operation",
             "record_id",
-            "record_env",
+            "record_environment",
             "record_version",
             "http_request_body",
             "http_response_body",
