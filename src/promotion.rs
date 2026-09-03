@@ -2549,4 +2549,45 @@ columns:
             .expect_err("empty merge input must be rejected");
         assert_eq!(err.code(), "missing_manifests");
     }
+
+    #[test]
+    fn mocker_v1_manifest_validates_without_reserved_collisions() {
+        let yaml = include_str!("../docs/promotion/mocker-v1.yaml");
+        let manifest = parse_promotion_manifest(yaml).expect("mocker-v1 parses");
+        let PromotionManifest::TelemetryColumns(spec) = manifest else {
+            panic!("expected telemetry manifest");
+        };
+        super::validate_telemetry_column_additive(&spec).expect("no reserved column collisions");
+        assert!(spec.columns.iter().any(|c| c.name == "record_category"));
+        assert!(spec.columns.iter().any(|c| c.name == "record_operation"));
+    }
+
+    #[test]
+    fn mocker_v1_merges_with_llm_v1_fragment_without_name_collision() {
+        let mocker = parse_promotion_manifest(include_str!("../docs/promotion/mocker-v1.yaml"))
+            .expect("mocker-v1 parses");
+        let llm = telemetry_manifest(
+            r#"
+specVersion: softprobe.promotion.v1
+target: { kind: telemetry_columns, tables: [traces] }
+columns:
+  - name: operation_name
+    type: string
+    nullable: true
+    source: { from: attribute, key: gen_ai.operation.name }
+  - name: observation_type
+    type: string
+    nullable: true
+    source: { from: attribute, key: sp.observation.type }
+"#,
+        );
+        let PromotionManifest::TelemetryColumns(mocker_spec) = mocker else {
+            panic!("expected mocker telemetry manifest");
+        };
+        let merged =
+            super::merge_telemetry_columns_manifests(&[llm, mocker_spec]).expect("llm ∪ mocker");
+        assert!(merged.columns.iter().any(|c| c.name == "record_category"));
+        assert!(merged.columns.iter().any(|c| c.name == "operation_name"));
+        super::validate_telemetry_column_additive(&merged).expect("merged manifest valid");
+    }
 }

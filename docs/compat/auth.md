@@ -64,3 +64,7 @@ The following path prefixes require the same runtime Bearer middleware as
 
 Admin provisioning (`POST /v1/tenants`) remains admin-key only and is unrelated
 to compatibility query routes.
+
+Slack alert OAuth callbacks and interaction payloads are **not** thelake routes;
+they are served by **sp-notify** on a separate service and database. See
+[sp-llm Slack alerts design](../../../sp-llm/docs/integrations/slack-alerts.md).

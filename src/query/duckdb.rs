@@ -47,10 +47,31 @@ fn is_sql_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// True when `pos` lies inside a single-quoted SQL string literal.
+fn inside_sql_string_literal(s: &str, pos: usize) -> bool {
+    let mut in_string = false;
+    let mut i = 0;
+    let bytes = s.as_bytes();
+    while i < pos && i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if in_string && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                i += 2;
+                continue;
+            }
+            in_string = !in_string;
+        }
+        i += 1;
+    }
+    in_string
+}
+
 fn replace_standalone_ident(s: &str, from: &str, to: &str) -> String {
     let mut out = String::with_capacity(s.len().saturating_add(32));
     let mut last = 0;
     for (i, _) in s.match_indices(from) {
+        if inside_sql_string_literal(s, i) {
+            continue;
+        }
         let before_ok = s[..i]
             .chars()
             .next_back()
@@ -979,6 +1000,10 @@ impl DuckDBCore {
             s = replace_standalone_ident(&s, name, &traces);
         }
         s = replace_standalone_ident(&s, "scores", &scores);
+        // Tenant-scoped DuckLake catalogs expose traces/logs under catalog.schema.table;
+        // bare `FROM traces` would miss the attachment and return empty (masked as 0 rows).
+        s = replace_standalone_ident(&s, "traces", &traces);
+        s = replace_standalone_ident(&s, "logs", &logs);
         s
     }
 
@@ -1137,6 +1162,42 @@ mod tests {
         let out = replace_standalone_ident(s, "tm_cq_span", "softprobe.softprobe.traces");
         assert!(out.contains("softprobe.softprobe.traces"), "got {out}");
         assert!(!out.contains("tm_cq_span"));
+    }
+
+    #[test]
+    fn replace_standalone_ident_skips_string_literals() {
+        let s = "SELECT count(*) FROM union_metrics WHERE metric_name = 'sp.logs.ingest.requests'";
+        let out = replace_standalone_ident(s, "logs", "softprobe.ducklake_softprobe_local.logs");
+        assert_eq!(s, out, "must not rewrite logs inside quoted metric names");
+    }
+
+    #[test]
+    fn ducklake_inline_sql_qualifies_bare_traces_and_logs() {
+        use crate::config::DuckLakeConfig;
+        use crate::storage::ducklake::ducklake_qualified_table_name;
+
+        let cfg = DuckLakeConfig {
+            catalog_type: "postgres".to_string(),
+            metadata_path: "host=localhost dbname=ducklake".to_string(),
+            data_path: "s3://warehouse/tenant/".to_string(),
+            catalog_alias: "softprobe".to_string(),
+            metadata_schema: "ducklake_softprobe_local".to_string(),
+            data_inlining_row_limit: Some(0),
+            writer_pool_size: 1,
+        };
+        let traces = ducklake_qualified_table_name(&cfg, "traces");
+        let logs = ducklake_qualified_table_name(&cfg, "logs");
+        assert_eq!(traces, "softprobe.ducklake_softprobe_local.traces");
+        assert_eq!(logs, "softprobe.ducklake_softprobe_local.logs");
+
+        let out = replace_standalone_ident(
+            "SELECT * FROM traces WHERE record_category = 'Servlet'",
+            "traces",
+            &traces,
+        );
+        assert!(out.contains("softprobe.ducklake_softprobe_local.traces"), "got {out}");
+        let logs_out = replace_standalone_ident("SELECT 1 FROM logs LIMIT 1", "logs", &logs);
+        assert!(logs_out.contains("softprobe.ducklake_softprobe_local.logs"), "got {logs_out}");
     }
 
     #[test]

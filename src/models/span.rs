@@ -217,19 +217,24 @@ impl Span {
             None
         };
 
-        // Extract app_id from resource attributes
+        // Extract app_id from resource attributes (Softprobe + OpenTelemetry conventions).
+        // Backend ThelakeMockerRepositoryProvider sets resource `sp.app.id`; also accept
+        // span attr `sp_app_id` used on the Softprobe agent wire.
         let app_id = resource_attributes
             .get("sp.app.id")
+            .or_else(|| resource_attributes.get("sp_app_id"))
             .or_else(|| resource_attributes.get("service.name"))
+            .or_else(|| attributes.get("sp_app_id"))
+            .or_else(|| attributes.get("sp.app.id"))
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
         let trace_id = hex::encode(&otlp_span.trace_id);
 
-        // Extract session_id from attributes (sp.session.id) or default to trace_id
-        // This must be done before creating the span since we need to look at attributes
+        // Extract session_id from attributes (dotted Softprobe key or underscore wire) or default to trace_id
         let session_id = attributes
             .get("sp.session.id")
+            .or_else(|| attributes.get("sp_session_id"))
             .cloned()
             .unwrap_or_else(|| trace_id.clone());
 
