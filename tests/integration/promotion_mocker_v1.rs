@@ -29,13 +29,18 @@ fn load_mocker_v1_manifest() -> String {
     std::fs::read_to_string(mocker_v1_manifest_path()).expect("mocker-v1 manifest readable")
 }
 
-fn load_llm_v1_manifest_optional() -> Option<String> {
+fn load_llm_v1_manifest() -> String {
     let path = if let Ok(path) = std::env::var("SP_LLM_MANIFEST") {
         PathBuf::from(path)
     } else {
         sp_llm_manifest_path("llm-v1.yaml")
     };
-    std::fs::read_to_string(path).ok()
+    std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!(
+            "Softprobe shared-schema proof requires llm-v1 at {}: {err}",
+            path.display()
+        )
+    })
 }
 
 fn merged_mocker_manifest_yaml() -> String {
@@ -44,16 +49,21 @@ fn merged_mocker_manifest_yaml() -> String {
         panic!("expected telemetry manifest");
     };
 
-    let mut manifests = vec![mocker_spec];
-    if let Some(llm_yaml) = load_llm_v1_manifest_optional() {
-        let llm = parse_promotion_manifest(&llm_yaml).expect("llm-v1 parses");
-        let PromotionManifest::TelemetryColumns(llm_spec) = llm else {
-            panic!("expected llm telemetry manifest");
-        };
-        manifests.insert(0, llm_spec);
-    }
+    let llm = parse_promotion_manifest(&load_llm_v1_manifest()).expect("llm-v1 parses");
+    let PromotionManifest::TelemetryColumns(llm_spec) = llm else {
+        panic!("expected llm telemetry manifest");
+    };
 
-    let merged = merge_telemetry_columns_manifests(&manifests).expect("llm ∪ mocker merge");
+    let merged =
+        merge_telemetry_columns_manifests(&[llm_spec, mocker_spec]).expect("llm ∪ mocker merge");
+    assert!(
+        merged.columns.iter().any(|c| c.name == "observation_type"),
+        "merged Softprobe schema must include llm observation_type"
+    );
+    assert!(
+        merged.columns.iter().any(|c| c.name == "record_category"),
+        "merged Softprobe schema must include mocker record_category"
+    );
     telemetry_columns_manifest_to_yaml(&merged)
 }
 

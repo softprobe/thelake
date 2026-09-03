@@ -2552,8 +2552,16 @@ columns:
 
     #[test]
     fn mocker_v1_manifest_validates_without_reserved_collisions() {
-        let yaml = include_str!("../docs/promotion/mocker-v1.yaml");
-        let manifest = parse_promotion_manifest(yaml).expect("mocker-v1 parses");
+        // Softprobe SSOT lives in sibling sp-llm/manifests (thelake stays generic).
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sp-llm/manifests/mocker-v1.yaml");
+        let yaml = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "expected Softprobe SSOT mocker-v1 at {}: {err}",
+                path.display()
+            )
+        });
+        let manifest = parse_promotion_manifest(&yaml).expect("mocker-v1 parses");
         let PromotionManifest::TelemetryColumns(spec) = manifest else {
             panic!("expected telemetry manifest");
         };
@@ -2564,8 +2572,17 @@ columns:
 
     #[test]
     fn mocker_v1_merges_with_llm_v1_fragment_without_name_collision() {
-        let mocker = parse_promotion_manifest(include_str!("../docs/promotion/mocker-v1.yaml"))
-            .expect("mocker-v1 parses");
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sp-llm/manifests/mocker-v1.yaml");
+        let mocker = parse_promotion_manifest(
+            &std::fs::read_to_string(&path).unwrap_or_else(|err| {
+                panic!(
+                    "expected Softprobe SSOT mocker-v1 at {}: {err}",
+                    path.display()
+                )
+            }),
+        )
+        .expect("mocker-v1 parses");
         let llm = telemetry_manifest(
             r#"
 specVersion: softprobe.promotion.v1
