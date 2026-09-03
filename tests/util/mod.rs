@@ -1,6 +1,7 @@
 pub mod config;
 pub mod otlp;
 pub mod promotion_contract;
+pub mod promotion_file_backed;
 pub mod mocker_manifests;
 pub mod sp_llm_manifests;
 pub mod tenant;

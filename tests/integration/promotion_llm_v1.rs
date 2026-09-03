@@ -1,30 +1,23 @@
 //! Verify the canonical softprobe/sp-llm `manifests/llm-v1.yaml` promotion profile.
 //!
 //! The manifest is loaded from the sibling sp-llm checkout and is not duplicated here.
+//! Lifecycle (router / apply / ingest / DuckLake attach) lives in
+//! [`crate::util::promotion_file_backed`].
 
-use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
-use axum::middleware::from_fn;
-use axum::routing::post;
-use http_body_util::BodyExt;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span, Status};
 use prost::Message;
-use serde_json::json;
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
-use softprobe_runtime::runtime_api::runtime_control_routes;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tempfile::TempDir;
-use tower::ServiceExt;
 use uuid::Uuid;
 
-use crate::util::config::file_backed_test_config;
 use crate::util::otlp::{double_kv, int_kv, string_kv};
+use crate::util::promotion_file_backed::{
+    apply_promotion_yaml, assert_traces_columns_exist, attach_softprobe_ducklake,
+    ingest_otlp_protobuf, setup_file_backed_promotion_env,
+};
 use crate::util::sp_llm_manifests::sp_llm_manifest_path;
-use crate::util::tenant::inject_local_sqlite_tenant as inject_tenant;
 
 fn llm_v1_manifest_path() -> PathBuf {
     if let Ok(path) = std::env::var("SP_LLM_MANIFEST") {
@@ -104,104 +97,32 @@ async fn canonical_llm_v1_manifest_promotes_generation_fields() {
         "unexpected llm-v1 manifest contents"
     );
 
-    let temp = TempDir::new().expect("tempdir");
-    let config = file_backed_test_config(&temp);
-    let metadata_path = config.ducklake.metadata_path.clone();
-    let data_path = config.ducklake.data_path.clone();
-
-    let (router, state) =
-        softprobe_runtime::api::create_router(Arc::new(config), post(ingest_traces), None)
-            .await
-            .expect("router");
-    let router = router
-        .merge(runtime_control_routes().with_state(state))
-        .layer(from_fn(inject_tenant));
-
-    let apply = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/promotions/apply")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&json!({ "manifestYaml": manifest_yaml })).unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .expect("apply");
-    let apply_status = apply.status();
-    let apply_body = apply
-        .into_body()
-        .collect()
-        .await
-        .expect("apply body")
-        .to_bytes();
-    assert_eq!(
-        apply_status,
-        StatusCode::OK,
-        "apply failed: {}",
-        String::from_utf8_lossy(&apply_body)
-    );
+    let env = setup_file_backed_promotion_env().await;
+    apply_promotion_yaml(&env.router, &manifest_yaml).await;
 
     let session_id = format!("sess-llm-v1-{}", Uuid::new_v4());
     let mut body = Vec::new();
     generation_request(&session_id)
         .encode(&mut body)
         .expect("encode");
-    let ingest = router
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/traces")
-                .header(header::CONTENT_TYPE, "application/x-protobuf")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .expect("ingest");
-    assert_eq!(ingest.status(), StatusCode::OK);
+    ingest_otlp_protobuf(env.router.clone(), body).await;
 
-    let connection = duckdb::Connection::open_in_memory().expect("duckdb");
-    connection
-        .execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
-        .expect("extensions");
-    connection
-        .execute_batch(&format!(
-            "ATTACH 'ducklake:sqlite:{}' AS softprobe \
-             (DATA_PATH '{}', META_JOURNAL_MODE 'WAL', META_BUSY_TIMEOUT 5000, \
-              DATA_INLINING_ROW_LIMIT 0);",
-            metadata_path.replace('\'', "''"),
-            data_path.replace('\'', "''"),
-        ))
-        .expect("attach");
-
-    for column in [
-        "observation_type",
-        "model_name",
-        "model_provider",
-        "user_id",
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "total_cost",
-        "environment",
-        "release",
-    ] {
-        let count: i64 = connection
-            .query_row(
-                &format!(
-                    "SELECT count(*) FROM information_schema.columns \
-                     WHERE table_catalog = 'softprobe' AND table_name = 'traces' \
-                     AND column_name = '{column}'"
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .expect("column exists query");
-        assert!(count > 0, "expected promoted column {column}");
-    }
+    let connection = attach_softprobe_ducklake(&env.metadata_path, &env.data_path);
+    assert_traces_columns_exist(
+        &connection,
+        &[
+            "observation_type",
+            "model_name",
+            "model_provider",
+            "user_id",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "total_cost",
+            "environment",
+            "release",
+        ],
+    );
 
     let sql = format!(
         "SELECT observation_type, model_name, model_provider, user_id, \

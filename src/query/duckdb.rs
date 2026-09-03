@@ -47,41 +47,83 @@ fn is_sql_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// True when `pos` lies inside a single-quoted SQL string literal.
-fn inside_sql_string_literal(s: &str, pos: usize) -> bool {
+/// Boundary for standalone identifier rewrite. `.` keeps qualified name parts together so
+/// `softprobe.schema.traces` is not re-matched on the trailing `traces` segment.
+fn is_sql_ident_boundary(c: char) -> bool {
+    !is_sql_ident_char(c) && c != '.'
+}
+
+/// True when `pos` lies inside a single-quoted SQL string literal or a SQL comment.
+fn inside_sql_string_or_comment(s: &str, pos: usize) -> bool {
     let mut in_string = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
     let mut i = 0;
     let bytes = s.as_bytes();
     while i < pos && i < bytes.len() {
-        if bytes[i] == b'\'' {
-            if in_string && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+        if in_line_comment {
+            if bytes[i] == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block_comment {
+            if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                in_block_comment = false;
                 i += 2;
                 continue;
             }
-            in_string = !in_string;
+            i += 1;
+            continue;
         }
-        i += 1;
+        if in_string {
+            if bytes[i] == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match bytes[i] {
+            b'\'' => {
+                in_string = true;
+                i += 1;
+            }
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
+                in_line_comment = true;
+                i += 2;
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                in_block_comment = true;
+                i += 2;
+            }
+            _ => i += 1,
+        }
     }
-    in_string
+    in_string || in_line_comment || in_block_comment
 }
 
 fn replace_standalone_ident(s: &str, from: &str, to: &str) -> String {
     let mut out = String::with_capacity(s.len().saturating_add(32));
     let mut last = 0;
     for (i, _) in s.match_indices(from) {
-        if inside_sql_string_literal(s, i) {
+        if inside_sql_string_or_comment(s, i) {
             continue;
         }
         let before_ok = s[..i]
             .chars()
             .next_back()
-            .map(|c| !is_sql_ident_char(c))
+            .map(is_sql_ident_boundary)
             .unwrap_or(true);
         let end = i + from.len();
         let after_ok = s[end..]
             .chars()
             .next()
-            .map(|c| !is_sql_ident_char(c))
+            .map(is_sql_ident_boundary)
             .unwrap_or(true);
         if before_ok && after_ok {
             out.push_str(&s[last..i]);
@@ -1169,6 +1211,56 @@ mod tests {
         let s = "SELECT count(*) FROM union_metrics WHERE metric_name = 'sp.logs.ingest.requests'";
         let out = replace_standalone_ident(s, "logs", "softprobe.ducklake_softprobe_local.logs");
         assert_eq!(s, out, "must not rewrite logs inside quoted metric names");
+    }
+
+    #[test]
+    fn replace_standalone_ident_skips_line_and_block_comments() {
+        let line = "-- user's query\nSELECT * FROM union_spans";
+        let line_out = replace_standalone_ident(line, "union_spans", "tm_all_span");
+        assert!(
+            line_out.contains("tm_all_span"),
+            "line-comment apostrophe must not block rewrite: {line_out}"
+        );
+        assert!(!line_out.contains("FROM union_spans"));
+
+        let block = "SELECT * FROM /* user's table traces */ union_logs";
+        let block_out = replace_standalone_ident(block, "union_logs", "tm_all_log");
+        assert!(
+            block_out.contains("tm_all_log"),
+            "block-comment apostrophe must not block rewrite: {block_out}"
+        );
+        assert!(
+            block_out.contains("/* user's table traces */"),
+            "must not rewrite idents inside block comments: {block_out}"
+        );
+    }
+
+    #[test]
+    fn replace_standalone_ident_does_not_requalify_dotted_suffix() {
+        let qualified = "SELECT * FROM softprobe.ducklake_softprobe_local.traces";
+        let out = replace_standalone_ident(
+            qualified,
+            "traces",
+            "softprobe.ducklake_softprobe_local.traces",
+        );
+        assert_eq!(
+            out, qualified,
+            "qualified trailing segment must not be rewritten again"
+        );
+    }
+
+    #[test]
+    fn ducklake_inline_pipeline_does_not_double_qualify_union_spans() {
+        let prep = rewrite_reserved_telemetry_view_names("SELECT * FROM union_spans LIMIT 1");
+        assert_eq!(prep, "SELECT * FROM tm_all_span LIMIT 1");
+        let traces = "softprobe.ducklake_softprobe_local.traces";
+        let after_alias = replace_standalone_ident(&prep, "tm_all_span", traces);
+        assert_eq!(after_alias, format!("SELECT * FROM {traces} LIMIT 1"));
+        let after_bare = replace_standalone_ident(&after_alias, "traces", traces);
+        assert_eq!(
+            after_bare, after_alias,
+            "bare traces rewrite must not double-qualify expanded tm_* aliases"
+        );
     }
 
     #[test]
