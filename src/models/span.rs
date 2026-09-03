@@ -447,6 +447,101 @@ mod tests {
     }
 
     #[test]
+    fn from_otlp_uses_resource_underscore_sp_app_id() {
+        use opentelemetry_proto::tonic::trace::v1::Span as OtlpSpan;
+
+        let mut resource = HashMap::new();
+        resource.insert("sp_app_id".to_string(), "travel-ota".to_string());
+        resource.insert("service.name".to_string(), "demo-ota".to_string());
+
+        let otlp = OtlpSpan {
+            trace_id: vec![1; 16],
+            span_id: vec![2; 8],
+            start_time_unix_nano: 1_000_000_000,
+            end_time_unix_nano: 2_000_000_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            Span::from_otlp(otlp, &resource).expect("from_otlp").app_id,
+            "travel-ota"
+        );
+    }
+
+    #[test]
+    fn from_otlp_uses_span_dotted_sp_app_id() {
+        use opentelemetry_proto::tonic::common::v1::any_value;
+        use opentelemetry_proto::tonic::trace::v1::Span as OtlpSpan;
+
+        let mut resource = HashMap::new();
+        resource.insert("service.name".to_string(), "demo-ota".to_string());
+
+        let otlp = OtlpSpan {
+            trace_id: vec![1; 16],
+            span_id: vec![2; 8],
+            start_time_unix_nano: 1_000_000_000,
+            end_time_unix_nano: 2_000_000_000,
+            attributes: vec![KeyValue {
+                key: "sp.app.id".into(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::StringValue("travel-ota".into())),
+                }),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            Span::from_otlp(otlp, &resource).expect("from_otlp").app_id,
+            "travel-ota"
+        );
+    }
+
+    #[test]
+    fn from_otlp_falls_back_to_service_name() {
+        use opentelemetry_proto::tonic::trace::v1::Span as OtlpSpan;
+
+        let mut resource = HashMap::new();
+        resource.insert("service.name".to_string(), "demo-ota".to_string());
+
+        let otlp = OtlpSpan {
+            trace_id: vec![1; 16],
+            span_id: vec![2; 8],
+            start_time_unix_nano: 1_000_000_000,
+            end_time_unix_nano: 2_000_000_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            Span::from_otlp(otlp, &resource).expect("from_otlp").app_id,
+            "demo-ota"
+        );
+    }
+
+    #[test]
+    fn from_otlp_resource_sp_app_id_wins_over_span() {
+        use opentelemetry_proto::tonic::common::v1::any_value;
+        use opentelemetry_proto::tonic::trace::v1::Span as OtlpSpan;
+
+        let mut resource = HashMap::new();
+        resource.insert("sp.app.id".to_string(), "from-resource".to_string());
+
+        let otlp = OtlpSpan {
+            trace_id: vec![1; 16],
+            span_id: vec![2; 8],
+            start_time_unix_nano: 1_000_000_000,
+            end_time_unix_nano: 2_000_000_000,
+            attributes: vec![KeyValue {
+                key: "sp_app_id".into(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::StringValue("from-span".into())),
+                }),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            Span::from_otlp(otlp, &resource).expect("from_otlp").app_id,
+            "from-resource"
+        );
+    }
+
+    #[test]
     fn otlp_scope_and_link_carriers_keep_key_value_shape() {
         let scope = InstrumentationScope {
             name: "otel-rust".into(),

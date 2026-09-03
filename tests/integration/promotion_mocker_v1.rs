@@ -194,7 +194,7 @@ async fn canonical_mocker_v1_manifest_promotes_record_fields_and_http_bodies() {
     let servlet = connection
         .query_row(
             &format!(
-                "SELECT record_category, record_operation, http_request_body, http_response_body, app_id \
+                "SELECT record_category, record_operation, http_request_body, http_response_body \
                  FROM softprobe.traces \
                  WHERE trace_id = '{trace_hex}' AND record_category = 'Servlet'"
             ),
@@ -205,7 +205,6 @@ async fn canonical_mocker_v1_manifest_promotes_record_fields_and_http_bodies() {
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
@@ -215,8 +214,19 @@ async fn canonical_mocker_v1_manifest_promotes_record_fields_and_http_bodies() {
     assert_eq!(servlet.1.as_deref(), Some("POST /api/book"));
     assert!(servlet.2.as_deref().unwrap().contains("servlet-req"));
     assert!(servlet.3.as_deref().unwrap().contains("servlet-res"));
+
+    let servlet_app_id: Option<String> = connection
+        .query_row(
+            &format!(
+                "SELECT app_id FROM softprobe.traces \
+                 WHERE trace_id = '{trace_hex}' AND record_category = 'Servlet'"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .expect("servlet app_id");
     assert_eq!(
-        servlet.4.as_deref(),
+        servlet_app_id.as_deref(),
         Some("travel-ota"),
         "span sp_app_id must win over resource service.name"
     );

@@ -47,15 +47,14 @@ fn is_sql_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Boundary for standalone identifier rewrite. `.` keeps qualified name parts together so
-/// `softprobe.schema.traces` is not re-matched on the trailing `traces` segment.
-fn is_sql_ident_boundary(c: char) -> bool {
-    !is_sql_ident_char(c) && c != '.'
-}
-
-/// True when `pos` lies inside a single-quoted SQL string literal or a SQL comment.
+/// True when `pos` lies inside a SQL string/identifier literal or comment.
+///
+/// Recognizes single-quoted strings, double-quoted identifiers, `--` line comments,
+/// and `/* */` block comments so rewrite does not treat apostrophes/`--` inside them
+/// as string/comment toggles.
 fn inside_sql_string_or_comment(s: &str, pos: usize) -> bool {
-    let mut in_string = false;
+    let mut in_single = false;
+    let mut in_double = false;
     let mut in_line_comment = false;
     let mut in_block_comment = false;
     let mut i = 0;
@@ -77,20 +76,35 @@ fn inside_sql_string_or_comment(s: &str, pos: usize) -> bool {
             i += 1;
             continue;
         }
-        if in_string {
+        if in_single {
             if bytes[i] == b'\'' {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
                     i += 2;
                     continue;
                 }
-                in_string = false;
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if bytes[i] == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
             }
             i += 1;
             continue;
         }
         match bytes[i] {
             b'\'' => {
-                in_string = true;
+                in_single = true;
+                i += 1;
+            }
+            b'"' => {
+                in_double = true;
                 i += 1;
             }
             b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
@@ -104,7 +118,7 @@ fn inside_sql_string_or_comment(s: &str, pos: usize) -> bool {
             _ => i += 1,
         }
     }
-    in_string || in_line_comment || in_block_comment
+    in_single || in_double || in_line_comment || in_block_comment
 }
 
 fn replace_standalone_ident(s: &str, from: &str, to: &str) -> String {
@@ -114,16 +128,17 @@ fn replace_standalone_ident(s: &str, from: &str, to: &str) -> String {
         if inside_sql_string_or_comment(s, i) {
             continue;
         }
-        let before_ok = s[..i]
-            .chars()
-            .next_back()
-            .map(is_sql_ident_boundary)
-            .unwrap_or(true);
+        // `.` before the match means a qualified suffix (`catalog.traces`) — do not rewrite.
+        // `.` after the match means `traces.col` — still rewrite the table segment.
+        let before_ok = match s[..i].chars().next_back() {
+            None => true,
+            Some(c) => !is_sql_ident_char(c) && c != '.',
+        };
         let end = i + from.len();
         let after_ok = s[end..]
             .chars()
             .next()
-            .map(is_sql_ident_boundary)
+            .map(|c| !is_sql_ident_char(c))
             .unwrap_or(true);
         if before_ok && after_ok {
             out.push_str(&s[last..i]);
@@ -1247,6 +1262,31 @@ mod tests {
             out, qualified,
             "qualified trailing segment must not be rewritten again"
         );
+    }
+
+    #[test]
+    fn replace_standalone_ident_rewrites_table_column_form() {
+        let traces = "softprobe.ducklake_softprobe_local.traces";
+        let out = replace_standalone_ident("SELECT traces.app_id FROM traces", "traces", traces);
+        assert_eq!(
+            out,
+            format!("SELECT {traces}.app_id FROM {traces}"),
+            "table.column must still qualify the table segment"
+        );
+        let logs = "softprobe.ducklake_softprobe_local.logs";
+        let logs_out = replace_standalone_ident("SELECT logs.body FROM logs", "logs", logs);
+        assert_eq!(logs_out, format!("SELECT {logs}.body FROM {logs}"));
+    }
+
+    #[test]
+    fn replace_standalone_ident_skips_double_quoted_idents_with_dashes() {
+        let s = r#"SELECT "col--name", count(*) FROM union_spans"#;
+        let out = replace_standalone_ident(s, "union_spans", "tm_all_span");
+        assert!(
+            out.contains("tm_all_span"),
+            "double-quoted -- must not start a line comment: {out}"
+        );
+        assert!(out.contains(r#""col--name""#), "got {out}");
     }
 
     #[test]
