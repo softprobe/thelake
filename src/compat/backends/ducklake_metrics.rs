@@ -67,13 +67,14 @@ static SERIES_META_CACHE: Lazy<Mutex<SeriesMetaStore>> =
 /// Full postings-resolve answer for a matcher set + day span (short TTL).
 /// Covers multi-day Grafana/SLO windows that skip the per-day posting set cache
 /// so cold INTERSECT does not repeat on every panel refresh within ~30s.
-static RESOLVE_IDS_CACHE: Lazy<Mutex<crate::compat::ttl_lru::TtlLruCache<ResolveIdsKey, Arc<Vec<u64>>>>> =
-    Lazy::new(|| {
-        Mutex::new(crate::compat::ttl_lru::TtlLruCache::new(
-            RESOLVE_IDS_TTL,
-            RESOLVE_IDS_MAX,
-        ))
-    });
+static RESOLVE_IDS_CACHE: Lazy<
+    Mutex<crate::compat::ttl_lru::TtlLruCache<ResolveIdsKey, Arc<Vec<u64>>>>,
+> = Lazy::new(|| {
+    Mutex::new(crate::compat::ttl_lru::TtlLruCache::new(
+        RESOLVE_IDS_TTL,
+        RESOLVE_IDS_MAX,
+    ))
+});
 
 const RESOLVE_IDS_TTL: Duration = Duration::from_secs(30);
 const RESOLVE_IDS_MAX: usize = 4096;

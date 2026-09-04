@@ -287,9 +287,8 @@ fn ensure_layout_additive_columns(
     if ddls.is_empty() {
         return Ok(());
     }
-    conn.execute_batch(&ddls.join("\n")).map_err(|e| {
-        anyhow!("failed to add additive columns on {qualified}: {e}")
-    })?;
+    conn.execute_batch(&ddls.join("\n"))
+        .map_err(|e| anyhow!("failed to add additive columns on {qualified}: {e}"))?;
     Ok(())
 }
 
