@@ -220,9 +220,7 @@ pub fn ensure_metrics_layout_table(
     table: &MetricsLayoutTable,
 ) -> Result<()> {
     if metrics_layout_table_ready(conn, catalog_alias, table.name)? {
-        if table.name == "metric_hist_samples" {
-            ensure_hist_fidelity_columns(conn, catalog_alias)?;
-        }
+        ensure_layout_additive_columns(conn, catalog_alias, table.name)?;
         return Ok(());
     }
     let sql = ensure_metrics_layout_table_sql(catalog_alias, table);
@@ -233,9 +231,7 @@ pub fn ensure_metrics_layout_table(
             table.name
         )
     })?;
-    if table.name == "metric_hist_samples" {
-        ensure_hist_fidelity_columns(conn, catalog_alias)?;
-    }
+    ensure_layout_additive_columns(conn, catalog_alias, table.name)?;
     Ok(())
 }
 
@@ -262,11 +258,27 @@ fn describe_layout_columns(
     Ok(found)
 }
 
-fn ensure_hist_fidelity_columns(conn: &Connection, catalog_alias: &str) -> Result<()> {
-    let qualified = qualified_metrics_layout_table(catalog_alias, "metric_hist_samples");
+/// Idempotent ADD COLUMN for layout fields introduced after the table already existed.
+///
+/// Demo lakes created before `aggregation_temporality` / hist fidelity columns would
+/// otherwise 503 on every `/v1/metrics` INSERT while partition/sort already looked "ready".
+fn ensure_layout_additive_columns(
+    conn: &Connection,
+    catalog_alias: &str,
+    table_name: &str,
+) -> Result<()> {
+    let needed: &[(&str, &str)] = match table_name {
+        "metric_series" => &[
+            ("aggregation_temporality", "VARCHAR"),
+            ("is_monotonic", "BOOLEAN"),
+        ],
+        "metric_hist_samples" => &[("quantiles", "VARCHAR"), ("exemplars_json", "VARCHAR")],
+        _ => return Ok(()),
+    };
+    let qualified = qualified_metrics_layout_table(catalog_alias, table_name);
     let found = describe_layout_columns(conn, &qualified)?;
-    let ddls = [("quantiles", "VARCHAR"), ("exemplars_json", "VARCHAR")]
-        .into_iter()
+    let ddls = needed
+        .iter()
         .filter(|(name, _)| !found.contains_key(*name))
         .map(|(name, sql_type)| {
             format!("ALTER TABLE {qualified} ADD COLUMN IF NOT EXISTS {name} {sql_type};")
@@ -275,8 +287,9 @@ fn ensure_hist_fidelity_columns(conn: &Connection, catalog_alias: &str) -> Resul
     if ddls.is_empty() {
         return Ok(());
     }
-    conn.execute_batch(&ddls.join("\n"))
-        .map_err(|e| anyhow!("failed to add hist fidelity columns on {qualified}: {e}"))?;
+    conn.execute_batch(&ddls.join("\n")).map_err(|e| {
+        anyhow!("failed to add additive columns on {qualified}: {e}")
+    })?;
     Ok(())
 }
 
@@ -535,5 +548,75 @@ mod tests {
         let rel = union_metrics_layout_relation_sql("softprobe", "tm_all_metric");
         assert!(rel.starts_with('('));
         assert!(rel.ends_with(") AS tm_all_metric"));
+    }
+
+    #[test]
+    fn ensure_adds_missing_metric_series_columns_on_legacy_table() {
+        let temp = TempDir::new().expect("temp");
+        let (conn, catalog) = attach_ducklake(&temp);
+        // Legacy CREATE without aggregation_temporality / is_monotonic.
+        conn.execute_batch(&format!(
+            "CREATE TABLE {catalog}.metric_series (\
+               series_id UBIGINT, metric_name VARCHAR, metric_type VARCHAR, \
+               unit VARCHAR, description VARCHAR, labels VARIANT, record_date DATE\
+             );\
+             ALTER TABLE {catalog}.metric_series SET PARTITIONED BY (record_date);\
+             ALTER TABLE {catalog}.metric_series SET SORTED BY (metric_name, series_id);"
+        ))
+        .expect("legacy create");
+        let before = describe_layout_columns(
+            &conn,
+            &qualified_metrics_layout_table(&catalog, "metric_series"),
+        )
+        .expect("describe before");
+        assert!(!before.contains_key("aggregation_temporality"));
+        assert!(!before.contains_key("is_monotonic"));
+
+        ensure_metrics_layout_table(&conn, &catalog, &METRICS_LAYOUT_CORE_TABLES[0])
+            .expect("ensure additive");
+
+        let after = describe_layout_columns(
+            &conn,
+            &qualified_metrics_layout_table(&catalog, "metric_series"),
+        )
+        .expect("describe after");
+        assert!(after.contains_key("aggregation_temporality"));
+        assert!(after.contains_key("is_monotonic"));
+    }
+
+    #[test]
+    fn ensure_adds_missing_metric_hist_fidelity_columns_on_legacy_table() {
+        let temp = TempDir::new().expect("temp");
+        let (conn, catalog) = attach_ducklake(&temp);
+        conn.execute_batch(&format!(
+            "CREATE TABLE {catalog}.metric_hist_samples (\
+               series_id UBIGINT, timestamp TIMESTAMPTZ, count DOUBLE, sum DOUBLE, \
+               bucket_counts VARCHAR, explicit_bounds VARCHAR, record_date DATE\
+             );\
+             ALTER TABLE {catalog}.metric_hist_samples SET PARTITIONED BY (record_date);\
+             ALTER TABLE {catalog}.metric_hist_samples SET SORTED BY (series_id, timestamp);"
+        ))
+        .expect("legacy hist create");
+        let before = describe_layout_columns(
+            &conn,
+            &qualified_metrics_layout_table(&catalog, "metric_hist_samples"),
+        )
+        .expect("describe before");
+        assert!(!before.contains_key("quantiles"));
+        assert!(!before.contains_key("exemplars_json"));
+
+        let hist = METRICS_LAYOUT_CORE_TABLES
+            .iter()
+            .find(|t| t.name == "metric_hist_samples")
+            .expect("hist table spec");
+        ensure_metrics_layout_table(&conn, &catalog, hist).expect("ensure hist additive");
+
+        let after = describe_layout_columns(
+            &conn,
+            &qualified_metrics_layout_table(&catalog, "metric_hist_samples"),
+        )
+        .expect("describe after");
+        assert!(after.contains_key("quantiles"));
+        assert!(after.contains_key("exemplars_json"));
     }
 }

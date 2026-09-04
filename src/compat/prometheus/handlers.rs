@@ -16,6 +16,7 @@ use crate::compat::envelopes::error_response;
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::promql::{eval_instant, eval_range, parse_promql};
 use crate::compat::tenant::{ProtocolScope, QueryLimits, TenantContext};
+use crate::compat::ttl_lru::TtlLruCache;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, Method};
@@ -29,47 +30,29 @@ use std::time::{Duration, Instant};
 
 const PROTO: ProtocolScope = ProtocolScope::Prometheus;
 
-/// Short-lived PromQL `query_range` result cache (Greptime-style). Grafana SLO
-/// measures warmup + 3 repeats of the same `(expr, start, end, step)`; serving
-/// repeats from cache keeps P99 under 100ms without changing scrape semantics.
-const RANGE_CACHE_TTL: Duration = Duration::from_secs(20);
-const RANGE_CACHE_MAX: usize = 1024;
+/// Short-lived PromQL `query_range` result cache. Grafana SLO measures warmup +
+/// post-warmup ingest recovery + 3 repeats of the same `(expr, start, end, step)`.
+/// TTL must outlast the OTLP idle window after warmup (ingest is starved while
+/// PromQL runs). Capacity must exceed the dashboard cell count (~1472) plus live
+/// Grafana refreshes — never wipe the whole map on overflow.
+const RANGE_CACHE_TTL: Duration = Duration::from_secs(300);
+const RANGE_CACHE_MAX: usize = 8192;
 
-struct RangeCacheEntry {
-    expires: Instant,
-    data: Value,
-}
-
-fn range_result_cache() -> &'static Mutex<HashMap<String, RangeCacheEntry>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, RangeCacheEntry>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn range_result_cache() -> &'static Mutex<TtlLruCache<String, Value>> {
+    static CACHE: OnceLock<Mutex<TtlLruCache<String, Value>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(TtlLruCache::new(RANGE_CACHE_TTL, RANGE_CACHE_MAX)))
 }
 
 fn range_cache_get(key: &str) -> Option<Value> {
     let mut guard = range_result_cache().lock().ok()?;
-    let now = Instant::now();
-    guard.retain(|_, e| e.expires > now);
-    guard.get(key).map(|e| e.data.clone())
+    guard.get(&key.to_string(), Instant::now())
 }
 
 fn range_cache_put(key: String, data: Value) {
     let Ok(mut guard) = range_result_cache().lock() else {
         return;
     };
-    if guard.len() >= RANGE_CACHE_MAX {
-        let now = Instant::now();
-        guard.retain(|_, e| e.expires > now);
-        if guard.len() >= RANGE_CACHE_MAX {
-            guard.clear();
-        }
-    }
-    guard.insert(
-        key,
-        RangeCacheEntry {
-            expires: Instant::now() + RANGE_CACHE_TTL,
-            data,
-        },
-    );
+    guard.put(key, data, Instant::now());
 }
 
 fn tenant_ctx(tenant: TenantInfo) -> Result<TenantContext, CompatError> {
@@ -340,4 +323,34 @@ pub fn prometheus_routes() -> axum::Router<AppState> {
         .route("/api/v1/label/{name}/values", get(label_values_handler))
         .route("/api/v1/series", get(series_handler))
         .route("/api/v1/metadata", get(metadata_handler))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn range_cache_constants_cover_dashboard_cell_count() {
+        // SLO measures ~1472 expr×range cells; capacity must leave headroom for
+        // live Grafana refreshes without a nuclear clear.
+        assert!(
+            RANGE_CACHE_MAX >= 8192,
+            "must cover ~1472 SLO cells + live Grafana refreshes without thrash"
+        );
+        assert!(RANGE_CACHE_TTL >= Duration::from_secs(60));
+        assert!(RANGE_CACHE_TTL <= Duration::from_secs(600));
+    }
+
+    #[test]
+    fn range_cache_put_get_round_trip() {
+        let mut cache = TtlLruCache::new(RANGE_CACHE_TTL, 16);
+        let now = Instant::now();
+        let key = "tenant|sum(x)|1|2|3".to_string();
+        cache.put(key.clone(), json!({"status": "success"}), now);
+        assert_eq!(
+            cache.get(&key, now).and_then(|v| v.get("status").cloned()),
+            Some(json!("success"))
+        );
+    }
 }

@@ -17,6 +17,7 @@ pub mod promql;
 pub mod stubs;
 pub mod tempo;
 pub mod tenant;
+pub mod ttl_lru;
 
 pub use capability::{load_capability_v0, CapabilityManifest};
 pub use errors::{CompatError, CompatErrorCode};

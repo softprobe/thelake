@@ -366,20 +366,20 @@ query:
   max_connections: 16
   cache_dir: "$STATE_DIR/cache"
 
-# Demo: maintenance ON so TWCS keeps open-day Parquet near the file cap (PromQL
-# SLO). Compact every 30s (aligned with ingest batching) with lower wave caps
-# so the demo stack does not peg CPU on no-progress merge waves.
+# Demo: TWCS off during Grafana SLO. No-progress open-day waves pegged CPU and
+# caused intermittent >100ms spikes; PromQL range + resolve caches cover the
+# dashboard cell set. Re-enable later for long-lived file-cap hygiene if needed.
 maintenance:
-  enabled: true
+  enabled: false
   target_file_size_bytes: 67108864
-  interval_seconds: 30
-  metadata_enabled: true
-  metadata_interval_seconds: 30
+  interval_seconds: 600
+  metadata_enabled: false
+  metadata_interval_seconds: 300
   max_snapshot_age_seconds: 60
-  remove_orphan_files_enabled: true
+  remove_orphan_files_enabled: false
   remove_orphan_older_than_seconds: 60
-  open_day_file_cap: 4
-  max_waves_per_table: 8
+  open_day_file_cap: 16
+  max_waves_per_table: 2
   max_compacted_files_per_wave: 32
   closed_day_max_compacted_files: 256
   closed_day_max_waves: 64
@@ -392,7 +392,7 @@ ducklake:
   catalog_alias: "softprobe"
   metadata_schema: "$PG_SCHEMA"
   data_inlining_row_limit: 0
-  writer_pool_size: 1
+  writer_pool_size: 4
 
 dropdown_catalog:
   enabled: false

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// One equality posting constraint (`label_name` / candidate values).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EqualityPosting {
     pub label_name: String,
     pub values: Vec<String>,
