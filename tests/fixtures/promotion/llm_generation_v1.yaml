@@ -1,0 +1,79 @@
+# Simulated LLM generation promotion profile for thelake tests.
+#
+# Intentional subset of softprobe/sp-llm `manifests/llm-v1.yaml` — not a product
+# mirror and will drift. Covers only the attribute→column cases asserted by
+# promotion_llm_v1 and llm∪mocker merge proofs.
+#
+# Omitted vs product SSOT (non-exhaustive): response_model, input_cost,
+# output_cost, completion_start_time, prompt_*.
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces]
+columns:
+  - name: observation_type
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.observation.type
+  - name: environment
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: deployment.environment.name
+  - name: user_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.user.id
+  - name: model_provider
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.provider.name
+  - name: model_name
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.request.model
+  - name: operation_name
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.operation.name
+  - name: input_tokens
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.usage.input_tokens
+  - name: output_tokens
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.usage.output_tokens
+  - name: total_tokens
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.usage.total_tokens
+  - name: total_cost
+    type: double
+    nullable: true
+    source:
+      from: attribute
+      key: sp.cost.total
+  - name: release
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: service.version

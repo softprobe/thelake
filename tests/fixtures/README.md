@@ -9,3 +9,5 @@
 | `verify_ducklake.sql` | DuckLake SQL samples |
 | `legacy_verify_session.sql` | Session UNION template for DuckLake |
 | `legacy_verify_e2e.md` | Why old bash/Lakekeeper checks were removed |
+| `promotion/llm_generation_v1.yaml` | Simulated LLM generation subset (CI self-contained; drifts from `sp-llm/manifests`) |
+| `promotion/mocker_rolling_v1.yaml` | Simulated Rolling/mocker subset (CI self-contained; drifts from `sp-llm/manifests`) |

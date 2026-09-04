@@ -12,9 +12,9 @@ pub mod promotion_business_row_extraction;
 pub mod promotion_business_table_ddl;
 pub mod promotion_llm_v1;
 pub mod promotion_manifest;
-pub mod promotion_mocker_v1;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_metadata;
+pub mod promotion_mocker_v1;
 pub mod promotion_sqlite_local;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_telemetry_columns;

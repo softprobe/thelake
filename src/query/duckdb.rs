@@ -1327,9 +1327,15 @@ mod tests {
             "traces",
             &traces,
         );
-        assert!(out.contains("softprobe.ducklake_softprobe_local.traces"), "got {out}");
+        assert!(
+            out.contains("softprobe.ducklake_softprobe_local.traces"),
+            "got {out}"
+        );
         let logs_out = replace_standalone_ident("SELECT 1 FROM logs LIMIT 1", "logs", &logs);
-        assert!(logs_out.contains("softprobe.ducklake_softprobe_local.logs"), "got {logs_out}");
+        assert!(
+            logs_out.contains("softprobe.ducklake_softprobe_local.logs"),
+            "got {logs_out}"
+        );
     }
 
     #[test]

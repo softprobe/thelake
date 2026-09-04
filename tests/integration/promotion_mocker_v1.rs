@@ -1,8 +1,9 @@
-//! Verify the canonical mocker-v1 promotion profile and Rolling span ingest.
+//! Verify simulated Rolling / mocker promotion and span ingest.
 //!
 //! Covers HTTP bodies from `http.request` / `http.response` events (not sp_target_* attrs)
 //! and typed `record_category` filters after promotion apply.
 //!
+//! Fixture YAML lives under `tests/fixtures/promotion/` so CI is self-contained.
 //! Lifecycle (router / apply / ingest / DuckLake attach) lives in
 //! [`crate::util::promotion_file_backed`]; this module keeps mocker fixtures + assertions.
 
@@ -12,10 +13,9 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span, Status};
 use prost::Message;
 use softprobe_runtime::promotion::{
-    merge_telemetry_columns_manifests, parse_promotion_manifest, telemetry_columns_manifest_to_yaml,
-    PromotionManifest,
+    merge_telemetry_columns_manifests, parse_promotion_manifest,
+    telemetry_columns_manifest_to_yaml, PromotionManifest,
 };
-use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::util::otlp::{int_kv, string_kv};
@@ -23,33 +23,15 @@ use crate::util::promotion_file_backed::{
     apply_promotion_yaml, assert_traces_columns_exist, attach_softprobe_ducklake,
     ingest_otlp_protobuf, setup_file_backed_promotion_env,
 };
-use crate::util::sp_llm_manifests::{mocker_v1_manifest_path, sp_llm_manifest_path};
-
-fn load_mocker_v1_manifest() -> String {
-    std::fs::read_to_string(mocker_v1_manifest_path()).expect("mocker-v1 manifest readable")
-}
-
-fn load_llm_v1_manifest() -> String {
-    let path = if let Ok(path) = std::env::var("SP_LLM_MANIFEST") {
-        PathBuf::from(path)
-    } else {
-        sp_llm_manifest_path("llm-v1.yaml")
-    };
-    std::fs::read_to_string(&path).unwrap_or_else(|err| {
-        panic!(
-            "Softprobe shared-schema proof requires llm-v1 at {}: {err}",
-            path.display()
-        )
-    })
-}
+use crate::util::promotion_fixtures::{LLM_GENERATION_V1_YAML, MOCKER_ROLLING_V1_YAML};
 
 fn merged_mocker_manifest_yaml() -> String {
-    let mocker = parse_promotion_manifest(&load_mocker_v1_manifest()).expect("mocker-v1 parses");
+    let mocker = parse_promotion_manifest(MOCKER_ROLLING_V1_YAML).expect("mocker fixture parses");
     let PromotionManifest::TelemetryColumns(mocker_spec) = mocker else {
         panic!("expected telemetry manifest");
     };
 
-    let llm = parse_promotion_manifest(&load_llm_v1_manifest()).expect("llm-v1 parses");
+    let llm = parse_promotion_manifest(LLM_GENERATION_V1_YAML).expect("llm fixture parses");
     let PromotionManifest::TelemetryColumns(llm_spec) = llm else {
         panic!("expected llm telemetry manifest");
     };
@@ -58,11 +40,11 @@ fn merged_mocker_manifest_yaml() -> String {
         merge_telemetry_columns_manifests(&[llm_spec, mocker_spec]).expect("llm ∪ mocker merge");
     assert!(
         merged.columns.iter().any(|c| c.name == "observation_type"),
-        "merged Softprobe schema must include llm observation_type"
+        "merged schema must include llm observation_type"
     );
     assert!(
         merged.columns.iter().any(|c| c.name == "record_category"),
-        "merged Softprobe schema must include mocker record_category"
+        "merged schema must include mocker record_category"
     );
     telemetry_columns_manifest_to_yaml(&merged)
 }
@@ -79,9 +61,7 @@ fn mocker_span(
     Span {
         trace_id: trace_id.to_vec(),
         span_id: span_id.to_vec(),
-        parent_span_id: parent_span_id
-            .map(|id| id.to_vec())
-            .unwrap_or_default(),
+        parent_span_id: parent_span_id.map(|id| id.to_vec()).unwrap_or_default(),
         name: operation.to_string(),
         kind: if category == "Servlet" {
             span::SpanKind::Server as i32
@@ -167,7 +147,7 @@ fn servlet_and_httpclient_request(trace_id: [u8; 16]) -> ExportTraceServiceReque
 }
 
 #[tokio::test]
-async fn canonical_mocker_v1_manifest_promotes_record_fields_and_http_bodies() {
+async fn simulated_mocker_rolling_manifest_promotes_record_fields_and_http_bodies() {
     let manifest_yaml = merged_mocker_manifest_yaml();
     assert!(
         manifest_yaml.contains("record_category"),

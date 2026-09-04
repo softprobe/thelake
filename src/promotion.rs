@@ -1537,6 +1537,13 @@ mod tests {
     use super::{parse_promotion_manifest, PromotionManifest};
     use std::collections::HashMap;
 
+    // Same bytes as `tests/util/promotion_fixtures.rs` (lib cannot import the
+    // integration-test util crate; keep one include_str! per fixture here).
+    const LLM_GENERATION_V1_YAML: &str =
+        include_str!("../tests/fixtures/promotion/llm_generation_v1.yaml");
+    const MOCKER_ROLLING_V1_YAML: &str =
+        include_str!("../tests/fixtures/promotion/mocker_rolling_v1.yaml");
+
     #[test]
     fn rejects_telemetry_non_nullable_columns() {
         let err = parse_promotion_manifest(
@@ -2551,17 +2558,10 @@ columns:
     }
 
     #[test]
-    fn mocker_v1_manifest_validates_without_reserved_collisions() {
-        // Softprobe SSOT lives in sibling sp-llm/manifests (thelake stays generic).
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../sp-llm/manifests/mocker-v1.yaml");
-        let yaml = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-            panic!(
-                "expected Softprobe SSOT mocker-v1 at {}: {err}",
-                path.display()
-            )
-        });
-        let manifest = parse_promotion_manifest(&yaml).expect("mocker-v1 parses");
+    fn mocker_rolling_fixture_validates_without_reserved_collisions() {
+        // Simulation-only reserved-name check (not product SSOT validation).
+        let manifest =
+            parse_promotion_manifest(MOCKER_ROLLING_V1_YAML).expect("mocker fixture parses");
         let PromotionManifest::TelemetryColumns(spec) = manifest else {
             panic!("expected telemetry manifest");
         };
@@ -2571,40 +2571,21 @@ columns:
     }
 
     #[test]
-    fn mocker_v1_merges_with_llm_v1_fragment_without_name_collision() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../sp-llm/manifests/mocker-v1.yaml");
-        let mocker = parse_promotion_manifest(
-            &std::fs::read_to_string(&path).unwrap_or_else(|err| {
-                panic!(
-                    "expected Softprobe SSOT mocker-v1 at {}: {err}",
-                    path.display()
-                )
-            }),
-        )
-        .expect("mocker-v1 parses");
-        let llm = telemetry_manifest(
-            r#"
-specVersion: softprobe.promotion.v1
-target: { kind: telemetry_columns, tables: [traces] }
-columns:
-  - name: operation_name
-    type: string
-    nullable: true
-    source: { from: attribute, key: gen_ai.operation.name }
-  - name: observation_type
-    type: string
-    nullable: true
-    source: { from: attribute, key: sp.observation.type }
-"#,
-        );
+    fn mocker_rolling_merges_with_llm_generation_fixture_without_name_collision() {
+        let mocker =
+            parse_promotion_manifest(MOCKER_ROLLING_V1_YAML).expect("mocker fixture parses");
+        let llm = parse_promotion_manifest(LLM_GENERATION_V1_YAML).expect("llm fixture parses");
         let PromotionManifest::TelemetryColumns(mocker_spec) = mocker else {
             panic!("expected mocker telemetry manifest");
         };
-        let merged =
-            super::merge_telemetry_columns_manifests(&[llm, mocker_spec]).expect("llm ∪ mocker");
+        let PromotionManifest::TelemetryColumns(llm_spec) = llm else {
+            panic!("expected llm telemetry manifest");
+        };
+        let merged = super::merge_telemetry_columns_manifests(&[llm_spec, mocker_spec])
+            .expect("llm ∪ mocker");
         assert!(merged.columns.iter().any(|c| c.name == "record_category"));
         assert!(merged.columns.iter().any(|c| c.name == "operation_name"));
+        assert!(merged.columns.iter().any(|c| c.name == "observation_type"));
         super::validate_telemetry_column_additive(&merged).expect("merged manifest valid");
     }
 }

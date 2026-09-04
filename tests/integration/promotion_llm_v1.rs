@@ -1,6 +1,6 @@
-//! Verify the canonical softprobe/sp-llm `manifests/llm-v1.yaml` promotion profile.
+//! Verify simulated LLM generation promotion (attribute → traces columns).
 //!
-//! The manifest is loaded from the sibling sp-llm checkout and is not duplicated here.
+//! Fixture YAML lives under `tests/fixtures/promotion/` so CI is self-contained.
 //! Lifecycle (router / apply / ingest / DuckLake attach) lives in
 //! [`crate::util::promotion_file_backed`].
 
@@ -9,7 +9,6 @@ use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span, Status};
 use prost::Message;
-use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::util::otlp::{double_kv, int_kv, string_kv};
@@ -17,19 +16,7 @@ use crate::util::promotion_file_backed::{
     apply_promotion_yaml, assert_traces_columns_exist, attach_softprobe_ducklake,
     ingest_otlp_protobuf, setup_file_backed_promotion_env,
 };
-use crate::util::sp_llm_manifests::sp_llm_manifest_path;
-
-fn llm_v1_manifest_path() -> PathBuf {
-    if let Ok(path) = std::env::var("SP_LLM_MANIFEST") {
-        return PathBuf::from(path);
-    }
-    sp_llm_manifest_path("llm-v1.yaml")
-}
-
-fn load_llm_v1_manifest() -> Option<String> {
-    let path = llm_v1_manifest_path();
-    std::fs::read_to_string(&path).ok()
-}
+use crate::util::promotion_fixtures::LLM_GENERATION_V1_YAML;
 
 fn generation_request(session_id: &str) -> ExportTraceServiceRequest {
     ExportTraceServiceRequest {
@@ -61,13 +48,10 @@ fn generation_request(session_id: &str) -> ExportTraceServiceRequest {
                         string_kv("sp.user.id", "user-promo-1"),
                         string_kv("gen_ai.provider.name", "openai"),
                         string_kv("gen_ai.request.model", "gpt-4o"),
-                        string_kv("gen_ai.response.model", "gpt-4o-2024-08-06"),
                         string_kv("gen_ai.operation.name", "chat"),
                         int_kv("gen_ai.usage.input_tokens", 11),
                         int_kv("gen_ai.usage.output_tokens", 22),
                         int_kv("gen_ai.usage.total_tokens", 33),
-                        double_kv("sp.cost.input", 0.001),
-                        double_kv("sp.cost.output", 0.002),
                         double_kv("sp.cost.total", 0.003),
                     ],
                     status: Some(Status {
@@ -84,23 +68,17 @@ fn generation_request(session_id: &str) -> ExportTraceServiceRequest {
 }
 
 #[tokio::test]
-async fn canonical_llm_v1_manifest_promotes_generation_fields() {
-    let Some(manifest_yaml) = load_llm_v1_manifest() else {
-        eprintln!(
-            "skipping: canonical manifest not found at {}",
-            llm_v1_manifest_path().display()
-        );
-        return;
-    };
+async fn simulated_llm_generation_manifest_promotes_generation_fields() {
+    let manifest_yaml = LLM_GENERATION_V1_YAML;
     assert!(
         manifest_yaml.contains("observation_type"),
-        "unexpected llm-v1 manifest contents"
+        "unexpected llm generation fixture contents"
     );
 
     let env = setup_file_backed_promotion_env().await;
-    apply_promotion_yaml(&env.router, &manifest_yaml).await;
+    apply_promotion_yaml(&env.router, manifest_yaml).await;
 
-    let session_id = format!("sess-llm-v1-{}", Uuid::new_v4());
+    let session_id = format!("sess-llm-gen-{}", Uuid::new_v4());
     let mut body = Vec::new();
     generation_request(&session_id)
         .encode(&mut body)

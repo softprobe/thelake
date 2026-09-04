@@ -1,8 +1,8 @@
-//! Shared file-backed DuckLake lifecycle for canonical promotion profile tests.
+//! Shared file-backed DuckLake lifecycle for promotion profile integration tests.
 //!
 //! `promotion_llm_v1` and `promotion_mocker_v1` share router setup, apply, OTLP ingest,
-//! and DuckLake attach/query primitives. Profile-specific manifests, OTLP fixtures, and
-//! assertions stay in each test module.
+//! and DuckLake attach/query primitives. Profile-specific simulated manifests, OTLP
+//! fixtures, and assertions stay in each test module (see `promotion_fixtures`).
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
