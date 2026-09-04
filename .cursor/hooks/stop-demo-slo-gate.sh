@@ -223,15 +223,39 @@ fi
 
 if [[ ! -s "$FAILS" ]]; then
   log "stop gate passed"
+  python3 - "$STATE_DIR/last-pass.json" <<'PY'
+import json, subprocess, sys
+from datetime import datetime, timezone
+from pathlib import Path
+head = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "passed_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "head": head,
+            "measure": "consecutive-v1",
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
   echo '{}'
   exit 0
 fi
 
 python3 - "$FAILS" <<'PY'
-import json, sys
+import json, subprocess, sys
+from datetime import datetime, timezone
 from pathlib import Path
 fails = Path(sys.argv[1]).read_text(encoding="utf-8")
+head = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+run_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 msg = f"""STOP GATE FAILED. Do not stop.
+
+gate_run_utc={run_id} head={head} measure=consecutive-v1
+(Ignore older followups that say "OTEL ingest and/or" or list samples_ms values >100ms — those are pre-consecutive measure runs.)
 
 All of these must be true before you may finish:
 1. All tests green (`make test`).
