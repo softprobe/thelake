@@ -2684,6 +2684,6 @@ mod tests {
             cache.put(k, Arc::new(vec![i as u64]), now);
         }
         assert!(cache.len() <= 8);
-        assert!(cache.len() >= 1);
+        assert!(!cache.is_empty());
     }
 }
