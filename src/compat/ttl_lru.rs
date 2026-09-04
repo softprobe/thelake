@@ -3,6 +3,10 @@
 //! Evicts oldest entries under capacity pressure — never wipe the whole map
 //! (that caused intermittent Grafana 100ms SLO misses under cell thrash).
 //! Optional byte budget bounds RSS when values are large (e.g. JSON results).
+//!
+//! Follow-up (constitution §IX DRY): migrate `PostingSetCache` and
+//! `SeriesMetaStore` half-map wipe onto this type. Deferred from the Grafana
+//! SLO patch to keep that change scoped; do not add new half-wipe caches.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;

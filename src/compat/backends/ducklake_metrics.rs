@@ -67,17 +67,21 @@ static SERIES_META_CACHE: Lazy<Mutex<SeriesMetaStore>> =
 /// Full postings-resolve answer for a matcher set + day span (short TTL).
 /// Covers multi-day Grafana/SLO windows that skip the per-day posting set cache
 /// so cold INTERSECT does not repeat on every panel refresh within ~30s.
+/// Byte budget mirrors the Prom range-result cache (refuse oversized id lists).
 static RESOLVE_IDS_CACHE: Lazy<
     Mutex<crate::compat::ttl_lru::TtlLruCache<ResolveIdsKey, Arc<Vec<u64>>>>,
 > = Lazy::new(|| {
-    Mutex::new(crate::compat::ttl_lru::TtlLruCache::new(
+    Mutex::new(crate::compat::ttl_lru::TtlLruCache::with_byte_budget(
         RESOLVE_IDS_TTL,
         RESOLVE_IDS_MAX,
+        Some(RESOLVE_IDS_MAX_BYTES),
     ))
 });
 
 const RESOLVE_IDS_TTL: Duration = Duration::from_secs(30);
 const RESOLVE_IDS_MAX: usize = 4096;
+/// ~32 MiB of `u64` id payload across resolve-cache entries.
+const RESOLVE_IDS_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ResolveIdsKey {
@@ -552,7 +556,8 @@ impl DuckLakeMetricsBackend {
         enforce_resolved_series_cap(ids.len(), ctx.limits.max_series)?;
         {
             let mut guard = RESOLVE_IDS_CACHE.lock().await;
-            guard.put(resolve_key, Arc::new(ids.clone()), Instant::now());
+            let bytes = ids.len().saturating_mul(std::mem::size_of::<u64>());
+            guard.put_sized(resolve_key, Arc::new(ids.clone()), bytes, Instant::now());
         }
         Ok(ids)
     }
@@ -2641,7 +2646,7 @@ mod tests {
         use crate::compat::backends::postings_resolve::EqualityPosting;
         use crate::compat::ttl_lru::TtlLruCache;
         let mut cache: TtlLruCache<ResolveIdsKey, Arc<Vec<u64>>> =
-            TtlLruCache::new(Duration::from_secs(30), 8);
+            TtlLruCache::with_byte_budget(Duration::from_secs(30), 8, Some(1024 * 1024));
         let now = Instant::now();
         let key_a = ResolveIdsKey {
             engine_id: 1,
@@ -2663,8 +2668,8 @@ mod tests {
                 values: vec!["b".into()],
             }]),
         };
-        cache.put(key_a.clone(), Arc::new(vec![1, 2]), now);
-        cache.put(key_b.clone(), Arc::new(vec![9]), now);
+        cache.put_sized(key_a.clone(), Arc::new(vec![1, 2]), 16, now);
+        cache.put_sized(key_b.clone(), Arc::new(vec![9]), 8, now);
         let hit_a = cache.get(&key_a, now).expect("key_a");
         assert_eq!(hit_a.as_slice(), &[1u64, 2]);
         let hit_b = cache.get(&key_b, now).expect("key_b");
@@ -2681,7 +2686,7 @@ mod tests {
                     values: vec![format!("m{i}")],
                 }]),
             };
-            cache.put(k, Arc::new(vec![i as u64]), now);
+            cache.put_sized(k, Arc::new(vec![i as u64]), 8, now);
         }
         assert!(cache.len() <= 8);
         assert!(!cache.is_empty());

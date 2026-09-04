@@ -53,9 +53,9 @@ fn range_result_cache() -> &'static Mutex<TtlLruCache<String, Value>> {
     })
 }
 
-fn range_cache_get(key: &str) -> Option<Value> {
+fn range_cache_get(key: &String) -> Option<Value> {
     let mut guard = range_result_cache().lock().ok()?;
-    guard.get(&key.to_string(), Instant::now())
+    guard.get(key, Instant::now())
 }
 
 fn range_cache_put(key: String, data: Value) {

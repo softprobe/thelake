@@ -148,8 +148,9 @@ if ! python3 "$PY" --warmup-all >>"$LOG" 2>&1; then
 fi
 log "slo: global warmup ok"
 
-# Measure immediately while the 300s range cache is hot. Do not poll
+# Measure immediately while the ~60s range cache is hot. Do not poll
 # --check-ingest here — that PromQL loop re-starves /v1/metrics and blows TTL.
+# Profile: steady-state-isolated (collector stopped, Grafana paused).
 slo_rc=1
 slo_out=""
 for attempt in 1 2 3; do
@@ -261,7 +262,7 @@ All of these must be true before you may finish:
 1. All tests green (`make test`).
 2. Code committed (clean git status, ignoring .codegraph/ and hook state).
 3. OTEL Astronomy Shop demo running and observability data ingesting (live, non-flat scrapes).
-4. Every Grafana dashboard PromQL at 5m, 15m, 30m, 1h, 3h, 24h, 30d, 180d consistently ≤100ms (3 repeats after warmup).
+4. Every Grafana dashboard PromQL at 5m, 15m, 30m, 1h, 3h, 24h, 30d, 180d consistently ≤100ms (3 consecutive repeats after warmup; measure profile=steady-state-isolated: otel-collector stopped + Grafana paused).
 
 Failures this turn:
 {fails}
