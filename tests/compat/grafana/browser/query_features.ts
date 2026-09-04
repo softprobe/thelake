@@ -514,7 +514,7 @@ export const QUERY_FEATURE_CATALOG: QueryFeatureTestCase[] = [
     expr: '{service_name=~".+"} |= "HTTP"',
     isRange: true,
     description: 'Loki line filter containing substring',
-    validate: (data) => Array.isArray(data),
+    validate: (data) => Array.isArray(data) && data.length > 0 && data.every(s => (s.values || []).every((pt: [string, string]) => pt[1].includes('HTTP'))),
   },
   {
     id: 'L-03',
@@ -523,7 +523,7 @@ export const QUERY_FEATURE_CATALOG: QueryFeatureTestCase[] = [
     expr: '{service_name=~".+"} != "DEBUG"',
     isRange: true,
     description: 'Loki line filter excluding substring',
-    validate: (data) => Array.isArray(data),
+    validate: (data) => Array.isArray(data) && data.length > 0 && data.every(s => (s.values || []).every((pt: [string, string]) => !pt[1].includes('DEBUG'))),
   },
   {
     id: 'L-04',
@@ -532,7 +532,7 @@ export const QUERY_FEATURE_CATALOG: QueryFeatureTestCase[] = [
     expr: '{service_name=~".+"} |~ "GET|POST"',
     isRange: true,
     description: 'Loki line filter matching regular expression',
-    validate: (data) => Array.isArray(data),
+    validate: (data) => Array.isArray(data) && data.length > 0 && data.every(s => (s.values || []).every((pt: [string, string]) => /GET|POST/.test(pt[1]))),
   },
   {
     id: 'L-05',

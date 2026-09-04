@@ -235,8 +235,9 @@ wait_for_demo_logs() {
   echo "==> Softprobe Loki labels (live window): $(echo "$body" | head -c 400)…"
 }
 
-# Reuse if Softprobe + Grafana + demo collector already healthy *and* ingest is live.
-if our_softprobe_running \
+# Reuse if Softprobe + Grafana + demo collector already healthy *and* ingest is live (disabled if GRAFANA_REUSE_STACK=0).
+if [[ "${GRAFANA_REUSE_STACK:-1}" == "1" ]] \
+  && our_softprobe_running \
   && curl -sf "$SOFTPROBE_URL_HOST/ready" >/dev/null 2>&1 \
   && curl -sf -o /dev/null -u admin:admin http://127.0.0.1:3000/api/health >/dev/null 2>&1 \
   && docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -q true; then
@@ -448,7 +449,7 @@ export SOFTPROBE_ADMIN_API_KEY="$ADMIN_API_KEY"
 export SOFTPROBE_GRPC_DISABLE=1
 export RUST_LOG="${RUST_LOG:-info}"
 : >"$LOG"
-nohup "$RUNTIME_BIN" >>"$LOG" 2>&1 &
+setsid "$RUNTIME_BIN" >>"$LOG" 2>&1 &
 echo $! >"$PID_FILE"
 disown || true
 

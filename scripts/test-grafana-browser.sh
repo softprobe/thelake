@@ -23,7 +23,26 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "==> Ensuring Grafana stack + live OTel ingestion are ready..."
+# Deterministically install declared Playwright dependencies
+if [[ ! -d "$BROWSER_DIR/node_modules/@playwright/test" ]]; then
+  echo "==> Installing browser automation dependencies in $BROWSER_DIR..."
+  if [[ -f "$BROWSER_DIR/package-lock.json" ]]; then
+    npm --prefix "$BROWSER_DIR" ci --no-audit
+  else
+    npm --prefix "$BROWSER_DIR" install --no-audit
+  fi
+fi
+
+# Ensure Playwright Chromium browser binary is installed
+if ! (cd "$BROWSER_DIR" && npx playwright --version >/dev/null 2>&1); then
+  echo "ERROR: playwright executable not found after install." >&2
+  exit 1
+fi
+(cd "$BROWSER_DIR" && npx playwright install chromium)
+
+# Force the manual stack to run the current binary from reviewed source
+export GRAFANA_REUSE_STACK="${GRAFANA_REUSE_STACK:-0}"
+echo "==> Ensuring Grafana stack + live OTel ingestion are ready (GRAFANA_REUSE_STACK=$GRAFANA_REUSE_STACK)..."
 ./scripts/grafana-manual-up.sh
 
 echo "==> Verifying Softprobe and Grafana connectivity..."
@@ -31,11 +50,10 @@ curl -sf "$SOFTPROBE_URL/ready" >/dev/null || { echo "ERROR: Softprobe not ready
 curl -sf -u admin:admin "$GRAFANA_URL/api/health" >/dev/null || { echo "ERROR: Grafana not healthy at $GRAFANA_URL" >&2; exit 1; }
 
 echo "==> Running Playwright E2E test suite..."
-export NODE_PATH="$(npm root -g):${NODE_PATH:-}"
 export SOFTPROBE_URL
 export GRAFANA_URL
 
-cd "$ROOT"
+cd "$BROWSER_DIR"
 npx playwright test --config "$CONFIG_FILE" "$@"
 
 echo "================================================================"

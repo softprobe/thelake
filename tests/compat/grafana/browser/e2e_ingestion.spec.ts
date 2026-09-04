@@ -14,18 +14,14 @@ test.describe('OpenTelemetry Demo Ingestion Pipeline (E2E)', () => {
 
   test('I-02: OTel Demo metrics stream is active and fresh', async ({ request }) => {
     const end = Math.floor(Date.now() / 1000);
-    const start = end - 900;
 
-    const resp = await request.get(`${SOFTPROBE_URL}/api/v1/query_range`, {
+    const resp = await request.get(`${SOFTPROBE_URL}/api/v1/query`, {
       headers: {
         Authorization: `Bearer ${API_KEY}`,
         'X-Scope-OrgID': TENANT_ID,
       },
       params: {
         query: 'k6_http_reqs',
-        start: start.toString(),
-        end: end.toString(),
-        step: '15',
       },
     });
 
@@ -35,20 +31,22 @@ test.describe('OpenTelemetry Demo Ingestion Pipeline (E2E)', () => {
     const results = json.data?.result || [];
     expect(results.length).toBeGreaterThan(0);
 
-    // Verify recent timestamps: the latest sample must be within the last 600s
+    // Enforce genuine freshness: the latest sample timestamp must be within 60s of wall clock
     let latestTimestamp = 0;
     for (const series of results) {
-      for (const [ts, _] of series.values || []) {
+      if (series.value) {
+        const ts = parseFloat(series.value[0]);
         if (ts > latestTimestamp) latestTimestamp = ts;
       }
     }
-    const lagSeconds = end - latestTimestamp;
-    expect(lagSeconds).toBeLessThan(600);
+    expect(latestTimestamp).toBeGreaterThan(0);
+    const lagSeconds = Math.abs(end - latestTimestamp);
+    expect(lagSeconds).toBeLessThan(60);
   });
 
-  test('I-03: Continuous live scrapes show varying counter values', async ({ request }) => {
+  test('I-03: Continuous live scrapes show varying counter values in recent window', async ({ request }) => {
     const end = Math.floor(Date.now() / 1000);
-    const start = end - 900;
+    const start = end - 300;
 
     const resp = await request.get(`${SOFTPROBE_URL}/api/v1/query_range`, {
       headers: {

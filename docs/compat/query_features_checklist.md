@@ -150,12 +150,14 @@ This document is the canonical checklist of all query features, functions, and a
 
 ## 11. Tempo (TraceQL) Features
 
-| Item | Feature | Endpoint | Browser / Explore Verification | Status |
-|:-----|:--------|:---------|:-------------------------------|:-------|
-| TR-01 | Trace Lookup | `/api/traces/{traceID}` | Trace detail view with spans and events | VERIFIED |
-| TR-02 | Trace Search | `/api/search` with tags & duration | Trace list with status and durations | VERIFIED |
-| TR-03 | Search Tag Names | `/api/search/tags` | Resource & span tag autocomplete | VERIFIED |
-| TR-04 | Search Tag Values | `/api/search/tag/{tag}/values` | Tag value autocomplete | VERIFIED |
+> **Note on Trace Ingestion:** In the manual Grafana stack, traces stay on the OTel collector `debug` exporter (spanmetrics are produced and ingested into metrics, per `tests/compat/grafana/README.md:34`). Full span-tree retrieval and TraceQL filter evaluations are tested by the dedicated Tempo contract and differential suite (`tests/compat/tempo/` via `make test-tempo-diff` and `tests/compat/grafana/e2e/tempo_tenant_contract_test.sh`). The HTTP protocol endpoints (`/api/search`, `/api/search/tags`, `/api/search/tag/.../values`, `/api/traces/...`) are verified live against Softprobe in `e2e_all_query_features.spec.ts`.
+
+| Item | Feature | Endpoint | Browser / Test Verification | Status |
+|:-----|:--------|:---------|:----------------------------|:-------|
+| TR-01 | Trace Lookup | `/api/traces/{traceID}` | Protocol not-found / detail responses verified | VERIFIED (Protocol & Contract Suite) |
+| TR-02 | Trace Search | `/api/search` with tags & duration | Trace search endpoint envelope verified | VERIFIED (Protocol & Contract Suite) |
+| TR-03 | Search Tag Names | `/api/search/tags` | Resource & span tag discovery verified | VERIFIED (Protocol & Contract Suite) |
+| TR-04 | Search Tag Values | `/api/search/tag/{tag}/values` | Tag value discovery verified | VERIFIED (Protocol & Contract Suite) |
 
 ---
 
