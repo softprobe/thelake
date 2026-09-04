@@ -115,7 +115,9 @@ unpause_grafana() {
 }
 
 log "slo: pre-warmup ingest check"
-if ! python3 "$PY" --check-ingest 2>&1 | tee -a "$LOG" | grep -q "ingest ok"; then
+ingest_out="$(python3 "$PY" --check-ingest 2>&1)" || true
+printf '%s\n' "$ingest_out" | tee -a "$LOG" >&2
+if ! grep -q "ingest ok" <<<"$ingest_out"; then
   fail "OTEL ingest is not live before Grafana warmup (see $LOG)"
 fi
 
@@ -141,9 +143,10 @@ restart_collector() {
 trap 'restart_collector; unpause_grafana' EXIT
 
 log "slo: global warmup"
-if ! python3 "$PY" --warmup-all 2>&1 | tee -a "$LOG"; then
+if ! python3 "$PY" --warmup-all >>"$LOG" 2>&1; then
   fail "Grafana global warmup failed (see $LOG)"
 fi
+log "slo: global warmup ok"
 
 # Measure immediately while the 300s range cache is hot. Do not poll
 # --check-ingest here — that PromQL loop re-starves /v1/metrics and blows TTL.
@@ -182,7 +185,9 @@ sleep 30
 log "slo: post-measure ingest check"
 ingest_ok=0
 for _ in $(seq 1 8); do
-  if python3 "$PY" --check-ingest 2>&1 | tee -a "$LOG" | grep -q "ingest ok"; then
+  ingest_out="$(python3 "$PY" --check-ingest 2>&1)" || true
+  printf '%s\n' "$ingest_out" | tee -a "$LOG" >&2
+  if grep -q "ingest ok" <<<"$ingest_out"; then
     ingest_ok=1
     break
   fi
