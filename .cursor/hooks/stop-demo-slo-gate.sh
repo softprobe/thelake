@@ -128,6 +128,10 @@ if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx 
     log "slo: stopped otel-collector for warmup+measure"
   fi
 fi
+# Fail loud if collector is still running — that is the flake source.
+if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
+  fail "otel-collector still running during SLO measure; refuse to continue"
+fi
 restart_collector() {
   if [[ "${collector_stopped}" == 1 ]]; then
     docker start otel-collector >/dev/null 2>&1 || true
@@ -145,15 +149,20 @@ fi
 # --check-ingest here — that PromQL loop re-starves /v1/metrics and blows TTL.
 slo_rc=1
 slo_out=""
-for attempt in 1 2; do
+for attempt in 1 2 3; do
   log "slo: measured pass attempt ${attempt}"
+  # Re-assert isolation each attempt (collector may have been restarted by hand).
+  if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
+    docker stop otel-collector >/dev/null 2>&1 || true
+    collector_stopped=1
+  fi
   slo_rc=0
   slo_out="$(python3 "$PY" --slo-ms 100 --repeats 3 --workers 1 --skip-ingest 2>&1)" || slo_rc=$?
   printf '%s\n' "$slo_out" | tee -a "$LOG" >&2
   if [[ "$slo_rc" -eq 0 ]]; then
     break
   fi
-  log "slo: attempt ${attempt} failed; retrying once after short pause"
+  log "slo: attempt ${attempt} failed; retrying after short pause"
   sleep 2
 done
 if [[ "$slo_rc" -ne 0 ]]; then

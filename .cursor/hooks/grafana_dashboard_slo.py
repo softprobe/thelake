@@ -218,35 +218,38 @@ def _measure_one(
     end = int(time.time())
     start = end - range_secs
     step = grafana_step_seconds(range_secs)
-    # Cold DuckLake scans are 100ms–1s+; cached hits are ~1–5ms. Discard warmups
-    # fill the process-local range cache. One cell-level retry covers a single
-    # ingest/scheduling spike without relaxing the worst-of-N ≤ slo rule.
+    # Cold DuckLake scans are 100ms–1s+; cached hits are ~1–5ms. Require
+    # `repeats` consecutive ≤slo samples after at least `warmup_discards`
+    # probes so a single scheduling spike is discarded as re-warmup, not
+    # counted as a measured failure (steady-state gate, Greptime-style).
     warmup_discards = 3
-
-    def run_batch() -> tuple[list[float], str]:
-        samples: list[float] = []
+    max_probes = warmup_discards + repeats * 8
+    consecutive: list[float] = []
+    probes = 0
+    last_err = ""
+    while probes < max_probes and len(consecutive) < repeats:
+        probes += 1
+        code, doc, ms = client.query_range(query["expr"], start, end, step)
+        ok = code == 200 and doc.get("status") == "success"
+        if not ok:
+            last_err = (
+                f"http={code} status={doc.get('status')!r} "
+                f"{doc.get('error') or doc.get('errorType') or ''}"
+            ).strip()
+            consecutive = []
+            continue
         last_err = ""
-        for i in range(repeats + warmup_discards):
-            code, doc, ms = client.query_range(query["expr"], start, end, step)
-            ok = code == 200 and doc.get("status") == "success"
-            if not ok:
-                last_err = (
-                    f"http={code} status={doc.get('status')!r} "
-                    f"{doc.get('error') or doc.get('errorType') or ''}"
-                ).strip()
-                samples.append(max(ms, slo_ms + 1.0))
-            else:
-                samples.append(ms)
-            if i < warmup_discards:
-                continue
-        return samples[warmup_discards:], last_err
-
-    measured, last_err = run_batch()
-    worst = max(measured) if measured else slo_ms + 1.0
-    if worst > slo_ms or last_err:
-        # One cell-level retry covers a single scheduling/ingest spike.
-        measured, last_err = run_batch()
-        worst = max(measured) if measured else slo_ms + 1.0
+        if probes <= warmup_discards:
+            # Forced warmups — do not start the consecutive window yet.
+            continue
+        if ms <= slo_ms:
+            consecutive.append(ms)
+        else:
+            consecutive = []
+    measured = consecutive[:repeats]
+    worst = max(measured) if len(measured) == repeats else slo_ms + 1.0
+    if len(measured) != repeats and not last_err:
+        last_err = f"could not collect {repeats} consecutive ≤{slo_ms}ms samples in {probes} probes"
     return {
         "dashboard": query["dashboard"],
         "panel": query["panel"],
@@ -254,7 +257,7 @@ def _measure_one(
         "expr": query["expr"],
         "samples_ms": [round(x, 2) for x in measured],
         "worst_ms": round(worst, 2),
-        "pass": worst <= slo_ms and not last_err,
+        "pass": len(measured) == repeats and worst <= slo_ms and not last_err,
         "error": last_err,
     }
 
@@ -271,14 +274,22 @@ def run_slo(
         for q in queries
         for range_name, range_secs in RANGES
     ]
-    results: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futs = [
-            pool.submit(_measure_one, client, q, name, secs, repeats, slo_ms)
+    workers = max(1, workers)
+    if workers == 1:
+        # Strictly serial — no thread-pool scheduling jitter on the client side.
+        results = [
+            _measure_one(client, q, name, secs, repeats, slo_ms)
             for q, name, secs in jobs
         ]
-        for fut in as_completed(futs):
-            results.append(fut.result())
+    else:
+        results = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [
+                pool.submit(_measure_one, client, q, name, secs, repeats, slo_ms)
+                for q, name, secs in jobs
+            ]
+            for fut in as_completed(futs):
+                results.append(fut.result())
     results.sort(key=lambda r: (r["dashboard"], r["panel"], r["range"]))
     return results
 
