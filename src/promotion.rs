@@ -1537,6 +1537,13 @@ mod tests {
     use super::{parse_promotion_manifest, PromotionManifest};
     use std::collections::HashMap;
 
+    // Same bytes as `tests/util/promotion_fixtures.rs` (lib cannot import the
+    // integration-test util crate; keep one include_str! per fixture here).
+    const LLM_GENERATION_V1_YAML: &str =
+        include_str!("../tests/fixtures/promotion/llm_generation_v1.yaml");
+    const MOCKER_ROLLING_V1_YAML: &str =
+        include_str!("../tests/fixtures/promotion/mocker_rolling_v1.yaml");
+
     #[test]
     fn rejects_telemetry_non_nullable_columns() {
         let err = parse_promotion_manifest(
@@ -2548,5 +2555,37 @@ columns:
         let err = super::merge_telemetry_columns_manifests(&[])
             .expect_err("empty merge input must be rejected");
         assert_eq!(err.code(), "missing_manifests");
+    }
+
+    #[test]
+    fn mocker_rolling_fixture_validates_without_reserved_collisions() {
+        // Simulation-only reserved-name check (not product SSOT validation).
+        let manifest =
+            parse_promotion_manifest(MOCKER_ROLLING_V1_YAML).expect("mocker fixture parses");
+        let PromotionManifest::TelemetryColumns(spec) = manifest else {
+            panic!("expected telemetry manifest");
+        };
+        super::validate_telemetry_column_additive(&spec).expect("no reserved column collisions");
+        assert!(spec.columns.iter().any(|c| c.name == "record_category"));
+        assert!(spec.columns.iter().any(|c| c.name == "record_operation"));
+    }
+
+    #[test]
+    fn mocker_rolling_merges_with_llm_generation_fixture_without_name_collision() {
+        let mocker =
+            parse_promotion_manifest(MOCKER_ROLLING_V1_YAML).expect("mocker fixture parses");
+        let llm = parse_promotion_manifest(LLM_GENERATION_V1_YAML).expect("llm fixture parses");
+        let PromotionManifest::TelemetryColumns(mocker_spec) = mocker else {
+            panic!("expected mocker telemetry manifest");
+        };
+        let PromotionManifest::TelemetryColumns(llm_spec) = llm else {
+            panic!("expected llm telemetry manifest");
+        };
+        let merged = super::merge_telemetry_columns_manifests(&[llm_spec, mocker_spec])
+            .expect("llm ∪ mocker");
+        assert!(merged.columns.iter().any(|c| c.name == "record_category"));
+        assert!(merged.columns.iter().any(|c| c.name == "operation_name"));
+        assert!(merged.columns.iter().any(|c| c.name == "observation_type"));
+        super::validate_telemetry_column_additive(&merged).expect("merged manifest valid");
     }
 }

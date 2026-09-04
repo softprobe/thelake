@@ -10,11 +10,13 @@ use softprobe_runtime::runtime_api::runtime_control_routes;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use crate::util::config::file_backed_test_config;
 use crate::util::promotion_contract::{
     apply_manifest, contract_apply_ingest_query, contract_business_compatibility,
     contract_shrink_safe, contract_update_and_idempotency, ingest_otlp, PromotionContractBackend,
     MANIFEST_V1,
+};
+use crate::util::promotion_file_backed::{
+    attach_softprobe_ducklake, setup_file_backed_promotion_env,
 };
 use crate::util::tenant::inject_local_sqlite_tenant as inject_tenant;
 
@@ -36,40 +38,19 @@ async fn build_router(config: Config) -> Router {
 }
 
 async fn setup() -> SqliteBackend {
-    let temp = TempDir::new().expect("tempdir");
-    let config = file_backed_test_config(&temp);
-    let metadata_path = config.ducklake.metadata_path.clone();
-    let data_path = config.ducklake.data_path.clone();
-    let router = build_router(config).await;
+    let env = setup_file_backed_promotion_env().await;
     SqliteBackend {
-        _temp: temp,
-        router,
-        metadata_path,
-        data_path,
+        _temp: env._temp,
+        router: env.router,
+        metadata_path: env.metadata_path,
+        data_path: env.data_path,
     }
 }
 
 impl SqliteBackend {
     fn attach(&self) -> duckdb::Connection {
-        attach(&self.metadata_path, &self.data_path)
+        attach_softprobe_ducklake(&self.metadata_path, &self.data_path)
     }
-}
-
-fn attach(metadata_path: &str, data_path: &str) -> duckdb::Connection {
-    let connection = duckdb::Connection::open_in_memory().expect("duckdb");
-    connection
-        .execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
-        .expect("extensions");
-    connection
-        .execute_batch(&format!(
-            "ATTACH 'ducklake:sqlite:{}' AS softprobe \
-             (DATA_PATH '{}', META_JOURNAL_MODE 'WAL', META_BUSY_TIMEOUT 5000, \
-              DATA_INLINING_ROW_LIMIT 0);",
-            metadata_path.replace('\'', "''"),
-            data_path.replace('\'', "''"),
-        ))
-        .expect("attach");
-    connection
 }
 
 #[async_trait]

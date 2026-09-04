@@ -1,0 +1,83 @@
+# Simulated Rolling / mocker promotion profile for thelake tests.
+#
+# Intentional subset of softprobe/sp-llm `manifests/mocker-v1.yaml` — not a
+# product mirror and will drift. Covers record_* promotion, llm∪mocker merge,
+# and simulation-only reserved-name checks in thelake unit tests.
+#
+# Omitted vs product SSOT: record_expiration_time, update_time.
+# Product reserved-name gates for the full SSOT belong in softprobe/sp-llm, not
+# here. HTTP bodies are base columns (http_request_body / http_response_body).
+#
+# Column names use record_* / mocker_* so they do not collide with
+# llm_generation_v1.yaml (environment, operation_name) or base traces columns.
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces]
+columns:
+  - name: record_category
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp_category_type
+  - name: record_operation
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp_operation_name
+  - name: record_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp_record_id
+  - name: record_environment
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: sp_record_environment
+  - name: record_version
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp_record_version
+  - name: record_creation_time
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: sp_creation_time
+  - name: mocker_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp_mocker_id
+  - name: record_replay_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp_replay_id
+  - name: record_transaction_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp_transaction_id
+  - name: record_deleted
+    type: bool
+    nullable: true
+    source:
+      from: attribute
+      key: sp_record_deleted
+  - name: record_ghost
+    type: bool
+    nullable: true
+    source:
+      from: attribute
+      key: sp_record_ghost
