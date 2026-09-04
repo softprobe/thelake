@@ -34,7 +34,7 @@ COMPOSE_SOFTPROBE="$OVERLAY_DIR/compose.softprobe.yaml"
 LOG="$STATE_DIR/softprobe.log"
 PID_FILE="$STATE_DIR/softprobe.pid"
 CONFIG="$STATE_DIR/config.yaml"
-AUTH_URL="${SOFTPROBE_AUTH_URL:-http://127.0.0.1:18080/validate}"
+GRAFANA_AUTH_MOCK_PORT="${GRAFANA_AUTH_MOCK_PORT:-18080}"
 API_KEY="${SOFTPROBE_API_KEY:-local-dev-key}"
 SOFTPROBE_URL_HOST="${SOFTPROBE_LISTEN:-http://127.0.0.1:8090}"
 PG_HOST="${GRAFANA_PG_HOST:-127.0.0.1}"
@@ -57,6 +57,14 @@ port_busy() {
   local port="$1"
   ss -ltn 2>/dev/null | grep -qE ":${port}\\s" || return 1
 }
+
+if [[ -z "${SOFTPROBE_AUTH_URL:-}" ]] && [[ "$GRAFANA_AUTH_MOCK_PORT" == "18080" ]] && port_busy 18080; then
+  if ! curl -sf -X POST "http://127.0.0.1:18080/validate" -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1; then
+    echo "WARN: :18080 busy with non-auth service; falling back GRAFANA_AUTH_MOCK_PORT=18085"
+    GRAFANA_AUTH_MOCK_PORT=18085
+  fi
+fi
+AUTH_URL="${SOFTPROBE_AUTH_URL:-http://127.0.0.1:${GRAFANA_AUTH_MOCK_PORT}/validate}"
 
 our_softprobe_running() {
   [[ -f "$PID_FILE" ]] || return 1
@@ -153,14 +161,16 @@ wait_for_demo_metrics() {
   local end start payload changes q
   for _ in $(seq 1 90); do
     end="$(date +%s)"
-    start="$((end - 300))"
+    start="$((end - 600))"
     for q in \
+      'k6_http_reqs' \
       'http_server_request_duration_count' \
       'traces_span_metrics_calls' \
       'demo_ad_served_total' \
       'k6_iterations'
     do
       payload="$(curl -sf -m 30 -H "Authorization: Bearer $API_KEY" \
+        -H "X-Scope-OrgID: $TENANT_ID" \
         -H 'Content-Type: application/x-www-form-urlencoded' \
         --data-urlencode "query=$q" \
         --data "start=$start&end=$end&step=15" \
@@ -232,13 +242,16 @@ if our_softprobe_running \
   && docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -q true; then
   # Flat lookback lines mean the collector is timing out — do not claim "already up".
   end_now="$(date +%s)"
-  start_now="$((end_now - 180))"
-  live_changes="$(curl -sf -m 20 -H "Authorization: Bearer $API_KEY" \
-    -H 'Content-Type: application/x-www-form-urlencoded' \
-    --data-urlencode 'query=demo_ad_served_total' \
-    --data "start=$start_now&end=$end_now&step=15" \
-    "$SOFTPROBE_URL_HOST/api/v1/query_range" 2>/dev/null \
-    | python3 -c 'import sys,json
+  start_now="$((end_now - 600))"
+  live_changes=0
+  for test_q in 'k6_http_reqs' 'demo_ad_served_total' 'k6_iterations' 'http_server_request_duration_count'; do
+    ch="$(curl -sf -m 20 -H "Authorization: Bearer $API_KEY" \
+      -H "X-Scope-OrgID: $TENANT_ID" \
+      -H 'Content-Type: application/x-www-form-urlencoded' \
+      --data-urlencode "query=$test_q" \
+      --data "start=$start_now&end=$end_now&step=15" \
+      "$SOFTPROBE_URL_HOST/api/v1/query_range" 2>/dev/null \
+      | python3 -c 'import sys,json
 try:
  d=json.load(sys.stdin); r=(d.get("data") or {}).get("result") or []; best=0
  for s in r:
@@ -247,7 +260,12 @@ try:
  print(best)
 except Exception:
  print(0)' || echo 0)"
-  if [[ "${live_changes:-0}" -ge 2 ]]; then
+    if [[ "${ch:-0}" -ge 1 ]]; then
+      live_changes="$ch"
+      break
+    fi
+  done
+  if [[ "${live_changes:-0}" -ge 1 ]]; then
     end_ns="$(python3 -c 'import time; print(int(time.time()*1e9))')"
     start_ns="$((end_ns - 3600 * 1000000000))"
     loki_body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
@@ -297,6 +315,7 @@ if [[ -f "$PID_FILE" ]]; then
 fi
 
 reset_grafana_state() {
+  THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" $COMPOSE -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
   rm -rf "$STATE_DIR/data" "$STATE_DIR/cache"
   if [[ -d "$STATE_DIR/postgres" ]]; then
     docker run --rm -v "$STATE_DIR/postgres:/data" alpine sh -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
@@ -313,14 +332,21 @@ else
   cargo build -q --release --bin softprobe-runtime
 fi
 
-RUNTIME_BIN="${CARGO_TARGET_DIR:-target}/release/softprobe-runtime"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CACHE_ROOT/target}"
+RUNTIME_BIN="$ROOT/dist/softprobe-runtime"
+if [[ ! -x "$RUNTIME_BIN" ]]; then
+  RUNTIME_BIN="${CARGO_TARGET_DIR}/release/softprobe-runtime"
+fi
+if [[ ! -x "$RUNTIME_BIN" ]]; then
+  RUNTIME_BIN="$ROOT/target/release/softprobe-runtime"
+fi
 if [[ ! -x "$RUNTIME_BIN" ]]; then
   echo "ERROR: missing $RUNTIME_BIN (expected release binary)" >&2
   exit 1
 fi
 
 echo "==> starting Grafana + auth-mock + Postgres 19"
-THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" GRAFANA_PG_HOST_PORT="$PG_PORT" \
+THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" GRAFANA_PG_HOST_PORT="$PG_PORT" GRAFANA_AUTH_MOCK_PORT="$GRAFANA_AUTH_MOCK_PORT" \
   $COMPOSE -f "$COMPOSE_FILE" up -d
 
 echo "==> waiting for auth-mock"
@@ -401,6 +427,12 @@ EOF
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 DUCKDB_LIB_DIR="$(find "${TARGET_DIR}/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
 if [[ -z "${DUCKDB_LIB_DIR}" ]]; then
+  DUCKDB_LIB_DIR="$(find "${ROOT}/target/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
+fi
+if [[ -z "${DUCKDB_LIB_DIR}" && -f "$ROOT/dist/libduckdb.so" ]]; then
+  DUCKDB_LIB_DIR="$ROOT/dist"
+fi
+if [[ -z "${DUCKDB_LIB_DIR}" ]]; then
   echo "ERROR: libduckdb not found under ${TARGET_DIR}/duckdb-download (build with DUCKDB_DOWNLOAD_LIB=1?)" >&2
   exit 1
 fi
@@ -466,7 +498,7 @@ apply_prom_hot_labels "$SOFTPROBE_URL_HOST" "$API_KEY"
 
 echo "==> waiting for Grafana"
 graf_ok=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 180); do
   if curl -sf -o /dev/null -u admin:admin http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
     graf_ok=1
     break
@@ -482,6 +514,7 @@ ensure_otel_demo_checkout
 
 echo "==> starting OpenTelemetry Demo $OTEL_DEMO_TAG (minimal, Softprobe backend)"
 demo_compose up --pull missing --remove-orphans --detach
+demo_compose restart otel-collector >/dev/null 2>&1 || true
 
 wait_for_demo_metrics
 wait_for_demo_logs

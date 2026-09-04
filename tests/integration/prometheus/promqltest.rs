@@ -288,6 +288,19 @@ async fn ingest_then_labels_series_and_query() {
         "values={values}"
     );
 
+    let (status, values_post) =
+        post_form_json(&router, "/api/v1/label/job/values", &values_q).await;
+    assert_eq!(status, StatusCode::OK, "{values_post}");
+    assert_eq!(values_post["status"], "success");
+    assert!(
+        values_post["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some("checkout")),
+        "values_post={values_post}"
+    );
+
     let (status, meta) = get_json(&router, "/api/v1/metadata?metric=http_requests").await;
     assert_eq!(status, StatusCode::OK, "{meta}");
     assert_eq!(meta["status"], "success");
@@ -312,6 +325,40 @@ async fn ingest_then_labels_series_and_query() {
     assert!(!arr.is_empty(), "series={series}");
     assert_eq!(arr[0]["__name__"], "http_requests");
     assert_eq!(arr[0]["job"], "checkout");
+
+    // POST parity for discovery endpoints (labels, series)
+    let (status, labels_post) = post_form_json(
+        &router,
+        "/api/v1/labels",
+        &encode_query(&[("match[]", r#"http_requests{job="checkout"}"#)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{labels_post}");
+    assert_eq!(labels_post["status"], "success");
+
+    let (status, series_post) = post_form_json(
+        &router,
+        "/api/v1/series",
+        &encode_query(&[("match[]", r#"http_requests{job="checkout"}"#)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{series_post}");
+    assert_eq!(series_post["status"], "success");
+
+    let (status, rules) = get_json(&router, "/api/v1/rules").await;
+    assert_eq!(status, StatusCode::OK, "{rules}");
+    assert_eq!(rules["status"], "success");
+    assert_eq!(rules["data"]["groups"], serde_json::json!([]));
+
+    let (status, exemplars) = get_json(&router, "/api/v1/query_exemplars").await;
+    assert_eq!(status, StatusCode::OK, "{exemplars}");
+    assert_eq!(exemplars["status"], "success");
+    assert_eq!(exemplars["data"], serde_json::json!([]));
+
+    let (status, buildinfo) = get_json(&router, "/api/v1/status/buildinfo").await;
+    assert_eq!(status, StatusCode::OK, "{buildinfo}");
+    assert_eq!(buildinfo["status"], "success");
+    assert_eq!(buildinfo["data"]["version"], "2.54.1");
 
     let eval_s = (ts_nano / 1_000_000_000) as i64;
     let query_q = encode_query(&[

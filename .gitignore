@@ -69,3 +69,6 @@ mooncake/
 
 # Cursor stop-hook local cache/logs (HEAD test stamp, gate output)
 .cursor/hooks/.state/
+.tmp/
+playwright-report/
+test-results/
