@@ -161,31 +161,51 @@ def check_ingest(client: SoftprobeProm) -> str | None:
     end = int(time.time())
     # 15m lookback: after Softprobe restarts / OTLP queue drain, the last 5m can
     # still look like a single scrape while older points in the window move.
+    # Still require a change whose sample timestamp is recent so a stopped
+    # collector cannot pass on stale churn left inside the lookback alone.
     start = end - 900
+    recent_max_age_s = 120
     best = 0
+    newest_change_ts = 0.0
     used = ""
     for q in LIVE_INGEST_QUERIES:
         _code, body, _ms = client.query_range(q, start, end, 15)
         rows = ((body.get("data") or {}).get("result")) or []
         for series in rows:
-            vals = []
-            for _ts, v in series.get("values") or []:
+            points: list[tuple[float, float]] = []
+            for ts, v in series.get("values") or []:
                 try:
-                    vals.append(float(v))
+                    points.append((float(ts), float(v)))
                 except (TypeError, ValueError):
                     continue
-            changes = sum(1 for a, b in zip(vals, vals[1:]) if a != b)
-            if changes > best:
+            changes = 0
+            last_change_ts = 0.0
+            for (t0, a), (t1, b) in zip(points, points[1:]):
+                if a != b:
+                    changes += 1
+                    last_change_ts = t1
+            if changes > best or (changes == best and last_change_ts > newest_change_ts):
                 best = changes
+                newest_change_ts = last_change_ts
                 used = q
-        if best >= 2:
+        if best >= 2 and newest_change_ts >= end - recent_max_age_s:
             break
     if best < 2:
         return (
             "OTEL demo series are flat (15m lookback). "
             "Need live ingest: value changes ≥ 2 on http_server / spanmetrics / demo / k6."
         )
-    print(f"ingest ok ({used} value changes={best}, names={len(names)})", file=sys.stderr)
+    if newest_change_ts < end - recent_max_age_s:
+        age = end - int(newest_change_ts) if newest_change_ts else None
+        return (
+            f"OTEL ingest looks stale (newest value change age={age}s, need ≤{recent_max_age_s}s). "
+            "Collector may still be stopped or Softprobe not receiving OTLP."
+        )
+    print(
+        f"ingest ok ({used} value changes={best}, newest_change_age_s={end - int(newest_change_ts)}, "
+        f"names={len(names)})",
+        file=sys.stderr,
+    )
     return None
 
 

@@ -2,6 +2,7 @@
 //!
 //! Evicts oldest entries under capacity pressure — never wipe the whole map
 //! (that caused intermittent Grafana 100ms SLO misses under cell thrash).
+//! Optional byte budget bounds RSS when values are large (e.g. JSON results).
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
@@ -13,12 +14,15 @@ pub struct TtlLruCache<K, V> {
     order: VecDeque<K>,
     ttl: Duration,
     max: usize,
+    max_bytes: Option<usize>,
+    bytes_used: usize,
 }
 
 #[derive(Debug)]
 struct Entry<V> {
     expires: Instant,
     value: V,
+    bytes: usize,
 }
 
 impl<K, V> TtlLruCache<K, V>
@@ -27,11 +31,17 @@ where
     V: Clone,
 {
     pub fn new(ttl: Duration, max: usize) -> Self {
+        Self::with_byte_budget(ttl, max, None)
+    }
+
+    pub fn with_byte_budget(ttl: Duration, max: usize, max_bytes: Option<usize>) -> Self {
         Self {
             map: HashMap::new(),
             order: VecDeque::new(),
             ttl,
             max: max.max(1),
+            max_bytes,
+            bytes_used: 0,
         }
     }
 
@@ -44,36 +54,67 @@ where
         if hit.is_some() {
             self.touch(key);
         } else if self.map.contains_key(key) {
-            self.map.remove(key);
-            self.unlink(key);
+            self.remove_key(key);
         }
         hit
     }
 
     pub fn put(&mut self, key: K, value: V, now: Instant) {
+        self.put_sized(key, value, 0, now);
+    }
+
+    /// Insert with an explicit serialized/approximate byte weight for the budget.
+    /// Entries larger than `max_bytes` alone are refused (not cached).
+    pub fn put_sized(&mut self, key: K, value: V, bytes: usize, now: Instant) {
+        if let Some(cap) = self.max_bytes {
+            if bytes > cap {
+                return;
+            }
+        }
         if self.map.contains_key(&key) {
-            self.unlink(&key);
-            self.map.remove(&key);
+            self.remove_key(&key);
         }
         self.evict_expired(now);
-        while self.map.len() >= self.max {
+        while self.needs_eviction(bytes) {
             let Some(victim) = self.order.pop_front() else {
                 break;
             };
-            self.map.remove(&victim);
+            if let Some(old) = self.map.remove(&victim) {
+                self.bytes_used = self.bytes_used.saturating_sub(old.bytes);
+            }
+        }
+        if self.needs_eviction(bytes) {
+            // Still over budget after draining — refuse insert.
+            return;
         }
         self.map.insert(
             key.clone(),
             Entry {
                 expires: now + self.ttl,
                 value,
+                bytes,
             },
         );
+        self.bytes_used = self.bytes_used.saturating_add(bytes);
         self.order.push_back(key);
     }
 
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    pub fn bytes_used(&self) -> usize {
+        self.bytes_used
+    }
+
+    fn needs_eviction(&self, incoming_bytes: usize) -> bool {
+        if self.map.len() >= self.max {
+            return true;
+        }
+        match self.max_bytes {
+            Some(cap) => self.bytes_used.saturating_add(incoming_bytes) > cap,
+            None => false,
+        }
     }
 
     fn touch(&mut self, key: &K) {
@@ -87,6 +128,13 @@ where
         }
     }
 
+    fn remove_key(&mut self, key: &K) {
+        if let Some(old) = self.map.remove(key) {
+            self.bytes_used = self.bytes_used.saturating_sub(old.bytes);
+        }
+        self.unlink(key);
+    }
+
     fn evict_expired(&mut self, now: Instant) {
         let expired: Vec<K> = self
             .map
@@ -95,8 +143,7 @@ where
             .map(|(k, _)| k.clone())
             .collect();
         for key in expired {
-            self.map.remove(&key);
-            self.unlink(&key);
+            self.remove_key(&key);
         }
     }
 }
@@ -153,5 +200,26 @@ mod tests {
             cache.get(&"k", t0 + Duration::from_millis(60)).is_none(),
             "get must not refresh expires past the original put TTL"
         );
+    }
+
+    #[test]
+    fn byte_budget_evicts_until_under_cap() {
+        let mut cache = TtlLruCache::with_byte_budget(Duration::from_secs(60), 32, Some(100));
+        let now = Instant::now();
+        cache.put_sized("a", 1, 40, now);
+        cache.put_sized("b", 2, 40, now);
+        cache.put_sized("c", 3, 40, now);
+        assert!(cache.bytes_used() <= 100);
+        assert!(cache.get(&"a", now).is_none());
+        assert_eq!(cache.get(&"c", now), Some(3));
+    }
+
+    #[test]
+    fn single_entry_larger_than_budget_is_refused() {
+        let mut cache = TtlLruCache::with_byte_budget(Duration::from_secs(60), 8, Some(50));
+        let now = Instant::now();
+        cache.put_sized("huge", 1, 51, now);
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.bytes_used(), 0);
     }
 }

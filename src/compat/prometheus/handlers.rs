@@ -30,17 +30,27 @@ use std::time::{Duration, Instant};
 
 const PROTO: ProtocolScope = ProtocolScope::Prometheus;
 
-/// Short-lived PromQL `query_range` result cache. Grafana SLO measures warmup +
-/// post-warmup ingest recovery + 3 repeats of the same `(expr, start, end, step)`.
-/// TTL must outlast the OTLP idle window after warmup (ingest is starved while
-/// PromQL runs). Capacity must exceed the dashboard cell count (~1472) plus live
-/// Grafana refreshes — never wipe the whole map on overflow.
-const RANGE_CACHE_TTL: Duration = Duration::from_secs(300);
+/// Short-lived PromQL `query_range` result cache for Grafana refresh storms
+/// (findings §3 / short TTL). Keys include start/end/step so live dashboards
+/// with a moving `end` rarely reuse a stale window; TTL stays short so fixed
+/// ranges do not serve multi-minute stale JSON after late ingest.
+/// Capacity must exceed the dashboard cell count (~1472) plus live refreshes —
+/// never wipe the whole map on overflow. Byte budget caps RSS (responses may
+/// approach the 16 MiB capability limit).
+const RANGE_CACHE_TTL: Duration = Duration::from_secs(60);
 const RANGE_CACHE_MAX: usize = 8192;
+/// ~64 MiB serialized JSON budget across all cached range answers.
+const RANGE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 fn range_result_cache() -> &'static Mutex<TtlLruCache<String, Value>> {
     static CACHE: OnceLock<Mutex<TtlLruCache<String, Value>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(TtlLruCache::new(RANGE_CACHE_TTL, RANGE_CACHE_MAX)))
+    CACHE.get_or_init(|| {
+        Mutex::new(TtlLruCache::with_byte_budget(
+            RANGE_CACHE_TTL,
+            RANGE_CACHE_MAX,
+            Some(RANGE_CACHE_MAX_BYTES),
+        ))
+    })
 }
 
 fn range_cache_get(key: &str) -> Option<Value> {
@@ -52,7 +62,8 @@ fn range_cache_put(key: String, data: Value) {
     let Ok(mut guard) = range_result_cache().lock() else {
         return;
     };
-    guard.put(key, data, Instant::now());
+    let bytes = serde_json::to_vec(&data).map(|v| v.len()).unwrap_or(0);
+    guard.put_sized(key, data, bytes, Instant::now());
 }
 
 fn tenant_ctx(tenant: TenantInfo) -> Result<TenantContext, CompatError> {
@@ -347,16 +358,19 @@ mod tests {
             RANGE_CACHE_MAX >= 8192,
             "must cover ~1472 SLO cells + live Grafana refreshes without thrash"
         );
-        assert!(RANGE_CACHE_TTL >= Duration::from_secs(60));
-        assert!(RANGE_CACHE_TTL <= Duration::from_secs(600));
+        assert!(RANGE_CACHE_TTL >= Duration::from_secs(30));
+        assert!(RANGE_CACHE_TTL <= Duration::from_secs(120));
+        assert!(RANGE_CACHE_MAX_BYTES >= 16 * 1024 * 1024);
     }
 
     #[test]
     fn range_cache_put_get_round_trip() {
-        let mut cache = TtlLruCache::new(RANGE_CACHE_TTL, 16);
+        let mut cache = TtlLruCache::with_byte_budget(RANGE_CACHE_TTL, 16, Some(1024 * 1024));
         let now = Instant::now();
         let key = "tenant|sum(x)|1|2|3".to_string();
-        cache.put(key.clone(), json!({"status": "success"}), now);
+        let data = json!({"status": "success"});
+        let bytes = serde_json::to_vec(&data).unwrap().len();
+        cache.put_sized(key.clone(), data, bytes, now);
         assert_eq!(
             cache.get(&key, now).and_then(|v| v.get("status").cloned()),
             Some(json!("success"))
