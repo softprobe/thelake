@@ -164,7 +164,7 @@ def check_ingest(client: SoftprobeProm) -> str | None:
     # Still require a change whose sample timestamp is recent so a stopped
     # collector cannot pass on stale churn left inside the lookback alone.
     start = end - 900
-    recent_max_age_s = 120
+    recent_max_age_s = 180
     best = 0
     newest_change_ts = 0.0
     used = ""

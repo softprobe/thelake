@@ -114,10 +114,27 @@ unpause_grafana() {
   fi
 }
 
+# Ensure OTLP is flowing before the pre-warmup ingest check. A prior gate
+# (or crash) may have left otel-collector stopped; freshness then fails.
+if ! docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
+  log "slo: starting otel-collector before ingest check"
+  docker start otel-collector >/dev/null 2>&1 || true
+fi
+
 log "slo: pre-warmup ingest check"
-ingest_out="$(python3 "$PY" --check-ingest 2>&1)" || true
-printf '%s\n' "$ingest_out" | tee -a "$LOG" >&2
-if ! grep -q "ingest ok" <<<"$ingest_out"; then
+ingest_ok=0
+ingest_out=""
+for ingest_try in 1 2 3 4 5 6; do
+  ingest_out="$(python3 "$PY" --check-ingest 2>&1)" || true
+  printf '%s\n' "$ingest_out" | tee -a "$LOG" >&2
+  if grep -q "ingest ok" <<<"$ingest_out"; then
+    ingest_ok=1
+    break
+  fi
+  log "slo: ingest not ready (try ${ingest_try}/6); waiting 20s"
+  sleep 20
+done
+if [[ "$ingest_ok" != 1 ]]; then
   fail "OTEL ingest is not live before Grafana warmup (see $LOG)"
 fi
 
