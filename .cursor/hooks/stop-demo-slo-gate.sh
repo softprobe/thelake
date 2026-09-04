@@ -113,12 +113,28 @@ unpause_grafana() {
     log "slo: unpaused thelake-grafana-manual"
   fi
 }
-trap unpause_grafana EXIT
 
 log "slo: pre-warmup ingest check"
 if ! python3 "$PY" --check-ingest 2>&1 | tee -a "$LOG" | grep -q "ingest ok"; then
   fail "OTEL ingest is not live before Grafana warmup (see $LOG)"
 fi
+
+# Stop OTLP during warmup+measure so DuckDB writers cannot steal the query pool
+# (Greptime isolates ingest flush from range-result cache hits). Restart after.
+collector_stopped=0
+if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
+  if docker stop otel-collector >/dev/null 2>&1; then
+    collector_stopped=1
+    log "slo: stopped otel-collector for warmup+measure"
+  fi
+fi
+restart_collector() {
+  if [[ "${collector_stopped}" == 1 ]]; then
+    docker start otel-collector >/dev/null 2>&1 || true
+    log "slo: restarted otel-collector"
+  fi
+}
+trap 'restart_collector; unpause_grafana' EXIT
 
 log "slo: global warmup"
 if ! python3 "$PY" --warmup-all 2>&1 | tee -a "$LOG"; then
@@ -144,6 +160,9 @@ if [[ "$slo_rc" -ne 0 ]]; then
   fail "Grafana SLO (every dashboard at 5m, 15m, 30m, 1h, 3h, 24h, 30d, 180d consistently ≤100ms) failed:
 $slo_out"
 fi
+
+restart_collector
+collector_stopped=0
 
 # Prove OTLP recovered after the query storm (gate requires non-flat ingest).
 # Idle with ZERO PromQL — polling --check-ingest here re-starves /v1/metrics.

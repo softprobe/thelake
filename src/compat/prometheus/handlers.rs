@@ -278,9 +278,14 @@ async fn query_range_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let (ctx, pairs, backend) = match prepare(&state, tenant, &method, &uri, &headers, &body).await
-    {
-        Ok(v) => v,
+    // Cache lookup before acquiring a tenant DuckDB engine — Greptime-style
+    // range-result cache must not pay ingest/query pool contention on hits.
+    let ctx = match tenant_ctx(tenant) {
+        Ok(c) => c,
+        Err(e) => return map_err(e),
+    };
+    let pairs = match collect_pairs(&method, uri.query(), &headers, &body) {
+        Ok(p) => p,
         Err(e) => return map_err(e),
     };
     let params = match parse_query_params(&pairs, &ctx.limits, true) {
@@ -297,6 +302,10 @@ async fn query_range_handler(
     if let Some(data) = range_cache_get(&cache_key) {
         return respond_data(&ctx, data);
     }
+    let backend = match backend_for(&state, &ctx).await {
+        Ok(b) => b,
+        Err(e) => return map_err(e),
+    };
     let expr = match parse_promql(&params.query) {
         Ok(e) => e,
         Err(e) => return map_err(e),
