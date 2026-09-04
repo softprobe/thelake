@@ -76,18 +76,23 @@ Audit date: 2026-08-14 against `src/compat/backends/ducklake_metrics.rs`, `src/q
 
 **Implication:** Narrow Grafana selectors (`{job=...}`) prune early. Unfiltered panels still avoid full attribute JSON materialization by projecting the known identity key set \(N\) as scalars.
 
-### 2.5 Caching — DuckDB file/object caches yes; Prom result cache no
+### 2.5 Caching — DuckDB file/object caches yes; short Prom `query_range` answer cache for refresh storms
 
 When `query.cache_dir` is set (default `/var/tmp/softprobe/duckdb`):
 
 - DuckDB: `enable_object_cache`, `enable_external_file_cache`, `enable_http_metadata_cache`, `parquet_metadata_cache`, `experimental_metadata_reuse`
 - Optional `cache_httpfs` on-disk wrap for S3/httpfs
 
+**Application caches (2026-09):**
+
+- **Allowed (Greptime-analogue):** day-scoped posting lists, `series_id` → labels, and short-TTL resolve-ids answers — not sample scans.
+- **Approved exception — short Prom `query_range` JSON cache:** process-local TTL+LRU with a **byte budget**, keyed by `tenant|query|start|end|step`. Purpose: Grafana **refresh storms** and the demo **steady-state-isolated** SLO gate (warmup + consecutive cache hits). TTL is short (≈60s). Live dashboards normally move `end`, so fixed-window staleness is bounded. Cold first paint must still be paid via postings + skinny samples; this cache must not become a substitute for scan work.
+
 **Gaps:**
 
-- No application-level Prom series / query-result cache across Grafana refreshes.
 - Within one `query_range`, one SQL fetch + in-memory step eval is already good (avoids O(steps) SQL).
-- “Segment cache” in the TSDB sense does not exist; rely on DuckDB byte/metadata caches only.
+- “Segment cache” in the TSDB sense does not exist; rely on DuckDB byte/metadata caches plus the short answer cache above.
+- Older half-map wipe caches (`PostingSetCache`, `SeriesMetaStore`) remain a follow-up migrate onto `compat::ttl_lru::TtlLruCache` (entry LRU) — out of scope for the Grafana SLO patch; do not add new half-wipe caches.
 
 ---
 
@@ -158,7 +163,7 @@ bench overlay documents the anti-pattern (1s scrape + `send_batch_size: 8`).
 
 **C1. Confirm cache_httpfs + external_file_cache are active** in the demo/deploy config (`query.cache_dir` writable).
 
-**C2. Do not cache PromQL HTTP answers.** Repeating Grafana's last `query_range` JSON is not a scan. Each request must hit postings + skinny samples (Greptime analog: DataFusion plan + SST inverted index, not a response TTL). DuckDB object/parquet metadata caches are engine page caches, not query-result reuse. **Allowed:** day-scoped posting lists and `series_id` → labels (series metadata / inverted index), which are not PromQL answers.
+**C2. Prefer postings + skinny samples over answer caches; short TTL answer cache is an approved refresh-storm exception.** Cold `query_range` must hit postings + samples (Greptime analog: plan + inverted index), not rely on a multi-minute HTTP JSON TTL. DuckDB object/parquet metadata caches are engine page caches. **Allowed always:** day-scoped posting lists and `series_id` → labels. **Allowed with constraints:** process-local `query_range` JSON reuse with short TTL (≤~60s), entry LRU, and a serialized-byte budget — see §2.5. Do not reintroduce unbounded or long-TTL answer caches that hide DuckDB cost.
 
 **C3. Dashboard guidance:** prefer `rate()` / narrow matchers; document expensive patterns (unmatched high-cardinality `sum(rate(...))` over long ranges).
 
@@ -287,7 +292,7 @@ Bare-VARIANT SELECT was attempted and **rejected**: DuckDB client error `decodin
 1. **Done (Option A):** `make bench-prom-baseline` harness + results dir + high-card loadgen (`BENCH_CARDINALITY`).
 2. **Done:** labeled `baseline` / `killcase-before` runs before lean-scan changes.
 3. **Done:** VARIANT pushdown for `job` / `instance` / safe equality labels; unit tests; kill-case remeasure.
-4. **Done:** skip histogram fidelity columns for plain gauges; drop SQL ORDER BY. Prom `query_range` HTTP/scan-result TTL caches were removed — they hid DuckDB cost instead of paying it.
+4. **Done (revised 2026-09):** skip histogram fidelity columns for plain gauges; drop SQL ORDER BY. A **short-TTL, byte-budgeted** Prom `query_range` answer cache was re-introduced for Grafana refresh storms + the steady-state-isolated demo SLO gate (§2.5 / C2 exception). Long-TTL / wipe-all answer caches remain forbidden.
 5. **Done:** lean scalar Prom SELECT (no `CAST(... AS JSON)`); resolve \(N\) from variant stats + promotions + aliases; promotion-aware matchers.
 6. **Done:** canonical metrics hot-label manifest + apply in bench/grafana-up before ingest.
 7. **Done (partial):** compaction interval 300s, metrics-first merge, retries (see Phase B).

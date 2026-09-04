@@ -64,6 +64,55 @@ static POSTING_SET_CACHE: Lazy<Mutex<PostingSetCache>> =
 static SERIES_META_CACHE: Lazy<Mutex<SeriesMetaStore>> =
     Lazy::new(|| Mutex::new(SeriesMetaStore::default()));
 
+/// Full postings-resolve answer for a matcher set + day span (short TTL).
+/// Covers multi-day Grafana/SLO windows that skip the per-day posting set cache
+/// so cold INTERSECT does not repeat on every panel refresh within ~30s.
+/// Byte budget mirrors the Prom range-result cache (refuse oversized id lists).
+static RESOLVE_IDS_CACHE: Lazy<
+    Mutex<crate::compat::ttl_lru::TtlLruCache<ResolveIdsKey, Arc<Vec<u64>>>>,
+> = Lazy::new(|| {
+    Mutex::new(crate::compat::ttl_lru::TtlLruCache::with_byte_budget(
+        RESOLVE_IDS_TTL,
+        RESOLVE_IDS_MAX,
+        Some(RESOLVE_IDS_MAX_BYTES),
+    ))
+});
+
+const RESOLVE_IDS_TTL: Duration = Duration::from_secs(30);
+const RESOLVE_IDS_MAX: usize = 4096;
+/// ~32 MiB of `u64` id payload across resolve-cache entries.
+const RESOLVE_IDS_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ResolveIdsKey {
+    engine_id: usize,
+    tenant_id: String,
+    start_day: Option<chrono::NaiveDate>,
+    end_day: Option<chrono::NaiveDate>,
+    /// Canonical equality set (sorted labels + sorted values) — full identity,
+    /// not a bare fingerprint (collision would return wrong series_ids).
+    equality: Arc<[crate::compat::backends::postings_resolve::EqualityPosting]>,
+}
+
+/// Stable cache identity: label order and value order from matchers must not
+/// create distinct keys for the same semantic posting set.
+fn canonicalize_equality(
+    equality: &[crate::compat::backends::postings_resolve::EqualityPosting],
+) -> Arc<[crate::compat::backends::postings_resolve::EqualityPosting]> {
+    let mut items: Vec<_> = equality
+        .iter()
+        .map(|eq| {
+            let mut values = eq.values.clone();
+            values.sort();
+            crate::compat::backends::postings_resolve::EqualityPosting {
+                label_name: eq.label_name.clone(),
+                values,
+            }
+        })
+        .collect();
+    items.sort_by(|a, b| a.label_name.cmp(&b.label_name));
+    Arc::from(items)
+}
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct TenantCacheKey {
     engine_id: usize,
@@ -470,25 +519,57 @@ impl DuckLakeMetricsBackend {
         let catalog = self.layout_catalog();
         let days = RecordDateRange::from_ms(start_ms, end_ms);
         let equality = equality_postings(matchers);
+        let engine_id = Arc::as_ptr(&self.query) as usize;
+        let tenant_id = ctx.tenant_id().to_string();
+        let resolve_key = ResolveIdsKey {
+            engine_id,
+            tenant_id: tenant_id.clone(),
+            start_day: days.start,
+            end_day: days.end,
+            equality: canonicalize_equality(&equality),
+        };
+        {
+            let mut guard = RESOLVE_IDS_CACHE.lock().await;
+            if let Some(ids) = guard.get(&resolve_key, Instant::now()) {
+                enforce_resolved_series_cap(ids.len(), ctx.limits.max_series)?;
+                return Ok(Arc::unwrap_or_clone(ids));
+            }
+        }
 
         // Day-scoped posting cache is for Grafana refreshes (AC-G3 / Q3), including
         // windows that straddle midnight (2 calendar days). Wider windows use SQL
         // + LIMIT so 180d does not issue hundreds of per-day posting fills.
-        if let Some(day_list) = days.inclusive_days() {
+        let ids = if let Some(day_list) = days.inclusive_days() {
             if !equality.is_empty() && posting_cache_covers_days(day_list.len()) {
-                let engine_id = Arc::as_ptr(&self.query) as usize;
-                let tenant_id = ctx.tenant_id().to_string();
-                let ids = self
-                    .resolve_series_ids_cached(
-                        ctx, &catalog, engine_id, &tenant_id, &day_list, &equality,
-                    )
-                    .await?;
-                enforce_resolved_series_cap(ids.len(), ctx.limits.max_series)?;
-                return Ok(ids);
+                self.resolve_series_ids_cached(
+                    ctx, &catalog, engine_id, &tenant_id, &day_list, &equality,
+                )
+                .await?
+            } else {
+                self.resolve_series_ids_sql_path(ctx, &catalog, days, &equality)
+                    .await?
             }
+        } else {
+            self.resolve_series_ids_sql_path(ctx, &catalog, days, &equality)
+                .await?
+        };
+        enforce_resolved_series_cap(ids.len(), ctx.limits.max_series)?;
+        {
+            let mut guard = RESOLVE_IDS_CACHE.lock().await;
+            let bytes = ids.len().saturating_mul(std::mem::size_of::<u64>());
+            guard.put_sized(resolve_key, Arc::new(ids.clone()), bytes, Instant::now());
         }
+        Ok(ids)
+    }
 
-        let sql = resolve_series_ids_sql(&catalog, days, &equality, ctx.limits.max_series);
+    async fn resolve_series_ids_sql_path(
+        &self,
+        ctx: &TenantContext,
+        catalog: &str,
+        days: RecordDateRange,
+        equality: &[crate::compat::backends::postings_resolve::EqualityPosting],
+    ) -> Result<Vec<u64>, CompatError> {
+        let sql = resolve_series_ids_sql(catalog, days, equality, ctx.limits.max_series);
         debug_assert!(
             sql.contains("metric_postings") && !sql.contains("FROM union_metrics"),
             "Prom resolve must use metric_postings: {sql}"
@@ -503,7 +584,6 @@ impl DuckLakeMetricsBackend {
         }
         ids.sort_unstable();
         ids.dedup();
-        enforce_resolved_series_cap(ids.len(), ctx.limits.max_series)?;
         Ok(ids)
     }
 
@@ -2528,5 +2608,87 @@ mod tests {
         assert!(!posting_cache_covers_days(0));
         assert!(!posting_cache_covers_days(3));
         assert!(!posting_cache_covers_days(180));
+    }
+
+    #[test]
+    fn canonicalize_equality_ignores_matcher_order() {
+        use crate::compat::backends::postings_resolve::EqualityPosting;
+        let a = vec![
+            EqualityPosting {
+                label_name: "job".into(),
+                values: vec!["b".into(), "a".into()],
+            },
+            EqualityPosting {
+                label_name: "__name__".into(),
+                values: vec!["m".into()],
+            },
+        ];
+        let b = vec![
+            EqualityPosting {
+                label_name: "__name__".into(),
+                values: vec!["m".into()],
+            },
+            EqualityPosting {
+                label_name: "job".into(),
+                values: vec!["a".into(), "b".into()],
+            },
+        ];
+        assert_eq!(canonicalize_equality(&a), canonicalize_equality(&b));
+        let other = vec![EqualityPosting {
+            label_name: "__name__".into(),
+            values: vec!["other".into()],
+        }];
+        assert_ne!(canonicalize_equality(&a), canonicalize_equality(&other));
+    }
+
+    #[test]
+    fn resolve_ids_cache_put_get_and_distinct_keys() {
+        use crate::compat::backends::postings_resolve::EqualityPosting;
+        use crate::compat::ttl_lru::TtlLruCache;
+        let mut cache: TtlLruCache<ResolveIdsKey, Arc<Vec<u64>>> =
+            TtlLruCache::with_byte_budget(Duration::from_secs(30), 8, Some(1024 * 1024));
+        let now = Instant::now();
+        let key_a = ResolveIdsKey {
+            engine_id: 1,
+            tenant_id: "t".into(),
+            start_day: None,
+            end_day: None,
+            equality: canonicalize_equality(&[EqualityPosting {
+                label_name: "__name__".into(),
+                values: vec!["a".into()],
+            }]),
+        };
+        let key_b = ResolveIdsKey {
+            engine_id: 1,
+            tenant_id: "t".into(),
+            start_day: None,
+            end_day: None,
+            equality: canonicalize_equality(&[EqualityPosting {
+                label_name: "__name__".into(),
+                values: vec!["b".into()],
+            }]),
+        };
+        cache.put_sized(key_a.clone(), Arc::new(vec![1, 2]), 16, now);
+        cache.put_sized(key_b.clone(), Arc::new(vec![9]), 8, now);
+        let hit_a = cache.get(&key_a, now).expect("key_a");
+        assert_eq!(hit_a.as_slice(), &[1u64, 2]);
+        let hit_b = cache.get(&key_b, now).expect("key_b");
+        assert_eq!(hit_b.as_slice(), &[9u64]);
+        // Capacity pressure must not wipe everything.
+        for i in 0..16 {
+            let k = ResolveIdsKey {
+                engine_id: 1,
+                tenant_id: "t".into(),
+                start_day: None,
+                end_day: None,
+                equality: canonicalize_equality(&[EqualityPosting {
+                    label_name: "__name__".into(),
+                    values: vec![format!("m{i}")],
+                }]),
+            };
+            cache.put_sized(k, Arc::new(vec![i as u64]), 8, now);
+        }
+        assert!(cache.len() <= 8);
+        assert!(!cache.is_empty());
     }
 }

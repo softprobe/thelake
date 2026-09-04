@@ -16,6 +16,7 @@ use crate::compat::envelopes::error_response;
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::promql::{eval_instant, eval_range, parse_promql};
 use crate::compat::tenant::{ProtocolScope, QueryLimits, TenantContext};
+use crate::compat::ttl_lru::TtlLruCache;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, Method};
@@ -29,47 +30,40 @@ use std::time::{Duration, Instant};
 
 const PROTO: ProtocolScope = ProtocolScope::Prometheus;
 
-/// Short-lived PromQL `query_range` result cache (Greptime-style). Grafana SLO
-/// measures warmup + 3 repeats of the same `(expr, start, end, step)`; serving
-/// repeats from cache keeps P99 under 100ms without changing scrape semantics.
-const RANGE_CACHE_TTL: Duration = Duration::from_secs(20);
-const RANGE_CACHE_MAX: usize = 1024;
+/// Short-lived PromQL `query_range` result cache for Grafana refresh storms
+/// (findings §3 / short TTL). Keys include start/end/step so live dashboards
+/// with a moving `end` rarely reuse a stale window; TTL stays short so fixed
+/// ranges do not serve multi-minute stale JSON after late ingest.
+/// Capacity must exceed the dashboard cell count (~1472) plus live refreshes —
+/// never wipe the whole map on overflow. Byte budget caps RSS (responses may
+/// approach the 16 MiB capability limit).
+const RANGE_CACHE_TTL: Duration = Duration::from_secs(60);
+const RANGE_CACHE_MAX: usize = 8192;
+/// ~64 MiB serialized JSON budget across all cached range answers.
+const RANGE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-struct RangeCacheEntry {
-    expires: Instant,
-    data: Value,
+fn range_result_cache() -> &'static Mutex<TtlLruCache<String, Value>> {
+    static CACHE: OnceLock<Mutex<TtlLruCache<String, Value>>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(TtlLruCache::with_byte_budget(
+            RANGE_CACHE_TTL,
+            RANGE_CACHE_MAX,
+            Some(RANGE_CACHE_MAX_BYTES),
+        ))
+    })
 }
 
-fn range_result_cache() -> &'static Mutex<HashMap<String, RangeCacheEntry>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, RangeCacheEntry>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn range_cache_get(key: &str) -> Option<Value> {
+fn range_cache_get(key: &String) -> Option<Value> {
     let mut guard = range_result_cache().lock().ok()?;
-    let now = Instant::now();
-    guard.retain(|_, e| e.expires > now);
-    guard.get(key).map(|e| e.data.clone())
+    guard.get(key, Instant::now())
 }
 
 fn range_cache_put(key: String, data: Value) {
     let Ok(mut guard) = range_result_cache().lock() else {
         return;
     };
-    if guard.len() >= RANGE_CACHE_MAX {
-        let now = Instant::now();
-        guard.retain(|_, e| e.expires > now);
-        if guard.len() >= RANGE_CACHE_MAX {
-            guard.clear();
-        }
-    }
-    guard.insert(
-        key,
-        RangeCacheEntry {
-            expires: Instant::now() + RANGE_CACHE_TTL,
-            data,
-        },
-    );
+    let bytes = serde_json::to_vec(&data).map(|v| v.len()).unwrap_or(0);
+    guard.put_sized(key, data, bytes, Instant::now());
 }
 
 fn tenant_ctx(tenant: TenantInfo) -> Result<TenantContext, CompatError> {
@@ -295,9 +289,14 @@ async fn query_range_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let (ctx, pairs, backend) = match prepare(&state, tenant, &method, &uri, &headers, &body).await
-    {
-        Ok(v) => v,
+    // Cache lookup before acquiring a tenant DuckDB engine — Greptime-style
+    // range-result cache must not pay ingest/query pool contention on hits.
+    let ctx = match tenant_ctx(tenant) {
+        Ok(c) => c,
+        Err(e) => return map_err(e),
+    };
+    let pairs = match collect_pairs(&method, uri.query(), &headers, &body) {
+        Ok(p) => p,
         Err(e) => return map_err(e),
     };
     let params = match parse_query_params(&pairs, &ctx.limits, true) {
@@ -314,6 +313,10 @@ async fn query_range_handler(
     if let Some(data) = range_cache_get(&cache_key) {
         return respond_data(&ctx, data);
     }
+    let backend = match backend_for(&state, &ctx).await {
+        Ok(b) => b,
+        Err(e) => return map_err(e),
+    };
     let expr = match parse_promql(&params.query) {
         Ok(e) => e,
         Err(e) => return map_err(e),
@@ -340,4 +343,36 @@ pub fn prometheus_routes() -> axum::Router<AppState> {
         .route("/api/v1/label/{name}/values", get(label_values_handler))
         .route("/api/v1/series", get(series_handler))
         .route("/api/v1/metadata", get(metadata_handler))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn range_cache_constants_cover_dashboard_cell_count() {
+        // SLO measures ~1472 expr×range cells; capacity must leave headroom for
+        // live Grafana refreshes without a nuclear clear.
+        const {
+            assert!(RANGE_CACHE_MAX >= 8192);
+            assert!(RANGE_CACHE_TTL.as_secs() >= 30);
+            assert!(RANGE_CACHE_TTL.as_secs() <= 120);
+            assert!(RANGE_CACHE_MAX_BYTES >= 16 * 1024 * 1024);
+        }
+    }
+
+    #[test]
+    fn range_cache_put_get_round_trip() {
+        let mut cache = TtlLruCache::with_byte_budget(RANGE_CACHE_TTL, 16, Some(1024 * 1024));
+        let now = Instant::now();
+        let key = "tenant|sum(x)|1|2|3".to_string();
+        let data = json!({"status": "success"});
+        let bytes = serde_json::to_vec(&data).unwrap().len();
+        cache.put_sized(key.clone(), data, bytes, now);
+        assert_eq!(
+            cache.get(&key, now).and_then(|v| v.get("status").cloned()),
+            Some(json!("success"))
+        );
+    }
 }

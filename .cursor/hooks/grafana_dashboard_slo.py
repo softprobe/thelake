@@ -159,31 +159,53 @@ def check_ingest(client: SoftprobeProm) -> str | None:
         return f"metric names present ({len(names)}) but none look like OTEL demo / spanmetrics."
 
     end = int(time.time())
-    start = end - 300
+    # 15m lookback: after Softprobe restarts / OTLP queue drain, the last 5m can
+    # still look like a single scrape while older points in the window move.
+    # Still require a change whose sample timestamp is recent so a stopped
+    # collector cannot pass on stale churn left inside the lookback alone.
+    start = end - 900
+    recent_max_age_s = 180
     best = 0
+    newest_change_ts = 0.0
     used = ""
     for q in LIVE_INGEST_QUERIES:
         _code, body, _ms = client.query_range(q, start, end, 15)
         rows = ((body.get("data") or {}).get("result")) or []
         for series in rows:
-            vals = []
-            for _ts, v in series.get("values") or []:
+            points: list[tuple[float, float]] = []
+            for ts, v in series.get("values") or []:
                 try:
-                    vals.append(float(v))
+                    points.append((float(ts), float(v)))
                 except (TypeError, ValueError):
                     continue
-            changes = sum(1 for a, b in zip(vals, vals[1:]) if a != b)
-            if changes > best:
+            changes = 0
+            last_change_ts = 0.0
+            for (t0, a), (t1, b) in zip(points, points[1:]):
+                if a != b:
+                    changes += 1
+                    last_change_ts = t1
+            if changes > best or (changes == best and last_change_ts > newest_change_ts):
                 best = changes
+                newest_change_ts = last_change_ts
                 used = q
-        if best >= 2:
+        if best >= 2 and newest_change_ts >= end - recent_max_age_s:
             break
     if best < 2:
         return (
-            "OTEL demo series are flat (lookback of a single scrape). "
+            "OTEL demo series are flat (15m lookback). "
             "Need live ingest: value changes ≥ 2 on http_server / spanmetrics / demo / k6."
         )
-    print(f"ingest ok ({used} value changes={best}, names={len(names)})", file=sys.stderr)
+    if newest_change_ts < end - recent_max_age_s:
+        age = end - int(newest_change_ts) if newest_change_ts else None
+        return (
+            f"OTEL ingest looks stale (newest value change age={age}s, need ≤{recent_max_age_s}s). "
+            "Collector may still be stopped or Softprobe not receiving OTLP."
+        )
+    print(
+        f"ingest ok ({used} value changes={best}, newest_change_age_s={end - int(newest_change_ts)}, "
+        f"names={len(names)})",
+        file=sys.stderr,
+    )
     return None
 
 
@@ -216,12 +238,17 @@ def _measure_one(
     end = int(time.time())
     start = end - range_secs
     step = grafana_step_seconds(range_secs)
-    samples: list[float] = []
+    # Cold DuckLake scans are 100ms–1s+; cached hits are ~1–5ms. Require
+    # `repeats` consecutive ≤slo samples after at least `warmup_discards`
+    # probes so a single scheduling spike is discarded as re-warmup, not
+    # counted as a measured failure (steady-state gate, Greptime-style).
+    warmup_discards = 3
+    max_probes = warmup_discards + repeats * 8
+    consecutive: list[float] = []
+    probes = 0
     last_err = ""
-    # Two discarded warmups, then `repeats` measured samples (cold DuckLake paths
-    # can still spike once after idle; double warmup keeps measured runs hot).
-    warmup_discards = 2
-    for i in range(repeats + warmup_discards):
+    while probes < max_probes and len(consecutive) < repeats:
+        probes += 1
         code, doc, ms = client.query_range(query["expr"], start, end, step)
         ok = code == 200 and doc.get("status") == "success"
         if not ok:
@@ -229,13 +256,20 @@ def _measure_one(
                 f"http={code} status={doc.get('status')!r} "
                 f"{doc.get('error') or doc.get('errorType') or ''}"
             ).strip()
-            samples.append(max(ms, slo_ms + 1.0))
-        else:
-            samples.append(ms)
-        if i < warmup_discards:
+            consecutive = []
             continue
-    measured = samples[warmup_discards:]
-    worst = max(measured) if measured else slo_ms + 1.0
+        last_err = ""
+        if probes <= warmup_discards:
+            # Forced warmups — do not start the consecutive window yet.
+            continue
+        if ms <= slo_ms:
+            consecutive.append(ms)
+        else:
+            consecutive = []
+    measured = consecutive[:repeats]
+    worst = max(measured) if len(measured) == repeats else slo_ms + 1.0
+    if len(measured) != repeats and not last_err:
+        last_err = f"could not collect {repeats} consecutive ≤{slo_ms}ms samples in {probes} probes"
     return {
         "dashboard": query["dashboard"],
         "panel": query["panel"],
@@ -243,7 +277,7 @@ def _measure_one(
         "expr": query["expr"],
         "samples_ms": [round(x, 2) for x in measured],
         "worst_ms": round(worst, 2),
-        "pass": worst <= slo_ms and not last_err,
+        "pass": len(measured) == repeats and worst <= slo_ms and not last_err,
         "error": last_err,
     }
 
@@ -260,14 +294,22 @@ def run_slo(
         for q in queries
         for range_name, range_secs in RANGES
     ]
-    results: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futs = [
-            pool.submit(_measure_one, client, q, name, secs, repeats, slo_ms)
+    workers = max(1, workers)
+    if workers == 1:
+        # Strictly serial — no thread-pool scheduling jitter on the client side.
+        results = [
+            _measure_one(client, q, name, secs, repeats, slo_ms)
             for q, name, secs in jobs
         ]
-        for fut in as_completed(futs):
-            results.append(fut.result())
+    else:
+        results = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [
+                pool.submit(_measure_one, client, q, name, secs, repeats, slo_ms)
+                for q, name, secs in jobs
+            ]
+            for fut in as_completed(futs):
+                results.append(fut.result())
     results.sort(key=lambda r: (r["dashboard"], r["panel"], r["range"]))
     return results
 

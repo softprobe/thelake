@@ -25,9 +25,11 @@ processors:
       log_record:
         - 'not IsMatch(resource.attributes["service.name"], "(?i)^(ad|cart|checkout|currency|email|fraud-detection|frontend|frontend-proxy|payment|product-catalog|quote|recommendation|shipping|accounting|flagd|load-generator)$")'
   batch/softprobe:
-    timeout: 20s
-    send_batch_size: 10000
-    send_batch_max_size: 10000
+    # 10k-point batches regularly exceed Softprobe's OTLP timeout under PromQL
+    # load (Grafana SLO warmup). Smaller batches keep /v1/metrics alive.
+    timeout: 5s
+    send_batch_size: 512
+    send_batch_max_size: 1024
   memory_limiter/softprobe:
     check_interval: 1s
     limit_mib: 512
@@ -38,7 +40,7 @@ exporters:
     endpoint: http://host.docker.internal:8090
     tls:
       insecure: true
-    timeout: 30s
+    timeout: 60s
     compression: gzip
     headers:
       Authorization: "Bearer local-dev-key"
@@ -46,11 +48,11 @@ exporters:
       enabled: true
       initial_interval: 1s
       max_interval: 15s
-      max_elapsed_time: 120s
+      max_elapsed_time: 180s
     sending_queue:
       enabled: true
-      num_consumers: 1
-      queue_size: 64
+      num_consumers: 2
+      queue_size: 256
 
 service:
   pipelines:
