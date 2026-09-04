@@ -354,13 +354,12 @@ mod tests {
     fn range_cache_constants_cover_dashboard_cell_count() {
         // SLO measures ~1472 expr×range cells; capacity must leave headroom for
         // live Grafana refreshes without a nuclear clear.
-        assert!(
-            RANGE_CACHE_MAX >= 8192,
-            "must cover ~1472 SLO cells + live Grafana refreshes without thrash"
-        );
-        assert!(RANGE_CACHE_TTL >= Duration::from_secs(30));
-        assert!(RANGE_CACHE_TTL <= Duration::from_secs(120));
-        assert!(RANGE_CACHE_MAX_BYTES >= 16 * 1024 * 1024);
+        const {
+            assert!(RANGE_CACHE_MAX >= 8192);
+            assert!(RANGE_CACHE_TTL.as_secs() >= 30);
+            assert!(RANGE_CACHE_TTL.as_secs() <= 120);
+            assert!(RANGE_CACHE_MAX_BYTES >= 16 * 1024 * 1024);
+        }
     }
 
     #[test]
