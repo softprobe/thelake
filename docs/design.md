@@ -40,9 +40,11 @@ decode OTLP -> Span / Log / Metric
 Arrow RecordBatch -> temporary local Parquet
         |
         v
-DuckDB transaction:
-  CREATE TABLE IF NEEDED
+DuckDB transaction (warm path):
+  BEGIN TRANSACTION
   INSERT ... SELECT read_parquet(...)
+  COMMIT
+  (table creation, layout & options ensured at startup/bootstrap)
         |
         v
 DuckLake
@@ -60,6 +62,8 @@ DuckLake write retries surface as HTTP `503` so exporters can retry.
 **Soft coalesce** (`flush_interval_seconds` > 0): OTLP returns after enqueue; a
 background timer flushes coalesced batches. Post-ack write failures are logged
 and dropped (not returned to the exporter). Unflushed rows may be lost on crash.
+Soft coalesce amortizes commit frequency, but is not a mitigation for
+schema-on-write; the warm ingest hot path performs zero schema/DDL probes.
 
 The temporary Parquet file is only an input adapter between Arrow and DuckLake
 and is deleted after the transaction; it is not a staged durability tier.

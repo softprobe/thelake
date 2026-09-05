@@ -295,6 +295,30 @@ impl DuckLakeWriter {
         let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
         let max_labels = super::DEFAULT_MAX_LABELS_PER_SERIES;
         let pool = self.get_or_create_pool(dk)?;
+
+        if !pool.is_table_ready("metric_samples") {
+            let lock = pool.table_lock("metric_samples");
+            let _guard = lock.lock().await;
+            if !pool.is_table_ready("metric_samples") {
+                let catalog_clone = catalog.clone();
+                let pool_for_ensure = pool.clone();
+                tokio::task::spawn_blocking(move || {
+                    pool_for_ensure.with_conn(|conn| {
+                        crate::storage::schema::ensure_metrics_layout_family_tables(
+                            conn,
+                            &catalog_clone,
+                        )
+                    })
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("metrics layout ensure join failed: {e}"))??;
+                for t in crate::storage::schema::METRICS_LAYOUT_CORE_TABLES {
+                    pool.mark_table_ready(t.name);
+                }
+                pool.mark_table_ready("metrics");
+            }
+        }
+
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
                 super::write_metrics_layout_txn(conn, &catalog, &metrics, max_labels)

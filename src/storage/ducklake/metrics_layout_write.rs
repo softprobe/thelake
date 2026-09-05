@@ -8,9 +8,7 @@ use crate::compat::projection::prometheus::{
 };
 use crate::models::Metric;
 use crate::storage::ducklake::util::escape_sql_literal;
-use crate::storage::schema::metrics_layout::{
-    ensure_metrics_layout_family_tables, qualified_metrics_layout_table,
-};
+use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
 use crate::storage::schema::variant::encode_attributes_json;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -536,7 +534,7 @@ fn exec_chunked<T>(
     Ok(())
 }
 
-/// Ensure core (+ family DDL for maintenance targets) then ingest in one transaction.
+/// Ingest metrics in one transaction. Table readiness is ensured prior to write.
 pub fn write_metrics_layout_txn(
     conn: &Connection,
     catalog_alias: &str,
@@ -546,9 +544,6 @@ pub fn write_metrics_layout_txn(
     if metrics.is_empty() {
         return Ok(());
     }
-    // Family ensure is outside the sample txn so CREATE/ALTER snapshots stay separate
-    // from the data commit (one data BEGIN…COMMIT per successful /v1/metrics).
-    ensure_metrics_layout_family_tables(conn, catalog_alias)?;
 
     let prepared = prepare_ingest(metrics, max_labels);
     conn.execute_batch("BEGIN TRANSACTION;")?;
@@ -633,8 +628,8 @@ pub fn count_variant_columns(conn: &Connection, catalog: &str, table_name: &str)
 mod tests {
     use super::*;
     use crate::storage::schema::metrics_layout::{
-        ensure_metrics_layout_core_tables, MAINTENANCE_METRICS_FAMILY_TABLES,
-        METRICS_LAYOUT_CORE_TABLES,
+        ensure_metrics_layout_core_tables, ensure_metrics_layout_family_tables,
+        MAINTENANCE_METRICS_FAMILY_TABLES, METRICS_LAYOUT_CORE_TABLES,
     };
     use chrono::TimeZone;
     use std::collections::HashSet;
@@ -662,6 +657,7 @@ mod tests {
             data.to_string_lossy().replace('\'', "''"),
         ))
         .expect("attach");
+        ensure_metrics_layout_family_tables(&conn, catalog).expect("layout ensure");
         (conn, catalog.to_string())
     }
 

@@ -634,47 +634,24 @@ async fn variant_write_fails_fast_on_legacy_map_table() {
         );
     }
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let now = Utc::now();
-    let mut attributes = HashMap::new();
-    attributes.insert("sp.observation.type".to_string(), "generation".to_string());
-    let span = SpanData {
-        session_id: "legacy-map".to_string(),
-        trace_id: "tr-legacy".to_string(),
-        span_id: "sp-legacy".to_string(),
-        parent_span_id: None,
-        app_id: "variant-app".to_string(),
-        organization_id: None,
-        tenant_id: None,
-        message_type: "chat".to_string(),
-        span_kind: Some("INTERNAL".to_string()),
-        timestamp: now,
-        end_timestamp: Some(now),
-        attributes,
-        resource_attributes: HashMap::new(),
-        events: Vec::new(),
-        http_request_method: None,
-        http_request_path: None,
-        http_request_headers: None,
-        http_request_body: None,
-        http_response_status_code: None,
-        http_response_headers: None,
-        http_response_body: None,
-        status_code: Some("OK".to_string()),
-        status_message: None,
-    };
-
-    let write_result = pipeline.write_span_batches(vec![vec![span]]).await;
+    let pipeline_res = IngestPipeline::new(&config).await;
     match previous_reset {
         Some(value) => std::env::set_var("SPLAKE_RESET_DUCKLAKE", value),
         None => std::env::remove_var("SPLAKE_RESET_DUCKLAKE"),
     }
 
-    let err = write_result.expect_err("legacy MAP table must fail fast");
+    let err = match pipeline_res {
+        Ok(_) => panic!("legacy MAP table must fail fast at startup"),
+        Err(e) => e,
+    };
     let message = err.to_string();
     assert!(
-        message.contains("expected VARIANT") || message.contains("VARIANT"),
-        "error should mention VARIANT migration, got: {message}"
+        message.contains("expected VARIANT"),
+        "error must mention VARIANT requirement: {message}"
+    );
+    assert!(
+        message.contains("Hot MAP columns were migrated"),
+        "error must mention migration advice: {message}"
     );
     assert!(
         message.contains("rebuild") || message.contains("migrate"),

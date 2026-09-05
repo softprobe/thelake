@@ -71,6 +71,15 @@ request as soon as rows are buffered; flush to DuckLake on a timer (and via
 returned to the exporter. Unflushed rows may be lost on crash. This is not a
 WAL or staged tier.
 
+**Schema/DDL off the hot path (locked principle):** Schema creation, validation,
+timestamp precision migrations, partition/sort layout, and table options
+(`set_option`) run strictly during writer-pool startup/bootstrap, explicit
+promotion (`POST /v1/promotions/apply`), or maintenance. The warm INSERT path
+executes strictly `BEGIN TRANSACTION; INSERT ...; COMMIT;`. Soft coalesce
+(`ingest.flush_interval_seconds` > 0) amortizes commit frequency, but is **not**
+a mitigation for schema-on-write overhead; warm writes perform zero `DESCRIBE`,
+partition-info, or DDL probes regardless of flush interval.
+
 The writer may create a temporary local Parquet file to bridge Arrow into
 DuckLake. That file is deleted after commit or failure and is not durable,
 queryable, or recoverable storage.

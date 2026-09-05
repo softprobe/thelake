@@ -7,7 +7,7 @@
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
 
-use super::ducklake_partition::table_partition_sort_ready;
+use super::ducklake_partition::{describe_table_columns, table_partition_sort_ready};
 
 /// Calendar-day partition key shared by every metrics-layout table.
 pub const METRICS_LAYOUT_PARTITION_COLUMN: &str = "record_date";
@@ -219,29 +219,6 @@ pub fn ensure_metrics_layout_table(
     Ok(())
 }
 
-fn describe_layout_columns(
-    conn: &Connection,
-    qualified_table: &str,
-) -> Result<std::collections::HashMap<String, String>> {
-    let sql = format!("DESCRIBE {qualified_table};");
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| anyhow!("DESCRIBE {qualified_table} failed: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            let name: String = row.get(0)?;
-            let dtype: String = row.get(1)?;
-            Ok((name, dtype))
-        })
-        .map_err(|e| anyhow!("DESCRIBE {qualified_table} query failed: {e}"))?;
-    let mut found = std::collections::HashMap::new();
-    for row in rows {
-        let (name, dtype) = row.map_err(|e| anyhow!("DESCRIBE row failed: {e}"))?;
-        found.insert(name.to_ascii_lowercase(), dtype);
-    }
-    Ok(found)
-}
-
 /// Idempotent ADD COLUMN for layout fields introduced after the table already existed.
 ///
 /// Demo lakes created before `aggregation_temporality` / hist fidelity columns would
@@ -260,7 +237,7 @@ fn ensure_layout_additive_columns(
         _ => return Ok(()),
     };
     let qualified = qualified_metrics_layout_table(catalog_alias, table_name);
-    let found = describe_layout_columns(conn, &qualified)?;
+    let found = describe_table_columns(conn, &qualified)?;
     let ddls = needed
         .iter()
         .filter(|(name, _)| !found.contains_key(*name))
@@ -547,7 +524,7 @@ mod tests {
              ALTER TABLE {catalog}.metric_series SET SORTED BY (metric_name, series_id);"
         ))
         .expect("legacy create");
-        let before = describe_layout_columns(
+        let before = describe_table_columns(
             &conn,
             &qualified_metrics_layout_table(&catalog, "metric_series"),
         )
@@ -558,7 +535,7 @@ mod tests {
         ensure_metrics_layout_table(&conn, &catalog, &METRICS_LAYOUT_CORE_TABLES[0])
             .expect("ensure additive");
 
-        let after = describe_layout_columns(
+        let after = describe_table_columns(
             &conn,
             &qualified_metrics_layout_table(&catalog, "metric_series"),
         )
@@ -580,7 +557,7 @@ mod tests {
              ALTER TABLE {catalog}.metric_hist_samples SET SORTED BY (series_id, timestamp);"
         ))
         .expect("legacy hist create");
-        let before = describe_layout_columns(
+        let before = describe_table_columns(
             &conn,
             &qualified_metrics_layout_table(&catalog, "metric_hist_samples"),
         )
@@ -594,7 +571,7 @@ mod tests {
             .expect("hist table spec");
         ensure_metrics_layout_table(&conn, &catalog, hist).expect("ensure hist additive");
 
-        let after = describe_layout_columns(
+        let after = describe_table_columns(
             &conn,
             &qualified_metrics_layout_table(&catalog, "metric_hist_samples"),
         )

@@ -1,31 +1,11 @@
+use crate::storage::schema::describe_table_columns;
 use crate::storage::schema::variant::hot_variant_columns;
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
-use std::collections::HashMap;
 use tracing::warn;
 
 pub(crate) fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
-}
-
-/// Write attempt outcome: only qualification/engine errors may try the next table name candidate.
-pub(super) enum WriteAttemptError {
-    /// Schema incompatibility (legacy MAP, missing VARIANT column) — fail the write immediately.
-    Fatal(anyhow::Error),
-    /// Likely three-part name / catalog issues — try `catalog.table` fallback.
-    Retryable(anyhow::Error),
-}
-
-impl WriteAttemptError {
-    pub(super) fn from_variant_guard(err: anyhow::Error) -> Self {
-        let msg = err.to_string();
-        if msg.contains("expected VARIANT") || msg.contains("missing required VARIANT") {
-            Self::Fatal(err)
-        } else {
-            // DESCRIBE / prepare failures can mean the three-part name is unsupported.
-            Self::Retryable(err)
-        }
-    }
 }
 
 /// Fail fast when an existing DuckLake table still uses MAP for hot VARIANT columns.
@@ -38,7 +18,7 @@ pub(super) fn ensure_variant_column_types(
     if expected.is_empty() {
         return Ok(());
     }
-    let found = describe_columns(conn, qualified_table)?;
+    let found = describe_table_columns(conn, qualified_table)?;
 
     for col in expected {
         let Some(dtype) = found.get(*col) else {
@@ -95,7 +75,7 @@ fn ensure_timestamp_precision(
     columns: &[&str],
     kind: &str,
 ) -> Result<()> {
-    let found = describe_columns(conn, qualified_table)?;
+    let found = describe_table_columns(conn, qualified_table)?;
     let mut ddls = Vec::new();
 
     for &column in columns {
@@ -130,7 +110,7 @@ fn ensure_timestamp_precision(
         })?;
     }
 
-    let verified = describe_columns(conn, qualified_table)?;
+    let verified = describe_table_columns(conn, qualified_table)?;
     for &column in columns {
         if verified.get(column).map(|dtype| dtype.as_str()) != Some("TIMESTAMP_NS") {
             return Err(anyhow!(
@@ -145,7 +125,7 @@ pub(super) fn ensure_trace_fidelity_columns(
     conn: &Connection,
     qualified_table: &str,
 ) -> Result<()> {
-    let found = describe_columns(conn, qualified_table)?;
+    let found = describe_table_columns(conn, qualified_table)?;
     let ddls = [
         ("resource_attributes", "VARIANT"),
         ("instrumentation_scope", "VARIANT"),
@@ -165,27 +145,6 @@ pub(super) fn ensure_trace_fidelity_columns(
             "failed to add Tempo trace fidelity columns on {qualified_table}; refusing write: {e}"
         )
     })
-}
-
-fn describe_columns(conn: &Connection, qualified_table: &str) -> Result<HashMap<String, String>> {
-    let sql = format!("DESCRIBE {qualified_table};");
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| anyhow!("DESCRIBE {qualified_table} failed: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            let name: String = row.get(0)?;
-            let dtype: String = row.get(1)?;
-            Ok((name, dtype))
-        })
-        .map_err(|e| anyhow!("DESCRIBE {qualified_table} query failed: {e}"))?;
-
-    let mut found: HashMap<String, String> = HashMap::new();
-    for row in rows {
-        let (name, dtype) = row.map_err(|e| anyhow!("DESCRIBE row failed: {e}"))?;
-        found.insert(name, dtype);
-    }
-    Ok(found)
 }
 
 pub(super) fn quote_duckdb_ident(input: &str) -> String {

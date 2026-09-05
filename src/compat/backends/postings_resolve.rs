@@ -1145,6 +1145,8 @@ mod tests {
             data.to_string_lossy().replace('\'', "''"),
         ))
         .expect("attach");
+        crate::storage::schema::ensure_metrics_layout_family_tables(&conn, catalog)
+            .expect("layout ensure");
         (conn, catalog.to_string())
     }
 
