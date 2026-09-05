@@ -49,9 +49,8 @@ pub fn ensure_otlp_table_partition_sort(conn: &Connection, qualified_table: &str
          ALTER TABLE {qualified_table} SET SORTED BY ({});",
         layout.sorted_by
     );
-    conn.execute_batch(&sql).map_err(|e| {
-        anyhow!("failed to apply OTLP partition/sort on {qualified_table}: {e}")
-    })?;
+    conn.execute_batch(&sql)
+        .map_err(|e| anyhow!("failed to apply OTLP partition/sort on {qualified_table}: {e}"))?;
     Ok(())
 }
 
