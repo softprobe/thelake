@@ -68,7 +68,11 @@ test.describe('Query Features, Functions & Aggregations Verification', () => {
       const seriesList = proxyJson.data?.result || [];
 
       if (item.validate) {
-        expect(item.validate(seriesList)).toBe(true);
+        const ok = item.validate(seriesList);
+        expect(
+          ok,
+          `validate failed for ${item.id}: series=${seriesList.length} expr=${item.expr}`,
+        ).toBe(true);
       }
     });
   }

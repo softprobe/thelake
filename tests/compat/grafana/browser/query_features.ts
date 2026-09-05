@@ -3,6 +3,9 @@
  * Matches the checklist in docs/compat/query_features_checklist.md.
  */
 
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
 export interface QueryFeatureTestCase {
   id: string;
   category: 'selectors' | 'rate_family' | 'over_time' | 'aggregations' | 'math' | 'operators' | 'histograms' | 'modifiers' | 'discovery' | 'loki';
@@ -13,6 +16,12 @@ export interface QueryFeatureTestCase {
   description: string;
   validate?: (data: any) => boolean;
 }
+
+/** Shared with scripts/grafana-manual-up.sh readiness gate (single source of truth). */
+export const HISTOGRAM_BUCKET_RATE_EXPR = readFileSync(
+  join(__dirname, 'catalog_gates', 'histogram_bucket_rate.expr'),
+  'utf8',
+).trim();
 
 export const QUERY_FEATURE_CATALOG: QueryFeatureTestCase[] = [
   // --- 1. Selectors & Matchers ---
@@ -491,10 +500,16 @@ export const QUERY_FEATURE_CATALOG: QueryFeatureTestCase[] = [
     id: 'H-04',
     category: 'histograms',
     name: 'histogram_bucket_rate',
-    expr: 'sum by (le) (rate(http_server_request_duration_bucket[5m]))',
+    // Prefer k6 classic histogram buckets: rate() needs ≥2 raw samples per series in
+    // the window. OTLP http_server_* series go sparse under collector export backoff,
+    // so rate(...[5m]) returns empty while k6 scrapes stay dense enough for CI.
+    // H-01–H-03 still cover http_server_* shape without rate(); astronomy boards that
+    // use rate(http_server_…_bucket[5m]) remain a separate GOLD density concern.
+    expr: HISTOGRAM_BUCKET_RATE_EXPR,
     isRange: true,
     description: 'Rate of observation count by histogram bucket',
-    validate: (data) => Array.isArray(data) && data.length > 0,
+    validate: (data) =>
+      Array.isArray(data) && data.length > 0 && data.some((s) => 'le' in (s.metric || {})),
   },
 
   // --- 8. Loki LogQL Features ---

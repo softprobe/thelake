@@ -48,6 +48,8 @@ TENANT_SCHEMA="${GRAFANA_TENANT_SCHEMA:-${PG_SCHEMA}_local_dev_tenant}"
 OTEL_DEMO_TAG="${OTEL_DEMO_TAG:-3.0.0}"
 CACHE_ROOT="${THELAKE_CACHE_ROOT:-$HOME/.cache/thelake}"
 DEMO_DIR="${OTEL_DEMO_DIR:-$CACHE_ROOT/otel-demo/$OTEL_DEMO_TAG}"
+# Shared with tests/compat/grafana/browser/query_features.ts (H-04 catalog expr).
+HISTOGRAM_BUCKET_RATE_EXPR_FILE="$ROOT/tests/compat/grafana/browser/catalog_gates/histogram_bucket_rate.expr"
 DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
 
@@ -206,6 +208,55 @@ PY
     echo "  softprobe: tail -60 $LOG" >&2
     exit 1
   fi
+
+  wait_for_histogram_bucket_rates
+}
+
+# rate() on classic _bucket needs ≥2 raw samples per series in the window.
+# Expr is shared with browser H-04 (catalog_gates/histogram_bucket_rate.expr).
+wait_for_histogram_bucket_rates() {
+  local bucket_q
+  if [[ ! -f "$HISTOGRAM_BUCKET_RATE_EXPR_FILE" ]]; then
+    echo "ERROR: missing H-04 expr file: $HISTOGRAM_BUCKET_RATE_EXPR_FILE" >&2
+    exit 1
+  fi
+  bucket_q="$(tr -d '\n' <"$HISTOGRAM_BUCKET_RATE_EXPR_FILE")"
+  echo "==> waiting for classic histogram bucket rates (H-04)"
+  local bucket_rate_ok=0
+  local end start payload
+  for _ in $(seq 1 60); do
+    end="$(date +%s)"
+    start="$((end - 600))"
+    payload="$(curl -sf -m 30 -H "Authorization: Bearer $API_KEY" \
+      -H "X-Scope-OrgID: $TENANT_ID" \
+      -H 'Content-Type: application/x-www-form-urlencoded' \
+      --data-urlencode "query=$bucket_q" \
+      --data "start=$start&end=$end&step=15" \
+      "$SOFTPROBE_URL_HOST/api/v1/query_range" 2>/dev/null || true)"
+    printf '%s' "$payload" > /tmp/thelake-grafana-prom-bucket-rate.json
+    if python3 - <<'PY'
+import json
+try:
+    d = json.load(open("/tmp/thelake-grafana-prom-bucket-rate.json"))
+except Exception:
+    raise SystemExit(1)
+rows = (d.get("data") or {}).get("result") or []
+ok = any("le" in ((s.get("metric") or {})) for s in rows)
+raise SystemExit(0 if ok else 1)
+PY
+    then
+      bucket_rate_ok=1
+      echo "==> histogram bucket rates OK ($bucket_q)"
+      break
+    fi
+    sleep 5
+  done
+  if [[ "$bucket_rate_ok" != 1 ]]; then
+    echo "ERROR: classic histogram bucket rate query stayed empty (need ≥2 samples/series in 5m)." >&2
+    echo "  query: $bucket_q" >&2
+    echo "  collector: docker logs otel-collector 2>&1 | tail -60" >&2
+    exit 1
+  fi
 }
 
 wait_for_demo_logs() {
@@ -274,6 +325,7 @@ except Exception:
       "$SOFTPROBE_URL_HOST/loki/api/v1/labels?start=$start_ns&end=$end_ns" 2>/dev/null || true)"
     if [[ -n "$loki_body" ]] && [[ "$loki_body" == *'"status":"success"'* ]] \
       && [[ "$loki_body" == *'"data":['* ]] && [[ "$loki_body" != *'"data":[]'* ]]; then
+      wait_for_histogram_bucket_rates
       echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live Prom + Loki OK)."
       print_ready
       exit 0
