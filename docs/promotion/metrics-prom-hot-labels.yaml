@@ -4,7 +4,7 @@
 specVersion: softprobe.promotion.v1
 target:
   kind: telemetry_columns
-  tables: [metrics]
+  tables: [metric_samples]
 columns:
   - name: service_name
     type: string
