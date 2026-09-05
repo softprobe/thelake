@@ -8,6 +8,8 @@
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
 
+use super::ducklake_partition::table_partition_sort_ready;
+
 const PARTITION_COLUMN: &str = "record_date";
 
 #[derive(Debug, Clone, Copy)]
@@ -39,7 +41,7 @@ pub fn ensure_otlp_table_partition_sort(conn: &Connection, qualified_table: &str
     let Some(layout) = OTLP_LAYOUT_TABLES.iter().find(|t| t.name == table_name) else {
         return Ok(());
     };
-    if otlp_table_partition_ready(conn, qualified_table, table_name)? {
+    if table_partition_sort_ready(conn, qualified_table, table_name)? {
         return Ok(());
     }
     let sql = format!(
@@ -51,31 +53,6 @@ pub fn ensure_otlp_table_partition_sort(conn: &Connection, qualified_table: &str
         anyhow!("failed to apply OTLP partition/sort on {qualified_table}: {e}")
     })?;
     Ok(())
-}
-
-fn otlp_table_partition_ready(
-    conn: &Connection,
-    qualified_table: &str,
-    table_name: &str,
-) -> Result<bool> {
-    // Prefer catalog-metadata check when available; fall back to DESCRIBE-less no-op probe.
-    let attach = qualified_table.split('.').next().unwrap_or("softprobe");
-    let meta = format!("__ducklake_metadata_{attach}");
-    let sql = format!(
-        "SELECT \
-            (SELECT count(*) FROM {meta}.ducklake_partition_info info \
-             JOIN {meta}.ducklake_table t ON info.table_id = t.table_id \
-             WHERE t.table_name = ? AND t.end_snapshot IS NULL) AS parts, \
-            (SELECT count(*) FROM {meta}.ducklake_sort_info info \
-             JOIN {meta}.ducklake_table t ON info.table_id = t.table_id \
-             WHERE t.table_name = ? AND t.end_snapshot IS NULL) AS sorts"
-    );
-    let (parts, sorts): (i64, i64) = conn
-        .query_row(&sql, [table_name, table_name], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .unwrap_or((0, 0));
-    Ok(parts > 0 && sorts > 0)
 }
 
 #[cfg(test)]
