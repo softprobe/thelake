@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
 
 type BoxFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
@@ -311,7 +311,9 @@ mod tests {
         let calls = StdArc::new(AtomicUsize::new(0));
         let rows = StdArc::new(TokioMutex::new(Vec::new()));
         let buf = CoalesceBuf::new(1, counting_writer(calls.clone(), rows, true));
-        buf.enqueue(vec![1]).await.expect("enqueue ok despite later fail");
+        buf.enqueue(vec![1])
+            .await
+            .expect("enqueue ok despite later fail");
         // force_flush surfaces the error for tests; enqueue already succeeded.
         let err = buf.force_flush().await;
         assert!(err.is_err());
