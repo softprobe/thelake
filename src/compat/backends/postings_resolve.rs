@@ -1130,24 +1130,12 @@ mod tests {
     }
 
     fn attach_ducklake(temp: &TempDir) -> (Connection, String) {
-        let meta = temp.path().join("metadata.sqlite");
-        let data = temp.path().join("data");
-        std::fs::create_dir_all(&data).expect("data dir");
-        let conn = Connection::open_in_memory().expect("duckdb");
-        conn.execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
-            .expect("extensions");
-        let catalog = "softprobe";
-        conn.execute_batch(&format!(
-            "ATTACH 'ducklake:sqlite:{}' AS {catalog} \
-             (DATA_PATH '{}', META_JOURNAL_MODE 'WAL', META_BUSY_TIMEOUT 5000, \
-              DATA_INLINING_ROW_LIMIT 0);",
-            meta.to_string_lossy().replace('\'', "''"),
-            data.to_string_lossy().replace('\'', "''"),
-        ))
-        .expect("attach");
-        crate::storage::schema::ensure_metrics_layout_family_tables(&conn, catalog)
+        let config = crate::test_support::file_backed_test_config(temp);
+        let (conn, catalog) =
+            crate::storage::ducklake::open_and_attach_ducklake(&config.ducklake).expect("attach");
+        crate::storage::schema::ensure_metrics_layout_family_tables(&conn, &catalog)
             .expect("layout ensure");
-        (conn, catalog.to_string())
+        (conn, catalog)
     }
 
     fn gauge(name: &str, instance: &str, ts: DateTime<Utc>, value: f64) -> Metric {

@@ -401,16 +401,4 @@ impl DuckLakeWriter {
         self.write_record_batches_internal("logs", record_batches)
             .await
     }
-
-    pub async fn write_metric_record_batches(
-        &self,
-        _record_batches: Vec<RecordBatch>,
-    ) -> Result<()> {
-        // Arrow-to-layout conversion is removed (§11.3). Callers must use Metric batches
-        // via `write_metric_batches` (layout ingest). Keeping the method so external
-        // signatures stay stable until call sites are deleted.
-        Err(anyhow::anyhow!(
-            "write_metric_record_batches is retired; use write_metric_batches (metrics layout ingest)"
-        ))
-    }
 }

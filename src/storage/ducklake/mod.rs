@@ -18,6 +18,7 @@ pub(crate) use metrics_layout_write::{
     layout_catalog_prefix, write_metrics_layout_txn, DEFAULT_MAX_LABELS_PER_SERIES,
 };
 
+pub use attach::open_and_attach_ducklake;
 pub use object_store::{configure_httpfs_gcs_for_data_path, configure_object_store};
 pub use writer::DuckLakeWriter;
 

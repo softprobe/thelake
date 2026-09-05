@@ -140,6 +140,38 @@ pub(crate) fn ducklake_set_option_scope_for_qualified(qualified_table: &str) -> 
     }
 }
 
+/// Open an in-memory DuckDB connection and attach DuckLake driven entirely by [`DuckLakeConfig`].
+/// Reuses production attach logic across SQLite and PostgreSQL (DRY first).
+pub fn open_and_attach_ducklake(dk: &DuckLakeConfig) -> anyhow::Result<(Connection, String)> {
+    let conn =
+        Connection::open_in_memory().map_err(|e| anyhow::anyhow!("DuckDB open failed: {e}"))?;
+    conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
+    if dk.catalog_type == "postgres" {
+        conn.execute_batch("INSTALL postgres; LOAD postgres;")?;
+    }
+    if dk.catalog_type == "sqlite" {
+        conn.execute_batch("INSTALL sqlite; LOAD sqlite;")?;
+    }
+    apply_ducklake_retry_settings(&conn)?;
+
+    let attach_target = ducklake_attach_target(dk);
+    prepare_local_ducklake_paths(dk, &attach_target)?;
+
+    let options = ducklake_attach_options(dk);
+    let sql = format!(
+        "ATTACH 'ducklake:{target}' AS {alias} ({opts});",
+        target = escape_sql_literal(&attach_target),
+        alias = dk.catalog_alias,
+        opts = options.join(", ")
+    );
+    conn.execute_batch(&sql)
+        .map_err(|e| anyhow::anyhow!("DuckLake attach failed: {e}"))?;
+
+    let catalog =
+        super::metrics_layout_write::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
+    Ok((conn, catalog))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

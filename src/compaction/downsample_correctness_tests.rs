@@ -35,22 +35,8 @@ const EVAL_DAY: &str = "2023-11-14";
 const EVAL_HOUR: &str = "2023-11-14 10:00:00+00";
 
 fn attach_ducklake(temp: &TempDir) -> (Connection, String) {
-    let meta = temp.path().join("metadata.sqlite");
-    let data = temp.path().join("data");
-    std::fs::create_dir_all(&data).expect("data dir");
-    let conn = Connection::open_in_memory().expect("duckdb");
-    conn.execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
-        .expect("extensions");
-    let catalog = "softprobe";
-    conn.execute_batch(&format!(
-        "ATTACH 'ducklake:sqlite:{}' AS {catalog} \
-         (DATA_PATH '{}', META_JOURNAL_MODE 'WAL', META_BUSY_TIMEOUT 5000, \
-          DATA_INLINING_ROW_LIMIT 0);",
-        meta.to_string_lossy().replace('\'', "''"),
-        data.to_string_lossy().replace('\'', "''"),
-    ))
-    .expect("attach");
-    (conn, catalog.to_string())
+    let config = crate::test_support::file_backed_test_config(temp);
+    crate::storage::ducklake::open_and_attach_ducklake(&config.ducklake).expect("attach")
 }
 
 fn commit_sql(body: &str) -> String {
