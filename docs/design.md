@@ -14,10 +14,11 @@
 - telemetry search and detail APIs
 - schema promotion and optional dropdown metadata
 
-DuckLake is the only durable telemetry backend. Apache Iceberg, the
-application-level ingest buffer, staged Parquet tier, and application WAL have
-been removed. Historical documents for those designs are under
-[`legacy/`](legacy/README.md).
+DuckLake is the only durable telemetry backend. Apache Iceberg, the staged
+Parquet tier, and application WAL have been removed. Optional soft coalesce
+(`ingest.flush_interval_seconds` > 0) may hold rows in memory briefly before a
+DuckLake write; default `0` is flush-through. Historical documents for removed
+designs are under [`legacy/`](legacy/README.md).
 
 ## Runtime data flow
 
@@ -30,7 +31,12 @@ authenticate and bind tenant
         v
 decode OTLP -> Span / Log / Metric
         |
-        v
+        +---- flush_interval_seconds == 0 (default) ----+
+        |                                               |
+        |  soft coalesce N>0: enqueue, return 200       |
+        |  (timer / force_flush later)                  |
+        |                                               |
+        v                                               v
 Arrow RecordBatch -> temporary local Parquet
         |
         v
@@ -47,10 +53,16 @@ DuckLake
 DuckDB query workers ATTACH the same tenant scope
 ```
 
-Each OTLP request is written through immediately. Upstream OpenTelemetry
-collectors own batching. The temporary Parquet file is only an input adapter
-between Arrow and DuckLake and is deleted after the transaction; it is not a
-staged durability tier.
+**Default** (`ingest.flush_interval_seconds: 0`): each OTLP request is written
+through immediately; upstream OpenTelemetry collectors own batching. Exhausted
+DuckLake write retries surface as HTTP `503` so exporters can retry.
+
+**Soft coalesce** (`flush_interval_seconds` > 0): OTLP returns after enqueue; a
+background timer flushes coalesced batches. Post-ack write failures are logged
+and dropped (not returned to the exporter). Unflushed rows may be lost on crash.
+
+The temporary Parquet file is only an input adapter between Arrow and DuckLake
+and is deleted after the transaction; it is not a staged durability tier.
 
 DuckLake data inlining decides where committed rows live:
 
@@ -89,9 +101,11 @@ catalog journal mode, not the removed Softprobe application WAL.
 
 DuckLake's own conflict retry settings are pinned on writer connections.
 The runtime sets `ducklake_max_retry_count=10`,
-`ducklake_retry_backoff=1.5`, and `ducklake_retry_wait_ms=100`. Exhausted
-ingest writes are surfaced to the HTTP exporter as `503 Service Unavailable`;
-Softprobe does not add another hidden write retry loop.
+`ducklake_retry_backoff=1.5`, and `ducklake_retry_wait_ms=100`. Under default
+flush-through, exhausted ingest writes are surfaced to the HTTP exporter as
+`503 Service Unavailable`. Under soft coalesce, the HTTP ack already happened;
+background write failures are WARN-logged only. Softprobe does not add another
+hidden write retry loop.
 
 Each catalog scope owns a pool of already-attached writer connections.
 `ducklake.writer_pool_size` defaults to `4` and is clamped to `1..=16`.
@@ -204,8 +218,9 @@ Public query names remain:
 - `union_spans`, `union_logs`
 - `committed_spans`, `committed_logs`
 
-Because ingest is flush-through, union and committed names resolve to the same
-DuckLake tables. Historical `buffer_*`, `staged_*`, and `iceberg_*` aliases are
+Because ingest defaults to flush-through (optional soft coalesce does not add a
+queryable buffer tier), union and committed names resolve to the same DuckLake
+tables. Historical `buffer_*`, `staged_*`, and `iceberg_*` aliases are
 compatibility spellings only; there are no corresponding runtime tiers.
 Metric queries target `metric_samples` and the explicitly named rollup tables
 directly.

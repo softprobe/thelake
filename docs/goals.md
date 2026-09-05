@@ -64,7 +64,9 @@ operational telemetry.
 ## Non-goals
 
 - Reintroducing Apache Iceberg or a second durable table format.
-- Maintaining an application-level ingest buffer, staged tier, or WAL.
+- Maintaining a staged Parquet tier or application WAL. Optional soft coalesce
+  (`ingest.flush_interval_seconds` > 0; default 0 = flush-through) is allowed;
+  it is not a durable buffer.
 - Hiding failed commits behind an application retry/fallback path.
 - Accepting arbitrary tenant identifiers in already tenant-bound operational
   APIs.

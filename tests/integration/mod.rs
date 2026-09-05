@@ -29,6 +29,8 @@ pub mod tenant_promotion_specs;
 pub mod variant_shredding;
 
 #[cfg(feature = "integration-e2e")]
+pub mod ingest_coalesce;
+#[cfg(feature = "integration-e2e")]
 pub mod ingest_commit_query;
 #[cfg(feature = "integration-e2e")]
 pub mod integration;

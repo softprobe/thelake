@@ -27,13 +27,19 @@ Use DuckLake as the sole durable store for spans, logs, and metrics.
 - SQLite is the local multi-client catalog.
 - Parquet data lives under the configured local or object-store `data_path`
   when rows are not catalog-inlined.
-- Apache Iceberg, Lakekeeper, the application ingest buffer, staged tier, and
-  application WAL are not supported runtime paths.
+- Apache Iceberg, Lakekeeper, the staged Parquet tier, and application WAL are
+  not supported runtime paths. An optional **soft coalesce** buffer
+  (`ingest.flush_interval_seconds` > 0) may hold rows in memory briefly before
+  one DuckLake write; default `0` remains flush-through. That buffer is not a
+  WAL or staged query tier.
 
 ### Consequences
 
-- Each OTLP request writes through in one DuckLake transaction; the upstream
-  OpenTelemetry collector owns batching.
+- Default (`flush_interval_seconds: 0`): each OTLP request writes through in one
+  DuckLake transaction; the upstream OpenTelemetry collector owns batching.
+- When soft coalesce is enabled: OTLP returns after enqueue; a background flush
+  commits coalesced batches. Crash or post-ack write failure can lose data;
+  exporters are not told about background write failures.
 - DuckLake data inlining is used to avoid tiny object-store files for normal
   collector batches.
 - Query workers ATTACH the same tenant DuckLake scope as ingest.
@@ -52,17 +58,22 @@ it is single-client only.
 SQLite's `META_JOURNAL_MODE 'WAL'` is a database journal setting and must not
 be described as an application ingest WAL.
 
-## Current invariant: flush-through ingest
+## Current invariant: flush-through ingest (default)
 
-Do not batch telemetry inside the runtime. Decode one OTLP request and commit
-its records immediately through `DuckLakeWriter`.
+**Default** (`ingest.flush_interval_seconds: 0`): do not batch telemetry inside
+the runtime. Decode one OTLP request and commit its records immediately through
+`DuckLakeWriter`. If DuckLake conflict retries are exhausted, surface the
+failure so the exporter can retry.
+
+**Optional soft coalesce** (`flush_interval_seconds` > 0): acknowledge the OTLP
+request as soon as rows are buffered; flush to DuckLake on a timer (and via
+`force_flush` in tests). Post-ack write failures are logged and dropped — not
+returned to the exporter. Unflushed rows may be lost on crash. This is not a
+WAL or staged tier.
 
 The writer may create a temporary local Parquet file to bridge Arrow into
 DuckLake. That file is deleted after commit or failure and is not durable,
 queryable, or recoverable storage.
-
-Conflict retries belong to DuckLake. If retries are exhausted, surface the
-failure so the exporter can retry.
 
 ## Current invariant: tenant-bound runtime engines
 

@@ -42,7 +42,8 @@ const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql"
 
 /// When a DuckLake catalog is attached, DuckDB treats identifiers containing substrings like
 /// `union_spans` / `committed_spans` as special. Rewrite the public surface to neutral `tm_*` names.
-/// Buffer/staged aliases map to the committed tier (ingest is flush-through).
+/// Buffer/staged aliases map to the committed tier (default ingest is flush-through;
+/// soft coalesce N>0 only delays when rows appear there).
 fn is_sql_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }

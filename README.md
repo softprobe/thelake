@@ -32,9 +32,11 @@ OTLP HTTP/gRPC
   -> inlined rows or Parquet under data_path
 ```
 
-Ingest is flush-through: one OTLP request becomes one DuckLake commit. The
-OpenTelemetry collector owns batching. There is no application ingest buffer,
-staged storage tier, application WAL, Apache Iceberg, or Lakekeeper path.
+Ingest defaults to flush-through (`ingest.flush_interval_seconds: 0`): one OTLP
+request becomes one DuckLake commit. Set `flush_interval_seconds` > 0 for optional
+soft coalesce: OTLP acks as soon as rows are buffered; a background timer flushes
+to DuckLake (unflushed / post-ack write failures may be lost — no WAL). Keep N below
+exporter timeouts when enabling. There is no staged storage tier or application WAL.
 
 See [`docs/design.md`](docs/design.md) for the current architecture and
 [`docs/legacy/`](docs/legacy/README.md) for superseded designs.

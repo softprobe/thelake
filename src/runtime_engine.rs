@@ -134,7 +134,10 @@ impl RuntimeEngineManager {
             )
             .await?,
         );
-        let ingest = Arc::new(IngestEngine::from_storage(storage.clone()));
+        let ingest = Arc::new(IngestEngine::from_storage(
+            storage.clone(),
+            self.config.ingest.flush_interval_seconds,
+        ));
         let query = Arc::new(
             query_mod::create_query_engine_for_scope(self.config.as_ref(), storage.clone(), &scope)
                 .await?,
