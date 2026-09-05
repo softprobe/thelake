@@ -46,32 +46,74 @@ test.describe('Query Features, Functions & Aggregations Verification', () => {
       const frames = resultA.frames || [];
       expect(frames.length).toBeGreaterThanOrEqual(1);
 
-      // Also verify direct Prometheus endpoint format via datasource proxy
-      const end = Math.floor(Date.now() / 1000);
-      const start = end - 3600;
-      const proxyResp = await request.post(`${GRAFANA_URL}/api/datasources/proxy/uid/softprobe-prom-a/api/v1/query_range`, {
-        headers: {
-          ...GRAFANA_AUTH_HEADERS,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        form: {
-          query: item.expr,
-          start: start.toString(),
-          end: end.toString(),
-          step: item.step || '15',
-        },
-      });
+      // Validate Prometheus matrix shape. Prefer Softprobe directly (same path as
+      // grafana-manual-up readiness) with a recent window — 1h proxy scans of
+      // high-cardinality rate(_bucket) can return empty under ingest load even
+      // when the feature works. Retry briefly for dual-sample rate windows.
+      const step = item.step || '15';
+      const lookbackSec = item.expr.includes('rate(') || item.expr.includes('irate(')
+        ? 600
+        : 3600;
 
-      expect(proxyResp.status()).toBe(200);
-      const proxyJson = await proxyResp.json();
-      expect(proxyJson.status).toBe('success');
-      const seriesList = proxyJson.data?.result || [];
+      let seriesList: any[] = [];
+      let lastProxyStatus = '';
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const end = Math.floor(Date.now() / 1000);
+        const start = end - lookbackSec;
+
+        const directResp = await request.post(`${SOFTPROBE_URL}/api/v1/query_range`, {
+          headers: {
+            Authorization: `Bearer ${API_KEY}`,
+            'X-Scope-OrgID': TENANT_ID,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          form: {
+            query: item.expr,
+            start: start.toString(),
+            end: end.toString(),
+            step,
+          },
+        });
+        expect(directResp.status()).toBe(200);
+        const directJson = await directResp.json();
+        expect(directJson.status).toBe('success');
+        seriesList = directJson.data?.result || [];
+        if (!item.validate || item.validate(seriesList)) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+
+      // Also smoke the Grafana datasource proxy once series are known-good.
+      {
+        const end = Math.floor(Date.now() / 1000);
+        const start = end - lookbackSec;
+        const proxyResp = await request.post(
+          `${GRAFANA_URL}/api/datasources/proxy/uid/softprobe-prom-a/api/v1/query_range`,
+          {
+            headers: {
+              ...GRAFANA_AUTH_HEADERS,
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            form: {
+              query: item.expr,
+              start: start.toString(),
+              end: end.toString(),
+              step,
+            },
+          },
+        );
+        expect(proxyResp.status()).toBe(200);
+        const proxyJson = await proxyResp.json();
+        lastProxyStatus = String(proxyJson.status);
+        expect(proxyJson.status).toBe('success');
+      }
 
       if (item.validate) {
         const ok = item.validate(seriesList);
         expect(
           ok,
-          `validate failed for ${item.id}: series=${seriesList.length} expr=${item.expr}`,
+          `validate failed for ${item.id}: series=${seriesList.length} expr=${item.expr} proxy=${lastProxyStatus}`,
         ).toBe(true);
       }
     });

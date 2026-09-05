@@ -241,7 +241,7 @@ try:
 except Exception:
     raise SystemExit(1)
 rows = (d.get("data") or {}).get("result") or []
-ok = any("le" in ((s.get("metric") or {})) for s in rows)
+ok = sum(1 for s in rows if "le" in ((s.get("metric") or {}))) >= 3
 raise SystemExit(0 if ok else 1)
 PY
     then
