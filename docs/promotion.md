@@ -72,7 +72,7 @@ language examples. Keep large HTTP bodies in `http.request` /
 
 | Kind | Purpose | Effect of apply | Effect of later ingest |
 |------|---------|-----------------|------------------------|
-| `telemetry_columns` | Add nullable columns to `traces`, `logs`, and/or `metric_samples` | Idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` + activate one telemetry spec (supersede prior) | Extract values into the new columns for **new** rows |
+| `telemetry_columns` | Add nullable columns to `traces`, `logs`, and/or `metric_samples` | Idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` + activate one telemetry spec **per `target_tables` set** (supersede prior for that set only) | Extract values into the new columns for **new** rows |
 | `business_table` | Create a versioned business table + `*_current` view | Compatibility check, then `CREATE TABLE IF NOT EXISTS` / additive `ADD COLUMN IF NOT EXISTS` / `CREATE OR REPLACE VIEW` + activate one spec per table | Extraction helpers exist; **automatic OTLP ingest materialization is not wired yet** |
 
 Use `telemetry_columns` when you want a first-class filter column on existing
@@ -318,25 +318,32 @@ query either CAST(attributes['sp.user.id'] AS VARCHAR) or user_id
 
 ### Active-spec lifecycle
 
-- Each tenant has **at most one active** `telemetry_columns` document.
+- Each tenant has **at most one active** `telemetry_columns` document **per
+  `target_tables` value** (e.g. `traces` and `metric_samples` may both be
+  active). Softprobe Compose applies llm∪mocker for `traces`, then Prom
+  hot-labels for `metric_samples`, without either clobbering the other.
 - Re-applying the **same** YAML is idempotent: DDL uses `IF NOT EXISTS`, and
   the existing `promotion_specs` row is upserted back to `active`.
-- Applying an **updated** YAML activates the new content-hash `spec_id` and
-  marks prior active telemetry specs `inactive` in the same metadata transaction
-  (Postgres `BEGIN` / DuckDB `BEGIN TRANSACTION` on SQLite).
+- Applying an **updated** YAML for the **same** `target_tables` activates the
+  new content-hash `spec_id` and marks prior active specs for that table set
+  `inactive` in the same metadata transaction (Postgres `BEGIN` / DuckDB
+  `BEGIN TRANSACTION` on SQLite). Specs for other table sets stay active.
+- Ingest unions promoted columns from every active telemetry document that
+  lists the signal's table. Prefer disjoint `target.tables`; overlapping sets
+  are not conflict-checked across documents.
 - Physical columns are **additive only**: DuckLake never drops a column when
-  YAML removes it. Extraction follows the active document only, so removed
+  YAML removes it. Extraction follows active document(s) only, so removed
   columns stop being populated on new rows while the physical column remains.
 - Spec identity uses a hash of the raw YAML text (`telemetry_columns_{hash}`).
 
 ### Merging multiple `telemetry_columns` sources before apply
 
-Because a tenant can only have **one active** `telemetry_columns` document,
-multiple feature-owned manifests must be merged into a single manifest
-client-side before calling apply — applying them one after another would just
-supersede the previous one, not union the columns.
+When several feature-owned manifests target the **same** `target.tables` set,
+merge them client-side before apply — sequential applies for that set supersede
+rather than union. Manifests for **different** table sets may be applied
+separately and coexist (see Active-spec lifecycle).
 
-`merge_telemetry_columns_manifests` (`src/promotion.rs`) does this:
+`merge_telemetry_columns_manifests` (`src/promotion.rs`) does same-set merge:
 
 - rejects manifests that don't target the exact same `target.tables` set
   (`merge_target_tables_mismatch`) — merging would otherwise silently add one
