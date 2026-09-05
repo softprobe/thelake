@@ -24,7 +24,7 @@ SHELL := /bin/bash
 	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
-	test-grafana-static test-grafana-system test-compat \
+	test-grafana-static test-grafana-system test-grafana-browser test-compat \
 	stress test-deploy \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
 	grafana-up grafana-down \
@@ -166,7 +166,7 @@ help:
 	@echo "Infra:    setup | teardown | doctor"
 	@echo "Stress:   stress BACKEND=local|r2|gcs"
 	@echo "Extras:   duckdb-shell | demo-session | drop-tables | generate-telemetry | test-deploy | telemetrygen"
-	@echo "Grafana:  grafana-up | grafana-down | test-grafana-prom-smoke | test-grafana-system"
+	@echo "Grafana:  grafana-up | grafana-down | test-grafana-prom-smoke | test-grafana-system | test-grafana-browser"
 	@echo "Compat:   test-compat | check-compat-reference-pins | test-loki-diff | test-tempo-diff"
 	@echo "Bench:    bench-prom-baseline | bench-prom-down"
 	@echo ""
@@ -647,6 +647,11 @@ test-tempo-diff: ensure-cache
 # Grafana Prometheus datasource smoke (#27 Prom-only slice; also covered by `make test`).
 test-grafana-prom-smoke: ensure-cache
 	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::grafana_prom_smoke -- --nocapture
+
+# End-to-end browser automation + Grafana + OTel demo ingestion tests.
+test-grafana-browser: ensure-cache
+	@chmod +x scripts/test-grafana-browser.sh
+	./scripts/test-grafana-browser.sh
 
 # Manual Grafana inspection: host Softprobe + pinned Grafana 11.2.0 + seeded demo metrics.
 # Open http://127.0.0.1:3000 (admin/admin) → Softprobe → Softprobe Prometheus smoke.

@@ -633,6 +633,56 @@ jobs:
           path: target/compat/upload/grafana/
           if-no-files-found: error
 
+  grafana-browser-automation:
+    name: Grafana browser automation (${{ inputs.selector || 'real' }})
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
+    needs: [real-preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CI: "true"
+      CARGO_INCREMENTAL: "0"
+      GRAFANA_REUSE_STACK: "0"
+    steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          set -euo pipefail
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          if [[ -d "$WS" ]]; then
+            sudo rm -rf "$WS/warehouse" || true
+            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Ensure compatibility toolchain
+        uses: ./.github/actions/compat-deps
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install browser test dependencies and Chromium
+        run: |
+          set -euo pipefail
+          npm --prefix tests/compat/grafana/browser ci
+          npx --prefix tests/compat/grafana/browser playwright install --with-deps chromium
+
+      - name: Run E2E browser automation suite
+        run: make test-grafana-browser
+
+      - name: Upload Playwright test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grafana-browser-report
+          path: |
+            tests/compat/grafana/browser/playwright-report/
+            tests/compat/grafana/browser/test-results/
+          retention-days: 7
+
   manifest-conformance:
     name: Manifest conformance (${{ matrix.protocol }}, ${{ inputs.selector || 'real' }})
     # The matrix is deliberately after all protocol and Grafana prerequisites.

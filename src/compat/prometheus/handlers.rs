@@ -19,8 +19,8 @@ use crate::compat::tenant::{ProtocolScope, QueryLimits, TenantContext};
 use crate::compat::ttl_lru::TtlLruCache;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, Method};
-use axum::response::Response;
+use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -331,6 +331,33 @@ async fn query_range_handler(
     }
 }
 
+async fn rules_handler() -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"status":"success","data":{"groups":[]}}"#,
+    )
+        .into_response()
+}
+
+async fn query_exemplars_handler() -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"status":"success","data":[]}"#,
+    )
+        .into_response()
+}
+
+async fn buildinfo_handler() -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"status":"success","data":{"version":"2.54.1","revision":"softprobe","branch":"main","buildUser":"softprobe","buildDate":"2026-09-04","goVersion":"go1.22.5"}}"#,
+    )
+        .into_response()
+}
+
 pub fn prometheus_routes() -> axum::Router<AppState> {
     use axum::routing::get;
     axum::Router::new()
@@ -339,10 +366,19 @@ pub fn prometheus_routes() -> axum::Router<AppState> {
             "/api/v1/query_range",
             get(query_range_handler).post(query_range_handler),
         )
-        .route("/api/v1/labels", get(labels_handler))
-        .route("/api/v1/label/{name}/values", get(label_values_handler))
-        .route("/api/v1/series", get(series_handler))
+        .route("/api/v1/labels", get(labels_handler).post(labels_handler))
+        .route(
+            "/api/v1/label/{name}/values",
+            get(label_values_handler).post(label_values_handler),
+        )
+        .route("/api/v1/series", get(series_handler).post(series_handler))
         .route("/api/v1/metadata", get(metadata_handler))
+        .route("/api/v1/rules", get(rules_handler))
+        .route(
+            "/api/v1/query_exemplars",
+            get(query_exemplars_handler).post(query_exemplars_handler),
+        )
+        .route("/api/v1/status/buildinfo", get(buildinfo_handler))
 }
 
 #[cfg(test)]
