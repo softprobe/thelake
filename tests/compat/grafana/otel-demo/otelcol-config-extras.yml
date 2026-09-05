@@ -25,11 +25,12 @@ processors:
       log_record:
         - 'not IsMatch(resource.attributes["service.name"], "(?i)^(ad|cart|checkout|currency|email|fraud-detection|frontend|frontend-proxy|payment|product-catalog|quote|recommendation|shipping|accounting|flagd|load-generator)$")'
   batch/softprobe:
-    # 10k-point batches regularly exceed Softprobe's OTLP timeout under PromQL
-    # load (Grafana SLO warmup). Smaller batches keep /v1/metrics alive.
-    timeout: 5s
-    send_batch_size: 512
-    send_batch_max_size: 1024
+    # Collector is the write buffer (Greptime-style: isolate flush from query).
+    # 10k-point / 5s firehose exceeds Softprobe OTLP deadlines under PromQL load.
+    # 15s + 256 keeps /v1/metrics alive while Grafana refreshes (TWCS plan AC).
+    timeout: 15s
+    send_batch_size: 256
+    send_batch_max_size: 512
   memory_limiter/softprobe:
     check_interval: 1s
     limit_mib: 512
