@@ -1,3 +1,5 @@
+mod coalesce;
+
 use crate::catalog::DropdownCatalog;
 use crate::config::Config;
 use crate::models::{Log, Metric, Span};
@@ -5,6 +7,7 @@ use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::storage::ducklake::DuckLakeWriter;
 use crate::storage::Storage;
 use anyhow::Result;
+use coalesce::CoalesceBuf;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,11 +15,51 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct IngestEngine {
     storage: Arc<Storage>,
+    flush_interval_seconds: u64,
+    logs: Option<Arc<CoalesceBuf<Log>>>,
+    spans: Option<Arc<CoalesceBuf<Span>>>,
+    metrics: Option<Arc<CoalesceBuf<Metric>>>,
 }
 
 impl IngestEngine {
-    pub fn from_storage(storage: Arc<Storage>) -> Self {
-        Self { storage }
+    pub fn from_storage(storage: Arc<Storage>, flush_interval_seconds: u64) -> Self {
+        let logs = (flush_interval_seconds > 0).then(|| {
+            let w = storage.writer.clone();
+            CoalesceBuf::new(
+                flush_interval_seconds,
+                Arc::new(move |batches| {
+                    let w = w.clone();
+                    Box::pin(async move { w.write_log_batches(batches).await })
+                }),
+            )
+        });
+        let spans = (flush_interval_seconds > 0).then(|| {
+            let w = storage.writer.clone();
+            CoalesceBuf::new(
+                flush_interval_seconds,
+                Arc::new(move |batches| {
+                    let w = w.clone();
+                    Box::pin(async move { w.write_span_batches(batches).await })
+                }),
+            )
+        });
+        let metrics = (flush_interval_seconds > 0).then(|| {
+            let w = storage.writer.clone();
+            CoalesceBuf::new(
+                flush_interval_seconds,
+                Arc::new(move |batches| {
+                    let w = w.clone();
+                    Box::pin(async move { w.write_metric_batches(batches).await })
+                }),
+            )
+        });
+        Self {
+            storage,
+            flush_interval_seconds,
+            logs,
+            spans,
+            metrics,
+        }
     }
 
     pub fn writer(&self) -> Arc<DuckLakeWriter> {
@@ -27,45 +70,72 @@ impl IngestEngine {
         if items.is_empty() {
             return Ok(());
         }
-        self.storage.writer.write_span_batches(vec![items]).await
+        if let Some(buf) = &self.spans {
+            buf.enqueue(items).await
+        } else {
+            self.storage.writer.write_span_batches(vec![items]).await
+        }
     }
 
     pub async fn add_logs(&self, items: Vec<Log>, _request_size: usize) -> Result<()> {
         if items.is_empty() {
             return Ok(());
         }
-        self.storage.writer.write_log_batches(vec![items]).await
+        if let Some(buf) = &self.logs {
+            buf.enqueue(items).await
+        } else {
+            self.storage.writer.write_log_batches(vec![items]).await
+        }
     }
 
     pub async fn add_metrics(&self, items: Vec<Metric>, _request_size: usize) -> Result<()> {
         if items.is_empty() {
             return Ok(());
         }
-        self.storage.writer.write_metric_batches(vec![items]).await
+        if let Some(buf) = &self.metrics {
+            buf.enqueue(items).await
+        } else {
+            self.storage.writer.write_metric_batches(vec![items]).await
+        }
     }
 
-    /// No-op: ingest is flush-through (OTel collector batches upstream).
     pub async fn force_flush_spans(&self) -> Result<()> {
-        Ok(())
+        if let Some(buf) = &self.spans {
+            buf.force_flush().await
+        } else {
+            Ok(())
+        }
     }
 
-    /// No-op: ingest is flush-through (OTel collector batches upstream).
     pub async fn force_flush_logs(&self) -> Result<()> {
-        Ok(())
+        if let Some(buf) = &self.logs {
+            buf.force_flush().await
+        } else {
+            Ok(())
+        }
     }
 
-    /// No-op: ingest is flush-through (OTel collector batches upstream).
     pub async fn force_flush_metrics(&self) -> Result<()> {
-        Ok(())
+        if let Some(buf) = &self.metrics {
+            buf.force_flush().await
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn flush_interval_seconds(&self) -> u64 {
+        self.flush_interval_seconds
     }
 }
 
+/// Test / single-tenant pipeline with a long-lived [`IngestEngine`] (shared coalesce state).
 #[derive(Clone)]
 pub struct IngestPipeline {
     pub storage: Storage,
     /// Shared with maintenance scheduler for TTL prune.
     pub dropdown_catalog: Option<Arc<DropdownCatalog>>,
     cache_dir: Option<PathBuf>,
+    ingest: Arc<IngestEngine>,
 }
 
 impl IngestPipeline {
@@ -76,11 +146,16 @@ impl IngestPipeline {
             Arc::new(DuckLakeWriter::new(config, dropdown_catalog.clone(), tenant_ducklake).await?);
         let cache_dir = config.query.cache_dir.as_ref().map(PathBuf::from);
         let storage = Storage::new(writer);
+        let ingest = Arc::new(IngestEngine::from_storage(
+            Arc::new(storage.clone()),
+            config.ingest.flush_interval_seconds,
+        ));
 
         Ok(Self {
             storage,
             dropdown_catalog,
             cache_dir,
+            ingest,
         })
     }
 
@@ -103,21 +178,15 @@ impl IngestPipeline {
     }
 
     pub async fn add_spans(&self, items: Vec<Span>, request_size: usize) -> Result<()> {
-        IngestEngine::from_storage(Arc::new(self.storage.clone()))
-            .add_spans(items, request_size)
-            .await
+        self.ingest.add_spans(items, request_size).await
     }
 
     pub async fn add_logs(&self, items: Vec<Log>, request_size: usize) -> Result<()> {
-        IngestEngine::from_storage(Arc::new(self.storage.clone()))
-            .add_logs(items, request_size)
-            .await
+        self.ingest.add_logs(items, request_size).await
     }
 
     pub async fn add_metrics(&self, items: Vec<Metric>, request_size: usize) -> Result<()> {
-        IngestEngine::from_storage(Arc::new(self.storage.clone()))
-            .add_metrics(items, request_size)
-            .await
+        self.ingest.add_metrics(items, request_size).await
     }
 
     pub async fn write_span_batches(&self, batches: Vec<Vec<Span>>) -> Result<()> {
@@ -132,19 +201,16 @@ impl IngestPipeline {
         self.storage.writer.write_metric_batches(batches).await
     }
 
-    /// No-op: ingest is flush-through.
     pub async fn force_flush_spans(&self) -> Result<()> {
-        Ok(())
+        self.ingest.force_flush_spans().await
     }
 
-    /// No-op: ingest is flush-through.
     pub async fn force_flush_logs(&self) -> Result<()> {
-        Ok(())
+        self.ingest.force_flush_logs().await
     }
 
-    /// No-op: ingest is flush-through.
     pub async fn force_flush_metrics(&self) -> Result<()> {
-        Ok(())
+        self.ingest.force_flush_metrics().await
     }
 
     pub fn writer(&self) -> Arc<DuckLakeWriter> {
@@ -153,5 +219,9 @@ impl IngestPipeline {
 
     pub fn cache_dir(&self) -> Option<PathBuf> {
         self.cache_dir.clone()
+    }
+
+    pub fn ingest_engine(&self) -> Arc<IngestEngine> {
+        self.ingest.clone()
     }
 }

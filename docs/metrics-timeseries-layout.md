@@ -58,7 +58,7 @@ Every goal is **mandatory**. A change that makes Grafana green by dropping data,
 Metrics identity, samples, histograms, downsamples, and collapse tables are DuckLake tables in the **tenant** catalog (Postgres metadata in production, SQLite locally; Parquet under `data_path`).
 
 - No Prometheus / VictoriaMetrics / Mimir / ClickHouse / Greptime sidecar.
-- No application WAL, ingest buffer, or staged tier ([`decision_log.md`](decision_log.md) flush-through invariant). Softprobe does **not** adopt Greptime’s memtable+WAL write path.
+- No application WAL or staged tier ([`decision_log.md`](decision_log.md)). Softprobe does **not** adopt Greptime’s memtable+WAL write path. Default ingest is flush-through; optional soft coalesce (`ingest.flush_interval_seconds` > 0) may ack before durable commit.
 - OTLP remains the only write API. Prom/Grafana stay query-only ([`goals.md`](goals.md) §7).
 - SQL accessibility stays: public `union_metrics` / `committed_metrics` names still work ([`goals.md`](goals.md) §4). Schema for the new tables lives in the existing shared schema module (not a second metrics stack).
 
@@ -105,11 +105,11 @@ Match Greptime: **do not** reject Prom ranges with a fixed Softprobe max (not 1d
 - Empty long ranges (no retained samples) return success with empty series — **not** a Softprobe max-range error.
 - Tests **must not wait wall-clock days**. Inject OTLP points with backdated `time_unix_nano` (see §10.1).
 
-### G5 — Bounded snapshots (compatible with flush-through)
+### G5 — Bounded snapshots (compatible with flush-through + soft coalesce)
 
-Flush-through creates **one snapshot per successful `/v1/metrics` commit**. The live snapshot count is then ≈ `commit_rate × max_snapshot_age`. A flat “≤ 500” with no assumed rate is not an invariant.
+Each successful DuckLake metrics **write** creates **one snapshot**. Under default flush-through that is ≈ one snapshot per OTLP `/v1/metrics` request; under soft coalesce (`ingest.flush_interval_seconds` = `N` > 0) commits are throttled to about one flush per `N` seconds per signal (plus force_flush). Live snapshot count is then ≈ `commit_rate × max_snapshot_age`. A flat “≤ 500” with no assumed rate is not an invariant.
 
-Let `A = maintenance.max_snapshot_age_seconds` (default **60**), `I = maintenance.metadata_interval_seconds` (default **60**), `C` = minimum seconds between OTLP metric commits (demo overlay `batch/softprobe.timeout` = **15s**, with `send_batch_size` large enough that timeout dominates).
+Let `A = maintenance.max_snapshot_age_seconds` (default **60**), `I = maintenance.metadata_interval_seconds` (default **60**), `C` = minimum seconds between metric **commits** (demo overlay `batch/softprobe.timeout` = **15s** when flush-through; when soft coalesce is on, treat `C ≈ max(collector_timeout, N)`).
 
 PromQL does not use DuckLake time-travel; snapshot history is unused. After a maintenance pass:
 
@@ -121,7 +121,7 @@ PromQL does not use DuckLake time-travel; snapshot history is unused. After a ma
 | Expiry + orphan cleanup SQL | **Second-granularity** `INTERVAL '… seconds'` (fix `max(1, age/86400)` day flooring in **both** `ducklake_expire_snapshots` and `ducklake_cleanup_old_files`) |
 | Sample/index **data** | Unchanged by snapshot expiry (time-travel history only) |
 
-If an environment commits faster than 60s, the count bar scales with `C`; the **age** bar does not. The 4,135-snapshot failure was expiry never applying to “today,” not an inevitable flush-through tax.
+If an environment commits faster than 60s, the count bar scales with `C`; the **age** bar does not. The 4,135-snapshot failure was expiry never applying to “today,” not an inevitable flush-through tax. Soft coalesce reduces commit rate when collectors still emit tiny OTLP batches.
 
 ### G6 — Bounded small files (TWCS-shaped)
 
@@ -215,7 +215,7 @@ Studied under Softprobe’s problems: wide mixed-name Parquet, discovery timeout
 | Fat sample rows with labels on every point | Tags as primary-key columns on a physical mito region; fields are values | **Skinny samples** `(series_id, ts, value)` + day-local `metric_series` for labels (Prom identity model) |
 | Series discovery = `GROUP BY` samples | **Inverted index** per SST (tag value → row-group bitmaps, FST, Puffin sidecar) | **`metric_postings`** per day (label → `series_id`) then skinny sample scan. **Not** SST row-group prune — Prometheus-style resolve, not Greptime II equivalence |
 | Mixed-name files, no prune | TWCS + PK ranges + inverted index prune | `PARTITIONED BY (record_date)` + `SET SORTED BY (series_id, timestamp)` + postings resolve **before** sample scan |
-| Small-file storm under continuous write | Memtable → flush SST → **TWCS** (never merge across time windows; size-tier inside window) | Keep **flush-through**; add Softprobe **TWCS policy** on DuckLake merge (§7). Upstream collector batching still required |
+| Small-file storm under continuous write | Memtable → flush SST → **TWCS** (never merge across time windows; size-tier inside window) | Default **flush-through**; optional soft coalesce (`ingest.flush_interval_seconds` > 0) for tiny OTLP; Softprobe **TWCS policy** on DuckLake merge (§7). Upstream collector batching still preferred |
 | Index build blocking writes | Sync or **async** index build after flush/compact | Ingest writes postings in the same txn (discoverability). Maintenance **re-merges** postings with samples (async-index lesson: compact must not starve ingest/query) |
 | Table-per-metric too heavy | **Metric engine**: many logical metric tables multiplex one physical mito table | Softprobe already wants **one table family** — keep it. Do **not** create DuckLake tables per `__name__` |
 | Long-range PromQL | PromQL on DataFusion; Flow for continuous aggregation | Keep Softprobe PromQL evaluator; **maintenance-built** 5m/1h + `job` collapse = Softprobe’s Flow analog |
@@ -226,7 +226,7 @@ Studied under Softprobe’s problems: wide mixed-name Parquet, discovery timeout
 
 | Pattern | Why Softprobe rejects it |
 |---------|--------------------------|
-| Memtable + WAL as the durable write path | Violates flush-through ADR; Softprobe commits each OTLP request into DuckLake |
+| Memtable + WAL as the durable write path | Violates ADR; Softprobe does not use a WAL. Optional soft coalesce is best-effort memory only |
 | Wide physical table with nullable tag columns for all metrics | Fights DuckLake evidence SQL / VARIANT promotion story; label soup returns via series catalog instead |
 | Puffin inverted-index blobs next to Parquet | Would require a Softprobe-owned index reader outside DuckDB; day-partitioned postings tables reuse DuckLake |
 | DataFusion PromQL plans | Softprobe already has PromQL-on-DuckDB; swapping engines is out of scope |
@@ -236,10 +236,11 @@ Studied under Softprobe’s problems: wide mixed-name Parquet, discovery timeout
 
 ```text
 Greptime:   OTLP/remote_write → memtable (+ WAL) → flush SST + index → TWCS compact → object store
-Softprobe:  OTLP → one DuckLake txn (series + postings + skinny samples) → TWCS-shaped maintenance → object store
+Softprobe (N=0):  OTLP → one DuckLake txn (series + postings + skinny samples) → TWCS-shaped maintenance → object store
+Softprobe (N>0):  OTLP → ack-on-enqueue coalesce (~N s) → one DuckLake txn (…same…) → TWCS-shaped maintenance → object store
 ```
 
-Same user-visible contract (OTLP in, Prom out). Different durability mid-layer. Softprobe’s speed must come from **layout + maintenance**, not from copying Greptime’s LSM.
+Same user-visible contract (OTLP in, Prom out). Soft coalesce is best-effort memory only (no WAL). Softprobe’s speed must come from **layout + maintenance**, not from copying Greptime’s LSM.
 
 ### 4.4 Performance budget vs non-negotiables
 
@@ -250,7 +251,7 @@ Same user-visible contract (OTLP in, Prom out). Different durability mid-layer. 
 | Item | KEEP reason | Paid cost (budget) |
 |------|-------------|--------------------|
 | DuckLake-only (G1) | One store, SQL evidence | No mito memtable/SST/II; layout+maintenance only |
-| No app WAL / no staged tier | ADR flush-through | Collector batching mandatory; open-day small files until TWCS |
+| No app WAL / no staged tier | ADR | Collector batching and/or soft coalesce; open-day small files until TWCS |
 | OTLP-only Softprobe write | Product write API | No Softprobe `remote_write`; G9 still OTLP on Greptime for fairness |
 | `union_metrics` / `committed_metrics` names | goals.md SQL | Compatibility relations may JOIN; **Prom path must never** scan them (AC-Q7). No interactive SQL latency AC in this work — SQL is compatibility, not G2 |
 | Snapshot per successful metrics commit | DuckLake txn model | Bound age/count (G5); measure catalog conflict / compaction-skip under AC-Q0 |

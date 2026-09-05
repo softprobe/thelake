@@ -134,7 +134,10 @@ impl RuntimeEngineManager {
             )
             .await?,
         );
-        let ingest = Arc::new(IngestEngine::from_storage(storage.clone()));
+        let ingest = Arc::new(IngestEngine::from_storage(
+            storage.clone(),
+            self.config.ingest.flush_interval_seconds,
+        ));
         let query = Arc::new(
             query_mod::create_query_engine_for_scope(self.config.as_ref(), storage.clone(), &scope)
                 .await?,
@@ -387,11 +390,13 @@ RETURNING scope_id;"#,
         let schema = scope.metadata_schema.replace('"', "\"\"");
         tx.execute(
             &format!(
+                // Supersede only the same (target_kind, target_tables) pair so traces and
+                // metric_samples telemetry_columns specs can both stay active.
                 r#"UPDATE "{schema}".promotion_specs
 SET status = 'inactive'
 WHERE status = 'active'
   AND target_kind = $1
-  AND ($1 <> 'business_table' OR target_tables = $2)
+  AND target_tables = $2
   AND spec_id <> $3;"#
             ),
             &[

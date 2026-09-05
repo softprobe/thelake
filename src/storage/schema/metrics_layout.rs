@@ -7,6 +7,8 @@
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
 
+use super::ducklake_partition::table_partition_sort_ready;
+
 /// Calendar-day partition key shared by every metrics-layout table.
 pub const METRICS_LAYOUT_PARTITION_COLUMN: &str = "record_date";
 
@@ -192,25 +194,7 @@ fn metrics_layout_table_ready(
     catalog_alias: &str,
     table_name: &str,
 ) -> Result<bool> {
-    // catalog_alias may be `softprobe` or `softprobe.tenant_schema` — metadata is always
-    // `__ducklake_metadata_<attach_alias>` where attach_alias is the first path segment.
-    let attach = catalog_alias.split('.').next().unwrap_or(catalog_alias);
-    let meta = format!("__ducklake_metadata_{attach}");
-    let sql = format!(
-        "SELECT \
-            (SELECT count(*) FROM {meta}.ducklake_partition_info info \
-             JOIN {meta}.ducklake_table t ON info.table_id = t.table_id \
-             WHERE t.table_name = ? AND t.end_snapshot IS NULL) AS parts, \
-            (SELECT count(*) FROM {meta}.ducklake_sort_info info \
-             JOIN {meta}.ducklake_table t ON info.table_id = t.table_id \
-             WHERE t.table_name = ? AND t.end_snapshot IS NULL) AS sorts"
-    );
-    let (parts, sorts): (i64, i64) = conn
-        .query_row(&sql, [table_name, table_name], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .unwrap_or((0, 0));
-    Ok(parts > 0 && sorts > 0)
+    table_partition_sort_ready(conn, catalog_alias, table_name)
 }
 
 /// Create + partition/sort one layout table, or no-op when already ready (no DDL snapshot).

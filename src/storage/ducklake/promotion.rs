@@ -120,12 +120,12 @@ pub(super) fn record_active_spec(
     let result = (|| -> Result<String> {
         conn.execute(
             &format!(
+                // Same (target_kind, target_tables) only — parallel telemetry_columns
+                // specs (e.g. traces + metric_samples) must not clobber each other.
                 "UPDATE {catalog}.promotion_specs SET status = 'inactive' \
-WHERE status = 'active' AND target_kind = ? \
-AND (? <> 'business_table' OR target_tables = ?) AND spec_id <> ?"
+WHERE status = 'active' AND target_kind = ? AND target_tables = ? AND spec_id <> ?"
             ),
             duckdb::params![
-                activation.target_kind,
                 activation.target_kind,
                 activation.target_tables,
                 activation.spec_id

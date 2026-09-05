@@ -400,8 +400,10 @@ pub fn local_promotion_specs_table_ddl(catalog_alias: &str) -> String {
 /// Rows with `target_kind != telemetry_columns` are skipped. Business-table specs may live in the
 /// same table but are ignored here so ingest/query can resolve telemetry promotion per tenant.
 ///
-/// Under normal apply, at most one telemetry_columns row is active per tenant (superseded specs
-/// are marked `inactive`). Loaders still return a vector so older multi-active rows remain readable.
+/// Under normal apply, at most one telemetry_columns row is active per
+/// `(tenant, target_tables)` (superseded specs for that table set are marked `inactive`).
+/// Distinct table sets (e.g. `traces` vs `metric_samples`) may both be active. Loaders return a
+/// vector so multi-active rows remain readable.
 pub async fn load_active_telemetry_columns_manifests(
     client: &tokio_postgres::Client,
     tenant_schema: &str,

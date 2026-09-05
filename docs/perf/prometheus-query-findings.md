@@ -10,7 +10,7 @@ Related:
 - Compat design: [`../compat/phase1-prometheus.md`](../compat/phase1-prometheus.md)
 - VARIANT shredding: [`../variant_shredding.md`](../variant_shredding.md)
 - Column promotion: [`../promotion.md`](../promotion.md)
-- Architecture invariants: [`../decision_log.md`](../decision_log.md) (flush-through ingest, no app buffer)
+- Architecture invariants: [`../decision_log.md`](../decision_log.md) (default flush-through; optional soft coalesce)
 - Positioning: storage/SQL first; Prom is query compatibility, not a second TSDB write path ([`../positioning.md`](../positioning.md), [`../goals.md`](../goals.md))
 - **Proposed layout (implementation source of truth for this problem):** [`../metrics-timeseries-layout.md`](../metrics-timeseries-layout.md) — DuckLake postings + skinny samples + TWCS-shaped maintenance (Greptime-inspired) + 5m/1h ladder + collapse; 39 machine ACs including 30d/90d, snapshots, small files, histograms, GOLD
 
@@ -61,7 +61,7 @@ Audit date: 2026-08-14 against `src/compat/backends/ducklake_metrics.rs`, `src/q
 
 **Gaps:**
 
-- Ingest is **flush-through** (ADR invariant): every OTLP request commits immediately; no application buffer/WAL ([`decision_log.md`](../decision_log.md)). Upstream collector batching is assumed.
+- Default ingest is **flush-through** (`ingest.flush_interval_seconds: 0`): every OTLP request commits immediately; no WAL/staged tier ([`decision_log.md`](../decision_log.md)). Optional soft coalesce (N>0) acks on enqueue and flushes on a timer. Upstream collector batching remains preferred for production.
 - OTel Demo + many exporters produce high-frequency small batches → many files until merge catches up.
 - Compaction may **skip** on transient DuckLake metadata conflicts.
 - Staging Parquet uses default `WriterProperties` (no explicit bloom / row-group sizing).
@@ -112,7 +112,7 @@ Principles:
 
 - Keep **OTLP as the only write path** and Prom as **query-only** ([`compat/matrix.md`](../compat/matrix.md)).
 - Prefer unlocking **existing** storage features over inventing a TSDB.
-- Stay compatible with flush-through unless a measured ADR change is approved (collector batching first).
+- Stay compatible with default flush-through unless soft coalesce (`ingest.flush_interval_seconds`) or collector batching is explicitly configured.
 - Optimize for **acceptable Grafana** + **storage efficiency**, not VictoriaMetrics-class latency.
 
 ### Phase A — Prom path uses storage features (highest leverage)

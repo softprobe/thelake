@@ -1,6 +1,7 @@
 use crate::config::{Config, DuckLakeConfig};
 use crate::promotion::TelemetryTable;
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
+use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
 use crate::storage::schema::tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
 use crate::storage::schema::variant::parquet_select_with_variant_casts;
 use ::arrow::datatypes::Schema;
@@ -355,6 +356,12 @@ impl DuckLakeWriter {
                         }
                         if variant_table_name == "logs" {
                             ensure_log_timestamp_precision(conn, qualified_table)
+                                .map_err(WriteAttemptError::Fatal)?;
+                        }
+                        if variant_table_name == "traces" || variant_table_name == "logs" {
+                            // Partition prune for SoftProbe Rolling identity/hydrate SQL
+                            // (backend#281). Idempotent — skips when catalog already ready.
+                            ensure_otlp_table_partition_sort(conn, qualified_table)
                                 .map_err(WriteAttemptError::Fatal)?;
                         }
                         conn.execute_batch(&insert).map_err(|e| {

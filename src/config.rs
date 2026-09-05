@@ -20,6 +20,30 @@ pub struct Config {
     pub ducklake: DuckLakeConfig,
     #[serde(default)]
     pub dropdown_catalog: DropdownCatalogConfig,
+    /// Optional soft coalesce for OTLP ingest (ack-on-enqueue when interval > 0).
+    #[serde(default)]
+    pub ingest: IngestConfig,
+}
+
+/// Soft coalesce window for OTLP ingest. `0` = flush-through (commit before ack).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IngestConfig {
+    /// Seconds to hold rows in memory before one DuckLake write. `0` disables the buffer.
+    #[serde(default = "default_ingest_flush_interval_seconds")]
+    pub flush_interval_seconds: u64,
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            flush_interval_seconds: default_ingest_flush_interval_seconds(),
+        }
+    }
+}
+
+fn default_ingest_flush_interval_seconds() -> u64 {
+    0
 }
 
 /// Postgres EAV table ([`crate::catalog::DropdownCatalog`]) for control-plane UI filter dropdowns.
@@ -564,6 +588,21 @@ ducklake:
         assert_eq!(c.server.port, 8090);
         assert_eq!(c.query.max_connections, 10);
         assert_eq!(c.ducklake.metadata_path, "/tmp/meta.sqlite");
+        assert_eq!(c.ingest.flush_interval_seconds, 0);
+    }
+
+    #[test]
+    fn ingest_flush_interval_parses() {
+        let yaml = r#"
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/meta.sqlite
+  data_path: /tmp/data/
+ingest:
+  flush_interval_seconds: 2
+"#;
+        let c: Config = serde_yaml::from_str(yaml).expect("ingest ok");
+        assert_eq!(c.ingest.flush_interval_seconds, 2);
     }
 
     #[test]
