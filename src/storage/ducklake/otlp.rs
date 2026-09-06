@@ -295,6 +295,22 @@ impl DuckLakeWriter {
         let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
         let max_labels = super::DEFAULT_MAX_LABELS_PER_SERIES;
         let pool = self.get_or_create_pool(dk)?;
+
+        if !pool.is_table_ready("metric_samples") {
+            let lock = pool.table_lock("metric_samples");
+            let _guard = lock.lock().await;
+            if !pool.is_table_ready("metric_samples") {
+                let dk_clone = dk.clone();
+                let pool_for_ensure = pool.clone();
+                tokio::task::spawn_blocking(move || {
+                    pool_for_ensure
+                        .with_conn(|conn| pool_for_ensure.ensure_metrics_ready(conn, &dk_clone))
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("metrics layout ensure join failed: {e}"))??;
+            }
+        }
+
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
                 super::write_metrics_layout_txn(conn, &catalog, &metrics, max_labels)
@@ -376,17 +392,5 @@ impl DuckLakeWriter {
         }
         self.write_record_batches_internal("logs", record_batches)
             .await
-    }
-
-    pub async fn write_metric_record_batches(
-        &self,
-        _record_batches: Vec<RecordBatch>,
-    ) -> Result<()> {
-        // Arrow-to-layout conversion is removed (§11.3). Callers must use Metric batches
-        // via `write_metric_batches` (layout ingest). Keeping the method so external
-        // signatures stay stable until call sites are deleted.
-        Err(anyhow::anyhow!(
-            "write_metric_record_batches is retired; use write_metric_batches (metrics layout ingest)"
-        ))
     }
 }

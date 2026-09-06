@@ -4,6 +4,7 @@ use crate::storage::schema::tables::{ScoreConfigTable, ScoreTable};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
+use super::attach::ducklake_qualified_table_name;
 use super::DuckLakeWriter;
 
 /// Projection for score_configs reads via the writer DuckDB pool.
@@ -103,21 +104,18 @@ impl DuckLakeWriter {
         } else {
             self.ducklake.clone()
         };
-        let candidates = self.table_name_candidates_for(ScoreTable::table_name(), &dk);
+        let table = ducklake_qualified_table_name(&dk, ScoreTable::table_name());
         let pool = self.get_or_create_pool(&dk)?;
         let score_id = score_id.to_string();
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                for table in candidates {
-                    let sql =
-                        format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? LIMIT 1)");
-                    match conn.query_row(&sql, [&score_id], |row| row.get::<_, bool>(0)) {
-                        Ok(exists) => return Ok(exists),
-                        Err(error) if error.to_string().contains("does not exist") => continue,
-                        Err(error) => return Err(error.into()),
-                    }
+                let sql =
+                    format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? LIMIT 1)");
+                match conn.query_row(&sql, [&score_id], |row| row.get::<_, bool>(0)) {
+                    Ok(exists) => Ok(exists),
+                    Err(error) if error.to_string().contains("does not exist") => Ok(false),
+                    Err(error) => Err(error.into()),
                 }
-                Ok(false)
             })
         })
         .await
@@ -164,21 +162,18 @@ impl DuckLakeWriter {
         } else {
             self.ducklake.clone()
         };
-        let candidates = self.table_name_candidates_for(ScoreConfigTable::table_name(), &dk);
+        let table = ducklake_qualified_table_name(&dk, ScoreConfigTable::table_name());
         let pool = self.get_or_create_pool(&dk)?;
         let config_id = config_id.to_string();
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                for table in candidates {
-                    let sql =
-                        format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE config_id = ? LIMIT 1)");
-                    match conn.query_row(&sql, [&config_id], |row| row.get::<_, bool>(0)) {
-                        Ok(exists) => return Ok(exists),
-                        Err(error) if error.to_string().contains("does not exist") => continue,
-                        Err(error) => return Err(error.into()),
-                    }
+                let sql =
+                    format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE config_id = ? LIMIT 1)");
+                match conn.query_row(&sql, [&config_id], |row| row.get::<_, bool>(0)) {
+                    Ok(exists) => Ok(exists),
+                    Err(error) if error.to_string().contains("does not exist") => Ok(false),
+                    Err(error) => Err(error.into()),
                 }
-                Ok(false)
             })
         })
         .await
@@ -194,30 +189,29 @@ impl DuckLakeWriter {
         } else {
             self.ducklake.clone()
         };
-        let candidates = self.table_name_candidates_for(ScoreConfigTable::table_name(), &dk);
+        let table = ducklake_qualified_table_name(&dk, ScoreConfigTable::table_name());
         let pool = self.get_or_create_pool(&dk)?;
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                for table in candidates {
-                    let sql = format!(
-                        "{} FROM {table} ORDER BY timestamp DESC, config_id DESC",
-                        SCORE_CONFIG_SELECT
-                    );
-                    let mut stmt = match conn.prepare(&sql) {
-                        Ok(stmt) => stmt,
-                        Err(error) if error.to_string().contains("does not exist") => continue,
-                        Err(error) => return Err(error.into()),
-                    };
-                    let mut rows = stmt.query([])?;
-                    let mut configs = Vec::new();
-                    while let Some(row) = rows.next()? {
-                        if let Some(config) = score_config_from_sql_row(row)? {
-                            configs.push(config);
-                        }
+                let sql = format!(
+                    "{} FROM {table} ORDER BY timestamp DESC, config_id DESC",
+                    SCORE_CONFIG_SELECT
+                );
+                let mut stmt = match conn.prepare(&sql) {
+                    Ok(stmt) => stmt,
+                    Err(error) if error.to_string().contains("does not exist") => {
+                        return Ok(Vec::new())
                     }
-                    return Ok(configs);
+                    Err(error) => return Err(error.into()),
+                };
+                let mut rows = stmt.query([])?;
+                let mut configs = Vec::new();
+                while let Some(row) = rows.next()? {
+                    if let Some(config) = score_config_from_sql_row(row)? {
+                        configs.push(config);
+                    }
                 }
-                Ok(Vec::new())
+                Ok(configs)
             })
         })
         .await
@@ -233,25 +227,23 @@ impl DuckLakeWriter {
         } else {
             self.ducklake.clone()
         };
-        let candidates = self.table_name_candidates_for(ScoreConfigTable::table_name(), &dk);
+        let table = ducklake_qualified_table_name(&dk, ScoreConfigTable::table_name());
         let pool = self.get_or_create_pool(&dk)?;
         let config_id = config_id.to_string();
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                for table in candidates {
-                    let sql = format!(
-                        "{} FROM {table} WHERE config_id = ? LIMIT 1",
-                        SCORE_CONFIG_SELECT
-                    );
-                    let mut stmt = match conn.prepare(&sql) {
-                        Ok(stmt) => stmt,
-                        Err(error) if error.to_string().contains("does not exist") => continue,
-                        Err(error) => return Err(error.into()),
-                    };
-                    let mut rows = stmt.query([&config_id])?;
-                    if let Some(row) = rows.next()? {
-                        return score_config_from_sql_row(row);
-                    }
+                let sql = format!(
+                    "{} FROM {table} WHERE config_id = ? LIMIT 1",
+                    SCORE_CONFIG_SELECT
+                );
+                let mut stmt = match conn.prepare(&sql) {
+                    Ok(stmt) => stmt,
+                    Err(error) if error.to_string().contains("does not exist") => return Ok(None),
+                    Err(error) => return Err(error.into()),
+                };
+                let mut rows = stmt.query([&config_id])?;
+                if let Some(row) = rows.next()? {
+                    return score_config_from_sql_row(row);
                 }
                 Ok(None)
             })

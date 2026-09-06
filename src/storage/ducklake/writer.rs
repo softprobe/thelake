@@ -10,10 +10,10 @@ use anyhow::{anyhow, Result};
 use duckdb::Connection;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tracing::{info, warn};
 
 use super::attach::{
@@ -26,15 +26,57 @@ use super::object_store::configure_object_store;
 use super::util::{
     ensure_log_timestamp_precision, ensure_trace_fidelity_columns,
     ensure_trace_timestamp_precision, ensure_variant_column_types, escape_sql_literal,
-    size_literal, WriteAttemptError,
+    size_literal,
 };
+
+pub(super) struct TableReadinessRegistry {
+    ready_tables: RwLock<HashSet<String>>,
+}
+
+impl TableReadinessRegistry {
+    pub(super) fn new() -> Self {
+        Self {
+            ready_tables: RwLock::new(HashSet::new()),
+        }
+    }
+
+    pub(super) fn is_ready(&self, table_name: &str) -> bool {
+        self.ready_tables
+            .read()
+            .map(|r| r.contains(table_name))
+            .unwrap_or(false)
+    }
+
+    pub(super) fn mark_ready(&self, table_name: &str) {
+        if let Ok(mut w) = self.ready_tables.write() {
+            w.insert(table_name.to_string());
+        }
+    }
+
+    pub(super) fn clear(&self) {
+        if let Ok(mut w) = self.ready_tables.write() {
+            w.clear();
+        }
+    }
+}
 
 pub(super) struct WriterPool {
     conns: Vec<Mutex<Connection>>,
     next: AtomicUsize,
+    registry: TableReadinessRegistry,
+    table_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl WriterPool {
+    pub(super) fn new(conns: Vec<Mutex<Connection>>) -> Self {
+        Self {
+            conns,
+            next: AtomicUsize::new(0),
+            registry: TableReadinessRegistry::new(),
+            table_locks: Mutex::new(HashMap::new()),
+        }
+    }
+
     pub(super) fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
         let n = self.conns.len();
         if n == 0 {
@@ -51,6 +93,43 @@ impl WriterPool {
             .lock()
             .map_err(|_| anyhow!("DuckLake writer connection lock poisoned"))?;
         f(&guard)
+    }
+
+    pub(super) fn is_table_ready(&self, table_name: &str) -> bool {
+        self.registry.is_ready(table_name)
+    }
+
+    pub(super) fn mark_table_ready(&self, table_name: &str) {
+        self.registry.mark_ready(table_name);
+    }
+
+    pub(super) fn clear_ready(&self) {
+        self.registry.clear();
+    }
+
+    pub(super) fn ensure_metrics_ready(
+        &self,
+        conn: &Connection,
+        dk: &DuckLakeConfig,
+    ) -> Result<()> {
+        let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
+        crate::storage::schema::ensure_metrics_layout_family_tables(conn, &catalog)?;
+        for t in crate::storage::schema::METRICS_LAYOUT_CORE_TABLES {
+            self.mark_table_ready(t.name);
+        }
+        self.mark_table_ready("metrics");
+        Ok(())
+    }
+
+    pub(super) fn table_lock(&self, table_name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self
+            .table_locks
+            .lock()
+            .map_err(|_| anyhow!("table locks map lock poisoned"))
+            .unwrap();
+        map.entry(table_name.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 }
 
@@ -126,12 +205,43 @@ impl DuckLakeWriter {
     }
 
     pub(super) fn initialize_catalog(&self) -> Result<()> {
-        self.with_attached_conn(&self.ducklake, |conn| {
-            if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
-                self.reset_tables_for_dev(conn)?;
+        let pool = self.get_or_create_pool(&self.ducklake)?;
+        if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
+            pool.with_conn(|conn| self.reset_tables_for_dev(conn))?;
+            self.warm_pool(&pool, &self.ducklake)?;
+            pool.with_conn(|conn| self.reapply_active_promotions(conn, &self.ducklake))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn reapply_active_promotions(
+        &self,
+        conn: &Connection,
+        dk: &DuckLakeConfig,
+    ) -> Result<()> {
+        if let Ok(manifests) =
+            super::promotion::load_active_telemetry_manifests(conn, &dk.catalog_alias)
+        {
+            let prefix = if dk.metadata_schema == "main" {
+                dk.catalog_alias.clone()
+            } else {
+                format!(
+                    "{}.{}",
+                    super::util::quote_duckdb_ident(&dk.catalog_alias),
+                    super::util::quote_duckdb_ident(&dk.metadata_schema)
+                )
+            };
+            for manifest in manifests {
+                if let Ok(ddls) = crate::promotion::telemetry_column_add_ddls(&prefix, &manifest) {
+                    for ddl in ddls {
+                        if let Err(err) = conn.execute_batch(&ddl) {
+                            warn!("failed to reapply promotion DDL after reset: {err}");
+                        }
+                    }
+                }
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 
     pub(super) fn conn_cache_key(dk: &DuckLakeConfig) -> String {
@@ -143,30 +253,177 @@ impl DuckLakeWriter {
 
     pub(super) fn get_or_create_pool(&self, dk: &DuckLakeConfig) -> Result<Arc<WriterPool>> {
         let key = Self::conn_cache_key(dk);
-        let mut guard = self
-            .writer_pools
-            .lock()
-            .map_err(|_| anyhow!("DuckLake writer pool map lock poisoned"))?;
-        if let Some(pool) = guard.get(&key) {
-            return Ok(Arc::clone(pool));
+        let (pool, is_new) = {
+            let mut guard = self
+                .writer_pools
+                .lock()
+                .map_err(|_| anyhow!("DuckLake writer pool map lock poisoned"))?;
+            if let Some(pool) = guard.get(&key) {
+                (Arc::clone(pool), false)
+            } else {
+                let size = dk.effective_writer_pool_size();
+                let mut conns = Vec::with_capacity(size);
+                // Attach sequentially: the first connection initializes DuckLake metadata tables; later
+                // pool members ATTACH the already-initialized Postgres schema (with retry on races).
+                for _ in 0..size {
+                    let conn = self.open_connection_for(dk)?;
+                    apply_ducklake_retry_settings(&conn)?;
+                    self.attach_ducklake_for(&conn, dk)?;
+                    self.ensure_schema_for(&conn, dk)?;
+                    conns.push(Mutex::new(conn));
+                }
+                let pool = Arc::new(WriterPool::new(conns));
+                guard.insert(key, Arc::clone(&pool));
+                (pool, true)
+            }
+        };
+
+        if is_new {
+            // Warm tables outside the global writer_pools lock so other scopes are never blocked.
+            self.warm_pool(&pool, dk)?;
         }
-        let size = dk.effective_writer_pool_size();
-        let mut conns = Vec::with_capacity(size);
-        // Attach sequentially: the first connection initializes DuckLake metadata tables; later
-        // pool members ATTACH the already-initialized Postgres schema (with retry on races).
-        for _ in 0..size {
-            let conn = self.open_connection_for(dk)?;
-            apply_ducklake_retry_settings(&conn)?;
-            self.attach_ducklake_for(&conn, dk)?;
-            self.ensure_schema_for(&conn, dk)?;
-            conns.push(Mutex::new(conn));
-        }
-        let pool = Arc::new(WriterPool {
-            conns,
-            next: AtomicUsize::new(0),
-        });
-        guard.insert(key, Arc::clone(&pool));
         Ok(pool)
+    }
+
+    pub(super) fn warm_pool(&self, pool: &WriterPool, dk: &DuckLakeConfig) -> Result<()> {
+        pool.with_conn(|conn| {
+            pool.ensure_metrics_ready(conn, dk)?;
+            Ok(())
+        })
+    }
+
+    pub(super) fn ensure_table_with_conn(
+        conn: &Connection,
+        dk: &DuckLakeConfig,
+        table_name: &str,
+        custom_schema: Option<&Arc<Schema>>,
+        target_file_size_bytes: usize,
+    ) -> Result<()> {
+        let qualified_table = ducklake_qualified_table_name(dk, table_name);
+
+        let (arrow_schema, select_prefix) = match table_name {
+            "traces" => (
+                custom_schema
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(TraceTable::schema())),
+                parquet_select_with_variant_casts(table_name),
+            ),
+            "logs" => (
+                custom_schema
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(OtlpLogsTable::schema())),
+                parquet_select_with_variant_casts(table_name),
+            ),
+            "scores" => (
+                custom_schema
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(ScoreTable::schema())),
+                parquet_select_with_variant_casts(table_name),
+            ),
+            name if name == ScoreConfigTable::table_name() => (
+                custom_schema
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(ScoreConfigTable::schema())),
+                parquet_select_with_variant_casts(table_name),
+            ),
+            _ => {
+                if let Some(schema) = custom_schema {
+                    (
+                        Arc::clone(schema),
+                        parquet_select_with_variant_casts(table_name),
+                    )
+                } else {
+                    return Err(anyhow!(
+                        "unsupported table for DuckLake ensure: {table_name}"
+                    ));
+                }
+            }
+        };
+
+        let batch = RecordBatch::new_empty(arrow_schema);
+        let temp_path = Self::write_temp_parquet(table_name, &[batch])?;
+        let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
+        let ddl = format!(
+            "CREATE TABLE IF NOT EXISTS {table} AS {select} FROM read_parquet('{path}') LIMIT 0;",
+            table = qualified_table,
+            select = select_prefix,
+            path = escaped_path
+        );
+        let ddl_res = conn.execute_batch(&ddl);
+        let _ = std::fs::remove_file(&temp_path);
+        ddl_res.map_err(|e| anyhow!("CREATE TABLE failed for {qualified_table}: {e}"))?;
+
+        if let Some(schema) = custom_schema {
+            let found = crate::storage::schema::describe_table_columns(conn, &qualified_table)?;
+            for field in schema.fields() {
+                if !found.contains_key(&field.name().to_ascii_lowercase()) {
+                    let duck_type = match field.data_type() {
+                        ::arrow::datatypes::DataType::Utf8 => "VARCHAR",
+                        ::arrow::datatypes::DataType::Boolean => "BOOLEAN",
+                        ::arrow::datatypes::DataType::Int64 => "BIGINT",
+                        ::arrow::datatypes::DataType::Float64 => "DOUBLE",
+                        ::arrow::datatypes::DataType::Timestamp(
+                            ::arrow::datatypes::TimeUnit::Nanosecond,
+                            _,
+                        ) => "TIMESTAMP_NS",
+                        ::arrow::datatypes::DataType::Timestamp(_, _) => "TIMESTAMPTZ",
+                        _ => "VARCHAR",
+                    };
+                    let alter_sql = format!(
+                        "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {} {duck_type};",
+                        super::util::quote_duckdb_ident(field.name())
+                    );
+                    conn.execute_batch(&alter_sql).map_err(|e| {
+                        anyhow!(
+                            "failed to add column {} to {}: {}",
+                            field.name(),
+                            qualified_table,
+                            e
+                        )
+                    })?;
+                }
+            }
+        }
+
+        if table_name == "traces" {
+            ensure_trace_fidelity_columns(conn, &qualified_table)?;
+        }
+        ensure_variant_column_types(conn, &qualified_table, table_name)?;
+        if table_name == "traces" {
+            ensure_trace_timestamp_precision(conn, &qualified_table)?;
+        }
+        if table_name == "logs" {
+            ensure_log_timestamp_precision(conn, &qualified_table)?;
+        }
+        if table_name == "traces" || table_name == "logs" {
+            ensure_otlp_table_partition_sort(conn, &qualified_table)?;
+        }
+
+        let scope = ducklake_set_option_scope_for_qualified(&qualified_table);
+        let opt_size = format!(
+            "CALL {}.set_option('target_file_size', '{}', {});",
+            dk.catalog_alias,
+            size_literal(target_file_size_bytes),
+            scope
+        );
+        let opt_hive = format!(
+            "CALL {}.set_option('hive_file_pattern', true, {});",
+            dk.catalog_alias, scope
+        );
+        if let Err(err) = conn.execute_batch(&opt_size) {
+            warn!(
+                "DuckLake target_file_size set_option skipped on ensure: {}",
+                err
+            );
+        }
+        if let Err(err) = conn.execute_batch(&opt_hive) {
+            warn!(
+                "DuckLake hive_file_pattern set_option skipped on ensure: {}",
+                err
+            );
+        }
+
+        Ok(())
     }
 
     /// Borrow one connection from the per-scope writer pool (short map lock; pool slot for SQL).
@@ -205,27 +462,44 @@ impl DuckLakeWriter {
         dk: &DuckLakeConfig,
         table: &TelemetryTable,
     ) -> Result<()> {
+        let pool = self.get_or_create_pool(dk)?;
         if matches!(table, TelemetryTable::Metrics) {
-            // Layout family owns metric DDL (promotions / empty bootstrap).
-            let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
-            let pool = self.get_or_create_pool(dk)?;
-            return tokio::task::spawn_blocking(move || {
-                pool.with_conn(|conn| {
-                    crate::storage::schema::ensure_metrics_layout_family_tables(conn, &catalog)
-                })
+            let dk = dk.clone();
+            tokio::task::spawn_blocking({
+                let pool = pool.clone();
+                move || pool.with_conn(|conn| pool.ensure_metrics_ready(conn, &dk))
             })
             .await
-            .map_err(|e| anyhow!("metrics layout ensure join failed: {e}"))?;
+            .map_err(|e| anyhow!("metrics layout ensure join failed: {e}"))??;
+            return Ok(());
         }
-        let (table_name, schema) = match table {
-            TelemetryTable::Traces => ("traces", TraceTable::schema()),
-            TelemetryTable::Logs => ("logs", OtlpLogsTable::schema()),
+        let table_name = match table {
+            TelemetryTable::Traces => "traces",
+            TelemetryTable::Logs => "logs",
             TelemetryTable::Metrics => unreachable!("handled above"),
         };
-        let arrow_schema = Arc::new(schema);
-        let batch = RecordBatch::new_empty(arrow_schema);
-        self.write_record_batches_internal_with_ducklake(dk, table_name, vec![batch])
-            .await
+        let dk = dk.clone();
+        let table_name_owned = table_name.to_string();
+        let target_file_size_bytes = self.config.maintenance.target_file_size_bytes;
+        tokio::task::spawn_blocking({
+            let pool = pool.clone();
+            move || {
+                pool.with_conn(|conn| {
+                    Self::ensure_table_with_conn(
+                        conn,
+                        &dk,
+                        &table_name_owned,
+                        None,
+                        target_file_size_bytes,
+                    )
+                })?;
+                pool.mark_table_ready(&table_name_owned);
+                Ok::<(), anyhow::Error>(())
+            }
+        })
+        .await
+        .map_err(|e| anyhow!("telemetry table ensure join failed: {e}"))??;
+        Ok(())
     }
 
     pub async fn spans_schema(&self) -> Result<Arc<Schema>> {
@@ -255,7 +529,7 @@ impl DuckLakeWriter {
             return Ok(());
         }
 
-        // Dropdown catalog from ingest batches **before** DuckLake INSERT (covers data inlining into Postgres).
+        // Dropdown catalog from ingest batches before DuckLake INSERT (covers data inlining into Postgres).
         if table_name == "traces" {
             if let Some(ref cat) = self.dropdown_catalog {
                 if self.config.dropdown_catalog.enabled {
@@ -266,12 +540,40 @@ impl DuckLakeWriter {
             }
         }
 
-        let temp_path = self.write_temp_parquet(table_name, &record_batches)?;
+        let pool = self.get_or_create_pool(dk)?;
+        let qualified_table = ducklake_qualified_table_name(dk, table_name);
+
+        // Process-local table readiness gate: cold first touch ensures once and marks ready.
+        if !pool.is_table_ready(table_name) {
+            let lock = pool.table_lock(table_name);
+            let _guard = lock.lock().await;
+            if !pool.is_table_ready(table_name) {
+                let dk = dk.clone();
+                let table_name_owned = table_name.to_string();
+                let schema_ref = record_batches[0].schema();
+                let target_file_size_bytes = self.config.maintenance.target_file_size_bytes;
+                let pool_clone = pool.clone();
+                tokio::task::spawn_blocking(move || {
+                    pool_clone.with_conn(|conn| {
+                        Self::ensure_table_with_conn(
+                            conn,
+                            &dk,
+                            &table_name_owned,
+                            Some(&schema_ref),
+                            target_file_size_bytes,
+                        )
+                    })
+                })
+                .await
+                .map_err(|e| anyhow!("table ensure join failed: {e}"))??;
+                pool.mark_table_ready(table_name);
+            }
+        }
+
+        let temp_path = Self::write_temp_parquet(table_name, &record_batches)?;
         let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
-        let candidates = self.table_name_candidates_for(table_name, dk);
         let order_clause = self.insert_order_clause(table_name);
         let select_prefix = parquet_select_with_variant_casts(table_name);
-        let variant_table_name = table_name.to_string();
         let deduplicate_scores =
             table_name == ScoreTable::table_name() || table_name == ScoreConfigTable::table_name();
         let dedupe_id_column: Option<&'static str> = if !deduplicate_scores {
@@ -281,146 +583,61 @@ impl DuckLakeWriter {
         } else {
             Some("score_id")
         };
-        let option_stmts: Vec<String> = candidates
-            .iter()
-            .flat_map(|qualified_table| {
-                let scope = ducklake_set_option_scope_for_qualified(qualified_table);
-                [
-                    format!(
-                        "CALL {}.set_option('target_file_size', '{}', {});",
-                        self.ducklake.catalog_alias,
-                        size_literal(self.config.maintenance.target_file_size_bytes),
-                        scope
-                    ),
-                    format!(
-                        "CALL {}.set_option('hive_file_pattern', true, {});",
-                        self.ducklake.catalog_alias, scope
-                    ),
-                ]
-            })
-            .collect();
-        let pool = self.get_or_create_pool(dk)?;
+
+        let insert = if let Some(id_column) = dedupe_id_column {
+            format!(
+                "INSERT INTO {table} BY NAME
+                 SELECT incoming.* FROM (
+                   {select} FROM read_parquet('{path}')
+                 ) incoming
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM {table} existing
+                   WHERE existing.{id_column} = incoming.{id_column}
+                 )
+                 {order_clause};",
+                table = qualified_table,
+                select = select_prefix,
+                path = escaped_path,
+                order_clause = order_clause,
+                id_column = id_column,
+            )
+        } else {
+            format!(
+                "INSERT INTO {table} BY NAME {select} FROM read_parquet('{path}') {order_clause};",
+                table = qualified_table,
+                select = select_prefix,
+                path = escaped_path,
+                order_clause = order_clause,
+            )
+        };
+
         let write_result = tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                let mut last_err: Option<anyhow::Error> = None;
-                for (i, qualified_table) in candidates.iter().enumerate() {
-                    let ddl = format!(
-                        "CREATE TABLE IF NOT EXISTS {table} AS {select} FROM read_parquet('{path}') LIMIT 0;",
-                        table = qualified_table,
-                        select = select_prefix,
-                        path = escaped_path
-                    );
-                    // BY NAME keeps ingest shrink-safe: physical promoted columns absent from the
-                    // active manifest (and thus from this Parquet batch) are filled with NULL
-                    // instead of failing a positional column-count match.
-                    let insert = if let Some(id_column) = dedupe_id_column {
-                        format!(
-                            "INSERT INTO {table} BY NAME
-                             SELECT incoming.* FROM (
-                               {select} FROM read_parquet('{path}')
-                             ) incoming
-                             WHERE NOT EXISTS (
-                               SELECT 1 FROM {table} existing
-                               WHERE existing.{id_column} = incoming.{id_column}
-                             )
-                             {order_clause};",
-                            table = qualified_table,
-                            select = select_prefix,
-                            path = escaped_path,
-                            order_clause = order_clause,
-                            id_column = id_column,
-                        )
-                    } else {
-                        format!(
-                            "INSERT INTO {table} BY NAME {select} FROM read_parquet('{path}') {order_clause};",
-                            table = qualified_table,
-                            select = select_prefix,
-                            path = escaped_path,
-                            order_clause = order_clause,
-                        )
-                    };
-                    conn.execute_batch("BEGIN TRANSACTION;")?;
-                    let write_ok = (|| -> Result<(), WriteAttemptError> {
-                        conn.execute_batch(&ddl).map_err(|e| {
-                            WriteAttemptError::Retryable(anyhow!("CREATE TABLE failed: {e}"))
-                        })?;
-                        if variant_table_name == "traces" {
-                            ensure_trace_fidelity_columns(conn, qualified_table)
-                                .map_err(WriteAttemptError::Fatal)?;
-                        }
-                        ensure_variant_column_types(conn, qualified_table, &variant_table_name)
-                            .map_err(WriteAttemptError::from_variant_guard)?;
-                        if variant_table_name == "traces" {
-                            ensure_trace_timestamp_precision(conn, qualified_table)
-                                .map_err(WriteAttemptError::Fatal)?;
-                        }
-                        if variant_table_name == "logs" {
-                            ensure_log_timestamp_precision(conn, qualified_table)
-                                .map_err(WriteAttemptError::Fatal)?;
-                        }
-                        if variant_table_name == "traces" || variant_table_name == "logs" {
-                            // Partition prune for SoftProbe Rolling identity/hydrate SQL
-                            // (backend#281). Idempotent — skips when catalog already ready.
-                            ensure_otlp_table_partition_sort(conn, qualified_table)
-                                .map_err(WriteAttemptError::Fatal)?;
-                        }
-                        conn.execute_batch(&insert).map_err(|e| {
-                            WriteAttemptError::Retryable(anyhow!("INSERT failed: {e}"))
-                        })?;
+                conn.execute_batch("BEGIN TRANSACTION;")?;
+                match conn.execute_batch(&insert) {
+                    Ok(()) => {
+                        conn.execute_batch("COMMIT;")?;
                         Ok(())
-                    })();
-                    match write_ok {
-                        Ok(_) => {
-                            conn.execute_batch("COMMIT;")?;
-                            // Apply options for this table (two stmts per candidate).
-                            let base = i * 2;
-                            if let Some(stmt) = option_stmts.get(base) {
-                                if let Err(err) = conn.execute_batch(stmt) {
-                                    warn!("DuckLake table option optimization skipped: {}", err);
-                                }
-                            }
-                            if let Some(stmt) = option_stmts.get(base + 1) {
-                                if let Err(err) = conn.execute_batch(stmt) {
-                                    warn!("DuckLake table option optimization skipped: {}", err);
-                                }
-                            }
-                            return Ok(());
-                        }
-                        Err(WriteAttemptError::Fatal(err)) => {
-                            let _ = conn.execute_batch("ROLLBACK;");
-                            // Legacy MAP / schema mismatch must not fall through to catalog.table —
-                            // that would create a second VARIANT table while queries still read the
-                            // unchanged three-part legacy table.
-                            return Err(err);
-                        }
-                        Err(WriteAttemptError::Retryable(err)) => {
-                            let _ = conn.execute_batch("ROLLBACK;");
-                            last_err = Some(anyhow!(
-                                "DuckLake write failed for {}: {}",
-                                qualified_table,
-                                err
-                            ));
-                        }
+                    }
+                    Err(err) => {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        Err(anyhow!(
+                            "DuckLake write failed for {}: {}",
+                            qualified_table,
+                            err
+                        ))
                     }
                 }
-                Err(last_err.unwrap_or_else(|| anyhow!("DuckLake write failed")))
             })
         })
         .await
         .map_err(|e| anyhow!("DuckLake writer blocking task join failed: {e}"))?;
-        if write_result.is_err() {
-            let _ = std::fs::remove_file(&temp_path);
-            return write_result;
-        }
+
         let _ = std::fs::remove_file(&temp_path);
-        Ok(())
+        write_result
     }
 
-    pub(super) fn write_temp_parquet(
-        &self,
-        table_name: &str,
-        batches: &[RecordBatch],
-    ) -> Result<PathBuf> {
+    pub(super) fn write_temp_parquet(table_name: &str, batches: &[RecordBatch]) -> Result<PathBuf> {
         let base_dir = std::env::temp_dir().join("splake-ducklake");
         std::fs::create_dir_all(&base_dir)?;
         // The staging dir is shared by every engine in the process (and other
@@ -528,20 +745,6 @@ impl DuckLakeWriter {
         ducklake_qualified_table_name(dk, table_name)
     }
 
-    pub(super) fn table_name_candidates_for(
-        &self,
-        table_name: &str,
-        dk: &DuckLakeConfig,
-    ) -> Vec<String> {
-        // Prefer catalog.schema.table when metadata lives in a non-main schema; fall back to
-        // catalog.table if the engine rejects the three-part name. set_option scope must match
-        // whichever form succeeds (see write_record_batches_internal_with_ducklake).
-        vec![
-            self.qualified_table_name_for(table_name, dk),
-            format!("{}.{}", dk.catalog_alias, table_name),
-        ]
-    }
-
     pub(super) fn insert_order_clause(&self, table_name: &str) -> &'static str {
         match table_name {
             "traces" => "ORDER BY record_date, app_id, session_id, timestamp",
@@ -559,6 +762,12 @@ impl DuckLakeWriter {
                 "DROP TABLE IF EXISTS {}.{};",
                 self.ducklake.catalog_alias, table
             ))?;
+        }
+        let key = Self::conn_cache_key(&self.ducklake);
+        if let Ok(guard) = self.writer_pools.lock() {
+            if let Some(pool) = guard.get(&key) {
+                pool.clear_ready();
+            }
         }
         info!("DuckLake tables reset because SPLAKE_RESET_DUCKLAKE=1");
         Ok(())

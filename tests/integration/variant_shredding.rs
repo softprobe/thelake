@@ -673,8 +673,12 @@ async fn variant_write_fails_fast_on_legacy_map_table() {
     let err = write_result.expect_err("legacy MAP table must fail fast");
     let message = err.to_string();
     assert!(
-        message.contains("expected VARIANT") || message.contains("VARIANT"),
-        "error should mention VARIANT migration, got: {message}"
+        message.contains("expected VARIANT"),
+        "error must mention VARIANT requirement: {message}"
+    );
+    assert!(
+        message.contains("Hot MAP columns were migrated"),
+        "error must mention migration advice: {message}"
     );
     assert!(
         message.contains("rebuild") || message.contains("migrate"),

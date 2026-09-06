@@ -7,7 +7,7 @@
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
 
-use super::ducklake_partition::table_partition_sort_ready;
+use super::ducklake_partition::{describe_table_columns, table_partition_sort_ready};
 
 /// Calendar-day partition key shared by every metrics-layout table.
 pub const METRICS_LAYOUT_PARTITION_COLUMN: &str = "record_date";
@@ -219,29 +219,6 @@ pub fn ensure_metrics_layout_table(
     Ok(())
 }
 
-fn describe_layout_columns(
-    conn: &Connection,
-    qualified_table: &str,
-) -> Result<std::collections::HashMap<String, String>> {
-    let sql = format!("DESCRIBE {qualified_table};");
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| anyhow!("DESCRIBE {qualified_table} failed: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            let name: String = row.get(0)?;
-            let dtype: String = row.get(1)?;
-            Ok((name, dtype))
-        })
-        .map_err(|e| anyhow!("DESCRIBE {qualified_table} query failed: {e}"))?;
-    let mut found = std::collections::HashMap::new();
-    for row in rows {
-        let (name, dtype) = row.map_err(|e| anyhow!("DESCRIBE row failed: {e}"))?;
-        found.insert(name.to_ascii_lowercase(), dtype);
-    }
-    Ok(found)
-}
-
 /// Idempotent ADD COLUMN for layout fields introduced after the table already existed.
 ///
 /// Demo lakes created before `aggregation_temporality` / hist fidelity columns would
@@ -260,7 +237,7 @@ fn ensure_layout_additive_columns(
         _ => return Ok(()),
     };
     let qualified = qualified_metrics_layout_table(catalog_alias, table_name);
-    let found = describe_layout_columns(conn, &qualified)?;
+    let found = describe_table_columns(conn, &qualified)?;
     let ddls = needed
         .iter()
         .filter(|(name, _)| !found.contains_key(*name))
@@ -398,22 +375,8 @@ mod tests {
     use tempfile::TempDir;
 
     fn attach_ducklake(temp: &TempDir) -> (duckdb::Connection, String) {
-        let meta = temp.path().join("metadata.sqlite");
-        let data = temp.path().join("data");
-        std::fs::create_dir_all(&data).expect("data dir");
-        let conn = duckdb::Connection::open_in_memory().expect("duckdb");
-        conn.execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
-            .expect("extensions");
-        let catalog = "softprobe";
-        conn.execute_batch(&format!(
-            "ATTACH 'ducklake:sqlite:{}' AS {catalog} \
-             (DATA_PATH '{}', META_JOURNAL_MODE 'WAL', META_BUSY_TIMEOUT 5000, \
-              DATA_INLINING_ROW_LIMIT 0);",
-            meta.to_string_lossy().replace('\'', "''"),
-            data.to_string_lossy().replace('\'', "''"),
-        ))
-        .expect("attach");
-        (conn, catalog.to_string())
+        let config = crate::test_support::file_backed_test_config(temp);
+        crate::storage::ducklake::open_and_attach_ducklake(&config.ducklake).expect("attach")
     }
 
     fn catalog_count(conn: &Connection, catalog: &str, meta_table: &str, table_name: &str) -> i64 {
@@ -547,7 +510,7 @@ mod tests {
              ALTER TABLE {catalog}.metric_series SET SORTED BY (metric_name, series_id);"
         ))
         .expect("legacy create");
-        let before = describe_layout_columns(
+        let before = describe_table_columns(
             &conn,
             &qualified_metrics_layout_table(&catalog, "metric_series"),
         )
@@ -558,7 +521,7 @@ mod tests {
         ensure_metrics_layout_table(&conn, &catalog, &METRICS_LAYOUT_CORE_TABLES[0])
             .expect("ensure additive");
 
-        let after = describe_layout_columns(
+        let after = describe_table_columns(
             &conn,
             &qualified_metrics_layout_table(&catalog, "metric_series"),
         )
@@ -580,7 +543,7 @@ mod tests {
              ALTER TABLE {catalog}.metric_hist_samples SET SORTED BY (series_id, timestamp);"
         ))
         .expect("legacy hist create");
-        let before = describe_layout_columns(
+        let before = describe_table_columns(
             &conn,
             &qualified_metrics_layout_table(&catalog, "metric_hist_samples"),
         )
@@ -594,7 +557,7 @@ mod tests {
             .expect("hist table spec");
         ensure_metrics_layout_table(&conn, &catalog, hist).expect("ensure hist additive");
 
-        let after = describe_layout_columns(
+        let after = describe_table_columns(
             &conn,
             &qualified_metrics_layout_table(&catalog, "metric_hist_samples"),
         )
