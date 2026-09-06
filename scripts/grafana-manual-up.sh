@@ -379,7 +379,9 @@ reset_grafana_state() {
 reset_grafana_state
 
 echo "==> building softprobe-runtime (release; AC-S3)"
-if [[ -f "$ROOT/Makefile" ]] && grep -q '^build-release:' "$ROOT/Makefile"; then
+if [[ "${SP_THELAKE_SKIP_BUILD:-0}" == "1" && -x "$ROOT/dist/softprobe-runtime" ]]; then
+  echo "==> reusing pre-built $ROOT/dist/softprobe-runtime (SP_THELAKE_SKIP_BUILD=1)"
+elif [[ -f "$ROOT/Makefile" ]] && grep -q '^build-release:' "$ROOT/Makefile"; then
   make -C "$ROOT" build-release
 else
   cargo build -q --release --bin softprobe-runtime
@@ -551,7 +553,7 @@ apply_prom_hot_labels "$SOFTPROBE_URL_HOST" "$API_KEY"
 
 echo "==> waiting for Grafana"
 graf_ok=0
-for _ in $(seq 1 180); do
+for _ in $(seq 1 600); do
   if curl -sf -o /dev/null -u admin:admin http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
     graf_ok=1
     break
