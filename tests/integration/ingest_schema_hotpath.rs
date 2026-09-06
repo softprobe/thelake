@@ -5,19 +5,18 @@ use chrono::Utc;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::{Log as LogData, Metric as MetricData, Span as SpanData};
-use softprobe_runtime::query;
+use softprobe_runtime::storage::ducklake::open_and_attach_ducklake;
 use softprobe_runtime::storage::schema::{
     describe_probe_count, partition_sort_probe_count, total_schema_probe_count,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 use tempfile::TempDir;
 
 use crate::util::config::file_backed_test_config;
 
 static HOTPATH_CONTRACT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn sample_span(i: usize) -> SpanData {
+fn sample_span(i: usize, tenant_id: Option<&str>) -> SpanData {
     let now = Utc::now();
     let mut attributes = HashMap::new();
     attributes.insert("test.iteration".to_string(), i.to_string());
@@ -28,7 +27,7 @@ fn sample_span(i: usize) -> SpanData {
         parent_span_id: None,
         app_id: "hotpath-app".to_string(),
         organization_id: None,
-        tenant_id: None,
+        tenant_id: tenant_id.map(|s| s.to_string()),
         message_type: "chat".to_string(),
         span_kind: Some("INTERNAL".to_string()),
         timestamp: now,
@@ -82,13 +81,13 @@ fn sample_metric(i: usize) -> MetricData {
     }
 }
 
-async fn assert_warm_writes_zero_probes_contract(config: Config) {
+async fn assert_warm_writes_zero_probes_contract(config: Config, tenant_id: Option<&str>) {
     let _guard = HOTPATH_CONTRACT_LOCK.lock().await;
     let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
 
     // Perform one initial write across signals to ensure cold paths / pool creation are complete.
     pipeline
-        .write_span_batches(vec![vec![sample_span(0)]])
+        .write_span_batches(vec![vec![sample_span(0, tenant_id)]])
         .await
         .expect("warm span write");
     pipeline
@@ -108,7 +107,7 @@ async fn assert_warm_writes_zero_probes_contract(config: Config) {
     const N: usize = 5;
     for i in 1..=N {
         pipeline
-            .write_span_batches(vec![vec![sample_span(i)]])
+            .write_span_batches(vec![vec![sample_span(i, tenant_id)]])
             .await
             .unwrap_or_else(|e| panic!("span write {i} failed: {e}"));
         pipeline
@@ -143,38 +142,49 @@ async fn assert_warm_writes_zero_probes_contract(config: Config) {
     );
 
     // Verify all rows were committed and queryable.
-    let query_engine = query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
-        .await
-        .expect("query engine");
+    let query_dk = if let Some(tid) = tenant_id {
+        let resolver = softprobe_runtime::runtime_engine::DuckLakeScopeResolver::connect(&config)
+            .await
+            .expect("resolver")
+            .expect("postgres resolver");
+        let (scope, _) = resolver
+            .load_active_telemetry_columns_manifests(tid)
+            .await
+            .expect("scope");
+        let mut t_dk = config.ducklake.clone();
+        t_dk.metadata_schema = scope.metadata_schema;
+        t_dk.data_path = scope.data_path;
+        t_dk
+    } else {
+        config.ducklake.clone()
+    };
 
-    let span_res = query_engine
-        .execute_query("SELECT count(*) AS c FROM traces")
-        .await
+    let (conn, catalog) = open_and_attach_ducklake(&query_dk).expect("query attach");
+
+    let span_n: i64 = conn
+        .query_row(&format!("SELECT count(*) FROM {catalog}.traces"), [], |r| {
+            r.get(0)
+        })
         .expect("query traces");
-    assert_eq!(
-        span_res.rows[0][0].as_i64(),
-        Some((N + 1) as i64),
-        "all traces must be committed"
-    );
+    assert_eq!(span_n, (N + 1) as i64, "all traces must be committed");
 
-    let log_res = query_engine
-        .execute_query("SELECT count(*) AS c FROM logs")
-        .await
+    let log_n: i64 = conn
+        .query_row(&format!("SELECT count(*) FROM {catalog}.logs"), [], |r| {
+            r.get(0)
+        })
         .expect("query logs");
-    assert_eq!(
-        log_res.rows[0][0].as_i64(),
-        Some((N + 1) as i64),
-        "all logs must be committed"
-    );
+    assert_eq!(log_n, (N + 1) as i64, "all logs must be committed");
 
-    let metric_table = format!("{}.metric_samples", config.ducklake.catalog_alias);
-    let metric_res = query_engine
-        .execute_query(&format!("SELECT count(*) AS c FROM {metric_table}"))
-        .await
+    let metric_n: i64 = conn
+        .query_row(
+            &format!("SELECT count(*) FROM {catalog}.metric_samples"),
+            [],
+            |r| r.get(0),
+        )
         .expect("query metric_samples");
     assert_eq!(
-        metric_res.rows[0][0].as_i64(),
-        Some((N + 1) as i64),
+        metric_n,
+        (N + 1) as i64,
         "all metric samples must be committed"
     );
 }
@@ -183,7 +193,7 @@ async fn assert_warm_writes_zero_probes_contract(config: Config) {
 async fn warm_writes_perform_zero_schema_probes_sqlite() {
     let temp = TempDir::new().expect("temp");
     let config = file_backed_test_config(&temp);
-    assert_warm_writes_zero_probes_contract(config).await;
+    assert_warm_writes_zero_probes_contract(config, None).await;
 }
 
 #[tokio::test]
@@ -209,7 +219,28 @@ async fn warm_writes_perform_zero_schema_probes_postgres() {
     config.ducklake.catalog_type = "postgres".to_string();
     config.ducklake.metadata_path = conn_str;
     let suffix = uuid::Uuid::new_v4().to_string().replace('-', "_");
-    config.ducklake.metadata_schema = format!("hotpath_test_{suffix}");
+    config.ducklake.metadata_schema = format!("hotpath_reg_{suffix}");
 
-    assert_warm_writes_zero_probes_contract(config).await;
+    // Connect resolver and provision tenant scope
+    let resolver = softprobe_runtime::runtime_engine::DuckLakeScopeResolver::connect(&config)
+        .await
+        .expect("connect resolver")
+        .expect("postgres resolver");
+
+    let tenant_id = format!("tenant-hotpath-{suffix}");
+    let tenant_schema = format!("hotpath_tenant_{suffix}");
+    let tenant_data = temp.path().join("data").to_string_lossy().to_string();
+
+    resolver
+        .provision_scope(
+            softprobe_runtime::runtime_engine::ScopeProvisioningRequest {
+                scope_id: tenant_id.clone(),
+                metadata_schema: tenant_schema,
+                data_path: tenant_data,
+            },
+        )
+        .await
+        .expect("provision scope");
+
+    assert_warm_writes_zero_probes_contract(config, Some(&tenant_id)).await;
 }
