@@ -446,22 +446,22 @@ query:
   max_connections: 16
   cache_dir: "$STATE_DIR/cache"
 
-# Demo: keep TWCS on so ops dashboard compaction panels have series.
-# Cap waves tightly so open-day merge cannot peg CPU under Grafana refresh.
+# Demo: TWCS on so ops compaction panels have series, but keep merge light so
+# browser I-02/I-03 (fresh k6_http_reqs) stay green under Astronomy Shop load.
 maintenance:
   enabled: true
   target_file_size_bytes: 67108864
-  interval_seconds: 120
+  interval_seconds: 300
   metadata_enabled: true
-  metadata_interval_seconds: 120
+  metadata_interval_seconds: 300
   max_snapshot_age_seconds: 60
   remove_orphan_files_enabled: true
   remove_orphan_older_than_seconds: 60
-  open_day_file_cap: 16
-  max_waves_per_table: 2
-  max_compacted_files_per_wave: 32
-  closed_day_max_compacted_files: 256
-  closed_day_max_waves: 4
+  open_day_file_cap: 64
+  max_waves_per_table: 1
+  max_compacted_files_per_wave: 16
+  closed_day_max_compacted_files: 128
+  closed_day_max_waves: 2
   max_merge_file_size_bytes: 8388608
 
 ducklake:
