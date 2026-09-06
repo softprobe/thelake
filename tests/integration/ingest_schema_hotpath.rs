@@ -2,6 +2,7 @@
 //! DESCRIBE / partition-info / sort-info probes (Issue #51).
 
 use chrono::Utc;
+use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::{Log as LogData, Metric as MetricData, Span as SpanData};
 use softprobe_runtime::query;
@@ -13,6 +14,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use crate::util::config::file_backed_test_config;
+
+static HOTPATH_CONTRACT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn sample_span(i: usize) -> SpanData {
     let now = Utc::now();
@@ -79,10 +82,8 @@ fn sample_metric(i: usize) -> MetricData {
     }
 }
 
-#[tokio::test]
-async fn warm_writes_perform_zero_schema_probes() {
-    let temp = TempDir::new().expect("temp");
-    let config = file_backed_test_config(&temp);
+async fn assert_warm_writes_zero_probes_contract(config: Config) {
+    let _guard = HOTPATH_CONTRACT_LOCK.lock().await;
     let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
 
     // Perform one initial write across signals to ensure cold paths / pool creation are complete.
@@ -166,8 +167,9 @@ async fn warm_writes_perform_zero_schema_probes() {
         "all logs must be committed"
     );
 
+    let metric_table = format!("{}.metric_samples", config.ducklake.catalog_alias);
     let metric_res = query_engine
-        .execute_query("SELECT count(*) AS c FROM softprobe.metric_samples")
+        .execute_query(&format!("SELECT count(*) AS c FROM {metric_table}"))
         .await
         .expect("query metric_samples");
     assert_eq!(
@@ -175,4 +177,39 @@ async fn warm_writes_perform_zero_schema_probes() {
         Some((N + 1) as i64),
         "all metric samples must be committed"
     );
+}
+
+#[tokio::test]
+async fn warm_writes_perform_zero_schema_probes_sqlite() {
+    let temp = TempDir::new().expect("temp");
+    let config = file_backed_test_config(&temp);
+    assert_warm_writes_zero_probes_contract(config).await;
+}
+
+#[tokio::test]
+async fn warm_writes_perform_zero_schema_probes_postgres() {
+    let pg_host = std::env::var("PG_HOST").unwrap_or_else(|_| "localhost".to_string());
+    let pg_port = std::env::var("PG_PORT").unwrap_or_else(|_| "5432".to_string());
+    let conn_str =
+        format!("host={pg_host} port={pg_port} dbname=ducklake user=ducklake password=ducklake");
+
+    // Check if Postgres is reachable; skip if not running in local environment
+    if tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+        .await
+        .is_err()
+    {
+        eprintln!(
+            "skipping warm_writes_perform_zero_schema_probes_postgres: PostgreSQL not reachable at {conn_str}"
+        );
+        return;
+    }
+
+    let temp = TempDir::new().expect("temp");
+    let mut config = file_backed_test_config(&temp);
+    config.ducklake.catalog_type = "postgres".to_string();
+    config.ducklake.metadata_path = conn_str;
+    let suffix = uuid::Uuid::new_v4().to_string().replace('-', "_");
+    config.ducklake.metadata_schema = format!("hotpath_test_{suffix}");
+
+    assert_warm_writes_zero_probes_contract(config).await;
 }

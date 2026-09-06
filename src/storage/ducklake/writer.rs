@@ -107,6 +107,20 @@ impl WriterPool {
         self.registry.clear();
     }
 
+    pub(super) fn ensure_metrics_ready(
+        &self,
+        conn: &Connection,
+        dk: &DuckLakeConfig,
+    ) -> Result<()> {
+        let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
+        crate::storage::schema::ensure_metrics_layout_family_tables(conn, &catalog)?;
+        for t in crate::storage::schema::METRICS_LAYOUT_CORE_TABLES {
+            self.mark_table_ready(t.name);
+        }
+        self.mark_table_ready("metrics");
+        Ok(())
+    }
+
     pub(super) fn table_lock(&self, table_name: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut map = self
             .table_locks
@@ -195,6 +209,37 @@ impl DuckLakeWriter {
         if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
             pool.with_conn(|conn| self.reset_tables_for_dev(conn))?;
             self.warm_pool(&pool, &self.ducklake)?;
+            pool.with_conn(|conn| self.reapply_active_promotions(conn, &self.ducklake))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn reapply_active_promotions(
+        &self,
+        conn: &Connection,
+        dk: &DuckLakeConfig,
+    ) -> Result<()> {
+        if let Ok(manifests) =
+            super::promotion::load_active_telemetry_manifests(conn, &dk.catalog_alias)
+        {
+            let prefix = if dk.metadata_schema == "main" {
+                dk.catalog_alias.clone()
+            } else {
+                format!(
+                    "{}.{}",
+                    super::util::quote_duckdb_ident(&dk.catalog_alias),
+                    super::util::quote_duckdb_ident(&dk.metadata_schema)
+                )
+            };
+            for manifest in manifests {
+                if let Ok(ddls) = crate::promotion::telemetry_column_add_ddls(&prefix, &manifest) {
+                    for ddl in ddls {
+                        if let Err(err) = conn.execute_batch(&ddl) {
+                            warn!("failed to reapply promotion DDL after reset: {err}");
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -242,12 +287,7 @@ impl DuckLakeWriter {
 
     pub(super) fn warm_pool(&self, pool: &WriterPool, dk: &DuckLakeConfig) -> Result<()> {
         pool.with_conn(|conn| {
-            let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
-            crate::storage::schema::ensure_metrics_layout_family_tables(conn, &catalog)?;
-            for t in crate::storage::schema::METRICS_LAYOUT_CORE_TABLES {
-                pool.mark_table_ready(t.name);
-            }
-            pool.mark_table_ready("metrics");
+            pool.ensure_metrics_ready(conn, dk)?;
 
             for table in ["traces", "logs", "scores", ScoreConfigTable::table_name()] {
                 Self::ensure_table_with_conn(
@@ -395,20 +435,10 @@ impl DuckLakeWriter {
     ) -> Result<()> {
         let pool = self.get_or_create_pool(dk)?;
         if matches!(table, TelemetryTable::Metrics) {
-            // Layout family owns metric DDL (promotions / empty bootstrap).
-            let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
+            let dk = dk.clone();
             tokio::task::spawn_blocking({
                 let pool = pool.clone();
-                move || {
-                    pool.with_conn(|conn| {
-                        crate::storage::schema::ensure_metrics_layout_family_tables(conn, &catalog)
-                    })?;
-                    for t in crate::storage::schema::METRICS_LAYOUT_CORE_TABLES {
-                        pool.mark_table_ready(t.name);
-                    }
-                    pool.mark_table_ready("metrics");
-                    Ok::<(), anyhow::Error>(())
-                }
+                move || pool.with_conn(|conn| pool.ensure_metrics_ready(conn, &dk))
             })
             .await
             .map_err(|e| anyhow!("metrics layout ensure join failed: {e}"))??;
