@@ -19,8 +19,10 @@ fn attach_ducklake(temp: &TempDir) -> (Connection, String) {
 }
 
 fn attach_ducklake_with_data(temp: &TempDir) -> (Connection, String, std::path::PathBuf) {
-    let data = temp.path().join("data");
-    let (conn, catalog) = attach_ducklake(temp);
+    let config = crate::test_support::file_backed_test_config(temp);
+    let data = std::path::PathBuf::from(&config.ducklake.data_path);
+    let (conn, catalog) =
+        crate::storage::ducklake::open_and_attach_ducklake(&config.ducklake).expect("attach");
     (conn, catalog, data)
 }
 
