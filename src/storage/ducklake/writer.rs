@@ -288,17 +288,6 @@ impl DuckLakeWriter {
     pub(super) fn warm_pool(&self, pool: &WriterPool, dk: &DuckLakeConfig) -> Result<()> {
         pool.with_conn(|conn| {
             pool.ensure_metrics_ready(conn, dk)?;
-
-            for table in ["traces", "logs", "scores", ScoreConfigTable::table_name()] {
-                Self::ensure_table_with_conn(
-                    conn,
-                    dk,
-                    table,
-                    None,
-                    self.config.maintenance.target_file_size_bytes,
-                )?;
-                pool.mark_table_ready(table);
-            }
             Ok(())
         })
     }
