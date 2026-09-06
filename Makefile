@@ -686,12 +686,12 @@ bench-prom-down:
 	@chmod +x scripts/bench-prom-down.sh
 	./scripts/bench-prom-down.sh
 
+# Grafana manual stack may export CONFIG_FILE; clear it so e2e uses tests/config/test.yaml.
 test-e2e: ensure-cache check-infra
 	@set -e; \
 	backend="$(E2E_BACKEND)"; \
 	echo "integration-e2e E2E_BACKEND=$$backend..."; \
 	$(_export-minio-aws); \
-	# Grafana manual stack sets CONFIG_FILE; do not let it override tests/config/test.yaml.
 	unset CONFIG_FILE; \
 	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=$$backend; \
 	case "$$backend" in \
