@@ -27,7 +27,7 @@ SHELL := /bin/bash
 	test-grafana-static test-grafana-system test-grafana-browser test-compat \
 	stress test-deploy \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
-	grafana-up grafana-down \
+	grafana-up grafana-down validate-ops-dashboard \
 	bench-prom-baseline bench-prom-down
 
 COMPOSE ?= $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo "docker compose")
@@ -226,6 +226,9 @@ build-release: ensure-cache
 		*.dylib*) cp -f "$$duckdb_so" "$(DIST_DIR)/libduckdb.dylib" ;; \
 		*) cp -f "$$duckdb_so" "$(DIST_DIR)/libduckdb.so" ;; \
 	esac; \
+	if [ "$$(uname -s)" = Darwin ] && [ -f "$(DIST_DIR)/libduckdb.dylib" ]; then \
+		install_name_tool -add_rpath @executable_path "$(DIST_DIR)/softprobe-runtime" 2>/dev/null || true; \
+	fi; \
 	cp -f config.yaml "$(DIST_DIR)/config.yaml"; \
 	echo "staged $(DIST_DIR)/"
 
@@ -665,6 +668,12 @@ grafana-down:
 	@chmod +x scripts/grafana-manual-down.sh
 	./scripts/grafana-manual-down.sh
 
+# Every thelake-ops dashboard PromQL/LogQL must return data (no skips).
+# Requires manual stack config under THELAKE_GRAFANA_STATE_DIR (make grafana-up once).
+validate-ops-dashboard: ensure-cache
+	@chmod +x scripts/validate-ops-dashboard.sh scripts/validate-ops-dashboard-queries.py
+	./scripts/validate-ops-dashboard.sh
+
 # Softprobe-only Prom micro-benchmark (Option A): hostmetrics OTLP + curated PromQL.
 # Writes docs/perf/results/<stamp>-<label>.{json,md}. Override: BENCH_LABEL=… LEAVE_UP=1
 # Small-file stress: BENCH_FORCE_PARQUET=1 BENCH_LABEL=small-files make bench-prom-baseline
@@ -682,6 +691,8 @@ test-e2e: ensure-cache check-infra
 	backend="$(E2E_BACKEND)"; \
 	echo "integration-e2e E2E_BACKEND=$$backend..."; \
 	$(_export-minio-aws); \
+	# Grafana manual stack sets CONFIG_FILE; do not let it override tests/config/test.yaml.
+	unset CONFIG_FILE; \
 	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=$$backend; \
 	case "$$backend" in \
 		local) \

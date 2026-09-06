@@ -1,0 +1,263 @@
+{
+  "annotations": { "list": [] },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "sum by (tenant, signal) (rate(thelake_ingest_requests_total[5m]))",
+          "legendFormat": "{{tenant}} {{signal}} ok",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (tenant, signal) (rate(thelake_ingest_errors_total[5m]))",
+          "legendFormat": "{{tenant}} {{signal}} err",
+          "refId": "B"
+        }
+      ],
+      "title": "Ingest rate by tenant/signal",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "sum by (sql_kind) (rate(thelake_query_duration_milliseconds_sum[5m])) / sum by (sql_kind) (rate(thelake_query_duration_milliseconds_count[5m])) > 0",
+          "legendFormat": "{{sql_kind}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Query latency avg ms by sql_kind",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "thelake_table_open_day_live_files",
+          "legendFormat": "{{tenant}} {{table}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Open-day live files by table",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "thelake_table_live_bytes",
+          "legendFormat": "{{tenant}} {{table}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Live bytes by table",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": { "stacking": { "mode": "normal" } }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "thelake_table_files_by_size_bucket",
+          "legendFormat": "{{table}} {{size_bucket}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Files by size bucket",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "sum by (table, day_kind) (rate(thelake_compaction_waves_total[5m]))",
+          "legendFormat": "waves {{table}} {{day_kind}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (table) (rate(thelake_compaction_duration_milliseconds_sum[5m])) / sum by (table) (rate(thelake_compaction_duration_milliseconds_count[5m])) > 0",
+          "legendFormat": "avg ms {{table}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Compaction waves / duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "id": 13,
+      "targets": [
+        {
+          "expr": "thelake_compaction_files_before",
+          "legendFormat": "before {{tenant}} {{table}} {{day_kind}}",
+          "refId": "A"
+        },
+        {
+          "expr": "thelake_compaction_files_after",
+          "legendFormat": "after {{tenant}} {{table}} {{day_kind}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Compaction files before/after",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 12, "y": 24 },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "thelake_process_cpu_ratio",
+          "legendFormat": "cpu cores",
+          "refId": "A"
+        }
+      ],
+      "title": "Process CPU ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 32 },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "thelake_process_resident_memory_bytes",
+          "legendFormat": "rss",
+          "refId": "A"
+        }
+      ],
+      "title": "Process RSS",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 32 },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "rate(thelake_process_disk_read_bytes_total[5m])",
+          "legendFormat": "read",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(thelake_process_disk_written_bytes_total[5m])",
+          "legendFormat": "write",
+          "refId": "B"
+        }
+      ],
+      "title": "Process disk IO",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 32 },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "sum by (sql_kind) (rate(thelake_query_queue_wait_milliseconds_sum[5m])) / sum by (sql_kind) (rate(thelake_query_queue_wait_milliseconds_count[5m])) > 0",
+          "legendFormat": "queue {{sql_kind}}",
+          "refId": "A"
+        },
+        {
+          "expr": "thelake_query_workers_busy",
+          "legendFormat": "busy workers",
+          "refId": "B"
+        },
+        {
+          "expr": "thelake_ingest_pending_batches",
+          "legendFormat": "ingest pending",
+          "refId": "C"
+        }
+      ],
+      "title": "Query queue wait / workers / ingest pending",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "sum by (sql_kind) (rate(thelake_slow_queries_total[5m]))",
+          "legendFormat": "rate {{sql_kind}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (sql_kind) (thelake_slow_queries_total)",
+          "legendFormat": "total {{sql_kind}}",
+          "refId": "C"
+        },
+        {
+          "expr": "thelake_self_monitoring_export_drops_total",
+          "legendFormat": "export drops",
+          "refId": "B"
+        }
+      ],
+      "title": "Slow queries / export drops",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "softprobe-loki-ops" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 48 },
+      "id": 12,
+      "options": {
+        "showLabels": true,
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "softprobe-loki-ops" },
+          "editorMode": "code",
+          "expr": "{service_name=\"thelake\"} |= \"thelake.slow_query\"",
+          "queryType": "range",
+          "refId": "A",
+          "maxLines": 1000
+        }
+      ],
+      "title": "Slow query events (ops Loki)",
+      "type": "logs"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["thelake", "ops", "self-monitoring"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "title": "thelake ops",
+  "uid": "thelake-ops",
+  "version": 3
+}

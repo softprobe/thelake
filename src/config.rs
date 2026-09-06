@@ -23,6 +23,46 @@ pub struct Config {
     /// Optional soft coalesce for OTLP ingest (ack-on-enqueue when interval > 0).
     #[serde(default)]
     pub ingest: IngestConfig,
+    /// Self-monitoring ops lake (Design 2). Disabled by default.
+    #[serde(default)]
+    pub self_monitoring: SelfMonitoringConfig,
+}
+
+/// Reserved ops DuckLake scope + OTel export interval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfMonitoringConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_self_monitoring_export_interval_seconds")]
+    pub export_interval_seconds: u64,
+    #[serde(default = "default_self_monitoring_ops_metadata_schema")]
+    pub ops_metadata_schema: String,
+    #[serde(default = "default_self_monitoring_ops_data_path")]
+    pub ops_data_path: String,
+}
+
+impl Default for SelfMonitoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            export_interval_seconds: default_self_monitoring_export_interval_seconds(),
+            ops_metadata_schema: default_self_monitoring_ops_metadata_schema(),
+            ops_data_path: default_self_monitoring_ops_data_path(),
+        }
+    }
+}
+
+fn default_self_monitoring_export_interval_seconds() -> u64 {
+    60
+}
+
+fn default_self_monitoring_ops_metadata_schema() -> String {
+    "thelake_ops".to_string()
+}
+
+fn default_self_monitoring_ops_data_path() -> String {
+    "s3://warehouse/_thelake_ops/".to_string()
 }
 
 /// Soft coalesce window for OTLP ingest. `0` = flush-through (commit before ack).

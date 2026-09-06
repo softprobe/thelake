@@ -39,3 +39,13 @@ providers:
     allowUiUpdates: false
     options:
       path: /var/lib/grafana/dashboards/compose
+
+  - name: thelake ops
+    orgId: 1
+    folder: thelake ops
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards/ops
