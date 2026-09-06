@@ -303,19 +303,27 @@ impl DuckLakeWriter {
 
         let (arrow_schema, select_prefix) = match table_name {
             "traces" => (
-                Arc::new(TraceTable::schema()),
+                custom_schema
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(TraceTable::schema())),
                 parquet_select_with_variant_casts(table_name),
             ),
             "logs" => (
-                Arc::new(OtlpLogsTable::schema()),
+                custom_schema
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(OtlpLogsTable::schema())),
                 parquet_select_with_variant_casts(table_name),
             ),
             "scores" => (
-                Arc::new(ScoreTable::schema()),
+                custom_schema
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(ScoreTable::schema())),
                 parquet_select_with_variant_casts(table_name),
             ),
             name if name == ScoreConfigTable::table_name() => (
-                Arc::new(ScoreConfigTable::schema()),
+                custom_schema
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(ScoreConfigTable::schema())),
                 parquet_select_with_variant_casts(table_name),
             ),
             _ => {
@@ -344,6 +352,38 @@ impl DuckLakeWriter {
         let ddl_res = conn.execute_batch(&ddl);
         let _ = std::fs::remove_file(&temp_path);
         ddl_res.map_err(|e| anyhow!("CREATE TABLE failed for {qualified_table}: {e}"))?;
+
+        if let Some(schema) = custom_schema {
+            let found = crate::storage::schema::describe_table_columns(conn, &qualified_table)?;
+            for field in schema.fields() {
+                if !found.contains_key(&field.name().to_ascii_lowercase()) {
+                    let duck_type = match field.data_type() {
+                        ::arrow::datatypes::DataType::Utf8 => "VARCHAR",
+                        ::arrow::datatypes::DataType::Boolean => "BOOLEAN",
+                        ::arrow::datatypes::DataType::Int64 => "BIGINT",
+                        ::arrow::datatypes::DataType::Float64 => "DOUBLE",
+                        ::arrow::datatypes::DataType::Timestamp(
+                            ::arrow::datatypes::TimeUnit::Nanosecond,
+                            _,
+                        ) => "TIMESTAMP_NS",
+                        ::arrow::datatypes::DataType::Timestamp(_, _) => "TIMESTAMPTZ",
+                        _ => "VARCHAR",
+                    };
+                    let alter_sql = format!(
+                        "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {} {duck_type};",
+                        super::util::quote_duckdb_ident(field.name())
+                    );
+                    conn.execute_batch(&alter_sql).map_err(|e| {
+                        anyhow!(
+                            "failed to add column {} to {}: {}",
+                            field.name(),
+                            qualified_table,
+                            e
+                        )
+                    })?;
+                }
+            }
+        }
 
         if table_name == "traces" {
             ensure_trace_fidelity_columns(conn, &qualified_table)?;
