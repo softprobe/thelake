@@ -2,14 +2,16 @@
 //! DESCRIBE / partition-info / sort-info probes (Issue #51).
 
 use chrono::Utc;
-use softprobe_runtime::config::Config;
+use softprobe_runtime::config::DuckLakeConfig;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::{Log as LogData, Metric as MetricData, Span as SpanData};
 use softprobe_runtime::storage::ducklake::open_and_attach_ducklake;
 use softprobe_runtime::storage::schema::{
     describe_probe_count, partition_sort_probe_count, total_schema_probe_count,
 };
+use softprobe_runtime::storage::DuckLakeWriter;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 use crate::util::config::file_backed_test_config;
@@ -81,20 +83,23 @@ fn sample_metric(i: usize) -> MetricData {
     }
 }
 
-async fn assert_warm_writes_zero_probes_contract(config: Config, tenant_id: Option<&str>) {
+async fn assert_warm_writes_zero_probes_contract(
+    writer: Arc<DuckLakeWriter>,
+    query_dk: DuckLakeConfig,
+    tenant_id: Option<&str>,
+) {
     let _guard = HOTPATH_CONTRACT_LOCK.lock().await;
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
 
     // Perform one initial write across signals to ensure cold paths / pool creation are complete.
-    pipeline
+    writer
         .write_span_batches(vec![vec![sample_span(0, tenant_id)]])
         .await
         .expect("warm span write");
-    pipeline
+    writer
         .write_log_batches(vec![vec![sample_log(0)]])
         .await
         .expect("warm log write");
-    pipeline
+    writer
         .write_metric_batches(vec![vec![sample_metric(0)]])
         .await
         .expect("warm metric write");
@@ -106,15 +111,15 @@ async fn assert_warm_writes_zero_probes_contract(config: Config, tenant_id: Opti
 
     const N: usize = 5;
     for i in 1..=N {
-        pipeline
+        writer
             .write_span_batches(vec![vec![sample_span(i, tenant_id)]])
             .await
             .unwrap_or_else(|e| panic!("span write {i} failed: {e}"));
-        pipeline
+        writer
             .write_log_batches(vec![vec![sample_log(i)]])
             .await
             .unwrap_or_else(|e| panic!("log write {i} failed: {e}"));
-        pipeline
+        writer
             .write_metric_batches(vec![vec![sample_metric(i)]])
             .await
             .unwrap_or_else(|e| panic!("metric write {i} failed: {e}"));
@@ -142,23 +147,6 @@ async fn assert_warm_writes_zero_probes_contract(config: Config, tenant_id: Opti
     );
 
     // Verify all rows were committed and queryable.
-    let query_dk = if let Some(tid) = tenant_id {
-        let resolver = softprobe_runtime::runtime_engine::DuckLakeScopeResolver::connect(&config)
-            .await
-            .expect("resolver")
-            .expect("postgres resolver");
-        let (scope, _) = resolver
-            .load_active_telemetry_columns_manifests(tid)
-            .await
-            .expect("scope");
-        let mut t_dk = config.ducklake.clone();
-        t_dk.metadata_schema = scope.metadata_schema;
-        t_dk.data_path = scope.data_path;
-        t_dk
-    } else {
-        config.ducklake.clone()
-    };
-
     let (conn, catalog) = open_and_attach_ducklake(&query_dk).expect("query attach");
 
     let span_n: i64 = conn
@@ -193,7 +181,8 @@ async fn assert_warm_writes_zero_probes_contract(config: Config, tenant_id: Opti
 async fn warm_writes_perform_zero_schema_probes_sqlite() {
     let temp = TempDir::new().expect("temp");
     let config = file_backed_test_config(&temp);
-    assert_warm_writes_zero_probes_contract(config, None).await;
+    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    assert_warm_writes_zero_probes_contract(pipeline.storage.writer, config.ducklake, None).await;
 }
 
 #[tokio::test]
@@ -221,7 +210,6 @@ async fn warm_writes_perform_zero_schema_probes_postgres() {
     let suffix = uuid::Uuid::new_v4().to_string().replace('-', "_");
     config.ducklake.metadata_schema = format!("hotpath_reg_{suffix}");
 
-    // Connect resolver and provision tenant scope
     let resolver = softprobe_runtime::runtime_engine::DuckLakeScopeResolver::connect(&config)
         .await
         .expect("connect resolver")
@@ -235,12 +223,31 @@ async fn warm_writes_perform_zero_schema_probes_postgres() {
         .provision_scope(
             softprobe_runtime::runtime_engine::ScopeProvisioningRequest {
                 scope_id: tenant_id.clone(),
-                metadata_schema: tenant_schema,
-                data_path: tenant_data,
+                metadata_schema: tenant_schema.clone(),
+                data_path: tenant_data.clone(),
             },
         )
         .await
         .expect("provision scope");
 
-    assert_warm_writes_zero_probes_contract(config, Some(&tenant_id)).await;
+    let scope = resolver
+        .resolve_scope(&tenant_id)
+        .await
+        .expect("tenant scope");
+
+    let storage = IngestPipeline::build_tenant_storage(
+        &config,
+        None,
+        Some(resolver),
+        tenant_id.clone(),
+        scope.clone(),
+    )
+    .await
+    .expect("tenant storage");
+
+    let mut query_dk = config.ducklake.clone();
+    query_dk.metadata_schema = scope.metadata_schema;
+    query_dk.data_path = scope.data_path;
+
+    assert_warm_writes_zero_probes_contract(storage.writer, query_dk, Some(&tenant_id)).await;
 }
