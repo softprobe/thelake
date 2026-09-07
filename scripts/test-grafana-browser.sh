@@ -42,7 +42,9 @@ fi
 
 # Force the manual stack to run the current binary from reviewed source
 export GRAFANA_REUSE_STACK="${GRAFANA_REUSE_STACK:-0}"
-echo "==> Ensuring Grafana stack + live OTel ingestion are ready (GRAFANA_REUSE_STACK=$GRAFANA_REUSE_STACK)..."
+# TWCS open-day waves under demo load starve fresh k6_http_reqs (I-02/I-03).
+export THELAKE_MAINTENANCE_ENABLED="${THELAKE_MAINTENANCE_ENABLED:-false}"
+echo "==> Ensuring Grafana stack + live OTel ingestion are ready (GRAFANA_REUSE_STACK=$GRAFANA_REUSE_STACK THELAKE_MAINTENANCE_ENABLED=$THELAKE_MAINTENANCE_ENABLED)..."
 ./scripts/grafana-manual-up.sh
 
 echo "==> Verifying Softprobe and Grafana connectivity..."

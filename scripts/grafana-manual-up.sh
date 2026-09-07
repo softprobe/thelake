@@ -431,6 +431,14 @@ if [[ "$pg_ok" != 1 ]]; then
   exit 1
 fi
 
+# TWCS default on for ops compaction panels. Browser CI sets
+# THELAKE_MAINTENANCE_ENABLED=false — open-day waves under demo load starve
+# fresh k6_http_reqs (I-02/I-03), matching main's Grafana SLO stance.
+case "${THELAKE_MAINTENANCE_ENABLED:-true}" in
+  0|false|FALSE|no|NO|off|OFF) MAINTENANCE_ENABLED=false ;;
+  *) MAINTENANCE_ENABLED=true ;;
+esac
+
 cat >"$CONFIG" <<EOF
 server:
   port: 8090
@@ -446,10 +454,10 @@ query:
   max_connections: 16
   cache_dir: "$STATE_DIR/cache"
 
-# Demo: TWCS on so ops compaction panels have series, but keep merge light so
-# browser I-02/I-03 (fresh k6_http_reqs) stay green under Astronomy Shop load.
+# Demo: TWCS on by default (ops panels). Override with THELAKE_MAINTENANCE_ENABLED.
+# Keep merge light so open-day waves cannot peg CPU under Grafana refresh.
 maintenance:
-  enabled: true
+  enabled: ${MAINTENANCE_ENABLED}
   target_file_size_bytes: 67108864
   interval_seconds: 300
   metadata_enabled: true
