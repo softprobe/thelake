@@ -431,12 +431,24 @@ if [[ "$pg_ok" != 1 ]]; then
   exit 1
 fi
 
-# TWCS default on for ops compaction panels. Browser CI sets
-# THELAKE_MAINTENANCE_ENABLED=false — open-day waves under demo load starve
-# fresh k6_http_reqs (I-02/I-03), matching main's Grafana SLO stance.
+# TWCS + metadata default on for ops compaction panels. Browser CI sets
+# THELAKE_MAINTENANCE_ENABLED=false — matching main's Grafana SLO profile
+# (no TWCS / snapshot expire / orphan cleanup under Astronomy Shop load).
 case "${THELAKE_MAINTENANCE_ENABLED:-true}" in
-  0|false|FALSE|no|NO|off|OFF) MAINTENANCE_ENABLED=false ;;
-  *) MAINTENANCE_ENABLED=true ;;
+  0|false|FALSE|no|NO|off|OFF)
+    MAINTENANCE_ENABLED=false
+    METADATA_ENABLED=false
+    ORPHAN_ENABLED=false
+    ;;
+  *)
+    MAINTENANCE_ENABLED=true
+    METADATA_ENABLED=true
+    ORPHAN_ENABLED=true
+    ;;
+esac
+case "${THELAKE_SELF_MONITORING_ENABLED:-true}" in
+  0|false|FALSE|no|NO|off|OFF) SELF_MONITORING_ENABLED=false ;;
+  *) SELF_MONITORING_ENABLED=true ;;
 esac
 
 cat >"$CONFIG" <<EOF
@@ -454,16 +466,15 @@ query:
   max_connections: 16
   cache_dir: "$STATE_DIR/cache"
 
-# Demo: TWCS on by default (ops panels). Override with THELAKE_MAINTENANCE_ENABLED.
-# Keep merge light so open-day waves cannot peg CPU under Grafana refresh.
+# Demo: TWCS/metadata on by default (ops panels). Override with THELAKE_MAINTENANCE_ENABLED.
 maintenance:
   enabled: ${MAINTENANCE_ENABLED}
   target_file_size_bytes: 67108864
   interval_seconds: 300
-  metadata_enabled: true
+  metadata_enabled: ${METADATA_ENABLED}
   metadata_interval_seconds: 300
   max_snapshot_age_seconds: 60
-  remove_orphan_files_enabled: true
+  remove_orphan_files_enabled: ${ORPHAN_ENABLED}
   remove_orphan_older_than_seconds: 60
   open_day_file_cap: 64
   max_waves_per_table: 1
@@ -484,9 +495,10 @@ ducklake:
 dropdown_catalog:
   enabled: false
 
-# Self-monitoring ops lake (Design 2) — Grafana Softprobe Prometheus · ops.
+# Self-monitoring ops lake (Design 2). Browser CI may set
+# THELAKE_SELF_MONITORING_ENABLED=false to keep k6 freshness under demo load.
 self_monitoring:
-  enabled: true
+  enabled: ${SELF_MONITORING_ENABLED}
   export_interval_seconds: 15
   ops_metadata_schema: thelake_ops
   ops_data_path: "$STATE_DIR/data/_thelake_ops/"
