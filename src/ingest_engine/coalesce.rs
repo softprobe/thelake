@@ -51,6 +51,7 @@ impl<T: Send + 'static> CoalesceBuf<T> {
         }
         let mut g = self.state.lock().await;
         g.pending.push(items);
+        crate::self_monitoring::gauge_store::add_ingest_pending(1);
         if !g.timer_armed && !g.flushing {
             g.timer_armed = true;
             drop(g);
@@ -138,7 +139,10 @@ impl<T: Send + 'static> CoalesceBuf<T> {
                 return Ok(());
             }
             g.flushing = true;
-            std::mem::take(&mut g.pending)
+            let n = g.pending.len();
+            let batches = std::mem::take(&mut g.pending);
+            crate::self_monitoring::gauge_store::sub_ingest_pending(n);
+            batches
         };
 
         let result = (self.write)(batches).await;

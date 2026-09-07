@@ -53,7 +53,7 @@ HISTOGRAM_BUCKET_RATE_EXPR_FILE="$ROOT/tests/compat/grafana/browser/catalog_gate
 DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
 
-mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/cache" "$STATE_DIR/postgres"
+mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 
 port_busy() {
   local port="$1"
@@ -113,7 +113,8 @@ Grafana is ready for manual inspection (live Astronomy Shop traffic).
   Grafana:     http://127.0.0.1:3000  (admin / admin)
   Dashboards:  Astronomy Shop → GOLD overview + per-service boards
                Softprobe PromQL → capability smoke boards
-  Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY)
+               thelake ops → self-monitoring (datasource Softprobe Prometheus · ops)
+  Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY; ops: local-ops-key → thelake-ops)
   DuckLake:    Postgres 19 catalog on $PG_HOST:$PG_PORT (schema $PG_SCHEMA)
   Parquet:     $STATE_DIR/data/
   Store UI:    $STORE_URL
@@ -373,7 +374,7 @@ reset_grafana_state() {
   if [[ -d "$STATE_DIR/postgres" ]]; then
     docker run --rm -v "$STATE_DIR/postgres:/data" alpine sh -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
   fi
-  mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/cache" "$STATE_DIR/postgres"
+  mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 }
 
 reset_grafana_state
@@ -430,6 +431,26 @@ if [[ "$pg_ok" != 1 ]]; then
   exit 1
 fi
 
+# TWCS + metadata default on for ops compaction panels. Browser CI sets
+# THELAKE_MAINTENANCE_ENABLED=false — matching main's Grafana SLO profile
+# (no TWCS / snapshot expire / orphan cleanup under Astronomy Shop load).
+case "${THELAKE_MAINTENANCE_ENABLED:-true}" in
+  0|false|FALSE|no|NO|off|OFF)
+    MAINTENANCE_ENABLED=false
+    METADATA_ENABLED=false
+    ORPHAN_ENABLED=false
+    ;;
+  *)
+    MAINTENANCE_ENABLED=true
+    METADATA_ENABLED=true
+    ORPHAN_ENABLED=true
+    ;;
+esac
+case "${THELAKE_SELF_MONITORING_ENABLED:-true}" in
+  0|false|FALSE|no|NO|off|OFF) SELF_MONITORING_ENABLED=false ;;
+  *) SELF_MONITORING_ENABLED=true ;;
+esac
+
 cat >"$CONFIG" <<EOF
 server:
   port: 8090
@@ -445,23 +466,21 @@ query:
   max_connections: 16
   cache_dir: "$STATE_DIR/cache"
 
-# Demo: TWCS off during Grafana SLO. No-progress open-day waves pegged CPU and
-# caused intermittent >100ms spikes; PromQL range + resolve caches cover the
-# dashboard cell set. Re-enable later for long-lived file-cap hygiene if needed.
+# Demo: TWCS/metadata on by default (ops panels). Override with THELAKE_MAINTENANCE_ENABLED.
 maintenance:
-  enabled: false
+  enabled: ${MAINTENANCE_ENABLED}
   target_file_size_bytes: 67108864
-  interval_seconds: 600
-  metadata_enabled: false
+  interval_seconds: 300
+  metadata_enabled: ${METADATA_ENABLED}
   metadata_interval_seconds: 300
   max_snapshot_age_seconds: 60
-  remove_orphan_files_enabled: false
+  remove_orphan_files_enabled: ${ORPHAN_ENABLED}
   remove_orphan_older_than_seconds: 60
-  open_day_file_cap: 16
-  max_waves_per_table: 2
-  max_compacted_files_per_wave: 32
-  closed_day_max_compacted_files: 256
-  closed_day_max_waves: 64
+  open_day_file_cap: 64
+  max_waves_per_table: 1
+  max_compacted_files_per_wave: 16
+  closed_day_max_compacted_files: 128
+  closed_day_max_waves: 2
   max_merge_file_size_bytes: 8388608
 
 ducklake:
@@ -475,6 +494,14 @@ ducklake:
 
 dropdown_catalog:
   enabled: false
+
+# Self-monitoring ops lake (Design 2). Browser CI may set
+# THELAKE_SELF_MONITORING_ENABLED=false to keep k6 freshness under demo load.
+self_monitoring:
+  enabled: ${SELF_MONITORING_ENABLED}
+  export_interval_seconds: 15
+  ops_metadata_schema: thelake_ops
+  ops_data_path: "$STATE_DIR/data/_thelake_ops/"
 EOF
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
@@ -485,12 +512,21 @@ fi
 if [[ -z "${DUCKDB_LIB_DIR}" && -f "$ROOT/dist/libduckdb.so" ]]; then
   DUCKDB_LIB_DIR="$ROOT/dist"
 fi
+if [[ -z "${DUCKDB_LIB_DIR}" && -f "$ROOT/dist/libduckdb.dylib" ]]; then
+  DUCKDB_LIB_DIR="$ROOT/dist"
+fi
 if [[ -z "${DUCKDB_LIB_DIR}" ]]; then
   echo "ERROR: libduckdb not found under ${TARGET_DIR}/duckdb-download (build with DUCKDB_DOWNLOAD_LIB=1?)" >&2
   exit 1
 fi
 case "$(uname -s)" in
-  Darwin) export DYLD_LIBRARY_PATH="${DUCKDB_LIB_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" ;;
+  Darwin)
+    export DYLD_LIBRARY_PATH="${DUCKDB_LIB_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
+    # SIP often strips DYLD_* for child processes; @executable_path next to staged dylib is reliable.
+    if [[ -f "$ROOT/dist/libduckdb.dylib" ]] && command -v install_name_tool >/dev/null 2>&1; then
+      install_name_tool -add_rpath @executable_path "$RUNTIME_BIN" 2>/dev/null || true
+    fi
+    ;;
   *) export LD_LIBRARY_PATH="${DUCKDB_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
 esac
 
@@ -501,8 +537,47 @@ export SOFTPROBE_ADMIN_API_KEY="$ADMIN_API_KEY"
 export SOFTPROBE_GRPC_DISABLE=1
 export RUST_LOG="${RUST_LOG:-info}"
 : >"$LOG"
-setsid "$RUNTIME_BIN" >>"$LOG" 2>&1 &
-echo $! >"$PID_FILE"
+# Detach from the launcher process group so Softprobe survives when Make/CI
+# shells exit (Cursor agent shells tear down the whole tree otherwise).
+# Linux: setsid. Darwin: double-fork + setsid-equivalent via perl.
+start_softprobe_detached() {
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$RUNTIME_BIN" >>"$LOG" 2>&1 &
+    echo $! >"$PID_FILE"
+    return
+  fi
+  # macOS: no setsid; perl double-fork orphans the runtime from Make/agent shells.
+  perl -e '
+    use strict; use warnings;
+    my ($bin, $log, $pidfile) = @ARGV;
+    exit 0 if fork;
+    require POSIX; POSIX::setsid();
+    exit 0 if fork;
+    if (open my $fh, ">", $pidfile) { print {$fh} "$$\n"; close $fh; }
+    open STDOUT, ">>", $log or die $!;
+    open STDERR, ">&STDOUT";
+    open STDIN, "<", "/dev/null";
+    exec $bin or die $!;
+  ' "$RUNTIME_BIN" "$LOG" "$PID_FILE"
+  local ok=0
+  for _ in $(seq 1 40); do
+    if [[ -f "$PID_FILE" ]]; then
+      local pid
+      pid="$(tr -d "[:space:]" <"$PID_FILE" || true)"
+      if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+        ok=1
+        break
+      fi
+    fi
+    sleep 0.25
+  done
+  if [[ "$ok" != 1 ]]; then
+    echo "ERROR: Softprobe did not appear after detach start" >&2
+    tail -40 "$LOG" >&2 || true
+    exit 1
+  fi
+}
+start_softprobe_detached
 disown || true
 
 echo "==> waiting for Softprobe /ready"

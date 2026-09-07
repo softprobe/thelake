@@ -129,6 +129,65 @@ With a PostgreSQL catalog, `DuckLakeScopeResolver` stores scope mappings in the
 configured registry schema. Operational APIs do not accept arbitrary tenant or
 scope parameters after binding.
 
+### Self-monitoring ops scope
+
+When `self_monitoring.enabled` is true, the reserved tenant id `thelake-ops`
+binds to a dedicated DuckLake scope on the **same** catalog DSN
+(`self_monitoring.ops_metadata_schema` + `ops_data_path`). thelake collects
+process metrics via the OpenTelemetry Meter API (`SdkMeterProvider` +
+`PeriodicReader` + internal `PushMetricExporter` →
+`DuckLakeWriter::write_metric_batches`) — not public OTLP.
+
+#### Cardinality rules
+
+Metric attributes only: `tenant`, `signal` (`metrics|logs|traces|none`),
+`op` (`ingest|write|query|maintenance|export|compact`), `status` (`ok|error`),
+`sql_kind` (fixed enum), `app` (OTLP `service.name`, max 64 → `_other`),
+`table` (maintenance allowlist), `day_kind` (`open|closed`),
+`size_bucket` (`lt_1mb|1_8mb|8_64mb|gte_64mb`). Resource: `service.name=thelake`.
+
+Latency Prom names use `*_duration_milliseconds_{sum,count}` (not `*_latency_ms_*`).
+
+Orphan remove and snapshot expire counters are emitted **only when the action is
+enabled/attempted** (`maintenance.metadata_enabled` / `remove_orphan_files_enabled`).
+Disabled passes mint nothing (never `status=ok`). Attempted success → `ok`;
+attempted failure (`ActionStatus::Failed`) → `error`.
+
+#### Metric catalog (locked)
+
+| Prom name | Type | Labels |
+|-----------|------|--------|
+| `thelake_ingest_requests_total` / `thelake_ingest_errors_total` | counter | tenant, signal, status, app |
+| `thelake_ingest_duration_milliseconds_{sum,count}` | hist | tenant, signal, app |
+| `thelake_write_duration_milliseconds_{sum,count}` | hist | tenant, signal |
+| `thelake_query_duration_milliseconds_{sum,count}` | hist | tenant, sql_kind |
+| `thelake_query_queue_wait_milliseconds_{sum,count}` | hist | tenant, sql_kind |
+| `thelake_slow_queries_total` | counter | tenant, sql_kind |
+| `thelake_table_live_files` / `live_bytes` / `open_day_live_files` | gauge | tenant, table |
+| `thelake_table_files_by_size_bucket` | gauge | tenant, table, size_bucket |
+| `thelake_compaction_passes_total` | counter | tenant, status |
+| `thelake_compaction_waves_total` | counter | tenant, table, day_kind |
+| `thelake_compaction_duration_milliseconds_{sum,count}` | hist | tenant, table, day_kind |
+| `thelake_compaction_files_before` / `files_after` | gauge | tenant, table, day_kind |
+| `thelake_orphan_remove_total` | counter | tenant, status |
+| `thelake_snapshot_expire_total` | counter | tenant, status |
+| `thelake_self_heal_rebuilds_total` / `thelake_self_heal_consecutive_failures` | counter/gauge | — |
+| `thelake_process_*` (RSS/VSZ/CPU/threads/disk) | gauge/counter | — |
+| `thelake_query_workers` / `workers_busy` / `ingest_pending_batches` / `writer_pool_size` | gauge | — |
+| `thelake_self_monitoring_export_drops_total` | counter | — |
+
+Anti-recursion: never instrument ops-tenant ingest; inventory uses uninstrumented
+one-shot SQL; ops DuckDB engines set `counts_toward_liveness=false` so slow-query
+events and query histograms are not recorded for ops-plane work. Exporter only
+`write_metric_batches` / `write_log_batches`. `thelake_self_monitoring_export_drops_total`
+is published at 0 on install so dashboards always resolve the series. OTLP decode
+failures on metrics/logs/traces increment `thelake_ingest_errors_total` for customer
+tenants.
+Slow DuckDB queries (≥200ms) also emit ops log events for Loki drill-down.
+`POST /v1/tenants` rejects `thelake-ops`. Ops query workers do not count toward
+`/health` liveness SelfHeal. Bootstrap is best-effort and never blocks customer
+HTTP bind.
+
 ## Telemetry tables
 
 DuckLake creates tables lazily from Arrow schemas.

@@ -77,6 +77,19 @@ impl RuntimeEngineManager {
         self.scope_registry.as_ref()
     }
 
+    pub fn config(&self) -> &Config {
+        self.config.as_ref()
+    }
+
+    pub fn list_cached_tenant_ids(&self) -> Vec<String> {
+        self.engines.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Return a cached engine without building (for opportunistic gauges).
+    pub fn cached_engine(&self, tenant_id: &str) -> Option<Arc<RuntimeEngine>> {
+        self.engines.get(tenant_id).map(|e| e.clone())
+    }
+
     /// Drop cached engine (e.g. after provisioning changes scope).
     pub fn invalidate(&self, tenant_id: &str) {
         self.engines.remove(tenant_id);
@@ -113,16 +126,34 @@ impl RuntimeEngineManager {
     async fn build_engine(&self, tenant_id: &str) -> Result<Arc<RuntimeEngine>> {
         #[cfg(test)]
         self.build_counter.fetch_add(1, Ordering::Relaxed);
-        let resolver = self.scope_registry.as_ref();
-        let scope = if let Some(resolver) = resolver {
-            resolver.resolve_or_create(tenant_id).await?
-        } else {
-            DuckLakeScope {
-                metadata_schema: self.config.ducklake.metadata_schema.clone(),
-                data_path: self.config.ducklake.data_path.clone(),
-            }
-        };
 
+        let (scope, counts_toward_liveness) =
+            if crate::self_monitoring::is_reserved_tenant_id(tenant_id) {
+                let sm = &self.config.self_monitoring;
+                if !sm.enabled {
+                    bail!("self-monitoring is disabled; cannot bind ops tenant");
+                }
+                if sm.ops_metadata_schema.trim().is_empty() || sm.ops_data_path.trim().is_empty() {
+                    bail!("self_monitoring.ops_metadata_schema and ops_data_path are required");
+                }
+                (
+                    crate::self_monitoring::ops_scope_from_config(self.config.as_ref()),
+                    false,
+                )
+            } else {
+                let resolver = self.scope_registry.as_ref();
+                let scope = if let Some(resolver) = resolver {
+                    resolver.resolve_or_create(tenant_id).await?
+                } else {
+                    DuckLakeScope {
+                        metadata_schema: self.config.ducklake.metadata_schema.clone(),
+                        data_path: self.config.ducklake.data_path.clone(),
+                    }
+                };
+                (scope, true)
+            };
+
+        let resolver = self.scope_registry.as_ref();
         let dropdown_catalog = DropdownCatalog::connect(self.config.as_ref()).await?;
         let storage = Arc::new(
             IngestPipeline::build_tenant_storage(
@@ -139,8 +170,14 @@ impl RuntimeEngineManager {
             self.config.ingest.flush_interval_seconds,
         ));
         let query = Arc::new(
-            query_mod::create_query_engine_for_scope(self.config.as_ref(), storage.clone(), &scope)
-                .await?,
+            query_mod::create_query_engine_for_scope_with_liveness(
+                self.config.as_ref(),
+                storage.clone(),
+                &scope,
+                counts_toward_liveness,
+                tenant_id,
+            )
+            .await?,
         );
         Ok(Arc::new(RuntimeEngine {
             tenant_id: tenant_id.to_string(),
@@ -332,12 +369,13 @@ RETURNING scope_id;"#,
     }
 
     /// List all provisioned DuckLake scopes from the registry (for maintenance).
-    pub async fn list_scopes(&self) -> Result<Vec<DuckLakeScope>> {
+    /// Returns `(scope_id, scope)` — `scope_id` is the tenant id used for ops labels.
+    pub async fn list_scopes(&self) -> Result<Vec<(String, DuckLakeScope)>> {
         let client = self.pool.get().await?;
         let rows = client
             .query(
                 &format!(
-                    "SELECT ducklake_metadata_schema, data_path FROM {}.scope_registry ORDER BY scope_id;",
+                    "SELECT scope_id, ducklake_metadata_schema, data_path FROM {}.scope_registry ORDER BY scope_id;",
                     quote_pg_ident(&self.registry_schema)
                 ),
                 &[],
@@ -345,9 +383,14 @@ RETURNING scope_id;"#,
             .await?;
         Ok(rows
             .into_iter()
-            .map(|row| DuckLakeScope {
-                metadata_schema: row.get(0),
-                data_path: row.get(1),
+            .map(|row| {
+                (
+                    row.get::<_, String>(0),
+                    DuckLakeScope {
+                        metadata_schema: row.get(1),
+                        data_path: row.get(2),
+                    },
+                )
             })
             .collect())
     }

@@ -413,6 +413,17 @@ async fn v1_provision_scope(
             Json(json!({"error": {"code": "invalid_request", "message": "tenantId is required"}})),
         ));
     }
+    if crate::self_monitoring::is_reserved_tenant_id(&tenant_id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "reserved_tenant_id",
+                    "message": "tenantId is reserved for self-monitoring and cannot be provisioned via POST /v1/tenants"
+                }
+            })),
+        ));
+    }
 
     let Some(tenant_ducklake) = state.engines.scope_registry() else {
         return Err((
@@ -880,5 +891,13 @@ mod bearer_tests {
             !requires_runtime_auth(&Method::POST, "/v1/tenants"),
             "POST /v1/tenants uses admin Bearer validated in-handler, not tenant middleware"
         );
+    }
+
+    #[test]
+    fn reserved_ops_tenant_id_is_recognized() {
+        assert!(crate::self_monitoring::is_reserved_tenant_id("thelake-ops"));
+        assert!(!crate::self_monitoring::is_reserved_tenant_id(
+            "softprobe-local"
+        ));
     }
 }
