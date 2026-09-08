@@ -39,6 +39,14 @@ them as **informational consistency checks**, never as the source of truth.
 Missing scope headers are allowed when Bearer auth succeeded: the authenticated
 tenant is used.
 
+## Self-monitoring ops Bearer
+
+When self-monitoring is enabled, operators query the ops Prom datasource with a
+Bearer whose auth resolution returns tenant id `thelake-ops`. That id binds to
+the reserved ops DuckLake scope (see `docs/design.md`). Customer API keys must
+not resolve to `thelake-ops`; the ops key must not resolve to a customer tenant.
+Local compose uses `THELAKE_AUTH_STUB_KEY_TENANTS` (`apiKey:tenantId` pairs).
+
 An unauthorized caller cannot select another tenant by forging `X-Scope-OrgID`
 alone — middleware still requires a valid Bearer, and a mismatched header is
 denied.

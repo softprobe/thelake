@@ -93,6 +93,16 @@ async fn main() -> anyhow::Result<()> {
 
     info!("HTTP listening on {listen}");
     let listener = tokio::net::TcpListener::bind(listen).await?;
+
+    // Self-monitoring bootstrap must not postpone customer bind or abort the process.
+    if config.self_monitoring.enabled {
+        let sm_state = state.clone();
+        let sm_config = config.clone();
+        tokio::spawn(async move {
+            softprobe_runtime::self_monitoring::bootstrap(sm_state, sm_config).await;
+        });
+    }
+
     axum::serve(listener, app).await?;
 
     Ok(())

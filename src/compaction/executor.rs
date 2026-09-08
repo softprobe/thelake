@@ -73,11 +73,33 @@ pub struct ActionResult {
     pub status: ActionStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionStatus {
     Completed,
     Skipped,
+    /// Attempted and failed (ops metrics: status=error).
+    Failed,
     Unsupported,
+}
+
+/// Ops metric status for orphan cleanup: `None` = do not emit (disabled / no-op).
+pub fn orphan_metric_status(enabled: bool, status: ActionStatus) -> Option<&'static str> {
+    if !enabled {
+        return None;
+    }
+    match status {
+        ActionStatus::Completed => Some("ok"),
+        ActionStatus::Failed | ActionStatus::Unsupported => Some("error"),
+        ActionStatus::Skipped => None,
+    }
+}
+
+/// Ops metric status for snapshot expire: `None` = do not emit (disabled).
+pub fn snapshot_metric_status(enabled: bool, skipped: bool) -> Option<&'static str> {
+    if !enabled {
+        return None;
+    }
+    Some(if skipped { "error" } else { "ok" })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,28 +131,30 @@ impl MaintenanceExecutor {
     /// `run_compaction` is true so the scheduler can expire every `A` without
     /// merging every metadata tick.
     pub async fn run_pass(&self, run_compaction: bool) -> Result<MaintenanceSummary> {
+        crate::self_monitoring::record_maintenance();
         self.run_once_ducklake(run_compaction).await
     }
 
     async fn maintenance_scopes(&self) -> Result<Vec<(String, crate::config::DuckLakeConfig)>> {
         let mut scopes = Vec::new();
         let default = self.ducklake.clone();
-        scopes.push((
-            format!("default:{}", default.metadata_schema),
-            default.clone(),
-        ));
+        let mut saw_default = false;
         if let Some(registry) = &self.scope_registry {
-            for scope in registry.list_scopes().await? {
-                if scope.metadata_schema == default.metadata_schema
-                    && scope.data_path == default.data_path
-                {
-                    continue;
-                }
+            for (scope_id, scope) in registry.list_scopes().await? {
                 let mut dk = default.clone();
                 dk.metadata_schema = scope.metadata_schema;
                 dk.data_path = scope.data_path;
-                scopes.push((format!("registry:{}", dk.metadata_schema), dk));
+                if dk.metadata_schema == default.metadata_schema
+                    && dk.data_path == default.data_path
+                {
+                    saw_default = true;
+                }
+                // scope_id is the tenant id used by RuntimeEngine / inventory gauges.
+                scopes.push((scope_id, dk));
             }
+        }
+        if !saw_default {
+            scopes.insert(0, ("_default".to_string(), default));
         }
         Ok(scopes)
     }
@@ -144,16 +168,20 @@ impl MaintenanceExecutor {
         let tables = maintenance_table_names();
         let mut results = Vec::new();
 
-        for (label, ducklake) in self.maintenance_scopes().await? {
+        for (tenant_id, ducklake) in self.maintenance_scopes().await? {
+            let label = tenant_id.as_str();
+            let scope_start = std::time::Instant::now();
             let conn = match self.open_ducklake_connection(&ducklake) {
                 Ok(c) => c,
                 Err(err) => {
                     warn!("Maintenance skip scope {}: open failed: {}", label, err);
+                    crate::self_monitoring::record_compaction_pass(label, false);
                     continue;
                 }
             };
             if let Err(err) = self.attach_ducklake(&conn, &ducklake) {
                 warn!("Maintenance skip scope {}: attach failed: {}", label, err);
+                crate::self_monitoring::record_compaction_pass(label, false);
                 continue;
             }
 
@@ -182,7 +210,9 @@ impl MaintenanceExecutor {
                             ducklake.metadata_schema, table, label, err
                         );
                     }
-                    let status = match self.ducklake_twcs_compact_table(&conn, &ducklake, table) {
+                    let status = match self
+                        .ducklake_twcs_compact_table(&conn, &ducklake, table, &tenant_id)
+                    {
                         Ok(s) => s,
                         Err(err) => {
                             warn!(
@@ -229,7 +259,24 @@ impl MaintenanceExecutor {
 
             // Expire + orphan cleanup once per scope (not once per table).
             let (metadata, remove_orphan_files) =
-                self.run_scope_metadata_cleanup(&conn, &ducklake, &label);
+                self.run_scope_metadata_cleanup(&conn, &ducklake, label);
+
+            // Locked cardinality: status is ok|error only. Emit only when the
+            // action was attempted — disabled/no-op must not mint series.
+            let orphan_enabled = self.config.maintenance.metadata_enabled
+                && self.config.maintenance.remove_orphan_files_enabled;
+            if let Some(orphan_status) =
+                orphan_metric_status(orphan_enabled, remove_orphan_files.status)
+            {
+                crate::self_monitoring::record_orphan_remove(&tenant_id, orphan_status);
+            }
+            if let Some(snap_status) =
+                snapshot_metric_status(self.config.maintenance.metadata_enabled, metadata.skipped)
+            {
+                crate::self_monitoring::record_snapshot_expire(&tenant_id, snap_status);
+            }
+            crate::self_monitoring::record_compaction_pass(&tenant_id, true);
+            let _ = scope_start;
 
             for table in &tables {
                 let table_ident = format!("{}.{}", ducklake.metadata_schema, table);
@@ -254,7 +301,7 @@ impl MaintenanceExecutor {
                 });
             }
             let files_after = count_parquet_files_under(&ducklake.data_path);
-            warn_if_too_many_parquet_files(&label, &ducklake.data_path, files_before, files_after);
+            warn_if_too_many_parquet_files(label, &ducklake.data_path, files_before, files_after);
         }
 
         if let Some(ref dc) = self.dropdown_catalog {
@@ -309,7 +356,7 @@ impl MaintenanceExecutor {
                 Err(err) => {
                     warn!("Maintenance orphan cleanup failed ({}): {}", label, err);
                     ActionResult {
-                        status: ActionStatus::Skipped,
+                        status: ActionStatus::Failed,
                     }
                 }
             }
@@ -513,6 +560,7 @@ impl MaintenanceExecutor {
         conn: &Connection,
         ducklake: &crate::config::DuckLakeConfig,
         table: &str,
+        tenant_id: &str,
     ) -> Result<CompactionStatus> {
         let policy = self.twcs_policy();
         let today = Utc::now().date_naive();
@@ -532,11 +580,14 @@ impl MaintenanceExecutor {
             )?;
         }
 
-        last = self.twcs_compact_closed_days(conn, ducklake, table, today, last, &policy)?;
-        last = self.twcs_compact_open_day(conn, ducklake, table, today, last, &policy)?;
+        last =
+            self.twcs_compact_closed_days(conn, ducklake, table, today, last, &policy, tenant_id)?;
+        last =
+            self.twcs_compact_open_day(conn, ducklake, table, today, last, &policy, tenant_id)?;
         Ok(last)
     }
 
+    #[allow(clippy::too_many_arguments)] // TWCS wave loop; tenant_id required for ops labels
     fn twcs_compact_closed_days(
         &self,
         conn: &Connection,
@@ -545,6 +596,7 @@ impl MaintenanceExecutor {
         today: NaiveDate,
         mut last: CompactionStatus,
         policy: &TwcsPolicy,
+        tenant_id: &str,
     ) -> Result<CompactionStatus> {
         for wave in 0..policy.closed_day_max_waves {
             let partitions = self
@@ -579,6 +631,7 @@ impl MaintenanceExecutor {
                 files_before,
                 policy.closed_day_max_compacted_files
             );
+            let wave_start = std::time::Instant::now();
             last = self.ducklake_compact_table_wave(
                 conn,
                 ducklake,
@@ -586,15 +639,23 @@ impl MaintenanceExecutor {
                 policy.closed_day_max_compacted_files,
                 policy.max_merge_file_size_bytes,
             )?;
-            if last != CompactionStatus::Completed {
-                return Ok(last);
-            }
             let files_after = closed_day_live_file_count(
                 &self
                     .load_partition_stats(conn, &ducklake.catalog_alias, table)
                     .unwrap_or_default(),
                 today,
             );
+            crate::self_monitoring::record_compaction_wave(
+                tenant_id,
+                table,
+                "closed",
+                wave_start.elapsed(),
+                files_before as u64,
+                files_after as u64,
+            );
+            if last != CompactionStatus::Completed {
+                return Ok(last);
+            }
             if files_after >= files_before {
                 info!(
                     "TWCS closed-day merge {} made no file-count progress ({}); stopping waves",
@@ -606,6 +667,7 @@ impl MaintenanceExecutor {
         Ok(last)
     }
 
+    #[allow(clippy::too_many_arguments)] // TWCS wave loop; tenant_id required for ops labels
     fn twcs_compact_open_day(
         &self,
         conn: &Connection,
@@ -614,6 +676,7 @@ impl MaintenanceExecutor {
         today: NaiveDate,
         mut last: CompactionStatus,
         policy: &TwcsPolicy,
+        tenant_id: &str,
     ) -> Result<CompactionStatus> {
         for wave in 0..policy.max_waves_per_table {
             let partitions = self
@@ -648,6 +711,7 @@ impl MaintenanceExecutor {
                 policy.open_day_file_cap,
                 max_compacted
             );
+            let wave_start = std::time::Instant::now();
             last = self.ducklake_compact_table_wave(
                 conn,
                 ducklake,
@@ -662,6 +726,14 @@ impl MaintenanceExecutor {
                 .load_live_file_count(conn, &ducklake.catalog_alias, table)
                 .ok();
             let files_after = open_day_files_for_merge(&partitions_after, today, fallback_after);
+            crate::self_monitoring::record_compaction_wave(
+                tenant_id,
+                table,
+                "open",
+                wave_start.elapsed(),
+                files_before as u64,
+                files_after as u64,
+            );
             info!(
                 "TWCS open-day wave {}/{} {}: status={:?} files {} → {}",
                 wave + 1,
@@ -1384,5 +1456,32 @@ mod tests {
             );
             assert!(!sql.contains("days"), "must not contain days: {sql}");
         }
+    }
+
+    #[test]
+    fn orphan_metric_status_emit_rules() {
+        assert_eq!(orphan_metric_status(false, ActionStatus::Completed), None);
+        assert_eq!(orphan_metric_status(false, ActionStatus::Failed), None);
+        assert_eq!(
+            orphan_metric_status(true, ActionStatus::Completed),
+            Some("ok")
+        );
+        assert_eq!(
+            orphan_metric_status(true, ActionStatus::Failed),
+            Some("error")
+        );
+        assert_eq!(
+            orphan_metric_status(true, ActionStatus::Unsupported),
+            Some("error")
+        );
+        assert_eq!(orphan_metric_status(true, ActionStatus::Skipped), None);
+    }
+
+    #[test]
+    fn snapshot_metric_status_emit_rules() {
+        assert_eq!(snapshot_metric_status(false, true), None);
+        assert_eq!(snapshot_metric_status(false, false), None);
+        assert_eq!(snapshot_metric_status(true, false), Some("ok"));
+        assert_eq!(snapshot_metric_status(true, true), Some("error"));
     }
 }

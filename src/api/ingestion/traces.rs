@@ -1,4 +1,4 @@
-use crate::api::ingestion::{ingest_write_failed, IngestResponse};
+use crate::api::ingestion::{ingest_write_failed, record_ingest_decode_failure, IngestResponse};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::Span as SpanData;
@@ -8,6 +8,7 @@ use axum::http::{header::CONTENT_TYPE, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{extract::State, Json};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use std::time::Instant;
 use tracing::{error, info};
 
 /// OTLP /v1/traces JSON handler with proper parsing
@@ -16,8 +17,10 @@ pub async fn ingest_traces_json(
     tenant: Option<Extension<TenantInfo>>,
     body: axum::body::Bytes,
 ) -> Response {
+    let start = Instant::now();
     let body_size = body.len();
-    let auth_tid = tenant.map(|t| t.0.tenant_id.clone());
+    let tenant_info = tenant.map(|t| t.0);
+    let auth_tid = tenant_info.as_ref().map(|t| t.tenant_id.clone());
     match serde_json::from_slice::<ExportTraceServiceRequest>(&body) {
         Ok(request) => match process_traces(state, request, body_size, auth_tid).await {
             Ok(count) => Json(IngestResponse {
@@ -32,6 +35,7 @@ pub async fn ingest_traces_json(
             }
         },
         Err(e) => {
+            record_ingest_decode_failure(tenant_info.as_ref(), "traces", start);
             error!("Failed to decode JSON: {}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -52,8 +56,10 @@ pub async fn ingest_traces_protobuf(
     tenant: Option<Extension<TenantInfo>>,
     body: axum::body::Bytes,
 ) -> Response {
+    let start = Instant::now();
     let body_size = body.len();
-    let auth_tid = tenant.map(|t| t.0.tenant_id.clone());
+    let tenant_info = tenant.map(|t| t.0);
+    let auth_tid = tenant_info.as_ref().map(|t| t.tenant_id.clone());
     match prost::Message::decode(body.as_ref()) {
         Ok(request) => match process_traces(state, request, body_size, auth_tid).await {
             Ok(count) => Json(IngestResponse {
@@ -68,6 +74,7 @@ pub async fn ingest_traces_protobuf(
             }
         },
         Err(e) => {
+            record_ingest_decode_failure(tenant_info.as_ref(), "traces", start);
             error!("Failed to decode protobuf: {}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -89,8 +96,10 @@ pub async fn ingest_traces(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let start = Instant::now();
     let body_size = body.len();
-    let auth_tid = tenant.map(|t| t.0.tenant_id.clone());
+    let tenant_info = tenant.map(|t| t.0);
+    let auth_tid = tenant_info.as_ref().map(|t| t.tenant_id.clone());
     let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -115,6 +124,7 @@ pub async fn ingest_traces(
                 }
             }
             Err(e) => {
+                record_ingest_decode_failure(tenant_info.as_ref(), "traces", start);
                 error!("Failed to decode protobuf: {}", e);
                 (StatusCode::BAD_REQUEST, "Protobuf decode failed").into_response()
             }
@@ -136,7 +146,10 @@ pub async fn ingest_traces(
                     }
                 }
             }
-            Err(_) => (StatusCode::BAD_REQUEST, "Invalid JSON").into_response(),
+            Err(_) => {
+                record_ingest_decode_failure(tenant_info.as_ref(), "traces", start);
+                (StatusCode::BAD_REQUEST, "Invalid JSON").into_response()
+            }
         }
     }
 }
@@ -152,10 +165,40 @@ pub async fn process_traces(
     body_size: usize,
     auth_tenant_id: Option<String>,
 ) -> Result<usize> {
+    let start = std::time::Instant::now();
+    let tid_hint = auth_tenant_id.clone().unwrap_or_default();
+    let result = process_traces_inner(state, request, body_size, auth_tenant_id).await;
+    if crate::self_monitoring::instrument_customer_tenant(&tid_hint) {
+        let (ok, app) = match &result {
+            Ok((_, app)) => (true, app.clone()),
+            Err(_) => (false, None),
+        };
+        crate::self_monitoring::record_ingest(
+            &tid_hint,
+            "traces",
+            ok,
+            app.as_deref(),
+            start.elapsed(),
+        );
+        return result.map(|(n, _)| n);
+    }
+    result.map(|(n, _)| n)
+}
+
+async fn process_traces_inner(
+    state: AppState,
+    request: ExportTraceServiceRequest,
+    body_size: usize,
+    auth_tenant_id: Option<String>,
+) -> Result<(usize, Option<String>)> {
     let mut spans = Vec::new();
+    let mut app: Option<String> = None;
 
     for resource_spans in request.resource_spans {
         let resource_attributes = SpanData::extract_resource_attributes(&resource_spans);
+        if app.is_none() {
+            app = resource_attributes.get("service.name").cloned();
+        }
 
         for scope_spans in resource_spans.scope_spans {
             let instrumentation_scope = scope_spans
@@ -197,11 +240,15 @@ pub async fn process_traces(
     let span_count = spans.len();
 
     let engine = state.engine_for_id(&tid).await?;
+    let write_start = std::time::Instant::now();
     engine.ingest.add_spans(spans, body_size).await?;
+    if crate::self_monitoring::instrument_customer_tenant(&tid) {
+        crate::self_monitoring::record_write(&tid, "traces", app.as_deref(), write_start.elapsed());
+    }
 
     info!(
         "Processed {} spans from OTLP request ({} bytes)",
         span_count, body_size
     );
-    Ok(span_count)
+    Ok((span_count, app))
 }

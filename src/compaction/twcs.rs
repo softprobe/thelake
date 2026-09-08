@@ -299,6 +299,19 @@ pub fn live_file_count_sql(catalog_alias: &str, table: &str) -> String {
     )
 }
 
+/// Live file sizes for inventory size-bucket gauges (same join as live_file_count).
+pub fn live_file_sizes_sql(catalog_alias: &str, table: &str) -> String {
+    let meta = format!("__ducklake_metadata_{catalog_alias}");
+    format!(
+        "SELECT df.file_size_bytes::BIGINT AS file_size_bytes \
+         FROM {meta}.ducklake_data_file df \
+         JOIN {meta}.ducklake_table t ON df.table_id = t.table_id \
+         WHERE t.table_name = '{table}' \
+           AND t.end_snapshot IS NULL \
+           AND df.end_snapshot IS NULL"
+    )
+}
+
 /// AC-F8: closed-day live files are 1, or 2 when that day's bytes exceed 64 MiB.
 pub fn closed_day_meets_file_bar(live_file_count: usize, total_bytes: u64) -> bool {
     const TARGET: u64 = 64 * 1024 * 1024;

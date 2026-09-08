@@ -5,7 +5,7 @@
 // After binding tenant context, use tenant-scoped instances/contexts only.
 // ============================================================================
 
-use crate::api::ingestion::{ingest_write_failed, IngestResponse};
+use crate::api::ingestion::{ingest_write_failed, record_ingest_decode_failure, IngestResponse};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::Log as LogData;
@@ -15,6 +15,7 @@ use axum::http::{header::CONTENT_TYPE, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{extract::State, Json};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+use std::time::Instant;
 use tracing::{error, info};
 
 /// Unified OTLP /v1/logs handler that switches on Content-Type
@@ -24,6 +25,7 @@ pub async fn ingest_logs(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let start = Instant::now();
     let body_size = body.len();
     let runtime_engine = tenant.map(|t| t.0);
     let content_type = headers
@@ -50,6 +52,7 @@ pub async fn ingest_logs(
                 }
             }
             Err(e) => {
+                record_ingest_decode_failure(runtime_engine.as_ref(), "logs", start);
                 error!("Failed to decode protobuf: {}", e);
                 (StatusCode::BAD_REQUEST, "Protobuf decode failed").into_response()
             }
@@ -72,6 +75,7 @@ pub async fn ingest_logs(
                 }
             }
             Err(e) => {
+                record_ingest_decode_failure(runtime_engine.as_ref(), "logs", start);
                 error!("Failed to decode JSON: {}", e);
                 (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)).into_response()
             }
@@ -86,10 +90,37 @@ async fn process_logs(
     body_size: usize,
     tenant: Option<TenantInfo>,
 ) -> Result<usize> {
+    let start = std::time::Instant::now();
+    let tid = tenant
+        .as_ref()
+        .map(|t| t.tenant_id.clone())
+        .unwrap_or_default();
+    let result = process_logs_inner(state, request, body_size, tenant).await;
+    if crate::self_monitoring::instrument_customer_tenant(&tid) {
+        let (ok, app) = match &result {
+            Ok((_, app)) => (true, app.clone()),
+            Err(_) => (false, None),
+        };
+        crate::self_monitoring::record_ingest(&tid, "logs", ok, app.as_deref(), start.elapsed());
+        return result.map(|(n, _)| n);
+    }
+    result.map(|(n, _)| n)
+}
+
+async fn process_logs_inner(
+    state: AppState,
+    request: ExportLogsServiceRequest,
+    body_size: usize,
+    tenant: Option<TenantInfo>,
+) -> Result<(usize, Option<String>)> {
     let mut logs = Vec::new();
+    let mut app: Option<String> = None;
 
     for resource_logs in request.resource_logs {
         let resource_attributes = LogData::extract_resource_attributes(&resource_logs);
+        if app.is_none() {
+            app = resource_attributes.get("service.name").cloned();
+        }
 
         for scope_logs in resource_logs.scope_logs {
             // OTEL stores the logger / instrumentation name on scope.name; SoftProbe product
@@ -112,11 +143,20 @@ async fn process_logs(
 
     let tenant_id = tenant.map(|t| t.tenant_id).unwrap_or_default();
     let engine = state.engine_for_id(&tenant_id).await?;
+    let write_start = std::time::Instant::now();
     engine.ingest.add_logs(logs, body_size).await?;
+    if crate::self_monitoring::instrument_customer_tenant(&tenant_id) {
+        crate::self_monitoring::record_write(
+            &tenant_id,
+            "logs",
+            app.as_deref(),
+            write_start.elapsed(),
+        );
+    }
 
     info!(
         "Processed {} log records from OTLP request ({} bytes)",
         log_count, body_size
     );
-    Ok(log_count)
+    Ok((log_count, app))
 }

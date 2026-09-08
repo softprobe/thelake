@@ -66,6 +66,9 @@ services:
       SOFTPROBE_TENANT_B_API_KEY: local-dev-key
       SOFTPROBE_TENANT_A_ID: local-dev-tenant
       SOFTPROBE_TENANT_B_ID: local-dev-tenant
+      # Ops self-monitoring datasource (softprobe-prom-ops → thelake-ops).
+      SOFTPROBE_OPS_API_KEY: local-ops-key
+      SOFTPROBE_OPS_TENANT_ID: thelake-ops
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

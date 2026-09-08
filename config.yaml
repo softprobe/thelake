@@ -49,3 +49,10 @@ dropdown_catalog:
   active_values_days: 7
   maintenance_prune_enabled: true
   upsert_batch_size: 500
+
+# Self-monitoring ops lake (disabled by default). See docs/design.md.
+# self_monitoring:
+#   enabled: false
+#   export_interval_seconds: 60
+#   ops_metadata_schema: thelake_ops
+#   ops_data_path: "./warehouse/_thelake_ops/"

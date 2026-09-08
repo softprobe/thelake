@@ -23,6 +23,7 @@ const MAX_CONSECUTIVE_REBUILD_FAILURES: u64 = 3;
 /// 2026-08-03 outage served 503s for half an hour behind a green health check.
 pub async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
     let heal = duckdb::self_heal_snapshot();
+    let export_drops = crate::self_monitoring::self_monitoring_export_drops();
     if heal.consecutive_failures >= MAX_CONSECUTIVE_REBUILD_FAILURES {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -30,8 +31,9 @@ pub async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
                 "status": "unhealthy",
                 "reason": "query worker connection rebuild keeps failing",
                 "consecutiveRebuildFailures": heal.consecutive_failures,
+                "exportDrops": export_drops,
                 "specVersion": "http-control-api@v1",
-                "schemaVersion": "1"
+                "schemaVersion": "2"
             })),
         );
     }
@@ -39,8 +41,9 @@ pub async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::OK,
         Json(json!({
             "status": "ok",
+            "exportDrops": export_drops,
             "specVersion": "http-control-api@v1",
-            "schemaVersion": "1"
+            "schemaVersion": "2"
         })),
     )
 }
@@ -115,6 +118,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(j.0["status"], "ok");
         assert_eq!(j.0["specVersion"], "http-control-api@v1");
+        assert!(j.0.get("exportDrops").is_some());
+        assert_eq!(j.0["schemaVersion"], "2");
     }
 
     #[tokio::test]

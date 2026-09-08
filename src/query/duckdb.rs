@@ -36,6 +36,8 @@ pub struct DuckDBQueryEngine {
     config: Config,
     /// In-flight identical SQL shares one worker (Grafana panel stampede), not a result TTL.
     inflight: Arc<Mutex<InflightMap>>,
+    tenant_id: String,
+    counts_toward_liveness: bool,
 }
 
 const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql");
@@ -347,17 +349,23 @@ fn rebuild_worker_state(core: &DuckDBCore, index: usize) -> Option<ConnectionSta
         .and_then(|conn| core.init_connection_state_with(conn))
     {
         Ok(state) => {
-            SELF_HEAL.rebuilds.fetch_add(1, Ordering::Relaxed);
-            SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
+            if core.counts_toward_liveness {
+                SELF_HEAL.rebuilds.fetch_add(1, Ordering::Relaxed);
+                SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
+            }
             info!("DuckDB query worker {index} rebuilt its connection after a fatal engine error");
             Some(state)
         }
         Err(err) => {
             // Counted so /health can turn "self-heal keeps failing" into an
             // unhealthy signal; nothing recovers from this state on its own.
-            SELF_HEAL
-                .consecutive_failures
-                .fetch_add(1, Ordering::Relaxed);
+            // Ops engines set counts_toward_liveness=false so a broken ops
+            // catalog cannot crashloop the customer plane.
+            if core.counts_toward_liveness {
+                SELF_HEAL
+                    .consecutive_failures
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             warn!("DuckDB query worker {index} failed to rebuild its poisoned connection: {err}");
             None
         }
@@ -371,7 +379,14 @@ struct WorkerHandle {
 
 struct QueryRequest {
     sql: String,
-    respond_to: oneshot::Sender<Result<QueryResult>>,
+    enqueued_at: std::time::Instant,
+    respond_to: oneshot::Sender<QueryWorkerResponse>,
+}
+
+struct QueryWorkerResponse {
+    result: Result<QueryResult>,
+    queue_wait: std::time::Duration,
+    exec_elapsed: std::time::Duration,
 }
 
 struct ConnectionState {
@@ -385,6 +400,10 @@ struct ConnectionState {
 struct DuckDBCore {
     config: Config,
     cache: CacheSettings,
+    /// When false, rebuild failures do not increment process-global SelfHeal
+    /// counters used by `/health` liveness (ops engines).
+    counts_toward_liveness: bool,
+    tenant_id: String,
 }
 
 fn sql_coalesce_key(sql: &str) -> u64 {
@@ -444,11 +463,28 @@ impl Drop for InflightLease {
 }
 
 impl DuckDBQueryEngine {
-    pub async fn new(config: &Config, _tiered_storage: Arc<dyn TieredStorage>) -> Result<Self> {
+    pub async fn new(config: &Config, tiered_storage: Arc<dyn TieredStorage>) -> Result<Self> {
+        Self::new_with_liveness(config, tiered_storage, true, "_default").await
+    }
+
+    /// `counts_toward_liveness=false` for ops/self-monitoring engines so rebuild
+    /// failures never trip process `/health` liveness.
+    pub async fn new_with_liveness(
+        config: &Config,
+        _tiered_storage: Arc<dyn TieredStorage>,
+        counts_toward_liveness: bool,
+        tenant_id: &str,
+    ) -> Result<Self> {
         let core = DuckDBCore {
             config: config.clone(),
             cache: CacheSettings::new(config),
+            counts_toward_liveness,
+            tenant_id: tenant_id.to_string(),
         };
+        crate::self_monitoring::gauge_store::QUERY_WORKERS.store(
+            std::cmp::max(1, config.query.max_connections),
+            Ordering::Relaxed,
+        );
         // Install extensions once to ensure they're available
         let temp_conn = core.open_connection()?;
         core.install_extensions(&temp_conn)?;
@@ -493,6 +529,18 @@ impl DuckDBQueryEngine {
                     }
                     drop(ready_tx);
                     while let Some(request) = rx.blocking_recv() {
+                        let queue_wait = request.enqueued_at.elapsed();
+                        let sql_kind = crate::self_monitoring::classify_sql_kind(&request.sql);
+                        if core.counts_toward_liveness {
+                            crate::self_monitoring::record_query_queue_wait(
+                                &core.tenant_id,
+                                sql_kind,
+                                queue_wait,
+                            );
+                        }
+                        crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY
+                            .fetch_add(1, Ordering::Relaxed);
+                        let exec_start = std::time::Instant::now();
                         let mut result = core.execute_query_on_state(&mut state, &request.sql);
                         if let Err(err) = &result {
                             let kind = poison_kind(&err.to_string());
@@ -521,13 +569,30 @@ impl DuckDBQueryEngine {
                                 }
                             }
                         }
-                        if result.is_ok() {
-                            // Any success anywhere clears the global streak --
-                            // see SelfHealCounters for why this must not be
-                            // limited to successful rebuilds.
-                            SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
+                        let exec_elapsed = exec_start.elapsed();
+                        crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY
+                            .fetch_sub(1, Ordering::Relaxed);
+                        if core.counts_toward_liveness {
+                            crate::self_monitoring::record_query(
+                                &core.tenant_id,
+                                sql_kind,
+                                exec_elapsed,
+                            );
                         }
-                        let _ = request.respond_to.send(result);
+                        if result.is_ok() {
+                            // Any *customer* success clears the global streak --
+                            // see SelfHealCounters. Ops engines must not clear
+                            // (or they can hide a dead customer plane behind
+                            // healthy Grafana traffic).
+                            if core.counts_toward_liveness {
+                                SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
+                            }
+                        }
+                        let _ = request.respond_to.send(QueryWorkerResponse {
+                            result,
+                            queue_wait,
+                            exec_elapsed,
+                        });
                     }
                 })
                 .map_err(|err| anyhow!("DuckDB worker spawn failed: {}", err))?;
@@ -629,6 +694,8 @@ impl DuckDBQueryEngine {
             next_worker: AtomicUsize::new(0),
             config: config.clone(),
             inflight: Arc::new(Mutex::new(HashMap::new())),
+            tenant_id: core.tenant_id.clone(),
+            counts_toward_liveness: core.counts_toward_liveness,
         })
     }
 
@@ -691,26 +758,59 @@ impl DuckDBQueryEngine {
         let (tx, rx) = oneshot::channel();
         let request = QueryRequest {
             sql: query.to_string(),
+            enqueued_at: std::time::Instant::now(),
             respond_to: tx,
         };
-        let queued = std::time::Instant::now();
         sender
             .send(request)
             .await
             .map_err(|_| anyhow!("DuckDB worker channel closed"))?;
-        let result = rx
+        let response = rx
             .await
             .map_err(|_| anyhow!("DuckDB worker dropped response"))?;
-        let elapsed = queued.elapsed();
+        let elapsed = response.queue_wait + response.exec_elapsed;
         if elapsed >= std::time::Duration::from_millis(200) {
             let preview: String = query.chars().take(160).collect();
+            let sql_kind = crate::self_monitoring::classify_sql_kind(query);
             warn!(
                 elapsed_ms = elapsed.as_millis() as u64,
+                queue_wait_ms = response.queue_wait.as_millis() as u64,
                 sql = %preview,
                 "slow DuckDB query (queue + execute)"
             );
+            if self.counts_toward_liveness {
+                crate::self_monitoring::record_slow_query(&self.tenant_id, sql_kind);
+                crate::self_monitoring::try_enqueue_slow_query(
+                    crate::self_monitoring::SlowQueryEvent {
+                        tenant: self.tenant_id.clone(),
+                        sql_kind: sql_kind.to_string(),
+                        elapsed_ms: elapsed.as_millis() as u64,
+                        queue_wait_ms: response.queue_wait.as_millis() as u64,
+                        sql_preview: preview,
+                    },
+                );
+            }
         }
-        result
+        response.result
+    }
+
+    /// One-shot metadata SQL on a dedicated connection (no worker pool, no
+    /// self-monitoring instruments). Used by inventory scrapes.
+    pub async fn execute_query_uninstrumented(&self, query: &str) -> Result<QueryResult> {
+        let core = DuckDBCore {
+            config: self.config.clone(),
+            cache: CacheSettings::new(&self.config),
+            counts_toward_liveness: false,
+            tenant_id: self.tenant_id.clone(),
+        };
+        let sql = query.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = core.open_connection()?;
+            let mut state = core.init_connection_state_with(conn)?;
+            core.execute_query_on_state(&mut state, &sql)
+        })
+        .await
+        .map_err(|e| anyhow!("inventory query join: {e}"))?
     }
 
     /// Execute one query with a tenant-specific DuckLake metadata schema.
@@ -730,6 +830,8 @@ impl DuckDBQueryEngine {
         let core = DuckDBCore {
             cache: CacheSettings::new(&config),
             config,
+            counts_toward_liveness: true,
+            tenant_id: self.tenant_id.clone(),
         };
         let conn = core.open_connection()?;
         let mut state = core.init_connection_state_with(conn)?;

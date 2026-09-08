@@ -52,3 +52,18 @@ datasources:
     secureJsonData:
       httpHeaderValue1: "Bearer ${SOFTPROBE_TENANT_B_API_KEY}"
       httpHeaderValue2: "${SOFTPROBE_TENANT_B_ID}"
+
+  - name: Softprobe Prometheus · ops
+    type: prometheus
+    uid: softprobe-prom-ops
+    access: proxy
+    url: ${SOFTPROBE_URL}
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
+      httpHeaderName1: Authorization
+      httpHeaderName2: X-Scope-OrgID
+    secureJsonData:
+      httpHeaderValue1: "Bearer ${SOFTPROBE_OPS_API_KEY}"
+      httpHeaderValue2: "${SOFTPROBE_OPS_TENANT_ID}"

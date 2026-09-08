@@ -5,7 +5,7 @@
 // After binding tenant context, use tenant-scoped instances/contexts only.
 // ============================================================================
 
-use crate::api::ingestion::{ingest_write_failed, IngestResponse};
+use crate::api::ingestion::{ingest_write_failed, record_ingest_decode_failure, IngestResponse};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::Metric;
@@ -15,6 +15,7 @@ use axum::http::{header::CONTENT_TYPE, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{extract::State, Json};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use std::time::Instant;
 use tracing::{error, info};
 
 /// OTLP /v1/metrics JSON handler
@@ -23,6 +24,7 @@ pub async fn ingest_metrics_json(
     tenant: Option<Extension<TenantInfo>>,
     body: axum::body::Bytes,
 ) -> Response {
+    let start = Instant::now();
     let body_size = body.len();
     let tenant_info = tenant.map(|t| t.0);
     match serde_json::from_slice::<ExportMetricsServiceRequest>(&body) {
@@ -39,6 +41,7 @@ pub async fn ingest_metrics_json(
             }
         },
         Err(e) => {
+            record_ingest_decode_failure(tenant_info.as_ref(), "metrics", start);
             error!("Failed to decode JSON: {}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -59,6 +62,7 @@ pub async fn ingest_metrics_protobuf(
     tenant: Option<Extension<TenantInfo>>,
     body: axum::body::Bytes,
 ) -> Response {
+    let start = Instant::now();
     let body_size = body.len();
     let tenant_info = tenant.map(|t| t.0);
     match prost::Message::decode(body.as_ref()) {
@@ -75,6 +79,7 @@ pub async fn ingest_metrics_protobuf(
             }
         },
         Err(e) => {
+            record_ingest_decode_failure(tenant_info.as_ref(), "metrics", start);
             error!("Failed to decode protobuf: {}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -96,6 +101,7 @@ pub async fn ingest_metrics(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let start = Instant::now();
     let body_size = body.len();
     let tenant_info = tenant.map(|t| t.0);
     let content_type = headers
@@ -122,6 +128,7 @@ pub async fn ingest_metrics(
                 }
             }
             Err(e) => {
+                record_ingest_decode_failure(tenant_info.as_ref(), "metrics", start);
                 error!("Failed to decode protobuf: {}", e);
                 (StatusCode::BAD_REQUEST, "Invalid protobuf").into_response()
             }
@@ -143,7 +150,10 @@ pub async fn ingest_metrics(
                     }
                 }
             }
-            Err(_) => (StatusCode::BAD_REQUEST, "Invalid JSON").into_response(),
+            Err(e) => {
+                record_ingest_decode_failure(tenant_info.as_ref(), "metrics", start);
+                (StatusCode::BAD_REQUEST, format!("Invalid JSON: {e}")).into_response()
+            }
         }
     }
 }
@@ -155,10 +165,43 @@ async fn process_metrics(
     body_size: usize,
     tenant: Option<TenantInfo>,
 ) -> Result<usize> {
+    let start = std::time::Instant::now();
+    let tenant_id = tenant
+        .as_ref()
+        .map(|t| t.tenant_id.as_str())
+        .unwrap_or("")
+        .to_string();
+    let result = process_metrics_inner(state, request, body_size, tenant).await;
+    if crate::self_monitoring::instrument_customer_tenant(&tenant_id) {
+        let (ok, app) = match &result {
+            Ok((_, app)) => (true, app.clone()),
+            Err(_) => (false, None),
+        };
+        crate::self_monitoring::record_ingest(
+            &tenant_id,
+            "metrics",
+            ok,
+            app.as_deref(),
+            start.elapsed(),
+        );
+    }
+    result.map(|(n, _)| n)
+}
+
+async fn process_metrics_inner(
+    state: AppState,
+    request: ExportMetricsServiceRequest,
+    body_size: usize,
+    tenant: Option<TenantInfo>,
+) -> Result<(usize, Option<String>)> {
     let mut metrics = Vec::new();
+    let mut app: Option<String> = None;
 
     for resource_metrics in request.resource_metrics {
         let resource_attributes = Metric::extract_resource_attributes(&resource_metrics);
+        if app.is_none() {
+            app = resource_attributes.get("service.name").cloned();
+        }
 
         for scope_metrics in resource_metrics.scope_metrics {
             for otlp_metric in scope_metrics.metrics {
@@ -172,11 +215,20 @@ async fn process_metrics(
 
     let tenant_id = tenant.map(|t| t.tenant_id).unwrap_or_default();
     let engine = state.engine_for_id(&tenant_id).await?;
+    let write_start = std::time::Instant::now();
     engine.ingest.add_metrics(metrics, body_size).await?;
+    if crate::self_monitoring::instrument_customer_tenant(&tenant_id) {
+        crate::self_monitoring::record_write(
+            &tenant_id,
+            "metrics",
+            app.as_deref(),
+            write_start.elapsed(),
+        );
+    }
 
     info!(
         "Processed {} metric data points from OTLP request ({} bytes)",
         metric_count, body_size
     );
-    Ok(metric_count)
+    Ok((metric_count, app))
 }

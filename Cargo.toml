@@ -24,6 +24,9 @@ bytes = "1"
 
 # OpenTelemetry Protocol
 opentelemetry-proto = { version = "0.7", features = ["gen-tonic", "trace", "metrics", "logs"] }
+opentelemetry = { version = "0.27", default-features = false, features = ["metrics"] }
+opentelemetry_sdk = { version = "0.27", default-features = false, features = ["metrics", "rt-tokio"] }
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 prost = "0.13"
 prost-types = "0.13"
 tonic = { version = "0.12", features = ["gzip"] }

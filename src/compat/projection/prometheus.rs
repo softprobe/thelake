@@ -123,6 +123,9 @@ pub fn classic_prom_suffix_base(prom_name: &str) -> Option<&str> {
 
 /// Dual-write classic suffix gauges at ingest for Grafana GOLD / demo families.
 /// Other histograms stay native and expand at query time.
+///
+/// `thelake_` self-monitoring exports `_sum`/`_count` (and
+/// `files_by_size_bucket`) as first-class series — not native hist expand.
 pub fn classic_prom_dual_write_allowed(base_name: &str) -> bool {
     base_name.starts_with("k6_")
         || base_name.starts_with("demo_")
@@ -130,6 +133,7 @@ pub fn classic_prom_dual_write_allowed(base_name: &str) -> bool {
         || base_name.starts_with("rpc_")
         || base_name.starts_with("traces_span_metrics_")
         || base_name.starts_with("layout_")
+        || base_name.starts_with("thelake_")
 }
 
 /// `_bucket`/`_sum`/`_count` selector with no dual-written gauge series.
@@ -236,5 +240,15 @@ mod tests {
         assert!(!classic_suffix_uses_native_hist("http_duration_bucket"));
         assert!(!classic_suffix_uses_native_hist("layout_latency_count"));
         assert!(!classic_suffix_uses_native_hist("k6_vus"));
+        // Ops self-monitoring: literal series, not native-hist expand.
+        assert!(!classic_suffix_uses_native_hist(
+            "thelake_query_duration_milliseconds_sum"
+        ));
+        assert!(!classic_suffix_uses_native_hist(
+            "thelake_table_files_by_size_bucket"
+        ));
+        assert!(!classic_suffix_uses_native_hist(
+            "thelake_query_queue_wait_milliseconds_count"
+        ));
     }
 }
