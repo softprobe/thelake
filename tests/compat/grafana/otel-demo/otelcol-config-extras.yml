@@ -25,10 +25,10 @@ processors:
   probabilistic_sampler:
     sampling_percentage: 5
   batch/softprobe:
-    # Timeout-dominated pacing: Softprobe coalesce + Grafana refresh=10s.
-    # Keep well under the stop-gate ingest recovery budget (flush≈60s + retries):
-    # 120s batch + 60s coalesce left post-measure checks staring at stale PromQL.
-    timeout: 30s
+    # Timeout-dominated pacing: Softprobe coalesce (~60s) + Grafana refresh=10s.
+    # Keep near Softprobe flush so recovery after isolated SLO stays inside the
+    # gate wait budget without a write+query CPU storm every few seconds.
+    timeout: 60s
     send_batch_size: 8192
     send_batch_max_size: 8192
   memory_limiter/softprobe:

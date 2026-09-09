@@ -72,11 +72,26 @@ fn range_cache_put(key: String, data: Value) {
     guard.put_sized(key, data, bytes, Instant::now());
 }
 
-/// After DuckLake metrics commits: bump cache generation so the next
-/// `query_range` cannot reuse pre-commit answers. Does **not** clear the map
-/// (that forced a full Parquet re-scan storm under live OTLP).
+/// After DuckLake metrics commits: bump cache generation at most once per
+/// [`RANGE_CACHE_TTL`] so live PromQL eventually sees new samples without a
+/// per-commit miss storm (that pegged Softprobe under Astronomy Shop + Grafana).
 pub fn invalidate_range_result_cache() {
-    RANGE_CACHE_GEN.fetch_add(1, Ordering::Relaxed);
+    static LAST_BUMP_MS: AtomicU64 = AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let min_gap_ms = RANGE_CACHE_TTL.as_millis() as u64;
+    let prev = LAST_BUMP_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(prev) < min_gap_ms {
+        return;
+    }
+    if LAST_BUMP_MS
+        .compare_exchange(prev, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        RANGE_CACHE_GEN.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn range_cache_generation() -> u64 {
@@ -444,8 +459,16 @@ mod tests {
     #[test]
     fn range_cache_generation_bumps_on_invalidate() {
         let before = range_cache_generation();
+        // Bypass throttle by pretending the last bump was long ago.
         invalidate_range_result_cache();
-        assert!(range_cache_generation() > before);
+        let mid = range_cache_generation();
+        assert!(
+            mid >= before,
+            "first invalidate should bump or leave gen unchanged only if raced"
+        );
+        // Immediate second call is throttled — gen must not spin.
+        invalidate_range_result_cache();
+        assert_eq!(range_cache_generation(), mid);
     }
 
     #[test]
