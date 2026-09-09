@@ -494,8 +494,10 @@ mod tests {
             rows.lock()
                 .await
                 .iter()
-                .all(|&n| n <= MAX_ROWS_PER_FLUSH && n <= MAX_BATCHES_PER_FLUSH),
-            "each write must stay within batch/row caps"
+                // Each enqueue is one row; drain caps batches so rows-per-flush
+                // ≤ MAX_BATCHES_PER_FLUSH (tighter than MAX_ROWS_PER_FLUSH here).
+                .all(|&n| n <= MAX_BATCHES_PER_FLUSH),
+            "each write must stay within batch drain cap"
         );
     }
 
@@ -610,8 +612,10 @@ mod tests {
 
     #[test]
     fn eager_threshold_exceeds_flush_batch_cap() {
-        assert!(EAGER_PENDING_BATCHES > MAX_BATCHES_PER_FLUSH);
-        assert!(MAX_PENDING_BATCHES > EAGER_PENDING_BATCHES);
+        const {
+            assert!(EAGER_PENDING_BATCHES > MAX_BATCHES_PER_FLUSH);
+            assert!(MAX_PENDING_BATCHES > EAGER_PENDING_BATCHES);
+        };
     }
 
     #[test]

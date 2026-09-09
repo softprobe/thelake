@@ -214,10 +214,9 @@ mod tests {
 
     #[test]
     fn compaction_memory_cap_exceeds_writer_so_twcs_can_merge() {
-        assert!(
-            COMPACTION_DUCKDB_THREADS >= WRITER_DUCKDB_THREADS,
-            "compaction must not be thinner than writers"
-        );
+        const {
+            assert!(COMPACTION_DUCKDB_THREADS >= WRITER_DUCKDB_THREADS);
+        };
         assert_ne!(COMPACTION_DUCKDB_MEMORY, WRITER_DUCKDB_MEMORY);
         assert!(
             COMPACTION_DUCKDB_MEMORY.ends_with("GB"),
