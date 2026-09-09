@@ -123,11 +123,12 @@ ensure_grafana_running() {
 }
 
 force_recreate_collector() {
-  local overlay demo_dir
+  local overlay demo_dir rc
   overlay="$ROOT/tests/compat/grafana/otel-demo"
   demo_dir="${OTEL_DEMO_DIR:-$HOME/.cache/thelake/otel-demo/${OTEL_DEMO_TAG:-3.0.0}}"
-  if [[ -d "$demo_dir" && -f "$overlay/otelcol-config-extras.yml" ]]; then
+  if [[ -d "$demo_dir" && -f "$overlay/otelcol-config-extras.yml" && -f "$overlay/compose.softprobe.yaml" ]]; then
     log "slo: force-recreating otel-collector for clean OTLP recovery"
+    rc=0
     (
       cd "$demo_dir" && \
         DEMO_VERSION="${OTEL_DEMO_TAG:-3.0.0}" IMAGE_VERSION="${OTEL_DEMO_TAG:-3.0.0}" \
@@ -135,7 +136,25 @@ force_recreate_collector() {
         docker compose -p "${OTEL_PROJECT:-thelake-otel-demo}" --env-file .env \
           -f compose.yaml -f "$overlay/compose.softprobe.yaml" \
           up -d --force-recreate otel-collector
-    ) >/dev/null 2>&1 || docker start otel-collector >/dev/null 2>&1 || true
+    ) >>"$LOG" 2>&1 || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      log "slo: compose recreate failed (rc=$rc); trying docker start"
+      docker start otel-collector >/dev/null 2>&1 || true
+    fi
+    # Bare recreate without compose.softprobe.yaml drops host.docker.internal
+    # and OTLP to Softprobe silently dies while debug exporter still looks busy.
+    if ! docker inspect -f '{{json .HostConfig.ExtraHosts}}' otel-collector 2>/dev/null \
+      | grep -q 'host.docker.internal'; then
+      log "slo: otel-collector missing host.docker.internal; re-applying softprobe overlay"
+      (
+        cd "$demo_dir" && \
+          DEMO_VERSION="${OTEL_DEMO_TAG:-3.0.0}" IMAGE_VERSION="${OTEL_DEMO_TAG:-3.0.0}" \
+          OTEL_COLLECTOR_CONFIG_EXTRAS="$overlay/otelcol-config-extras.yml" \
+          docker compose -p "${OTEL_PROJECT:-thelake-otel-demo}" --env-file .env \
+            -f compose.yaml -f "$overlay/compose.softprobe.yaml" \
+            up -d --force-recreate otel-collector
+      ) >>"$LOG" 2>&1 || true
+    fi
   else
     docker start otel-collector >/dev/null 2>&1 || true
   fi
