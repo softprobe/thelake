@@ -179,7 +179,7 @@ restart_collector() {
 }
 
 restart_softprobe_demo() {
-  local pid bin cfg logf auth_url
+  local pid bin cfg logf auth_url duck_lib
   pid="$(tr -d '[:space:]' <"$PID_FILE" 2>/dev/null || true)"
   bin="$GRAFANA_STATE/softprobe-runtime"
   cfg="$GRAFANA_STATE/config.yaml"
@@ -187,6 +187,22 @@ restart_softprobe_demo() {
   if [[ ! -x "$bin" || ! -f "$cfg" ]]; then
     log "slo: softprobe restart skipped (missing $bin or $cfg)"
     return 0
+  fi
+  # Same resolution as scripts/grafana-manual-up.sh — restart must set LD_LIBRARY_PATH
+  # or the binary dies with "libduckdb.so: cannot open shared object file".
+  duck_lib=""
+  if [[ -f "$GRAFANA_STATE/libduckdb.so" ]]; then
+    duck_lib="$GRAFANA_STATE"
+  elif [[ -f "$ROOT/dist/libduckdb.so" ]]; then
+    duck_lib="$ROOT/dist"
+    cp -f "$ROOT/dist/libduckdb.so" "$GRAFANA_STATE/libduckdb.so" 2>/dev/null || true
+    duck_lib="$GRAFANA_STATE"
+  else
+    duck_lib="$(find "${CARGO_TARGET_DIR:-$ROOT/target}/duckdb-download" -type f -name 'libduckdb.so*' -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
+  fi
+  if [[ -z "$duck_lib" ]]; then
+    log "slo: softprobe restart skipped (libduckdb.so not found)"
+    return 1
   fi
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
     log "slo: stopping Softprobe pid=$pid for query-worker reattach"
@@ -205,6 +221,7 @@ restart_softprobe_demo() {
     "SOFTPROBE_GRPC_DISABLE=1"
     "RUST_LOG=${RUST_LOG:-info}"
     "CONFIG_FILE=$cfg"
+    "LD_LIBRARY_PATH=${duck_lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   )
   if command -v taskset >/dev/null 2>&1; then
     run+=(taskset -c "${THELAKE_CPU_AFFINITY:-0}")

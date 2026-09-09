@@ -578,6 +578,20 @@ if [[ -z "${DUCKDB_LIB_DIR}" ]]; then
   echo "ERROR: libduckdb not found under ${TARGET_DIR}/duckdb-download (build with DUCKDB_DOWNLOAD_LIB=1?)" >&2
   exit 1
 fi
+# Stage lib next to the demo binary so stop-gate Softprobe restarts (setsid +
+# no inherited LD_LIBRARY_PATH) can still resolve libduckdb.so.
+case "$(uname -s)" in
+  Darwin)
+    if [[ -f "$DUCKDB_LIB_DIR/libduckdb.dylib" ]]; then
+      cp -f "$DUCKDB_LIB_DIR/libduckdb.dylib" "$STATE_DIR/libduckdb.dylib"
+    fi
+    ;;
+  *)
+    if [[ -f "$DUCKDB_LIB_DIR/libduckdb.so" ]]; then
+      cp -f "$DUCKDB_LIB_DIR/libduckdb.so" "$STATE_DIR/libduckdb.so"
+    fi
+    ;;
+esac
 case "$(uname -s)" in
   Darwin)
     export DYLD_LIBRARY_PATH="${DUCKDB_LIB_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
