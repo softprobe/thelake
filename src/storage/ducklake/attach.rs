@@ -204,8 +204,8 @@ mod tests {
 
     #[test]
     fn query_resource_caps_pin_single_thread() {
-        let conn = open_in_memory_capped(QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)
-            .expect("duckdb");
+        let conn =
+            open_in_memory_capped(QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY).expect("duckdb");
         let threads: i64 = conn
             .query_row("SELECT current_setting('threads')", [], |row| row.get(0))
             .expect("threads setting");

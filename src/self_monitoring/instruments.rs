@@ -359,7 +359,11 @@ pub fn record_write(tenant: &str, signal: &str, app: Option<&str>, elapsed: Dura
 /// When coalesce is on, `rate(commits)` must stay well below `rate(requests)`.
 pub fn record_ingest_commit(tenant: &str, signal: &str, rows: u64, coalesced: bool) {
     let Some(i) = instruments() else { return };
-    let path = if coalesced { "coalesce" } else { "flush_through" };
+    let path = if coalesced {
+        "coalesce"
+    } else {
+        "flush_through"
+    };
     let a = attrs(&[
         ("tenant", tenant),
         ("signal", signal),

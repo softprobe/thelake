@@ -95,6 +95,7 @@ impl IngestEngine {
                             crate::self_monitoring::record_ingest_commit(
                                 &tenant, "metrics", rows, true,
                             );
+                            // Durable commit only — see module docs (not on OTLP enqueue).
                             crate::compat::prometheus::invalidate_range_result_cache();
                         }
                         r

@@ -283,8 +283,8 @@ impl<T: Send + 'static> CoalesceBuf<T> {
         // Non-timer flush (eager/force): schedule a follow-up if overflow remains.
         let (overflow, has_pending, can_schedule) = {
             let g = self.state.lock().await;
-            let overflow = g.pending.len() >= EAGER_PENDING_BATCHES
-                || g.pending_rows >= MAX_ROWS_PER_FLUSH;
+            let overflow =
+                g.pending.len() >= EAGER_PENDING_BATCHES || g.pending_rows >= MAX_ROWS_PER_FLUSH;
             let has_pending = !g.pending.is_empty();
             let can_schedule = has_pending && !g.flushing && !g.timer_armed;
             (overflow, has_pending, can_schedule)
@@ -311,11 +311,7 @@ impl<T: Send + 'static> Drop for CoalesceBuf<T> {
         // Ack-on-enqueue gauges pending depth; discarded rows on engine recycle
         // must heal the counter or ops panels stick high under coalesce.
         // Use try_lock: Drop may run on a tokio worker (cannot blocking_lock).
-        let n = self
-            .state
-            .try_lock()
-            .map(|g| g.pending.len())
-            .unwrap_or(0);
+        let n = self.state.try_lock().map(|g| g.pending.len()).unwrap_or(0);
         crate::self_monitoring::gauge_store::sub_ingest_pending(n);
     }
 }
@@ -495,8 +491,7 @@ mod tests {
         let total: usize = rows.lock().await.iter().sum();
         assert_eq!(total, EAGER_PENDING_BATCHES + 1);
         assert!(
-            rows
-                .lock()
+            rows.lock()
                 .await
                 .iter()
                 .all(|&n| n <= MAX_ROWS_PER_FLUSH && n <= MAX_BATCHES_PER_FLUSH),

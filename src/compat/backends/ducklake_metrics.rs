@@ -471,8 +471,7 @@ impl DuckLakeMetricsBackend {
                 SeriesMetaDayScope::Recent => metric_name,
                 SeriesMetaDayScope::QueryWindow => None,
             };
-            let meta_sql =
-                series_meta_sql(catalog, &still_missing, scope, name, start_ms, end_ms);
+            let meta_sql = series_meta_sql(catalog, &still_missing, scope, name, start_ms, end_ms);
             debug_assert!(
                 meta_sql.contains("metric_series")
                     && meta_sql.contains("CAST(s.labels AS JSON)")
