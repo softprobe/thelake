@@ -293,33 +293,47 @@ restart_collector
 collector_stopped=0
 
 # Prove OTLP recovered after the query storm (gate requires non-flat ingest).
+# Do NOT bounce Softprobe here: killing it drops the coalesce buffer and cold-starts
+# DuckDB on one core, which routinely leaves PromQL flat past the 180s freshness
+# window. Range-cache invalidation on metrics flush is the Greptime-style fix;
+# Softprobe bounce is only for heal-when-down above.
 # Idle with ZERO PromQL — polling --check-ingest here re-starves /v1/metrics.
 log "slo: idle pause for OTLP after measure"
-sleep 20
-# Bounce Softprobe so query workers re-ATTACH and see commits written while the
-# single worker was pinned to the SLO query storm (parquet can land while PromQL
-# still looks stale until reconnect).
-restart_softprobe_demo
-# k6 cumulative counters can freeze across collector/Softprobe bounces; restart
+sleep 15
+# k6 cumulative counters can freeze across collector stop windows; restart
 # load-generator so post-measure --check-ingest sees fresh value changes.
 if docker inspect -f '{{.State.Running}}' load-generator >/dev/null 2>&1; then
   log "slo: restarting load-generator for fresh k6 counters"
   docker restart load-generator >/dev/null 2>&1 || true
 fi
+# Exporter queue can wedge after Softprobe was unreachable during measure;
+# one more force-recreate after load-generator is up.
 collector_stopped=1
 restart_collector
 collector_stopped=0
-sleep 75
+# flush_interval=10s + otel batch timeout=10s → wait for ≥2 committed changes.
+sleep 45
 log "slo: post-measure ingest check"
 ingest_ok=0
-for _ in $(seq 1 8); do
+for ingest_try in $(seq 1 12); do
   ingest_out="$(python3 "$PY" --check-ingest 2>&1)" || true
   printf '%s\n' "$ingest_out" | tee -a "$LOG" >&2
   if grep -q "ingest ok" <<<"$ingest_out"; then
     ingest_ok=1
     break
   fi
-  sleep 20
+  # Last-resort heal: only if still stale after several tries.
+  if [[ "$ingest_try" -eq 6 ]]; then
+    log "slo: ingest still stale; heal Softprobe + collector once"
+    restart_softprobe_demo || true
+    collector_stopped=1
+    restart_collector
+    collector_stopped=0
+    docker restart load-generator >/dev/null 2>&1 || true
+    sleep 45
+  else
+    sleep 15
+  fi
 done
 if [[ "$ingest_ok" != 1 ]]; then
   fail "OTEL ingest did not recover after Grafana SLO measure (see $LOG)"
