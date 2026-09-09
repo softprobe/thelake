@@ -185,7 +185,15 @@ def check_ingest(client: SoftprobeProm) -> str | None:
                 if a != b:
                     changes += 1
                     last_change_ts = t1
-            if changes > best or (changes == best and last_change_ts > newest_change_ts):
+            # Prefer the freshest series with ≥2 changes. After load-generator /
+            # Softprobe restarts, dead generations often retain high historical
+            # change counts while a new series is the only live one — ranking by
+            # change count alone falsely reports "stale" ingest.
+            if changes < 2:
+                continue
+            if last_change_ts > newest_change_ts or (
+                last_change_ts == newest_change_ts and changes > best
+            ):
                 best = changes
                 newest_change_ts = last_change_ts
                 used = q

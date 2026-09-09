@@ -330,7 +330,9 @@ for ingest_try in $(seq 1 12); do
     restart_collector
     collector_stopped=0
     docker restart load-generator >/dev/null 2>&1 || true
-    sleep 45
+    # After bounce: idle with ZERO PromQL so coalesce can flush on the single
+    # DuckDB worker before --check-ingest runs series_meta / query_range.
+    sleep 60
   else
     sleep 15
   fi
