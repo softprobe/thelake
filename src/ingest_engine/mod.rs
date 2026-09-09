@@ -15,6 +15,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct IngestEngine {
     storage: Arc<Storage>,
+    tenant_id: String,
     flush_interval_seconds: u64,
     logs: Option<Arc<CoalesceBuf<Log>>>,
     spans: Option<Arc<CoalesceBuf<Span>>>,
@@ -22,39 +23,78 @@ pub struct IngestEngine {
 }
 
 impl IngestEngine {
-    pub fn from_storage(storage: Arc<Storage>, flush_interval_seconds: u64) -> Self {
+    pub fn from_storage(
+        storage: Arc<Storage>,
+        tenant_id: impl Into<String>,
+        flush_interval_seconds: u64,
+    ) -> Self {
+        let tenant_id = tenant_id.into();
         let logs = (flush_interval_seconds > 0).then(|| {
             let w = storage.writer.clone();
+            let tenant = tenant_id.clone();
             CoalesceBuf::new(
                 flush_interval_seconds,
                 Arc::new(move |batches| {
                     let w = w.clone();
-                    Box::pin(async move { w.write_log_batches(batches).await })
+                    let tenant = tenant.clone();
+                    Box::pin(async move {
+                        let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
+                        let r = w.write_log_batches(batches).await;
+                        if r.is_ok() {
+                            crate::self_monitoring::record_ingest_commit(
+                                &tenant, "logs", rows, true,
+                            );
+                        }
+                        r
+                    })
                 }),
             )
         });
         let spans = (flush_interval_seconds > 0).then(|| {
             let w = storage.writer.clone();
+            let tenant = tenant_id.clone();
             CoalesceBuf::new(
                 flush_interval_seconds,
                 Arc::new(move |batches| {
                     let w = w.clone();
-                    Box::pin(async move { w.write_span_batches(batches).await })
+                    let tenant = tenant.clone();
+                    Box::pin(async move {
+                        let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
+                        let r = w.write_span_batches(batches).await;
+                        if r.is_ok() {
+                            crate::self_monitoring::record_ingest_commit(
+                                &tenant, "traces", rows, true,
+                            );
+                        }
+                        r
+                    })
                 }),
             )
         });
         let metrics = (flush_interval_seconds > 0).then(|| {
             let w = storage.writer.clone();
+            let tenant = tenant_id.clone();
             CoalesceBuf::new(
                 flush_interval_seconds,
                 Arc::new(move |batches| {
                     let w = w.clone();
-                    Box::pin(async move { w.write_metric_batches(batches).await })
+                    let tenant = tenant.clone();
+                    Box::pin(async move {
+                        let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
+                        let r = w.write_metric_batches(batches).await;
+                        if r.is_ok() {
+                            crate::self_monitoring::record_ingest_commit(
+                                &tenant, "metrics", rows, true,
+                            );
+                        }
+                        r
+                    })
                 }),
             )
         });
         Self {
             storage,
+            tenant_id,
             flush_interval_seconds,
             logs,
             spans,
@@ -73,7 +113,17 @@ impl IngestEngine {
         if let Some(buf) = &self.spans {
             buf.enqueue(items).await
         } else {
-            self.storage.writer.write_span_batches(vec![items]).await
+            let rows = items.len() as u64;
+            let r = self.storage.writer.write_span_batches(vec![items]).await;
+            if r.is_ok() {
+                crate::self_monitoring::record_ingest_commit(
+                    &self.tenant_id,
+                    "traces",
+                    rows,
+                    false,
+                );
+            }
+            r
         }
     }
 
@@ -84,7 +134,12 @@ impl IngestEngine {
         if let Some(buf) = &self.logs {
             buf.enqueue(items).await
         } else {
-            self.storage.writer.write_log_batches(vec![items]).await
+            let rows = items.len() as u64;
+            let r = self.storage.writer.write_log_batches(vec![items]).await;
+            if r.is_ok() {
+                crate::self_monitoring::record_ingest_commit(&self.tenant_id, "logs", rows, false);
+            }
+            r
         }
     }
 
@@ -95,7 +150,17 @@ impl IngestEngine {
         if let Some(buf) = &self.metrics {
             buf.enqueue(items).await
         } else {
-            self.storage.writer.write_metric_batches(vec![items]).await
+            let rows = items.len() as u64;
+            let r = self.storage.writer.write_metric_batches(vec![items]).await;
+            if r.is_ok() {
+                crate::self_monitoring::record_ingest_commit(
+                    &self.tenant_id,
+                    "metrics",
+                    rows,
+                    false,
+                );
+            }
+            r
         }
     }
 
@@ -148,6 +213,7 @@ impl IngestPipeline {
         let storage = Storage::new(writer);
         let ingest = Arc::new(IngestEngine::from_storage(
             Arc::new(storage.clone()),
+            "default",
             config.ingest.flush_interval_seconds,
         ));
 

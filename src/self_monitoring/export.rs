@@ -60,14 +60,15 @@ async fn export_inner(metrics: &mut ResourceMetrics) -> MetricResult<()> {
         .engine_for(OPS_TENANT_ID)
         .await
         .map_err(|e| MetricError::Other(e.to_string()))?;
-    if let Err(err) = engine
-        .ingest
-        .writer()
-        .write_metric_batches(vec![rows])
-        .await
-    {
+    if let Err(err) = engine.ingest.add_metrics(rows, 0).await {
         record_export_drop();
         warn!("self-monitoring metric export failed: {err}");
+        return Err(MetricError::Other(err.to_string()));
+    }
+    // Durable for ops panels: don't leave the sample only in coalesce memory.
+    if let Err(err) = engine.ingest.force_flush_metrics().await {
+        record_export_drop();
+        warn!("self-monitoring metric force_flush failed: {err}");
         return Err(MetricError::Other(err.to_string()));
     }
     Ok(())
@@ -110,7 +111,8 @@ async fn flush_logs(state: &AppState, batch: &mut Vec<crate::models::Log>) {
     let logs = std::mem::take(batch);
     let res = async {
         let engine = state.engines.engine_for(OPS_TENANT_ID).await?;
-        engine.ingest.writer().write_log_batches(vec![logs]).await
+        engine.ingest.add_logs(logs, 0).await?;
+        engine.ingest.force_flush_logs().await
     }
     .await;
     if let Err(err) = res {

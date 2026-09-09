@@ -578,6 +578,20 @@ impl DuckDBQueryEngine {
                                 sql_kind,
                                 exec_elapsed,
                             );
+                            // Sample-table scans only: expose grain + raw vs
+                            // downsample vs live UNION so long-window CPU
+                            // hotspots are diagnosable without guessing.
+                            if sql_kind.contains("metric_samples")
+                                || sql_kind.contains("metric_hist_samples")
+                            {
+                                let (grain, scan_mode) =
+                                    crate::self_monitoring::classify_sample_scan(&request.sql);
+                                crate::self_monitoring::record_sample_scan(
+                                    &core.tenant_id,
+                                    grain,
+                                    scan_mode,
+                                );
+                            }
                         }
                         if result.is_ok() {
                             // Any *customer* success clears the global streak --

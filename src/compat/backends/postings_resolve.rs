@@ -374,14 +374,23 @@ pub fn samples_scan_sql(
     )
 }
 
-/// For gauge FiveMin/OneHour grains: scan raw with step-bucketing for correctness.
+/// Half-open stitch: downsample covers through `align_floor(now - lag, bucket)`;
+/// raw starts there. Using `now - lag` for both sides left a gap of up to one
+/// bucket (closed-bucket materialization ends at the floor, not at `now - lag`).
+fn stitch_raw_start_ms(cutoff_ms: i64, bucket_ms: i64) -> i64 {
+    if bucket_ms <= 0 {
+        return cutoff_ms;
+    }
+    cutoff_ms.div_euclid(bucket_ms) * bucket_ms
+}
+
+/// Gauge FiveMin/OneHour grains: downsample for closed history + raw lag tail.
 ///
-/// Downsample tables may have gaps while a bucket is still open or before a
-/// maintenance pass has materialized its key.
-/// Rather than UNION (which introduces duplicate-handling complexity), we scan
-/// raw with step-bucketing applied — this guarantees correctness for all windows.
-/// For OneHour grain on very long ranges (>48h) where raw scan would be expensive,
-/// we fall back to the downsample table for historical data and raw for the recent tail.
+/// Mirrors `hist_or_union_scan_sql` (HistFiveMin / HistOneHour). Live Grafana
+/// panels use `end ≈ now`, so a raw-only live path scanned the full multi-day
+/// raw window and blew CPU / 100ms SLO even when `metric_samples_5m` /
+/// `metric_samples_1h` were populated. Archive queries (`end` older than lag)
+/// read downsample only (AC-Q2).
 fn gauge_downsample_with_raw_tail(
     catalog: &str,
     ids: &str,
@@ -391,38 +400,41 @@ fn gauge_downsample_with_raw_tail(
     grain: SampleGrain,
     step_ms: Option<i64>,
 ) -> String {
-    use crate::compat::backends::grain::ONE_HOUR_LAG_MS;
+    use crate::compat::backends::grain::{FIVE_MIN_LAG_MS, ONE_HOUR_LAG_MS};
 
+    let (lag_ms, bucket_ms) = match grain {
+        SampleGrain::FiveMin => (FIVE_MIN_LAG_MS, FIVE_MIN_LAG_MS),
+        SampleGrain::OneHour => (ONE_HOUR_LAG_MS, ONE_HOUR_LAG_MS),
+        _ => (ONE_HOUR_LAG_MS, ONE_HOUR_LAG_MS),
+    };
     let bucket = step_bucket_interval_sql(step_ms);
     let raw_table = grain_table_sql(catalog, SampleGrain::Raw);
+    let ds_table = grain_table_sql(catalog, grain);
+    let ds_time_col = grain.time_column();
+    let ds_value = grain.value_expr();
 
-    if grain == SampleGrain::FiveMin {
-        // Empty 5m × multi-day record_date probes blow the 100ms SLO on fresh demos
-        // (same failure mode as 1h). Live windows: step-bucketed raw + dead 5m ref.
-        // Archive queries (`end` older than lag) read 5m only.
-        use crate::compat::backends::grain::FIVE_MIN_LAG_MS;
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let end = end_ms.unwrap_or(now_ms);
-        let start = start_ms.unwrap_or(i64::MIN);
-        let cutoff = now_ms.saturating_sub(FIVE_MIN_LAG_MS);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let end = end_ms.unwrap_or(now_ms);
+    let start = start_ms.unwrap_or(i64::MIN);
+    let cutoff = now_ms.saturating_sub(lag_ms);
+    let stitch = stitch_raw_start_ms(cutoff, bucket_ms);
 
-        let ds_table = grain_table_sql(catalog, SampleGrain::FiveMin);
-        if end <= cutoff {
-            let ds_time = samples_time_predicates(Some(start), Some(end), "window_ts");
-            return format!(
-                "SELECT sm.series_id, \
-                 CAST((epoch(sm.window_ts) * 1000) AS BIGINT) AS timestamp_ms, \
-                 sm.last AS value, \
-                 NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-                 FROM {ds_table} sm \
-                 WHERE sm.series_id IN ({ids}){ds_time} \
-                 LIMIT {fetch_limit}"
-            );
-        }
+    let ds_select = |from_ms: i64, to_ms: i64| -> String {
+        let ds_time = samples_time_predicates(Some(from_ms), Some(to_ms), ds_time_col);
+        format!(
+            "SELECT sm.series_id, \
+             CAST((epoch(sm.{ds_time_col}) * 1000) AS BIGINT) AS timestamp_ms, \
+             {ds_value} AS value, \
+             NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+             NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+             FROM {ds_table} sm \
+             WHERE sm.series_id IN ({ids}){ds_time}"
+        )
+    };
 
-        let raw_time = samples_time_predicates(Some(start), Some(end), "timestamp");
-        let raw_sql = if let Some(ref iv) = bucket {
+    let raw_select = |from_ms: i64, to_ms: i64| -> String {
+        let raw_time = samples_time_predicates(Some(from_ms), Some(to_ms), "timestamp");
+        if let Some(ref iv) = bucket {
             format!(
                 "SELECT sm.series_id, \
                  CAST((epoch(time_bucket({iv}, sm.timestamp)) * 1000) AS BIGINT) AS timestamp_ms, \
@@ -443,67 +455,25 @@ fn gauge_downsample_with_raw_tail(
                  FROM {raw_table} sm \
                  WHERE sm.series_id IN ({ids}){raw_time}"
             )
-        };
-        // No dead `WHERE false` 5m probe — opening empty downsample tables on
-        // fresh tenants cost 15–40ms and blew the Grafana 100ms SLO on 30d/180d.
-        return format!("{raw_sql} LIMIT {fetch_limit}");
-    }
-
-    // OneHour grain: empty `metric_samples_1h` × wide `record_date` probes (30d/180d
-    // Grafana panels on a fresh demo) cost 200–300ms alone. Greptime keeps rollups
-    // warm; until Softprobe's 1h ladder has rows, scan step-bucketed raw over the
-    // window and keep a dead 1h reference so plans stay grain-aware. Historical
-    // archive queries (`end` older than the lag) still read 1h only (AC-Q2).
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let end = end_ms.unwrap_or(now_ms);
-    let start = start_ms.unwrap_or(i64::MIN);
-    let cutoff = now_ms.saturating_sub(ONE_HOUR_LAG_MS);
-
-    let ds_table = grain_table_sql(catalog, grain);
-    let ds_time_col = grain.time_column();
-    let ds_value = grain.value_expr();
-
-    if end <= cutoff {
-        let ds_time = samples_time_predicates(Some(start), Some(end), ds_time_col);
-        return format!(
-            "SELECT sm.series_id, \
-             CAST((epoch(sm.{ds_time_col}) * 1000) AS BIGINT) AS timestamp_ms, \
-             {ds_value} AS value, \
-             NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-             NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-             FROM {ds_table} sm \
-             WHERE sm.series_id IN ({ids}){ds_time} \
-             LIMIT {fetch_limit}"
-        );
-    }
-
-    let raw_time = samples_time_predicates(Some(start), Some(end), "timestamp");
-    let raw_sql = if let Some(ref iv) = bucket {
-        format!(
-            "SELECT sm.series_id, \
-             CAST((epoch(time_bucket({iv}, sm.timestamp)) * 1000) AS BIGINT) AS timestamp_ms, \
-             arg_max(sm.value, sm.timestamp) AS value, \
-             NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-             NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-             FROM {raw_table} sm \
-             WHERE sm.series_id IN ({ids}){raw_time} \
-             GROUP BY sm.series_id, time_bucket({iv}, sm.timestamp)"
-        )
-    } else {
-        format!(
-            "SELECT sm.series_id, \
-             CAST((epoch(sm.timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
-             sm.value AS value, \
-             NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-             NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-             FROM {raw_table} sm \
-             WHERE sm.series_id IN ({ids}){raw_time}"
-        )
+        }
     };
-    // Live window on empty 1h: raw only. A dead `WHERE false` 1h scan still
-    // opens DuckLake metadata for every wide Grafana panel (30d/180d) and was
-    // the last ~15ms that kept three cells above the 100ms SLO.
-    format!("{raw_sql} LIMIT {fetch_limit}")
+
+    // Fully closed window → downsample only.
+    if end <= cutoff {
+        return format!("{} LIMIT {fetch_limit}", ds_select(start, end));
+    }
+
+    // Live window: historical downsample + recent raw (half-open at stitch).
+    let mut parts = Vec::new();
+    let raw_start = start.max(stitch);
+    parts.push(raw_select(raw_start, end));
+    if start < stitch {
+        parts.push(ds_select(start, stitch));
+    }
+    match parts.len() {
+        1 => format!("{} LIMIT {fetch_limit}", parts[0]),
+        _ => format!("({}) UNION ALL ({}) LIMIT {fetch_limit}", parts[0], parts[1]),
+    }
 }
 
 fn sql_series_id_list(series_ids: &[u64]) -> String {
@@ -518,27 +488,64 @@ fn sql_series_id_list(series_ids: &[u64]) -> String {
     }
 }
 
+/// How far `series_meta_sql` may look when filling the series-id cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeriesMetaDayScope {
+    /// Open / near-open days only — partition-prunes for live Grafana series.
+    Recent,
+    /// Miss path: still bound to the Prom query's `record_date` window (not
+    /// full retention) so churned ids cannot re-open the whole lake.
+    QueryWindow,
+}
+
 /// Series identity + labels once per `series_id` (Greptime series metadata,
 /// not VARIANT extracts on every sample row).
+///
+/// Self-monitoring showed `sql_kind=metric_series` at tens of seconds when meta
+/// SQL scanned the full Prom window (or all retained days) of day-duplicated
+/// `metric_series` just to decorate already-resolved ids. The in-process cache
+/// is keyed only by `series_id` (identity is immutable). Prefer:
+/// 1. `Recent` + optional `metric_name` (sort key) for the hot path
+/// 2. `QueryWindow` only for ids still missing after (1)
 pub fn series_meta_sql(
     catalog: &str,
     series_ids: &[u64],
+    scope: SeriesMetaDayScope,
+    metric_name: Option<&str>,
     start_ms: Option<i64>,
     end_ms: Option<i64>,
 ) -> String {
     let series = qualified_metrics_layout_table(catalog, "metric_series");
     let ids = sql_series_id_list(series_ids);
-    let day_pred = RecordDateRange::from_ms(start_ms, end_ms).sql_predicate("s.");
-    let day_and = if day_pred.is_empty() {
-        String::new()
-    } else {
-        format!(" AND {day_pred}")
+    let mut preds = vec![format!("s.series_id IN ({ids})")];
+    if let Some(name) = metric_name {
+        preds.push(format!("s.metric_name = {}", sql_string_literal(name)));
+    }
+    let hint = match scope {
+        SeriesMetaDayScope::Recent => {
+            // Two calendar days covers open-day + lag without multi-week partition fanout.
+            preds.push("s.record_date >= CURRENT_DATE - INTERVAL 2 DAY".to_string());
+            "thelake_series_meta_recent"
+        }
+        SeriesMetaDayScope::QueryWindow => {
+            let day_pred = RecordDateRange::from_ms(start_ms, end_ms).sql_predicate("s.");
+            if !day_pred.is_empty() {
+                preds.push(day_pred);
+            }
+            "thelake_series_meta_all"
+        }
     };
+    let where_sql = preds.join(" AND ");
     format!(
-        "SELECT s.series_id, s.metric_name, s.description, s.unit, s.metric_type, \
+        "SELECT /* {hint} */ s.series_id, \
+         s.metric_name, \
+         s.description, \
+         s.unit, \
+         s.metric_type, \
          CAST(s.labels AS JSON) AS labels_json \
          FROM {series} s \
-         WHERE s.series_id IN ({ids}){day_and}"
+         WHERE {where_sql} \
+         QUALIFY row_number() OVER (PARTITION BY s.series_id ORDER BY s.record_date DESC) = 1"
     )
 }
 
@@ -630,6 +637,7 @@ fn hist_or_union_scan_sql(
                 let end = end_ms.unwrap_or(now_ms);
                 let start = start_ms.unwrap_or(i64::MIN);
                 let cutoff = now_ms.saturating_sub(FIVE_MIN_LAG_MS);
+                let stitch = stitch_raw_start_ms(cutoff, FIVE_MIN_LAG_MS);
 
                 if end <= cutoff {
                     let ds_time = samples_time_predicates(Some(start), Some(end), "window_ts");
@@ -644,7 +652,7 @@ fn hist_or_union_scan_sql(
                     )
                 } else {
                     let mut parts = Vec::new();
-                    let raw_start = start.max(cutoff);
+                    let raw_start = start.max(stitch);
                     let raw_time = samples_time_predicates(Some(raw_start), Some(end), "timestamp");
                     parts.push(hist_row_select_sql(
                         catalog,
@@ -655,9 +663,9 @@ fn hist_or_union_scan_sql(
                         hist_arrays,
                         bucket_iv,
                     ));
-                    if start < cutoff {
+                    if start < stitch {
                         let ds_time =
-                            samples_time_predicates(Some(start), Some(cutoff), "window_ts");
+                            samples_time_predicates(Some(start), Some(stitch), "window_ts");
                         parts.push(hist_row_select_sql(
                             catalog,
                             "metric_hist_samples_5m",
@@ -680,6 +688,7 @@ fn hist_or_union_scan_sql(
                 let end = end_ms.unwrap_or(now_ms);
                 let start = start_ms.unwrap_or(i64::MIN);
                 let cutoff = now_ms.saturating_sub(ONE_HOUR_LAG_MS);
+                let stitch = stitch_raw_start_ms(cutoff, ONE_HOUR_LAG_MS);
 
                 if end <= cutoff {
                     hist_row_select_sql(
@@ -693,7 +702,7 @@ fn hist_or_union_scan_sql(
                     )
                 } else {
                     let mut parts = Vec::new();
-                    let raw_start = start.max(cutoff);
+                    let raw_start = start.max(stitch);
                     let raw_time = samples_time_predicates(Some(raw_start), Some(end), "timestamp");
                     parts.push(hist_row_select_sql(
                         catalog,
@@ -704,9 +713,9 @@ fn hist_or_union_scan_sql(
                         hist_arrays,
                         bucket_iv,
                     ));
-                    if start < cutoff {
+                    if start < stitch {
                         let ds_time =
-                            samples_time_predicates(Some(start), Some(cutoff), "window_ts");
+                            samples_time_predicates(Some(start), Some(stitch), "window_ts");
                         parts.push(hist_row_select_sql(
                             catalog,
                             "metric_hist_samples_1h",
@@ -1327,12 +1336,78 @@ mod tests {
 
     #[test]
     fn series_meta_sql_reads_labels_as_json_once() {
-        let sql = series_meta_sql("softprobe", &[42], Some(1_000), Some(2_000));
+        let sql = series_meta_sql(
+            "softprobe",
+            &[42],
+            SeriesMetaDayScope::Recent,
+            Some("demo_metric"),
+            Some(1_000),
+            Some(2_000),
+        );
         assert!(sql.contains("metric_series"));
         assert!(sql.contains("CAST(s.labels AS JSON)"));
+        assert!(sql.contains("QUALIFY row_number()"));
+        assert!(sql.contains("thelake_series_meta_recent"));
+        assert!(sql.contains("CURRENT_DATE - INTERVAL 2 DAY"));
+        assert!(sql.contains("metric_name = 'demo_metric'"));
         assert!(!sql.contains("CAST(s.labels['"));
         assert!(sql.contains("series_id IN (42)"));
-        assert!(sql.contains("record_date BETWEEN DATE"));
+
+        let all = series_meta_sql(
+            "softprobe",
+            &[42],
+            SeriesMetaDayScope::QueryWindow,
+            None,
+            Some(1_700_000_000_000),
+            Some(1_700_086_400_000),
+        );
+        assert!(all.contains("thelake_series_meta_all"));
+        assert!(all.contains("record_date BETWEEN"));
+        assert!(!all.contains("CURRENT_DATE"));
+    }
+
+    #[test]
+    fn stitch_raw_start_aligns_to_closed_bucket_end() {
+        let bucket = 3_600_000i64;
+        // Arbitrary cutoff mid-hour → stitch is the hour floor (closed bucket end).
+        let cutoff = 1_700_005_220_000i64; // not on an hour boundary
+        let stitch = stitch_raw_start_ms(cutoff, bucket);
+        assert_eq!(stitch, cutoff.div_euclid(bucket) * bucket);
+        assert!(stitch <= cutoff);
+        assert!(cutoff - stitch < bucket);
+        // Aligned cutoff is unchanged.
+        assert_eq!(stitch_raw_start_ms(stitch, bucket), stitch);
+    }
+
+    /// Live 30d panels (`end ≈ now`) must UNION 1h history + raw lag, not raw-only.
+    #[test]
+    fn live_long_range_samples_sql_unions_1h_with_raw_tail() {
+        let end = chrono::Utc::now().timestamp_millis();
+        let start = end - 30 * 86_400_000;
+        let sql = samples_scan_sql_for_window(
+            "softprobe",
+            &[1],
+            Some(start),
+            Some(end),
+            Some(3_600_000),
+            "NULL::VARCHAR AS lbl__empty",
+            false,
+            false,
+            true,
+            100,
+        );
+        assert!(
+            sql.contains("metric_samples_1h"),
+            "live 30d must read 1h history, got {sql}"
+        );
+        assert!(
+            sql.contains("UNION ALL"),
+            "live 30d must UNION downsample + raw lag, got {sql}"
+        );
+        assert!(
+            sql.contains("metric_samples sm") || sql.contains(".metric_samples sm"),
+            "live 30d must keep raw lag tail, got {sql}"
+        );
     }
 
     /// time_predicate_is_timestamptz (§9.1 step 8).
@@ -1455,6 +1530,8 @@ mod tests {
         let meta_sql = series_meta_sql(
             &catalog,
             &ids,
+            SeriesMetaDayScope::QueryWindow,
+            Some("layout_postings"),
             Some(ts.timestamp_millis() - 60_000),
             Some(ts.timestamp_millis() + 60_000),
         );

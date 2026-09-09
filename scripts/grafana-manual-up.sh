@@ -3,6 +3,12 @@
 # as the live OTLP traffic source.
 # Usage (from repo root): ./scripts/grafana-manual-up.sh
 # Teardown: ./scripts/grafana-manual-down.sh  (or: make grafana-down)
+#
+# Ingest buffering (soft coalesce):
+#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=2  (default) — ack-on-enqueue, one
+#     DuckLake Parquet commit per signal every N seconds (demo CPU/IO profile).
+#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=0  — flush-through (commit before ack;
+#     debug / contract tests only; saturates disk under Astronomy Shop + k6).
 
 set -euo pipefail
 
@@ -52,6 +58,8 @@ DEMO_DIR="${OTEL_DEMO_DIR:-$CACHE_ROOT/otel-demo/$OTEL_DEMO_TAG}"
 HISTOGRAM_BUCKET_RATE_EXPR_FILE="$ROOT/tests/compat/grafana/browser/catalog_gates/histogram_bucket_rate.expr"
 DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
+# Soft coalesce window for OTLP → DuckLake (0 = flush-through every request).
+INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-2}"
 
 mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 
@@ -115,6 +123,7 @@ Grafana is ready for manual inspection (live Astronomy Shop traffic).
                Softprobe PromQL → capability smoke boards
                thelake ops → self-monitoring (datasource Softprobe Prometheus · ops)
   Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY; ops: local-ops-key → thelake-ops)
+  Ingest:      flush_interval_seconds=$INGEST_FLUSH_INTERVAL_SECONDS  (0=flush-through; >0=coalesce)
   DuckLake:    Postgres 19 catalog on $PG_HOST:$PG_PORT (schema $PG_SCHEMA)
   Parquet:     $STATE_DIR/data/
   Store UI:    $STORE_URL
@@ -377,7 +386,18 @@ reset_grafana_state() {
   mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 }
 
-reset_grafana_state
+# GRAFANA_KEEP_DATA=1 keeps parquet + DuckLake Postgres catalog (clean binary restart).
+# Default remains wipe-on-up for a deterministic empty demo.
+case "${GRAFANA_KEEP_DATA:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    echo "==> GRAFANA_KEEP_DATA: preserving $STATE_DIR/data and $STATE_DIR/postgres"
+    THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" $COMPOSE -f "$COMPOSE_FILE" down --remove-orphans >/dev/null 2>&1 || true
+    mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
+    ;;
+  *)
+    reset_grafana_state
+    ;;
+esac
 
 echo "==> building softprobe-runtime (release; AC-S3)"
 if [[ -f "$ROOT/Makefile" ]] && grep -q '^build-release:' "$ROOT/Makefile"; then
@@ -466,6 +486,12 @@ query:
   max_connections: 16
   cache_dir: "$STATE_DIR/cache"
 
+# Soft coalesce: hold OTLP rows in memory and commit once per interval.
+# 0 = flush-through (commit before ack). Demo default is 2s via
+# THELAKE_INGEST_FLUSH_INTERVAL_SECONDS (see script header).
+ingest:
+  flush_interval_seconds: $INGEST_FLUSH_INTERVAL_SECONDS
+
 # Demo: TWCS/metadata on by default (ops panels). Override with THELAKE_MAINTENANCE_ENABLED.
 maintenance:
   enabled: ${MAINTENANCE_ENABLED}
@@ -476,11 +502,13 @@ maintenance:
   max_snapshot_age_seconds: 60
   remove_orphan_files_enabled: ${ORPHAN_ENABLED}
   remove_orphan_older_than_seconds: 60
-  open_day_file_cap: 64
-  max_waves_per_table: 1
-  max_compacted_files_per_wave: 16
-  closed_day_max_compacted_files: 128
-  closed_day_max_waves: 2
+  open_day_file_cap: ${THELAKE_OPEN_DAY_FILE_CAP:-64}
+  max_waves_per_table: ${THELAKE_MAX_WAVES_PER_TABLE:-1}
+  max_compacted_files_per_wave: ${THELAKE_MAX_COMPACTED_FILES_PER_WAVE:-16}
+  # Defaults match MaintenanceConfig (256×64) so closed-day catch-up can finish;
+  # demo SLO may override lower via env.
+  closed_day_max_compacted_files: ${THELAKE_CLOSED_DAY_MAX_COMPACTED_FILES:-256}
+  closed_day_max_waves: ${THELAKE_CLOSED_DAY_MAX_WAVES:-64}
   max_merge_file_size_bytes: 8388608
 
 ducklake:
@@ -613,7 +641,15 @@ tenant_http="$(curl -sS -o /tmp/thelake-grafana-tenant-provision.json -w '%{http
   -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$tenant_payload" || true)"
-if [[ "$tenant_http" != "200" && "$tenant_http" != "201" ]]; then
+if [[ "$tenant_http" == "200" || "$tenant_http" == "201" ]]; then
+  :
+elif [[ "${GRAFANA_KEEP_DATA:-0}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]] \
+  && [[ "$tenant_http" == "409" || "$tenant_http" == "200" ]]; then
+  echo "==> tenant $TENANT_ID already present (HTTP $tenant_http); keeping existing catalog"
+elif [[ "${GRAFANA_KEEP_DATA:-0}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]] \
+  && grep -qiE 'already|exists|conflict' /tmp/thelake-grafana-tenant-provision.json 2>/dev/null; then
+  echo "==> tenant $TENANT_ID already present (HTTP $tenant_http); keeping existing catalog"
+else
   echo "ERROR: tenant provisioning returned HTTP ${tenant_http:-curl-fail}" >&2
   cat /tmp/thelake-grafana-tenant-provision.json >&2 || true
   exit 1

@@ -18,6 +18,12 @@ pub struct Instruments {
     pub ingest_requests: Counter<u64>,
     pub ingest_errors: Counter<u64>,
     pub ingest_duration_ms: Histogram<f64>,
+    /// DuckLake write transactions (flush-through request or coalesce flush).
+    pub ingest_commits: Counter<u64>,
+    /// Rows included in those commits.
+    pub ingest_rows_committed: Counter<u64>,
+    /// Coalesce timer / force_flush drains (absent on flush-through).
+    pub ingest_coalesce_flushes: Counter<u64>,
     pub write_duration_ms: Histogram<f64>,
     pub query_duration_ms: Histogram<f64>,
     pub query_queue_wait_ms: Histogram<f64>,
@@ -28,6 +34,8 @@ pub struct Instruments {
     pub orphan_remove: Counter<u64>,
     pub snapshot_expire: Counter<u64>,
     pub slow_queries: Counter<u64>,
+    /// Prom sample-scan plan: grain table + raw vs downsample vs live UNION.
+    pub sample_scans: Counter<u64>,
     pub export_drops: Counter<u64>,
 }
 
@@ -216,6 +224,20 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .with_description("Ingest request duration")
             .with_unit("ms")
             .build(),
+        ingest_commits: meter
+            .u64_counter("thelake.ingest.commits")
+            .with_description(
+                "DuckLake write transactions (one per coalesce flush or flush-through request)",
+            )
+            .build(),
+        ingest_rows_committed: meter
+            .u64_counter("thelake.ingest.rows_committed")
+            .with_description("Rows written in DuckLake ingest commits")
+            .build(),
+        ingest_coalesce_flushes: meter
+            .u64_counter("thelake.ingest.coalesce_flushes")
+            .with_description("Soft-coalesce timer/force_flush drains (not flush-through)")
+            .build(),
         write_duration_ms: meter
             .f64_histogram("thelake.write.duration")
             .with_unit("ms")
@@ -238,6 +260,13 @@ fn build_instruments(meter: &Meter) -> Instruments {
         orphan_remove: meter.u64_counter("thelake.orphan.remove").build(),
         snapshot_expire: meter.u64_counter("thelake.snapshot.expire").build(),
         slow_queries: meter.u64_counter("thelake.slow_queries").build(),
+        sample_scans: meter
+            .u64_counter("thelake.query.sample_scans")
+            .with_description(
+                "Prom sample scans by grain table and scan_mode \
+                 (raw | downsample | downsample_with_raw_tail)",
+            )
+            .build(),
         export_drops: meter
             .u64_counter("thelake.self_monitoring.export_drops")
             .build(),
@@ -316,6 +345,27 @@ pub fn record_write(tenant: &str, signal: &str, app: Option<&str>, elapsed: Dura
         .record(elapsed.as_secs_f64() * 1000.0, &a);
 }
 
+/// Record a completed DuckLake ingest commit (coalesced or flush-through).
+///
+/// When coalesce is on, `rate(commits)` must stay well below `rate(requests)`.
+pub fn record_ingest_commit(tenant: &str, signal: &str, rows: u64, coalesced: bool) {
+    let Some(i) = instruments() else { return };
+    let path = if coalesced { "coalesce" } else { "flush_through" };
+    let a = attrs(&[
+        ("tenant", tenant),
+        ("signal", signal),
+        ("path", path),
+        ("op", "ingest"),
+    ]);
+    i.ingest_commits.add(1, &a);
+    if rows > 0 {
+        i.ingest_rows_committed.add(rows, &a);
+    }
+    if coalesced {
+        i.ingest_coalesce_flushes.add(1, &a);
+    }
+}
+
 pub fn record_query(tenant: &str, sql_kind: &str, elapsed: Duration) {
     let Some(i) = instruments() else { return };
     let a = attrs(&[
@@ -326,6 +376,21 @@ pub fn record_query(tenant: &str, sql_kind: &str, elapsed: Duration) {
     ]);
     i.query_duration_ms
         .record(elapsed.as_secs_f64() * 1000.0, &a);
+}
+
+/// Count Prom sample-scan plans so ops can see raw vs downsample vs live UNION
+/// without inferring from latency alone.
+pub fn record_sample_scan(tenant: &str, grain: &str, scan_mode: &str) {
+    let Some(i) = instruments() else { return };
+    i.sample_scans.add(
+        1,
+        &attrs(&[
+            ("tenant", tenant),
+            ("grain", grain),
+            ("scan_mode", scan_mode),
+            ("op", "query"),
+        ]),
+    );
 }
 
 pub fn record_query_queue_wait(tenant: &str, sql_kind: &str, elapsed: Duration) {
