@@ -1,3 +1,12 @@
+//! Soft coalesce + flush-through ingest for one tenant-bound [`Storage`].
+//!
+//! # CPU / PromQL coupling (demo Astronomy Shop)
+//! When `flush_interval_seconds > 0`, OTLP acks on enqueue and a timer drains
+//! capped batches into DuckLake. After each successful **metrics** commit we
+//! call [`crate::compat::prometheus::invalidate_range_result_cache`] so Grafana
+//! refresh / stop-gate `--check-ingest` do not keep serving pre-commit answers
+//! (Greptime-style: invalidate on durable write, not on every HTTP enqueue).
+
 mod coalesce;
 
 use crate::catalog::DropdownCatalog;

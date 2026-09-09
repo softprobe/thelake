@@ -77,9 +77,10 @@ pub fn spawn_inventory_loop(state: AppState, interval_secs: u64) {
                 let Ok(engine) = state.engines.engine_for(&tenant).await else {
                     continue;
                 };
-                // One attach per tenant (not per SQL) — each uninstrumented query
-                // used to open+INSTALL+ATTACH and dominated Softprobe CPU.
-                scrape_tenant(engine.as_ref()).await;
+            // One attach per tenant (not per SQL) — each uninstrumented query
+            // used to open+INSTALL+ATTACH and dominated Softprobe CPU under the
+            // inventory ticker (was the main self-mon "CPU storm" before this).
+            scrape_tenant(engine.as_ref()).await;
             }
         }
     });

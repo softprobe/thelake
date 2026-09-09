@@ -34,6 +34,9 @@ RANGES: list[tuple[str, int]] = [
 ]
 
 LIVE_INGEST_QUERIES = (
+    # Prefer counters that move under the CPU-budget collector allow-list
+    # (k6 + demo_ad). http_server / spanmetrics may be empty when extras.yml
+    # drops them to protect Softprobe's single-core write path.
     "http_server_request_duration_count",
     "traces_span_metrics_calls",
     "demo_ad_served_total",

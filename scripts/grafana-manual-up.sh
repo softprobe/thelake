@@ -4,6 +4,16 @@
 # Usage (from repo root): ./scripts/grafana-manual-up.sh
 # Teardown: ./scripts/grafana-manual-down.sh  (or: make grafana-down)
 #
+# CPU / PromQL budget (Astronomy Shop + stop-demo-slo-gate):
+#   Softprobe must stay ≤1 core while Grafana refresh=10s and OTLP are live.
+#   Levers (defaults below):
+#     - taskset CPU affinity (THELAKE_CPU_AFFINITY=0)
+#     - tokio worker_threads=1, DuckDB query max_connections=1, writer_pool_size=1
+#     - DuckDB opened with threads=1 at create time (src/storage/ducklake/attach.rs)
+#     - soft coalesce flush_interval_seconds=10 (fewer parquet commits)
+#     - self_monitoring off (ops export competed with PromQL on one core)
+#     - otelcol-config-extras.yml allow-list + 10s batch (metrics-only to Softprobe)
+#
 # Ingest buffering (soft coalesce):
 #   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=10 (default) — ack-on-enqueue, one
 #     DuckLake Parquet commit per signal every N seconds (demo CPU/IO profile).

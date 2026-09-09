@@ -490,6 +490,10 @@ impl DuckDBQueryEngine {
         core.install_extensions(&temp_conn)?;
         drop(temp_conn); // Extensions are installed globally, connection no longer needed
 
+        // `max_connections` = number of long-lived DuckDB query worker threads.
+        // Demo profile sets this to 1 so PromQL cannot fan out across cores while
+        // the writer also holds a connection (pair with QUERY_DUCKDB_THREADS=1 and
+        // host `taskset` in grafana-manual-up.sh to stay under one core).
         let worker_count = std::cmp::max(1, config.query.max_connections);
         let mut workers = Vec::with_capacity(worker_count);
         // Workers report startup outcome so a failed one cannot stay in the pool.

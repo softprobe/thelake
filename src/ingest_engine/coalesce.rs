@@ -1,8 +1,15 @@
 //! Soft coalesce buffer: ack on enqueue; background flush after N seconds.
 //!
+//! # Why coalesce exists (demo CPU/IO)
+//! Flush-through (N=0) commits every OTLP POST and pegs DuckLake write + parquet
+//! under Astronomy Shop. Soft coalesce (N>0) batches posts into fewer commits.
+//! Drains are **capped** ([`MAX_BATCHES_PER_FLUSH`] / [`MAX_ROWS_PER_FLUSH`]) so a
+//! slow commit cannot absorb minutes of backlog into one megatransaction.
+//!
 //! When the last `Arc` is dropped, in-flight timer tasks fail `Weak::upgrade`
-//! and leave pending rows discarded (no WAL). An already-running flush may still
-//! complete and WARN on write error.
+//! and leave pending rows discarded (no WAL). [`Drop`] heals the
+//! `thelake.ingest.pending_batches` gauge so ops panels do not stick high after
+//! engine recycle. An already-running flush may still complete and WARN on write error.
 
 use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
