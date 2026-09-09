@@ -553,7 +553,7 @@ ingest:
 maintenance:
   enabled: ${MAINTENANCE_ENABLED}
   target_file_size_bytes: 67108864
-  interval_seconds: ${THELAKE_MAINTENANCE_INTERVAL_SECONDS:-60}
+  interval_seconds: ${THELAKE_MAINTENANCE_INTERVAL_SECONDS:-300}
   metadata_enabled: ${METADATA_ENABLED}
   metadata_interval_seconds: ${THELAKE_METADATA_INTERVAL_SECONDS:-600}
   max_snapshot_age_seconds: 60

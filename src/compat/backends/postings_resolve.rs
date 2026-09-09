@@ -376,7 +376,6 @@ pub fn samples_scan_sql(
                  FROM {samples} sm \
                  WHERE sm.series_id IN ({ids}){time} \
                  GROUP BY sm.series_id, time_bucket({iv}, sm.{ts_col}) \
-                 ORDER BY timestamp_ms DESC \
                  LIMIT {fetch_limit}"
             );
         }
@@ -389,7 +388,6 @@ pub fn samples_scan_sql(
          NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
          FROM {samples} sm \
          WHERE sm.series_id IN ({ids}){time} \
-         ORDER BY timestamp_ms DESC \
          LIMIT {fetch_limit}"
     )
 }
@@ -462,7 +460,6 @@ fn gauge_downsample_with_raw_tail(
                  FROM {raw_table} sm \
                  WHERE sm.series_id IN ({ids}){raw_time} \
                  GROUP BY sm.series_id, time_bucket({iv}, sm.timestamp) \
-                 ORDER BY timestamp_ms DESC \
                  LIMIT {fetch_limit}"
             )
         } else {
@@ -474,7 +471,6 @@ fn gauge_downsample_with_raw_tail(
                  NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
                  FROM {raw_table} sm \
                  WHERE sm.series_id IN ({ids}){raw_time} \
-                 ORDER BY timestamp_ms DESC \
                  LIMIT {fetch_limit}"
             )
         };
@@ -531,7 +527,7 @@ fn gauge_downsample_with_raw_tail(
     // Fully closed window → downsample only.
     if end <= cutoff {
         return format!(
-            "{} ORDER BY timestamp_ms DESC LIMIT {fetch_limit}",
+            "{} LIMIT {fetch_limit}",
             ds_select(start, end, true)
         );
     }
@@ -546,11 +542,11 @@ fn gauge_downsample_with_raw_tail(
     }
     match parts.len() {
         1 => format!(
-            "{} ORDER BY timestamp_ms DESC LIMIT {fetch_limit}",
+            "{} LIMIT {fetch_limit}",
             parts[0]
         ),
         _ => format!(
-            "({}) UNION ALL ({}) ORDER BY timestamp_ms DESC LIMIT {fetch_limit}",
+            "({}) UNION ALL ({}) LIMIT {fetch_limit}",
             parts[0], parts[1]
         ),
     }
@@ -822,7 +818,7 @@ fn hist_or_union_scan_sql(
             }
             _ => unreachable!("is_hist()"),
         };
-        return format!("{body} ORDER BY timestamp_ms DESC LIMIT {fetch_limit}");
+        return format!("{body} LIMIT {fetch_limit}");
     }
 
     let samples = grain_table_sql(catalog, SampleGrain::Raw);
@@ -837,7 +833,7 @@ fn hist_or_union_scan_sql(
          WHERE sm.series_id IN ({ids}){raw_time}"
     );
     if !include_fidelity {
-        return format!("{gauge_sql} ORDER BY timestamp_ms DESC LIMIT {fetch_limit}");
+        return format!("{gauge_sql} LIMIT {fetch_limit}");
     }
     let hist_sql = hist_row_select_sql(
         catalog,
@@ -848,7 +844,7 @@ fn hist_or_union_scan_sql(
         hist_arrays,
         bucket_iv,
     );
-    format!("({gauge_sql}) UNION ALL ({hist_sql}) ORDER BY timestamp_ms DESC LIMIT {fetch_limit}")
+    format!("({gauge_sql}) UNION ALL ({hist_sql}) LIMIT {fetch_limit}")
 }
 
 /// Build samples SQL using §9.1 grain selection.
