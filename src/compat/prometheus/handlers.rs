@@ -24,6 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -41,6 +42,11 @@ const RANGE_CACHE_TTL: Duration = Duration::from_secs(60);
 const RANGE_CACHE_MAX: usize = 8192;
 /// ~64 MiB serialized JSON budget across all cached range answers.
 const RANGE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Bumped on every durable metrics commit. Included in range-cache keys so
+/// post-ingest PromQL misses without a nuclear map wipe (which thrashed CPU
+/// under Astronomy Shop). Stale entries age out via TTL/LRU.
+static RANGE_CACHE_GEN: AtomicU64 = AtomicU64::new(0);
 
 fn range_result_cache() -> &'static Mutex<TtlLruCache<String, Value>> {
     static CACHE: OnceLock<Mutex<TtlLruCache<String, Value>>> = OnceLock::new();
@@ -66,14 +72,15 @@ fn range_cache_put(key: String, data: Value) {
     guard.put_sized(key, data, bytes, Instant::now());
 }
 
-/// Drop cached PromQL range answers after DuckLake metrics commits.
-///
-/// **No-op by design.** Wiping on every coalesce commit forced Grafana to
-/// re-scan Parquet on the next refresh (CPU storm under live OTLP). Freshness
-/// is bounded by [`RANGE_CACHE_TTL`] plus start/end quantization — the same
-/// trade-off as keeping a query answer cache across memtable flushes.
+/// After DuckLake metrics commits: bump cache generation so the next
+/// `query_range` cannot reuse pre-commit answers. Does **not** clear the map
+/// (that forced a full Parquet re-scan storm under live OTLP).
 pub fn invalidate_range_result_cache() {
-    // retained as a stable hook for future selective invalidation
+    RANGE_CACHE_GEN.fetch_add(1, Ordering::Relaxed);
+}
+
+fn range_cache_generation() -> u64 {
+    RANGE_CACHE_GEN.load(Ordering::Relaxed)
 }
 
 fn tenant_ctx(tenant: TenantInfo) -> Result<TenantContext, CompatError> {
@@ -324,8 +331,13 @@ async fn query_range_handler(
     let cache_start = start_ms.div_euclid(cache_bucket_ms) * cache_bucket_ms;
     let cache_end = end_ms.div_euclid(cache_bucket_ms) * cache_bucket_ms;
     let cache_key = format!(
-        "{}|{}|{}|{}|{}",
-        ctx.tenant.tenant_id, params.query, cache_start, cache_end, step_ms
+        "{}|{}|{}|{}|{}|g{}",
+        ctx.tenant.tenant_id,
+        params.query,
+        cache_start,
+        cache_end,
+        step_ms,
+        range_cache_generation()
     );
     if let Some(data) = range_cache_get(&cache_key) {
         return respond_data(&ctx, data);
@@ -427,6 +439,13 @@ mod tests {
             cache.get(&key, now).and_then(|v| v.get("status").cloned()),
             Some(json!("success"))
         );
+    }
+
+    #[test]
+    fn range_cache_generation_bumps_on_invalidate() {
+        let before = range_cache_generation();
+        invalidate_range_result_cache();
+        assert!(range_cache_generation() > before);
     }
 
     #[test]

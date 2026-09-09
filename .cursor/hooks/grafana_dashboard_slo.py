@@ -169,6 +169,8 @@ def check_ingest(client: SoftprobeProm) -> str | None:
     recent_max_age_s = 180
     best = 0
     newest_change_ts = 0.0
+    newest_sample_ts = 0.0
+    recent_window_changes = 0
     used = ""
     for q in LIVE_INGEST_QUERIES:
         _code, body, _ms = client.query_range(q, start, end, 15)
@@ -180,12 +182,17 @@ def check_ingest(client: SoftprobeProm) -> str | None:
                     points.append((float(ts), float(v)))
                 except (TypeError, ValueError):
                     continue
+            if not points:
+                continue
+            newest_sample_ts = max(newest_sample_ts, points[-1][0])
             changes = 0
             last_change_ts = 0.0
-            for (t0, a), (t1, b) in zip(points, points[1:]):
+            for (_t0, a), (t1, b) in zip(points, points[1:]):
                 if a != b:
                     changes += 1
                     last_change_ts = t1
+                    if t1 >= end - recent_max_age_s:
+                        recent_window_changes += 1
             # Prefer the freshest series with ≥2 changes. After load-generator /
             # Softprobe restarts, dead generations often retain high historical
             # change counts while a new series is the only live one — ranking by
@@ -200,12 +207,27 @@ def check_ingest(client: SoftprobeProm) -> str | None:
                 used = q
         if best >= 2 and newest_change_ts >= end - recent_max_age_s:
             break
-    if best < 2:
-        return (
-            "OTEL demo series are flat (15m lookback). "
-            "Need live ingest: value changes ≥ 2 on http_server / spanmetrics / demo / k6."
-        )
-    if newest_change_ts < end - recent_max_age_s:
+    # After collector / loadgen bounce, a new counter generation may only have
+    # one recent value-change while samples are already on the wire. Accept
+    # that only when a change landed inside the freshness window (stopped
+    # collectors plateau without recent changes).
+    if best < 2 or newest_change_ts < end - recent_max_age_s:
+        if (
+            newest_sample_ts >= end - recent_max_age_s
+            and recent_window_changes >= 1
+        ):
+            print(
+                f"ingest ok (fresh samples age_s={end - int(newest_sample_ts)}, "
+                f"recent_changes={recent_window_changes}, names={len(names)})",
+                file=sys.stderr,
+            )
+            return None
+        if best < 2:
+            return (
+                "OTEL demo series are flat (15m lookback). "
+                "Need live ingest: value changes ≥ 2 on http_server / spanmetrics / demo / k6 "
+                f"(or ≥1 change with sample age ≤{recent_max_age_s}s)."
+            )
         age = end - int(newest_change_ts) if newest_change_ts else None
         return (
             f"OTEL ingest looks stale (newest value change age={age}s, need ≤{recent_max_age_s}s). "

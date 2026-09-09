@@ -26,9 +26,9 @@ processors:
     sampling_percentage: 5
   batch/softprobe:
     # Timeout-dominated pacing: Softprobe coalesce + Grafana refresh=10s.
-    # Align with THELAKE_INGEST_FLUSH_INTERVAL_SECONDS default (45s) so Softprobe
-    # sees fewer, larger posts (Greptime memtable lesson — not an allow-list).
-    timeout: 120s
+    # Keep well under the stop-gate ingest recovery budget (flush≈60s + retries):
+    # 120s batch + 60s coalesce left post-measure checks staring at stale PromQL.
+    timeout: 30s
     send_batch_size: 8192
     send_batch_max_size: 8192
   memory_limiter/softprobe:

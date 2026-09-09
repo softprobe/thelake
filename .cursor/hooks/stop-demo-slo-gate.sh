@@ -442,23 +442,24 @@ if docker inspect -f '{{.State.Running}}' load-generator >/dev/null 2>&1; then
 fi
 collector_stopped=1
 restart_collector
-sleep 45
+# Collector batch timeout (30s) + Softprobe coalesce flush (60s) + one scrape.
+sleep 90
 log "slo: post-measure ingest check"
 ingest_ok=0
-for ingest_try in $(seq 1 12); do
+for ingest_try in $(seq 1 16); do
   ingest_out="$(python3 "$PY" --check-ingest 2>&1)" || true
   printf '%s\n' "$ingest_out" | tee -a "$LOG" >&2
   if grep -q "ingest ok" <<<"$ingest_out"; then
     ingest_ok=1
     break
   fi
-  if [[ "$ingest_try" -eq 6 ]]; then
+  if [[ "$ingest_try" -eq 8 ]]; then
     log "slo: ingest still stale; heal Softprobe + collector once (last resort)"
     restart_softprobe_demo || true
     collector_stopped=1
     restart_collector
     docker restart load-generator >/dev/null 2>&1 || true
-    sleep 60
+    sleep 90
   else
     sleep 15
   fi
