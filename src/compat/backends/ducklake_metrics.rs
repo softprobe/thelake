@@ -465,36 +465,18 @@ impl DuckLakeMetricsBackend {
         }
 
         let mut still_missing = missing;
-        let span_ms = match (start_ms, end_ms) {
-            (Some(s), Some(e)) => (e - s).abs(),
-            _ => i64::MAX,
-        };
-        // Live Grafana boards (≤24h) should resolve from open-day partitions.
-        // QueryWindow meta scans CAST(labels AS JSON) across the Prom day range
-        // and was pegging Softprobe (~10s) under concurrent load+ingest.
-        let scopes: &[SeriesMetaDayScope] = if span_ms <= crate::compat::backends::grain::RAW_RANGE_MS
-        {
-            &[SeriesMetaDayScope::Recent]
-        } else {
-            &[
-                SeriesMetaDayScope::Recent,
-                SeriesMetaDayScope::QueryWindow,
-            ]
-        };
-        for scope in scopes {
+        for scope in [SeriesMetaDayScope::Recent, SeriesMetaDayScope::QueryWindow] {
             if still_missing.is_empty() {
                 break;
             }
             // Recent: optional metric_name for sort-key prune. QueryWindow miss
             // path drops the name filter so a Prom/OTel name mismatch cannot
             // strand ids, but keeps the Prom record_date window bound.
-            // Short-window second chance: Recent without name (still day-pruned).
             let name = match scope {
                 SeriesMetaDayScope::Recent => metric_name,
                 SeriesMetaDayScope::QueryWindow => None,
             };
-            let meta_sql =
-                series_meta_sql(catalog, &still_missing, *scope, name, start_ms, end_ms);
+            let meta_sql = series_meta_sql(catalog, &still_missing, scope, name, start_ms, end_ms);
             debug_assert!(
                 meta_sql.contains("metric_series")
                     && meta_sql.contains("CAST(s.labels AS JSON)")
@@ -522,42 +504,6 @@ impl DuckLakeMetricsBackend {
             }
             out.extend(fetched);
             still_missing.retain(|id| !out.contains_key(id));
-            // Live path: one more Recent pass without metric_name for Prom/OTel
-            // name mismatches — still partition-pruned, never full QueryWindow.
-            if *scope == SeriesMetaDayScope::Recent
-                && span_ms <= crate::compat::backends::grain::RAW_RANGE_MS
-                && !still_missing.is_empty()
-                && metric_name.is_some()
-            {
-                let meta_sql = series_meta_sql(
-                    catalog,
-                    &still_missing,
-                    SeriesMetaDayScope::Recent,
-                    None,
-                    start_ms,
-                    end_ms,
-                );
-                let meta_result = self.execute_soft(ctx, &meta_sql).await?;
-                Self::check_deadline(ctx)?;
-                let fetched = parse_series_meta(&meta_result);
-                {
-                    let mut guard = SERIES_META_CACHE.lock().await;
-                    let now = Instant::now();
-                    for (id, meta) in &fetched {
-                        guard.put(
-                            SeriesMetaKey {
-                                engine_id,
-                                tenant_id: tenant_id.to_string(),
-                                series_id: *id,
-                            },
-                            meta.clone(),
-                            now,
-                        );
-                    }
-                }
-                out.extend(fetched);
-                still_missing.retain(|id| !out.contains_key(id));
-            }
         }
         Ok(out)
     }

@@ -74,7 +74,7 @@ DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
 # Soft coalesce window for OTLP → DuckLake (0 = flush-through every request).
 # Demo default 45s: full-fidelity OTLP otherwise pegs Softprobe above one core.
-INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-90}"
+INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-60}"
 # Optional CPU pin for experiments only — empty default so the success gate is
 # process %CPU under normal scheduling (set THELAKE_CPU_AFFINITY=0 to pin).
 CPU_AFFINITY="${THELAKE_CPU_AFFINITY:-}"
@@ -555,7 +555,7 @@ maintenance:
   target_file_size_bytes: 67108864
   interval_seconds: ${THELAKE_MAINTENANCE_INTERVAL_SECONDS:-300}
   metadata_enabled: ${METADATA_ENABLED}
-  metadata_interval_seconds: ${THELAKE_METADATA_INTERVAL_SECONDS:-600}
+  metadata_interval_seconds: ${THELAKE_METADATA_INTERVAL_SECONDS:-300}
   max_snapshot_age_seconds: 60
   remove_orphan_files_enabled: ${ORPHAN_ENABLED}
   remove_orphan_older_than_seconds: 60
