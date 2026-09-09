@@ -94,7 +94,7 @@ if [[ "${otel_n:-0}" -lt 1 || -z "$otel_collector" ]]; then
   fail "OpenTelemetry Demo is not running (compose project ${OTEL_PROJECT}, need otel-collector). Start with: make grafana-up"
 fi
 if [[ "$softprobe_ok" != 1 ]]; then
-  fail "Softprobe is not serving on :8090. Start with: make grafana-up"
+  log "slo: Softprobe not detected on :8090 yet (will retry after helper init)"
 fi
 
 # --- 3. live ingest + Grafana 100ms SLO ---
@@ -121,38 +121,8 @@ if ! docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -q
   docker start otel-collector >/dev/null 2>&1 || true
 fi
 
-log "slo: pre-warmup ingest check"
-ingest_ok=0
-ingest_out=""
-for ingest_try in 1 2 3 4 5 6; do
-  ingest_out="$(python3 "$PY" --check-ingest 2>&1)" || true
-  printf '%s\n' "$ingest_out" | tee -a "$LOG" >&2
-  if grep -q "ingest ok" <<<"$ingest_out"; then
-    ingest_ok=1
-    break
-  fi
-  log "slo: ingest not ready (try ${ingest_try}/6); waiting 20s"
-  sleep 20
-done
-if [[ "$ingest_ok" != 1 ]]; then
-  fail "OTEL ingest is not live before Grafana warmup (see $LOG)"
-fi
-
-# Stop OTLP during warmup+measure so DuckDB writers cannot steal the query pool
-# (Greptime isolates ingest flush from range-result cache hits). Restart after.
-collector_stopped=0
-if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
-  if docker stop otel-collector >/dev/null 2>&1; then
-    collector_stopped=1
-    log "slo: stopped otel-collector for warmup+measure"
-  fi
-fi
-# Fail loud if collector is still running — that is the flake source.
-if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
-  fail "otel-collector still running during SLO measure; refuse to continue"
-fi
 restart_collector() {
-  if [[ "${collector_stopped}" != 1 ]]; then
+  if [[ "${collector_stopped:-0}" != 1 ]]; then
     return 0
   fi
   # Prefer compose force-recreate: plain `docker start` often leaves the
@@ -194,7 +164,6 @@ restart_softprobe_demo() {
   if [[ -f "$GRAFANA_STATE/libduckdb.so" ]]; then
     duck_lib="$GRAFANA_STATE"
   elif [[ -f "$ROOT/dist/libduckdb.so" ]]; then
-    duck_lib="$ROOT/dist"
     cp -f "$ROOT/dist/libduckdb.so" "$GRAFANA_STATE/libduckdb.so" 2>/dev/null || true
     duck_lib="$GRAFANA_STATE"
   else
@@ -249,6 +218,43 @@ restart_softprobe_demo() {
   fi
   log "slo: Softprobe restarted pid=$(tr -d '[:space:]' <"$PID_FILE") (fresh DuckDB query workers)"
 }
+
+# Ensure Softprobe is up before pausing Grafana / stopping the collector.
+if ! curl -sf -m 2 "http://127.0.0.1:8090/ready" >/dev/null 2>&1; then
+  log "slo: Softprobe not ready before ingest check; attempting demo restart"
+  restart_softprobe_demo || fail "Softprobe is not serving on :8090. Start with: make grafana-up"
+fi
+
+log "slo: pre-warmup ingest check"
+ingest_ok=0
+ingest_out=""
+for ingest_try in 1 2 3 4 5 6; do
+  ingest_out="$(python3 "$PY" --check-ingest 2>&1)" || true
+  printf '%s\n' "$ingest_out" | tee -a "$LOG" >&2
+  if grep -q "ingest ok" <<<"$ingest_out"; then
+    ingest_ok=1
+    break
+  fi
+  log "slo: ingest not ready (try ${ingest_try}/6); waiting 20s"
+  sleep 20
+done
+if [[ "$ingest_ok" != 1 ]]; then
+  fail "OTEL ingest is not live before Grafana warmup (see $LOG)"
+fi
+
+# Stop OTLP during warmup+measure so DuckDB writers cannot steal the query pool
+# (Greptime isolates ingest flush from range-result cache hits). Restart after.
+collector_stopped=0
+if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
+  if docker stop otel-collector >/dev/null 2>&1; then
+    collector_stopped=1
+    log "slo: stopped otel-collector for warmup+measure"
+  fi
+fi
+# Fail loud if collector is still running — that is the flake source.
+if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
+  fail "otel-collector still running during SLO measure; refuse to continue"
+fi
 trap 'restart_collector; unpause_grafana' EXIT
 
 log "slo: global warmup"
