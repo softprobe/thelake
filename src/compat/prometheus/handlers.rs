@@ -66,6 +66,23 @@ fn range_cache_put(key: String, data: Value) {
     guard.put_sized(key, data, bytes, Instant::now());
 }
 
+/// Drop cached PromQL range answers after DuckLake metrics commits.
+///
+/// Call from the coalesce flush path (not OTLP enqueue): clearing on every
+/// `/v1/metrics` ack would thrash the cache under live demo traffic and break
+/// the steady-state SLO. After a real commit, Grafana / ingest-live checks
+/// must not keep reading pre-commit answers while newer parquet exists.
+pub fn invalidate_range_result_cache() {
+    let Ok(mut guard) = range_result_cache().lock() else {
+        return;
+    };
+    *guard = TtlLruCache::with_byte_budget(
+        RANGE_CACHE_TTL,
+        RANGE_CACHE_MAX,
+        Some(RANGE_CACHE_MAX_BYTES),
+    );
+}
+
 fn tenant_ctx(tenant: TenantInfo) -> Result<TenantContext, CompatError> {
     TenantContext::from_authenticated(tenant, PROTO, None, QueryLimits::default())
 }

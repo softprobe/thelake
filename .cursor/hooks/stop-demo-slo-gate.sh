@@ -177,6 +177,61 @@ restart_collector() {
   fi
   log "slo: restarted otel-collector"
 }
+
+restart_softprobe_demo() {
+  local pid bin cfg logf auth_url
+  pid="$(tr -d '[:space:]' <"$PID_FILE" 2>/dev/null || true)"
+  bin="$GRAFANA_STATE/softprobe-runtime"
+  cfg="$GRAFANA_STATE/config.yaml"
+  logf="$GRAFANA_STATE/softprobe.log"
+  if [[ ! -x "$bin" || ! -f "$cfg" ]]; then
+    log "slo: softprobe restart skipped (missing $bin or $cfg)"
+    return 0
+  fi
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    log "slo: stopping Softprobe pid=$pid for query-worker reattach"
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 40); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.25
+    done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  auth_url="${SOFTPROBE_AUTH_URL:-http://127.0.0.1:18080/validate}"
+  : >"$logf"
+  local -a run=(env
+    "SOFTPROBE_AUTH_URL=$auth_url"
+    "SOFTPROBE_ADMIN_API_KEY=${SOFTPROBE_ADMIN_API_KEY:-local-admin-key}"
+    "SOFTPROBE_GRPC_DISABLE=1"
+    "RUST_LOG=${RUST_LOG:-info}"
+    "CONFIG_FILE=$cfg"
+  )
+  if command -v taskset >/dev/null 2>&1; then
+    run+=(taskset -c "${THELAKE_CPU_AFFINITY:-0}")
+  fi
+  run+=("$bin" --config "$cfg")
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "${run[@]}" >>"$logf" 2>&1 &
+    echo $! >"$PID_FILE"
+  else
+    "${run[@]}" >>"$logf" 2>&1 &
+    echo $! >"$PID_FILE"
+  fi
+  local ok=0
+  for _ in $(seq 1 60); do
+    if curl -sf "http://127.0.0.1:8090/ready" >/dev/null 2>&1; then
+      ok=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$ok" != 1 ]]; then
+    log "slo: Softprobe did not become ready after restart"
+    tail -40 "$logf" | tee -a "$LOG" >&2 || true
+    return 1
+  fi
+  log "slo: Softprobe restarted pid=$(tr -d '[:space:]' <"$PID_FILE") (fresh DuckDB query workers)"
+}
 trap 'restart_collector; unpause_grafana' EXIT
 
 log "slo: global warmup"
@@ -217,13 +272,15 @@ collector_stopped=0
 # Prove OTLP recovered after the query storm (gate requires non-flat ingest).
 # Idle with ZERO PromQL — polling --check-ingest here re-starves /v1/metrics.
 log "slo: idle pause for OTLP after measure"
-sleep 45
-# Second recreate: first restart (from restart_collector) may race Softprobe
-# still draining query backlog; a fresh collector after idle is reliable.
+sleep 20
+# Bounce Softprobe so query workers re-ATTACH and see commits written while the
+# single worker was pinned to the SLO query storm (parquet can land while PromQL
+# still looks stale until reconnect).
+restart_softprobe_demo
 collector_stopped=1
 restart_collector
 collector_stopped=0
-sleep 30
+sleep 75
 log "slo: post-measure ingest check"
 ingest_ok=0
 for _ in $(seq 1 8); do

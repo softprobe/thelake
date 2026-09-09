@@ -8,5 +8,5 @@ pub mod diff_normalize;
 pub mod gold_overview;
 
 pub use gold_overview::GOLD_OVERVIEW_EXPRS;
-pub use handlers::prometheus_routes;
+pub use handlers::{invalidate_range_result_cache, prometheus_routes};
 pub use params::{pairs_from_query, parse_time_ms};

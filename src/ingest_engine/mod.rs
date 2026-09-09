@@ -86,6 +86,7 @@ impl IngestEngine {
                             crate::self_monitoring::record_ingest_commit(
                                 &tenant, "metrics", rows, true,
                             );
+                            crate::compat::prometheus::invalidate_range_result_cache();
                         }
                         r
                     })
@@ -159,6 +160,7 @@ impl IngestEngine {
                     rows,
                     false,
                 );
+                crate::compat::prometheus::invalidate_range_result_cache();
             }
             r
         }
