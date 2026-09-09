@@ -665,6 +665,15 @@ pub fn write_metrics_layout_txn(
         return Ok(());
     }
 
+    // Unit tests attach a fresh DuckLake per case but share process-global
+    // open-day identity — clear so prior cases cannot skip INSERTs into a new catalog.
+    #[cfg(test)]
+    {
+        if let Ok(mut guard) = OPEN_DAY_IDENTITY.lock() {
+            *guard = None;
+        }
+    }
+
     let prepared = prepare_ingest(metrics, max_labels);
     let series = take_new_series(prepared.series);
     let postings = take_new_postings(prepared.postings);
