@@ -4,18 +4,21 @@
 # Usage (from repo root): ./scripts/grafana-manual-up.sh
 # Teardown: ./scripts/grafana-manual-down.sh  (or: make grafana-down)
 #
-# CPU / PromQL budget (Astronomy Shop + stop-demo-slo-gate):
-#   Softprobe must stay ≤1 core while Grafana refresh=10s and OTLP are live.
+# Full-fidelity CPU budget (Astronomy Shop + stop-demo-slo-gate):
+#   Softprobe process top %CPU 60s avg < 100 with Grafana refresh=10s, full OTLP
+#   metrics/logs/traces, and self-monitoring/ops online. Budget comes from
+#   pacing + cheaper work — not from dropping shop signals.
 #   Levers (defaults below):
-#     - taskset CPU affinity (THELAKE_CPU_AFFINITY=0)
-#     - tokio worker_threads=1, DuckDB query max_connections=1, writer_pool_size=1
-#     - DuckDB opened with threads=1 at create time (src/storage/ducklake/attach.rs)
-#     - soft coalesce flush_interval_seconds=10 (fewer parquet commits)
-#     - self_monitoring off (ops export competed with PromQL on one core)
-#     - otelcol-config-extras.yml allow-list + 10s batch (metrics-only to Softprobe)
+# Soft coalesce flush_interval_seconds=60 (fewer parquet commits)
+#     - DuckDB threads=1 per connection at create time (attach.rs)
+#     - query.max_connections=2, tokio worker_threads=2 (ingest ≠ query starve)
+#     - writer_pool_size=1 (serialize DuckLake commits)
+#     - self_monitoring on (inventory reuses query workers; interval ≥180s)
+#     - otelcol-config-extras.yml: full metrics + app logs + traces; batch pacing
+#     - THELAKE_CPU_AFFINITY empty by default (optional experiment pin only)
 #
 # Ingest buffering (soft coalesce):
-#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=10 (default) — ack-on-enqueue, one
+#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=60 (default) — ack-on-enqueue, one
 #     DuckLake Parquet commit per signal every N seconds (demo CPU/IO profile).
 #   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=0  — flush-through (commit before ack;
 #     debug / contract tests only; saturates disk under Astronomy Shop + k6).
@@ -70,16 +73,16 @@ HISTOGRAM_BUCKET_RATE_EXPR_FILE="$ROOT/tests/compat/grafana/browser/catalog_gate
 DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
 # Soft coalesce window for OTLP → DuckLake (0 = flush-through every request).
-# Demo default 10s: fewer Parquet commits under Astronomy Shop OTLP volume.
-INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-10}"
-# Pin Softprobe to one CPU so query-worker + blocking-pool cannot exceed 100% process
-# CPU under Grafana refresh=10s (override with THELAKE_CPU_AFFINITY= or empty to disable).
-CPU_AFFINITY="${THELAKE_CPU_AFFINITY:-0}"
-# CPU-budget overlay drops logs + histogram buckets; skip matching readiness gates
-# unless THELAKE_REQUIRE_FULL_OTLP=1 (needs a wider collector allow-list).
-REQUIRE_FULL_OTLP=0
-case "${THELAKE_REQUIRE_FULL_OTLP:-0}" in
-  1|true|TRUE|yes|YES|on|ON) REQUIRE_FULL_OTLP=1 ;;
+# Demo default 45s: full-fidelity OTLP otherwise pegs Softprobe above one core.
+INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-60}"
+# Optional CPU pin for experiments only — empty default so the success gate is
+# process %CPU under normal scheduling (set THELAKE_CPU_AFFINITY=0 to pin).
+CPU_AFFINITY="${THELAKE_CPU_AFFINITY:-}"
+# Full OTLP readiness (H-04 histograms + Loki labels) is the default. Set
+# THELAKE_REQUIRE_FULL_OTLP=0 only for temporary bring-up experiments.
+REQUIRE_FULL_OTLP=1
+case "${THELAKE_REQUIRE_FULL_OTLP:-1}" in
+  0|false|FALSE|no|NO|off|OFF) REQUIRE_FULL_OTLP=0 ;;
 esac
 
 mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
@@ -260,12 +263,11 @@ PY
   wait_for_histogram_bucket_rates
 }
 
-# rate() on classic _bucket needs ≥2 raw samples per series in the window.
-# Expr is shared with browser H-04 (catalog_gates/histogram_bucket_rate.expr).
-# CPU-budget collector extras drop k6.http.req.* histograms; skip unless full OTLP.
+# CPU-budget collector extras used to drop histograms; skip only when explicitly
+# opted out via THELAKE_REQUIRE_FULL_OTLP=0.
 wait_for_histogram_bucket_rates() {
   if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
-    echo "==> skipping histogram bucket rate wait (CPU-budget OTLP; set THELAKE_REQUIRE_FULL_OTLP=1 to enforce H-04)"
+    echo "==> skipping histogram bucket rate wait (THELAKE_REQUIRE_FULL_OTLP=0)"
     return 0
   fi
   local bucket_q
@@ -314,7 +316,7 @@ PY
 
 wait_for_demo_logs() {
   if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
-    echo "==> skipping Loki log wait (CPU-budget OTLP sends metrics only; set THELAKE_REQUIRE_FULL_OTLP=1 to enforce)"
+    echo "==> skipping Loki log wait (THELAKE_REQUIRE_FULL_OTLP=0)"
     return 0
   fi
   echo "==> waiting for Softprobe Loki labels in the live Explore window"
@@ -377,7 +379,7 @@ except Exception:
   if [[ "${live_changes:-0}" -ge 1 ]]; then
     if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
       wait_for_histogram_bucket_rates
-      echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live Prom OK; Loki/H-04 optional under CPU-budget OTLP)."
+      echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live Prom OK; Loki/H-04 optional with THELAKE_REQUIRE_FULL_OTLP=0)."
       print_ready
       exit 0
     fi
@@ -453,24 +455,21 @@ case "${GRAFANA_KEEP_DATA:-0}" in
 esac
 
 echo "==> building softprobe-runtime (release; AC-S3)"
-if [[ -f "$ROOT/Makefile" ]] && grep -q '^build-release:' "$ROOT/Makefile"; then
-  make -C "$ROOT" build-release
-else
-  cargo build -q --release --bin softprobe-runtime
-fi
-
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CACHE_ROOT/target}"
-RUNTIME_BIN="$ROOT/dist/softprobe-runtime"
-if [[ ! -x "$RUNTIME_BIN" ]]; then
-  RUNTIME_BIN="${CARGO_TARGET_DIR}/release/softprobe-runtime"
-fi
-if [[ ! -x "$RUNTIME_BIN" ]]; then
-  RUNTIME_BIN="$ROOT/target/release/softprobe-runtime"
-fi
-if [[ ! -x "$RUNTIME_BIN" ]]; then
-  echo "ERROR: missing $RUNTIME_BIN (expected release binary)" >&2
+if [[ ! -f "$ROOT/Makefile" ]] || ! grep -q '^build-release:' "$ROOT/Makefile"; then
+  echo "ERROR: Makefile build-release target required (host-first dist; no cargo fallback)" >&2
   exit 1
 fi
+make -C "$ROOT" build-release
+
+RUNTIME_BIN="$ROOT/dist/softprobe-runtime"
+if [[ ! -x "$RUNTIME_BIN" ]]; then
+  echo "ERROR: missing $RUNTIME_BIN after make build-release" >&2
+  exit 1
+fi
+# Stage beside demo state so stop-gate heal restarts the same binary.
+cp -f "$RUNTIME_BIN" "$STATE_DIR/softprobe-runtime"
+chmod +x "$STATE_DIR/softprobe-runtime"
+RUNTIME_BIN="$STATE_DIR/softprobe-runtime"
 
 echo "==> starting Grafana + auth-mock + Postgres 19"
 THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" GRAFANA_PG_HOST_PORT="$PG_PORT" GRAFANA_AUTH_MOCK_PORT="$GRAFANA_AUTH_MOCK_PORT" \
@@ -519,11 +518,12 @@ case "${THELAKE_MAINTENANCE_ENABLED:-true}" in
     ORPHAN_ENABLED=true
     ;;
 esac
-# Default off: ops self-export competes with demo OTLP + Grafana PromQL for the
-# single-core CPU budget. Set THELAKE_SELF_MONITORING_ENABLED=true for ops panels.
-case "${THELAKE_SELF_MONITORING_ENABLED:-false}" in
-  1|true|TRUE|yes|YES|on|ON) SELF_MONITORING_ENABLED=true ;;
-  *) SELF_MONITORING_ENABLED=false ;;
+# Self-mon on by default so thelake ops boards work. Inventory reuses query
+# workers (no fresh ATTACH storm). Set THELAKE_SELF_MONITORING_ENABLED=false
+# only for bring-up experiments.
+case "${THELAKE_SELF_MONITORING_ENABLED:-true}" in
+  0|false|FALSE|no|NO|off|OFF) SELF_MONITORING_ENABLED=false ;;
+  *) SELF_MONITORING_ENABLED=true ;;
 esac
 
 cat >"$CONFIG" <<EOF
@@ -531,19 +531,20 @@ server:
   port: 8090
   host: "0.0.0.0"
   max_body_size: 104857600
-  worker_threads: ${THELAKE_WORKER_THREADS:-1}
+  # ≥2 so OTLP HTTP and PromQL are not single-threaded-starving each other.
+  worker_threads: ${THELAKE_WORKER_THREADS:-2}
 
 object_store:
   region: "us-east-1"
   endpoint: null
 
 query:
-  # 1 keeps Softprobe under one core when Grafana fires many panels every 10s.
+  # 2 workers × DuckDB threads=1: parallel panels without nproc fan-out.
   max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-1}
   cache_dir: "$STATE_DIR/cache"
 
 # Soft coalesce: hold OTLP rows in memory and commit once per interval.
-# 0 = flush-through (commit before ack). Demo default is 2s via
+# 0 = flush-through (commit before ack). Demo default via
 # THELAKE_INGEST_FLUSH_INTERVAL_SECONDS (see script header).
 ingest:
   flush_interval_seconds: $INGEST_FLUSH_INTERVAL_SECONDS
@@ -552,13 +553,13 @@ ingest:
 maintenance:
   enabled: ${MAINTENANCE_ENABLED}
   target_file_size_bytes: 67108864
-  interval_seconds: 300
+  interval_seconds: ${THELAKE_MAINTENANCE_INTERVAL_SECONDS:-60}
   metadata_enabled: ${METADATA_ENABLED}
-  metadata_interval_seconds: 300
+  metadata_interval_seconds: ${THELAKE_METADATA_INTERVAL_SECONDS:-600}
   max_snapshot_age_seconds: 60
   remove_orphan_files_enabled: ${ORPHAN_ENABLED}
   remove_orphan_older_than_seconds: 60
-  open_day_file_cap: ${THELAKE_OPEN_DAY_FILE_CAP:-64}
+  open_day_file_cap: ${THELAKE_OPEN_DAY_FILE_CAP:-32}
   max_waves_per_table: ${THELAKE_MAX_WAVES_PER_TABLE:-1}
   max_compacted_files_per_wave: ${THELAKE_MAX_COMPACTED_FILES_PER_WAVE:-16}
   # Defaults match MaintenanceConfig (256×64) so closed-day catch-up can finish;
@@ -581,11 +582,11 @@ ducklake:
 dropdown_catalog:
   enabled: false
 
-# Self-monitoring ops lake (Design 2). Browser CI may set
-# THELAKE_SELF_MONITORING_ENABLED=false to keep k6 freshness under demo load.
+# Self-monitoring ops lake. Inventory interval ≥180s; export can be faster.
 self_monitoring:
   enabled: ${SELF_MONITORING_ENABLED}
-  export_interval_seconds: 15
+  export_interval_seconds: ${THELAKE_SELF_MONITORING_EXPORT_INTERVAL_SECONDS:-300}
+  inventory_interval_seconds: ${THELAKE_SELF_MONITORING_INVENTORY_INTERVAL_SECONDS:-300}
   ops_metadata_schema: thelake_ops
   ops_data_path: "$STATE_DIR/data/_thelake_ops/"
 EOF
@@ -689,12 +690,13 @@ disown || true
 
 echo "==> waiting for Softprobe /ready"
 ok=0
-for _ in $(seq 1 60); do
+# TWCS open-day catch-up on preserved demo data can block /ready past 30s.
+for _ in $(seq 1 180); do
   if curl -sf "$SOFTPROBE_URL_HOST/ready" >/dev/null 2>&1; then
     ok=1
     break
   fi
-  sleep 0.5
+  sleep 1
 done
 if [[ "$ok" != 1 ]]; then
   echo "ERROR: Softprobe did not become ready; log: $LOG" >&2

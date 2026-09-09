@@ -34,9 +34,7 @@ RANGES: list[tuple[str, int]] = [
 ]
 
 LIVE_INGEST_QUERIES = (
-    # Prefer counters that move under the CPU-budget collector allow-list
-    # (k6 + demo_ad). http_server / spanmetrics may be empty when extras.yml
-    # drops them to protect Softprobe's single-core write path.
+    # Full-fidelity OTLP: shop HTTP, spanmetrics, ad scrape, and k6 loadgen.
     "http_server_request_duration_count",
     "traces_span_metrics_calls",
     "demo_ad_served_total",
@@ -219,6 +217,63 @@ def check_ingest(client: SoftprobeProm) -> str | None:
         file=sys.stderr,
     )
     return None
+
+
+def load_cpu_burst(
+    client: SoftprobeProm,
+    queries: list[dict[str, str]],
+    duration_s: float = 60.0,
+    workers: int = 2,
+) -> int:
+    """Issue live-window PromQL for `duration_s` (CPU probe load).
+
+    Mimics Grafana refresh≈10s on one Astronomy Shop board: fire the panel set
+    once per refresh interval, then idle until the next tick. Continuous QPS
+    pacing left Softprobe pegged near one core with no idle gaps for flushes.
+    """
+    windows = [5 * 60, 15 * 60, 30 * 60]
+    # One board's worth of panels — matches live Grafana, not every curated expr.
+    subset = queries[: min(12, len(queries))] or queries
+    if not subset:
+        print("cpu load burst: no dashboard exprs", file=sys.stderr)
+        return 0
+    refresh_s = 10.0
+    stop_at = time.time() + duration_s
+    issued = 0
+    lock = __import__("threading").Lock()
+
+    def worker() -> None:
+        nonlocal issued
+        i = 0
+        while time.time() < stop_at:
+            tick_start = time.time()
+            for _ in range(len(subset)):
+                if time.time() >= stop_at:
+                    break
+                q = subset[i % len(subset)]
+                range_secs = windows[i % len(windows)]
+                i += 1
+                end = int(time.time())
+                start = end - range_secs
+                step = grafana_step_seconds(range_secs)
+                try:
+                    client.query_range(q["expr"], start, end, step)
+                except Exception:
+                    pass
+                with lock:
+                    issued += 1
+            # Idle until next Grafana-style refresh tick.
+            sleep_for = refresh_s - (time.time() - tick_start)
+            remaining = stop_at - time.time()
+            if sleep_for > 0 and remaining > 0:
+                time.sleep(min(sleep_for, remaining))
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futs = [pool.submit(worker) for _ in range(max(1, workers))]
+        for f in as_completed(futs):
+            f.result()
+    print(f"cpu load burst ok (issued={issued} workers={workers})", file=sys.stderr)
+    return issued
 
 
 def warmup_all(
@@ -557,6 +612,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--warmup-all", action="store_true", help="run one query per expr×range then exit 0")
+    parser.add_argument(
+        "--load-cpu",
+        action="store_true",
+        help="issue concurrent live-window PromQL for --duration-s (CPU probe load)",
+    )
+    parser.add_argument("--duration-s", type=float, default=60.0, help="duration for --load-cpu")
     parser.add_argument("--extract-only", action="store_true")
     parser.add_argument("--check-ingest", action="store_true")
     parser.add_argument("--skip-ingest", action="store_true", help="run queries even if ingest liveness check fails")
@@ -595,6 +656,13 @@ def main() -> int:
             "5m,15m,30m,1h,3h,24h,30d,180d"
         )
         warmup_all(client, queries, ranges)
+        return 0
+
+    if args.load_cpu:
+        timeout_s = max(args.timeout_s, 5.0)
+        client = SoftprobeProm(args.base_url, args.token, timeout_s=timeout_s)
+        workers = args.workers if args.workers > 0 else 2
+        load_cpu_burst(client, queries, duration_s=args.duration_s, workers=workers)
         return 0
 
     if args.extract_only:

@@ -136,7 +136,11 @@ pub fn spawn_exporter(state: AppState, config: Arc<Config>) {
 
     gauge_store_init_from_config(&config);
     spawn_slow_query_drain(state.clone());
-    spawn_inventory_loop(state, config.self_monitoring.export_interval_seconds.max(1));
+    // Inventory is heavier than export; use dedicated (usually longer) interval.
+    spawn_inventory_loop(
+        state,
+        config.self_monitoring.inventory_interval_seconds.max(60),
+    );
 }
 
 fn gauge_store_init_from_config(config: &Config) {

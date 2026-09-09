@@ -1,7 +1,8 @@
 //! Best-effort DuckLake file inventory scrape → gauge_store.
 //!
-//! Uses a one-shot uninstrumented DuckDB connection so metadata SQL does not
-//! pollute customer query latency / slow-query series or contend on workers.
+//! Runs metadata SQL on the tenant's **already-attached query workers** so
+//! inventory does not open+INSTALL+ATTACH a fresh DuckDB (that path pegged a
+//! core under the inventory ticker).
 
 use crate::api::AppState;
 use crate::compaction::executor::maintenance_table_names;
@@ -41,8 +42,7 @@ fn json_date(v: &Value, fallback: NaiveDate) -> NaiveDate {
 
 /// Periodically refresh inventory + process gauges for cached engines.
 pub fn spawn_inventory_loop(state: AppState, interval_secs: u64) {
-    // Floor at 60s: sub-minute open+attach scrapes pegged one core once tenants
-    // were cached (demo Softprobe sat at ~100% CPU with no OTLP/Grafana).
+    // Floor at 60s; demo uses 120s via inventory_interval_seconds.
     let interval = std::time::Duration::from_secs(interval_secs.max(60));
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
@@ -58,7 +58,7 @@ pub fn spawn_inventory_loop(state: AppState, interval_secs: u64) {
             if state.engines.config().ingest.flush_interval_seconds == 0 {
                 gauge_store::INGEST_PENDING_BATCHES.store(0, std::sync::atomic::Ordering::Relaxed);
             }
-            // Interval fires immediately; skip DuckDB attach on that first tick so
+            // Interval fires immediately; skip DuckDB work on that first tick so
             // Softprobe is not pegged at startup / after every process restart.
             static SKIP_FIRST: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(true);
@@ -77,9 +77,7 @@ pub fn spawn_inventory_loop(state: AppState, interval_secs: u64) {
                 let Ok(engine) = state.engines.engine_for(&tenant).await else {
                     continue;
                 };
-                // One attach per tenant (not per SQL) — each uninstrumented query
-                // used to open+INSTALL+ATTACH and dominated Softprobe CPU under the
-                // inventory ticker (was the main self-mon "CPU storm" before this).
+                // Reuse attached query workers — never open a second DuckDB for inventory.
                 scrape_tenant(engine.as_ref()).await;
             }
         }
@@ -90,19 +88,22 @@ async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
     let tables = maintenance_table_names();
     let catalog = engine.query.catalog_alias().to_string();
     let tenant = engine.tenant_id.clone();
-    let mut sqls: Vec<String> = Vec::with_capacity(tables.len() * 2);
+    let mut results: Vec<Result<crate::query::duckdb::QueryResult, anyhow::Error>> =
+        Vec::with_capacity(tables.len() * 2);
     for table in &tables {
-        sqls.push(partition_live_file_stats_sql(&catalog, table));
-        sqls.push(live_file_sizes_sql(&catalog, table));
+        results.push(
+            engine
+                .query
+                .execute_query(&partition_live_file_stats_sql(&catalog, table))
+                .await,
+        );
+        results.push(
+            engine
+                .query
+                .execute_query(&live_file_sizes_sql(&catalog, table))
+                .await,
+        );
     }
-    let sql_refs: Vec<&str> = sqls.iter().map(|s| s.as_str()).collect();
-    let results = match engine.query.execute_queries_uninstrumented(sql_refs).await {
-        Ok(r) => r,
-        Err(err) => {
-            warn!(tenant = %tenant, "inventory scrape failed: {err}");
-            return;
-        }
-    };
     let today = Utc::now().date_naive();
     let mut idx = 0usize;
     for table in tables {

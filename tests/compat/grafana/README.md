@@ -29,11 +29,12 @@ What it starts:
 
 Requires Docker + ~3 GB RAM. Demo cache: `~/.cache/thelake/otel-demo/3.0.0`.
 
-Collector extras send **metrics and filtered application logs** to Softprobe (OTLP
-+ ad Prometheus + spanmetrics), in small batches, so Grafana GOLD panels and Loki
-Explore get live data. Traces stay on the collector `debug` exporter (spanmetrics
-still produced). `grafana-up` refuses to declare ready on lookback-only flat
-Prom series or an empty Loki label list in the live hour window.
+Collector extras send **full shop metrics, app logs, and traces** to Softprobe
+(OTLP + ad Prometheus + spanmetrics), paced with a timeout-dominated batch so
+Grafana GOLD panels, Loki Explore, and Tempo stay live. Softprobe coalesce +
+downsample grains bound CPU — not metric allow-lists. `grafana-up` refuses to
+declare ready on lookback-only flat Prom series or an empty Loki label list in
+the live hour window.
 
 ### Dashboard folders
 

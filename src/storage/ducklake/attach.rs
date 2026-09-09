@@ -16,8 +16,11 @@ pub(super) fn catalog_is_attached(conn: &Connection, alias: &str) -> bool {
 /// connection made Grafana refresh occupy hundreds of OS threads and 15s timeouts.
 ///
 /// # Demo CPU budget
-/// Paired with `query.max_connections=1`, tokio `worker_threads=1`, and host
-/// `taskset` so Softprobe cannot exceed ~1 core under Astronomy Shop + Grafana.
+/// Softprobe stays under one core of wall time via coalesce pacing, downsample
+/// grains, and capped DuckDB threads — not via host `taskset`. Demo pairs this
+/// with `query.max_connections=2` and tokio `worker_threads=2` so ingest HTTP and
+/// PromQL do not single-thread-starve each other. Optional `THELAKE_CPU_AFFINITY`
+/// is experiments-only.
 pub(crate) const QUERY_DUCKDB_THREADS: i64 = 1;
 pub(crate) const QUERY_DUCKDB_MEMORY: &str = "512MB";
 /// Writers / TWCS: classic Prom dual-write + live OTEL need more than 512MB.
@@ -25,7 +28,7 @@ pub(crate) const WRITER_DUCKDB_THREADS: i64 = 1;
 pub(crate) const WRITER_DUCKDB_MEMORY: &str = "1GB";
 /// Compaction merges hundreds of VARIANT/postings files; 512MB OOMs (TWCS skip
 /// → Grafana scans 200–500 Parquet files per PromQL). One compact connection.
-pub(crate) const COMPACTION_DUCKDB_THREADS: i64 = 2;
+pub(crate) const COMPACTION_DUCKDB_THREADS: i64 = 1;
 pub(crate) const COMPACTION_DUCKDB_MEMORY: &str = "2GB";
 
 /// Open in-memory DuckDB with thread/memory caps applied at database create

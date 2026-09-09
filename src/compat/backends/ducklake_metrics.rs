@@ -385,6 +385,10 @@ impl DuckLakeMetricsBackend {
 
         let catalog = self.layout_catalog();
         let is_histogram = Self::is_classic_hist_selector(matchers);
+        // Grain follows the Grafana/client board window. PromQL lookback expands
+        // start_ms/end_ms for rate/irate; selecting grain on the expanded fetch
+        // tipped exact-24h boards into empty 5m (only a raw lag-tail).
+        let grain_range = client_range.or(Some((start_ms, end_ms)));
         let sql = samples_scan_sql_for_window(
             &catalog,
             &series_ids,
@@ -396,6 +400,7 @@ impl DuckLakeMetricsBackend {
             is_histogram,
             Self::hist_needs_bucket_arrays(matchers),
             fetch_limit,
+            grain_range,
         );
         debug_assert!(
             (sql.contains("metric_samples") || sql.contains("metric_hist_samples"))

@@ -491,9 +491,9 @@ impl DuckDBQueryEngine {
         drop(temp_conn); // Extensions are installed globally, connection no longer needed
 
         // `max_connections` = number of long-lived DuckDB query worker threads.
-        // Demo profile sets this to 1 so PromQL cannot fan out across cores while
-        // the writer also holds a connection (pair with QUERY_DUCKDB_THREADS=1 and
-        // host `taskset` in grafana-manual-up.sh to stay under one core).
+        // Demo profile uses 2 so OTLP HTTP and PromQL are not single-thread-starving
+        // each other; each worker still has QUERY_DUCKDB_THREADS=1. Host `taskset`
+        // is optional for experiments only (see grafana-manual-up.sh).
         let worker_count = std::cmp::max(1, config.query.max_connections);
         let mut workers = Vec::with_capacity(worker_count);
         // Workers report startup outcome so a failed one cannot stay in the pool.
@@ -813,14 +813,16 @@ impl DuckDBQueryEngine {
     }
 
     /// One-shot metadata SQL on a dedicated connection (no worker pool, no
-    /// self-monitoring instruments). Used by inventory scrapes.
+    /// self-monitoring instruments). Prefer pooled `execute_query` for inventory —
+    /// this path still open+ATTACH and is expensive under a ticker.
     pub async fn execute_query_uninstrumented(&self, query: &str) -> Result<QueryResult> {
         let mut rows = self.execute_queries_uninstrumented(vec![query]).await?;
         rows.pop()
-            .ok_or_else(|| anyhow!("inventory query returned no result"))?
+            .ok_or_else(|| anyhow!("uninstrumented query returned no result"))?
     }
 
-    /// Run several metadata SQLs on one open+attach connection (inventory).
+    /// Run several metadata SQLs on one open+attach connection (legacy; inventory
+    /// now reuses attached query workers via `execute_query`).
     pub async fn execute_queries_uninstrumented(
         &self,
         queries: Vec<&str>,

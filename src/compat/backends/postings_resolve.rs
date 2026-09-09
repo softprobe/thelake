@@ -312,6 +312,10 @@ fn step_bucket_interval_sql(step_ms: Option<i64>) -> Option<String> {
 ///
 /// `grain` selects raw / 5m / 1h / hist (§9.1). Downsample empty tables yield empty
 /// results until maintenance builds them — planner still emits the correct FROM.
+///
+/// `grain_range` is the Grafana/client board window used only for the ≤24h raw
+/// fallback inside downsample stitches. Fetch still uses `start_ms`/`end_ms`
+/// (lookback-expanded). When `None`, the fetch window is used.
 #[allow(clippy::too_many_arguments)]
 pub fn samples_scan_sql(
     catalog: &str,
@@ -324,6 +328,7 @@ pub fn samples_scan_sql(
     grain: SampleGrain,
     step_ms: Option<i64>,
     hist_arrays: bool,
+    grain_range: Option<(Option<i64>, Option<i64>)>,
 ) -> String {
     let time = samples_time_predicates(start_ms, end_ms, grain.time_column());
     let ids = sql_series_id_list(series_ids);
@@ -353,6 +358,7 @@ pub fn samples_scan_sql(
             fetch_limit,
             grain,
             step_ms,
+            grain_range,
         );
     }
 
@@ -399,10 +405,12 @@ fn stitch_raw_start_ms(cutoff_ms: i64, bucket_ms: i64) -> i64 {
 /// Gauge FiveMin/OneHour grains: downsample for closed history + raw lag tail.
 ///
 /// Mirrors `hist_or_union_scan_sql` (HistFiveMin / HistOneHour). Live Grafana
-/// panels use `end ≈ now`, so a raw-only live path scanned the full multi-day
-/// raw window and blew CPU / 100ms SLO even when `metric_samples_5m` /
-/// `metric_samples_1h` were populated. Archive queries (`end` older than lag)
-/// read downsample only (AC-Q2).
+/// panels use `end ≈ now`: keep up to [`RAW_RANGE_MS`] of raw so `rate[5m]` can
+/// see multiple samples (5m/1h `last` alone cannot). Older history reads the
+/// downsample ladder. Archive queries (`end` older than the raw cover) read
+/// downsample only (AC-Q2). Client board windows ≤24h fall back to full raw so
+/// empty ladders cannot blank mid-range boards (including lookback-expanded
+/// fetches for `rate`).
 fn gauge_downsample_with_raw_tail(
     catalog: &str,
     ids: &str,
@@ -411,8 +419,9 @@ fn gauge_downsample_with_raw_tail(
     fetch_limit: usize,
     grain: SampleGrain,
     step_ms: Option<i64>,
+    grain_range: Option<(Option<i64>, Option<i64>)>,
 ) -> String {
-    use crate::compat::backends::grain::{FIVE_MIN_LAG_MS, ONE_HOUR_LAG_MS};
+    use crate::compat::backends::grain::{FIVE_MIN_LAG_MS, ONE_HOUR_LAG_MS, RAW_RANGE_MS};
 
     let (lag_ms, bucket_ms) = match grain {
         SampleGrain::FiveMin => (FIVE_MIN_LAG_MS, FIVE_MIN_LAG_MS),
@@ -428,7 +437,51 @@ fn gauge_downsample_with_raw_tail(
     let now_ms = chrono::Utc::now().timestamp_millis();
     let end = end_ms.unwrap_or(now_ms);
     let start = start_ms.unwrap_or(i64::MIN);
-    let cutoff = now_ms.saturating_sub(lag_ms);
+    let fetch_span = end.saturating_sub(start);
+    // Grain decision follows the Grafana/client board window — not the PromQL
+    // lookback-expanded fetch. `rate(x[5m])` over a 24h board expands fetch to
+    // 24h+5m, which must still stay on raw when 5m/1h ladders are empty.
+    let grain_span = match grain_range {
+        Some((Some(gs), Some(ge))) => ge.saturating_sub(gs),
+        _ => fetch_span,
+    };
+    // Correctness: Grafana mid-windows (≤24h) must not depend on empty 5m/1h.
+    // `step ≥ 1h` can select OneHour even for a 6h panel — fall back to raw for
+    // the full fetch span so boards stay populated before the ladder catches up.
+    if grain_span > 0 && grain_span <= RAW_RANGE_MS {
+        let raw_time = samples_time_predicates(Some(start), Some(end), "timestamp");
+        let raw_sql = if let Some(ref iv) = bucket {
+            format!(
+                "SELECT sm.series_id, \
+                 CAST((epoch(time_bucket({iv}, sm.timestamp)) * 1000) AS BIGINT) AS timestamp_ms, \
+                 arg_max(sm.value, sm.timestamp) AS value, \
+                 NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+                 FROM {raw_table} sm \
+                 WHERE sm.series_id IN ({ids}){raw_time} \
+                 GROUP BY sm.series_id, time_bucket({iv}, sm.timestamp) \
+                 LIMIT {fetch_limit}"
+            )
+        } else {
+            format!(
+                "SELECT sm.series_id, \
+                 CAST((epoch(sm.timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
+                 sm.value AS value, \
+                 NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
+                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
+                 FROM {raw_table} sm \
+                 WHERE sm.series_id IN ({ids}){raw_time} \
+                 LIMIT {fetch_limit}"
+            )
+        };
+        return raw_sql;
+    }
+    // Live multi-day boards: keep up to 24h of raw ahead of the 5m/1h ladder.
+    // A 5m `last` is one point per bucket — not enough samples for rate[5m].
+    // Step-bucketing bounds the raw scan (CPU). Archive (end ≤ cutoff) stays
+    // downsample-only (AC-Q2).
+    let raw_cover_ms = RAW_RANGE_MS.max(lag_ms);
+    let cutoff = now_ms.saturating_sub(raw_cover_ms);
     let stitch = stitch_raw_start_ms(cutoff, bucket_ms);
 
     let ds_select = |from_ms: i64, to_ms: i64, end_inclusive: bool| -> String {
@@ -789,6 +842,10 @@ fn hist_or_union_scan_sql(
 }
 
 /// Build samples SQL using §9.1 grain selection.
+///
+/// `grain_range`: optional Grafana/client board window. PromQL lookback expands
+/// `start_ms`/`end_ms` for `rate`/`irate`; grain must follow the client board so
+/// mid-windows (≤24h) stay on raw when downsample ladders are empty.
 #[allow(clippy::too_many_arguments)]
 pub fn samples_scan_sql_for_window(
     catalog: &str,
@@ -801,8 +858,13 @@ pub fn samples_scan_sql_for_window(
     is_histogram: bool,
     hist_arrays: bool,
     fetch_limit: usize,
+    grain_range: Option<(Option<i64>, Option<i64>)>,
 ) -> String {
-    let grain = select_sample_grain(start_ms, end_ms, step_ms, is_histogram);
+    let (grain_start, grain_end) = match grain_range {
+        Some((gs, ge)) => (gs.or(start_ms), ge.or(end_ms)),
+        None => (start_ms, end_ms),
+    };
+    let grain = select_sample_grain(grain_start, grain_end, step_ms, is_histogram);
     samples_scan_sql(
         catalog,
         series_ids,
@@ -814,6 +876,7 @@ pub fn samples_scan_sql_for_window(
         grain,
         step_ms,
         hist_arrays,
+        grain_range.or(Some((grain_start, grain_end))),
     )
 }
 
@@ -1261,6 +1324,7 @@ mod tests {
             SampleGrain::Raw,
             None,
             true,
+            None,
         );
         assert!(
             sql_is_postings_resolve_path(&resolve, &samples),
@@ -1292,6 +1356,7 @@ mod tests {
             false,
             true,
             100,
+            None,
         );
         assert!(
             sql.contains("metric_samples_1h"),
@@ -1321,8 +1386,107 @@ mod tests {
             false,
             true,
             100,
+            None,
         );
         assert!(sql.contains("metric_samples_1h"), "{sql}");
+    }
+
+    /// Live 6h panel must scan raw (not empty 5m lag-tail only).
+    #[test]
+    fn live_6h_samples_sql_uses_raw_full_span() {
+        let end = chrono::Utc::now().timestamp_millis();
+        let start = end - 6 * 3_600_000;
+        let sql = samples_scan_sql_for_window(
+            "softprobe",
+            &[1],
+            Some(start),
+            Some(end),
+            Some(30_000),
+            "NULL::VARCHAR AS lbl__empty",
+            false,
+            false,
+            true,
+            100,
+            None,
+        );
+        assert!(
+            sql.contains("metric_samples sm") || sql.contains(".metric_samples sm"),
+            "live 6h must use raw metric_samples, got {sql}"
+        );
+        assert!(
+            !sql.contains("metric_samples_5m"),
+            "live 6h must not depend on empty 5m grain, got {sql}"
+        );
+        // Even with step≥1h (forces OneHour grain), span≤24h falls back to raw.
+        let sql_step_1h = samples_scan_sql_for_window(
+            "softprobe",
+            &[1],
+            Some(start),
+            Some(end),
+            Some(3_600_000),
+            "NULL::VARCHAR AS lbl__empty",
+            false,
+            false,
+            true,
+            100,
+            None,
+        );
+        assert!(
+            sql_step_1h.contains("metric_samples sm") || sql_step_1h.contains(".metric_samples sm"),
+            "live 6h with step=1h must still fall back to raw, got {sql_step_1h}"
+        );
+        assert!(
+            !sql_step_1h.contains("metric_samples_1h"),
+            "live 6h must not blank on empty 1h grain, got {sql_step_1h}"
+        );
+    }
+
+    /// `rate(x[5m])` over a 24h Grafana board expands fetch to 24h+5m. Grain must
+    /// follow the client 24h window (raw), not tip into empty 5m lag-tail.
+    #[test]
+    fn rate_lookback_past_24h_still_uses_client_raw_grain() {
+        let client_end = chrono::Utc::now().timestamp_millis();
+        let client_start = client_end - 24 * 3_600_000;
+        let fetch_start = client_start - 5 * 60 * 1000; // rate[5m] lookback
+        let sql = samples_scan_sql_for_window(
+            "softprobe",
+            &[1],
+            Some(fetch_start),
+            Some(client_end),
+            Some(60_000),
+            "NULL::VARCHAR AS lbl__empty",
+            false,
+            false,
+            true,
+            100,
+            Some((Some(client_start), Some(client_end))),
+        );
+        assert!(
+            sql.contains("metric_samples sm") || sql.contains(".metric_samples sm"),
+            "24h board + rate lookback must stay on raw, got {sql}"
+        );
+        assert!(
+            !sql.contains("metric_samples_5m"),
+            "24h board must not blank on empty 5m after lookback expand, got {sql}"
+        );
+        // Without grain_range, lookback-expanded fetch alone would pick 5m.
+        let sql_no_client = samples_scan_sql_for_window(
+            "softprobe",
+            &[1],
+            Some(fetch_start),
+            Some(client_end),
+            Some(60_000),
+            "NULL::VARCHAR AS lbl__empty",
+            false,
+            false,
+            true,
+            100,
+            None,
+        );
+        assert!(
+            sql_no_client.contains("metric_samples_5m"),
+            "sanity: fetch-only grain for 24h+5m must be 5m, got {sql_no_client}"
+        );
     }
 
     /// T-Q1 SQL shape: 30m → raw metric_samples.
@@ -1341,6 +1505,7 @@ mod tests {
             false,
             true,
             100,
+            None,
         );
         assert!(
             sql.contains("metric_samples sm") || sql.contains(".metric_samples sm"),
@@ -1420,6 +1585,7 @@ mod tests {
             false,
             true,
             100,
+            None,
         );
         assert!(
             sql.contains("metric_samples_1h"),
@@ -1437,6 +1603,21 @@ mod tests {
         assert!(
             sql.contains("window_ts < ") && !sql.contains("window_ts <="),
             "live stitch must use exclusive downsample end: {sql}"
+        );
+        // Raw cover is ~24h (RAW_RANGE), not the old 5m/1h lag-only tail.
+        let raw_lo = sql
+            .find("timestamp >= TIMESTAMPTZ '")
+            .and_then(|i| sql[i..].split('\'').nth(1))
+            .expect("raw lower bound");
+        let lo = chrono::DateTime::parse_from_rfc3339(
+            &raw_lo.replace(' ', "T").replace("+00", "+00:00"),
+        )
+        .or_else(|_| chrono::DateTime::parse_from_str(raw_lo, "%Y-%m-%d %H:%M:%S%z"))
+        .unwrap_or_else(|e| panic!("parse raw_lo={raw_lo:?}: {e}"));
+        let age_ms = end - lo.timestamp_millis();
+        assert!(
+            age_ms >= 20 * 3_600_000 && age_ms <= 26 * 3_600_000,
+            "live multi-day raw cover must be ~24h (got {age_ms}ms), sql={sql}"
         );
     }
 
@@ -1562,6 +1743,7 @@ mod tests {
             SampleGrain::Raw,
             None,
             true,
+            None,
         );
         assert!(sql_is_postings_resolve_path(&resolve_sql, &samples_sql));
         let mut sstmt = conn.prepare(&samples_sql).expect("prepare samples");
@@ -1808,6 +1990,7 @@ mod tests {
             true,
             true,
             100,
+            None,
         );
         assert!(
             sql_is_hist_prom_path(&resolve, &samples),
@@ -1862,6 +2045,7 @@ mod tests {
                 true,
                 true,
                 100,
+                None,
             );
             assert!(
                 want(&samples),
@@ -1968,6 +2152,7 @@ mod tests {
             false,
             false,
             100,
+            None,
         );
         assert!(
             samples_sql.contains("metric_samples"),
@@ -2073,6 +2258,7 @@ mod tests {
             true,
             true,
             100,
+            None,
         );
         assert!(
             samples_sql.contains("metric_hist_samples"),

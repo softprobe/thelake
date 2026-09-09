@@ -1,11 +1,10 @@
 //! Soft coalesce + flush-through ingest for one tenant-bound [`Storage`].
 //!
-//! # CPU / PromQL coupling (demo Astronomy Shop)
+//! # CPU / PromQL coupling
 //! When `flush_interval_seconds > 0`, OTLP acks on enqueue and a timer drains
-//! capped batches into DuckLake. After each successful **metrics** commit we
-//! call [`crate::compat::prometheus::invalidate_range_result_cache`] so Grafana
-//! refresh / stop-gate `--check-ingest` do not keep serving pre-commit answers
-//! (Greptime-style: invalidate on durable write, not on every HTTP enqueue).
+//! capped batches into DuckLake. PromQL range answers stay in the HTTP cache
+//! across commits (TTL + start/end buckets); wiping that cache on every flush
+//! forced dashboard refreshes to re-scan Parquet and pegged query CPU.
 
 mod coalesce;
 

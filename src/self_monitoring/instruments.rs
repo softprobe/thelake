@@ -472,8 +472,8 @@ pub fn record_slow_query(tenant: &str, sql_kind: &str) {
 /// Refresh process CPU/RSS/IO snapshots for ObservableGauges (best-effort).
 ///
 /// Reads `/proc/self` directly — no `sysinfo` double-refresh sleep. That sleep
-/// previously ran on the tokio worker (inventory/export) and, with
-/// `worker_threads=1`, stalled the whole runtime every scrape.
+/// previously ran on the tokio worker (inventory/export) and, with a single
+/// tokio worker thread, stalled the whole runtime every scrape.
 pub fn refresh_process_gauges() {
     use std::fs;
 

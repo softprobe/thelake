@@ -68,19 +68,12 @@ fn range_cache_put(key: String, data: Value) {
 
 /// Drop cached PromQL range answers after DuckLake metrics commits.
 ///
-/// Call from the coalesce flush path (not OTLP enqueue): clearing on every
-/// `/v1/metrics` ack would thrash the cache under live demo traffic and break
-/// the steady-state SLO. After a real commit, Grafana / ingest-live checks
-/// must not keep reading pre-commit answers while newer parquet exists.
+/// **No-op by design.** Wiping on every coalesce commit forced Grafana to
+/// re-scan Parquet on the next refresh (CPU storm under live OTLP). Freshness
+/// is bounded by [`RANGE_CACHE_TTL`] plus start/end quantization — the same
+/// trade-off as keeping a query answer cache across memtable flushes.
 pub fn invalidate_range_result_cache() {
-    let Ok(mut guard) = range_result_cache().lock() else {
-        return;
-    };
-    *guard = TtlLruCache::with_byte_budget(
-        RANGE_CACHE_TTL,
-        RANGE_CACHE_MAX,
-        Some(RANGE_CACHE_MAX_BYTES),
-    );
+    // retained as a stable hook for future selective invalidation
 }
 
 fn tenant_ctx(tenant: TenantInfo) -> Result<TenantContext, CompatError> {
@@ -323,9 +316,16 @@ async fn query_range_handler(
     let start_ms = params.start_ms.unwrap();
     let end_ms = params.end_ms.unwrap();
     let step_ms = params.step_ms.unwrap();
+    // Live Grafana uses moving `end≈now`; exact ms keys never hit. Quantize to
+    // max(step, 30s) so refresh storms reuse answers across a few refresh ticks
+    // (Greptime-style steady-state range cache). Eval still uses the exact
+    // client window; answers can be up to one bucket stale.
+    let cache_bucket_ms = step_ms.max(60_000);
+    let cache_start = start_ms.div_euclid(cache_bucket_ms) * cache_bucket_ms;
+    let cache_end = end_ms.div_euclid(cache_bucket_ms) * cache_bucket_ms;
     let cache_key = format!(
         "{}|{}|{}|{}|{}",
-        ctx.tenant.tenant_id, params.query, start_ms, end_ms, step_ms
+        ctx.tenant.tenant_id, params.query, cache_start, cache_end, step_ms
     );
     if let Some(data) = range_cache_get(&cache_key) {
         return respond_data(&ctx, data);
@@ -427,5 +427,17 @@ mod tests {
             cache.get(&key, now).and_then(|v| v.get("status").cloned()),
             Some(json!("success"))
         );
+    }
+
+    #[test]
+    fn range_cache_bucket_aligns_moving_end_within_refresh() {
+        // Two Grafana refreshes 3s apart with step=15s share one bucketed key.
+        let step_ms = 15_000i64;
+        let bucket = step_ms.max(60_000);
+        let end_a = 1_700_000_003_000i64;
+        let end_b = end_a + 3_000;
+        let qa = end_a.div_euclid(bucket) * bucket;
+        let qb = end_b.div_euclid(bucket) * bucket;
+        assert_eq!(qa, qb, "moving end within refresh must share cache bucket");
     }
 }
