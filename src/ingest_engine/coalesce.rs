@@ -299,6 +299,20 @@ impl<T: Send + 'static> CoalesceBuf<T> {
     }
 }
 
+impl<T: Send + 'static> Drop for CoalesceBuf<T> {
+    fn drop(&mut self) {
+        // Ack-on-enqueue gauges pending depth; discarded rows on engine recycle
+        // must heal the counter or ops panels stick high under coalesce.
+        // Use try_lock: Drop may run on a tokio worker (cannot blocking_lock).
+        let n = self
+            .state
+            .try_lock()
+            .map(|g| g.pending.len())
+            .unwrap_or(0);
+        crate::self_monitoring::gauge_store::sub_ingest_pending(n);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,5 +610,36 @@ mod tests {
     fn eager_threshold_exceeds_flush_batch_cap() {
         assert!(EAGER_PENDING_BATCHES > MAX_BATCHES_PER_FLUSH);
         assert!(MAX_PENDING_BATCHES > EAGER_PENDING_BATCHES);
+    }
+
+    #[test]
+    fn drop_heals_ingest_pending_gauge() {
+        use crate::self_monitoring::gauge_store::INGEST_PENDING_BATCHES;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let before = INGEST_PENDING_BATCHES.load(Ordering::SeqCst);
+        let buf = rt.block_on(async {
+            let calls = StdArc::new(AtomicUsize::new(0));
+            let rows = StdArc::new(TokioMutex::new(Vec::new()));
+            // Long interval so enqueue does not flush before drop.
+            let buf = CoalesceBuf::new(3600, counting_writer(calls, rows, false));
+            buf.enqueue(vec![1]).await.unwrap();
+            buf.enqueue(vec![2, 3]).await.unwrap();
+            assert_eq!(
+                INGEST_PENDING_BATCHES.load(Ordering::SeqCst),
+                before + 2,
+                "enqueue must raise pending gauge"
+            );
+            buf
+        });
+        // Drop outside the runtime so try_lock is uncontended.
+        drop(buf);
+        assert_eq!(
+            INGEST_PENDING_BATCHES.load(Ordering::SeqCst),
+            before,
+            "CoalesceBuf drop must heal pending gauge for discarded batches"
+        );
     }
 }

@@ -125,6 +125,23 @@ ensure_otel_demo_checkout() {
 }
 
 print_ready() {
+  # Prefer the live Softprobe config so GRAFANA_REUSE_STACK early-exit does not
+  # claim the script default when the process was started with a different N.
+  local flush_shown="$INGEST_FLUSH_INTERVAL_SECONDS"
+  if [[ -f "$STATE_DIR/config.yaml" ]]; then
+    flush_shown="$(
+      python3 -c '
+import re, sys
+path, fallback = sys.argv[1], sys.argv[2]
+try:
+    text = open(path, encoding="utf-8").read()
+except OSError:
+    print(fallback); raise SystemExit
+m = re.search(r"(?m)^\s*flush_interval_seconds:\s*(\d+)\s*$", text)
+print(m.group(1) if m else fallback)
+' "$STATE_DIR/config.yaml" "$INGEST_FLUSH_INTERVAL_SECONDS"
+    )"
+  fi
   cat <<EOF
 
 Grafana is ready for manual inspection (live Astronomy Shop traffic).
@@ -134,7 +151,7 @@ Grafana is ready for manual inspection (live Astronomy Shop traffic).
                Softprobe PromQL → capability smoke boards
                thelake ops → self-monitoring (datasource Softprobe Prometheus · ops)
   Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY; ops: local-ops-key → thelake-ops)
-  Ingest:      flush_interval_seconds=$INGEST_FLUSH_INTERVAL_SECONDS  (0=flush-through; >0=coalesce)
+  Ingest:      flush_interval_seconds=$flush_shown  (0=flush-through; >0=coalesce; from live config when present)
   DuckLake:    Postgres 19 catalog on $PG_HOST:$PG_PORT (schema $PG_SCHEMA)
   Parquet:     $STATE_DIR/data/
   Store UI:    $STORE_URL

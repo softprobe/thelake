@@ -260,6 +260,17 @@ pub fn samples_time_predicates(
     end_ms: Option<i64>,
     time_column: &str,
 ) -> String {
+    samples_time_predicates_bounded(start_ms, end_ms, time_column, true)
+}
+
+/// Like [`samples_time_predicates`], but `end_inclusive=false` emits `col < end`
+/// for half-open stitch windows (downsample `[start, stitch)`, raw `[stitch, end]`).
+pub fn samples_time_predicates_bounded(
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    time_column: &str,
+    end_inclusive: bool,
+) -> String {
     let mut parts = Vec::new();
     if let Some(start) = start_ms {
         parts.push(format!(
@@ -268,8 +279,9 @@ pub fn samples_time_predicates(
         ));
     }
     if let Some(end) = end_ms {
+        let op = if end_inclusive { "<=" } else { "<" };
         parts.push(format!(
-            "sm.{time_column} <= {}",
+            "sm.{time_column} {op} {}",
             timestamptz_literal_ms(end)
         ));
     }
@@ -419,8 +431,9 @@ fn gauge_downsample_with_raw_tail(
     let cutoff = now_ms.saturating_sub(lag_ms);
     let stitch = stitch_raw_start_ms(cutoff, bucket_ms);
 
-    let ds_select = |from_ms: i64, to_ms: i64| -> String {
-        let ds_time = samples_time_predicates(Some(from_ms), Some(to_ms), ds_time_col);
+    let ds_select = |from_ms: i64, to_ms: i64, end_inclusive: bool| -> String {
+        let ds_time =
+            samples_time_predicates_bounded(Some(from_ms), Some(to_ms), ds_time_col, end_inclusive);
         format!(
             "SELECT sm.series_id, \
              CAST((epoch(sm.{ds_time_col}) * 1000) AS BIGINT) AS timestamp_ms, \
@@ -460,7 +473,7 @@ fn gauge_downsample_with_raw_tail(
 
     // Fully closed window → downsample only.
     if end <= cutoff {
-        return format!("{} LIMIT {fetch_limit}", ds_select(start, end));
+        return format!("{} LIMIT {fetch_limit}", ds_select(start, end, true));
     }
 
     // Live window: historical downsample + recent raw (half-open at stitch).
@@ -468,7 +481,8 @@ fn gauge_downsample_with_raw_tail(
     let raw_start = start.max(stitch);
     parts.push(raw_select(raw_start, end));
     if start < stitch {
-        parts.push(ds_select(start, stitch));
+        // Downsample is [start, stitch); raw is [stitch, end].
+        parts.push(ds_select(start, stitch, false));
     }
     match parts.len() {
         1 => format!("{} LIMIT {fetch_limit}", parts[0]),
@@ -664,8 +678,12 @@ fn hist_or_union_scan_sql(
                         bucket_iv,
                     ));
                     if start < stitch {
-                        let ds_time =
-                            samples_time_predicates(Some(start), Some(stitch), "window_ts");
+                        let ds_time = samples_time_predicates_bounded(
+                            Some(start),
+                            Some(stitch),
+                            "window_ts",
+                            false,
+                        );
                         parts.push(hist_row_select_sql(
                             catalog,
                             "metric_hist_samples_5m",
@@ -714,8 +732,12 @@ fn hist_or_union_scan_sql(
                         bucket_iv,
                     ));
                     if start < stitch {
-                        let ds_time =
-                            samples_time_predicates(Some(start), Some(stitch), "window_ts");
+                        let ds_time = samples_time_predicates_bounded(
+                            Some(start),
+                            Some(stitch),
+                            "window_ts",
+                            false,
+                        );
                         parts.push(hist_row_select_sql(
                             catalog,
                             "metric_hist_samples_1h",
@@ -1408,6 +1430,11 @@ mod tests {
             sql.contains("metric_samples sm") || sql.contains(".metric_samples sm"),
             "live 30d must keep raw lag tail, got {sql}"
         );
+        // Downsample side must be half-open at stitch (`window_ts < stitch`), not `<=`.
+        assert!(
+            sql.contains("window_ts < ") && !sql.contains("window_ts <="),
+            "live stitch must use exclusive downsample end: {sql}"
+        );
     }
 
     /// time_predicate_is_timestamptz (§9.1 step 8).
@@ -1419,6 +1446,21 @@ mod tests {
         assert!(
             pred.contains("record_date BETWEEN DATE"),
             "time window must also prune record_date partitions: {pred}"
+        );
+    }
+
+    #[test]
+    fn stitch_downsample_end_is_exclusive() {
+        let inclusive = samples_time_predicates(Some(1_000), Some(2_000), "window_ts");
+        let exclusive =
+            samples_time_predicates_bounded(Some(1_000), Some(2_000), "window_ts", false);
+        assert!(
+            inclusive.contains("window_ts <="),
+            "default end must stay inclusive: {inclusive}"
+        );
+        assert!(
+            exclusive.contains("window_ts < ") && !exclusive.contains("window_ts <="),
+            "half-open stitch end must be exclusive: {exclusive}"
         );
     }
 
