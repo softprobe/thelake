@@ -152,10 +152,30 @@ if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx 
   fail "otel-collector still running during SLO measure; refuse to continue"
 fi
 restart_collector() {
-  if [[ "${collector_stopped}" == 1 ]]; then
-    docker start otel-collector >/dev/null 2>&1 || true
-    log "slo: restarted otel-collector"
+  if [[ "${collector_stopped}" != 1 ]]; then
+    return 0
   fi
+  # Prefer compose force-recreate: plain `docker start` often leaves the
+  # otlphttp exporter queue wedged against Softprobe after a long query storm,
+  # so post-measure --check-ingest stays flat until a human recreates.
+  local root overlay demo_dir
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  overlay="$root/tests/compat/grafana/otel-demo"
+  demo_dir="${OTEL_DEMO_DIR:-$HOME/.cache/thelake/otel-demo/${OTEL_DEMO_TAG:-3.0.0}}"
+  if [[ -d "$demo_dir" && -f "$overlay/otelcol-config-extras.yml" ]]; then
+    log "slo: force-recreating otel-collector for clean OTLP recovery"
+    (
+      cd "$demo_dir" && \
+        DEMO_VERSION="${OTEL_DEMO_TAG:-3.0.0}" IMAGE_VERSION="${OTEL_DEMO_TAG:-3.0.0}" \
+        OTEL_COLLECTOR_CONFIG_EXTRAS="$overlay/otelcol-config-extras.yml" \
+        docker compose -p "${OTEL_PROJECT:-thelake-otel-demo}" --env-file .env \
+          -f compose.yaml -f "$overlay/compose.softprobe.yaml" \
+          up -d --force-recreate otel-collector
+    ) >/dev/null 2>&1 || docker start otel-collector >/dev/null 2>&1 || true
+  else
+    docker start otel-collector >/dev/null 2>&1 || true
+  fi
+  log "slo: restarted otel-collector"
 }
 trap 'restart_collector; unpause_grafana' EXIT
 
@@ -197,8 +217,12 @@ collector_stopped=0
 # Prove OTLP recovered after the query storm (gate requires non-flat ingest).
 # Idle with ZERO PromQL — polling --check-ingest here re-starves /v1/metrics.
 log "slo: idle pause for OTLP after measure"
-sleep 90
-docker restart otel-collector >/dev/null 2>&1 || true
+sleep 45
+# Second recreate: first restart (from restart_collector) may race Softprobe
+# still draining query backlog; a fresh collector after idle is reliable.
+collector_stopped=1
+restart_collector
+collector_stopped=0
 sleep 30
 log "slo: post-measure ingest check"
 ingest_ok=0

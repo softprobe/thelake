@@ -38,6 +38,7 @@ LIVE_INGEST_QUERIES = (
     "traces_span_metrics_calls",
     "demo_ad_served_total",
     "k6_iterations",
+    "k6_http_reqs",
 )
 
 

@@ -1531,7 +1531,7 @@ mod tests {
             &catalog,
             &ids,
             SeriesMetaDayScope::QueryWindow,
-            Some("layout_postings"),
+            Some("layout_wide"),
             Some(ts.timestamp_millis() - 60_000),
             Some(ts.timestamp_millis() + 60_000),
         );

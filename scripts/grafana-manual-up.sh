@@ -62,6 +62,15 @@ STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
 # Soft coalesce window for OTLP → DuckLake (0 = flush-through every request).
 # Demo default 10s: fewer Parquet commits under Astronomy Shop OTLP volume.
 INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-10}"
+# Pin Softprobe to one CPU so query-worker + blocking-pool cannot exceed 100% process
+# CPU under Grafana refresh=10s (override with THELAKE_CPU_AFFINITY= or empty to disable).
+CPU_AFFINITY="${THELAKE_CPU_AFFINITY:-0}"
+# CPU-budget overlay drops logs + histogram buckets; skip matching readiness gates
+# unless THELAKE_REQUIRE_FULL_OTLP=1 (needs a wider collector allow-list).
+REQUIRE_FULL_OTLP=0
+case "${THELAKE_REQUIRE_FULL_OTLP:-0}" in
+  1|true|TRUE|yes|YES|on|ON) REQUIRE_FULL_OTLP=1 ;;
+esac
 
 mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 
@@ -226,7 +235,12 @@ PY
 
 # rate() on classic _bucket needs ≥2 raw samples per series in the window.
 # Expr is shared with browser H-04 (catalog_gates/histogram_bucket_rate.expr).
+# CPU-budget collector extras drop k6.http.req.* histograms; skip unless full OTLP.
 wait_for_histogram_bucket_rates() {
+  if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
+    echo "==> skipping histogram bucket rate wait (CPU-budget OTLP; set THELAKE_REQUIRE_FULL_OTLP=1 to enforce H-04)"
+    return 0
+  fi
   local bucket_q
   if [[ ! -f "$HISTOGRAM_BUCKET_RATE_EXPR_FILE" ]]; then
     echo "ERROR: missing H-04 expr file: $HISTOGRAM_BUCKET_RATE_EXPR_FILE" >&2
@@ -272,6 +286,10 @@ PY
 }
 
 wait_for_demo_logs() {
+  if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
+    echo "==> skipping Loki log wait (CPU-budget OTLP sends metrics only; set THELAKE_REQUIRE_FULL_OTLP=1 to enforce)"
+    return 0
+  fi
   echo "==> waiting for Softprobe Loki labels in the live Explore window"
   local ok=0
   local body=""
@@ -330,6 +348,12 @@ except Exception:
     fi
   done
   if [[ "${live_changes:-0}" -ge 1 ]]; then
+    if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
+      wait_for_histogram_bucket_rates
+      echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live Prom OK; Loki/H-04 optional under CPU-budget OTLP)."
+      print_ready
+      exit 0
+    fi
     end_ns="$(python3 -c 'import time; print(int(time.time()*1e9))')"
     start_ns="$((end_ns - 3600 * 1000000000))"
     loki_body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
@@ -468,9 +492,11 @@ case "${THELAKE_MAINTENANCE_ENABLED:-true}" in
     ORPHAN_ENABLED=true
     ;;
 esac
-case "${THELAKE_SELF_MONITORING_ENABLED:-true}" in
-  0|false|FALSE|no|NO|off|OFF) SELF_MONITORING_ENABLED=false ;;
-  *) SELF_MONITORING_ENABLED=true ;;
+# Default off: ops self-export competes with demo OTLP + Grafana PromQL for the
+# single-core CPU budget. Set THELAKE_SELF_MONITORING_ENABLED=true for ops panels.
+case "${THELAKE_SELF_MONITORING_ENABLED:-false}" in
+  1|true|TRUE|yes|YES|on|ON) SELF_MONITORING_ENABLED=true ;;
+  *) SELF_MONITORING_ENABLED=false ;;
 esac
 
 cat >"$CONFIG" <<EOF
@@ -485,7 +511,8 @@ object_store:
   endpoint: null
 
 query:
-  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-4}
+  # 1 keeps Softprobe under one core when Grafana fires many panels every 10s.
+  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-1}
   cache_dir: "$STATE_DIR/cache"
 
 # Soft coalesce: hold OTLP rows in memory and commit once per interval.
@@ -573,12 +600,19 @@ export RUST_LOG="${RUST_LOG:-info}"
 # shells exit (Cursor agent shells tear down the whole tree otherwise).
 # Linux: setsid. Darwin: double-fork + setsid-equivalent via perl.
 start_softprobe_detached() {
+  local -a run_cmd=()
+  if [[ -n "$CPU_AFFINITY" ]] && command -v taskset >/dev/null 2>&1; then
+    run_cmd=(taskset -c "$CPU_AFFINITY")
+    echo "==> Softprobe CPU affinity: $CPU_AFFINITY (THELAKE_CPU_AFFINITY)"
+  fi
+  run_cmd+=("$RUNTIME_BIN")
   if command -v setsid >/dev/null 2>&1; then
-    setsid "$RUNTIME_BIN" >>"$LOG" 2>&1 &
+    setsid "${run_cmd[@]}" >>"$LOG" 2>&1 &
     echo $! >"$PID_FILE"
     return
   fi
   # macOS: no setsid; perl double-fork orphans the runtime from Make/agent shells.
+  # Affinity pin is Linux-only (taskset); Darwin runs without it.
   perl -e '
     use strict; use warnings;
     my ($bin, $log, $pidfile) = @ARGV;
