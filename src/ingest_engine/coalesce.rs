@@ -196,19 +196,25 @@ impl<T: Send + 'static> CoalesceBuf<T> {
         });
     }
 
-    /// Timer path: keep draining capped chunks until empty.
+    /// Timer path: one capped chunk, then re-arm if overflow remains.
+    ///
+    /// Do not tight-loop drain — self-mon export can enqueue huge row sets and a
+    /// back-to-back drain pegged Softprobe at ~100% CPU for minutes with no OTLP.
     async fn flush_drain_timer(self: &Arc<Self>) {
-        loop {
-            match self.flush_once(true).await {
-                Ok(()) => {}
-                Err(e) => warn!("coalesce background flush failed after OTLP ack: {e}"),
-            }
-            let more = {
-                let g = self.state.lock().await;
-                !g.pending.is_empty() && !g.flushing
-            };
-            if !more {
-                break;
+        match self.flush_once(true).await {
+            Ok(()) => {}
+            Err(e) => warn!("coalesce background flush failed after OTLP ack: {e}"),
+        }
+        let should_arm = {
+            let g = self.state.lock().await;
+            !g.pending.is_empty() && !g.flushing && !g.timer_armed
+        };
+        if should_arm {
+            let mut g = self.state.lock().await;
+            if !g.pending.is_empty() && !g.flushing && !g.timer_armed {
+                g.timer_armed = true;
+                drop(g);
+                self.arm_timer();
             }
         }
     }
@@ -263,7 +269,7 @@ impl<T: Send + 'static> CoalesceBuf<T> {
         }
 
         if from_timer {
-            // Caller (`flush_drain_timer`) continues until empty.
+            // Overflow re-arm is handled by `flush_drain_timer` (paced, not tight-loop).
             return Ok(());
         }
 

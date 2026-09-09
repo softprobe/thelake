@@ -1,35 +1,29 @@
 # Copyright Softprobe / OpenTelemetry Authors overlay
 # SPDX-License-Identifier: Apache-2.0
 #
-# Bring Softprobe in as an OTLP/HTTP backend for the official Astronomy Shop demo.
-# Mounted as OTEL_COLLECTOR_CONFIG_EXTRAS (arrays replace on merge — repeat upstream
-# receivers/processors/exporters you still want; base 3.0.0 core uses debug + span_metrics).
+# Softprobe demo overlay for Astronomy Shop.
 #
-# Softprobe DuckLake cannot sustain the full demo metrics firehose (docker_stats,
-# host_metrics, redis, postgres, …) while Grafana refreshes.
-# Keep GOLD-relevant metric sources only. Export Astronomy Shop application logs
-# (not infra collectors) so Loki Explore label pickers stay live in the now-1h window.
+# Softprobe runs with worker_threads=1. Drop span_metrics connector series and
+# infra scrapes; use a single OTLP/HTTP consumer so Softprobe is not flooded by
+# parallel exporters. Remaining http_/rpc_/k6 volume is still ~one core of useful
+# work — Softprobe code fixes remove multi-core waste (DuckDB nproc pools,
+# coalesce tight-loop drains, self-mon inventory storms).
 
 processors:
-  # Keep GOLD / Astronomy Shop + k6. k6 OTLP names use dots (`k6.http.reqs`);
-  # Softprobe sanitizes to underscores after ingest — filter must match both.
   filter/softprobe_gold:
     error_mode: ignore
     metrics:
       metric:
-        - 'not IsMatch(name, "(?i)^(k6[_\\.]|demo[_\\.]|http\\.|http_|rpc\\.|rpc_|traces\\.span\\.metrics|traces_span_metrics|calls$|duration$|http_reqs$|http_req_|iterations$|vus$|data_sent$|data_received$)")'
-  # Application logs only — skip collector/docker noise that drowns DuckLake ingest.
+        - 'not IsMatch(name, "(?i)^(k6[_\\.]|demo[_\\.]|http\\.|http_|rpc\\.|rpc_|http_reqs$|http_req_|iterations$|vus$|data_sent$|data_received$)")'
   filter/softprobe_gold_logs:
     error_mode: ignore
     logs:
       log_record:
         - 'not IsMatch(resource.attributes["service.name"], "(?i)^(ad|cart|checkout|currency|email|fraud-detection|frontend|frontend-proxy|payment|product-catalog|quote|recommendation|shipping|accounting|flagd|load-generator)$")'
   batch/softprobe:
-    # 10k-point batches regularly exceed Softprobe's OTLP timeout under PromQL
-    # load (Grafana SLO warmup). Smaller batches keep /v1/metrics alive.
     timeout: 5s
-    send_batch_size: 512
-    send_batch_max_size: 1024
+    send_batch_size: 256
+    send_batch_max_size: 256
   memory_limiter/softprobe:
     check_interval: 1s
     limit_mib: 512
@@ -51,8 +45,8 @@ exporters:
       max_elapsed_time: 180s
     sending_queue:
       enabled: true
-      num_consumers: 8
-      queue_size: 2048
+      num_consumers: 1
+      queue_size: 256
 
 service:
   pipelines:
@@ -67,7 +61,7 @@ service:
         ]
       exporters: [debug, span_metrics]
     metrics:
-      receivers: [otlp, prometheus/ad, span_metrics]
+      receivers: [otlp, span_metrics]
       processors:
         [
           resourcedetection,

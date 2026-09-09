@@ -5,10 +5,11 @@
 # Teardown: ./scripts/grafana-manual-down.sh  (or: make grafana-down)
 #
 # Ingest buffering (soft coalesce):
-#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=2  (default) — ack-on-enqueue, one
+#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=10 (default) — ack-on-enqueue, one
 #     DuckLake Parquet commit per signal every N seconds (demo CPU/IO profile).
 #   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=0  — flush-through (commit before ack;
 #     debug / contract tests only; saturates disk under Astronomy Shop + k6).
+#   THELAKE_WRITER_POOL_SIZE=1 (default) — serialize DuckLake writers under demo.
 
 set -euo pipefail
 
@@ -59,7 +60,8 @@ HISTOGRAM_BUCKET_RATE_EXPR_FILE="$ROOT/tests/compat/grafana/browser/catalog_gate
 DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
 # Soft coalesce window for OTLP → DuckLake (0 = flush-through every request).
-INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-2}"
+# Demo default 10s: fewer Parquet commits under Astronomy Shop OTLP volume.
+INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-10}"
 
 mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 
@@ -476,14 +478,14 @@ server:
   port: 8090
   host: "0.0.0.0"
   max_body_size: 104857600
-  worker_threads: null
+  worker_threads: ${THELAKE_WORKER_THREADS:-1}
 
 object_store:
   region: "us-east-1"
   endpoint: null
 
 query:
-  max_connections: 16
+  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-4}
   cache_dir: "$STATE_DIR/cache"
 
 # Soft coalesce: hold OTLP rows in memory and commit once per interval.
@@ -518,7 +520,9 @@ ducklake:
   catalog_alias: "softprobe"
   metadata_schema: "$PG_SCHEMA"
   data_inlining_row_limit: 0
-  writer_pool_size: 4
+  # Serialize DuckLake commits under demo load (parallel writers × layout txn
+  # multi-core scans of open-day small files pegged Softprobe CPU).
+  writer_pool_size: ${THELAKE_WRITER_POOL_SIZE:-1}
 
 dropdown_catalog:
   enabled: false

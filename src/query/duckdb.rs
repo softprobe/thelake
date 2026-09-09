@@ -3,7 +3,7 @@ use crate::query::cache::CacheSettings;
 use crate::runtime_engine::DuckLakeScope;
 use crate::storage::ducklake::{
     configure_duckdb_resources, ducklake_qualified_table_name, escape_sql_literal,
-    QUERY_DUCKDB_MEMORY, QUERY_DUCKDB_THREADS,
+    open_in_memory_capped, QUERY_DUCKDB_MEMORY, QUERY_DUCKDB_THREADS,
 };
 use crate::storage::TieredStorage;
 use anyhow::{anyhow, Result};
@@ -811,17 +811,31 @@ impl DuckDBQueryEngine {
     /// One-shot metadata SQL on a dedicated connection (no worker pool, no
     /// self-monitoring instruments). Used by inventory scrapes.
     pub async fn execute_query_uninstrumented(&self, query: &str) -> Result<QueryResult> {
+        let mut rows = self.execute_queries_uninstrumented(vec![query]).await?;
+        rows.pop()
+            .ok_or_else(|| anyhow!("inventory query returned no result"))?
+    }
+
+    /// Run several metadata SQLs on one open+attach connection (inventory).
+    pub async fn execute_queries_uninstrumented(
+        &self,
+        queries: Vec<&str>,
+    ) -> Result<Vec<Result<QueryResult>>> {
         let core = DuckDBCore {
             config: self.config.clone(),
             cache: CacheSettings::new(&self.config),
             counts_toward_liveness: false,
             tenant_id: self.tenant_id.clone(),
         };
-        let sql = query.to_string();
+        let sqls: Vec<String> = queries.iter().map(|s| (*s).to_string()).collect();
         tokio::task::spawn_blocking(move || {
             let conn = core.open_connection()?;
             let mut state = core.init_connection_state_with(conn)?;
-            core.execute_query_on_state(&mut state, &sql)
+            let mut out = Vec::with_capacity(sqls.len());
+            for sql in sqls {
+                out.push(core.execute_query_on_state(&mut state, &sql));
+            }
+            Ok(out)
         })
         .await
         .map_err(|e| anyhow!("inventory query join: {e}"))?
@@ -873,7 +887,9 @@ impl Drop for DuckDBQueryEngine {
 
 impl DuckDBCore {
     fn open_connection(&self) -> Result<Connection> {
-        Connection::open_in_memory().map_err(|err| anyhow!("DuckDB open failed: {}", err))
+        // Cap at open so TaskScheduler never starts at nproc.
+        let conn = open_in_memory_capped(QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)?;
+        Ok(conn)
     }
 
     fn install_extensions(&self, conn: &Connection) -> Result<()> {

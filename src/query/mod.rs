@@ -115,6 +115,14 @@ impl QueryEngine {
         self.duckdb.execute_query_uninstrumented(query).await
     }
 
+    /// Several inventory SQLs on one open+attach (avoids per-query DuckDB init).
+    pub async fn execute_queries_uninstrumented(
+        &self,
+        queries: Vec<&str>,
+    ) -> anyhow::Result<Vec<anyhow::Result<duckdb::QueryResult>>> {
+        self.duckdb.execute_queries_uninstrumented(queries).await
+    }
+
     /// Execute a DuckLake query against one tenant's resolved metadata schema.
     ///
     /// Runtime control endpoints are tenant-authenticated, so they must read from the same

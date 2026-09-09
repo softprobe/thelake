@@ -65,12 +65,8 @@ async fn export_inner(metrics: &mut ResourceMetrics) -> MetricResult<()> {
         warn!("self-monitoring metric export failed: {err}");
         return Err(MetricError::Other(err.to_string()));
     }
-    // Durable for ops panels: don't leave the sample only in coalesce memory.
-    if let Err(err) = engine.ingest.force_flush_metrics().await {
-        record_export_drop();
-        warn!("self-monitoring metric force_flush failed: {err}");
-        return Err(MetricError::Other(err.to_string()));
-    }
+    // Coalesce with customer ingest (flush_interval). Forcing a commit every
+    // export interval created an ops open-day Parquet storm and stole writer CPU.
     Ok(())
 }
 
@@ -111,8 +107,7 @@ async fn flush_logs(state: &AppState, batch: &mut Vec<crate::models::Log>) {
     let logs = std::mem::take(batch);
     let res = async {
         let engine = state.engines.engine_for(OPS_TENANT_ID).await?;
-        engine.ingest.add_logs(logs, 0).await?;
-        engine.ingest.force_flush_logs().await
+        engine.ingest.add_logs(logs, 0).await
     }
     .await;
     if let Err(err) = res {

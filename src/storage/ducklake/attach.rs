@@ -17,14 +17,25 @@ pub(super) fn catalog_is_attached(conn: &Connection, alias: &str) -> bool {
 pub(crate) const QUERY_DUCKDB_THREADS: i64 = 1;
 pub(crate) const QUERY_DUCKDB_MEMORY: &str = "512MB";
 /// Writers / TWCS: classic Prom dual-write + live OTEL need more than 512MB.
-pub(crate) const WRITER_DUCKDB_THREADS: i64 = 2;
+pub(crate) const WRITER_DUCKDB_THREADS: i64 = 1;
 pub(crate) const WRITER_DUCKDB_MEMORY: &str = "1GB";
 /// Compaction merges hundreds of VARIANT/postings files; 512MB OOMs (TWCS skip
 /// → Grafana scans 200–500 Parquet files per PromQL). One compact connection.
 pub(crate) const COMPACTION_DUCKDB_THREADS: i64 = 2;
 pub(crate) const COMPACTION_DUCKDB_MEMORY: &str = "2GB";
 
-/// Cap CPU and RAM for one DuckDB connection.
+/// Open in-memory DuckDB with thread/memory caps applied at database create
+/// time. `SET threads` after INSTALL/LOAD does not fully shrink an nproc-wide
+/// TaskScheduler (self-mon inventory spiked to ~40 Running threads / ~5 cores).
+pub(crate) fn open_in_memory_capped(threads: i64, memory_limit: &str) -> Result<Connection> {
+    let config = duckdb::Config::default()
+        .threads(threads)?
+        .max_memory(memory_limit)?;
+    Connection::open_in_memory_with_flags(config)
+        .map_err(|e| anyhow::anyhow!("DuckDB open failed: {e}"))
+}
+
+/// Cap CPU and RAM for an already-open DuckDB connection (best-effort follow-up).
 pub(crate) fn configure_duckdb_resources(
     conn: &Connection,
     threads: i64,
@@ -143,8 +154,7 @@ pub(crate) fn ducklake_set_option_scope_for_qualified(qualified_table: &str) -> 
 /// Open an in-memory DuckDB connection and attach DuckLake driven entirely by [`DuckLakeConfig`].
 /// Reuses production attach logic across SQLite and PostgreSQL (DRY first).
 pub fn open_and_attach_ducklake(dk: &DuckLakeConfig) -> anyhow::Result<(Connection, String)> {
-    let conn =
-        Connection::open_in_memory().map_err(|e| anyhow::anyhow!("DuckDB open failed: {e}"))?;
+    let conn = open_in_memory_capped(QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)?;
     conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
     if dk.catalog_type == "postgres" {
         conn.execute_batch("INSTALL postgres; LOAD postgres;")?;
@@ -190,9 +200,8 @@ mod tests {
 
     #[test]
     fn query_resource_caps_pin_single_thread() {
-        let conn = Connection::open_in_memory().expect("duckdb");
-        configure_duckdb_resources(&conn, QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)
-            .expect("set resource caps");
+        let conn = open_in_memory_capped(QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)
+            .expect("duckdb");
         let threads: i64 = conn
             .query_row("SELECT current_setting('threads')", [], |row| row.get(0))
             .expect("threads setting");
@@ -201,7 +210,10 @@ mod tests {
 
     #[test]
     fn compaction_memory_cap_exceeds_writer_so_twcs_can_merge() {
-        assert_eq!(COMPACTION_DUCKDB_THREADS, WRITER_DUCKDB_THREADS);
+        assert!(
+            COMPACTION_DUCKDB_THREADS >= WRITER_DUCKDB_THREADS,
+            "compaction must not be thinner than writers"
+        );
         assert_ne!(COMPACTION_DUCKDB_MEMORY, WRITER_DUCKDB_MEMORY);
         assert!(
             COMPACTION_DUCKDB_MEMORY.ends_with("GB"),
