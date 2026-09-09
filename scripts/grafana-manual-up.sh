@@ -532,7 +532,7 @@ server:
   host: "0.0.0.0"
   max_body_size: 104857600
   # ≥2 so OTLP HTTP and PromQL are not single-threaded-starving each other.
-  worker_threads: ${THELAKE_WORKER_THREADS:-2}
+  worker_threads: ${THELAKE_WORKER_THREADS:-1}
 
 object_store:
   region: "us-east-1"
