@@ -294,6 +294,12 @@ sleep 20
 # single worker was pinned to the SLO query storm (parquet can land while PromQL
 # still looks stale until reconnect).
 restart_softprobe_demo
+# k6 cumulative counters can freeze across collector/Softprobe bounces; restart
+# load-generator so post-measure --check-ingest sees fresh value changes.
+if docker inspect -f '{{.State.Running}}' load-generator >/dev/null 2>&1; then
+  log "slo: restarting load-generator for fresh k6 counters"
+  docker restart load-generator >/dev/null 2>&1 || true
+fi
 collector_stopped=1
 restart_collector
 collector_stopped=0
