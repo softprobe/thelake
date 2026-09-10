@@ -28,7 +28,7 @@ type WriteFn<T> = Arc<dyn Fn(Vec<Vec<T>>) -> BoxFuture + Send + Sync>;
 const MAX_BATCHES_PER_FLUSH: usize = 8;
 /// Rows per capped DuckLake commit (chunk size). Keep near one collector post
 /// so each write stays short; timer overflow re-arms via [`OVERFLOW_REARM`].
-const MAX_ROWS_PER_FLUSH: usize = 4_096;
+const MAX_ROWS_PER_FLUSH: usize = 2_048;
 /// Only eager-flush when backlog is truly large — must be ≫ [`MAX_ROWS_PER_FLUSH`]
 /// or every OTLP post would flush immediately and defeat the coalesce timer.
 const EAGER_PENDING_ROWS: usize = 256_000;
@@ -266,9 +266,6 @@ impl<T: Send + 'static> CoalesceBuf<T> {
             batches
         };
 
-        // DuckDB max_connections=1 already serializes writer vs query. Waiting
-        // here under Grafana load just grew coalesce backlog and produced
-        // longer full-core commits once the wait timed out (p95≈100%).
         let result = (self.write)(batches).await;
 
         let waiters = {

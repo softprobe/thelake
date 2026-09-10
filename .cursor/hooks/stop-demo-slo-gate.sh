@@ -12,6 +12,10 @@ FAILS="$STATE_DIR/failures.txt"
 PY="$ROOT/.cursor/hooks/grafana_dashboard_slo.py"
 GRAFANA_STATE="${THELAKE_GRAFANA_STATE_DIR:-/tmp/thelake-grafana-manual}"
 PID_FILE="$GRAFANA_STATE/softprobe.pid"
+WRITE_PID_FILE="$GRAFANA_STATE/softprobe-write.pid"
+READ_PID_FILE="$GRAFANA_STATE/softprobe-read.pid"
+INGEST_URL="${SOFTPROBE_INGEST_URL:-http://127.0.0.1:8091}"
+QUERY_URL="${SOFTPROBE_QUERY_URL:-http://127.0.0.1:8090}"
 OTEL_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 # Never honor skip env vars. The gate is the product stop condition.
 
@@ -66,18 +70,12 @@ otel_n="$(docker ps --filter "label=com.docker.compose.project=${OTEL_PROJECT}" 
 otel_collector="$(docker ps --filter "label=com.docker.compose.project=${OTEL_PROJECT}" --filter status=running --format '{{.Names}}' 2>/dev/null | grep -Ei 'otel-collector|collector' || true)"
 
 softprobe_ok=0
-if [[ -f "$PID_FILE" ]]; then
-  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-  if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
-    cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-    if [[ "$cmd" == *softprobe-runtime* ]]; then
-      softprobe_ok=1
-    fi
-  fi
-fi
-if curl -sf -m 2 "http://127.0.0.1:8090/api/v1/status/buildinfo" >/dev/null 2>&1 \
+if curl -sf -m 2 "${QUERY_URL}/api/v1/status/buildinfo" >/dev/null 2>&1 \
   || curl -sf -m 2 -H "Authorization: Bearer ${SOFTPROBE_API_KEY:-local-dev-key}" \
-       "http://127.0.0.1:8090/api/v1/label/__name__/values" >/dev/null 2>&1; then
+       "${QUERY_URL}/api/v1/label/__name__/values" >/dev/null 2>&1; then
+  softprobe_ok=1
+fi
+if curl -sf -m 2 "${INGEST_URL}/ready" >/dev/null 2>&1; then
   softprobe_ok=1
 fi
 
@@ -94,7 +92,7 @@ if [[ "${otel_n:-0}" -lt 1 || -z "$otel_collector" ]]; then
   fail "OpenTelemetry Demo is not running (compose project ${OTEL_PROJECT}, need otel-collector). Start with: make grafana-up"
 fi
 if [[ "$softprobe_ok" != 1 ]]; then
-  log "slo: Softprobe not detected on :8090 yet (will retry after helper init)"
+  log "slo: Softprobe not detected on query :8090 / ingest :8091 yet (will retry after helper init)"
 fi
 
 # --- 3. full-fidelity live stack + PromQL SLO ---
@@ -170,16 +168,13 @@ restart_collector() {
 }
 
 restart_softprobe_demo() {
-  local pid bin cfg logf auth_url duck_lib
-  local -a run_cmd
-  pid="$(tr -d '[:space:]' <"$PID_FILE" 2>/dev/null || true)"
+  local bin cfg auth_url duck_lib
   bin="$GRAFANA_STATE/softprobe-runtime"
   if [[ ! -x "$bin" && -x "$ROOT/dist/softprobe-runtime" ]]; then
     cp -f "$ROOT/dist/softprobe-runtime" "$bin"
     chmod +x "$bin"
   fi
   cfg="$GRAFANA_STATE/config.yaml"
-  logf="$GRAFANA_STATE/softprobe.log"
   if [[ ! -x "$bin" || ! -f "$cfg" ]]; then
     log "slo: softprobe restart skipped (missing $bin or $cfg)"
     return 1
@@ -197,135 +192,176 @@ restart_softprobe_demo() {
     log "slo: softprobe restart skipped (libduckdb.so not found)"
     return 1
   fi
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    log "slo: stopping Softprobe pid=$pid for query-worker reattach"
-    kill "$pid" 2>/dev/null || true
-    for _ in $(seq 1 40); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.25
-    done
-    kill -9 "$pid" 2>/dev/null || true
-  fi
+
+  stop_pidfile() {
+    local pf="$1"
+    local pid
+    pid="$(tr -d '[:space:]' <"$pf" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      log "slo: stopping Softprobe pid=$pid ($pf)"
+      kill "$pid" 2>/dev/null || true
+      for _ in $(seq 1 40); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.25
+      done
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  }
+  stop_pidfile "$WRITE_PID_FILE"
+  stop_pidfile "$READ_PID_FILE"
+  stop_pidfile "$PID_FILE"
+
   auth_url="${SOFTPROBE_AUTH_URL:-http://127.0.0.1:18080/validate}"
-  : >"$logf"
-  run_cmd=(env
-    "SOFTPROBE_AUTH_URL=$auth_url"
-    "SOFTPROBE_ADMIN_API_KEY=${SOFTPROBE_ADMIN_API_KEY:-local-dev-admin-key}"
-    "SOFTPROBE_GRPC_DISABLE=1"
-    "RUST_LOG=${RUST_LOG:-info}"
-    "CONFIG_FILE=$cfg"
-    "LD_LIBRARY_PATH=${duck_lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-  )
-  # Affinity optional for experiments only — empty default matches grafana-manual-up.
-  if [[ -n "${THELAKE_CPU_AFFINITY:-}" ]] && command -v taskset >/dev/null 2>&1; then
-    run_cmd+=(taskset -c "$THELAKE_CPU_AFFINITY")
-    log "slo: Softprobe restart CPU affinity=$THELAKE_CPU_AFFINITY"
-  fi
-  run_cmd+=("$bin" --config "$cfg")
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "${run_cmd[@]}" >>"$logf" 2>&1 &
-    echo $! >"$PID_FILE"
-  else
-    "${run_cmd[@]}" >>"$logf" 2>&1 &
-    echo $! >"$PID_FILE"
-  fi
+  start_role() {
+    local role="$1" listen="$2" logf="$3" pidf="$4"
+    local -a run_cmd
+    : >"$logf"
+    run_cmd=(env
+      "SOFTPROBE_AUTH_URL=$auth_url"
+      "SOFTPROBE_ADMIN_API_KEY=${SOFTPROBE_ADMIN_API_KEY:-local-dev-admin-key}"
+      "SOFTPROBE_GRPC_DISABLE=1"
+      "SOFTPROBE_HTTP_ROLE=$role"
+      "SOFTPROBE_LISTEN_ADDR=$listen"
+      "RUST_LOG=${RUST_LOG:-info}"
+      "CONFIG_FILE=$cfg"
+      "LD_LIBRARY_PATH=${duck_lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    )
+    if [[ -n "${THELAKE_CPU_AFFINITY:-}" ]] && command -v taskset >/dev/null 2>&1; then
+      run_cmd+=(taskset -c "$THELAKE_CPU_AFFINITY")
+      log "slo: Softprobe $role CPU affinity=$THELAKE_CPU_AFFINITY"
+    fi
+    run_cmd+=("$bin")
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "${run_cmd[@]}" >>"$logf" 2>&1 &
+      echo $! >"$pidf"
+    else
+      "${run_cmd[@]}" >>"$logf" 2>&1 &
+      echo $! >"$pidf"
+    fi
+  }
+  start_role ingest "0.0.0.0:8091" "$GRAFANA_STATE/softprobe-write.log" "$WRITE_PID_FILE"
+  start_role query "0.0.0.0:8090" "$GRAFANA_STATE/softprobe-read.log" "$READ_PID_FILE"
+  cp -f "$READ_PID_FILE" "$PID_FILE"
+
   local ok=0
   for _ in $(seq 1 60); do
-    if curl -sf "http://127.0.0.1:8090/ready" >/dev/null 2>&1; then
+    if curl -sf "${QUERY_URL}/ready" >/dev/null 2>&1 \
+      && curl -sf "${INGEST_URL}/ready" >/dev/null 2>&1; then
       ok=1
       break
     fi
     sleep 0.5
   done
   if [[ "$ok" != 1 ]]; then
-    log "slo: Softprobe did not become ready after restart"
-    tail -40 "$logf" | tee -a "$LOG" >&2 || true
+    log "slo: Softprobe dual-process did not become ready after restart"
+    tail -40 "$GRAFANA_STATE/softprobe-write.log" | tee -a "$LOG" >&2 || true
+    tail -40 "$GRAFANA_STATE/softprobe-read.log" | tee -a "$LOG" >&2 || true
     return 1
   fi
-  log "slo: Softprobe restarted pid=$(tr -d '[:space:]' <"$PID_FILE")"
+  log "slo: Softprobe restarted write=$(tr -d '[:space:]' <"$WRITE_PID_FILE") read=$(tr -d '[:space:]' <"$READ_PID_FILE")"
 }
 
-# Resolve Softprobe pid for CPU sampling (pid file preferred).
-softprobe_pid() {
+# Resolve write + read Softprobe pids (dual-process demo; legacy single pid fallback).
+softprobe_pids() {
+  local write_pid read_pid
+  write_pid="$(tr -d '[:space:]' <"$WRITE_PID_FILE" 2>/dev/null || true)"
+  read_pid="$(tr -d '[:space:]' <"$READ_PID_FILE" 2>/dev/null || true)"
+  if [[ -n "$write_pid" ]] && kill -0 "$write_pid" 2>/dev/null \
+    && [[ -n "$read_pid" ]] && kill -0 "$read_pid" 2>/dev/null; then
+    printf '%s %s' "$write_pid" "$read_pid"
+    return 0
+  fi
   local pid
   pid="$(tr -d '[:space:]' <"$PID_FILE" 2>/dev/null || true)"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
     printf '%s' "$pid"
     return 0
   fi
-  pgrep -f 'softprobe-runtime' 2>/dev/null | head -n1 || true
+  pgrep -f 'softprobe-runtime' 2>/dev/null | head -n2 | tr '\n' ' ' | sed 's/[[:space:]]*$//'
 }
 
-# Live-stack CPU probe: ~20×3s *instantaneous* samples (utime+stime deltas from
-# /proc — NOT `ps %cpu`, which is lifetime average since process start and is
-# poisoned by startup TWCS). Concurrent PromQL paced like Grafana refresh≈10s.
-# 3s windows absorb sub-second DuckDB+tokio scheduling noise around one busy
-# core (~101–108% on 1s samples) while still failing sustained multi-core burn.
-# Fail if avg≥100 or p95≥100.
+# Live-stack CPU probe: each Softprobe process (write + read) must stay
+# avg<100 and p95<100 under concurrent OTLP + Grafana + paced PromQL.
 probe_live_cpu() {
-  local pid load_pid samples_file
+  local pids load_pid samples_file
   ensure_grafana_running
   if ! docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
     force_recreate_collector
   fi
-  pid="$(softprobe_pid)"
-  if [[ -z "$pid" ]]; then
-    fail "live CPU probe: Softprobe pid not found"
+  pids="$(softprobe_pids)"
+  if [[ -z "$pids" ]]; then
+    fail "live CPU probe: Softprobe pid(s) not found"
     return 1
   fi
   samples_file="$STATE_DIR/live-cpu-samples.txt"
-  log "slo: live CPU probe (60s / 3s /proc deltas, pid=$pid, collector+Grafana+PromQL load)"
+  log "slo: live CPU probe (60s / 3s /proc deltas, pids=$pids, collector+Grafana+PromQL load)"
   python3 "$PY" --load-cpu --duration-s 65 --workers 1 >>"$LOG" 2>&1 &
   load_pid=$!
-  # workers=1: demo max_connections=1 serializes DuckDB; a second load worker
-  # only queues behind Grafana and burns tokio CPU without realistic concurrency.
   local cpu_rc=0
-  python3 - "$pid" "$samples_file" >>"$LOG" 2>&1 <<'PY' || cpu_rc=$?
+  # shellcheck disable=SC2086
+  python3 - "$samples_file" $pids >>"$LOG" 2>&1 <<'PY' || cpu_rc=$?
 import os, sys, time
 from pathlib import Path
 
-pid, out_path = sys.argv[1], Path(sys.argv[2])
+out_path = Path(sys.argv[1])
+pids = [p for p in sys.argv[2:] if p]
 hz = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
 
 def cpu_ticks(p: str) -> int:
     fields = Path(f"/proc/{p}/stat").read_text().split()
     return int(fields[13]) + int(fields[14])
 
-samples = []
-prev = cpu_ticks(pid)
+if len(pids) >= 2:
+    labels = {pids[0]: "write", pids[1]: "read"}
+else:
+    labels = {pids[0]: "softprobe"}
+
+prev = {p: cpu_ticks(p) for p in pids}
 prev_t = time.time()
+samples = {p: [] for p in pids}
 time.sleep(3.0)
 for _ in range(20):
-    now = cpu_ticks(pid)
     now_t = time.time()
     dt = max(now_t - prev_t, 1e-6)
-    pct = ((now - prev) / hz) / dt * 100.0
-    samples.append(pct)
-    prev, prev_t = now, now_t
+    for p in pids:
+        now = cpu_ticks(p)
+        pct = ((now - prev[p]) / hz) / dt * 100.0
+        samples[p].append(pct)
+        prev[p] = now
+    prev_t = now_t
     time.sleep(3.0)
 
-out_path.write_text("\n".join(f"{v:.3f}" for v in samples) + "\n", encoding="utf-8")
-if len(samples) < 15:
-    print(f"live CPU probe FAILED: only {len(samples)} samples", file=sys.stderr)
-    raise SystemExit(2)
-vals_sorted = sorted(samples)
-avg = sum(samples) / len(samples)
-idx = min(len(vals_sorted) - 1, max(0, int(0.95 * (len(vals_sorted) - 1))))
-p95 = vals_sorted[idx]
-print(
-    f"live CPU probe (instantaneous 3s): n={len(samples)} avg={avg:.1f} p95={p95:.1f} max={max(samples):.1f}",
-    file=sys.stderr,
-)
-if avg >= 100.0 or p95 >= 100.0:
+lines = []
+failed = False
+for p in pids:
+    vals = samples[p]
+    lines.append(f"# {labels[p]} pid={p}")
+    lines.extend(f"{v:.3f}" for v in vals)
+    if len(vals) < 15:
+        print(f"live CPU probe FAILED ({labels[p]}): only {len(vals)} samples", file=sys.stderr)
+        failed = True
+        continue
+    vals_sorted = sorted(vals)
+    avg = sum(vals) / len(vals)
+    idx = min(len(vals_sorted) - 1, max(0, int(0.95 * (len(vals_sorted) - 1))))
+    p95 = vals_sorted[idx]
     print(
-        f"live CPU probe FAILED: need avg<100 and p95<100 (got avg={avg:.1f} p95={p95:.1f})",
+        f"live CPU probe {labels[p]} (instantaneous 3s): n={len(vals)} avg={avg:.1f} p95={p95:.1f} max={max(vals):.1f}",
         file=sys.stderr,
     )
+    if avg >= 100.0 or p95 >= 100.0:
+        print(
+            f"live CPU probe FAILED ({labels[p]}): need avg<100 and p95<100 (got avg={avg:.1f} p95={p95:.1f})",
+            file=sys.stderr,
+        )
+        failed = True
+out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+if failed:
     raise SystemExit(1)
-print("live CPU probe ok", file=sys.stderr)
+print("live CPU probe ok (all Softprobe processes)", file=sys.stderr)
 PY
   wait "$load_pid" 2>/dev/null || true
-  tail -n 8 "$LOG" >&2 || true
+  tail -n 12 "$LOG" >&2 || true
   return "$cpu_rc"
 }
 
@@ -334,7 +370,7 @@ check_ops_tenant() {
   body="$(curl -sf -m 15 \
     -H "Authorization: Bearer ${SOFTPROBE_OPS_API_KEY:-local-ops-key}" \
     -H "X-Scope-OrgID: thelake-ops" \
-    "http://127.0.0.1:8090/api/v1/label/__name__/values" 2>/dev/null || true)"
+    "${QUERY_URL}/api/v1/label/__name__/values" 2>/dev/null || true)"
   if [[ -z "$body" ]] || [[ "$body" != *'"status":"success"'* ]]; then
     fail "ops label values failed (Bearer local-ops-key + X-Scope-OrgID: thelake-ops)"
     return 1
@@ -357,7 +393,7 @@ check_loki_labels() {
   body="$(curl -sf -m 15 \
     -H "Authorization: Bearer ${SOFTPROBE_API_KEY:-local-dev-key}" \
     -H "X-Scope-OrgID: ${GRAFANA_TENANT_ID:-local-dev-tenant}" \
-    "http://127.0.0.1:8090/loki/api/v1/labels?start=$start_ns&end=$end_ns" 2>/dev/null || true)"
+    "${QUERY_URL}/loki/api/v1/labels?start=$start_ns&end=$end_ns" 2>/dev/null || true)"
   if [[ -z "$body" ]] || [[ "$body" != *'"status":"success"'* ]] \
     || [[ "$body" == *'"data":[]'* ]]; then
     fail "Loki labels empty in last hour (full OTLP logs required)"
@@ -367,9 +403,9 @@ check_loki_labels() {
 }
 
 # Ensure Softprobe + collector before live checks.
-if ! curl -sf -m 2 "http://127.0.0.1:8090/ready" >/dev/null 2>&1; then
+if ! curl -sf -m 2 "${QUERY_URL}/ready" >/dev/null 2>&1; then
   log "slo: Softprobe not ready; attempting demo restart"
-  restart_softprobe_demo || fail "Softprobe is not serving on :8090. Start with: make grafana-up"
+  restart_softprobe_demo || fail "Softprobe query/ingest not serving on :8090/:8091. Start with: make grafana-up"
 fi
 ensure_grafana_running
 if ! docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
@@ -399,7 +435,7 @@ check_loki_labels
 
 # CPU budget under concurrent full stack (must not depend on pausing Grafana).
 if ! probe_live_cpu; then
-  fail "Softprobe live-stack CPU budget failed (need 60s avg<100 and p95<100 with collector+Grafana online)"
+  fail "Softprobe live-stack CPU budget failed (need each Softprobe process 60s avg<100 and p95<100 with collector+Grafana online)"
 fi
 
 # Short isolated PromQL measure (warmup + cache hits). Recover full ingest after;
@@ -553,7 +589,7 @@ All of these must be true before you may finish:
 1. All tests green (`make test`).
 2. Code committed (clean git status, ignoring .codegraph/ and hook state).
 3. OTEL Astronomy Shop demo running with full-fidelity ingest (metrics+logs+traces; live non-flat scrapes; Loki labels; ops `thelake_*` with self_monitoring on).
-4. Softprobe process live-stack CPU: 60s avg %CPU <100 and p95 <100 with collector up and Grafana unpaused (no taskset cheat required).
+4. Softprobe write+read processes live-stack CPU: each 60s avg %CPU <100 and p95 <100 with collector up and Grafana unpaused (no taskset cheat required).
 5. Every Grafana dashboard PromQL at 5m, 15m, 30m, 1h, 3h, 24h, 30d, 180d consistently ≤100ms (3 consecutive repeats after warmup; short isolated measure OK — recover full ingest without Softprobe bounce on happy path).
 
 Failures this turn:

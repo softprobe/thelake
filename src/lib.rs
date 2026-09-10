@@ -10,6 +10,7 @@ pub mod compat;
 pub mod config;
 pub mod control_plane;
 pub mod grpc_otlp;
+pub mod http_role;
 pub mod ingest_engine;
 pub mod models;
 pub mod promotion;

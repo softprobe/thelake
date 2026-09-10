@@ -38,7 +38,7 @@ processors:
 
 exporters:
   otlphttp/softprobe:
-    endpoint: http://host.docker.internal:8090
+    endpoint: http://host.docker.internal:8091
     tls:
       insecure: true
     timeout: 90s

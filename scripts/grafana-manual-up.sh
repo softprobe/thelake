@@ -52,11 +52,19 @@ OVERLAY_DIR="$ROOT/tests/compat/grafana/otel-demo"
 COLLECTOR_EXTRAS="$OVERLAY_DIR/otelcol-config-extras.yml"
 COMPOSE_SOFTPROBE="$OVERLAY_DIR/compose.softprobe.yaml"
 LOG="$STATE_DIR/softprobe.log"
+WRITE_LOG="$STATE_DIR/softprobe-write.log"
+READ_LOG="$STATE_DIR/softprobe-read.log"
 PID_FILE="$STATE_DIR/softprobe.pid"
+WRITE_PID_FILE="$STATE_DIR/softprobe-write.pid"
+READ_PID_FILE="$STATE_DIR/softprobe-read.pid"
 CONFIG="$STATE_DIR/config.yaml"
 GRAFANA_AUTH_MOCK_PORT="${GRAFANA_AUTH_MOCK_PORT:-18080}"
 API_KEY="${SOFTPROBE_API_KEY:-local-dev-key}"
+# Query process stays on :8090 (Grafana + PromQL gate). Ingest process :8091 (OTLP).
 SOFTPROBE_URL_HOST="${SOFTPROBE_LISTEN:-http://127.0.0.1:8090}"
+SOFTPROBE_INGEST_URL="${SOFTPROBE_INGEST_LISTEN:-http://127.0.0.1:8091}"
+INGEST_PORT="${SOFTPROBE_INGEST_PORT:-8091}"
+QUERY_PORT="${SOFTPROBE_QUERY_PORT:-8090}"
 PG_HOST="${GRAFANA_PG_HOST:-127.0.0.1}"
 PG_PORT="${GRAFANA_PG_HOST_PORT:-5434}"
 PG_SCHEMA="${GRAFANA_PG_SCHEMA:-grafana_manual}"
@@ -101,6 +109,29 @@ fi
 AUTH_URL="${SOFTPROBE_AUTH_URL:-http://127.0.0.1:${GRAFANA_AUTH_MOCK_PORT}/validate}"
 
 our_softprobe_running() {
+  local write_ok=0 read_ok=0
+  if [[ -f "$WRITE_PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$WRITE_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      local cmd
+      cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+      [[ "$cmd" == *softprobe-runtime* ]] && write_ok=1
+    fi
+  fi
+  if [[ -f "$READ_PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$READ_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      local cmd
+      cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+      [[ "$cmd" == *softprobe-runtime* ]] && read_ok=1
+    fi
+  fi
+  # Legacy single-pid stack still counts as up until rebuilt.
+  if [[ "$write_ok" == 1 && "$read_ok" == 1 ]]; then
+    return 0
+  fi
   [[ -f "$PID_FILE" ]] || return 1
   local pid
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
@@ -110,6 +141,26 @@ our_softprobe_running() {
   cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
   [[ "$cmd" == *softprobe-runtime* ]] || return 1
   return 0
+}
+
+kill_softprobe_pidfile() {
+  local pf="$1"
+  [[ -f "$pf" ]] || return 0
+  local old
+  old="$(cat "$pf" 2>/dev/null || true)"
+  if [[ -n "${old:-}" ]] && kill -0 "$old" 2>/dev/null; then
+    local cmd
+    cmd="$(ps -p "$old" -o args= 2>/dev/null || true)"
+    if [[ "$cmd" == *softprobe-runtime* ]]; then
+      kill "$old" 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        kill -0 "$old" 2>/dev/null || break
+        sleep 0.25
+      done
+      kill -9 "$old" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$pf"
 }
 
 demo_compose() {
@@ -163,7 +214,8 @@ Grafana is ready for manual inspection (live Astronomy Shop traffic).
   Dashboards:  Astronomy Shop → GOLD overview + per-service boards
                Softprobe PromQL → capability smoke boards
                thelake ops → self-monitoring (datasource Softprobe Prometheus · ops)
-  Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY; ops: local-ops-key → thelake-ops)
+  Softprobe:   query $SOFTPROBE_URL_HOST + ingest ${SOFTPROBE_INGEST_URL:-http://127.0.0.1:8091}
+               (Bearer $API_KEY; ops: local-ops-key → thelake-ops)
   Ingest:      flush_interval_seconds=$flush_shown  (0=flush-through; >0=coalesce; from live config when present)
   DuckLake:    Postgres 19 catalog on $PG_HOST:$PG_PORT (schema $PG_SCHEMA)
   Parquet:     $STATE_DIR/data/
@@ -400,8 +452,12 @@ except Exception:
   echo "already up but Prom series are flat (changes=${live_changes:-0}); rebuilding stack for live ingest."
 fi
 
-if port_busy 8090 && ! our_softprobe_running; then
-  echo "ERROR: :8090 is in use by another process. Stop it or make grafana-down first." >&2
+if port_busy "$QUERY_PORT" && ! our_softprobe_running; then
+  echo "ERROR: :$QUERY_PORT is in use by another process. Stop it or make grafana-down first." >&2
+  exit 1
+fi
+if port_busy "$INGEST_PORT" && ! our_softprobe_running; then
+  echo "ERROR: :$INGEST_PORT is in use by another process. Stop it or make grafana-down first." >&2
   exit 1
 fi
 if port_busy 3000 && ! curl -sf -o /dev/null -u admin:admin http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
@@ -416,21 +472,9 @@ if port_busy 8080; then
   echo "WARN: :8080 busy — Astronomy Shop UI may fail to bind (ENVOY_PORT). Softprobe ingest can still work." >&2
 fi
 
-if [[ -f "$PID_FILE" ]]; then
-  old="$(cat "$PID_FILE" 2>/dev/null || true)"
-  if [[ -n "${old:-}" ]] && kill -0 "$old" 2>/dev/null; then
-    cmd="$(ps -p "$old" -o args= 2>/dev/null || true)"
-    if [[ "$cmd" == *softprobe-runtime* ]]; then
-      kill "$old" 2>/dev/null || true
-      for _ in $(seq 1 20); do
-        kill -0 "$old" 2>/dev/null || break
-        sleep 0.25
-      done
-      kill -9 "$old" 2>/dev/null || true
-    fi
-  fi
-  rm -f "$PID_FILE"
-fi
+kill_softprobe_pidfile "$WRITE_PID_FILE"
+kill_softprobe_pidfile "$READ_PID_FILE"
+kill_softprobe_pidfile "$PID_FILE"
 
 reset_grafana_state() {
   THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" $COMPOSE -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
@@ -631,33 +675,47 @@ case "$(uname -s)" in
   *) export LD_LIBRARY_PATH="${DUCKDB_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
 esac
 
-echo "==> starting Softprobe on :8090"
+echo "==> starting Softprobe dual-process (query :$QUERY_PORT, ingest :$INGEST_PORT)"
 export CONFIG_FILE="$CONFIG"
 export SOFTPROBE_AUTH_URL="$AUTH_URL"
 export SOFTPROBE_ADMIN_API_KEY="$ADMIN_API_KEY"
 export SOFTPROBE_GRPC_DISABLE=1
 export RUST_LOG="${RUST_LOG:-info}"
 : >"$LOG"
+: >"$WRITE_LOG"
+: >"$READ_LOG"
 # Detach from the launcher process group so Softprobe survives when Make/CI
 # shells exit (Cursor agent shells tear down the whole tree otherwise).
 # Linux: setsid. Darwin: double-fork + setsid-equivalent via perl.
 start_softprobe_detached() {
+  local role="$1"
+  local listen="$2"
+  local logf="$3"
+  local pidf="$4"
   local -a run_cmd=()
   if [[ -n "$CPU_AFFINITY" ]] && command -v taskset >/dev/null 2>&1; then
     run_cmd=(taskset -c "$CPU_AFFINITY")
-    echo "==> Softprobe CPU affinity: $CPU_AFFINITY (THELAKE_CPU_AFFINITY)"
+    echo "==> Softprobe ($role) CPU affinity: $CPU_AFFINITY (THELAKE_CPU_AFFINITY)"
   fi
+  run_cmd+=(env
+    "CONFIG_FILE=$CONFIG"
+    "SOFTPROBE_AUTH_URL=$AUTH_URL"
+    "SOFTPROBE_ADMIN_API_KEY=$ADMIN_API_KEY"
+    "SOFTPROBE_GRPC_DISABLE=1"
+    "SOFTPROBE_HTTP_ROLE=$role"
+    "SOFTPROBE_LISTEN_ADDR=$listen"
+    "RUST_LOG=${RUST_LOG:-info}"
+  )
   run_cmd+=("$RUNTIME_BIN")
   if command -v setsid >/dev/null 2>&1; then
-    setsid "${run_cmd[@]}" >>"$LOG" 2>&1 &
-    echo $! >"$PID_FILE"
+    setsid "${run_cmd[@]}" >>"$logf" 2>&1 &
+    echo $! >"$pidf"
     return
   fi
   # macOS: no setsid; perl double-fork orphans the runtime from Make/agent shells.
-  # Affinity pin is Linux-only (taskset); Darwin runs without it.
   perl -e '
     use strict; use warnings;
-    my ($bin, $log, $pidfile) = @ARGV;
+    my ($bin, $log, $pidfile, @env) = @ARGV;
     exit 0 if fork;
     require POSIX; POSIX::setsid();
     exit 0 if fork;
@@ -665,13 +723,21 @@ start_softprobe_detached() {
     open STDOUT, ">>", $log or die $!;
     open STDERR, ">&STDOUT";
     open STDIN, "<", "/dev/null";
+    %ENV = (%ENV, map { split /=/, $_, 2 } @env);
     exec $bin or die $!;
-  ' "$RUNTIME_BIN" "$LOG" "$PID_FILE"
+  ' "$RUNTIME_BIN" "$logf" "$pidf" \
+    "CONFIG_FILE=$CONFIG" \
+    "SOFTPROBE_AUTH_URL=$AUTH_URL" \
+    "SOFTPROBE_ADMIN_API_KEY=$ADMIN_API_KEY" \
+    "SOFTPROBE_GRPC_DISABLE=1" \
+    "SOFTPROBE_HTTP_ROLE=$role" \
+    "SOFTPROBE_LISTEN_ADDR=$listen" \
+    "RUST_LOG=${RUST_LOG:-info}"
   local ok=0
   for _ in $(seq 1 40); do
-    if [[ -f "$PID_FILE" ]]; then
+    if [[ -f "$pidf" ]]; then
       local pid
-      pid="$(tr -d "[:space:]" <"$PID_FILE" || true)"
+      pid="$(tr -d "[:space:]" <"$pidf" || true)"
       if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
         ok=1
         break
@@ -680,31 +746,40 @@ start_softprobe_detached() {
     sleep 0.25
   done
   if [[ "$ok" != 1 ]]; then
-    echo "ERROR: Softprobe did not appear after detach start" >&2
-    tail -40 "$LOG" >&2 || true
+    echo "ERROR: Softprobe ($role) did not appear after detach start" >&2
+    tail -40 "$logf" >&2 || true
     exit 1
   fi
 }
-start_softprobe_detached
+# Ingest first so tenant provisioning + OTLP have a writer before query warms.
+start_softprobe_detached ingest "0.0.0.0:${INGEST_PORT}" "$WRITE_LOG" "$WRITE_PID_FILE"
+start_softprobe_detached query "0.0.0.0:${QUERY_PORT}" "$READ_LOG" "$READ_PID_FILE"
+# Legacy pid file tracks the query process (Grafana :8090) for older helpers.
+cp -f "$READ_PID_FILE" "$PID_FILE"
+# Combined log pointer for operators.
+: >"$LOG"
+printf 'write=%s read=%s\n' "$(cat "$WRITE_PID_FILE")" "$(cat "$READ_PID_FILE")" >>"$LOG"
 disown || true
 
-echo "==> waiting for Softprobe /ready"
+echo "==> waiting for Softprobe query /ready (:$QUERY_PORT) and ingest /ready (:$INGEST_PORT)"
 ok=0
 # TWCS open-day catch-up on preserved demo data can block /ready past 30s.
 for _ in $(seq 1 180); do
-  if curl -sf "$SOFTPROBE_URL_HOST/ready" >/dev/null 2>&1; then
+  if curl -sf "$SOFTPROBE_URL_HOST/ready" >/dev/null 2>&1 \
+    && curl -sf "$SOFTPROBE_INGEST_URL/ready" >/dev/null 2>&1; then
     ok=1
     break
   fi
   sleep 1
 done
 if [[ "$ok" != 1 ]]; then
-  echo "ERROR: Softprobe did not become ready; log: $LOG" >&2
-  tail -40 "$LOG" >&2 || true
+  echo "ERROR: Softprobe dual-process did not become ready; logs: $WRITE_LOG $READ_LOG" >&2
+  tail -40 "$WRITE_LOG" >&2 || true
+  tail -40 "$READ_LOG" >&2 || true
   exit 1
 fi
 
-echo "==> provisioning tenant $TENANT_ID (Postgres catalog)"
+echo "==> provisioning tenant $TENANT_ID (Postgres catalog) via ingest :$INGEST_PORT"
 tenant_payload="$(TENANT_ID="$TENANT_ID" TENANT_SCHEMA="$TENANT_SCHEMA" TENANT_DATA_PATH="$STATE_DIR/data/$TENANT_ID/" python3 - <<'PY'
 import json, os
 print(json.dumps({
@@ -718,7 +793,7 @@ print(json.dumps({
 PY
 )"
 tenant_http="$(curl -sS -o /tmp/thelake-grafana-tenant-provision.json -w '%{http_code}' \
-  -X POST "$SOFTPROBE_URL_HOST/v1/tenants" \
+  -X POST "$SOFTPROBE_INGEST_URL/v1/tenants" \
   -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$tenant_payload" || true)"
@@ -739,7 +814,7 @@ fi
 # Prefer typed hot columns for Prom/Grafana selectors before demo traffic.
 # shellcheck source=scripts/lib/apply-prom-hot-labels.sh
 source "$ROOT/scripts/lib/apply-prom-hot-labels.sh"
-apply_prom_hot_labels "$SOFTPROBE_URL_HOST" "$API_KEY"
+apply_prom_hot_labels "$SOFTPROBE_INGEST_URL" "$API_KEY"
 
 echo "==> waiting for Grafana"
 graf_ok=0

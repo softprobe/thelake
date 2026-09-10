@@ -18,6 +18,7 @@ use crate::compat::prometheus::prometheus_routes;
 use crate::compat::stubs::compat_stub_routes;
 use crate::compat::tempo::tempo_routes;
 use crate::config::Config;
+use crate::http_role::HttpRole;
 use crate::ingest_engine::IngestPipeline;
 use crate::query::{self as query_engine, QueryEngine};
 use crate::runtime_engine::DuckLakeScopeResolver;
@@ -102,10 +103,22 @@ impl AppPipeline {
 /// HTTP router + [`AppState`]. Per-tenant DuckLake/query engines are created
 /// lazily on first request via [`RuntimeEngineManager`] — callers must not
 /// pre-build an unused [`AppPipeline`] just to satisfy this API.
+///
+/// `role` gates OTLP vs Prom/Loki/Tempo (and related read APIs) so demo can run
+/// dedicated ingest and query processes against one DuckLake catalog.
 pub async fn create_router(
     config: Arc<Config>,
     traces: MethodRouter<AppState>,
     control_plane: Option<ControlPlaneRuntime>,
+) -> anyhow::Result<(Router, AppState)> {
+    create_router_with_role(config, traces, control_plane, HttpRole::from_env()).await
+}
+
+pub async fn create_router_with_role(
+    config: Arc<Config>,
+    traces: MethodRouter<AppState>,
+    control_plane: Option<ControlPlaneRuntime>,
+    role: HttpRole,
 ) -> anyhow::Result<(Router, AppState)> {
     let scope_registry = DuckLakeScopeResolver::connect(config.as_ref()).await?;
     let runtime_engine_manager = Arc::new(RuntimeEngineManager::new(
@@ -117,60 +130,72 @@ pub async fn create_router(
         engines: runtime_engine_manager,
     };
 
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/health", get(health::health_check))
         .route("/ready", get(health::ready_check))
         .route("/openapi.json", get(openapi_spec))
-        .route("/swagger", get(swagger_ui))
-        .route("/v1/traces", traces)
-        .route("/v1/logs", post(ingestion::logs::ingest_logs))
-        .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
-        .route("/v1/llm/scores", post(llm::create_score))
-        .route(
-            "/v1/llm/score-configs",
-            get(llm::list_score_configs).post(llm::create_score_config),
-        )
-        .route(
-            "/v1/llm/observations/search",
-            post(llm::query::search_observations),
-        )
-        .route(
-            "/v1/llm/observations/{span_id}",
-            get(llm::query::get_observation),
-        )
-        .route("/v1/llm/traces/{trace_id}", get(llm::query::get_trace))
-        .route("/v1/llm/sessions/search", post(llm::query::search_sessions))
-        .route(
-            "/v1/llm/sessions/{session_id}",
-            get(llm::query::get_session),
-        )
-        .route(
-            "/v1/llm/sessions/{session_id}/recording",
-            get(llm::query::get_session_recording),
-        )
-        .route("/v1/query/sql", post(query::execute_sql))
-        .route("/v1/telemetry/search", post(telemetry::search))
-        .route("/v1/telemetry/details", post(telemetry::details_post))
-        .route("/v1/telemetry/fields", get(telemetry::fields))
-        .route(
-            "/v1/telemetry/fields/{field}/values",
-            get(telemetry::field_values),
-        )
-        .route(
-            "/v1/telemetry/sessions/{session_id}",
-            get(telemetry::session_details),
-        )
-        .route(
-            "/v1/telemetry/traces/{trace_id}",
-            get(telemetry::trace_details),
-        )
-        .merge(prometheus_routes())
-        .merge(loki_routes())
-        .merge(tempo_routes())
-        .merge(compat_stub_routes())
-        .with_state(state.clone());
+        .route("/swagger", get(swagger_ui));
 
-    Ok((router, state))
+    if role.serves_ingest() {
+        router = router
+            .route("/v1/traces", traces)
+            .route("/v1/logs", post(ingestion::logs::ingest_logs))
+            .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
+            .route("/v1/llm/scores", post(llm::create_score))
+            .route(
+                "/v1/llm/score-configs",
+                get(llm::list_score_configs).post(llm::create_score_config),
+            );
+    }
+
+    if role.serves_query() {
+        router = router
+            .route(
+                "/v1/llm/observations/search",
+                post(llm::query::search_observations),
+            )
+            .route(
+                "/v1/llm/observations/{span_id}",
+                get(llm::query::get_observation),
+            )
+            .route("/v1/llm/traces/{trace_id}", get(llm::query::get_trace))
+            .route("/v1/llm/sessions/search", post(llm::query::search_sessions))
+            .route(
+                "/v1/llm/sessions/{session_id}",
+                get(llm::query::get_session),
+            )
+            .route(
+                "/v1/llm/sessions/{session_id}/recording",
+                get(llm::query::get_session_recording),
+            )
+            .route("/v1/query/sql", post(query::execute_sql))
+            .route("/v1/telemetry/search", post(telemetry::search))
+            .route("/v1/telemetry/details", post(telemetry::details_post))
+            .route("/v1/telemetry/fields", get(telemetry::fields))
+            .route(
+                "/v1/telemetry/fields/{field}/values",
+                get(telemetry::field_values),
+            )
+            .route(
+                "/v1/telemetry/sessions/{session_id}",
+                get(telemetry::session_details),
+            )
+            .route(
+                "/v1/telemetry/traces/{trace_id}",
+                get(telemetry::trace_details),
+            )
+            .merge(prometheus_routes())
+            .merge(loki_routes())
+            .merge(tempo_routes())
+            .merge(compat_stub_routes());
+    }
+
+    // Score-config GET is useful on query; POST stays ingest-only above.
+    if role == HttpRole::Query {
+        router = router.route("/v1/llm/score-configs", get(llm::list_score_configs));
+    }
+
+    Ok((router.with_state(state.clone()), state))
 }
 
 async fn openapi_spec() -> Json<serde_json::Value> {
