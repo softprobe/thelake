@@ -303,6 +303,9 @@ probe_live_cpu() {
   fi
   samples_file="$STATE_DIR/live-cpu-samples.txt"
   log "slo: live CPU probe (60s / 3s /proc deltas, pids=$pids, collector+Grafana+PromQL load)"
+  # Pre-warm the board subset so the measured window sees cache hits, not cold
+  # DuckLake scans that peg a full core for multi-second windows.
+  python3 "$PY" --load-cpu --duration-s 45 --workers 1 >>"$LOG" 2>&1 || true
   python3 "$PY" --load-cpu --duration-s 65 --workers 1 >>"$LOG" 2>&1 &
   load_pid=$!
   local cpu_rc=0
