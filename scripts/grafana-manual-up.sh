@@ -11,9 +11,9 @@
 #   Levers (defaults below):
 # Soft coalesce flush_interval_seconds=60 (fewer parquet commits)
 #     - DuckDB threads=1 per connection at create time (attach.rs)
-#     - query.max_connections=1 on both roles (DuckDB threads=1); dedicated
-#       write (:8091) + read (:8090) processes so ingest/query may overlap
-#       without sharing one process's CPU budget
+#     - query.max_connections=4 on the read process (DuckDB threads=1 each);
+#       write process forced to 1; dedicated write (:8091) + read (:8090) so
+#       ingest/query may overlap without sharing one process CPU budget
 #     - writer_pool_size=1 (serialize DuckLake commits)
 #     - self_monitoring on (inventory reuses query workers; interval ≥180s)
 #     - otelcol-config-extras.yml: full metrics + app logs + traces; batch pacing
