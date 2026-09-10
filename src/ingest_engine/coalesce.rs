@@ -38,7 +38,7 @@ const EAGER_PENDING_BATCHES: usize = 96;
 const MAX_PENDING_BATCHES: usize = 256;
 /// After a capped timer drain with backlog remaining, wait this long before the
 /// next chunk (not a tight loop, not a full coalesce interval).
-const OVERFLOW_REARM: Duration = Duration::from_secs(5);
+const OVERFLOW_REARM: Duration = Duration::from_secs(2);
 
 struct State<T> {
     pending: VecDeque<Vec<T>>,
@@ -574,7 +574,7 @@ mod tests {
 
         // Unblock enough writes to drain and finish the filler.
         release.add_permits(MAX_PENDING_BATCHES + 16);
-        tokio::time::timeout(Duration::from_secs(5), filler)
+        tokio::time::timeout(Duration::from_secs(2), filler)
             .await
             .expect("backpressured enqueue did not complete")
             .unwrap();
