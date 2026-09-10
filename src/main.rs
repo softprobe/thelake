@@ -39,7 +39,14 @@ fn main() -> anyhow::Result<()> {
         // Blocking pool must be >1: inventory/export and DuckLake writes all use
         // spawn_blocking. With max_blocking_threads=1, a long inventory attach
         // deadlocks OTLP /v1/metrics (idle CPU, collector timeouts).
-        let blocking = n.max(4);
+        // Ingest-only processes keep the pool small (2) so write+maintenance
+        // cannot fan out past ~one core each; all-in-one keeps ≥4.
+        let role = softprobe_runtime::http_role::HttpRole::from_env();
+        let blocking = if role == softprobe_runtime::http_role::HttpRole::Ingest {
+            n.max(2)
+        } else {
+            n.max(4)
+        };
         info!("Tokio worker_threads={n} max_blocking_threads={blocking}");
         builder.worker_threads(n);
         builder.max_blocking_threads(blocking);

@@ -448,7 +448,9 @@ fi
 
 # Short isolated PromQL measure (warmup + cache hits). Recover full ingest after;
 # Softprobe bounce is last-resort only.
+if [[ ! -s "$FAILS" ]]; then
 trap 'restart_collector; unpause_grafana' EXIT
+
 if docker inspect -f '{{.State.Status}}' thelake-grafana-manual 2>/dev/null | grep -qx running; then
   if docker pause thelake-grafana-manual >/dev/null 2>&1; then
     grafana_paused=1
@@ -534,6 +536,7 @@ fi
 check_ops_tenant
 check_loki_labels
 trap - EXIT
+fi
 
 # --- 4. tests green (committed tree only; cache by HEAD) ---
 if [[ -n "$dirty" ]]; then
