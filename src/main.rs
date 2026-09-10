@@ -39,10 +39,15 @@ fn main() -> anyhow::Result<()> {
         // Blocking pool must be >1: inventory/export and DuckLake writes all use
         // spawn_blocking. With max_blocking_threads=1, a long inventory attach
         // deadlocks OTLP /v1/metrics (idle CPU, collector timeouts).
-        // Ingest-only processes keep the pool small (2) so write+maintenance
-        // cannot fan out past ~one core each; all-in-one keeps ≥4.
+        // Dedicated ingest/query demo processes keep the pool small (2) so a
+        // single DuckDB connection plus one helper cannot fan out past ~one
+        // core; all-in-one keeps ≥4 for inventory+write headroom.
         let role = softprobe_runtime::http_role::HttpRole::from_env();
-        let blocking = if role == softprobe_runtime::http_role::HttpRole::Ingest {
+        let blocking = if matches!(
+            role,
+            softprobe_runtime::http_role::HttpRole::Ingest
+                | softprobe_runtime::http_role::HttpRole::Query
+        ) {
             n.max(2)
         } else {
             n.max(4)
