@@ -496,6 +496,9 @@ fi
 check_ops_tenant
 check_loki_labels
 
+# One DuckDB worker for the live CPU budget; PromQL measure scales up after.
+scale_query_workers 1 || log "slo: query scale to 1 skipped (non-dual stack?)"
+
 # CPU budget under concurrent full stack (must not depend on pausing Grafana).
 if ! probe_live_cpu; then
   fail "Softprobe live-stack CPU budget failed (need each Softprobe process 60s avg<100 and p95<100 with collector+Grafana online)"
@@ -504,6 +507,8 @@ fi
 # Short isolated PromQL measure (warmup + cache hits). Recover full ingest after;
 # Softprobe bounce is last-resort only.
 if [[ ! -s "$FAILS" ]]; then
+# Two query workers for parallel warmup/measure (collector+Grafana paused).
+scale_query_workers 2 || log "slo: query scale to 2 skipped"
 trap 'restart_collector; unpause_grafana' EXIT
 
 if docker inspect -f '{{.State.Status}}' thelake-grafana-manual 2>/dev/null | grep -qx running; then
