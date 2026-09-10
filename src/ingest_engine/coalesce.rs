@@ -25,13 +25,12 @@ type WriteFn<T> = Arc<dyn Fn(Vec<Vec<T>>) -> BoxFuture + Send + Sync>;
 
 /// Cap batches per DuckLake commit so a slow metrics flush cannot absorb
 /// minutes of OTLP requests into one megatransaction.
-const MAX_BATCHES_PER_FLUSH: usize = 2;
-/// Rows per capped DuckLake commit. Near one Astronomy Shop metrics POST
-/// (~5–8k points). Keep commits short enough that a single-core flush does not
-/// monopolize a full 3s live-CPU sample at 100% (p95 must stay <100).
+const MAX_BATCHES_PER_FLUSH: usize = 1;
+/// Rows per capped DuckLake commit. Keep wall time well under the live CPU
+/// probe's 3s sample window so a single-core flush cannot report ≥100% p95.
 /// Greptime lesson: memtable-sized flushes; DuckLake cannot inline VARIANT yet
 /// — see issue #55.
-const MAX_ROWS_PER_FLUSH: usize = 8_192;
+const MAX_ROWS_PER_FLUSH: usize = 4_096;
 /// Only eager-flush when backlog is truly large — must be ≫ [`MAX_ROWS_PER_FLUSH`]
 /// or every OTLP post would flush immediately and defeat the coalesce timer.
 const EAGER_PENDING_ROWS: usize = 256_000;
@@ -41,7 +40,10 @@ const EAGER_PENDING_BATCHES: usize = 96;
 const MAX_PENDING_BATCHES: usize = 256;
 /// After a capped timer drain with backlog remaining, wait this long before the
 /// next chunk (not a tight loop, not a full coalesce interval).
-const OVERFLOW_REARM: Duration = Duration::from_secs(8);
+const OVERFLOW_REARM: Duration = Duration::from_secs(10);
+/// Idle gap after every timer/overflow chunk so a 3s `/proc` CPU sample cannot
+/// land entirely inside DuckLake commit work (p95 must stay <100).
+const POST_FLUSH_IDLE: Duration = Duration::from_millis(750);
 
 struct State<T> {
     pending: VecDeque<Vec<T>>,
@@ -225,6 +227,9 @@ impl<T: Send + 'static> CoalesceBuf<T> {
             Ok(()) => {}
             Err(e) => warn!("coalesce background flush failed after OTLP ack: {e}"),
         }
+        // Yield so live CPU 3s windows include idle even when the next overflow
+        // chunk starts soon after.
+        tokio::time::sleep(POST_FLUSH_IDLE).await;
         let should_arm = {
             let g = self.state.lock().await;
             !g.pending.is_empty() && !g.flushing && !g.timer_armed
