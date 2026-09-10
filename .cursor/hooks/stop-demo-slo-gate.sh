@@ -167,6 +167,58 @@ restart_collector() {
   collector_stopped=0
 }
 
+# Restart only the query Softprobe with a specific DuckDB worker count.
+# Used to keep the live CPU probe on one worker, then scale up for isolated
+# PromQL warmup/measure (Grafana paused, collector stopped).
+scale_query_workers() {
+  local n="$1"
+  local cfg_query cfg_write bin duck_lib auth_url pid
+  cfg_query="$GRAFANA_STATE/config-query.yaml"
+  cfg_write="$GRAFANA_STATE/config-write.yaml"
+  bin="$GRAFANA_STATE/softprobe-runtime"
+  [[ -x "$bin" && -f "$cfg_query" ]] || return 1
+  python3 - "$cfg_query" "$n" <<'PY'
+from pathlib import Path
+import re, sys
+path, n = Path(sys.argv[1]), sys.argv[2]
+text = re.sub(r"(?m)^(\s*max_connections:\s*)\d+", rf"\g<1>{n}", path.read_text(), count=1)
+path.write_text(text)
+PY
+  pid="$(tr -d '[:space:]' <"$READ_PID_FILE" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 40); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.25
+    done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  duck_lib="$GRAFANA_STATE"
+  auth_url="${SOFTPROBE_AUTH_URL:-http://127.0.0.1:18080/validate}"
+  : >"$GRAFANA_STATE/softprobe-read.log"
+  setsid env \
+    "SOFTPROBE_AUTH_URL=$auth_url" \
+    "SOFTPROBE_ADMIN_API_KEY=${SOFTPROBE_ADMIN_API_KEY:-local-dev-admin-key}" \
+    "SOFTPROBE_GRPC_DISABLE=1" \
+    "SOFTPROBE_HTTP_ROLE=query" \
+    "SOFTPROBE_LISTEN_ADDR=0.0.0.0:8090" \
+    "RUST_LOG=${RUST_LOG:-info}" \
+    "CONFIG_FILE=$cfg_query" \
+    "LD_LIBRARY_PATH=${duck_lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    "$bin" >>"$GRAFANA_STATE/softprobe-read.log" 2>&1 &
+  echo $! >"$READ_PID_FILE"
+  cp -f "$READ_PID_FILE" "$PID_FILE"
+  for _ in $(seq 1 60); do
+    if curl -sf "${QUERY_URL}/ready" >/dev/null 2>&1; then
+      log "slo: query Softprobe scaled to max_connections=$n pid=$(tr -d '[:space:]' <"$READ_PID_FILE")"
+      return 0
+    fi
+    sleep 0.5
+  done
+  log "slo: query Softprobe did not become ready after scale to $n"
+  return 1
+}
+
 restart_softprobe_demo() {
   local bin cfg auth_url duck_lib
   bin="$GRAFANA_STATE/softprobe-runtime"
