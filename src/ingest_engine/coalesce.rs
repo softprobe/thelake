@@ -15,7 +15,6 @@ use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{oneshot, Mutex};
@@ -29,7 +28,7 @@ type WriteFn<T> = Arc<dyn Fn(Vec<Vec<T>>) -> BoxFuture + Send + Sync>;
 const MAX_BATCHES_PER_FLUSH: usize = 8;
 /// Rows per capped DuckLake commit (chunk size). Keep near one collector post
 /// so each write stays short; timer overflow re-arms via [`OVERFLOW_REARM`].
-const MAX_ROWS_PER_FLUSH: usize = 8_192;
+const MAX_ROWS_PER_FLUSH: usize = 4_096;
 /// Only eager-flush when backlog is truly large — must be ≫ [`MAX_ROWS_PER_FLUSH`]
 /// or every OTLP post would flush immediately and defeat the coalesce timer.
 const EAGER_PENDING_ROWS: usize = 256_000;
@@ -267,18 +266,9 @@ impl<T: Send + 'static> CoalesceBuf<T> {
             batches
         };
 
-        // Prefer not to overlap DuckLake commits with busy PromQL workers —
-        // concurrent writer+query on separate DuckDB connections doubles core
-        // use without helping latency (query already waits on the write lock
-        // for catalog visibility). Brief wait for an idle gap, then commit.
-        for _ in 0..40 {
-            if crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY.load(Ordering::Relaxed) == 0
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
+        // DuckDB max_connections=1 already serializes writer vs query. Waiting
+        // here under Grafana load just grew coalesce backlog and produced
+        // longer full-core commits once the wait timed out (p95≈100%).
         let result = (self.write)(batches).await;
 
         let waiters = {
