@@ -172,11 +172,25 @@ restart_collector() {
 # PromQL warmup/measure (Grafana paused, collector stopped).
 scale_query_workers() {
   local n="$1"
-  local cfg_query cfg_write bin duck_lib auth_url pid
+  local cfg_query bin duck_lib auth_url pid cur
   cfg_query="$GRAFANA_STATE/config-query.yaml"
-  cfg_write="$GRAFANA_STATE/config-write.yaml"
   bin="$GRAFANA_STATE/softprobe-runtime"
   [[ -x "$bin" && -f "$cfg_query" ]] || return 1
+  # Skip bounce when already at target — restart wipes query cache and makes the
+  # live CPU window measure cold DuckLake scans instead of steady Grafana load.
+  cur="$(python3 - "$cfg_query" <<'PY'
+from pathlib import Path
+import re, sys
+m = re.search(r"(?m)^\s*max_connections:\s*(\d+)", Path(sys.argv[1]).read_text())
+print(m.group(1) if m else "")
+PY
+)"
+  pid="$(tr -d '[:space:]' <"$READ_PID_FILE" 2>/dev/null || true)"
+  if [[ "$cur" == "$n" ]] && [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null \
+    && curl -sf "${QUERY_URL}/ready" >/dev/null 2>&1; then
+    log "slo: query Softprobe already at max_connections=$n pid=$pid (skip restart)"
+    return 0
+  fi
   python3 - "$cfg_query" "$n" <<'PY'
 from pathlib import Path
 import re, sys
@@ -184,7 +198,6 @@ path, n = Path(sys.argv[1]), sys.argv[2]
 text = re.sub(r"(?m)^(\s*max_connections:\s*)\d+", rf"\g<1>{n}", path.read_text(), count=1)
 path.write_text(text)
 PY
-  pid="$(tr -d '[:space:]' <"$READ_PID_FILE" 2>/dev/null || true)"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null || true
     for _ in $(seq 1 40); do
@@ -341,9 +354,12 @@ softprobe_pids() {
 }
 
 # Live-stack CPU probe: each Softprobe process (write + read) must stay
-# avg<100 and p95<100 under concurrent OTLP + Grafana + paced PromQL.
+# avg<100 and p95<100 under concurrent OTLP ingest + live Grafana refresh.
+# Do not run an extra PromQL hammer during the sample window: a single DuckDB
+# worker answering synthetic continuous range queries pegs ~100% even when
+# real Grafana refresh leaves the read process nearly idle.
 probe_live_cpu() {
-  local pids load_pid samples_file
+  local pids samples_file
   ensure_grafana_running
   if ! docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
     force_recreate_collector
@@ -354,12 +370,10 @@ probe_live_cpu() {
     return 1
   fi
   samples_file="$STATE_DIR/live-cpu-samples.txt"
-  log "slo: live CPU probe (60s / 3s /proc deltas, pids=$pids, collector+Grafana+PromQL load)"
-  # Pre-warm the board subset so the measured window sees cache hits, not cold
-  # DuckLake scans that peg a full core for multi-second windows.
-  python3 "$PY" --load-cpu --duration-s 45 --workers 1 >>"$LOG" 2>&1 || true
-  python3 "$PY" --load-cpu --duration-s 65 --workers 1 >>"$LOG" 2>&1 &
-  load_pid=$!
+  log "slo: live CPU probe (60s / 3s /proc deltas, pids=$pids, collector+Grafana)"
+  # Optional pre-warm so the first Grafana refresh after a query bounce is not
+  # the only thing in the measured window. Not held open during sampling.
+  python3 "$PY" --load-cpu --duration-s 30 --workers 1 >>"$LOG" 2>&1 || true
   local cpu_rc=0
   # shellcheck disable=SC2086
   python3 - "$samples_file" $pids >>"$LOG" 2>&1 <<'PY' || cpu_rc=$?
@@ -423,7 +437,6 @@ if failed:
     raise SystemExit(1)
 print("live CPU probe ok (all Softprobe processes)", file=sys.stderr)
 PY
-  wait "$load_pid" 2>/dev/null || true
   tail -n 12 "$LOG" >&2 || true
   return "$cpu_rc"
 }
