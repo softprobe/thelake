@@ -25,13 +25,13 @@ type WriteFn<T> = Arc<dyn Fn(Vec<Vec<T>>) -> BoxFuture + Send + Sync>;
 
 /// Cap batches per DuckLake commit so a slow metrics flush cannot absorb
 /// minutes of OTLP requests into one megatransaction.
-const MAX_BATCHES_PER_FLUSH: usize = 2;
-/// Rows per capped DuckLake commit. Size near one Astronomy Shop metrics POST
-/// so drain rate stays ahead of collector ingest; CPU gate keeps decode from
-/// stacking on the blocking write (live p95<100).
+const MAX_BATCHES_PER_FLUSH: usize = 1;
+/// Rows per capped DuckLake commit. One collector POST (~8k) may split across
+/// two chunks; keep each commit short so a 3s live-CPU sample stays <100% on
+/// one core. OVERFLOW_REARM stays low so drain still beats Astronomy Shop.
 /// Greptime lesson: memtable-sized flushes; DuckLake cannot inline VARIANT yet
 /// — see issue #55.
-const MAX_ROWS_PER_FLUSH: usize = 8_192;
+const MAX_ROWS_PER_FLUSH: usize = 4_096;
 /// Only eager-flush when backlog is truly large — must be ≫ [`MAX_ROWS_PER_FLUSH`]
 /// or every OTLP post would flush immediately and defeat the coalesce timer.
 const EAGER_PENDING_ROWS: usize = 256_000;
@@ -40,10 +40,10 @@ const EAGER_PENDING_BATCHES: usize = 96;
 /// Hard queue depth — enqueue waits (OTLP backpressure) instead of growing forever.
 const MAX_PENDING_BATCHES: usize = 256;
 /// After a capped timer drain with backlog remaining, wait this long before the
-/// next chunk. Keep short enough that drain ≥ Astronomy Shop ingest rate.
-const OVERFLOW_REARM: Duration = Duration::from_secs(2);
-/// Brief idle after each timer chunk so a 3s `/proc` sample is not 100% commit.
-const POST_FLUSH_IDLE: Duration = Duration::from_millis(250);
+/// next chunk. ~1s keeps drain ≥ collector while leaving idle in 3s CPU windows.
+const OVERFLOW_REARM: Duration = Duration::from_secs(1);
+/// Idle after each timer chunk (gate released) so `/proc` 3s samples mix idle.
+const POST_FLUSH_IDLE: Duration = Duration::from_millis(500);
 
 struct State<T> {
     pending: VecDeque<Vec<T>>,
@@ -411,9 +411,9 @@ mod tests {
         buf.enqueue(vec![1]).await.unwrap();
         buf.enqueue(vec![2, 3]).await.unwrap();
         buf.force_flush().await.unwrap();
-        // Two enqueued batches fit in one drain when MAX_BATCHES_PER_FLUSH ≥ 2.
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(*rows.lock().await, vec![3]);
+        // MAX_BATCHES_PER_FLUSH == 1 → one write per enqueued batch.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(*rows.lock().await, vec![1, 2]);
     }
 
     #[tokio::test]
