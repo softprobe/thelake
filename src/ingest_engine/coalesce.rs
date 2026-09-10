@@ -25,12 +25,13 @@ type WriteFn<T> = Arc<dyn Fn(Vec<Vec<T>>) -> BoxFuture + Send + Sync>;
 
 /// Cap batches per DuckLake commit so a slow metrics flush cannot absorb
 /// minutes of OTLP requests into one megatransaction.
-const MAX_BATCHES_PER_FLUSH: usize = 1;
-/// Rows per capped DuckLake commit. Keep wall time well under the live CPU
-/// probe's 3s sample window so a single-core flush cannot report ≥100% p95.
+const MAX_BATCHES_PER_FLUSH: usize = 2;
+/// Rows per capped DuckLake commit. Size near one Astronomy Shop metrics POST
+/// so drain rate stays ahead of collector ingest; CPU gate keeps decode from
+/// stacking on the blocking write (live p95<100).
 /// Greptime lesson: memtable-sized flushes; DuckLake cannot inline VARIANT yet
 /// — see issue #55.
-const MAX_ROWS_PER_FLUSH: usize = 4_096;
+const MAX_ROWS_PER_FLUSH: usize = 8_192;
 /// Only eager-flush when backlog is truly large — must be ≫ [`MAX_ROWS_PER_FLUSH`]
 /// or every OTLP post would flush immediately and defeat the coalesce timer.
 const EAGER_PENDING_ROWS: usize = 256_000;
@@ -39,11 +40,10 @@ const EAGER_PENDING_BATCHES: usize = 96;
 /// Hard queue depth — enqueue waits (OTLP backpressure) instead of growing forever.
 const MAX_PENDING_BATCHES: usize = 256;
 /// After a capped timer drain with backlog remaining, wait this long before the
-/// next chunk (not a tight loop, not a full coalesce interval).
-const OVERFLOW_REARM: Duration = Duration::from_secs(10);
-/// Idle gap after every timer/overflow chunk so a 3s `/proc` CPU sample cannot
-/// land entirely inside DuckLake commit work (p95 must stay <100).
-const POST_FLUSH_IDLE: Duration = Duration::from_millis(750);
+/// next chunk. Keep short enough that drain ≥ Astronomy Shop ingest rate.
+const OVERFLOW_REARM: Duration = Duration::from_secs(2);
+/// Brief idle after each timer chunk so a 3s `/proc` sample is not 100% commit.
+const POST_FLUSH_IDLE: Duration = Duration::from_millis(250);
 
 struct State<T> {
     pending: VecDeque<Vec<T>>,
@@ -404,13 +404,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_enqueues_one_write_after_force_flush() {
+    async fn two_enqueues_force_flush_respects_batch_cap() {
         let calls = StdArc::new(AtomicUsize::new(0));
         let rows = StdArc::new(TokioMutex::new(Vec::new()));
         let buf = CoalesceBuf::new(60, counting_writer(calls.clone(), rows.clone(), false));
         buf.enqueue(vec![1]).await.unwrap();
         buf.enqueue(vec![2, 3]).await.unwrap();
         buf.force_flush().await.unwrap();
+        // Two enqueued batches fit in one drain when MAX_BATCHES_PER_FLUSH ≥ 2.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(*rows.lock().await, vec![3]);
     }

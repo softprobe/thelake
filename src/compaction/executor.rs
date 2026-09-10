@@ -191,8 +191,9 @@ impl MaintenanceExecutor {
         run_compaction: bool,
         unit_limit: usize,
     ) -> Result<MaintenanceSummary> {
-        // Do not overlap TWCS/metadata DuckDB work with OTLP decode (ingest CPU gate).
-        let _cpu = crate::ingest_engine::hold_ingest_cpu().await;
+        // Do not hold the ingest CPU gate for the whole pass: TWCS can run for
+        // minutes and would starve OTLP decode. max_blocking_threads=1 already
+        // serializes DuckDB IO against coalesce flushes.
         crate::self_monitoring::record_maintenance();
         self.run_once_ducklake(run_compaction, unit_limit).await
     }
