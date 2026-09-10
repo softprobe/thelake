@@ -302,7 +302,7 @@ def warmup_all(
     client: SoftprobeProm,
     queries: list[dict[str, str]],
     ranges: list[tuple[str, int]] | None = None,
-    workers: int = 4,
+    workers: int = 2,
 ) -> int:
     """One discarded query_range per dashboard expr × range (parallel)."""
     work: list[tuple[dict[str, str], int]] = []
