@@ -520,8 +520,10 @@ fi
 # Short isolated PromQL measure (warmup + cache hits). Recover full ingest after;
 # Softprobe bounce is last-resort only.
 if [[ ! -s "$FAILS" ]]; then
-# Two query workers for parallel warmup/measure (collector+Grafana paused).
-scale_query_workers 2 || log "slo: query scale to 2 skipped"
+# Four query workers for parallel warmup/measure (collector+Grafana paused).
+# Live CPU already passed on one worker; more DuckDB workers cut cold-cache
+# warmup from tens of minutes to a few without affecting the CPU budget.
+scale_query_workers 4 || log "slo: query scale to 4 skipped"
 trap 'restart_collector; unpause_grafana' EXIT
 
 if docker inspect -f '{{.State.Status}}' thelake-grafana-manual 2>/dev/null | grep -qx running; then
@@ -541,7 +543,7 @@ if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx 
 fi
 
 log "slo: global warmup"
-if ! python3 "$PY" --warmup-all --timeout-s 60 >>"$LOG" 2>&1; then
+if ! python3 "$PY" --warmup-all --timeout-s 120 --workers 4 >>"$LOG" 2>&1; then
   fail "Grafana global warmup failed (see $LOG)"
 fi
 log "slo: global warmup ok"
@@ -555,7 +557,7 @@ for attempt in 1 2 3; do
     collector_stopped=1
   fi
   slo_rc=0
-  slo_out="$(python3 "$PY" --slo-ms 100 --repeats 3 --workers 1 --skip-ingest 2>&1)" || slo_rc=$?
+  slo_out="$(python3 "$PY" --slo-ms 100 --repeats 3 --workers 4 --skip-ingest 2>&1)" || slo_rc=$?
   printf '%s\n' "$slo_out" | tee -a "$LOG" >&2
   if [[ "$slo_rc" -eq 0 ]]; then
     break

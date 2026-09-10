@@ -310,18 +310,28 @@ def warmup_all(
         for _range_name, range_secs in ranges or RANGES:
             work.append((q, range_secs))
 
+    total = len(work)
+    done = 0
+    lock = __import__("threading").Lock()
+    workers = max(1, workers)
+    print(f"global warmup start ({total} cells, workers={workers})", file=sys.stderr)
+
     def one(item: tuple[dict[str, str], int]) -> None:
+        nonlocal done
         q, range_secs = item
         end = int(time.time())
         start = end - range_secs
         step = grafana_step_seconds(range_secs)
         client.query_range(q["expr"], start, end, step)
+        with lock:
+            done += 1
+            if done == total or done % 50 == 0:
+                print(f"global warmup progress {done}/{total}", file=sys.stderr)
 
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         list(pool.map(one, work))
-    warmed = len(work)
-    print(f"global warmup ok ({warmed} cells)", file=sys.stderr)
-    return warmed
+    print(f"global warmup ok ({total} cells)", file=sys.stderr)
+    return total
 
 
 def _measure_one(
@@ -685,7 +695,8 @@ def main() -> int:
         ranges = select_ranges(
             "5m,15m,30m,1h,3h,24h,30d,180d"
         )
-        warmup_all(client, queries, ranges)
+        workers = args.workers if args.workers > 0 else 4
+        warmup_all(client, queries, ranges, workers=workers)
         return 0
 
     if args.load_cpu:
