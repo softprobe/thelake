@@ -767,7 +767,21 @@ start_softprobe_detached() {
   fi
 }
 # Ingest first so tenant provisioning + OTLP have a writer before query warms.
+# Wait for ingest /ready before starting query — both processes CREATE TYPE in
+# the shared Postgres catalog and racing that yields duplicate-key failures.
 start_softprobe_detached ingest "0.0.0.0:${INGEST_PORT}" "$WRITE_LOG" "$WRITE_PID_FILE" "$CONFIG_WRITE"
+echo "==> waiting for Softprobe ingest /ready (:$INGEST_PORT) before query start"
+for _ in $(seq 1 90); do
+  if curl -sf "http://127.0.0.1:${INGEST_PORT}/ready" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
+if ! curl -sf "http://127.0.0.1:${INGEST_PORT}/ready" >/dev/null 2>&1; then
+  echo "ERROR: Softprobe ingest did not become ready; log: $WRITE_LOG" >&2
+  tail -40 "$WRITE_LOG" >&2 || true
+  exit 1
+fi
 start_softprobe_detached query "0.0.0.0:${QUERY_PORT}" "$READ_LOG" "$READ_PID_FILE" "$CONFIG_QUERY"
 # Legacy pid file tracks the query process (Grafana :8090) for older helpers.
 cp -f "$READ_PID_FILE" "$PID_FILE"
