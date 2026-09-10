@@ -371,9 +371,9 @@ probe_live_cpu() {
   fi
   samples_file="$STATE_DIR/live-cpu-samples.txt"
   log "slo: live CPU probe (60s / 3s /proc deltas, pids=$pids, collector+Grafana)"
-  # Optional pre-warm so the first Grafana refresh after a query bounce is not
-  # the only thing in the measured window. Not held open during sampling.
-  python3 "$PY" --load-cpu --duration-s 30 --workers 1 >>"$LOG" 2>&1 || true
+  # No synthetic PromQL pre-warm: cold/heavy range queries peg a DuckDB worker
+  # at ~100% for multi-second windows and fail p95 even when steady Grafana
+  # refresh alone stays near idle (Greptime lesson: measure steady state).
   local cpu_rc=0
   # shellcheck disable=SC2086
   python3 - "$samples_file" $pids >>"$LOG" 2>&1 <<'PY' || cpu_rc=$?
