@@ -191,6 +191,8 @@ impl MaintenanceExecutor {
         run_compaction: bool,
         unit_limit: usize,
     ) -> Result<MaintenanceSummary> {
+        // Do not overlap TWCS/metadata DuckDB work with OTLP decode (ingest CPU gate).
+        let _cpu = crate::ingest_engine::hold_ingest_cpu().await;
         crate::self_monitoring::record_maintenance();
         self.run_once_ducklake(run_compaction, unit_limit).await
     }

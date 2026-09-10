@@ -25,12 +25,13 @@ type WriteFn<T> = Arc<dyn Fn(Vec<Vec<T>>) -> BoxFuture + Send + Sync>;
 
 /// Cap batches per DuckLake commit so a slow metrics flush cannot absorb
 /// minutes of OTLP requests into one megatransaction.
-const MAX_BATCHES_PER_FLUSH: usize = 4;
-/// Rows per capped DuckLake commit. Size near one Astronomy Shop collector
-/// metrics POST (~5–8k points) so we do not shatter the open day into
-/// hundreds of tiny Parquets (Greptime lesson: memtable-sized flushes;
-/// DuckLake cannot inline VARIANT yet — see issue #55).
-const MAX_ROWS_PER_FLUSH: usize = 16_384;
+const MAX_BATCHES_PER_FLUSH: usize = 2;
+/// Rows per capped DuckLake commit. Near one Astronomy Shop metrics POST
+/// (~5–8k points). Keep commits short enough that a single-core flush does not
+/// monopolize a full 3s live-CPU sample at 100% (p95 must stay <100).
+/// Greptime lesson: memtable-sized flushes; DuckLake cannot inline VARIANT yet
+/// — see issue #55.
+const MAX_ROWS_PER_FLUSH: usize = 8_192;
 /// Only eager-flush when backlog is truly large — must be ≫ [`MAX_ROWS_PER_FLUSH`]
 /// or every OTLP post would flush immediately and defeat the coalesce timer.
 const EAGER_PENDING_ROWS: usize = 256_000;
@@ -40,7 +41,7 @@ const EAGER_PENDING_BATCHES: usize = 96;
 const MAX_PENDING_BATCHES: usize = 256;
 /// After a capped timer drain with backlog remaining, wait this long before the
 /// next chunk (not a tight loop, not a full coalesce interval).
-const OVERFLOW_REARM: Duration = Duration::from_secs(5);
+const OVERFLOW_REARM: Duration = Duration::from_secs(8);
 
 struct State<T> {
     pending: VecDeque<Vec<T>>,
@@ -268,7 +269,11 @@ impl<T: Send + 'static> CoalesceBuf<T> {
             batches
         };
 
-        let result = (self.write)(batches).await;
+        // Serialize DuckLake commit vs OTLP decode (see cpu_budget.rs).
+        let result = {
+            let _cpu = super::hold_ingest_cpu().await;
+            (self.write)(batches).await
+        };
 
         let waiters = {
             let mut g = self.state.lock().await;
