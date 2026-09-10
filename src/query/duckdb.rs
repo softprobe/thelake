@@ -3,7 +3,7 @@ use crate::query::cache::CacheSettings;
 use crate::runtime_engine::DuckLakeScope;
 use crate::storage::ducklake::{
     configure_duckdb_resources, ducklake_qualified_table_name, escape_sql_literal,
-    QUERY_DUCKDB_MEMORY, QUERY_DUCKDB_THREADS,
+    open_in_memory_capped, QUERY_DUCKDB_MEMORY, QUERY_DUCKDB_THREADS,
 };
 use crate::storage::TieredStorage;
 use anyhow::{anyhow, Result};
@@ -490,6 +490,10 @@ impl DuckDBQueryEngine {
         core.install_extensions(&temp_conn)?;
         drop(temp_conn); // Extensions are installed globally, connection no longer needed
 
+        // `max_connections` = number of long-lived DuckDB query worker threads.
+        // Demo profile uses 2 so OTLP HTTP and PromQL are not single-thread-starving
+        // each other; each worker still has QUERY_DUCKDB_THREADS=1. Host `taskset`
+        // is optional for experiments only (see grafana-manual-up.sh).
         let worker_count = std::cmp::max(1, config.query.max_connections);
         let mut workers = Vec::with_capacity(worker_count);
         // Workers report startup outcome so a failed one cannot stay in the pool.
@@ -578,6 +582,20 @@ impl DuckDBQueryEngine {
                                 sql_kind,
                                 exec_elapsed,
                             );
+                            // Sample-table scans only: expose grain + raw vs
+                            // downsample vs live UNION so long-window CPU
+                            // hotspots are diagnosable without guessing.
+                            if sql_kind.contains("metric_samples")
+                                || sql_kind.contains("metric_hist_samples")
+                            {
+                                let (grain, scan_mode) =
+                                    crate::self_monitoring::classify_sample_scan(&request.sql);
+                                crate::self_monitoring::record_sample_scan(
+                                    &core.tenant_id,
+                                    grain,
+                                    scan_mode,
+                                );
+                            }
                         }
                         if result.is_ok() {
                             // Any *customer* success clears the global streak --
@@ -795,19 +813,35 @@ impl DuckDBQueryEngine {
     }
 
     /// One-shot metadata SQL on a dedicated connection (no worker pool, no
-    /// self-monitoring instruments). Used by inventory scrapes.
+    /// self-monitoring instruments). Prefer pooled `execute_query` for inventory —
+    /// this path still open+ATTACH and is expensive under a ticker.
     pub async fn execute_query_uninstrumented(&self, query: &str) -> Result<QueryResult> {
+        let mut rows = self.execute_queries_uninstrumented(vec![query]).await?;
+        rows.pop()
+            .ok_or_else(|| anyhow!("uninstrumented query returned no result"))?
+    }
+
+    /// Run several metadata SQLs on one open+attach connection (legacy; inventory
+    /// now reuses attached query workers via `execute_query`).
+    pub async fn execute_queries_uninstrumented(
+        &self,
+        queries: Vec<&str>,
+    ) -> Result<Vec<Result<QueryResult>>> {
         let core = DuckDBCore {
             config: self.config.clone(),
             cache: CacheSettings::new(&self.config),
             counts_toward_liveness: false,
             tenant_id: self.tenant_id.clone(),
         };
-        let sql = query.to_string();
+        let sqls: Vec<String> = queries.iter().map(|s| (*s).to_string()).collect();
         tokio::task::spawn_blocking(move || {
             let conn = core.open_connection()?;
             let mut state = core.init_connection_state_with(conn)?;
-            core.execute_query_on_state(&mut state, &sql)
+            let mut out = Vec::with_capacity(sqls.len());
+            for sql in sqls {
+                out.push(core.execute_query_on_state(&mut state, &sql));
+            }
+            Ok(out)
         })
         .await
         .map_err(|e| anyhow!("inventory query join: {e}"))?
@@ -859,7 +893,9 @@ impl Drop for DuckDBQueryEngine {
 
 impl DuckDBCore {
     fn open_connection(&self) -> Result<Connection> {
-        Connection::open_in_memory().map_err(|err| anyhow!("DuckDB open failed: {}", err))
+        // Cap at open so TaskScheduler never starts at nproc.
+        let conn = open_in_memory_capped(QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)?;
+        Ok(conn)
     }
 
     fn install_extensions(&self, conn: &Connection) -> Result<()> {

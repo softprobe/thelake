@@ -12,11 +12,122 @@ use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
 use crate::storage::schema::variant::encode_attributes_json;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, NaiveDate, Utc};
-use duckdb::Connection;
+use duckdb::types::Value as DuckValue;
+use duckdb::{appender_params_from_iter, params, Connection};
+use once_cell::sync::Lazy;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Mutex;
 
 /// Matches capability `limits.max_labels_per_series` default.
 pub const DEFAULT_MAX_LABELS_PER_SERIES: usize = 40;
+
+/// Open-day series/postings already appended this process. Avoids re-INSERT and
+/// the old `NOT EXISTS` lake probe (that scanned all postings Parquet on every
+/// flush and grew to multi-tens-of-seconds of write CPU as files accumulated).
+struct OpenDayIdentity {
+    day: NaiveDate,
+    series: HashSet<u64>,
+    /// (label_name, label_value, series_id) — strings interned per open day only.
+    postings: HashSet<(String, String, u64)>,
+}
+
+static OPEN_DAY_IDENTITY: Lazy<Mutex<Option<OpenDayIdentity>>> = Lazy::new(|| Mutex::new(None));
+
+fn take_new_series(rows: Vec<SeriesRow>) -> Vec<SeriesRow> {
+    if rows.is_empty() {
+        return rows;
+    }
+    let day = rows[0].record_date;
+    let Ok(mut guard) = OPEN_DAY_IDENTITY.lock() else {
+        return rows;
+    };
+    let cat = guard.get_or_insert_with(|| OpenDayIdentity {
+        day,
+        series: HashSet::new(),
+        postings: HashSet::new(),
+    });
+    if cat.day != day {
+        cat.day = day;
+        cat.series.clear();
+        cat.postings.clear();
+    }
+    rows.into_iter()
+        .filter(|r| !cat.series.contains(&r.series_id))
+        .collect()
+}
+
+fn take_new_postings(rows: Vec<PostingKey>) -> Vec<PostingKey> {
+    if rows.is_empty() {
+        return rows;
+    }
+    let day = rows[0].record_date;
+    let Ok(mut guard) = OPEN_DAY_IDENTITY.lock() else {
+        return rows;
+    };
+    let cat = guard.get_or_insert_with(|| OpenDayIdentity {
+        day,
+        series: HashSet::new(),
+        postings: HashSet::new(),
+    });
+    if cat.day != day {
+        cat.day = day;
+        cat.series.clear();
+        cat.postings.clear();
+    }
+    rows.into_iter()
+        .filter(|r| {
+            !cat.postings
+                .contains(&(r.label_name.clone(), r.label_value.clone(), r.series_id))
+        })
+        .collect()
+}
+
+fn remember_series(rows: &[SeriesRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    let day = rows[0].record_date;
+    let Ok(mut guard) = OPEN_DAY_IDENTITY.lock() else {
+        return;
+    };
+    let cat = guard.get_or_insert_with(|| OpenDayIdentity {
+        day,
+        series: HashSet::new(),
+        postings: HashSet::new(),
+    });
+    if cat.day != day {
+        cat.day = day;
+        cat.series.clear();
+        cat.postings.clear();
+    }
+    for r in rows {
+        cat.series.insert(r.series_id);
+    }
+}
+
+fn remember_postings(rows: &[PostingKey]) {
+    if rows.is_empty() {
+        return;
+    }
+    let day = rows[0].record_date;
+    let Ok(mut guard) = OPEN_DAY_IDENTITY.lock() else {
+        return;
+    };
+    let cat = guard.get_or_insert_with(|| OpenDayIdentity {
+        day,
+        series: HashSet::new(),
+        postings: HashSet::new(),
+    });
+    if cat.day != day {
+        cat.day = day;
+        cat.series.clear();
+        cat.postings.clear();
+    }
+    for r in rows {
+        cat.postings
+            .insert((r.label_name.clone(), r.label_value.clone(), r.series_id));
+    }
+}
 
 /// Stable FNV-1a 64-bit hash for `series_id = hash(metric_name, sorted label pairs)`.
 pub fn series_id_hash(metric_name: &str, labels: &BTreeMap<String, String>) -> u64 {
@@ -115,6 +226,7 @@ fn push_classic_prom_gauges(
             value,
             record_date,
             classic_dual_write: true,
+            promoted: promoted_sample_values(m),
         });
     };
 
@@ -170,6 +282,39 @@ struct SampleRow {
     record_date: NaiveDate,
     /// Classic `_bucket`/`_sum`/`_count` dual-write from native histograms.
     classic_dual_write: bool,
+    /// Values for nullable `ALTER TABLE` promotion columns on `metric_samples`
+    /// (column name → string). Filled from post-promotion `Metric.attributes`.
+    promoted: HashMap<String, String>,
+}
+
+/// Capture promoted telemetry columns that live on `metric_samples` after apply.
+///
+/// `apply_metric_promotions` writes column names (snake_case, no dots) into
+/// `Metric.attributes`. DuckDB Appender requires a value for every table column,
+/// so these must travel with each sample row.
+fn promoted_sample_values(m: &Metric) -> HashMap<String, String> {
+    m.attributes
+        .iter()
+        .filter(|(k, _)| is_promoted_column_name(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+fn is_promoted_column_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('.')
+        && name
+            .chars()
+            .enumerate()
+            .all(|(i, c)| c.is_ascii_alphanumeric() || c == '_' || (i > 0 && c == '$'))
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && !matches!(
+            name,
+            "series_id" | "timestamp" | "value" | "record_date"
+        )
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +442,7 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 value: m.value,
                 record_date,
                 classic_dual_write: false,
+                promoted: promoted_sample_values(m),
             });
         }
     }
@@ -417,59 +563,8 @@ fn insert_series_sql(catalog: &str, rows: &[SeriesRow]) -> String {
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "INSERT INTO {table} (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date)\n\
-         SELECT * FROM (VALUES\n{values}\n) AS v(series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date)\n\
-         WHERE NOT EXISTS (\n\
-           SELECT 1 FROM {table} e\n\
-           WHERE e.record_date = v.record_date AND e.series_id = v.series_id\n\
-         );"
+        "INSERT INTO {table} (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES\n{values};"
     )
-}
-
-fn insert_postings_sql(catalog: &str, rows: &[PostingKey]) -> String {
-    let table = qualified_metrics_layout_table(catalog, "metric_postings");
-    let values = rows
-        .iter()
-        .map(|r| {
-            format!(
-                "({ln}, {lv}, {id}::UBIGINT, {rd})",
-                ln = sql_str(&r.label_name),
-                lv = sql_str(&r.label_value),
-                id = r.series_id,
-                rd = sql_date(r.record_date),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",\n");
-    format!(
-        "INSERT INTO {table} (label_name, label_value, series_id, record_date)\n\
-         SELECT * FROM (VALUES\n{values}\n) AS v(label_name, label_value, series_id, record_date)\n\
-         WHERE NOT EXISTS (\n\
-           SELECT 1 FROM {table} e\n\
-           WHERE e.record_date = v.record_date\n\
-             AND e.label_name = v.label_name\n\
-             AND e.label_value = v.label_value\n\
-             AND e.series_id = v.series_id\n\
-         );"
-    )
-}
-
-fn insert_samples_sql(catalog: &str, rows: &[SampleRow]) -> String {
-    let table = qualified_metrics_layout_table(catalog, "metric_samples");
-    let values = rows
-        .iter()
-        .map(|r| {
-            format!(
-                "({id}::UBIGINT, {ts}, {val}, {rd})",
-                id = r.series_id,
-                ts = sql_ts(r.timestamp),
-                val = sql_f64(r.value),
-                rd = sql_date(r.record_date),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",\n");
-    format!("INSERT INTO {table} (series_id, timestamp, value, record_date) VALUES\n{values};")
 }
 
 fn insert_hist_sql(catalog: &str, rows: &[HistSampleRow]) -> String {
@@ -534,7 +629,108 @@ fn exec_chunked<T>(
     Ok(())
 }
 
+/// Split `softprobe` vs `softprobe.tenant_schema` catalog prefixes for Appender.
+fn catalog_parts(catalog: &str) -> (&str, &str) {
+    match catalog.split_once('.') {
+        Some((cat, schema)) => (cat, schema),
+        None => (catalog, "main"),
+    }
+}
+
+fn append_series(conn: &Connection, catalog: &str, rows: &[SeriesRow]) -> Result<()> {
+    // VARIANT labels need `::JSON::VARIANT`; Appender stores plain VARCHAR and
+    // breaks attribute projection. Series cardinality is small vs postings/samples.
+    exec_chunked(conn, rows, |chunk| insert_series_sql(catalog, chunk))
+}
+
+fn append_postings(conn: &Connection, catalog: &str, rows: &[PostingKey]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let (cat, schema) = catalog_parts(catalog);
+    let mut app = conn
+        .appender_to_catalog_and_db("metric_postings", cat, schema)
+        .map_err(|e| anyhow!("metric_postings appender: {e}"))?;
+    for r in rows {
+        let day = r.record_date.format("%Y-%m-%d").to_string();
+        app.append_row(params![
+            r.label_name.as_str(),
+            r.label_value.as_str(),
+            r.series_id,
+            day.as_str(),
+        ])
+        .map_err(|e| anyhow!("metric_postings append_row: {e}"))?;
+    }
+    app.flush()
+        .map_err(|e| anyhow!("metric_postings appender flush: {e}"))?;
+    Ok(())
+}
+
+/// Live `metric_samples` column names in Appender order (DESCRIBE).
+fn metric_samples_column_names(conn: &Connection, catalog: &str) -> Result<Vec<String>> {
+    let sql = format!(
+        "DESCRIBE {}",
+        qualified_metrics_layout_table(catalog, "metric_samples")
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| anyhow!("metric_samples DESCRIBE prepare: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| anyhow!("metric_samples DESCRIBE: {e}"))?;
+    let mut names = Vec::new();
+    for r in rows {
+        names.push(r.map_err(|e| anyhow!("metric_samples DESCRIBE row: {e}"))?);
+    }
+    if names.len() < 4 {
+        return Err(anyhow!(
+            "metric_samples schema too short ({} cols); expected at least series_id,timestamp,value,record_date",
+            names.len()
+        ));
+    }
+    Ok(names)
+}
+
+fn append_samples(conn: &Connection, catalog: &str, rows: &[SampleRow]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let columns = metric_samples_column_names(conn, catalog)?;
+    let (cat, schema) = catalog_parts(catalog);
+    let mut app = conn
+        .appender_to_catalog_and_db("metric_samples", cat, schema)
+        .map_err(|e| anyhow!("metric_samples appender: {e}"))?;
+    for r in rows {
+        let day = r.record_date.format("%Y-%m-%d").to_string();
+        // TIMESTAMPTZ via RFC3339; DATE via ISO string — avoids duckdb chrono feature skew.
+        let ts = r.timestamp.to_rfc3339();
+        let mut values: Vec<DuckValue> = Vec::with_capacity(columns.len());
+        for col in &columns {
+            let v = match col.as_str() {
+                "series_id" => DuckValue::UBigInt(r.series_id),
+                "timestamp" => DuckValue::Text(ts.clone()),
+                "value" => DuckValue::Double(r.value),
+                "record_date" => DuckValue::Text(day.clone()),
+                other => match r.promoted.get(other) {
+                    Some(s) => DuckValue::Text(s.clone()),
+                    None => DuckValue::Null,
+                },
+            };
+            values.push(v);
+        }
+        app.append_row(appender_params_from_iter(values))
+            .map_err(|e| anyhow!("metric_samples append_row: {e}"))?;
+    }
+    app.flush()
+        .map_err(|e| anyhow!("metric_samples appender flush: {e}"))?;
+    Ok(())
+}
+
 /// Ingest metrics in one transaction. Table readiness is ensured prior to write.
+///
+/// Series/postings/samples use DuckDB Appender (bulk bind) instead of giant
+/// `INSERT … VALUES` SQL strings — the VALUES path pegged write CPU for tens of
+/// seconds per OTLP batch as postings cardinality grew.
 pub fn write_metrics_layout_txn(
     conn: &Connection,
     catalog_alias: &str,
@@ -545,18 +741,24 @@ pub fn write_metrics_layout_txn(
         return Ok(());
     }
 
+    // Unit tests attach a fresh DuckLake per case but share process-global
+    // open-day identity — clear so prior cases cannot skip INSERTs into a new catalog.
+    #[cfg(test)]
+    {
+        if let Ok(mut guard) = OPEN_DAY_IDENTITY.lock() {
+            *guard = None;
+        }
+    }
+
     let prepared = prepare_ingest(metrics, max_labels);
+    let series = take_new_series(prepared.series);
+    let postings = take_new_postings(prepared.postings);
     conn.execute_batch("BEGIN TRANSACTION;")?;
     let write = (|| -> Result<()> {
-        exec_chunked(conn, &prepared.series, |c| {
-            insert_series_sql(catalog_alias, c)
-        })?;
-        exec_chunked(conn, &prepared.postings, |c| {
-            insert_postings_sql(catalog_alias, c)
-        })?;
-        exec_chunked(conn, &prepared.samples, |c| {
-            insert_samples_sql(catalog_alias, c)
-        })?;
+        append_series(conn, catalog_alias, &series)?;
+        append_postings(conn, catalog_alias, &postings)?;
+        append_samples(conn, catalog_alias, &prepared.samples)?;
+        // Hist rows often include arrays; keep the existing SQL path (smaller volume).
         exec_chunked(conn, &prepared.hist_samples, |c| {
             insert_hist_sql(catalog_alias, c)
         })?;
@@ -566,6 +768,8 @@ pub fn write_metrics_layout_txn(
         Ok(()) => {
             conn.execute_batch("COMMIT;")
                 .map_err(|e| anyhow!("metrics layout COMMIT failed: {e}"))?;
+            remember_series(&series);
+            remember_postings(&postings);
             Ok(())
         }
         Err(e) => {
@@ -734,6 +938,40 @@ mod tests {
         assert_eq!(series_n, 1);
         assert_eq!(samples_n, 1);
         assert!(postings_n >= 1);
+    }
+
+    /// Promotion apply ADDs nullable columns to metric_samples; Appender must
+    /// bind every column (fill promoted attrs or NULL) or EndRow fails.
+    #[test]
+    fn ingest_survives_promoted_metric_samples_columns() {
+        let temp = TempDir::new().expect("temp");
+        let (conn, catalog) = attach_ducklake(&temp);
+        conn.execute_batch(&format!(
+            "ALTER TABLE {catalog}.metric_samples ADD COLUMN IF NOT EXISTS service_name VARCHAR;
+             ALTER TABLE {catalog}.metric_samples ADD COLUMN IF NOT EXISTS http_route VARCHAR;"
+        ))
+        .expect("add promoted columns");
+
+        let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        let mut m = gauge("http_requests", "i1", ts, 1.0);
+        // Mimic apply_metric_promotions: column names land in attributes.
+        m.attributes
+            .insert("service_name".into(), "checkout".into());
+        m.attributes
+            .insert("http_route".into(), "/pay".into());
+
+        write_metrics_layout_txn(&conn, &catalog, &[m], DEFAULT_MAX_LABELS_PER_SERIES)
+            .expect("ingest with promoted columns must not EndRow");
+
+        let (svc, route): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT service_name, http_route FROM softprobe.metric_samples LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read promoted");
+        assert_eq!(svc.as_deref(), Some("checkout"));
+        assert_eq!(route.as_deref(), Some("/pay"));
     }
 
     /// T-C2 / AC-C2: wide ingest → metric_series count = N (test-scale).
@@ -1003,6 +1241,7 @@ mod tests {
                 value: 1.0,
                 record_date: day,
                 classic_dual_write: true,
+                promoted: HashMap::new(),
             },
             SampleRow {
                 series_id: 1,
@@ -1010,6 +1249,7 @@ mod tests {
                 value: 2.0,
                 record_date: day,
                 classic_dual_write: true,
+                promoted: HashMap::new(),
             },
             SampleRow {
                 series_id: 1,
@@ -1017,6 +1257,7 @@ mod tests {
                 value: 3.0,
                 record_date: day,
                 classic_dual_write: true,
+                promoted: HashMap::new(),
             },
             SampleRow {
                 series_id: 2,
@@ -1024,6 +1265,7 @@ mod tests {
                 value: 9.0,
                 record_date: day,
                 classic_dual_write: true,
+                promoted: HashMap::new(),
             },
         ];
         coalesce_samples_to_step(&mut samples, 15_000);

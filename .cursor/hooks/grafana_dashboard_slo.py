@@ -34,10 +34,12 @@ RANGES: list[tuple[str, int]] = [
 ]
 
 LIVE_INGEST_QUERIES = (
+    # Full-fidelity OTLP: shop HTTP, spanmetrics, ad scrape, and k6 loadgen.
     "http_server_request_duration_count",
     "traces_span_metrics_calls",
     "demo_ad_served_total",
     "k6_iterations",
+    "k6_http_reqs",
 )
 
 
@@ -167,6 +169,8 @@ def check_ingest(client: SoftprobeProm) -> str | None:
     recent_max_age_s = 180
     best = 0
     newest_change_ts = 0.0
+    newest_sample_ts = 0.0
+    recent_window_changes = 0
     used = ""
     for q in LIVE_INGEST_QUERIES:
         _code, body, _ms = client.query_range(q, start, end, 15)
@@ -178,24 +182,52 @@ def check_ingest(client: SoftprobeProm) -> str | None:
                     points.append((float(ts), float(v)))
                 except (TypeError, ValueError):
                     continue
+            if not points:
+                continue
+            newest_sample_ts = max(newest_sample_ts, points[-1][0])
             changes = 0
             last_change_ts = 0.0
-            for (t0, a), (t1, b) in zip(points, points[1:]):
+            for (_t0, a), (t1, b) in zip(points, points[1:]):
                 if a != b:
                     changes += 1
                     last_change_ts = t1
-            if changes > best or (changes == best and last_change_ts > newest_change_ts):
+                    if t1 >= end - recent_max_age_s:
+                        recent_window_changes += 1
+            # Prefer the freshest series with ≥2 changes. After load-generator /
+            # Softprobe restarts, dead generations often retain high historical
+            # change counts while a new series is the only live one — ranking by
+            # change count alone falsely reports "stale" ingest.
+            if changes < 2:
+                continue
+            if last_change_ts > newest_change_ts or (
+                last_change_ts == newest_change_ts and changes > best
+            ):
                 best = changes
                 newest_change_ts = last_change_ts
                 used = q
         if best >= 2 and newest_change_ts >= end - recent_max_age_s:
             break
-    if best < 2:
-        return (
-            "OTEL demo series are flat (15m lookback). "
-            "Need live ingest: value changes ≥ 2 on http_server / spanmetrics / demo / k6."
-        )
-    if newest_change_ts < end - recent_max_age_s:
+    # After collector / loadgen bounce, a new counter generation may only have
+    # one recent value-change while samples are already on the wire. Accept
+    # that only when a change landed inside the freshness window (stopped
+    # collectors plateau without recent changes).
+    if best < 2 or newest_change_ts < end - recent_max_age_s:
+        if (
+            newest_sample_ts >= end - recent_max_age_s
+            and recent_window_changes >= 1
+        ):
+            print(
+                f"ingest ok (fresh samples age_s={end - int(newest_sample_ts)}, "
+                f"recent_changes={recent_window_changes}, names={len(names)})",
+                file=sys.stderr,
+            )
+            return None
+        if best < 2:
+            return (
+                "OTEL demo series are flat (15m lookback). "
+                "Need live ingest: value changes ≥ 2 on http_server / spanmetrics / demo / k6 "
+                f"(or ≥1 change with sample age ≤{recent_max_age_s}s)."
+            )
         age = end - int(newest_change_ts) if newest_change_ts else None
         return (
             f"OTEL ingest looks stale (newest value change age={age}s, need ≤{recent_max_age_s}s). "
@@ -209,22 +241,97 @@ def check_ingest(client: SoftprobeProm) -> str | None:
     return None
 
 
+def load_cpu_burst(
+    client: SoftprobeProm,
+    queries: list[dict[str, str]],
+    duration_s: float = 60.0,
+    workers: int = 2,
+) -> int:
+    """Issue live-window PromQL for `duration_s` (CPU probe load).
+
+    Mimics Grafana refresh≈10s on one Astronomy Shop board: fire the panel set
+    once per refresh interval, then idle until the next tick. Continuous QPS
+    pacing left Softprobe pegged near one core with no idle gaps for flushes.
+    """
+    windows = [5 * 60, 15 * 60, 30 * 60]
+    # One board's worth of panels — matches live Grafana, not every curated expr.
+    subset = queries[: min(12, len(queries))] or queries
+    if not subset:
+        print("cpu load burst: no dashboard exprs", file=sys.stderr)
+        return 0
+    refresh_s = 10.0
+    stop_at = time.time() + duration_s
+    issued = 0
+    lock = __import__("threading").Lock()
+
+    def worker() -> None:
+        nonlocal issued
+        i = 0
+        while time.time() < stop_at:
+            tick_start = time.time()
+            for _ in range(len(subset)):
+                if time.time() >= stop_at:
+                    break
+                q = subset[i % len(subset)]
+                range_secs = windows[i % len(windows)]
+                i += 1
+                end = int(time.time())
+                start = end - range_secs
+                step = grafana_step_seconds(range_secs)
+                try:
+                    client.query_range(q["expr"], start, end, step)
+                except Exception:
+                    pass
+                with lock:
+                    issued += 1
+            # Idle until next Grafana-style refresh tick.
+            sleep_for = refresh_s - (time.time() - tick_start)
+            remaining = stop_at - time.time()
+            if sleep_for > 0 and remaining > 0:
+                time.sleep(min(sleep_for, remaining))
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futs = [pool.submit(worker) for _ in range(max(1, workers))]
+        for f in as_completed(futs):
+            f.result()
+    print(f"cpu load burst ok (issued={issued} workers={workers})", file=sys.stderr)
+    return issued
+
+
 def warmup_all(
     client: SoftprobeProm,
     queries: list[dict[str, str]],
     ranges: list[tuple[str, int]] | None = None,
+    workers: int = 2,
 ) -> int:
-    """One discarded query_range per dashboard expr × range (serial)."""
-    warmed = 0
+    """One discarded query_range per dashboard expr × range (parallel)."""
+    work: list[tuple[dict[str, str], int]] = []
     for q in queries:
-        for range_name, range_secs in ranges or RANGES:
-            end = int(time.time())
-            start = end - range_secs
-            step = grafana_step_seconds(range_secs)
-            client.query_range(q["expr"], start, end, step)
-            warmed += 1
-    print(f"global warmup ok ({warmed} cells)", file=sys.stderr)
-    return warmed
+        for _range_name, range_secs in ranges or RANGES:
+            work.append((q, range_secs))
+
+    total = len(work)
+    done = 0
+    lock = __import__("threading").Lock()
+    workers = max(1, workers)
+    print(f"global warmup start ({total} cells, workers={workers})", file=sys.stderr)
+
+    def one(item: tuple[dict[str, str], int]) -> None:
+        nonlocal done
+        q, range_secs = item
+        end = int(time.time())
+        start = end - range_secs
+        step = grafana_step_seconds(range_secs)
+        client.query_range(q["expr"], start, end, step)
+        with lock:
+            done += 1
+            if done == total or done % 50 == 0:
+                print(f"global warmup progress {done}/{total}", file=sys.stderr)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(one, work))
+    print(f"global warmup ok ({total} cells)", file=sys.stderr)
+    return total
 
 
 def _measure_one(
@@ -545,6 +652,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--warmup-all", action="store_true", help="run one query per expr×range then exit 0")
+    parser.add_argument(
+        "--load-cpu",
+        action="store_true",
+        help="issue concurrent live-window PromQL for --duration-s (CPU probe load)",
+    )
+    parser.add_argument("--duration-s", type=float, default=60.0, help="duration for --load-cpu")
     parser.add_argument("--extract-only", action="store_true")
     parser.add_argument("--check-ingest", action="store_true")
     parser.add_argument("--skip-ingest", action="store_true", help="run queries even if ingest liveness check fails")
@@ -582,7 +695,15 @@ def main() -> int:
         ranges = select_ranges(
             "5m,15m,30m,1h,3h,24h,30d,180d"
         )
-        warmup_all(client, queries, ranges)
+        workers = args.workers if args.workers > 0 else 4
+        warmup_all(client, queries, ranges, workers=workers)
+        return 0
+
+    if args.load_cpu:
+        timeout_s = max(args.timeout_s, 5.0)
+        client = SoftprobeProm(args.base_url, args.token, timeout_s=timeout_s)
+        workers = args.workers if args.workers > 0 else 2
+        load_cpu_burst(client, queries, duration_s=args.duration_s, workers=workers)
         return 0
 
     if args.extract_only:

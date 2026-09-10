@@ -1,5 +1,7 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -7,9 +9,20 @@
   "links": [],
   "panels": [
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "targets": [
         {
@@ -27,9 +40,61 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 15,
+      "targets": [
+        {
+          "expr": "sum by (signal) (rate(thelake_ingest_requests_total[5m]))",
+          "legendFormat": "requests {{signal}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (signal, path) (rate(thelake_ingest_commits_total[5m]))",
+          "legendFormat": "commits {{signal}} {{path}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (signal) (rate(thelake_ingest_coalesce_flushes_total[5m]))",
+          "legendFormat": "coalesce_flush {{signal}}",
+          "refId": "C"
+        },
+        {
+          "expr": "thelake_ingest_pending_batches",
+          "legendFormat": "pending_batches",
+          "refId": "D"
+        }
+      ],
+      "title": "Ingest requests vs DuckLake commits (coalesce)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
       "id": 2,
       "targets": [
         {
@@ -42,9 +107,20 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
       "id": 3,
       "targets": [
         {
@@ -57,9 +133,20 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
       "id": 4,
       "targets": [
         {
@@ -72,9 +159,24 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": { "stacking": { "mode": "normal" } }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "stacking": {
+            "mode": "normal"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
       "id": 5,
       "targets": [
         {
@@ -87,9 +189,20 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
       "id": 6,
       "targets": [
         {
@@ -107,9 +220,20 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
       "id": 13,
       "targets": [
         {
@@ -127,9 +251,20 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 8, "x": 12, "y": 24 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 32
+      },
       "id": 7,
       "targets": [
         {
@@ -142,9 +277,22 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 32 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 32
+      },
       "id": 8,
       "targets": [
         {
@@ -157,9 +305,22 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 32 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 32
+      },
       "id": 9,
       "targets": [
         {
@@ -177,9 +338,20 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 32 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 40
+      },
       "id": 10,
       "targets": [
         {
@@ -202,9 +374,20 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "softprobe-prom-ops" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 40
+      },
       "id": 11,
       "targets": [
         {
@@ -227,9 +410,50 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "loki", "uid": "softprobe-loki-ops" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 48 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "softprobe-prom-ops"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "stacking": {
+            "mode": "normal"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 40
+      },
+      "id": 14,
+      "targets": [
+        {
+          "expr": "sum by (grain, scan_mode) (rate(thelake_query_sample_scans_total[5m]))",
+          "legendFormat": "{{grain}} {{scan_mode}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Sample scans by grain / scan_mode",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "softprobe-loki-ops"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
       "id": 12,
       "options": {
         "showLabels": true,
@@ -240,7 +464,10 @@
       },
       "targets": [
         {
-          "datasource": { "type": "loki", "uid": "softprobe-loki-ops" },
+          "datasource": {
+            "type": "loki",
+            "uid": "softprobe-loki-ops"
+          },
           "editorMode": "code",
           "expr": "{service_name=\"thelake\"} |= \"thelake.slow_query\"",
           "queryType": "range",
@@ -253,9 +480,18 @@
     }
   ],
   "schemaVersion": 39,
-  "tags": ["thelake", "ops", "self-monitoring"],
-  "templating": { "list": [] },
-  "time": { "from": "now-1h", "to": "now" },
+  "tags": [
+    "thelake",
+    "ops",
+    "self-monitoring"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timezone": "browser",
   "title": "thelake ops",
   "uid": "thelake-ops",

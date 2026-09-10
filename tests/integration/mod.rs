@@ -5,6 +5,7 @@ pub mod ingest_schema_hotpath;
 pub mod metrics_fidelity;
 pub mod metrics_layout_gold;
 pub mod metrics_layout_long_grain;
+pub mod metrics_layout_window_correctness;
 pub mod prometheus;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_apply_e2e;

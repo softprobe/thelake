@@ -60,16 +60,13 @@ async fn export_inner(metrics: &mut ResourceMetrics) -> MetricResult<()> {
         .engine_for(OPS_TENANT_ID)
         .await
         .map_err(|e| MetricError::Other(e.to_string()))?;
-    if let Err(err) = engine
-        .ingest
-        .writer()
-        .write_metric_batches(vec![rows])
-        .await
-    {
+    if let Err(err) = engine.ingest.add_metrics(rows, 0).await {
         record_export_drop();
         warn!("self-monitoring metric export failed: {err}");
         return Err(MetricError::Other(err.to_string()));
     }
+    // Coalesce with customer ingest (flush_interval). Forcing a commit every
+    // export interval created an ops open-day Parquet storm and stole writer CPU.
     Ok(())
 }
 
@@ -110,7 +107,7 @@ async fn flush_logs(state: &AppState, batch: &mut Vec<crate::models::Log>) {
     let logs = std::mem::take(batch);
     let res = async {
         let engine = state.engines.engine_for(OPS_TENANT_ID).await?;
-        engine.ingest.writer().write_log_batches(vec![logs]).await
+        engine.ingest.add_logs(logs, 0).await
     }
     .await;
     if let Err(err) = res {
@@ -139,7 +136,11 @@ pub fn spawn_exporter(state: AppState, config: Arc<Config>) {
 
     gauge_store_init_from_config(&config);
     spawn_slow_query_drain(state.clone());
-    spawn_inventory_loop(state, config.self_monitoring.export_interval_seconds.max(1));
+    // Inventory is heavier than export; use dedicated (usually longer) interval.
+    spawn_inventory_loop(
+        state,
+        config.self_monitoring.inventory_interval_seconds.max(60),
+    );
 }
 
 fn gauge_store_init_from_config(config: &Config) {

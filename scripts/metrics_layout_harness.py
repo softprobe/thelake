@@ -1734,10 +1734,15 @@ GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timesta
                 and "build-release" not in up
             )
         )
+        has_coalesce = (
+            "flush_interval_seconds" in up
+            and "THELAKE_INGEST_FLUSH_INTERVAL_SECONDS" in up
+            and "ingest:" in up
+        )
         self.mark(
             "AC-S3",
-            pass_=uses_release and not debug_bin,
-            notes="grafana-manual-up.sh must build release binary",
+            pass_=uses_release and not debug_bin and has_coalesce,
+            notes="grafana-manual-up.sh must build release + set ingest.flush_interval_seconds",
         )
 
     def measure_catalog_acs(self) -> None:

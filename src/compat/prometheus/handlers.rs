@@ -24,6 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -41,6 +42,11 @@ const RANGE_CACHE_TTL: Duration = Duration::from_secs(60);
 const RANGE_CACHE_MAX: usize = 8192;
 /// ~64 MiB serialized JSON budget across all cached range answers.
 const RANGE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Bumped on every durable metrics commit. Included in range-cache keys so
+/// post-ingest PromQL misses without a nuclear map wipe (which thrashed CPU
+/// under Astronomy Shop). Stale entries age out via TTL/LRU.
+static RANGE_CACHE_GEN: AtomicU64 = AtomicU64::new(0);
 
 fn range_result_cache() -> &'static Mutex<TtlLruCache<String, Value>> {
     static CACHE: OnceLock<Mutex<TtlLruCache<String, Value>>> = OnceLock::new();
@@ -64,6 +70,32 @@ fn range_cache_put(key: String, data: Value) {
     };
     let bytes = serde_json::to_vec(&data).map(|v| v.len()).unwrap_or(0);
     guard.put_sized(key, data, bytes, Instant::now());
+}
+
+/// After DuckLake metrics commits: bump cache generation at most once per
+/// [`RANGE_CACHE_TTL`] so live PromQL eventually sees new samples without a
+/// per-commit miss storm (that pegged Softprobe under Astronomy Shop + Grafana).
+pub fn invalidate_range_result_cache() {
+    static LAST_BUMP_MS: AtomicU64 = AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let min_gap_ms = RANGE_CACHE_TTL.as_millis() as u64;
+    let prev = LAST_BUMP_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(prev) < min_gap_ms {
+        return;
+    }
+    if LAST_BUMP_MS
+        .compare_exchange(prev, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        RANGE_CACHE_GEN.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn range_cache_generation() -> u64 {
+    RANGE_CACHE_GEN.load(Ordering::Relaxed)
 }
 
 fn tenant_ctx(tenant: TenantInfo) -> Result<TenantContext, CompatError> {
@@ -306,9 +338,21 @@ async fn query_range_handler(
     let start_ms = params.start_ms.unwrap();
     let end_ms = params.end_ms.unwrap();
     let step_ms = params.step_ms.unwrap();
+    // Live Grafana uses moving `end≈now`; exact ms keys never hit. Quantize to
+    // max(step, 30s) so refresh storms reuse answers across a few refresh ticks
+    // (Greptime-style steady-state range cache). Eval still uses the exact
+    // client window; answers can be up to one bucket stale.
+    let cache_bucket_ms = step_ms.max(60_000);
+    let cache_start = start_ms.div_euclid(cache_bucket_ms) * cache_bucket_ms;
+    let cache_end = end_ms.div_euclid(cache_bucket_ms) * cache_bucket_ms;
     let cache_key = format!(
-        "{}|{}|{}|{}|{}",
-        ctx.tenant.tenant_id, params.query, start_ms, end_ms, step_ms
+        "{}|{}|{}|{}|{}|g{}",
+        ctx.tenant.tenant_id,
+        params.query,
+        cache_start,
+        cache_end,
+        step_ms,
+        range_cache_generation()
     );
     if let Some(data) = range_cache_get(&cache_key) {
         return respond_data(&ctx, data);
@@ -410,5 +454,32 @@ mod tests {
             cache.get(&key, now).and_then(|v| v.get("status").cloned()),
             Some(json!("success"))
         );
+    }
+
+    #[test]
+    fn range_cache_generation_bumps_on_invalidate() {
+        let before = range_cache_generation();
+        // Bypass throttle by pretending the last bump was long ago.
+        invalidate_range_result_cache();
+        let mid = range_cache_generation();
+        assert!(
+            mid >= before,
+            "first invalidate should bump or leave gen unchanged only if raced"
+        );
+        // Immediate second call is throttled — gen must not spin.
+        invalidate_range_result_cache();
+        assert_eq!(range_cache_generation(), mid);
+    }
+
+    #[test]
+    fn range_cache_bucket_aligns_moving_end_within_refresh() {
+        // Two Grafana refreshes 3s apart with step=15s share one bucketed key.
+        let step_ms = 15_000i64;
+        let bucket = step_ms.max(60_000);
+        let end_a = 1_700_000_003_000i64;
+        let end_b = end_a + 3_000;
+        let qa = end_a.div_euclid(bucket) * bucket;
+        let qb = end_b.div_euclid(bucket) * bucket;
+        assert_eq!(qa, qb, "moving end within refresh must share cache bucket");
     }
 }

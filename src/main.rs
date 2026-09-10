@@ -6,6 +6,7 @@ use softprobe_runtime::api::{self, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp;
+use softprobe_runtime::http_role::HttpRole;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
 use std::net::SocketAddr;
@@ -16,8 +17,7 @@ use tower_http::{cors::CorsLayer, decompression::RequestDecompressionLayer, trac
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::DEBUG)
         .with_env_filter(
@@ -32,27 +32,65 @@ async fn main() -> anyhow::Result<()> {
     let config = Arc::new(Config::load()?);
     info!("Configuration loaded");
 
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    if let Some(n) = config.server.worker_threads {
+        let n = n.max(1);
+        // Blocking pool must be >1: inventory/export and DuckLake writes all use
+        // spawn_blocking. With max_blocking_threads=1, a long inventory attach
+        // deadlocks OTLP /v1/metrics (idle CPU, collector timeouts).
+        // Dedicated ingest demo process: one blocking slot so DuckLake write +
+        // ops export cannot overlap onto two cores. Query-role keeps 2; all-in-one ≥4.
+        let role = softprobe_runtime::http_role::HttpRole::from_env();
+        let blocking = match role {
+            softprobe_runtime::http_role::HttpRole::Ingest => 1,
+            softprobe_runtime::http_role::HttpRole::Query => n.max(2),
+            softprobe_runtime::http_role::HttpRole::All => n.max(4),
+        };
+        info!("Tokio worker_threads={n} max_blocking_threads={blocking}");
+        builder.worker_threads(n);
+        builder.max_blocking_threads(blocking);
+    }
+    let rt = builder.build()?;
+    rt.block_on(async_main(config))
+}
+
+async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
+    let role = HttpRole::from_env();
+    info!(role = role.as_str(), "HTTP process role");
+
     // Maintenance needs a writer/catalog; HTTP/gRPC engines are built lazily per tenant.
     let pipeline = IngestPipeline::new(config.as_ref()).await?;
     let storage = pipeline.storage.clone();
     let dropdown_catalog = pipeline.dropdown_catalog.clone();
 
-    if let Some(_handle) = softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
-        config.as_ref(),
-        dropdown_catalog.clone(),
-        storage.writer.scope_registry().cloned(),
-    )
-    .await?
-    {
-        info!("Maintenance scheduler started");
+    // TWCS/orphan cleanup only on the ingest (or all-in-one) process so a query
+    // replica does not race DuckLake commits against the writer.
+    if role.serves_ingest() {
+        if let Some(_handle) =
+            softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
+                config.as_ref(),
+                dropdown_catalog.clone(),
+                storage.writer.scope_registry().cloned(),
+            )
+            .await?
+        {
+            info!("Maintenance scheduler started");
+        }
+    } else {
+        info!("Maintenance scheduler skipped (query-only role)");
     }
 
     let control_plane = control_plane_runtime_from_env()?;
     let traces = post(ingest_traces);
 
     let (mut app, state) =
-        api::create_router(config.clone(), traces, Some(control_plane.clone())).await?;
-    app = app.merge(runtime_control_routes().with_state(state.clone()));
+        api::create_router_with_role(config.clone(), traces, Some(control_plane.clone()), role)
+            .await?;
+    // Tenant / catalog control stays on ingest (and all-in-one).
+    if role.serves_ingest() {
+        app = app.merge(runtime_control_routes().with_state(state.clone()));
+    }
 
     // CorsLayer must be outermost: browsers send OPTIONS preflight without
     // Authorization. If auth wraps CORS, preflight 401s and SPA OTLP never runs;
@@ -69,9 +107,11 @@ async fn main() -> anyhow::Result<()> {
         );
 
     // OTLP/gRPC (4317). Set `SOFTPROBE_GRPC_DISABLE=1` to skip (e.g. port conflicts in tests).
-    if !std::env::var("SOFTPROBE_GRPC_DISABLE")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    // Query-only processes never bind gRPC even if the env flag is unset.
+    if role.serves_ingest()
+        && !std::env::var("SOFTPROBE_GRPC_DISABLE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
     {
         let grpc_port: u16 = std::env::var("OTEL_GRPC_PORT")
             .ok()
@@ -94,8 +134,8 @@ async fn main() -> anyhow::Result<()> {
     info!("HTTP listening on {listen}");
     let listener = tokio::net::TcpListener::bind(listen).await?;
 
-    // Self-monitoring bootstrap must not postpone customer bind or abort the process.
-    if config.self_monitoring.enabled {
+    // Ops `thelake_*` export on the ingest process only (one writer to ops lake).
+    if role.serves_ingest() && config.self_monitoring.enabled {
         let sm_state = state.clone();
         let sm_config = config.clone();
         tokio::spawn(async move {

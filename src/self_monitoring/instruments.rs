@@ -18,6 +18,12 @@ pub struct Instruments {
     pub ingest_requests: Counter<u64>,
     pub ingest_errors: Counter<u64>,
     pub ingest_duration_ms: Histogram<f64>,
+    /// DuckLake write transactions (flush-through request or coalesce flush).
+    pub ingest_commits: Counter<u64>,
+    /// Rows included in those commits.
+    pub ingest_rows_committed: Counter<u64>,
+    /// Coalesce timer / force_flush drains (absent on flush-through).
+    pub ingest_coalesce_flushes: Counter<u64>,
     pub write_duration_ms: Histogram<f64>,
     pub query_duration_ms: Histogram<f64>,
     pub query_queue_wait_ms: Histogram<f64>,
@@ -28,6 +34,8 @@ pub struct Instruments {
     pub orphan_remove: Counter<u64>,
     pub snapshot_expire: Counter<u64>,
     pub slow_queries: Counter<u64>,
+    /// Prom sample-scan plan: grain table + raw vs downsample vs live UNION.
+    pub sample_scans: Counter<u64>,
     pub export_drops: Counter<u64>,
 }
 
@@ -216,6 +224,20 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .with_description("Ingest request duration")
             .with_unit("ms")
             .build(),
+        ingest_commits: meter
+            .u64_counter("thelake.ingest.commits")
+            .with_description(
+                "DuckLake write transactions (one per coalesce flush or flush-through request)",
+            )
+            .build(),
+        ingest_rows_committed: meter
+            .u64_counter("thelake.ingest.rows_committed")
+            .with_description("Rows written in DuckLake ingest commits")
+            .build(),
+        ingest_coalesce_flushes: meter
+            .u64_counter("thelake.ingest.coalesce_flushes")
+            .with_description("Soft-coalesce timer/force_flush drains (not flush-through)")
+            .build(),
         write_duration_ms: meter
             .f64_histogram("thelake.write.duration")
             .with_unit("ms")
@@ -238,6 +260,13 @@ fn build_instruments(meter: &Meter) -> Instruments {
         orphan_remove: meter.u64_counter("thelake.orphan.remove").build(),
         snapshot_expire: meter.u64_counter("thelake.snapshot.expire").build(),
         slow_queries: meter.u64_counter("thelake.slow_queries").build(),
+        sample_scans: meter
+            .u64_counter("thelake.query.sample_scans")
+            .with_description(
+                "Prom sample scans by grain table and scan_mode \
+                 (raw | downsample | downsample_with_raw_tail)",
+            )
+            .build(),
         export_drops: meter
             .u64_counter("thelake.self_monitoring.export_drops")
             .build(),
@@ -284,17 +313,27 @@ pub fn record_export_drop() {
 
 pub fn record_ingest(tenant: &str, signal: &str, ok: bool, app: Option<&str>, elapsed: Duration) {
     let Some(i) = instruments() else { return };
-    let app = bound_app(app);
+    // Omit `app` on duration histograms — 64 apps × signals explode SDK series
+    // and self-mon export/coalesce drain pegged Softprobe CPU after light ingest.
     let status = if ok { "ok" } else { "error" };
     let a = attrs(&[
         ("tenant", tenant),
         ("signal", signal),
         ("status", status),
-        ("app", &app),
         ("op", "ingest"),
     ]);
     if ok {
-        i.ingest_requests.add(1, &a);
+        let app = bound_app(app);
+        i.ingest_requests.add(
+            1,
+            &attrs(&[
+                ("tenant", tenant),
+                ("signal", signal),
+                ("status", status),
+                ("app", &app),
+                ("op", "ingest"),
+            ]),
+        );
     } else {
         i.ingest_errors.add(1, &a);
     }
@@ -304,16 +343,40 @@ pub fn record_ingest(tenant: &str, signal: &str, ok: bool, app: Option<&str>, el
 
 pub fn record_write(tenant: &str, signal: &str, app: Option<&str>, elapsed: Duration) {
     let Some(i) = instruments() else { return };
-    let app = bound_app(app);
+    let _ = app; // cardinality: duration without per-app series
     let a = attrs(&[
         ("tenant", tenant),
         ("signal", signal),
-        ("app", &app),
         ("op", "write"),
         ("status", "ok"),
     ]);
     i.write_duration_ms
         .record(elapsed.as_secs_f64() * 1000.0, &a);
+}
+
+/// Record a completed DuckLake ingest commit (coalesced or flush-through).
+///
+/// When coalesce is on, `rate(commits)` must stay well below `rate(requests)`.
+pub fn record_ingest_commit(tenant: &str, signal: &str, rows: u64, coalesced: bool) {
+    let Some(i) = instruments() else { return };
+    let path = if coalesced {
+        "coalesce"
+    } else {
+        "flush_through"
+    };
+    let a = attrs(&[
+        ("tenant", tenant),
+        ("signal", signal),
+        ("path", path),
+        ("op", "ingest"),
+    ]);
+    i.ingest_commits.add(1, &a);
+    if rows > 0 {
+        i.ingest_rows_committed.add(rows, &a);
+    }
+    if coalesced {
+        i.ingest_coalesce_flushes.add(1, &a);
+    }
 }
 
 pub fn record_query(tenant: &str, sql_kind: &str, elapsed: Duration) {
@@ -326,6 +389,21 @@ pub fn record_query(tenant: &str, sql_kind: &str, elapsed: Duration) {
     ]);
     i.query_duration_ms
         .record(elapsed.as_secs_f64() * 1000.0, &a);
+}
+
+/// Count Prom sample-scan plans so ops can see raw vs downsample vs live UNION
+/// without inferring from latency alone.
+pub fn record_sample_scan(tenant: &str, grain: &str, scan_mode: &str) {
+    let Some(i) = instruments() else { return };
+    i.sample_scans.add(
+        1,
+        &attrs(&[
+            ("tenant", tenant),
+            ("grain", grain),
+            ("scan_mode", scan_mode),
+            ("op", "query"),
+        ]),
+    );
 }
 
 pub fn record_query_queue_wait(tenant: &str, sql_kind: &str, elapsed: Duration) {
@@ -392,22 +470,81 @@ pub fn record_slow_query(tenant: &str, sql_kind: &str) {
 }
 
 /// Refresh process CPU/RSS/IO snapshots for ObservableGauges (best-effort).
+///
+/// Reads `/proc/self` directly — no `sysinfo` double-refresh sleep. That sleep
+/// previously ran on the tokio worker (inventory/export) and, with a single
+/// tokio worker thread, stalled the whole runtime every scrape.
 pub fn refresh_process_gauges() {
-    use sysinfo::{Pid, ProcessesToUpdate, System};
-    let mut sys = System::new();
-    let pid = Pid::from_u32(std::process::id());
-    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    if let Some(p) = sys.process(pid) {
-        gauge_store::PROCESS_RSS.store(p.memory(), Ordering::Relaxed);
-        gauge_store::PROCESS_VSIZE.store(p.virtual_memory(), Ordering::Relaxed);
-        // cpu_usage is percent of one core (100.0 = one full core). Store ×10 so
-        // ObservableGauge can expose ratio ≈ stored/1000 (0–N cores).
-        let cpu_milli = (p.cpu_usage() as f64 * 10.0) as u64;
-        gauge_store::PROCESS_CPU_MILLI.store(cpu_milli, Ordering::Relaxed);
-        let threads = p.tasks().map(|t| t.len() as u64).unwrap_or(0);
-        gauge_store::PROCESS_THREADS.store(threads, Ordering::Relaxed);
-        let disk = p.disk_usage();
-        gauge_store::PROCESS_DISK_READ.store(disk.total_read_bytes, Ordering::Relaxed);
-        gauge_store::PROCESS_DISK_WRITE.store(disk.total_written_bytes, Ordering::Relaxed);
+    use std::fs;
+
+    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let mut rss_kb = 0u64;
+    let mut vsize_kb = 0u64;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            rss_kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("VmSize:") {
+            vsize_kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        }
+    }
+    gauge_store::PROCESS_RSS.store(rss_kb.saturating_mul(1024), Ordering::Relaxed);
+    gauge_store::PROCESS_VSIZE.store(vsize_kb.saturating_mul(1024), Ordering::Relaxed);
+
+    let threads = fs::read_dir("/proc/self/task")
+        .map(|rd| rd.count() as u64)
+        .unwrap_or(0);
+    gauge_store::PROCESS_THREADS.store(threads, Ordering::Relaxed);
+
+    // Instantaneous CPU: delta utime+stime vs previous sample (Linux jiffies).
+    // Ratio units match prior sysinfo path: 1000 milli ≈ one full core.
+    static PREV_CPU: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static PREV_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if let Ok(stat) = fs::read_to_string("/proc/self/stat") {
+        // comm can contain spaces/parens; utime/stime are fields 14/15 after ") ".
+        if let Some(rest) = stat.rsplit(") ").next() {
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            // After ") ": state is [0], so utime=[11], stime=[12] (1-based 14/15 of full stat).
+            if fields.len() > 12 {
+                let utime: u64 = fields[11].parse().unwrap_or(0);
+                let stime: u64 = fields[12].parse().unwrap_or(0);
+                let jiffies = utime.saturating_add(stime);
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                let prev_j = PREV_CPU.swap(jiffies, Ordering::Relaxed);
+                let prev_ns = PREV_NS.swap(now_ns, Ordering::Relaxed);
+                if prev_j > 0 && now_ns > prev_ns {
+                    let dj = jiffies.saturating_sub(prev_j) as f64;
+                    let dt_sec = (now_ns - prev_ns) as f64 / 1e9;
+                    // Linux USER_HZ is almost always 100.
+                    let cores = (dj / 100.0) / dt_sec.max(1e-6);
+                    let cpu_milli = (cores * 1000.0) as u64;
+                    gauge_store::PROCESS_CPU_MILLI.store(cpu_milli, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    if let Ok(io) = fs::read_to_string("/proc/self/io") {
+        for line in io.lines() {
+            if let Some(rest) = line.strip_prefix("read_bytes: ") {
+                if let Ok(v) = rest.trim().parse::<u64>() {
+                    gauge_store::PROCESS_DISK_READ.store(v, Ordering::Relaxed);
+                }
+            } else if let Some(rest) = line.strip_prefix("write_bytes: ") {
+                if let Ok(v) = rest.trim().parse::<u64>() {
+                    gauge_store::PROCESS_DISK_WRITE.store(v, Ordering::Relaxed);
+                }
+            }
+        }
     }
 }

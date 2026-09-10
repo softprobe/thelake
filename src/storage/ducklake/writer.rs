@@ -19,8 +19,8 @@ use tracing::{info, warn};
 use super::attach::{
     apply_ducklake_retry_settings, catalog_is_attached, configure_duckdb_resources,
     ducklake_attach_options, ducklake_attach_target, ducklake_qualified_table_name,
-    ducklake_set_option_scope_for_qualified, prepare_local_ducklake_paths, WRITER_DUCKDB_MEMORY,
-    WRITER_DUCKDB_THREADS,
+    ducklake_set_option_scope_for_qualified, open_in_memory_capped, prepare_local_ducklake_paths,
+    WRITER_DUCKDB_MEMORY, WRITER_DUCKDB_THREADS,
 };
 use super::object_store::configure_object_store;
 use super::util::{
@@ -668,8 +668,8 @@ impl DuckLakeWriter {
     }
 
     pub(super) fn open_connection_for(&self, dk: &DuckLakeConfig) -> Result<Connection> {
-        let conn =
-            Connection::open_in_memory().map_err(|e| anyhow!("DuckDB open failed: {}", e))?;
+        // Cap at open — SET threads after INSTALL/LOAD leaves an nproc TaskScheduler.
+        let conn = open_in_memory_capped(WRITER_DUCKDB_THREADS, WRITER_DUCKDB_MEMORY)?;
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
         configure_object_store(&conn, &self.config, &dk.data_path)?;
         conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;

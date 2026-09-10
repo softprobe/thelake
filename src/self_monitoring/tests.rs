@@ -15,7 +15,8 @@ fn reserved_tenant_id_is_thelake_ops() {
 fn self_monitoring_config_defaults_disabled() {
     let c = Config::default();
     assert!(!c.self_monitoring.enabled);
-    assert_eq!(c.self_monitoring.export_interval_seconds, 60);
+    assert_eq!(c.self_monitoring.export_interval_seconds, 300);
+    assert_eq!(c.self_monitoring.inventory_interval_seconds, 300);
     assert_eq!(c.self_monitoring.ops_metadata_schema, "thelake_ops");
 }
 
@@ -29,13 +30,33 @@ ducklake:
 self_monitoring:
   enabled: true
   export_interval_seconds: 15
+  inventory_interval_seconds: 90
   ops_metadata_schema: thelake_ops
   ops_data_path: /tmp/ops-data/
 "#;
     let c: Config = serde_yaml::from_str(yaml).expect("parse");
     assert!(c.self_monitoring.enabled);
     assert_eq!(c.self_monitoring.export_interval_seconds, 15);
+    assert_eq!(c.self_monitoring.inventory_interval_seconds, 90);
     assert_eq!(c.self_monitoring.ops_data_path, "/tmp/ops-data/");
+}
+
+#[test]
+fn inventory_source_reuses_pooled_execute_query() {
+    // Regression: inventory must not open+ATTACH via uninstrumented path.
+    let src = include_str!("inventory.rs");
+    assert!(
+        src.contains("execute_query("),
+        "inventory must call pooled execute_query"
+    );
+    assert!(
+        !src.contains("execute_queries_uninstrumented"),
+        "inventory must not call execute_queries_uninstrumented (fresh ATTACH)"
+    );
+    assert!(
+        !src.contains("execute_query_uninstrumented"),
+        "inventory must not call execute_query_uninstrumented (fresh ATTACH)"
+    );
 }
 
 #[tokio::test]

@@ -36,6 +36,10 @@ pub struct SelfMonitoringConfig {
     pub enabled: bool,
     #[serde(default = "default_self_monitoring_export_interval_seconds")]
     pub export_interval_seconds: u64,
+    /// DuckLake file inventory scrape period. Floored at 60s in the loop; demo
+    /// defaults to 120s so ATTACH-free worker scrapes stay off the hot path.
+    #[serde(default = "default_self_monitoring_inventory_interval_seconds")]
+    pub inventory_interval_seconds: u64,
     #[serde(default = "default_self_monitoring_ops_metadata_schema")]
     pub ops_metadata_schema: String,
     #[serde(default = "default_self_monitoring_ops_data_path")]
@@ -47,6 +51,7 @@ impl Default for SelfMonitoringConfig {
         Self {
             enabled: false,
             export_interval_seconds: default_self_monitoring_export_interval_seconds(),
+            inventory_interval_seconds: default_self_monitoring_inventory_interval_seconds(),
             ops_metadata_schema: default_self_monitoring_ops_metadata_schema(),
             ops_data_path: default_self_monitoring_ops_data_path(),
         }
@@ -54,7 +59,11 @@ impl Default for SelfMonitoringConfig {
 }
 
 fn default_self_monitoring_export_interval_seconds() -> u64 {
-    60
+    300
+}
+
+fn default_self_monitoring_inventory_interval_seconds() -> u64 {
+    300
 }
 
 fn default_self_monitoring_ops_metadata_schema() -> String {

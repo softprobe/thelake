@@ -115,7 +115,7 @@ This document is the canonical checklist of all query features, functions, and a
 | H-01 | `_bucket` series | Histogram cumulative counter | `sum by (le) (http_server_request_duration_bucket)` | Cumulative bucket ladder | VERIFIED |
 | H-02 | `_count` series | Total observations count | `sum(http_server_request_duration_count)` | Total count series | VERIFIED |
 | H-03 | `_sum` series | Total observation sum | `sum(http_server_request_duration_sum)` | Latency sum series | VERIFIED |
-| H-04 | `rate` on `_bucket` | Per-second bucket rates | `sum by (le) (rate(k6_http_req_duration_bucket[5m]))` | Rate of observations by bucket (k6 fixture; OTLP `http_server_*` is too sparse for `[5m]` under collector backoff) | VERIFIED |
+| H-04 | `rate` on `_bucket` | Per-second bucket rates | `sum by (le) (rate(demo_cart_add_item_latency_bucket[5m]))` | Rate of observations by bucket (Cart demo histogram; unbounded `k6_*_bucket` exceeds `max_series` under full-fidelity) | VERIFIED |
 
 ---
 

@@ -472,6 +472,7 @@ fn query_1h_grain_returns_downsampled_last() {
         false,
         true,
         1000,
+        None,
     );
     assert!(
         sql.contains("metric_samples_1h"),
@@ -520,6 +521,7 @@ fn query_5m_grain_returns_downsampled_last() {
         false,
         true,
         1000,
+        None,
     );
     assert!(
         sql.contains("metric_samples_5m"),
@@ -595,6 +597,7 @@ fn label_filter_with_downsample_returns_correct_series() {
         false,
         true,
         1000,
+        None,
     );
     let mut sstmt = conn.prepare(&samples_sql).expect("samples");
     let values: Vec<f64> = sstmt

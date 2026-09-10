@@ -1,35 +1,36 @@
 # Copyright Softprobe / OpenTelemetry Authors overlay
 # SPDX-License-Identifier: Apache-2.0
 #
-# Bring Softprobe in as an OTLP/HTTP backend for the official Astronomy Shop demo.
-# Mounted as OTEL_COLLECTOR_CONFIG_EXTRAS (arrays replace on merge — repeat upstream
-# receivers/processors/exporters you still want; base 3.0.0 core uses debug + span_metrics).
+# Softprobe demo overlay — full-fidelity Astronomy Shop → Softprobe.
 #
-# Softprobe DuckLake cannot sustain the full demo metrics firehose (docker_stats,
-# host_metrics, redis, postgres, …) while Grafana refreshes.
-# Keep GOLD-relevant metric sources only. Export Astronomy Shop application logs
-# (not infra collectors) so Loki Explore label pickers stay live in the now-1h window.
+# Strategy (CPU via pacing, not dropping product metrics/logs):
+# - Send full application metrics (no name allow-list). Keep memory limiter +
+#   timeout-dominated batch so Softprobe sees paced posts, not a firehose.
+# - Send application logs to Softprobe (coalesced on Softprobe side).
+# - Send traces to Softprobe with probabilistic sampling (default 10%) so Tempo
+#   boards stay online without span storms — metrics+logs stay complete.
+# - Receivers stay Astronomy Shop + k6 + ad scrape + span_metrics (not
+#   docker_stats / host_metrics / redis / postgres collectors — those are
+#   infra noise, not shop dashboards).
+# - Pair with grafana-manual-up.sh: coalesce flush, query pool ≥2, self-mon on.
 
 processors:
-  # Keep GOLD / Astronomy Shop + k6. k6 OTLP names use dots (`k6.http.reqs`);
-  # Softprobe sanitizes to underscores after ingest — filter must match both.
-  filter/softprobe_gold:
-    error_mode: ignore
-    metrics:
-      metric:
-        - 'not IsMatch(name, "(?i)^(k6[_\\.]|demo[_\\.]|http\\.|http_|rpc\\.|rpc_|traces\\.span\\.metrics|traces_span_metrics|calls$|duration$|http_reqs$|http_req_|iterations$|vus$|data_sent$|data_received$)")'
-  # Application logs only — skip collector/docker noise that drowns DuckLake ingest.
-  filter/softprobe_gold_logs:
+  # Application logs only — skip collector/docker noise that drowns DuckLake.
+  filter/softprobe_app_logs:
     error_mode: ignore
     logs:
       log_record:
         - 'not IsMatch(resource.attributes["service.name"], "(?i)^(ad|cart|checkout|currency|email|fraud-detection|frontend|frontend-proxy|payment|product-catalog|quote|recommendation|shipping|accounting|flagd|load-generator)$")'
+  # Keep metrics+logs complete; sample traces only (plan fallback if CPU tight).
+  probabilistic_sampler:
+    sampling_percentage: 5
   batch/softprobe:
-    # 10k-point batches regularly exceed Softprobe's OTLP timeout under PromQL
-    # load (Grafana SLO warmup). Smaller batches keep /v1/metrics alive.
-    timeout: 5s
-    send_batch_size: 512
-    send_batch_max_size: 1024
+    # Timeout-dominated pacing: Softprobe coalesce (~60s) + Grafana refresh=10s.
+    # Keep near Softprobe flush so recovery after isolated SLO stays inside the
+    # gate wait budget without a write+query CPU storm every few seconds.
+    timeout: 60s
+    send_batch_size: 8192
+    send_batch_max_size: 8192
   memory_limiter/softprobe:
     check_interval: 1s
     limit_mib: 512
@@ -37,10 +38,10 @@ processors:
 
 exporters:
   otlphttp/softprobe:
-    endpoint: http://host.docker.internal:8090
+    endpoint: http://host.docker.internal:8091
     tls:
       insecure: true
-    timeout: 60s
+    timeout: 90s
     compression: gzip
     headers:
       Authorization: "Bearer local-dev-key"
@@ -51,8 +52,9 @@ exporters:
       max_elapsed_time: 180s
     sending_queue:
       enabled: true
-      num_consumers: 8
-      queue_size: 2048
+      # Pace Softprobe writers; raise only if coalesce backlog stays empty.
+      num_consumers: 1
+      queue_size: 64
 
 service:
   pipelines:
@@ -61,18 +63,19 @@ service:
       processors:
         [
           resourcedetection,
-          memory_limiter,
+          memory_limiter/softprobe,
           transform/sanitize_spans,
           gen_ai_normalizer,
+          probabilistic_sampler,
+          batch/softprobe,
         ]
-      exporters: [debug, span_metrics]
+      exporters: [debug, span_metrics, otlphttp/softprobe]
     metrics:
       receivers: [otlp, prometheus/ad, span_metrics]
       processors:
         [
           resourcedetection,
           memory_limiter/softprobe,
-          filter/softprobe_gold,
           batch/softprobe,
         ]
       exporters: [debug, otlphttp/softprobe]
@@ -83,7 +86,7 @@ service:
           resourcedetection,
           memory_limiter/softprobe,
           transform/sanitize_logs,
-          filter/softprobe_gold_logs,
+          filter/softprobe_app_logs,
           batch/softprobe,
         ]
       exporters: [debug, otlphttp/softprobe]

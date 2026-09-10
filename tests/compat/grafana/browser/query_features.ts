@@ -500,11 +500,11 @@ export const QUERY_FEATURE_CATALOG: QueryFeatureTestCase[] = [
     id: 'H-04',
     category: 'histograms',
     name: 'histogram_bucket_rate',
-    // Prefer k6 classic histogram buckets: rate() needs ≥2 raw samples per series in
-    // the window. OTLP http_server_* series go sparse under collector export backoff,
-    // so rate(...[5m]) returns empty while k6 scrapes stay dense enough for CI.
-    // H-01–H-03 still cover http_server_* shape without rate(); astronomy boards that
-    // use rate(http_server_…_bucket[5m]) remain a separate GOLD density concern.
+    // Prefer demo_cart classic histogram buckets: rate() needs ≥2 raw samples per
+    // series in the window, and the selector must stay under max_series (10k).
+    // Unbounded k6_http_req_duration_bucket exceeds that cap under full-fidelity
+    // Astronomy Shop cardinality. H-01–H-03 still cover http_server_* shape without
+    // rate(); GOLD boards that use rate(http_server_…_bucket[5m]) are separate.
     expr: HISTOGRAM_BUCKET_RATE_EXPR,
     isRange: true,
     description: 'Rate of observation count by histogram bucket',

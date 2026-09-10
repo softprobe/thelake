@@ -35,12 +35,61 @@ pub fn maintenance_table_names() -> Vec<&'static str> {
     tables
 }
 
+/// One TWCS/ladder step. Compaction passes rotate through this ring so each tick
+/// stays bounded (LSM-style incremental merge) instead of stop-the-world over
+/// every metrics-family table + ladder + traces/logs/scores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionUnit {
+    MetricsTwcs(&'static str),
+    MetricsLadder,
+    TelemetryTwcs(&'static str),
+}
+
+/// Stable ring order: raw/index → downsample tables → ladder → other signals.
+pub fn compaction_unit_ring() -> Vec<CompactionUnit> {
+    let mut units: Vec<CompactionUnit> = MAINTENANCE_METRICS_FAMILY_TABLES
+        .iter()
+        .copied()
+        .map(CompactionUnit::MetricsTwcs)
+        .collect();
+    units.push(CompactionUnit::MetricsLadder);
+    units.extend(
+        ["traces", "logs", "scores"]
+            .into_iter()
+            .map(CompactionUnit::TelemetryTwcs),
+    );
+    units
+}
+
+/// How many ring units one compaction tick runs (always ≥1 when compaction is due).
+pub const COMPACTION_UNITS_PER_PASS: usize = 2;
+
+/// Slice `count` units from `ring` starting at `cursor`; returns units + next cursor.
+pub fn take_compaction_units(
+    ring: &[CompactionUnit],
+    cursor: usize,
+    count: usize,
+) -> (Vec<CompactionUnit>, usize) {
+    if ring.is_empty() || count == 0 {
+        return (Vec::new(), cursor);
+    }
+    let n = count.min(ring.len());
+    let start = cursor % ring.len();
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        out.push(ring[(start + i) % ring.len()]);
+    }
+    (out, (start + n) % ring.len())
+}
+
 #[derive(Clone)]
 pub struct MaintenanceExecutor {
     config: Config,
     ducklake: crate::config::DuckLakeConfig,
     dropdown_catalog: Option<Arc<DropdownCatalog>>,
     scope_registry: Option<DuckLakeScopeResolver>,
+    /// Rotates through [`compaction_unit_ring`] across compaction ticks.
+    compaction_cursor: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,19 +169,33 @@ impl MaintenanceExecutor {
             ducklake: config.ducklake.clone(),
             dropdown_catalog,
             scope_registry,
+            compaction_cursor: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
+    /// Full ring drain — tests / one-shot CLI expect TWCS+ladder completeness.
     pub async fn run_once(&self) -> Result<MaintenanceSummary> {
-        self.run_pass(true).await
+        self.run_pass_with_unit_limit(true, usize::MAX).await
     }
 
     /// Metadata (expire + DuckLake file cleanup) always; TWCS/ladder only when
     /// `run_compaction` is true so the scheduler can expire every `A` without
     /// merging every metadata tick.
     pub async fn run_pass(&self, run_compaction: bool) -> Result<MaintenanceSummary> {
+        self.run_pass_with_unit_limit(run_compaction, COMPACTION_UNITS_PER_PASS)
+            .await
+    }
+
+    async fn run_pass_with_unit_limit(
+        &self,
+        run_compaction: bool,
+        unit_limit: usize,
+    ) -> Result<MaintenanceSummary> {
+        // Do not hold the ingest CPU gate for the whole pass: TWCS can run for
+        // minutes and would starve OTLP decode. max_blocking_threads=1 already
+        // serializes DuckDB IO against coalesce flushes.
         crate::self_monitoring::record_maintenance();
-        self.run_once_ducklake(run_compaction).await
+        self.run_once_ducklake(run_compaction, unit_limit).await
     }
 
     async fn maintenance_scopes(&self) -> Result<Vec<(String, crate::config::DuckLakeConfig)>> {
@@ -159,7 +222,11 @@ impl MaintenanceExecutor {
         Ok(scopes)
     }
 
-    async fn run_once_ducklake(&self, run_compaction: bool) -> Result<MaintenanceSummary> {
+    async fn run_once_ducklake(
+        &self,
+        run_compaction: bool,
+        unit_limit: usize,
+    ) -> Result<MaintenanceSummary> {
         // §7.2 pass order per tenant scope:
         // 1 ensure PARTITIONED BY / SORTED BY
         // 2 TWCS merge (metrics family first, partition-scoped plans)
@@ -167,6 +234,19 @@ impl MaintenanceExecutor {
         // 6–7 expire snapshots + orphan cleanup (once per scope)
         let tables = maintenance_table_names();
         let mut results = Vec::new();
+
+        let compaction_units = if run_compaction {
+            let ring = compaction_unit_ring();
+            let cursor = self
+                .compaction_cursor
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let (units, next_cursor) = take_compaction_units(&ring, cursor, unit_limit);
+            self.compaction_cursor
+                .store(next_cursor, std::sync::atomic::Ordering::Relaxed);
+            units
+        } else {
+            Vec::new()
+        };
 
         for (tenant_id, ducklake) in self.maintenance_scopes().await? {
             let label = tenant_id.as_str();
@@ -203,57 +283,62 @@ impl MaintenanceExecutor {
                 std::collections::HashMap::new();
 
             if self.config.maintenance.enabled && run_compaction {
-                for table in MAINTENANCE_METRICS_FAMILY_TABLES {
-                    if let Err(err) = self.ducklake_flush_inlined_table(&conn, &ducklake, table) {
-                        warn!(
-                            "Maintenance flush inlined failed for {}.{} ({}); TWCS still runs: {}",
-                            ducklake.metadata_schema, table, label, err
-                        );
-                    }
-                    let status = match self
-                        .ducklake_twcs_compact_table(&conn, &ducklake, table, &tenant_id)
-                    {
-                        Ok(s) => s,
-                        Err(err) => {
-                            warn!(
-                                "Maintenance TWCS merge failed for {}.{} ({}): {}",
-                                ducklake.metadata_schema, table, label, err
-                            );
-                            CompactionStatus::Skipped
-                        }
-                    };
-                    compact_status.insert((*table).to_string(), status);
-                }
-
-                if let Err(err) = self.run_metrics_ladder(&conn, &ducklake) {
-                    warn!(
-                        "Maintenance downsample/collapse ladder failed ({}): {}",
-                        label, err
-                    );
-                }
-
-                // Metrics-layout demos have no traces/logs/scores tables.
-                // Only compact when the table exists so we do not ERROR/spam every
-                // minute and contend with PromQL (Grafana 100ms SLO).
-                for table in ["traces", "logs", "scores"] {
-                    let status = if self
-                        .ducklake_table_exists(&conn, &ducklake, table)
-                        .unwrap_or(false)
-                    {
-                        match self.ducklake_compact_table(&conn, &ducklake, table) {
-                            Ok(s) => s,
-                            Err(err) => {
+                for unit in &compaction_units {
+                    match *unit {
+                        CompactionUnit::MetricsTwcs(table) => {
+                            if let Err(err) =
+                                self.ducklake_flush_inlined_table(&conn, &ducklake, table)
+                            {
                                 warn!(
-                                    "Maintenance compaction failed for {}.{} ({}): {}",
+                                    "Maintenance flush inlined failed for {}.{} ({}); TWCS still runs: {}",
                                     ducklake.metadata_schema, table, label, err
                                 );
-                                CompactionStatus::Skipped
+                            }
+                            let status = match self
+                                .ducklake_twcs_compact_table(&conn, &ducklake, table, &tenant_id)
+                            {
+                                Ok(s) => s,
+                                Err(err) => {
+                                    warn!(
+                                        "Maintenance TWCS merge failed for {}.{} ({}): {}",
+                                        ducklake.metadata_schema, table, label, err
+                                    );
+                                    CompactionStatus::Skipped
+                                }
+                            };
+                            compact_status.insert(table.to_string(), status);
+                        }
+                        CompactionUnit::MetricsLadder => {
+                            if let Err(err) = self.run_metrics_ladder(&conn, &ducklake) {
+                                warn!(
+                                    "Maintenance downsample/collapse ladder failed ({}): {}",
+                                    label, err
+                                );
                             }
                         }
-                    } else {
-                        CompactionStatus::Skipped
-                    };
-                    compact_status.insert(table.to_string(), status);
+                        CompactionUnit::TelemetryTwcs(table) => {
+                            // Only compact when the table exists so we do not ERROR/spam
+                            // and contend with PromQL when the scope is metrics-only.
+                            let status = if self
+                                .ducklake_table_exists(&conn, &ducklake, table)
+                                .unwrap_or(false)
+                            {
+                                match self.ducklake_compact_table(&conn, &ducklake, table) {
+                                    Ok(s) => s,
+                                    Err(err) => {
+                                        warn!(
+                                            "Maintenance compaction failed for {}.{} ({}): {}",
+                                            ducklake.metadata_schema, table, label, err
+                                        );
+                                        CompactionStatus::Skipped
+                                    }
+                                }
+                            } else {
+                                CompactionStatus::Skipped
+                            };
+                            compact_status.insert(table.to_string(), status);
+                        }
+                    }
                 }
             }
 
@@ -898,7 +983,10 @@ impl MaintenanceExecutor {
         &self,
         ducklake: &crate::config::DuckLakeConfig,
     ) -> Result<Connection> {
-        let conn = Connection::open_in_memory()?;
+        let conn = crate::storage::ducklake::open_in_memory_capped(
+            crate::storage::ducklake::COMPACTION_DUCKDB_THREADS,
+            crate::storage::ducklake::COMPACTION_DUCKDB_MEMORY,
+        )?;
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
         crate::storage::ducklake::configure_object_store(&conn, &self.config, &ducklake.data_path)?;
         conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
@@ -1262,6 +1350,30 @@ mod tests {
             tables.iter().position(|t| *t == "metric_samples").unwrap()
                 < tables.iter().position(|t| *t == "traces").unwrap()
         );
+    }
+
+    #[test]
+    fn compaction_unit_ring_covers_family_ladder_and_telemetry() {
+        let ring = compaction_unit_ring();
+        assert!(ring.len() >= MAINTENANCE_METRICS_FAMILY_TABLES.len() + 1 + 3);
+        assert_eq!(ring[0], CompactionUnit::MetricsTwcs("metric_samples"));
+        assert!(ring.contains(&CompactionUnit::MetricsLadder));
+        assert!(ring.contains(&CompactionUnit::TelemetryTwcs("logs")));
+    }
+
+    #[test]
+    fn take_compaction_units_rotates_without_skipping() {
+        let ring = compaction_unit_ring();
+        let (a, c1) = take_compaction_units(&ring, 0, COMPACTION_UNITS_PER_PASS);
+        assert_eq!(a.len(), COMPACTION_UNITS_PER_PASS);
+        let (b, _c2) = take_compaction_units(&ring, c1, COMPACTION_UNITS_PER_PASS);
+        assert_eq!(b.len(), COMPACTION_UNITS_PER_PASS);
+        assert_ne!(a, b);
+        // Full drain visits every unit exactly once.
+        let (all, next) = take_compaction_units(&ring, 0, usize::MAX);
+        assert_eq!(all.len(), ring.len());
+        assert_eq!(next, 0);
+        assert_eq!(all, ring);
     }
 
     #[test]
