@@ -38,7 +38,7 @@ const EAGER_PENDING_BATCHES: usize = 96;
 const MAX_PENDING_BATCHES: usize = 256;
 /// After a capped timer drain with backlog remaining, wait this long before the
 /// next chunk (not a tight loop, not a full coalesce interval).
-const OVERFLOW_REARM: Duration = Duration::from_secs(2);
+const OVERFLOW_REARM: Duration = Duration::from_secs(5);
 
 struct State<T> {
     pending: VecDeque<Vec<T>>,
