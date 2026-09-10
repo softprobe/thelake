@@ -509,8 +509,10 @@ fi
 check_ops_tenant
 check_loki_labels
 
-# One DuckDB worker for the live CPU budget; PromQL measure scales up after.
-scale_query_workers 1 || log "slo: query scale to 1 skipped (non-dual stack?)"
+# Keep four DuckDB workers for live CPU + PromQL. Grafana-only load stays
+# well under one core even with four workers; scaling down to one then back
+# up restarts the query process and turns warmup into multi-hour cold scans.
+scale_query_workers 4 || log "slo: query scale to 4 skipped (non-dual stack?)"
 
 # CPU budget under concurrent full stack (must not depend on pausing Grafana).
 if ! probe_live_cpu; then
@@ -520,10 +522,8 @@ fi
 # Short isolated PromQL measure (warmup + cache hits). Recover full ingest after;
 # Softprobe bounce is last-resort only.
 if [[ ! -s "$FAILS" ]]; then
-# Keep the single warm DuckDB worker for PromQL measure. Scaling up restarts
-# the query process, wipes cache, and turns warmup into a multi-hour cold scan.
-# Client concurrency stays at 1 to match.
-scale_query_workers 1 || log "slo: query ensure max_connections=1 skipped"
+# Same worker count as live CPU — skip restart so warmup reuses warm cache.
+scale_query_workers 4 || log "slo: query ensure max_connections=4 skipped"
 trap 'restart_collector; unpause_grafana' EXIT
 
 if docker inspect -f '{{.State.Status}}' thelake-grafana-manual 2>/dev/null | grep -qx running; then
@@ -543,7 +543,7 @@ if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx 
 fi
 
 log "slo: global warmup"
-if ! python3 "$PY" --warmup-all --timeout-s 120 --workers 1 >>"$LOG" 2>&1; then
+if ! python3 "$PY" --warmup-all --timeout-s 120 --workers 4 >>"$LOG" 2>&1; then
   fail "Grafana global warmup failed (see $LOG)"
 fi
 log "slo: global warmup ok"
@@ -557,7 +557,7 @@ for attempt in 1 2 3; do
     collector_stopped=1
   fi
   slo_rc=0
-  slo_out="$(python3 "$PY" --slo-ms 100 --repeats 3 --workers 1 --skip-ingest 2>&1)" || slo_rc=$?
+  slo_out="$(python3 "$PY" --slo-ms 100 --repeats 3 --workers 4 --skip-ingest 2>&1)" || slo_rc=$?
   printf '%s\n' "$slo_out" | tee -a "$LOG" >&2
   if [[ "$slo_rc" -eq 0 ]]; then
     break

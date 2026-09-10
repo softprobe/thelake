@@ -587,10 +587,10 @@ object_store:
   endpoint: null
 
 query:
-  # One DuckDB worker per process (threads=1). Dual Softprobe keeps write/read
-  # CPU budgets separate; bump THELAKE_QUERY_MAX_CONNECTIONS only for isolated
-  # experiments — stop-gate live CPU expects 1 on the query process.
-  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-1}
+  # Four DuckDB workers (threads=1 each) on the query process. Live CPU stays
+  # under budget with Grafana-only load; isolated PromQL warmup needs the
+  # parallelism. Write process is forced to max_connections=1 below.
+  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-4}
   cache_dir: "$STATE_DIR/cache"
 
 # Soft coalesce: hold OTLP rows in memory and commit once per interval.
