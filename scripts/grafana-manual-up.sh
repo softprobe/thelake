@@ -586,7 +586,7 @@ object_store:
 
 query:
   # Query process uses ≥2 workers (DuckDB threads=1 each). Write process keeps 1.
-  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-1}
+  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-2}
   cache_dir: "$STATE_DIR/cache"
 
 # Soft coalesce: hold OTLP rows in memory and commit once per interval.
