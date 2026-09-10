@@ -302,16 +302,24 @@ def warmup_all(
     client: SoftprobeProm,
     queries: list[dict[str, str]],
     ranges: list[tuple[str, int]] | None = None,
+    workers: int = 4,
 ) -> int:
-    """One discarded query_range per dashboard expr × range (serial)."""
-    warmed = 0
+    """One discarded query_range per dashboard expr × range (parallel)."""
+    work: list[tuple[dict[str, str], int]] = []
     for q in queries:
-        for range_name, range_secs in ranges or RANGES:
-            end = int(time.time())
-            start = end - range_secs
-            step = grafana_step_seconds(range_secs)
-            client.query_range(q["expr"], start, end, step)
-            warmed += 1
+        for _range_name, range_secs in ranges or RANGES:
+            work.append((q, range_secs))
+
+    def one(item: tuple[dict[str, str], int]) -> None:
+        q, range_secs = item
+        end = int(time.time())
+        start = end - range_secs
+        step = grafana_step_seconds(range_secs)
+        client.query_range(q["expr"], start, end, step)
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(one, work))
+    warmed = len(work)
     print(f"global warmup ok ({warmed} cells)", file=sys.stderr)
     return warmed
 
