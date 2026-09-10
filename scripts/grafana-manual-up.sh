@@ -9,7 +9,7 @@
 #   metrics/logs/traces, and self-monitoring/ops online. Budget comes from
 #   pacing + cheaper work — not from dropping shop signals.
 #   Levers (defaults below):
-# Soft coalesce flush_interval_seconds=60 (fewer parquet commits)
+# Soft coalesce flush_interval_seconds=30 (demo freshness + fewer parquet commits)
 #     - DuckDB threads=1 per connection at create time (attach.rs)
 #     - query.max_connections=4 on the read process (DuckDB threads=1 each);
 #       write process forced to 1; dedicated write (:8091) + read (:8090) so
@@ -20,10 +20,11 @@
 #     - THELAKE_CPU_AFFINITY empty by default (optional experiment pin only)
 #
 # Ingest buffering (soft coalesce):
-#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=60 (default) — ack-on-enqueue, one
+#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=30 (default) — ack-on-enqueue, one
 #     DuckLake Parquet commit per signal every N seconds (demo CPU/IO profile).
 #   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=0  — flush-through (commit before ack;
 #     debug / contract tests only; saturates disk under Astronomy Shop + k6).
+#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=60 — longer coalesce when CPU is tight.
 #   THELAKE_WRITER_POOL_SIZE=1 (default) — serialize DuckLake writers under demo.
 
 set -euo pipefail
