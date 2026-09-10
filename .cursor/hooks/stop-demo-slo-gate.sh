@@ -175,6 +175,14 @@ restart_softprobe_demo() {
     chmod +x "$bin"
   fi
   cfg="$GRAFANA_STATE/config.yaml"
+  cfg_write="$GRAFANA_STATE/config-write.yaml"
+  cfg_query="$GRAFANA_STATE/config-query.yaml"
+  if [[ ! -f "$cfg_write" ]]; then
+    cfg_write="$cfg"
+  fi
+  if [[ ! -f "$cfg_query" ]]; then
+    cfg_query="$cfg"
+  fi
   if [[ ! -x "$bin" || ! -f "$cfg" ]]; then
     log "slo: softprobe restart skipped (missing $bin or $cfg)"
     return 1
@@ -213,7 +221,7 @@ restart_softprobe_demo() {
 
   auth_url="${SOFTPROBE_AUTH_URL:-http://127.0.0.1:18080/validate}"
   start_role() {
-    local role="$1" listen="$2" logf="$3" pidf="$4"
+    local role="$1" listen="$2" logf="$3" pidf="$4" cfgf="$5"
     local -a run_cmd
     : >"$logf"
     run_cmd=(env
@@ -223,7 +231,7 @@ restart_softprobe_demo() {
       "SOFTPROBE_HTTP_ROLE=$role"
       "SOFTPROBE_LISTEN_ADDR=$listen"
       "RUST_LOG=${RUST_LOG:-info}"
-      "CONFIG_FILE=$cfg"
+      "CONFIG_FILE=$cfgf"
       "LD_LIBRARY_PATH=${duck_lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     )
     if [[ -n "${THELAKE_CPU_AFFINITY:-}" ]] && command -v taskset >/dev/null 2>&1; then
@@ -239,8 +247,8 @@ restart_softprobe_demo() {
       echo $! >"$pidf"
     fi
   }
-  start_role ingest "0.0.0.0:8091" "$GRAFANA_STATE/softprobe-write.log" "$WRITE_PID_FILE"
-  start_role query "0.0.0.0:8090" "$GRAFANA_STATE/softprobe-read.log" "$READ_PID_FILE"
+  start_role ingest "0.0.0.0:8091" "$GRAFANA_STATE/softprobe-write.log" "$WRITE_PID_FILE" "$cfg_write"
+  start_role query "0.0.0.0:8090" "$GRAFANA_STATE/softprobe-read.log" "$READ_PID_FILE" "$cfg_query"
   cp -f "$READ_PID_FILE" "$PID_FILE"
 
   local ok=0
@@ -458,7 +466,7 @@ if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx 
 fi
 
 log "slo: global warmup"
-if ! python3 "$PY" --warmup-all >>"$LOG" 2>&1; then
+if ! python3 "$PY" --warmup-all --timeout-s 60 >>"$LOG" 2>&1; then
   fail "Grafana global warmup failed (see $LOG)"
 fi
 log "slo: global warmup ok"

@@ -58,6 +58,8 @@ PID_FILE="$STATE_DIR/softprobe.pid"
 WRITE_PID_FILE="$STATE_DIR/softprobe-write.pid"
 READ_PID_FILE="$STATE_DIR/softprobe-read.pid"
 CONFIG="$STATE_DIR/config.yaml"
+CONFIG_WRITE="$STATE_DIR/config-write.yaml"
+CONFIG_QUERY="$STATE_DIR/config-query.yaml"
 GRAFANA_AUTH_MOCK_PORT="${GRAFANA_AUTH_MOCK_PORT:-18080}"
 API_KEY="${SOFTPROBE_API_KEY:-local-dev-key}"
 # Query process stays on :8090 (Grafana + PromQL gate). Ingest process :8091 (OTLP).
@@ -583,8 +585,8 @@ object_store:
   endpoint: null
 
 query:
-  # 2 workers × DuckDB threads=1: parallel panels without nproc fan-out.
-  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-1}
+  # Query process uses ≥2 workers (DuckDB threads=1 each). Write process keeps 1.
+  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-2}
   cache_dir: "$STATE_DIR/cache"
 
 # Soft coalesce: hold OTLP rows in memory and commit once per interval.
@@ -634,6 +636,15 @@ self_monitoring:
   ops_metadata_schema: thelake_ops
   ops_data_path: "$STATE_DIR/data/_thelake_ops/"
 EOF
+# Dual-process: write keeps a single query worker (self-mon only); query serves PromQL.
+cp -f "$CONFIG" "$CONFIG_QUERY"
+python3 - "$CONFIG" "$CONFIG_WRITE" <<'PY'
+import pathlib, re, sys
+src, dst = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+text = src.read_text()
+text = re.sub(r"(?m)^(\s*max_connections:\s*)\d+", r"\g<1>1", text, count=1)
+dst.write_text(text)
+PY
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 DUCKDB_LIB_DIR="$(find "${TARGET_DIR}/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
@@ -692,13 +703,14 @@ start_softprobe_detached() {
   local listen="$2"
   local logf="$3"
   local pidf="$4"
+  local cfgf="$5"
   local -a run_cmd=()
   if [[ -n "$CPU_AFFINITY" ]] && command -v taskset >/dev/null 2>&1; then
     run_cmd=(taskset -c "$CPU_AFFINITY")
     echo "==> Softprobe ($role) CPU affinity: $CPU_AFFINITY (THELAKE_CPU_AFFINITY)"
   fi
   run_cmd+=(env
-    "CONFIG_FILE=$CONFIG"
+    "CONFIG_FILE=$cfgf"
     "SOFTPROBE_AUTH_URL=$AUTH_URL"
     "SOFTPROBE_ADMIN_API_KEY=$ADMIN_API_KEY"
     "SOFTPROBE_GRPC_DISABLE=1"
@@ -712,7 +724,6 @@ start_softprobe_detached() {
     echo $! >"$pidf"
     return
   fi
-  # macOS: no setsid; perl double-fork orphans the runtime from Make/agent shells.
   perl -e '
     use strict; use warnings;
     my ($bin, $log, $pidfile, @env) = @ARGV;
@@ -726,7 +737,7 @@ start_softprobe_detached() {
     %ENV = (%ENV, map { split /=/, $_, 2 } @env);
     exec $bin or die $!;
   ' "$RUNTIME_BIN" "$logf" "$pidf" \
-    "CONFIG_FILE=$CONFIG" \
+    "CONFIG_FILE=$cfgf" \
     "SOFTPROBE_AUTH_URL=$AUTH_URL" \
     "SOFTPROBE_ADMIN_API_KEY=$ADMIN_API_KEY" \
     "SOFTPROBE_GRPC_DISABLE=1" \
@@ -752,8 +763,8 @@ start_softprobe_detached() {
   fi
 }
 # Ingest first so tenant provisioning + OTLP have a writer before query warms.
-start_softprobe_detached ingest "0.0.0.0:${INGEST_PORT}" "$WRITE_LOG" "$WRITE_PID_FILE"
-start_softprobe_detached query "0.0.0.0:${QUERY_PORT}" "$READ_LOG" "$READ_PID_FILE"
+start_softprobe_detached ingest "0.0.0.0:${INGEST_PORT}" "$WRITE_LOG" "$WRITE_PID_FILE" "$CONFIG_WRITE"
+start_softprobe_detached query "0.0.0.0:${QUERY_PORT}" "$READ_LOG" "$READ_PID_FILE" "$CONFIG_QUERY"
 # Legacy pid file tracks the query process (Grafana :8090) for older helpers.
 cp -f "$READ_PID_FILE" "$PID_FILE"
 # Combined log pointer for operators.
