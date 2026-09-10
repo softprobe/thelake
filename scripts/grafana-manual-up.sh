@@ -11,7 +11,9 @@
 #   Levers (defaults below):
 # Soft coalesce flush_interval_seconds=60 (fewer parquet commits)
 #     - DuckDB threads=1 per connection at create time (attach.rs)
-#     - query.max_connections=2, tokio worker_threads=2 (ingest ≠ query starve)
+#     - query.max_connections=1 on both roles (DuckDB threads=1); dedicated
+#       write (:8091) + read (:8090) processes so ingest/query may overlap
+#       without sharing one process's CPU budget
 #     - writer_pool_size=1 (serialize DuckLake commits)
 #     - self_monitoring on (inventory reuses query workers; interval ≥180s)
 #     - otelcol-config-extras.yml: full metrics + app logs + traces; batch pacing
@@ -585,8 +587,10 @@ object_store:
   endpoint: null
 
 query:
-  # Query process uses ≥2 workers (DuckDB threads=1 each). Write process keeps 1.
-  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-2}
+  # One DuckDB worker per process (threads=1). Dual Softprobe keeps write/read
+  # CPU budgets separate; bump THELAKE_QUERY_MAX_CONNECTIONS only for isolated
+  # experiments — stop-gate live CPU expects 1 on the query process.
+  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-1}
   cache_dir: "$STATE_DIR/cache"
 
 # Soft coalesce: hold OTLP rows in memory and commit once per interval.
