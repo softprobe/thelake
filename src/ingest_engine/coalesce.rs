@@ -64,19 +64,27 @@ pub struct CoalesceBuf<T: Send + 'static> {
 fn drain_capped<T>(pending: &mut VecDeque<Vec<T>>, pending_rows: &mut usize) -> Vec<Vec<T>> {
     let mut out = Vec::new();
     let mut rows = 0usize;
-    while let Some(front) = pending.front() {
-        let front_len = front.len();
-        if !out.is_empty()
-            && (out.len() >= MAX_BATCHES_PER_FLUSH || rows + front_len > MAX_ROWS_PER_FLUSH)
-        {
+    while out.len() < MAX_BATCHES_PER_FLUSH && rows < MAX_ROWS_PER_FLUSH {
+        let Some(front) = pending.front_mut() else {
             break;
+        };
+        if front.is_empty() {
+            pending.pop_front();
+            continue;
         }
-        let batch = pending.pop_front().expect("front checked");
-        *pending_rows = pending_rows.saturating_sub(batch.len());
-        rows += batch.len();
-        out.push(batch);
-        if out.len() >= MAX_BATCHES_PER_FLUSH || rows >= MAX_ROWS_PER_FLUSH {
-            break;
+        let space = MAX_ROWS_PER_FLUSH - rows;
+        if front.len() <= space {
+            let batch = pending.pop_front().expect("front checked");
+            *pending_rows = pending_rows.saturating_sub(batch.len());
+            rows += batch.len();
+            out.push(batch);
+        } else {
+            // Split oversized OTLP posts (Astronomy Shop ~8k) so MAX_ROWS is real.
+            let rest = front.split_off(space);
+            let batch = std::mem::replace(front, rest);
+            *pending_rows = pending_rows.saturating_sub(batch.len());
+            rows += batch.len();
+            out.push(batch);
         }
     }
     out
@@ -522,6 +530,24 @@ mod tests {
                 .all(|&n| n <= MAX_BATCHES_PER_FLUSH),
             "each write must stay within batch drain cap"
         );
+    }
+
+    #[tokio::test]
+    async fn row_cap_splits_oversized_single_batch() {
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let rows = StdArc::new(TokioMutex::new(Vec::new()));
+        let buf = CoalesceBuf::new(60, counting_writer(calls.clone(), rows.clone(), false));
+        buf.enqueue(vec![0u32; MAX_ROWS_PER_FLUSH * 2 + 10])
+            .await
+            .unwrap();
+        buf.force_flush().await.unwrap();
+        let wrote: Vec<usize> = rows.lock().await.clone();
+        assert!(
+            calls.load(Ordering::SeqCst) >= 3,
+            "one oversized enqueue must split across multiple DuckLake writes"
+        );
+        assert!(wrote.iter().all(|&n| n <= MAX_ROWS_PER_FLUSH));
+        assert_eq!(wrote.iter().sum::<usize>(), MAX_ROWS_PER_FLUSH * 2 + 10);
     }
 
     #[tokio::test]
