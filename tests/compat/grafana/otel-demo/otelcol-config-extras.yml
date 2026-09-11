@@ -1,31 +1,33 @@
 # Copyright Softprobe / OpenTelemetry Authors overlay
 # SPDX-License-Identifier: Apache-2.0
 #
-# Softprobe demo overlay. Target: Softprobe process CPU < 100% under Grafana
-# dashboards with refresh=10s (softprobe-prom-overview and siblings).
+# Softprobe demo overlay — full-fidelity Astronomy Shop → Softprobe.
 #
-# Strategy:
-# - Allow-list overview series (k6 vus/iterations/http_reqs + demo_ad). Drop
-#   k6.http.req.* latency histograms and demo_cart histograms (~800 pts/10s).
-# - Pace OTLP on the 10s refresh cadence (timeout-dominated batch).
-# - Do not send logs/traces or span_metrics-derived series to Softprobe.
-# - Pair with grafana-manual-up.sh: worker_threads=1, max_connections=1,
-#   CPU affinity, self-mon off; H-04/Loki waits skipped unless
-#   THELAKE_REQUIRE_FULL_OTLP=1.
+# Strategy (CPU via MAP bags + coalesce + pacing, not dropping product signals):
+# - Send full application metrics (no name allow-list). Keep memory limiter +
+#   timeout-dominated batch so Softprobe sees paced posts, not a firehose.
+# - Send application logs to Softprobe (coalesced on Softprobe side).
+# - Send traces to Softprobe with probabilistic sampling so Tempo boards stay
+#   online without span storms — metrics+logs stay complete.
+# - Receivers stay Astronomy Shop + k6 + ad scrape + span_metrics (not
+#   docker_stats / host_metrics / redis / postgres collectors — those are
+#   infra noise, not shop dashboards).
+# - Pair with grafana-manual-up.sh: coalesce flush, worker_threads=1,
+#   one-core affinity, product-hot promotions applied.
 
 processors:
-  filter/softprobe_gold:
+  # Application logs only — skip collector/docker noise that drowns DuckLake.
+  filter/softprobe_app_logs:
     error_mode: ignore
-    metrics:
-      metric:
-        # Overview GOLD: k6 vus/iterations/http_reqs + ad counter. OTLP uses dotted
-        # names (k6.vus). Exclude k6.http.req.* latency histograms and demo_cart
-        # histograms (~800 points/10s) that peg DuckLake write on one core.
-        - 'not IsMatch(name, "(?i)^(k6[_\\.]vus|k6[_\\.]iterations|k6[_\\.]vus[_\\.]max|k6[_\\.]http[_\\.]reqs$|http_reqs$|iterations$|vus$|demo[_\\.]ad[_\\.]served)")'
+    logs:
+      log_record:
+        - 'not IsMatch(resource.attributes["service.name"], "(?i)^(ad|cart|checkout|currency|email|fraud-detection|frontend|frontend-proxy|payment|product-catalog|quote|recommendation|shipping|accounting|flagd|load-generator)$")'
+  # Keep metrics+logs complete; sample traces only.
+  probabilistic_sampler:
+    sampling_percentage: 5
   batch/softprobe:
-    # Timeout-dominated: large size so Softprobe sees ~1 metrics POST / 10s, not
-    # a continuous 256-point firehose while the load generator is running.
-    timeout: 10s
+    # Timeout-dominated pacing: Softprobe coalesce + Grafana refresh=10s.
+    timeout: 60s
     send_batch_size: 8192
     send_batch_max_size: 8192
   memory_limiter/softprobe:
@@ -38,7 +40,7 @@ exporters:
     endpoint: http://host.docker.internal:8090
     tls:
       insecure: true
-    timeout: 60s
+    timeout: 90s
     compression: gzip
     headers:
       Authorization: "Bearer local-dev-key"
@@ -50,7 +52,7 @@ exporters:
     sending_queue:
       enabled: true
       num_consumers: 1
-      queue_size: 8
+      queue_size: 64
 
 service:
   pipelines:
@@ -59,19 +61,19 @@ service:
       processors:
         [
           resourcedetection,
-          memory_limiter,
+          memory_limiter/softprobe,
           transform/sanitize_spans,
           gen_ai_normalizer,
+          probabilistic_sampler,
+          batch/softprobe,
         ]
-      # No Softprobe / span_metrics — Prom GOLD boards are metrics-only.
-      exporters: [debug]
+      exporters: [debug, span_metrics, otlphttp/softprobe]
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, prometheus/ad, span_metrics]
       processors:
         [
           resourcedetection,
           memory_limiter/softprobe,
-          filter/softprobe_gold,
           batch/softprobe,
         ]
       exporters: [debug, otlphttp/softprobe]
@@ -82,6 +84,7 @@ service:
           resourcedetection,
           memory_limiter/softprobe,
           transform/sanitize_logs,
+          filter/softprobe_app_logs,
+          batch/softprobe,
         ]
-      # Logs are not queried by Prom GOLD boards; skip Softprobe to save CPU.
-      exporters: [debug]
+      exporters: [debug, otlphttp/softprobe]

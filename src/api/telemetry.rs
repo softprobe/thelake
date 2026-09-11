@@ -276,6 +276,8 @@ pub fn compile_details_sql(
         "session" => (
             format!("session_id = {escaped_id}"),
             format!("session_id = {escaped_id}"),
+            // union_metrics (skinny layout) has no first-class session_id /
+            // session_attr_id columns — session keys live in the labels MAP.
             format!(
                 "({a} = {escaped_id} OR {b} = {escaped_id} OR {c} = {escaped_id} OR {d} = {escaped_id} OR {e} = {escaped_id} OR {f} = {escaped_id})",
                 a = variant_varchar("attributes", "sp.session.id"),
@@ -856,6 +858,26 @@ fn storage_error(err: anyhow::Error) -> (StatusCode, Json<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_details_prefer_first_class_session_id_on_spans_and_logs() {
+        let compiled = compile_details_sql(
+            &TelemetryDetailsTarget {
+                kind: "session".into(),
+                id: "sess-1".into(),
+            },
+            None,
+            50,
+        )
+        .unwrap();
+        assert!(compiled.spans.contains("session_id = 'sess-1'"));
+        assert!(compiled.logs.contains("session_id = 'sess-1'"));
+        // Metrics: skinny union_metrics has no session_id column — bag keys only.
+        assert!(compiled
+            .metrics
+            .contains("CAST(attributes['sp.session.id'] AS VARCHAR)"));
+        assert!(!compiled.metrics.contains("session_attr_id"));
+    }
 
     #[test]
     fn bounded_log_details_use_timestamp_ns_without_changing_other_tables() {

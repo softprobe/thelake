@@ -60,16 +60,16 @@ HISTOGRAM_BUCKET_RATE_EXPR_FILE="$ROOT/tests/compat/grafana/browser/catalog_gate
 DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
 # Soft coalesce window for OTLP → DuckLake (0 = flush-through every request).
-# Demo default 10s: fewer Parquet commits under Astronomy Shop OTLP volume.
-INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-10}"
+# Demo default 60s under full OTLP (metrics+logs+sampled traces).
+INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-60}"
 # Pin Softprobe to one CPU so query-worker + blocking-pool cannot exceed 100% process
 # CPU under Grafana refresh=10s (override with THELAKE_CPU_AFFINITY= or empty to disable).
 CPU_AFFINITY="${THELAKE_CPU_AFFINITY:-0}"
-# CPU-budget overlay drops logs + histogram buckets; skip matching readiness gates
-# unless THELAKE_REQUIRE_FULL_OTLP=1 (needs a wider collector allow-list).
-REQUIRE_FULL_OTLP=0
-case "${THELAKE_REQUIRE_FULL_OTLP:-0}" in
-  1|true|TRUE|yes|YES|on|ON) REQUIRE_FULL_OTLP=1 ;;
+# Full OTLP (metrics+app logs+sampled traces) is the default product profile.
+# Set THELAKE_REQUIRE_FULL_OTLP=0 only for temporary bring-up experiments.
+REQUIRE_FULL_OTLP=1
+case "${THELAKE_REQUIRE_FULL_OTLP:-1}" in
+  0|false|FALSE|no|NO|off|OFF) REQUIRE_FULL_OTLP=0 ;;
 esac
 
 mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
@@ -255,7 +255,7 @@ PY
 # CPU-budget collector extras drop k6.http.req.* histograms; skip unless full OTLP.
 wait_for_histogram_bucket_rates() {
   if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
-    echo "==> skipping histogram bucket rate wait (CPU-budget OTLP; set THELAKE_REQUIRE_FULL_OTLP=1 to enforce H-04)"
+    echo "==> skipping histogram bucket rate wait (THELAKE_REQUIRE_FULL_OTLP=0)"
     return 0
   fi
   local bucket_q
@@ -267,7 +267,7 @@ wait_for_histogram_bucket_rates() {
   echo "==> waiting for classic histogram bucket rates (H-04)"
   local bucket_rate_ok=0
   local end start payload
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 120); do
     end="$(date +%s)"
     start="$((end - 600))"
     payload="$(curl -sf -m 30 -H "Authorization: Bearer $API_KEY" \
@@ -304,7 +304,7 @@ PY
 
 wait_for_demo_logs() {
   if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
-    echo "==> skipping Loki log wait (CPU-budget OTLP sends metrics only; set THELAKE_REQUIRE_FULL_OTLP=1 to enforce)"
+    echo "==> skipping Loki log wait (THELAKE_REQUIRE_FULL_OTLP=0)"
     return 0
   fi
   echo "==> waiting for Softprobe Loki labels in the live Explore window"
@@ -419,6 +419,26 @@ if [[ -f "$PID_FILE" ]]; then
   fi
   rm -f "$PID_FILE"
 fi
+# Clear dual-process leftovers from older demo profiles (write :8091 / read :8090).
+for leftover in "$STATE_DIR/softprobe-write.pid" "$STATE_DIR/softprobe-read.pid"; do
+  if [[ -f "$leftover" ]]; then
+    old="$(cat "$leftover" 2>/dev/null || true)"
+    if [[ -n "${old:-}" ]] && kill -0 "$old" 2>/dev/null; then
+      cmd="$(ps -p "$old" -o args= 2>/dev/null || true)"
+      if [[ "$cmd" == *softprobe-runtime* ]]; then
+        kill "$old" 2>/dev/null || true
+        sleep 0.5
+        kill -9 "$old" 2>/dev/null || true
+      fi
+    fi
+    rm -f "$leftover"
+  fi
+done
+for old in $(pgrep -f "$STATE_DIR/softprobe-runtime" 2>/dev/null || true); do
+  kill "$old" 2>/dev/null || true
+  sleep 0.25
+  kill -9 "$old" 2>/dev/null || true
+done
 
 reset_grafana_state() {
   THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" $COMPOSE -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
@@ -533,7 +553,7 @@ query:
   cache_dir: "$STATE_DIR/cache"
 
 # Soft coalesce: hold OTLP rows in memory and commit once per interval.
-# 0 = flush-through (commit before ack). Demo default is 2s via
+# 0 = flush-through (commit before ack). Demo default is 60s via
 # THELAKE_INGEST_FLUSH_INTERVAL_SECONDS (see script header).
 ingest:
   flush_interval_seconds: $INGEST_FLUSH_INTERVAL_SECONDS
@@ -724,10 +744,10 @@ else
   exit 1
 fi
 
-# Prefer typed hot columns for Prom/Grafana selectors before demo traffic.
-# shellcheck source=scripts/lib/apply-prom-hot-labels.sh
-source "$ROOT/scripts/lib/apply-prom-hot-labels.sh"
-apply_prom_hot_labels "$SOFTPROBE_URL_HOST" "$API_KEY"
+# Prefer typed hot columns for Prom/LLM/Loki/Tempo before demo traffic.
+# shellcheck source=scripts/lib/apply-product-hot-promotions.sh
+source "$ROOT/scripts/lib/apply-product-hot-promotions.sh"
+apply_product_hot_promotions "$SOFTPROBE_URL_HOST" "$API_KEY"
 
 echo "==> waiting for Grafana"
 graf_ok=0
@@ -747,7 +767,9 @@ ensure_otel_demo_checkout
 
 echo "==> starting OpenTelemetry Demo $OTEL_DEMO_TAG (minimal, Softprobe backend)"
 demo_compose up --pull missing --remove-orphans --detach
-demo_compose restart otel-collector >/dev/null 2>&1 || true
+# Force-recreate so host-mounted extras (full OTLP vs prior gold filter) always reload.
+demo_compose up -d --force-recreate otel-collector >/dev/null 2>&1 || \
+  demo_compose restart otel-collector >/dev/null 2>&1 || true
 
 wait_for_demo_metrics
 wait_for_demo_logs

@@ -3,7 +3,7 @@ use crate::promotion::TelemetryTable;
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
 use crate::storage::schema::tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
-use crate::storage::schema::variant::parquet_select_with_variant_casts;
+use crate::storage::schema::variant::parquet_select_for_table;
 use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
 use anyhow::{anyhow, Result};
@@ -25,7 +25,7 @@ use super::attach::{
 use super::object_store::configure_object_store;
 use super::util::{
     ensure_log_timestamp_precision, ensure_trace_fidelity_columns,
-    ensure_trace_timestamp_precision, ensure_variant_column_types, escape_sql_literal,
+    ensure_hot_map_column_types, ensure_trace_timestamp_precision, escape_sql_literal,
     size_literal,
 };
 
@@ -292,6 +292,34 @@ impl DuckLakeWriter {
         })
     }
 
+    /// DuckDB type for `ALTER TABLE … ADD COLUMN` evolution.
+    ///
+    /// MAP bags must not fall through to `VARCHAR`. LIST columns (e.g. events)
+    /// are owned by fidelity helpers — refuse here rather than invent a wrong type.
+    fn arrow_field_to_duck_add_type(field: &::arrow::datatypes::Field) -> Result<&'static str> {
+        use ::arrow::datatypes::{DataType, TimeUnit};
+        match field.data_type() {
+            DataType::Utf8 => Ok("VARCHAR"),
+            DataType::Boolean => Ok("BOOLEAN"),
+            DataType::Int64 => Ok("BIGINT"),
+            DataType::Int32 => Ok("INTEGER"),
+            DataType::Float64 => Ok("DOUBLE"),
+            DataType::Date32 => Ok("DATE"),
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok("TIMESTAMP_NS"),
+            DataType::Timestamp(_, _) => Ok("TIMESTAMPTZ"),
+            DataType::Map(_, _) => Ok("MAP(VARCHAR, VARCHAR)"),
+            DataType::List(_) => Err(anyhow!(
+                "skip LIST field '{}' in generic ADD COLUMN — fidelity helpers own it",
+                field.name()
+            )),
+            other => Err(anyhow!(
+                "refusing ADD COLUMN for field '{}' with unsupported Arrow type {other:?} \
+                 (do not default to VARCHAR)",
+                field.name()
+            )),
+        }
+    }
+
     pub(super) fn ensure_table_with_conn(
         conn: &Connection,
         dk: &DuckLakeConfig,
@@ -306,31 +334,31 @@ impl DuckLakeWriter {
                 custom_schema
                     .cloned()
                     .unwrap_or_else(|| Arc::new(TraceTable::schema())),
-                parquet_select_with_variant_casts(table_name),
+                parquet_select_for_table(table_name),
             ),
             "logs" => (
                 custom_schema
                     .cloned()
                     .unwrap_or_else(|| Arc::new(OtlpLogsTable::schema())),
-                parquet_select_with_variant_casts(table_name),
+                parquet_select_for_table(table_name),
             ),
             "scores" => (
                 custom_schema
                     .cloned()
                     .unwrap_or_else(|| Arc::new(ScoreTable::schema())),
-                parquet_select_with_variant_casts(table_name),
+                parquet_select_for_table(table_name),
             ),
             name if name == ScoreConfigTable::table_name() => (
                 custom_schema
                     .cloned()
                     .unwrap_or_else(|| Arc::new(ScoreConfigTable::schema())),
-                parquet_select_with_variant_casts(table_name),
+                parquet_select_for_table(table_name),
             ),
             _ => {
                 if let Some(schema) = custom_schema {
                     (
                         Arc::clone(schema),
-                        parquet_select_with_variant_casts(table_name),
+                        parquet_select_for_table(table_name),
                     )
                 } else {
                     return Err(anyhow!(
@@ -340,7 +368,7 @@ impl DuckLakeWriter {
             }
         };
 
-        let batch = RecordBatch::new_empty(arrow_schema);
+        let batch = RecordBatch::new_empty(arrow_schema.clone());
         let temp_path = Self::write_temp_parquet(table_name, &[batch])?;
         let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
         let ddl = format!(
@@ -353,42 +381,35 @@ impl DuckLakeWriter {
         let _ = std::fs::remove_file(&temp_path);
         ddl_res.map_err(|e| anyhow!("CREATE TABLE failed for {qualified_table}: {e}"))?;
 
-        if let Some(schema) = custom_schema {
-            let found = crate::storage::schema::describe_table_columns(conn, &qualified_table)?;
-            for field in schema.fields() {
-                if !found.contains_key(&field.name().to_ascii_lowercase()) {
-                    let duck_type = match field.data_type() {
-                        ::arrow::datatypes::DataType::Utf8 => "VARCHAR",
-                        ::arrow::datatypes::DataType::Boolean => "BOOLEAN",
-                        ::arrow::datatypes::DataType::Int64 => "BIGINT",
-                        ::arrow::datatypes::DataType::Float64 => "DOUBLE",
-                        ::arrow::datatypes::DataType::Timestamp(
-                            ::arrow::datatypes::TimeUnit::Nanosecond,
-                            _,
-                        ) => "TIMESTAMP_NS",
-                        ::arrow::datatypes::DataType::Timestamp(_, _) => "TIMESTAMPTZ",
-                        _ => "VARCHAR",
-                    };
-                    let alter_sql = format!(
-                        "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {} {duck_type};",
-                        super::util::quote_duckdb_ident(field.name())
-                    );
-                    conn.execute_batch(&alter_sql).map_err(|e| {
-                        anyhow!(
-                            "failed to add column {} to {}: {}",
-                            field.name(),
-                            qualified_table,
-                            e
-                        )
-                    })?;
+        // Evolve existing tables: ADD any columns present in the Arrow schema
+        // (base + product-hot + promotion custom) that the live table lacks.
+        let found = crate::storage::schema::describe_table_columns(conn, &qualified_table)?;
+        for field in arrow_schema.fields() {
+            if !found.contains_key(&field.name().to_ascii_lowercase()) {
+                // LIST columns (events) are owned by ensure_trace_fidelity_columns.
+                if matches!(field.data_type(), ::arrow::datatypes::DataType::List(_)) {
+                    continue;
                 }
+                let duck_type = Self::arrow_field_to_duck_add_type(field)?;
+                let alter_sql = format!(
+                    "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {} {duck_type};",
+                    super::util::quote_duckdb_ident(field.name())
+                );
+                conn.execute_batch(&alter_sql).map_err(|e| {
+                    anyhow!(
+                        "failed to add column {} to {}: {}",
+                        field.name(),
+                        qualified_table,
+                        e
+                    )
+                })?;
             }
         }
 
         if table_name == "traces" {
             ensure_trace_fidelity_columns(conn, &qualified_table)?;
         }
-        ensure_variant_column_types(conn, &qualified_table, table_name)?;
+        ensure_hot_map_column_types(conn, &qualified_table, table_name)?;
         if table_name == "traces" {
             ensure_trace_timestamp_precision(conn, &qualified_table)?;
         }
@@ -573,7 +594,7 @@ impl DuckLakeWriter {
         let temp_path = Self::write_temp_parquet(table_name, &record_batches)?;
         let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
         let order_clause = self.insert_order_clause(table_name);
-        let select_prefix = parquet_select_with_variant_casts(table_name);
+        let select_prefix = parquet_select_for_table(table_name);
         let deduplicate_scores =
             table_name == ScoreTable::table_name() || table_name == ScoreConfigTable::table_name();
         let dedupe_id_column: Option<&'static str> = if !deduplicate_scores {
@@ -781,6 +802,51 @@ mod tests {
     use crate::models::Log;
     use crate::storage::schema::{arrow, OtlpLogsTable};
     use std::collections::HashMap;
+
+    #[test]
+    fn arrow_field_to_duck_add_type_maps_bags_and_dates() {
+        use ::arrow::datatypes::{DataType, Field, Fields, TimeUnit};
+        use std::sync::Arc;
+
+        let utf8 = Field::new("user_id", DataType::Utf8, true);
+        assert_eq!(
+            DuckLakeWriter::arrow_field_to_duck_add_type(&utf8).unwrap(),
+            "VARCHAR"
+        );
+        let date = Field::new("record_date", DataType::Date32, false);
+        assert_eq!(
+            DuckLakeWriter::arrow_field_to_duck_add_type(&date).unwrap(),
+            "DATE"
+        );
+        let entries = Field::new(
+            "entries",
+            DataType::Struct(Fields::from(vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("value", DataType::Utf8, false),
+            ])),
+            false,
+        );
+        let map = Field::new(
+            "attributes",
+            DataType::Map(Arc::new(entries), false),
+            true,
+        );
+        assert_eq!(
+            DuckLakeWriter::arrow_field_to_duck_add_type(&map).unwrap(),
+            "MAP(VARCHAR, VARCHAR)"
+        );
+        let list = Field::new(
+            "events",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        );
+        assert!(DuckLakeWriter::arrow_field_to_duck_add_type(&list)
+            .unwrap_err()
+            .to_string()
+            .contains("LIST"));
+        // ensure_table skips LIST fields rather than erroring (fidelity helpers).
+        let _ = TimeUnit::Nanosecond;
+    }
 
     #[tokio::test]
     async fn spans_schema_has_no_process_global_promoted_columns() {

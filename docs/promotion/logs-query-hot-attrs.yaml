@@ -1,0 +1,41 @@
+# Canonical logs hot-attribute promotion for Softprobe product / Loki SQL.
+# Apply via POST /v1/promotions/apply (or scripts/lib/apply-product-hot-promotions.sh)
+# before ingest so typed columns fill.
+#
+# Stream-label keys match Loki DEFAULT_STREAM_LABEL_ALLOWLIST where applicable
+# (`deployment.environment`, not `.name`).
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [logs]
+columns:
+  - name: logger_name
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: logger_name
+  - name: service_name
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: service.name
+  - name: deployment_environment
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: deployment.environment
+  - name: session_attr_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.session.id
+  - name: user_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.user.id

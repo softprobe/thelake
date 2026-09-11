@@ -108,6 +108,44 @@ Schema promotion is tenant-scoped:
 
 Canonical contract: [`promotion.md`](promotion.md).
 
+## ADR-015: Temporary MAP bags; prefer promoted columns (VARIANT deferred)
+
+**Date:** 2026-09-10
+**Status:** Accepted (temporary)
+**Issue:** [#55](https://github.com/softprobe/thelake/issues/55)
+
+### Context
+
+DuckLake `VARIANT` shredding for hot attribute bags required
+`data_inlining_row_limit=0` on Postgres catalogs (VARIANT does not inline) and a
+warm-path `::JSON::VARIANT` cast. That write path dominated Softprobe CPU under
+full OTEL demo ingest with Grafana `refresh=10s`. Column promotion already
+covers query-hot keys.
+
+### Decision
+
+1. Store hot telemetry bags as `MAP(VARCHAR, VARCHAR)` temporarily
+   (traces/logs bags + `metric_series.labels`).
+2. Remove the `::JSON::VARIANT` INSERT bridge; fail-fast if leftover VARIANT.
+3. Keep catalog-global `data_inlining_row_limit=0` (metrics AC-F7 / TWCS). Document
+   that MAP *could* inline but the limit is not per-table.
+4. Ship product-hot promotion manifests; demo/bench apply them. Softprobe does
+   not auto-bootstrap promotions on cold start.
+5. All Softprobe SQL compilers prefer promoted columns when an active promotion
+   matches.
+6. Restore VARIANT shredding when DuckLake+Postgres VARIANT inlining (#42) or
+   per-table inlining is available.
+7. `make bench-demo-cpu-full` must keep Softprobe mean process CPU &lt; 85% of one
+   core under full OTLP + Grafana 10s refresh (durable headroom vs cliff-edge
+   saturation).
+
+### Consequences
+
+- Operator rebuild for catalogs that still have VARIANT hot columns.
+- Query-hot filters should use promotion; bag access remains for ad-hoc keys.
+- Canonical notes: [`variant_shredding.md`](variant_shredding.md),
+  [`promotion.md`](promotion.md).
+
 ## Proposed: metrics time-series layout on DuckLake
 
 **Date:** 2026-08-15 (redesign after GreptimeDB study; original goals 2026-08-14)

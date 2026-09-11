@@ -3,7 +3,8 @@
 **Status:** In progress — Phase A/B/C partially landed with kill-case measurements  
 **Date:** 2026-08-14  
 **Context:** Host killed under OpenTelemetry Demo traffic + Grafana Prom dashboards; DuckDB/PromQL path felt unacceptably slow.  
-**Scope:** Metrics storage + Prometheus-compatible **query** path (`DuckLakeMetricsBackend` + PromQL eval). Traces/logs are out of scope except where shared DuckLake maintenance applies.
+**Scope:** Metrics storage + Prometheus-compatible **query** path (`DuckLakeMetricsBackend` + PromQL eval). Traces/logs are out of scope except where shared DuckLake maintenance applies.  
+**Update (2026-09-10 / #55):** Hot bags temporarily restored to MAP; VARIANT shredding deferred. Prefer promoted columns in generated SQL. Full-demo CPU gate: `make bench-demo-cpu-full` (mean Softprobe process CPU &lt; 85% under full OTLP + Grafana `refresh=10s`; PromQL range cache uses TTL freshness under coalesce). Catalog `data_inlining_row_limit` remains `0` (AC-F7).
 
 Related:
 

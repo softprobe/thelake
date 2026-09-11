@@ -6,7 +6,8 @@ use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreDataType, ScoreSource};
 use crate::storage::schema::variant::{
-    variant_as_json, variant_json_to_string_map, variant_try_cast, variant_varchar,
+    prefer_attr_try_cast, prefer_attr_varchar, variant_as_json, variant_json_to_string_map,
+    variant_varchar,
 };
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
@@ -21,6 +22,41 @@ const DEFAULT_SEARCH_LIMIT: usize = 50;
 const DEFAULT_TRACE_LIMIT: usize = 100;
 const DEFAULT_SESSION_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
+
+/// Softprobe product promotion column names from
+/// `docs/promotion/traces-query-hot-attrs.yaml`.
+///
+/// Product SQL always COALESCE these ahead of the attribute MAP bag. Columns are
+/// nullable, so the expression is safe before apply (all-NULL → bag fallback)
+/// and fills after apply. Loading manifests on the query path is unnecessary.
+#[derive(Debug, Clone, Copy)]
+struct LlmAttrPromotions {
+    observation_type: &'static str,
+    model_name: &'static str,
+    model_provider: &'static str,
+    user_id: &'static str,
+    input_tokens: &'static str,
+    output_tokens: &'static str,
+    total_tokens: &'static str,
+    total_cost: &'static str,
+}
+
+impl LlmAttrPromotions {
+    const PRODUCT: Self = Self {
+        observation_type: "observation_type",
+        model_name: "model_name",
+        model_provider: "model_provider",
+        user_id: "user_id",
+        input_tokens: "input_tokens",
+        output_tokens: "output_tokens",
+        total_tokens: "total_tokens",
+        total_cost: "total_cost",
+    };
+}
+
+fn llm_promo() -> LlmAttrPromotions {
+    LlmAttrPromotions::PRODUCT
+}
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -415,10 +451,7 @@ pub fn compile_session_recording_sql(
     if from > to {
         return Err("`from` must be <= `to`".to_string());
     }
-    let obs_type = format!(
-        "COALESCE({}, 'span')",
-        variant_varchar("attributes", "sp.observation.type")
-    );
+    let obs_type = format!("COALESCE({}, 'span')", expr_observation_type());
     Ok(format!(
         "SELECT {projection} FROM union_spans \
          WHERE session_id = {session} \
@@ -670,7 +703,7 @@ pub fn compile_session_search_sql(
     {
         predicates.push(format!(
             "{} = {}",
-            variant_varchar("attributes", "gen_ai.request.model"),
+            expr_model_name(),
             sql_string_literal(model)
         ));
     }
@@ -726,10 +759,7 @@ pub fn compile_session_search_sql(
         }
     };
 
-    let observation_type = format!(
-        "COALESCE({}, 'span')",
-        variant_varchar("attributes", "sp.observation.type")
-    );
+    let observation_type = format!("COALESCE({}, 'span')", expr_observation_type());
 
     Ok(format!(
         "SELECT * FROM ( \
@@ -762,7 +792,7 @@ pub fn compile_session_search_sql(
         total_cost = expr_total_cost(),
         obs_type = observation_type,
         user_id = expr_user_id(),
-        model_name = variant_varchar("attributes", "gen_ai.request.model"),
+        model_name = expr_model_name(),
         where_sql = predicates.join(" AND "),
         having_sql = if having.is_empty() {
             String::new()
@@ -838,20 +868,20 @@ pub fn compile_observation_search_sql(
             .join(", ");
         conditions.push(format!(
             "COALESCE({}, 'span') IN ({values})",
-            variant_varchar("attributes", "sp.observation.type")
+            expr_observation_type()
         ));
     }
     if let Some(model_name) = &request.model_name {
         conditions.push(format!(
             "{} = {}",
-            variant_varchar("attributes", "gen_ai.request.model"),
+            expr_model_name(),
             sql_string_literal(model_name)
         ));
     }
     if let Some(user_id) = &request.user_id {
         conditions.push(format!(
             "({sp} = {id} OR {enduser} = {id})",
-            sp = variant_varchar("attributes", "sp.user.id"),
+            sp = prefer_attr_varchar(Some(llm_promo().user_id), "attributes", "sp.user.id"),
             enduser = variant_varchar("attributes", "enduser.id"),
             id = sql_string_literal(user_id)
         ));
@@ -995,10 +1025,7 @@ pub fn compile_session_traces_sql(
 /// Recording spans share `session_id` with LLM work but must not inflate
 /// session list / detail LLM aggregates or crowd out conversation traces.
 fn exclude_recording_observation_sql() -> String {
-    format!(
-        "COALESCE({}, '') <> 'recording'",
-        variant_varchar("attributes", "sp.observation.type")
-    )
+    format!("COALESCE({}, '') <> 'recording'", expr_observation_type())
 }
 
 pub fn compile_scores_for_span_sql(span_id: &str) -> String {
@@ -1064,19 +1091,13 @@ fn observation_projection(include_payload: bool) -> String {
         "message_type AS name".to_string(),
         format!(
             "COALESCE({}, 'span') AS observation_type",
-            variant_varchar("attributes", "sp.observation.type")
+            expr_observation_type()
         ),
         "timestamp AS start_time".to_string(),
         "end_timestamp AS end_time".to_string(),
         "status_code".to_string(),
-        format!(
-            "{} AS model_name",
-            variant_varchar("attributes", "gen_ai.request.model")
-        ),
-        format!(
-            "{} AS model_provider",
-            variant_varchar("attributes", "gen_ai.provider.name")
-        ),
+        format!("{} AS model_name", expr_model_name()),
+        format!("{} AS model_provider", expr_model_provider()),
         format!("{} AS user_id", expr_user_id()),
         format!("{} AS input_tokens", expr_input_tokens()),
         format!("{} AS output_tokens", expr_output_tokens()),
@@ -1112,28 +1133,73 @@ fn trace_summary_projection() -> String {
     )
 }
 
+fn expr_observation_type() -> String {
+    prefer_attr_varchar(
+        Some(llm_promo().observation_type),
+        "attributes",
+        "sp.observation.type",
+    )
+}
+
+fn expr_model_name() -> String {
+    prefer_attr_varchar(
+        Some(llm_promo().model_name),
+        "attributes",
+        "gen_ai.request.model",
+    )
+}
+
+fn expr_model_provider() -> String {
+    prefer_attr_varchar(
+        Some(llm_promo().model_provider),
+        "attributes",
+        "gen_ai.provider.name",
+    )
+}
+
 fn expr_user_id() -> String {
+    // enduser.id is bag-only fallback (not in product hot-attrs manifest).
     format!(
         "COALESCE({}, {})",
-        variant_varchar("attributes", "sp.user.id"),
+        prefer_attr_varchar(Some(llm_promo().user_id), "attributes", "sp.user.id"),
         variant_varchar("attributes", "enduser.id")
     )
 }
 
 fn expr_input_tokens() -> String {
-    variant_try_cast("attributes", "gen_ai.usage.input_tokens", "BIGINT")
+    prefer_attr_try_cast(
+        Some(llm_promo().input_tokens),
+        "attributes",
+        "gen_ai.usage.input_tokens",
+        "BIGINT",
+    )
 }
 
 fn expr_output_tokens() -> String {
-    variant_try_cast("attributes", "gen_ai.usage.output_tokens", "BIGINT")
+    prefer_attr_try_cast(
+        Some(llm_promo().output_tokens),
+        "attributes",
+        "gen_ai.usage.output_tokens",
+        "BIGINT",
+    )
 }
 
 fn expr_total_tokens() -> String {
-    variant_try_cast("attributes", "gen_ai.usage.total_tokens", "BIGINT")
+    prefer_attr_try_cast(
+        Some(llm_promo().total_tokens),
+        "attributes",
+        "gen_ai.usage.total_tokens",
+        "BIGINT",
+    )
 }
 
 fn expr_total_cost() -> String {
-    variant_try_cast("attributes", "sp.cost.total", "DOUBLE")
+    prefer_attr_try_cast(
+        Some(llm_promo().total_cost),
+        "attributes",
+        "sp.cost.total",
+        "DOUBLE",
+    )
 }
 
 fn score_columns() -> &'static str {
@@ -1886,9 +1952,62 @@ mod tests {
         assert!(sql.contains("gpt-4o''; DROP TABLE traces; --"));
         assert!(sql.contains(&format!(
             "COALESCE({}, 'span') IN ('generation')",
-            variant_varchar("attributes", "sp.observation.type")
+            expr_observation_type()
         )));
         assert!(sql.contains("ORDER BY timestamp DESC, span_id DESC"));
+        // Prefer promoted column before bag path.
+        let obs_pos = sql.find("observation_type").expect("observation_type");
+        let bag_pos = sql
+            .find("attributes['sp.observation.type']")
+            .expect("bag fallback");
+        assert!(
+            obs_pos < bag_pos,
+            "promoted observation_type must lead bag access"
+        );
+    }
+
+    #[test]
+    fn search_and_session_sql_prefer_promoted_hot_attrs() {
+        let request = ObservationSearchRequest {
+            from: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            to: DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            observation_types: vec!["generation".to_string()],
+            model_name: Some("gpt-4o".to_string()),
+            user_id: Some("user-1".to_string()),
+            session_id: None,
+            trace_id: None,
+            limit: Some(10),
+            cursor: None,
+        };
+        let search = compile_observation_search_sql(&request).expect("search");
+        assert!(search.contains("COALESCE(observation_type,"));
+        assert!(search.contains("COALESCE(model_name,"));
+        assert!(search.contains("COALESCE(user_id,"));
+        assert!(
+            search.find("observation_type").unwrap()
+                < search.find("attributes['sp.observation.type']").unwrap()
+        );
+        assert!(
+            search.find("model_name").unwrap()
+                < search.find("attributes['gen_ai.request.model']").unwrap()
+        );
+
+        let mut session = session_search_request();
+        session.user_id = Some("user-1".into());
+        session.model_name = Some("gpt-4o".into());
+        let session_sql = compile_session_search_sql(&session, 10).expect("session");
+        assert!(session_sql.contains("COALESCE(observation_type,"));
+        assert!(session_sql.contains("COALESCE(model_name,"));
+        assert!(
+            session_sql.find("observation_type").unwrap()
+                < session_sql
+                    .find("attributes['sp.observation.type']")
+                    .unwrap()
+        );
     }
 
     #[test]

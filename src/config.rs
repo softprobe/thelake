@@ -392,8 +392,8 @@ fn default_ducklake_metadata_schema() -> String {
 }
 
 fn default_data_inlining_row_limit() -> Option<u64> {
-    // VARIANT shredding (series.labels, traces) only works on Parquet. Skinny
-    // samples/postings/hist used to inline into Postgres and skip TWCS merge.
+    // Keep Some(0) for AC-F7 / TWCS: skinny samples/postings/hist must land in
+    // Parquet so compaction merge sees them (not Postgres-inlined).
     Some(0)
 }
 

@@ -1,4 +1,15 @@
+//! Soft coalesce + flush-through ingest for one tenant-bound [`Storage`].
+//!
+//! # CPU / PromQL coupling
+//! When `flush_interval_seconds > 0`, OTLP acks on enqueue and a timer drains
+//! capped batches into DuckLake. PromQL range answers stay in the HTTP cache
+//! across commits (TTL + start/end buckets); wiping that cache on every flush
+//! forced dashboard refreshes to re-scan Parquet and pegged query CPU.
+
 mod coalesce;
+mod cpu_budget;
+
+pub use cpu_budget::hold_ingest_cpu;
 
 use crate::catalog::DropdownCatalog;
 use crate::config::Config;
@@ -86,7 +97,9 @@ impl IngestEngine {
                             crate::self_monitoring::record_ingest_commit(
                                 &tenant, "metrics", rows, true,
                             );
-                            crate::compat::prometheus::invalidate_range_result_cache();
+                            // Do not invalidate PromQL range cache on coalesce
+                            // commits — TTL covers freshness; wipe-on-flush pegs
+                            // Grafana refresh CPU (see module docs).
                         }
                         r
                     })

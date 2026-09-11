@@ -1124,12 +1124,13 @@ async fn spans_without_events_are_readable() {
         .oneshot(req)
         .await
         .expect("observation detail");
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "reading a span whose events are an empty array must not fail"
-    );
+    let status = resp.status();
     let obs = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "reading a span whose events are an empty array must not fail: {obs}"
+    );
     assert_eq!(obs["span_id"], span_hex);
     assert!(
         obs["events"].as_array().is_none_or(|e| e.is_empty()),
@@ -1172,13 +1173,11 @@ async fn spans_without_events_are_readable() {
 /// DuckDB invalidated the whole database. Until this test existed no CI path
 /// ever read inlined data back, let alone after maintenance ran over it.
 ///
-/// Two facts are pinned, discovered while writing this test:
-/// - Tables with a VARIANT column (traces/logs/metric_samples since the VARIANT
-///   attribute migration) are NOT inlined at all -- tiny span batches write
-///   Parquet despite the config. If a ducklake upgrade starts inlining
-///   VARIANT tables, the first assertion fails and forces a conscious look.
-/// - Tables without VARIANT (scores: MAP metadata) DO inline, so scores are
-///   the live inlined read/write path this test exercises across maintenance.
+/// Temporary MAP era (#55): hot bags are MAP again, so Postgres-backed DuckLake
+/// *can* inline traces/logs when the catalog limit is raised. This test keeps
+/// `data_inlining_row_limit=10_000` to exercise the inlined reader. Production
+/// still keeps the limit at 0 (AC-F7 skinny TWCS). Scores (MAP metadata) remain
+/// the primary inlined path this test walks across maintenance.
 #[tokio::test]
 async fn inlined_data_stays_readable_across_maintenance() {
     use softprobe_runtime::compaction::executor::MaintenanceExecutor;
@@ -1224,8 +1223,8 @@ async fn inlined_data_stays_readable_across_maintenance() {
     let span_hex = hex::encode([0x61u8; 8]);
     let data_dir = temp.path().join("ducklake").join("data");
 
-    // 1. One collector-sized span batch. VARIANT attribute columns opt the
-    //    traces table out of inlining entirely, so this must land as Parquet.
+    // 1. One collector-sized span batch. MAP bags may inline under limit=10_000;
+    //    either Parquet or inlined catalog rows must stay readable below.
     let mut buf = Vec::new();
     llm_generation_request(session_id, [0x51; 16], [0x61; 8])
         .encode(&mut buf)
@@ -1246,14 +1245,11 @@ async fn inlined_data_stays_readable_across_maintenance() {
         .force_flush_spans()
         .await
         .expect("flush spans");
-    assert!(
-        parquet_count(&data_dir.join("main").join("traces")) >= 1,
-        "traces (VARIANT attributes) were inlined -- ducklake behavior changed, \
-         re-evaluate inlining coverage and the inlined-reader risk for spans"
-    );
+    let _traces_parquet = parquet_count(&data_dir.join("main").join("traces"));
+    // MAP + limit=10_000 may inline (0 parquet) or write Parquet; both are OK.
 
-    // 2. One score -> the scores table has no VARIANT column, so this row
-    //    must be inlined into the catalog, not written as Parquet.
+    // 2. One score -> the scores table has MAP metadata and should inline under
+    //    limit=10_000 (not written as Parquet).
     let score_body = json!({
         "score_id": "score-inline-1",
         "timestamp": "2024-07-19T00:02:00Z",
@@ -1334,8 +1330,17 @@ async fn inlined_data_stays_readable_across_maintenance() {
         .oneshot(req)
         .await
         .expect("observation after maintenance");
-    assert_eq!(resp.status(), StatusCode::OK);
-    let obs = response_json(resp).await;
+    let status = resp.status();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("obs body");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "observation after maintenance: {}",
+        String::from_utf8_lossy(&body_bytes)
+    );
+    let obs: serde_json::Value = serde_json::from_slice(&body_bytes).expect("obs json");
     assert_eq!(
         obs["scores"].as_array().expect("scores").len(),
         1,

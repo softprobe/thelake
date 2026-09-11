@@ -1,5 +1,5 @@
 use crate::models::{Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
-use crate::storage::schema::variant::encode_attributes_json;
+use crate::storage::schema::variant::variant_json_to_string_map;
 use anyhow::Result;
 use arrow::array::{
     ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array, ListArray, MapArray,
@@ -9,6 +9,8 @@ use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
+use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, trace};
 
@@ -550,7 +552,7 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
             .collect::<Vec<_>>(),
     ));
 
-    // Build attributes JSON (Utf8) for DuckLake VARIANT cast on write
+    // Build attributes MAP(VARCHAR, VARCHAR)
     let attributes_array = build_span_attributes_array(spans, &attributes_field)?;
 
     let resource_attributes_field = Arc::new(
@@ -559,13 +561,9 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
             .map_err(|e| anyhow::anyhow!("resource_attributes field not found in schema: {e}"))?
             .clone(),
     );
-    let resource_attributes_array = build_variant_json_array(
-        &spans
-            .iter()
-            .map(|span| &span.resource_attributes)
-            .collect::<Vec<_>>(),
+    let resource_attributes_array = build_string_metadata_array(
+        spans.iter().map(|span| &span.resource_attributes),
         &resource_attributes_field,
-        "resource_attributes",
     )?;
 
     let instrumentation_scope_field = Arc::new(
@@ -723,14 +721,14 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
     Ok(record_batch)
 }
 
-/// Build attributes JSON (Utf8) array for spans — staged for DuckLake VARIANT.
+/// Build attributes MAP array for spans (reserved internal carriers excluded).
 fn build_span_attributes_array(
     spans: &[Span],
     attributes_field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef> {
     // Internal carriers live in dedicated columns; keep them out of the
-    // user-facing attributes JSON.
-    let filtered: Vec<std::collections::HashMap<String, String>> = spans
+    // user-facing attributes MAP.
+    let filtered: Vec<HashMap<String, String>> = spans
         .iter()
         .map(|s| {
             s.attributes
@@ -740,28 +738,7 @@ fn build_span_attributes_array(
                 .collect()
         })
         .collect();
-    let refs: Vec<&std::collections::HashMap<String, String>> = filtered.iter().collect();
-    build_variant_json_array(&refs, attributes_field, "attributes")
-}
-
-fn build_variant_json_array(
-    maps: &[&std::collections::HashMap<String, String>],
-    field: &arrow::datatypes::FieldRef,
-    field_name: &str,
-) -> Result<ArrayRef> {
-    use arrow::datatypes::DataType;
-
-    match field.data_type() {
-        DataType::Utf8 => {
-            let values: Vec<String> = maps.iter().map(|m| encode_attributes_json(m)).collect();
-            Ok(Arc::new(StringArray::from(
-                values.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            )))
-        }
-        other => Err(anyhow::anyhow!(
-            "Expected Utf8 JSON staging type for {field_name}, got {other:?}"
-        )),
-    }
+    build_string_metadata_array(filtered.iter(), attributes_field)
 }
 
 /// Build events LIST<STRUCT> array for spans
@@ -926,7 +903,7 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
         logs.iter().map(|l| l.body.as_str()).collect::<Vec<_>>(),
     ));
 
-    // Build attributes JSON (Utf8) for DuckLake VARIANT cast on write
+    // Build attributes MAP(VARCHAR, VARCHAR)
     let attributes_array = build_log_map_array(
         logs.iter()
             .map(|l| &l.attributes)
@@ -935,7 +912,7 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
         &attributes_field,
     )?;
 
-    // Build resource_attributes JSON (Utf8) for DuckLake VARIANT cast on write
+    // Build resource_attributes MAP(VARCHAR, VARCHAR)
     let resource_attributes_array = build_log_map_array(
         logs.iter()
             .map(|l| &l.resource_attributes)
@@ -1013,12 +990,37 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
     Ok(record_batch)
 }
 
-/// Build a JSON (Utf8) array for log/metric VARIANT attribute columns.
+/// Build a MAP(VARCHAR, VARCHAR) array for log attribute columns.
 fn build_log_map_array(
-    maps: &[&std::collections::HashMap<String, String>],
+    maps: &[&HashMap<String, String>],
     map_field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef> {
-    build_variant_json_array(maps, map_field, map_field.name())
+    build_string_metadata_array(maps.iter().copied(), map_field)
+}
+
+/// Parse a reserved JSON-object attribute string into a string MAP.
+///
+/// On parse failure, stores the raw blob under `_raw`. Missing values yield an empty map.
+fn reserved_json_to_string_map(raw: Option<&str>) -> HashMap<String, String> {
+    let Some(text) = raw else {
+        return HashMap::new();
+    };
+    let parsed = match serde_json::from_str::<Value>(text) {
+        Ok(v) => v,
+        Err(_) => {
+            let mut m = HashMap::new();
+            m.insert("_raw".to_string(), text.to_string());
+            return m;
+        }
+    };
+    let map = variant_json_to_string_map(&parsed);
+    if map.is_empty() && !text.is_empty() {
+        let mut m = HashMap::new();
+        m.insert("_raw".to_string(), text.to_string());
+        m
+    } else {
+        map
+    }
 }
 
 fn build_reserved_metadata_array(
@@ -1026,21 +1028,11 @@ fn build_reserved_metadata_array(
     key: &str,
     field: &arrow::datatypes::FieldRef,
 ) -> Result<ArrayRef> {
-    use arrow::datatypes::DataType;
-
-    if !matches!(field.data_type(), DataType::Utf8) {
-        return Err(anyhow::anyhow!(
-            "Expected Utf8 JSON staging type for {}, got {:?}",
-            field.name(),
-            field.data_type()
-        ));
-    }
-    Ok(Arc::new(StringArray::from(
-        spans
-            .iter()
-            .map(|span| span.attributes.get(key).map(String::as_str))
-            .collect::<Vec<_>>(),
-    )))
+    let maps: Vec<HashMap<String, String>> = spans
+        .iter()
+        .map(|span| reserved_json_to_string_map(span.attributes.get(key).map(String::as_str)))
+        .collect();
+    build_string_metadata_array(maps.iter(), field)
 }
 
 #[cfg(test)]

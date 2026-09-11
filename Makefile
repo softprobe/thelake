@@ -28,7 +28,7 @@ SHELL := /bin/bash
 	stress test-deploy \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
 	grafana-up grafana-down validate-ops-dashboard \
-	bench-prom-baseline bench-prom-down
+	bench-prom-baseline bench-prom-down bench-demo-cpu-full
 
 COMPOSE ?= $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo "docker compose")
 
@@ -168,7 +168,7 @@ help:
 	@echo "Extras:   duckdb-shell | demo-session | drop-tables | generate-telemetry | test-deploy | telemetrygen"
 	@echo "Grafana:  grafana-up | grafana-down | test-grafana-prom-smoke | test-grafana-system | test-grafana-browser"
 	@echo "Compat:   test-compat | check-compat-reference-pins | test-loki-diff | test-tempo-diff"
-	@echo "Bench:    bench-prom-baseline | bench-prom-down"
+	@echo "Bench:    bench-prom-baseline | bench-prom-down | bench-demo-cpu-full"
 	@echo ""
 	@echo "Cache:    $(THELAKE_CACHE_ROOT)  (override THELAKE_CACHE_ROOT=...)"
 	@echo "          make clean keeps cache; make clean-cache wipes it"
@@ -685,6 +685,15 @@ bench-prom-baseline: ensure-cache
 bench-prom-down:
 	@chmod +x scripts/bench-prom-down.sh
 	./scripts/bench-prom-down.sh
+
+# Full-OTLP + Grafana 10s Softprobe process CPU budget (#55).
+# Mean Softprobe CPU ratio must stay < 0.85 (one core; durable headroom).
+# Artifacts: docs/perf/results/*-demo-cpu-full.*
+# Short smoke: BENCH_CPU_WARMUP_SECS=20 BENCH_CPU_MEASURE_SECS=60 make bench-demo-cpu-full
+# Force rebuild/wipe: BENCH_CPU_FORCE_BRINGUP=1 make bench-demo-cpu-full
+bench-demo-cpu-full: ensure-cache
+	@chmod +x scripts/bench-demo-cpu-full.sh scripts/grafana-manual-up.sh scripts/grafana-manual-down.sh
+	./scripts/bench-demo-cpu-full.sh
 
 # Grafana manual stack may export CONFIG_FILE; clear it so e2e uses tests/config/test.yaml.
 test-e2e: ensure-cache check-infra

@@ -113,31 +113,38 @@ async fn process_logs_inner(
     body_size: usize,
     tenant: Option<TenantInfo>,
 ) -> Result<(usize, Option<String>)> {
-    let mut logs = Vec::new();
-    let mut app: Option<String> = None;
+    let (logs, app) = {
+        let _cpu = crate::ingest_engine::hold_ingest_cpu().await;
+        let mut logs = Vec::new();
+        let mut app: Option<String> = None;
 
-    for resource_logs in request.resource_logs {
-        let resource_attributes = LogData::extract_resource_attributes(&resource_logs);
-        if app.is_none() {
-            app = resource_attributes.get("service.name").cloned();
-        }
+        for resource_logs in request.resource_logs {
+            let resource_attributes = LogData::extract_resource_attributes(&resource_logs);
+            if app.is_none() {
+                app = resource_attributes.get("service.name").cloned();
+            }
 
-        for scope_logs in resource_logs.scope_logs {
-            // OTEL stores the logger / instrumentation name on scope.name; SoftProbe product
-            // queries filter attributes['logger_name']. Promote when the record MAP omits it.
-            let scope_name = scope_logs
-                .scope
-                .as_ref()
-                .map(|s| s.name.trim())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
-            for log_record in scope_logs.log_records {
-                let mut log_data = LogData::from_otlp(log_record, &resource_attributes)?;
-                LogData::promote_scope_logger_name(&mut log_data.attributes, scope_name.as_deref());
-                logs.push(log_data);
+            for scope_logs in resource_logs.scope_logs {
+                // OTEL stores the logger / instrumentation name on scope.name; SoftProbe product
+                // queries filter attributes['logger_name']. Promote when the record MAP omits it.
+                let scope_name = scope_logs
+                    .scope
+                    .as_ref()
+                    .map(|s| s.name.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                for log_record in scope_logs.log_records {
+                    let mut log_data = LogData::from_otlp(log_record, &resource_attributes)?;
+                    LogData::promote_scope_logger_name(
+                        &mut log_data.attributes,
+                        scope_name.as_deref(),
+                    );
+                    logs.push(log_data);
+                }
             }
         }
-    }
+        (logs, app)
+    };
 
     let log_count = logs.len();
 

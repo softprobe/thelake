@@ -4,6 +4,8 @@ Status: proposed
 Scope: [thelake#42](https://github.com/softprobe/thelake/issues/42) and [thelake#43](https://github.com/softprobe/thelake/issues/43)
 Baseline: branch `v0.2`, commit `5e01c34`
 
+**Application interim (2026-09-10 / [#55](https://github.com/softprobe/thelake/issues/55)):** Softprobe temporarily stores hot bags as `MAP(VARCHAR, VARCHAR)` and keeps `data_inlining_row_limit=0` (metrics AC-F7). This design remains the **restore path** for VARIANT shredding once external-catalog VARIANT inlining works. Stale baseline notes below that assume live VARIANT hot columns describe the pre-#55 / restore target state.
+
 ## Decision summary
 
 Maintain one Softprobe DuckLake fork, pinned together with the DuckDB engine

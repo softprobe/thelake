@@ -53,7 +53,7 @@ fn downsample_keeps_raw_and_second_pass_is_noop() {
         "BEGIN TRANSACTION;\n\
          INSERT INTO {catalog}.metric_series \
            (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-           (1, 'layout_http', 'gauge', '', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{day}');\n\
+           (1, 'layout_http', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
          INSERT INTO {catalog}.metric_postings VALUES \
            ('job', 'api', 1, DATE '{day}');\n\
          INSERT INTO {catalog}.metric_samples VALUES \
@@ -192,7 +192,7 @@ fn twcs_merge_keeps_files_single_record_date() {
             conn.execute_batch(&format!(
                 "INSERT INTO {catalog}.metric_series \
                    (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-                   ({sid}, 'layout_http', 'gauge', '', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{day}');\n\
+                   ({sid}, 'layout_http', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
                  INSERT INTO {catalog}.metric_samples VALUES \
                    ({sid}, TIMESTAMPTZ '{day} 12:0{i}:00+00', {i}.0, DATE '{day}');"
             ))
@@ -439,7 +439,7 @@ fn downsample_1h_visible_on_second_connection_after_commit() {
             "BEGIN TRANSACTION;\n\
              INSERT INTO {catalog}.metric_series \
                (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-               (42, 'layout_tall', 'gauge', '', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{day}');\n\
+               (42, 'layout_tall', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
              INSERT INTO {catalog}.metric_samples VALUES \
                (42, TIMESTAMPTZ '{ts_1h}', 7.0, DATE '{day}');\n\
              COMMIT;"

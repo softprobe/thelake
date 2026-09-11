@@ -11,9 +11,10 @@
 > evaluation, regression, governance, and continuous-improvement workflows.**
 
 The product should lead with the durable value of AI evidence. Open storage,
-DuckLake, Parquet VARIANT shredding, and tenant-controlled column promotion are
-the mechanisms that preserve and keep that evidence useful; they are not the
-category definition.
+DuckLake, Parquet (temporary MAP bags; VARIANT shredding deferred — see
+[`variant_shredding.md`](variant_shredding.md)), and tenant-controlled column
+promotion are the mechanisms that preserve and keep that evidence useful; they
+are not the category definition.
 
 ## Category thesis
 
@@ -112,9 +113,10 @@ The implementation provides:
 - tenant-bound DuckLake catalogs, data paths, writers, and query engines;
 - OTLP trace, log, and metric ingestion without runtime sampling, with HTTP
   payload fields preserved when instrumentation supplies them;
-- DuckLake `VARIANT` columns for hot telemetry attribute maps;
-- Parquet VARIANT shredding and file-level shredded-path statistics when rows
-  are stored in Parquet;
+- DuckLake `MAP(VARCHAR, VARCHAR)` columns for hot telemetry attribute maps
+  (VARIANT shredding temporarily deferred pending Postgres inlining — #42);
+- tenant-controlled promotion as the governed fast path for query-hot keys
+  (compilers prefer promoted columns when active);
 - promotion manifests that add typed nullable columns and extract their values
   on subsequent ingest, using tenant-scoped PostgreSQL metadata in production
   or a local single-scope SQLite catalog;
@@ -136,11 +138,12 @@ evidence into rigid schemas chosen before its value is understood.
 
 Softprobe uses two complementary optimization layers:
 
-1. **VARIANT shredding** retains flexible semi-structured attributes while
-   allowing stable subfields to become physical Parquet columns with
-   projection and file-pruning benefits.
+1. **Flexible MAP bags** retain semi-structured attributes as
+   `MAP(VARCHAR, VARCHAR)`. VARIANT shredding is planned to return when
+   DuckLake+Postgres can inline VARIANT (#42).
 2. **Tenant-controlled promotion** gives a field a stable name and SQL type
-   when that tenant wants an explicit, governed fast path.
+   when that tenant wants an explicit, governed fast path. Softprobe SQL
+   compilers prefer promoted columns whenever a matching promotion is active.
 
 This combination can avoid a global union of every tenant's business schema
 without reducing the retained recording to only the fields promoted today. It
@@ -264,10 +267,12 @@ It should not initially compete for workloads dominated by:
 - DuckLake is the sole durable telemetry backend.
 - Non-inlined data is retained as Parquet in configurable local or object
   storage.
-- Selected telemetry attribute containers are stored as DuckLake `VARIANT`
-  and can be shredded in Parquet.
+- Selected telemetry attribute containers are stored as DuckLake
+  `MAP(VARCHAR, VARCHAR)` (VARIANT temporarily deferred; see
+  [`variant_shredding.md`](variant_shredding.md)).
 - Promotion creates typed columns for future ingest, using tenant-scoped
   PostgreSQL metadata in production or a local single-scope SQLite catalog.
+  Generated product/compat SQL prefers promoted columns when active.
 - Customers can query tenant-bound evidence through DuckDB SQL.
 - Durable records can be revisited and queried after their original incident
   window rather than being reduced to short-lived aggregates.
@@ -292,9 +297,10 @@ Until comparative results exist, use **designed to**, **can**, or
   backfilled.
 - PostgreSQL is the multi-tenant promotion path; SQLite promotion is limited
   to a local single-scope catalog.
-- VARIANT file statistics require data to land in Parquet rather than remain
-  catalog-inlined.
-- Existing legacy MAP tables require an operator-owned migration to VARIANT.
+- Catalog-global `data_inlining_row_limit` stays `0` for metrics TWCS (AC-F7);
+  MAP bags are inline-safe but sharing the limit with skinny samples prevents
+  re-enabling inlining until per-table inlining or #42 lands.
+- Existing VARIANT hot columns require an operator-owned rebuild to MAP.
 - Flush-through ingestion makes one DuckLake commit per collector request, so
   collector batch sizing and catalog contention matter.
 - Per-tenant promotion still needs quotas and lifecycle policy to prevent
@@ -308,7 +314,7 @@ Until comparative results exist, use **designed to**, **can**, or
 
 A reproducible benchmark should compare:
 
-1. Softprobe VARIANT lookup without explicit promotion.
+1. Softprobe MAP bag lookup without explicit promotion.
 2. Softprobe promoted typed columns.
 3. ClickHouse JSON with default dynamic paths.
 4. ClickHouse JSON with explicit type hints or materialized columns.

@@ -594,6 +594,9 @@ fn parse_events(
 
 fn parse_json_object(value: &Value, row_index: usize, field: &str) -> Result<Value, CompatError> {
     let value = strict_json_value(value, row_index, field)?;
+    // MAP bags stringify nested arrays/objects; rehydrate so Tempo scope fidelity
+    // keeps `attributes: []` as a JSON array (not the string `"[]"`).
+    let value = crate::storage::schema::rehydrate_map_json_values(value);
     if value.is_object() {
         Ok(value)
     } else {
@@ -719,14 +722,35 @@ fn parse_timestamp_value(value: &Value, _fallback: i64) -> Option<i64> {
 
 fn parse_links(value: &Value, row_index: usize) -> Result<Vec<Value>, CompatError> {
     let value = strict_json_value(value, row_index, "links")?;
-    let Value::Array(values) = value else {
-        return Err(malformed_row(row_index, "links"));
-    };
-    if values.iter().all(Value::is_object) {
-        Ok(values)
-    } else {
-        Err(malformed_row(row_index, "links"))
+    // MAP(VARCHAR,VARCHAR) storage (#55): empty maps CAST to `{}`; JSON arrays that
+    // cannot flatten are stored under `_raw` by `reserved_json_to_string_map`.
+    let value = unwrap_map_encoded_json_array(value);
+    match value {
+        Value::Array(values) if values.iter().all(Value::is_object) => Ok(values),
+        Value::Object(map) if map.is_empty() => Ok(Vec::new()),
+        _ => Err(malformed_row(row_index, "links")),
     }
+}
+
+/// Recover a JSON array from MAP-bag encoding (`{}` or `{ "_raw": "<json>" }`).
+fn unwrap_map_encoded_json_array(value: Value) -> Value {
+    let Value::Object(mut map) = value else {
+        return value;
+    };
+    if map.is_empty() {
+        return Value::Array(Vec::new());
+    }
+    if map.len() == 1 {
+        if let Some(raw) = map.remove("_raw") {
+            let rehydrated = crate::storage::schema::rehydrate_map_json_values(raw);
+            return match rehydrated {
+                Value::Array(_) => rehydrated,
+                Value::String(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+                other => other,
+            };
+        }
+    }
+    Value::Object(map)
 }
 
 fn cell_string(value: &Value) -> Option<String> {
@@ -1224,6 +1248,32 @@ mod tests {
     }
 
     #[test]
+    fn map_encoded_empty_and_raw_links_round_trip() {
+        let mut empty = valid_trace_result();
+        let links_col = empty
+            .columns
+            .iter()
+            .position(|c| c == "links")
+            .expect("links");
+        empty.rows[0][links_col] = Value::String("{}".into());
+        let span = parse_rows(&empty)
+            .expect("empty MAP links")
+            .pop()
+            .expect("span");
+        assert!(span.links.is_empty());
+
+        let mut raw = valid_trace_result();
+        let payload = r#"[{"traceId":"aa","spanId":"bb"}]"#;
+        raw.rows[0][links_col] = serde_json::json!({ "_raw": payload });
+        let span = parse_rows(&raw)
+            .expect("_raw MAP links")
+            .pop()
+            .expect("span");
+        assert_eq!(span.links.len(), 1);
+        assert_eq!(span.links[0]["traceId"], "aa");
+    }
+
+    #[test]
     fn malformed_optional_trace_fields_return_bad_request() {
         let malformed = [
             (
@@ -1242,7 +1292,8 @@ mod tests {
                 "instrumentation_scope",
                 Value::String("not-json".into()),
             ),
-            ("links", "links", Value::String("{}".into())),
+            // Empty MAP `{}` is a valid no-links encoding under MAP bags (#55).
+            ("links", "links", Value::String("[1]".into())),
             ("events", "events", Value::String("{}".into())),
         ];
 

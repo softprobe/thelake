@@ -340,6 +340,13 @@ fn poison_kind(message: &str) -> Poison {
     if head.starts_with("INTERNAL Error") {
         return Poison::Triggered;
     }
+    // Maintenance `ducklake_flush_inlined_data` renames inlined catalog tables
+    // (e.g. ducklake_inlined_data_28_28 → _28_29). A worker with a stale ATTACH
+    // snapshot fails reads; rebuild + retry picks up the new name (#55 MAP era
+    // can re-enable inlining, so this path must self-heal).
+    if head.starts_with("Catalog Error: Failed to read inlined data from DuckLake") {
+        return Poison::Collateral;
+    }
     Poison::None
 }
 
@@ -1619,6 +1626,15 @@ mod tests {
         assert_eq!(
             poison_kind("INTERNAL Error: Attempted to access index 0 within vector of size 0"),
             Poison::Triggered
+        );
+        assert_eq!(
+            poison_kind(
+                "Catalog Error: Failed to read inlined data from DuckLake: Table with name \
+                 ducklake_inlined_data_28_28 does not exist!\n\
+                 Did you mean \"ducklake_inlined_data_28_29\"?\n\n\
+                 LINE 3: FROM \"__ducklake_metadata_softprobe\".\"main\".ducklake_inlined_dat..."
+            ),
+            Poison::Collateral
         );
     }
 
