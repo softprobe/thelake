@@ -173,8 +173,11 @@ impl DuckLakeLogsBackend {
     ) -> Result<Option<LogHit>, CompatError> {
         let mut resource = row.resource;
         let mut attributes = row.attributes;
-        // Overlay promoted hot values so allowlisted keys project as stream labels
-        // and product matchers see logger_name / user_id / session_attr_id.
+        // Overlay allowlisted OTel keys so project_loki emits stream labels.
+        // Product-hot non-allowlist promotions (user_id / session / logger) are
+        // injected only via stream_labels below — do not also reinsert bag keys
+        // into attributes or JSON-parse paths sanitize them to a second label
+        // (e.g. sp_user_id alongside user_id) and break Loki differentials.
         for (label, value) in &row.promoted {
             if label == "service_name" {
                 resource
@@ -185,17 +188,14 @@ impl DuckLakeLogsBackend {
                     .entry("deployment.environment".into())
                     .or_insert_with(|| value.clone());
             } else if label == "logger_name" {
-                attributes
-                    .entry("logger_name".into())
-                    .or_insert_with(|| value.clone());
+                attributes.remove("logger_name");
             } else if label == "session_attr_id" {
-                attributes
-                    .entry("sp.session.id".into())
-                    .or_insert_with(|| value.clone());
+                attributes.remove("sp.session.id");
+                attributes.remove("session.id");
+                attributes.remove("session_id");
             } else if label == "user_id" {
-                attributes
-                    .entry("sp.user.id".into())
-                    .or_insert_with(|| value.clone());
+                attributes.remove("sp.user.id");
+                attributes.remove("enduser.id");
             }
         }
         let projection = project_loki(&resource, &attributes, DEFAULT_STREAM_LABEL_ALLOWLIST);
@@ -310,17 +310,14 @@ impl DuckLakeLogsBackend {
                             .entry("deployment.environment".into())
                             .or_insert_with(|| value.clone());
                     } else if label == "logger_name" {
-                        attributes
-                            .entry("logger_name".into())
-                            .or_insert_with(|| value.clone());
+                        attributes.remove("logger_name");
                     } else if label == "session_attr_id" {
-                        attributes
-                            .entry("sp.session.id".into())
-                            .or_insert_with(|| value.clone());
+                        attributes.remove("sp.session.id");
+                        attributes.remove("session.id");
+                        attributes.remove("session_id");
                     } else if label == "user_id" {
-                        attributes
-                            .entry("sp.user.id".into())
-                            .or_insert_with(|| value.clone());
+                        attributes.remove("sp.user.id");
+                        attributes.remove("enduser.id");
                     }
                 }
                 let projection =
@@ -698,6 +695,42 @@ mod tests {
         ] {
             assert!(select.contains(col), "missing {col} in {select}");
         }
+    }
+
+    #[test]
+    fn promoted_user_id_does_not_emit_sp_user_id_stream_label() {
+        let request = LogsQueryRequest {
+            start_ns: None,
+            end_ns: None,
+            matchers: Vec::new(),
+            line_filters: Vec::new(),
+            parser: Some(LogParser::Json),
+            parsed_filters: Vec::new(),
+            unwrap: None,
+            limit: 10,
+            direction: LogDirection::Forward,
+        };
+        let row = RawLogRow {
+            timestamp_ns: 1,
+            body: r#"{"level":"info","msg":"checkout started","duration_ms":12}"#.into(),
+            attributes: [("sp.user.id".into(), "u1".into())].into_iter().collect(),
+            resource: [
+                ("service.name".into(), "checkout".into()),
+                ("deployment.environment".into(), "prod".into()),
+            ]
+            .into_iter()
+            .collect(),
+            promoted: [("user_id".into(), "u1".into())].into_iter().collect(),
+        };
+        let hit = DuckLakeLogsBackend::apply_row(row, &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.labels.get("user_id"), Some(&"u1".into()));
+        assert!(
+            !hit.labels.contains_key("sp_user_id"),
+            "prefer-promoted must not dual-emit sanitized bag key: {:?}",
+            hit.labels
+        );
     }
 
     #[test]
