@@ -25,12 +25,10 @@ type WriteFn<T> = Arc<dyn Fn(Vec<Vec<T>>) -> BoxFuture + Send + Sync>;
 
 /// Cap batches per DuckLake commit so a slow metrics flush cannot absorb
 /// minutes of OTLP requests into one megatransaction.
-const MAX_BATCHES_PER_FLUSH: usize = 1;
+const MAX_BATCHES_PER_FLUSH: usize = 2;
 /// Rows per capped DuckLake commit. One collector POST (~8k) may split across
-/// two chunks; keep each commit short so a 3s live-CPU sample stays <100% on
-/// one core. OVERFLOW_REARM stays low so drain still beats Astronomy Shop.
-/// Greptime lesson: memtable-sized flushes; DuckLake cannot inline VARIANT yet
-/// — see issue #55.
+/// chunks; keep each commit bounded. OVERFLOW_REARM stays low so drain still
+/// beats Astronomy Shop backlog.
 const MAX_ROWS_PER_FLUSH: usize = 4_096;
 /// Only eager-flush when backlog is truly large — must be ≫ [`MAX_ROWS_PER_FLUSH`]
 /// or every OTLP post would flush immediately and defeat the coalesce timer.
@@ -40,10 +38,8 @@ const EAGER_PENDING_BATCHES: usize = 96;
 /// Hard queue depth — enqueue waits (OTLP backpressure) instead of growing forever.
 const MAX_PENDING_BATCHES: usize = 256;
 /// After a capped timer drain with backlog remaining, wait this long before the
-/// next chunk. ~1s keeps drain ahead of the collector without a tight spin.
+/// next chunk so drain stays ahead of the collector without a tight spin.
 const OVERFLOW_REARM: Duration = Duration::from_secs(1);
-/// Yield after each timer chunk so DuckLake commit and OTLP decode do not stack.
-const POST_FLUSH_IDLE: Duration = Duration::from_millis(500);
 
 struct State<T> {
     pending: VecDeque<Vec<T>>,
@@ -228,15 +224,13 @@ impl<T: Send + 'static> CoalesceBuf<T> {
     /// Timer path: one capped chunk, then re-arm if overflow remains.
     ///
     /// Overflow uses [`OVERFLOW_REARM`] (short) so a large backlog drains as a
-    /// sequence of bounded commits with idle gaps — not one multi-second peg and
+    /// sequence of bounded commits — not one multi-second megatransaction and
     /// not a tight spin. Fresh work still waits the full coalesce interval.
     async fn flush_drain_timer(self: &Arc<Self>) {
         match self.flush_once(true).await {
             Ok(()) => {}
             Err(e) => warn!("coalesce background flush failed after OTLP ack: {e}"),
         }
-        // Brief yield between capped commits before re-arming overflow drain.
-        tokio::time::sleep(POST_FLUSH_IDLE).await;
         let should_arm = {
             let g = self.state.lock().await;
             !g.pending.is_empty() && !g.flushing && !g.timer_armed
@@ -281,11 +275,7 @@ impl<T: Send + 'static> CoalesceBuf<T> {
             batches
         };
 
-        // Serialize DuckLake commit vs OTLP decode (see cpu_budget.rs).
-        let result = {
-            let _cpu = super::hold_ingest_cpu().await;
-            (self.write)(batches).await
-        };
+        let result = (self.write)(batches).await;
 
         let waiters = {
             let mut g = self.state.lock().await;
@@ -418,9 +408,9 @@ mod tests {
         buf.enqueue(vec![1]).await.unwrap();
         buf.enqueue(vec![2, 3]).await.unwrap();
         buf.force_flush().await.unwrap();
-        // MAX_BATCHES_PER_FLUSH == 1 → one write per enqueued batch.
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert_eq!(*rows.lock().await, vec![1, 2]);
+        // Two batches fit under MAX_BATCHES_PER_FLUSH → one DuckLake write.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*rows.lock().await, vec![3]);
     }
 
     #[tokio::test]

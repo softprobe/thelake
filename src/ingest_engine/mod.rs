@@ -7,9 +7,6 @@
 //! forced dashboard refreshes to re-scan Parquet and pegged query CPU.
 
 mod coalesce;
-mod cpu_budget;
-
-pub use cpu_budget::hold_ingest_cpu;
 
 use crate::catalog::DropdownCatalog;
 use crate::config::Config;

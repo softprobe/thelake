@@ -194,26 +194,22 @@ async fn process_metrics_inner(
     body_size: usize,
     tenant: Option<TenantInfo>,
 ) -> Result<(usize, Option<String>)> {
-    let (metrics, app) = {
-        let _cpu = crate::ingest_engine::hold_ingest_cpu().await;
-        let mut metrics = Vec::new();
-        let mut app: Option<String> = None;
+    let mut metrics = Vec::new();
+    let mut app: Option<String> = None;
 
-        for resource_metrics in request.resource_metrics {
-            let resource_attributes = Metric::extract_resource_attributes(&resource_metrics);
-            if app.is_none() {
-                app = resource_attributes.get("service.name").cloned();
-            }
+    for resource_metrics in request.resource_metrics {
+        let resource_attributes = Metric::extract_resource_attributes(&resource_metrics);
+        if app.is_none() {
+            app = resource_attributes.get("service.name").cloned();
+        }
 
-            for scope_metrics in resource_metrics.scope_metrics {
-                for otlp_metric in scope_metrics.metrics {
-                    let metric_data_points = Metric::from_otlp(&otlp_metric, &resource_attributes)?;
-                    metrics.extend(metric_data_points);
-                }
+        for scope_metrics in resource_metrics.scope_metrics {
+            for otlp_metric in scope_metrics.metrics {
+                let metric_data_points = Metric::from_otlp(&otlp_metric, &resource_attributes)?;
+                metrics.extend(metric_data_points);
             }
         }
-        (metrics, app)
-    };
+    }
 
     let metric_count = metrics.len();
 

@@ -191,49 +191,45 @@ async fn process_traces_inner(
     body_size: usize,
     auth_tenant_id: Option<String>,
 ) -> Result<(usize, Option<String>)> {
-    let (mut spans, app) = {
-        let _cpu = crate::ingest_engine::hold_ingest_cpu().await;
-        let mut spans = Vec::new();
-        let mut app: Option<String> = None;
+    let mut spans = Vec::new();
+    let mut app: Option<String> = None;
 
-        for resource_spans in request.resource_spans {
-            let resource_attributes = SpanData::extract_resource_attributes(&resource_spans);
-            if app.is_none() {
-                app = resource_attributes.get("service.name").cloned();
-            }
+    for resource_spans in request.resource_spans {
+        let resource_attributes = SpanData::extract_resource_attributes(&resource_spans);
+        if app.is_none() {
+            app = resource_attributes.get("service.name").cloned();
+        }
 
-            for scope_spans in resource_spans.scope_spans {
-                let instrumentation_scope = scope_spans
-                    .scope
-                    .as_ref()
-                    .map(crate::models::span::encode_instrumentation_scope);
-                for span in scope_spans.spans {
-                    let links = crate::models::span::encode_links(&span.links);
-                    let mut span_data = SpanData::from_otlp(span, &resource_attributes)?;
-                    // The __softprobe.* namespace is reserved for internal
-                    // carriers persisted in dedicated columns; drop client-supplied
-                    // keys in that namespace so they can neither leak into user
-                    // attributes nor shadow internal metadata.
-                    span_data.attributes.retain(|key, _| {
-                        !key.starts_with(crate::models::span::RESERVED_ATTRIBUTE_PREFIX)
-                    });
-                    if let Some(scope) = &instrumentation_scope {
-                        span_data.attributes.insert(
-                            crate::models::span::INSTRUMENTATION_SCOPE_ATTRIBUTE.into(),
-                            scope.clone(),
-                        );
-                    }
-                    if links != "[]" {
-                        span_data
-                            .attributes
-                            .insert(crate::models::span::LINKS_ATTRIBUTE.into(), links);
-                    }
-                    spans.push(span_data);
+        for scope_spans in resource_spans.scope_spans {
+            let instrumentation_scope = scope_spans
+                .scope
+                .as_ref()
+                .map(crate::models::span::encode_instrumentation_scope);
+            for span in scope_spans.spans {
+                let links = crate::models::span::encode_links(&span.links);
+                let mut span_data = SpanData::from_otlp(span, &resource_attributes)?;
+                // The __softprobe.* namespace is reserved for internal
+                // carriers persisted in dedicated columns; drop client-supplied
+                // keys in that namespace so they can neither leak into user
+                // attributes nor shadow internal metadata.
+                span_data.attributes.retain(|key, _| {
+                    !key.starts_with(crate::models::span::RESERVED_ATTRIBUTE_PREFIX)
+                });
+                if let Some(scope) = &instrumentation_scope {
+                    span_data.attributes.insert(
+                        crate::models::span::INSTRUMENTATION_SCOPE_ATTRIBUTE.into(),
+                        scope.clone(),
+                    );
                 }
+                if links != "[]" {
+                    span_data
+                        .attributes
+                        .insert(crate::models::span::LINKS_ATTRIBUTE.into(), links);
+                }
+                spans.push(span_data);
             }
         }
-        (spans, app)
-    };
+    }
 
     let tid = auth_tenant_id.unwrap_or_default();
 
