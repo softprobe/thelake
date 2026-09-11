@@ -299,7 +299,11 @@ impl DuckLakeLogsBackend {
             .into_iter()
             .filter_map(|row| {
                 let mut resource = row.resource;
-                let mut attributes = row.attributes;
+                let attributes = row.attributes;
+                // Discovery mirrors Loki's indexed stream labels (allowlist only).
+                // Product-hot columns like user_id are filled from attribute name
+                // match and must not appear in /labels — they remain query-time
+                // stream fields via apply_row (structured metadata / promoted).
                 for (label, value) in &row.promoted {
                     if label == "service_name" {
                         resource
@@ -309,26 +313,20 @@ impl DuckLakeLogsBackend {
                         resource
                             .entry("deployment.environment".into())
                             .or_insert_with(|| value.clone());
-                    } else if label == "logger_name" {
-                        attributes.remove("logger_name");
-                    } else if label == "session_attr_id" {
-                        attributes.remove("sp.session.id");
-                        attributes.remove("session.id");
-                        attributes.remove("session_id");
-                    } else if label == "user_id" {
-                        attributes.remove("sp.user.id");
-                        attributes.remove("enduser.id");
                     }
                 }
                 let projection =
                     project_loki(&resource, &attributes, DEFAULT_STREAM_LABEL_ALLOWLIST);
-                let mut stream_labels = projection.stream_labels;
+                let stream_labels = projection.stream_labels;
+                // Matcher pushdown may still filter on product labels via SQL;
+                // discovery response keys stay allowlist-only for oracle parity.
+                let mut match_labels = stream_labels.clone();
                 for (label, value) in &row.promoted {
-                    stream_labels
+                    match_labels
                         .entry(label.clone())
                         .or_insert_with(|| value.clone());
                 }
-                match labels_match_any(&stream_labels, &request.matchers) {
+                match labels_match_any(&match_labels, &request.matchers) {
                     Ok(true) => Some(Ok(LogHit {
                         timestamp_ns: row.timestamp_ns,
                         line: row.body,
@@ -695,6 +693,48 @@ mod tests {
         ] {
             assert!(select.contains(col), "missing {col} in {select}");
         }
+    }
+
+    #[test]
+    fn discovery_promoted_user_id_stays_off_allowlist_stream_labels() {
+        // Mirrors discovery_rows: only service_name / deployment_environment are
+        // folded into resource for Loki indexed labels; product-hot user_id must
+        // not appear in /labels (oracle parity) while remaining queryable via apply_row.
+        let mut resource: HashMap<String, String> = [
+            ("service.name".into(), "checkout".into()),
+            ("deployment.environment".into(), "prod".into()),
+        ]
+        .into_iter()
+        .collect();
+        let attributes: HashMap<String, String> = HashMap::new();
+        let promoted: HashMap<String, String> = [
+            ("service_name".into(), "checkout".into()),
+            ("deployment_environment".into(), "prod".into()),
+            ("user_id".into(), "u1".into()),
+        ]
+        .into_iter()
+        .collect();
+        for (label, value) in &promoted {
+            if label == "service_name" {
+                resource
+                    .entry("service.name".into())
+                    .or_insert_with(|| value.clone());
+            } else if label == "deployment_environment" {
+                resource
+                    .entry("deployment.environment".into())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        let projection = project_loki(&resource, &attributes, DEFAULT_STREAM_LABEL_ALLOWLIST);
+        assert!(
+            !projection.stream_labels.contains_key("user_id"),
+            "discovery stream labels must stay allowlist-only: {:?}",
+            projection.stream_labels
+        );
+        assert_eq!(
+            projection.stream_labels.get("service_name"),
+            Some(&"checkout".into())
+        );
     }
 
     #[test]

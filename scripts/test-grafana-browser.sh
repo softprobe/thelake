@@ -46,7 +46,12 @@ export GRAFANA_REUSE_STACK="${GRAFANA_REUSE_STACK:-0}"
 # so I-02/I-03 (fresh k6_http_reqs) stay green. Manual `make grafana-up` keeps both on.
 export THELAKE_MAINTENANCE_ENABLED="${THELAKE_MAINTENANCE_ENABLED:-false}"
 export THELAKE_SELF_MONITORING_ENABLED="${THELAKE_SELF_MONITORING_ENABLED:-false}"
-echo "==> Ensuring Grafana stack + live OTel ingestion are ready (GRAFANA_REUSE_STACK=$GRAFANA_REUSE_STACK THELAKE_MAINTENANCE_ENABLED=$THELAKE_MAINTENANCE_ENABLED THELAKE_SELF_MONITORING_ENABLED=$THELAKE_SELF_MONITORING_ENABLED)..."
+# Full OTLP + MAP bags is heavier than the old metrics-only demo; keep commits
+# frequent and unpin Softprobe so Playwright query load cannot starve ingest for
+# the 5m Prom lookback window. CPU SLO stays on `make bench-demo-cpu-full`.
+export THELAKE_INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-10}"
+export THELAKE_CPU_AFFINITY="${THELAKE_CPU_AFFINITY:-}"
+echo "==> Ensuring Grafana stack + live OTel ingestion are ready (GRAFANA_REUSE_STACK=$GRAFANA_REUSE_STACK THELAKE_MAINTENANCE_ENABLED=$THELAKE_MAINTENANCE_ENABLED THELAKE_SELF_MONITORING_ENABLED=$THELAKE_SELF_MONITORING_ENABLED THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=$THELAKE_INGEST_FLUSH_INTERVAL_SECONDS THELAKE_CPU_AFFINITY=${THELAKE_CPU_AFFINITY:-unpinned})..."
 ./scripts/grafana-manual-up.sh
 
 echo "==> Verifying Softprobe and Grafana connectivity..."

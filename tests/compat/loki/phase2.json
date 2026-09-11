@@ -244,8 +244,7 @@
         "data_shape": "array",
         "values": [
           "deployment_environment",
-          "service_name",
-          "user_id"
+          "service_name"
         ]
       },
       "differential": true
