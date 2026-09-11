@@ -486,7 +486,10 @@ fn gauge_downsample_with_raw_tail(
     }
     match parts.len() {
         1 => format!("{} LIMIT {fetch_limit}", parts[0]),
-        _ => format!("({}) UNION ALL ({}) LIMIT {fetch_limit}", parts[0], parts[1]),
+        _ => format!(
+            "({}) UNION ALL ({}) LIMIT {fetch_limit}",
+            parts[0], parts[1]
+        ),
     }
 }
 

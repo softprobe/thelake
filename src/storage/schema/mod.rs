@@ -20,6 +20,5 @@ pub use tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
 pub use variant::{
     encode_attributes_json, hot_map_columns, parquet_select_for_table, parse_projected_json_value,
     prefer_attr_try_cast, prefer_attr_varchar, rehydrate_map_json_values, variant_as_json,
-    variant_json_to_string_map,
-    variant_try_cast, variant_varchar,
+    variant_json_to_string_map, variant_try_cast, variant_varchar,
 };

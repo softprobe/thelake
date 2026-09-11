@@ -444,12 +444,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
             "gen_ai.usage.total_tokens",
             "BIGINT"
         ),
-        cost = prefer_attr_try_cast(
-            Some("total_cost"),
-            "attributes",
-            "sp.cost.total",
-            "DOUBLE"
-        ),
+        cost = prefer_attr_try_cast(Some("total_cost"), "attributes", "sp.cost.total", "DOUBLE"),
         capture = variant_varchar("attributes", "sp.capture.id"),
         sess = session_id.replace('\'', "''"),
     );

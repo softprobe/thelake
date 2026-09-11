@@ -249,7 +249,12 @@ mod tests {
             "CAST(attributes['sp.user.id'] AS VARCHAR)"
         );
         assert_eq!(
-            prefer_attr_try_cast(Some("attr_tokens"), "attributes", "gen_ai.usage.input_tokens", "BIGINT"),
+            prefer_attr_try_cast(
+                Some("attr_tokens"),
+                "attributes",
+                "gen_ai.usage.input_tokens",
+                "BIGINT"
+            ),
             "COALESCE(attr_tokens, try_cast(attributes['gen_ai.usage.input_tokens'] AS BIGINT))"
         );
         assert_eq!(

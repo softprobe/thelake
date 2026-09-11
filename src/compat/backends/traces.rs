@@ -453,7 +453,10 @@ mod tests {
         let sql = trace_scan_sql(
             &TraceSearchRequest {
                 tags: BTreeMap::from([
-                    (String::from("sp.observation.type"), String::from("generation")),
+                    (
+                        String::from("sp.observation.type"),
+                        String::from("generation"),
+                    ),
                     (String::from("service.name"), String::from("api")),
                 ]),
                 selector: None,

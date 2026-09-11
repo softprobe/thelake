@@ -24,9 +24,8 @@ use super::attach::{
 };
 use super::object_store::configure_object_store;
 use super::util::{
-    ensure_log_timestamp_precision, ensure_trace_fidelity_columns,
-    ensure_hot_map_column_types, ensure_trace_timestamp_precision, escape_sql_literal,
-    size_literal,
+    ensure_hot_map_column_types, ensure_log_timestamp_precision, ensure_trace_fidelity_columns,
+    ensure_trace_timestamp_precision, escape_sql_literal, size_literal,
 };
 
 pub(super) struct TableReadinessRegistry {
@@ -356,10 +355,7 @@ impl DuckLakeWriter {
             ),
             _ => {
                 if let Some(schema) = custom_schema {
-                    (
-                        Arc::clone(schema),
-                        parquet_select_for_table(table_name),
-                    )
+                    (Arc::clone(schema), parquet_select_for_table(table_name))
                 } else {
                     return Err(anyhow!(
                         "unsupported table for DuckLake ensure: {table_name}"
@@ -826,11 +822,7 @@ mod tests {
             ])),
             false,
         );
-        let map = Field::new(
-            "attributes",
-            DataType::Map(Arc::new(entries), false),
-            true,
-        );
+        let map = Field::new("attributes", DataType::Map(Arc::new(entries), false), true);
         assert_eq!(
             DuckLakeWriter::arrow_field_to_duck_add_type(&map).unwrap(),
             "MAP(VARCHAR, VARCHAR)"
