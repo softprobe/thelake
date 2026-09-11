@@ -340,10 +340,9 @@ fn poison_kind(message: &str) -> Poison {
     if head.starts_with("INTERNAL Error") {
         return Poison::Triggered;
     }
-    // Maintenance `ducklake_flush_inlined_data` renames inlined catalog tables
-    // (e.g. ducklake_inlined_data_28_28 → _28_29). A worker with a stale ATTACH
-    // snapshot fails reads; rebuild + retry picks up the new name (#55 MAP era
-    // can re-enable inlining, so this path must self-heal).
+    // Stale ATTACH after inlined catalog table rename (e.g. optional external
+    // flush). Rebuild + retry picks up the new name — required now that default
+    // inlining is 10_000 (#55).
     if head.starts_with("Catalog Error: Failed to read inlined data from DuckLake") {
         return Poison::Collateral;
     }

@@ -8,9 +8,10 @@ use crate::compaction::downsample::{
 };
 use crate::compaction::twcs::{
     closed_day_live_file_count, closed_days_need_complete_merge, day_kind,
-    ducklake_merge_adjacent_files_sql, live_file_count_sql, open_day_files_for_merge,
-    open_day_max_compacted_files, partition_live_file_stats_sql, plan_twcs_merges,
-    should_merge_partition, DayKind, PartitionFileStats, TwcsMergePlan, TwcsPolicy,
+    ducklake_merge_adjacent_files_sql, live_file_count_sql, logical_table_row_count_sql,
+    open_day_files_for_merge, open_day_max_compacted_files, partition_live_file_stats_sql,
+    plan_twcs_merges, should_merge_partition, DayKind, InlinedFragmentStats, PartitionFileStats,
+    TwcsMergePlan, TwcsPolicy,
 };
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
@@ -203,13 +204,12 @@ impl MaintenanceExecutor {
                 std::collections::HashMap::new();
 
             if self.config.maintenance.enabled && run_compaction {
+                // AC-F7 wait-for-next-run: do not flush catalog-inlined rows
+                // before TWCS. Inlined rows stay readable via the catalog; TWCS
+                // only merges Parquet that already exists (batches over the
+                // inlining limit). Paying flush every pass is intentionally
+                // avoided.
                 for table in MAINTENANCE_METRICS_FAMILY_TABLES {
-                    if let Err(err) = self.ducklake_flush_inlined_table(&conn, &ducklake, table) {
-                        warn!(
-                            "Maintenance flush inlined failed for {}.{} ({}); TWCS still runs: {}",
-                            ducklake.metadata_schema, table, label, err
-                        );
-                    }
                     let status = match self
                         .ducklake_twcs_compact_table(&conn, &ducklake, table, &tenant_id)
                     {
@@ -510,41 +510,6 @@ impl MaintenanceExecutor {
         }
     }
 
-    /// Materialize catalog-inlined rows to Parquet so TWCS can merge (AC-F7).
-    /// Empty-vector INTERNAL from DuckLake is skippable when there is nothing to flush.
-    fn ducklake_flush_inlined_table(
-        &self,
-        conn: &Connection,
-        ducklake: &crate::config::DuckLakeConfig,
-        table: &str,
-    ) -> Result<()> {
-        let sql = flush_inlined_sql(&ducklake.catalog_alias, &ducklake.metadata_schema, table);
-        match execute_batch_with_serialization_retry(
-            conn,
-            &sql,
-            COMPACTION_SERIALIZATION_ATTEMPTS,
-            &format!(
-                "ducklake_flush_inlined_data {}.{}",
-                ducklake.metadata_schema, table
-            ),
-        ) {
-            Ok(()) => Ok(()),
-            Err(err) if is_skippable_empty_inlined_flush_error(&err.to_string()) => {
-                info!(
-                    "Maintenance flush inlined skipped for {}.{} (empty inlined data): {}",
-                    ducklake.metadata_schema, table, err
-                );
-                Ok(())
-            }
-            Err(err) => Err(anyhow!(
-                "DuckLake flush inlined failed for {}.{}: {}",
-                ducklake.metadata_schema,
-                table,
-                err
-            )),
-        }
-    }
-
     fn twcs_policy(&self) -> TwcsPolicy {
         TwcsPolicy::from(&self.config.maintenance)
     }
@@ -569,6 +534,20 @@ impl MaintenanceExecutor {
         let initial = self
             .load_partition_stats(conn, &ducklake.catalog_alias, table)
             .unwrap_or_default();
+        // AC-F7: observe inlined backlog every pass (no watermark). When those
+        // rows later become Parquet, the next pass's partition stats pick them up.
+        if let Ok(Some(pending)) =
+            self.load_inlined_fragment_stats(conn, &ducklake.catalog_alias, table)
+        {
+            info!(
+                "TWCS backlog {}.{}: logical_rows={} live_parquet_files={} inlined_only={}",
+                ducklake.metadata_schema,
+                table,
+                pending.logical_row_count,
+                pending.live_parquet_files,
+                pending.is_inlined_only()
+            );
+        }
         if initial.is_empty() {
             // Inline-only / empty stats: one merge may materialize Parquet.
             last = self.ducklake_compact_table_wave(
@@ -791,6 +770,37 @@ impl MaintenanceExecutor {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Softprobe backlog probe: logical rows vs live Parquet (AC-F7).
+    fn load_inlined_fragment_stats(
+        &self,
+        conn: &Connection,
+        catalog_alias: &str,
+        table: &str,
+    ) -> Result<Option<InlinedFragmentStats>> {
+        let row_sql = logical_table_row_count_sql(catalog_alias, table);
+        let logical_rows: i64 = match conn.query_row(&row_sql, [], |row| row.get(0)) {
+            Ok(v) => v,
+            Err(err) => {
+                warn!(
+                    "TWCS logical-row probe failed for {}: {}; treating as empty",
+                    table, err
+                );
+                return Ok(None);
+            }
+        };
+        if logical_rows <= 0 {
+            return Ok(None);
+        }
+        let files = self
+            .load_live_file_count(conn, catalog_alias, table)
+            .unwrap_or(0);
+        Ok(Some(InlinedFragmentStats {
+            table: table.to_string(),
+            live_parquet_files: files,
+            logical_row_count: logical_rows as u64,
+        }))
     }
 
     fn ducklake_compact_table_wave(
@@ -1060,20 +1070,6 @@ impl MaintenanceExecutor {
     }
 }
 
-pub(crate) fn flush_inlined_sql(catalog_alias: &str, schema: &str, table: &str) -> String {
-    format!(
-        "CALL ducklake_flush_inlined_data('{catalog_alias}', schema_name => '{schema}', table_name => '{table}');"
-    )
-}
-
-/// DuckLake INTERNAL empty-vector on `ducklake_flush_inlined_data` when the
-/// table has nothing left to flush (AC-F7). Do not treat other flush errors
-/// as skippable — those can hide leftover inlined bytes.
-pub(crate) fn is_skippable_empty_inlined_flush_error(message: &str) -> bool {
-    let m = message.to_lowercase();
-    m.contains("attempted to access index 0 within vector of size 0")
-}
-
 /// AC-N6: after a maintenance pass, live `ducklake_snapshot` count must be ≤ this.
 pub const SNAPSHOT_COUNT_BAR_AFTER_PASS: usize = 50;
 
@@ -1257,6 +1253,23 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn maintenance_does_not_flush_inlined_before_twcs() {
+        // Production source only (tests module may mention flush by name).
+        let prod = include_str!("executor.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("cfg(test) marker");
+        assert!(
+            !prod.contains("ducklake_flush_inlined_data"),
+            "AC-F7 wait-for-next-run: maintenance must not flush catalog-inlined rows before TWCS"
+        );
+        assert!(
+            !prod.contains("flush_inlined"),
+            "AC-F7: flush-before-TWCS helpers must stay removed from maintenance production code"
+        );
+    }
+
+    #[test]
     fn maintenance_compacts_metrics_before_other_tables() {
         let tables = maintenance_table_names();
         assert_eq!(tables[0], "metric_samples");
@@ -1301,36 +1314,6 @@ mod tests {
     #[test]
     fn parquet_warn_threshold_is_sane() {
         assert_eq!(COMPACTION_SERIALIZATION_ATTEMPTS, 8);
-    }
-
-    /// AC-F7: flush leftover inlined skinny rows before TWCS merge.
-    #[test]
-    fn flush_inlined_sql_targets_schema_and_table() {
-        let sql = flush_inlined_sql("softprobe", "main", "metric_samples");
-        assert!(sql.contains("ducklake_flush_inlined_data"));
-        assert!(sql.contains("schema_name => 'main'"));
-        assert!(sql.contains("table_name => 'metric_samples'"));
-    }
-
-    /// AC-F7: DuckLake INTERNAL empty-vector is skippable; real flush errors are not.
-    #[test]
-    fn flush_inlined_empty_vector_error_is_skippable() {
-        assert!(is_skippable_empty_inlined_flush_error(
-            r#"Invalid Input Error: INTERNAL Error: Attempted to access index 0 within vector of size 0"#
-        ));
-        assert!(is_skippable_empty_inlined_flush_error(
-            "INTERNAL Error: Attempted to access index 0 within vector of size 0"
-        ));
-        assert!(!is_skippable_empty_inlined_flush_error(
-            "IO Error: could not write parquet"
-        ));
-        assert!(!is_skippable_empty_inlined_flush_error(
-            "could not serialize access due to concurrent update"
-        ));
-        assert!(!is_skippable_empty_inlined_flush_error(
-            "INTERNAL Error: unexpected catalog conflict"
-        ));
-        assert!(!is_skippable_empty_inlined_flush_error(""));
     }
 
     /// AC-N2 / T-N2: 3600s must become a seconds interval, not `INTERVAL '1 days'`.

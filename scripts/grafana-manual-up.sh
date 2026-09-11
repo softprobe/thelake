@@ -583,7 +583,7 @@ ducklake:
   data_path: "$STATE_DIR/data/"
   catalog_alias: "softprobe"
   metadata_schema: "$PG_SCHEMA"
-  data_inlining_row_limit: 0
+  data_inlining_row_limit: 10000
   # Serialize DuckLake commits under demo load (parallel writers × layout txn
   # multi-core scans of open-day small files pegged Softprobe CPU).
   writer_pool_size: ${THELAKE_WRITER_POOL_SIZE:-1}

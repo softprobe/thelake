@@ -3,8 +3,7 @@
 **Status:** Current (temporary)  
 **Breaking change:** yes (physical column type)  
 **Restore when:** DuckLake + Postgres VARIANT **inlining** lands (see
-[`design-ducklake-42-43.md`](design-ducklake-42-43.md) / issue #42), or DuckLake
-gains per-table inlining so skinny metrics can stay on Parquet while bags inline.
+[`design-ducklake-42-43.md`](design-ducklake-42-43.md) / issue #42).
 
 ## Why VARIANT was removed (temporary)
 
@@ -40,14 +39,15 @@ Skinny `metric_samples` / hist / postings have **no** attribute bags.
 
 ## Inlining re-evaluation
 
-MAP bags are Postgres-inline-safe (scores metadata already inlines when
-enabled). Catalog-global `data_inlining_row_limit` remains **`0`** because
-metrics layout **AC-F7** requires zero inlined bytes for skinny
-`metric_samples` / `metric_hist_samples` / `metric_postings` so TWCS merge
-sees Parquet. Re-enabling `10_000` would inline those skinny tables too.
+MAP bags are Postgres-inline-safe (scores metadata already inlines). Default
+catalog-global `data_inlining_row_limit` is **`10_000`**. Metrics **AC-F7** is
+wait-for-next-run: TWCS merges live Parquet only and does **not** flush
+catalog-inlined skinny rows every pass. Batches over the limit write Parquet and
+are compacted on a later maintenance run. Downsample `INSERT … SELECT` reads the
+DuckLake table (inlined ∪ Parquet).
 
-Primary win of this change is removing VARIANT cast/shredding, not re-enabling
-inlining. Revisit when per-table inlining or #42 VARIANT inlining exists.
+Primary wins of this change: remove VARIANT cast/shredding **and** restore small-batch
+inlining for MAP bags.
 
 ## Query path
 

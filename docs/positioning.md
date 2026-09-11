@@ -297,9 +297,8 @@ Until comparative results exist, use **designed to**, **can**, or
   backfilled.
 - PostgreSQL is the multi-tenant promotion path; SQLite promotion is limited
   to a local single-scope catalog.
-- Catalog-global `data_inlining_row_limit` stays `0` for metrics TWCS (AC-F7);
-  MAP bags are inline-safe but sharing the limit with skinny samples prevents
-  re-enabling inlining until per-table inlining or #42 lands.
+- Default `data_inlining_row_limit` is `10_000` (MAP bags + small metric batches
+  inline). TWCS wait-for-next-run (AC-F7): no flush-before-merge every pass.
 - Existing VARIANT hot columns require an operator-owned rebuild to MAP.
 - Flush-through ingestion makes one DuckLake commit per collector request, so
   collector batch sizing and catalog contention matter.

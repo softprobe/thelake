@@ -416,6 +416,12 @@ else
       log "==> live flush_interval_seconds='${flush_live:-missing}' != gate $flush_want"
       need_rebuild=1
     fi
+    inline_live="$(awk '/data_inlining_row_limit:/{print $2; exit}' "$cfg" | tr -d '"')"
+    inline_want="${BENCH_INLINE_LIMIT:-10000}"
+    if [[ -z "$inline_live" || "$inline_live" != "$inline_want" ]]; then
+      log "==> live data_inlining_row_limit='${inline_live:-missing}' != gate $inline_want"
+      need_rebuild=1
+    fi
   fi
   if [[ "$need_rebuild" == 1 ]]; then
     log "==> live stack config != gate profile (maintenance/self-mon); forcing rebuild"

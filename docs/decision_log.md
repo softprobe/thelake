@@ -127,8 +127,10 @@ covers query-hot keys.
 1. Store hot telemetry bags as `MAP(VARCHAR, VARCHAR)` temporarily
    (traces/logs bags + `metric_series.labels`).
 2. Remove the `::JSON::VARIANT` INSERT bridge; fail-fast if leftover VARIANT.
-3. Keep catalog-global `data_inlining_row_limit=0` (metrics AC-F7 / TWCS). Document
-   that MAP *could* inline but the limit is not per-table.
+3. Set catalog-global `data_inlining_row_limit=10_000` (MAP is Postgres-inline-safe).
+   Rewrite metrics **AC-F7** to wait-for-next-run TWCS: do not flush inlined
+   rows every maintenance pass; TWCS only merges live Parquet. Downsample reads
+   the DuckLake table (inlined ∪ Parquet), so accuracy is unaffected.
 4. Ship product-hot promotion manifests; demo/bench apply them. Softprobe does
    not auto-bootstrap promotions on cold start.
 5. All Softprobe SQL compilers prefer promoted columns when an active promotion

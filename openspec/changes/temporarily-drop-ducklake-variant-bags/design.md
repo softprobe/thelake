@@ -10,14 +10,18 @@ Out of scope (already MAP): `scores.metadata`, nested `traces.events[].attribute
 
 ## Inlining
 
-Catalog-global `DATA_INLINING_ROW_LIMIT` stays **0**:
+Catalog-global `DATA_INLINING_ROW_LIMIT` default is **10_000**:
 
-- AC-F7 requires zero inlined bytes for `metric_samples` / hist / postings so
-  TWCS merge sees Parquet.
-- Limit is not per-table; re-enabling 10_000 would inline skinny metrics too.
+- MAP bags are Postgres-inline-safe; #55 re-enables small-batch inlining.
+- Metrics **AC-F7** is wait-for-next-run: TWCS merges live Parquet only and does
+  **not** flush catalog-inlined rows every maintenance pass.
+- Per-write: batches over the limit write Parquet (merged later); prior ≤limit
+  batches remain inlined unless something else flushes (no auto-promote).
+- Downsample reads the DuckLake table (inlined ∪ Parquet); closed-bucket lag
+  keeps accuracy.
 
-MAP *could* inline; we choose not to until per-table inlining or #42 lands.
-Primary win for this change is removing VARIANT cast/shredding CPU.
+Primary wins: remove VARIANT cast/shredding CPU **and** avoid Parquet-per-small-batch
+write amplification.
 
 ## Prefer-promoted rule
 

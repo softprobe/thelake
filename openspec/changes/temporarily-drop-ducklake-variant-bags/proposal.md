@@ -16,8 +16,8 @@ thesis — and it currently owns too much of the CPU budget.
 - Temporarily store hot telemetry bags as `MAP(VARCHAR, VARCHAR)` again
   (traces/logs attribute bags + `metric_series.labels`).
 - Remove the `::JSON::VARIANT` INSERT bridge and VARIANT type gates.
-- Keep catalog-global `data_inlining_row_limit=0` (AC-F7 skinny TWCS); document
-  the re-evaluation (MAP is inline-safe, but the limit is catalog-global).
+- Re-enable catalog-global `data_inlining_row_limit=10_000` (MAP is inline-safe).
+  Rewrite metrics AC-F7 to wait-for-next-run TWCS (no flush-before-merge).
 - Ship product-hot `telemetry_columns` promotion manifests; apply via demo/bench
   hooks (no cold-start auto-bootstrap).
 - All Softprobe SQL compilers prefer promoted columns when an active promotion

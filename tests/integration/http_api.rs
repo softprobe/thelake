@@ -1165,8 +1165,7 @@ async fn spans_without_events_are_readable() {
 
 /// Pins DuckLake data-inlining behavior across a maintenance pass -- the
 /// 2026-08-03 production outage shape. Collector-sized batches can be inlined
-/// into the catalog (`data_inlining_row_limit`, opt-in 10_000; production
-/// default is 0 so skinny metrics write Parquet TWCS can merge),
+/// into the catalog (`data_inlining_row_limit`, default 10_000),
 /// and reads of inlined rows go through the ducklake extension's inlined-data
 /// reader; in production (postgres catalog) that reader crashed with
 /// "INTERNAL Error: Attempted to access index 0 within vector of size 0" and
@@ -1174,10 +1173,9 @@ async fn spans_without_events_are_readable() {
 /// ever read inlined data back, let alone after maintenance ran over it.
 ///
 /// Temporary MAP era (#55): hot bags are MAP again, so Postgres-backed DuckLake
-/// *can* inline traces/logs when the catalog limit is raised. This test keeps
-/// `data_inlining_row_limit=10_000` to exercise the inlined reader. Production
-/// still keeps the limit at 0 (AC-F7 skinny TWCS). Scores (MAP metadata) remain
-/// the primary inlined path this test walks across maintenance.
+/// can inline traces/logs under the default catalog limit. This test keeps
+/// `data_inlining_row_limit=10_000` to exercise the inlined reader. Scores (MAP
+/// metadata) remain the primary inlined path this test walks across maintenance.
 #[tokio::test]
 async fn inlined_data_stays_readable_across_maintenance() {
     use softprobe_runtime::compaction::executor::MaintenanceExecutor;

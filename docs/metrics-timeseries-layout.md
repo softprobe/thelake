@@ -136,7 +136,7 @@ After maintenance, **closed** time windows are merged toward `target_file_size_b
 | Median file size of those closed-day **sample** files | ≥ **8 MiB**, **or** the partition holds < 8 MiB of data (then 1 file is enough) |
 | Current UTC day after a merge pass | `metric_samples` live files ≤ **20** |
 | Closed-day parquet per family after a pass (AC-F8) | **1** file, or **2** if that day’s bytes **> 64 MiB**; median ≥ **8 MiB** unless the partition holds < 8 MiB |
-| Inlined catalog bytes for skinny tables (AC-F7) | **0** for `metric_samples`, `metric_hist_samples`, `metric_postings` (`data_inlining_row_limit` default **0**; VARIANT shredding stays on Parquet for `metric_series`) |
+| Inlined catalog rows for skinny tables (AC-F7) | Default `data_inlining_row_limit` **10_000**; TWCS **wait-for-next-run** (merge live Parquet only; do **not** flush inlined rows every pass). Over-limit writes create Parquet for later merges; ≤limit batches may remain catalog-resident. |
 | Existing warn threshold (≥200 files) | Must not fire on any metrics-family table after a successful maintenance pass on a 30d fixture |
 
 Do **not** hive-partition by `metric_name` (hundreds of tiny files per OTLP batch). Greptime’s metric-engine exists precisely because table-per-metric is too heavy; Softprobe keeps **one physical table family**.
@@ -474,7 +474,7 @@ Implementation must not call a blind global `ducklake_merge_adjacent_files` that
 ### 7.2 Pass order
 
 1. `SET SORTED BY` / `SET PARTITIONED BY` if missing (idempotent).
-2. **TWCS merge** on `metric_samples`, `metric_hist_samples`, `metric_series`, `metric_postings`, plus downsample/collapse tables (**metrics family first**). Loop bounded waves until closed-day file bars (AC-F8) **and** until today’s live files are ≤20 (AC-F4). Open-day uses a 256-file CALL when over 256 live files; do not stop after one 32-file wave.
+2. **TWCS merge** on `metric_samples`, `metric_hist_samples`, `metric_series`, `metric_postings`, plus downsample/collapse tables (**metrics family first**). Loop bounded waves until closed-day file bars (AC-F8) **and** until today’s live files are ≤20 (AC-F4). Open-day uses a 256-file CALL when over 256 live files; do not stop after one 32-file wave. **Do not** flush catalog-inlined rows before TWCS (AC-F7 wait-for-next-run).
 3. Build/append `metric_samples_5m` from raw older than **2h** (closed hours only).
 4. Build/append `metric_samples_1h` from 5m (or raw) older than **24h**.
 5. Build/append `metric_collapse_job_1h` from 1h (or raw) grouped by `(metric_name, job, hour)`.
@@ -708,7 +708,7 @@ GOLD exprs (from `tests/compat/grafana/dashboards/astronomy/astronomy-shop-overv
 | **AC-F4** | After merge, **today’s** `metric_samples` live files ≤ **20** | Today unbounded small files | `T-F4` |
 | **AC-F5** | Closed-day live files for `metric_postings`, `metric_series`, `metric_hist_samples` each ≤ **2 × days_retained**. F-files sizes indexes so each family is ≥ 8 MiB before merge when asserting size; JSON `precondition_met: true` | Index tables explode into tiny files; precondition false while claiming pass | `T-F5` |
 | **AC-F6** | After forced merge of a **2-day** F-files corpus: every output sample Parquet file maps to a **single** `record_date`; merge SQL/plan is partition-scoped (`record_date = $d`). Unit `twcs_merge_does_not_cross_record_date` | Unfiltered global merge across days | `T-F6` |
-| **AC-F7** | Inlined catalog bytes for `metric_samples`, `metric_hist_samples`, `metric_postings` **= 0**. Default `data_inlining_row_limit` is **0** (opt-in inlining remains for the scores/inlined-reader test) | Skinny tables sit in Postgres `ducklake_inlined_data_*` and skip TWCS | `T-F7` |
+| **AC-F7** | Default `data_inlining_row_limit` is **10_000**. Maintenance TWCS does **not** flush catalog-inlined rows before merge (wait-for-next-run): only live Parquet is compacted. TWCS has **no** partition watermark — each pass reloads live Parquet and probes Softprobe backlog (`logical_row_count` vs `live_parquet_files`) so inlined-only tables are observed; when those rows later become files, the next pass plans merges for them. Inlined rows stay readable via DuckLake table scans (downsample included). Per-write: batches **over** the limit write Parquet; prior ≤limit batches **remain** inlined unless something else flushes. | Default forced to `0`, or maintenance pays `ducklake_flush_inlined_data` every pass solely to feed TWCS, or a watermark skips days after inlined→Parquet materialization | `T-F7` |
 | **AC-F8** | After a pass: each closed-day parquet partition per family is **1** file, or **2** if that day’s bytes **> 64 MiB**; median file size ≥ **8 MiB** unless the partition holds < 8 MiB | Many tiny closed-day files remain | `T-F8` |
 
 #### Cheap storage + keep data (G7, G8)
@@ -923,6 +923,7 @@ Ready evidence: [`docs/perf/results/20260818T045403Z-metrics-layout.json`](perf/
 - **2026-08-14:** Goals G1–G8 and original 39 ACs reviewed adversarially.
 - **2026-08-15:** Redesign after GreptimeDB study (§4, TWCS, reject fork/WAL/Puffin/DataFusion).
 - **2026-08-15 (review loop):** Senior-architect pass — G9, §4.4, AC-F6/M2/G\*, JSON `release_full` gate.
+- **2026-09-11 (AC-F7 wait-for-next-run):** Default `data_inlining_row_limit=10_000`; maintenance no longer flushes inlined rows before TWCS. Downsample still reads the DuckLake table (inlined ∪ Parquet).
 - **2026-08-18 (snapshots + parquet TWCS):** Default `A=60`, inlining postponed (`data_inlining_row_limit=0`), collector demo batch **15s**, TWCS closed-day complete merge, AC-N6/F7/F8. **Required AC ids = 56**.
 - **2026-08-17 (multi-window hist):** AC-H3..H6 + Q-hist-mid/long + window×type matrix; classic hist/summary always `metric_hist_samples` (no >2h divert to empty 1h grain). **Required AC ids = 53**.
 - **2026-08-15 (range ceiling):** Drop Softprobe-imposed `max_query_range` (Greptime-like). Retention TTL bounds data; 30d/90d/180d remain tested SLOs. **Required AC ids = 49** (added AC-W6).
