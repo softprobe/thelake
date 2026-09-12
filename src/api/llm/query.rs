@@ -681,8 +681,16 @@ pub fn compile_session_search_sql(
     }
 
     let mut predicates = vec![
-        format!("{} >= {}", timestamp_ns_column("timestamp"), timestamp_ns_literal(&request.from)),
-        format!("{} <= {}", timestamp_ns_column("timestamp"), timestamp_ns_literal(&request.to)),
+        format!(
+            "{} >= {}",
+            timestamp_ns_column("timestamp"),
+            timestamp_ns_literal(&request.from)
+        ),
+        format!(
+            "{} <= {}",
+            timestamp_ns_column("timestamp"),
+            timestamp_ns_literal(&request.to)
+        ),
         // Spans without a session id cannot belong to a session row.
         "session_id IS NOT NULL AND session_id <> ''".to_string(),
         // Web recording shares session_id with LLM spans but is not an LLM
