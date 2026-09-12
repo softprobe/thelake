@@ -77,8 +77,8 @@ pub fn verify_softprobe_assertion(
     let header_json = URL_SAFE_NO_PAD
         .decode(header_b64)
         .map_err(|_| anyhow!("assertion: bad header encoding"))?;
-    let header: serde_json::Value = serde_json::from_slice(&header_json)
-        .map_err(|_| anyhow!("assertion: bad header json"))?;
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_json).map_err(|_| anyhow!("assertion: bad header json"))?;
     if header.get("alg").and_then(|v| v.as_str()) != Some("HS256") {
         bail!("assertion: unsupported alg");
     }

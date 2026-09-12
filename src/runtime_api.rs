@@ -39,7 +39,8 @@ pub async fn runtime_auth_middleware(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        let secret = crate::softprobe_assertion::assertion_hmac_secret().ok_or(StatusCode::UNAUTHORIZED)?;
+        let secret =
+            crate::softprobe_assertion::assertion_hmac_secret().ok_or(StatusCode::UNAUTHORIZED)?;
         let now = chrono::Utc::now().timestamp();
         let claims = crate::softprobe_assertion::verify_softprobe_assertion(raw, &secret, now)
             .map_err(|_| StatusCode::UNAUTHORIZED)?;
