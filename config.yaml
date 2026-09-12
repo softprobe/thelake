@@ -37,9 +37,10 @@ ducklake:
   data_path: "./warehouse/ducklake/data/"
   catalog_alias: "softprobe"
   metadata_schema: "softprobe"
-  # 0 = Parquet always so TWCS can merge skinny tables. VARIANT shredding
-  # (series.labels) already required Parquet. Opt-in 10000 only for inlined-reader tests.
-  data_inlining_row_limit: 0
+  # Default 10000: small batches stay catalog-inlined (MAP-safe). TWCS
+  # wait-for-next-run (AC-F7) merges live Parquet only — no flush every pass.
+  # Set 0 only for fixtures that need Parquet-per-batch.
+  data_inlining_row_limit: 10000
   # Per-scope DuckDB writer connections (1..=16). Default 4.
   writer_pool_size: 4
 

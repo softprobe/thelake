@@ -66,6 +66,27 @@ fn range_cache_put(key: String, data: Value) {
     guard.put_sized(key, data, bytes, Instant::now());
 }
 
+/// Drop all cached `/api/v1/query_range` answers.
+///
+/// **Flush-through** (`flush_interval_seconds = 0`): call after each metrics
+/// commit so Grafana never keeps pre-commit answers when every POST is durable.
+///
+/// **Soft coalesce** (`flush_interval_seconds > 0`): do **not** call on every
+/// timer chunk. Nuclear clears under Astronomy Shop thrash the cache and peg
+/// query CPU on Grafana refresh=10s. Freshness is then TTL-bounded
+/// ([`RANGE_CACHE_TTL`], 60s) — dashboards may lag up to one TTL after a commit
+/// lands. That is the deliberate demo/CPU-budget tradeoff (#55).
+pub fn invalidate_range_result_cache() {
+    let Ok(mut guard) = range_result_cache().lock() else {
+        return;
+    };
+    *guard = TtlLruCache::with_byte_budget(
+        RANGE_CACHE_TTL,
+        RANGE_CACHE_MAX,
+        Some(RANGE_CACHE_MAX_BYTES),
+    );
+}
+
 fn tenant_ctx(tenant: TenantInfo) -> Result<TenantContext, CompatError> {
     TenantContext::from_authenticated(tenant, PROTO, None, QueryLimits::default())
 }
@@ -409,6 +430,22 @@ mod tests {
         assert_eq!(
             cache.get(&key, now).and_then(|v| v.get("status").cloned()),
             Some(json!("success"))
+        );
+    }
+
+    #[test]
+    fn range_cache_ttl_expires_stale_entries() {
+        let mut cache =
+            TtlLruCache::with_byte_budget(Duration::from_secs(1), 16, Some(1024 * 1024));
+        let t0 = Instant::now();
+        let key = "tenant|sum(x)|1|2|3".to_string();
+        let data = json!({"status": "success"});
+        let bytes = serde_json::to_vec(&data).unwrap().len();
+        cache.put_sized(key.clone(), data, bytes, t0);
+        assert!(cache.get(&key, t0).is_some());
+        assert!(
+            cache.get(&key, t0 + Duration::from_secs(2)).is_none(),
+            "coalesce freshness relies on TTL expiry when wipe-on-flush is skipped"
         );
     }
 }

@@ -3,6 +3,13 @@
 # as the live OTLP traffic source.
 # Usage (from repo root): ./scripts/grafana-manual-up.sh
 # Teardown: ./scripts/grafana-manual-down.sh  (or: make grafana-down)
+#
+# Ingest buffering (soft coalesce):
+#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=10 (default) — ack-on-enqueue, one
+#     DuckLake Parquet commit per signal every N seconds (demo CPU/IO profile).
+#   THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=0  — flush-through (commit before ack;
+#     debug / contract tests only; saturates disk under Astronomy Shop + k6).
+#   THELAKE_WRITER_POOL_SIZE=1 (default) — serialize DuckLake writers under demo.
 
 set -euo pipefail
 
@@ -52,6 +59,18 @@ DEMO_DIR="${OTEL_DEMO_DIR:-$CACHE_ROOT/otel-demo/$OTEL_DEMO_TAG}"
 HISTOGRAM_BUCKET_RATE_EXPR_FILE="$ROOT/tests/compat/grafana/browser/catalog_gates/histogram_bucket_rate.expr"
 DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
+# Soft coalesce window for OTLP → DuckLake (0 = flush-through every request).
+# Demo default 60s under full OTLP (metrics+logs+sampled traces).
+INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-60}"
+# Pin Softprobe to one CPU so query-worker + blocking-pool cannot exceed 100% process
+# CPU under Grafana refresh=10s (override with THELAKE_CPU_AFFINITY= or empty to disable).
+CPU_AFFINITY="${THELAKE_CPU_AFFINITY:-0}"
+# Full OTLP (metrics+app logs+sampled traces) is the default product profile.
+# Set THELAKE_REQUIRE_FULL_OTLP=0 only for temporary bring-up experiments.
+REQUIRE_FULL_OTLP=1
+case "${THELAKE_REQUIRE_FULL_OTLP:-1}" in
+  0|false|FALSE|no|NO|off|OFF) REQUIRE_FULL_OTLP=0 ;;
+esac
 
 mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 
@@ -106,6 +125,23 @@ ensure_otel_demo_checkout() {
 }
 
 print_ready() {
+  # Prefer the live Softprobe config so GRAFANA_REUSE_STACK early-exit does not
+  # claim the script default when the process was started with a different N.
+  local flush_shown="$INGEST_FLUSH_INTERVAL_SECONDS"
+  if [[ -f "$STATE_DIR/config.yaml" ]]; then
+    flush_shown="$(
+      python3 -c '
+import re, sys
+path, fallback = sys.argv[1], sys.argv[2]
+try:
+    text = open(path, encoding="utf-8").read()
+except OSError:
+    print(fallback); raise SystemExit
+m = re.search(r"(?m)^\s*flush_interval_seconds:\s*(\d+)\s*$", text)
+print(m.group(1) if m else fallback)
+' "$STATE_DIR/config.yaml" "$INGEST_FLUSH_INTERVAL_SECONDS"
+    )"
+  fi
   cat <<EOF
 
 Grafana is ready for manual inspection (live Astronomy Shop traffic).
@@ -115,6 +151,7 @@ Grafana is ready for manual inspection (live Astronomy Shop traffic).
                Softprobe PromQL → capability smoke boards
                thelake ops → self-monitoring (datasource Softprobe Prometheus · ops)
   Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY; ops: local-ops-key → thelake-ops)
+  Ingest:      flush_interval_seconds=$flush_shown  (0=flush-through; >0=coalesce; from live config when present)
   DuckLake:    Postgres 19 catalog on $PG_HOST:$PG_PORT (schema $PG_SCHEMA)
   Parquet:     $STATE_DIR/data/
   Store UI:    $STORE_URL
@@ -215,7 +252,12 @@ PY
 
 # rate() on classic _bucket needs ≥2 raw samples per series in the window.
 # Expr is shared with browser H-04 (catalog_gates/histogram_bucket_rate.expr).
+# CPU-budget collector extras drop k6.http.req.* histograms; skip unless full OTLP.
 wait_for_histogram_bucket_rates() {
+  if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
+    echo "==> skipping histogram bucket rate wait (THELAKE_REQUIRE_FULL_OTLP=0)"
+    return 0
+  fi
   local bucket_q
   if [[ ! -f "$HISTOGRAM_BUCKET_RATE_EXPR_FILE" ]]; then
     echo "ERROR: missing H-04 expr file: $HISTOGRAM_BUCKET_RATE_EXPR_FILE" >&2
@@ -225,7 +267,7 @@ wait_for_histogram_bucket_rates() {
   echo "==> waiting for classic histogram bucket rates (H-04)"
   local bucket_rate_ok=0
   local end start payload
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 120); do
     end="$(date +%s)"
     start="$((end - 600))"
     payload="$(curl -sf -m 30 -H "Authorization: Bearer $API_KEY" \
@@ -261,6 +303,10 @@ PY
 }
 
 wait_for_demo_logs() {
+  if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
+    echo "==> skipping Loki log wait (THELAKE_REQUIRE_FULL_OTLP=0)"
+    return 0
+  fi
   echo "==> waiting for Softprobe Loki labels in the live Explore window"
   local ok=0
   local body=""
@@ -319,6 +365,12 @@ except Exception:
     fi
   done
   if [[ "${live_changes:-0}" -ge 1 ]]; then
+    if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
+      wait_for_histogram_bucket_rates
+      echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live Prom OK; Loki/H-04 optional under CPU-budget OTLP)."
+      print_ready
+      exit 0
+    fi
     end_ns="$(python3 -c 'import time; print(int(time.time()*1e9))')"
     start_ns="$((end_ns - 3600 * 1000000000))"
     loki_body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
@@ -367,6 +419,26 @@ if [[ -f "$PID_FILE" ]]; then
   fi
   rm -f "$PID_FILE"
 fi
+# Clear dual-process leftovers from older demo profiles (write :8091 / read :8090).
+for leftover in "$STATE_DIR/softprobe-write.pid" "$STATE_DIR/softprobe-read.pid"; do
+  if [[ -f "$leftover" ]]; then
+    old="$(cat "$leftover" 2>/dev/null || true)"
+    if [[ -n "${old:-}" ]] && kill -0 "$old" 2>/dev/null; then
+      cmd="$(ps -p "$old" -o args= 2>/dev/null || true)"
+      if [[ "$cmd" == *softprobe-runtime* ]]; then
+        kill "$old" 2>/dev/null || true
+        sleep 0.5
+        kill -9 "$old" 2>/dev/null || true
+      fi
+    fi
+    rm -f "$leftover"
+  fi
+done
+for old in $(pgrep -f "$STATE_DIR/softprobe-runtime" 2>/dev/null || true); do
+  kill "$old" 2>/dev/null || true
+  sleep 0.25
+  kill -9 "$old" 2>/dev/null || true
+done
 
 reset_grafana_state() {
   THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" $COMPOSE -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
@@ -377,7 +449,18 @@ reset_grafana_state() {
   mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 }
 
-reset_grafana_state
+# GRAFANA_KEEP_DATA=1 keeps parquet + DuckLake Postgres catalog (clean binary restart).
+# Default remains wipe-on-up for a deterministic empty demo.
+case "${GRAFANA_KEEP_DATA:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    echo "==> GRAFANA_KEEP_DATA: preserving $STATE_DIR/data and $STATE_DIR/postgres"
+    THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" $COMPOSE -f "$COMPOSE_FILE" down --remove-orphans >/dev/null 2>&1 || true
+    mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
+    ;;
+  *)
+    reset_grafana_state
+    ;;
+esac
 
 echo "==> building softprobe-runtime (release; AC-S3)"
 if [[ -f "$ROOT/Makefile" ]] && grep -q '^build-release:' "$ROOT/Makefile"; then
@@ -446,9 +529,11 @@ case "${THELAKE_MAINTENANCE_ENABLED:-true}" in
     ORPHAN_ENABLED=true
     ;;
 esac
-case "${THELAKE_SELF_MONITORING_ENABLED:-true}" in
-  0|false|FALSE|no|NO|off|OFF) SELF_MONITORING_ENABLED=false ;;
-  *) SELF_MONITORING_ENABLED=true ;;
+# Default off: ops self-export competes with demo OTLP + Grafana PromQL for the
+# single-core CPU budget. Set THELAKE_SELF_MONITORING_ENABLED=true for ops panels.
+case "${THELAKE_SELF_MONITORING_ENABLED:-false}" in
+  1|true|TRUE|yes|YES|on|ON) SELF_MONITORING_ENABLED=true ;;
+  *) SELF_MONITORING_ENABLED=false ;;
 esac
 
 cat >"$CONFIG" <<EOF
@@ -456,15 +541,22 @@ server:
   port: 8090
   host: "0.0.0.0"
   max_body_size: 104857600
-  worker_threads: null
+  worker_threads: ${THELAKE_WORKER_THREADS:-1}
 
 object_store:
   region: "us-east-1"
   endpoint: null
 
 query:
-  max_connections: 16
+  # 1 keeps Softprobe under one core when Grafana fires many panels every 10s.
+  max_connections: ${THELAKE_QUERY_MAX_CONNECTIONS:-1}
   cache_dir: "$STATE_DIR/cache"
+
+# Soft coalesce: hold OTLP rows in memory and commit once per interval.
+# 0 = flush-through (commit before ack). Demo default is 60s via
+# THELAKE_INGEST_FLUSH_INTERVAL_SECONDS (see script header).
+ingest:
+  flush_interval_seconds: $INGEST_FLUSH_INTERVAL_SECONDS
 
 # Demo: TWCS/metadata on by default (ops panels). Override with THELAKE_MAINTENANCE_ENABLED.
 maintenance:
@@ -476,11 +568,13 @@ maintenance:
   max_snapshot_age_seconds: 60
   remove_orphan_files_enabled: ${ORPHAN_ENABLED}
   remove_orphan_older_than_seconds: 60
-  open_day_file_cap: 64
-  max_waves_per_table: 1
-  max_compacted_files_per_wave: 16
-  closed_day_max_compacted_files: 128
-  closed_day_max_waves: 2
+  open_day_file_cap: ${THELAKE_OPEN_DAY_FILE_CAP:-64}
+  max_waves_per_table: ${THELAKE_MAX_WAVES_PER_TABLE:-1}
+  max_compacted_files_per_wave: ${THELAKE_MAX_COMPACTED_FILES_PER_WAVE:-16}
+  # Defaults match MaintenanceConfig (256×64) so closed-day catch-up can finish;
+  # demo SLO may override lower via env.
+  closed_day_max_compacted_files: ${THELAKE_CLOSED_DAY_MAX_COMPACTED_FILES:-256}
+  closed_day_max_waves: ${THELAKE_CLOSED_DAY_MAX_WAVES:-64}
   max_merge_file_size_bytes: 8388608
 
 ducklake:
@@ -489,8 +583,10 @@ ducklake:
   data_path: "$STATE_DIR/data/"
   catalog_alias: "softprobe"
   metadata_schema: "$PG_SCHEMA"
-  data_inlining_row_limit: 0
-  writer_pool_size: 4
+  data_inlining_row_limit: 10000
+  # Serialize DuckLake commits under demo load (parallel writers × layout txn
+  # multi-core scans of open-day small files pegged Softprobe CPU).
+  writer_pool_size: ${THELAKE_WRITER_POOL_SIZE:-1}
 
 dropdown_catalog:
   enabled: false
@@ -519,6 +615,20 @@ if [[ -z "${DUCKDB_LIB_DIR}" ]]; then
   echo "ERROR: libduckdb not found under ${TARGET_DIR}/duckdb-download (build with DUCKDB_DOWNLOAD_LIB=1?)" >&2
   exit 1
 fi
+# Stage lib next to the demo binary so stop-gate Softprobe restarts (setsid +
+# no inherited LD_LIBRARY_PATH) can still resolve libduckdb.so.
+case "$(uname -s)" in
+  Darwin)
+    if [[ -f "$DUCKDB_LIB_DIR/libduckdb.dylib" ]]; then
+      cp -f "$DUCKDB_LIB_DIR/libduckdb.dylib" "$STATE_DIR/libduckdb.dylib"
+    fi
+    ;;
+  *)
+    if [[ -f "$DUCKDB_LIB_DIR/libduckdb.so" ]]; then
+      cp -f "$DUCKDB_LIB_DIR/libduckdb.so" "$STATE_DIR/libduckdb.so"
+    fi
+    ;;
+esac
 case "$(uname -s)" in
   Darwin)
     export DYLD_LIBRARY_PATH="${DUCKDB_LIB_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
@@ -541,12 +651,19 @@ export RUST_LOG="${RUST_LOG:-info}"
 # shells exit (Cursor agent shells tear down the whole tree otherwise).
 # Linux: setsid. Darwin: double-fork + setsid-equivalent via perl.
 start_softprobe_detached() {
+  local -a run_cmd=()
+  if [[ -n "$CPU_AFFINITY" ]] && command -v taskset >/dev/null 2>&1; then
+    run_cmd=(taskset -c "$CPU_AFFINITY")
+    echo "==> Softprobe CPU affinity: $CPU_AFFINITY (THELAKE_CPU_AFFINITY)"
+  fi
+  run_cmd+=("$RUNTIME_BIN")
   if command -v setsid >/dev/null 2>&1; then
-    setsid "$RUNTIME_BIN" >>"$LOG" 2>&1 &
+    setsid "${run_cmd[@]}" >>"$LOG" 2>&1 &
     echo $! >"$PID_FILE"
     return
   fi
   # macOS: no setsid; perl double-fork orphans the runtime from Make/agent shells.
+  # Affinity pin is Linux-only (taskset); Darwin runs without it.
   perl -e '
     use strict; use warnings;
     my ($bin, $log, $pidfile) = @ARGV;
@@ -613,16 +730,24 @@ tenant_http="$(curl -sS -o /tmp/thelake-grafana-tenant-provision.json -w '%{http
   -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$tenant_payload" || true)"
-if [[ "$tenant_http" != "200" && "$tenant_http" != "201" ]]; then
+if [[ "$tenant_http" == "200" || "$tenant_http" == "201" ]]; then
+  :
+elif [[ "${GRAFANA_KEEP_DATA:-0}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]] \
+  && [[ "$tenant_http" == "409" || "$tenant_http" == "200" ]]; then
+  echo "==> tenant $TENANT_ID already present (HTTP $tenant_http); keeping existing catalog"
+elif [[ "${GRAFANA_KEEP_DATA:-0}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]] \
+  && grep -qiE 'already|exists|conflict' /tmp/thelake-grafana-tenant-provision.json 2>/dev/null; then
+  echo "==> tenant $TENANT_ID already present (HTTP $tenant_http); keeping existing catalog"
+else
   echo "ERROR: tenant provisioning returned HTTP ${tenant_http:-curl-fail}" >&2
   cat /tmp/thelake-grafana-tenant-provision.json >&2 || true
   exit 1
 fi
 
-# Prefer typed hot columns for Prom/Grafana selectors before demo traffic.
-# shellcheck source=scripts/lib/apply-prom-hot-labels.sh
-source "$ROOT/scripts/lib/apply-prom-hot-labels.sh"
-apply_prom_hot_labels "$SOFTPROBE_URL_HOST" "$API_KEY"
+# Prefer typed hot columns for Prom/LLM/Loki/Tempo before demo traffic.
+# shellcheck source=scripts/lib/apply-product-hot-promotions.sh
+source "$ROOT/scripts/lib/apply-product-hot-promotions.sh"
+apply_product_hot_promotions "$SOFTPROBE_URL_HOST" "$API_KEY"
 
 echo "==> waiting for Grafana"
 graf_ok=0
@@ -642,7 +767,9 @@ ensure_otel_demo_checkout
 
 echo "==> starting OpenTelemetry Demo $OTEL_DEMO_TAG (minimal, Softprobe backend)"
 demo_compose up --pull missing --remove-orphans --detach
-demo_compose restart otel-collector >/dev/null 2>&1 || true
+# Force-recreate so host-mounted extras (full OTLP vs prior gold filter) always reload.
+demo_compose up -d --force-recreate otel-collector >/dev/null 2>&1 || \
+  demo_compose restart otel-collector >/dev/null 2>&1 || true
 
 wait_for_demo_metrics
 wait_for_demo_logs

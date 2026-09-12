@@ -4,9 +4,9 @@ use crate::compaction::collapse::{collapse_job_1h_sql, collapse_scan_sql};
 use crate::compaction::downsample::{count_sql, downsample_1h_from_raw_sql, downsample_5m_sql};
 use crate::compaction::executor::{cleanup_old_files_sql, expire_snapshots_sql};
 use crate::compaction::twcs::{
-    live_data_file_paths_sql, live_files_spanning_record_dates_sql, plan_twcs_merges,
-    twcs_merge_sql, PartitionFileStats, TwcsMergePlan, TwcsPolicy,
-    TWCS_MAX_COMPACTED_FILES_PER_WAVE,
+    live_data_file_paths_sql, live_files_spanning_record_dates_sql, logical_table_row_count_sql,
+    plan_twcs_merges, twcs_merge_sql, InlinedFragmentStats, PartitionFileStats, TwcsMergePlan,
+    TwcsPolicy, TWCS_MAX_COMPACTED_FILES_PER_WAVE,
 };
 use crate::storage::schema::metrics_layout::ensure_metrics_layout_family_tables;
 use chrono::{Duration, NaiveDate, Utc};
@@ -18,8 +18,19 @@ fn attach_ducklake(temp: &TempDir) -> (Connection, String) {
     crate::storage::ducklake::open_and_attach_ducklake(&config.ducklake).expect("attach")
 }
 
-fn attach_ducklake_with_data(temp: &TempDir) -> (Connection, String, std::path::PathBuf) {
+/// Default inlining (10k): small batches stay catalog-inlined.
+fn attach_ducklake_with_inlining(temp: &TempDir) -> (Connection, String, std::path::PathBuf) {
     let config = crate::test_support::file_backed_test_config(temp);
+    let data = std::path::PathBuf::from(&config.ducklake.data_path);
+    let (conn, catalog) =
+        crate::storage::ducklake::open_and_attach_ducklake(&config.ducklake).expect("attach");
+    (conn, catalog, data)
+}
+
+/// Force Parquet-per-batch (AC-F6 / F-files style) under default inlining=10k.
+fn attach_ducklake_with_parquet_data(temp: &TempDir) -> (Connection, String, std::path::PathBuf) {
+    let mut config = crate::test_support::file_backed_test_config(temp);
+    config.ducklake.data_inlining_row_limit = Some(0);
     let data = std::path::PathBuf::from(&config.ducklake.data_path);
     let (conn, catalog) =
         crate::storage::ducklake::open_and_attach_ducklake(&config.ducklake).expect("attach");
@@ -28,6 +39,102 @@ fn attach_ducklake_with_data(temp: &TempDir) -> (Connection, String, std::path::
 
 fn count(conn: &Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0)
+}
+
+fn live_sample_files(conn: &Connection, catalog: &str) -> i64 {
+    conn.query_row(
+        &format!(
+            "SELECT count(*) FROM __ducklake_metadata_{catalog}.ducklake_data_file df \
+             JOIN __ducklake_metadata_{catalog}.ducklake_table t ON df.table_id = t.table_id \
+             WHERE t.table_name = 'metric_samples' AND df.end_snapshot IS NULL \
+               AND t.end_snapshot IS NULL"
+        ),
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// AC-F7: inlined backlog is observable; after rows become Parquet, TWCS plans
+/// merges for that day (no watermark / no miss on wait-for-next-run).
+#[test]
+fn twcs_tracks_inlined_then_plans_after_parquet_materializes() {
+    let temp = TempDir::new().unwrap();
+    let (conn, catalog, _data) = attach_ducklake_with_inlining(&temp);
+    ensure_metrics_layout_family_tables(&conn, &catalog).expect("layout");
+
+    let day = (Utc::now() - Duration::days(2))
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    for i in 0..5 {
+        let sid = 10 + i;
+        conn.execute_batch(&format!(
+            "INSERT INTO {catalog}.metric_series \
+               (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
+               ({sid}, 'inline_track', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
+             INSERT INTO {catalog}.metric_samples VALUES \
+               ({sid}, TIMESTAMPTZ '{day} 12:0{i}:00+00', {i}.0, DATE '{day}');"
+        ))
+        .unwrap_or_else(|e| panic!("inline seed i={i}: {e}"));
+    }
+
+    let files_before = live_sample_files(&conn, &catalog);
+    assert_eq!(
+        files_before, 0,
+        "small batches under default inlining must not create Parquet yet"
+    );
+    let logical_rows: i64 = conn
+        .query_row(
+            &logical_table_row_count_sql(&catalog, "metric_samples"),
+            [],
+            |r| r.get(0),
+        )
+        .expect("logical row count");
+    let backlog = InlinedFragmentStats {
+        table: "metric_samples".into(),
+        live_parquet_files: files_before as usize,
+        logical_row_count: logical_rows as u64,
+    };
+    assert!(
+        backlog.is_inlined_only() && backlog.logical_row_count >= 5,
+        "TWCS must observe inlined-only backlog: {backlog:?}"
+    );
+
+    // Later materialization (not every-pass flush): explicit flush once, then
+    // next TWCS plan must see the closed-day files.
+    conn.execute_batch(&format!(
+        "CALL ducklake_flush_inlined_data('{catalog}', schema_name => 'main', table_name => 'metric_samples');"
+    ))
+    .unwrap_or_else(|e| panic!("one-shot materialize for test: {e}"));
+
+    let files_after = live_sample_files(&conn, &catalog);
+    assert!(
+        files_after >= 1,
+        "expected Parquet after materialize, got {files_after}"
+    );
+
+    let today = Utc::now().date_naive();
+    let day_parsed = NaiveDate::parse_from_str(&day, "%Y-%m-%d").unwrap();
+    let partitions = [PartitionFileStats {
+        record_date: day_parsed,
+        live_file_count: files_after.max(2) as usize,
+        total_bytes: 1_000,
+    }];
+    let actions = plan_twcs_merges(&TwcsMergePlan {
+        table: "metric_samples",
+        catalog_alias: &catalog,
+        schema: "main",
+        partitions: &partitions,
+        today,
+        size_pressure: false,
+        max_compacted_files: 32,
+        policy: &TwcsPolicy::default(),
+    });
+    assert!(
+        !actions.is_empty(),
+        "after inlined→Parquet, TWCS must plan merge for that day (got {actions:?})"
+    );
 }
 
 /// AC-S2 / AC-M2: downsample is additive + key-scoped incremental.
@@ -53,7 +160,7 @@ fn downsample_keeps_raw_and_second_pass_is_noop() {
         "BEGIN TRANSACTION;\n\
          INSERT INTO {catalog}.metric_series \
            (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-           (1, 'layout_http', 'gauge', '', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{day}');\n\
+           (1, 'layout_http', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
          INSERT INTO {catalog}.metric_postings VALUES \
            ('job', 'api', 1, DATE '{day}');\n\
          INSERT INTO {catalog}.metric_samples VALUES \
@@ -173,7 +280,7 @@ fn maintenance_merge_waves_are_bounded_for_queries() {
 #[test]
 fn twcs_merge_keeps_files_single_record_date() {
     let temp = TempDir::new().unwrap();
-    let (conn, catalog, data_dir) = attach_ducklake_with_data(&temp);
+    let (conn, catalog, data_dir) = attach_ducklake_with_parquet_data(&temp);
     ensure_metrics_layout_family_tables(&conn, &catalog).expect("layout");
 
     let day_a = (Utc::now() - Duration::days(3))
@@ -192,7 +299,7 @@ fn twcs_merge_keeps_files_single_record_date() {
             conn.execute_batch(&format!(
                 "INSERT INTO {catalog}.metric_series \
                    (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-                   ({sid}, 'layout_http', 'gauge', '', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{day}');\n\
+                   ({sid}, 'layout_http', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
                  INSERT INTO {catalog}.metric_samples VALUES \
                    ({sid}, TIMESTAMPTZ '{day} 12:0{i}:00+00', {i}.0, DATE '{day}');"
             ))
@@ -439,7 +546,7 @@ fn downsample_1h_visible_on_second_connection_after_commit() {
             "BEGIN TRANSACTION;\n\
              INSERT INTO {catalog}.metric_series \
                (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-               (42, 'layout_tall', 'gauge', '', '', NULL, NULL, '{{}}'::JSON::VARIANT, DATE '{day}');\n\
+               (42, 'layout_tall', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
              INSERT INTO {catalog}.metric_samples VALUES \
                (42, TIMESTAMPTZ '{ts_1h}', 7.0, DATE '{day}');\n\
              COMMIT;"

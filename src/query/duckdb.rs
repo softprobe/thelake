@@ -3,7 +3,7 @@ use crate::query::cache::CacheSettings;
 use crate::runtime_engine::DuckLakeScope;
 use crate::storage::ducklake::{
     configure_duckdb_resources, ducklake_qualified_table_name, escape_sql_literal,
-    QUERY_DUCKDB_MEMORY, QUERY_DUCKDB_THREADS,
+    open_in_memory_capped, QUERY_DUCKDB_MEMORY, QUERY_DUCKDB_THREADS,
 };
 use crate::storage::TieredStorage;
 use anyhow::{anyhow, Result};
@@ -340,6 +340,12 @@ fn poison_kind(message: &str) -> Poison {
     if head.starts_with("INTERNAL Error") {
         return Poison::Triggered;
     }
+    // Stale ATTACH after inlined catalog table rename (e.g. optional external
+    // flush). Rebuild + retry picks up the new name — required now that default
+    // inlining is 10_000 (#55).
+    if head.starts_with("Catalog Error: Failed to read inlined data from DuckLake") {
+        return Poison::Collateral;
+    }
     Poison::None
 }
 
@@ -578,6 +584,20 @@ impl DuckDBQueryEngine {
                                 sql_kind,
                                 exec_elapsed,
                             );
+                            // Sample-table scans only: expose grain + raw vs
+                            // downsample vs live UNION so long-window CPU
+                            // hotspots are diagnosable without guessing.
+                            if sql_kind.contains("metric_samples")
+                                || sql_kind.contains("metric_hist_samples")
+                            {
+                                let (grain, scan_mode) =
+                                    crate::self_monitoring::classify_sample_scan(&request.sql);
+                                crate::self_monitoring::record_sample_scan(
+                                    &core.tenant_id,
+                                    grain,
+                                    scan_mode,
+                                );
+                            }
                         }
                         if result.is_ok() {
                             // Any *customer* success clears the global streak --
@@ -797,17 +817,31 @@ impl DuckDBQueryEngine {
     /// One-shot metadata SQL on a dedicated connection (no worker pool, no
     /// self-monitoring instruments). Used by inventory scrapes.
     pub async fn execute_query_uninstrumented(&self, query: &str) -> Result<QueryResult> {
+        let mut rows = self.execute_queries_uninstrumented(vec![query]).await?;
+        rows.pop()
+            .ok_or_else(|| anyhow!("inventory query returned no result"))?
+    }
+
+    /// Run several metadata SQLs on one open+attach connection (inventory).
+    pub async fn execute_queries_uninstrumented(
+        &self,
+        queries: Vec<&str>,
+    ) -> Result<Vec<Result<QueryResult>>> {
         let core = DuckDBCore {
             config: self.config.clone(),
             cache: CacheSettings::new(&self.config),
             counts_toward_liveness: false,
             tenant_id: self.tenant_id.clone(),
         };
-        let sql = query.to_string();
+        let sqls: Vec<String> = queries.iter().map(|s| (*s).to_string()).collect();
         tokio::task::spawn_blocking(move || {
             let conn = core.open_connection()?;
             let mut state = core.init_connection_state_with(conn)?;
-            core.execute_query_on_state(&mut state, &sql)
+            let mut out = Vec::with_capacity(sqls.len());
+            for sql in sqls {
+                out.push(core.execute_query_on_state(&mut state, &sql));
+            }
+            Ok(out)
         })
         .await
         .map_err(|e| anyhow!("inventory query join: {e}"))?
@@ -859,7 +893,9 @@ impl Drop for DuckDBQueryEngine {
 
 impl DuckDBCore {
     fn open_connection(&self) -> Result<Connection> {
-        Connection::open_in_memory().map_err(|err| anyhow!("DuckDB open failed: {}", err))
+        // Cap at open so TaskScheduler never starts at nproc.
+        let conn = open_in_memory_capped(QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)?;
+        Ok(conn)
     }
 
     fn install_extensions(&self, conn: &Connection) -> Result<()> {
@@ -1589,6 +1625,15 @@ mod tests {
         assert_eq!(
             poison_kind("INTERNAL Error: Attempted to access index 0 within vector of size 0"),
             Poison::Triggered
+        );
+        assert_eq!(
+            poison_kind(
+                "Catalog Error: Failed to read inlined data from DuckLake: Table with name \
+                 ducklake_inlined_data_28_28 does not exist!\n\
+                 Did you mean \"ducklake_inlined_data_28_29\"?\n\n\
+                 LINE 3: FROM \"__ducklake_metadata_softprobe\".\"main\".ducklake_inlined_dat..."
+            ),
+            Poison::Collateral
         );
     }
 

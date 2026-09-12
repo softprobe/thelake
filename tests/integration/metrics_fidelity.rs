@@ -480,7 +480,9 @@ async fn nested_otlp_attributes_round_trip_ducklake() {
             |row| row.get(0),
         )
         .expect("read labels JSON");
-    let parsed: serde_json::Value = serde_json::from_str(&attrs_json).expect("parse labels");
+    let parsed = softprobe_runtime::storage::schema::variant::rehydrate_map_json_values(
+        serde_json::from_str(&attrs_json).expect("parse labels"),
+    );
     // Nested sp.json: values rehydrate; OTel keys are Prom-sanitized on the series labels map.
     assert_eq!(parsed["tags"], serde_json::json!(["a", 1]));
     assert_eq!(parsed["meta"]["region"], "us");
@@ -602,7 +604,9 @@ async fn http_otlp_nested_attributes_round_trip_ducklake() {
             |row| row.get(0),
         )
         .expect("read nested labels");
-    let parsed: serde_json::Value = serde_json::from_str(&attrs_json).unwrap();
+    let parsed = softprobe_runtime::storage::schema::variant::rehydrate_map_json_values(
+        serde_json::from_str(&attrs_json).unwrap(),
+    );
     assert_eq!(parsed["tags"], serde_json::json!(["a", 1]));
     assert_eq!(parsed["meta"]["region"], "us");
 }

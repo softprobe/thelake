@@ -1,84 +1,85 @@
-# MAP → VARIANT Shredding Migration
+# Temporary MAP bags (VARIANT shredding deferred)
 
-**Status:** Current  
-**Breaking change:** yes (physical column type + nested SQL access)
+**Status:** Current (temporary)  
+**Breaking change:** yes (physical column type)  
+**Restore when:** DuckLake + Postgres VARIANT **inlining** lands (see
+[`design-ducklake-42-43.md`](design-ducklake-42-43.md) / issue #42).
 
-## What changed
+## Why VARIANT was removed (temporary)
 
-Hot telemetry map columns are now DuckLake `VARIANT` columns with Iceberg v3 /
-Parquet variant shredding:
+Postgres-backed DuckLake cannot inline `VARIANT` today. Keeping hot bags as
+VARIANT forced `data_inlining_row_limit=0` and a warm-path
+`JSON Utf8 → Parquet → ::JSON::VARIANT` shredding cast on every flush. That
+write tax dominated Softprobe CPU under OTEL demo ingest + Grafana
+`refresh=10s`.
 
-| Table | Columns |
-|-------|---------|
-| `traces` | `attributes` |
-| `logs` | `attributes`, `resource_attributes` |
-| `metric_samples` | `attributes`, `resource_attributes` |
+Tenant-scoped **column promotion** ([`promotion.md`](promotion.md)) is the
+governed fast path for query-hot keys. VARIANT shredding remains desirable as
+optional acceleration for unpromoted/ad-hoc keys once upstream inlining works —
+it is not load-bearing for the product thesis until then.
 
-Out of scope (still `MAP(VARCHAR, VARCHAR)`):
+## Current physical types
 
-- `scores.metadata`
-- nested `traces.events[].attributes`
+| Table | Columns | Type |
+|-------|---------|------|
+| `traces` | `attributes`, `resource_attributes`, `instrumentation_scope`, `links` | `MAP(VARCHAR, VARCHAR)` |
+| `logs` | `attributes`, `resource_attributes` | `MAP(VARCHAR, VARCHAR)` |
+| `metric_series` | `labels` | `MAP(VARCHAR, VARCHAR)` |
+| `scores` / `score_configs` | `metadata` | `MAP(VARCHAR, VARCHAR)` (unchanged) |
+| nested `traces.events[].attributes` | | `MAP` (unchanged) |
+
+Skinny `metric_samples` / hist / postings have **no** attribute bags.
 
 ## Write path
 
-1. Arrow staging encodes hot attribute maps as **JSON Utf8**.
-2. Known numeric keys are typed in JSON for stable shredding:
-   - integers: `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`,
-     `gen_ai.usage.total_tokens`
-   - floats: `sp.cost.total`
-3. DuckLake `CREATE TABLE` / `INSERT` cast with
-   `SELECT * REPLACE (…::JSON::VARIANT AS …)`.
+1. Arrow stages hot attribute maps as Arrow **Map** (`Utf8` → `Utf8`).
+2. DuckLake `CREATE` / `INSERT` uses `SELECT *` from temp Parquet — **no**
+   `::JSON::VARIANT` REPLACE bridge.
+3. Promotion extract still fills dedicated typed columns on **future** ingest.
 
-## Query path (breaking)
+## Inlining re-evaluation
 
-VARIANT field extraction returns VARIANT. String filters and `COALESCE` must
-cast:
+MAP bags are Postgres-inline-safe (scores metadata already inlines). Default
+catalog-global `data_inlining_row_limit` is **`10_000`**. Metrics **AC-F7** is
+wait-for-next-run: TWCS merges live Parquet only and does **not** flush
+catalog-inlined skinny rows every pass. Batches over the limit write Parquet and
+are compacted on a later maintenance run. Downsample `INSERT … SELECT` reads the
+DuckLake table (inlined ∪ Parquet).
+
+Primary wins of this change: remove VARIANT cast/shredding **and** restore small-batch
+inlining for MAP bags.
+
+## Query path
+
+Map field access and JSON projection stay the familiar forms:
 
 ```sql
--- Preferred
 WHERE CAST(attributes['sp.user.id'] AS VARCHAR) = 'user-123'
-
--- COALESCE requires the cast (otherwise it can yield NULL)
-SELECT COALESCE(CAST(attributes['sp.observation.type'] AS VARCHAR), 'span')
-
--- Project for APIs / JSON clients
 SELECT CAST(attributes AS JSON) AS attributes FROM traces
 ```
 
-Runtime SQL compilers (`llm/query`, `telemetry`) already emit
-these casts. SoftProbe product adapters (`ThelakeSql`) must use the same
-`CAST(col['key'] AS VARCHAR)` form when querying via `/v1/query/sql`.
+**Hard rule:** if a matching promoted column is active, Softprobe SQL compilers
+MUST prefer it (`COALESCE(promoted_col, CAST(bag['key'] AS VARCHAR), …)` with
+promoted first). See [`promotion.md`](promotion.md).
 
 ## Operator migration
 
-Existing DuckLake tables created with `MAP(VARCHAR, VARCHAR)` are **not**
-auto-migrated. On write, Softprobe fails fast with a message requiring a table
-rebuild when a hot column is not `VARIANT`.
+Existing DuckLake tables created with `VARIANT` hot columns are **not**
+auto-migrated. On write, Softprobe fails fast requiring a table/catalog rebuild
+when a hot column is still `VARIANT`.
 
 Rebuild options (operator-owned; Softprobe does **not** auto-drop tables):
 
-1. **Dev / local:** recreate the DuckLake metadata/data paths, or use the
-   explicit local-only `SPLAKE_RESET_DUCKLAKE=1` bootstrap flag if you accept
-   wiping that catalog.
-2. **Production:** provision a new DuckLake data path / metadata schema, re-ingest
-   (or copy with an explicit offline `INSERT … SELECT …::JSON::VARIANT` rebuild),
-   then cut readers over. Do not mix MAP and VARIANT physical types for the same
-   logical table name.
-
-To verify shredding after ingest (with inlining disabled):
-
-```sql
-SELECT variant_path, shredded_type, min_value, max_value, value_count
-FROM __ducklake_metadata_<alias>.ducklake_file_variant_stats
-ORDER BY variant_path;
-```
-
-Expect paths such as `"sp.observation.type"` (varchar),
-`"gen_ai.request.model"` (varchar), and `"sp.cost.total"` (float64).
+1. **Dev / local:** recreate DuckLake metadata/data paths, or
+   `SPLAKE_RESET_DUCKLAKE=1` if you accept wiping that catalog.
+2. **Production:** new metadata schema / data path, re-ingest (or offline copy
+   with explicit MAP casts), then cut readers over. Do not mix MAP and VARIANT
+   physical types for the same logical table name.
 
 ## Related code
 
-- [`src/storage/schema/variant.rs`](../src/storage/schema/variant.rs)
+- [`src/storage/schema/variant.rs`](../src/storage/schema/variant.rs) — bag SQL helpers + prefer-promoted
 - [`src/storage/schema/tables.rs`](../src/storage/schema/tables.rs)
-- [`src/storage/ducklake/`](../src/storage/ducklake/) (`writer.rs`, `otlp.rs`, `util.rs`)
-- [`tests/integration/variant_shredding.rs`](../tests/integration/variant_shredding.rs)
+- [`src/storage/ducklake/`](../src/storage/ducklake/) (`writer.rs`, `otlp.rs`, `util.rs`, `metrics_layout_write.rs`)
+- [`docs/promotion/`](promotion/) — product-hot manifests
+- Full-demo CPU gate: `make bench-demo-cpu-full`

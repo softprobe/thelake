@@ -17,6 +17,7 @@ targets; these scripts are thin helpers invoked by Make.
 | `generate_telemetry.py` | `generate-telemetry` |
 | `grafana-manual-up.sh` / `grafana-manual-down.sh` | `grafana-up` / `grafana-down` |
 | `bench-prom-baseline.sh` / `bench-prom-down.sh` | `bench-prom-baseline` / `bench-prom-down` |
+| `bench-demo-cpu-full.sh` | `bench-demo-cpu-full` |
 
 ## Public Make surface
 

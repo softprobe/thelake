@@ -94,7 +94,7 @@ if [[ "${otel_n:-0}" -lt 1 || -z "$otel_collector" ]]; then
   fail "OpenTelemetry Demo is not running (compose project ${OTEL_PROJECT}, need otel-collector). Start with: make grafana-up"
 fi
 if [[ "$softprobe_ok" != 1 ]]; then
-  fail "Softprobe is not serving on :8090. Start with: make grafana-up"
+  log "slo: Softprobe not detected on :8090 yet (will retry after helper init)"
 fi
 
 # --- 3. live ingest + Grafana 100ms SLO ---
@@ -119,6 +119,110 @@ unpause_grafana() {
 if ! docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
   log "slo: starting otel-collector before ingest check"
   docker start otel-collector >/dev/null 2>&1 || true
+fi
+
+restart_collector() {
+  if [[ "${collector_stopped:-0}" != 1 ]]; then
+    return 0
+  fi
+  # Prefer compose force-recreate: plain `docker start` often leaves the
+  # otlphttp exporter queue wedged against Softprobe after a long query storm,
+  # so post-measure --check-ingest stays flat until a human recreates.
+  local root overlay demo_dir
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  overlay="$root/tests/compat/grafana/otel-demo"
+  demo_dir="${OTEL_DEMO_DIR:-$HOME/.cache/thelake/otel-demo/${OTEL_DEMO_TAG:-3.0.0}}"
+  if [[ -d "$demo_dir" && -f "$overlay/otelcol-config-extras.yml" ]]; then
+    log "slo: force-recreating otel-collector for clean OTLP recovery"
+    (
+      cd "$demo_dir" && \
+        DEMO_VERSION="${OTEL_DEMO_TAG:-3.0.0}" IMAGE_VERSION="${OTEL_DEMO_TAG:-3.0.0}" \
+        OTEL_COLLECTOR_CONFIG_EXTRAS="$overlay/otelcol-config-extras.yml" \
+        docker compose -p "${OTEL_PROJECT:-thelake-otel-demo}" --env-file .env \
+          -f compose.yaml -f "$overlay/compose.softprobe.yaml" \
+          up -d --force-recreate otel-collector
+    ) >/dev/null 2>&1 || docker start otel-collector >/dev/null 2>&1 || true
+  else
+    docker start otel-collector >/dev/null 2>&1 || true
+  fi
+  log "slo: restarted otel-collector"
+}
+
+restart_softprobe_demo() {
+  local pid bin cfg logf auth_url duck_lib
+  pid="$(tr -d '[:space:]' <"$PID_FILE" 2>/dev/null || true)"
+  bin="$GRAFANA_STATE/softprobe-runtime"
+  cfg="$GRAFANA_STATE/config.yaml"
+  logf="$GRAFANA_STATE/softprobe.log"
+  if [[ ! -x "$bin" || ! -f "$cfg" ]]; then
+    log "slo: softprobe restart skipped (missing $bin or $cfg)"
+    return 0
+  fi
+  # Same resolution as scripts/grafana-manual-up.sh — restart must set LD_LIBRARY_PATH
+  # or the binary dies with "libduckdb.so: cannot open shared object file".
+  duck_lib=""
+  if [[ -f "$GRAFANA_STATE/libduckdb.so" ]]; then
+    duck_lib="$GRAFANA_STATE"
+  elif [[ -f "$ROOT/dist/libduckdb.so" ]]; then
+    cp -f "$ROOT/dist/libduckdb.so" "$GRAFANA_STATE/libduckdb.so" 2>/dev/null || true
+    duck_lib="$GRAFANA_STATE"
+  else
+    duck_lib="$(find "${CARGO_TARGET_DIR:-$ROOT/target}/duckdb-download" -type f -name 'libduckdb.so*' -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
+  fi
+  if [[ -z "$duck_lib" ]]; then
+    log "slo: softprobe restart skipped (libduckdb.so not found)"
+    return 1
+  fi
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    log "slo: stopping Softprobe pid=$pid for query-worker reattach"
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 40); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.25
+    done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  auth_url="${SOFTPROBE_AUTH_URL:-http://127.0.0.1:18080/validate}"
+  : >"$logf"
+  local -a run=(env
+    "SOFTPROBE_AUTH_URL=$auth_url"
+    "SOFTPROBE_ADMIN_API_KEY=${SOFTPROBE_ADMIN_API_KEY:-local-admin-key}"
+    "SOFTPROBE_GRPC_DISABLE=1"
+    "RUST_LOG=${RUST_LOG:-info}"
+    "CONFIG_FILE=$cfg"
+    "LD_LIBRARY_PATH=${duck_lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  )
+  if command -v taskset >/dev/null 2>&1; then
+    run+=(taskset -c "${THELAKE_CPU_AFFINITY:-0}")
+  fi
+  run+=("$bin" --config "$cfg")
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "${run[@]}" >>"$logf" 2>&1 &
+    echo $! >"$PID_FILE"
+  else
+    "${run[@]}" >>"$logf" 2>&1 &
+    echo $! >"$PID_FILE"
+  fi
+  local ok=0
+  for _ in $(seq 1 60); do
+    if curl -sf "http://127.0.0.1:8090/ready" >/dev/null 2>&1; then
+      ok=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$ok" != 1 ]]; then
+    log "slo: Softprobe did not become ready after restart"
+    tail -40 "$logf" | tee -a "$LOG" >&2 || true
+    return 1
+  fi
+  log "slo: Softprobe restarted pid=$(tr -d '[:space:]' <"$PID_FILE") (fresh DuckDB query workers)"
+}
+
+# Ensure Softprobe is up before pausing Grafana / stopping the collector.
+if ! curl -sf -m 2 "http://127.0.0.1:8090/ready" >/dev/null 2>&1; then
+  log "slo: Softprobe not ready before ingest check; attempting demo restart"
+  restart_softprobe_demo || fail "Softprobe is not serving on :8090. Start with: make grafana-up"
 fi
 
 log "slo: pre-warmup ingest check"
@@ -151,12 +255,6 @@ fi
 if docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -qx true; then
   fail "otel-collector still running during SLO measure; refuse to continue"
 fi
-restart_collector() {
-  if [[ "${collector_stopped}" == 1 ]]; then
-    docker start otel-collector >/dev/null 2>&1 || true
-    log "slo: restarted otel-collector"
-  fi
-}
 trap 'restart_collector; unpause_grafana' EXIT
 
 log "slo: global warmup"
@@ -195,21 +293,49 @@ restart_collector
 collector_stopped=0
 
 # Prove OTLP recovered after the query storm (gate requires non-flat ingest).
+# Do NOT bounce Softprobe here: killing it drops the coalesce buffer and cold-starts
+# DuckDB on one core, which routinely leaves PromQL flat past the 180s freshness
+# window. Range-cache invalidation on metrics flush is the Greptime-style fix;
+# Softprobe bounce is only for heal-when-down above.
 # Idle with ZERO PromQL — polling --check-ingest here re-starves /v1/metrics.
 log "slo: idle pause for OTLP after measure"
-sleep 90
-docker restart otel-collector >/dev/null 2>&1 || true
-sleep 30
+sleep 15
+# k6 cumulative counters can freeze across collector stop windows; restart
+# load-generator so post-measure --check-ingest sees fresh value changes.
+if docker inspect -f '{{.State.Running}}' load-generator >/dev/null 2>&1; then
+  log "slo: restarting load-generator for fresh k6 counters"
+  docker restart load-generator >/dev/null 2>&1 || true
+fi
+# Exporter queue can wedge after Softprobe was unreachable during measure;
+# one more force-recreate after load-generator is up.
+collector_stopped=1
+restart_collector
+collector_stopped=0
+# flush_interval=10s + otel batch timeout=10s → wait for ≥2 committed changes.
+sleep 45
 log "slo: post-measure ingest check"
 ingest_ok=0
-for _ in $(seq 1 8); do
+for ingest_try in $(seq 1 12); do
   ingest_out="$(python3 "$PY" --check-ingest 2>&1)" || true
   printf '%s\n' "$ingest_out" | tee -a "$LOG" >&2
   if grep -q "ingest ok" <<<"$ingest_out"; then
     ingest_ok=1
     break
   fi
-  sleep 20
+  # Last-resort heal: only if still stale after several tries.
+  if [[ "$ingest_try" -eq 6 ]]; then
+    log "slo: ingest still stale; heal Softprobe + collector once"
+    restart_softprobe_demo || true
+    collector_stopped=1
+    restart_collector
+    collector_stopped=0
+    docker restart load-generator >/dev/null 2>&1 || true
+    # After bounce: idle with ZERO PromQL so coalesce can flush on the single
+    # DuckDB worker before --check-ingest runs series_meta / query_range.
+    sleep 60
+  else
+    sleep 15
+  fi
 done
 if [[ "$ingest_ok" != 1 ]]; then
   fail "OTEL ingest did not recover after Grafana SLO measure (see $LOG)"

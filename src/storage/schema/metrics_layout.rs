@@ -34,7 +34,7 @@ unit VARCHAR, \
 description VARCHAR, \
 aggregation_temporality VARCHAR, \
 is_monotonic BOOLEAN, \
-labels VARIANT, \
+labels MAP(VARCHAR, VARCHAR), \
 record_date DATE",
         sorted_by: "metric_name, series_id",
     },
@@ -205,6 +205,9 @@ pub fn ensure_metrics_layout_table(
 ) -> Result<()> {
     if metrics_layout_table_ready(conn, catalog_alias, table.name)? {
         ensure_layout_additive_columns(conn, catalog_alias, table.name)?;
+        if table.name == "metric_series" {
+            ensure_metric_series_labels_are_map(conn, catalog_alias)?;
+        }
         return Ok(());
     }
     let sql = ensure_metrics_layout_table_sql(catalog_alias, table);
@@ -216,6 +219,36 @@ pub fn ensure_metrics_layout_table(
         )
     })?;
     ensure_layout_additive_columns(conn, catalog_alias, table.name)?;
+    if table.name == "metric_series" {
+        ensure_metric_series_labels_are_map(conn, catalog_alias)?;
+    }
+    Ok(())
+}
+
+/// Fail fast if leftover VARIANT `metric_series.labels` blocks MAP rollback (#55).
+fn ensure_metric_series_labels_are_map(conn: &Connection, catalog_alias: &str) -> Result<()> {
+    let qualified = qualified_metrics_layout_table(catalog_alias, "metric_series");
+    let found = describe_table_columns(conn, &qualified)?;
+    let Some(dtype) = found.get("labels") else {
+        return Err(anyhow!(
+            "table {qualified} is missing required MAP column 'labels'"
+        ));
+    };
+    let upper = dtype.to_ascii_uppercase();
+    if upper == "VARIANT" || upper.starts_with("VARIANT") {
+        return Err(anyhow!(
+            "table {qualified} column 'labels' has type {dtype} (VARIANT). \
+             Temporary MAP rollback (#55): rebuild/migrate this DuckLake table via \
+             operations (do not auto-drop in-process), then re-ingest."
+        ));
+    }
+    if !upper.contains("MAP") {
+        return Err(anyhow!(
+            "table {qualified} column 'labels' has type {dtype}, expected \
+             MAP(VARCHAR, VARCHAR). Rebuild/migrate this DuckLake table via operations \
+             (do not auto-drop in-process), then re-ingest."
+        ));
+    }
     Ok(())
 }
 
@@ -311,7 +344,7 @@ pub fn apply_metrics_layout_partition_sort(
 /// Joins skinny samples (+ hist) to `metric_series`. Column list preserves the
 /// existing SQL / telemetry / Prom scanners keep working without duplicate writes.
 /// `labels` is exposed as both `attributes` and `resource_attributes` ( Prom identity +
-/// original OTel keys are stored on the series VARIANT at ingest).
+/// original OTel keys are stored on the series MAP at ingest).
 pub fn union_metrics_from_layout_sql(catalog_prefix: &str) -> String {
     let series = qualified_metrics_layout_table(catalog_prefix, "metric_series");
     let samples = qualified_metrics_layout_table(catalog_prefix, "metric_samples");
@@ -504,7 +537,7 @@ mod tests {
         conn.execute_batch(&format!(
             "CREATE TABLE {catalog}.metric_series (\
                series_id UBIGINT, metric_name VARCHAR, metric_type VARCHAR, \
-               unit VARCHAR, description VARCHAR, labels VARIANT, record_date DATE\
+               unit VARCHAR, description VARCHAR, labels MAP(VARCHAR, VARCHAR), record_date DATE\
              );\
              ALTER TABLE {catalog}.metric_series SET PARTITIONED BY (record_date);\
              ALTER TABLE {catalog}.metric_series SET SORTED BY (metric_name, series_id);"

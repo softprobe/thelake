@@ -167,6 +167,35 @@ pub fn partition_live_file_stats_sql(catalog_alias: &str, table: &str) -> String
     )
 }
 
+/// Softprobe view of non-Parquet backlog for one logical table (AC-F7).
+///
+/// TWCS has **no** compaction watermark: each pass reloads live Parquet via
+/// [`partition_live_file_stats_sql`]. Rows that are still catalog-inlined (or
+/// otherwise not yet in `ducklake_data_file`) are invisible to merge until they
+/// become files. Softprobe observes that backlog as
+/// `logical_row_count` vs `live_parquet_files` so maintenance logs/tests can
+/// prove wait-for-next-run will still see the day once Parquet appears.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlinedFragmentStats {
+    pub table: String,
+    /// Live Parquet file count for the table (0 ⇒ all current rows are non-Parquet).
+    pub live_parquet_files: usize,
+    /// `count(*)` from the logical DuckLake table (inlined ∪ Parquet).
+    pub logical_row_count: u64,
+}
+
+impl InlinedFragmentStats {
+    /// True when the table has rows but no live Parquet yet (typical inlined-only).
+    pub fn is_inlined_only(&self) -> bool {
+        self.logical_row_count > 0 && self.live_parquet_files == 0
+    }
+}
+
+/// SQL: logical row count for a metrics-family table in the attached catalog.
+pub fn logical_table_row_count_sql(catalog_alias: &str, table: &str) -> String {
+    format!("SELECT count(*)::BIGINT FROM {catalog_alias}.{table}")
+}
+
 /// T-F6: live sample files that map to more than one `record_date` (must be empty).
 pub fn live_files_spanning_record_dates_sql(catalog_alias: &str, table: &str) -> String {
     let meta = format!("__ducklake_metadata_{catalog_alias}");
@@ -362,6 +391,67 @@ mod tests {
 
     fn policy() -> TwcsPolicy {
         TwcsPolicy::default()
+    }
+
+    #[test]
+    fn logical_table_row_count_sql_targets_catalog_table() {
+        let sql = logical_table_row_count_sql("softprobe", "metric_samples");
+        assert_eq!(sql, "SELECT count(*)::BIGINT FROM softprobe.metric_samples");
+    }
+
+    #[test]
+    fn inlined_only_backlog_flag() {
+        assert!(InlinedFragmentStats {
+            table: "metric_samples".into(),
+            live_parquet_files: 0,
+            logical_row_count: 5,
+        }
+        .is_inlined_only());
+        assert!(!InlinedFragmentStats {
+            table: "metric_samples".into(),
+            live_parquet_files: 2,
+            logical_row_count: 5,
+        }
+        .is_inlined_only());
+    }
+
+    #[test]
+    fn twcs_plans_merge_when_later_parquet_appears_for_prior_inlined_day() {
+        // Wait-for-next-run: no watermark. Empty parquet → no actions; after
+        // files appear for that day, the next plan schedules merge.
+        let today = d(2026, 9, 11);
+        let day = d(2026, 9, 10);
+        let p = policy();
+        let empty: &[PartitionFileStats] = &[];
+        assert!(plan_twcs_merges(&TwcsMergePlan {
+            table: "metric_samples",
+            catalog_alias: "softprobe",
+            schema: "main",
+            partitions: empty,
+            today,
+            size_pressure: false,
+            max_compacted_files: 32,
+            policy: &p,
+        })
+        .is_empty());
+
+        let after_materialize = [PartitionFileStats {
+            record_date: day,
+            live_file_count: 4,
+            total_bytes: 1_000_000,
+        }];
+        let actions = plan_twcs_merges(&TwcsMergePlan {
+            table: "metric_samples",
+            catalog_alias: "softprobe",
+            schema: "main",
+            partitions: &after_materialize,
+            today,
+            size_pressure: false,
+            max_compacted_files: 32,
+            policy: &p,
+        });
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].record_date, day);
     }
 
     #[test]

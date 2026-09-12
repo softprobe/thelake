@@ -1,10 +1,12 @@
-//! Verify DuckLake VARIANT shredding for hot attribute columns.
+//! Verify temporary MAP attribute bags (#55) and prefer-promoted SQL compilers.
+//!
+//! VARIANT shredding is deferred until DuckLake+Postgres VARIANT inlining is reliable.
 
 use chrono::Utc;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::{Log as LogData, Metric as MetricData, Span as SpanData};
 use softprobe_runtime::query;
-use softprobe_runtime::storage::schema::variant::variant_varchar;
+use softprobe_runtime::storage::schema::variant::{prefer_attr_varchar, variant_varchar};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,6 +14,14 @@ use tempfile::TempDir;
 
 use crate::util::config::file_backed_test_config;
 use serde_json::Value;
+
+fn assert_map_dtype(dtype: &str, column: &str) {
+    let normalized = dtype.to_ascii_uppercase();
+    assert!(
+        normalized == "MAP" || normalized.starts_with("MAP(") || normalized.starts_with("MAP "),
+        "{column} must be MAP(VARCHAR, VARCHAR), got {dtype}"
+    );
+}
 
 fn attach(metadata_path: &str, data_path: &str) -> duckdb::Connection {
     let connection = duckdb::Connection::open_in_memory().expect("duckdb");
@@ -42,7 +52,7 @@ fn attributes_object(value: &Value) -> serde_json::Map<String, Value> {
 }
 
 #[tokio::test]
-async fn variant_shredding_hot_paths_and_nested_filters() {
+async fn map_bags_hot_paths_and_nested_filters() {
     let temp = TempDir::new().expect("tempdir");
     let mut config = file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
@@ -159,46 +169,26 @@ async fn variant_shredding_hot_paths_and_nested_filters() {
         .expect("map")
         .map(|r| r.expect("row"))
         .collect();
-    assert_eq!(
-        types.get("attributes").map(String::as_str),
-        Some("VARIANT"),
-        "traces.attributes must be VARIANT, got {types:?}"
+    assert_map_dtype(
+        types
+            .get("attributes")
+            .map(String::as_str)
+            .unwrap_or("<missing>"),
+        "traces.attributes",
     );
-
-    let mut stats = conn
-        .prepare(
-            "SELECT variant_path, shredded_type, value_count \
-             FROM __ducklake_metadata_softprobe.ducklake_file_variant_stats \
-             ORDER BY variant_path;",
-        )
-        .expect("stats");
-    let rows: Vec<(String, String, i64)> = stats
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)?))
-        })
-        .expect("query")
-        .map(|r| r.expect("row"))
-        .collect();
-    assert!(
-        rows.iter()
-            .any(|(path, ty, _)| path == "\"sp.observation.type\"" && ty == "varchar"),
-        "expected shredded observation type path, got {rows:?}"
-    );
-    assert!(
-        rows.iter()
-            .any(|(path, ty, _)| path == "\"gen_ai.request.model\"" && ty == "varchar"),
-        "expected shredded model path, got {rows:?}"
-    );
-    assert!(
-        rows.iter()
-            .any(|(path, ty, _)| path == "\"sp.cost.total\"" && ty == "float64"),
-        "expected shredded cost path, got {rows:?}"
+    assert_map_dtype(
+        types
+            .get("resource_attributes")
+            .map(String::as_str)
+            .unwrap_or("<missing>"),
+        "traces.resource_attributes",
     );
 
     let filter_sql = format!(
         "SELECT COUNT(*)::BIGINT AS c FROM union_spans \
          WHERE session_id = '{sess}' AND {obs} = 'generation'",
         sess = session_id.replace('\'', "''"),
+        // Bag-only: this test does not apply promotions (columns may be absent).
         obs = variant_varchar("attributes", "sp.observation.type"),
     );
     let started = Instant::now();
@@ -210,7 +200,7 @@ async fn variant_shredding_hot_paths_and_nested_filters() {
     assert_eq!(result.rows[0][0].as_i64(), Some(40));
     assert!(
         elapsed < Duration::from_secs(5),
-        "nested VARIANT filter should complete quickly, took {elapsed:?}"
+        "MAP bag filter should complete quickly, took {elapsed:?}"
     );
 
     let detail_sql = format!(
@@ -252,14 +242,14 @@ async fn variant_shredding_hot_paths_and_nested_filters() {
     assert_eq!(logs.rows[0][0].as_i64(), Some(1));
 }
 
-/// Cover every nested VARIANT key path used by LLM / telemetry SQL compilers.
+/// Cover MAP bag key paths used by LLM / telemetry SQL compilers + prefer-promoted SQL.
 #[tokio::test]
-async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
+async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     use softprobe_runtime::api::llm::query::{
         compile_observation_search_sql, ObservationSearchRequest,
     };
     use softprobe_runtime::api::telemetry::{compile_details_sql, TelemetryDetailsTarget};
-    use softprobe_runtime::storage::schema::variant::variant_try_cast;
+    use softprobe_runtime::storage::schema::variant::prefer_attr_try_cast;
 
     let temp = TempDir::new().expect("tempdir");
     let mut config = file_backed_test_config(&temp);
@@ -392,7 +382,27 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
         .await
         .expect("write logs");
 
-    // 1) Direct VARIANT key projections + typed casts.
+    // Prefer-promoted COALESCE(col, bag) requires the column to exist at bind time.
+    // Add nullable product-hot columns (empty) so compiled LLM SQL can run; values
+    // still resolve from the MAP bag until a real promotion apply+re-ingest.
+    {
+        let conn = attach(&config.ducklake.metadata_path, &config.ducklake.data_path);
+        conn.execute_batch(
+            "ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS observation_type VARCHAR;
+             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS model_name VARCHAR;
+             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS model_provider VARCHAR;
+             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS user_id VARCHAR;
+             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS input_tokens BIGINT;
+             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS output_tokens BIGINT;
+             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS total_tokens BIGINT;
+             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS total_cost DOUBLE;
+             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS session_attr_id VARCHAR;
+             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS service_name VARCHAR;",
+        )
+        .expect("add nullable prefer-promoted columns");
+    }
+
+    // 1) Prefer-promoted projections against MAP bags (columns NULL → bag fallback).
     let proj_sql = format!(
         "SELECT \
             COALESCE({obs}, 'span') AS observation_type, \
@@ -406,15 +416,35 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
             {capture} AS capture_id \
          FROM union_spans \
          WHERE session_id = '{sess}' AND span_id = 'vk-span-1'",
-        obs = variant_varchar("attributes", "sp.observation.type"),
-        model = variant_varchar("attributes", "gen_ai.request.model"),
-        provider = variant_varchar("attributes", "gen_ai.provider.name"),
-        user = variant_varchar("attributes", "sp.user.id"),
+        obs = prefer_attr_varchar(
+            Some("observation_type"),
+            "attributes",
+            "sp.observation.type"
+        ),
+        model = prefer_attr_varchar(Some("model_name"), "attributes", "gen_ai.request.model"),
+        provider =
+            prefer_attr_varchar(Some("model_provider"), "attributes", "gen_ai.provider.name"),
+        user = prefer_attr_varchar(Some("user_id"), "attributes", "sp.user.id"),
         enduser = variant_varchar("attributes", "enduser.id"),
-        input = variant_try_cast("attributes", "gen_ai.usage.input_tokens", "BIGINT"),
-        output = variant_try_cast("attributes", "gen_ai.usage.output_tokens", "BIGINT"),
-        total = variant_try_cast("attributes", "gen_ai.usage.total_tokens", "BIGINT"),
-        cost = variant_try_cast("attributes", "sp.cost.total", "DOUBLE"),
+        input = prefer_attr_try_cast(
+            Some("input_tokens"),
+            "attributes",
+            "gen_ai.usage.input_tokens",
+            "BIGINT"
+        ),
+        output = prefer_attr_try_cast(
+            Some("output_tokens"),
+            "attributes",
+            "gen_ai.usage.output_tokens",
+            "BIGINT"
+        ),
+        total = prefer_attr_try_cast(
+            Some("total_tokens"),
+            "attributes",
+            "gen_ai.usage.total_tokens",
+            "BIGINT"
+        ),
+        cost = prefer_attr_try_cast(Some("total_cost"), "attributes", "sp.cost.total", "DOUBLE"),
         capture = variant_varchar("attributes", "sp.capture.id"),
         sess = session_id.replace('\'', "''"),
     );
@@ -439,8 +469,12 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
         "SELECT COALESCE({obs}, 'span') AS observation_type, \
                 COALESCE({user}, {enduser}) AS user_id \
          FROM union_spans WHERE span_id = 'vk-span-2'",
-        obs = variant_varchar("attributes", "sp.observation.type"),
-        user = variant_varchar("attributes", "sp.user.id"),
+        obs = prefer_attr_varchar(
+            Some("observation_type"),
+            "attributes",
+            "sp.observation.type"
+        ),
+        user = prefer_attr_varchar(Some("user_id"), "attributes", "sp.user.id"),
         enduser = variant_varchar("attributes", "enduser.id"),
     );
     let fallback = query_engine
@@ -461,7 +495,7 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
         .expect("missing");
     assert_eq!(missing.rows[0][0].as_bool(), Some(true));
 
-    // 4) Compiled LLM observation search SQL against live VARIANT data.
+    // 4) Compiled LLM observation search SQL prefers promoted columns against live MAP data.
     let search = ObservationSearchRequest {
         from: now - chrono::Duration::hours(1),
         to: now + chrono::Duration::hours(1),
@@ -474,9 +508,19 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
         cursor: None,
     };
     let search_sql = compile_observation_search_sql(&search).expect("compile search");
-    assert!(search_sql.contains("CAST(attributes['sp.observation.type'] AS VARCHAR)"));
-    assert!(search_sql.contains("CAST(attributes['gen_ai.request.model'] AS VARCHAR)"));
-    assert!(search_sql.contains("CAST(attributes['sp.user.id'] AS VARCHAR)"));
+    let obs_pos = search_sql
+        .find("observation_type")
+        .expect("promoted observation_type");
+    let bag_pos = search_sql
+        .find("attributes['sp.observation.type']")
+        .expect("bag fallback");
+    assert!(
+        obs_pos < bag_pos,
+        "prefer-promoted: observation_type must lead bag access"
+    );
+    assert!(search_sql.contains("COALESCE(observation_type,"));
+    assert!(search_sql.contains("COALESCE(model_name,"));
+    assert!(search_sql.contains("COALESCE(user_id,"));
     let search_result = query_engine
         .execute_query(&search_sql)
         .await
@@ -506,7 +550,7 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
         .expect("run miss");
     assert_eq!(miss_result.row_count, 0);
 
-    // 5) Nested VARIANT capture-id key (SoftProbe capture_export removed with Redis).
+    // 5) Nested MAP capture-id key (SoftProbe capture_export removed with Redis).
     let capture_sql = format!(
         "SELECT CAST(attributes AS JSON) AS attributes FROM union_spans \
          WHERE CAST(attributes['sp.capture.id'] AS VARCHAR) = '{cap}' \
@@ -605,7 +649,7 @@ async fn variant_key_queries_cover_llm_telemetry_and_capture_paths() {
 }
 
 #[tokio::test]
-async fn variant_write_fails_fast_on_legacy_map_table() {
+async fn map_write_fails_fast_on_legacy_variant_table() {
     // make test-e2e exports SPLAKE_RESET_DUCKLAKE=1; that path drops tables for local
     // iteration only. This test must not rely on DROP and must not fight that reset.
     let previous_reset = std::env::var_os("SPLAKE_RESET_DUCKLAKE");
@@ -615,12 +659,14 @@ async fn variant_write_fails_fast_on_legacy_map_table() {
     let mut config = file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
 
-    // Fresh catalog: create legacy MAP table first (no DROP). Writer CREATE IF NOT EXISTS
-    // leaves it alone; ensure_variant_column_types must then fail fast.
+    // Fresh catalog: create leftover VARIANT table first (no DROP). Writer CREATE IF NOT EXISTS
+    // leaves it alone; ensure_hot_map_column_types must then fail fast (#55).
     {
         let conn = attach(&config.ducklake.metadata_path, &config.ducklake.data_path);
-        conn.execute_batch("CREATE TABLE softprobe.traces AS SELECT MAP {'a':'1'} AS attributes;")
-            .expect("create legacy map table");
+        conn.execute_batch(
+            "CREATE TABLE softprobe.traces AS SELECT '{}'::JSON::VARIANT AS attributes;",
+        )
+        .expect("create leftover variant table");
         let dtype: String = conn
             .query_row(
                 "SELECT column_type FROM (DESCRIBE softprobe.traces) WHERE column_name = 'attributes';",
@@ -629,8 +675,8 @@ async fn variant_write_fails_fast_on_legacy_map_table() {
             )
             .expect("describe attributes type");
         assert!(
-            dtype.to_ascii_uppercase().contains("MAP"),
-            "precondition: legacy table should be MAP, got {dtype}"
+            dtype.to_ascii_uppercase().contains("VARIANT"),
+            "precondition: leftover table should be VARIANT, got {dtype}"
         );
     }
 
@@ -639,11 +685,11 @@ async fn variant_write_fails_fast_on_legacy_map_table() {
     let mut attributes = HashMap::new();
     attributes.insert("sp.observation.type".to_string(), "generation".to_string());
     let span = SpanData {
-        session_id: "legacy-map".to_string(),
+        session_id: "legacy-variant".to_string(),
         trace_id: "tr-legacy".to_string(),
         span_id: "sp-legacy".to_string(),
         parent_span_id: None,
-        app_id: "variant-app".to_string(),
+        app_id: "map-app".to_string(),
         organization_id: None,
         tenant_id: None,
         message_type: "chat".to_string(),
@@ -670,15 +716,15 @@ async fn variant_write_fails_fast_on_legacy_map_table() {
         None => std::env::remove_var("SPLAKE_RESET_DUCKLAKE"),
     }
 
-    let err = write_result.expect_err("legacy MAP table must fail fast");
+    let err = write_result.expect_err("leftover VARIANT table must fail fast");
     let message = err.to_string();
     assert!(
-        message.contains("expected VARIANT"),
-        "error must mention VARIANT requirement: {message}"
+        message.contains("VARIANT"),
+        "error must mention leftover VARIANT: {message}"
     );
     assert!(
-        message.contains("Hot MAP columns were migrated"),
-        "error must mention migration advice: {message}"
+        message.contains("Temporary MAP rollback") || message.contains("#55"),
+        "error must mention MAP rollback #55: {message}"
     );
     assert!(
         message.contains("rebuild") || message.contains("migrate"),

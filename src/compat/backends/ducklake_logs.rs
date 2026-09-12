@@ -4,17 +4,46 @@ use crate::compat::backends::logs::{
     LogDirection, LogHit, LogLineFilter, LogParser, LogsDiscoveryRequest, LogsQueryBackend,
     LogsQueryRequest,
 };
-use crate::compat::backends::metrics::{labels_match, labels_match_any};
+use crate::compat::backends::metrics::{labels_match, labels_match_any, LabelMatcher, MatcherOp};
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::loki::{project_loki, DEFAULT_STREAM_LABEL_ALLOWLIST};
 use crate::compat::tenant::TenantContext;
 use crate::query::duckdb::QueryResult;
 use crate::query::QueryEngine;
-use crate::storage::schema::variant::variant_json_to_string_map;
+use crate::storage::schema::variant::{prefer_attr_varchar, variant_json_to_string_map};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+
+/// Product log hot columns from `docs/promotion/logs-query-hot-attrs.yaml`.
+/// `(stream_or_matcher_label, sql_column, bag_column, otel_key)`.
+const LOG_HOT_PROMOTIONS: &[(&str, &str, &str, &str)] = &[
+    (
+        "service_name",
+        "service_name",
+        "resource_attributes",
+        "service.name",
+    ),
+    (
+        "deployment_environment",
+        "deployment_environment",
+        "resource_attributes",
+        "deployment.environment",
+    ),
+    ("logger_name", "logger_name", "attributes", "logger_name"),
+    (
+        "session_attr_id",
+        "session_attr_id",
+        "attributes",
+        "sp.session.id",
+    ),
+    ("user_id", "user_id", "attributes", "sp.user.id"),
+];
+
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
 
 pub struct DuckLakeLogsBackend {
     query: Arc<QueryEngine>,
@@ -75,11 +104,47 @@ impl DuckLakeLogsBackend {
         }
     }
 
+    /// Equality matchers that map to product-hot promotions → column-prefer predicates.
+    fn matcher_pushdown_sql(matchers: &[LabelMatcher]) -> String {
+        let mut parts = Vec::new();
+        for m in matchers {
+            if m.op != MatcherOp::Eq {
+                continue;
+            }
+            let Some(&(label, col, bag, key)) = LOG_HOT_PROMOTIONS
+                .iter()
+                .find(|(matcher, _, _, _)| *matcher == m.name)
+            else {
+                continue;
+            };
+            let _ = label;
+            let lit = format!("'{}'", escape_sql_literal(&m.value));
+            parts.push(format!(
+                "({}) = {lit}",
+                prefer_attr_varchar(Some(col), bag, key)
+            ));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", parts.join(" AND "))
+        }
+    }
+
+    fn promoted_select_sql() -> String {
+        LOG_HOT_PROMOTIONS
+            .iter()
+            .map(|(_, col, _, _)| (*col).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     async fn scan(
         &self,
         ctx: &TenantContext,
         start_ns: Option<i64>,
         end_ns: Option<i64>,
+        matchers: &[LabelMatcher],
     ) -> Result<Vec<RawLogRow>, CompatError> {
         ctx.limits.validate_time_range_ms(
             start_ns.map(|value| value / 1_000_000),
@@ -89,10 +154,13 @@ impl DuckLakeLogsBackend {
         let sql = format!(
             "SELECT CAST(epoch_ns(timestamp) AS BIGINT) AS timestamp_ns, body, \
              CAST(attributes AS JSON) AS attributes, \
-             CAST(resource_attributes AS JSON) AS resource_attributes \
-             FROM union_logs WHERE 1=1{} ORDER BY timestamp ASC LIMIT {}",
+             CAST(resource_attributes AS JSON) AS resource_attributes, \
+             {promoted} \
+             FROM union_logs WHERE 1=1{}{} ORDER BY timestamp ASC LIMIT {}",
             Self::sql_window(start_ns, end_ns),
-            cap.saturating_add(1)
+            Self::matcher_pushdown_sql(matchers),
+            cap.saturating_add(1),
+            promoted = Self::promoted_select_sql(),
         );
         let result = self.execute(ctx, &sql).await?;
         enforce_scan_cap(&result, cap)?;
@@ -103,12 +171,42 @@ impl DuckLakeLogsBackend {
         row: RawLogRow,
         request: &LogsQueryRequest,
     ) -> Result<Option<LogHit>, CompatError> {
-        let projection = project_loki(
-            &row.resource,
-            &row.attributes,
-            DEFAULT_STREAM_LABEL_ALLOWLIST,
-        );
-        if !labels_match(&projection.stream_labels, &request.matchers)? {
+        let mut resource = row.resource;
+        let mut attributes = row.attributes;
+        // Overlay allowlisted OTel keys so project_loki emits stream labels.
+        // Product-hot non-allowlist promotions (user_id / session / logger) are
+        // injected only via stream_labels below — do not also reinsert bag keys
+        // into attributes or JSON-parse paths sanitize them to a second label
+        // (e.g. sp_user_id alongside user_id) and break Loki differentials.
+        for (label, value) in &row.promoted {
+            if label == "service_name" {
+                resource
+                    .entry("service.name".into())
+                    .or_insert_with(|| value.clone());
+            } else if label == "deployment_environment" {
+                resource
+                    .entry("deployment.environment".into())
+                    .or_insert_with(|| value.clone());
+            } else if label == "logger_name" {
+                attributes.remove("logger_name");
+            } else if label == "session_attr_id" {
+                attributes.remove("sp.session.id");
+                attributes.remove("session.id");
+                attributes.remove("session_id");
+            } else if label == "user_id" {
+                attributes.remove("sp.user.id");
+                attributes.remove("enduser.id");
+            }
+        }
+        let projection = project_loki(&resource, &attributes, DEFAULT_STREAM_LABEL_ALLOWLIST);
+        let mut stream_labels = projection.stream_labels;
+        for (label, value) in &row.promoted {
+            // Non-allowlist product labels still participate in matcher matching.
+            stream_labels
+                .entry(label.clone())
+                .or_insert_with(|| value.clone());
+        }
+        if !labels_match(&stream_labels, &request.matchers)? {
             return Ok(None);
         }
         if !line_matches(&row.body, &request.line_filters)? {
@@ -147,7 +245,7 @@ impl DuckLakeLogsBackend {
 
         let parsed_query = parsed.is_some();
         let structured_metadata = projection.structured_metadata;
-        let mut labels = projection.stream_labels;
+        let mut labels = stream_labels;
         if parsed_query {
             for (key, value) in normalized_fields(&structured_metadata) {
                 // Stream labels retain precedence over original metadata, which
@@ -188,20 +286,51 @@ impl DuckLakeLogsBackend {
         ctx: &TenantContext,
         request: &LogsDiscoveryRequest,
     ) -> Result<Vec<LogHit>, CompatError> {
-        let rows = self.scan(ctx, request.start_ns, request.end_ns).await?;
+        // Discovery matchers are OR-of-AND groups. Pushdown only when a single
+        // AND-group is present so we never drop rows needed by another branch.
+        let pushdown: &[LabelMatcher] = match request.matchers.as_slice() {
+            [only] => only.as_slice(),
+            _ => &[],
+        };
+        let rows = self
+            .scan(ctx, request.start_ns, request.end_ns, pushdown)
+            .await?;
         let hits = rows
             .into_iter()
             .filter_map(|row| {
-                let projection = project_loki(
-                    &row.resource,
-                    &row.attributes,
-                    DEFAULT_STREAM_LABEL_ALLOWLIST,
-                );
-                match labels_match_any(&projection.stream_labels, &request.matchers) {
+                let mut resource = row.resource;
+                let attributes = row.attributes;
+                // Discovery mirrors Loki's indexed stream labels (allowlist only).
+                // Product-hot columns like user_id are filled from attribute name
+                // match and must not appear in /labels — they remain query-time
+                // stream fields via apply_row (structured metadata / promoted).
+                for (label, value) in &row.promoted {
+                    if label == "service_name" {
+                        resource
+                            .entry("service.name".into())
+                            .or_insert_with(|| value.clone());
+                    } else if label == "deployment_environment" {
+                        resource
+                            .entry("deployment.environment".into())
+                            .or_insert_with(|| value.clone());
+                    }
+                }
+                let projection =
+                    project_loki(&resource, &attributes, DEFAULT_STREAM_LABEL_ALLOWLIST);
+                let stream_labels = projection.stream_labels;
+                // Matcher pushdown may still filter on product labels via SQL;
+                // discovery response keys stay allowlist-only for oracle parity.
+                let mut match_labels = stream_labels.clone();
+                for (label, value) in &row.promoted {
+                    match_labels
+                        .entry(label.clone())
+                        .or_insert_with(|| value.clone());
+                }
+                match labels_match_any(&match_labels, &request.matchers) {
                     Ok(true) => Some(Ok(LogHit {
                         timestamp_ns: row.timestamp_ns,
                         line: row.body,
-                        labels: projection.stream_labels,
+                        labels: stream_labels,
                         structured_metadata: projection.structured_metadata,
                     })),
                     Ok(false) => None,
@@ -222,7 +351,7 @@ impl LogsQueryBackend for DuckLakeLogsBackend {
         request: LogsQueryRequest,
     ) -> Result<Vec<LogHit>, CompatError> {
         let mut hits = self
-            .scan(ctx, request.start_ns, request.end_ns)
+            .scan(ctx, request.start_ns, request.end_ns, &request.matchers)
             .await?
             .into_iter()
             .map(|row| Self::apply_row(row, &request))
@@ -285,6 +414,8 @@ struct RawLogRow {
     body: String,
     attributes: HashMap<String, String>,
     resource: HashMap<String, String>,
+    /// Product-hot promoted columns (matcher label → value).
+    promoted: BTreeMap<String, String>,
 }
 
 fn parse_rows(result: &QueryResult) -> Vec<RawLogRow> {
@@ -301,6 +432,16 @@ fn parse_rows(result: &QueryResult) -> Vec<RawLogRow> {
         .rows
         .iter()
         .filter_map(|row| {
+            let mut promoted = BTreeMap::new();
+            for (label, col, _, _) in LOG_HOT_PROMOTIONS {
+                if let Some(index) = idx(col) {
+                    if let Some(value) = row.get(index).and_then(cell_str) {
+                        if !value.is_empty() {
+                            promoted.insert((*label).to_string(), value);
+                        }
+                    }
+                }
+            }
             Some(RawLogRow {
                 timestamp_ns: cell_i64(row.get(timestamp)?)?,
                 body: cell_str(row.get(body)?).unwrap_or_default(),
@@ -312,6 +453,7 @@ fn parse_rows(result: &QueryResult) -> Vec<RawLogRow> {
                     .and_then(|index| row.get(index))
                     .map(json_map)
                     .unwrap_or_default(),
+                promoted,
             })
         })
         .collect()
@@ -517,6 +659,121 @@ mod tests {
     use crate::compat::backends::metrics::{LabelMatcher, MatcherOp};
 
     #[test]
+    fn matcher_pushdown_prefers_promoted_columns() {
+        let sql = DuckLakeLogsBackend::matcher_pushdown_sql(&[
+            LabelMatcher {
+                name: "service_name".into(),
+                op: MatcherOp::Eq,
+                value: "checkout".into(),
+            },
+            LabelMatcher {
+                name: "logger_name".into(),
+                op: MatcherOp::Eq,
+                value: "app".into(),
+            },
+        ]);
+        assert!(sql.contains("COALESCE(service_name,"));
+        assert!(sql.contains("COALESCE(logger_name,"));
+        let svc = sql.find("service_name").expect("service_name");
+        let bag = sql
+            .find("resource_attributes['service.name']")
+            .expect("bag fallback");
+        assert!(svc < bag, "promoted service_name must lead bag access");
+    }
+
+    #[test]
+    fn promoted_select_lists_product_hot_columns() {
+        let select = DuckLakeLogsBackend::promoted_select_sql();
+        for col in [
+            "service_name",
+            "deployment_environment",
+            "logger_name",
+            "session_attr_id",
+            "user_id",
+        ] {
+            assert!(select.contains(col), "missing {col} in {select}");
+        }
+    }
+
+    #[test]
+    fn discovery_promoted_user_id_stays_off_allowlist_stream_labels() {
+        // Mirrors discovery_rows: only service_name / deployment_environment are
+        // folded into resource for Loki indexed labels; product-hot user_id must
+        // not appear in /labels (oracle parity) while remaining queryable via apply_row.
+        let mut resource: HashMap<String, String> = [
+            ("service.name".into(), "checkout".into()),
+            ("deployment.environment".into(), "prod".into()),
+        ]
+        .into_iter()
+        .collect();
+        let attributes: HashMap<String, String> = HashMap::new();
+        let promoted: HashMap<String, String> = [
+            ("service_name".into(), "checkout".into()),
+            ("deployment_environment".into(), "prod".into()),
+            ("user_id".into(), "u1".into()),
+        ]
+        .into_iter()
+        .collect();
+        for (label, value) in &promoted {
+            if label == "service_name" {
+                resource
+                    .entry("service.name".into())
+                    .or_insert_with(|| value.clone());
+            } else if label == "deployment_environment" {
+                resource
+                    .entry("deployment.environment".into())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        let projection = project_loki(&resource, &attributes, DEFAULT_STREAM_LABEL_ALLOWLIST);
+        assert!(
+            !projection.stream_labels.contains_key("user_id"),
+            "discovery stream labels must stay allowlist-only: {:?}",
+            projection.stream_labels
+        );
+        assert_eq!(
+            projection.stream_labels.get("service_name"),
+            Some(&"checkout".into())
+        );
+    }
+
+    #[test]
+    fn promoted_user_id_does_not_emit_sp_user_id_stream_label() {
+        let request = LogsQueryRequest {
+            start_ns: None,
+            end_ns: None,
+            matchers: Vec::new(),
+            line_filters: Vec::new(),
+            parser: Some(LogParser::Json),
+            parsed_filters: Vec::new(),
+            unwrap: None,
+            limit: 10,
+            direction: LogDirection::Forward,
+        };
+        let row = RawLogRow {
+            timestamp_ns: 1,
+            body: r#"{"level":"info","msg":"checkout started","duration_ms":12}"#.into(),
+            attributes: [("sp.user.id".into(), "u1".into())].into_iter().collect(),
+            resource: [
+                ("service.name".into(), "checkout".into()),
+                ("deployment.environment".into(), "prod".into()),
+            ]
+            .into_iter()
+            .collect(),
+            promoted: [("user_id".into(), "u1".into())].into_iter().collect(),
+        };
+        let hit = DuckLakeLogsBackend::apply_row(row, &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.labels.get("user_id"), Some(&"u1".into()));
+        assert!(
+            !hit.labels.contains_key("sp_user_id"),
+            "prefer-promoted must not dual-emit sanitized bag key: {:?}",
+            hit.labels
+        );
+    }
+
+    #[test]
     fn parses_json_fields_and_rejects_non_objects() {
         let fields = parse_fields(r#"{"status":500,"message":"failed"}"#, LogParser::Json).unwrap();
         assert_eq!(fields.get("status"), Some(&"500".into()));
@@ -556,6 +813,7 @@ mod tests {
             resource: [("service.name".into(), "checkout".into())]
                 .into_iter()
                 .collect(),
+            promoted: BTreeMap::new(),
         };
 
         let hit = DuckLakeLogsBackend::apply_row(row, &request)
@@ -595,6 +853,7 @@ mod tests {
             body: r#"{"level":"info","message":"checkout started"}"#.into(),
             attributes: HashMap::new(),
             resource: HashMap::new(),
+            promoted: BTreeMap::new(),
         };
 
         let hit = DuckLakeLogsBackend::apply_row(row, &request)
@@ -628,6 +887,7 @@ mod tests {
             .into_iter()
             .collect(),
             resource: HashMap::new(),
+            promoted: BTreeMap::new(),
         };
 
         let hit = DuckLakeLogsBackend::apply_row(row, &request)
@@ -673,6 +933,7 @@ mod tests {
             .into_iter()
             .collect(),
             resource: HashMap::new(),
+            promoted: BTreeMap::new(),
         };
 
         let hit = DuckLakeLogsBackend::apply_row(row, &request)
@@ -794,6 +1055,7 @@ mod tests {
                 body: body.into(),
                 attributes: HashMap::new(),
                 resource: HashMap::new(),
+                promoted: BTreeMap::new(),
             };
 
             assert!(DuckLakeLogsBackend::apply_row(row, &request)

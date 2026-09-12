@@ -349,7 +349,10 @@ pub struct DuckLakeConfig {
     pub catalog_alias: String,
     #[serde(default = "default_ducklake_metadata_schema")]
     pub metadata_schema: String,
-    /// Prefer Parquet (TWCS can merge). Opt-in `Some(10000)` only for scores/inlined-reader tests.
+    /// Rows per INSERT at or below this limit may stay catalog-inlined.
+    /// Default `Some(10000)`. TWCS wait-for-next-run (AC-F7): maintenance does
+    /// not flush inlined rows before merge. Set `Some(0)` only when a fixture
+    /// needs Parquet-per-batch (shredding / F-files stress).
     #[serde(default = "default_data_inlining_row_limit")]
     pub data_inlining_row_limit: Option<u64>,
     /// Number of reused ATTACH'd DuckDB writer connections per catalog scope key.
@@ -392,9 +395,10 @@ fn default_ducklake_metadata_schema() -> String {
 }
 
 fn default_data_inlining_row_limit() -> Option<u64> {
-    // VARIANT shredding (series.labels, traces) only works on Parquet. Skinny
-    // samples/postings/hist used to inline into Postgres and skip TWCS merge.
-    Some(0)
+    // AC-F7 wait-for-next-run: small batches stay catalog-inlined; TWCS only
+    // merges live Parquet (no flush-before-TWCS). Override to Some(0) only when
+    // a fixture needs Parquet-per-batch (e.g. shredding / F-files stress).
+    Some(10_000)
 }
 
 fn default_writer_pool_size() -> usize {
@@ -606,14 +610,14 @@ mod tests {
         assert_eq!(c.maintenance.max_snapshot_age_seconds, 60);
         assert_ne!(c.maintenance.max_snapshot_age_seconds, 604800);
         assert_ne!(c.maintenance.max_snapshot_age_seconds, 3600);
-        assert_eq!(c.ducklake.data_inlining_row_limit, Some(0));
+        assert_eq!(c.ducklake.data_inlining_row_limit, Some(10_000));
     }
 
-    /// AC-F7 / T-F7: skinny tables write Parquet; inlining is opt-in.
+    /// AC-F7 / T-F7: default inlining is 10_000 (wait-for-next-run TWCS).
     #[test]
-    fn default_data_inlining_row_limit_is_zero() {
+    fn default_data_inlining_row_limit_is_ten_thousand() {
         let c = Config::default();
-        assert_eq!(c.ducklake.data_inlining_row_limit, Some(0));
+        assert_eq!(c.ducklake.data_inlining_row_limit, Some(10_000));
     }
 
     #[test]

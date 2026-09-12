@@ -14,18 +14,25 @@ OVERLAY_DIR="$ROOT/tests/compat/grafana/otel-demo"
 COMPOSE_SOFTPROBE="$OVERLAY_DIR/compose.softprobe.yaml"
 COLLECTOR_EXTRAS="$OVERLAY_DIR/otelcol-config-extras.yml"
 PID_FILE="$STATE_DIR/softprobe.pid"
+WRITE_PID_FILE="$STATE_DIR/softprobe-write.pid"
+READ_PID_FILE="$STATE_DIR/softprobe-read.pid"
 
 OTEL_DEMO_TAG="${OTEL_DEMO_TAG:-3.0.0}"
 CACHE_ROOT="${THELAKE_CACHE_ROOT:-$HOME/.cache/thelake}"
 DEMO_DIR="${OTEL_DEMO_DIR:-$CACHE_ROOT/otel-demo/$OTEL_DEMO_TAG}"
 DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 
-if [[ -f "$PID_FILE" ]]; then
-  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+stop_softprobe_pidfile() {
+  local file="$1"
+  local label="${2:-Softprobe}"
+  [[ -f "$file" ]] || return 0
+  local pid
+  pid="$(cat "$file" 2>/dev/null || true)"
   if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+    local cmd
     cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
     if [[ "$cmd" == *softprobe-runtime* ]]; then
-      echo "==> stopping Softprobe pid=$pid"
+      echo "==> stopping ${label} pid=$pid"
       kill "$pid" 2>/dev/null || true
       for _ in $(seq 1 20); do
         kill -0 "$pid" 2>/dev/null || break
@@ -36,10 +43,19 @@ if [[ -f "$PID_FILE" ]]; then
       echo "==> pid $pid is not softprobe-runtime; leaving it alone"
     fi
   fi
-  rm -f "$PID_FILE"
-else
-  echo "==> no Softprobe pid file at $PID_FILE (skip host kill)"
-fi
+  rm -f "$file"
+}
+
+stop_softprobe_pidfile "$WRITE_PID_FILE" "Softprobe-write"
+stop_softprobe_pidfile "$READ_PID_FILE" "Softprobe-read"
+stop_softprobe_pidfile "$PID_FILE" "Softprobe"
+# Also clear stray staged binaries started under the state dir.
+for pid in $(pgrep -f "$STATE_DIR/softprobe-runtime" 2>/dev/null || true); do
+  echo "==> stopping stray Softprobe pid=$pid"
+  kill "$pid" 2>/dev/null || true
+  sleep 0.5
+  kill -9 "$pid" 2>/dev/null || true
+done
 
 if [[ -f "$DEMO_DIR/compose.yaml" ]]; then
   echo "==> stopping OpenTelemetry Demo ($DEMO_PROJECT)"

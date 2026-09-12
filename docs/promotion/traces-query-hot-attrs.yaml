@@ -1,0 +1,73 @@
+# Canonical traces hot-attribute promotion for Softprobe product SQL (LLM / Tempo).
+# Apply via POST /v1/promotions/apply (or scripts/lib/apply-product-hot-promotions.sh)
+# before ingest so typed columns fill. Softprobe does not auto-promote arbitrary keys.
+#
+# Column names align with tests/fixtures/promotion/llm_generation_v1.yaml where they
+# overlap. Product SQL compilers COALESCE these columns ahead of MAP bag access.
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces]
+columns:
+  - name: observation_type
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.observation.type
+  - name: model_name
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.request.model
+  - name: model_provider
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.provider.name
+  - name: user_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.user.id
+  - name: input_tokens
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.usage.input_tokens
+  - name: output_tokens
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.usage.output_tokens
+  - name: total_tokens
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.usage.total_tokens
+  - name: total_cost
+    type: double
+    nullable: true
+    source:
+      from: attribute
+      key: sp.cost.total
+  # Attribute-sourced session id (first-class traces.session_id remains primary).
+  # enduser.id stays bag-only fallback in LLM SQL — not promoted here.
+  - name: session_attr_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.session.id
+  - name: service_name
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: service.name

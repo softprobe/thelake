@@ -1,6 +1,7 @@
 use crate::compat::errors::CompatError;
 use crate::compat::tempo::traceql::{is_duration_field, parse_duration_ns, TraceSelector};
 use crate::compat::tenant::TenantContext;
+use crate::storage::schema::variant::prefer_attr_varchar;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 
@@ -137,7 +138,9 @@ pub fn trace_scan_sql(request: &TraceSearchRequest, trace_id: Option<&str>) -> S
          CAST(attributes AS JSON) AS attributes, CAST(resource_attributes AS JSON) AS resource_attributes, \
          CAST(instrumentation_scope AS JSON) AS instrumentation_scope, CAST(links AS JSON) AS links, \
          status_code, status_message, \
-         CAST(events AS JSON) AS events FROM union_spans WHERE {}), \
+         CAST(events AS JSON) AS events, \
+         observation_type, model_name, model_provider, user_id, session_attr_id, service_name \
+         FROM union_spans WHERE {}), \
          matching_traces AS (SELECT DISTINCT trace_id FROM base WHERE {}), \
          qualified_traces AS (SELECT trace_id FROM base GROUP BY trace_id HAVING {} ) \
          SELECT base.* FROM base \
@@ -181,11 +184,51 @@ fn json_string(column: &str, key: &str) -> String {
 }
 
 fn span_attribute_value(key: &str) -> String {
+    if let Some(expr) = promoted_attr_expr(key) {
+        return expr;
+    }
     format!(
         "COALESCE({}, {})",
         json_string("attributes", key),
         json_string("resource_attributes", key)
     )
+}
+
+/// Prefer product-hot / first-class columns from traces-query-hot-attrs.yaml.
+fn promoted_attr_expr(key: &str) -> Option<String> {
+    match key {
+        "sp.observation.type" => Some(prefer_attr_varchar(
+            Some("observation_type"),
+            "attributes",
+            "sp.observation.type",
+        )),
+        "gen_ai.request.model" => Some(prefer_attr_varchar(
+            Some("model_name"),
+            "attributes",
+            "gen_ai.request.model",
+        )),
+        "gen_ai.provider.name" => Some(prefer_attr_varchar(
+            Some("model_provider"),
+            "attributes",
+            "gen_ai.provider.name",
+        )),
+        "sp.user.id" => Some(prefer_attr_varchar(
+            Some("user_id"),
+            "attributes",
+            "sp.user.id",
+        )),
+        "sp.session.id" => Some(prefer_attr_varchar(
+            Some("session_attr_id"),
+            "attributes",
+            "sp.session.id",
+        )),
+        "service.name" => Some(format!(
+            "COALESCE(service_name, {}, {}, app_id)",
+            json_string("attributes", key),
+            json_string("resource_attributes", key)
+        )),
+        _ => None,
+    }
 }
 
 fn span_status_code_sql() -> String {
@@ -213,11 +256,7 @@ fn tag_value_sql(key: &str) -> String {
         "name" => "message_type".to_string(),
         "kind" => "span_kind".to_string(),
         "status" => "status_code".to_string(),
-        "service.name" => format!(
-            "COALESCE({}, {}, app_id)",
-            json_string("attributes", key),
-            json_string("resource_attributes", key)
-        ),
+        "service.name" => promoted_attr_expr("service.name").expect("service.name mapping"),
         _ => span_attribute_value(key),
     }
 }
@@ -257,13 +296,10 @@ fn predicate_sql(predicate: &crate::compat::tempo::traceql::TracePredicate) -> S
     };
     let actual = match field {
         TraceField::Span(key) if key == "status_code" || key == "status" => span_status_code_sql(),
-        TraceField::Span(key) => json_string("attributes", key),
+        TraceField::Span(key) => span_attribute_value(key),
         TraceField::Resource(key) => {
             if key == "service.name" {
-                format!(
-                    "COALESCE({}, app_id)",
-                    json_string("resource_attributes", key)
-                )
+                promoted_attr_expr("service.name").expect("service.name mapping")
             } else {
                 json_string("resource_attributes", key)
             }
@@ -413,6 +449,35 @@ mod tests {
     use crate::compat::tempo::params::parse_tempo_search_params;
 
     #[test]
+    fn tag_predicates_prefer_product_hot_promoted_columns() {
+        let sql = trace_scan_sql(
+            &TraceSearchRequest {
+                tags: BTreeMap::from([
+                    (
+                        String::from("sp.observation.type"),
+                        String::from("generation"),
+                    ),
+                    (String::from("service.name"), String::from("api")),
+                ]),
+                selector: None,
+                min_duration_ns: None,
+                max_duration_ns: None,
+                start_ns: None,
+                end_ns: None,
+                limit: 5,
+            },
+            None,
+        );
+        assert!(sql.contains("COALESCE(observation_type,"));
+        let obs = sql.find("observation_type").expect("observation_type");
+        let bag = sql
+            .find("attributes['sp.observation.type']")
+            .expect("bag fallback");
+        assert!(obs < bag, "promoted observation_type must lead bag access");
+        assert!(sql.contains("COALESCE(service_name,"));
+    }
+
+    #[test]
     fn trace_scan_is_tenant_neutral_and_bounded() {
         let params = parse_tempo_search_params(
             &[("limit".into(), "5".into())],
@@ -511,7 +576,12 @@ mod tests {
             },
             None,
         );
-        assert!(sql.contains("TRY_CAST(json_extract_string"));
+        // Span attrs COALESCE attributes + resource_attributes, then numeric TRY_CAST.
+        assert!(
+            sql.contains("TRY_CAST(COALESCE(json_extract_string")
+                || sql.contains("TRY_CAST(json_extract_string"),
+            "numeric span predicates must TRY_CAST extracted JSON strings, got: {sql}"
+        );
         assert!(sql.contains(">= 500"));
         assert!(!sql.contains("AS VARCHAR) >= 500"));
     }

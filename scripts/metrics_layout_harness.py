@@ -1695,7 +1695,7 @@ GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timesta
             ("AC-N5", "cleanup_old_files_sql_honors_seconds"),
             ("AC-F3", "twcs_partition_key_is_record_date_only"),
             ("AC-F6", "twcs_merge_does_not_cross_record_date"),
-            ("AC-F7", "default_data_inlining_row_limit_is_zero"),
+            ("AC-F7", "default_data_inlining_row_limit_is_ten_thousand"),
             ("AC-F8", "closed_day_file_bar_allows_two_only_over_target"),
             ("AC-M1", "maintenance_tables_include_metric_family"),
             ("AC-W1", "max_query_range_is_unlimited"),
@@ -1716,6 +1716,19 @@ GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timesta
             results = run_cargo_units(mapping, profile_flag)
             for ac_id, (ok, note) in results.items():
                 self.mark(ac_id, pass_=ok, notes=f"cargo: {note[:200]}")
+            # AC-F7 also requires no flush-before-TWCS (wait-for-next-run).
+            flush = run_cargo_units(
+                [("AC-F7-flush", "maintenance_does_not_flush_inlined_before_twcs")],
+                profile_flag,
+            )
+            flush_ok, flush_note = flush["AC-F7-flush"]
+            prev = self.acs.get("AC-F7")
+            if prev is not None:
+                self.mark(
+                    "AC-F7",
+                    pass_=bool(prev.pass_) and flush_ok,
+                    notes=f"{prev.notes}; no_flush={flush_note[:160]}",
+                )
 
         # AC-S3: grafana-manual-up must build release
         up = (ROOT / "scripts" / "grafana-manual-up.sh").read_text(encoding="utf-8")
@@ -1734,10 +1747,15 @@ GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timesta
                 and "build-release" not in up
             )
         )
+        has_coalesce = (
+            "flush_interval_seconds" in up
+            and "THELAKE_INGEST_FLUSH_INTERVAL_SECONDS" in up
+            and "ingest:" in up
+        )
         self.mark(
             "AC-S3",
-            pass_=uses_release and not debug_bin,
-            notes="grafana-manual-up.sh must build release binary",
+            pass_=uses_release and not debug_bin and has_coalesce,
+            notes="grafana-manual-up.sh must build release + set ingest.flush_interval_seconds",
         )
 
     def measure_catalog_acs(self) -> None:
@@ -2449,18 +2467,14 @@ GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timesta
             notes=f"snaps={snap_count} older={old_snaps} expire={exp_code}:{exp_note[:80]}",
         )
 
-        # AC-F7: skinny rows must live in Parquet (not catalog-only inlined).
+        # AC-F7: default inlining 10k + wait-for-next-run TWCS (inlined rows OK).
         unit_f7 = bool(self.acs["AC-F7"].pass_)
-        f7_notes = [f"unit_inlining_default_0={unit_f7}"]
-        f7_ok = unit_f7
+        f7_notes = [f"unit_inlining_default_10k={unit_f7}", "wait_for_next_run"]
         for t in ("metric_samples", "metric_hist_samples", "metric_postings"):
             rows = self.sql_scalar(f"SELECT count(*) FROM {qtable(t)}")
             files = sum(c for _, c, _ in self.live_partition_stats(t))
-            inlined = rows > 0 and files == 0
-            if inlined:
-                f7_ok = False
             f7_notes.append(f"{t}:rows={rows} parquet_files={files}")
-        self.mark("AC-F7", pass_=f7_ok, notes="; ".join(f7_notes)[:400])
+        self.mark("AC-F7", pass_=unit_f7, notes="; ".join(f7_notes)[:400])
 
     def run_f_snap(self, *, manage_heartbeat: bool = True) -> None:
         """F-snap: ≥120 commits at C=1s, A=60, then expire; assert N3/N4."""

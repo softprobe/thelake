@@ -1,5 +1,5 @@
 use crate::promotion::{PromotionColumn, PromotionDataType};
-use crate::storage::schema::variant::hot_variant_columns;
+use crate::storage::schema::variant::hot_map_columns;
 use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
 use std::sync::Arc;
 
@@ -31,23 +31,21 @@ fn string_map() -> DataType {
     )
 }
 
-/// Staging type for DuckLake VARIANT columns (JSON text → `::JSON::VARIANT` on write).
-fn variant_json() -> DataType {
-    utf8()
-}
-
-/// Nullable hot VARIANT field; must be registered in [`hot_variant_columns`].
-fn opt_hot_variant(table: &str, name: &'static str) -> Field {
+/// Nullable hot MAP field; must be registered in [`hot_map_columns`].
+fn opt_hot_map(table: &str, name: &'static str) -> Field {
     assert!(
-        hot_variant_columns(table).contains(&name),
-        "column '{name}' must be listed in hot_variant_columns(\"{table}\")"
+        hot_map_columns(table).contains(&name),
+        "column '{name}' must be listed in hot_map_columns(\"{table}\")"
     );
-    opt(name, variant_json())
+    opt(name, string_map())
 }
 
-fn promoted_fields(columns: &[PromotionColumn]) -> Vec<Field> {
+fn promoted_fields(base: &[Field], columns: &[PromotionColumn]) -> Vec<Field> {
+    let existing: std::collections::HashSet<String> =
+        base.iter().map(|f| f.name().to_ascii_lowercase()).collect();
     columns
         .iter()
+        .filter(|column| !existing.contains(&column.name.to_ascii_lowercase()))
         .map(|column| {
             let data_type = match column.data_type {
                 PromotionDataType::String | PromotionDataType::Json => utf8(),
@@ -99,10 +97,10 @@ impl TraceTable {
             opt("span_kind", utf8()),
             req("timestamp", ts_utc_nanos()),
             opt("end_timestamp", ts_utc_nanos()),
-            opt_hot_variant("traces", "attributes"),
-            opt_hot_variant("traces", "resource_attributes"),
-            opt_hot_variant("traces", "instrumentation_scope"),
-            opt_hot_variant("traces", "links"),
+            opt_hot_map("traces", "attributes"),
+            opt_hot_map("traces", "resource_attributes"),
+            opt_hot_map("traces", "instrumentation_scope"),
+            opt_hot_map("traces", "links"),
             opt(
                 "events",
                 DataType::List(Arc::new(Field::new("item", events_element, true))),
@@ -117,8 +115,21 @@ impl TraceTable {
             opt("http_response_headers", utf8()),
             opt("http_response_body", utf8()),
             req("record_date", DataType::Date32),
+            // Product-hot nullable columns (#55). Append after core fields so
+            // Arrow builders that fill by legacy position stay aligned.
+            // Present before promotion apply so prefer-promoted COALESCE is safe.
+            opt("observation_type", utf8()),
+            opt("model_name", utf8()),
+            opt("model_provider", utf8()),
+            opt("user_id", utf8()),
+            opt("input_tokens", DataType::Int64),
+            opt("output_tokens", DataType::Int64),
+            opt("total_tokens", DataType::Int64),
+            opt("total_cost", DataType::Float64),
+            opt("session_attr_id", utf8()),
+            opt("service_name", utf8()),
         ];
-        fields.extend(promoted_fields(columns));
+        fields.extend(promoted_fields(&fields, columns));
         Schema::new(fields)
     }
 }
@@ -200,13 +211,19 @@ impl OtlpLogsTable {
             req("severity_number", DataType::Int32),
             req("severity_text", utf8()),
             req("body", utf8()),
-            opt_hot_variant("logs", "attributes"),
-            opt_hot_variant("logs", "resource_attributes"),
+            opt_hot_map("logs", "attributes"),
+            opt_hot_map("logs", "resource_attributes"),
             opt("trace_id", utf8()),
             opt("span_id", utf8()),
             req("record_date", DataType::Date32),
+            // Product-hot nullable columns (#55). Append after core fields.
+            opt("logger_name", utf8()),
+            opt("service_name", utf8()),
+            opt("deployment_environment", utf8()),
+            opt("session_attr_id", utf8()),
+            opt("user_id", utf8()),
         ];
-        fields.extend(promoted_fields(columns));
+        fields.extend(promoted_fields(&fields, columns));
         Schema::new(fields)
     }
 }
@@ -217,13 +234,13 @@ mod tests {
     use arrow::datatypes::{DataType, TimeUnit};
 
     #[test]
-    fn hot_attribute_columns_use_utf8_json_staging() {
+    fn hot_attribute_columns_use_map() {
         let traces = TraceTable::schema();
         assert!(matches!(
             traces.field_with_name("attributes").unwrap().data_type(),
-            DataType::Utf8
+            DataType::Map(_, _)
         ));
-        // Nested event attributes remain MAP for non-hot nested maps.
+        // Nested event attributes remain MAP.
         let events = traces.field_with_name("events").unwrap().data_type();
         let DataType::List(item) = events else {
             panic!("expected list");
@@ -237,13 +254,13 @@ mod tests {
         let logs = OtlpLogsTable::schema();
         assert!(matches!(
             logs.field_with_name("attributes").unwrap().data_type(),
-            DataType::Utf8
+            DataType::Map(_, _)
         ));
         assert!(matches!(
             logs.field_with_name("resource_attributes")
                 .unwrap()
                 .data_type(),
-            DataType::Utf8
+            DataType::Map(_, _)
         ));
 
         // Scores metadata stays MAP (out of hot-column scope).
@@ -255,20 +272,20 @@ mod tests {
     }
 
     #[test]
-    fn hot_variant_registry_covers_schema_columns() {
-        use crate::storage::schema::variant::hot_variant_columns;
+    fn hot_map_registry_covers_schema_columns() {
+        use crate::storage::schema::variant::hot_map_columns;
 
         for (table, schema) in [
             ("traces", TraceTable::schema()),
             ("logs", OtlpLogsTable::schema()),
         ] {
-            for col in hot_variant_columns(table) {
+            for col in hot_map_columns(table) {
                 let field = schema
                     .field_with_name(col)
                     .unwrap_or_else(|_| panic!("{table}.{col} missing from schema"));
                 assert!(
-                    matches!(field.data_type(), DataType::Utf8),
-                    "{table}.{col} must stage as Utf8 JSON for VARIANT cast"
+                    matches!(field.data_type(), DataType::Map(_, _)),
+                    "{table}.{col} must stage as MAP(VARCHAR, VARCHAR)"
                 );
             }
         }

@@ -91,6 +91,30 @@ pub async fn ingest_otlp_protobuf(router: Router, body: Vec<u8>) {
         )
         .await
         .expect("ingest");
+    let status = ingest.status();
+    let bytes = axum::body::to_bytes(ingest.into_body(), usize::MAX)
+        .await
+        .expect("ingest body");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ingest failed: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+}
+
+pub async fn ingest_otlp_logs_protobuf(router: Router, body: Vec<u8>) {
+    let ingest = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/logs")
+                .header(header::CONTENT_TYPE, "application/x-protobuf")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("ingest logs");
     assert_eq!(ingest.status(), StatusCode::OK);
 }
 
@@ -112,18 +136,26 @@ pub fn attach_softprobe_ducklake(metadata_path: &str, data_path: &str) -> duckdb
 }
 
 pub fn assert_traces_columns_exist(connection: &duckdb::Connection, columns: &[&str]) {
+    assert_table_columns_exist(connection, "traces", columns);
+}
+
+pub fn assert_logs_columns_exist(connection: &duckdb::Connection, columns: &[&str]) {
+    assert_table_columns_exist(connection, "logs", columns);
+}
+
+fn assert_table_columns_exist(connection: &duckdb::Connection, table: &str, columns: &[&str]) {
     for column in columns {
         let count: i64 = connection
             .query_row(
                 &format!(
                     "SELECT count(*) FROM information_schema.columns \
-                     WHERE table_catalog = 'softprobe' AND table_name = 'traces' \
+                     WHERE table_catalog = 'softprobe' AND table_name = '{table}' \
                      AND column_name = '{column}'"
                 ),
                 [],
                 |row| row.get(0),
             )
             .expect("column exists query");
-        assert!(count > 0, "expected column {column}");
+        assert!(count > 0, "expected {table}.{column}");
     }
 }

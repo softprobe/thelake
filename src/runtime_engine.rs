@@ -167,6 +167,7 @@ impl RuntimeEngineManager {
         );
         let ingest = Arc::new(IngestEngine::from_storage(
             storage.clone(),
+            tenant_id,
             self.config.ingest.flush_interval_seconds,
         ));
         let query = Arc::new(

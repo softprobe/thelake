@@ -12,15 +12,13 @@ promotion. Other docs link here; do not duplicate the full contract elsewhere.
 
 ## What problem promotion solves
 
-OTLP spans store arbitrary attributes in an `attributes` VARIANT column
-(Iceberg v3 / DuckLake variant shredding). Nested field filters work:
+OTLP spans store arbitrary attributes in an `attributes` MAP column
+(`MAP(VARCHAR, VARCHAR)`; VARIANT shredding is temporarily deferred — see
+[`variant_shredding.md`](variant_shredding.md)). Nested field filters work:
 
 ```sql
 WHERE CAST(attributes['sp.user.id'] AS VARCHAR) = 'user-123'
 ```
-
-Hot keys with stable types are shredded into typed Parquet sub-columns so
-DuckLake can prune files and skip unused nested fields.
 
 Promotion lets a tenant declare selected fields as dedicated typed SQL columns
 so queries can use:
@@ -28,6 +26,11 @@ so queries can use:
 ```sql
 WHERE user_id = 'user-123'
 ```
+
+**Hard rule for Softprobe SQL compilers:** if an active `telemetry_columns`
+promotion matches a source key, generated SQL MUST prefer that promoted column
+(`COALESCE(promoted_col, CAST(bag['key'] AS VARCHAR), …)` with promoted first).
+Never emit bag-path access first when a matching promotion is active.
 
 Promotion is tenant-scoped, additive, and explicit. Softprobe does **not**:
 
@@ -48,7 +51,7 @@ OpenTelemetry semantic convention and not a runtime-enforced schema.
 ### Rules
 
 1. Your application must set the attributes explicitly.
-2. Softprobe stores them in the telemetry `attributes` VARIANT as ordinary keys.
+2. Softprobe stores them in the telemetry `attributes` MAP as ordinary keys.
 3. Naming consistency across services matters more than the prefix itself.
 4. Prefer `sp.*` for Softprobe-specific business keys so they do not collide
    with `http.*`, `db.*`, or other OTel conventions.
@@ -289,7 +292,7 @@ auto-promote arbitrary attribute keys; merge this document with any other
 tenant).
 
 The Prometheus query path prefers these typed columns and falls back to
-per-key `CAST(attributes['k'] AS VARCHAR)` / resource VARIANT access. It never
+per-key `CAST(attributes['k'] AS VARCHAR)` / resource MAP access. It never
 `CAST(... AS JSON)` whole attribute blobs on the sample scan.
 
 ### Lifecycle
@@ -380,7 +383,7 @@ domain modules inside thelake.
    promotions for the scope before commit.
 6. Historical rows written before apply remain `NULL` in the new column. There
    is no automatic backfill.
-7. The original attribute keys remain queryable in the `attributes` VARIANT.
+7. The original attribute keys remain queryable in the `attributes` MAP.
 
 ### Reserved names
 
@@ -514,7 +517,7 @@ payload storage.
    catalog with tenant scopes. For **local/dev**, SQLite single-scope
    promotion (apply + ingest extraction + query) is supported.
 2. Instrument consistent business attributes (`sp.user.id`, …).
-3. Verify VARIANT nested-field queries work before promoting anything.
+3. Verify MAP nested-field queries work before promoting anything.
 4. Promote only high-value filters you query often.
 5. Keep telemetry promoted columns nullable.
 6. Prefer `attribute` / `resource_attribute` sources for identifiers. Use
@@ -532,7 +535,8 @@ payload storage.
 - [`instrumentation_guide.md`](instrumentation_guide.md) — how to emit bodies and `sp.*`
 - [`design.md`](design.md) — runtime architecture
 - [`decision_log.md`](decision_log.md) — current architecture decisions
-- [`variant_shredding.md`](variant_shredding.md) — MAP → VARIANT migration notes
+- [`variant_shredding.md`](variant_shredding.md) — temporary MAP bags; VARIANT restore criteria
+- [`docs/promotion/`](promotion/) — product-hot manifests (traces/logs/metrics)
 
 - [`ingestion-openapi.yaml`](ingestion-openapi.yaml) — HTTP contract including apply
 - [`adhoc-duckdb-ducklake.md`](adhoc-duckdb-ducklake.md) — local SQL against DuckLake

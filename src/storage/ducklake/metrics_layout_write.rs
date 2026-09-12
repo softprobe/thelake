@@ -192,7 +192,7 @@ struct PreparedIngest {
     hist_samples: Vec<HistSampleRow>,
 }
 
-/// Series VARIANT for SQL/Prom bridges: original OTel keys (dotted) plus sanitized
+/// Series MAP for SQL/Prom bridges: original OTel keys (dotted) plus sanitized
 /// Prom identity labels (`job`, `instance`, `__name__`, …). Postings / series_id still
 /// use only the sanitized map.
 fn labels_to_json(
@@ -214,7 +214,7 @@ fn labels_to_json(
     for (k, v) in labels {
         as_map.insert(k.clone(), v.clone());
     }
-    // Rehydrate nested `sp.json:` values using the shared VARIANT encoding.
+    // Rehydrate nested `sp.json:` values using the shared attribute encoding.
     encode_attributes_json(&as_map)
 }
 
@@ -395,7 +395,7 @@ fn insert_series_sql(catalog: &str, rows: &[SeriesRow]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "({id}::UBIGINT, {name}, {mtype}, {unit}, {desc}, {temporality}, {monotonic}, {labels}::JSON::VARIANT, {rd})",
+                "({id}::UBIGINT, {name}, {mtype}, {unit}, {desc}, {temporality}, {monotonic}, ({labels}::JSON)::MAP(VARCHAR, VARCHAR), {rd})",
                 id = r.series_id,
                 name = sql_str(&r.metric_name),
                 mtype = sql_str(&r.metric_type),
@@ -767,7 +767,7 @@ mod tests {
             .unwrap();
         assert_eq!(samples_n, N);
 
-        // Labels must live on series (VARIANT), not on samples columns.
+        // Labels must live on series (MAP), not on samples columns.
         let sample_variant = count_variant_columns(&conn, &catalog, "metric_samples").unwrap();
         assert_eq!(sample_variant, 0);
         let series_labels: i64 = conn

@@ -346,6 +346,19 @@ impl DuckLakeMetricsBackend {
             .any(|m| m.name == "__name__" && m.op == MatcherOp::Eq && m.value.ends_with("_bucket"))
     }
 
+    /// Equality `__name__` for series-meta sort-key prune (None if absent/ambiguous).
+    fn equality_metric_name(matchers: &[LabelMatcher]) -> Option<String> {
+        let mut names = matchers
+            .iter()
+            .filter(|m| m.name == "__name__" && m.op == MatcherOp::Eq)
+            .map(|m| m.value.clone());
+        let first = names.next()?;
+        if names.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn scan_rows(
         &self,
@@ -407,13 +420,24 @@ impl DuckLakeMetricsBackend {
             return Err(scan_cap_exceeded(cap));
         }
         let meta = self
-            .load_series_meta(ctx, &catalog, &series_ids, start_ms, end_ms)
+            .load_series_meta(
+                ctx,
+                &catalog,
+                &series_ids,
+                start_ms,
+                end_ms,
+                Self::equality_metric_name(matchers).as_deref(),
+            )
             .await?;
         Ok(parse_raw_rows(&result, &meta))
     }
 
     /// Warm path is the in-process series catalog. Misses read `metric_series`
     /// once per `series_id` (JSON blob, not per-key VARIANT on sample rows).
+    ///
+    /// Two-step lake fill (self-mon: `metric_series_recent` then `metric_series_all`):
+    /// recent open days + optional `metric_name` sort-key prune first; only still-
+    /// missing ids pay a query-window-bounded scan (churned historical series).
     async fn load_series_meta(
         &self,
         ctx: &TenantContext,
@@ -421,7 +445,10 @@ impl DuckLakeMetricsBackend {
         series_ids: &[u64],
         start_ms: Option<i64>,
         end_ms: Option<i64>,
+        metric_name: Option<&str>,
     ) -> Result<HashMap<u64, SeriesMeta>, CompatError> {
+        use crate::compat::backends::postings_resolve::SeriesMetaDayScope;
+
         let engine_id = Arc::as_ptr(&self.query) as usize;
         let tenant_id = ctx.tenant_id();
         let (mut out, missing) = {
@@ -431,32 +458,48 @@ impl DuckLakeMetricsBackend {
         if missing.is_empty() {
             return Ok(out);
         }
-        let meta_sql = series_meta_sql(catalog, &missing, start_ms, end_ms);
-        debug_assert!(
-            meta_sql.contains("metric_series")
-                && meta_sql.contains("CAST(s.labels AS JSON)")
-                && !meta_sql.contains("CAST(s.labels['"),
-            "series meta must read labels as one JSON blob: {meta_sql}"
-        );
-        let meta_result = self.execute_soft(ctx, &meta_sql).await?;
-        Self::check_deadline(ctx)?;
-        let fetched = parse_series_meta(&meta_result);
-        {
-            let mut guard = SERIES_META_CACHE.lock().await;
-            let now = Instant::now();
-            for (id, meta) in &fetched {
-                guard.put(
-                    SeriesMetaKey {
-                        engine_id,
-                        tenant_id: tenant_id.to_string(),
-                        series_id: *id,
-                    },
-                    meta.clone(),
-                    now,
-                );
+
+        let mut still_missing = missing;
+        for scope in [SeriesMetaDayScope::Recent, SeriesMetaDayScope::QueryWindow] {
+            if still_missing.is_empty() {
+                break;
             }
+            // Recent: optional metric_name for sort-key prune. QueryWindow miss
+            // path drops the name filter so a Prom/OTel name mismatch cannot
+            // strand ids, but keeps the Prom record_date window bound.
+            let name = match scope {
+                SeriesMetaDayScope::Recent => metric_name,
+                SeriesMetaDayScope::QueryWindow => None,
+            };
+            let meta_sql = series_meta_sql(catalog, &still_missing, scope, name, start_ms, end_ms);
+            debug_assert!(
+                meta_sql.contains("metric_series")
+                    && meta_sql.contains("CAST(s.labels AS JSON)")
+                    && meta_sql.contains("QUALIFY row_number()")
+                    && !meta_sql.contains("CAST(s.labels['"),
+                "series meta must be one JSON CAST per series_id: {meta_sql}"
+            );
+            let meta_result = self.execute_soft(ctx, &meta_sql).await?;
+            Self::check_deadline(ctx)?;
+            let fetched = parse_series_meta(&meta_result);
+            {
+                let mut guard = SERIES_META_CACHE.lock().await;
+                let now = Instant::now();
+                for (id, meta) in &fetched {
+                    guard.put(
+                        SeriesMetaKey {
+                            engine_id,
+                            tenant_id: tenant_id.to_string(),
+                            series_id: *id,
+                        },
+                        meta.clone(),
+                        now,
+                    );
+                }
+            }
+            out.extend(fetched);
+            still_missing.retain(|id| !out.contains_key(id));
         }
-        out.extend(fetched);
         Ok(out)
     }
 

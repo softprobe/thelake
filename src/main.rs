@@ -16,8 +16,7 @@ use tower_http::{cors::CorsLayer, decompression::RequestDecompressionLayer, trac
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::DEBUG)
         .with_env_filter(
@@ -32,6 +31,23 @@ async fn main() -> anyhow::Result<()> {
     let config = Arc::new(Config::load()?);
     info!("Configuration loaded");
 
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    if let Some(n) = config.server.worker_threads {
+        let n = n.max(1);
+        // Blocking pool must be >1: inventory/export and DuckLake writes all use
+        // spawn_blocking. With max_blocking_threads=1, a long inventory attach
+        // deadlocks OTLP /v1/metrics (idle CPU, collector timeouts).
+        let blocking = n.max(4);
+        info!("Tokio worker_threads={n} max_blocking_threads={blocking}");
+        builder.worker_threads(n);
+        builder.max_blocking_threads(blocking);
+    }
+    let rt = builder.build()?;
+    rt.block_on(async_main(config))
+}
+
+async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
     // Maintenance needs a writer/catalog; HTTP/gRPC engines are built lazily per tenant.
     let pipeline = IngestPipeline::new(config.as_ref()).await?;
     let storage = pipeline.storage.clone();

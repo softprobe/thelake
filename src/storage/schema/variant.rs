@@ -1,23 +1,23 @@
-//! DuckLake VARIANT staging and SQL helpers for shredded attribute columns.
+//! Temporary MAP-era helpers for hot telemetry attribute bags (#55).
 //!
-//! Hot MAP columns are staged as JSON (Utf8) in Arrow/Parquet, then cast to
-//! `VARIANT` on DuckLake CREATE/INSERT so nested fields can be shredded.
+//! Hot bags are stored as DuckLake `MAP(VARCHAR, VARCHAR)`. VARIANT shredding is
+//! deferred until external-catalog VARIANT inlining is reliable again.
 
 use serde_json::{Map as JsonMap, Number, Value};
 use std::collections::HashMap;
 
-/// Attribute keys encoded as JSON integers for stable VARIANT shredding.
+/// Attribute keys encoded as JSON integers for stable typed encoding (metrics labels).
 pub const VARIANT_INT64_KEYS: &[&str] = &[
     "gen_ai.usage.input_tokens",
     "gen_ai.usage.output_tokens",
     "gen_ai.usage.total_tokens",
 ];
 
-/// Attribute keys encoded as JSON floats for stable VARIANT shredding.
+/// Attribute keys encoded as JSON floats for stable typed encoding (metrics labels).
 pub const VARIANT_FLOAT64_KEYS: &[&str] = &["sp.cost.total"];
 
-/// Telemetry columns stored as DuckLake `VARIANT` (staged as JSON Utf8).
-pub fn hot_variant_columns(table_name: &str) -> &'static [&'static str] {
+/// Telemetry columns stored as DuckLake `MAP(VARCHAR, VARCHAR)`.
+pub fn hot_map_columns(table_name: &str) -> &'static [&'static str] {
     match table_name {
         "traces" => &[
             "attributes",
@@ -26,9 +26,16 @@ pub fn hot_variant_columns(table_name: &str) -> &'static [&'static str] {
             "links",
         ],
         "logs" => &["attributes", "resource_attributes"],
-        "metric_samples" => &["attributes", "resource_attributes"],
+        // Skinny metric_samples have no attribute bags; series labels are the hot MAP.
+        "metric_series" => &["labels"],
         _ => &[],
     }
+}
+
+/// Deprecated alias for [`hot_map_columns`].
+#[deprecated(note = "renamed to hot_map_columns (#55 temporary MAP era)")]
+pub fn hot_variant_columns(table_name: &str) -> &'static [&'static str] {
+    hot_map_columns(table_name)
 }
 
 /// Escape a SQL string literal (single quotes only).
@@ -36,7 +43,7 @@ pub fn escape_sql_string(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-/// VARIANT object field as VARCHAR (required for COALESCE / string filters).
+/// MAP/VARIANT object field as VARCHAR (required for COALESCE / string filters).
 pub fn variant_varchar(column: &str, key: &str) -> String {
     format!(
         "CAST({column}['{key}'] AS VARCHAR)",
@@ -45,7 +52,7 @@ pub fn variant_varchar(column: &str, key: &str) -> String {
     )
 }
 
-/// `try_cast` of a VARIANT object field to a DuckDB type.
+/// `try_cast` of a MAP/VARIANT object field to a DuckDB type.
 pub fn variant_try_cast(column: &str, key: &str, duck_type: &str) -> String {
     format!(
         "try_cast({column}['{key}'] AS {duck_type})",
@@ -55,7 +62,34 @@ pub fn variant_try_cast(column: &str, key: &str, duck_type: &str) -> String {
     )
 }
 
-/// Project a VARIANT column as JSON for API serialization.
+/// Prefer a promoted column when present; otherwise read from the attribute bag.
+///
+/// `promoted` must already be a safe SQL identifier (caller-validated).
+pub fn prefer_attr_varchar(promoted: Option<&str>, bag: &str, key: &str) -> String {
+    let from_bag = variant_varchar(bag, key);
+    match promoted {
+        Some(col) => format!("COALESCE({col}, {from_bag})"),
+        None => from_bag,
+    }
+}
+
+/// Prefer a promoted column when present; otherwise `try_cast` from the attribute bag.
+///
+/// `promoted` must already be a safe SQL identifier (caller-validated).
+pub fn prefer_attr_try_cast(
+    promoted: Option<&str>,
+    bag: &str,
+    key: &str,
+    duck_type: &str,
+) -> String {
+    let from_bag = variant_try_cast(bag, key, duck_type);
+    match promoted {
+        Some(col) => format!("COALESCE({col}, {from_bag})"),
+        None => from_bag,
+    }
+}
+
+/// Project a MAP/VARIANT column as JSON for API serialization.
 pub fn variant_as_json(column: &str) -> String {
     format!("CAST({column} AS JSON) AS {column}")
 }
@@ -63,13 +97,40 @@ pub fn variant_as_json(column: &str) -> String {
 /// DuckDB returns `CAST(... AS JSON)` as text; parse to object/array when possible.
 ///
 /// Leaves non-JSON strings and non-string values unchanged so callers can treat
-/// VARIANT projections as nested JSON without double-encoding in HTTP responses.
+/// projections as nested JSON without double-encoding in HTTP responses.
 pub fn parse_projected_json_value(value: Value) -> Value {
     match value {
         Value::String(text) => match serde_json::from_str::<Value>(&text) {
             Ok(parsed @ (Value::Object(_) | Value::Array(_))) => parsed,
             _ => Value::String(text),
         },
+        other => other,
+    }
+}
+
+/// Rehydrate nested JSON-text values inside a projected MAP object.
+///
+/// `MAP(VARCHAR, VARCHAR)` cannot store typed nested values; after
+/// `CAST(map AS JSON)` nested OTel payloads appear as JSON strings. Walk the
+/// object and parse stringified arrays/objects (and `sp.json:` prefixed forms).
+pub fn rehydrate_map_json_values(value: Value) -> Value {
+    let top = parse_projected_json_value(value);
+    match top {
+        Value::Object(map) => {
+            let mut out = JsonMap::new();
+            for (k, v) in map {
+                out.insert(k, rehydrate_map_json_values(v));
+            }
+            Value::Object(out)
+        }
+        Value::String(text) => {
+            let payload = crate::models::strip_nested_json_prefix(&text).unwrap_or(text.as_str());
+            match serde_json::from_str::<Value>(payload) {
+                Ok(parsed @ (Value::Object(_) | Value::Array(_))) => parsed,
+                Ok(other) if crate::models::strip_nested_json_prefix(&text).is_some() => other,
+                _ => Value::String(text),
+            }
+        }
         other => other,
     }
 }
@@ -98,20 +159,15 @@ pub fn variant_json_to_string_map(value: &Value) -> HashMap<String, String> {
         .collect()
 }
 
-/// DuckLake SELECT list that casts staged JSON columns to VARIANT.
-///
-/// Example: `SELECT * REPLACE (attributes::JSON::VARIANT AS attributes) FROM ...`
+/// DuckLake SELECT list for Parquet ingest (MAP columns need no cast bridge).
+pub fn parquet_select_for_table(_table_name: &str) -> String {
+    "SELECT *".to_string()
+}
+
+/// Deprecated alias for [`parquet_select_for_table`].
+#[deprecated(note = "renamed to parquet_select_for_table (#55); always SELECT *")]
 pub fn parquet_select_with_variant_casts(table_name: &str) -> String {
-    let cols = hot_variant_columns(table_name);
-    if cols.is_empty() {
-        return "SELECT *".to_string();
-    }
-    let replacements = cols
-        .iter()
-        .map(|col| format!("{col}::JSON::VARIANT AS {col}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("SELECT * REPLACE ({replacements})")
+    parquet_select_for_table(table_name)
 }
 
 /// Encode a string map as a JSON object, applying stable typed shredding for hot keys.
@@ -177,15 +233,38 @@ mod tests {
             variant_try_cast("attributes", "gen_ai.usage.input_tokens", "BIGINT"),
             "try_cast(attributes['gen_ai.usage.input_tokens'] AS BIGINT)"
         );
+        assert_eq!(parquet_select_for_table("traces"), "SELECT *");
+        assert_eq!(parquet_select_for_table("logs"), "SELECT *");
+        assert_eq!(parquet_select_for_table("scores"), "SELECT *");
+    }
+
+    #[test]
+    fn prefer_attr_helpers_promoted_first() {
         assert_eq!(
-            parquet_select_with_variant_casts("traces"),
-            "SELECT * REPLACE (attributes::JSON::VARIANT AS attributes, resource_attributes::JSON::VARIANT AS resource_attributes, instrumentation_scope::JSON::VARIANT AS instrumentation_scope, links::JSON::VARIANT AS links)"
+            prefer_attr_varchar(Some("attr_user_id"), "attributes", "sp.user.id"),
+            "COALESCE(attr_user_id, CAST(attributes['sp.user.id'] AS VARCHAR))"
         );
         assert_eq!(
-            parquet_select_with_variant_casts("logs"),
-            "SELECT * REPLACE (attributes::JSON::VARIANT AS attributes, resource_attributes::JSON::VARIANT AS resource_attributes)"
+            prefer_attr_varchar(None, "attributes", "sp.user.id"),
+            "CAST(attributes['sp.user.id'] AS VARCHAR)"
         );
-        assert_eq!(parquet_select_with_variant_casts("scores"), "SELECT *");
+        assert_eq!(
+            prefer_attr_try_cast(
+                Some("attr_tokens"),
+                "attributes",
+                "gen_ai.usage.input_tokens",
+                "BIGINT"
+            ),
+            "COALESCE(attr_tokens, try_cast(attributes['gen_ai.usage.input_tokens'] AS BIGINT))"
+        );
+        assert_eq!(
+            prefer_attr_try_cast(None, "attributes", "gen_ai.usage.input_tokens", "BIGINT"),
+            "try_cast(attributes['gen_ai.usage.input_tokens'] AS BIGINT)"
+        );
+
+        let promoted = prefer_attr_varchar(Some("p"), "attributes", "k");
+        assert!(promoted.starts_with("COALESCE(p,"));
+        assert!(!promoted.starts_with("CAST(attributes"));
     }
 
     #[test]

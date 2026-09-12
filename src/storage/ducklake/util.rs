@@ -1,5 +1,5 @@
 use crate::storage::schema::describe_table_columns;
-use crate::storage::schema::variant::hot_variant_columns;
+use crate::storage::schema::variant::hot_map_columns;
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
 use tracing::warn;
@@ -8,13 +8,23 @@ pub(crate) fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
 }
 
-/// Fail fast when an existing DuckLake table still uses MAP for hot VARIANT columns.
-pub(super) fn ensure_variant_column_types(
+fn is_map_dtype(dtype: &str) -> bool {
+    let normalized = dtype.to_ascii_uppercase();
+    normalized == "MAP" || normalized.starts_with("MAP(") || normalized.starts_with("MAP ")
+}
+
+fn is_variant_dtype(dtype: &str) -> bool {
+    let normalized = dtype.to_ascii_uppercase();
+    normalized == "VARIANT" || normalized.starts_with("VARIANT")
+}
+
+/// Fail fast when an existing DuckLake table still uses VARIANT for hot MAP columns (#55).
+pub(crate) fn ensure_hot_map_column_types(
     conn: &Connection,
     qualified_table: &str,
     table_name: &str,
 ) -> Result<()> {
-    let expected = hot_variant_columns(table_name);
+    let expected = hot_map_columns(table_name);
     if expected.is_empty() {
         return Ok(());
     }
@@ -23,16 +33,21 @@ pub(super) fn ensure_variant_column_types(
     for col in expected {
         let Some(dtype) = found.get(*col) else {
             return Err(anyhow!(
-                "table {qualified_table} is missing required VARIANT column '{col}'"
+                "table {qualified_table} is missing required MAP column '{col}'"
             ));
         };
-        let normalized = dtype.to_ascii_uppercase();
-        if normalized != "VARIANT" {
+        if is_variant_dtype(dtype) {
             return Err(anyhow!(
-                "table {qualified_table} column '{col}' has type {dtype}, expected VARIANT. \
-                 Hot MAP columns were migrated to Iceberg/DuckLake VARIANT shredding; \
-                 rebuild/migrate this DuckLake table via operations (do not auto-drop in-process), \
-                 then re-ingest."
+                "table {qualified_table} column '{col}' has type {dtype} (VARIANT). \
+                 Temporary MAP rollback (#55): rebuild/migrate this DuckLake table via \
+                 operations (do not auto-drop in-process), then re-ingest."
+            ));
+        }
+        if !is_map_dtype(dtype) {
+            return Err(anyhow!(
+                "table {qualified_table} column '{col}' has type {dtype}, expected \
+                 MAP(VARCHAR, VARCHAR). Rebuild/migrate this DuckLake table via operations \
+                 (do not auto-drop in-process), then re-ingest."
             ));
         }
     }
@@ -127,9 +142,9 @@ pub(super) fn ensure_trace_fidelity_columns(
 ) -> Result<()> {
     let found = describe_table_columns(conn, qualified_table)?;
     let ddls = [
-        ("resource_attributes", "VARIANT"),
-        ("instrumentation_scope", "VARIANT"),
-        ("links", "VARIANT"),
+        ("resource_attributes", "MAP(VARCHAR, VARCHAR)"),
+        ("instrumentation_scope", "MAP(VARCHAR, VARCHAR)"),
+        ("links", "MAP(VARCHAR, VARCHAR)"),
     ]
     .into_iter()
     .filter(|(name, _)| !found.contains_key(*name))

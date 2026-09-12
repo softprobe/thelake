@@ -340,7 +340,7 @@ Important DuckLake settings:
 - `data_path`: local, `s3://`, or `gs://` data location
 - `catalog_alias`
 - `metadata_schema`
-- `data_inlining_row_limit` (default `0`; opt-in `10000` for scores/inlined-reader tests)
+- `data_inlining_row_limit` (default `10000`; set `0` only when a fixture needs Parquet-per-batch)
 - `writer_pool_size` (default `4`, clamped to `1..=16`)
 
 Non-secret object-store settings live in the `object_store` section (`region`

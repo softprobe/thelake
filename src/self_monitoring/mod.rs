@@ -17,10 +17,11 @@ pub use events::{try_enqueue_slow_query, SlowQueryEvent};
 pub use ids::{instrument_customer_tenant, is_reserved_tenant_id, OPS_TENANT_ID};
 pub use instruments::{
     record_compaction_pass, record_compaction_wave, record_export_drop, record_ingest,
-    record_maintenance, record_orphan_remove, record_query, record_query_queue_wait,
-    record_slow_query, record_snapshot_expire, record_write, self_monitoring_export_drops,
+    record_ingest_commit, record_maintenance, record_orphan_remove, record_query,
+    record_query_queue_wait, record_sample_scan, record_slow_query, record_snapshot_expire,
+    record_write, self_monitoring_export_drops,
 };
-pub use labels::{bound_app, classify_sql_kind};
+pub use labels::{bound_app, classify_sample_scan, classify_sql_kind};
 
 use crate::api::AppState;
 use crate::config::Config;
