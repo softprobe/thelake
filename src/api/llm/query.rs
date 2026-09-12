@@ -1770,7 +1770,9 @@ mod tests {
         ));
         let sql = compile_session_search_sql(&request, 50).expect("sql");
         let group_by = sql.find("GROUP BY session_id").expect("group by");
-        let cursor_at = sql.rfind("start_time <").expect("cursor predicate");
+        let cursor_at = sql
+            .rfind("CAST(start_time AS TIMESTAMP_NS) <")
+            .expect("cursor predicate");
         assert!(
             cursor_at > group_by,
             "cursor predicate must sit after the aggregation, got: {sql}"
@@ -2051,7 +2053,7 @@ mod tests {
         assert_eq!(decoded.t, ts);
         assert!(decode_cursor("%%%not-base64%%%").is_err());
         let predicate = cursor_predicate(&encoded, "timestamp", "span_id").unwrap();
-        assert!(predicate.contains("timestamp <"));
+        assert!(predicate.contains("CAST(timestamp AS TIMESTAMP_NS) <"));
         assert!(predicate.contains("span_id <"));
     }
 

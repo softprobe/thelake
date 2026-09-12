@@ -58,6 +58,23 @@ pub async fn runtime_auth_middleware(
 
     let token = parse_bearer(auth).ok_or(StatusCode::UNAUTHORIZED)?;
 
+    // Machine ingest keys may be long-lived Softprobe assertion JWTs (Explorer
+    // workspace keys). Prefer verifying those before the Softprobe auth HTTP path
+    // (which returns Softprobe numeric ids that are not DuckLake scope_ids).
+    if token.chars().filter(|c| *c == '.').count() == 2 {
+        if let Some(secret) = crate::softprobe_assertion::assertion_hmac_secret() {
+            let now = chrono::Utc::now().timestamp();
+            if let Ok(claims) =
+                crate::softprobe_assertion::verify_softprobe_assertion(&token, &secret, now)
+            {
+                if let Ok(info) = crate::softprobe_assertion::tenant_info_from_assertion(&claims) {
+                    req.extensions_mut().insert(info);
+                    return Ok(next.run(req).await);
+                }
+            }
+        }
+    }
+
     let control_plane = state
         .engines
         .control_plane()
