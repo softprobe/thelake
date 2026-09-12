@@ -1,29 +1,43 @@
 # Compatibility authentication and tenant isolation
 
-**Status:** Phase 0 contract  
-**Last updated:** 2026-08-12
+**Status:** Phase 0 contract (updated for Softprobe assertion)  
+**Last updated:** 2026-09-12
 
 ## Canonical identity
 
-Softprobe Runtime authenticates callers with a Softprobe **API key** presented
-as an HTTP Bearer token:
+Preferred Softprobe identity for Explorer and edge-proxied traffic is the
+dedicated assertion header ([sp-llm#39](https://github.com/softprobe/sp-llm/issues/39)):
+
+```http
+X-Softprobe-Assertion: <jwt>
+```
+
+thelake verifies HS256 (`SOFTPROBE_ASSERTION_HMAC_SECRET` /
+`ASSERTION_HMAC_SECRET`), then binds DuckLake scope from claim **`tenant_key`**
+(Softprobe `tenants.tenant_id` string). Assertion traffic does **not** call the
+Softprobe auth API-key validate service.
+
+### Legacy Bearer API key
+
+Machine clients that have not yet migrated (Grafana datasources, some OTLP
+ingest paths) may still send:
 
 ```http
 Authorization: Bearer <softprobe-api-key>
 ```
 
-The key is resolved through the configured auth service (`SOFTPROBE_AUTH_URL`)
-to a tenant identity (`TenantInfo` / `TenantContext`). There is no local JWT
-parse path for compatibility routes.
+That path still resolves through `SOFTPROBE_AUTH_URL`. When both headers are
+present, **assertion wins**.
 
-Grafana Prometheus, Loki, and Tempo datasources should configure the same
-Bearer token in their HTTP auth settings.
+Admin provisioning stays admin-key only: `POST /v1/tenants` with
+`SOFTPROBE_ADMIN_API_KEY`.
 
 ## Tenant constitution
 
 Operational and compatibility handlers **must not** accept `tenant_id` (or
 equivalent) from query parameters or request bodies. Tenant scope comes only
-from the authenticated context established by middleware.
+from the authenticated context established by middleware (`tenant_key` from
+assertion, or auth-service `tenantId` from Bearer).
 
 ## Protocol scope headers
 
@@ -32,11 +46,11 @@ them as **informational consistency checks**, never as the source of truth.
 
 | Protocol | Header | Behavior |
 |----------|--------|----------|
-| Prometheus / Grafana Prom | (none required beyond Bearer) | Extra org headers ignored for tenancy |
+| Prometheus / Grafana Prom | (none required beyond Bearer/assertion) | Extra org headers ignored for tenancy |
 | Loki | `X-Scope-OrgID` | If present and non-empty, **must equal** authenticated `tenant_id`; otherwise `403` |
 | Tempo | `X-Scope-OrgID` (same convention) | If present and non-empty, **must equal** authenticated `tenant_id`; otherwise `403` |
 
-Missing scope headers are allowed when Bearer auth succeeded: the authenticated
+Missing scope headers are allowed when auth succeeded: the authenticated
 tenant is used.
 
 ## Self-monitoring ops Bearer
@@ -48,14 +62,16 @@ not resolve to `thelake-ops`; the ops key must not resolve to a customer tenant.
 Local compose uses `THELAKE_AUTH_STUB_KEY_TENANTS` (`apiKey:tenantId` pairs).
 
 An unauthorized caller cannot select another tenant by forging `X-Scope-OrgID`
-alone — middleware still requires a valid Bearer, and a mismatched header is
-denied.
+alone — middleware still requires a valid assertion or Bearer, and a mismatched
+header is denied.
 
 ## Auth outcomes
 
 | Condition | HTTP status |
 |-----------|-------------|
-| Missing `Authorization` | `401` |
+| Missing assertion and Authorization | `401` |
+| Invalid / expired assertion | `401` |
+| Assertion without `tenant_key` | `403` |
 | Malformed Bearer | `401` |
 | Unknown / rejected API key | `403` |
 | Scope header mismatches authenticated tenant | `403` |
@@ -63,7 +79,7 @@ denied.
 
 ## Compatibility route prefixes
 
-The following path prefixes require the same runtime Bearer middleware as
+The following path prefixes require the same runtime auth middleware as
 `/v1/*` (CORS `OPTIONS` preflight exempt where applicable):
 
 - `/api/v1/` — Prometheus-compatible

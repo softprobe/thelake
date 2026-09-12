@@ -4,6 +4,7 @@ mod test_support;
 
 pub mod api;
 pub mod authn;
+pub mod softprobe_assertion;
 pub mod catalog;
 pub mod compaction;
 pub mod compat;
