@@ -20,8 +20,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Require `Authorization: Bearer` for `/v1/*` (except CORS `OPTIONS` preflight and
-/// admin `POST /v1/tenants`), resolve tenant, store [`TenantInfo`] in extensions.
+/// Prefer `X-Softprobe-Assertion` (sp-llm#39). Fall back to Bearer → auth service
+/// for legacy machine clients (Grafana/OTLP) until those mint assertions.
 pub async fn runtime_auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
@@ -29,6 +29,24 @@ pub async fn runtime_auth_middleware(
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path();
     if !requires_runtime_auth(req.method(), path) {
+        return Ok(next.run(req).await);
+    }
+
+    if let Some(raw) = req
+        .headers()
+        .get(crate::softprobe_assertion::ASSERTION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let secret =
+            crate::softprobe_assertion::assertion_hmac_secret().ok_or(StatusCode::UNAUTHORIZED)?;
+        let now = chrono::Utc::now().timestamp();
+        let claims = crate::softprobe_assertion::verify_softprobe_assertion(raw, &secret, now)
+            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        let info = crate::softprobe_assertion::tenant_info_from_assertion(&claims)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+        req.extensions_mut().insert(info);
         return Ok(next.run(req).await);
     }
 
