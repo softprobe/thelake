@@ -27,6 +27,14 @@ pub(crate) fn timestamp_ns_literal_from_str(value: &str) -> String {
     format!("{}::TIMESTAMP_NS", sql_string_literal(value))
 }
 
+/// Compare a timestamp column to a `TIMESTAMP_NS` literal.
+///
+/// Prod DuckLake tables may still be `TIMESTAMPTZ` while newer schemas use
+/// `TIMESTAMP_NS`. Casting the column makes predicates bind for both.
+pub(crate) fn timestamp_ns_column(column: &str) -> String {
+    format!("CAST({column} AS TIMESTAMP_NS)")
+}
+
 pub(crate) fn encode_cursor(timestamp: DateTime<Utc>, id: &str) -> String {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     let payload = PageCursor {
@@ -50,8 +58,9 @@ pub(crate) fn cursor_predicate(
     id_col: &str,
 ) -> Result<String, String> {
     let decoded = decode_cursor(cursor)?;
+    let ts_col = timestamp_ns_column(timestamp_col);
     Ok(format!(
-        "({timestamp_col} < {ts} OR ({timestamp_col} = {ts} AND {id_col} < {id}))",
+        "({ts_col} < {ts} OR ({ts_col} = {ts} AND {id_col} < {id}))",
         ts = timestamp_ns_literal(&decoded.t),
         id = sql_string_literal(&decoded.id),
     ))
@@ -68,17 +77,26 @@ pub(crate) fn push_optional_time_bounds(
             if from > to {
                 return Err("`from` must be <= `to`".to_string());
             }
+            let col = timestamp_ns_column("timestamp");
             conditions.push(format!(
-                "timestamp >= {} AND timestamp <= {}",
+                "{col} >= {} AND {col} <= {}",
                 timestamp_ns_literal(&from),
                 timestamp_ns_literal(&to)
             ));
         }
         (Some(from), None) => {
-            conditions.push(format!("timestamp >= {}", timestamp_ns_literal(&from)));
+            conditions.push(format!(
+                "{} >= {}",
+                timestamp_ns_column("timestamp"),
+                timestamp_ns_literal(&from)
+            ));
         }
         (None, Some(to)) => {
-            conditions.push(format!("timestamp <= {}", timestamp_ns_literal(&to)));
+            conditions.push(format!(
+                "{} <= {}",
+                timestamp_ns_column("timestamp"),
+                timestamp_ns_literal(&to)
+            ));
         }
         (None, None) => {}
     }

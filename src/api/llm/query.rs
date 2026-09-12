@@ -1,6 +1,6 @@
 use crate::api::sql_support::{
     cursor_predicate, encode_cursor, push_optional_time_bounds, sql_string_literal,
-    timestamp_ns_literal,
+    timestamp_ns_column, timestamp_ns_literal,
 };
 use crate::api::AppState;
 use crate::authn::TenantInfo;
@@ -455,8 +455,8 @@ pub fn compile_session_recording_sql(
     Ok(format!(
         "SELECT {projection} FROM union_spans \
          WHERE session_id = {session} \
-           AND timestamp >= {from_ts} \
-           AND timestamp <= {to_ts} \
+           AND CAST(timestamp AS TIMESTAMP_NS) >= {from_ts} \
+           AND CAST(timestamp AS TIMESTAMP_NS) <= {to_ts} \
            AND {obs_type} = 'recording' \
          ORDER BY timestamp ASC, span_id ASC \
          LIMIT {limit}",
@@ -681,8 +681,8 @@ pub fn compile_session_search_sql(
     }
 
     let mut predicates = vec![
-        format!("timestamp >= {}", timestamp_ns_literal(&request.from)),
-        format!("timestamp <= {}", timestamp_ns_literal(&request.to)),
+        format!("{} >= {}", timestamp_ns_column("timestamp"), timestamp_ns_literal(&request.from)),
+        format!("{} <= {}", timestamp_ns_column("timestamp"), timestamp_ns_literal(&request.to)),
         // Spans without a session id cannot belong to a session row.
         "session_id IS NOT NULL AND session_id <> ''".to_string(),
         // Web recording shares session_id with LLM spans but is not an LLM
@@ -854,8 +854,10 @@ pub fn compile_observation_search_sql(
     }
     let limit = clamp_limit(request.limit, DEFAULT_SEARCH_LIMIT);
     let mut conditions = vec![format!(
-        "timestamp >= {} AND timestamp <= {}",
+        "{} >= {} AND {} <= {}",
+        timestamp_ns_column("timestamp"),
         timestamp_ns_literal(&request.from),
+        timestamp_ns_column("timestamp"),
         timestamp_ns_literal(&request.to)
     )];
 
@@ -971,8 +973,8 @@ pub fn compile_session_aggregate_sql(
             list(DISTINCT {user_id}) AS user_ids \
          FROM union_spans \
          WHERE session_id = {session} \
-           AND timestamp >= {from_ts} \
-           AND timestamp <= {to_ts} \
+           AND CAST(timestamp AS TIMESTAMP_NS) >= {from_ts} \
+           AND CAST(timestamp AS TIMESTAMP_NS) <= {to_ts} \
            AND {not_recording}",
         input_tokens = expr_input_tokens(),
         output_tokens = expr_output_tokens(),
@@ -997,7 +999,7 @@ pub fn compile_session_traces_sql(
         return Err("`from` must be <= `to`".to_string());
     }
     let where_sql = format!(
-        "session_id = {} AND timestamp >= {} AND timestamp <= {} AND {}",
+        "session_id = {} AND CAST(timestamp AS TIMESTAMP_NS) >= {} AND CAST(timestamp AS TIMESTAMP_NS) <= {} AND {}",
         sql_string_literal(session_id),
         timestamp_ns_literal(&from),
         timestamp_ns_literal(&to),
@@ -1064,7 +1066,7 @@ pub fn compile_scores_for_session_sql(
         return Err("`from` must be <= `to`".to_string());
     }
     let member_filter = format!(
-        "session_id = {session} AND timestamp >= {from_ts} AND timestamp <= {to_ts}",
+        "session_id = {session} AND CAST(timestamp AS TIMESTAMP_NS) >= {from_ts} AND CAST(timestamp AS TIMESTAMP_NS) <= {to_ts}",
         session = sql_string_literal(session_id),
         from_ts = timestamp_ns_literal(&from),
         to_ts = timestamp_ns_literal(&to),
@@ -1819,8 +1821,8 @@ mod tests {
     fn session_search_aggregates_in_sql_and_bounds_time() {
         let sql = compile_session_search_sql(&session_search_request(), 50).expect("sql");
         assert!(sql.contains("GROUP BY session_id"));
-        assert!(sql.contains("timestamp >="));
-        assert!(sql.contains("timestamp <="));
+        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) >="));
+        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="));
         // spans with no session id must not become a session row
         assert!(sql.contains("session_id IS NOT NULL AND session_id <> ''"));
         // recording spans share session_id but must not inflate LLM session rows
@@ -1947,7 +1949,7 @@ mod tests {
             cursor: None,
         };
         let sql = compile_observation_search_sql(&request).expect("sql");
-        assert!(sql.contains("timestamp >="));
+        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) >="));
         assert!(sql.contains("LIMIT 201"));
         assert!(sql.contains("gpt-4o''; DROP TABLE traces; --"));
         assert!(sql.contains(&format!(
@@ -2050,8 +2052,8 @@ mod tests {
         let sql = compile_scores_for_trace_sql("trace-1", None, None).expect("trace scores sql");
         assert!(sql.contains("trace_id = 'trace-1'"));
         assert!(sql.contains("span_id IN (SELECT"));
-        assert!(!sql.contains("timestamp >="));
-        assert!(!sql.contains("timestamp <="));
+        assert!(!sql.contains("CAST(timestamp AS TIMESTAMP_NS) >="));
+        assert!(!sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="));
 
         let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
             .unwrap()
@@ -2061,8 +2063,8 @@ mod tests {
             .with_timezone(&Utc);
         let sql = compile_scores_for_trace_sql("trace-1", Some(from), Some(to))
             .expect("trace scores sql with bounds");
-        assert!(sql.contains("span_id IN (SELECT span_id FROM union_spans WHERE trace_id = 'trace-1' AND timestamp >="));
-        assert!(sql.contains("timestamp <="));
+        assert!(sql.contains("span_id IN (SELECT span_id FROM union_spans WHERE trace_id = 'trace-1' AND CAST(timestamp AS TIMESTAMP_NS) >="));
+        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="));
     }
 
     #[test]
