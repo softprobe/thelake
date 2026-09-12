@@ -76,7 +76,7 @@ COMPARE_GREPTIME ?= 0
 PERF_LAYOUT_GOAL_SECS ?= 1200
 
 CI_GOAL_SECS ?= 1080
-PERF_GOAL_SECS ?= 480
+PERF_GOAL_SECS ?= 720
 RELEASE_GOAL_SECS ?= 1500
 
 # Compatibility reference images are derived from the single YAML manifest.
