@@ -23,11 +23,16 @@ Machine clients that have not yet migrated (Grafana datasources, some OTLP
 ingest paths) may still send:
 
 ```http
-Authorization: Bearer <softprobe-api-key>
+Authorization: Bearer <softprobe-api-key-or-assertion-jwt>
 ```
 
-That path still resolves through `SOFTPROBE_AUTH_URL`. When both headers are
-present, **assertion wins**.
+Resolution order when `X-Softprobe-Assertion` is absent:
+
+1. If the Bearer token is a Softprobe assertion JWT (HS256), verify it and bind
+   DuckLake scope from `tenant_key` (Explorer workspace ingest keys use this).
+2. Otherwise resolve through `SOFTPROBE_AUTH_URL` (legacy Softprobe API keys).
+
+When both the assertion header and Authorization are present, **assertion wins**.
 
 Admin provisioning stays admin-key only: `POST /v1/tenants` with
 `SOFTPROBE_ADMIN_API_KEY`.
