@@ -36,9 +36,20 @@ Resolution order when `X-Softprobe-Assertion` is absent:
 
 1. If the Bearer token is a Softprobe assertion JWT (HS256), verify it and bind
    DuckLake scope from `tenant_key` (Explorer workspace ingest keys use this).
-2. Otherwise resolve through `SOFTPROBE_AUTH_URL` (legacy Softprobe API keys).
+2. Else if **`SOFTPROBE_DEFAULT_TENANT_KEY`** (alias
+   `THELAKE_DEFAULT_TENANT_KEY`) is set to a non-empty DuckLake `scope_id` /
+   `tenant_key` (must not be `thelake-ops`): require a non-empty Bearer, then
+   bind that default lake **without** calling the Softprobe auth service.
+   Use this to route legacy direct-to-thelake OTLP clients onto a known MAP-ready
+   workspace lake while assertion migration completes.
+3. Otherwise resolve through `SOFTPROBE_AUTH_URL` (legacy Softprobe API keys).
 
 When both the assertion header and Authorization are present, **assertion wins**.
+
+Default-lake fallback still requires `Authorization: Bearer …` (any non-empty
+token). It does **not** open anonymous ingest. Prefer assertion or Explorer
+gateway (`/api/thelake`) for new clients; keep the default key temporary and
+tenant-specific.
 
 Admin provisioning stays admin-key only: `POST /v1/tenants` with
 `SOFTPROBE_ADMIN_API_KEY`.

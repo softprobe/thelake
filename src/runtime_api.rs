@@ -20,8 +20,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Prefer `X-Softprobe-Assertion` (sp-llm#39). Fall back to Bearer → auth service
-/// for legacy machine clients (Grafana/OTLP) until those mint assertions.
+/// Prefer `X-Softprobe-Assertion` (sp-llm#39). Fall back to Bearer assertion JWT,
+/// then optional `SOFTPROBE_DEFAULT_TENANT_KEY`, then Softprobe auth service.
 pub async fn runtime_auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
@@ -73,6 +73,15 @@ pub async fn runtime_auth_middleware(
                 }
             }
         }
+    }
+
+    // Legacy direct-to-thelake clients: no assertion header. Optional default
+    // lake routes them onto a configured MAP-ready scope (Bearer still required).
+    if let Some(default_key) = crate::softprobe_assertion::default_tenant_key_from_env() {
+        let info = crate::softprobe_assertion::tenant_info_for_default_lake(&default_key)
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+        req.extensions_mut().insert(info);
+        return Ok(next.run(req).await);
     }
 
     let control_plane = state
