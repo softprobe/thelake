@@ -47,6 +47,8 @@ fn isolation_span(tenant_id: &str, session_id: &str, trace_id: &str) -> ModelSpa
         app_id: "it-app".to_string(),
         organization_id: None,
         tenant_id: Some(tenant_id.to_string()),
+        agent_id: None,
+        agent_name: None,
         message_type: "op".to_string(),
         span_kind: Some("SPAN_KIND_INTERNAL".to_string()),
         timestamp: chrono::Utc::now(),
@@ -316,6 +318,8 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
         tenant_id,
         bucket_name: String::new(),
         dataset_id: String::new(),
+        agent_id: None,
+        agent_name: None,
     };
     let http_export = otlp_export_with_session(&format!("http-sess-{suffix}"));
     let http_body_size = prost::Message::encoded_len(&http_export);
@@ -323,7 +327,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
         state,
         http_export,
         http_body_size,
-        Some(tenant_info.tenant_id.clone()),
+        Some(tenant_info),
     )
     .await
     .expect("HTTP-path export should write to the same tenant scope");

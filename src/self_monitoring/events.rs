@@ -53,5 +53,7 @@ pub fn to_log(ev: &SlowQueryEvent) -> Log {
         resource_attributes,
         trace_id: None,
         span_id: None,
+        agent_id: None,
+        agent_name: None,
     }
 }

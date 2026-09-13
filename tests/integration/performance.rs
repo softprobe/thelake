@@ -245,6 +245,8 @@ async fn perf_union_read_latency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         });
     }
     pipeline
@@ -265,6 +267,8 @@ async fn perf_union_read_latency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         });
     }
     pipeline
@@ -285,6 +289,8 @@ async fn perf_union_read_latency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         });
     }
     pipeline
@@ -456,6 +462,8 @@ async fn perf_union_read_concurrency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         });
     }
     pipeline
@@ -476,6 +484,8 @@ async fn perf_union_read_concurrency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         });
     }
     pipeline
@@ -496,6 +506,8 @@ async fn perf_union_read_concurrency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         });
     }
     pipeline
@@ -658,6 +670,8 @@ async fn perf_view_recreate_stability() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         });
     }
     pipeline
@@ -678,6 +692,8 @@ async fn perf_view_recreate_stability() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         });
     }
     pipeline
@@ -698,6 +714,8 @@ async fn perf_view_recreate_stability() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         });
     }
     pipeline

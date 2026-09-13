@@ -148,6 +148,8 @@ fn promoted_span(tenant_id: &str) -> Span {
         app_id: "checkout-api".to_string(),
         organization_id: None,
         tenant_id: Some(tenant_id.to_string()),
+        agent_id: None,
+        agent_name: None,
         message_type: "checkout".to_string(),
         span_kind: Some("SPAN_KIND_INTERNAL".to_string()),
         timestamp: Utc::now(),

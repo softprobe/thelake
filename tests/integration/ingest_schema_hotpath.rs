@@ -30,6 +30,8 @@ fn sample_span(i: usize, tenant_id: Option<&str>) -> SpanData {
         app_id: "hotpath-app".to_string(),
         organization_id: None,
         tenant_id: tenant_id.map(|s| s.to_string()),
+        agent_id: None,
+        agent_name: None,
         message_type: "chat".to_string(),
         span_kind: Some("INTERNAL".to_string()),
         timestamp: now,
@@ -64,6 +66,8 @@ fn sample_log(i: usize) -> LogData {
         resource_attributes: HashMap::new(),
         trace_id: Some(format!("trace-{i:016x}")),
         span_id: Some(format!("span-{i:016x}")),
+        agent_id: None,
+        agent_name: None,
     }
 }
 

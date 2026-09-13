@@ -21,6 +21,8 @@ fn test_tenant() -> TenantInfo {
         tenant_id: "unit-test-tenant".to_string(),
         bucket_name: "unit-bucket".to_string(),
         dataset_id: "unit-dataset".to_string(),
+        agent_id: None,
+        agent_name: None,
     }
 }
 

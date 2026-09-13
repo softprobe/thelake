@@ -592,6 +592,8 @@ pub struct SessionSearchRequest {
     pub has_errors: Option<bool>,
     pub user_id: Option<String>,
     pub model_name: Option<String>,
+    /// Match session-level `agent_name` (persisted column, `sp.agent.name`, else agent span name).
+    pub agent_name: Option<String>,
     #[serde(default)]
     pub order_by: SessionOrderBy,
     #[serde(default)]
@@ -727,20 +729,32 @@ pub fn compile_session_search_sql(
     //
     // `order=asc` is rejected too: cursor_predicate emits `<`, which under an
     // ascending sort walks backwards and loops.
-    let cursor_sql = match request.cursor.as_deref().filter(|v| !v.is_empty()) {
-        Some(cursor) => {
-            if request.order_by != SessionOrderBy::StartTime {
-                return Err("`cursor` is only supported with order_by=start_time".to_string());
-            }
-            if request.order != SortDirection::Desc {
-                return Err("`cursor` is only supported with order=desc".to_string());
-            }
-            format!(
-                " WHERE {}",
-                cursor_predicate(cursor, "start_time", "session_id")?
-            )
+    //
+    // Session-level `agent_name` is also an aggregate alias — filter it here.
+    let mut outer_predicates = Vec::new();
+    if let Some(cursor) = request.cursor.as_deref().filter(|v| !v.is_empty()) {
+        if request.order_by != SessionOrderBy::StartTime {
+            return Err("`cursor` is only supported with order_by=start_time".to_string());
         }
-        None => String::new(),
+        if request.order != SortDirection::Desc {
+            return Err("`cursor` is only supported with order=desc".to_string());
+        }
+        outer_predicates.push(cursor_predicate(cursor, "start_time", "session_id")?);
+    }
+    if let Some(agent) = request
+        .agent_name
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    {
+        outer_predicates.push(format!(
+            "agent_name = {}",
+            sql_string_literal(agent.trim())
+        ));
+    }
+    let cursor_sql = if outer_predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", outer_predicates.join(" AND "))
     };
 
     let mut having = Vec::new();
@@ -783,7 +797,10 @@ pub fn compile_session_search_sql(
              SUM({output_tokens})::BIGINT AS output_tokens, \
              SUM({total_tokens})::BIGINT AS total_tokens, \
              SUM({total_cost}) AS total_cost, \
-             arg_min(message_type, timestamp) FILTER (WHERE {obs_type} = 'agent') AS agent_name, \
+             COALESCE( \
+               NULLIF(arg_min({agent_attr}, timestamp) FILTER (WHERE NULLIF({agent_attr}, '') IS NOT NULL), ''), \
+               arg_min(message_type, timestamp) FILTER (WHERE {obs_type} = 'agent') \
+             ) AS agent_name, \
              list(DISTINCT {user_id}) AS user_ids, \
              list(DISTINCT {model_name}) AS models \
            FROM union_spans \
@@ -798,6 +815,7 @@ pub fn compile_session_search_sql(
         output_tokens = expr_output_tokens(),
         total_tokens = expr_total_tokens(),
         total_cost = expr_total_cost(),
+        agent_attr = expr_agent_name_attr(),
         obs_type = observation_type,
         user_id = expr_user_id(),
         model_name = expr_model_name(),
@@ -1174,6 +1192,11 @@ fn expr_user_id() -> String {
         prefer_attr_varchar(Some(llm_promo().user_id), "attributes", "sp.user.id"),
         variant_varchar("attributes", "enduser.id")
     )
+}
+
+/// Session agent name: persisted assertion column, then `sp.agent.name`, else bag-only.
+fn expr_agent_name_attr() -> String {
+    prefer_attr_varchar(Some("agent_name"), "attributes", "sp.agent.name")
 }
 
 fn expr_input_tokens() -> String {
@@ -1820,11 +1843,39 @@ mod tests {
             has_errors: None,
             user_id: None,
             model_name: None,
+            agent_name: None,
             order_by: SessionOrderBy::StartTime,
             order: SortDirection::Desc,
             limit: Some(50),
             cursor: None,
         }
+    }
+
+    #[test]
+    fn session_search_prefers_persisted_agent_name_then_attr_and_filters_outer() {
+        let sql = compile_session_search_sql(&session_search_request(), 50).expect("sql");
+        let col_pos = sql
+            .find("COALESCE(agent_name,")
+            .expect("agent_name must prefer persisted column");
+        let attr_pos = sql
+            .find("sp.agent.name")
+            .expect("agent_name must fall back to sp.agent.name");
+        assert!(
+            col_pos < attr_pos,
+            "persisted agent_name must lead attr fallback: {sql}"
+        );
+        assert!(
+            sql.contains("arg_min(message_type, timestamp) FILTER"),
+            "agent_name must fall back to agent span name: {sql}"
+        );
+
+        let mut request = session_search_request();
+        request.agent_name = Some("support-refund-agent".into());
+        let filtered = compile_session_search_sql(&request, 50).expect("sql");
+        assert!(
+            filtered.contains("agent_name = 'support-refund-agent'"),
+            "agent filter must apply on outer aggregate: {filtered}"
+        );
     }
 
     #[test]

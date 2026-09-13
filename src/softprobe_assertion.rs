@@ -32,6 +32,12 @@ pub struct SoftprobeAssertionClaims {
     pub email: Option<String>,
     #[serde(default)]
     pub exp: Option<i64>,
+    /// Softprobe agent id when the assertion was minted for an agent API key.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Softprobe agent display name when minted for an agent API key.
+    #[serde(default)]
+    pub agent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +133,18 @@ pub fn tenant_info_from_assertion(claims: &SoftprobeAssertionClaims) -> Result<T
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("assertion: tenant_key required"))?
         .to_string();
+    let agent_id = claims
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let agent_name = claims
+        .agent_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     Ok(TenantInfo {
         tenant_id: tenant_key,
         // Bucket/dataset historically came from Softprobe auth resources.
@@ -134,6 +152,8 @@ pub fn tenant_info_from_assertion(claims: &SoftprobeAssertionClaims) -> Result<T
         // fields are only required by ducklake-connection material.
         bucket_name: std::env::var("DATALAKE_BUCKET").unwrap_or_default(),
         dataset_id: String::new(),
+        agent_id,
+        agent_name,
     })
 }
 
@@ -173,6 +193,31 @@ mod tests {
         assert_eq!(claims.tenant_key.as_deref(), Some("sp-llm-gke-smoke"));
         let info = tenant_info_from_assertion(&claims).unwrap();
         assert_eq!(info.tenant_id, "sp-llm-gke-smoke");
+        assert_eq!(info.agent_id, None);
+        assert_eq!(info.agent_name, None);
+    }
+
+    #[test]
+    fn carries_agent_claims_into_tenant_info() {
+        let now = 1_700_000_000_i64;
+        let token = mint(
+            serde_json::json!({
+                "iss": "softprobe-edge",
+                "aud": "sp-backend",
+                "sub": "agent-key",
+                "tenant_key": "ws-a",
+                "agent_id": "support-refund-agent",
+                "agent_name": "Support Refund Agent",
+                "exp": now + 300
+            }),
+            "test-secret",
+        );
+        let claims = verify_softprobe_assertion(&token, "test-secret", now).expect("ok");
+        assert_eq!(claims.agent_id.as_deref(), Some("support-refund-agent"));
+        assert_eq!(claims.agent_name.as_deref(), Some("Support Refund Agent"));
+        let info = tenant_info_from_assertion(&claims).unwrap();
+        assert_eq!(info.agent_id.as_deref(), Some("support-refund-agent"));
+        assert_eq!(info.agent_name.as_deref(), Some("Support Refund Agent"));
     }
 
     #[test]

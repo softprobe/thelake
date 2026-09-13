@@ -23,6 +23,8 @@ pub async fn inject_local_sqlite_tenant(
         tenant_id,
         bucket_name: String::new(),
         dataset_id: String::new(),
+        agent_id: None,
+        agent_name: None,
     });
     next.run(request).await
 }

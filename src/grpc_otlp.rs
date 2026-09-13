@@ -49,7 +49,7 @@ impl TraceService for GrpcTraceService {
             self.state.clone(),
             inner,
             body_size,
-            Some(tenant.tenant_id.clone()),
+            Some(tenant),
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;

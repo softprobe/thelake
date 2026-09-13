@@ -128,6 +128,9 @@ impl TraceTable {
             opt("total_cost", DataType::Float64),
             opt("session_attr_id", utf8()),
             opt("service_name", utf8()),
+            // Softprobe assertion agent identity (auth-stamped; not client OTLP).
+            opt("agent_id", utf8()),
+            opt("agent_name", utf8()),
         ];
         fields.extend(promoted_fields(&fields, columns));
         Schema::new(fields)
@@ -222,6 +225,9 @@ impl OtlpLogsTable {
             opt("deployment_environment", utf8()),
             opt("session_attr_id", utf8()),
             opt("user_id", utf8()),
+            // Softprobe assertion agent identity (auth-stamped; not client OTLP).
+            opt("agent_id", utf8()),
+            opt("agent_name", utf8()),
         ];
         fields.extend(promoted_fields(&fields, columns));
         Schema::new(fields)
