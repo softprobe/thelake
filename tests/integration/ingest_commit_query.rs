@@ -681,6 +681,8 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
                 resource_attributes,
                 trace_id,
                 span_id,
+                agent_id: None,
+                agent_name: None,
             });
         }
     }
