@@ -170,9 +170,7 @@ pub fn default_tenant_key_from_env() -> Option<String> {
                 continue;
             }
             if crate::self_monitoring::is_reserved_tenant_id(t) {
-                tracing::warn!(
-                    "{key}={t} is reserved; ignoring default-tenant fallback"
-                );
+                tracing::warn!("{key}={t} is reserved; ignoring default-tenant fallback");
                 return None;
             }
             return Some(t.to_string());
@@ -303,7 +301,10 @@ mod tests {
         std::env::remove_var("THELAKE_DEFAULT_TENANT_KEY");
         assert_eq!(default_tenant_key_from_env(), None);
 
-        std::env::set_var("THELAKE_DEFAULT_TENANT_KEY", "ws-myworkspace-mtyxusmz-2t77yn");
+        std::env::set_var(
+            "THELAKE_DEFAULT_TENANT_KEY",
+            "ws-myworkspace-mtyxusmz-2t77yn",
+        );
         assert_eq!(
             default_tenant_key_from_env().as_deref(),
             Some("ws-myworkspace-mtyxusmz-2t77yn")
