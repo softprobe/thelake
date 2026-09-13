@@ -323,14 +323,9 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     };
     let http_export = otlp_export_with_session(&format!("http-sess-{suffix}"));
     let http_body_size = prost::Message::encoded_len(&http_export);
-    process_traces(
-        state,
-        http_export,
-        http_body_size,
-        Some(tenant_info),
-    )
-    .await
-    .expect("HTTP-path export should write to the same tenant scope");
+    process_traces(state, http_export, http_body_size, Some(tenant_info))
+        .await
+        .expect("HTTP-path export should write to the same tenant scope");
 
     // Ingest is flush-through; no separate pipeline flush needed.
 

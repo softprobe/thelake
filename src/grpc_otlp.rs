@@ -45,14 +45,9 @@ impl TraceService for GrpcTraceService {
             .resolve(&token)
             .await
             .map_err(|_| Status::permission_denied("tenant resolution failed"))?;
-        process_traces(
-            self.state.clone(),
-            inner,
-            body_size,
-            Some(tenant),
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        process_traces(self.state.clone(), inner, body_size, Some(tenant))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(ExportTraceServiceResponse::default()))
     }
 }

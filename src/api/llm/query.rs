@@ -746,10 +746,7 @@ pub fn compile_session_search_sql(
         .as_deref()
         .filter(|v| !v.trim().is_empty())
     {
-        outer_predicates.push(format!(
-            "agent_name = {}",
-            sql_string_literal(agent.trim())
-        ));
+        outer_predicates.push(format!("agent_name = {}", sql_string_literal(agent.trim())));
     }
     let cursor_sql = if outer_predicates.is_empty() {
         String::new()
