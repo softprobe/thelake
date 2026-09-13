@@ -17,6 +17,12 @@ thelake verifies HS256 (`SOFTPROBE_ASSERTION_HMAC_SECRET` /
 (Softprobe `tenants.tenant_id` string). Assertion traffic does **not** call the
 Softprobe auth API-key validate service.
 
+Optional assertion claims **`agent_id`** / **`agent_name`** (minted for agent API
+keys) are stamped onto every ingested trace and log row. Browser/session JWTs
+without those claims leave the columns NULL. `POST /v1/llm/sessions/search`
+can filter by `agent_name`, derived as persisted column, then `sp.agent.name`,
+then the agent span name.
+
 ### Legacy Bearer API key
 
 Machine clients that have not yet migrated (Grafana datasources, some OTLP

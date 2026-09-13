@@ -236,6 +236,8 @@ mod data_connection_tests {
             tenant_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
+            agent_id: None,
+            agent_name: None,
         };
         let scope = DuckLakeScope {
             metadata_schema: "tenant_tenant_123".to_string(),
@@ -284,6 +286,8 @@ mod data_connection_tests {
             tenant_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
+            agent_id: None,
+            agent_name: None,
         };
         let scope = DuckLakeScope {
             metadata_schema: "tenant_tenant_123".to_string(),
@@ -333,6 +337,8 @@ mod data_connection_tests {
             tenant_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
+            agent_id: None,
+            agent_name: None,
         };
         let scope = DuckLakeScope {
             metadata_schema: "tenant_tenant_123".to_string(),
@@ -375,6 +381,8 @@ mod data_connection_tests {
             tenant_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
+            agent_id: None,
+            agent_name: None,
         };
         let scope = DuckLakeScope {
             metadata_schema: "tenant_tenant_123".to_string(),

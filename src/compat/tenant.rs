@@ -275,6 +275,8 @@ mod tests {
             tenant_id: id.to_string(),
             bucket_name: "bucket".to_string(),
             dataset_id: "dataset".to_string(),
+            agent_id: None,
+            agent_name: None,
         }
     }
 

@@ -1,3 +1,4 @@
+pub mod assertion_agent_columns;
 pub mod authn_contract;
 pub mod grafana_prom_smoke;
 pub mod http_api;

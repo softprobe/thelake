@@ -26,6 +26,8 @@ async fn coalesce_force_flush_makes_logs_queryable() {
         resource_attributes: HashMap::new(),
         trace_id: Some("trace-coalesce-1".to_string()),
         span_id: Some("span-coalesce-1".to_string()),
+        agent_id: None,
+        agent_name: None,
     };
 
     pipeline

@@ -421,10 +421,15 @@ fn build_promoted_columns_for_spans(
             continue;
         }
 
-        let values: Vec<Option<String>> = spans
-            .iter()
-            .map(|span| span.attributes.get(field_name.as_str()).cloned())
-            .collect();
+        let values: Vec<Option<String>> = match field_name.as_str() {
+            // Auth-stamped Softprobe agent identity — never trust client attributes.
+            "agent_id" => spans.iter().map(|span| span.agent_id.clone()).collect(),
+            "agent_name" => spans.iter().map(|span| span.agent_name.clone()).collect(),
+            _ => spans
+                .iter()
+                .map(|span| span.attributes.get(field_name.as_str()).cloned())
+                .collect(),
+        };
 
         promoted_arrays.push(promoted_array_from_values(field, values));
     }
@@ -432,10 +437,11 @@ fn build_promoted_columns_for_spans(
     Ok(promoted_arrays)
 }
 
-fn build_promoted_columns_from_attribute_maps(
+fn build_promoted_columns_from_attribute_maps_with_overrides(
     maps: &[&std::collections::HashMap<String, String>],
     arrow_schema: &Schema,
     base_fields: &[&str],
+    field_overrides: &[(&str, &[Option<String>])],
 ) -> Vec<ArrayRef> {
     let mut promoted_arrays = Vec::new();
     for field in arrow_schema.fields() {
@@ -443,10 +449,16 @@ fn build_promoted_columns_from_attribute_maps(
         if base_fields.contains(&field_name.as_str()) {
             continue;
         }
-        let values = maps
+        let values = if let Some((_, override_values)) = field_overrides
             .iter()
-            .map(|attrs| attrs.get(field_name.as_str()).cloned())
-            .collect::<Vec<_>>();
+            .find(|(name, _)| *name == field_name.as_str())
+        {
+            override_values.to_vec()
+        } else {
+            maps.iter()
+                .map(|attrs| attrs.get(field_name.as_str()).cloned())
+                .collect::<Vec<_>>()
+        };
         promoted_arrays.push(promoted_array_from_values(field, values));
     }
     promoted_arrays
@@ -957,13 +969,17 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
     }
 
     let record_dates: ArrayRef = Arc::new(Date32Array::from(record_date_values));
-    let promoted_arrays = build_promoted_columns_from_attribute_maps(
-        logs.iter()
-            .map(|l| &l.attributes)
-            .collect::<Vec<_>>()
-            .as_slice(),
+    let agent_ids: Vec<Option<String>> = logs.iter().map(|l| l.agent_id.clone()).collect();
+    let agent_names: Vec<Option<String>> = logs.iter().map(|l| l.agent_name.clone()).collect();
+    let attr_maps: Vec<&HashMap<String, String>> = logs.iter().map(|l| &l.attributes).collect();
+    let promoted_arrays = build_promoted_columns_from_attribute_maps_with_overrides(
+        &attr_maps,
         &arrow_schema,
         LOGS_BASE_FIELDS,
+        &[
+            ("agent_id", agent_ids.as_slice()),
+            ("agent_name", agent_names.as_slice()),
+        ],
     );
 
     let mut arrays = vec![
@@ -1052,6 +1068,8 @@ mod tests {
             app_id: "api".into(),
             organization_id: None,
             tenant_id: Some("tenant".into()),
+            agent_id: None,
+            agent_name: None,
             message_type: "GET /".into(),
             span_kind: Some("SPAN_KIND_SERVER".into()),
             timestamp: chrono::DateTime::from_timestamp_nanos(start_ns),
@@ -1129,6 +1147,8 @@ mod tests {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         }
     }
 

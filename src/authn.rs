@@ -11,6 +11,10 @@ pub struct TenantInfo {
     pub tenant_id: String,
     pub bucket_name: String,
     pub dataset_id: String,
+    /// Softprobe agent id from assertion JWT (agent API key path).
+    pub agent_id: Option<String>,
+    /// Softprobe agent display name from assertion JWT.
+    pub agent_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -110,6 +114,8 @@ async fn call_auth_service(
         tenant_id: data.tenant_id.clone(),
         bucket_name: String::new(),
         dataset_id: String::new(),
+        agent_id: None,
+        agent_name: None,
     };
 
     if let Some(resources) = data.resources {

@@ -36,6 +36,10 @@ pub struct Log {
     // Links logs to traces for distributed tracing
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
+    /// Softprobe agent id from assertion auth (not client OTLP).
+    pub agent_id: Option<String>,
+    /// Softprobe agent display name from assertion auth (not client OTLP).
+    pub agent_name: Option<String>,
     // Field 15: record_date (partition key - computed, not stored in struct)
     // Derived from timestamp at write time in arrow.rs
 }
@@ -142,6 +146,8 @@ impl Log {
             resource_attributes: resource_attributes.clone(),
             trace_id,
             span_id,
+            agent_id: None,
+            agent_name: None,
         })
     }
 
@@ -236,6 +242,8 @@ mod tests {
                 .collect(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         }
     }
 

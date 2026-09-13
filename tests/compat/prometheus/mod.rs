@@ -11,6 +11,8 @@ fn tenant(id: &str) -> TenantInfo {
         tenant_id: id.into(),
         bucket_name: "b".into(),
         dataset_id: "d".into(),
+        agent_id: None,
+        agent_name: None,
     }
 }
 

@@ -2126,6 +2126,8 @@ mod tests {
                 tenant_id: "t".into(),
                 bucket_name: "b".into(),
                 dataset_id: "d".into(),
+                agent_id: None,
+                agent_name: None,
             },
             ProtocolScope::Prometheus,
             None,

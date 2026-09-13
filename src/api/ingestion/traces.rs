@@ -20,9 +20,8 @@ pub async fn ingest_traces_json(
     let start = Instant::now();
     let body_size = body.len();
     let tenant_info = tenant.map(|t| t.0);
-    let auth_tid = tenant_info.as_ref().map(|t| t.tenant_id.clone());
     match serde_json::from_slice::<ExportTraceServiceRequest>(&body) {
-        Ok(request) => match process_traces(state, request, body_size, auth_tid).await {
+        Ok(request) => match process_traces(state, request, body_size, tenant_info.clone()).await {
             Ok(count) => Json(IngestResponse {
                 success: true,
                 ingested_count: count,
@@ -59,9 +58,8 @@ pub async fn ingest_traces_protobuf(
     let start = Instant::now();
     let body_size = body.len();
     let tenant_info = tenant.map(|t| t.0);
-    let auth_tid = tenant_info.as_ref().map(|t| t.tenant_id.clone());
     match prost::Message::decode(body.as_ref()) {
-        Ok(request) => match process_traces(state, request, body_size, auth_tid).await {
+        Ok(request) => match process_traces(state, request, body_size, tenant_info.clone()).await {
             Ok(count) => Json(IngestResponse {
                 success: true,
                 ingested_count: count,
@@ -99,7 +97,6 @@ pub async fn ingest_traces(
     let start = Instant::now();
     let body_size = body.len();
     let tenant_info = tenant.map(|t| t.0);
-    let auth_tid = tenant_info.as_ref().map(|t| t.tenant_id.clone());
     let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -110,7 +107,7 @@ pub async fn ingest_traces(
     if content_type.contains("protobuf") || content_type.contains("application/x-protobuf") {
         match prost::Message::decode(body.as_ref()) {
             Ok(request) => {
-                match process_traces(state, request, body_size, auth_tid.clone()).await {
+                match process_traces(state, request, body_size, tenant_info.clone()).await {
                     Ok(count) => Json(IngestResponse {
                         success: true,
                         ingested_count: count,
@@ -133,7 +130,7 @@ pub async fn ingest_traces(
         // Default to JSON
         match serde_json::from_slice::<ExportTraceServiceRequest>(&body) {
             Ok(request) => {
-                match process_traces(state, request, body_size, auth_tid.clone()).await {
+                match process_traces(state, request, body_size, tenant_info.clone()).await {
                     Ok(count) => Json(IngestResponse {
                         success: true,
                         ingested_count: count,
@@ -156,18 +153,23 @@ pub async fn ingest_traces(
 
 /// Core OTLP processing logic (shared by HTTP and gRPC ingest).
 ///
-/// `auth_tenant_id` is the authenticated Softprobe tenant from Bearer validation. When the
-/// runtime uses a Postgres tenant registry, this **must** be set so spans flush to the correct
-/// DuckLake scope (never inferred from optional OTLP attributes alone).
+/// `auth_tenant` is the authenticated Softprobe tenant from Bearer / assertion
+/// validation. When the runtime uses a Postgres tenant registry, this **must**
+/// be set so spans flush to the correct DuckLake scope (never inferred from
+/// optional OTLP attributes alone). Agent identity on the tenant (from Softprobe
+/// assertion JWTs) is stamped onto every span — client OTLP must not set it.
 pub async fn process_traces(
     state: AppState,
     request: ExportTraceServiceRequest,
     body_size: usize,
-    auth_tenant_id: Option<String>,
+    auth_tenant: Option<TenantInfo>,
 ) -> Result<usize> {
     let start = std::time::Instant::now();
-    let tid_hint = auth_tenant_id.clone().unwrap_or_default();
-    let result = process_traces_inner(state, request, body_size, auth_tenant_id).await;
+    let tid_hint = auth_tenant
+        .as_ref()
+        .map(|t| t.tenant_id.clone())
+        .unwrap_or_default();
+    let result = process_traces_inner(state, request, body_size, auth_tenant).await;
     if crate::self_monitoring::instrument_customer_tenant(&tid_hint) {
         let (ok, app) = match &result {
             Ok((_, app)) => (true, app.clone()),
@@ -189,7 +191,7 @@ async fn process_traces_inner(
     state: AppState,
     request: ExportTraceServiceRequest,
     body_size: usize,
-    auth_tenant_id: Option<String>,
+    auth_tenant: Option<TenantInfo>,
 ) -> Result<(usize, Option<String>)> {
     let mut spans = Vec::new();
     let mut app: Option<String> = None;
@@ -231,10 +233,17 @@ async fn process_traces_inner(
         }
     }
 
-    let tid = auth_tenant_id.unwrap_or_default();
+    let tid = auth_tenant
+        .as_ref()
+        .map(|t| t.tenant_id.clone())
+        .unwrap_or_default();
+    let agent_id = auth_tenant.as_ref().and_then(|t| t.agent_id.clone());
+    let agent_name = auth_tenant.as_ref().and_then(|t| t.agent_name.clone());
 
     for span in &mut spans {
         span.tenant_id = Some(tid.clone());
+        span.agent_id = agent_id.clone();
+        span.agent_name = agent_name.clone();
     }
 
     let span_count = spans.len();

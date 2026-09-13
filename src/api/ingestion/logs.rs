@@ -141,7 +141,16 @@ async fn process_logs_inner(
 
     let log_count = logs.len();
 
-    let tenant_id = tenant.map(|t| t.tenant_id).unwrap_or_default();
+    let tenant_id = tenant
+        .as_ref()
+        .map(|t| t.tenant_id.clone())
+        .unwrap_or_default();
+    let agent_id = tenant.as_ref().and_then(|t| t.agent_id.clone());
+    let agent_name = tenant.as_ref().and_then(|t| t.agent_name.clone());
+    for log in &mut logs {
+        log.agent_id = agent_id.clone();
+        log.agent_name = agent_name.clone();
+    }
     let engine = state.engine_for_id(&tenant_id).await?;
     let write_start = std::time::Instant::now();
     engine.ingest.add_logs(logs, body_size).await?;

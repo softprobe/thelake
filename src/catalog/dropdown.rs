@@ -348,6 +348,8 @@ mod tests {
     fn sample_span(tenant: Option<&str>) -> Span {
         Span {
             tenant_id: tenant.map(|s| s.to_string()),
+            agent_id: None,
+            agent_name: None,
             session_id: "s1".into(),
             trace_id: "t1".into(),
             span_id: "p1".into(),

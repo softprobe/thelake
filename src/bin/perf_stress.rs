@@ -1194,6 +1194,8 @@ fn sample_span(counter: u64) -> Span {
         app_id,
         organization_id: Some("stress-org".to_string()),
         tenant_id: Some("stress-tenant".to_string()),
+        agent_id: None,
+        agent_name: None,
         message_type: "http.server".to_string(),
         span_kind: Some("SERVER".to_string()),
         timestamp,
@@ -1254,6 +1256,8 @@ fn sample_log(counter: u64) -> Log {
         resource_attributes,
         trace_id: Some(uuid::Uuid::new_v4().to_string()),
         span_id: Some(uuid::Uuid::new_v4().to_string()),
+        agent_id: None,
+        agent_name: None,
     }
 }
 

@@ -85,6 +85,8 @@ fn tempo_scope_header_must_match_tenant() {
             tenant_id: "tenant-a".into(),
             bucket_name: "b".into(),
             dataset_id: "d".into(),
+            agent_id: None,
+            agent_name: None,
         },
         ProtocolScope::Tempo,
         Some("other"),

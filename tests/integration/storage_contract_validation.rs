@@ -34,6 +34,8 @@ async fn strict_trace_union_shape_ducklake_contract() {
         app_id: "strict-app".to_string(),
         organization_id: None,
         tenant_id: None,
+        agent_id: None,
+        agent_name: None,
         message_type: "server".to_string(),
         span_kind: Some("SERVER".to_string()),
         timestamp: now,
@@ -149,6 +151,8 @@ async fn strict_session_correlates_traces_and_logs() {
         app_id: "strict-app".to_string(),
         organization_id: None,
         tenant_id: None,
+        agent_id: None,
+        agent_name: None,
         message_type: "server".to_string(),
         span_kind: Some("SERVER".to_string()),
         timestamp: now,
@@ -178,6 +182,8 @@ async fn strict_session_correlates_traces_and_logs() {
         resource_attributes: HashMap::new(),
         trace_id: Some(trace_id.clone()),
         span_id: Some("strict-span-a".to_string()),
+        agent_id: None,
+        agent_name: None,
     };
 
     pipeline

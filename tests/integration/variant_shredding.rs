@@ -93,6 +93,8 @@ async fn map_bags_hot_paths_and_nested_filters() {
             app_id: "variant-app".to_string(),
             organization_id: None,
             tenant_id: None,
+            agent_id: None,
+            agent_name: None,
             message_type: "chat".to_string(),
             span_kind: Some("INTERNAL".to_string()),
             timestamp: now + chrono::Duration::milliseconds(i),
@@ -127,6 +129,8 @@ async fn map_bags_hot_paths_and_nested_filters() {
         resource_attributes: log_resource,
         trace_id: Some("tr-0".to_string()),
         span_id: Some("sp-0".to_string()),
+        agent_id: None,
+        agent_name: None,
     };
 
     let mut metric_attrs = HashMap::new();
@@ -285,6 +289,8 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         app_id: "vk-app".into(),
         organization_id: None,
         tenant_id: Some(tenant_id.into()),
+        agent_id: None,
+        agent_name: None,
         message_type: "chat".into(),
         span_kind: Some("CLIENT".into()),
         timestamp: now,
@@ -315,6 +321,8 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         app_id: "vk-app".into(),
         organization_id: None,
         tenant_id: Some(tenant_id.into()),
+        agent_id: None,
+        agent_name: None,
         message_type: "tool".into(),
         span_kind: Some("INTERNAL".into()),
         timestamp: now + chrono::Duration::milliseconds(1),
@@ -367,6 +375,8 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         resource_attributes: log_resource,
         trace_id: Some(trace_id.into()),
         span_id: Some("vk-span-1".into()),
+        agent_id: None,
+        agent_name: None,
     };
 
     pipeline
@@ -692,6 +702,8 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
         app_id: "map-app".to_string(),
         organization_id: None,
         tenant_id: None,
+        agent_id: None,
+        agent_name: None,
         message_type: "chat".to_string(),
         span_kind: Some("INTERNAL".to_string()),
         timestamp: now,

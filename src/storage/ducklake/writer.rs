@@ -975,6 +975,8 @@ mod tests {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            agent_id: None,
+            agent_name: None,
         };
         let batch = arrow::logs_to_record_batch(&[log], &OtlpLogsTable::schema()).unwrap();
         let path = std::env::temp_dir().join(format!(

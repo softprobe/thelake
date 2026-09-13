@@ -74,6 +74,10 @@ pub struct Span {
     pub app_id: String,
     pub organization_id: Option<String>,
     pub tenant_id: Option<String>,
+    /// Softprobe agent id from assertion auth (not client OTLP).
+    pub agent_id: Option<String>,
+    /// Softprobe agent display name from assertion auth (not client OTLP).
+    pub agent_name: Option<String>,
 
     // Field 8-11: Span metadata
     pub message_type: String,
@@ -250,6 +254,8 @@ impl Span {
             app_id,
             organization_id: resource_attributes.get("sp.organization.id").cloned(),
             tenant_id: resource_attributes.get("sp.tenant.id").cloned(),
+            agent_id: None,
+            agent_name: None,
             message_type: otlp_span.name.clone(),
             span_kind: Some(format!("{:?}", otlp_span.kind())),
             timestamp,
@@ -381,6 +387,8 @@ mod tests {
             app_id: "app".to_string(),
             organization_id: None,
             tenant_id: None,
+            agent_id: None,
+            agent_name: None,
             message_type: "msg".to_string(),
             span_kind: None,
             timestamp: chrono::Utc::now(),
