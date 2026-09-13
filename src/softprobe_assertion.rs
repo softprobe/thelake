@@ -157,6 +157,48 @@ pub fn tenant_info_from_assertion(claims: &SoftprobeAssertionClaims) -> Result<T
     })
 }
 
+/// Optional DuckLake `scope_id` / `tenant_key` for legacy clients that send
+/// Bearer auth but no `X-Softprobe-Assertion` (see docs/compat/auth.md).
+///
+/// Env: `SOFTPROBE_DEFAULT_TENANT_KEY` or alias `THELAKE_DEFAULT_TENANT_KEY`.
+/// Reserved ops id `thelake-ops` is rejected.
+pub fn default_tenant_key_from_env() -> Option<String> {
+    for key in ["SOFTPROBE_DEFAULT_TENANT_KEY", "THELAKE_DEFAULT_TENANT_KEY"] {
+        if let Ok(v) = std::env::var(key) {
+            let t = v.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if crate::self_monitoring::is_reserved_tenant_id(t) {
+                tracing::warn!(
+                    "{key}={t} is reserved; ignoring default-tenant fallback"
+                );
+                return None;
+            }
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+/// Bind legacy Bearer-only traffic to a configured default lake scope.
+pub fn tenant_info_for_default_lake(tenant_key: &str) -> Result<TenantInfo> {
+    let tenant_key = tenant_key.trim();
+    if tenant_key.is_empty() {
+        bail!("default tenant_key is empty");
+    }
+    if crate::self_monitoring::is_reserved_tenant_id(tenant_key) {
+        bail!("default tenant_key must not be reserved ops scope");
+    }
+    Ok(TenantInfo {
+        tenant_id: tenant_key.to_string(),
+        bucket_name: std::env::var("DATALAKE_BUCKET").unwrap_or_default(),
+        dataset_id: String::new(),
+        agent_id: None,
+        agent_name: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +293,44 @@ mod tests {
             "test-secret",
         );
         assert!(verify_softprobe_assertion(&token, "other-secret", now).is_err());
+    }
+
+    #[test]
+    fn default_tenant_key_from_env_reads_primary_and_alias() {
+        let prev_primary = std::env::var("SOFTPROBE_DEFAULT_TENANT_KEY").ok();
+        let prev_alias = std::env::var("THELAKE_DEFAULT_TENANT_KEY").ok();
+        std::env::remove_var("SOFTPROBE_DEFAULT_TENANT_KEY");
+        std::env::remove_var("THELAKE_DEFAULT_TENANT_KEY");
+        assert_eq!(default_tenant_key_from_env(), None);
+
+        std::env::set_var("THELAKE_DEFAULT_TENANT_KEY", "ws-myworkspace-mtyxusmz-2t77yn");
+        assert_eq!(
+            default_tenant_key_from_env().as_deref(),
+            Some("ws-myworkspace-mtyxusmz-2t77yn")
+        );
+
+        std::env::set_var("SOFTPROBE_DEFAULT_TENANT_KEY", "ws-primary");
+        assert_eq!(default_tenant_key_from_env().as_deref(), Some("ws-primary"));
+
+        std::env::set_var("SOFTPROBE_DEFAULT_TENANT_KEY", "thelake-ops");
+        assert_eq!(default_tenant_key_from_env(), None);
+
+        match prev_primary {
+            Some(v) => std::env::set_var("SOFTPROBE_DEFAULT_TENANT_KEY", v),
+            None => std::env::remove_var("SOFTPROBE_DEFAULT_TENANT_KEY"),
+        }
+        match prev_alias {
+            Some(v) => std::env::set_var("THELAKE_DEFAULT_TENANT_KEY", v),
+            None => std::env::remove_var("THELAKE_DEFAULT_TENANT_KEY"),
+        }
+    }
+
+    #[test]
+    fn tenant_info_for_default_lake_binds_scope() {
+        let info = tenant_info_for_default_lake("ws-myworkspace-mtyxusmz-2t77yn").unwrap();
+        assert_eq!(info.tenant_id, "ws-myworkspace-mtyxusmz-2t77yn");
+        assert!(info.agent_id.is_none());
+        assert!(tenant_info_for_default_lake("thelake-ops").is_err());
+        assert!(tenant_info_for_default_lake("  ").is_err());
     }
 }
