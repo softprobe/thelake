@@ -235,10 +235,11 @@ impl Span {
 
         let trace_id = hex::encode(&otlp_span.trace_id);
 
-        // Extract session_id from attributes (dotted Softprobe key or underscore wire) or default to trace_id
+        // Extract session_id: Softprobe product session, OTel conversation alias, else trace_id
         let session_id = attributes
             .get("sp.session.id")
             .or_else(|| attributes.get("sp_session_id"))
+            .or_else(|| attributes.get("gen_ai.conversation.id"))
             .cloned()
             .unwrap_or_else(|| trace_id.clone());
 
@@ -499,6 +500,33 @@ mod tests {
         assert_eq!(
             Span::from_otlp(otlp, &resource).expect("from_otlp").app_id,
             "travel-ota"
+        );
+    }
+
+    #[test]
+    fn from_otlp_uses_gen_ai_conversation_id_as_session() {
+        use opentelemetry_proto::tonic::common::v1::any_value;
+        use opentelemetry_proto::tonic::trace::v1::Span as OtlpSpan;
+
+        let resource = HashMap::new();
+        let otlp = OtlpSpan {
+            trace_id: vec![9; 16],
+            span_id: vec![2; 8],
+            start_time_unix_nano: 1_000_000_000,
+            end_time_unix_nano: 2_000_000_000,
+            attributes: vec![KeyValue {
+                key: "gen_ai.conversation.id".into(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::StringValue("conv-only".into())),
+                }),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            Span::from_otlp(otlp, &resource)
+                .expect("from_otlp")
+                .session_id,
+            "conv-only"
         );
     }
 
