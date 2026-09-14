@@ -160,6 +160,8 @@ pub struct DetailQuery {
     pub to: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
+    /// When set, only return observations belonging to this product session.
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -228,8 +230,13 @@ pub async fn get_trace(
         return Err(bad_request("trace_id is required".to_string()));
     }
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let summary_sql =
-        compile_trace_summary_sql(&trace_id, params.from, params.to).map_err(bad_request)?;
+    let summary_sql = compile_trace_summary_sql(
+        &trace_id,
+        params.from,
+        params.to,
+        params.session_id.as_deref(),
+    )
+    .map_err(bad_request)?;
     let summary_result = state
         .execute_tenant_scoped_sql(tenant_ref, &summary_sql)
         .await
@@ -244,6 +251,7 @@ pub async fn get_trace(
         params.to,
         limit,
         params.cursor.as_deref(),
+        params.session_id.as_deref(),
     )
     .map_err(bad_request)?;
     let obs_result = state
@@ -354,6 +362,57 @@ pub async fn get_session(
         total_cost: aggregate.total_cost,
         traces,
         scores,
+        next_cursor,
+    }))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionObservations {
+    pub session_id: String,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub observations: Vec<ObservationDetail>,
+    pub next_cursor: Option<String>,
+}
+
+/// Holistic session observation page (product session id, including nested agents).
+pub async fn get_session_observations(
+    State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
+    Path(session_id): Path<String>,
+    Query(params): Query<SessionQuery>,
+) -> Result<Json<SessionObservations>, ApiError> {
+    if session_id.trim().is_empty() {
+        return Err(bad_request("session_id is required".to_string()));
+    }
+    if params.from > params.to {
+        return Err(bad_request("`from` must be <= `to`".to_string()));
+    }
+    let limit = clamp_limit(params.limit, DEFAULT_SEARCH_LIMIT);
+    let sql = compile_session_observations_sql(
+        &session_id,
+        params.from,
+        params.to,
+        limit,
+        params.cursor.as_deref(),
+    )
+    .map_err(bad_request)?;
+    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
+    let result = state
+        .execute_tenant_scoped_sql(tenant_ref, &sql)
+        .await
+        .map_err(storage_error)?;
+    let mut observations = result
+        .rows
+        .iter()
+        .filter_map(|row| map_observation_detail(&result.columns, row))
+        .collect::<Vec<_>>();
+    let next_cursor = next_cursor_from_details(&mut observations, limit);
+    Ok(Json(SessionObservations {
+        session_id,
+        from: params.from,
+        to: params.to,
+        observations,
         next_cursor,
     }))
 }
@@ -594,12 +653,19 @@ pub struct SessionSearchRequest {
     pub model_name: Option<String>,
     /// Match session-level `agent_name` (persisted column, `sp.agent.name`, else agent span name).
     pub agent_name: Option<String>,
+    /// When true (default), hide legacy nested-only OpenCode child sessions.
+    #[serde(default = "default_true")]
+    pub roots_only: bool,
     #[serde(default)]
     pub order_by: SessionOrderBy,
     #[serde(default)]
     pub order: SortDirection,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -761,6 +827,19 @@ pub fn compile_session_search_sql(
         having.push("error_count = 0".to_string());
     }
 
+    let observation_type = format!("COALESCE({}, 'span')", expr_observation_type());
+    // Legacy OpenCode child sessions stamped their own ses_* as session_id and
+    // marked the turn with parentSessionID. Drop those from the default list;
+    // holistic (new) sessions keep a root agent turn without that metadata.
+    // COALESCE inside arg_min matters: DuckDB arg_min skips NULLs, so a later
+    // nested turn's parentSessionID would otherwise "win" over an earlier root.
+    if request.roots_only {
+        having.push(format!(
+            "COALESCE(arg_min(COALESCE(CAST(attributes['sp.metadata.opencode.parentSessionID'] AS VARCHAR), ''), timestamp) FILTER (WHERE {obs_type} = 'agent'), '') = ''",
+            obs_type = observation_type
+        ));
+    }
+
     let direction = request.order.as_sql();
     let order_sql = match request.order_by {
         SessionOrderBy::StartTime => format!("start_time {direction}, session_id {direction}"),
@@ -777,8 +856,6 @@ pub fn compile_session_search_sql(
             format!("total_cost {direction} NULLS LAST, start_time DESC, session_id DESC")
         }
     };
-
-    let observation_type = format!("COALESCE({}, 'span')", expr_observation_type());
 
     Ok(format!(
         "SELECT * FROM ( \
@@ -947,9 +1024,13 @@ pub fn compile_trace_summary_sql(
     trace_id: &str,
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
+    session_id: Option<&str>,
 ) -> Result<String, String> {
     let mut conditions = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
     push_optional_time_bounds(&mut conditions, from, to)?;
+    if let Some(session_id) = session_id.map(str::trim).filter(|v| !v.is_empty()) {
+        conditions.push(format!("session_id = {}", sql_string_literal(session_id)));
+    }
     Ok(format!(
         "SELECT {projection} FROM union_spans WHERE {where_sql} GROUP BY trace_id",
         projection = trace_summary_projection(),
@@ -963,9 +1044,48 @@ pub fn compile_trace_observations_sql(
     to: Option<DateTime<Utc>>,
     limit: usize,
     cursor: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<String, String> {
     let mut conditions = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
     push_optional_time_bounds(&mut conditions, from, to)?;
+    if let Some(session_id) = session_id.map(str::trim).filter(|v| !v.is_empty()) {
+        conditions.push(format!("session_id = {}", sql_string_literal(session_id)));
+    }
+    if let Some(cursor) = cursor {
+        conditions.push(cursor_predicate(cursor, "timestamp", "span_id")?);
+    }
+    Ok(format!(
+        "SELECT {projection} FROM union_spans WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
+        projection = observation_projection(true),
+        where_sql = conditions.join(" AND "),
+        fetch = limit + 1
+    ))
+}
+
+pub fn compile_session_observations_sql(
+    session_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<String, String> {
+    if from > to {
+        return Err("`from` must be <= `to`".to_string());
+    }
+    let mut conditions = vec![
+        format!("session_id = {}", sql_string_literal(session_id)),
+        format!(
+            "{} >= {}",
+            timestamp_ns_column("timestamp"),
+            timestamp_ns_literal(&from)
+        ),
+        format!(
+            "{} <= {}",
+            timestamp_ns_column("timestamp"),
+            timestamp_ns_literal(&to)
+        ),
+        exclude_recording_observation_sql(),
+    ];
     if let Some(cursor) = cursor {
         conditions.push(cursor_predicate(cursor, "timestamp", "span_id")?);
     }
@@ -1841,6 +1961,7 @@ mod tests {
             user_id: None,
             model_name: None,
             agent_name: None,
+            roots_only: true,
             order_by: SessionOrderBy::StartTime,
             order: SortDirection::Desc,
             limit: Some(50),
@@ -1901,8 +2022,27 @@ mod tests {
         assert!(sql.contains("HAVING error_count = 0"));
 
         request.has_errors = None;
+        request.roots_only = false;
         let sql = compile_session_search_sql(&request, 50).expect("sql");
         assert!(!sql.contains("HAVING"));
+    }
+
+    #[test]
+    fn session_search_roots_only_filters_legacy_child_sessions() {
+        let request = session_search_request();
+        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        assert!(
+            sql.contains("sp.metadata.opencode.parentSessionID"),
+            "roots_only must inspect legacy parent metadata: {sql}"
+        );
+
+        let mut all = session_search_request();
+        all.roots_only = false;
+        let sql = compile_session_search_sql(&all, 50).expect("sql");
+        assert!(
+            !sql.contains("sp.metadata.opencode.parentSessionID"),
+            "roots_only=false must not filter parent metadata: {sql}"
+        );
     }
 
     #[test]
@@ -2230,9 +2370,10 @@ mod tests {
         assert_ns(compile_session_aggregate_sql("sess-1", from, to).unwrap());
         assert_ns(compile_session_traces_sql("sess-1", from, to, 10, None).unwrap());
         assert_ns(compile_observation_detail_sql("span-1", Some(from), Some(to)).unwrap());
-        assert_ns(compile_trace_summary_sql("trace-1", Some(from), Some(to)).unwrap());
+        assert_ns(compile_trace_summary_sql("trace-1", Some(from), Some(to), None).unwrap());
         assert_ns(
-            compile_trace_observations_sql("trace-1", Some(from), Some(to), 10, None).unwrap(),
+            compile_trace_observations_sql("trace-1", Some(from), Some(to), 10, None, None)
+                .unwrap(),
         );
 
         let request = ObservationSearchRequest {
