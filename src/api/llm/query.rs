@@ -230,9 +230,13 @@ pub async fn get_trace(
         return Err(bad_request("trace_id is required".to_string()));
     }
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let summary_sql =
-        compile_trace_summary_sql(&trace_id, params.from, params.to, params.session_id.as_deref())
-            .map_err(bad_request)?;
+    let summary_sql = compile_trace_summary_sql(
+        &trace_id,
+        params.from,
+        params.to,
+        params.session_id.as_deref(),
+    )
+    .map_err(bad_request)?;
     let summary_result = state
         .execute_tenant_scoped_sql(tenant_ref, &summary_sql)
         .await
