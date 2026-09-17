@@ -2,7 +2,9 @@ use crate::config::{Config, DuckLakeConfig};
 use crate::promotion::TelemetryTable;
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
-use crate::storage::schema::tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
+use crate::storage::schema::tables::{
+    OtlpLogsTable, ScoreConfigTable, ScoreTable, SessionStatsDeltaTable, TraceTable,
+};
 use crate::storage::schema::variant::parquet_select_for_table;
 use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
@@ -306,7 +308,17 @@ impl DuckLakeWriter {
             DataType::Date32 => Ok("DATE"),
             DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok("TIMESTAMP_NS"),
             DataType::Timestamp(_, _) => Ok("TIMESTAMPTZ"),
-            DataType::Map(_, _) => Ok("MAP(VARCHAR, VARCHAR)"),
+            DataType::Map(entries, _) => match entries.data_type() {
+                DataType::Struct(fields) => match fields
+                    .iter()
+                    .find(|f| f.name() == "value")
+                    .map(|f| f.data_type())
+                {
+                    Some(DataType::Float64) => Ok("MAP(VARCHAR, DOUBLE)"),
+                    _ => Ok("MAP(VARCHAR, VARCHAR)"),
+                },
+                _ => Ok("MAP(VARCHAR, VARCHAR)"),
+            },
             DataType::List(_) => Err(anyhow!(
                 "skip LIST field '{}' in generic ADD COLUMN — fidelity helpers own it",
                 field.name()
@@ -351,6 +363,12 @@ impl DuckLakeWriter {
                 custom_schema
                     .cloned()
                     .unwrap_or_else(|| Arc::new(ScoreConfigTable::schema())),
+                parquet_select_for_table(table_name),
+            ),
+            name if name == SessionStatsDeltaTable::table_name() => (
+                custom_schema
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(SessionStatsDeltaTable::schema())),
                 parquet_select_for_table(table_name),
             ),
             _ => {
@@ -412,7 +430,7 @@ impl DuckLakeWriter {
         if table_name == "logs" {
             ensure_log_timestamp_precision(conn, &qualified_table)?;
         }
-        if table_name == "traces" || table_name == "logs" {
+        if table_name == "traces" || table_name == "logs" || table_name == "session_stats_delta" {
             ensure_otlp_table_partition_sort(conn, &qualified_table)?;
         }
 

@@ -27,6 +27,10 @@ const OTLP_LAYOUT_TABLES: &[OtlpLayoutTable] = &[
         name: "logs",
         sorted_by: "session_id, timestamp",
     },
+    OtlpLayoutTable {
+        name: "session_stats_delta",
+        sorted_by: "session_id, start_time",
+    },
 ];
 
 /// Idempotent `SET PARTITIONED BY (record_date)` + `SET SORTED BY (…)`.
@@ -59,9 +63,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_covers_traces_and_logs() {
-        assert_eq!(OTLP_LAYOUT_TABLES.len(), 2);
+    fn layout_covers_traces_logs_and_session_stats_delta() {
+        assert_eq!(OTLP_LAYOUT_TABLES.len(), 3);
         assert!(OTLP_LAYOUT_TABLES.iter().any(|t| t.name == "traces"));
         assert!(OTLP_LAYOUT_TABLES.iter().any(|t| t.name == "logs"));
+        let delta = OTLP_LAYOUT_TABLES
+            .iter()
+            .find(|t| t.name == "session_stats_delta")
+            .expect("session_stats_delta layout");
+        assert_eq!(delta.sorted_by, "session_id, start_time");
     }
 }

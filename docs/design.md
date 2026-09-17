@@ -280,6 +280,8 @@ Public query names remain:
 
 - `union_spans`, `union_logs`
 - `committed_spans`, `committed_logs`
+- `session_stats_delta` — skinny per-ingest session rows for Explorer list
+  merge-on-read (`POST /v1/llm/sessions/search`)
 
 Because ingest defaults to flush-through (optional soft coalesce does not add a
 queryable buffer tier), union and committed names resolve to the same DuckLake
@@ -287,6 +289,17 @@ tables. Historical `buffer_*`, `staged_*`, and `iceberg_*` aliases are
 compatibility spellings only; there are no corresponding runtime tiers.
 Metric queries target `metric_samples` and the explicitly named rollup tables
 directly.
+
+### Session list (merge-on-read)
+
+Each `write_span_batches` also appends one skinny row per `session_id` in that
+batch to `session_stats_delta` (core counts/tokens/cost/agent/nested flag plus
+a `measures` MAP for manifest extras). The list endpoint merges with
+`SUM`/`MIN`/`MAX`/`any_value` over those deltas; when the table is missing or
+the window has no deltas, it falls back to the historical `union_spans`
+aggregate. List `error_count` is a batch ERROR sum — not detail primary-error
+topology. Manifest: `softprobe.session_stats.v1` (builtin product defaults in
+`src/session_stats.rs`).
 
 Query surfaces include:
 
