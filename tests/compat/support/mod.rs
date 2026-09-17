@@ -1621,7 +1621,7 @@ mod selector_tests {
             "loki",
             "loki-query-backward-limit-order",
             "GET",
-            "/loki/api/v1/query",
+            "/loki/api/v1/query_range",
             params.clone(),
             true,
         )
@@ -1644,7 +1644,7 @@ mod selector_tests {
             "loki:loki-query-backward-limit-order"
         );
         assert_eq!(descriptor.method, "GET");
-        assert_eq!(descriptor.path, "/loki/api/v1/query");
+        assert_eq!(descriptor.path, "/loki/api/v1/query_range");
         assert_eq!(descriptor.params, params);
     }
 }

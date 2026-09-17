@@ -112,7 +112,7 @@
     },
     {
       "id": "loki-query-backward-limit-order",
-      "path": "/loki/api/v1/query",
+      "path": "/loki/api/v1/query_range",
       "params": {
         "query": "{service_name=\"checkout\"}",
         "start": "1786827600000000001",
