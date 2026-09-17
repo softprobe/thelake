@@ -392,7 +392,10 @@ mod tests {
         let DataType::Struct(fields) = entries.data_type() else {
             panic!("expected struct entries");
         };
-        assert_eq!(fields.find("value").unwrap().1.data_type(), &DataType::Float64);
+        assert_eq!(
+            fields.find("value").unwrap().1.data_type(),
+            &DataType::Float64
+        );
         assert_eq!(
             schema.field_with_name("start_time").unwrap().data_type(),
             &DataType::Timestamp(TimeUnit::Nanosecond, None)

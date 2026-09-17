@@ -7,7 +7,6 @@ pub mod metrics_fidelity;
 pub mod metrics_layout_gold;
 pub mod metrics_layout_long_grain;
 pub mod prometheus;
-pub mod session_stats_delta;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_apply_e2e;
 pub mod promotion_business_row_extraction;
@@ -24,6 +23,7 @@ pub mod promotion_sqlite_local;
 pub mod promotion_telemetry_columns;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_telemetry_ingest;
+pub mod session_stats_delta;
 #[cfg(feature = "integration-e2e")]
 pub mod tenant_ducklake_registry;
 #[cfg(feature = "integration-e2e")]

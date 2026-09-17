@@ -1,3 +1,4 @@
+use crate::config::DuckLakeConfig;
 use crate::models::{Log, Metric, Span};
 use crate::promotion::{
     ensure_promoted_columns_not_reserved, extract_telemetry_promoted_value, PromotionColumn,
@@ -9,7 +10,6 @@ use crate::session_stats::{
 };
 use crate::storage::schema::arrow;
 use crate::storage::schema::tables::{OtlpLogsTable, SessionStatsDeltaTable, TraceTable};
-use crate::config::DuckLakeConfig;
 use ::arrow::record_batch::RecordBatch;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -191,7 +191,8 @@ impl DuckLakeWriter {
             let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
             self.write_record_batches_internal("traces", record_batches)
                 .await?;
-            self.write_session_stats_deltas_best_effort(None, &spans).await;
+            self.write_session_stats_deltas_best_effort(None, &spans)
+                .await;
             Ok(())
         } else {
             let schema = self.spans_schema().await?;

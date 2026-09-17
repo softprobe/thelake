@@ -128,7 +128,10 @@ pub fn is_core_measure_name(name: &str) -> bool {
 }
 
 pub fn is_core_dimension_name(name: &str) -> bool {
-    matches!(name, "agent_name" | "is_nested_child" | "user_id" | "model_name")
+    matches!(
+        name,
+        "agent_name" | "is_nested_child" | "user_id" | "model_name"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +142,11 @@ pub struct SessionStatsValidationError {
 }
 
 impl SessionStatsValidationError {
-    pub fn new(code: impl Into<String>, path: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(
+        code: impl Into<String>,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             code: code.into(),
             path: path.into(),
@@ -150,11 +157,7 @@ impl SessionStatsValidationError {
 
 impl fmt::Display for SessionStatsValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} at {}: {}",
-            self.code, self.path, self.message
-        )
+        write!(f, "{} at {}: {}", self.code, self.path, self.message)
     }
 }
 
@@ -253,21 +256,10 @@ fn derive_one_session(
         if span.status_code.as_deref() == Some("ERROR") {
             error_count += 1;
         }
-        input_tokens += attr_i64(
-            span,
-            &["input_tokens", "gen_ai.usage.input_tokens"],
-        )
-        .unwrap_or(0);
-        output_tokens += attr_i64(
-            span,
-            &["output_tokens", "gen_ai.usage.output_tokens"],
-        )
-        .unwrap_or(0);
-        total_tokens += attr_i64(
-            span,
-            &["total_tokens", "gen_ai.usage.total_tokens"],
-        )
-        .unwrap_or(0);
+        input_tokens += attr_i64(span, &["input_tokens", "gen_ai.usage.input_tokens"]).unwrap_or(0);
+        output_tokens +=
+            attr_i64(span, &["output_tokens", "gen_ai.usage.output_tokens"]).unwrap_or(0);
+        total_tokens += attr_i64(span, &["total_tokens", "gen_ai.usage.total_tokens"]).unwrap_or(0);
         total_cost += attr_f64(span, &["total_cost", "sp.cost.total"]).unwrap_or(0.0);
         if agent_name.is_none() {
             agent_name = first_agent_name(span);
@@ -276,10 +268,7 @@ fn derive_one_session(
             traces.insert(span.trace_id.as_str());
         }
         if observation_type(span).as_deref() == Some("agent") {
-            if let Some(parent) = span
-                .attributes
-                .get("sp.metadata.opencode.parentSessionID")
-            {
+            if let Some(parent) = span.attributes.get("sp.metadata.opencode.parentSessionID") {
                 if !parent.trim().is_empty() {
                     is_nested_child = true;
                 }
@@ -344,7 +333,12 @@ fn observation_type(span: &Span) -> Option<String> {
 }
 
 fn first_agent_name(span: &Span) -> Option<String> {
-    if let Some(name) = span.agent_name.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(name) = span
+        .agent_name
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         return Some(name.to_string());
     }
     attr_str(span, &["agent_name", "sp.agent.name"])
@@ -709,16 +703,13 @@ fn require_field(
 
 fn validate_identifier(path: &str, value: &str) -> Result<(), SessionStatsValidationError> {
     let ok = !value.is_empty()
-        && value
-            .chars()
-            .enumerate()
-            .all(|(i, c)| {
-                if i == 0 {
-                    c.is_ascii_lowercase() || c == '_'
-                } else {
-                    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
-                }
-            });
+        && value.chars().enumerate().all(|(i, c)| {
+            if i == 0 {
+                c.is_ascii_lowercase() || c == '_'
+            } else {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
+            }
+        });
     if !ok {
         return Err(SessionStatsValidationError::new(
             "invalid_identifier",
@@ -977,7 +968,10 @@ dimensions:
             .insert("observation_type".into(), "recording".into());
         let other = span("s3", "t4", None);
 
-        let rows = derive_session_deltas(&[ok, empty, recording, other], &builtin_session_stats_manifest());
+        let rows = derive_session_deltas(
+            &[ok, empty, recording, other],
+            &builtin_session_stats_manifest(),
+        );
         let ids: Vec<_> = rows.iter().map(|r| r.session_id.as_str()).collect();
         assert_eq!(ids, vec!["s1", "s3"]);
     }
@@ -991,13 +985,14 @@ dimensions:
         child
             .attributes
             .insert("observation_type".into(), "agent".into());
-        child.attributes.insert(
-            "sp.metadata.opencode.parentSessionID".into(),
-            "root".into(),
-        );
+        child
+            .attributes
+            .insert("sp.metadata.opencode.parentSessionID".into(), "root".into());
         let rows = derive_session_deltas(&[root, child], &builtin_session_stats_manifest());
-        let by_id: std::collections::HashMap<_, _> =
-            rows.into_iter().map(|r| (r.session_id.clone(), r)).collect();
+        let by_id: std::collections::HashMap<_, _> = rows
+            .into_iter()
+            .map(|r| (r.session_id.clone(), r))
+            .collect();
         assert!(!by_id["root"].is_nested_child);
         assert!(by_id["child"].is_nested_child);
     }
@@ -1042,11 +1037,42 @@ measures:
     fn delta_rows_to_record_batch_round_trips_core_fields() {
         use crate::storage::schema::SessionStatsDeltaTable;
         let mut row_span = span("s1", "t1", Some("ERROR"));
-        row_span.attributes.insert("total_tokens".into(), "5".into());
+        row_span
+            .attributes
+            .insert("total_tokens".into(), "5".into());
         let rows = derive_session_deltas(&[row_span], &builtin_session_stats_manifest());
         let batch =
             session_stats_deltas_to_record_batch(&rows, &SessionStatsDeltaTable::schema()).unwrap();
         assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), SessionStatsDeltaTable::schema().fields().len());
+        assert_eq!(
+            batch.num_columns(),
+            SessionStatsDeltaTable::schema().fields().len()
+        );
+    }
+
+    #[test]
+    fn derive_missing_tokens_and_cost_treat_as_zero() {
+        let a = span("s1", "t1", None);
+        let rows = derive_session_deltas(&[a], &builtin_session_stats_manifest());
+        assert_eq!(rows[0].total_tokens, 0);
+        assert_eq!(rows[0].input_tokens, 0);
+        assert_eq!(rows[0].output_tokens, 0);
+        assert_eq!(rows[0].total_cost, 0.0);
+    }
+
+    #[test]
+    fn rejects_empty_key_list() {
+        let err = parse_session_stats_manifest(
+            r#"
+specVersion: softprobe.session_stats.v1
+key: []
+measures:
+  - name: observation_count
+    op: sum
+    source: { kind: count_rows }
+"#,
+        )
+        .expect_err("must reject");
+        assert_eq!(err.code, "missing_session_id_key");
     }
 }

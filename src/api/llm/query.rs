@@ -716,7 +716,11 @@ pub async fn search_sessions(
         request.order_by == SessionOrderBy::StartTime && request.order == SortDirection::Desc;
     let prefer_deltas = !session_search_needs_span_scan(&request);
     let sql = if prefer_deltas {
-        compile_session_search_sql_from_deltas(&request, limit, &crate::session_stats::builtin_session_stats_manifest())
+        compile_session_search_sql_from_deltas(
+            &request,
+            limit,
+            &crate::session_stats::builtin_session_stats_manifest(),
+        )
     } else {
         compile_session_search_sql_from_spans(&request, limit)
     }
@@ -2310,7 +2314,8 @@ measures:
 
     #[test]
     fn session_search_span_fallback_sql_still_excludes_recording() {
-        let sql = compile_session_search_sql_from_spans(&session_search_request(), 50).expect("sql");
+        let sql =
+            compile_session_search_sql_from_spans(&session_search_request(), 50).expect("sql");
         assert!(sql.contains("FROM union_spans"));
         assert!(sql.contains("<> 'recording'"));
         assert!(sql.contains("sp.metadata.opencode.parentSessionID"));
@@ -2318,10 +2323,9 @@ measures:
 
     #[test]
     fn golden_merge_math_multi_batch_deltas_sum_and_minmax() {
-        // T5b: two delta rows for one session must merge as sum/min/max.
-        use crate::session_stats::{
-            builtin_session_stats_manifest, derive_session_deltas, SessionStatsDeltaRow,
-        };
+        // Derive-level arithmetic only. Real merge-on-read goldens live in
+        // tests/integration/session_stats_delta.rs (HTTP + DuckDB).
+        use crate::session_stats::{builtin_session_stats_manifest, derive_session_deltas};
         use chrono::TimeZone;
 
         fn make_span(
@@ -2378,37 +2382,11 @@ measures:
             ],
             &builtin_session_stats_manifest(),
         );
-        assert_eq!(batch1.len(), 1);
-        assert_eq!(batch2.len(), 1);
-
-        // Simulate merge-on-read arithmetic (same ops as SQL).
-        let merged = SessionStatsDeltaRow {
-            session_id: "A".into(),
-            record_date: batch1[0].record_date,
-            start_time: batch1[0].start_time.min(batch2[0].start_time),
-            end_time: batch1[0].end_time.max(batch2[0].end_time),
-            observation_count: batch1[0].observation_count + batch2[0].observation_count,
-            error_count: batch1[0].error_count + batch2[0].error_count,
-            trace_count: batch1[0].trace_count + batch2[0].trace_count, // per-batch distinct sum (may overcount)
-            input_tokens: batch1[0].input_tokens + batch2[0].input_tokens,
-            output_tokens: batch1[0].output_tokens + batch2[0].output_tokens,
-            total_tokens: batch1[0].total_tokens + batch2[0].total_tokens,
-            total_cost: batch1[0].total_cost + batch2[0].total_cost,
-            agent_name: batch1[0]
-                .agent_name
-                .clone()
-                .or_else(|| batch2[0].agent_name.clone()),
-            is_nested_child: batch1[0].is_nested_child || batch2[0].is_nested_child,
-            measures: Default::default(),
-        };
-        assert_eq!(merged.observation_count, 3);
-        assert_eq!(merged.error_count, 2);
-        assert_eq!(merged.total_tokens, 30);
-        assert!((merged.total_cost - 0.3).abs() < 1e-9);
-        assert_eq!(merged.start_time, t1);
-        assert!(merged.end_time >= t2);
-        // trace_count is sum of per-batch distinct: batch1 has t1, batch2 has t1+t2 → 1+2=3
-        assert_eq!(merged.trace_count, 3);
+        assert_eq!(batch1[0].observation_count + batch2[0].observation_count, 3);
+        assert_eq!(batch1[0].error_count + batch2[0].error_count, 2);
+        assert_eq!(batch1[0].total_tokens + batch2[0].total_tokens, 30);
+        assert!(((batch1[0].total_cost + batch2[0].total_cost) - 0.3).abs() < 1e-9);
+        assert_eq!(batch1[0].start_time.min(batch2[0].start_time), t1);
 
         let sql = compile_session_search_sql_from_deltas(
             &session_search_request(),
@@ -2417,7 +2395,6 @@ measures:
         )
         .unwrap();
         assert!(sql.contains("SUM(observation_count)"));
-        assert!(sql.contains("SUM(trace_count)"));
         assert!(sql.contains("MIN(start_time)"));
         assert!(sql.contains("MAX(end_time)"));
         assert!(!sql.contains("FROM union_spans"));
