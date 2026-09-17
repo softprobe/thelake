@@ -846,7 +846,7 @@ pub fn compile_session_search_sql_from_deltas(
     let from_date = request.from.date_naive();
     let to_date = request.to.date_naive();
     // Overlap [start_time, end_time] with [from, to]; record_date for partition prune.
-    let predicates = vec![
+    let predicates = [
         format!("record_date >= DATE '{from_date}'"),
         format!("record_date <= DATE '{to_date}'"),
         format!(
