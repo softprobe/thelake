@@ -22,50 +22,30 @@ use crate::models::Span;
 
 pub const SESSION_STATS_SPEC_VERSION: &str = "softprobe.session_stats.v1";
 
-/// Builtin product defaults for Explorer session list (always on).
-pub const BUILTIN_SESSION_STATS_YAML: &str = r#"
-specVersion: softprobe.session_stats.v1
-key:
-  - session_id
-measures:
-  - name: observation_count
-    op: sum
-    source: { kind: count_rows }
-  - name: error_count
-    op: sum
-    source:
-      kind: count_where
-      column: status_code
-      eq: ERROR
-  - name: total_tokens
-    op: sum
-    source: { kind: column, column: total_tokens }
-  - name: total_cost
-    op: sum
-    source: { kind: column, column: total_cost }
-  - name: input_tokens
-    op: sum
-    source: { kind: column, column: input_tokens }
-  - name: output_tokens
-    op: sum
-    source: { kind: column, column: output_tokens }
-  - name: trace_count
-    op: sum
-    source: { kind: count_distinct, column: trace_id }
-  - name: start_time
-    op: min
-    source: { kind: column, column: timestamp }
-  - name: end_time
-    op: max
-    source: { kind: column, column: end_timestamp }
-dimensions:
-  - name: agent_name
-    source: { kind: column, column: agent_name }
-  - name: is_nested_child
-    source:
-      kind: flag_attr
-      key: sp.metadata.opencode.parentSessionID
-"#;
+/// Builtin product defaults for Explorer session list (SoT:
+/// `docs/session_stats/default.yaml`).
+pub const BUILTIN_SESSION_STATS_YAML: &str = include_str!("../docs/session_stats/default.yaml");
+
+/// Physical columns already on `session_stats_delta` (no apply DDL needed).
+pub fn is_physical_session_stats_column(name: &str) -> bool {
+    matches!(
+        name,
+        "session_id"
+            | "record_date"
+            | "start_time"
+            | "end_time"
+            | "observation_count"
+            | "error_count"
+            | "trace_count"
+            | "input_tokens"
+            | "output_tokens"
+            | "total_tokens"
+            | "total_cost"
+            | "agent_name"
+            | "is_nested_child"
+            | "measures"
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStatsManifest {
@@ -180,6 +160,70 @@ pub fn builtin_session_stats_manifest() -> SessionStatsManifest {
     parse_session_stats_manifest(BUILTIN_SESSION_STATS_YAML)
         .expect("builtin session stats manifest must parse")
 }
+
+/// Describe apply-side schema effects for a session_stats manifest (no I/O).
+pub fn session_stats_schema_changes(manifest: &SessionStatsManifest) -> Vec<serde_json::Value> {
+    let mut changes = Vec::new();
+    for measure in &manifest.measures {
+        if measure.map_backed {
+            changes.push(serde_json::json!({
+                "table": "session_stats_delta",
+                "action": "map_measure",
+                "column": measure.name,
+            }));
+        }
+    }
+    for dim in &manifest.dimensions {
+        if !is_physical_session_stats_column(&dim.name) {
+            changes.push(serde_json::json!({
+                "table": "session_stats_delta",
+                "action": "add_column",
+                "column": dim.name,
+                "type": "string",
+                "nullable": true,
+            }));
+        }
+    }
+    changes
+}
+
+/// Idempotent ADD COLUMN DDLs for dimensions that are not already physical.
+pub fn session_stats_dimension_add_ddls(
+    catalog_schema_prefix: &str,
+    manifest: &SessionStatsManifest,
+) -> Vec<String> {
+    let mut ddls = Vec::new();
+    for dim in &manifest.dimensions {
+        if is_physical_session_stats_column(&dim.name) {
+            continue;
+        }
+        // Identifiers are validated at parse time ([a-z_][a-z0-9_]*).
+        ddls.push(format!(
+            "ALTER TABLE {}.session_stats_delta ADD COLUMN IF NOT EXISTS \"{}\" VARCHAR;",
+            catalog_schema_prefix, dim.name
+        ));
+    }
+    ddls
+}
+
+/// Test hook: when true, `write_session_stats_deltas_best_effort` skips the
+/// delta write after spans commit (simulates INSERT failure isolation).
+///
+/// Integration tests that flip this flag must serialize with other ingest tests
+/// via `tests/util/session_stats_serial.rs`.
+pub fn set_fail_session_stats_delta_write_for_test(fail: bool) {
+    *SESSION_STATS_DELTA_WRITE_FAIL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = fail;
+}
+
+pub fn fail_session_stats_delta_write_for_test() -> bool {
+    *SESSION_STATS_DELTA_WRITE_FAIL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+static SESSION_STATS_DELTA_WRITE_FAIL: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 
 /// One skinny delta row per session_id in an ingest batch.
 #[derive(Debug, Clone, PartialEq)]
@@ -761,6 +805,19 @@ mod tests {
             &nested.source,
             DimensionSource::FlagAttr { key } if key == "sp.metadata.opencode.parentSessionID"
         ));
+    }
+
+    #[test]
+    fn include_str_builtin_equals_default_yaml_file() {
+        let from_const = parse_session_stats_manifest(BUILTIN_SESSION_STATS_YAML).unwrap();
+        let file = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/session_stats/default.yaml"
+        ))
+        .expect("default.yaml must exist");
+        let from_file = parse_session_stats_manifest(&file).unwrap();
+        assert_eq!(from_const, from_file);
+        assert_eq!(builtin_session_stats_manifest(), from_file);
     }
 
     #[test]

@@ -284,6 +284,56 @@ pub fn business_spec_activation(table_name: &str, manifest_yaml: &str) -> Promot
     }
 }
 
+/// Stable `promotion_specs.spec_id` for a session_stats document.
+pub fn session_stats_spec_id(manifest_yaml: &str) -> String {
+    format!("session_stats_{}", promotion_manifest_hash(manifest_yaml))
+}
+
+pub fn session_stats_spec_activation(manifest_yaml: &str) -> PromotionSpecActivation {
+    PromotionSpecActivation {
+        spec_id: session_stats_spec_id(manifest_yaml),
+        manifest_hash: promotion_manifest_hash(manifest_yaml),
+        target_kind: "session_stats",
+        target_tables: "session_stats_delta".to_string(),
+    }
+}
+
+/// Parse one `(spec_id, manifest_json)` row into a session_stats manifest.
+pub fn session_stats_manifest_from_row(
+    spec_id: &str,
+    manifest_json: &str,
+) -> Result<Option<crate::session_stats::SessionStatsManifest>, PromotionSpecLoadError> {
+    match crate::session_stats::parse_session_stats_manifest(manifest_json) {
+        Ok(m) => Ok(Some(m)),
+        Err(e) => Err(PromotionSpecLoadError::Backend(format!(
+            "promotion_specs row {spec_id} has invalid session_stats manifest: {e}"
+        ))),
+    }
+}
+
+/// Load the active session_stats manifest for one tenant schema, if any.
+pub async fn load_active_session_stats_manifest(
+    client: &tokio_postgres::Client,
+    tenant_schema: &str,
+) -> Result<Option<crate::session_stats::SessionStatsManifest>, PromotionSpecLoadError> {
+    let schema = quote_sql_ident(tenant_schema);
+    let sql = format!(
+        "SELECT spec_id, manifest_json FROM {schema}.promotion_specs \
+WHERE status = 'active' AND target_kind = 'session_stats' \
+ORDER BY applied_at DESC LIMIT 1;"
+    );
+    let rows = client
+        .query(&sql, &[])
+        .await
+        .map_err(PromotionSpecLoadError::Postgres)?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let spec_id: String = row.get(0);
+    let manifest_json: String = row.get(1);
+    session_stats_manifest_from_row(&spec_id, &manifest_json)
+}
+
 /// Shared telemetry apply lifecycle. Backend adapters provide only DDL and activation primitives.
 pub async fn run_telemetry_apply<ApplyDdl, ApplyDdlFuture, Activate, ActivateFuture>(
     apply_ddl: ApplyDdl,

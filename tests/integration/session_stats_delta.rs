@@ -18,6 +18,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::util::config::file_backed_test_config;
+use crate::util::session_stats_serial::session_stats_ingest_serial;
 
 fn string_kv(key: &str, value: &str) -> KeyValue {
     KeyValue {
@@ -84,7 +85,14 @@ async fn response_json(resp: axum::response::Response) -> Value {
     serde_json::from_slice(&body).expect("json body")
 }
 
-async fn test_router() -> (Router, AppState, TempDir) {
+async fn test_router() -> (
+    Router,
+    AppState,
+    TempDir,
+    tokio::sync::MutexGuard<'static, ()>,
+) {
+    let guard = session_stats_ingest_serial().lock().await;
+    softprobe_runtime::session_stats::set_fail_session_stats_delta_write_for_test(false);
     let temp = TempDir::new().expect("tempdir");
     let (router, state) = create_router(
         Arc::new(file_backed_test_config(&temp)),
@@ -93,7 +101,7 @@ async fn test_router() -> (Router, AppState, TempDir) {
     )
     .await
     .expect("router");
-    (router, state, temp)
+    (router, state, temp, guard)
 }
 
 async fn post_traces(router: &Router, body: ExportTraceServiceRequest) {
@@ -160,7 +168,7 @@ fn gen_attrs(tokens: &str, cost: &str) -> Vec<KeyValue> {
 
 #[tokio::test]
 async fn multi_batch_ingest_merges_on_sessions_search() {
-    let (router, state, _temp) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
     let session_id = "sess-delta-merge-1";
 
     post_traces(
@@ -254,7 +262,7 @@ async fn multi_batch_ingest_merges_on_sessions_search() {
 
 #[tokio::test]
 async fn has_errors_and_agent_name_filters_via_api() {
-    let (router, state, _temp) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
 
     post_traces(
         &router,
@@ -365,7 +373,7 @@ async fn has_errors_and_agent_name_filters_via_api() {
 
 #[tokio::test]
 async fn roots_only_hides_nested_child_sessions() {
-    let (router, state, _temp) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
 
     post_traces(
         &router,
@@ -447,7 +455,7 @@ async fn roots_only_hides_nested_child_sessions() {
 
 #[tokio::test]
 async fn recording_and_empty_session_id_never_listed() {
-    let (router, state, _temp) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
 
     // Recording-only: shares a fake session id but must not create a list row.
     post_traces(
@@ -564,7 +572,7 @@ async fn recording_and_empty_session_id_never_listed() {
 
 #[tokio::test]
 async fn fallback_when_deltas_deleted_uses_union_spans() {
-    let (router, state, _temp) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
     let session_id = "sess-fallback-spans";
 
     post_traces(
@@ -625,7 +633,7 @@ async fn fallback_when_deltas_deleted_uses_union_spans() {
 
 #[tokio::test]
 async fn fallback_when_delta_table_dropped() {
-    let (router, state, _temp) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
     let session_id = "sess-fallback-drop";
 
     post_traces(
@@ -670,7 +678,7 @@ async fn fallback_when_delta_table_dropped() {
 
 #[tokio::test]
 async fn inverted_range_is_400_and_limit_clamped() {
-    let (router, state, _temp) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
 
     for i in 0..5u8 {
         post_traces(
@@ -718,7 +726,7 @@ async fn inverted_range_is_400_and_limit_clamped() {
 
 #[tokio::test]
 async fn agent_name_sql_injection_is_safe() {
-    let (router, state, _temp) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
     post_traces(
         &router,
         trace_batch(
@@ -763,7 +771,7 @@ async fn agent_name_sql_injection_is_safe() {
 
 #[tokio::test]
 async fn null_tokens_merge_as_zero_and_cursor_pages() {
-    let (router, state, _temp) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
 
     // Session with no token attrs on first batch, tokens on second.
     post_traces(
@@ -888,7 +896,7 @@ async fn null_tokens_merge_as_zero_and_cursor_pages() {
 
 #[tokio::test]
 async fn empty_window_returns_empty_items() {
-    let (router, _state, _temp) = test_router().await;
+    let (router, _state, _temp, _guard) = test_router().await;
     let (st, body) = search_sessions(
         &router,
         json!({
@@ -905,7 +913,7 @@ async fn empty_window_returns_empty_items() {
 
 #[tokio::test]
 async fn session_stats_delta_partition_sort_applied() {
-    let (router, state, _temp) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
     post_traces(
         &router,
         trace_batch(

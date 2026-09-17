@@ -715,18 +715,24 @@ pub async fn search_sessions(
     let cursor_supported =
         request.order_by == SessionOrderBy::StartTime && request.order == SortDirection::Desc;
     let prefer_deltas = !session_search_needs_span_scan(&request);
+    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
+    let tenant_id = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
+    let manifest = match state.engines.engine_for(tenant_id).await {
+        Ok(engine) => engine
+            .storage
+            .writer
+            .resolve_session_stats_manifest(&engine.scope)
+            .await
+            .unwrap_or_else(|_| crate::session_stats::builtin_session_stats_manifest()),
+        Err(_) => crate::session_stats::builtin_session_stats_manifest(),
+    };
     let sql = if prefer_deltas {
-        compile_session_search_sql_from_deltas(
-            &request,
-            limit,
-            &crate::session_stats::builtin_session_stats_manifest(),
-        )
+        compile_session_search_sql_from_deltas(&request, limit, &manifest)
     } else {
         compile_session_search_sql_from_spans(&request, limit)
     }
     .map_err(bad_request)?;
 
-    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
     let result = match state.execute_tenant_scoped_sql(tenant_ref, &sql).await {
         Ok(result) => {
             if prefer_deltas && result.rows.is_empty() {

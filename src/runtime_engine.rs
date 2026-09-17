@@ -13,11 +13,13 @@ use crate::control_plane::ControlPlaneRuntime;
 use crate::ingest_engine::{IngestEngine, IngestPipeline};
 use crate::promotion::{
     business_manifest_from_row, business_spec_activation, ensure_promotion_metadata_tables,
-    load_active_telemetry_columns_manifests, run_business_apply, run_telemetry_apply,
+    load_active_session_stats_manifest, load_active_telemetry_columns_manifests,
+    run_business_apply, run_telemetry_apply, session_stats_spec_activation,
     telemetry_spec_activation, BusinessApplyError, BusinessTableManifest, PromotionSpecActivation,
     PromotionSpecLoadError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
+use crate::session_stats::SessionStatsManifest;
 use crate::storage::Storage;
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
@@ -425,6 +427,18 @@ RETURNING scope_id;"#,
         Ok(manifests)
     }
 
+    /// Load active session_stats manifest for an already bound scope.
+    pub async fn load_active_session_stats_manifest_for_scope(
+        &self,
+        scope: &DuckLakeScope,
+    ) -> Result<Option<SessionStatsManifest>> {
+        let client = self.pool.get().await?;
+        let manifest = load_active_session_stats_manifest(&client, &scope.metadata_schema)
+            .await
+            .map_err(map_spec_load_error)?;
+        Ok(manifest)
+    }
+
     async fn activate_spec_tx(
         tx: &deadpool_postgres::Transaction<'_>,
         scope: &DuckLakeScope,
@@ -546,6 +560,29 @@ LIMIT 1;"#
         let tx = client.transaction().await?;
         Self::lock_promotion_tx(&tx, scope, "telemetry_columns").await?;
         let activation = telemetry_spec_activation(manifest_yaml, target_tables);
+        let spec_id = run_telemetry_apply(apply_ddl, || async {
+            Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await
+        })
+        .await?;
+        tx.commit().await?;
+        Ok(spec_id)
+    }
+
+    /// Apply session_stats DDL + activation under a Postgres advisory lock.
+    pub async fn apply_session_stats_promotion_guarded<F, Fut>(
+        &self,
+        scope: &DuckLakeScope,
+        manifest_yaml: &str,
+        apply_ddl: F,
+    ) -> Result<String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        Self::lock_promotion_tx(&tx, scope, "session_stats").await?;
+        let activation = session_stats_spec_activation(manifest_yaml);
         let spec_id = run_telemetry_apply(apply_ddl, || async {
             Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await
         })

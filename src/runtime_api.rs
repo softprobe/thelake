@@ -7,9 +7,13 @@ use crate::config::Config;
 use crate::promotion::{
     business_current_view_name, business_physical_table_name, parse_promotion_manifest,
     BusinessApplyError, BusinessTableManifest, PromotionDataType, PromotionManifest,
-    TelemetryColumnsManifest, TelemetryTable,
+    TelemetryColumnsManifest, TelemetryTable, PROMOTION_SPEC_VERSION,
 };
 use crate::runtime_engine::{DuckLakeScope, ScopeProvisioningRequest};
+use crate::session_stats::{
+    parse_session_stats_manifest, session_stats_schema_changes, SessionStatsManifest,
+    SESSION_STATS_SPEC_VERSION,
+};
 use axum::{
     extract::{Extension, Query, Request, State},
     http::{header, HeaderMap, Method, StatusCode},
@@ -632,25 +636,98 @@ async fn v1_promotions_apply(
     Extension(tenant): Extension<TenantInfo>,
     Json(req): Json<PromotionApplyRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let manifest = parse_promotion_manifest(&req.manifest_yaml).map_err(|err| {
+    #[derive(Deserialize)]
+    struct SpecVersionPeek {
+        #[serde(rename = "specVersion")]
+        spec_version: String,
+    }
+    let peek: SpecVersionPeek = serde_yaml::from_str(&req.manifest_yaml).map_err(|err| {
         (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({
                 "error": {
-                    "code": err.code(),
-                    "message": err.to_string()
+                    "code": "invalid_yaml",
+                    "message": format!("promotion manifest YAML is invalid: {err}")
                 }
             })),
         )
     })?;
-    match manifest {
-        PromotionManifest::TelemetryColumns(spec) => {
-            apply_telemetry_promotion(state, tenant, req.manifest_yaml, spec).await
+    match peek.spec_version.as_str() {
+        SESSION_STATS_SPEC_VERSION => {
+            let manifest = parse_session_stats_manifest(&req.manifest_yaml).map_err(|err| {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "error": {
+                            "code": err.code,
+                            "message": err.to_string(),
+                            "path": err.path
+                        }
+                    })),
+                )
+            })?;
+            apply_session_stats_promotion(state, tenant, req.manifest_yaml, manifest).await
         }
-        PromotionManifest::BusinessTable(spec) => {
-            apply_business_table_promotion(state, tenant, req.manifest_yaml, spec).await
+        PROMOTION_SPEC_VERSION => {
+            let manifest = parse_promotion_manifest(&req.manifest_yaml).map_err(|err| {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "error": {
+                            "code": err.code(),
+                            "message": err.to_string()
+                        }
+                    })),
+                )
+            })?;
+            match manifest {
+                PromotionManifest::TelemetryColumns(spec) => {
+                    apply_telemetry_promotion(state, tenant, req.manifest_yaml, spec).await
+                }
+                PromotionManifest::BusinessTable(spec) => {
+                    apply_business_table_promotion(state, tenant, req.manifest_yaml, spec).await
+                }
+            }
         }
+        other => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": {
+                    "code": "unsupported_spec_version",
+                    "message": format!(
+                        "expected {PROMOTION_SPEC_VERSION} or {SESSION_STATS_SPEC_VERSION}, got {other}"
+                    )
+                }
+            })),
+        )),
     }
+}
+
+async fn apply_session_stats_promotion(
+    state: AppState,
+    tenant: TenantInfo,
+    manifest_yaml: String,
+    manifest: SessionStatsManifest,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let engine = state
+        .engine_for_tenant(&tenant)
+        .await
+        .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
+    engine
+        .storage
+        .writer
+        .apply_and_record_session_stats_promotion(&engine.scope, &manifest_yaml, &manifest)
+        .await
+        .map_err(|err| promotion_apply_error("promotion_schema_apply_failed", err))?;
+    Ok(Json(json!({
+        "specVersion": "softprobe.promotion.apply.v1",
+        "applied": true,
+        "target": {
+            "kind": "session_stats",
+            "tables": ["session_stats_delta"]
+        },
+        "schemaChanges": session_stats_schema_changes(&manifest)
+    })))
 }
 
 async fn apply_telemetry_promotion(

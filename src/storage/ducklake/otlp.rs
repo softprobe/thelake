@@ -143,7 +143,7 @@ impl DuckLakeWriter {
                 let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
                 self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
                     .await?;
-                self.write_session_stats_deltas_best_effort(Some(&dk), &spans)
+                self.write_session_stats_deltas_best_effort(Some(&dk), Some(&scope), &spans)
                     .await;
                 return Ok(());
             }
@@ -175,7 +175,7 @@ impl DuckLakeWriter {
                 let record_batches = vec![Span::to_record_batch(&tenant_spans, schema.as_ref())?];
                 self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
                     .await?;
-                self.write_session_stats_deltas_best_effort(Some(&dk), &tenant_spans)
+                self.write_session_stats_deltas_best_effort(Some(&dk), Some(&scope), &tenant_spans)
                     .await;
             }
             Ok(())
@@ -191,7 +191,11 @@ impl DuckLakeWriter {
             let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
             self.write_record_batches_internal("traces", record_batches)
                 .await?;
-            self.write_session_stats_deltas_best_effort(None, &spans)
+            let scope = DuckLakeScope {
+                metadata_schema: self.ducklake.metadata_schema.clone(),
+                data_path: self.ducklake.data_path.clone(),
+            };
+            self.write_session_stats_deltas_best_effort(None, Some(&scope), &spans)
                 .await;
             Ok(())
         } else {
@@ -206,7 +210,7 @@ impl DuckLakeWriter {
             }
             self.write_record_batches_internal("traces", record_batches)
                 .await?;
-            self.write_session_stats_deltas_best_effort(None, &all_spans)
+            self.write_session_stats_deltas_best_effort(None, None, &all_spans)
                 .await;
             Ok(())
         }
@@ -217,9 +221,31 @@ impl DuckLakeWriter {
     async fn write_session_stats_deltas_best_effort(
         &self,
         dk: Option<&DuckLakeConfig>,
+        scope: Option<&DuckLakeScope>,
         spans: &[Span],
     ) {
-        let deltas = derive_session_deltas(spans, &builtin_session_stats_manifest());
+        if crate::session_stats::fail_session_stats_delta_write_for_test() {
+            warn!(
+                sessions = spans.len(),
+                "session_stats_delta write fault-injected; spans already committed"
+            );
+            return;
+        }
+        let manifest = if let Some(scope) = scope {
+            match self.resolve_session_stats_manifest(scope).await {
+                Ok(m) => m,
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "session_stats manifest resolve failed; using builtin"
+                    );
+                    builtin_session_stats_manifest()
+                }
+            }
+        } else {
+            builtin_session_stats_manifest()
+        };
+        let deltas = derive_session_deltas(spans, &manifest);
         if deltas.is_empty() {
             return;
         }

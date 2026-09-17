@@ -298,8 +298,9 @@ a `measures` MAP for manifest extras). The list endpoint merges with
 `SUM`/`MIN`/`MAX`/`any_value` over those deltas; when the table is missing or
 the window has no deltas, it falls back to the historical `union_spans`
 aggregate. List `error_count` is a batch ERROR sum — not detail primary-error
-topology. Manifest: `softprobe.session_stats.v1` (builtin product defaults in
-`src/session_stats.rs`).
+topology. Manifest: `softprobe.session_stats.v1` — product defaults in
+[`session_stats/default.yaml`](session_stats/default.yaml); apply / resolve /
+core-vs-MAP rules in [`session_stats.md`](session_stats.md).
 
 Query surfaces include:
 
