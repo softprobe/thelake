@@ -23,6 +23,8 @@ pub mod promotion_sqlite_local;
 pub mod promotion_telemetry_columns;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_telemetry_ingest;
+pub mod session_stats_config;
+pub mod session_stats_delta;
 #[cfg(feature = "integration-e2e")]
 pub mod tenant_ducklake_registry;
 #[cfg(feature = "integration-e2e")]

@@ -16,7 +16,7 @@ pub use metrics_layout::{
     METRICS_LAYOUT_COLLAPSE_TABLES, METRICS_LAYOUT_CORE_TABLES, METRICS_LAYOUT_DOWNSAMPLE_TABLES,
 };
 pub use otlp_layout::ensure_otlp_table_partition_sort;
-pub use tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
+pub use tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, SessionStatsDeltaTable, TraceTable};
 pub use variant::{
     encode_attributes_json, hot_map_columns, parquet_select_for_table, parse_projected_json_value,
     prefer_attr_try_cast, prefer_attr_varchar, rehydrate_map_json_values, variant_as_json,

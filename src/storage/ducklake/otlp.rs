@@ -1,15 +1,20 @@
+use crate::config::DuckLakeConfig;
 use crate::models::{Log, Metric, Span};
 use crate::promotion::{
     ensure_promoted_columns_not_reserved, extract_telemetry_promoted_value, PromotionColumn,
     TelemetryColumnsManifest, TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
 };
 use crate::runtime_engine::DuckLakeScope;
+use crate::session_stats::{
+    builtin_session_stats_manifest, derive_session_deltas, session_stats_deltas_to_record_batch,
+};
 use crate::storage::schema::arrow;
-use crate::storage::schema::tables::{OtlpLogsTable, TraceTable};
+use crate::storage::schema::tables::{OtlpLogsTable, SessionStatsDeltaTable, TraceTable};
 use ::arrow::record_batch::RecordBatch;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::warn;
 
 use super::DuckLakeWriter;
 
@@ -138,6 +143,8 @@ impl DuckLakeWriter {
                 let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
                 self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
                     .await?;
+                self.write_session_stats_deltas_best_effort(Some(&dk), Some(&scope), &spans)
+                    .await;
                 return Ok(());
             }
             let spans = Self::flatten_spans(batches);
@@ -168,6 +175,8 @@ impl DuckLakeWriter {
                 let record_batches = vec![Span::to_record_batch(&tenant_spans, schema.as_ref())?];
                 self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
                     .await?;
+                self.write_session_stats_deltas_best_effort(Some(&dk), Some(&scope), &tenant_spans)
+                    .await;
             }
             Ok(())
         } else if self.ducklake.catalog_type == "sqlite" {
@@ -181,17 +190,93 @@ impl DuckLakeWriter {
             let schema = Arc::new(TraceTable::schema_with_promoted_columns(&columns));
             let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
             self.write_record_batches_internal("traces", record_batches)
-                .await
+                .await?;
+            let scope = DuckLakeScope {
+                metadata_schema: self.ducklake.metadata_schema.clone(),
+                data_path: self.ducklake.data_path.clone(),
+            };
+            self.write_session_stats_deltas_best_effort(None, Some(&scope), &spans)
+                .await;
+            Ok(())
         } else {
             let schema = self.spans_schema().await?;
             let mut record_batches = Vec::new();
+            let mut all_spans = Vec::new();
             for batch in batches {
                 if !batch.is_empty() {
+                    all_spans.extend(batch.iter().cloned());
                     record_batches.push(Span::to_record_batch(&batch, schema.as_ref())?);
                 }
             }
             self.write_record_batches_internal("traces", record_batches)
+                .await?;
+            self.write_session_stats_deltas_best_effort(None, None, &all_spans)
+                .await;
+            Ok(())
+        }
+    }
+
+    /// Append session_stats_delta rows for the batch. Failures are logged only —
+    /// span ingest must still succeed. Session list requires deltas (no span fallback).
+    async fn write_session_stats_deltas_best_effort(
+        &self,
+        dk: Option<&DuckLakeConfig>,
+        scope: Option<&DuckLakeScope>,
+        spans: &[Span],
+    ) {
+        if crate::session_stats::fail_session_stats_delta_write_for_test() {
+            warn!(
+                sessions = spans.len(),
+                "session_stats_delta write fault-injected; spans already committed"
+            );
+            return;
+        }
+        let manifest = if let Some(scope) = scope {
+            match self.resolve_session_stats_manifest(scope).await {
+                Ok(m) => m,
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "session_stats manifest resolve failed; using builtin"
+                    );
+                    builtin_session_stats_manifest()
+                }
+            }
+        } else {
+            builtin_session_stats_manifest()
+        };
+        let deltas = derive_session_deltas(spans, &manifest);
+        if deltas.is_empty() {
+            return;
+        }
+        let schema = SessionStatsDeltaTable::schema();
+        let batch = match session_stats_deltas_to_record_batch(&deltas, &schema) {
+            Ok(b) => b,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "session_stats_delta record batch build failed; spans already committed"
+                );
+                return;
+            }
+        };
+        let result = if let Some(dk) = dk {
+            self.write_record_batches_internal_with_ducklake(
+                dk,
+                SessionStatsDeltaTable::table_name(),
+                vec![batch],
+            )
+            .await
+        } else {
+            self.write_record_batches_internal(SessionStatsDeltaTable::table_name(), vec![batch])
                 .await
+        };
+        if let Err(err) = result {
+            warn!(
+                error = %err,
+                sessions = deltas.len(),
+                "session_stats_delta write failed; spans already committed"
+            );
         }
     }
 

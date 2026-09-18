@@ -31,6 +31,20 @@ fn string_map() -> DataType {
     )
 }
 
+fn double_map() -> DataType {
+    DataType::Map(
+        Arc::new(Field::new(
+            "entries",
+            DataType::Struct(Fields::from(vec![
+                Field::new("key", utf8(), false),
+                Field::new("value", DataType::Float64, true),
+            ])),
+            false,
+        )),
+        false,
+    )
+}
+
 /// Nullable hot MAP field; must be registered in [`hot_map_columns`].
 fn opt_hot_map(table: &str, name: &'static str) -> Field {
     assert!(
@@ -134,6 +148,34 @@ impl TraceTable {
         ];
         fields.extend(promoted_fields(&fields, columns));
         Schema::new(fields)
+    }
+}
+
+/// Per-ingest skinny session stats for merge-on-read list (`sessions/search`).
+pub struct SessionStatsDeltaTable;
+
+impl SessionStatsDeltaTable {
+    pub fn table_name() -> &'static str {
+        "session_stats_delta"
+    }
+
+    pub fn schema() -> Schema {
+        Schema::new(vec![
+            req("session_id", utf8()),
+            req("record_date", DataType::Date32),
+            req("start_time", ts_utc_nanos()),
+            req("end_time", ts_utc_nanos()),
+            req("observation_count", DataType::Int64),
+            req("error_count", DataType::Int64),
+            req("trace_count", DataType::Int64),
+            req("input_tokens", DataType::Int64),
+            req("output_tokens", DataType::Int64),
+            req("total_tokens", DataType::Int64),
+            req("total_cost", DataType::Float64),
+            opt("agent_name", utf8()),
+            req("is_nested_child", DataType::Boolean),
+            opt("measures", double_map()),
+        ])
     }
 }
 
@@ -310,6 +352,52 @@ mod tests {
                 .field_with_name("observed_timestamp")
                 .unwrap()
                 .data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+    }
+
+    #[test]
+    fn session_stats_delta_has_core_columns_and_measures_map() {
+        let schema = SessionStatsDeltaTable::schema();
+        assert_eq!(SessionStatsDeltaTable::table_name(), "session_stats_delta");
+        for name in [
+            "session_id",
+            "record_date",
+            "start_time",
+            "end_time",
+            "observation_count",
+            "error_count",
+            "trace_count",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "total_cost",
+            "agent_name",
+            "is_nested_child",
+            "measures",
+        ] {
+            assert!(
+                schema.field_with_name(name).is_ok(),
+                "missing column {name}"
+            );
+        }
+        assert!(matches!(
+            schema.field_with_name("measures").unwrap().data_type(),
+            DataType::Map(_, _)
+        ));
+        let DataType::Map(entries, _) = schema.field_with_name("measures").unwrap().data_type()
+        else {
+            panic!("expected map");
+        };
+        let DataType::Struct(fields) = entries.data_type() else {
+            panic!("expected struct entries");
+        };
+        assert_eq!(
+            fields.find("value").unwrap().1.data_type(),
+            &DataType::Float64
+        );
+        assert_eq!(
+            schema.field_with_name("start_time").unwrap().data_type(),
             &DataType::Timestamp(TimeUnit::Nanosecond, None)
         );
     }

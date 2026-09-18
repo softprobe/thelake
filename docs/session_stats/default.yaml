@@ -1,0 +1,48 @@
+# Canonical Softprobe session list skinny-delta manifest (product defaults).
+# Builtin fallback when no active promotion_specs row with target_kind=session_stats.
+# Apply via POST /v1/promotions/apply (specVersion softprobe.session_stats.v1).
+#
+# Ops are limited to sum / min / max / any. Map-backed measures (non-core names)
+# land in session_stats_delta.measures MAP(VARCHAR, DOUBLE). Core measures and
+# dimensions use typed columns on session_stats_delta.
+specVersion: softprobe.session_stats.v1
+key:
+  - session_id
+measures:
+  - name: observation_count
+    op: sum
+    source: { kind: count_rows }
+  - name: error_count
+    op: sum
+    source:
+      kind: count_where
+      column: status_code
+      eq: ERROR
+  - name: total_tokens
+    op: sum
+    source: { kind: column, column: total_tokens }
+  - name: total_cost
+    op: sum
+    source: { kind: column, column: total_cost }
+  - name: input_tokens
+    op: sum
+    source: { kind: column, column: input_tokens }
+  - name: output_tokens
+    op: sum
+    source: { kind: column, column: output_tokens }
+  - name: trace_count
+    op: sum
+    source: { kind: count_distinct, column: trace_id }
+  - name: start_time
+    op: min
+    source: { kind: column, column: timestamp }
+  - name: end_time
+    op: max
+    source: { kind: column, column: end_timestamp }
+dimensions:
+  - name: agent_name
+    source: { kind: column, column: agent_name }
+  - name: is_nested_child
+    source:
+      kind: flag_attr
+      key: sp.metadata.opencode.parentSessionID

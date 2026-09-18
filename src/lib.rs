@@ -17,5 +17,6 @@ pub mod query;
 pub mod runtime_api;
 pub mod runtime_engine;
 pub mod self_monitoring;
+pub mod session_stats;
 pub mod softprobe_assertion;
 pub mod storage;

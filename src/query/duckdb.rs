@@ -1177,6 +1177,7 @@ impl DuckDBCore {
         let traces = self.ducklake_qualified_table("traces");
         let logs = self.ducklake_qualified_table("logs");
         let scores = self.ducklake_qualified_table("scores");
+        let session_stats_delta = self.ducklake_qualified_table("session_stats_delta");
         let metrics_prefix = self.ducklake_catalog_prefix();
         let mut s = sql.to_string();
         for name in [
@@ -1200,6 +1201,7 @@ impl DuckDBCore {
         // bare `FROM traces` would miss the attachment and return empty (masked as 0 rows).
         s = replace_standalone_ident(&s, "traces", &traces);
         s = replace_standalone_ident(&s, "logs", &logs);
+        s = replace_standalone_ident(&s, "session_stats_delta", &session_stats_delta);
         s
     }
 

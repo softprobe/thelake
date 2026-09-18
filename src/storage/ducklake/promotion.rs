@@ -7,11 +7,13 @@
 use crate::promotion::{
     business_manifest_from_row, business_spec_activation, business_table_create_ddls,
     local_promotion_specs_table_ddl, run_business_apply, run_telemetry_apply,
-    telemetry_column_add_ddls, telemetry_manifest_from_row, telemetry_spec_activation,
-    BusinessApplyError, BusinessTableManifest, PromotionSpecActivation, PromotionSpecLoadError,
+    session_stats_manifest_from_row, session_stats_spec_activation, telemetry_column_add_ddls,
+    telemetry_manifest_from_row, telemetry_spec_activation, BusinessApplyError,
+    BusinessTableManifest, PromotionSpecActivation, PromotionSpecLoadError,
     TelemetryColumnsManifest,
 };
 use crate::runtime_engine::DuckLakeScope;
+use crate::session_stats::{session_stats_dimension_add_ddls, SessionStatsManifest};
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
 use std::sync::OnceLock;
@@ -67,6 +69,40 @@ WHERE status = 'active' AND target_kind = 'telemetry_columns';"
         }
     }
     Ok(out)
+}
+
+/// Load the active session_stats manifest from the local DuckLake catalog.
+pub(super) fn load_active_session_stats_manifest(
+    conn: &Connection,
+    catalog_alias: &str,
+) -> Result<Option<SessionStatsManifest>, PromotionSpecLoadError> {
+    let catalog = quote_duckdb_ident(catalog_alias);
+    let sql = format!(
+        "SELECT spec_id, manifest_json FROM {catalog}.promotion_specs \
+WHERE status = 'active' AND target_kind = 'session_stats' \
+ORDER BY applied_at DESC LIMIT 1;"
+    );
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(err) if table_missing(&err) => return Ok(None),
+        Err(err) => return Err(PromotionSpecLoadError::Backend(err.to_string())),
+    };
+    let mut rows = stmt
+        .query([])
+        .map_err(|err| PromotionSpecLoadError::Backend(err.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .map_err(|err| PromotionSpecLoadError::Backend(err.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let spec_id: String = row
+        .get(0)
+        .map_err(|err| PromotionSpecLoadError::Backend(err.to_string()))?;
+    let manifest_json: String = row
+        .get(1)
+        .map_err(|err| PromotionSpecLoadError::Backend(err.to_string()))?;
+    session_stats_manifest_from_row(&spec_id, &manifest_json)
 }
 
 /// Load the active business-table manifest for one logical table, if any.
@@ -214,6 +250,44 @@ impl DuckLakeWriter {
         Ok(Vec::new())
     }
 
+    pub fn load_active_session_stats_manifest_local(&self) -> Result<Option<SessionStatsManifest>> {
+        let dk = &self.ducklake;
+        self.with_attached_conn(dk, |conn| {
+            load_active_session_stats_manifest(conn, &dk.catalog_alias).map_err(Self::map_spec_load)
+        })
+    }
+
+    /// Load active session_stats manifest for this writer's scope, if any.
+    pub async fn load_active_session_stats_manifest(
+        &self,
+        scope: &DuckLakeScope,
+    ) -> Result<Option<SessionStatsManifest>> {
+        if self.ducklake.catalog_type == "postgres" {
+            let resolver = self
+                .tenant_ducklake
+                .as_ref()
+                .ok_or_else(|| anyhow!("postgres promotion requires a tenant DuckLake resolver"))?;
+            return resolver
+                .load_active_session_stats_manifest_for_scope(scope)
+                .await;
+        }
+        if self.ducklake.catalog_type == "sqlite" {
+            return self.load_active_session_stats_manifest_local();
+        }
+        Ok(None)
+    }
+
+    /// Active session_stats row, or builtin default.yaml.
+    pub async fn resolve_session_stats_manifest(
+        &self,
+        scope: &DuckLakeScope,
+    ) -> Result<SessionStatsManifest> {
+        Ok(self
+            .load_active_session_stats_manifest(scope)
+            .await?
+            .unwrap_or_else(crate::session_stats::builtin_session_stats_manifest))
+    }
+
     pub(super) fn activate_spec_local_unlocked(
         &self,
         scope: &DuckLakeScope,
@@ -266,6 +340,79 @@ impl DuckLakeWriter {
             "promotion specs are unsupported for catalog_type={}",
             self.ducklake.catalog_type
         ))
+    }
+
+    /// Apply session_stats dimension DDL (if any) and activate the spec.
+    pub async fn apply_and_record_session_stats_promotion(
+        &self,
+        scope: &DuckLakeScope,
+        manifest_yaml: &str,
+        manifest: &SessionStatsManifest,
+    ) -> Result<String> {
+        if self.ducklake.catalog_type == "postgres" {
+            let resolver = self
+                .tenant_ducklake
+                .as_ref()
+                .ok_or_else(|| anyhow!("postgres promotion requires a tenant DuckLake resolver"))?;
+            return resolver
+                .apply_session_stats_promotion_guarded(scope, manifest_yaml, || async {
+                    self.apply_session_stats_dimension_ddl(scope, manifest)
+                        .await
+                        .map(|_| ())
+                })
+                .await;
+        }
+        if self.ducklake.catalog_type == "sqlite" {
+            let _guard = local_apply_mutex().lock().await;
+            let activation = session_stats_spec_activation(manifest_yaml);
+            return run_telemetry_apply(
+                || async {
+                    self.apply_session_stats_dimension_ddl(scope, manifest)
+                        .await
+                        .map(|_| ())
+                },
+                || async { self.activate_spec_local_unlocked(scope, manifest_yaml, &activation) },
+            )
+            .await;
+        }
+        Err(anyhow!(
+            "promotion specs are unsupported for catalog_type={}",
+            self.ducklake.catalog_type
+        ))
+    }
+
+    /// Ensure `session_stats_delta` exists, then ADD COLUMN for non-physical dimensions.
+    pub async fn apply_session_stats_dimension_ddl(
+        &self,
+        scope: &DuckLakeScope,
+        manifest: &SessionStatsManifest,
+    ) -> Result<Vec<String>> {
+        let dk = self.effective_ducklake(scope);
+        let target_file_size_bytes = self.config.maintenance.target_file_size_bytes;
+        let ddls = self.with_attached_conn(&dk, |conn| {
+            Self::ensure_table_with_conn(
+                conn,
+                &dk,
+                "session_stats_delta",
+                None,
+                target_file_size_bytes,
+            )?;
+            let prefix = if dk.metadata_schema == "main" {
+                dk.catalog_alias.clone()
+            } else {
+                format!(
+                    "{}.{}",
+                    quote_duckdb_ident(&dk.catalog_alias),
+                    quote_duckdb_ident(&dk.metadata_schema)
+                )
+            };
+            let ddls = session_stats_dimension_add_ddls(&prefix, manifest);
+            for ddl in &ddls {
+                conn.execute_batch(ddl)?;
+            }
+            Ok(ddls)
+        })?;
+        Ok(ddls)
     }
 
     /// Backend-neutral guarded business-table apply (load → validate → DDL → record).

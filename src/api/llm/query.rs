@@ -15,7 +15,7 @@ use axum::Json;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::warn;
 
 const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -649,10 +649,11 @@ pub struct SessionSearchRequest {
     /// Keep only sessions containing at least one ERROR span.
     #[serde(default)]
     pub has_errors: Option<bool>,
-    pub user_id: Option<String>,
-    pub model_name: Option<String>,
-    /// Match session-level `agent_name` (persisted column, `sp.agent.name`, else agent span name).
-    pub agent_name: Option<String>,
+    /// Equality filters on `session_stats_delta` dimension columns.
+    /// Keys must be physical columns or declared on the resolved session_stats
+    /// manifest (same names as `dimensions[].name` in softprobe.session_stats.v1).
+    #[serde(default)]
+    pub dimensions: BTreeMap<String, String>,
     /// When true (default), hide legacy nested-only OpenCode child sessions.
     #[serde(default = "default_true")]
     pub roots_only: bool,
@@ -714,11 +715,32 @@ pub async fn search_sessions(
     // to fix, just with a different status code.
     let cursor_supported =
         request.order_by == SessionOrderBy::StartTime && request.order == SortDirection::Desc;
-    let sql = compile_session_search_sql(&request, limit).map_err(bad_request)?;
-    let result = state
-        .execute_tenant_scoped_sql(tenant.as_ref().map(|extension| &extension.0), &sql)
-        .await
-        .map_err(storage_error)?;
+    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
+    let tenant_id = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
+    let manifest = match state.engines.engine_for(tenant_id).await {
+        Ok(engine) => engine
+            .storage
+            .writer
+            .resolve_session_stats_manifest(&engine.scope)
+            .await
+            .unwrap_or_else(|_| crate::session_stats::builtin_session_stats_manifest()),
+        Err(_) => crate::session_stats::builtin_session_stats_manifest(),
+    };
+    validate_session_search_against_manifest(&request, &manifest)
+        .map_err(|m| session_stats_schema_error(&m))?;
+
+    let sql = compile_session_search_sql_from_deltas(&request, limit, &manifest)
+        .map_err(bad_request)?;
+
+    let result = match state.execute_tenant_scoped_sql(tenant_ref, &sql).await {
+        Ok(result) => result,
+        Err(err) if is_missing_session_stats_table(&err) => {
+            return Err(session_stats_schema_error(
+                "session_stats_delta is missing; promote softprobe.session_stats.v1 or ingest spans so the table is created",
+            ));
+        }
+        Err(err) => return Err(storage_error(err)),
+    };
 
     let mut items = result
         .rows
@@ -740,63 +762,115 @@ pub async fn search_sessions(
     }))
 }
 
+fn is_missing_session_stats_table(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("session_stats_delta")
+        && (msg.contains("does not exist")
+            || msg.contains("not found")
+            || msg.contains("catalog error")
+            || msg.contains("table with name"))
+}
+
+fn session_stats_schema_error(message: &str) -> ApiError {
+    bad_request(format!(
+        "session_stats_delta table schema does not allow this query, please consider applying softprobe.session_stats.v1: {message}"
+    ))
+}
+
+/// Non-empty equality filters from `request.dimensions`, in stable key order.
+fn session_search_dimension_filters(
+    request: &SessionSearchRequest,
+) -> Vec<(&str, &str)> {
+    request
+        .dimensions
+        .iter()
+        .filter_map(|(name, value)| {
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some((name.as_str(), value))
+            }
+        })
+        .collect()
+}
+
+/// Reject list filters the resolved session_stats schema cannot answer.
+/// Session list never scans `union_spans`.
+pub fn validate_session_search_against_manifest(
+    request: &SessionSearchRequest,
+    manifest: &crate::session_stats::SessionStatsManifest,
+) -> Result<(), String> {
+    let dims: std::collections::HashSet<&str> = manifest
+        .dimensions
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    for (name, _) in session_search_dimension_filters(request) {
+        if !crate::session_stats::is_valid_session_stats_identifier(name) {
+            return Err(format!(
+                "filter dimension `{name}` is not a valid identifier ([a-z_][a-z0-9_]*)"
+            ));
+        }
+        if crate::session_stats::is_physical_session_stats_column(name) || dims.contains(name) {
+            continue;
+        }
+        return Err(format!(
+            "filter `{name}` is not available on session_stats_delta; declare it as a session_stats dimension and apply softprobe.session_stats.v1"
+        ));
+    }
+    Ok(())
+}
+
+/// Compile session list SQL against `session_stats_delta` (builtin manifest).
 pub fn compile_session_search_sql(
     request: &SessionSearchRequest,
     limit: usize,
+) -> Result<String, String> {
+    compile_session_search_sql_with_manifest(
+        request,
+        limit,
+        &crate::session_stats::builtin_session_stats_manifest(),
+    )
+}
+
+pub fn compile_session_search_sql_with_manifest(
+    request: &SessionSearchRequest,
+    limit: usize,
+    manifest: &crate::session_stats::SessionStatsManifest,
+) -> Result<String, String> {
+    validate_session_search_against_manifest(request, manifest)?;
+    compile_session_search_sql_from_deltas(request, limit, manifest)
+}
+
+pub fn compile_session_search_sql_from_deltas(
+    request: &SessionSearchRequest,
+    limit: usize,
+    manifest: &crate::session_stats::SessionStatsManifest,
 ) -> Result<String, String> {
     if request.from > request.to {
         return Err("`from` must be <= `to`".to_string());
     }
 
-    let mut predicates = vec![
-        format!(
-            "{} >= {}",
-            timestamp_ns_column("timestamp"),
-            timestamp_ns_literal(&request.from)
-        ),
+    let from_date = request.from.date_naive();
+    let to_date = request.to.date_naive();
+    // Overlap [start_time, end_time] with [from, to]; record_date for partition prune.
+    let predicates = [
+        format!("record_date >= DATE '{from_date}'"),
+        format!("record_date <= DATE '{to_date}'"),
         format!(
             "{} <= {}",
-            timestamp_ns_column("timestamp"),
+            timestamp_ns_column("start_time"),
             timestamp_ns_literal(&request.to)
         ),
-        // Spans without a session id cannot belong to a session row.
+        format!(
+            "{} >= {}",
+            timestamp_ns_column("end_time"),
+            timestamp_ns_literal(&request.from)
+        ),
         "session_id IS NOT NULL AND session_id <> ''".to_string(),
-        // Web recording shares session_id with LLM spans but is not an LLM
-        // observation — keep it off list aggregates / trace counts.
-        exclude_recording_observation_sql(),
     ];
-    if let Some(user_id) = request.user_id.as_deref().filter(|v| !v.trim().is_empty()) {
-        predicates.push(format!(
-            "{} = {}",
-            expr_user_id(),
-            sql_string_literal(user_id)
-        ));
-    }
-    if let Some(model) = request
-        .model_name
-        .as_deref()
-        .filter(|v| !v.trim().is_empty())
-    {
-        predicates.push(format!(
-            "{} = {}",
-            expr_model_name(),
-            sql_string_literal(model)
-        ));
-    }
 
-    // Cursor paging is defined against (start_time, session_id) descending.
-    //
-    // The predicate must sit on the OUTER query: start_time is an aggregate
-    // alias (MIN(timestamp)), so pushing it into the inner WHERE both fails to
-    // bind ("WHERE clause cannot contain aggregates") and would be wrong even
-    // if it bound -- trimming raw spans by timestamp makes every SUM/COUNT for
-    // that session cover only the post-cursor slice, so the aggregates would
-    // shift as the caller pages.
-    //
-    // `order=asc` is rejected too: cursor_predicate emits `<`, which under an
-    // ascending sort walks backwards and loops.
-    //
-    // Session-level `agent_name` is also an aggregate alias — filter it here.
     let mut outer_predicates = Vec::new();
     if let Some(cursor) = request.cursor.as_deref().filter(|v| !v.is_empty()) {
         if request.order_by != SessionOrderBy::StartTime {
@@ -807,12 +881,16 @@ pub fn compile_session_search_sql(
         }
         outer_predicates.push(cursor_predicate(cursor, "start_time", "session_id")?);
     }
-    if let Some(agent) = request
-        .agent_name
-        .as_deref()
-        .filter(|v| !v.trim().is_empty())
-    {
-        outer_predicates.push(format!("agent_name = {}", sql_string_literal(agent.trim())));
+
+    let mut extra_select = String::new();
+    for (name, value) in session_search_dimension_filters(request) {
+        outer_predicates.push(format!("{name} = {}", sql_string_literal(value)));
+        // Physical columns (e.g. agent_name) are already projected below.
+        if !crate::session_stats::is_physical_session_stats_column(name) {
+            extra_select.push_str(&format!(
+                ", any_value({name}) FILTER (WHERE NULLIF({name}, '') IS NOT NULL) AS {name}"
+            ));
+        }
     }
     let cursor_sql = if outer_predicates.is_empty() {
         String::new()
@@ -826,18 +904,8 @@ pub fn compile_session_search_sql(
     } else if request.has_errors == Some(false) {
         having.push("error_count = 0".to_string());
     }
-
-    let observation_type = format!("COALESCE({}, 'span')", expr_observation_type());
-    // Legacy OpenCode child sessions stamped their own ses_* as session_id and
-    // marked the turn with parentSessionID. Drop those from the default list;
-    // holistic (new) sessions keep a root agent turn without that metadata.
-    // COALESCE inside arg_min matters: DuckDB arg_min skips NULLs, so a later
-    // nested turn's parentSessionID would otherwise "win" over an earlier root.
     if request.roots_only {
-        having.push(format!(
-            "COALESCE(arg_min(COALESCE(CAST(attributes['sp.metadata.opencode.parentSessionID'] AS VARCHAR), ''), timestamp) FILTER (WHERE {obs_type} = 'agent'), '') = ''",
-            obs_type = observation_type
-        ));
+        having.push("NOT BOOL_OR(is_nested_child)".to_string());
     }
 
     let direction = request.order.as_sql();
@@ -857,42 +925,44 @@ pub fn compile_session_search_sql(
         }
     };
 
+    for measure in &manifest.measures {
+        if measure.map_backed {
+            // Expose extras for future API; SessionSummary ignores unknown columns.
+            extra_select.push_str(&format!(
+                ", SUM(TRY_CAST(measures[{key}] AS DOUBLE)) AS {name}",
+                key = sql_string_literal(&measure.name),
+                name = measure.name
+            ));
+        }
+    }
+
     Ok(format!(
         "SELECT * FROM ( \
            SELECT \
              session_id, \
-             MIN(timestamp) AS start_time, \
-             MAX(COALESCE(end_timestamp, timestamp)) AS end_time, \
-             date_diff('millisecond', MIN(timestamp), MAX(COALESCE(end_timestamp, timestamp)))::BIGINT AS duration_ms, \
-             COUNT(DISTINCT trace_id)::BIGINT AS trace_count, \
-             COUNT(*)::BIGINT AS observation_count, \
-             SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END)::BIGINT AS error_count, \
-             SUM({input_tokens})::BIGINT AS input_tokens, \
-             SUM({output_tokens})::BIGINT AS output_tokens, \
-             SUM({total_tokens})::BIGINT AS total_tokens, \
-             SUM({total_cost}) AS total_cost, \
-             COALESCE( \
-               NULLIF(arg_min({agent_attr}, timestamp) FILTER (WHERE NULLIF({agent_attr}, '') IS NOT NULL), ''), \
-               arg_min(message_type, timestamp) FILTER (WHERE {obs_type} = 'agent') \
-             ) AS agent_name, \
-             list(DISTINCT {user_id}) AS user_ids, \
-             list(DISTINCT {model_name}) AS models \
-           FROM union_spans \
+             MIN(start_time) AS start_time, \
+             MAX(end_time) AS end_time, \
+             date_diff('millisecond', MIN(start_time), MAX(end_time))::BIGINT AS duration_ms, \
+             SUM(trace_count)::BIGINT AS trace_count, \
+             SUM(observation_count)::BIGINT AS observation_count, \
+             SUM(error_count)::BIGINT AS error_count, \
+             SUM(input_tokens)::BIGINT AS input_tokens, \
+             SUM(output_tokens)::BIGINT AS output_tokens, \
+             SUM(total_tokens)::BIGINT AS total_tokens, \
+             SUM(total_cost) AS total_cost, \
+             any_value(agent_name) FILTER (WHERE NULLIF(agent_name, '') IS NOT NULL) AS agent_name, \
+             CAST([] AS VARCHAR[]) AS user_ids, \
+             CAST([] AS VARCHAR[]) AS models \
+             {extra_select} \
+           FROM session_stats_delta \
            WHERE {where_sql} \
            GROUP BY session_id \
            {having_sql} \
          ){cursor_sql} \
          ORDER BY {order_sql} \
          LIMIT {fetch}",
+        extra_select = extra_select,
         cursor_sql = cursor_sql,
-        input_tokens = expr_input_tokens(),
-        output_tokens = expr_output_tokens(),
-        total_tokens = expr_total_tokens(),
-        total_cost = expr_total_cost(),
-        agent_attr = expr_agent_name_attr(),
-        obs_type = observation_type,
-        user_id = expr_user_id(),
-        model_name = expr_model_name(),
         where_sql = predicates.join(" AND "),
         having_sql = if having.is_empty() {
             String::new()
@@ -900,7 +970,6 @@ pub fn compile_session_search_sql(
             format!("HAVING {}", having.join(" AND "))
         },
         order_sql = order_sql,
-        // one extra row tells us whether another page exists
         fetch = limit + 1,
     ))
 }
@@ -1309,11 +1378,6 @@ fn expr_user_id() -> String {
         prefer_attr_varchar(Some(llm_promo().user_id), "attributes", "sp.user.id"),
         variant_varchar("attributes", "enduser.id")
     )
-}
-
-/// Session agent name: persisted assertion column, then `sp.agent.name`, else bag-only.
-fn expr_agent_name_attr() -> String {
-    prefer_attr_varchar(Some("agent_name"), "attributes", "sp.agent.name")
 }
 
 fn expr_input_tokens() -> String {
@@ -1958,9 +2022,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             has_errors: None,
-            user_id: None,
-            model_name: None,
-            agent_name: None,
+            dimensions: BTreeMap::new(),
             roots_only: true,
             order_by: SessionOrderBy::StartTime,
             order: SortDirection::Desc,
@@ -1971,28 +2033,34 @@ mod tests {
 
     #[test]
     fn session_search_prefers_persisted_agent_name_then_attr_and_filters_outer() {
+        // Default path merges skinny deltas — agent_name is already a column.
         let sql = compile_session_search_sql(&session_search_request(), 50).expect("sql");
-        let col_pos = sql
-            .find("COALESCE(agent_name,")
-            .expect("agent_name must prefer persisted column");
-        let attr_pos = sql
-            .find("sp.agent.name")
-            .expect("agent_name must fall back to sp.agent.name");
         assert!(
-            col_pos < attr_pos,
-            "persisted agent_name must lead attr fallback: {sql}"
+            sql.contains("FROM session_stats_delta"),
+            "default list must read session_stats_delta: {sql}"
         );
         assert!(
-            sql.contains("arg_min(message_type, timestamp) FILTER"),
-            "agent_name must fall back to agent span name: {sql}"
+            sql.contains("any_value(agent_name) FILTER"),
+            "delta agent_name merge: {sql}"
         );
 
         let mut request = session_search_request();
-        request.agent_name = Some("support-refund-agent".into());
+        request
+            .dimensions
+            .insert("agent_name".into(), "support-refund-agent".into());
         let filtered = compile_session_search_sql(&request, 50).expect("sql");
         assert!(
             filtered.contains("agent_name = 'support-refund-agent'"),
             "agent filter must apply on outer aggregate: {filtered}"
+        );
+
+        // Undeclared dimensions are rejected — no union_spans fallback.
+        let mut span_req = session_search_request();
+        span_req.dimensions.insert("user_id".into(), "u1".into());
+        let err = compile_session_search_sql(&span_req, 50).expect_err("undeclared user_id");
+        assert!(
+            err.contains("user_id") && err.contains("session_stats"),
+            "must reject undeclared user_id: {err}"
         );
     }
 
@@ -2000,12 +2068,15 @@ mod tests {
     fn session_search_aggregates_in_sql_and_bounds_time() {
         let sql = compile_session_search_sql(&session_search_request(), 50).expect("sql");
         assert!(sql.contains("GROUP BY session_id"));
-        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) >="));
-        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="));
+        assert!(sql.contains("FROM session_stats_delta"));
+        assert!(sql.contains("record_date >="));
+        assert!(sql.contains("CAST(start_time AS TIMESTAMP_NS)"));
+        assert!(sql.contains("CAST(end_time AS TIMESTAMP_NS)"));
         // spans with no session id must not become a session row
         assert!(sql.contains("session_id IS NOT NULL AND session_id <> ''"));
-        // recording spans share session_id but must not inflate LLM session rows
-        assert!(sql.contains("<> 'recording'"));
+        // no fat bags on the happy path
+        assert!(!sql.contains("attributes["));
+        assert!(!sql.contains("events"));
         // one extra row is what tells us another page exists
         assert!(sql.contains("LIMIT 51"));
     }
@@ -2032,17 +2103,158 @@ mod tests {
         let request = session_search_request();
         let sql = compile_session_search_sql(&request, 50).expect("sql");
         assert!(
-            sql.contains("sp.metadata.opencode.parentSessionID"),
-            "roots_only must inspect legacy parent metadata: {sql}"
+            sql.contains("NOT BOOL_OR(is_nested_child)"),
+            "roots_only must filter merged is_nested_child: {sql}"
+        );
+        assert!(
+            !sql.contains("sp.metadata.opencode.parentSessionID"),
+            "delta path must not scan parent attr bag: {sql}"
         );
 
         let mut all = session_search_request();
         all.roots_only = false;
         let sql = compile_session_search_sql(&all, 50).expect("sql");
         assert!(
-            !sql.contains("sp.metadata.opencode.parentSessionID"),
-            "roots_only=false must not filter parent metadata: {sql}"
+            !sql.contains("is_nested_child"),
+            "roots_only=false must not filter nested flag: {sql}"
         );
+    }
+
+    #[test]
+    fn session_search_delta_merge_ops_and_extra_measure() {
+        let sql = compile_session_search_sql(&session_search_request(), 50).expect("sql");
+        assert!(sql.contains("SUM(observation_count)"));
+        assert!(sql.contains("MIN(start_time)"));
+        assert!(sql.contains("MAX(end_time)"));
+        assert!(sql.contains("SUM(error_count)"));
+
+        let manifest = crate::session_stats::parse_session_stats_manifest(
+            r#"
+specVersion: softprobe.session_stats.v1
+key: [session_id]
+measures:
+  - name: observation_count
+    op: sum
+    source: { kind: count_rows }
+  - name: tool_calls
+    op: sum
+    source: { kind: column, column: tool_call_count }
+"#,
+        )
+        .unwrap();
+        let sql = compile_session_search_sql_from_deltas(&session_search_request(), 10, &manifest)
+            .expect("sql");
+        assert!(
+            sql.contains("SUM(TRY_CAST(measures['tool_calls'] AS DOUBLE)) AS tool_calls"),
+            "extra measure from map: {sql}"
+        );
+    }
+
+    #[test]
+    fn session_search_declared_user_id_filters_on_deltas() {
+        let manifest = crate::session_stats::parse_session_stats_manifest(
+            r#"
+specVersion: softprobe.session_stats.v1
+key: [session_id]
+measures:
+  - name: observation_count
+    op: sum
+    source: { kind: count_rows }
+dimensions:
+  - name: agent_name
+    source: { kind: column, column: agent_name }
+  - name: user_id
+    source: { kind: column, column: user_id }
+"#,
+        )
+        .unwrap();
+        let mut request = session_search_request();
+        request.dimensions.insert("user_id".into(), "u1".into());
+        let sql =
+            compile_session_search_sql_with_manifest(&request, 50, &manifest).expect("sql");
+        assert!(sql.contains("FROM session_stats_delta"), "{sql}");
+        assert!(sql.contains("user_id = 'u1'"), "{sql}");
+        assert!(!sql.contains("FROM union_spans"), "{sql}");
+    }
+
+    #[test]
+    fn golden_merge_math_multi_batch_deltas_sum_and_minmax() {
+        // Derive-level arithmetic only. Real merge-on-read goldens live in
+        // tests/integration/session_stats_delta.rs (HTTP + DuckDB).
+        use crate::session_stats::{builtin_session_stats_manifest, derive_session_deltas};
+        use chrono::TimeZone;
+
+        fn make_span(
+            session: &str,
+            trace: &str,
+            tokens: i64,
+            cost: f64,
+            err: bool,
+            ts: DateTime<Utc>,
+        ) -> crate::models::Span {
+            let mut s = crate::models::Span {
+                session_id: session.into(),
+                trace_id: trace.into(),
+                span_id: format!("sp-{trace}"),
+                parent_span_id: None,
+                app_id: "app".into(),
+                organization_id: None,
+                tenant_id: None,
+                agent_id: None,
+                agent_name: None,
+                message_type: "span".into(),
+                span_kind: None,
+                timestamp: ts,
+                end_timestamp: Some(ts + chrono::Duration::seconds(1)),
+                attributes: Default::default(),
+                resource_attributes: Default::default(),
+                events: vec![],
+                status_code: if err { Some("ERROR".into()) } else { None },
+                status_message: None,
+                http_request_method: None,
+                http_request_path: None,
+                http_request_headers: None,
+                http_request_body: None,
+                http_response_status_code: None,
+                http_response_headers: None,
+                http_response_body: None,
+            };
+            s.attributes
+                .insert("total_tokens".into(), tokens.to_string());
+            s.attributes.insert("total_cost".into(), cost.to_string());
+            s
+        }
+
+        let t1 = Utc.with_ymd_and_hms(2026, 7, 20, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 7, 20, 11, 0, 0).unwrap();
+        let batch1 = derive_session_deltas(
+            &[make_span("A", "t1", 10, 0.1, true, t1)],
+            &builtin_session_stats_manifest(),
+        );
+        let batch2 = derive_session_deltas(
+            &[
+                make_span("A", "t1", 20, 0.2, false, t2),
+                make_span("A", "t2", 0, 0.0, true, t2),
+            ],
+            &builtin_session_stats_manifest(),
+        );
+        assert_eq!(batch1[0].observation_count + batch2[0].observation_count, 3);
+        assert_eq!(batch1[0].error_count + batch2[0].error_count, 2);
+        assert_eq!(batch1[0].total_tokens + batch2[0].total_tokens, 30);
+        assert!(((batch1[0].total_cost + batch2[0].total_cost) - 0.3).abs() < 1e-9);
+        assert_eq!(batch1[0].start_time.min(batch2[0].start_time), t1);
+
+        let sql = compile_session_search_sql_from_deltas(
+            &session_search_request(),
+            10,
+            &builtin_session_stats_manifest(),
+        )
+        .unwrap();
+        assert!(sql.contains("SUM(observation_count)"));
+        assert!(sql.contains("MIN(start_time)"));
+        assert!(sql.contains("MAX(end_time)"));
+        assert!(!sql.contains("FROM union_spans"));
+        assert!(!sql.contains("attributes["));
     }
 
     #[test]
@@ -2080,10 +2292,33 @@ mod tests {
 
     #[test]
     fn session_search_escapes_filter_literals() {
+        let manifest = crate::session_stats::parse_session_stats_manifest(
+            r#"
+specVersion: softprobe.session_stats.v1
+key: [session_id]
+measures:
+  - name: observation_count
+    op: sum
+    source: { kind: count_rows }
+dimensions:
+  - name: agent_name
+    source: { kind: column, column: agent_name }
+  - name: user_id
+    source: { kind: column, column: user_id }
+  - name: model_name
+    source: { kind: column, column: model_name }
+"#,
+        )
+        .unwrap();
         let mut request = session_search_request();
-        request.user_id = Some("u'; DROP TABLE traces; --".to_string());
-        request.model_name = Some("gpt-5.2'".to_string());
-        let sql = compile_session_search_sql(&request, 50).expect("sql");
+        request.dimensions.insert(
+            "user_id".into(),
+            "u'; DROP TABLE traces; --".to_string(),
+        );
+        request
+            .dimensions
+            .insert("model_name".into(), "gpt-5.2'".to_string());
+        let sql = compile_session_search_sql_with_manifest(&request, 50, &manifest).expect("sql");
         // The whole payload must land inside one literal with its quote doubled,
         // so the `;` never terminates a statement.
         assert!(sql.contains("'u''; DROP TABLE traces; --'"));
@@ -2194,19 +2429,6 @@ mod tests {
         assert!(
             search.find("model_name").unwrap()
                 < search.find("attributes['gen_ai.request.model']").unwrap()
-        );
-
-        let mut session = session_search_request();
-        session.user_id = Some("user-1".into());
-        session.model_name = Some("gpt-4o".into());
-        let session_sql = compile_session_search_sql(&session, 10).expect("session");
-        assert!(session_sql.contains("COALESCE(observation_type,"));
-        assert!(session_sql.contains("COALESCE(model_name,"));
-        assert!(
-            session_sql.find("observation_type").unwrap()
-                < session_sql
-                    .find("attributes['sp.observation.type']")
-                    .unwrap()
         );
     }
 
