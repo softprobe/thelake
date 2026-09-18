@@ -158,8 +158,7 @@ fn rewrite_reserved_telemetry_view_names(sql: &str) -> String {
     let mut s = sql.to_string();
     // Longer / legacy names first so `union_metrics` is not partially consumed by `metrics`.
     // Preferred public names: `traces` / `logs` / `metrics` (see ducklake_inline_sql).
-    // `union_*` and historical buffer/staged/iceberg/committed aliases stay as rewrite-only
-    // compatibility input until the shim is deleted (session-list-index Stage 0b.3).
+    // `union_*` and historical buffer/staged/iceberg/committed aliases stay rewrite-only.
     const PAIRS: &[(&str, &str)] = &[
         ("union_metrics", "tm_all_metric"),
         ("committed_metrics", "tm_cq_metric"),
