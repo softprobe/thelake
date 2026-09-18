@@ -1,12 +1,13 @@
+use crate::async_jobs::{self, Job};
 use crate::catalog::DropdownCatalog;
 use crate::compaction::executor::MaintenanceExecutor;
+use crate::compaction::maintenance_job::MaintenanceJob;
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
 use anyhow::Result;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
 
 /// Wake often enough for snapshot expiry without forcing TWCS at that rate.
 pub fn scheduler_wake_seconds(
@@ -29,13 +30,14 @@ pub fn scheduler_wake_seconds(
 
 /// TWCS/ladder is due on its own interval, not on every metadata tick (AC-Q9).
 ///
-/// Allow 1s early: `tokio::time::interval` often fires a tick slightly before
-/// the full period, which previously skipped every other compact and let
-/// open-day Parquet climb to 100+ files between merges (Grafana >100ms).
-pub fn compaction_due(elapsed_secs: u64, compaction_interval_seconds: u64) -> bool {
-    compaction_interval_seconds > 0 && elapsed_secs + 1 >= compaction_interval_seconds
+/// Allow 2s early: matches the pre-lease scheduler's `Instant` compare
+/// (`elapsed + 2s >= interval`) so timer jitter does not skip merges.
+pub fn compaction_due(elapsed: Duration, compaction_interval_seconds: u64) -> bool {
+    compaction_interval_seconds > 0
+        && elapsed + Duration::from_secs(2) >= Duration::from_secs(compaction_interval_seconds)
 }
 
+/// Start maintenance on the shared async job runner (leased per tenant).
 pub async fn start_maintenance_scheduler(
     config: &Config,
     dropdown_catalog: Option<Arc<DropdownCatalog>>,
@@ -43,7 +45,7 @@ pub async fn start_maintenance_scheduler(
 ) -> Result<Option<JoinHandle<()>>> {
     let metadata_enabled = config.maintenance.metadata_enabled;
     let compaction_enabled = config.maintenance.enabled;
-    let Some(interval_seconds) = scheduler_wake_seconds(
+    let Some(wake_secs) = scheduler_wake_seconds(
         metadata_enabled,
         compaction_enabled,
         config.maintenance.metadata_interval_seconds,
@@ -51,46 +53,21 @@ pub async fn start_maintenance_scheduler(
     ) else {
         return Ok(None);
     };
-    let compact_interval = config.maintenance.interval_seconds.max(1);
 
-    let executor = MaintenanceExecutor::new(config, dropdown_catalog, scope_registry).await?;
-    let handle = tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(interval_seconds));
-        // Long TWCS merges (multi-second) must not Burst-catch-up into a
-        // compaction=false metadata-only pass that wastes the next slot —
-        // that pattern left open-day Parquet at 100+ files for Grafana.
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // First tick should compact; then wait `compact_interval`.
-        let mut last_compact = Instant::now()
-            .checked_sub(Duration::from_secs(compact_interval))
-            .unwrap_or_else(Instant::now);
-        loop {
-            ticker.tick().await;
-            // Compact whenever the TWCS interval has elapsed (2s early slack for
-            // timer jitter). Do not require a perfect second boundary — missed
-            // Burst/Delay ticks previously left open-day files at 100+.
-            let run_compaction = compaction_enabled
-                && last_compact.elapsed() + Duration::from_secs(2)
-                    >= Duration::from_secs(compact_interval);
-            match executor.run_pass(run_compaction).await {
-                Ok(summary) => {
-                    if run_compaction {
-                        last_compact = Instant::now();
-                    }
-                    info!(
-                        "Maintenance run complete for {} tables (compaction={})",
-                        summary.tables.len(),
-                        run_compaction
-                    );
-                }
-                Err(err) => {
-                    warn!("Maintenance run failed: {}", err);
-                }
-            }
-        }
-    });
-
-    Ok(Some(handle))
+    let executor =
+        MaintenanceExecutor::new(config, dropdown_catalog, scope_registry.clone()).await?;
+    let job: Arc<dyn Job> = Arc::new(MaintenanceJob::new(
+        executor,
+        wake_secs,
+        config.maintenance.interval_seconds.max(1),
+        compaction_enabled,
+    ));
+    let leases = async_jobs::lease_store_for(scope_registry.as_ref());
+    Ok(async_jobs::spawn_runner(
+        &config.async_jobs,
+        leases,
+        vec![job],
+    ))
 }
 
 #[cfg(test)]
@@ -123,14 +100,15 @@ mod tests {
 
     #[test]
     fn twcs_does_not_run_every_metadata_tick() {
-        assert!(!compaction_due(0, 300));
-        assert!(!compaction_due(60, 300));
-        assert!(!compaction_due(298, 300));
+        use std::time::Duration;
+        assert!(!compaction_due(Duration::from_secs(0), 300));
+        assert!(!compaction_due(Duration::from_secs(60), 300));
+        assert!(!compaction_due(Duration::from_secs(297), 300));
         assert!(
-            compaction_due(299, 300),
-            "1s early slack for interval jitter"
+            compaction_due(Duration::from_secs(298), 300),
+            "2s early slack matching pre-lease Instant compare"
         );
-        assert!(compaction_due(300, 300));
-        assert!(compaction_due(301, 300));
+        assert!(compaction_due(Duration::from_secs(300), 300));
+        assert!(compaction_due(Duration::from_secs(301), 300));
     }
 }

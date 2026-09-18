@@ -5,5 +5,6 @@ mod downsample_correctness_tests;
 pub mod executor;
 #[cfg(test)]
 mod ladder_tests;
+mod maintenance_job;
 pub mod scheduler;
 pub mod twcs;

@@ -3,6 +3,7 @@
 mod test_support;
 
 pub mod api;
+pub mod async_jobs;
 pub mod authn;
 pub mod catalog;
 pub mod compaction;

@@ -16,6 +16,9 @@ pub struct Config {
     pub query: QueryConfig,
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
+    /// Shared async job runner + lease settings (maintenance, future session-index).
+    #[serde(default)]
+    pub async_jobs: AsyncJobsConfig,
     /// Required DuckLake catalog + data warehouse settings.
     pub ducklake: DuckLakeConfig,
     #[serde(default)]
@@ -26,6 +29,54 @@ pub struct Config {
     /// Self-monitoring ops lake (Design 2). Disabled by default.
     #[serde(default)]
     pub self_monitoring: SelfMonitoringConfig,
+}
+
+/// Cross-replica job leasing for the shared async job runner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AsyncJobsConfig {
+    /// Stable process id; default `thelake-{pid}-{uuid}` when null/empty.
+    #[serde(default)]
+    pub instance_id: Option<String>,
+    #[serde(default = "default_lease_ttl_seconds")]
+    pub lease_ttl_seconds: u64,
+    /// Heartbeat period while holding a lease. Keep well below `lease_ttl_seconds`
+    /// (e.g. ttl ≥ 3× heartbeat) so a slow DB round-trip cannot leave the row stealable.
+    #[serde(default = "default_heartbeat_seconds")]
+    pub heartbeat_seconds: u64,
+}
+
+impl Default for AsyncJobsConfig {
+    fn default() -> Self {
+        Self {
+            instance_id: None,
+            lease_ttl_seconds: default_lease_ttl_seconds(),
+            heartbeat_seconds: default_heartbeat_seconds(),
+        }
+    }
+}
+
+fn default_lease_ttl_seconds() -> u64 {
+    120
+}
+
+fn default_heartbeat_seconds() -> u64 {
+    30
+}
+
+impl AsyncJobsConfig {
+    /// Resolved holder id for lease rows.
+    pub fn resolved_instance_id(&self) -> String {
+        if let Some(id) = self
+            .instance_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return id.to_string();
+        }
+        format!("thelake-{}-{}", std::process::id(), uuid::Uuid::new_v4())
+    }
 }
 
 /// Reserved ops DuckLake scope + OTel export interval.
