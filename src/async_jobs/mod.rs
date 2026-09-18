@@ -77,6 +77,7 @@ pub fn spawn_runner(
                     Ok(s) => s,
                     Err(err) => {
                         warn!(job = job.name(), "scope_keys failed: {err}");
+                        // Sentinel scope label (not a tenant_id) — filter in dashboards.
                         self_monitoring::record_job_error(job.name(), "_scopes");
                         continue;
                     }

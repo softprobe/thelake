@@ -503,23 +503,26 @@ async fn runner_skips_scope_on_acquire_error_and_continues() {
     );
 }
 
-struct PanicJob {
+struct SlowPanicJob {
     ran: AtomicUsize,
+    sleep_ms: u64,
 }
 
 #[async_trait]
-impl Job for PanicJob {
+impl Job for SlowPanicJob {
     fn name(&self) -> &'static str {
         "panic_job"
     }
     fn interval(&self) -> Duration {
-        Duration::from_millis(10)
+        // Once per test window — avoid a second acquire/HB after unwind.
+        Duration::from_secs(3600)
     }
     async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
         Ok(vec!["t1".into()])
     }
     async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
         self.ran.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
         panic!("injected job panic");
     }
 }
@@ -527,9 +530,14 @@ impl Job for PanicJob {
 /// Job panic must be caught (runner continues) and stop the heartbeat via RAII.
 #[tokio::test]
 async fn runner_survives_job_panic_and_stops_heartbeat() {
-    let leases = Arc::new(MemoryLeaseStore::new());
-    let panic_job = Arc::new(PanicJob {
+    let leases = Arc::new(HeartbeatFailStore {
+        inner: MemoryLeaseStore::new(),
+        heartbeat_calls: AtomicUsize::new(0),
+    });
+    let hb_calls = Arc::clone(&leases);
+    let panic_job = Arc::new(SlowPanicJob {
         ran: AtomicUsize::new(0),
+        sleep_ms: 1100, // past first HB tick (skip + 1s)
     });
     let ran = Arc::clone(&panic_job);
     let count_job = Arc::new(CountingJob {
@@ -548,8 +556,7 @@ async fn runner_survives_job_panic_and_stops_heartbeat() {
         vec![panic_job as Arc<dyn Job>, count_job as Arc<dyn Job>],
     )
     .expect("runner");
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    handle.abort();
+    tokio::time::sleep(Duration::from_millis(1400)).await;
     assert!(
         ran.ran.load(Ordering::SeqCst) >= 1,
         "panic job must have run"
@@ -557,6 +564,95 @@ async fn runner_survives_job_panic_and_stops_heartbeat() {
     assert!(
         runs.runs.load(Ordering::SeqCst) >= 1,
         "sibling job must still run after peer panic"
+    );
+    let hb_at_stop = hb_calls.heartbeat_calls.load(Ordering::SeqCst);
+    assert!(
+        hb_at_stop >= 1,
+        "heartbeat should have fired before panic"
+    );
+    handle.abort();
+    // Leaked HB tasks would keep ticking after the runner is aborted.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        hb_calls.heartbeat_calls.load(Ordering::SeqCst),
+        hb_at_stop,
+        "heartbeat must stop after panic (RAII guard + join)"
+    );
+}
+
+struct FailOneScopeJob {
+    ran: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl Job for FailOneScopeJob {
+    fn name(&self) -> &'static str {
+        "fail_one"
+    }
+    fn interval(&self) -> Duration {
+        Duration::from_millis(10)
+    }
+    async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+        Ok(vec!["bad".into(), "good".into()])
+    }
+    async fn run(&self, scope_key: &str) -> anyhow::Result<()> {
+        self.ran.lock().unwrap().push(scope_key.to_string());
+        if scope_key == "bad" {
+            return Err(anyhow::anyhow!("injected scope failure"));
+        }
+        Ok(())
+    }
+}
+
+/// A scope `Err` must not skip later scopes in the same wake.
+#[tokio::test]
+async fn runner_continues_after_scope_run_error() {
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let job = Arc::new(FailOneScopeJob {
+        ran: std::sync::Mutex::new(Vec::new()),
+    });
+    let ran = Arc::clone(&job);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-scope-err".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    handle.abort();
+    let seen = ran.ran.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|s| s == "bad"),
+        "failing scope must still be attempted: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|s| s == "good"),
+        "later scope must run after peer Err: {seen:?}"
+    );
+}
+
+/// Memory store honors sub-second TTLs; Postgres floors to 1s (see lease.rs).
+#[tokio::test]
+async fn memory_honors_subsecond_ttl() {
+    let store = MemoryLeaseStore::new();
+    assert!(store
+        .try_acquire("j", "subsec", "a", Duration::from_millis(80))
+        .await
+        .unwrap());
+    assert!(
+        !store
+            .try_acquire("j", "subsec", "b", Duration::from_secs(60))
+            .await
+            .unwrap(),
+        "must still be held before expiry"
+    );
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(
+        store
+            .try_acquire("j", "subsec", "b", Duration::from_secs(60))
+            .await
+            .unwrap(),
+        "sub-second TTL must expire on Memory"
     );
 }
 

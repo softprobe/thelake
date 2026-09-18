@@ -162,6 +162,8 @@ impl LeaseStore for PostgresLeaseStore {
         ttl: Duration,
     ) -> Result<bool> {
         let mut client = self.pool.get().await?;
+        // Postgres interval is whole seconds; floor matches spawn_runner's
+        // `lease_ttl_seconds.max(1)`. Sub-second TTLs are Memory-only (tests).
         let ttl_secs = ttl.as_secs().max(1) as i64;
         // Serialize peek + UPSERT so steal metrics see the row that the UPSERT raced.
         let tx = client.transaction().await?;
@@ -211,6 +213,7 @@ RETURNING holder_id
         ttl: Duration,
     ) -> Result<()> {
         let client = self.pool.get().await?;
+        // Same whole-second floor as try_acquire.
         let ttl_secs = ttl.as_secs().max(1) as i64;
         let sql = format!(
             r#"

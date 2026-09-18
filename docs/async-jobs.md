@@ -209,6 +209,10 @@ List lag = dirty publish latency + reducer interval + lease wait (usually second
 | Dirty UPSERT fails | Spans durable; periodic `session_index.rebuild` heals |
 | Two replicas try acquire | One wins; other skips — no dual compact |
 | SQLite / single-node | `MemoryLeaseStore` (same `LeaseStore` trait; no durable lease rows) |
+| Tenant pass `Err` | Runner logs + continues next scope; dropdown prune still runs after the failed pass |
+| `scope_keys` fails | Metric `job_errors{scope="_scopes"}` (sentinel — not a tenant id) |
+
+Postgres lease TTL uses whole-second intervals (`ttl.as_secs().max(1)`); config is `lease_ttl_seconds` (≥1). Sub-second TTLs are Memory/test-only.
 
 ---
 

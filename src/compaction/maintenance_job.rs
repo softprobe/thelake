@@ -124,27 +124,27 @@ impl Job for MaintenanceJob {
             }
         };
         let run_compaction = *lock_mutex(&self.compact_this_wake);
-        match self
+        let pass = self
             .executor
             .run_tenant_pass(scope_key, &ducklake, run_compaction)
-            .await
-        {
+            .await;
+        match &pass {
             Ok(_) => {
                 if run_compaction {
                     self.note_compact_outcome(true);
                 }
+                crate::self_monitoring::record_maintenance();
             }
-            Err(err) => {
+            Err(_) => {
                 if run_compaction {
                     self.note_compact_outcome(false);
                 }
-                return Err(err);
             }
         }
-        crate::self_monitoring::record_maintenance();
-        // Idempotent; every successful leased run may prune (no last-scope heuristic).
+        // Idempotent and global: always attempt prune after a leased pass, even
+        // when the tenant pass failed (so a sticky bad tenant cannot starve TTL).
         self.executor.prune_dropdown_catalog().await;
-        Ok(())
+        pass.map(|_| ())
     }
 }
 
