@@ -12,9 +12,9 @@ session stats manifests.
 ## What problem this solves
 
 Each ingest batch appends one skinny row per `session_id` to
-`session_stats_delta`. `POST /v1/llm/sessions/search` merges those rows with
-`SUM` / `MIN` / `MAX` / `any_value`. When the table is missing or the window
-has no deltas, the list falls back to a `union_spans` aggregate.
+`session_stats_delta`. `POST /v1/llm/sessions/search` **only** merges those
+rows with `SUM` / `MIN` / `MAX` / `any_value`. There is no `union_spans`
+fallback for the list path.
 
 Configurability reuses promotion governance: apply a YAML manifest, persist an
 active `promotion_specs` row with `target_kind = session_stats`, and resolve
@@ -82,12 +82,24 @@ counts**. Session detail primary-error topology is a different signal. Both
 endpoints may succeed while those numbers disagree — clients must not treat
 list `error_count` as detail primary-error equivalence.
 
-## Filters and fallback
+## Filters and schema gate
 
-- Delta-path filters: `agent_name`, `has_errors`, time window, `roots_only`
-  (nested child flag).
-- Filters that need span-level columns not present as delta dimensions
-  (e.g. `user_id` / `model_name` before they are applied as dimensions) force
-  the `union_spans` compile path.
-- Delta write failures are best-effort: spans still commit; list falls back
-  when deltas are missing.
+Before SQL generation, `POST /v1/llm/sessions/search`:
+
+1. Resolves the active (or builtin) `softprobe.session_stats.v1` manifest.
+2. Rejects filters that are not declared dimensions on that manifest.
+
+Delta-compatible filters today: time window, `has_errors`, `roots_only`
+(nested-child flag), plus any key in `dimensions` that is a physical column
+or a declared session_stats dimension (e.g. `agent_name` on the builtin
+manifest; `user_id` / `model_name` after apply). Otherwise the API returns
+**400** with
+`session_stats_delta table schema does not allow this query: …`.
+
+If `session_stats_delta` is missing, the list SQL fails and is mapped to the
+same **400** schema error (no pre-flight probe). Empty delta rows in-window
+return an empty list — not a span scan.
+
+Delta write failures remain best-effort on ingest (spans still commit). Without
+delta rows, those sessions simply do not appear on the list until rebuilt or
+re-ingested.

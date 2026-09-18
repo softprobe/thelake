@@ -574,9 +574,7 @@ async fn t15_t16_list_sql_extra_only_when_active() {
             .unwrap()
             .with_timezone(&chrono::Utc),
         has_errors: None,
-        user_id: None,
-        model_name: None,
-        agent_name: None,
+        dimensions: std::collections::BTreeMap::new(),
         roots_only: false,
         order_by: Default::default(),
         order: Default::default(),
@@ -787,7 +785,7 @@ async fn t21_combined_agent_has_errors_window() {
         json!({
             "from": "2024-07-18T00:00:00Z",
             "to": "2024-07-20T00:00:00Z",
-            "agent_name": "ComboAgent",
+            "dimensions": { "agent_name": "ComboAgent" },
             "has_errors": true,
             "roots_only": false,
             "limit": 50
@@ -973,7 +971,7 @@ async fn t23_list_and_detail_both_succeed_error_semantics() {
 }
 
 #[tokio::test]
-async fn t24_undeclared_user_id_filter_uses_span_path() {
+async fn t24_undeclared_user_id_filter_is_rejected() {
     let req = SessionSearchRequest {
         from: chrono::DateTime::parse_from_rfc3339("2024-07-18T00:00:00Z")
             .unwrap()
@@ -982,23 +980,20 @@ async fn t24_undeclared_user_id_filter_uses_span_path() {
             .unwrap()
             .with_timezone(&chrono::Utc),
         has_errors: None,
-        user_id: Some("u-1".to_string()),
-        model_name: None,
-        agent_name: None,
+        dimensions: std::collections::BTreeMap::from([(
+            "user_id".into(),
+            "u-1".into(),
+        )]),
         roots_only: false,
         order_by: Default::default(),
         order: Default::default(),
         limit: None,
         cursor: None,
     };
-    let sql =
-        softprobe_runtime::api::llm::query::compile_session_search_sql(&req, 50).expect("sql");
+    let err =
+        softprobe_runtime::api::llm::query::compile_session_search_sql(&req, 50).expect_err("sql");
     assert!(
-        sql.contains("union_spans") || sql.to_lowercase().contains("from traces"),
-        "must fall back to span path: {sql}"
-    );
-    assert!(
-        !sql.contains("session_stats_delta"),
-        "must not use deltas for undeclared user_id: {sql}"
+        err.contains("user_id") && err.contains("session_stats"),
+        "must reject undeclared user_id: {err}"
     );
 }

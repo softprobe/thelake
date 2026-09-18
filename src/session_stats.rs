@@ -47,6 +47,11 @@ pub fn is_physical_session_stats_column(name: &str) -> bool {
     )
 }
 
+/// Same identifier grammar as manifest dimension/measure names (`[a-z_][a-z0-9_]*`).
+pub fn is_valid_session_stats_identifier(value: &str) -> bool {
+    validate_identifier("name", value).is_ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStatsManifest {
     pub key: Vec<String>,

@@ -343,7 +343,7 @@ async fn has_errors_and_agent_name_filters_via_api() {
         json!({
             "from": "2024-07-18T00:00:00Z",
             "to": "2024-07-20T00:00:00Z",
-            "agent_name": "CleanAgent",
+            "dimensions": { "agent_name": "CleanAgent" },
             "roots_only": false,
             "limit": 50
         }),
@@ -361,7 +361,7 @@ async fn has_errors_and_agent_name_filters_via_api() {
         json!({
             "from": "2024-07-18T00:00:00Z",
             "to": "2024-07-20T00:00:00Z",
-            "agent_name": "Clean",
+            "dimensions": { "agent_name": "Clean" },
             "roots_only": false,
             "limit": 50
         }),
@@ -571,9 +571,9 @@ async fn recording_and_empty_session_id_never_listed() {
 }
 
 #[tokio::test]
-async fn fallback_when_deltas_deleted_uses_union_spans() {
+async fn deleted_deltas_do_not_resurrect_via_span_scan() {
     let (router, state, _temp, _guard) = test_router().await;
-    let session_id = "sess-fallback-spans";
+    let session_id = "sess-no-span-fallback";
 
     post_traces(
         &router,
@@ -591,7 +591,6 @@ async fn fallback_when_deltas_deleted_uses_union_spans() {
     .await;
     flush(&state).await;
 
-    // Prove deltas existed, then wipe them so probe is empty → span fallback.
     let (st, before) = run_sql(
         &router,
         &format!(
@@ -619,22 +618,22 @@ async fn fallback_when_deltas_deleted_uses_union_spans() {
         }),
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "fallback search failed: {body}");
-    let row = body["items"]
+    assert_eq!(st, StatusCode::OK, "empty delta window is OK: {body}");
+    let found = body["items"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|r| r["session_id"] == session_id)
-        .unwrap_or_else(|| panic!("fallback must still list session: {body}"));
-    assert_eq!(row["observation_count"], 1);
-    assert_eq!(row["error_count"], 1);
-    assert_eq!(row["total_tokens"], 7);
+        .any(|r| r["session_id"] == session_id);
+    assert!(
+        !found,
+        "must not fall back to union_spans after deltas deleted: {body}"
+    );
 }
 
 #[tokio::test]
-async fn fallback_when_delta_table_dropped() {
+async fn missing_delta_table_is_400() {
     let (router, state, _temp, _guard) = test_router().await;
-    let session_id = "sess-fallback-drop";
+    let session_id = "sess-missing-delta-table";
 
     post_traces(
         &router,
@@ -665,15 +664,12 @@ async fn fallback_when_delta_table_dropped() {
         }),
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "missing-table fallback: {body}");
-    let row = body["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["session_id"] == session_id)
-        .unwrap_or_else(|| panic!("must list via union_spans: {body}"));
-    assert_eq!(row["observation_count"], 1);
-    assert_eq!(row["total_tokens"], 3);
+    assert_eq!(st, StatusCode::BAD_REQUEST, "missing table must 400: {body}");
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("session_stats_delta") && err.contains("schema"),
+        "schema error message: {body}"
+    );
 }
 
 #[tokio::test]
@@ -747,7 +743,7 @@ async fn agent_name_sql_injection_is_safe() {
         json!({
             "from": "2024-07-18T00:00:00Z",
             "to": "2024-07-20T00:00:00Z",
-            "agent_name": evil,
+            "dimensions": { "agent_name": evil },
             "roots_only": false,
             "limit": 10
         }),
@@ -896,7 +892,24 @@ async fn null_tokens_merge_as_zero_and_cursor_pages() {
 
 #[tokio::test]
 async fn empty_window_returns_empty_items() {
-    let (router, _state, _temp, _guard) = test_router().await;
+    let (router, state, _temp, _guard) = test_router().await;
+    // Create session_stats_delta via ingest, then query a non-overlapping window.
+    post_traces(
+        &router,
+        trace_batch(
+            "sess-elsewhere",
+            vec![(
+                vec![0x99; 16],
+                vec![0x88; 8],
+                T0,
+                None,
+                gen_attrs("1", "0.01"),
+            )],
+        ),
+    )
+    .await;
+    flush(&state).await;
+
     let (st, body) = search_sessions(
         &router,
         json!({

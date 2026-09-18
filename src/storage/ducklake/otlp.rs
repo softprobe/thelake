@@ -217,7 +217,7 @@ impl DuckLakeWriter {
     }
 
     /// Append session_stats_delta rows for the batch. Failures are logged only —
-    /// span ingest must still succeed (list falls back to union_spans).
+    /// span ingest must still succeed. Session list requires deltas (no span fallback).
     async fn write_session_stats_deltas_best_effort(
         &self,
         dk: Option<&DuckLakeConfig>,

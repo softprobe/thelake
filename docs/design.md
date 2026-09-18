@@ -295,9 +295,9 @@ directly.
 Each `write_span_batches` also appends one skinny row per `session_id` in that
 batch to `session_stats_delta` (core counts/tokens/cost/agent/nested flag plus
 a `measures` MAP for manifest extras). The list endpoint merges with
-`SUM`/`MIN`/`MAX`/`any_value` over those deltas; when the table is missing or
-the window has no deltas, it falls back to the historical `union_spans`
-aggregate. List `error_count` is a batch ERROR sum — not detail primary-error
+`SUM`/`MIN`/`MAX`/`any_value` over those deltas only — it never falls back to
+`union_spans`. Missing table or undeclared filter dimensions return **400**.
+List `error_count` is a batch ERROR sum — not detail primary-error
 topology. Manifest: `softprobe.session_stats.v1` — product defaults in
 [`session_stats/default.yaml`](session_stats/default.yaml); apply / resolve /
 core-vs-MAP rules in [`session_stats.md`](session_stats.md).
