@@ -139,6 +139,78 @@ async fn lease_contract(store: &dyn LeaseStore, prefix: &str) {
             .unwrap(),
         "near-expiry renew must extend past the original lease_until"
     );
+
+    // Heartbeat fails for missing / released / stolen keys.
+    assert!(store
+        .heartbeat(
+            &job,
+            &format!("{prefix}-missing"),
+            "a",
+            Duration::from_secs(60)
+        )
+        .await
+        .is_err());
+    let hb_gone = format!("{prefix}-hb-gone");
+    assert!(store
+        .try_acquire(&job, &hb_gone, "a", Duration::from_secs(60))
+        .await
+        .unwrap());
+    store.release(&job, &hb_gone, "a").await.unwrap();
+    assert!(store
+        .heartbeat(&job, &hb_gone, "a", Duration::from_secs(60))
+        .await
+        .is_err());
+    let hb_stolen = format!("{prefix}-hb-stolen");
+    assert!(store
+        .try_acquire(&job, &hb_stolen, "a", Duration::from_secs(1))
+        .await
+        .unwrap());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(store
+        .try_acquire(&job, &hb_stolen, "b", Duration::from_secs(60))
+        .await
+        .unwrap());
+    assert!(store
+        .heartbeat(&job, &hb_stolen, "a", Duration::from_secs(60))
+        .await
+        .is_err());
+
+    // Former holder release after steal must not drop the new holder's lease.
+    let post_loss = format!("{prefix}-post-loss");
+    assert!(store
+        .try_acquire(&job, &post_loss, "a", Duration::from_secs(1))
+        .await
+        .unwrap());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(store
+        .try_acquire(&job, &post_loss, "b", Duration::from_secs(60))
+        .await
+        .unwrap());
+    store.release(&job, &post_loss, "a").await.unwrap();
+    assert!(
+        !store
+            .try_acquire(&job, &post_loss, "c", Duration::from_secs(60))
+            .await
+            .unwrap(),
+        "b must still hold after a's post-loss release"
+    );
+
+    // Zero TTL still acquires (Postgres floors to 1s; Memory Instant+0 may expire fast).
+    let zero_scope = format!("{prefix}-ttl0");
+    assert!(
+        store
+            .try_acquire(&job, &zero_scope, "a", Duration::ZERO)
+            .await
+            .unwrap(),
+        "zero TTL must still acquire (clamped or Instant+0)"
+    );
+    assert!(
+        store
+            .try_acquire(&job, &zero_scope, "a", Duration::from_secs(60))
+            .await
+            .unwrap(),
+        "same holder must be able to renew/reclaim after zero-TTL acquire"
+    );
 }
 
 #[tokio::test]
@@ -261,6 +333,100 @@ async fn runner_runs_when_lease_won() {
     assert!(
         runs.runs.load(Ordering::SeqCst) >= 1,
         "expected at least one run"
+    );
+}
+
+/// Heartbeat errors are logged/counted but must not abort `job.run`.
+struct HeartbeatFailStore {
+    inner: MemoryLeaseStore,
+    heartbeat_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LeaseStore for HeartbeatFailStore {
+    async fn try_acquire(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        holder_id: &str,
+        ttl: Duration,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .try_acquire(job_name, scope_key, holder_id, ttl)
+            .await
+    }
+
+    async fn heartbeat(
+        &self,
+        _job_name: &str,
+        _scope_key: &str,
+        _holder_id: &str,
+        _ttl: Duration,
+    ) -> anyhow::Result<()> {
+        self.heartbeat_calls.fetch_add(1, Ordering::SeqCst);
+        Err(anyhow::anyhow!("injected heartbeat failure"))
+    }
+
+    async fn release(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        holder_id: &str,
+    ) -> anyhow::Result<()> {
+        self.inner.release(job_name, scope_key, holder_id).await
+    }
+}
+
+struct SlowJob {
+    runs: AtomicUsize,
+    sleep_ms: u64,
+}
+
+#[async_trait]
+impl Job for SlowJob {
+    fn name(&self) -> &'static str {
+        "slow"
+    }
+    fn interval(&self) -> Duration {
+        Duration::from_millis(10)
+    }
+    async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+        Ok(vec!["t1".into()])
+    }
+    async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
+        tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn runner_completes_run_despite_heartbeat_failures() {
+    let leases = Arc::new(HeartbeatFailStore {
+        inner: MemoryLeaseStore::new(),
+        heartbeat_calls: AtomicUsize::new(0),
+    });
+    let hb = Arc::clone(&leases);
+    let job = Arc::new(SlowJob {
+        runs: AtomicUsize::new(0),
+        sleep_ms: 80,
+    });
+    let runs = Arc::clone(&job);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-hb-fail".into()),
+        heartbeat_seconds: 1, // first interval tick is immediate → fails during run
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.abort();
+    assert!(
+        runs.runs.load(Ordering::SeqCst) >= 1,
+        "job must finish even when heartbeat fails"
+    );
+    assert!(
+        hb.heartbeat_calls.load(Ordering::SeqCst) >= 1,
+        "heartbeat must have been attempted"
     );
 }
 

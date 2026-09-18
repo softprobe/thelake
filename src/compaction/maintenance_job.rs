@@ -166,4 +166,38 @@ mod tests {
             "frozen wake decision must stay true mid-pass"
         );
     }
+
+    /// Mirrors `MaintenanceJob` compact-clock: advance once per wake after first
+    /// successful compact pass; later tenant success/failure must not move it again.
+    #[test]
+    fn compact_clock_advances_once_per_wake() {
+        let last_compact = Mutex::new(
+            Instant::now()
+                .checked_sub(Duration::from_secs(300))
+                .unwrap(),
+        );
+        let advanced = Mutex::new(false);
+        let compact_this_wake = true;
+
+        let mark_ok = |ok: bool| {
+            if !compact_this_wake || !ok {
+                return;
+            }
+            let mut adv = advanced.lock().unwrap();
+            if !*adv {
+                *last_compact.lock().unwrap() = Instant::now();
+                *adv = true;
+            }
+        };
+
+        let before = *last_compact.lock().unwrap();
+        mark_ok(true); // tenant1 success
+        let after_first = *last_compact.lock().unwrap();
+        assert!(after_first > before);
+        mark_ok(false); // tenant2 "failure" — no change
+        assert_eq!(*last_compact.lock().unwrap(), after_first);
+        mark_ok(true); // tenant3 success — still no second advance
+        assert_eq!(*last_compact.lock().unwrap(), after_first);
+        assert!(*advanced.lock().unwrap());
+    }
 }
