@@ -94,11 +94,85 @@ async fn lease_contract(store: &dyn LeaseStore, prefix: &str) {
         .try_acquire(&job, &steal_scope, "b", Duration::from_secs(60))
         .await
         .unwrap());
+
+    // Same holder re-acquires after expiry (steal-path WHERE, not a foreign steal).
+    let self_scope = format!("{prefix}-self-reacq");
+    assert!(store
+        .try_acquire(&job, &self_scope, "a", Duration::from_secs(1))
+        .await
+        .unwrap());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        store
+            .try_acquire(&job, &self_scope, "a", Duration::from_secs(60))
+            .await
+            .unwrap(),
+        "same holder must reclaim own expired lease"
+    );
+    assert!(
+        !store
+            .try_acquire(&job, &self_scope, "b", Duration::from_secs(60))
+            .await
+            .unwrap(),
+        "reclaim must leave a valid hold"
+    );
+
+    // Renew near expiry: extend before TTL elapses, then prove old deadline no longer applies.
+    let near_scope = format!("{prefix}-near-exp");
+    assert!(store
+        .try_acquire(&job, &near_scope, "a", Duration::from_secs(1))
+        .await
+        .unwrap());
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(
+        store
+            .try_acquire(&job, &near_scope, "a", Duration::from_secs(60))
+            .await
+            .unwrap(),
+        "renewal near expiry must succeed"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await; // past original 1s deadline
+    assert!(
+        !store
+            .try_acquire(&job, &near_scope, "b", Duration::from_secs(60))
+            .await
+            .unwrap(),
+        "near-expiry renew must extend past the original lease_until"
+    );
 }
 
 #[tokio::test]
 async fn memory_lease_contract() {
     lease_contract(&MemoryLeaseStore::new(), "mem").await;
+}
+
+/// After expiry, concurrent reclaim among **distinct** holders is a fair race —
+/// delayed renewal does not prefer the former holder once `lease_until` passed.
+/// (Same holder may renew while held; that path is covered elsewhere.)
+#[tokio::test]
+async fn expired_lease_concurrent_reclaim_exactly_one_winner() {
+    let store = Arc::new(MemoryLeaseStore::new());
+    assert!(store
+        .try_acquire("j", "expired-race", "former", Duration::from_millis(30))
+        .await
+        .unwrap());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut handles = Vec::new();
+    for holder in ["a", "b", "c", "d", "e"] {
+        let s = Arc::clone(&store);
+        let h = holder.to_string();
+        handles.push(tokio::spawn(async move {
+            s.try_acquire("j", "expired-race", &h, Duration::from_secs(60))
+                .await
+                .unwrap()
+        }));
+    }
+    let wins: usize = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap() as usize)
+        .sum();
+    assert_eq!(wins, 1, "exactly one winner after expiry race");
 }
 
 #[tokio::test]

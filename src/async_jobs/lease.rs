@@ -125,6 +125,13 @@ impl LeaseStore for MemoryLeaseStore {
 }
 
 /// Catalog-Postgres lease rows in `{registry}.thelake_job_lease`.
+///
+/// Expiry and renew/steal decisions use **Postgres `now()` only** — not the
+/// application node's clock — so replica clock skew cannot make one node
+/// believe it still holds a lease the DB already considers stealable.
+/// Delayed heartbeat/renewal after `lease_until` is a fair race: another
+/// holder may win the UPSERT; configure `lease_ttl_seconds` ≫ typical pass
+/// latency so heartbeats land while the row is still valid.
 pub struct PostgresLeaseStore {
     pool: Pool,
     /// Qualified `"schema".thelake_job_lease`
