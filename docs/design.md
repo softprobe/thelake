@@ -285,11 +285,7 @@ Public query names:
 Because ingest defaults to flush-through (optional soft coalesce does not add a
 queryable buffer tier), preferred and legacy names resolve to the same DuckLake
 tables / metrics layout JOIN. First-party compilers emit preferred names only;
-the query engine still rewrites legacy names for external SQL. Shim deletion
-plan: remove `union_*` / tier aliases from `rewrite_reserved_telemetry_view_names`
-only after callers (Explorer ad-hoc, e2e fixtures, external notebooks) are
-confirmed on `traces`/`logs`/`metrics` — track as follow-up; do not block
-session-index work on full removal.
+the query engine still rewrites legacy names for external SQL.
 
 Metric Prom paths target `metric_samples` and the explicitly named rollup tables
 directly (not the public `metrics` / `union_metrics` compatibility relation).
