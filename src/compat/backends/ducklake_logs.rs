@@ -156,7 +156,7 @@ impl DuckLakeLogsBackend {
              CAST(attributes AS JSON) AS attributes, \
              CAST(resource_attributes AS JSON) AS resource_attributes, \
              {promoted} \
-             FROM union_logs WHERE 1=1{}{} ORDER BY timestamp ASC LIMIT {}",
+             FROM logs WHERE 1=1{}{} ORDER BY timestamp ASC LIMIT {}",
             Self::sql_window(start_ns, end_ns),
             Self::matcher_pushdown_sql(matchers),
             cap.saturating_add(1),

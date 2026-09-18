@@ -13,7 +13,7 @@ use crate::util::storage_config::load_test_config;
 // Performance quality bar (do not raise PERF_TARGET_MS to hide regressions)
 //
 // Asserted here (latency + concurrency):
-//   Warm union_logs COUNT(*) p95  <  PERF_TARGET_MS   (default 1000 ms / 1s)
+//   Warm logs COUNT(*) p95  <  PERF_TARGET_MS   (default 1000 ms / 1s)
 //   Latency:      5 timed iterations after warmup
 //   Concurrency:  one timed query per worker (N = PERF_CONCURRENCY)
 //
@@ -46,7 +46,7 @@ fn load_perf_config() -> Config {
     config
 }
 
-/// Warm union_logs p95 must stay under this duration (default **1s**).
+/// Warm logs p95 must stay under this duration (default **1s**).
 /// Override with `PERF_TARGET_MS`; do not raise the default to mask regressions.
 fn perf_target() -> std::time::Duration {
     if let Ok(target_ms) = std::env::var("PERF_TARGET_MS") {
@@ -206,7 +206,7 @@ async fn retry_query_until_count(
     }
 }
 
-/// Single-client warm read: p95 of 5 timed `union_logs` queries < `PERF_TARGET_MS` (1s).
+/// Single-client warm read: p95 of 5 timed `logs` queries < `PERF_TARGET_MS` (1s).
 #[tokio::test]
 async fn perf_union_read_latency() {
     let mut config = load_perf_config();
@@ -301,7 +301,7 @@ async fn perf_union_read_latency() {
     let query_engine = test_pipeline.query_engine();
     maybe_log_cache_profile(&query_engine, "before_warmup").await;
     let warmup_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_logs \
+        "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         staged_session.replace('\'', "''"),
         record_date_start(days_back),
@@ -314,7 +314,7 @@ async fn perf_union_read_latency() {
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
     }
     let warmup_iceberg_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_logs \
+        "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         base_session.replace('\'', "''"),
         record_date_start(days_back),
@@ -335,7 +335,7 @@ async fn perf_union_read_latency() {
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
     }
     let warmup_iceberg_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_logs \
+        "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         base_session.replace('\'', "''"),
         record_date_start(days_back),
@@ -348,7 +348,7 @@ async fn perf_union_read_latency() {
         assert_eq!(warmup.rows[0][0].as_i64().unwrap_or(0), per_session as i64);
     }
     let warmup_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_logs \
+        "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         buffer_session.replace('\'', "''"),
         record_date_start(days_back),
@@ -362,7 +362,7 @@ async fn perf_union_read_latency() {
     }
 
     let sql = format!(
-        "SELECT COUNT(*) AS count FROM union_logs \
+        "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         buffer_session.replace('\'', "''"),
         record_date_start(days_back),
@@ -387,7 +387,7 @@ async fn perf_union_read_latency() {
     maybe_log_cache_profile(&query_engine, "after_latency").await;
     if diagnostics_enabled() {
         let base_sql = format!(
-            "SELECT COUNT(*) AS count FROM union_logs \
+            "SELECT COUNT(*) AS count FROM logs \
              WHERE session_id = '{}' AND record_date >= DATE '{}'",
             base_session.replace('\'', "''"),
             record_date_start(days_back),
@@ -398,7 +398,7 @@ async fn perf_union_read_latency() {
             staged_session.replace('\'', "''"),
             record_date_start(days_back),
         );
-        run_diagnostics(&query_engine, "union_logs", &base_sql).await;
+        run_diagnostics(&query_engine, "logs", &base_sql).await;
         run_diagnostics(&query_engine, "staged_logs", &staged_sql).await;
         let buffer_sql = format!(
             "SELECT COUNT(*) AS count FROM buffer_logs \
@@ -407,10 +407,10 @@ async fn perf_union_read_latency() {
             record_date_start(days_back),
         );
         run_diagnostics(&query_engine, "buffer_logs", &buffer_sql).await;
-        run_diagnostics(&query_engine, "union_logs", &sql).await;
+        run_diagnostics(&query_engine, "logs", &sql).await;
     }
     // Quality bar: warm p95 < 1s (PERF_TARGET_MS).
-    println!("p95 warm union_logs latency: {:?}", p95);
+    println!("p95 warm logs latency: {:?}", p95);
     assert!(
         p95 < perf_target(),
         "Expected p95 warm query under {:?} (PERF_TARGET_MS), got {:?}",
@@ -518,7 +518,7 @@ async fn perf_union_read_concurrency() {
     let query_engine = test_pipeline.query_engine();
     maybe_log_cache_profile(&query_engine, "before_warmup").await;
     let warmup_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_logs \
+        "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         staged_session.replace('\'', "''"),
         record_date_start(days_back),
@@ -532,7 +532,7 @@ async fn perf_union_read_concurrency() {
     }
 
     let warmup_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_logs \
+        "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         base_session.replace('\'', "''"),
         record_date_start(days_back),
@@ -553,7 +553,7 @@ async fn perf_union_read_concurrency() {
     }
 
     let warmup_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_logs \
+        "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         buffer_session.replace('\'', "''"),
         record_date_start(days_back),
@@ -578,7 +578,7 @@ async fn perf_union_read_concurrency() {
         let date_filter = record_date_start(days_back);
         handles.push(tokio::spawn(async move {
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM union_logs \
+                "SELECT COUNT(*) AS count FROM logs \
                  WHERE session_id = '{}' AND record_date >= DATE '{}'",
                 session_id.replace('\'', "''"),
                 date_filter,
@@ -604,7 +604,7 @@ async fn perf_union_read_concurrency() {
     maybe_log_cache_profile(&query_engine, "after_concurrency").await;
     if diagnostics_enabled() {
         let base_sql = format!(
-            "SELECT COUNT(*) AS count FROM union_logs \
+            "SELECT COUNT(*) AS count FROM logs \
              WHERE session_id = '{}' AND record_date >= DATE '{}'",
             base_session.replace('\'', "''"),
             record_date_start(days_back),
@@ -622,18 +622,18 @@ async fn perf_union_read_concurrency() {
             record_date_start(days_back),
         );
         let union_sql = format!(
-            "SELECT COUNT(*) AS count FROM union_logs \
+            "SELECT COUNT(*) AS count FROM logs \
              WHERE session_id = '{}' AND record_date >= DATE '{}'",
             buffer_session.replace('\'', "''"),
             record_date_start(days_back),
         );
-        run_diagnostics(&query_engine, "union_logs", &base_sql).await;
+        run_diagnostics(&query_engine, "logs", &base_sql).await;
         run_diagnostics(&query_engine, "staged_logs", &staged_sql).await;
         run_diagnostics(&query_engine, "buffer_logs", &buffer_sql).await;
-        run_diagnostics(&query_engine, "union_logs", &union_sql).await;
+        run_diagnostics(&query_engine, "logs", &union_sql).await;
     }
     // Quality bar: warm p95 < 1s under concurrent load (same PERF_TARGET_MS).
-    println!("p95 warm union_logs latency: {:?}", p95);
+    println!("p95 warm logs latency: {:?}", p95);
     assert!(
         p95 < perf_target(),
         "Expected p95 warm query under {:?} (PERF_TARGET_MS), got {:?}",
@@ -726,7 +726,7 @@ async fn perf_view_recreate_stability() {
     let query_engine = test_pipeline.query_engine();
     reset_view_counters();
     let sql = format!(
-        "SELECT COUNT(*) AS count FROM union_logs \
+        "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND record_date >= DATE '{}'",
         buffer_session.replace('\'', "''"),
         record_date_start(7),
@@ -756,5 +756,5 @@ async fn perf_view_recreate_stability() {
 #[tokio::test]
 async fn view_recreate_stability_local_stub() {
     // Removed: relied on DUCKDB_TEST_ICEBERG_FALLBACK_PATH / iceberg_scan stub path.
-    // Committed-tier stability is covered by perf_view_recreate_stability (union_logs).
+    // Committed-tier stability is covered by perf_view_recreate_stability (logs).
 }

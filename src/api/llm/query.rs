@@ -512,7 +512,7 @@ pub fn compile_session_recording_sql(
     }
     let obs_type = format!("COALESCE({}, 'span')", expr_observation_type());
     Ok(format!(
-        "SELECT {projection} FROM union_spans \
+        "SELECT {projection} FROM traces \
          WHERE session_id = {session} \
            AND CAST(timestamp AS TIMESTAMP_NS) >= {from_ts} \
            AND CAST(timestamp AS TIMESTAMP_NS) <= {to_ts} \
@@ -877,7 +877,7 @@ pub fn compile_session_search_sql(
              ) AS agent_name, \
              list(DISTINCT {user_id}) AS user_ids, \
              list(DISTINCT {model_name}) AS models \
-           FROM union_spans \
+           FROM traces \
            WHERE {where_sql} \
            GROUP BY session_id \
            {having_sql} \
@@ -1000,7 +1000,7 @@ pub fn compile_observation_search_sql(
 
     let where_sql = conditions.join(" AND ");
     Ok(format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
+        "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
         projection = observation_projection(false),
         fetch = limit + 1
     ))
@@ -1014,7 +1014,7 @@ pub fn compile_observation_detail_sql(
     let mut conditions = vec![format!("span_id = {}", sql_string_literal(span_id))];
     push_optional_time_bounds(&mut conditions, from, to)?;
     Ok(format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} LIMIT 1",
+        "SELECT {projection} FROM traces WHERE {where_sql} LIMIT 1",
         projection = observation_projection(true),
         where_sql = conditions.join(" AND ")
     ))
@@ -1032,7 +1032,7 @@ pub fn compile_trace_summary_sql(
         conditions.push(format!("session_id = {}", sql_string_literal(session_id)));
     }
     Ok(format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} GROUP BY trace_id",
+        "SELECT {projection} FROM traces WHERE {where_sql} GROUP BY trace_id",
         projection = trace_summary_projection(),
         where_sql = conditions.join(" AND ")
     ))
@@ -1055,7 +1055,7 @@ pub fn compile_trace_observations_sql(
         conditions.push(cursor_predicate(cursor, "timestamp", "span_id")?);
     }
     Ok(format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
+        "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
         projection = observation_projection(true),
         where_sql = conditions.join(" AND "),
         fetch = limit + 1
@@ -1090,7 +1090,7 @@ pub fn compile_session_observations_sql(
         conditions.push(cursor_predicate(cursor, "timestamp", "span_id")?);
     }
     Ok(format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
+        "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
         projection = observation_projection(true),
         where_sql = conditions.join(" AND "),
         fetch = limit + 1
@@ -1114,7 +1114,7 @@ pub fn compile_session_aggregate_sql(
             SUM({total_tokens}) AS total_tokens, \
             SUM({total_cost}) AS total_cost, \
             list(DISTINCT {user_id}) AS user_ids \
-         FROM union_spans \
+         FROM traces \
          WHERE session_id = {session} \
            AND CAST(timestamp AS TIMESTAMP_NS) >= {from_ts} \
            AND CAST(timestamp AS TIMESTAMP_NS) <= {to_ts} \
@@ -1150,7 +1150,7 @@ pub fn compile_session_traces_sql(
     );
     // Cursor applies to aggregated start_time/trace_id, so filter after GROUP BY.
     let inner = format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} GROUP BY trace_id",
+        "SELECT {projection} FROM traces WHERE {where_sql} GROUP BY trace_id",
         projection = trace_summary_projection(),
     );
     let outer_cursor = if let Some(cursor) = cursor {
@@ -1189,7 +1189,7 @@ pub fn compile_scores_for_trace_sql(
     let mut span_conditions = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
     push_optional_time_bounds(&mut span_conditions, from, to)?;
     let predicate = format!(
-        "trace_id = {trace} OR span_id IN (SELECT span_id FROM union_spans WHERE {span_where})",
+        "trace_id = {trace} OR span_id IN (SELECT span_id FROM traces WHERE {span_where})",
         trace = sql_string_literal(trace_id),
         span_where = span_conditions.join(" AND ")
     );
@@ -1216,8 +1216,8 @@ pub fn compile_scores_for_session_sql(
     );
     let predicate = format!(
         "session_id = {session} \
-         OR trace_id IN (SELECT DISTINCT trace_id FROM union_spans WHERE {member_filter}) \
-         OR span_id IN (SELECT span_id FROM union_spans WHERE {member_filter})",
+         OR trace_id IN (SELECT DISTINCT trace_id FROM traces WHERE {member_filter}) \
+         OR span_id IN (SELECT span_id FROM traces WHERE {member_filter})",
         session = sql_string_literal(session_id),
     );
     Ok(format!(
@@ -2261,7 +2261,7 @@ mod tests {
             .with_timezone(&Utc);
         let sql = compile_scores_for_trace_sql("trace-1", Some(from), Some(to))
             .expect("trace scores sql with bounds");
-        assert!(sql.contains("span_id IN (SELECT span_id FROM union_spans WHERE trace_id = 'trace-1' AND CAST(timestamp AS TIMESTAMP_NS) >="));
+        assert!(sql.contains("span_id IN (SELECT span_id FROM traces WHERE trace_id = 'trace-1' AND CAST(timestamp AS TIMESTAMP_NS) >="));
         assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="));
     }
 

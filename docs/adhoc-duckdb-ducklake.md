@@ -37,6 +37,9 @@ python3 scripts/duckdb_ducklake_render_init.py --config "$CONFIG_FILE" --meta /d
 
 Qualified names follow the runtime: **`catalog_alias.metadata_schema.table`** when `metadata_schema` is not `main`, else **`catalog_alias.table`**.
 
-## `union_spans` / `union_logs`
+## `union_spans` / `union_logs` / `union_metrics` (legacy)
 
-Those names are rewritten by the **runtime** query engine, not by a plain `duckdb` CLI session. For ad hoc work, query **`traces`** / **`logs`** views (after ingest) or the qualified DuckLake tables.
+Those names are rewritten by the **runtime** query engine to the same DuckLake
+tables / metrics layout JOIN as **`traces` / `logs` / `metrics`**. Prefer the
+latter in new SQL. A plain `duckdb` CLI session does not apply the rewrite —
+query **`traces` / `logs`** views (after ingest) or the qualified DuckLake tables.
