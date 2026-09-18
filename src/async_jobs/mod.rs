@@ -82,6 +82,9 @@ pub fn spawn_runner(
                     }
                 };
                 let interval = job.interval();
+                // Sequential per scope by design (matches pre-lease maintenance): one
+                // TWCS/metadata pass at a time avoids compact∥expire races and unbounded
+                // task fan-out. Cross-tenant parallelism is a later stage if needed.
                 for scope in scopes {
                     let key = (job.name().to_string(), scope.clone());
                     let due = match last_run.get(&key) {

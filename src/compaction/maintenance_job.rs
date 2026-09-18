@@ -15,12 +15,13 @@ pub struct MaintenanceJob {
     wake: Duration,
     compact_interval_secs: u64,
     compaction_enabled: bool,
-    /// Last time TWCS/ladder completed successfully (any scope).
+    /// Last time a full compact wake completed with every attempted scope Ok.
     last_compact: Mutex<Instant>,
     /// Frozen in [`scope_keys`] for the whole wake — never recomputed mid-pass.
     compact_this_wake: Mutex<bool>,
-    /// Advance `last_compact` at most once per wake after a successful compact pass.
-    compact_clock_advanced: Mutex<bool>,
+    /// Outcome of compact runs this wake: `None` = none yet, `Some(true)` = all Ok,
+    /// `Some(false)` = at least one Err. Applied to `last_compact` on the next freeze.
+    compact_wake_ok: Mutex<Option<bool>>,
     /// Scopes from the latest [`scope_keys`] call (avoids a second registry list).
     cached_scopes: Mutex<Vec<(String, DuckLakeConfig)>>,
 }
@@ -28,6 +29,16 @@ pub struct MaintenanceJob {
 /// Recover from poisoned mutexes so one panicked pass cannot kill the runner forever.
 fn lock_mutex<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lookup_cached_scope(
+    cached: &[(String, DuckLakeConfig)],
+    scope_key: &str,
+) -> Option<DuckLakeConfig> {
+    cached
+        .iter()
+        .find(|(id, _)| id == scope_key)
+        .map(|(_, dk)| dk.clone())
 }
 
 impl MaintenanceJob {
@@ -49,19 +60,33 @@ impl MaintenanceJob {
                     .unwrap_or_else(Instant::now),
             ),
             compact_this_wake: Mutex::new(false),
-            compact_clock_advanced: Mutex::new(false),
+            compact_wake_ok: Mutex::new(None),
             cached_scopes: Mutex::new(Vec::new()),
         }
     }
 
     fn freeze_compaction_for_wake(&self) {
+        // Close out prior wake: only advance the TWCS clock if every compact
+        // attempt succeeded. A mid-wake Err leaves last_compact unchanged so
+        // the next wake is still due for remaining tenants.
+        if matches!(lock_mutex(&self.compact_wake_ok).take(), Some(true)) {
+            *lock_mutex(&self.last_compact) = Instant::now();
+        }
         let due = self.compaction_enabled
             && compaction_due(
                 lock_mutex(&self.last_compact).elapsed(),
                 self.compact_interval_secs,
             );
         *lock_mutex(&self.compact_this_wake) = due;
-        *lock_mutex(&self.compact_clock_advanced) = false;
+    }
+
+    fn note_compact_outcome(&self, ok: bool) {
+        let mut outcome = lock_mutex(&self.compact_wake_ok);
+        match *outcome {
+            None => *outcome = Some(ok),
+            Some(true) if !ok => *outcome = Some(false),
+            Some(_) => {}
+        }
     }
 }
 
@@ -85,19 +110,13 @@ impl Job for MaintenanceJob {
 
     async fn run(&self, scope_key: &str) -> Result<()> {
         let ducklake = {
-            let found = lock_mutex(&self.cached_scopes)
-                .iter()
-                .find(|(id, _)| id == scope_key)
-                .map(|(_, dk)| dk.clone());
+            let found = lookup_cached_scope(&lock_mutex(&self.cached_scopes), scope_key);
             match found {
                 Some(dk) => dk,
                 None => {
                     // Defensive: refresh if cache and runner list ever diverge.
                     let scopes = self.executor.maintenance_scopes().await?;
-                    let dk = scopes
-                        .iter()
-                        .find(|(id, _)| id == scope_key)
-                        .map(|(_, d)| d.clone())
+                    let dk = lookup_cached_scope(&scopes, scope_key)
                         .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))?;
                     *lock_mutex(&self.cached_scopes) = scopes;
                     dk
@@ -105,24 +124,24 @@ impl Job for MaintenanceJob {
             }
         };
         let run_compaction = *lock_mutex(&self.compact_this_wake);
-        self.executor
+        match self
+            .executor
             .run_tenant_pass(scope_key, &ducklake, run_compaction)
-            .await?;
-        crate::self_monitoring::record_maintenance();
-        if run_compaction {
-            let should_mark = {
-                let mut advanced = lock_mutex(&self.compact_clock_advanced);
-                if !*advanced {
-                    *advanced = true;
-                    true
-                } else {
-                    false
+            .await
+        {
+            Ok(_) => {
+                if run_compaction {
+                    self.note_compact_outcome(true);
                 }
-            };
-            if should_mark {
-                *lock_mutex(&self.last_compact) = Instant::now();
+            }
+            Err(err) => {
+                if run_compaction {
+                    self.note_compact_outcome(false);
+                }
+                return Err(err);
             }
         }
+        crate::self_monitoring::record_maintenance();
         // Idempotent; every successful leased run may prune (no last-scope heuristic).
         self.executor.prune_dropdown_catalog().await;
         Ok(())
@@ -137,13 +156,26 @@ mod tests {
     struct FreezeProbe {
         compact_this_wake: Mutex<bool>,
         last_compact: Mutex<Instant>,
+        compact_wake_ok: Mutex<Option<bool>>,
         interval_secs: u64,
     }
 
     impl FreezeProbe {
         fn freeze(&self) {
+            if matches!(lock_mutex(&self.compact_wake_ok).take(), Some(true)) {
+                *lock_mutex(&self.last_compact) = Instant::now();
+            }
             let due = compaction_due(lock_mutex(&self.last_compact).elapsed(), self.interval_secs);
             *lock_mutex(&self.compact_this_wake) = due;
+        }
+
+        fn note(&self, ok: bool) {
+            let mut outcome = lock_mutex(&self.compact_wake_ok);
+            match *outcome {
+                None => *outcome = Some(ok),
+                Some(true) if !ok => *outcome = Some(false),
+                Some(_) => {}
+            }
         }
 
         fn read_frozen(&self) -> bool {
@@ -160,6 +192,7 @@ mod tests {
                     .checked_sub(Duration::from_secs(300))
                     .unwrap(),
             ),
+            compact_wake_ok: Mutex::new(None),
             interval_secs: 300,
         };
         probe.freeze();
@@ -170,46 +203,57 @@ mod tests {
             lock_mutex(&probe.last_compact).elapsed(),
             probe.interval_secs,
         );
-        assert!(
-            !would_be_due_now,
-            "fresh last_compact would recompute due=false"
-        );
+        assert!(!would_be_due_now);
+        assert!(probe.read_frozen(), "frozen flag must stay true mid-pass");
+    }
+
+    #[test]
+    fn compact_clock_advances_only_when_all_scopes_ok() {
+        let probe = FreezeProbe {
+            compact_this_wake: Mutex::new(false),
+            last_compact: Mutex::new(
+                Instant::now()
+                    .checked_sub(Duration::from_secs(300))
+                    .unwrap(),
+            ),
+            compact_wake_ok: Mutex::new(None),
+            interval_secs: 300,
+        };
+        let before = *lock_mutex(&probe.last_compact);
+        probe.note(true); // tenant A ok
+        probe.note(false); // tenant B err
+        probe.freeze(); // must NOT advance
+        assert_eq!(*lock_mutex(&probe.last_compact), before);
         assert!(
             probe.read_frozen(),
-            "frozen wake decision must stay true mid-pass"
+            "still due after failed wake so B can retry"
+        );
+
+        probe.note(true);
+        probe.note(true);
+        let mid = *lock_mutex(&probe.last_compact);
+        probe.freeze(); // all ok → advance
+        assert!(*lock_mutex(&probe.last_compact) > mid);
+        assert!(
+            !probe.read_frozen(),
+            "not due immediately after all-ok wake"
         );
     }
 
     #[test]
-    fn compact_clock_advances_once_per_wake() {
-        let last_compact = Mutex::new(
-            Instant::now()
-                .checked_sub(Duration::from_secs(300))
-                .unwrap(),
+    fn lookup_cached_scope_miss_and_hit() {
+        let cached = vec![(
+            "t1".into(),
+            DuckLakeConfig {
+                metadata_schema: "s1".into(),
+                ..DuckLakeConfig::default()
+            },
+        )];
+        assert!(lookup_cached_scope(&cached, "t1").is_some());
+        assert!(
+            lookup_cached_scope(&cached, "new-tenant").is_none(),
+            "miss must trigger refresh path in run()"
         );
-        let advanced = Mutex::new(false);
-        let compact_this_wake = true;
-
-        let mark_ok = |ok: bool| {
-            if !compact_this_wake || !ok {
-                return;
-            }
-            let mut adv = lock_mutex(&advanced);
-            if !*adv {
-                *lock_mutex(&last_compact) = Instant::now();
-                *adv = true;
-            }
-        };
-
-        let before = *lock_mutex(&last_compact);
-        mark_ok(true);
-        let after_first = *lock_mutex(&last_compact);
-        assert!(after_first > before);
-        mark_ok(false);
-        assert_eq!(*lock_mutex(&last_compact), after_first);
-        mark_ok(true);
-        assert_eq!(*lock_mutex(&last_compact), after_first);
-        assert!(*lock_mutex(&advanced));
     }
 
     #[test]

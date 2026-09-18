@@ -430,6 +430,79 @@ async fn runner_completes_run_despite_heartbeat_failures() {
     );
 }
 
+/// try_acquire DB errors skip the scope and continue the wake.
+struct AcquireFailStore {
+    fail_scopes: std::sync::Mutex<std::collections::HashSet<String>>,
+    inner: MemoryLeaseStore,
+}
+
+#[async_trait]
+impl LeaseStore for AcquireFailStore {
+    async fn try_acquire(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        holder_id: &str,
+        ttl: Duration,
+    ) -> anyhow::Result<bool> {
+        if self.fail_scopes.lock().unwrap().contains(scope_key) {
+            return Err(anyhow::anyhow!("injected acquire failure"));
+        }
+        self.inner
+            .try_acquire(job_name, scope_key, holder_id, ttl)
+            .await
+    }
+
+    async fn heartbeat(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        holder_id: &str,
+        ttl: Duration,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .heartbeat(job_name, scope_key, holder_id, ttl)
+            .await
+    }
+
+    async fn release(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        holder_id: &str,
+    ) -> anyhow::Result<()> {
+        self.inner.release(job_name, scope_key, holder_id).await
+    }
+}
+
+#[tokio::test]
+async fn runner_skips_scope_on_acquire_error_and_continues() {
+    let mut fail = std::collections::HashSet::new();
+    fail.insert("bad".into());
+    let leases = Arc::new(AcquireFailStore {
+        fail_scopes: std::sync::Mutex::new(fail),
+        inner: MemoryLeaseStore::new(),
+    });
+    let job = Arc::new(CountingJob {
+        runs: AtomicUsize::new(0),
+        scopes: vec!["bad".into(), "good".into()],
+    });
+    let runs = Arc::clone(&job);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-acq-fail".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    handle.abort();
+    assert_eq!(
+        runs.runs.load(Ordering::SeqCst),
+        1,
+        "only the good scope should run"
+    );
+}
+
 struct PanicJob {
     ran: AtomicUsize,
 }
