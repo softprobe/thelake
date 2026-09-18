@@ -161,18 +161,17 @@ impl LeaseStore for PostgresLeaseStore {
         holder_id: &str,
         ttl: Duration,
     ) -> Result<bool> {
-        let client = self.pool.get().await?;
+        let mut client = self.pool.get().await?;
         let ttl_secs = ttl.as_secs().max(1) as i64;
-        // Peek for steal metric (best-effort; acquire UPSERT remains the authority).
+        // Serialize peek + UPSERT so steal metrics see the row that the UPSERT raced.
+        let tx = client.transaction().await?;
         let peek_sql = format!(
             r#"SELECT holder_id, lease_until < now() AS expired
-FROM {table} WHERE job_name = $1 AND scope_key = $2"#,
+FROM {table} WHERE job_name = $1 AND scope_key = $2
+FOR UPDATE"#,
             table = self.table
         );
-        let prev = client
-            .query_opt(&peek_sql, &[&job_name, &scope_key])
-            .await?;
-        // Steal when expired or renew when we already hold.
+        let prev = tx.query_opt(&peek_sql, &[&job_name, &scope_key]).await?;
         let sql = format!(
             r#"
 INSERT INTO {table} (job_name, scope_key, holder_id, lease_until, heartbeat_at)
@@ -187,9 +186,10 @@ RETURNING holder_id
 "#,
             table = self.table
         );
-        let row = client
+        let row = tx
             .query_opt(&sql, &[&job_name, &scope_key, &holder_id, &ttl_secs])
             .await?;
+        tx.commit().await?;
         let won = matches!(row, Some(r) if r.get::<_, String>(0) == holder_id);
         if won {
             if let Some(prev) = prev {

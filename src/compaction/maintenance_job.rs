@@ -6,7 +6,7 @@ use crate::compaction::scheduler::compaction_due;
 use crate::config::DuckLakeConfig;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub struct MaintenanceJob {
@@ -23,6 +23,11 @@ pub struct MaintenanceJob {
     compact_clock_advanced: Mutex<bool>,
     /// Scopes from the latest [`scope_keys`] call (avoids a second registry list).
     cached_scopes: Mutex<Vec<(String, DuckLakeConfig)>>,
+}
+
+/// Recover from poisoned mutexes so one panicked pass cannot kill the runner forever.
+fn lock_mutex<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl MaintenanceJob {
@@ -52,14 +57,11 @@ impl MaintenanceJob {
     fn freeze_compaction_for_wake(&self) {
         let due = self.compaction_enabled
             && compaction_due(
-                self.last_compact.lock().expect("last_compact").elapsed(),
+                lock_mutex(&self.last_compact).elapsed(),
                 self.compact_interval_secs,
             );
-        *self.compact_this_wake.lock().expect("compact_this_wake") = due;
-        *self
-            .compact_clock_advanced
-            .lock()
-            .expect("compact_clock_advanced") = false;
+        *lock_mutex(&self.compact_this_wake) = due;
+        *lock_mutex(&self.compact_clock_advanced) = false;
     }
 }
 
@@ -77,32 +79,48 @@ impl Job for MaintenanceJob {
         let scopes = self.executor.maintenance_scopes().await?;
         self.freeze_compaction_for_wake();
         let ids: Vec<String> = scopes.iter().map(|(id, _)| id.clone()).collect();
-        *self.cached_scopes.lock().expect("cached_scopes") = scopes;
+        *lock_mutex(&self.cached_scopes) = scopes;
         Ok(ids)
     }
 
     async fn run(&self, scope_key: &str) -> Result<()> {
         let ducklake = {
-            let scopes = self.cached_scopes.lock().expect("cached_scopes");
-            scopes
+            let found = lock_mutex(&self.cached_scopes)
                 .iter()
                 .find(|(id, _)| id == scope_key)
-                .map(|(_, dk)| dk.clone())
-                .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))?
+                .map(|(_, dk)| dk.clone());
+            match found {
+                Some(dk) => dk,
+                None => {
+                    // Defensive: refresh if cache and runner list ever diverge.
+                    let scopes = self.executor.maintenance_scopes().await?;
+                    let dk = scopes
+                        .iter()
+                        .find(|(id, _)| id == scope_key)
+                        .map(|(_, d)| d.clone())
+                        .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))?;
+                    *lock_mutex(&self.cached_scopes) = scopes;
+                    dk
+                }
+            }
         };
-        let run_compaction = *self.compact_this_wake.lock().expect("compact_this_wake");
+        let run_compaction = *lock_mutex(&self.compact_this_wake);
         self.executor
             .run_tenant_pass(scope_key, &ducklake, run_compaction)
             .await?;
         crate::self_monitoring::record_maintenance();
         if run_compaction {
-            let mut advanced = self
-                .compact_clock_advanced
-                .lock()
-                .expect("compact_clock_advanced");
-            if !*advanced {
-                *self.last_compact.lock().expect("last_compact") = Instant::now();
-                *advanced = true;
+            let should_mark = {
+                let mut advanced = lock_mutex(&self.compact_clock_advanced);
+                if !*advanced {
+                    *advanced = true;
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_mark {
+                *lock_mutex(&self.last_compact) = Instant::now();
             }
         }
         // Idempotent; every successful leased run may prune (no last-scope heuristic).
@@ -124,15 +142,12 @@ mod tests {
 
     impl FreezeProbe {
         fn freeze(&self) {
-            let due = compaction_due(
-                self.last_compact.lock().unwrap().elapsed(),
-                self.interval_secs,
-            );
-            *self.compact_this_wake.lock().unwrap() = due;
+            let due = compaction_due(lock_mutex(&self.last_compact).elapsed(), self.interval_secs);
+            *lock_mutex(&self.compact_this_wake) = due;
         }
 
         fn read_frozen(&self) -> bool {
-            *self.compact_this_wake.lock().unwrap()
+            *lock_mutex(&self.compact_this_wake)
         }
     }
 
@@ -150,11 +165,9 @@ mod tests {
         probe.freeze();
         assert!(probe.read_frozen(), "should freeze due=true");
 
-        // Simulate wall time advancing as if another tenant ran for a long time;
-        // frozen flag must not flip even if last_compact were recomputed.
-        *probe.last_compact.lock().unwrap() = Instant::now();
+        *lock_mutex(&probe.last_compact) = Instant::now();
         let would_be_due_now = compaction_due(
-            probe.last_compact.lock().unwrap().elapsed(),
+            lock_mutex(&probe.last_compact).elapsed(),
             probe.interval_secs,
         );
         assert!(
@@ -167,8 +180,6 @@ mod tests {
         );
     }
 
-    /// Mirrors `MaintenanceJob` compact-clock: advance once per wake after first
-    /// successful compact pass; later tenant success/failure must not move it again.
     #[test]
     fn compact_clock_advances_once_per_wake() {
         let last_compact = Mutex::new(
@@ -183,21 +194,33 @@ mod tests {
             if !compact_this_wake || !ok {
                 return;
             }
-            let mut adv = advanced.lock().unwrap();
+            let mut adv = lock_mutex(&advanced);
             if !*adv {
-                *last_compact.lock().unwrap() = Instant::now();
+                *lock_mutex(&last_compact) = Instant::now();
                 *adv = true;
             }
         };
 
-        let before = *last_compact.lock().unwrap();
-        mark_ok(true); // tenant1 success
-        let after_first = *last_compact.lock().unwrap();
+        let before = *lock_mutex(&last_compact);
+        mark_ok(true);
+        let after_first = *lock_mutex(&last_compact);
         assert!(after_first > before);
-        mark_ok(false); // tenant2 "failure" — no change
-        assert_eq!(*last_compact.lock().unwrap(), after_first);
-        mark_ok(true); // tenant3 success — still no second advance
-        assert_eq!(*last_compact.lock().unwrap(), after_first);
-        assert!(*advanced.lock().unwrap());
+        mark_ok(false);
+        assert_eq!(*lock_mutex(&last_compact), after_first);
+        mark_ok(true);
+        assert_eq!(*lock_mutex(&last_compact), after_first);
+        assert!(*lock_mutex(&advanced));
+    }
+
+    #[test]
+    fn lock_mutex_recovers_from_poison() {
+        let m = Mutex::new(1u32);
+        let _ = std::panic::catch_unwind(|| {
+            let _g = m.lock().unwrap();
+            panic!("poison");
+        });
+        assert!(m.lock().is_err(), "mutex should be poisoned");
+        *lock_mutex(&m) = 2;
+        assert_eq!(*lock_mutex(&m), 2);
     }
 }

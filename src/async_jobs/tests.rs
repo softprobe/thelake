@@ -409,16 +409,16 @@ async fn runner_completes_run_despite_heartbeat_failures() {
     let hb = Arc::clone(&leases);
     let job = Arc::new(SlowJob {
         runs: AtomicUsize::new(0),
-        sleep_ms: 80,
+        sleep_ms: 1200, // > heartbeat_seconds so HB fires after skipped first tick
     });
     let runs = Arc::clone(&job);
     let cfg = AsyncJobsConfig {
         instance_id: Some("runner-hb-fail".into()),
-        heartbeat_seconds: 1, // first interval tick is immediate → fails during run
+        heartbeat_seconds: 1,
         lease_ttl_seconds: 60,
     };
     let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(1600)).await;
     handle.abort();
     assert!(
         runs.runs.load(Ordering::SeqCst) >= 1,
@@ -427,6 +427,63 @@ async fn runner_completes_run_despite_heartbeat_failures() {
     assert!(
         hb.heartbeat_calls.load(Ordering::SeqCst) >= 1,
         "heartbeat must have been attempted"
+    );
+}
+
+struct PanicJob {
+    ran: AtomicUsize,
+}
+
+#[async_trait]
+impl Job for PanicJob {
+    fn name(&self) -> &'static str {
+        "panic_job"
+    }
+    fn interval(&self) -> Duration {
+        Duration::from_millis(10)
+    }
+    async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+        Ok(vec!["t1".into()])
+    }
+    async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        panic!("injected job panic");
+    }
+}
+
+/// Job panic must be caught (runner continues) and stop the heartbeat via RAII.
+#[tokio::test]
+async fn runner_survives_job_panic_and_stops_heartbeat() {
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let panic_job = Arc::new(PanicJob {
+        ran: AtomicUsize::new(0),
+    });
+    let ran = Arc::clone(&panic_job);
+    let count_job = Arc::new(CountingJob {
+        runs: AtomicUsize::new(0),
+        scopes: vec!["t2".into()],
+    });
+    let runs = Arc::clone(&count_job);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-panic".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(
+        &cfg,
+        leases,
+        vec![panic_job as Arc<dyn Job>, count_job as Arc<dyn Job>],
+    )
+    .expect("runner");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    handle.abort();
+    assert!(
+        ran.ran.load(Ordering::SeqCst) >= 1,
+        "panic job must have run"
+    );
+    assert!(
+        runs.runs.load(Ordering::SeqCst) >= 1,
+        "sibling job must still run after peer panic"
     );
 }
 

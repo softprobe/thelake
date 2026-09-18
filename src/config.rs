@@ -40,6 +40,8 @@ pub struct AsyncJobsConfig {
     pub instance_id: Option<String>,
     #[serde(default = "default_lease_ttl_seconds")]
     pub lease_ttl_seconds: u64,
+    /// Heartbeat period while holding a lease. Keep well below `lease_ttl_seconds`
+    /// (e.g. ttl ≥ 3× heartbeat) so a slow DB round-trip cannot leave the row stealable.
     #[serde(default = "default_heartbeat_seconds")]
     pub heartbeat_seconds: u64,
 }

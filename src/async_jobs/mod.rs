@@ -14,12 +14,30 @@ pub use lease::{LeaseStore, MemoryLeaseStore, PostgresLeaseStore};
 
 use crate::config::AsyncJobsConfig;
 use crate::self_monitoring;
+use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+/// Stops the heartbeat task on drop (incl. panic unwind from `job.run`).
+struct HeartbeatStopGuard(Option<oneshot::Sender<()>>);
+
+impl Drop for HeartbeatStopGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
 /// Spawn the shared wake loop. Returns `None` when `jobs` is empty.
+///
+/// Configure `lease_ttl_seconds` well above `heartbeat_seconds` (and typical
+/// pass latency) so a slow heartbeat query cannot leave the row stealable
+/// mid-run. Heartbeat failures are logged; they do not abort `job.run`.
 pub fn spawn_runner(
     config: &AsyncJobsConfig,
     leases: Arc<dyn LeaseStore>,
@@ -101,10 +119,12 @@ pub fn spawn_runner(
                     let hb_scope = scope.clone();
                     let hb_holder = holder_id.clone();
                     let hb_ttl = lease_ttl;
-                    let (hb_stop_tx, mut hb_stop_rx) = tokio::sync::oneshot::channel::<()>();
+                    let (hb_stop_tx, mut hb_stop_rx) = oneshot::channel::<()>();
                     let hb_task = tokio::spawn(async move {
                         let mut hb_ticker = tokio::time::interval(heartbeat_every);
                         hb_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        // Skip the immediate first tick so we don't HB before work starts.
+                        hb_ticker.tick().await;
                         loop {
                             tokio::select! {
                                 _ = &mut hb_stop_rx => break,
@@ -127,15 +147,24 @@ pub fn spawn_runner(
                         }
                     });
 
-                    let run_result = job.run(&scope).await;
-                    let _ = hb_stop_tx.send(());
+                    // RAII: stop HB even if `job.run` panics.
+                    let _hb_guard = HeartbeatStopGuard(Some(hb_stop_tx));
+                    let run_result = AssertUnwindSafe(job.run(&scope)).catch_unwind().await;
+                    drop(_hb_guard);
                     let _ = hb_task.await;
 
-                    if let Err(err) = run_result {
-                        warn!(job = job.name(), scope = %scope, "job failed: {err}");
-                        self_monitoring::record_job_error(job.name(), &scope);
-                    } else {
-                        last_run.insert(key, Instant::now());
+                    match run_result {
+                        Ok(Ok(())) => {
+                            last_run.insert(key, Instant::now());
+                        }
+                        Ok(Err(err)) => {
+                            warn!(job = job.name(), scope = %scope, "job failed: {err}");
+                            self_monitoring::record_job_error(job.name(), &scope);
+                        }
+                        Err(_) => {
+                            warn!(job = job.name(), scope = %scope, "job panicked");
+                            self_monitoring::record_job_error(job.name(), &scope);
+                        }
                     }
 
                     if let Err(err) = leases.release(job.name(), &scope, &holder_id).await {
