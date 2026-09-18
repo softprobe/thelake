@@ -566,10 +566,7 @@ async fn runner_survives_job_panic_and_stops_heartbeat() {
         "sibling job must still run after peer panic"
     );
     let hb_at_stop = hb_calls.heartbeat_calls.load(Ordering::SeqCst);
-    assert!(
-        hb_at_stop >= 1,
-        "heartbeat should have fired before panic"
-    );
+    assert!(hb_at_stop >= 1, "heartbeat should have fired before panic");
     handle.abort();
     // Leaked HB tasks would keep ticking after the runner is aborted.
     tokio::time::sleep(Duration::from_millis(1500)).await;
