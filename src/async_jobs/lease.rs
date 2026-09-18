@@ -7,6 +7,12 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+/// Postgres interval is whole seconds; floor matches `lease_ttl_seconds.max(1)`.
+/// Sub-second TTLs are Memory-only (tests).
+pub(crate) fn lease_ttl_secs(ttl: Duration) -> i64 {
+    ttl.as_secs().max(1) as i64
+}
+
 /// Coordination store for `(job_name, scope_key)` single-winner leases.
 #[async_trait]
 pub trait LeaseStore: Send + Sync {
@@ -161,19 +167,10 @@ impl LeaseStore for PostgresLeaseStore {
         holder_id: &str,
         ttl: Duration,
     ) -> Result<bool> {
-        let mut client = self.pool.get().await?;
-        // Postgres interval is whole seconds; floor matches spawn_runner's
-        // `lease_ttl_seconds.max(1)`. Sub-second TTLs are Memory-only (tests).
-        let ttl_secs = ttl.as_secs().max(1) as i64;
-        // Serialize peek + UPSERT so steal metrics see the row that the UPSERT raced.
-        let tx = client.transaction().await?;
-        let peek_sql = format!(
-            r#"SELECT holder_id, lease_until < now() AS expired
-FROM {table} WHERE job_name = $1 AND scope_key = $2
-FOR UPDATE"#,
-            table = self.table
-        );
-        let prev = tx.query_opt(&peek_sql, &[&job_name, &scope_key]).await?;
+        let client = self.pool.get().await?;
+        let ttl_secs = lease_ttl_secs(ttl);
+        // Single race-safe UPSERT (design §4). Steal metrics are Memory-only —
+        // peek+FOR UPDATE was dropped to avoid a second SQL for a counter.
         let sql = format!(
             r#"
 INSERT INTO {table} (job_name, scope_key, holder_id, lease_until, heartbeat_at)
@@ -188,21 +185,10 @@ RETURNING holder_id
 "#,
             table = self.table
         );
-        let row = tx
+        let row = client
             .query_opt(&sql, &[&job_name, &scope_key, &holder_id, &ttl_secs])
             .await?;
-        tx.commit().await?;
-        let won = matches!(row, Some(r) if r.get::<_, String>(0) == holder_id);
-        if won {
-            if let Some(prev) = prev {
-                let prev_holder: String = prev.get(0);
-                let expired: bool = prev.get(1);
-                if expired && prev_holder != holder_id {
-                    crate::self_monitoring::record_lease_steal(job_name, scope_key);
-                }
-            }
-        }
-        Ok(won)
+        Ok(matches!(row, Some(r) if r.get::<_, String>(0) == holder_id))
     }
 
     async fn heartbeat(
@@ -213,8 +199,7 @@ RETURNING holder_id
         ttl: Duration,
     ) -> Result<()> {
         let client = self.pool.get().await?;
-        // Same whole-second floor as try_acquire.
-        let ttl_secs = ttl.as_secs().max(1) as i64;
+        let ttl_secs = lease_ttl_secs(ttl);
         let sql = format!(
             r#"
 UPDATE {table}

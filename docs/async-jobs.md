@@ -31,7 +31,7 @@ thelake may run **multiple processes** (replicas). Several background tasks must
 1. **Ingest path stays hot and local** — never wait on a job lease to ack OTLP.  
 2. **Background work is jobs** — same runner for maintenance and session-index.  
 3. **Catalog Postgres holds coordination** — same DSN as DuckLake metadata / scope registry (not Explorer Supabase, not Redis).  
-4. **Lease before side effects** — acquire → heartbeat → run → release; expired leases are stealable.  
+4. **Lease before side effects** — acquire → heartbeat while running → on Ok **keep** lease (sticky renew at end of run); on Err/panic **release**. Expired leases are stealable. `lease_ttl_seconds` must exceed the runner wake interval.  
 5. **Durable dirty hints for session-index** — if only the lease holder reduces, every ingest replica must publish dirty `(session_id, time bounds)` to Postgres (not only process RAM).  
 6. **SQLite / single-node** — `MemoryLeaseStore` (same trait; no rusqlite); multi-replica leasing only on Postgres.
 
@@ -138,8 +138,8 @@ Job {
 
 **Refactor target:** replace ad-hoc `start_maintenance_scheduler` loop with `async_jobs::spawn_runner(config, jobs[])` that:
 
-1. Wakes on `min(job.intervals)`.  
-2. For each due `(job, scope)`: `try_acquire` → `run` with heartbeat → `release` / let TTL expire.  
+1. Wakes on `min(job.intervals)`.
+2. For each due `(job, scope)`: `try_acquire` → `run` with heartbeat → on Ok **keep** lease (sticky); on Err/panic **release**.
 3. Never runs two holders for the same `(job_name, scope_key)`.
 
 Maintenance logic stays in `compaction::executor` (domain). Session-index reduce stays in a `session_index` module (domain). **Only** scheduling + leasing are shared.
@@ -206,13 +206,16 @@ List lag = dirty publish latency + reducer interval + lease wait (usually second
 |---|---|
 | Holder crashes mid-job | `lease_until` expires; another replica steals |
 | Holder alive but slow | Heartbeat extends lease; configure TTL > typical pass |
+| Job `run` returns Ok | Lease **kept** (sticky holder); same process renews next wake via `try_acquire` |
+| Job `run` returns Err / panics | Runner **releases** so peers can retry without waiting for TTL |
 | Dirty UPSERT fails | Spans durable; periodic `session_index.rebuild` heals |
 | Two replicas try acquire | One wins; other skips — no dual compact |
 | SQLite / single-node | `MemoryLeaseStore` (same `LeaseStore` trait; no durable lease rows) |
-| Tenant pass `Err` | Runner logs + continues next scope; dropdown prune still runs after the failed pass |
+| Tenant pass `Err` | Runner logs + continues next scope; dropdown prune still runs once per wake (first leased run) |
 | `scope_keys` fails | Metric `job_errors{scope="_scopes"}` (sentinel — not a tenant id) |
+| Open/attach fails | `run_tenant_pass` returns `Err` — compact clock does not advance |
 
-Postgres lease TTL uses whole-second intervals (`ttl.as_secs().max(1)`); config is `lease_ttl_seconds` (≥1). Sub-second TTLs are Memory/test-only.
+Postgres lease TTL uses whole-second intervals (`ttl.as_secs().max(1)`); config is `lease_ttl_seconds` (≥1). Sub-second TTLs are Memory/test-only. `start_maintenance_scheduler` rejects `lease_ttl_seconds <= wake`.
 
 ---
 
@@ -254,8 +257,8 @@ src/session_index/   // Stage C+
 ```yaml
 async_jobs:
   instance_id: null   # default: thelake-{pid}-{uuid}
-  lease_ttl_seconds: 120
-  heartbeat_seconds: 30
+  lease_ttl_seconds: 400  # must be > maintenance wake (compaction-only = interval_seconds)
+  heartbeat_seconds: 30   # must be < lease_ttl_seconds
 
 maintenance:          # existing knobs; runner reads intervals
   enabled: true
@@ -274,7 +277,7 @@ session_index:
 
 ## 12. Success criteria
 
-1. Two thelake replicas never run `maintenance` on the same `scope_key` concurrently. ✅ Stage A  
+1. Two thelake replicas do not both *start* `maintenance` on the same `scope_key` while a healthy holder renews the lease (acquire UPSERT + sticky Ok). ✅ Stage A. Residual risk: if heartbeats fail and `lease_until` expires mid-pass, a peer may steal and dual-run until the former holder finishes — configure `lease_ttl` ≫ typical pass and keep catalog Postgres healthy.  
 2. Session-index reduce uses the **same** lease module as maintenance. (Stage C)  
 3. Ingest on replica A dirties a session; replica B (lease holder) reduces it. (Stage C)  
 4. No ingest request blocks on lease acquisition. (Stage C)  
@@ -284,7 +287,7 @@ session_index:
 
 ## 13. References
 
-- Current unleased loop: `src/compaction/scheduler.rs`  
+- Leased scheduler entry: `src/compaction/scheduler.rs` → `async_jobs::spawn_runner`  
 - Pass body: `src/compaction/executor.rs`  
 - Session list index: [`session-list-index.md`](./session-list-index.md)  
 - Design maintenance section: [`design.md`](./design.md)

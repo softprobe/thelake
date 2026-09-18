@@ -22,6 +22,12 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+/// Interval due check with 2s early slack (timer jitter). Shared by the runner
+/// and maintenance compact gating — do not duplicate the formula elsewhere.
+pub fn interval_due(elapsed: Duration, interval: Duration) -> bool {
+    !interval.is_zero() && elapsed + Duration::from_secs(2) >= interval
+}
+
 /// Stops the heartbeat task on drop (incl. panic unwind from `job.run`).
 struct HeartbeatStopGuard(Option<oneshot::Sender<()>>);
 
@@ -35,9 +41,11 @@ impl Drop for HeartbeatStopGuard {
 
 /// Spawn the shared wake loop. Returns `None` when `jobs` is empty.
 ///
-/// Configure `lease_ttl_seconds` well above `heartbeat_seconds` (and typical
-/// pass latency) so a slow heartbeat query cannot leave the row stealable
-/// mid-run. Heartbeat failures are logged; they do not abort `job.run`.
+/// On successful `job.run`, the lease is **kept** (sticky holder) so the same
+/// process renews on the next wake via `try_acquire`. Release only on `Err` /
+/// panic so peers can retry. Configure `lease_ttl_seconds` well above
+/// `heartbeat_seconds` (and typical pass latency). Heartbeat failures are
+/// logged; they do not abort `job.run`.
 pub fn spawn_runner(
     config: &AsyncJobsConfig,
     leases: Arc<dyn LeaseStore>,
@@ -90,7 +98,7 @@ pub fn spawn_runner(
                     let key = (job.name().to_string(), scope.clone());
                     let due = match last_run.get(&key) {
                         None => true,
-                        Some(t) => t.elapsed() + Duration::from_secs(2) >= interval,
+                        Some(t) => interval_due(t.elapsed(), interval),
                     };
                     if !due {
                         continue;
@@ -157,25 +165,42 @@ pub fn spawn_runner(
                     drop(_hb_guard);
                     let _ = hb_task.await;
 
-                    match run_result {
+                    let failed = match &run_result {
                         Ok(Ok(())) => {
                             last_run.insert(key, Instant::now());
+                            false
                         }
                         Ok(Err(err)) => {
                             warn!(job = job.name(), scope = %scope, "job failed: {err}");
                             self_monitoring::record_job_error(job.name(), &scope);
+                            true
                         }
                         Err(_) => {
                             warn!(job = job.name(), scope = %scope, "job panicked");
                             self_monitoring::record_job_error(job.name(), &scope);
+                            true
                         }
-                    }
+                    };
 
-                    if let Err(err) = leases.release(job.name(), &scope, &holder_id).await {
+                    // Sticky hold on Ok: refresh TTL from end-of-run so affinity
+                    // survives until the next wake (requires lease_ttl > wake).
+                    // Release on failure so peers can retry without waiting for TTL.
+                    if failed {
+                        if let Err(err) = leases.release(job.name(), &scope, &holder_id).await {
+                            warn!(
+                                job = job.name(),
+                                scope = %scope,
+                                "lease release failed: {err}"
+                            );
+                        }
+                    } else if let Err(err) = leases
+                        .heartbeat(job.name(), &scope, &holder_id, lease_ttl)
+                        .await
+                    {
                         warn!(
                             job = job.name(),
                             scope = %scope,
-                            "lease release failed: {err}"
+                            "sticky lease renew failed: {err}"
                         );
                     }
                 }

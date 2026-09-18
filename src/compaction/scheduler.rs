@@ -30,11 +30,13 @@ pub fn scheduler_wake_seconds(
 
 /// TWCS/ladder is due on its own interval, not on every metadata tick (AC-Q9).
 ///
-/// Allow 2s early: matches the pre-lease scheduler's `Instant` compare
-/// (`elapsed + 2s >= interval`) so timer jitter does not skip merges.
+/// Uses shared [`async_jobs::interval_due`] (+2s slack) so runner and compact
+/// gating stay identical.
 pub fn compaction_due(elapsed: Duration, compaction_interval_seconds: u64) -> bool {
-    compaction_interval_seconds > 0
-        && elapsed + Duration::from_secs(2) >= Duration::from_secs(compaction_interval_seconds)
+    async_jobs::interval_due(
+        elapsed,
+        Duration::from_secs(compaction_interval_seconds),
+    )
 }
 
 /// Start maintenance on the shared async job runner (leased per tenant).
@@ -53,6 +55,15 @@ pub async fn start_maintenance_scheduler(
     ) else {
         return Ok(None);
     };
+
+    // Sticky hold has no inter-wake heartbeat; TTL must outlive the wake gap.
+    let ttl = config.async_jobs.lease_ttl_seconds.max(1);
+    if ttl <= wake_secs {
+        anyhow::bail!(
+            "async_jobs.lease_ttl_seconds ({ttl}) must be > maintenance wake ({wake_secs}s) \
+             so the sticky holder survives until the next try_acquire"
+        );
+    }
 
     let executor =
         MaintenanceExecutor::new(config, dropdown_catalog, scope_registry.clone()).await?;
@@ -84,6 +95,23 @@ mod tests {
             .await
             .expect("scheduler");
         assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn scheduler_rejects_lease_ttl_not_greater_than_wake() {
+        let mut c = Config::default();
+        c.maintenance.enabled = true;
+        c.maintenance.metadata_enabled = false;
+        c.maintenance.interval_seconds = 300;
+        c.async_jobs.lease_ttl_seconds = 120; // ≤ wake
+        c.async_jobs.heartbeat_seconds = 30;
+        let err = start_maintenance_scheduler(&c, None, None)
+            .await
+            .expect_err("ttl <= wake");
+        assert!(
+            err.to_string().contains("lease_ttl_seconds"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]

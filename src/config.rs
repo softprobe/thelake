@@ -57,7 +57,8 @@ impl Default for AsyncJobsConfig {
 }
 
 fn default_lease_ttl_seconds() -> u64 {
-    120
+    // Must exceed max default maintenance wake (compaction-only = interval_seconds = 300).
+    400
 }
 
 fn default_heartbeat_seconds() -> u64 {
@@ -76,6 +77,18 @@ impl AsyncJobsConfig {
             return id.to_string();
         }
         format!("thelake-{}-{}", std::process::id(), uuid::Uuid::new_v4())
+    }
+
+    /// Reject configs where heartbeat cannot land before the lease expires.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let ttl = self.lease_ttl_seconds.max(1);
+        let hb = self.heartbeat_seconds.max(1);
+        if hb >= ttl {
+            anyhow::bail!(
+                "async_jobs.heartbeat_seconds ({hb}) must be < async_jobs.lease_ttl_seconds ({ttl})"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -524,6 +537,7 @@ impl Config {
 
         config.apply_env_overrides()?;
         config.validate_ducklake_catalog()?;
+        config.async_jobs.validate()?;
         Ok(config)
     }
 
@@ -813,6 +827,17 @@ ducklake:
         c.ducklake.catalog_type = "duckdb".to_string();
         let err = c.validate_ducklake_catalog().expect_err("duckdb rejected");
         assert!(err.to_string().contains("unsupported"));
+    }
+
+    #[test]
+    fn async_jobs_validate_rejects_heartbeat_ge_ttl() {
+        let mut c = Config::default();
+        c.async_jobs.lease_ttl_seconds = 30;
+        c.async_jobs.heartbeat_seconds = 30;
+        let err = c.async_jobs.validate().expect_err("hb == ttl");
+        assert!(err.to_string().contains("heartbeat_seconds"));
+        c.async_jobs.heartbeat_seconds = 10;
+        c.async_jobs.validate().expect("hb < ttl ok");
     }
 
     #[test]

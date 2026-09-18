@@ -193,15 +193,15 @@ impl MaintenanceExecutor {
         let conn = match self.open_ducklake_connection(ducklake) {
             Ok(c) => c,
             Err(err) => {
-                warn!("Maintenance skip scope {}: open failed: {}", label, err);
+                warn!("Maintenance open failed for scope {}: {}", label, err);
                 crate::self_monitoring::record_compaction_pass(label, false);
-                return Ok(results);
+                return Err(anyhow!("maintenance open failed for {label}: {err}"));
             }
         };
         if let Err(err) = self.attach_ducklake(&conn, ducklake) {
-            warn!("Maintenance skip scope {}: attach failed: {}", label, err);
+            warn!("Maintenance attach failed for scope {}: {}", label, err);
             crate::self_monitoring::record_compaction_pass(label, false);
-            return Ok(results);
+            return Err(anyhow!("maintenance attach failed for {label}: {err}"));
         }
 
         let files_before = count_parquet_files_under(&ducklake.data_path);
@@ -1486,5 +1486,29 @@ mod tests {
         assert_eq!(snapshot_metric_status(false, false), None);
         assert_eq!(snapshot_metric_status(true, false), Some("ok"));
         assert_eq!(snapshot_metric_status(true, true), Some("error"));
+    }
+
+    #[tokio::test]
+    async fn run_tenant_pass_attach_failure_is_err() {
+        let mut cfg = Config::default();
+        cfg.maintenance.enabled = false;
+        cfg.maintenance.metadata_enabled = false;
+        let executor = MaintenanceExecutor::new(&cfg, None, None)
+            .await
+            .expect("executor");
+        let mut ducklake = cfg.ducklake.clone();
+        // Parent path is a file → prepare_local_ducklake_paths fails → attach Err.
+        let blocker = tempfile::NamedTempFile::new().expect("blocker file");
+        ducklake.catalog_type = "sqlite".into();
+        ducklake.metadata_path = format!("{}/meta.sqlite", blocker.path().display());
+        ducklake.data_path = format!("{}/data/", blocker.path().display());
+        let err = executor
+            .run_tenant_pass("t-attach-fail", &ducklake, false)
+            .await
+            .expect_err("attach must Err");
+        assert!(
+            err.to_string().contains("attach failed") || err.to_string().contains("open failed"),
+            "unexpected: {err}"
+        );
     }
 }
