@@ -22,10 +22,12 @@ Can start immediately; independent of Stages A–5.
 
 Independent of Stage 0; can run **in parallel with Stage A**.
 
-- [ ] **0b.1** Emit `traces` / `logs` (not `union_*`) from query compilers for new SQL
-- [ ] **0b.2** Keep rewrite shim for external SQL still using `union_*` (briefly)
-- [ ] **0b.3** Plan / ticket for deleting the shim (do not block later stages)
-- [ ] **0b.4** Remove all remainging `union_*` from all places
+- [x] **0b.1** Emit `traces` / `logs` (not `union_*`) from query compilers for new SQL
+- [x] **0b.2** Keep rewrite shim for external SQL still using `union_*` (briefly)
+- [x] **0b.3** Plan / ticket for deleting the shim (do not block later stages)
+- [x] **0b.4** Remove all remaining `union_*` from first-party emitters/fixtures (shim kept)
+
+**Stage 0b notes:** Compilers/fixtures emit `traces`/`logs`/`metrics`. Legacy `union_*` remains rewrite-only — see `docs/union-alias-shim.md` (lands with code PR `feat/prefer-traces-logs`). Internal Rust helpers named `union_metrics_layout_*` are not the SQL shim.
 
 ---
 
