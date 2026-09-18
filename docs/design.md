@@ -319,6 +319,13 @@ flush-through ingest does not create one tiny file per export. See
 [`perf/prometheus-query-findings.md`](perf/prometheus-query-findings.md)
 Phase B.
 
+**Multi-instance (design):** today’s `start_maintenance_scheduler` runs on every
+replica with **no** cross-process lease. The intended fix is a shared async job
+runner and Postgres `thelake_job_lease` used by maintenance **and** session-index
+reduce — see [`async-jobs.md`](async-jobs.md) and
+[`session-list-index.md`](session-list-index.md). Do not add a second ad-hoc lock
+per feature.
+
 **Proposed** metrics physical layout (not current code): day-sharded postings,
 skinny samples, 5m/1h ladder, and `job` collapse — goals and the 39-id
 acceptance suite are in
