@@ -27,7 +27,7 @@ Independent of Stage 0; can run **in parallel with Stage A**.
 - [x] **0b.3** Plan / ticket for deleting the shim (do not block later stages)
 - [x] **0b.4** Remove all remaining `union_*` from first-party emitters/fixtures (shim kept)
 
-**Stage 0b notes:** Compilers/fixtures emit `traces`/`logs`/`metrics`. Legacy `union_*` remains rewrite-only — see `docs/union-alias-shim.md` (lands with code PR `feat/prefer-traces-logs`). Internal Rust helpers named `union_metrics_layout_*` are not the SQL shim.
+**Stage 0b notes:** Compilers/fixtures emit `traces`/`logs`/`metrics`. Legacy `union_*` remains rewrite-only in `rewrite_reserved_telemetry_view_names` (code PR `feat/prefer-traces-logs`). Internal `union_metrics_layout_*` helpers are not the SQL shim.
 
 ---
 
