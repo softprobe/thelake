@@ -958,7 +958,7 @@ async fn logs_promote_scope_name_to_logger_name_attribute() {
     // CAST keeps this green under both MAP and VARIANT attribute storage.
     let sql = format!(
         "SELECT body, CAST(attributes['logger_name'] AS VARCHAR) AS logger_name \
-         FROM union_logs WHERE session_id = '{session_id}' ORDER BY timestamp ASC"
+         FROM logs WHERE session_id = '{session_id}' ORDER BY timestamp ASC"
     );
     let req = Request::builder()
         .method("POST")

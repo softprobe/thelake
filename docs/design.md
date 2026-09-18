@@ -276,17 +276,23 @@ auto-promote them. Canonical contract:
 Every worker loads `httpfs` and DuckLake, configures object-store access, and
 ATTACHes the same DuckLake scope used by its tenant-bound writer.
 
-Public query names remain:
+Public query names:
 
-- `union_spans`, `union_logs`
-- `committed_spans`, `committed_logs`
+- **Preferred:** `traces`, `logs`, `metrics`
+- **Legacy (rewrite shim only):** `union_spans`, `union_logs`, `union_metrics`,
+  plus historical `committed_*` / `buffer_*` / `staged_*` / `iceberg_*` aliases
 
 Because ingest defaults to flush-through (optional soft coalesce does not add a
-queryable buffer tier), union and committed names resolve to the same DuckLake
-tables. Historical `buffer_*`, `staged_*`, and `iceberg_*` aliases are
-compatibility spellings only; there are no corresponding runtime tiers.
-Metric queries target `metric_samples` and the explicitly named rollup tables
-directly.
+queryable buffer tier), preferred and legacy names resolve to the same DuckLake
+tables / metrics layout JOIN. First-party compilers emit preferred names only;
+the query engine still rewrites legacy names for external SQL. Shim deletion
+plan: remove `union_*` / tier aliases from `rewrite_reserved_telemetry_view_names`
+only after callers (Explorer ad-hoc, e2e fixtures, external notebooks) are
+confirmed on `traces`/`logs`/`metrics` — track as follow-up; do not block
+session-index work on full removal.
+
+Metric Prom paths target `metric_samples` and the explicitly named rollup tables
+directly (not the public `metrics` / `union_metrics` compatibility relation).
 
 Query surfaces include:
 

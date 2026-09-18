@@ -43,7 +43,8 @@ pub struct DuckDBQueryEngine {
 const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql");
 
 /// When a DuckLake catalog is attached, DuckDB treats identifiers containing substrings like
-/// `union_spans` / `committed_spans` as special. Rewrite the public surface to neutral `tm_*` names.
+/// `union_spans` / `committed_spans` as special. Rewrite those legacy names (and preferred
+/// `metrics`) to neutral `tm_*` names before inlining qualified DuckLake tables.
 /// Buffer/staged aliases map to the committed tier (default ingest is flush-through;
 /// soft coalesce N>0 only delays when rows appear there).
 fn is_sql_ident_char(c: char) -> bool {
@@ -155,13 +156,17 @@ fn replace_standalone_ident(s: &str, from: &str, to: &str) -> String {
 
 fn rewrite_reserved_telemetry_view_names(sql: &str) -> String {
     let mut s = sql.to_string();
-    // Metrics/logs before spans so `union_metrics` is not partially consumed.
+    // Longer / legacy names first so `union_metrics` is not partially consumed by `metrics`.
+    // Preferred public names: `traces` / `logs` / `metrics` (see ducklake_inline_sql).
+    // `union_*` and historical buffer/staged/iceberg/committed aliases stay as rewrite-only
+    // compatibility input until the shim is deleted (session-list-index Stage 0b.3).
     const PAIRS: &[(&str, &str)] = &[
         ("union_metrics", "tm_all_metric"),
         ("committed_metrics", "tm_cq_metric"),
         ("buffer_metrics", "tm_cq_metric"),
         ("iceberg_metrics", "tm_cq_metric"),
         ("staged_metrics", "tm_cq_metric"),
+        ("metrics", "tm_all_metric"),
         ("union_logs", "tm_all_log"),
         ("committed_logs", "tm_cq_log"),
         ("buffer_logs", "tm_cq_log"),
@@ -1506,6 +1511,20 @@ mod tests {
             &crate::storage::schema::union_metrics_layout_relation_sql("softprobe", "tm_cq_metric"),
         );
         assert!(cq.contains("metric_samples"));
+    }
+
+    #[test]
+    fn rewrite_preferred_metrics_alias_matches_union_metrics() {
+        let preferred = rewrite_reserved_telemetry_view_names("SELECT value FROM metrics");
+        let legacy = rewrite_reserved_telemetry_view_names("SELECT value FROM union_metrics");
+        assert_eq!(preferred, "SELECT value FROM tm_all_metric");
+        assert_eq!(preferred, legacy);
+    }
+
+    #[test]
+    fn rewrite_legacy_union_spans_still_accepted() {
+        let prep = rewrite_reserved_telemetry_view_names("SELECT 1 FROM union_spans");
+        assert_eq!(prep, "SELECT 1 FROM tm_all_span");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Strict storage and SQL-shape checks that replace the removed ad hoc scripts
 //! (`verify_e2e.sh`, `verify_iceberg.sql`, `verify_session.sql`). Assertions run against the
-//! runtime **DuckLake** query path (`union_spans` / `union_logs`), not Iceberg REST scans.
+//! runtime **DuckLake** query path (`traces` / `logs`), not Iceberg REST scans.
 //!
 //! Requirements: `integration-e2e` feature, local MinIO on the configured S3 endpoint, and
 //! `tests/config/test.yaml` (see `make test-e2e`).
@@ -62,7 +62,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
 
     let escaped = session_id.replace('\'', "''");
     let count_sql =
-        format!("SELECT COUNT(*)::BIGINT AS c FROM union_spans WHERE session_id = '{escaped}'");
+        format!("SELECT COUNT(*)::BIGINT AS c FROM traces WHERE session_id = '{escaped}'");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
@@ -73,7 +73,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
         },
     )
     .await
-    .expect("union_spans should show the flushed span");
+    .expect("traces should show the flushed span");
 
     let detail_sql = format!(
         "SELECT \
@@ -81,7 +81,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
             http_request_path, \
             http_response_status_code, \
             record_date::VARCHAR AS rd \
-         FROM union_spans \
+         FROM traces \
          WHERE session_id = '{escaped}' \
          LIMIT 1"
     );
@@ -104,7 +104,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
 
     let part_sql = format!(
         "SELECT COUNT(*)::BIGINT AS partitions FROM ( \
-            SELECT record_date FROM union_spans WHERE session_id = '{escaped}' GROUP BY record_date \
+            SELECT record_date FROM traces WHERE session_id = '{escaped}' GROUP BY record_date \
         ) s"
     );
     let pr = test_pipeline
@@ -117,7 +117,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
     );
 
     let distinct_sql = format!(
-        "SELECT COUNT(DISTINCT session_id)::BIGINT AS d FROM union_spans WHERE session_id = '{escaped}'"
+        "SELECT COUNT(DISTINCT session_id)::BIGINT AS d FROM traces WHERE session_id = '{escaped}'"
     );
     let dr = test_pipeline
         .execute_query(&distinct_sql)
@@ -195,7 +195,7 @@ async fn strict_session_correlates_traces_and_logs() {
     pipeline.force_flush_logs().await.expect("flush logs");
 
     let esc = session_id.replace('\'', "''");
-    let span_wait = format!("SELECT COUNT(*)::BIGINT FROM union_spans WHERE session_id = '{esc}'");
+    let span_wait = format!("SELECT COUNT(*)::BIGINT FROM traces WHERE session_id = '{esc}'");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
@@ -205,9 +205,9 @@ async fn strict_session_correlates_traces_and_logs() {
         },
     )
     .await
-    .expect("union_spans row for session");
+    .expect("traces row for session");
 
-    let log_wait = format!("SELECT COUNT(*)::BIGINT FROM union_logs WHERE session_id = '{esc}'");
+    let log_wait = format!("SELECT COUNT(*)::BIGINT FROM logs WHERE session_id = '{esc}'");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
@@ -217,11 +217,11 @@ async fn strict_session_correlates_traces_and_logs() {
         },
     )
     .await
-    .expect("union_logs row for session");
+    .expect("logs row for session");
 
     let trace_esc = trace_id.replace('\'', "''");
     let correlate_sql = format!(
-        "SELECT COUNT(*)::BIGINT AS n FROM union_logs \
+        "SELECT COUNT(*)::BIGINT AS n FROM logs \
          WHERE session_id = '{esc}' AND trace_id = '{trace_esc}'"
     );
     let cr = test_pipeline
