@@ -215,6 +215,14 @@ pub struct DuckLakeScopeResolver {
 }
 
 impl DuckLakeScopeResolver {
+    pub fn pool(&self) -> &Pool {
+        &self.pool
+    }
+
+    pub fn registry_schema(&self) -> &str {
+        &self.registry_schema
+    }
+
     pub async fn connect(config: &Config) -> Result<Option<Self>> {
         let dl = &config.ducklake;
         if dl.catalog_type != "postgres" {
@@ -270,6 +278,32 @@ impl DuckLakeScopeResolver {
   provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );"#,
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[],
+            )
+            .await?;
+        client
+            .execute(
+                &format!(
+                    r#"CREATE TABLE IF NOT EXISTS {}.thelake_job_lease (
+  job_name TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  holder_id TEXT NOT NULL,
+  lease_until TIMESTAMPTZ NOT NULL,
+  heartbeat_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (job_name, scope_key)
+);"#,
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[],
+            )
+            .await?;
+        client
+            .execute(
+                &format!(
+                    r#"CREATE INDEX IF NOT EXISTS thelake_job_lease_until
+ON {}.thelake_job_lease (lease_until);"#,
                     quote_pg_ident(&self.registry_schema)
                 ),
                 &[],
@@ -632,6 +666,6 @@ fn parse_postgres_kv_config(pg: &mut tokio_postgres::Config, metadata_path: &str
     Ok(())
 }
 
-fn quote_pg_ident(input: &str) -> String {
+pub(crate) fn quote_pg_ident(input: &str) -> String {
     format!("\"{}\"", input.replace('"', "\"\""))
 }

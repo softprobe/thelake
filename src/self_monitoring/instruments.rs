@@ -37,6 +37,10 @@ pub struct Instruments {
     /// Prom sample-scan plan: grain table + raw vs downsample vs live UNION.
     pub sample_scans: Counter<u64>,
     pub export_drops: Counter<u64>,
+    pub job_lease_acquire: Counter<u64>,
+    pub job_lease_steal: Counter<u64>,
+    pub job_lease_heartbeat_failure: Counter<u64>,
+    pub job_errors: Counter<u64>,
 }
 
 fn register_observables(meter: &Meter) {
@@ -270,6 +274,12 @@ fn build_instruments(meter: &Meter) -> Instruments {
         export_drops: meter
             .u64_counter("thelake.self_monitoring.export_drops")
             .build(),
+        job_lease_acquire: meter.u64_counter("thelake.job.lease_acquire").build(),
+        job_lease_steal: meter.u64_counter("thelake.job.lease_steal").build(),
+        job_lease_heartbeat_failure: meter
+            .u64_counter("thelake.job.lease_heartbeat_failure")
+            .build(),
+        job_errors: meter.u64_counter("thelake.job.errors").build(),
     }
 }
 
@@ -467,6 +477,32 @@ pub fn record_slow_query(tenant: &str, sql_kind: &str) {
         1,
         &attrs(&[("tenant", tenant), ("sql_kind", sql_kind), ("op", "query")]),
     );
+}
+
+pub fn record_lease_acquire(job: &str, scope: &str, outcome: &str) {
+    let Some(i) = instruments() else { return };
+    i.job_lease_acquire.add(
+        1,
+        &attrs(&[("job", job), ("scope", scope), ("outcome", outcome)]),
+    );
+}
+
+pub fn record_lease_steal(job: &str, scope: &str) {
+    let Some(i) = instruments() else { return };
+    i.job_lease_steal
+        .add(1, &attrs(&[("job", job), ("scope", scope)]));
+}
+
+pub fn record_lease_heartbeat_failure(job: &str, scope: &str) {
+    let Some(i) = instruments() else { return };
+    i.job_lease_heartbeat_failure
+        .add(1, &attrs(&[("job", job), ("scope", scope)]));
+}
+
+pub fn record_job_error(job: &str, scope: &str) {
+    let Some(i) = instruments() else { return };
+    i.job_errors
+        .add(1, &attrs(&[("job", job), ("scope", scope)]));
 }
 
 /// Refresh process CPU/RSS/IO snapshots for ObservableGauges (best-effort).
