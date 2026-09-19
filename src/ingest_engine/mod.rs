@@ -241,9 +241,8 @@ impl IngestPipeline {
         let mut scoped_config = config.clone();
         scoped_config.ducklake.metadata_schema = scope.metadata_schema;
         scoped_config.ducklake.data_path = scope.data_path;
-        let writer = Arc::new(
-            DuckLakeWriter::new_scope_bound(&scoped_config, tenant_ducklake).await?,
-        );
+        let writer =
+            Arc::new(DuckLakeWriter::new_scope_bound(&scoped_config, tenant_ducklake).await?);
         Ok(Storage::new(writer))
     }
 

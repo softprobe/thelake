@@ -852,12 +852,8 @@ async fn runner_continues_when_scope_keys_fails() {
         heartbeat_seconds: 1,
         lease_ttl_seconds: 60,
     };
-    let handle = spawn_runner(
-        &cfg,
-        leases,
-        vec![fail as Arc<dyn Job>, ok as Arc<dyn Job>],
-    )
-    .expect("runner");
+    let handle =
+        spawn_runner(&cfg, leases, vec![fail as Arc<dyn Job>, ok as Arc<dyn Job>]).expect("runner");
     tokio::time::sleep(Duration::from_millis(80)).await;
     handle.abort();
     assert!(
@@ -1129,7 +1125,12 @@ async fn panic_releases_lease_for_peer() {
     handle.abort();
     assert!(
         leases
-            .try_acquire("panic_job", "t1", "peer-after-panic", Duration::from_secs(60))
+            .try_acquire(
+                "panic_job",
+                "t1",
+                "peer-after-panic",
+                Duration::from_secs(60)
+            )
             .await
             .unwrap(),
         "panic must release so peer can acquire"
@@ -1166,4 +1167,3 @@ async fn lease_store_for_none_is_memory() {
         .await
         .unwrap());
 }
-

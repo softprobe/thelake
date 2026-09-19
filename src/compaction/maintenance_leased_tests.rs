@@ -120,7 +120,10 @@ fn seed_closed_day_small_files(ducklake: &DuckLakeConfig, series_base: u64) -> (
         files >= 8,
         "precondition: need many live Parquet files, got {files}"
     );
-    assert!(snaps >= 20, "precondition: need snapshot storm, got {snaps}");
+    assert!(
+        snaps >= 20,
+        "precondition: need snapshot storm, got {snaps}"
+    );
     drop(conn);
     (files, snaps, rows)
 }
@@ -140,8 +143,8 @@ where
 }
 
 fn try_observe(ducklake: &DuckLakeConfig) -> Result<(i64, i64, i64), String> {
-    let (conn, catalog) = crate::storage::ducklake::open_and_attach_ducklake(ducklake)
-        .map_err(|e| e.to_string())?;
+    let (conn, catalog) =
+        crate::storage::ducklake::open_and_attach_ducklake(ducklake).map_err(|e| e.to_string())?;
     let out = (
         live_sample_files(&conn, &catalog),
         snapshot_count(&conn, &catalog),
@@ -180,12 +183,8 @@ async fn leased_maintenance_compacts_files_and_expires_snapshots() {
         true,
     ));
     let leases = Arc::new(MemoryLeaseStore::new());
-    let handle = spawn_runner(
-        &config.async_jobs,
-        leases as Arc<dyn LeaseStore>,
-        vec![job],
-    )
-    .expect("runner");
+    let handle =
+        spawn_runner(&config.async_jobs, leases as Arc<dyn LeaseStore>, vec![job]).expect("runner");
 
     let ducklake = config.ducklake.clone();
     let ok = wait_until(Duration::from_secs(30), || {
@@ -263,12 +262,8 @@ async fn multi_tenant_leased_maintenance_compacts_each_scope() {
         ],
     ));
     let leases = Arc::new(MemoryLeaseStore::new());
-    let handle = spawn_runner(
-        &config.async_jobs,
-        leases as Arc<dyn LeaseStore>,
-        vec![job],
-    )
-    .expect("runner");
+    let handle =
+        spawn_runner(&config.async_jobs, leases as Arc<dyn LeaseStore>, vec![job]).expect("runner");
 
     let ok = wait_until(Duration::from_secs(45), || {
         let (fa, sa, ra) = observe(&dk_a);
@@ -308,12 +303,7 @@ async fn aborted_lease_holder_peer_recovers_and_compacts() {
     let leases = Arc::new(MemoryLeaseStore::new());
     // Zombie holds the maintenance lease then "dies" without release (no HB).
     assert!(leases
-        .try_acquire(
-            "maintenance",
-            "_default",
-            "zombie",
-            Duration::from_secs(2)
-        )
+        .try_acquire("maintenance", "_default", "zombie", Duration::from_secs(2))
         .await
         .unwrap());
 
