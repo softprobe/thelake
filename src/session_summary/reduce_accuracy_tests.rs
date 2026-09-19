@@ -752,3 +752,118 @@ fn clamp_window_excludes_early_history() {
         },
     );
 }
+
+/// Stage 5: MAP bag values must not leak into reduce when typed cols are NULL.
+#[test]
+fn map_only_attrs_do_not_fill_typed_aggregates() {
+    use crate::models::attr_keys::{gen_ai, sp};
+
+    let conn = Connection::open_in_memory().unwrap();
+    // Richer table than reduce reads — bag is deliberately populated.
+    conn.execute_batch(
+        "CREATE TABLE traces (
+           session_id VARCHAR,
+           span_id VARCHAR,
+           timestamp TIMESTAMP,
+           end_timestamp TIMESTAMP,
+           status_code VARCHAR,
+           message_type VARCHAR,
+           agent_name VARCHAR,
+           observation_type VARCHAR,
+           input_tokens BIGINT,
+           output_tokens BIGINT,
+           total_tokens BIGINT,
+           total_cost DOUBLE,
+           user_id VARCHAR,
+           model_name VARCHAR,
+           record_date DATE,
+           attributes MAP(VARCHAR, VARCHAR)
+         );",
+    )
+    .expect("create");
+    let day = Utc
+        .timestamp_opt(100, 0)
+        .unwrap()
+        .date_naive()
+        .format("%Y-%m-%d");
+    let bag = format!(
+        "MAP {{'{agent}': 'bag-agent', '{user}': 'bag-user', '{model}': 'bag-model', \
+         '{in_tok}': '99', '{out_tok}': '88', '{tot}': '187', '{cost}': '9.9'}}",
+        agent = sp::AGENT_NAME,
+        user = sp::USER_ID,
+        model = gen_ai::REQUEST_MODEL,
+        in_tok = gen_ai::USAGE_INPUT_TOKENS,
+        out_tok = gen_ai::USAGE_OUTPUT_TOKENS,
+        tot = gen_ai::USAGE_TOTAL_TOKENS,
+        cost = sp::COST_TOTAL,
+    );
+    conn.execute_batch(&format!(
+        "INSERT INTO traces VALUES (
+           'bag-only', 'a', epoch_ms(100000), NULL, 'OK', 'IgnoredName',
+           NULL, 'generation', NULL, NULL, NULL, NULL, NULL, NULL,
+           DATE '{day}', {bag}
+         );"
+    ))
+    .expect("insert bag row");
+
+    let rows = run_reduce(&conn, &["bag-only"], 0, 1000);
+    assert_full_fields(
+        &rows[0],
+        &Agg {
+            session_id: "bag-only".into(),
+            start_us: 100_000_000,
+            end_us: 100_000_000,
+            observation_count: 1,
+            error_count: 0,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            total_cost: None,
+            agent_name: None,
+            user_id: None,
+            model_name: None,
+        },
+    );
+}
+
+/// Stage 5: without auth agent_name or agent observation, generation message_type is ignored.
+#[test]
+fn generation_message_type_without_auth_agent_stays_null() {
+    let conn = Connection::open_in_memory().unwrap();
+    setup_traces(&conn);
+    insert(
+        &conn,
+        "no-agent",
+        "a",
+        100,
+        None,
+        "OK",
+        "generation",
+        "WouldBeWrongIfUsed",
+        None,
+        Some(1),
+        Some(1),
+        Some(2),
+        Some(0.01),
+        Some("u"),
+        Some("m"),
+    );
+    let rows = run_reduce(&conn, &["no-agent"], 0, 1000);
+    assert_full_fields(
+        &rows[0],
+        &Agg {
+            session_id: "no-agent".into(),
+            start_us: 100_000_000,
+            end_us: 100_000_000,
+            observation_count: 1,
+            error_count: 0,
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            total_tokens: Some(2),
+            total_cost: Some(0.01),
+            agent_name: None,
+            user_id: Some("u".into()),
+            model_name: Some("m".into()),
+        },
+    );
+}

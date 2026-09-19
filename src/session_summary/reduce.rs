@@ -294,28 +294,79 @@ fn map_duck_row(row: &duckdb::Row<'_>) -> duckdb::Result<SummaryRow> {
     })
 }
 
+/// Reject inverted or oversized rebuild windows (ops + periodic share this).
+pub fn validate_rebuild_window(
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    max_reduce_span_seconds: u64,
+) -> Result<(), String> {
+    if from > to {
+        return Err("`from` must be <= `to`".to_string());
+    }
+    let span_secs = (to - from).num_seconds();
+    if span_secs < 0 {
+        return Err("`from` must be <= `to`".to_string());
+    }
+    if (span_secs as u64) > max_reduce_span_seconds {
+        return Err(format!(
+            "rebuild window exceeds max_reduce_span_seconds ({max_reduce_span_seconds})"
+        ));
+    }
+    Ok(())
+}
+
 /// Run promoted-only aggregate against DuckLake `traces`.
+///
+/// - `session_ids = Some([...])` — reduce (dirty IN-list).
+/// - `session_ids = None` — rebuild (window-wide).
 pub fn aggregate_sessions_from_lake(
     ducklake: &DuckLakeConfig,
-    session_ids: &[String],
+    session_ids: Option<&[String]>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<Vec<SummaryRow>> {
     let from_table = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, "traces");
-    let sql = crate::session_summary::reduce_sql::compile_session_summary_reduce_sql(
-        &from_table,
-        session_ids,
-        from,
-        to,
-    )?;
+    let sql = match session_ids {
+        Some(ids) => crate::session_summary::reduce_sql::compile_session_summary_reduce_sql(
+            &from_table,
+            ids,
+            from,
+            to,
+        )?,
+        None => crate::session_summary::reduce_sql::compile_session_summary_rebuild_sql(
+            &from_table,
+            from,
+            to,
+        )?,
+    };
     let conn = open_reduce_connection(ducklake)?;
-    let mut stmt = conn.prepare(&sql).context("prepare reduce SQL")?;
+    let mut stmt = conn.prepare(&sql).context("prepare aggregate SQL")?;
     let mapped = stmt
         .query_map([], map_duck_row)
-        .context("query reduce")?
+        .context("query aggregate")?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .context("map reduce rows")?;
+        .context("map aggregate rows")?;
     Ok(mapped)
+}
+
+/// Window rebuild: lake aggregate (no IN-list) → absolute UPSERT. No dirty claim/ack.
+pub async fn rebuild_tenant_window(
+    pool: &Pool,
+    metadata_schema: &str,
+    ducklake: &DuckLakeConfig,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    max_reduce_span_seconds: u64,
+) -> Result<usize> {
+    validate_rebuild_window(from, to, max_reduce_span_seconds).map_err(|msg| anyhow!(msg))?;
+    let ducklake = ducklake.clone();
+    let rows = tokio::task::spawn_blocking(move || {
+        aggregate_sessions_from_lake(&ducklake, None, from, to)
+    })
+    .await
+    .map_err(|e| anyhow!("rebuild join: {e}"))??;
+    upsert_summary_rows(pool, metadata_schema, &rows).await?;
+    Ok(rows.len())
 }
 
 /// Full reduce pipeline for one tenant. Empty dirty → Ok no-op.
@@ -362,7 +413,7 @@ pub async fn reduce_tenant(
     let ducklake = ducklake.clone();
     let ids_for_lake = ids.clone();
     let rows = tokio::task::spawn_blocking(move || {
-        aggregate_sessions_from_lake(&ducklake, &ids_for_lake, from, to)
+        aggregate_sessions_from_lake(&ducklake, Some(&ids_for_lake), from, to)
     })
     .await
     .map_err(|e| anyhow!("reduce join: {e}"))??;
@@ -434,5 +485,14 @@ mod tests {
                 .unwrap();
         assert_eq!(from, claims[0].min_ts);
         assert_eq!(to, now);
+    }
+
+    #[test]
+    fn rebuild_window_rejects_inverted_and_oversized() {
+        let from = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap();
+        assert!(validate_rebuild_window(from, to, 86400).is_ok());
+        assert!(validate_rebuild_window(to, from, 86400).is_err());
+        assert!(validate_rebuild_window(from, to, 3600).is_err());
     }
 }

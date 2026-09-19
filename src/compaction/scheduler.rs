@@ -3,13 +3,13 @@ use crate::compaction::executor::MaintenanceExecutor;
 use crate::compaction::maintenance_job::MaintenanceJob;
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
-use crate::session_summary::SessionSummaryReduceJob;
+use crate::session_summary::{SessionSummaryRebuildJob, SessionSummaryReduceJob};
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-/// Start the shared async job runner with maintenance and/or session_summary.reduce.
+/// Start the shared async job runner with maintenance and/or session_summary jobs.
 ///
 /// One `spawn_runner` only — never a second timer loop.
 pub async fn start_maintenance_scheduler(
@@ -39,6 +39,12 @@ pub async fn start_maintenance_scheduler(
             )
         })?;
         jobs.push(Arc::new(SessionSummaryReduceJob::new(
+            registry.pool().clone(),
+            Some(registry.clone()),
+            config.ducklake.clone(),
+            config.session_summary.clone(),
+        )));
+        jobs.push(Arc::new(SessionSummaryRebuildJob::new(
             registry.pool().clone(),
             Some(registry),
             config.ducklake.clone(),

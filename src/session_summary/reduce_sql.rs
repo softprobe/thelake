@@ -1,7 +1,7 @@
-//! Promoted-only DuckLake aggregate SQL for `session_summary.reduce`.
+//! Promoted-only DuckLake aggregate SQL for `session_summary` reduce **and** rebuild.
 //!
 //! **Hard rule:** never reference `attributes` / MAP bags. List path may use
-//! `prefer_attr_*`; reduce must not.
+//! `prefer_attr_*`; reduce/rebuild must not.
 
 use crate::api::llm::query::llm_promo;
 use crate::api::sql_support::{sql_string_literal, timestamp_ns_column, timestamp_ns_literal};
@@ -30,37 +30,46 @@ const SESSION_SUMMARY_UPSERT_COLUMNS: &[&str] = &[
 
 /// Compile time-scoped `GROUP BY session_id` SQL over `from_table` (promoted cols only).
 ///
-/// `from_table` is typically `traces` (unit tests) or a DuckLake-qualified name.
-pub fn compile_session_summary_reduce_sql(
+/// - `session_ids = Some([...])` — reduce path (dirty claim IN-list; must be non-empty).
+/// - `session_ids = None` — rebuild path (window-wide; still `session_id <> ''`).
+pub fn compile_session_summary_aggregate_sql(
     from_table: &str,
-    session_ids: &[String],
+    session_ids: Option<&[String]>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<String> {
-    if session_ids.is_empty() {
-        bail!("session_summary reduce SQL requires at least one session_id");
-    }
     if from > to {
-        bail!("session_summary reduce SQL requires from <= to");
+        bail!("session_summary aggregate SQL requires from <= to");
     }
     if from_table.is_empty() || from_table.contains(';') {
-        bail!("invalid from_table for reduce SQL");
+        bail!("invalid from_table for aggregate SQL");
+    }
+    if let Some(ids) = session_ids {
+        if ids.is_empty() {
+            bail!("session_summary reduce SQL requires at least one session_id");
+        }
     }
 
     let promo = llm_promo();
     let from_date = from.date_naive();
     let to_date = to.date_naive();
-    let in_list = session_ids
-        .iter()
-        .map(|id| sql_string_literal(id))
-        .collect::<Vec<_>>()
-        .join(", ");
 
-    // Predicate order: record_date → session_id → timestamp → exclude recording.
+    let session_pred = match session_ids {
+        Some(ids) => {
+            let in_list = ids
+                .iter()
+                .map(|id| sql_string_literal(id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("session_id IN ({in_list}) AND session_id <> ''")
+        }
+        None => "session_id <> ''".to_string(),
+    };
+
+    // Predicate order: record_date → session filter → timestamp → exclude recording.
     let where_sql = format!(
         "record_date BETWEEN DATE '{from_date}' AND DATE '{to_date}' \
-         AND session_id IN ({in_list}) \
-         AND session_id <> '' \
+         AND {session_pred} \
          AND {ts_col} >= {from_ts} \
          AND {ts_col} <= {to_ts} \
          AND COALESCE({obs}, '') <> 'recording'",
@@ -106,6 +115,25 @@ pub fn compile_session_summary_reduce_sql(
         from_table = from_table,
         where_sql = where_sql,
     ))
+}
+
+/// Reduce path: dirty session IN-list required.
+pub fn compile_session_summary_reduce_sql(
+    from_table: &str,
+    session_ids: &[String],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<String> {
+    compile_session_summary_aggregate_sql(from_table, Some(session_ids), from, to)
+}
+
+/// Rebuild path: window-wide (no IN-list).
+pub fn compile_session_summary_rebuild_sql(
+    from_table: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<String> {
+    compile_session_summary_aggregate_sql(from_table, None, from, to)
 }
 
 /// Build `($1, $2, …), ($n, …)` for a multi-row INSERT.
@@ -156,33 +184,50 @@ mod tests {
         )
     }
 
+    fn assert_aggregate_invariants(sql: &str) {
+        use crate::models::attr_keys::{enduser, sp};
+        assert!(sql.contains("record_date BETWEEN"));
+        assert!(sql.contains("TIMESTAMP_NS"));
+        assert!(sql.contains("COUNT(DISTINCT span_id)"));
+        assert!(sql.contains("COALESCE(observation_type, '') <> 'recording'"));
+        assert!(sql.contains("SUM(input_tokens)"));
+        assert!(sql.contains("SUM(total_cost)"));
+        let lower = sql.to_lowercase();
+        assert!(!lower.contains("attributes"), "{sql}");
+        assert!(!lower.contains("resource_attributes"), "{sql}");
+        assert!(!sql.contains("SELECT *"));
+        for banned in [sp::AGENT_NAME, sp::USER_ID, enduser::ID, sp::COST_TOTAL] {
+            assert!(
+                !sql.contains(banned),
+                "aggregate SQL must not embed bag key {banned}: {sql}"
+            );
+        }
+        let rd = sql.find("record_date").expect("record_date");
+        let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").expect("ts");
+        assert!(rd < ts, "record_date must precede timestamp predicate");
+    }
+
     #[test]
     fn reduce_sql_has_pushdown_and_no_attributes() {
         let (from, to) = sample_window();
         let sql =
             compile_session_summary_reduce_sql("traces", &["s1".into(), "s2".into()], from, to)
                 .expect("sql");
-        assert!(sql.contains("record_date BETWEEN"));
+        assert_aggregate_invariants(&sql);
         assert!(sql.contains("session_id IN"));
-        assert!(sql.contains("TIMESTAMP_NS"));
-        assert!(sql.contains("COUNT(DISTINCT span_id)"));
-        assert!(sql.contains("COALESCE(observation_type, '') <> 'recording'"));
-        assert!(sql.contains("SUM(input_tokens)"));
-        assert!(sql.contains("SUM(total_cost)"));
-        assert!(!sql.to_lowercase().contains("attributes"));
-        assert!(!sql.contains("SELECT *"));
-        assert!(!sql.contains("events"));
-        assert!(!sql.contains("http_request_body"));
-        assert!(!sql.contains("http_response_body"));
-        assert!(!sql.contains("resource_attributes"));
-        // record_date before session_id before timestamp
-        let rd = sql.find("record_date").expect("record_date");
-        let sid = sql.find("session_id IN").expect("session_id IN");
-        let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").expect("ts");
-        assert!(
-            rd < sid && sid < ts,
-            "predicate order must be prune-friendly"
-        );
+        let rd = sql.find("record_date").unwrap();
+        let sid = sql.find("session_id IN").unwrap();
+        let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
+        assert!(rd < sid && sid < ts);
+    }
+
+    #[test]
+    fn rebuild_sql_window_wide_no_in_list() {
+        let (from, to) = sample_window();
+        let sql = compile_session_summary_rebuild_sql("traces", from, to).expect("sql");
+        assert_aggregate_invariants(&sql);
+        assert!(!sql.contains("session_id IN"));
+        assert!(sql.contains("session_id <> ''"));
     }
 
     #[test]
@@ -192,8 +237,9 @@ mod tests {
     }
 
     #[test]
-    fn reduce_sql_rejects_inverted_range() {
+    fn aggregate_sql_rejects_inverted_range() {
         let (from, to) = sample_window();
+        assert!(compile_session_summary_rebuild_sql("traces", to, from).is_err());
         assert!(compile_session_summary_reduce_sql("traces", &["s".into()], to, from).is_err());
     }
 

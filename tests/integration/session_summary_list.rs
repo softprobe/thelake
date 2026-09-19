@@ -851,3 +851,142 @@ async fn http_session_summary_list_independent_of_span_volume() {
         t1.elapsed()
     );
 }
+
+#[tokio::test]
+async fn truncate_summary_rebuild_restores_list_parquet_intact() {
+    let schema = format!("ss_rebuild_{}", Uuid::new_v4().simple());
+    let Some((router, state, _temp, schema)) = build_summary_router(schema).await else {
+        eprintln!("skip: postgres unreachable");
+        return;
+    };
+
+    ingest_filter_fixture(&router).await;
+    flush(&state).await;
+    let reduced = run_reduce(&state).await;
+    assert!(reduced >= 3, "expected reduce to populate summary");
+
+    let before = search(&router, window()).await;
+    let before_ids = session_ids(&before);
+    assert!(before_ids.contains(&"sess-ok"), "{before}");
+    assert!(before_ids.contains(&"sess-err"), "{before}");
+    let before_count = before["items"].as_array().unwrap().len();
+
+    // Lake detail still works (Parquet/traces intact after summary wipe).
+    let from_q = (Utc::now() - ChronoDuration::hours(2))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+        .replace(':', "%3A");
+    let to_q = (Utc::now() + ChronoDuration::minutes(5))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+        .replace(':', "%3A");
+    let detail_before = {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/llm/sessions/sess-ok?from={from_q}&to={to_q}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.expect("detail");
+        assert_eq!(resp.status(), StatusCode::OK);
+        response_json(resp).await
+    };
+    assert_eq!(detail_before["session_id"], "sess-ok");
+
+    let registry = state.engines.scope_registry().expect("registry");
+    let client = registry.pool().get().await.expect("client");
+    let q = format!("\"{}\"", schema.replace('"', "\"\""));
+    client
+        .execute(&format!("TRUNCATE {q}.session_summary"), &[])
+        .await
+        .expect("truncate summary");
+
+    let empty = search(&router, window()).await;
+    assert_eq!(
+        empty["items"].as_array().unwrap().len(),
+        0,
+        "list empty after truncate: {empty}"
+    );
+
+    // Reject inverted / oversized windows.
+    let now = Utc::now();
+    let bad_inv = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/sessions/summary/rebuild")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "from": (now + ChronoDuration::hours(1)).to_rfc3339(),
+                "to": now.to_rfc3339(),
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let inv_resp = router.clone().oneshot(bad_inv).await.unwrap();
+    assert_eq!(inv_resp.status(), StatusCode::BAD_REQUEST);
+
+    let max_span = state
+        .engines
+        .config()
+        .session_summary
+        .max_reduce_span_seconds;
+    let bad_big = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/sessions/summary/rebuild")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "from": (now - ChronoDuration::seconds((max_span as i64) + 3600)).to_rfc3339(),
+                "to": now.to_rfc3339(),
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let big_resp = router.clone().oneshot(bad_big).await.unwrap();
+    assert_eq!(big_resp.status(), StatusCode::BAD_REQUEST);
+
+    let rebuild_req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/sessions/summary/rebuild")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "from": (now - ChronoDuration::hours(6)).to_rfc3339(),
+                "to": (now + ChronoDuration::minutes(5)).to_rfc3339(),
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let rebuild_resp = router.clone().oneshot(rebuild_req).await.unwrap();
+    assert_eq!(rebuild_resp.status(), StatusCode::OK, "rebuild failed");
+    let rebuild_body = response_json(rebuild_resp).await;
+    assert!(
+        rebuild_body["sessions_upserted"].as_u64().unwrap() >= before_count as u64,
+        "{rebuild_body}"
+    );
+
+    let after = search(&router, window()).await;
+    let after_ids = session_ids(&after);
+    assert!(after_ids.contains(&"sess-ok"), "{after}");
+    assert!(after_ids.contains(&"sess-err"), "{after}");
+    assert!(
+        after["items"].as_array().unwrap().len() >= before_count,
+        "list restored: before={before_count} after={after}"
+    );
+
+    // Parquet / lake still has the session after rebuild (detail path).
+    let detail_after = {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/llm/sessions/sess-ok?from={from_q}&to={to_q}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.expect("detail");
+        assert_eq!(resp.status(), StatusCode::OK);
+        response_json(resp).await
+    };
+    assert_eq!(detail_after["session_id"], "sess-ok");
+    assert!(
+        detail_after["observation_count"].as_i64().unwrap_or(0) > 0,
+        "lake detail still populated: {detail_after}"
+    );
+}

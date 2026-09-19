@@ -25,3 +25,9 @@ pub mod gen_ai {
 pub mod resource {
     pub const SERVICE_NAME: &str = "service.name";
 }
+
+/// OTel end-user identity (lake list may COALESCE; session_summary reduce does **not**
+/// promote this — stays bag-only per traces-query-hot-attrs contract).
+pub mod enduser {
+    pub const ID: &str = "enduser.id";
+}

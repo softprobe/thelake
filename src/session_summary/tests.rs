@@ -319,3 +319,81 @@ async fn postgres_claim_empty_dirty_ok() {
     assert!(claims.is_empty());
     assert_eq!(dirty_depth(&pool, schema).await.expect("depth"), 0);
 }
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
+    use crate::api::llm::query::llm_promo;
+    use crate::config::Config;
+    use crate::promotion::load_active_telemetry_columns_manifests;
+    use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
+    use crate::session_summary::ensure_product_hot_attrs_for_scope;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    let suffix = uuid::Uuid::new_v4().to_string().replace('-', "_");
+    let schema = format!("thelake_ss_hot_{suffix}");
+    let temp = TempDir::new().expect("temp");
+    let mut config = Config::default();
+    config.shrink_pools_for_tests();
+    config.maintenance.enabled = false;
+    config.maintenance.metadata_enabled = false;
+    config.ducklake.catalog_type = "postgres".to_string();
+    config.ducklake.metadata_path =
+        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
+    config.ducklake.metadata_schema = schema.clone();
+    config.ducklake.data_path = temp.path().join("data").to_string_lossy().into();
+    config.ingest.flush_interval_seconds = 2;
+    config.session_summary.enabled = true;
+    let config = Arc::new(config);
+
+    let Some(resolver) = DuckLakeScopeResolver::connect(&config)
+        .await
+        .expect("connect")
+    else {
+        panic!("expected postgres catalog");
+    };
+    let scope = DuckLakeScope {
+        metadata_schema: schema.clone(),
+        data_path: config.ducklake.data_path.clone(),
+    };
+
+    // Connect already ensures when enabled; deactivate to prove ensure re-activates.
+    let client = resolver.pool().get().await.expect("client");
+    let q = crate::runtime_engine::quote_pg_ident(&schema);
+    client
+        .execute(
+            &format!("UPDATE {q}.promotion_specs SET status = 'inactive' WHERE status = 'active'"),
+            &[],
+        )
+        .await
+        .expect("deactivate");
+    let before = load_active_telemetry_columns_manifests(&client, &schema)
+        .await
+        .expect("load before");
+    assert!(
+        before.is_empty(),
+        "expected no active telemetry specs after deactivate"
+    );
+    drop(client);
+
+    ensure_product_hot_attrs_for_scope(&resolver, &scope)
+        .await
+        .expect("ensure");
+    let client = resolver.pool().get().await.expect("client");
+    let after = load_active_telemetry_columns_manifests(&client, &schema)
+        .await
+        .expect("load after");
+    let names: std::collections::HashSet<_> = after
+        .iter()
+        .flat_map(|m| m.columns.iter().map(|c| c.name.as_str()))
+        .collect();
+    for req in llm_promo().reduce_required_cols() {
+        assert!(names.contains(req), "ensure missing {req}; have {names:?}");
+    }
+
+    // Idempotent.
+    ensure_product_hot_attrs_for_scope(&resolver, &scope)
+        .await
+        .expect("ensure again");
+}

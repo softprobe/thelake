@@ -312,10 +312,10 @@ Unchanged: `GET …/sessions/{id}`, observations, recording — read **`traces`*
 ### 7.3 Explorer
 
 - Keep calling `sessions/search` via Worker — **summary rows only** (no parallel observations scan).
-- **Done (Stage 0 + 3):** list uses server `SessionSummary` counts only; no window `observations/search`.
-  Detail (`GET …/sessions/{id}`, observations) still reads `traces`. Child-session folding on the server list path is gone with the scan (client-side aggregate fallback still folds); restore via summary fields or server `roots_only` later.  
-- Findings/agents stay in Supabase UI join by `session_id`.  
+- **Done (Stage 0 + 3 + 3.6):** list is Postgres `session_summary`-backed. Trust server `SessionSummary` counts; Explorer must **not** window-scan `observations/search` for list counts. Detail still reads `traces`.
+- Findings/agents stay in Supabase UI join by `session_id`.
 - Explorer never writes `session_summary`.
+- Optional client fallback when the search endpoint is missing (404/405) remains a compatibility path only — not the product list path.
 
 ### 7.4 Pagination
 
@@ -337,7 +337,7 @@ rebuild([from, to]):
   → absolute UPSERT session_summary
 ```
 
-Triggers: ops/CLI with explicit window; periodic last-N-days (crash heal); optional post-promotion backfill.
+Triggers: ops `POST /v1/llm/sessions/summary/rebuild` with explicit `{from,to}`; periodic leased job every `rebuild_interval_ms` (default 24h) over lookback `max_reduce_span_seconds` (default 7d). Never whole-lake. Ops rejects windows larger than `max_reduce_span_seconds` (no chunking).
 
 ---
 
@@ -365,8 +365,9 @@ ingest:
 session_summary:
   enabled: true
   reducer_interval_ms: 10000
+  rebuild_interval_ms: 86400000   # 24h; lookback = max_reduce_span_seconds
   max_sessions_per_reduce: 1000
-  max_reduce_span: 7d
+  max_reduce_span_seconds: 604800 # 7d
 ```
 
 Startup validation: if `session_summary.enabled` and `ingest.flush_interval_seconds == 0`, fail config load with a clear message (force soft coalesce). Dirty UPSERT count should track **lake flush count**, not span count.
@@ -380,7 +381,9 @@ Ops: `POST /v1/llm/sessions/summary/rebuild` `{from,to}` triggers leased `sessio
 - `traces` partitioned by `record_date`, sorted with `session_id`.  
 - New SQL uses **`traces` / `logs`**, not `union_*`.  
 - Stage **0b**: remove `union_*` emitters from query compilers; keep rewrite shim briefly if external SQL still uses old names, then delete shim.  
-- Promote list filter columns so reducer prefers typed columns over MAP bags.
+- Promote list filter columns so reducer prefers typed columns over MAP bags — **done in Stage 2** (promoted-only reduce; Stage 5 is close-out evidence + non-goals).
+
+**Stage 5 non-goals:** no ingest bag→column copy for `sp.agent.name`; no `enduser.id` promotion into `user_id`; agent identity remains auth stamp or agent-observation `message_type`.
 
 ---
 
@@ -397,7 +400,7 @@ Checkbox task list (sequential order + **[P]** parallel marks): [`session-list-s
 | **2** | `session_summary.reduce` job on shared runner |
 | **3** | `sessions/search` reads summary |
 | **4** | Leased `session_summary.rebuild` (periodic + ops) |
-| **5** | Promote hot list columns |
+| **5** | Promotion invariant close-out (evidence locks; done-in-Stage-2) |
 
 **Do not** ship a private session-summary timer before stage A. Maintenance must gain leases in the same change set family.
 
@@ -414,7 +417,7 @@ Checkbox task list (sequential order + **[P]** parallel marks): [`session-list-s
 | Private session-summary `tokio::interval` + ad-hoc lock | Violates DRY; maintenance already needs shared leases |
 | Dual maintenance lock + session-summary lock | Two coordination systems |
 | Per-span Postgres UPDATE | Amplification |
-| Redis/Elastic/CH | Wrong economics |
+| Ingest bag→typed `agent_name` / `enduser.id` promote | Unrequested Stage 5 fallbacks; agent is auth/`message_type`; `enduser.id` stays bag-only |
 
 ---
 
@@ -446,7 +449,7 @@ Replaced reducer with: **durable dirty + leased async job + `FROM traces` aggreg
 1. Exact timestamp literal / `TIMESTAMP_NS` helpers shared with existing query SQL.  
 2. Behavior when `to - from > max_reduce_span` — **decided Stage 2: clamp** (no chunk); early history may undercount until Stage 4 rebuild.  
 3. `user_id` / `model_name` in v1 vs later.  
-4. Rebuild cadence.  
+4. Rebuild cadence — **decided Stage 4:** `rebuild_interval_ms` default 24h; lookback = `max_reduce_span_seconds` (default 7d).  
 5. DDL bootstrap vs existing `promotion_specs` ensure path.  
 6. Timeline to delete `union_*` rewrite shim entirely.  
 7. Registry schema name for `thelake_job_lease` (shared vs first tenant) — decide with scope-resolver layout.

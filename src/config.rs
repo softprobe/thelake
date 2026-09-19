@@ -41,10 +41,13 @@ pub struct SessionSummaryConfig {
     /// Wake interval for `session_summary.reduce` on the shared async job runner.
     #[serde(default = "default_reducer_interval_ms")]
     pub reducer_interval_ms: u64,
+    /// Wake interval for `session_summary.rebuild` (periodic heal lookback).
+    #[serde(default = "default_rebuild_interval_ms")]
+    pub rebuild_interval_ms: u64,
     /// Max dirty sessions claimed per reduce pass.
     #[serde(default = "default_max_sessions_per_reduce")]
     pub max_sessions_per_reduce: u64,
-    /// Clamp reduce `[from,to]` to at most this many seconds (Stage 2; no chunking).
+    /// Clamp reduce `[from,to]` / rebuild lookback + ops max window (seconds).
     #[serde(default = "default_max_reduce_span_seconds")]
     pub max_reduce_span_seconds: u64,
 }
@@ -54,6 +57,7 @@ impl Default for SessionSummaryConfig {
         Self {
             enabled: false,
             reducer_interval_ms: default_reducer_interval_ms(),
+            rebuild_interval_ms: default_rebuild_interval_ms(),
             max_sessions_per_reduce: default_max_sessions_per_reduce(),
             max_reduce_span_seconds: default_max_reduce_span_seconds(),
         }
@@ -62,6 +66,10 @@ impl Default for SessionSummaryConfig {
 
 fn default_reducer_interval_ms() -> u64 {
     10_000
+}
+
+fn default_rebuild_interval_ms() -> u64 {
+    86_400_000
 }
 
 fn default_max_sessions_per_reduce() -> u64 {
@@ -91,6 +99,9 @@ impl SessionSummaryConfig {
         }
         if self.reducer_interval_ms == 0 {
             anyhow::bail!("session_summary.reducer_interval_ms must be > 0 when enabled");
+        }
+        if self.rebuild_interval_ms == 0 {
+            anyhow::bail!("session_summary.rebuild_interval_ms must be > 0 when enabled");
         }
         if self.max_sessions_per_reduce == 0 {
             anyhow::bail!("session_summary.max_sessions_per_reduce must be > 0 when enabled");
@@ -866,6 +877,7 @@ ducklake:
         let c = Config::default();
         assert!(!c.session_summary.enabled);
         assert_eq!(c.session_summary.reducer_interval_ms, 10_000);
+        assert_eq!(c.session_summary.rebuild_interval_ms, 86_400_000);
         assert_eq!(c.session_summary.max_sessions_per_reduce, 1000);
         assert_eq!(c.session_summary.max_reduce_span_seconds, 604_800);
     }

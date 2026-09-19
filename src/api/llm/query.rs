@@ -3,6 +3,7 @@ use crate::api::sql_support::{
     timestamp_ns_column, timestamp_ns_literal,
 };
 use crate::api::AppState;
+use crate::async_jobs::LeaseStore;
 use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreDataType, ScoreSource};
 use crate::storage::schema::variant::{
@@ -54,6 +55,22 @@ impl LlmAttrPromotions {
         total_tokens: "total_tokens",
         total_cost: "total_cost",
     };
+
+    /// Typed columns `session_summary.reduce` requires (product-hot subset).
+    ///
+    /// Single source for `hot_attrs::REQUIRED` — do not re-list these names elsewhere.
+    /// `agent_name` is intentionally absent: auth-stamped / agent `message_type`, not yaml promote.
+    pub(crate) const fn reduce_required_cols(&self) -> [&'static str; 7] {
+        [
+            self.observation_type,
+            self.input_tokens,
+            self.output_tokens,
+            self.total_tokens,
+            self.total_cost,
+            self.user_id,
+            self.model_name,
+        ]
+    }
 }
 
 pub(crate) fn llm_promo() -> LlmAttrPromotions {
@@ -745,6 +762,103 @@ pub async fn search_sessions(
     }
 
     search_sessions_from_lake(&state, tenant_ref, &request, limit).await
+}
+
+/// Ops: rebuild `session_summary` for an explicit `[from,to]` window (sync).
+///
+/// Rejects inverted / oversized windows. 404 when summary disabled or non-postgres.
+/// Acquires `session_summary.rebuild` lease for the tenant scope, then runs the
+/// shared lake aggregate → UPSERT path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummaryRebuildRequest {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummaryRebuildResponse {
+    pub sessions_upserted: usize,
+}
+
+pub async fn rebuild_session_summary(
+    State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
+    Json(request): Json<SessionSummaryRebuildRequest>,
+) -> Result<Json<SessionSummaryRebuildResponse>, ApiError> {
+    let cfg = &state.engines.config().session_summary;
+    if !cfg.enabled {
+        return Err(not_found());
+    }
+    let Some(registry) = state.engines.scope_registry() else {
+        return Err(not_found());
+    };
+
+    crate::session_summary::validate_rebuild_window(
+        request.from,
+        request.to,
+        cfg.max_reduce_span_seconds,
+    )
+    .map_err(bad_request)?;
+
+    let tenant_id = tenant
+        .as_ref()
+        .map(|extension| extension.0.tenant_id.as_str())
+        .unwrap_or("");
+    let engine = state
+        .engines
+        .engine_for(tenant_id)
+        .await
+        .map_err(storage_error)?;
+    let mut ducklake = state.engines.config().ducklake.clone();
+    ducklake.metadata_schema = engine.scope.metadata_schema.clone();
+    ducklake.data_path = engine.scope.data_path.clone();
+
+    let scope = crate::runtime_engine::DuckLakeScope {
+        metadata_schema: ducklake.metadata_schema.clone(),
+        data_path: ducklake.data_path.clone(),
+    };
+    crate::session_summary::ensure_product_hot_attrs_for_scope(registry, &scope)
+        .await
+        .map_err(storage_error)?;
+
+    // Lease key matches RebuildJob: empty tenant → `_default`.
+    let scope_key = if tenant_id.is_empty() {
+        "_default"
+    } else {
+        tenant_id
+    };
+    let leases = crate::async_jobs::PostgresLeaseStore::from_resolver(registry);
+    let holder = format!(
+        "ops-rebuild-{}",
+        state.engines.config().async_jobs.resolved_instance_id()
+    );
+    let ttl =
+        std::time::Duration::from_secs(state.engines.config().async_jobs.lease_ttl_seconds.max(1));
+    let won = leases
+        .try_acquire("session_summary.rebuild", scope_key, &holder, ttl)
+        .await
+        .map_err(storage_error)?;
+    if !won {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "session_summary.rebuild lease held" })),
+        ));
+    }
+
+    let result = crate::session_summary::rebuild_tenant_window(
+        registry.pool(),
+        &ducklake.metadata_schema,
+        &ducklake,
+        request.from,
+        request.to,
+        cfg.max_reduce_span_seconds,
+    )
+    .await;
+    let _ = leases
+        .release("session_summary.rebuild", scope_key, &holder)
+        .await;
+    let sessions_upserted = result.map_err(storage_error)?;
+    Ok(Json(SessionSummaryRebuildResponse { sessions_upserted }))
 }
 
 async fn search_sessions_from_lake(
