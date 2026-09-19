@@ -26,23 +26,25 @@ const MAX_LIMIT: usize = 200;
 /// Softprobe product promotion column names from
 /// `docs/promotion/traces-query-hot-attrs.yaml`.
 ///
-/// Product SQL always COALESCE these ahead of the attribute MAP bag. Columns are
+/// Product list SQL COALESCE these ahead of the attribute MAP bag. Columns are
 /// nullable, so the expression is safe before apply (all-NULL → bag fallback)
 /// and fills after apply. Loading manifests on the query path is unnecessary.
+///
+/// Session-summary **reduce** uses the same names but **promoted-only** (no MAP).
 #[derive(Debug, Clone, Copy)]
-struct LlmAttrPromotions {
-    observation_type: &'static str,
-    model_name: &'static str,
-    model_provider: &'static str,
-    user_id: &'static str,
-    input_tokens: &'static str,
-    output_tokens: &'static str,
-    total_tokens: &'static str,
-    total_cost: &'static str,
+pub(crate) struct LlmAttrPromotions {
+    pub(crate) observation_type: &'static str,
+    pub(crate) model_name: &'static str,
+    pub(crate) model_provider: &'static str,
+    pub(crate) user_id: &'static str,
+    pub(crate) input_tokens: &'static str,
+    pub(crate) output_tokens: &'static str,
+    pub(crate) total_tokens: &'static str,
+    pub(crate) total_cost: &'static str,
 }
 
 impl LlmAttrPromotions {
-    const PRODUCT: Self = Self {
+    pub(crate) const PRODUCT: Self = Self {
         observation_type: "observation_type",
         model_name: "model_name",
         model_provider: "model_provider",
@@ -54,7 +56,7 @@ impl LlmAttrPromotions {
     };
 }
 
-fn llm_promo() -> LlmAttrPromotions {
+pub(crate) fn llm_promo() -> LlmAttrPromotions {
     LlmAttrPromotions::PRODUCT
 }
 
@@ -634,7 +636,7 @@ pub enum SortDirection {
 }
 
 impl SortDirection {
-    fn as_sql(self) -> &'static str {
+    pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Asc => "ASC",
             Self::Desc => "DESC",
@@ -695,7 +697,14 @@ pub struct SessionSearchResponse {
     pub cursor_supported: bool,
 }
 
-/// Session list, aggregated in the database.
+/// Session list.
+///
+/// Postgres catalog: always `session_summary` (no DuckLake scan). Empty table →
+/// empty page. `session_summary.enabled` gates dirty/reduce writes only — not
+/// this read path (no lake fallback when disabled).
+///
+/// Non-postgres catalogs (sqlite): lake `GROUP BY session_id` — the only list
+/// store available without a catalog Postgres.
 ///
 /// Without this endpoint a client has to pull raw observations and group them
 /// in memory, which makes every aggregate a per-page partial sum, breaks
@@ -707,6 +716,43 @@ pub async fn search_sessions(
     Json(request): Json<SessionSearchRequest>,
 ) -> Result<Json<SessionSearchResponse>, ApiError> {
     let limit = clamp_limit(request.limit, DEFAULT_SESSION_LIMIT);
+    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
+
+    if let Some(registry) = state.engines.scope_registry() {
+        let tenant_id = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
+        let engine = state
+            .engines
+            .engine_for(tenant_id)
+            .await
+            .map_err(storage_error)?;
+        let schema = &engine.scope.metadata_schema;
+        return match crate::session_summary::search_session_summary(
+            registry.pool(),
+            schema,
+            &request,
+            limit,
+        )
+        .await
+        {
+            Ok(response) => Ok(Json(response)),
+            Err(crate::session_summary::SessionSummaryListError::BadRequest(msg)) => {
+                Err(bad_request(msg))
+            }
+            Err(crate::session_summary::SessionSummaryListError::Storage(err)) => {
+                Err(storage_error(err))
+            }
+        };
+    }
+
+    search_sessions_from_lake(&state, tenant_ref, &request, limit).await
+}
+
+async fn search_sessions_from_lake(
+    state: &AppState,
+    tenant: Option<&TenantInfo>,
+    request: &SessionSearchRequest,
+    limit: usize,
+) -> Result<Json<SessionSearchResponse>, ApiError> {
     // Must mirror what compile_session_search_sql actually accepts, `order`
     // included. Advertising cursor support for order=asc handed the client a
     // next_cursor that its own follow-up request would reject with 400 -- the
@@ -714,9 +760,9 @@ pub async fn search_sessions(
     // to fix, just with a different status code.
     let cursor_supported =
         request.order_by == SessionOrderBy::StartTime && request.order == SortDirection::Desc;
-    let sql = compile_session_search_sql(&request, limit).map_err(bad_request)?;
+    let sql = compile_session_search_sql(request, limit).map_err(bad_request)?;
     let result = state
-        .execute_tenant_scoped_sql(tenant.as_ref().map(|extension| &extension.0), &sql)
+        .execute_tenant_scoped_sql(tenant, &sql)
         .await
         .map_err(storage_error)?;
 
@@ -1282,7 +1328,7 @@ fn expr_observation_type() -> String {
     prefer_attr_varchar(
         Some(llm_promo().observation_type),
         "attributes",
-        "sp.observation.type",
+        crate::models::attr_keys::sp::OBSERVATION_TYPE,
     )
 }
 
@@ -1290,7 +1336,7 @@ fn expr_model_name() -> String {
     prefer_attr_varchar(
         Some(llm_promo().model_name),
         "attributes",
-        "gen_ai.request.model",
+        crate::models::attr_keys::gen_ai::REQUEST_MODEL,
     )
 }
 
@@ -1298,7 +1344,7 @@ fn expr_model_provider() -> String {
     prefer_attr_varchar(
         Some(llm_promo().model_provider),
         "attributes",
-        "gen_ai.provider.name",
+        crate::models::attr_keys::gen_ai::PROVIDER_NAME,
     )
 }
 
@@ -1306,21 +1352,29 @@ fn expr_user_id() -> String {
     // enduser.id is bag-only fallback (not in product hot-attrs manifest).
     format!(
         "COALESCE({}, {})",
-        prefer_attr_varchar(Some(llm_promo().user_id), "attributes", "sp.user.id"),
+        prefer_attr_varchar(
+            Some(llm_promo().user_id),
+            "attributes",
+            crate::models::attr_keys::sp::USER_ID,
+        ),
         variant_varchar("attributes", "enduser.id")
     )
 }
 
 /// Session agent name: persisted assertion column, then `sp.agent.name`, else bag-only.
 fn expr_agent_name_attr() -> String {
-    prefer_attr_varchar(Some("agent_name"), "attributes", "sp.agent.name")
+    prefer_attr_varchar(
+        Some("agent_name"),
+        "attributes",
+        crate::models::attr_keys::sp::AGENT_NAME,
+    )
 }
 
 fn expr_input_tokens() -> String {
     prefer_attr_try_cast(
         Some(llm_promo().input_tokens),
         "attributes",
-        "gen_ai.usage.input_tokens",
+        crate::models::attr_keys::gen_ai::USAGE_INPUT_TOKENS,
         "BIGINT",
     )
 }
@@ -1329,7 +1383,7 @@ fn expr_output_tokens() -> String {
     prefer_attr_try_cast(
         Some(llm_promo().output_tokens),
         "attributes",
-        "gen_ai.usage.output_tokens",
+        crate::models::attr_keys::gen_ai::USAGE_OUTPUT_TOKENS,
         "BIGINT",
     )
 }
@@ -1338,7 +1392,7 @@ fn expr_total_tokens() -> String {
     prefer_attr_try_cast(
         Some(llm_promo().total_tokens),
         "attributes",
-        "gen_ai.usage.total_tokens",
+        crate::models::attr_keys::gen_ai::USAGE_TOTAL_TOKENS,
         "BIGINT",
     )
 }
@@ -1347,7 +1401,7 @@ fn expr_total_cost() -> String {
     prefer_attr_try_cast(
         Some(llm_promo().total_cost),
         "attributes",
-        "sp.cost.total",
+        crate::models::attr_keys::sp::COST_TOTAL,
         "DOUBLE",
     )
 }

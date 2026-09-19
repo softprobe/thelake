@@ -40,4 +40,4 @@ pub mod integration;
 #[cfg(feature = "integration-e2e")]
 pub mod metrics;
 #[cfg(feature = "integration-e2e")]
-pub mod storage_contract_validation;
+pub mod session_summary_list;

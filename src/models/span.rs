@@ -237,7 +237,7 @@ impl Span {
 
         // Extract session_id: Softprobe product session, OTel conversation alias, else trace_id
         let session_id = attributes
-            .get("sp.session.id")
+            .get(crate::models::attr_keys::sp::SESSION_ID)
             .or_else(|| attributes.get("sp_session_id"))
             .or_else(|| attributes.get("gen_ai.conversation.id"))
             .cloned()

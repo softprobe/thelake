@@ -263,8 +263,8 @@ maintenance:          # one job, one interval; each pass runs metadata + TWCS wh
 
 session_summary:
   enabled: true
-  reducer_interval_ms: 3000
-  max_sessions_per_reduce: 500
+  reducer_interval_ms: 10000
+  max_sessions_per_reduce: 1000
   max_reduce_span: 7d
 ```
 

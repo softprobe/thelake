@@ -1,6 +1,6 @@
 # Session list summary
 
-**Status:** Stage 1 in progress (DDL + dirty UPSERT; reduce not yet)  
+**Status:** Stages 2–3 implemented (leased reduce + Postgres `sessions/search`; no lake list fallback)  
 **Baseline:** `thelake` / `sp-llm` `main`  
 **Supersedes:** ChatGPT “Design Session Summaries” share; earlier drafts that put the directory in Explorer Supabase, dual-wrote DuckLake `session_facts`, or used a long-lived in-memory span counter
 
@@ -217,7 +217,7 @@ attrs/events/prompts, JSONB labels GIN (defer), version/hash/OPEN state, any Duc
 | | |
 |---|---|
 | **Where** | `SessionSummaryReduceJob` on the shared `async_jobs` runner (same process binary as maintenance) |
-| **When** | On `session_summary.reducer_interval_ms` (e.g. 2–5s), after winning `thelake_job_lease` for `(session_summary.reduce, tenant_id)` |
+| **When** | On `session_summary.reducer_interval_ms` (default 10s), after winning `thelake_job_lease` for `(session_summary.reduce, tenant_id)` |
 | **Not** | Inside the ingest HTTP/gRPC handler beyond the cheap dirty UPSERT |
 | **Coordination** | [`async-jobs.md`](./async-jobs.md) — same lease table as `maintenance.compact` |
 
@@ -289,7 +289,7 @@ to   = max(dirty.max_ts, now())
 from = least(coalesce(session_summary.start_time, dirty.min_ts), dirty.min_ts)
 ```
 
-Plus `record_date BETWEEN date(from) AND date(to)`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`; oversized windows chunk or defer to `session_summary.rebuild`.
+Plus `record_date BETWEEN date(from) AND date(to)`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`. Stage 2 **clamps** oversized windows (does not chunk); early history outside the clamp may undercount until Stage 4 rebuild.
 
 ### 6.6 Late spans
 
@@ -303,7 +303,7 @@ No FINALIZED. Late span → dirty UPSERT → next leased reduce replaces the sum
 
 `POST /v1/llm/sessions/search` → select from `session_summary` (cursor on `(start_time, session_id)` desc). Steady-state path does **not** scan `traces`.
 
-Fallback flag: legacy aggregate over `traces` for empty summary / rollout only.
+**No lake fallback** on Postgres catalogs: empty summary → empty list (whether or not `session_summary.enabled`; that flag gates dirty/reduce writes only). Lake `GROUP BY` remains only for non-postgres catalogs (sqlite) where there is no summary table.
 
 ### 7.2 Detail
 
@@ -311,9 +311,9 @@ Unchanged: `GET …/sessions/{id}`, observations, recording — read **`traces`*
 
 ### 7.3 Explorer
 
-- Keep calling `sessions/search` via Worker.  
-- **Done (Stage 0):** removed `sessionCountOverrides` — list uses server `SessionSummary` counts only; no window `observations/search`.  
-  Until Stage 3 (`session_summary`), list latency still tracks lake `sessions/search` cost; STEPS/RESULT may diverge from detail (bubbled errors / duplicate spans). Child-session folding on the server list path is gone with the scan (client-side aggregate fallback still folds); restore via summary fields or server `roots_only` later.  
+- Keep calling `sessions/search` via Worker — **summary rows only** (no parallel observations scan).
+- **Done (Stage 0 + 3):** list uses server `SessionSummary` counts only; no window `observations/search`.
+  Detail (`GET …/sessions/{id}`, observations) still reads `traces`. Child-session folding on the server list path is gone with the scan (client-side aggregate fallback still folds); restore via summary fields or server `roots_only` later.  
 - Findings/agents stay in Supabase UI join by `session_id`.  
 - Explorer never writes `session_summary`.
 
@@ -364,8 +364,8 @@ ingest:
   flush_interval_seconds: 2   # required when session_summary.enabled (> 0)
 session_summary:
   enabled: true
-  reducer_interval_ms: 3000
-  max_sessions_per_reduce: 500
+  reducer_interval_ms: 10000
+  max_sessions_per_reduce: 1000
   max_reduce_span: 7d
 ```
 
@@ -444,7 +444,7 @@ Replaced reducer with: **durable dirty + leased async job + `FROM traces` aggreg
 ## 16. Open questions
 
 1. Exact timestamp literal / `TIMESTAMP_NS` helpers shared with existing query SQL.  
-2. Behavior when `to - from > max_reduce_span` (chunk vs defer to rebuild).  
+2. Behavior when `to - from > max_reduce_span` — **decided Stage 2: clamp** (no chunk); early history may undercount until Stage 4 rebuild.  
 3. `user_id` / `model_name` in v1 vs later.  
 4. Rebuild cadence.  
 5. DDL bootstrap vs existing `promotion_specs` ensure path.  

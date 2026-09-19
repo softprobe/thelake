@@ -3,6 +3,9 @@
 
 use super::*;
 use crate::ingest_engine::maybe_after_traces_commit;
+use crate::session_summary::reduce::{
+    ack_dirty, claim_dirty, dirty_depth, upsert_summary_rows, SummaryRow,
+};
 use crate::session_summary::test_span::span_at;
 use chrono::{TimeZone, Utc};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -204,4 +207,115 @@ async fn postgres_session_summary_dirty_err_does_not_propagate() {
     let dirty = SessionSummaryDirty::new(pool, "thelake_ss_missing_schema_xyz", "t1");
     // Must return (not panic); ingest path treats dirty as best-effort.
     dirty.mark_after_traces_commit(&[span_at("s1", 1)]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_claim_ack_snapshot_preserves_newer_dirty() {
+    let schema = "thelake_ss_ack";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let dirty = SessionSummaryDirty::new(pool.clone(), schema, "t1");
+    dirty
+        .upsert_dirty(&fold_dirty_hints(&[span_at("s1", 10)]))
+        .await
+        .expect("dirty");
+    let (claims, snapshot) = claim_dirty(&pool, schema, 10).await.expect("claim");
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].session_id, "s1");
+
+    // Concurrent touch after snapshot.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    dirty
+        .upsert_dirty(&fold_dirty_hints(&[span_at("s1", 50)]))
+        .await
+        .expect("concurrent dirty");
+
+    let acked = ack_dirty(&pool, schema, &["s1".into()], snapshot)
+        .await
+        .expect("ack");
+    assert_eq!(acked, 0, "newer updated_at must survive ack");
+    let depth = dirty_depth(&pool, schema).await.expect("depth");
+    assert_eq!(depth, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_upsert_summary_absolute_replace_all_fields() {
+    let schema = "thelake_ss_upsert";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let row = SummaryRow {
+        session_id: "s1".into(),
+        start_time: Utc.timestamp_opt(100, 0).unwrap(),
+        end_time: Some(Utc.timestamp_opt(200, 0).unwrap()),
+        observation_count: 2,
+        error_count: 1,
+        input_tokens: Some(11),
+        output_tokens: Some(22),
+        total_tokens: Some(33),
+        total_cost: Some(0.5),
+        agent_name: Some("agent-a".into()),
+        user_id: Some("u1".into()),
+        model_name: Some("gpt".into()),
+    };
+    upsert_summary_rows(&pool, schema, std::slice::from_ref(&row))
+        .await
+        .expect("upsert1");
+    let replaced = SummaryRow {
+        observation_count: 5,
+        error_count: 0,
+        total_tokens: Some(55),
+        total_cost: Some(1.5),
+        ..row
+    };
+    upsert_summary_rows(&pool, schema, std::slice::from_ref(&replaced))
+        .await
+        .expect("upsert2");
+
+    let client = pool.get().await.expect("client");
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let r = client
+        .query_one(
+            &format!(
+                "SELECT observation_count, error_count, total_tokens, total_cost, \
+                        agent_name, user_id, model_name, input_tokens, output_tokens, \
+                        start_time, end_time \
+                 FROM {q}.session_summary WHERE session_id = 's1'"
+            ),
+            &[],
+        )
+        .await
+        .expect("select");
+    assert_eq!(r.get::<_, i64>(0), 5);
+    assert_eq!(r.get::<_, i64>(1), 0);
+    assert_eq!(r.get::<_, Option<i64>>(2), Some(55));
+    assert!((r.get::<_, Option<f64>>(3).unwrap() - 1.5).abs() < 1e-9);
+    assert_eq!(r.get::<_, Option<String>>(4).as_deref(), Some("agent-a"));
+    assert_eq!(r.get::<_, Option<String>>(5).as_deref(), Some("u1"));
+    assert_eq!(r.get::<_, Option<String>>(6).as_deref(), Some("gpt"));
+    assert_eq!(r.get::<_, Option<i64>>(7), Some(11));
+    assert_eq!(r.get::<_, Option<i64>>(8), Some(22));
+    assert_eq!(
+        r.get::<_, chrono::DateTime<Utc>>(9),
+        Utc.timestamp_opt(100, 0).unwrap()
+    );
+    assert_eq!(
+        r.get::<_, Option<chrono::DateTime<Utc>>>(10),
+        Some(Utc.timestamp_opt(200, 0).unwrap())
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_claim_empty_dirty_ok() {
+    let schema = "thelake_ss_empty";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let (claims, _) = claim_dirty(&pool, schema, 10).await.expect("claim");
+    assert!(claims.is_empty());
+    assert_eq!(dirty_depth(&pool, schema).await.expect("depth"), 0);
 }

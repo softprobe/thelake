@@ -33,15 +33,47 @@ pub struct Config {
 }
 
 /// Session list summary config (`enabled` requires coalesce + postgres catalog).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummaryConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Wake interval for `session_summary.reduce` on the shared async job runner.
+    #[serde(default = "default_reducer_interval_ms")]
+    pub reducer_interval_ms: u64,
+    /// Max dirty sessions claimed per reduce pass.
+    #[serde(default = "default_max_sessions_per_reduce")]
+    pub max_sessions_per_reduce: u64,
+    /// Clamp reduce `[from,to]` to at most this many seconds (Stage 2; no chunking).
+    #[serde(default = "default_max_reduce_span_seconds")]
+    pub max_reduce_span_seconds: u64,
+}
+
+impl Default for SessionSummaryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            reducer_interval_ms: default_reducer_interval_ms(),
+            max_sessions_per_reduce: default_max_sessions_per_reduce(),
+            max_reduce_span_seconds: default_max_reduce_span_seconds(),
+        }
+    }
+}
+
+fn default_reducer_interval_ms() -> u64 {
+    10_000
+}
+
+fn default_max_sessions_per_reduce() -> u64 {
+    1000
+}
+
+fn default_max_reduce_span_seconds() -> u64 {
+    604_800
 }
 
 impl SessionSummaryConfig {
-    /// `enabled` requires soft coalesce and a Postgres DuckLake catalog.
+    /// `enabled` requires soft coalesce, postgres catalog, and positive reducer knobs.
     pub fn validate(&self, ingest: &IngestConfig, ducklake: &DuckLakeConfig) -> anyhow::Result<()> {
         if !self.enabled {
             return Ok(());
@@ -56,6 +88,15 @@ impl SessionSummaryConfig {
                 "session_summary.enabled requires ducklake.catalog_type=postgres (got {})",
                 ducklake.catalog_type
             );
+        }
+        if self.reducer_interval_ms == 0 {
+            anyhow::bail!("session_summary.reducer_interval_ms must be > 0 when enabled");
+        }
+        if self.max_sessions_per_reduce == 0 {
+            anyhow::bail!("session_summary.max_sessions_per_reduce must be > 0 when enabled");
+        }
+        if self.max_reduce_span_seconds == 0 {
+            anyhow::bail!("session_summary.max_reduce_span_seconds must be > 0 when enabled");
         }
         Ok(())
     }
@@ -818,6 +859,29 @@ ducklake:
         assert!(err.to_string().contains("heartbeat_seconds"));
         c.async_jobs.heartbeat_seconds = 10;
         c.async_jobs.validate().expect("hb < ttl ok");
+    }
+
+    #[test]
+    fn session_summary_defaults_reducer_knobs() {
+        let c = Config::default();
+        assert!(!c.session_summary.enabled);
+        assert_eq!(c.session_summary.reducer_interval_ms, 10_000);
+        assert_eq!(c.session_summary.max_sessions_per_reduce, 1000);
+        assert_eq!(c.session_summary.max_reduce_span_seconds, 604_800);
+    }
+
+    #[test]
+    fn session_summary_enabled_rejects_zero_reducer_interval() {
+        let mut c = Config::default();
+        c.ducklake.catalog_type = "postgres".to_string();
+        c.session_summary.enabled = true;
+        c.ingest.flush_interval_seconds = 2;
+        c.session_summary.reducer_interval_ms = 0;
+        let err = c
+            .session_summary
+            .validate(&c.ingest, &c.ducklake)
+            .expect_err("interval 0");
+        assert!(err.to_string().contains("reducer_interval_ms"));
     }
 
     #[test]
