@@ -135,8 +135,8 @@ impl IngestEngine {
         if let Some(buf) = &self.spans {
             buf.enqueue(items).await
         } else {
-            // Flush-through: session_summary.enabled is rejected when flush==0, so
-            // dirty is never wired here (no second dirty call site).
+            // Flush-through (flush_interval==0) is rejected for postgres catalogs,
+            // so dirty is never wired here (no second dirty call site).
             let rows = items.len() as u64;
             let r = self.storage.writer.write_span_batches(vec![items]).await;
             if r.is_ok() {
@@ -251,9 +251,8 @@ mod after_commit_tests {
     }
 
     #[test]
-    fn dirty_handle_none_when_disabled() {
-        let mut config = Config::default();
-        config.session_summary.enabled = false;
+    fn dirty_handle_none_when_sqlite_catalog() {
+        let config = Config::default(); // sqlite
         assert!(session_summary_dirty_for(&config, None, "t", "schema").is_none());
     }
 }
@@ -356,14 +355,14 @@ impl IngestPipeline {
     }
 }
 
-/// Build dirty handle when session_summary is enabled (implies coalesce + postgres).
+/// Build dirty handle when catalog is postgres (session_summary always on).
 pub fn session_summary_dirty_for(
     config: &Config,
     resolver: Option<&DuckLakeScopeResolver>,
     tenant_id: &str,
     metadata_schema: &str,
 ) -> Option<Arc<SessionSummaryDirty>> {
-    if !config.session_summary.enabled {
+    if !crate::config::SessionSummaryConfig::active_for(&config.ducklake) {
         return None;
     }
     let resolver = resolver?;

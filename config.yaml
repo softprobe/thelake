@@ -45,8 +45,11 @@ ducklake:
 
 # Session list summary (Stage 1: dirty UPSERT after coalesced traces flush).
 # Requires ingest.flush_interval_seconds > 0 and ducklake.catalog_type=postgres.
-# session_summary:
-#   enabled: false
+# session_summary:  # knobs only; always on for postgres catalog
+#   reducer_interval_ms: 10000
+#   rebuild_interval_ms: 86400000
+#   max_sessions_per_reduce: 1000
+#   max_reduce_span_seconds: 604800
 
 # Self-monitoring ops lake (disabled by default). See docs/design.md.
 # self_monitoring:
