@@ -48,64 +48,6 @@ where
     }
 }
 
-/// Soft coalesce for one signal: timed write, then either plain ingest monitor
-/// (`dirty_sync == None`) or traces after-commit with optional session-summary
-/// dirty hints folded **before** the write consumes batches.
-fn monitored_signal_buf<T, Fut, W>(
-    flush_interval_seconds: u64,
-    max_pending: usize,
-    eager_pending: usize,
-    write_timeout_seconds: u64,
-    writer: Arc<DuckLakeWriter>,
-    tenant: String,
-    signal: &'static str,
-    write: W,
-    dirty_sync: Option<(
-        Option<Arc<SessionSummaryDirty>>,
-        fn(&[Vec<T>]) -> Vec<DirtyHint>,
-    )>,
-) -> Arc<CoalesceBuf<T>>
-where
-    T: Send + 'static,
-    W: Fn(Arc<DuckLakeWriter>, Vec<Vec<T>>) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Result<()>> + Send + 'static,
-{
-    CoalesceBuf::with_limits(
-        flush_interval_seconds,
-        max_pending,
-        eager_pending,
-        Arc::new(move |batches| {
-            let w = writer.clone();
-            let tenant = tenant.clone();
-            let write = write.clone();
-            let dirty_sync = dirty_sync.clone();
-            Box::pin(async move {
-                let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
-                let hints = match &dirty_sync {
-                    Some((Some(_), fold)) => fold(&batches),
-                    _ => Vec::new(),
-                };
-                let dirty = dirty_sync.as_ref().and_then(|(d, _)| d.clone());
-                let r = ducklake_write_with_timeout(write_timeout_seconds, write(w, batches)).await;
-                if dirty_sync.is_some() {
-                    maybe_after_traces_commit(
-                        r.is_ok(),
-                        &tenant,
-                        rows,
-                        true,
-                        &hints,
-                        dirty.as_deref(),
-                    )
-                    .await;
-                } else if r.is_ok() {
-                    crate::self_monitoring::record_ingest_commit(&tenant, signal, rows, true);
-                }
-                r
-            })
-        }),
-    )
-}
-
 impl IngestEngine {
     pub fn from_storage(
         storage: Arc<Storage>,
@@ -118,43 +60,101 @@ impl IngestEngine {
         let tenant_id = tenant_id.into();
         let (max_pending, eager_pending) = coalesce::resolve_byte_limits(buffer_size_mb);
         let write_timeout_seconds = resolve_write_timeout_seconds(write_timeout_seconds);
-        let logs = monitored_signal_buf(
-            flush_interval_seconds,
-            max_pending,
-            eager_pending,
-            write_timeout_seconds,
-            storage.writer.clone(),
-            tenant_id.clone(),
-            "logs",
-            |w, b| async move { w.write_log_batches(b).await },
-            None,
-        );
-        let spans = monitored_signal_buf(
-            flush_interval_seconds,
-            max_pending,
-            eager_pending,
-            write_timeout_seconds,
-            storage.writer.clone(),
-            tenant_id.clone(),
-            "traces",
-            |w, b| async move { w.write_span_batches(b).await },
-            Some((session_summary_dirty, |batches| {
-                crate::session_summary::fold_dirty_hints(batches.iter().flatten())
-            })),
-        );
+        let logs = {
+            let writer = storage.writer.clone();
+            let tenant = tenant_id.clone();
+            CoalesceBuf::with_limits(
+                flush_interval_seconds,
+                max_pending,
+                eager_pending,
+                Arc::new(move |batches| {
+                    let w = writer.clone();
+                    let tenant = tenant.clone();
+                    Box::pin(async move {
+                        let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
+                        let r = ducklake_write_with_timeout(
+                            write_timeout_seconds,
+                            w.write_log_batches(batches),
+                        )
+                        .await;
+                        if r.is_ok() {
+                            crate::self_monitoring::record_ingest_commit(
+                                &tenant, "logs", rows, true,
+                            );
+                        }
+                        r
+                    })
+                }),
+            )
+        };
+        let spans = {
+            let writer = storage.writer.clone();
+            let tenant = tenant_id.clone();
+            let dirty = session_summary_dirty;
+            CoalesceBuf::with_limits(
+                flush_interval_seconds,
+                max_pending,
+                eager_pending,
+                Arc::new(move |batches| {
+                    let w = writer.clone();
+                    let tenant = tenant.clone();
+                    let dirty = dirty.clone();
+                    Box::pin(async move {
+                        let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
+                        // Fold before write — write_span_batches consumes batches.
+                        let hints = if dirty.is_some() {
+                            crate::session_summary::fold_dirty_hints(batches.iter().flatten())
+                        } else {
+                            Vec::new()
+                        };
+                        let r = ducklake_write_with_timeout(
+                            write_timeout_seconds,
+                            w.write_span_batches(batches),
+                        )
+                        .await;
+                        maybe_after_traces_commit(
+                            r.is_ok(),
+                            &tenant,
+                            rows,
+                            true,
+                            &hints,
+                            dirty.as_deref(),
+                        )
+                        .await;
+                        r
+                    })
+                }),
+            )
+        };
         // Do not invalidate PromQL range cache on coalesce commits — TTL covers
         // freshness; wipe-on-flush pegs Grafana refresh CPU (see module docs).
-        let metrics = monitored_signal_buf(
-            flush_interval_seconds,
-            max_pending,
-            eager_pending,
-            write_timeout_seconds,
-            storage.writer.clone(),
-            tenant_id,
-            "metrics",
-            |w, b| async move { w.write_metric_batches(b).await },
-            None,
-        );
+        let metrics = {
+            let writer = storage.writer.clone();
+            let tenant = tenant_id;
+            CoalesceBuf::with_limits(
+                flush_interval_seconds,
+                max_pending,
+                eager_pending,
+                Arc::new(move |batches| {
+                    let w = writer.clone();
+                    let tenant = tenant.clone();
+                    Box::pin(async move {
+                        let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
+                        let r = ducklake_write_with_timeout(
+                            write_timeout_seconds,
+                            w.write_metric_batches(batches),
+                        )
+                        .await;
+                        if r.is_ok() {
+                            crate::self_monitoring::record_ingest_commit(
+                                &tenant, "metrics", rows, true,
+                            );
+                        }
+                        r
+                    })
+                }),
+            )
+        };
         Self {
             storage,
             flush_interval_seconds,
