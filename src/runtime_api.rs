@@ -228,6 +228,7 @@ mod data_connection_tests {
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
         config.ducklake.catalog_type = "postgres".to_string();
+        config.ingest.flush_interval_seconds = 2;
         config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
         config.ducklake.data_path = "./warehouse/ducklake/data/".to_string();
@@ -278,6 +279,7 @@ mod data_connection_tests {
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
         config.ducklake.catalog_type = "postgres".to_string();
+        config.ingest.flush_interval_seconds = 2;
         config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
         config.ducklake.data_path = "gs://bucket/ducklake/data/".to_string();
@@ -329,6 +331,7 @@ mod data_connection_tests {
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
         config.ducklake.catalog_type = "postgres".to_string();
+        config.ingest.flush_interval_seconds = 2;
         config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
         config.ducklake.data_path = "s3://bucket/ducklake/data/".to_string();
@@ -372,6 +375,7 @@ mod data_connection_tests {
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
         config.ducklake.catalog_type = "postgres".to_string();
+        config.ingest.flush_interval_seconds = 2;
         config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
         config.ducklake.data_path = "gs://bucket/ducklake/data/".to_string();

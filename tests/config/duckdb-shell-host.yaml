@@ -20,6 +20,9 @@ query:
 maintenance:
   enabled: false
 
+ingest:
+  flush_interval_seconds: 2
+
 ducklake:
   catalog_type: postgres
   metadata_path: host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake
