@@ -271,6 +271,7 @@ async fn concurrent_acquire_exactly_one_winner() {
 struct CountingJob {
     runs: AtomicUsize,
     scopes: Vec<String>,
+    interval: Duration,
 }
 
 #[async_trait]
@@ -279,7 +280,7 @@ impl Job for CountingJob {
         "count"
     }
     fn interval(&self) -> Duration {
-        Duration::from_millis(10)
+        self.interval
     }
     async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
         Ok(self.scopes.clone())
@@ -301,6 +302,7 @@ async fn runner_skips_run_when_lease_lost() {
     let job = Arc::new(CountingJob {
         runs: AtomicUsize::new(0),
         scopes: vec!["t1".into()],
+        interval: Duration::from_millis(10),
     });
     let runs = Arc::clone(&job);
     let cfg = AsyncJobsConfig {
@@ -320,6 +322,7 @@ async fn runner_runs_when_lease_won() {
     let job = Arc::new(CountingJob {
         runs: AtomicUsize::new(0),
         scopes: vec!["t1".into()],
+        interval: Duration::from_millis(10),
     });
     let runs = Arc::clone(&job);
     let cfg = AsyncJobsConfig {
@@ -486,6 +489,8 @@ async fn runner_skips_scope_on_acquire_error_and_continues() {
     let job = Arc::new(CountingJob {
         runs: AtomicUsize::new(0),
         scopes: vec!["bad".into(), "good".into()],
+        // One pass in the test window — avoid a second cycle counting as dual-run.
+        interval: Duration::from_secs(3600),
     });
     let runs = Arc::clone(&job);
     let cfg = AsyncJobsConfig {
@@ -494,7 +499,13 @@ async fn runner_skips_scope_on_acquire_error_and_continues() {
         lease_ttl_seconds: 60,
     };
     let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for the first (and only) wake to finish the good scope.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while runs.runs.load(Ordering::SeqCst) < 1 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Long job interval (3600s) — a short settle must not see a second wake.
+    tokio::time::sleep(Duration::from_millis(150)).await;
     handle.abort();
     assert_eq!(
         runs.runs.load(Ordering::SeqCst),
@@ -543,6 +554,7 @@ async fn runner_survives_job_panic_and_stops_heartbeat() {
     let count_job = Arc::new(CountingJob {
         runs: AtomicUsize::new(0),
         scopes: vec!["t2".into()],
+        interval: Duration::from_millis(10),
     });
     let runs = Arc::clone(&count_job);
     let cfg = AsyncJobsConfig {
@@ -737,4 +749,421 @@ async fn postgres_concurrent_acquire_exactly_one_winner() {
         }
     }
     assert_eq!(wins, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_expired_lease_concurrent_reclaim_exactly_one_winner() {
+    let store = try_postgres_store("thelake_lease_expired_race")
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let store = Arc::new(store);
+    assert!(store
+        .try_acquire("j", "expired-race", "former", Duration::from_secs(1))
+        .await
+        .unwrap());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let mut handles = Vec::new();
+    for holder in ["a", "b", "c", "d", "e"] {
+        let s = Arc::clone(&store);
+        let h = holder.to_string();
+        handles.push(tokio::spawn(async move {
+            s.try_acquire("j", "expired-race", &h, Duration::from_secs(60))
+                .await
+                .unwrap()
+        }));
+    }
+    let wins: usize = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap() as usize)
+        .sum();
+    assert_eq!(wins, 1, "exactly one winner after PG expiry race");
+}
+
+#[test]
+fn spawn_runner_returns_none_for_empty_jobs() {
+    let cfg = AsyncJobsConfig::default();
+    let leases = Arc::new(MemoryLeaseStore::new());
+    assert!(spawn_runner(&cfg, leases, vec![]).is_none());
+}
+
+#[test]
+fn async_jobs_config_rejects_heartbeat_ge_ttl() {
+    let bad = AsyncJobsConfig {
+        instance_id: None,
+        lease_ttl_seconds: 30,
+        heartbeat_seconds: 30,
+    };
+    assert!(bad.validate().is_err());
+    let also_bad = AsyncJobsConfig {
+        instance_id: None,
+        lease_ttl_seconds: 30,
+        heartbeat_seconds: 60,
+    };
+    assert!(also_bad.validate().is_err());
+    assert!(AsyncJobsConfig::default().validate().is_ok());
+}
+
+#[test]
+fn resolved_instance_id_default_and_explicit() {
+    let empty = AsyncJobsConfig {
+        instance_id: Some("  ".into()),
+        ..AsyncJobsConfig::default()
+    };
+    assert!(empty.resolved_instance_id().starts_with("thelake-"));
+    let named = AsyncJobsConfig {
+        instance_id: Some("node-1".into()),
+        ..AsyncJobsConfig::default()
+    };
+    assert_eq!(named.resolved_instance_id(), "node-1");
+}
+
+struct ScopeKeysFailJob;
+
+#[async_trait]
+impl Job for ScopeKeysFailJob {
+    fn name(&self) -> &'static str {
+        "scope_fail"
+    }
+    fn interval(&self) -> Duration {
+        Duration::from_millis(10)
+    }
+    async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+        Err(anyhow::anyhow!("injected scope_keys failure"))
+    }
+    async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn runner_continues_when_scope_keys_fails() {
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let fail = Arc::new(ScopeKeysFailJob);
+    let ok = Arc::new(CountingJob {
+        runs: AtomicUsize::new(0),
+        scopes: vec!["t1".into()],
+        interval: Duration::from_millis(10),
+    });
+    let runs = Arc::clone(&ok);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-scope-keys".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle =
+        spawn_runner(&cfg, leases, vec![fail as Arc<dyn Job>, ok as Arc<dyn Job>]).expect("runner");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    handle.abort();
+    assert!(
+        runs.runs.load(Ordering::SeqCst) >= 1,
+        "sibling job must run after scope_keys Err"
+    );
+}
+
+struct AlwaysFailJob {
+    runs: AtomicUsize,
+    interval: Duration,
+}
+
+#[async_trait]
+impl Job for AlwaysFailJob {
+    fn name(&self) -> &'static str {
+        "always_fail"
+    }
+    fn interval(&self) -> Duration {
+        self.interval
+    }
+    async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+        Ok(vec!["fail-scope".into()])
+    }
+    async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Err(anyhow::anyhow!("injected failure"))
+    }
+}
+
+#[tokio::test]
+async fn runner_retries_after_failed_run() {
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let fail = Arc::new(AlwaysFailJob {
+        runs: AtomicUsize::new(0),
+        interval: Duration::from_millis(40),
+    });
+    let runs = Arc::clone(&fail);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-retry-fail".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(&cfg, leases, vec![fail as Arc<dyn Job>]).expect("runner");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while runs.runs.load(Ordering::SeqCst) < 2 {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    handle.abort();
+    assert!(
+        runs.runs.load(Ordering::SeqCst) >= 2,
+        "each wake retries after Err; got {}",
+        runs.runs.load(Ordering::SeqCst)
+    );
+}
+
+#[tokio::test]
+async fn release_on_ok_lets_peer_acquire() {
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let job = Arc::new(CountingJob {
+        runs: AtomicUsize::new(0),
+        scopes: vec!["released".into()],
+        // One pass then idle — peer acquire must not race a re-hold.
+        interval: Duration::from_secs(3600),
+    });
+    let runs = Arc::clone(&job);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("holder-a".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(
+        &cfg,
+        Arc::clone(&leases) as Arc<dyn LeaseStore>,
+        vec![job as Arc<dyn Job>],
+    )
+    .expect("runner");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut peer_won = false;
+    while tokio::time::Instant::now() < deadline {
+        if runs.runs.load(Ordering::SeqCst) >= 1
+            && leases
+                .try_acquire("count", "released", "peer-b", Duration::from_secs(60))
+                .await
+                .unwrap()
+        {
+            peer_won = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+    assert!(
+        runs.runs.load(Ordering::SeqCst) >= 1,
+        "holder must complete one Ok run before peer acquire"
+    );
+    assert!(peer_won, "release after Ok must free the lease for peers");
+}
+
+#[tokio::test]
+async fn release_on_err_lets_peer_acquire() {
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let fail = Arc::new(AlwaysFailJob {
+        runs: AtomicUsize::new(0),
+        // One pass then idle — peer acquire must not race a re-hold.
+        interval: Duration::from_secs(3600),
+    });
+    let runs = Arc::clone(&fail);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("holder-fail".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(
+        &cfg,
+        Arc::clone(&leases) as Arc<dyn LeaseStore>,
+        vec![fail as Arc<dyn Job>],
+    )
+    .expect("runner");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut peer_won = false;
+    while tokio::time::Instant::now() < deadline {
+        if runs.runs.load(Ordering::SeqCst) >= 1
+            && leases
+                .try_acquire(
+                    "always_fail",
+                    "fail-scope",
+                    "peer-b",
+                    Duration::from_secs(60),
+                )
+                .await
+                .unwrap()
+        {
+            peer_won = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+    assert!(
+        runs.runs.load(Ordering::SeqCst) >= 1,
+        "holder must complete one Err run before peer acquire"
+    );
+    assert!(peer_won, "release on Err must free the lease for peers");
+}
+
+#[tokio::test]
+async fn two_runners_shared_store_no_dual_run() {
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let job_a = Arc::new(HoldLeaseJob {
+        runs: AtomicUsize::new(0),
+        sleep_ms: 300,
+    });
+    let job_b = Arc::new(HoldLeaseJob {
+        runs: AtomicUsize::new(0),
+        sleep_ms: 300,
+    });
+    let runs_a = Arc::clone(&job_a);
+    let runs_b = Arc::clone(&job_b);
+    let cfg_a = AsyncJobsConfig {
+        instance_id: Some("replica-a".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let cfg_b = AsyncJobsConfig {
+        instance_id: Some("replica-b".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let h_a = spawn_runner(
+        &cfg_a,
+        Arc::clone(&leases) as Arc<dyn LeaseStore>,
+        vec![job_a as Arc<dyn Job>],
+    )
+    .expect("a");
+    let h_b = spawn_runner(
+        &cfg_b,
+        Arc::clone(&leases) as Arc<dyn LeaseStore>,
+        vec![job_b as Arc<dyn Job>],
+    )
+    .expect("b");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let a = runs_a.runs.load(Ordering::SeqCst);
+    let b = runs_b.runs.load(Ordering::SeqCst);
+    h_a.abort();
+    h_b.abort();
+    assert_eq!(
+        a + b,
+        1,
+        "exactly one in-flight holder under a shared lease; got a={a} b={b}"
+    );
+}
+
+struct HoldLeaseJob {
+    runs: AtomicUsize,
+    sleep_ms: u64,
+}
+
+#[async_trait]
+impl Job for HoldLeaseJob {
+    fn name(&self) -> &'static str {
+        "hold"
+    }
+    fn interval(&self) -> Duration {
+        Duration::from_secs(3600)
+    }
+    async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+        Ok(vec!["hb-hold".into()])
+    }
+    async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn heartbeat_extends_so_peer_cannot_steal_mid_run() {
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let job = Arc::new(HoldLeaseJob {
+        runs: AtomicUsize::new(0),
+        sleep_ms: 2500,
+    });
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("hb-holder".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 2,
+    };
+    let handle = spawn_runner(
+        &cfg,
+        Arc::clone(&leases) as Arc<dyn LeaseStore>,
+        vec![job as Arc<dyn Job>],
+    )
+    .expect("runner");
+    // Wait past original TTL but within HB-extended window.
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(
+        !leases
+            .try_acquire("hold", "hb-hold", "thief", Duration::from_secs(60))
+            .await
+            .unwrap(),
+        "heartbeat must extend lease past original TTL"
+    );
+    handle.abort();
+}
+
+#[tokio::test]
+async fn panic_releases_lease_for_peer() {
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let panic_job = Arc::new(SlowPanicJob {
+        ran: AtomicUsize::new(0),
+        sleep_ms: 50,
+    });
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("panic-holder".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(
+        &cfg,
+        Arc::clone(&leases) as Arc<dyn LeaseStore>,
+        vec![panic_job as Arc<dyn Job>],
+    )
+    .expect("runner");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.abort();
+    assert!(
+        leases
+            .try_acquire(
+                "panic_job",
+                "t1",
+                "peer-after-panic",
+                Duration::from_secs(60)
+            )
+            .await
+            .unwrap(),
+        "panic must release so peer can acquire"
+    );
+}
+
+#[tokio::test]
+async fn memory_steal_records_without_panic() {
+    // Smoke: steal path + metric hook must not panic when instruments unset.
+    let store = MemoryLeaseStore::new();
+    assert!(store
+        .try_acquire("j", "steal-metric", "a", Duration::from_millis(40))
+        .await
+        .unwrap());
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(store
+        .try_acquire("j", "steal-metric", "b", Duration::from_secs(60))
+        .await
+        .unwrap());
+    crate::self_monitoring::record_lease_acquire("j", "steal-metric", "win");
+    crate::self_monitoring::record_lease_acquire("j", "steal-metric", "lose");
+    crate::self_monitoring::record_job_error("j", "steal-metric");
+}
+
+#[tokio::test]
+async fn lease_store_for_none_is_memory() {
+    let store = crate::async_jobs::lease_store_for(None);
+    assert!(store
+        .try_acquire("j", "mem-path", "a", Duration::from_secs(60))
+        .await
+        .unwrap());
+    assert!(!store
+        .try_acquire("j", "mem-path", "b", Duration::from_secs(60))
+        .await
+        .unwrap());
 }

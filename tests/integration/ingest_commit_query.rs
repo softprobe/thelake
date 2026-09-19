@@ -1281,18 +1281,9 @@ async fn test_wal_replay_recovers_spans() {
     let _config = load_test_config();
 }
 
-#[tokio::test]
-async fn test_metadata_maintenance_job_expires_snapshots() {
-    use softprobe_runtime::compaction::executor::MaintenanceExecutor;
-
-    let config = load_test_config();
-    assert!(
-        !config.ducklake.data_path.is_empty(),
-        "DuckLake required for maintenance smoke"
-    );
-    let executor = MaintenanceExecutor::new(&config, None, None).await.unwrap();
-    let _ = executor.run_once().await.unwrap();
-}
+// Snapshot expire + TWCS under the leased MaintenanceJob path are covered by
+// `compaction::maintenance_leased_tests` (compact file counts, expire, multi-tenant,
+// aborted-holder recover). Do not restore a no-assert `run_once` smoke here.
 
 #[tokio::test]
 async fn test_wal_cleanup_after_flush() {

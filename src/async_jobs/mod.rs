@@ -17,7 +17,7 @@ use crate::self_monitoring;
 use futures::FutureExt;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -35,9 +35,11 @@ impl Drop for HeartbeatStopGuard {
 
 /// Spawn the shared wake loop. Returns `None` when `jobs` is empty.
 ///
-/// Configure `lease_ttl_seconds` well above `heartbeat_seconds` (and typical
-/// pass latency) so a slow heartbeat query cannot leave the row stealable
-/// mid-run. Heartbeat failures are logged; they do not abort `job.run`.
+/// Each wake: for every job/scope, `try_acquire` → if win, `run` with heartbeat →
+/// always **release**. `Job::interval` only sets the wake period (min across
+/// jobs). Configure `lease_ttl_seconds` well above `heartbeat_seconds` and
+/// typical pass latency. Heartbeat failures are logged; they do not abort
+/// `job.run`.
 pub fn spawn_runner(
     config: &AsyncJobsConfig,
     leases: Arc<dyn LeaseStore>,
@@ -54,11 +56,13 @@ pub fn spawn_runner(
         .map(|j| j.interval())
         .min()
         .unwrap_or(Duration::from_secs(60));
-    let wake = wake.max(Duration::from_secs(1));
+    // Floor keeps a buggy `Job::interval` of 0 from busy-spinning; tests may use
+    // sub-second wakes via configurable maintenance intervals (Duration).
+    let wake = wake.max(Duration::from_millis(50));
 
     info!(
         holder_id = %holder_id,
-        wake_secs = wake.as_secs(),
+        wake_ms = wake.as_millis() as u64,
         jobs = jobs.len(),
         "async job runner starting"
     );
@@ -66,9 +70,6 @@ pub fn spawn_runner(
     let handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(wake);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // Track last success time per (job_name, scope) for interval due checks.
-        let mut last_run: std::collections::HashMap<(String, String), Instant> =
-            std::collections::HashMap::new();
 
         loop {
             ticker.tick().await;
@@ -82,20 +83,10 @@ pub fn spawn_runner(
                         continue;
                     }
                 };
-                let interval = job.interval();
                 // Sequential per scope by design (matches pre-lease maintenance): one
                 // TWCS/metadata pass at a time avoids compact∥expire races and unbounded
                 // task fan-out. Cross-tenant parallelism is a later stage if needed.
                 for scope in scopes {
-                    let key = (job.name().to_string(), scope.clone());
-                    let due = match last_run.get(&key) {
-                        None => true,
-                        Some(t) => t.elapsed() + Duration::from_secs(2) >= interval,
-                    };
-                    if !due {
-                        continue;
-                    }
-
                     match leases
                         .try_acquire(job.name(), &scope, &holder_id, lease_ttl)
                         .await
@@ -157,10 +148,8 @@ pub fn spawn_runner(
                     drop(_hb_guard);
                     let _ = hb_task.await;
 
-                    match run_result {
-                        Ok(Ok(())) => {
-                            last_run.insert(key, Instant::now());
-                        }
+                    match &run_result {
+                        Ok(Ok(())) => {}
                         Ok(Err(err)) => {
                             warn!(job = job.name(), scope = %scope, "job failed: {err}");
                             self_monitoring::record_job_error(job.name(), &scope);

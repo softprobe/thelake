@@ -564,7 +564,6 @@ maintenance:
   target_file_size_bytes: 67108864
   interval_seconds: 300
   metadata_enabled: ${METADATA_ENABLED}
-  metadata_interval_seconds: 300
   max_snapshot_age_seconds: 60
   remove_orphan_files_enabled: ${ORPHAN_ENABLED}
   remove_orphan_older_than_seconds: 60
@@ -587,9 +586,6 @@ ducklake:
   # Serialize DuckLake commits under demo load (parallel writers × layout txn
   # multi-core scans of open-day small files pegged Softprobe CPU).
   writer_pool_size: ${THELAKE_WRITER_POOL_SIZE:-1}
-
-dropdown_catalog:
-  enabled: false
 
 # Self-monitoring ops lake (Design 2). Browser CI may set
 # THELAKE_SELF_MONITORING_ENABLED=false to keep k6 freshness under demo load.

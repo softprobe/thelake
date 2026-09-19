@@ -6,5 +6,7 @@ pub mod executor;
 #[cfg(test)]
 mod ladder_tests;
 mod maintenance_job;
+#[cfg(test)]
+mod maintenance_leased_tests;
 pub mod scheduler;
 pub mod twcs;

@@ -12,7 +12,7 @@
 - OTLP trace ingestion over gRPC
 - tenant-scoped DuckLake storage and DuckDB queries
 - telemetry search and detail APIs
-- schema promotion and optional dropdown metadata
+- schema promotion
 
 DuckLake is the only durable telemetry backend. Apache Iceberg, the staged
 Parquet tier, and application WAL have been removed. Optional soft coalesce
@@ -122,8 +122,7 @@ Authentication resolves a tenant before operational work begins. A
 `RuntimeEngine` is then built and cached for that tenant with:
 
 - a tenant-bound DuckLake metadata schema and data path;
-- a tenant-bound writer and query engine;
-- an optional Postgres dropdown catalog.
+- a tenant-bound writer and query engine.
 
 With a PostgreSQL catalog, `DuckLakeScopeResolver` stores scope mappings in the
 configured registry schema. Operational APIs do not accept arbitrary tenant or
@@ -326,8 +325,7 @@ skinny samples, 5m/1h ladder, and `job` collapse — goals and the 39-id
 acceptance suite are in
 [`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
 
-When enabled, the Postgres dropdown catalog is pruned by its active-value
-retention. Iceberg manifest rewrite and Iceberg REST catalog maintenance do not
+Iceberg manifest rewrite and Iceberg REST catalog maintenance do not
 exist in the current path.
 
 ## Configuration

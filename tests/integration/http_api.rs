@@ -1302,7 +1302,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
     //    run_once_ducklake funnels every failure into warn! + Skipped, so
     //    `.expect()` can never fire -- assert on the summary instead, or a
     //    pass that did nothing at all would look like success.
-    let maintenance = MaintenanceExecutor::new(config.as_ref(), None, None)
+    let maintenance = MaintenanceExecutor::new(config.as_ref(), None)
         .await
         .expect("maintenance executor");
     let summary = maintenance.run_once().await.expect("maintenance run");
