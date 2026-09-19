@@ -20,8 +20,9 @@ pub use instruments::{
     record_ingest_commit, record_job_error, record_lease_acquire, record_lease_heartbeat_failure,
     record_lease_steal, record_maintenance, record_orphan_remove, record_query,
     record_query_queue_wait, record_sample_scan, record_session_summary_dirty_upsert,
-    record_session_summary_dirty_upsert_error, record_slow_query, record_snapshot_expire,
-    record_write, self_monitoring_export_drops,
+    record_session_summary_dirty_upsert_error, record_session_summary_reducer_lag,
+    record_session_summary_sessions_reduced, record_slow_query, record_snapshot_expire,
+    record_write, self_monitoring_export_drops, set_session_summary_dirty_depth,
 };
 pub use labels::{bound_app, classify_sample_scan, classify_sql_kind};
 

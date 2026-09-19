@@ -75,15 +75,26 @@ Depends on **A** for “where DDL lives” conventions; dirty UPSERT itself does
 
 Depends on **A** + **1**.
 
-- [ ] **2.1** `SessionSummaryReduceJob`: acquire lease `(session_summary.reduce, tenant)`
-- [ ] **2.2** Claim dirty batch (`LIMIT N` / `max_sessions_per_reduce`); snapshot `updated_at`
-- [ ] **2.3** Compute `[from,to]` per §6.5; always attach `record_date` + timestamp bounds
-- [ ] **2.4** Time-scoped `GROUP BY` from `traces` → absolute UPSERT `session_summary`
-- [ ] **2.5** Ack: `DELETE … WHERE session_id IN (…) AND updated_at <= snapshot`
-- [ ] **2.6** Clamp / chunk when `to - from > max_reduce_span` (decide open Q #2: chunk vs defer rebuild)
-- [ ] **2.7** Heartbeat during long reduces; release on completion
-- [ ] **2.8** Tests: dirty → reduce → summary matches aggregate; concurrent dirty mid-reduce not lost; no dual-reduce under two holders
-- [ ] **2.9** **[P]** Metrics: reducer lag, sessions/reduce, lease steal; dirty depth gauge (Postgres `count(*)` on claim — not on ingest)
+- [x] **2.1** `SessionSummaryReduceJob`: acquire lease `(session_summary.reduce, tenant)`
+- [x] **2.2** Claim dirty batch (`LIMIT N` / `max_sessions_per_reduce`); snapshot `updated_at`
+- [x] **2.3** Compute `[from,to]` per §6.5; always attach `record_date` + timestamp bounds
+- [x] **2.4** Time-scoped `GROUP BY` from `traces` → absolute UPSERT `session_summary`
+- [x] **2.5** Ack: `DELETE … WHERE session_id IN (…) AND updated_at <= snapshot`
+- [x] **2.6** Clamp when `to - from > max_reduce_span` (Q #2: **clamp**, no chunk; Stage 4 rebuild for early history)
+- [x] **2.7** Heartbeat during long reduces; release on completion (shared `spawn_runner`)
+- [x] **2.8** Tests: field-accuracy DuckDB matrix + postgres claim/ack/upsert; concurrent dirty mid-reduce not lost
+- [x] **2.9** **[P]** Metrics: reducer lag, sessions/reduce; dirty depth gauge (Postgres `count(*)` on claim)
+
+**Stage 2 notes (2026-09-18):** Implemented on `feat/session-summary-reduce`. Promoted-only reduce SQL (zero `attributes` MAP). Canonical `traces-query-hot-attrs.yaml` ensured when `session_summary.enabled`. Clamp (not chunk) for oversized windows.
+
+| Task | Evidence |
+|---|---|
+| 2.1 / 2.7 | `SessionSummaryReduceJob` on same `spawn_runner` as maintenance (`compaction/scheduler.rs`) |
+| 2.2–2.5 | `session_summary/reduce.rs` claim → lake aggregate → UPSERT → ack |
+| 2.3–2.4 | `reduce_sql.rs` — `record_date` + ts + `session_id IN`; typed SUMs; unit asserts no `attributes` |
+| 2.6 | `compute_reduce_bounds` clamp; accuracy test `clamp_window_excludes_early_history` |
+| 2.8 | `reduce_accuracy_tests.rs` (all fields/cases) + postgres claim/ack/upsert tests |
+| 2.9 | `session_summary_dirty_depth`, `sessions_reduced`, `reducer_lag_seconds` instruments |
 
 ---
 
@@ -91,12 +102,13 @@ Depends on **A** + **1**.
 
 Depends on **2** (summary must be populated). Stage **0** should already be done so Explorer does not double-scan.
 
-- [ ] **3.1** `POST /v1/llm/sessions/search` reads `session_summary` (cursor `(start_time, session_id)` desc)
-- [ ] **3.2** Filters: time range, agent, has-errors (match current list contract)
-- [ ] **3.3** Rollout fallback flag: legacy `traces` aggregate when summary empty / `session_summary.enabled=false`
-- [ ] **3.4** Detail paths unchanged (still `traces` / lake)
-- [ ] **3.5** API / Explorer contract tests: list p95 independent of span volume in window
-- [ ] **3.6** **[P]** Update Explorer/docs for summary-backed list behavior
+- [x] **3.1** `POST /v1/llm/sessions/search` reads `session_summary` (cursor `(start_time, session_id)` desc)
+- [x] **3.2** Filters: time range, agent, has-errors (match current list contract)
+- [x] **3.3** No lake fallback on Postgres: list always `session_summary` (empty → empty). `enabled` gates dirty/reduce only; sqlite keeps lake as sole store
+- [x] **3.4** Detail paths unchanged (still `traces` / lake)
+- [x] **3.5** API / Explorer contract tests: list p95 independent of span volume in window
+- [x] **3.6** **[P]** Update Explorer/docs for summary-backed list behavior
+  - Evidence: `sp-llm/apps/explorer/design/list-and-shell.md` (summary-backed list); `session-list-summary.md` §7.3; `api.test.ts` asserts no obs scan on list path
 
 ---
 
@@ -104,21 +116,61 @@ Depends on **2** (summary must be populated). Stage **0** should already be done
 
 Depends on **A** + **1** (+ ideally **2** so UPSERT path is shared). Can start **in parallel with Stage 3** if reduce UPSERT helpers are extracted.
 
-- [ ] **4.1** Shared reduce/rebuild aggregation helper (DRY with Stage 2)
-- [ ] **4.2** `SessionSummaryRebuildJob`: leased `session_summary.rebuild`; windowed re-aggregate from `traces`
-- [ ] **4.3** Periodic last-N-days rebuild (crash / dirty-miss heal) — cadence open Q #4
-- [ ] **4.4** Ops: `POST /v1/llm/sessions/summary/rebuild` `{from,to}` enqueues/triggers leased rebuild
-- [ ] **4.5** Test: truncate `session_summary` → rebuild restores list; Parquet untouched
+- [x] **4.1** Shared reduce/rebuild aggregation helper (DRY with Stage 2)
+  - Evidence: `reduce_sql::compile_session_summary_aggregate_sql`; `aggregate_sessions_from_lake` / `upsert_summary_rows` / `rebuild_tenant_window`
+- [x] **4.2** `SessionSummaryRebuildJob`: leased `session_summary.rebuild`; windowed re-aggregate from `traces`
+  - Evidence: `job.rs` `SessionSummaryRebuildJob`; registered in `compaction/scheduler.rs`
+- [x] **4.3** Periodic lookback = `max_reduce_span_seconds`; cadence `rebuild_interval_ms` default 24h (Q #4)
+  - Evidence: config defaults + RebuildJob `run` window
+- [x] **4.4** Ops: `POST /v1/llm/sessions/summary/rebuild` `{from,to}` → lease + sync rebuild; reject inverted/oversized
+  - Evidence: `query::rebuild_session_summary`; route in `api/mod.rs`
+- [x] **4.5** Test: truncate `session_summary` → rebuild restores list; Parquet untouched
+  - Evidence: `truncate_summary_rebuild_restores_list_parquet_intact` e2e
 
 ---
 
-## Stage 5 — Promote hot list columns (optional follow-on)
+## Stage 5 — Promote hot list columns → **promotion invariant close-out**
 
-Depends on **2**/**3** working; parallelizable with polish only.
+Depends on **2**/**3** working.
 
-- [ ] **5.1** Identify hot list filter columns still in MAP bags
-- [ ] **5.2** Promote typed columns so reducer prefers them over MAP extraction
-- [ ] **5.3** Update reducer SQL + any promotion specs
+### LOUD RULES (non-negotiable — fail the PR if violated)
+
+1. **Tests first / all cases.** No “add tests later.” Evidence must include positive *and* negative cases (bag-only must NOT fill reduce fields).
+2. **DRY hard.** One source for attr keys (`models/attr_keys`), one required-col list (`REQUIRED_TRACES_HOT_COLS` / yaml), one reduce SQL builder. **No duplicated logic. No string literals or magic numbers in new code — constants only.**
+3. **Simplicity is king.** **Never** add features, fallbacks, backward-compat shims, or second write paths unless the design explicitly requires them. Prefer closing the stage over inventing work.
+4. **No rubber stamps.** Review must aggressively reject busywork and scope creep.
+
+### Research verdict (2026-09-19)
+
+Stage 5’s original wording (“promote so reducer prefers typed over MAP”) was **executed in Stage 2**:
+- `reduce_sql` is promoted-only (hard ban on `attributes` / MAP).
+- `traces-query-hot-attrs.yaml` auto-activates when `session_summary.enabled`.
+- List filters already hit typed `session_summary` columns.
+- `agent_name` is **auth column** or agent-observation `message_type` — bag `sp.agent.name` is ignored by reduce **by design** (not a missing promotion).
+
+### Approaches (pick one)
+
+| | Scope | Verdict |
+|---|---|---|
+| **A. Close-out + regression locks** | Docs truth + aggressive evidence tests only; **no production behavior change** unless a test fails | **Recommended** |
+| **B. Ingest bag→`agent_name` when auth empty** | Copy `sp.agent.name` into typed col | **Rejected by critic** — unrequested fallback; duplicates agent semantics |
+| **C. Also fill `user_id` from `enduser.id`** | Widen product-hot | **Rejected by critic** — contradicts yaml “enduser.id stays bag-only”; new feature |
+
+### Revised tasks (Option A)
+
+- [x] **5.1** Doc truth: Stage 2 already did promote-over-MAP; agent = auth/`message_type` not bag; list = typed summary cols
+- [x] **5.2** Evidence matrix (all must pass):
+  - reduce SQL contains **no** `attributes` / `resource_attributes` / bag key literals (`attr_keys` constants in asserts)
+  - `REQUIRED_TRACES_HOT_COLS` ⊆ canonical yaml (single source via `llm_promo().reduce_required_cols()`)
+  - `session_summary.enabled` ensure path activates yaml when required cols missing
+  - **Negative:** MAP-only tokens/user/model/agent → summary fields stay NULL/0 (prove no secret MAP extract)
+  - **Positive:** auth `agent_name` and agent `message_type` still win (reuse accuracy fixtures; don’t duplicate)
+  - list SQL predicates stay typed-only (existing lock)
+- [x] **5.3** Explicit **non-goals** in docs: no ingest bag→column copy; no `enduser.id` promotion; no `sp.agent.name` in hot-attrs yaml
+
+**Critic:** [Stage 5 harsh review](4c260b31-d164-4da5-ba33-68ec5e3d100a) — rank A ≫ kill B/C; remaining real product work is Stage 4 + V, not MAP crutches.
+
+**Stage 5 notes (2026-09-19):** Close-out only — DRY required cols from `llm_promo`; yaml keys locked to `attr_keys`; MAP-ignore + ensure-activate evidence tests.
 
 ---
 
@@ -126,11 +178,20 @@ Depends on **2**/**3** working; parallelizable with polish only.
 
 Depends on Stages **0**, **A**, **1–4** (and **0b** if compilers changed).
 
-- [ ] **V.1** Success criteria in `session-list-summary.md` §15 checked with evidence
+- [x] **V.1** Success criteria in `session-list-summary.md` §15 checked with evidence
+  - List ≠ f(spans): `http_session_summary_list_independent_of_span_volume`
+  - Detail lake-only: `http_session_detail_still_reads_lake_after_summary_reduce`
+  - Truncate→rebuild: `truncate_summary_rebuild_restores_list_parquet_intact`
+  - No Explorer obs scan: `api.test.ts` + list-and-shell.md
+  - Reduce accuracy: `reduce_accuracy_tests::*`
+  - Lease shared module: Stage A + reduce/rebuild on `spawn_runner`
 - [x] **V.2** Success criteria in `async-jobs.md` §12 checked for Stage A (multi-replica lease + MemoryLeaseStore); criteria 2–4 wait on Stage C
-- [ ] **V.3** Dirty UPSERT rate ≈ lake flush rate, not span rate
-- [ ] **V.4** No reducer/rebuild SQL without `record_date` + timestamp bounds
-- [ ] **V.5** Workspace / thelake test gate green for touched crates
+- [x] **V.3** Dirty UPSERT rate ≈ lake flush rate, not span rate
+  - Evidence: dirty after coalesce flush only (`http_session_summary_*` + dirty mark-after-commit tests); soft coalesce required when enabled
+- [x] **V.4** No reducer/rebuild SQL without `record_date` + timestamp bounds
+  - Evidence: `reduce_sql::tests::{reduce_sql_has_pushdown_and_no_attributes,rebuild_sql_window_wide_no_in_list}`
+- [x] **V.5** Workspace / thelake test gate green for touched crates
+  - Evidence: `cargo fmt` + `clippy -D warnings` + `cargo test --lib session_summary` + `session_summary_list` e2e (8/8)
 
 ---
 

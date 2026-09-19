@@ -1,6 +1,6 @@
 # Session list summary
 
-**Status:** Stage 1 in progress (DDL + dirty UPSERT; reduce not yet)  
+**Status:** Stages 2–3 implemented (leased reduce + Postgres `sessions/search`; no lake list fallback)  
 **Baseline:** `thelake` / `sp-llm` `main`  
 **Supersedes:** ChatGPT “Design Session Summaries” share; earlier drafts that put the directory in Explorer Supabase, dual-wrote DuckLake `session_facts`, or used a long-lived in-memory span counter
 
@@ -217,7 +217,7 @@ attrs/events/prompts, JSONB labels GIN (defer), version/hash/OPEN state, any Duc
 | | |
 |---|---|
 | **Where** | `SessionSummaryReduceJob` on the shared `async_jobs` runner (same process binary as maintenance) |
-| **When** | On `session_summary.reducer_interval_ms` (e.g. 2–5s), after winning `thelake_job_lease` for `(session_summary.reduce, tenant_id)` |
+| **When** | On `session_summary.reducer_interval_ms` (default 10s), after winning `thelake_job_lease` for `(session_summary.reduce, tenant_id)` |
 | **Not** | Inside the ingest HTTP/gRPC handler beyond the cheap dirty UPSERT |
 | **Coordination** | [`async-jobs.md`](./async-jobs.md) — same lease table as `maintenance.compact` |
 
@@ -289,7 +289,7 @@ to   = max(dirty.max_ts, now())
 from = least(coalesce(session_summary.start_time, dirty.min_ts), dirty.min_ts)
 ```
 
-Plus `record_date BETWEEN date(from) AND date(to)`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`; oversized windows chunk or defer to `session_summary.rebuild`.
+Plus `record_date BETWEEN date(from) AND date(to)`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`. Stage 2 **clamps** oversized windows (does not chunk); early history outside the clamp may undercount until Stage 4 rebuild.
 
 ### 6.6 Late spans
 
@@ -303,7 +303,7 @@ No FINALIZED. Late span → dirty UPSERT → next leased reduce replaces the sum
 
 `POST /v1/llm/sessions/search` → select from `session_summary` (cursor on `(start_time, session_id)` desc). Steady-state path does **not** scan `traces`.
 
-Fallback flag: legacy aggregate over `traces` for empty summary / rollout only.
+**No lake fallback** on Postgres catalogs: empty summary → empty list (whether or not `session_summary.enabled`; that flag gates dirty/reduce writes only). Lake `GROUP BY` remains only for non-postgres catalogs (sqlite) where there is no summary table.
 
 ### 7.2 Detail
 
@@ -311,11 +311,11 @@ Unchanged: `GET …/sessions/{id}`, observations, recording — read **`traces`*
 
 ### 7.3 Explorer
 
-- Keep calling `sessions/search` via Worker.  
-- **Done (Stage 0):** removed `sessionCountOverrides` — list uses server `SessionSummary` counts only; no window `observations/search`.  
-  Until Stage 3 (`session_summary`), list latency still tracks lake `sessions/search` cost; STEPS/RESULT may diverge from detail (bubbled errors / duplicate spans). Child-session folding on the server list path is gone with the scan (client-side aggregate fallback still folds); restore via summary fields or server `roots_only` later.  
-- Findings/agents stay in Supabase UI join by `session_id`.  
+- Keep calling `sessions/search` via Worker — **summary rows only** (no parallel observations scan).
+- **Done (Stage 0 + 3 + 3.6):** list is Postgres `session_summary`-backed. Trust server `SessionSummary` counts; Explorer must **not** window-scan `observations/search` for list counts. Detail still reads `traces`.
+- Findings/agents stay in Supabase UI join by `session_id`.
 - Explorer never writes `session_summary`.
+- Optional client fallback when the search endpoint is missing (404/405) remains a compatibility path only — not the product list path.
 
 ### 7.4 Pagination
 
@@ -337,7 +337,7 @@ rebuild([from, to]):
   → absolute UPSERT session_summary
 ```
 
-Triggers: ops/CLI with explicit window; periodic last-N-days (crash heal); optional post-promotion backfill.
+Triggers: ops `POST /v1/llm/sessions/summary/rebuild` with explicit `{from,to}`; periodic leased job every `rebuild_interval_ms` (default 24h) over lookback `max_reduce_span_seconds` (default 7d). Never whole-lake. Ops rejects windows larger than `max_reduce_span_seconds` (no chunking).
 
 ---
 
@@ -364,9 +364,10 @@ ingest:
   flush_interval_seconds: 2   # required when session_summary.enabled (> 0)
 session_summary:
   enabled: true
-  reducer_interval_ms: 3000
-  max_sessions_per_reduce: 500
-  max_reduce_span: 7d
+  reducer_interval_ms: 10000
+  rebuild_interval_ms: 86400000   # 24h; lookback = max_reduce_span_seconds
+  max_sessions_per_reduce: 1000
+  max_reduce_span_seconds: 604800 # 7d
 ```
 
 Startup validation: if `session_summary.enabled` and `ingest.flush_interval_seconds == 0`, fail config load with a clear message (force soft coalesce). Dirty UPSERT count should track **lake flush count**, not span count.
@@ -380,7 +381,9 @@ Ops: `POST /v1/llm/sessions/summary/rebuild` `{from,to}` triggers leased `sessio
 - `traces` partitioned by `record_date`, sorted with `session_id`.  
 - New SQL uses **`traces` / `logs`**, not `union_*`.  
 - Stage **0b**: remove `union_*` emitters from query compilers; keep rewrite shim briefly if external SQL still uses old names, then delete shim.  
-- Promote list filter columns so reducer prefers typed columns over MAP bags.
+- Promote list filter columns so reducer prefers typed columns over MAP bags — **done in Stage 2** (promoted-only reduce; Stage 5 is close-out evidence + non-goals).
+
+**Stage 5 non-goals:** no ingest bag→column copy for `sp.agent.name`; no `enduser.id` promotion into `user_id`; agent identity remains auth stamp or agent-observation `message_type`.
 
 ---
 
@@ -397,7 +400,7 @@ Checkbox task list (sequential order + **[P]** parallel marks): [`session-list-s
 | **2** | `session_summary.reduce` job on shared runner |
 | **3** | `sessions/search` reads summary |
 | **4** | Leased `session_summary.rebuild` (periodic + ops) |
-| **5** | Promote hot list columns |
+| **5** | Promotion invariant close-out (evidence locks; done-in-Stage-2) |
 
 **Do not** ship a private session-summary timer before stage A. Maintenance must gain leases in the same change set family.
 
@@ -414,7 +417,7 @@ Checkbox task list (sequential order + **[P]** parallel marks): [`session-list-s
 | Private session-summary `tokio::interval` + ad-hoc lock | Violates DRY; maintenance already needs shared leases |
 | Dual maintenance lock + session-summary lock | Two coordination systems |
 | Per-span Postgres UPDATE | Amplification |
-| Redis/Elastic/CH | Wrong economics |
+| Ingest bag→typed `agent_name` / `enduser.id` promote | Unrequested Stage 5 fallbacks; agent is auth/`message_type`; `enduser.id` stays bag-only |
 
 ---
 
@@ -444,9 +447,9 @@ Replaced reducer with: **durable dirty + leased async job + `FROM traces` aggreg
 ## 16. Open questions
 
 1. Exact timestamp literal / `TIMESTAMP_NS` helpers shared with existing query SQL.  
-2. Behavior when `to - from > max_reduce_span` (chunk vs defer to rebuild).  
+2. Behavior when `to - from > max_reduce_span` — **decided Stage 2: clamp** (no chunk); early history may undercount until Stage 4 rebuild.  
 3. `user_id` / `model_name` in v1 vs later.  
-4. Rebuild cadence.  
+4. Rebuild cadence — **decided Stage 4:** `rebuild_interval_ms` default 24h; lookback = `max_reduce_span_seconds` (default 7d).  
 5. DDL bootstrap vs existing `promotion_specs` ensure path.  
 6. Timeline to delete `union_*` rewrite shim entirely.  
 7. Registry schema name for `thelake_job_lease` (shared vs first tenant) — decide with scope-resolver layout.

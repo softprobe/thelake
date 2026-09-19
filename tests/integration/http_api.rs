@@ -1074,6 +1074,147 @@ async fn llm_sessions_search_pages_without_dropping_rows() {
     );
 }
 
+/// Lake-path (summary disabled / sqlite) contract: every list filter is applied
+/// server-side. Summary-path filter matrix lives in
+/// `session_summary::list_filters_tests` (postgres, `make test-lease-pg`).
+#[tokio::test]
+async fn llm_sessions_search_applies_every_filter() {
+    let (router, state, _t) = build_router_and_state().await;
+
+    async fn ingest(router: &Router, mut request: ExportTraceServiceRequest, start_ns: u64) {
+        let span = &mut request.resource_spans[0].scope_spans[0].spans[0];
+        span.start_time_unix_nano = start_ns;
+        span.end_time_unix_nano = start_ns + 1_000_000_000;
+        let mut buf = Vec::new();
+        request.encode(&mut buf).expect("encode");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header(header::CONTENT_TYPE, "application/x-protobuf")
+            .body(Body::from(buf))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.expect("ingest");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // sess-ok: OK generation, user-llm-1, gpt-4o, agent attr agent-a
+    let mut ok = llm_generation_request("sess-ok", [0xa1; 16], [0xb1; 8]);
+    ok.resource_spans[0].scope_spans[0].spans[0]
+        .attributes
+        .push(string_kv("sp.agent.name", "agent-a"));
+    ingest(&router, ok, 1_721_349_720_000_000_000).await;
+
+    // sess-err: ERROR status, user-err, claude, agent-b
+    let mut err = llm_generation_request("sess-err", [0xa2; 16], [0xb2; 8]);
+    {
+        let span = &mut err.resource_spans[0].scope_spans[0].spans[0];
+        span.status = Some(Status {
+            code: 2, // ERROR
+            message: "boom".into(),
+        });
+        for kv in &mut span.attributes {
+            if kv.key == "sp.user.id" {
+                *kv = string_kv("sp.user.id", "user-err");
+            }
+            if kv.key == "gen_ai.request.model" {
+                *kv = string_kv("gen_ai.request.model", "claude");
+            }
+        }
+        span.attributes.push(string_kv("sp.agent.name", "agent-b"));
+    }
+    ingest(&router, err, 1_721_349_721_000_000_000).await;
+
+    // sess-mix: OK, user-llm-1, claude, agent-a
+    let mut mix = llm_generation_request("sess-mix", [0xa3; 16], [0xb3; 8]);
+    {
+        let span = &mut mix.resource_spans[0].scope_spans[0].spans[0];
+        for kv in &mut span.attributes {
+            if kv.key == "gen_ai.request.model" {
+                *kv = string_kv("gen_ai.request.model", "claude");
+            }
+        }
+        span.attributes.push(string_kv("sp.agent.name", "agent-a"));
+    }
+    ingest(&router, mix, 1_721_349_722_000_000_000).await;
+
+    state
+        .engine_for_id("")
+        .await
+        .expect("engine")
+        .ingest
+        .force_flush_spans()
+        .await
+        .expect("flush");
+
+    async fn search(router: &Router, body: Value) -> Value {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/llm/sessions/search")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.expect("search");
+        assert_eq!(resp.status(), StatusCode::OK, "{body}");
+        response_json(resp).await
+    }
+
+    fn session_ids(v: &Value) -> Vec<&str> {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["session_id"].as_str().unwrap())
+            .collect()
+    }
+
+    let window = json!({
+        "from": "2024-07-18T00:00:00Z",
+        "to": "2024-07-20T00:00:00Z",
+        "order_by": "start_time",
+        "order": "desc",
+        "limit": 50
+    });
+
+    let all = search(&router, window.clone()).await;
+    assert_eq!(session_ids(&all), vec!["sess-mix", "sess-err", "sess-ok"]);
+
+    let mut body = window.clone();
+    body["has_errors"] = json!(true);
+    assert_eq!(session_ids(&search(&router, body).await), vec!["sess-err"]);
+
+    let mut body = window.clone();
+    body["has_errors"] = json!(false);
+    let no_err_body = search(&router, body).await;
+    let no_err = session_ids(&no_err_body);
+    assert!(no_err.contains(&"sess-ok") && no_err.contains(&"sess-mix"));
+    assert!(!no_err.contains(&"sess-err"));
+
+    let mut body = window.clone();
+    body["agent_name"] = json!("agent-a");
+    assert_eq!(
+        session_ids(&search(&router, body).await),
+        vec!["sess-mix", "sess-ok"]
+    );
+
+    let mut body = window.clone();
+    body["user_id"] = json!("user-err");
+    assert_eq!(session_ids(&search(&router, body).await), vec!["sess-err"]);
+
+    let mut body = window.clone();
+    body["model_name"] = json!("claude");
+    assert_eq!(
+        session_ids(&search(&router, body).await),
+        vec!["sess-mix", "sess-err"]
+    );
+
+    let mut body = window.clone();
+    body["agent_name"] = json!("agent-a");
+    body["user_id"] = json!("user-llm-1");
+    body["model_name"] = json!("claude");
+    body["has_errors"] = json!(false);
+    assert_eq!(session_ids(&search(&router, body).await), vec!["sess-mix"]);
+}
+
 /// Guards the DuckDB floor set in Cargo.toml.
 ///
 /// DuckDB 1.5.2 crashes with "INTERNAL Error: Attempted to access index 0
