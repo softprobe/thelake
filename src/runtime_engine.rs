@@ -213,8 +213,6 @@ pub struct DuckLakeScopeResolver {
     pool: Pool,
     registry_schema: String,
     default_scope: DuckLakeScope,
-    /// When true, ensure activates canonical traces product-hot promotions.
-    session_summary_enabled: bool,
 }
 
 impl DuckLakeScopeResolver {
@@ -231,8 +229,7 @@ impl DuckLakeScopeResolver {
         if dl.catalog_type != "postgres" {
             return Ok(None);
         }
-        let mut resolver = Self::build_pool(dl)?;
-        resolver.session_summary_enabled = config.session_summary.enabled;
+        let resolver = Self::build_pool(dl)?;
         resolver.ensure_registry().await?;
         resolver.ensure_scope().await?;
         Ok(Some(resolver))
@@ -254,7 +251,6 @@ impl DuckLakeScopeResolver {
             pool,
             registry_schema: dl.metadata_schema.clone(),
             default_scope,
-            session_summary_enabled: false,
         })
     }
 
@@ -323,9 +319,8 @@ ON {}.thelake_job_lease (lease_until);"#,
         crate::session_summary::ensure_session_summary_tables(&client, &scope.metadata_schema)
             .await?;
         drop(client);
-        if self.session_summary_enabled {
-            crate::session_summary::ensure_product_hot_attrs_for_scope(self, scope).await?;
-        }
+        // Postgres catalog ⇒ session_summary always on; activate product-hot cols.
+        crate::session_summary::ensure_product_hot_attrs_for_scope(self, scope).await?;
         Ok(())
     }
 

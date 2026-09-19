@@ -1,4 +1,4 @@
-//! Ensure canonical product-hot traces promotions when session_summary is enabled.
+//! Ensure canonical product-hot traces promotions for postgres session_summary.
 
 use crate::api::llm::query::llm_promo;
 use crate::promotion::{

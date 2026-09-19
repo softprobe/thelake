@@ -1,7 +1,7 @@
 use crate::async_jobs::{self, Job};
 use crate::compaction::executor::MaintenanceExecutor;
 use crate::compaction::maintenance_job::MaintenanceJob;
-use crate::config::Config;
+use crate::config::{Config, SessionSummaryConfig};
 use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::session_summary::{SessionSummaryRebuildJob, SessionSummaryReduceJob};
 use anyhow::Result;
@@ -18,7 +18,7 @@ pub async fn start_maintenance_scheduler(
 ) -> Result<Option<JoinHandle<()>>> {
     let metadata_enabled = config.maintenance.metadata_enabled;
     let compaction_enabled = config.maintenance.enabled;
-    let summary_enabled = config.session_summary.enabled;
+    let summary_active = SessionSummaryConfig::active_for(&config.ducklake);
 
     let mut jobs: Vec<Arc<dyn Job>> = Vec::new();
 
@@ -32,10 +32,10 @@ pub async fn start_maintenance_scheduler(
         )));
     }
 
-    if summary_enabled {
+    if summary_active {
         let registry = scope_registry.clone().ok_or_else(|| {
             anyhow::anyhow!(
-                "session_summary.enabled requires a Postgres DuckLakeScopeResolver (catalog)"
+                "postgres catalog requires a DuckLakeScopeResolver for session_summary jobs"
             )
         })?;
         jobs.push(Arc::new(SessionSummaryReduceJob::new(
@@ -70,7 +70,7 @@ mod tests {
         let mut c = Config::default();
         c.maintenance.enabled = false;
         c.maintenance.metadata_enabled = false;
-        c.session_summary.enabled = false;
+        // default catalog is sqlite → summary inactive
         let out = start_maintenance_scheduler(&c, None)
             .await
             .expect("scheduler");
@@ -95,7 +95,6 @@ mod tests {
         let mut c = Config::default();
         c.maintenance.enabled = false;
         c.maintenance.metadata_enabled = false;
-        c.session_summary.enabled = true;
         c.session_summary.reducer_interval_ms = 1000;
         c.ingest.flush_interval_seconds = 2;
         c.ducklake.catalog_type = "postgres".to_string();
