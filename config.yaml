@@ -43,11 +43,8 @@ ducklake:
   # Per-scope DuckDB writer connections (1..=16). Default 4.
   writer_pool_size: 4
 
-# Soft coalesce required for postgres (session_summary always on).
-ingest:
-  flush_interval_seconds: 2
-
 # Session list summary knobs (always on for postgres catalog).
+# Dirty marks after every coalesce traces flush (interval 0 = immediate drain).
 # session_summary:
 #   reducer_interval_ms: 10000
 #   rebuild_interval_ms: 86400000

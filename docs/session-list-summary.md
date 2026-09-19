@@ -28,7 +28,7 @@ detail ← traces
 
 **Hard rule:** reducer/rebuild SQL always includes `record_date` + timestamp `[from,to]` so Parquet files are pruned.
 
-**Dirty write rule:** never per span — once per successful lake flush batch. Postgres catalog requires `ingest.flush_interval_seconds > 0` (soft coalesce).
+**Dirty write rule:** never per span — once per successful lake flush batch (coalesce drain; `flush_interval_seconds` 0 or >0 share that path).
 
 **Where/when the reducer runs:** not inline on ingest. It is an **async job** on the shared job runner (same framework as DuckLake maintenance), under a **Postgres job lease** so only one replica reduces a tenant at a time. See [`async-jobs.md`](./async-jobs.md).
 
@@ -181,16 +181,17 @@ CREATE TABLE session_summary_dirty (
    (multi-row `INSERT … ON CONFLICT` for the distinct session_ids in the batch).  
 3. If the lake commit fails, do not write dirty.
 
-That is already “batched” whenever the OTLP path commits many spans together. To keep commit (and thus dirty) frequency low in multi-replica production, **session_summary requires soft coalesce**:
+That is already “batched” whenever the OTLP path commits many spans together. Commit (and thus dirty) frequency follows coalesce drains:
 
 ```yaml
 ingest:
-  flush_interval_seconds: > 0   # required for postgres catalog (session_summary)
+  flush_interval_seconds: 0   # immediate drain after each enqueue (same path)
+  # or > 0 to timer-batch posts into fewer DuckLake writes / dirty UPSERTs
 session_summary:
   reducer_interval_ms: 10000
 ```
 
-Default thelake today is flush-through (`flush_interval_seconds: 0`) — fine for sqlite demos, but postgres catalogs reject flush-through so dirty-UPSERT stays once per coalesce flush. Soft coalesce merges requests into fewer DuckLake writes → fewer dirty UPSERTs. Upstream collector batching still matters; coalesce amortizes further.
+`0` and `N>0` both go through `CoalesceBuf` (ack-on-enqueue + capped drain + dirty mark). Prefer `N>0` in multi-replica production so dirty UPSERTs stay coarse; upstream collector batching still matters.
 
 Optional: coalesce dirty rows in-process for a few hundred ms before Postgres UPSERT **only if** still within the same post-commit hook; do not add a second timer that races the job runner. Prefer one dirty write per successful lake flush.
 ### 5.3 Semantics
@@ -246,7 +247,7 @@ SessionSummaryReduceJob (lease winner only)
   └─5─► DELETE dirty rows with updated_at <= snapshot
 ```
 
-Config gate: postgres catalog implies `ingest.flush_interval_seconds > 0` (reject at startup — ops must be explicit). Sqlite catalogs leave session_summary inactive (lake list).
+Config gate: postgres catalog ⇒ session_summary always on (sqlite inactive / lake list). `flush_interval_seconds` may be 0 or >0 — same coalesce + dirty path.
 ### 6.4 Reducer SQL (time scope required)
 
 ```sql
@@ -362,7 +363,7 @@ Keep `SessionSearchRequest` / `SessionSummary` shapes.
 # Shared runner: see async-jobs.md
 # postgres catalog ⇒ session_summary always on
 ingest:
-  flush_interval_seconds: 2   # required for postgres (> 0)
+  flush_interval_seconds: 2   # 0 = immediate coalesce drain; >0 = timer batch
 session_summary:
   reducer_interval_ms: 10000
   rebuild_interval_ms: 86400000   # 24h; lookback = max_reduce_span_seconds
@@ -370,7 +371,7 @@ session_summary:
   max_reduce_span_seconds: 604800 # 7d
 ```
 
-Startup validation: postgres + `ingest.flush_interval_seconds == 0` fails config load (force soft coalesce). Dirty UPSERT count should track **lake flush count**, not span count.
+Dirty UPSERT count should track **lake flush count**, not span count (`0` and `N>0` share the coalesce write path).
 
 Ops: `POST /v1/llm/sessions/summary/rebuild` `{from,to}` triggers leased `session_summary.rebuild`; metrics for dirty depth, reducer lag, lease steal, dirty_upserts vs span_writes.
 

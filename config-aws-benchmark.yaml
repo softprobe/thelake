@@ -20,9 +20,6 @@ maintenance:
   target_file_size_bytes: 67108864
   interval_seconds: 3600
 
-ingest:
-  flush_interval_seconds: 2
-
 ducklake:
   catalog_type: "postgres"
   metadata_path: "host=YOUR_PG_HOST port=5432 dbname=ducklake user=ducklake password=YOUR_PASSWORD"

@@ -59,7 +59,7 @@ Must complete before Stage 1 reduce/rebuild jobs. **Blocks Stages 1–4.**
 
 Depends on **A** for “where DDL lives” conventions; dirty UPSERT itself does **not** need the runner. Prefer after A.2 so catalog patterns match.
 
-- [x] **1.1** Config: `session_summary.*` knobs; postgres catalog ⇒ always on + reject if `ingest.flush_interval_seconds == 0`
+- [x] **1.1** Config: `session_summary.*` knobs; postgres catalog ⇒ always on; coalesce handles flush 0 and >0 alike
 - [x] **1.2** Per-tenant DDL: `session_summary` + indexes (list cursor / filters)
 - [x] **1.3** Per-tenant DDL: `session_summary_dirty` (`PRIMARY KEY (session_id)`)
 - [x] **1.4** Ensure tables on tenant bootstrap / scope ensure path (same pattern as other catalog tables)
@@ -67,7 +67,7 @@ Depends on **A** for “where DDL lives” conventions; dirty UPSERT itself does
 - [x] **1.6** Dirty UPSERT best-effort: log + metric on failure; **do not** fail ingest
 - [x] **1.7** Metrics: `dirty_upserts` ≈ flush count (not span count); `dirty_upsert_errors` (no depth gauge in Stage 1 — depth is Stage 2)
 - [x] **1.8** Tests: full matrix — config gates; fold empty/single/multi/missing session_id; LEAST/GREATEST merge; ensure idempotent; coalesce flush → dirty rows; lake Err → no dirty; dirty Err → ingest still Ok; disabled → no dirty
-- [x] **1.9** DRY: single post-traces-commit hook on coalesce spans writer only (flush-through unreachable on postgres); no duplicated fold/UPSERT
+- [x] **1.9** DRY: single post-traces-commit hook on coalesce spans writer (one mode for flush 0 and >0); no duplicated fold/UPSERT
 
 ---
 
@@ -187,7 +187,7 @@ Depends on Stages **0**, **A**, **1–4** (and **0b** if compilers changed).
   - Lease shared module: Stage A + reduce/rebuild on `spawn_runner`
 - [x] **V.2** Success criteria in `async-jobs.md` §12 checked for Stage A (multi-replica lease + MemoryLeaseStore); criteria 2–4 wait on Stage C
 - [x] **V.3** Dirty UPSERT rate ≈ lake flush rate, not span rate
-  - Evidence: dirty after coalesce flush only (`http_session_summary_*` + dirty mark-after-commit tests); soft coalesce required for postgres
+  - Evidence: dirty after coalesce flush only (`http_session_summary_*` + dirty mark-after-commit tests); flush 0 and >0 share coalesce path
 - [x] **V.4** No reducer/rebuild SQL without `record_date` + timestamp bounds
   - Evidence: `reduce_sql::tests::{reduce_sql_has_pushdown_and_no_attributes,rebuild_sql_window_wide_no_in_list}`
 - [x] **V.5** Workspace / thelake test gate green for touched crates

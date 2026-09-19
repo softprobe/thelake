@@ -84,16 +84,17 @@ impl SessionSummaryConfig {
         ducklake.catalog_type == "postgres"
     }
 
-    /// Postgres catalogs require soft coalesce + positive reducer/rebuild knobs.
+    /// Postgres catalogs require positive reducer/rebuild knobs.
+    /// `ingest.flush_interval_seconds` may be 0 (immediate coalesce drain) or >0
+    /// (timer); both mark dirty on the same coalesce write path.
     /// Sqlite: no-op (summary inactive).
-    pub fn validate(&self, ingest: &IngestConfig, ducklake: &DuckLakeConfig) -> anyhow::Result<()> {
+    pub fn validate(
+        &self,
+        _ingest: &IngestConfig,
+        ducklake: &DuckLakeConfig,
+    ) -> anyhow::Result<()> {
         if !Self::active_for(ducklake) {
             return Ok(());
-        }
-        if ingest.flush_interval_seconds == 0 {
-            anyhow::bail!(
-                "postgres catalog requires ingest.flush_interval_seconds > 0 (session_summary soft coalesce)"
-            );
         }
         if self.reducer_interval_ms == 0 {
             anyhow::bail!("session_summary.reducer_interval_ms must be > 0 for postgres catalog");
@@ -212,11 +213,11 @@ fn default_self_monitoring_ops_data_path() -> String {
     "s3://warehouse/_thelake_ops/".to_string()
 }
 
-/// Soft coalesce window for OTLP ingest. `0` = flush-through (commit before ack).
+/// Soft coalesce window for OTLP ingest (`0` = drain immediately after enqueue).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestConfig {
-    /// Seconds to hold rows in memory before one DuckLake write. `0` disables the buffer.
+    /// Seconds to hold rows before a capped DuckLake drain. `0` = immediate drain.
     #[serde(default = "default_ingest_flush_interval_seconds")]
     pub flush_interval_seconds: u64,
 }
@@ -898,15 +899,14 @@ ducklake:
     }
 
     #[test]
-    fn session_summary_postgres_rejects_flush_through() {
+    fn session_summary_postgres_ok_with_immediate_flush() {
         let mut c = Config::default();
         c.ducklake.catalog_type = "postgres".to_string();
         c.ingest.flush_interval_seconds = 0;
-        let err = c
-            .session_summary
+        c.session_summary
             .validate(&c.ingest, &c.ducklake)
-            .expect_err("flush 0");
-        assert!(err.to_string().contains("flush_interval_seconds"));
+            .expect("flush 0 uses same coalesce path");
+        assert!(super::SessionSummaryConfig::active_for(&c.ducklake));
     }
 
     #[test]
