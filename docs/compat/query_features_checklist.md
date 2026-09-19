@@ -125,8 +125,8 @@ This document is the canonical checklist of all query features, functions, and a
 |:-----|:---------|:-------|:--------|:----------------------------------------|:-------|
 | P-01 | `/api/v1/query` | GET & POST | Instant PromQL query | Returns vector data with current timestamp | VERIFIED |
 | P-02 | `/api/v1/query_range` | GET & POST | Range PromQL query | Returns matrix step-grid series data | VERIFIED |
-| P-03 | `/api/v1/labels` | GET & POST | Label names discovery | Powers Explore label picker dropdowns | VERIFIED |
-| P-04 | `/api/v1/label/{name}/values` | GET & POST | Label values discovery | Powers Explore label value dropdowns | VERIFIED |
+| P-03 | `/api/v1/labels` | GET & POST | Label names discovery | Powers Explore label pickers | VERIFIED |
+| P-04 | `/api/v1/label/{name}/values` | GET & POST | Label values discovery | Powers Explore label value pickers | VERIFIED |
 | P-05 | `/api/v1/series` | GET & POST | Series matcher discovery | Returns series labelsets matching selector | VERIFIED |
 | P-06 | `/api/v1/metadata` | GET | Metric type & description | Returns metric metadata (gauge/counter) | VERIFIED |
 | P-07 | `/api/v1/rules` | GET | Alerting/recording rules | Returns `groups: []` without throwing 404/alerts | VERIFIED |

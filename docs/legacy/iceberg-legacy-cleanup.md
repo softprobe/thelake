@@ -71,7 +71,6 @@ Also consumers:
 
 - `src/models/{span,log,metric}.rs` — comments and `to_record_batch` APIs take `iceberg::spec::Schema`
 - `src/query/duckdb.rs` — buffer→Parquet uses the same Arrow helpers
-- `src/catalog/dropdown.rs` (tests) — TraceTable + arrow conversion
 - `src/promotion.rs` — comments still say “Iceberg / DuckLake column names”
 
 **Cleanup** (recommended order):

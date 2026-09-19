@@ -104,7 +104,7 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         .resolve_scope(&business_tenant_id)
         .await
         .expect("tenant scope");
-    let writer = DuckLakeWriter::new(&config, None, Some(resolver))
+    let writer = DuckLakeWriter::new(&config, Some(resolver))
         .await
         .expect("writer");
     let manifest = parse_promotion_manifest(BUSINESS_MANIFEST).expect("valid manifest");

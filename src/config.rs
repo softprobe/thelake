@@ -21,8 +21,6 @@ pub struct Config {
     pub async_jobs: AsyncJobsConfig,
     /// Required DuckLake catalog + data warehouse settings.
     pub ducklake: DuckLakeConfig,
-    #[serde(default)]
-    pub dropdown_catalog: DropdownCatalogConfig,
     /// Optional soft coalesce for OTLP ingest (ack-on-enqueue when interval > 0).
     #[serde(default)]
     pub ingest: IngestConfig,
@@ -57,8 +55,7 @@ impl Default for AsyncJobsConfig {
 }
 
 fn default_lease_ttl_seconds() -> u64 {
-    // Must exceed max default maintenance wake (compaction-only = interval_seconds = 300).
-    400
+    120
 }
 
 fn default_heartbeat_seconds() -> u64 {
@@ -150,51 +147,6 @@ fn default_ingest_flush_interval_seconds() -> u64 {
     0
 }
 
-/// Postgres EAV table ([`crate::catalog::DropdownCatalog`]) for control-plane UI filter dropdowns.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DropdownCatalogConfig {
-    #[serde(default = "default_dropdown_catalog_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_dropdown_catalog_active_days")]
-    pub active_values_days: u32,
-    #[serde(default = "default_dropdown_catalog_maintenance_prune")]
-    pub maintenance_prune_enabled: bool,
-    /// Max (entity_type, entity_value) pairs per single Postgres `INSERT … VALUES …`.
-    #[serde(default = "default_dropdown_catalog_upsert_batch_size")]
-    pub upsert_batch_size: usize,
-    #[serde(default)]
-    pub skip_entity_columns: Vec<String>,
-}
-
-impl Default for DropdownCatalogConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_dropdown_catalog_enabled(),
-            active_values_days: default_dropdown_catalog_active_days(),
-            maintenance_prune_enabled: default_dropdown_catalog_maintenance_prune(),
-            upsert_batch_size: default_dropdown_catalog_upsert_batch_size(),
-            skip_entity_columns: Vec::new(),
-        }
-    }
-}
-
-fn default_dropdown_catalog_enabled() -> bool {
-    false
-}
-
-fn default_dropdown_catalog_active_days() -> u32 {
-    7
-}
-
-fn default_dropdown_catalog_maintenance_prune() -> bool {
-    true
-}
-
-fn default_dropdown_catalog_upsert_batch_size() -> usize {
-    500
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -283,21 +235,21 @@ fn default_query_cache_dir() -> Option<String> {
     Some("/var/tmp/softprobe/duckdb".to_string())
 }
 
-/// Compaction + metadata maintenance scheduling.
+/// Compaction + metadata maintenance (one leased job).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceConfig {
-    /// Run `ducklake_merge_adjacent_files` compaction.
+    /// Run `ducklake_merge_adjacent_files` compaction (TWCS) in each maintenance pass.
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_target_file_size_bytes")]
     pub target_file_size_bytes: usize,
+    /// How often the maintenance job tries to run (acquire → pass → release).
     #[serde(default = "default_interval_seconds")]
     pub interval_seconds: u64,
+    /// Run snapshot expire / orphan cleanup in each maintenance pass.
     #[serde(default = "default_true")]
     pub metadata_enabled: bool,
-    #[serde(default = "default_metadata_interval_seconds")]
-    pub metadata_interval_seconds: u64,
     #[serde(default = "default_max_snapshot_age_seconds")]
     pub max_snapshot_age_seconds: u64,
     /// When true (and metadata maintenance runs), call `ducklake_cleanup_old_files`.
@@ -332,7 +284,6 @@ impl Default for MaintenanceConfig {
             target_file_size_bytes: default_target_file_size_bytes(),
             interval_seconds: default_interval_seconds(),
             metadata_enabled: true,
-            metadata_interval_seconds: default_metadata_interval_seconds(),
             max_snapshot_age_seconds: default_max_snapshot_age_seconds(),
             remove_orphan_files_enabled: true,
             remove_orphan_older_than_seconds: default_remove_orphan_older_than_seconds(),
@@ -355,13 +306,8 @@ fn default_target_file_size_bytes() -> usize {
 }
 
 fn default_interval_seconds() -> u64 {
-    // Flush-through OTLP creates many small files under demo/Grafana churn;
-    // merge every 5m by default so query scans do not wait an hour.
-    300
-}
-
-fn default_metadata_interval_seconds() -> u64 {
-    // Expire unused snapshot history often; Prom does not time-travel.
+    // Combined pass (expire + TWCS). Keep near the old metadata cadence so
+    // snapshot age bars stay tight; TWCS no-ops when nothing to merge.
     60
 }
 
@@ -655,8 +601,7 @@ mod tests {
     #[test]
     fn maintenance_defaults_favor_frequent_compaction() {
         let c = Config::default();
-        assert_eq!(c.maintenance.interval_seconds, 300);
-        assert_eq!(c.maintenance.metadata_interval_seconds, 60);
+        assert_eq!(c.maintenance.interval_seconds, 60);
         assert!(c.maintenance.enabled);
         assert_eq!(c.maintenance.target_file_size_bytes, 64 * 1024 * 1024);
         assert_eq!(c.maintenance.open_day_file_cap, 2);

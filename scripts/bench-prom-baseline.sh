@@ -177,7 +177,6 @@ maintenance:
   target_file_size_bytes: 67108864
   interval_seconds: 300
   metadata_enabled: true
-  metadata_interval_seconds: 300
   remove_orphan_files_enabled: true
   remove_orphan_older_than_seconds: 0
 
@@ -190,8 +189,6 @@ ducklake:
   data_inlining_row_limit: $INLINE_LIMIT
   writer_pool_size: 2
 
-dropdown_catalog:
-  enabled: false
 EOF
 
 if [[ "$FORCE_PARQUET" == "1" ]]; then

@@ -1,5 +1,5 @@
 //! Runtime control API for the configured DuckLake scope (tenant provisioning, meta,
-//! DuckLake connection material, schema promotions, and catalog lookups).
+//! DuckLake connection material, schema promotions).
 
 use crate::api::AppState;
 use crate::authn::TenantInfo;
@@ -11,7 +11,7 @@ use crate::promotion::{
 };
 use crate::runtime_engine::{DuckLakeScope, ScopeProvisioningRequest};
 use axum::{
-    extract::{Extension, Query, Request, State},
+    extract::{Extension, Request, State},
     http::{header, HeaderMap, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -574,8 +574,6 @@ pub fn runtime_control_routes() -> axum::Router<AppState> {
         .route("/v1/meta", get(v1_meta))
         .route("/v1/data/ducklake-connection", get(v1_ducklake_connection))
         .route("/v1/promotions/apply", post(v1_promotions_apply))
-        .route("/v1/catalog/entity-types", get(v1_catalog_entity_types))
-        .route("/v1/catalog/values", get(v1_catalog_values))
 }
 
 async fn v1_ducklake_connection(
@@ -794,81 +792,6 @@ fn promotion_type_name(data_type: &PromotionDataType) -> &'static str {
         PromotionDataType::Decimal => "decimal",
         PromotionDataType::Timestamp => "timestamp",
         PromotionDataType::Json => "json",
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CatalogValuesQuery {
-    #[serde(rename = "entityType")]
-    pub entity_type: String,
-    #[serde(default = "default_catalog_limit")]
-    pub limit: i64,
-}
-
-fn default_catalog_limit() -> i64 {
-    500
-}
-
-async fn v1_catalog_entity_types(
-    State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let engine = state.engine_for_tenant(&tenant).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"code": "engine_unavailable", "message": e.to_string()}})),
-        )
-    })?;
-    let Some(cat) = engine.dropdown_catalog.as_ref() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "dropdown_catalog_unavailable"})),
-        ));
-    };
-    let days = cat.active_values_days();
-    match cat.list_entity_types(days).await {
-        Ok(types) => Ok(Json(json!({ "entityTypes": types }))),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{}", e)})),
-        )),
-    }
-}
-
-async fn v1_catalog_values(
-    State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
-    Query(q): Query<CatalogValuesQuery>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    if q.entity_type.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "entityType is required"})),
-        ));
-    }
-    let engine = state.engine_for_tenant(&tenant).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"code": "engine_unavailable", "message": e.to_string()}})),
-        )
-    })?;
-    let Some(cat) = engine.dropdown_catalog.as_ref() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "dropdown_catalog_unavailable"})),
-        ));
-    };
-    let limit = q.limit.clamp(1, 10_000);
-    let days = cat.active_values_days();
-    match cat.list_entity_values(&q.entity_type, days, limit).await {
-        Ok(values) => Ok(Json(json!({
-            "entityType": q.entity_type,
-            "values": values
-        }))),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{}", e)})),
-        )),
     }
 }
 

@@ -109,7 +109,7 @@ Match Greptime: **do not** reject Prom ranges with a fixed Softprobe max (not 1d
 
 Each successful DuckLake metrics **write** creates **one snapshot**. Under default flush-through that is ≈ one snapshot per OTLP `/v1/metrics` request; under soft coalesce (`ingest.flush_interval_seconds` = `N` > 0) commits are throttled to about one flush per `N` seconds per signal (plus force_flush). Live snapshot count is then ≈ `commit_rate × max_snapshot_age`. A flat “≤ 500” with no assumed rate is not an invariant.
 
-Let `A = maintenance.max_snapshot_age_seconds` (default **60**), `I = maintenance.metadata_interval_seconds` (default **60**), `C` = minimum seconds between metric **commits** (demo overlay `batch/softprobe.timeout` = **15s** when flush-through; when soft coalesce is on, treat `C ≈ max(collector_timeout, N)`).
+Let `A = maintenance.max_snapshot_age_seconds` (default **60**), `I = maintenance.interval_seconds` (default **60**), `C` = minimum seconds between metric **commits** (demo overlay `batch/softprobe.timeout` = **15s** when flush-through; when soft coalesce is on, treat `C ≈ max(collector_timeout, N)`).
 
 PromQL does not use DuckLake time-travel; snapshot history is unused. After a maintenance pass:
 

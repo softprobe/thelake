@@ -253,7 +253,6 @@ maintenance:
   target_file_size_bytes: 67108864
   interval_seconds: 300
   metadata_enabled: false
-  metadata_interval_seconds: 300
   remove_orphan_files_enabled: false
   remove_orphan_older_than_seconds: 0
   max_snapshot_age_seconds: 3600
@@ -267,8 +266,6 @@ ducklake:
   data_inlining_row_limit: 0
   writer_pool_size: 1
 
-dropdown_catalog:
-  enabled: false
 EOF
 
 DUCKDB_LIB_DIR="$(find "${TARGET_DIR}/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"

@@ -241,7 +241,6 @@ async fn warm_writes_perform_zero_schema_probes_postgres() {
 
     let storage = IngestPipeline::build_tenant_storage(
         &config,
-        None,
         Some(resolver),
         tenant_id.clone(),
         scope.clone(),

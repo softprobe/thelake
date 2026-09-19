@@ -1,4 +1,3 @@
-use crate::catalog::DropdownCatalog;
 use crate::compaction::collapse::{collapse_job_1h_from_raw_sql, collapse_job_1h_sql};
 use crate::compaction::downsample::{
     downsample_1h_from_5m_sql, downsample_1h_from_raw_sql, downsample_5m_sql,
@@ -20,7 +19,6 @@ use crate::storage::schema::MAINTENANCE_METRICS_FAMILY_TABLES;
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, Utc};
 use duckdb::Connection;
-use std::sync::Arc;
 use tracing::{info, warn};
 
 /// Metrics-family tables compacted/expired before traces/logs/scores (AC-M1).
@@ -40,7 +38,6 @@ pub fn maintenance_table_names() -> Vec<&'static str> {
 pub struct MaintenanceExecutor {
     config: Config,
     ducklake: crate::config::DuckLakeConfig,
-    dropdown_catalog: Option<Arc<DropdownCatalog>>,
     scope_registry: Option<DuckLakeScopeResolver>,
 }
 
@@ -113,13 +110,11 @@ pub enum CompactionStatus {
 impl MaintenanceExecutor {
     pub async fn new(
         config: &Config,
-        dropdown_catalog: Option<Arc<DropdownCatalog>>,
         scope_registry: Option<DuckLakeScopeResolver>,
     ) -> Result<Self> {
         Ok(Self {
             config: config.clone(),
             ducklake: config.ducklake.clone(),
-            dropdown_catalog,
             scope_registry,
         })
     }
@@ -170,7 +165,6 @@ impl MaintenanceExecutor {
                 .await?;
             results.append(&mut part);
         }
-        self.prune_dropdown_catalog().await;
         Ok(MaintenanceSummary { tables: results })
     }
 
@@ -320,20 +314,6 @@ impl MaintenanceExecutor {
         let files_after = count_parquet_files_under(&ducklake.data_path);
         warn_if_too_many_parquet_files(label, &ducklake.data_path, files_before, files_after);
         Ok(results)
-    }
-
-    pub(crate) async fn prune_dropdown_catalog(&self) {
-        if let Some(ref dc) = self.dropdown_catalog {
-            if self.config.dropdown_catalog.enabled
-                && self.config.dropdown_catalog.maintenance_prune_enabled
-            {
-                let days = self.config.dropdown_catalog.active_values_days;
-                match dc.prune_older_than_days(days).await {
-                    Ok(n) => info!("dropdown catalog TTL prune removed {} rows", n),
-                    Err(e) => warn!("dropdown catalog TTL prune failed: {}", e),
-                }
-            }
-        }
     }
 
     fn run_scope_metadata_cleanup(
@@ -1093,9 +1073,9 @@ pub const SNAPSHOT_COUNT_BAR_AFTER_PASS: usize = 50;
 /// AC-N6 age bar: no live snapshot older than `A + I`.
 pub fn snapshot_max_age_after_pass_seconds(
     max_snapshot_age_seconds: u64,
-    metadata_interval_seconds: u64,
+    interval_seconds: u64,
 ) -> u64 {
-    max_snapshot_age_seconds.saturating_add(metadata_interval_seconds)
+    max_snapshot_age_seconds.saturating_add(interval_seconds)
 }
 
 /// DuckLake `older_than` interval from an age in seconds (no day flooring).
@@ -1367,12 +1347,12 @@ mod tests {
     fn expire_snapshots_sql_honors_n6_count_and_age_bars() {
         let cfg = crate::config::Config::default();
         assert_eq!(cfg.maintenance.max_snapshot_age_seconds, 60);
-        assert_eq!(cfg.maintenance.metadata_interval_seconds, 60);
+        assert_eq!(cfg.maintenance.interval_seconds, 60);
         assert_eq!(SNAPSHOT_COUNT_BAR_AFTER_PASS, 50);
         assert_eq!(
             snapshot_max_age_after_pass_seconds(
                 cfg.maintenance.max_snapshot_age_seconds,
-                cfg.maintenance.metadata_interval_seconds,
+                cfg.maintenance.interval_seconds,
             ),
             120
         );
@@ -1493,7 +1473,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.maintenance.enabled = false;
         cfg.maintenance.metadata_enabled = false;
-        let executor = MaintenanceExecutor::new(&cfg, None, None)
+        let executor = MaintenanceExecutor::new(&cfg, None)
             .await
             .expect("executor");
         let mut ducklake = cfg.ducklake.clone();

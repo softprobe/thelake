@@ -7,7 +7,6 @@
   "id": null,
   "links": [
     {
-      "asDropdown": false,
       "includeVars": true,
       "keepTime": true,
       "tags": [],
@@ -17,7 +16,6 @@
       "url": "/explore?left=%7B%22datasource%22%3A%22softprobe-loki-a%22%2C%22queries%22%3A%5B%7B%22expr%22%3A%22%7Bservice_name%3D%5C%22checkout%5C%22%7D%22%2C%22refId%22%3A%22A%22%7D%5D%7D"
     },
     {
-      "asDropdown": false,
       "includeVars": true,
       "keepTime": true,
       "tags": [],

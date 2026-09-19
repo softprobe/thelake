@@ -52,7 +52,6 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     // Bind writer to the provisioned tenant scope (not the registry schema on config).
     let storage = IngestPipeline::build_tenant_storage(
         &config,
-        None,
         Some(resolver),
         tenant_id.clone(),
         scope.clone(),

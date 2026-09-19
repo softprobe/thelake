@@ -37,21 +37,21 @@ Must complete before Stage 1 reduce/rebuild jobs. **Blocks Stages 1–4.**
 
 - [x] **A.1** Decide registry schema for `thelake_job_lease` → same schema as `scope_registry` (`DuckLakeScopeResolver.registry_schema`)
 - [x] **A.2** DDL: `thelake_job_lease` (+ index on `lease_until`); Postgres in `ensure_registry`; sqlite/single-node via `MemoryLeaseStore`
-- [x] **A.3** `src/async_jobs/`: `Job` trait, runner wake loop, config (`instance_id`, `lease_ttl_seconds`, `heartbeat_seconds`); reject `heartbeat >= lease_ttl`
+- [x] **A.3** `src/async_jobs/`: `Job` trait, runner interval loop, config (`instance_id`, `lease_ttl_seconds`, `heartbeat_seconds`); reject `heartbeat >= lease_ttl`
 - [x] **A.4** `lease.rs`: acquire / heartbeat / release (race-safe UPSERT); Memory unit tests + Postgres (`make test-lease-pg`) for steal + renew + concurrent race
-- [x] **A.5** Wrap existing maintenance as one job_name `maintenance` per tenant (compact+metadata stay sequential; split names deferred); sticky hold on Ok (no release) so process-local compact clock stays fleet-correct; prune once per wake; remove unleased interval from `compaction/scheduler.rs`
+- [x] **A.5** Wrap existing maintenance as one job_name `maintenance` per tenant: each pass runs metadata + TWCS when enabled (TWCS no-ops when nothing to merge); always release after run; prune once per interval; remove unleased interval from `compaction/scheduler.rs`
 - [x] **A.6** Wire runner from `start_maintenance_scheduler` / `main.rs` (single registration; no second interval)
-- [x] **A.7** Verify: lease lose skips `run`; MemoryLeaseStore for non-Postgres; concurrent acquire → one winner; sticky Ok / release on Err+panic
+- [x] **A.7** Verify: lease lose skips `run`; MemoryLeaseStore for non-Postgres; concurrent acquire → one winner; release after Ok/Err/panic
 - [x] **A.8** **[P]** Metrics: lease acquire win/lose/error; Memory steal; heartbeat failure; job error
 
-**Stage A notes:** Dropdown prune stays inside the maintenance pass until Stage B (once per wake). No `thelake_job_run` history table. Open/attach failure is `Err` (does not advance compact clock).
+**Stage A notes:** No sticky leases / CompactWakeGate — lake decides TWCS work; lease only serializes the pass. Open/attach failure is `Err`. No `thelake_job_run` history table.
 
 ---
 
 ## Stage B — Remove Dropdown catalog
 
-- [ ] **B.1** Remove dropdown catalog, it's no longer used, all UI work should use session_catalog
-- [ ] **B.2** Clean up dropdown catalog releated docs, all mentioning should be gone, like it never exist in the whole database
+- [x] **B.1** Remove dropdown catalog (`src/catalog/`, config, writer upsert, API routes, maintenance prune)
+- [x] **B.2** Clean docs/config/scripts — no `dropdown_catalog` / `ui_dropdown_catalog` / `/v1/catalog/*` mentions
 
 ---
 

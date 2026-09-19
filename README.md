@@ -115,7 +115,7 @@ ducklake:
 
 YAML holds non-secret settings only. The top-level sections are `server`,
 `object_store` (`region` / optional `endpoint`), `query`, `maintenance`,
-`ducklake`, and `dropdown_catalog`. Unknown or legacy keys are rejected. Object
+`async_jobs`, and `ducklake`. Unknown or legacy keys are rejected. Object
 storage credentials are never stored in YAML; resolve them from the
 environment:
 
@@ -168,8 +168,8 @@ Query and telemetry:
 - `GET /v1/llm/sessions/{session_id}/recording` (web session replay batches)
 - `GET /v1/data/ducklake-connection`
 
-Control-plane routes also cover tenant provisioning, promotions, and dropdown
-catalog lookups. `/v1/*` operational routes require bearer authentication
+Control-plane routes also cover tenant provisioning and promotions.
+`/v1/*` operational routes require bearer authentication
 (`OPTIONS /v1/*` is exempt for browser CORS preflight); tenant provisioning
 validates its admin bearer inside the handler.
 
@@ -211,10 +211,10 @@ scope:
 
 - merge adjacent data files;
 - expire old snapshots;
-- clean old files;
-- prune optional dropdown-catalog values.
+- clean old files.
 
-Settings are under `maintenance` and `dropdown_catalog` in `config.yaml`.
+Settings are under `maintenance` (and `async_jobs` for lease TTL/heartbeat) in
+`config.yaml`.
 
 ## Publish Docker image
 

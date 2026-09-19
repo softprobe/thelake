@@ -7,7 +7,6 @@
 //! Per-tenant [`RuntimeEngine`] cache.
 
 use crate::authn::TenantInfo;
-use crate::catalog::DropdownCatalog;
 use crate::config::{Config, DuckLakeConfig};
 use crate::control_plane::ControlPlaneRuntime;
 use crate::ingest_engine::{IngestEngine, IngestPipeline};
@@ -37,7 +36,6 @@ pub struct RuntimeEngine {
     pub storage: Arc<Storage>,
     pub ingest: Arc<IngestEngine>,
     pub query: Arc<QueryEngine>,
-    pub dropdown_catalog: Option<Arc<DropdownCatalog>>,
 }
 
 /// Global cache: `tenantId` -> tenant-bound runtime (unbounded until restart).
@@ -154,11 +152,9 @@ impl RuntimeEngineManager {
             };
 
         let resolver = self.scope_registry.as_ref();
-        let dropdown_catalog = DropdownCatalog::connect(self.config.as_ref()).await?;
         let storage = Arc::new(
             IngestPipeline::build_tenant_storage(
                 self.config.as_ref(),
-                dropdown_catalog.clone(),
                 resolver.cloned(),
                 tenant_id.to_string(),
                 scope.clone(),
@@ -186,7 +182,6 @@ impl RuntimeEngineManager {
             storage,
             ingest,
             query,
-            dropdown_catalog,
         }))
     }
 }

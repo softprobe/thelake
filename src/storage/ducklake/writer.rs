@@ -135,7 +135,6 @@ impl WriterPool {
 pub struct DuckLakeWriter {
     pub(super) config: Config,
     pub(super) ducklake: DuckLakeConfig,
-    pub(super) dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
     /// When set with `catalog_type = postgres`, commits route to per-tenant metadata schemas.
     pub(super) tenant_ducklake: Option<DuckLakeScopeResolver>,
     /// When true, this writer is permanently bound to `ducklake.metadata_schema` / `data_path`
@@ -150,24 +149,21 @@ pub struct DuckLakeWriter {
 impl DuckLakeWriter {
     pub async fn new(
         config: &Config,
-        dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
         tenant_ducklake: Option<DuckLakeScopeResolver>,
     ) -> Result<Self> {
-        Self::new_inner(config, dropdown_catalog, tenant_ducklake, false).await
+        Self::new_inner(config, tenant_ducklake, false).await
     }
 
     /// Writer permanently bound to one DuckLake scope (per-tenant runtime engine).
     pub async fn new_scope_bound(
         config: &Config,
-        dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
         tenant_ducklake: Option<DuckLakeScopeResolver>,
     ) -> Result<Self> {
-        Self::new_inner(config, dropdown_catalog, tenant_ducklake, true).await
+        Self::new_inner(config, tenant_ducklake, true).await
     }
 
     pub(super) async fn new_inner(
         config: &Config,
-        dropdown_catalog: Option<std::sync::Arc<crate::catalog::DropdownCatalog>>,
         tenant_ducklake: Option<DuckLakeScopeResolver>,
         scope_bound: bool,
     ) -> Result<Self> {
@@ -176,7 +172,6 @@ impl DuckLakeWriter {
         let writer = Self {
             config: config.clone(),
             ducklake,
-            dropdown_catalog,
             tenant_ducklake,
             scope_bound,
             writer_pools: Mutex::new(HashMap::new()),
@@ -188,10 +183,6 @@ impl DuckLakeWriter {
             writer.ducklake.effective_writer_pool_size()
         );
         Ok(writer)
-    }
-
-    pub fn dropdown_catalog(&self) -> Option<std::sync::Arc<crate::catalog::DropdownCatalog>> {
-        self.dropdown_catalog.clone()
     }
 
     pub fn scope_registry(&self) -> Option<&DuckLakeScopeResolver> {
@@ -546,17 +537,6 @@ impl DuckLakeWriter {
             return Ok(());
         }
 
-        // Dropdown catalog from ingest batches before DuckLake INSERT (covers data inlining into Postgres).
-        if table_name == "traces" {
-            if let Some(ref cat) = self.dropdown_catalog {
-                if self.config.dropdown_catalog.enabled {
-                    if let Err(e) = cat.upsert_trace_batches(&record_batches).await {
-                        warn!("dropdown catalog upsert failed (non-fatal): {}", e);
-                    }
-                }
-            }
-        }
-
         let pool = self.get_or_create_pool(dk)?;
         let qualified_table = ducklake_qualified_table_name(dk, table_name);
 
@@ -854,7 +834,6 @@ mod tests {
                 data_inlining_row_limit: None,
                 writer_pool_size: 1,
             },
-            dropdown_catalog: None,
             tenant_ducklake: None,
             scope_bound: false,
             writer_pools: Mutex::new(HashMap::new()),

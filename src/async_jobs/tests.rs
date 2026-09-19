@@ -271,6 +271,7 @@ async fn concurrent_acquire_exactly_one_winner() {
 struct CountingJob {
     runs: AtomicUsize,
     scopes: Vec<String>,
+    interval: Duration,
 }
 
 #[async_trait]
@@ -279,7 +280,7 @@ impl Job for CountingJob {
         "count"
     }
     fn interval(&self) -> Duration {
-        Duration::from_millis(10)
+        self.interval
     }
     async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
         Ok(self.scopes.clone())
@@ -301,6 +302,7 @@ async fn runner_skips_run_when_lease_lost() {
     let job = Arc::new(CountingJob {
         runs: AtomicUsize::new(0),
         scopes: vec!["t1".into()],
+        interval: Duration::from_millis(10),
     });
     let runs = Arc::clone(&job);
     let cfg = AsyncJobsConfig {
@@ -320,6 +322,7 @@ async fn runner_runs_when_lease_won() {
     let job = Arc::new(CountingJob {
         runs: AtomicUsize::new(0),
         scopes: vec!["t1".into()],
+        interval: Duration::from_millis(10),
     });
     let runs = Arc::clone(&job);
     let cfg = AsyncJobsConfig {
@@ -486,6 +489,8 @@ async fn runner_skips_scope_on_acquire_error_and_continues() {
     let job = Arc::new(CountingJob {
         runs: AtomicUsize::new(0),
         scopes: vec!["bad".into(), "good".into()],
+        // One pass in the test window — avoid a second cycle counting as dual-run.
+        interval: Duration::from_secs(3600),
     });
     let runs = Arc::clone(&job);
     let cfg = AsyncJobsConfig {
@@ -494,7 +499,13 @@ async fn runner_skips_scope_on_acquire_error_and_continues() {
         lease_ttl_seconds: 60,
     };
     let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for the first (and only) wake to finish the good scope.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while runs.runs.load(Ordering::SeqCst) < 1 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Long job interval (3600s) — a short settle must not see a second wake.
+    tokio::time::sleep(Duration::from_millis(150)).await;
     handle.abort();
     assert_eq!(
         runs.runs.load(Ordering::SeqCst),
@@ -543,6 +554,7 @@ async fn runner_survives_job_panic_and_stops_heartbeat() {
     let count_job = Arc::new(CountingJob {
         runs: AtomicUsize::new(0),
         scopes: vec!["t2".into()],
+        interval: Duration::from_millis(10),
     });
     let runs = Arc::clone(&count_job);
     let cfg = AsyncJobsConfig {
@@ -770,15 +782,6 @@ async fn postgres_expired_lease_concurrent_reclaim_exactly_one_winner() {
 }
 
 #[test]
-fn interval_due_matches_two_second_slack() {
-    use crate::async_jobs::interval_due;
-    assert!(!interval_due(Duration::from_secs(0), Duration::from_secs(300)));
-    assert!(!interval_due(Duration::from_secs(297), Duration::from_secs(300)));
-    assert!(interval_due(Duration::from_secs(298), Duration::from_secs(300)));
-    assert!(!interval_due(Duration::ZERO, Duration::ZERO));
-}
-
-#[test]
 fn spawn_runner_returns_none_for_empty_jobs() {
     let cfg = AsyncJobsConfig::default();
     let leases = Arc::new(MemoryLeaseStore::new());
@@ -841,6 +844,7 @@ async fn runner_continues_when_scope_keys_fails() {
     let ok = Arc::new(CountingJob {
         runs: AtomicUsize::new(0),
         scopes: vec!["t1".into()],
+        interval: Duration::from_millis(10),
     });
     let runs = Arc::clone(&ok);
     let cfg = AsyncJobsConfig {
@@ -864,6 +868,7 @@ async fn runner_continues_when_scope_keys_fails() {
 
 struct AlwaysFailJob {
     runs: AtomicUsize,
+    interval: Duration,
 }
 
 #[async_trait]
@@ -872,8 +877,7 @@ impl Job for AlwaysFailJob {
         "always_fail"
     }
     fn interval(&self) -> Duration {
-        // Long interval: only retries if last_run is NOT updated on Err.
-        Duration::from_secs(10)
+        self.interval
     }
     async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
         Ok(vec!["fail-scope".into()])
@@ -884,29 +888,12 @@ impl Job for AlwaysFailJob {
     }
 }
 
-struct FastTickJob;
-
-#[async_trait]
-impl Job for FastTickJob {
-    fn name(&self) -> &'static str {
-        "fast_tick"
-    }
-    fn interval(&self) -> Duration {
-        Duration::from_millis(40)
-    }
-    async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
-        Ok(vec!["tick".into()])
-    }
-    async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
-async fn runner_retries_failed_run_without_waiting_full_interval() {
+async fn runner_retries_after_failed_run() {
     let leases = Arc::new(MemoryLeaseStore::new());
     let fail = Arc::new(AlwaysFailJob {
         runs: AtomicUsize::new(0),
+        interval: Duration::from_millis(40),
     });
     let runs = Arc::clone(&fail);
     let cfg = AsyncJobsConfig {
@@ -914,13 +901,7 @@ async fn runner_retries_failed_run_without_waiting_full_interval() {
         heartbeat_seconds: 1,
         lease_ttl_seconds: 60,
     };
-    let handle = spawn_runner(
-        &cfg,
-        leases,
-        vec![fail as Arc<dyn Job>, Arc::new(FastTickJob) as Arc<dyn Job>],
-    )
-    .expect("runner");
-    // Deterministic: wait until two failures (proves last_run not set on Err).
+    let handle = spawn_runner(&cfg, leases, vec![fail as Arc<dyn Job>]).expect("runner");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while runs.runs.load(Ordering::SeqCst) < 2 {
         if tokio::time::Instant::now() >= deadline {
@@ -931,23 +912,25 @@ async fn runner_retries_failed_run_without_waiting_full_interval() {
     handle.abort();
     assert!(
         runs.runs.load(Ordering::SeqCst) >= 2,
-        "failed run must not set last_run (retry every wake); got {}",
+        "each wake retries after Err; got {}",
         runs.runs.load(Ordering::SeqCst)
     );
 }
 
 #[tokio::test]
-async fn sticky_hold_on_ok_blocks_peer_until_ttl() {
+async fn release_on_ok_lets_peer_acquire() {
     let leases = Arc::new(MemoryLeaseStore::new());
-    // Run long enough that original 1s TTL would expire without end-of-run renew.
-    let job = Arc::new(HoldLeaseJob {
+    let job = Arc::new(CountingJob {
         runs: AtomicUsize::new(0),
-        sleep_ms: 800,
+        scopes: vec!["released".into()],
+        // One pass then idle — peer acquire must not race a re-hold.
+        interval: Duration::from_secs(3600),
     });
+    let runs = Arc::clone(&job);
     let cfg = AsyncJobsConfig {
         instance_id: Some("holder-a".into()),
         heartbeat_seconds: 1,
-        lease_ttl_seconds: 1,
+        lease_ttl_seconds: 60,
     };
     let handle = spawn_runner(
         &cfg,
@@ -955,16 +938,26 @@ async fn sticky_hold_on_ok_blocks_peer_until_ttl() {
         vec![job as Arc<dyn Job>],
     )
     .expect("runner");
-    // Past original acquire TTL (1s) but inside post-Ok renew window (~0.8+1s).
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut peer_won = false;
+    while tokio::time::Instant::now() < deadline {
+        if runs.runs.load(Ordering::SeqCst) >= 1
+            && leases
+                .try_acquire("count", "released", "peer-b", Duration::from_secs(60))
+                .await
+                .unwrap()
+        {
+            peer_won = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     handle.abort();
     assert!(
-        !leases
-            .try_acquire("hold", "hb-hold", "peer-b", Duration::from_secs(60))
-            .await
-            .unwrap(),
-        "end-of-run sticky renew must keep peer blocked past original TTL"
+        runs.runs.load(Ordering::SeqCst) >= 1,
+        "holder must complete one Ok run before peer acquire"
     );
+    assert!(peer_won, "release after Ok must free the lease for peers");
 }
 
 #[tokio::test]
@@ -972,7 +965,10 @@ async fn release_on_err_lets_peer_acquire() {
     let leases = Arc::new(MemoryLeaseStore::new());
     let fail = Arc::new(AlwaysFailJob {
         runs: AtomicUsize::new(0),
+        // One pass then idle — peer acquire must not race a re-hold.
+        interval: Duration::from_secs(3600),
     });
+    let runs = Arc::clone(&fail);
     let cfg = AsyncJobsConfig {
         instance_id: Some("holder-fail".into()),
         heartbeat_seconds: 1,
@@ -981,34 +977,46 @@ async fn release_on_err_lets_peer_acquire() {
     let handle = spawn_runner(
         &cfg,
         Arc::clone(&leases) as Arc<dyn LeaseStore>,
-        vec![
-            fail as Arc<dyn Job>,
-            Arc::new(FastTickJob) as Arc<dyn Job>,
-        ],
+        vec![fail as Arc<dyn Job>],
     )
     .expect("runner");
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut peer_won = false;
+    while tokio::time::Instant::now() < deadline {
+        if runs.runs.load(Ordering::SeqCst) >= 1
+            && leases
+                .try_acquire(
+                    "always_fail",
+                    "fail-scope",
+                    "peer-b",
+                    Duration::from_secs(60),
+                )
+                .await
+                .unwrap()
+        {
+            peer_won = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     handle.abort();
-    // After Err, lease released — peer can acquire the fail job scope.
     assert!(
-        leases
-            .try_acquire("always_fail", "fail-scope", "peer-b", Duration::from_secs(60))
-            .await
-            .unwrap(),
-        "release on Err must free the lease for peers"
+        runs.runs.load(Ordering::SeqCst) >= 1,
+        "holder must complete one Err run before peer acquire"
     );
+    assert!(peer_won, "release on Err must free the lease for peers");
 }
 
 #[tokio::test]
 async fn two_runners_shared_store_no_dual_run() {
     let leases = Arc::new(MemoryLeaseStore::new());
-    let job_a = Arc::new(CountingJob {
+    let job_a = Arc::new(HoldLeaseJob {
         runs: AtomicUsize::new(0),
-        scopes: vec!["shared".into()],
+        sleep_ms: 300,
     });
-    let job_b = Arc::new(CountingJob {
+    let job_b = Arc::new(HoldLeaseJob {
         runs: AtomicUsize::new(0),
-        scopes: vec!["shared".into()],
+        sleep_ms: 300,
     });
     let runs_a = Arc::clone(&job_a);
     let runs_b = Arc::clone(&job_b);
@@ -1034,16 +1042,15 @@ async fn two_runners_shared_store_no_dual_run() {
         vec![job_b as Arc<dyn Job>],
     )
     .expect("b");
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    h_a.abort();
-    h_b.abort();
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let a = runs_a.runs.load(Ordering::SeqCst);
     let b = runs_b.runs.load(Ordering::SeqCst);
-    assert!(a + b >= 1, "at least one run");
-    // Sticky hold: only one replica should accumulate runs; the other stays at 0.
-    assert!(
-        a == 0 || b == 0,
-        "exactly one sticky holder should run; got a={a} b={b}"
+    h_a.abort();
+    h_b.abort();
+    assert_eq!(
+        a + b,
+        1,
+        "exactly one in-flight holder under a shared lease; got a={a} b={b}"
     );
 }
 
