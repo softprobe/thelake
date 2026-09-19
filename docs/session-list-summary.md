@@ -185,13 +185,13 @@ That is already “batched” whenever the OTLP path commits many spans together
 
 ```yaml
 ingest:
-  flush_interval_seconds: 0   # immediate drain after each enqueue (same path)
+  flush_interval_seconds: 0   # drain before OTLP ack (same coalesce path)
   # or > 0 to timer-batch posts into fewer DuckLake writes / dirty UPSERTs
 session_summary:
   reducer_interval_ms: 10000
 ```
 
-`0` and `N>0` both go through `CoalesceBuf` (ack-on-enqueue + capped drain + dirty mark). Prefer `N>0` in multi-replica production so dirty UPSERTs stay coarse; upstream collector batching still matters.
+`0` and `N>0` both go through `CoalesceBuf` (capped drain + dirty mark). Prefer `N>0` in multi-replica production so dirty UPSERTs stay coarse; upstream collector batching still matters.
 
 Optional: coalesce dirty rows in-process for a few hundred ms before Postgres UPSERT **only if** still within the same post-commit hook; do not add a second timer that races the job runner. Prefer one dirty write per successful lake flush.
 ### 5.3 Semantics

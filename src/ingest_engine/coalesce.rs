@@ -1,8 +1,8 @@
 //! Soft coalesce buffer: ack on enqueue; background flush after N seconds.
 //!
 //! `flush_interval_seconds == 0` uses the **same** queue + capped drain path and
-//! flushes immediately after each enqueue (no timer). N>0 arms a timer so posts
-//! batch into fewer DuckLake commits. Drains are **capped**
+//! drains before enqueue returns (OTLP ack ⇒ durable). N>0 arms a timer so posts
+//! batch into fewer DuckLake commits (ack before write). Drains are **capped**
 //! ([`MAX_BATCHES_PER_FLUSH`] / [`MAX_ROWS_PER_FLUSH`]) so a slow commit cannot
 //! absorb minutes of backlog into one megatransaction.
 //!
@@ -133,12 +133,10 @@ impl<T: Send + 'static> CoalesceBuf<T> {
                     let overflow = g.pending.len() >= EAGER_PENDING_BATCHES
                         || g.pending_rows >= EAGER_PENDING_ROWS;
                     if self.flush_immediately() {
-                        // Same queue/drain as timer mode; fire now (or after
-                        // in-flight flush finishes — see flush_once follow-up).
-                        if !g.flushing {
-                            drop(g);
-                            self.spawn_eager_flush();
-                        }
+                        // Same coalesce queue/drain as timer mode; wait so OTLP
+                        // ack still means durable (legacy flush=0 contract).
+                        drop(g);
+                        return self.force_flush().await;
                     } else if overflow && !g.flushing {
                         drop(g);
                         self.spawn_eager_flush();
@@ -375,19 +373,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interval_zero_drains_without_force_flush() {
+    async fn interval_zero_enqueue_waits_for_durable_write() {
         let calls = StdArc::new(AtomicUsize::new(0));
         let rows = StdArc::new(TokioMutex::new(Vec::new()));
         let buf = CoalesceBuf::new(0, counting_writer(calls.clone(), rows.clone(), false));
         buf.enqueue(vec![1, 2, 3]).await.unwrap();
-        // Immediate mode: background drain; wait briefly then force_flush to sync.
-        for _ in 0..50 {
-            if calls.load(Ordering::SeqCst) >= 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        buf.force_flush().await.unwrap();
+        // Immediate mode awaits drain before enqueue returns.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(*rows.lock().await, vec![3]);
     }

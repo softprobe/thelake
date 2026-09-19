@@ -213,11 +213,11 @@ fn default_self_monitoring_ops_data_path() -> String {
     "s3://warehouse/_thelake_ops/".to_string()
 }
 
-/// Soft coalesce window for OTLP ingest (`0` = drain immediately after enqueue).
+/// Soft coalesce window for OTLP ingest (`0` = drain before ack returns).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestConfig {
-    /// Seconds to hold rows before a capped DuckLake drain. `0` = immediate drain.
+    /// Seconds to hold rows before a capped DuckLake drain. `0` = drain before ack.
     #[serde(default = "default_ingest_flush_interval_seconds")]
     pub flush_interval_seconds: u64,
 }

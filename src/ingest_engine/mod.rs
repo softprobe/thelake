@@ -1,11 +1,11 @@
 //! Soft coalesce ingest for one tenant-bound [`Storage`].
 //!
 //! # CPU / PromQL coupling
-//! OTLP acks on enqueue; a timer (or immediate drain when
-//! `flush_interval_seconds == 0`) writes capped batches into DuckLake. PromQL
-//! range answers stay in the HTTP cache across commits (TTL + start/end
-//! buckets); wiping that cache on every flush forced dashboard refreshes to
-//! re-scan Parquet and pegged query CPU.
+//! OTLP uses one coalesce path: `flush_interval_seconds == 0` drains before
+//! ack returns; `N > 0` acks on enqueue and a timer writes capped batches into
+//! DuckLake. PromQL range answers stay in the HTTP cache across commits (TTL +
+//! start/end buckets); wiping that cache on every flush forced dashboard
+//! refreshes to re-scan Parquet and pegged query CPU.
 
 mod coalesce;
 

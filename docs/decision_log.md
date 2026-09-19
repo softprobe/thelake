@@ -36,11 +36,10 @@ Use DuckLake as the sole durable store for spans, logs, and metrics.
 
 ### Consequences
 
-- `flush_interval_seconds: 0` drains immediately after each enqueue (ack still
-  returns before the DuckLake write completes).
+- `flush_interval_seconds: 0` drains before enqueue returns (OTLP ack ⇒ durable).
 - `flush_interval_seconds: N > 0` batches posts for up to N seconds before a
-  capped drain. Crash or post-ack write failure can lose data; exporters are
-  not told about background write failures.
+  capped drain (ack before write). Crash or post-ack write failure can lose
+  data; exporters are not told about background write failures.
 - DuckLake data inlining is used to avoid tiny object-store files for normal
   collector batches.
 - Query workers ATTACH the same tenant DuckLake scope as ingest.
@@ -63,13 +62,14 @@ be described as an application ingest WAL.
 
 OTLP always enqueues into `CoalesceBuf`, then drains to DuckLake:
 
-- **`flush_interval_seconds: 0`** — drain immediately after enqueue (same capped
-  write path; ack still returns before the write completes).
-- **`flush_interval_seconds: N > 0`** — arm a timer so posts batch into fewer
-  commits. `force_flush` drains in tests.
+- **`flush_interval_seconds: 0`** — drain before enqueue returns (OTLP ack ⇒
+  durable; same capped write path as timer mode).
+- **`flush_interval_seconds: N > 0`** — ack on enqueue; arm a timer so posts
+  batch into fewer commits. `force_flush` drains in tests.
 
-Post-ack write failures are logged and dropped — not returned to the exporter.
-Unflushed rows may be lost on crash. This is not a WAL or staged tier.
+For `N > 0`, post-ack write failures are logged and dropped — not returned to
+the exporter. Unflushed rows may be lost on crash. This is not a WAL or staged
+tier.
 
 **Schema/DDL off the hot path (locked principle):** Schema creation, validation,
 timestamp precision migrations, partition/sort layout, and table options
