@@ -1,7 +1,7 @@
 //! Shared async job runner and cross-replica leases.
 //!
 //! One runner loop, one [`LeaseStore`] trait, one [`Job`] trait — used by
-//! maintenance today and session-index later. Do not add a second timer or lock.
+//! maintenance today and session-summary later. Do not add a second timer or lock.
 
 mod job;
 mod lease;

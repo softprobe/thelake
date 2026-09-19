@@ -43,6 +43,11 @@ ducklake:
   # Per-scope DuckDB writer connections (1..=16). Default 4.
   writer_pool_size: 4
 
+# Session list summary (Stage 1: dirty UPSERT after coalesced traces flush).
+# Requires ingest.flush_interval_seconds > 0 and ducklake.catalog_type=postgres.
+# session_summary:
+#   enabled: false
+
 # Self-monitoring ops lake (disabled by default). See docs/design.md.
 # self_monitoring:
 #   enabled: false

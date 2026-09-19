@@ -41,6 +41,8 @@ pub struct Instruments {
     pub job_lease_steal: Counter<u64>,
     pub job_lease_heartbeat_failure: Counter<u64>,
     pub job_errors: Counter<u64>,
+    pub session_summary_dirty_upserts: Counter<u64>,
+    pub session_summary_dirty_upsert_errors: Counter<u64>,
 }
 
 fn register_observables(meter: &Meter) {
@@ -280,6 +282,14 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .u64_counter("thelake.job.lease_heartbeat_failure")
             .build(),
         job_errors: meter.u64_counter("thelake.job.errors").build(),
+        session_summary_dirty_upserts: meter
+            .u64_counter("thelake.session_summary.dirty_upserts")
+            .with_description("Successful session_summary_dirty UPSERT calls (≈ coalesce flush)")
+            .build(),
+        session_summary_dirty_upsert_errors: meter
+            .u64_counter("thelake.session_summary.dirty_upsert_errors")
+            .with_description("Failed session_summary_dirty UPSERT calls (ingest still ok)")
+            .build(),
     }
 }
 
@@ -503,6 +513,18 @@ pub fn record_job_error(job: &str, scope: &str) {
     let Some(i) = instruments() else { return };
     i.job_errors
         .add(1, &attrs(&[("job", job), ("scope", scope)]));
+}
+
+pub fn record_session_summary_dirty_upsert(tenant: &str) {
+    let Some(i) = instruments() else { return };
+    i.session_summary_dirty_upserts
+        .add(1, &attrs(&[("tenant", tenant), ("op", "session_summary")]));
+}
+
+pub fn record_session_summary_dirty_upsert_error(tenant: &str) {
+    let Some(i) = instruments() else { return };
+    i.session_summary_dirty_upsert_errors
+        .add(1, &attrs(&[("tenant", tenant), ("op", "session_summary")]));
 }
 
 /// Refresh process CPU/RSS/IO snapshots for ObservableGauges (best-effort).

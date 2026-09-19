@@ -165,6 +165,12 @@ impl RuntimeEngineManager {
             storage.clone(),
             tenant_id,
             self.config.ingest.flush_interval_seconds,
+            crate::ingest_engine::session_summary_dirty_for(
+                self.config.as_ref(),
+                resolver,
+                tenant_id,
+                &scope.metadata_schema,
+            ),
         ));
         let query = Arc::new(
             query_mod::create_query_engine_for_scope_with_liveness(
@@ -310,6 +316,8 @@ ON {}.thelake_job_lease (lease_until);"#,
     async fn ensure_scope_tables(&self, scope: &DuckLakeScope) -> Result<()> {
         let client = self.pool.get().await?;
         ensure_promotion_metadata_tables(&client, &scope.metadata_schema).await?;
+        crate::session_summary::ensure_session_summary_tables(&client, &scope.metadata_schema)
+            .await?;
         Ok(())
     }
 
