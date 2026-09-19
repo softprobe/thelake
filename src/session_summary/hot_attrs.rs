@@ -29,7 +29,7 @@ fn traces_hot_manifest() -> Result<TelemetryColumnsManifest> {
     }
 }
 
-fn active_covers_required(manifests: &[TelemetryColumnsManifest]) -> bool {
+fn traces_hot_col_names(manifests: &[TelemetryColumnsManifest]) -> std::collections::HashSet<&str> {
     let mut have = std::collections::HashSet::new();
     for m in manifests {
         if !m.target.tables.contains(&TelemetryTable::Traces) {
@@ -39,15 +39,43 @@ fn active_covers_required(manifests: &[TelemetryColumnsManifest]) -> bool {
             have.insert(c.name.as_str());
         }
     }
+    have
+}
+
+fn missing_reduce_required_cols(manifests: &[TelemetryColumnsManifest]) -> Vec<&'static str> {
+    let have = traces_hot_col_names(manifests);
     reduce_required_hot_cols()
-        .iter()
-        .all(|name| have.contains(name))
+        .into_iter()
+        .filter(|name| !have.contains(name))
+        .collect()
+}
+
+fn active_covers_required(manifests: &[TelemetryColumnsManifest]) -> bool {
+    missing_reduce_required_cols(manifests).is_empty()
+}
+
+/// Abort the process if active traces promotions omit any reduce-required hot col.
+///
+/// Incomplete product-hot coverage must never reach production reduce/list paths.
+fn require_reduce_hot_coverage(schema: &str, manifests: &[TelemetryColumnsManifest]) {
+    let missing = missing_reduce_required_cols(manifests);
+    if missing.is_empty() {
+        return;
+    }
+    panic!(
+        "schema {schema}: active traces promotions missing reduce-required hot cols {missing:?}; \
+         fix or remove the incomplete traces promotion_spec so session_summary can seed \
+         traces-query-hot-attrs.yaml"
+    );
 }
 
 /// Idempotently activate canonical traces product-hot specs for this tenant schema.
 ///
 /// Columns already exist on the TraceTable Arrow schema; activating the spec makes
 /// ingest fill them. Does not invent arbitrary keys (ADR-015).
+///
+/// Panics if a traces promotion is already active but omits reduce-required cols
+/// (does not clobber operator specs; does not soft-fail).
 ///
 /// **Non-goals (Stage 5):** does not promote `sp.agent.name` into `agent_name` (auth /
 /// agent observation only), and does not promote `enduser.id` into `user_id`.
@@ -62,17 +90,12 @@ pub async fn ensure_product_hot_attrs_for_scope(
     if active_covers_required(&active) {
         return Ok(());
     }
-    // Do not clobber an operator-applied traces promotion that happens to omit
-    // some reduce-required cols (resolve_scope / rebuild call this repeatedly).
     let has_traces = active
         .iter()
         .any(|m| m.target.tables.contains(&TelemetryTable::Traces));
+    // Incomplete operator traces promo: never soft-fail or overwrite — panic.
     if has_traces {
-        tracing::warn!(
-            schema = %scope.metadata_schema,
-            "active traces promotion_specs missing reduce-required hot cols; leaving in place"
-        );
-        return Ok(());
+        require_reduce_hot_coverage(&scope.metadata_schema, &active);
     }
     // Validate shipped yaml still parses before activating.
     let _ = traces_hot_manifest()?;
@@ -81,6 +104,10 @@ pub async fn ensure_product_hot_attrs_for_scope(
         .record_active_telemetry_promotion_spec(scope, TRACES_QUERY_HOT_ATTRS_YAML, &tables)
         .await
         .context("activate traces-query-hot-attrs for session_summary")?;
+    let active = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
+        .await
+        .map_err(|e| anyhow::anyhow!("reload active telemetry promotions: {e}"))?;
+    require_reduce_hot_coverage(&scope.metadata_schema, &active);
     Ok(())
 }
 
@@ -161,5 +188,23 @@ mod tests {
             !active_covers_required(std::slice::from_ref(&partial)),
             "missing user_id must fail cover check"
         );
+        assert_eq!(
+            missing_reduce_required_cols(std::slice::from_ref(&partial)),
+            vec![llm_promo().user_id]
+        );
+    }
+
+    #[test]
+    fn require_coverage_ok_when_complete() {
+        let m = traces_hot_manifest().expect("yaml");
+        require_reduce_hot_coverage("test_schema", std::slice::from_ref(&m));
+    }
+
+    #[test]
+    #[should_panic(expected = "missing reduce-required hot cols")]
+    fn require_coverage_panics_when_incomplete() {
+        let mut partial = traces_hot_manifest().expect("yaml");
+        partial.columns.retain(|c| c.name != llm_promo().user_id);
+        require_reduce_hot_coverage("test_schema", std::slice::from_ref(&partial));
     }
 }
