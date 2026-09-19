@@ -54,10 +54,6 @@ pub fn spawn_inventory_loop(state: AppState, interval_secs: u64) {
                 state.engines.config().ducklake.writer_pool_size,
                 std::sync::atomic::Ordering::Relaxed,
             );
-            // When flush-through (no coalesce), pending stays 0.
-            if state.engines.config().ingest.flush_interval_seconds == 0 {
-                gauge_store::INGEST_PENDING_BATCHES.store(0, std::sync::atomic::Ordering::Relaxed);
-            }
             // Interval fires immediately; skip DuckDB attach on that first tick so
             // Softprobe is not pegged at startup / after every process restart.
             static SKIP_FIRST: std::sync::atomic::AtomicBool =

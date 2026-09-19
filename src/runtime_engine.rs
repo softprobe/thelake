@@ -165,6 +165,8 @@ impl RuntimeEngineManager {
             storage.clone(),
             tenant_id,
             self.config.ingest.flush_interval_seconds,
+            self.config.ingest.buffer_size_mb,
+            self.config.ingest.write_timeout_seconds,
             crate::ingest_engine::session_summary_dirty_for(
                 self.config.as_ref(),
                 resolver,

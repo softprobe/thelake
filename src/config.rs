@@ -213,25 +213,51 @@ fn default_self_monitoring_ops_data_path() -> String {
     "s3://warehouse/_thelake_ops/".to_string()
 }
 
-/// Soft coalesce window for OTLP ingest (`0` = drain before ack returns).
+/// Soft coalesce window for OTLP ingest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestConfig {
-    /// Seconds to hold rows before a capped DuckLake drain. `0` = drain before ack.
+    /// Seconds to hold rows before a DuckLake drain. `0` = drain as soon as pending.
     #[serde(default = "default_ingest_flush_interval_seconds")]
     pub flush_interval_seconds: u64,
+    /// Soft in-memory coalesce budget in MiB (OTLP body bytes). Clamped to the
+    /// absolute 256 MiB ceiling. Eager flush fires at half of the effective max.
+    #[serde(default = "default_ingest_buffer_size_mb")]
+    pub buffer_size_mb: u64,
+    /// Soft wall-clock limit for one DuckLake ingest write. `0` disables.
+    /// Clamped to 3600s. Prevents a hung INSERT from stalling a signal forever.
+    #[serde(default = "default_ingest_write_timeout_seconds")]
+    pub write_timeout_seconds: u64,
 }
 
 impl Default for IngestConfig {
     fn default() -> Self {
         Self {
             flush_interval_seconds: default_ingest_flush_interval_seconds(),
+            buffer_size_mb: default_ingest_buffer_size_mb(),
+            write_timeout_seconds: default_ingest_write_timeout_seconds(),
         }
     }
 }
 
 fn default_ingest_flush_interval_seconds() -> u64 {
     0
+}
+
+fn default_ingest_buffer_size_mb() -> u64 {
+    256
+}
+
+fn default_ingest_write_timeout_seconds() -> u64 {
+    60
+}
+
+/// Absolute ceiling for [`IngestConfig::write_timeout_seconds`].
+pub const ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS: u64 = 3600;
+
+/// Clamp soft write timeout (`0` = disabled).
+pub fn resolve_write_timeout_seconds(secs: u64) -> u64 {
+    secs.min(ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -672,7 +698,7 @@ fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredential
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{resolve_write_timeout_seconds, Config, ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS};
     use crate::compaction::twcs::TwcsPolicy;
     use std::sync::Mutex;
 
@@ -733,6 +759,8 @@ ducklake:
         assert_eq!(c.query.max_connections, 10);
         assert_eq!(c.ducklake.metadata_path, "/tmp/meta.sqlite");
         assert_eq!(c.ingest.flush_interval_seconds, 0);
+        assert_eq!(c.ingest.buffer_size_mb, 256);
+        assert_eq!(c.ingest.write_timeout_seconds, 60);
     }
 
     #[test]
@@ -747,6 +775,44 @@ ingest:
 "#;
         let c: Config = serde_yaml::from_str(yaml).expect("ingest ok");
         assert_eq!(c.ingest.flush_interval_seconds, 2);
+        assert_eq!(c.ingest.buffer_size_mb, 256);
+        assert_eq!(c.ingest.write_timeout_seconds, 60);
+    }
+
+    #[test]
+    fn ingest_buffer_size_mb_parses() {
+        let yaml = r#"
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/meta.sqlite
+  data_path: /tmp/data/
+ingest:
+  flush_interval_seconds: 60
+  buffer_size_mb: 1
+"#;
+        let c: Config = serde_yaml::from_str(yaml).expect("ingest ok");
+        assert_eq!(c.ingest.flush_interval_seconds, 60);
+        assert_eq!(c.ingest.buffer_size_mb, 1);
+    }
+
+    #[test]
+    fn ingest_write_timeout_parses_and_clamps() {
+        let yaml = r#"
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/meta.sqlite
+  data_path: /tmp/data/
+ingest:
+  write_timeout_seconds: 15
+"#;
+        let c: Config = serde_yaml::from_str(yaml).expect("ingest ok");
+        assert_eq!(c.ingest.write_timeout_seconds, 15);
+        assert_eq!(resolve_write_timeout_seconds(15), 15);
+        assert_eq!(
+            resolve_write_timeout_seconds(ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS + 10),
+            ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS
+        );
+        assert_eq!(resolve_write_timeout_seconds(0), 0);
     }
 
     #[test]

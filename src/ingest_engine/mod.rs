@@ -1,24 +1,26 @@
 //! Soft coalesce ingest for one tenant-bound [`Storage`].
 //!
 //! # CPU / PromQL coupling
-//! OTLP uses one coalesce path: `flush_interval_seconds == 0` drains before
-//! ack returns; `N > 0` acks on enqueue and a timer writes capped batches into
-//! DuckLake. PromQL range answers stay in the HTTP cache across commits (TTL +
-//! start/end buckets); wiping that cache on every flush forced dashboard
-//! refreshes to re-scan Parquet and pegged query CPU.
+//! OTLP enqueues into a per-signal coalesce buffer and ticks a background flush
+//! worker (`flush_interval_seconds` / eager depth). Enqueue never writes the lake.
+//! PromQL range answers stay in the HTTP cache across commits (TTL + start/end
+//! buckets); wiping that cache on every flush forced dashboard refreshes to
+//! re-scan Parquet and pegged query CPU.
 
 mod coalesce;
 
-use crate::config::Config;
+use crate::config::{resolve_write_timeout_seconds, Config};
 use crate::models::{Log, Metric, Span};
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::session_summary::{DirtyHint, SessionSummaryDirty};
 use crate::storage::ducklake::DuckLakeWriter;
 use crate::storage::Storage;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use coalesce::CoalesceBuf;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Operational ingest surface for one tenant-bound [`Storage`].
 #[derive(Clone)]
@@ -30,90 +32,126 @@ pub struct IngestEngine {
     metrics: Arc<CoalesceBuf<Metric>>,
 }
 
+/// Bound a DuckLake write so a hung INSERT cannot stall the coalesce worker forever.
+/// `timeout_secs == 0` disables the wall clock (tests / explicit opt-out).
+pub(crate) async fn ducklake_write_with_timeout<F>(timeout_secs: u64, fut: F) -> Result<()>
+where
+    F: Future<Output = Result<()>>,
+{
+    let secs = resolve_write_timeout_seconds(timeout_secs);
+    if secs == 0 {
+        return fut.await;
+    }
+    match tokio::time::timeout(Duration::from_secs(secs), fut).await {
+        Ok(r) => r,
+        Err(_) => Err(anyhow!("DuckLake ingest write timed out after {secs}s")),
+    }
+}
+
+/// Soft coalesce for one signal: timed write, then either plain ingest monitor
+/// (`dirty_sync == None`) or traces after-commit with optional session-summary
+/// dirty hints folded **before** the write consumes batches.
+fn monitored_signal_buf<T, Fut, W>(
+    flush_interval_seconds: u64,
+    max_pending: usize,
+    eager_pending: usize,
+    write_timeout_seconds: u64,
+    writer: Arc<DuckLakeWriter>,
+    tenant: String,
+    signal: &'static str,
+    write: W,
+    dirty_sync: Option<(Option<Arc<SessionSummaryDirty>>, fn(&[Vec<T>]) -> Vec<DirtyHint>)>,
+) -> Arc<CoalesceBuf<T>>
+where
+    T: Send + 'static,
+    W: Fn(Arc<DuckLakeWriter>, Vec<Vec<T>>) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    CoalesceBuf::with_limits(
+        flush_interval_seconds,
+        max_pending,
+        eager_pending,
+        Arc::new(move |batches| {
+            let w = writer.clone();
+            let tenant = tenant.clone();
+            let write = write.clone();
+            let dirty_sync = dirty_sync.clone();
+            Box::pin(async move {
+                let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
+                let hints = match &dirty_sync {
+                    Some((Some(_), fold)) => fold(&batches),
+                    _ => Vec::new(),
+                };
+                let dirty = dirty_sync.as_ref().and_then(|(d, _)| d.clone());
+                let r = ducklake_write_with_timeout(write_timeout_seconds, write(w, batches)).await;
+                if dirty_sync.is_some() {
+                    maybe_after_traces_commit(
+                        r.is_ok(),
+                        &tenant,
+                        rows,
+                        true,
+                        &hints,
+                        dirty.as_deref(),
+                    )
+                    .await;
+                } else if r.is_ok() {
+                    crate::self_monitoring::record_ingest_commit(&tenant, signal, rows, true);
+                }
+                r
+            })
+        }),
+    )
+}
+
 impl IngestEngine {
     pub fn from_storage(
         storage: Arc<Storage>,
         tenant_id: impl Into<String>,
         flush_interval_seconds: u64,
+        buffer_size_mb: u64,
+        write_timeout_seconds: u64,
         session_summary_dirty: Option<Arc<SessionSummaryDirty>>,
     ) -> Self {
         let tenant_id = tenant_id.into();
-        let logs = {
-            let w = storage.writer.clone();
-            let tenant = tenant_id.clone();
-            CoalesceBuf::new(
-                flush_interval_seconds,
-                Arc::new(move |batches| {
-                    let w = w.clone();
-                    let tenant = tenant.clone();
-                    Box::pin(async move {
-                        let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
-                        let r = w.write_log_batches(batches).await;
-                        if r.is_ok() {
-                            crate::self_monitoring::record_ingest_commit(
-                                &tenant, "logs", rows, true,
-                            );
-                        }
-                        r
-                    })
-                }),
-            )
-        };
-        let spans = {
-            let w = storage.writer.clone();
-            let tenant = tenant_id.clone();
-            let dirty = session_summary_dirty;
-            CoalesceBuf::new(
-                flush_interval_seconds,
-                Arc::new(move |batches| {
-                    let w = w.clone();
-                    let tenant = tenant.clone();
-                    let dirty = dirty.clone();
-                    Box::pin(async move {
-                        let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
-                        // Fold refs before moving batches into the writer (no Span clone).
-                        let hints = dirty.as_ref().map(|_| {
-                            crate::session_summary::fold_dirty_hints(batches.iter().flatten())
-                        });
-                        let r = w.write_span_batches(batches).await;
-                        maybe_after_traces_commit(
-                            r.is_ok(),
-                            &tenant,
-                            rows,
-                            true,
-                            hints.as_deref().unwrap_or(&[]),
-                            dirty.as_deref(),
-                        )
-                        .await;
-                        r
-                    })
-                }),
-            )
-        };
-        let metrics = {
-            let w = storage.writer.clone();
-            let tenant = tenant_id;
-            CoalesceBuf::new(
-                flush_interval_seconds,
-                Arc::new(move |batches| {
-                    let w = w.clone();
-                    let tenant = tenant.clone();
-                    Box::pin(async move {
-                        let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
-                        let r = w.write_metric_batches(batches).await;
-                        if r.is_ok() {
-                            crate::self_monitoring::record_ingest_commit(
-                                &tenant, "metrics", rows, true,
-                            );
-                            // Do not invalidate PromQL range cache on coalesce
-                            // commits — TTL covers freshness; wipe-on-flush pegs
-                            // Grafana refresh CPU (see module docs).
-                        }
-                        r
-                    })
-                }),
-            )
-        };
+        let (max_pending, eager_pending) = coalesce::resolve_byte_limits(buffer_size_mb);
+        let write_timeout_seconds = resolve_write_timeout_seconds(write_timeout_seconds);
+        let logs = monitored_signal_buf(
+            flush_interval_seconds,
+            max_pending,
+            eager_pending,
+            write_timeout_seconds,
+            storage.writer.clone(),
+            tenant_id.clone(),
+            "logs",
+            |w, b| async move { w.write_log_batches(b).await },
+            None,
+        );
+        let spans = monitored_signal_buf(
+            flush_interval_seconds,
+            max_pending,
+            eager_pending,
+            write_timeout_seconds,
+            storage.writer.clone(),
+            tenant_id.clone(),
+            "traces",
+            |w, b| async move { w.write_span_batches(b).await },
+            Some((session_summary_dirty, |batches| {
+                crate::session_summary::fold_dirty_hints(batches.iter().flatten())
+            })),
+        );
+        // Do not invalidate PromQL range cache on coalesce commits — TTL covers
+        // freshness; wipe-on-flush pegs Grafana refresh CPU (see module docs).
+        let metrics = monitored_signal_buf(
+            flush_interval_seconds,
+            max_pending,
+            eager_pending,
+            write_timeout_seconds,
+            storage.writer.clone(),
+            tenant_id,
+            "metrics",
+            |w, b| async move { w.write_metric_batches(b).await },
+            None,
+        );
         Self {
             storage,
             flush_interval_seconds,
@@ -127,25 +165,38 @@ impl IngestEngine {
         self.storage.writer.clone()
     }
 
-    pub async fn add_spans(&self, items: Vec<Span>, _request_size: usize) -> Result<()> {
+    pub async fn add_spans(&self, items: Vec<Span>, request_size: usize) -> Result<()> {
         if items.is_empty() {
             return Ok(());
         }
-        self.spans.enqueue(items).await
+        self.spans.enqueue(items, request_size).await?;
+        // Interval 0: callers expect drain before return (HTTP 200 ⇒ readable).
+        if self.flush_interval_seconds == 0 {
+            self.spans.force_flush().await?;
+        }
+        Ok(())
     }
 
-    pub async fn add_logs(&self, items: Vec<Log>, _request_size: usize) -> Result<()> {
+    pub async fn add_logs(&self, items: Vec<Log>, request_size: usize) -> Result<()> {
         if items.is_empty() {
             return Ok(());
         }
-        self.logs.enqueue(items).await
+        self.logs.enqueue(items, request_size).await?;
+        if self.flush_interval_seconds == 0 {
+            self.logs.force_flush().await?;
+        }
+        Ok(())
     }
 
-    pub async fn add_metrics(&self, items: Vec<Metric>, _request_size: usize) -> Result<()> {
+    pub async fn add_metrics(&self, items: Vec<Metric>, request_size: usize) -> Result<()> {
         if items.is_empty() {
             return Ok(());
         }
-        self.metrics.enqueue(items).await
+        self.metrics.enqueue(items, request_size).await?;
+        if self.flush_interval_seconds == 0 {
+            self.metrics.force_flush().await?;
+        }
+        Ok(())
     }
 
     pub async fn force_flush_spans(&self) -> Result<()> {
@@ -228,6 +279,8 @@ impl IngestPipeline {
             Arc::new(storage.clone()),
             "default",
             config.ingest.flush_interval_seconds,
+            config.ingest.buffer_size_mb,
+            config.ingest.write_timeout_seconds,
             dirty,
         ));
 
@@ -318,4 +371,45 @@ pub fn session_summary_dirty_for(
         metadata_schema,
         tenant_id,
     )))
+}
+
+#[cfg(test)]
+mod write_timeout_tests {
+    use super::ducklake_write_with_timeout;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn write_timeout_disabled_waits_for_completion() {
+        let done = Arc::new(AtomicUsize::new(0));
+        let d = done.clone();
+        ducklake_write_with_timeout(0, async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            d.store(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(done.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn write_timeout_fails_hung_write() {
+        let err = ducklake_write_with_timeout(1, async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(())
+        })
+        .await;
+        assert!(err.is_err(), "expected timeout error");
+        let msg = format!("{:#}", err.unwrap_err());
+        assert!(msg.contains("timed out"), "unexpected error message: {msg}");
+    }
+
+    #[tokio::test]
+    async fn write_timeout_allows_fast_write() {
+        ducklake_write_with_timeout(5, async { Ok(()) })
+            .await
+            .unwrap();
+    }
 }

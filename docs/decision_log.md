@@ -36,10 +36,11 @@ Use DuckLake as the sole durable store for spans, logs, and metrics.
 
 ### Consequences
 
-- `flush_interval_seconds: 0` drains before enqueue returns (OTLP ack ⇒ durable).
-- `flush_interval_seconds: N > 0` batches posts for up to N seconds before a
-  capped drain (ack before write). Crash or post-ack write failure can lose
-  data; exporters are not told about background write failures.
+- `flush_interval_seconds: 0` still acks inside the coalesce buffer, but
+  `IngestEngine::add_*` awaits drain before returning (readable on HTTP 200).
+- `flush_interval_seconds: N > 0` batches posts for up to N seconds (first-byte
+  deadline) before drain. Crash or post-ack write failure can lose data;
+  exporters are not told about background write failures.
 - DuckLake data inlining is used to avoid tiny object-store files for normal
   collector batches.
 - Query workers ATTACH the same tenant DuckLake scope as ingest.
@@ -60,16 +61,29 @@ be described as an application ingest WAL.
 
 ## Current invariant: soft coalesce ingest
 
-OTLP always enqueues into `CoalesceBuf`, then drains to DuckLake:
+OTLP always enqueues into `CoalesceBuf` (ack on enqueue) via a channel; a
+**single background worker** per signal owns the pending buffer and alone
+decides when to drain to DuckLake:
 
-- **`flush_interval_seconds: 0`** — drain before enqueue returns (OTLP ack ⇒
-  durable; same capped write path as timer mode).
-- **`flush_interval_seconds: N > 0`** — ack on enqueue; arm a timer so posts
-  batch into fewer commits. `force_flush` drains in tests.
+- **`flush_interval_seconds: 0`** — worker flushes as soon as pending is non-empty;
+  `IngestEngine::add_*` also awaits that drain before returning (HTTP 200 ⇒
+  readable). The coalesce buffer itself still acks on enqueue.
+- **`flush_interval_seconds: N > 0`** — worker waits up to N seconds (from first
+  byte in the window) unless buffered OTLP bytes hit the eager threshold;
+  `add_*` returns after enqueue (ack before durable commit).
+- Enqueue only waits when the soft in-memory byte budget is full (backpressure);
+  budget is released at drain (before write completes). Soft budget is
+  `ingest.buffer_size_mb` (default 256), clamped to absolute ceilings
+  (`128 MiB` eager / `256 MiB` max wire bytes).
+- DuckLake writes are wrapped with `ingest.write_timeout_seconds` (default 60,
+  `0` disables, clamped ≤ 3600) so a hung INSERT fails the flush instead of
+  stalling that signal forever. Coalesce does not add its own write watchdog.
+- `force_flush` (tests) sends `Flush` and waits until the byte budget is empty.
+- Dropping the last `CoalesceBuf` closes the channel; the worker discards
+  pending (no WAL) and exits.
 
-For `N > 0`, post-ack write failures are logged and dropped — not returned to
-the exporter. Unflushed rows may be lost on crash. This is not a WAL or staged
-tier.
+Post-ack write failures are logged and dropped — not returned to the exporter.
+Unflushed rows may be lost on crash. This is not a WAL or staged tier.
 
 **Schema/DDL off the hot path (locked principle):** Schema creation, validation,
 timestamp precision migrations, partition/sort layout, and table options
