@@ -16,7 +16,7 @@ pub struct Config {
     pub query: QueryConfig,
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
-    /// Shared async job runner + lease settings (maintenance, future session-index).
+    /// Shared async job runner + lease settings (maintenance, future session-summary).
     #[serde(default)]
     pub async_jobs: AsyncJobsConfig,
     /// Required DuckLake catalog + data warehouse settings.
@@ -24,9 +24,41 @@ pub struct Config {
     /// Optional soft coalesce for OTLP ingest (ack-on-enqueue when interval > 0).
     #[serde(default)]
     pub ingest: IngestConfig,
+    /// Derived session list summary + dirty queue (Postgres catalog only).
+    #[serde(default)]
+    pub session_summary: SessionSummaryConfig,
     /// Self-monitoring ops lake (Design 2). Disabled by default.
     #[serde(default)]
     pub self_monitoring: SelfMonitoringConfig,
+}
+
+/// Session list summary config (`enabled` requires coalesce + postgres catalog).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSummaryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl SessionSummaryConfig {
+    /// `enabled` requires soft coalesce and a Postgres DuckLake catalog.
+    pub fn validate(&self, ingest: &IngestConfig, ducklake: &DuckLakeConfig) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if ingest.flush_interval_seconds == 0 {
+            anyhow::bail!(
+                "session_summary.enabled requires ingest.flush_interval_seconds > 0 (soft coalesce)"
+            );
+        }
+        if ducklake.catalog_type != "postgres" {
+            anyhow::bail!(
+                "session_summary.enabled requires ducklake.catalog_type=postgres (got {})",
+                ducklake.catalog_type
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Cross-replica job leasing for the shared async job runner.
@@ -484,6 +516,9 @@ impl Config {
         config.apply_env_overrides()?;
         config.validate_ducklake_catalog()?;
         config.async_jobs.validate()?;
+        config
+            .session_summary
+            .validate(&config.ingest, &config.ducklake)?;
         Ok(config)
     }
 
@@ -783,6 +818,53 @@ ducklake:
         assert!(err.to_string().contains("heartbeat_seconds"));
         c.async_jobs.heartbeat_seconds = 10;
         c.async_jobs.validate().expect("hb < ttl ok");
+    }
+
+    #[test]
+    fn session_summary_enabled_rejects_flush_through() {
+        let mut c = Config::default();
+        c.ducklake.catalog_type = "postgres".to_string();
+        c.session_summary.enabled = true;
+        c.ingest.flush_interval_seconds = 0;
+        let err = c
+            .session_summary
+            .validate(&c.ingest, &c.ducklake)
+            .expect_err("flush 0");
+        assert!(err.to_string().contains("flush_interval_seconds"));
+    }
+
+    #[test]
+    fn session_summary_enabled_rejects_non_postgres() {
+        let mut c = Config::default();
+        c.ducklake.catalog_type = "sqlite".to_string();
+        c.session_summary.enabled = true;
+        c.ingest.flush_interval_seconds = 2;
+        let err = c
+            .session_summary
+            .validate(&c.ingest, &c.ducklake)
+            .expect_err("sqlite");
+        assert!(err.to_string().contains("postgres"));
+    }
+
+    #[test]
+    fn session_summary_enabled_ok_with_coalesce_postgres() {
+        let mut c = Config::default();
+        c.ducklake.catalog_type = "postgres".to_string();
+        c.session_summary.enabled = true;
+        c.ingest.flush_interval_seconds = 2;
+        c.session_summary
+            .validate(&c.ingest, &c.ducklake)
+            .expect("ok");
+    }
+
+    #[test]
+    fn session_summary_disabled_allows_flush_through() {
+        let mut c = Config::default();
+        c.session_summary.enabled = false;
+        c.ingest.flush_interval_seconds = 0;
+        c.session_summary
+            .validate(&c.ingest, &c.ducklake)
+            .expect("disabled ok");
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod coalesce;
 use crate::config::Config;
 use crate::models::{Log, Metric, Span};
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
+use crate::session_summary::{DirtyHint, SessionSummaryDirty};
 use crate::storage::ducklake::DuckLakeWriter;
 use crate::storage::Storage;
 use anyhow::Result;
@@ -34,6 +35,7 @@ impl IngestEngine {
         storage: Arc<Storage>,
         tenant_id: impl Into<String>,
         flush_interval_seconds: u64,
+        session_summary_dirty: Option<Arc<SessionSummaryDirty>>,
     ) -> Self {
         let tenant_id = tenant_id.into();
         let logs = (flush_interval_seconds > 0).then(|| {
@@ -60,19 +62,29 @@ impl IngestEngine {
         let spans = (flush_interval_seconds > 0).then(|| {
             let w = storage.writer.clone();
             let tenant = tenant_id.clone();
+            let dirty = session_summary_dirty.clone();
             CoalesceBuf::new(
                 flush_interval_seconds,
                 Arc::new(move |batches| {
                     let w = w.clone();
                     let tenant = tenant.clone();
+                    let dirty = dirty.clone();
                     Box::pin(async move {
                         let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
+                        // Fold refs before moving batches into the writer (no Span clone).
+                        let hints = dirty.as_ref().map(|_| {
+                            crate::session_summary::fold_dirty_hints(batches.iter().flatten())
+                        });
                         let r = w.write_span_batches(batches).await;
-                        if r.is_ok() {
-                            crate::self_monitoring::record_ingest_commit(
-                                &tenant, "traces", rows, true,
-                            );
-                        }
+                        maybe_after_traces_commit(
+                            r.is_ok(),
+                            &tenant,
+                            rows,
+                            true,
+                            hints.as_deref().unwrap_or(&[]),
+                            dirty.as_deref(),
+                        )
+                        .await;
                         r
                     })
                 }),
@@ -123,6 +135,8 @@ impl IngestEngine {
         if let Some(buf) = &self.spans {
             buf.enqueue(items).await
         } else {
+            // Flush-through: session_summary.enabled is rejected when flush==0, so
+            // dirty is never wired here (no second dirty call site).
             let rows = items.len() as u64;
             let r = self.storage.writer.write_span_batches(vec![items]).await;
             if r.is_ok() {
@@ -204,6 +218,46 @@ impl IngestEngine {
     }
 }
 
+/// Apply traces commit side effects only when the lake write succeeded.
+pub(crate) async fn maybe_after_traces_commit(
+    write_ok: bool,
+    tenant: &str,
+    rows: u64,
+    coalesced: bool,
+    hints: &[DirtyHint],
+    dirty: Option<&SessionSummaryDirty>,
+) {
+    if !write_ok {
+        return;
+    }
+    crate::self_monitoring::record_ingest_commit(tenant, "traces", rows, coalesced);
+    if let Some(dirty) = dirty {
+        dirty.apply_hints(hints).await;
+    }
+}
+
+#[cfg(test)]
+mod after_commit_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn maybe_after_traces_commit_skips_when_write_failed() {
+        maybe_after_traces_commit(false, "t", 1, true, &[], None).await;
+    }
+
+    #[tokio::test]
+    async fn maybe_after_traces_commit_ok_without_dirty() {
+        maybe_after_traces_commit(true, "t", 1, true, &[], None).await;
+    }
+
+    #[test]
+    fn dirty_handle_none_when_disabled() {
+        let mut config = Config::default();
+        config.session_summary.enabled = false;
+        assert!(session_summary_dirty_for(&config, None, "t", "schema").is_none());
+    }
+}
+
 /// Test / single-tenant pipeline with a long-lived [`IngestEngine`] (shared coalesce state).
 #[derive(Clone)]
 pub struct IngestPipeline {
@@ -215,13 +269,20 @@ pub struct IngestPipeline {
 impl IngestPipeline {
     pub async fn new(config: &Config) -> Result<Self> {
         let tenant_ducklake = DuckLakeScopeResolver::connect(config).await?;
-        let writer = Arc::new(DuckLakeWriter::new(config, tenant_ducklake).await?);
+        let writer = Arc::new(DuckLakeWriter::new(config, tenant_ducklake.clone()).await?);
         let cache_dir = config.query.cache_dir.as_ref().map(PathBuf::from);
         let storage = Storage::new(writer);
+        let dirty = session_summary_dirty_for(
+            config,
+            tenant_ducklake.as_ref(),
+            "default",
+            &config.ducklake.metadata_schema,
+        );
         let ingest = Arc::new(IngestEngine::from_storage(
             Arc::new(storage.clone()),
             "default",
             config.ingest.flush_interval_seconds,
+            dirty,
         ));
 
         Ok(Self {
@@ -293,4 +354,22 @@ impl IngestPipeline {
     pub fn ingest_engine(&self) -> Arc<IngestEngine> {
         self.ingest.clone()
     }
+}
+
+/// Build dirty handle when session_summary is enabled (implies coalesce + postgres).
+pub fn session_summary_dirty_for(
+    config: &Config,
+    resolver: Option<&DuckLakeScopeResolver>,
+    tenant_id: &str,
+    metadata_schema: &str,
+) -> Option<Arc<SessionSummaryDirty>> {
+    if !config.session_summary.enabled {
+        return None;
+    }
+    let resolver = resolver?;
+    Some(Arc::new(SessionSummaryDirty::new(
+        resolver.pool().clone(),
+        metadata_schema,
+        tenant_id,
+    )))
 }
