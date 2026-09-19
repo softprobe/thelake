@@ -1,6 +1,6 @@
 # Session list summary
 
-**Status:** Stage 1 in progress (DDL + dirty UPSERT; reduce not yet)  
+**Status:** Stage 1 implemented (DDL + dirty UPSERT; reduce not yet)  
 **Baseline:** `thelake` / `sp-llm` `main`  
 **Supersedes:** ChatGPT “Design Session Summaries” share; earlier drafts that put the directory in Explorer Supabase, dual-wrote DuckLake `session_facts`, or used a long-lived in-memory span counter
 

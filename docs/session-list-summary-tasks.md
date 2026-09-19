@@ -69,6 +69,19 @@ Depends on **A** for “where DDL lives” conventions; dirty UPSERT itself does
 - [x] **1.8** Tests: full matrix — config gates; fold empty/single/multi/missing session_id; LEAST/GREATEST merge; ensure idempotent; coalesce flush → dirty rows; lake Err → no dirty; dirty Err → ingest still Ok; disabled → no dirty
 - [x] **1.9** DRY: single post-traces-commit hook on coalesce spans writer only (flush-through is unreachable when enabled); no duplicated fold/UPSERT
 
+**Stage 1 notes (2026-09-18):** Shipped on `feat/session-summary-dirty` ([PR #68](https://github.com/softprobe/thelake/pull/68)). Naming is `session_summary` (not `session_index`). Evidence:
+
+| Task | Evidence |
+|---|---|
+| 1.1 | `SessionSummaryConfig` + `validate` in `src/config.rs` (reject flush 0 / non-postgres); unit tests `session_summary_enabled_*` |
+| 1.2–1.3 | `src/session_summary/ddl.rs` — both tables + list indexes |
+| 1.4 | `ensure_session_summary_tables` from `DuckLakeScopeResolver::ensure_scope_tables` |
+| 1.5 | Coalesce spans writer: `fold_dirty_hints` then `maybe_after_traces_commit` → `apply_hints` UPSERT |
+| 1.6 | `apply_hints` warns + `dirty_upsert_errors` on failure; never returns Err to ingest |
+| 1.7 | Counters only (`dirty_upserts` / `dirty_upsert_errors`); depth deferred to Stage 2 |
+| 1.8 | Unit fold/config + ignored postgres_* tests (`make test-lease-pg`); local `make test` + `make test-e2e` green |
+| 1.9 | Dirty wired only on coalesce path; flush-through never gets a dirty handle when enabled |
+
 ---
 
 ## Stage 2 — `session_summary.reduce` job
