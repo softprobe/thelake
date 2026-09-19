@@ -53,10 +53,8 @@ async fn postgres_session_summary_ensure_idempotent() {
         .expect("second ensure");
     let n: i64 = client
         .query_one(
-            &format!(
-                "SELECT count(*)::bigint FROM information_schema.tables \
-                 WHERE table_schema = $1 AND table_name IN ('session_summary', 'session_summary_dirty')"
-            ),
+            "SELECT count(*)::bigint FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name IN ('session_summary', 'session_summary_dirty')",
             &[&schema],
         )
         .await

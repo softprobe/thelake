@@ -33,17 +33,11 @@ pub struct Config {
 }
 
 /// Session list summary config (`enabled` requires coalesce + postgres catalog).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummaryConfig {
     #[serde(default)]
     pub enabled: bool,
-}
-
-impl Default for SessionSummaryConfig {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 impl SessionSummaryConfig {
