@@ -46,6 +46,7 @@ fn ts(secs: i64) -> chrono::DateTime<Utc> {
     Utc.timestamp_opt(secs, 0).unwrap()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn row(
     id: &str,
     start: i64,
@@ -460,10 +461,7 @@ async fn postgres_session_summary_list_corner_cases() {
         .await
         .expect("null end duration");
     assert!(
-        resp.items
-            .iter()
-            .find(|s| s.session_id == "null-tokens")
-            .is_some(),
+        resp.items.iter().any(|s| s.session_id == "null-tokens"),
         "null end_time row must still list"
     );
     // Duration DESC: has-tokens (10s) before null-tokens (0s via COALESCE).
