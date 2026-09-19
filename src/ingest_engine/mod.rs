@@ -60,7 +60,10 @@ fn monitored_signal_buf<T, Fut, W>(
     tenant: String,
     signal: &'static str,
     write: W,
-    dirty_sync: Option<(Option<Arc<SessionSummaryDirty>>, fn(&[Vec<T>]) -> Vec<DirtyHint>)>,
+    dirty_sync: Option<(
+        Option<Arc<SessionSummaryDirty>>,
+        fn(&[Vec<T>]) -> Vec<DirtyHint>,
+    )>,
 ) -> Arc<CoalesceBuf<T>>
 where
     T: Send + 'static,
