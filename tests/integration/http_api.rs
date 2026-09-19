@@ -1081,11 +1081,7 @@ async fn llm_sessions_search_pages_without_dropping_rows() {
 async fn llm_sessions_search_applies_every_filter() {
     let (router, state, _t) = build_router_and_state().await;
 
-    async fn ingest(
-        router: &Router,
-        mut request: ExportTraceServiceRequest,
-        start_ns: u64,
-    ) {
+    async fn ingest(router: &Router, mut request: ExportTraceServiceRequest, start_ns: u64) {
         let span = &mut request.resource_spans[0].scope_spans[0].spans[0];
         span.start_time_unix_nano = start_ns;
         span.end_time_unix_nano = start_ns + 1_000_000_000;
@@ -1124,8 +1120,7 @@ async fn llm_sessions_search_applies_every_filter() {
                 *kv = string_kv("gen_ai.request.model", "claude");
             }
         }
-        span.attributes
-            .push(string_kv("sp.agent.name", "agent-b"));
+        span.attributes.push(string_kv("sp.agent.name", "agent-b"));
     }
     ingest(&router, err, 1_721_349_721_000_000_000).await;
 
@@ -1138,8 +1133,7 @@ async fn llm_sessions_search_applies_every_filter() {
                 *kv = string_kv("gen_ai.request.model", "claude");
             }
         }
-        span.attributes
-            .push(string_kv("sp.agent.name", "agent-a"));
+        span.attributes.push(string_kv("sp.agent.name", "agent-a"));
     }
     ingest(&router, mix, 1_721_349_722_000_000_000).await;
 
@@ -1218,10 +1212,7 @@ async fn llm_sessions_search_applies_every_filter() {
     body["user_id"] = json!("user-llm-1");
     body["model_name"] = json!("claude");
     body["has_errors"] = json!(false);
-    assert_eq!(
-        session_ids(&search(&router, body).await),
-        vec!["sess-mix"]
-    );
+    assert_eq!(session_ids(&search(&router, body).await), vec!["sess-mix"]);
 }
 
 /// Guards the DuckDB floor set in Cargo.toml.

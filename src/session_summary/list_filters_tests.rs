@@ -3,9 +3,9 @@
 
 use crate::api::llm::query::{SessionOrderBy, SessionSearchRequest, SortDirection};
 use crate::api::sql_support::encode_cursor;
+use crate::session_summary::ensure_session_summary_tables;
 use crate::session_summary::list::search_session_summary;
 use crate::session_summary::reduce::{upsert_summary_rows, SummaryRow};
-use crate::session_summary::ensure_session_summary_tables;
 use chrono::{TimeZone, Utc};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use std::time::Duration;
@@ -95,30 +95,16 @@ async fn seed_filter_fixture(pool: &Pool, schema: &str) {
         pool,
         schema,
         &[
-            row("sess-ok", 1100, 1150, 0, "agent-a", "u1", "gpt-4o", 100, 0.1),
-            row("sess-err", 1200, 1400, 2, "agent-b", "u2", "claude", 200, 0.2),
             row(
-                "sess-mix",
-                1400,
-                1500,
-                1,
-                "agent-a",
-                "u1",
-                "claude",
-                50,
-                0.05,
+                "sess-ok", 1100, 1150, 0, "agent-a", "u1", "gpt-4o", 100, 0.1,
             ),
             row(
-                "sess-old",
-                50,
-                60,
-                9,
-                "agent-a",
-                "u1",
-                "gpt-4o",
-                999,
-                9.0,
+                "sess-err", 1200, 1400, 2, "agent-b", "u2", "claude", 200, 0.2,
             ),
+            row(
+                "sess-mix", 1400, 1500, 1, "agent-a", "u1", "claude", 50, 0.05,
+            ),
+            row("sess-old", 50, 60, 9, "agent-a", "u1", "gpt-4o", 999, 9.0),
         ],
     )
     .await
@@ -126,10 +112,7 @@ async fn seed_filter_fixture(pool: &Pool, schema: &str) {
 }
 
 fn ids(resp: &crate::api::llm::query::SessionSearchResponse) -> Vec<&str> {
-    resp.items
-        .iter()
-        .map(|s| s.session_id.as_str())
-        .collect()
+    resp.items.iter().map(|s| s.session_id.as_str()).collect()
 }
 
 #[tokio::test]
@@ -273,10 +256,7 @@ async fn postgres_session_summary_list_cursor_and_orders() {
         .await
         .expect("tie");
     assert!(
-        after
-            .items
-            .iter()
-            .any(|s| s.session_id == "tie-a"),
+        after.items.iter().any(|s| s.session_id == "tie-a"),
         "session_id tiebreak must include tie-a after tie-b: {:?}",
         ids(&after)
     );
@@ -400,11 +380,9 @@ async fn postgres_session_summary_list_corner_cases() {
     req = base_req(1000, 2000);
     req.user_id = Some("u'1".into());
     assert_eq!(
-        ids(
-            &search_session_summary(&pool, schema, &req, 50)
-                .await
-                .expect("quoted user")
-        ),
+        ids(&search_session_summary(&pool, schema, &req, 50)
+            .await
+            .expect("quoted user")),
         vec!["quote-sess"]
     );
 

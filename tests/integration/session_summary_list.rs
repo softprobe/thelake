@@ -354,7 +354,9 @@ async fn ingest_filter_fixture(router: &Router) {
             span.name = spec.agent.to_string();
             span.span_id = vec![0xc0 + i as u8; 8];
             span.attributes.retain(|kv| {
-                kv.key == sp::SESSION_ID || kv.key == sp::OBSERVATION_TYPE || kv.key == sp::AGENT_NAME
+                kv.key == sp::SESSION_ID
+                    || kv.key == sp::OBSERVATION_TYPE
+                    || kv.key == sp::AGENT_NAME
             });
             for kv in &mut span.attributes {
                 if kv.key == sp::OBSERVATION_TYPE {
@@ -658,11 +660,7 @@ async fn http_session_summary_invalid_cursor_and_order_return_400() {
     body["order"] = json!("desc");
     body["cursor"] = json!(cursor.clone());
     let (status, v) = search_raw(&router, body).await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "cursor+error_count: {v}"
-    );
+    assert_eq!(status, StatusCode::BAD_REQUEST, "cursor+error_count: {v}");
 
     let mut body = window();
     body["order"] = json!("asc");

@@ -52,9 +52,8 @@ pub async fn search_session_summary(
 
     let mut items = Vec::with_capacity(rows.len());
     for row in &rows {
-        items.push(
-            map_pg_summary_row(row).map_err(|e| SessionSummaryListError::Storage(e.into()))?,
-        );
+        items
+            .push(map_pg_summary_row(row).map_err(|e| SessionSummaryListError::Storage(e.into()))?);
     }
 
     let next_cursor = if cursor_supported {

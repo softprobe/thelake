@@ -26,10 +26,7 @@ pub fn compile_session_summary_list_sql(
     }
 
     let mut predicates = vec![
-        format!(
-            "start_time >= {}",
-            pg_timestamptz_literal(&request.from)
-        ),
+        format!("start_time >= {}", pg_timestamptz_literal(&request.from)),
         format!("start_time <= {}", pg_timestamptz_literal(&request.to)),
     ];
 
@@ -44,26 +41,17 @@ pub fn compile_session_summary_list_sql(
         .as_deref()
         .filter(|v| !v.trim().is_empty())
     {
-        predicates.push(format!(
-            "agent_name = {}",
-            sql_string_literal(agent.trim())
-        ));
+        predicates.push(format!("agent_name = {}", sql_string_literal(agent.trim())));
     }
     if let Some(user_id) = request.user_id.as_deref().filter(|v| !v.trim().is_empty()) {
-        predicates.push(format!(
-            "user_id = {}",
-            sql_string_literal(user_id.trim())
-        ));
+        predicates.push(format!("user_id = {}", sql_string_literal(user_id.trim())));
     }
     if let Some(model) = request
         .model_name
         .as_deref()
         .filter(|v| !v.trim().is_empty())
     {
-        predicates.push(format!(
-            "model_name = {}",
-            sql_string_literal(model.trim())
-        ));
+        predicates.push(format!("model_name = {}", sql_string_literal(model.trim())));
     }
 
     if let Some(cursor) = request.cursor.as_deref().filter(|v| !v.is_empty()) {
@@ -134,11 +122,7 @@ fn pg_timestamptz_literal(value: &chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// Keyset cursor for Postgres TIMESTAMPTZ (not DuckDB TIMESTAMP_NS).
-fn pg_cursor_predicate(
-    cursor: &str,
-    timestamp_col: &str,
-    id_col: &str,
-) -> Result<String, String> {
+fn pg_cursor_predicate(cursor: &str, timestamp_col: &str, id_col: &str) -> Result<String, String> {
     let decoded = decode_cursor(cursor)?;
     let ts = pg_timestamptz_literal(&decoded.t);
     Ok(format!(
