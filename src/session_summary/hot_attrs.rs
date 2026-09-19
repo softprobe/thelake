@@ -62,6 +62,18 @@ pub async fn ensure_product_hot_attrs_for_scope(
     if active_covers_required(&active) {
         return Ok(());
     }
+    // Do not clobber an operator-applied traces promotion that happens to omit
+    // some reduce-required cols (resolve_scope / rebuild call this repeatedly).
+    let has_traces = active
+        .iter()
+        .any(|m| m.target.tables.contains(&TelemetryTable::Traces));
+    if has_traces {
+        tracing::warn!(
+            schema = %scope.metadata_schema,
+            "active traces promotion_specs missing reduce-required hot cols; leaving in place"
+        );
+        return Ok(());
+    }
     // Validate shipped yaml still parses before activating.
     let _ = traces_hot_manifest()?;
     let tables = vec![TRACES_TABLE.to_string()];
