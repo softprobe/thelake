@@ -344,7 +344,6 @@ async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
     config.ducklake.metadata_schema = schema.clone();
     config.ducklake.data_path = temp.path().join("data").to_string_lossy().into();
     config.ingest.flush_interval_seconds = 2;
-    config.session_summary.enabled = true;
     let config = Arc::new(config);
 
     let Some(resolver) = DuckLakeScopeResolver::connect(&config)

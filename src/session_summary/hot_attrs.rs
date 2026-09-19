@@ -1,4 +1,4 @@
-//! Ensure canonical product-hot traces promotions when session_summary is enabled.
+//! Ensure canonical product-hot traces promotions for postgres session_summary.
 
 use crate::api::llm::query::llm_promo;
 use crate::promotion::{
@@ -60,6 +60,18 @@ pub async fn ensure_product_hot_attrs_for_scope(
         .await
         .map_err(|e| anyhow::anyhow!("load active telemetry promotions: {e}"))?;
     if active_covers_required(&active) {
+        return Ok(());
+    }
+    // Do not clobber an operator-applied traces promotion that happens to omit
+    // some reduce-required cols (resolve_scope / rebuild call this repeatedly).
+    let has_traces = active
+        .iter()
+        .any(|m| m.target.tables.contains(&TelemetryTable::Traces));
+    if has_traces {
+        tracing::warn!(
+            schema = %scope.metadata_schema,
+            "active traces promotion_specs missing reduce-required hot cols; leaving in place"
+        );
         return Ok(());
     }
     // Validate shipped yaml still parses before activating.

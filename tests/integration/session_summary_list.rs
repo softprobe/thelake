@@ -43,9 +43,7 @@ fn postgres_summary_config(temp: &TempDir, metadata_schema: String) -> Config {
     config.ducklake.data_inlining_row_limit = Some(0);
 
     config.ingest.flush_interval_seconds = 2;
-    config.session_summary.enabled = true;
-    // Fixture spans are recent; keep default clamp. Historical fixed epochs
-    // would fall outside max_reduce_span_seconds (clamped to now).
+    // Postgres catalog ⇒ session_summary always active.
     config
 }
 
@@ -402,54 +400,6 @@ async fn http_session_summary_empty_before_reduce_ignores_lake() {
     assert!(
         v["items"].as_array().unwrap().is_empty(),
         "pre-reduce must not fall back to lake: {v}"
-    );
-}
-
-#[tokio::test]
-async fn http_session_summary_enabled_false_still_no_lake_fallback() {
-    let suffix = Uuid::new_v4().to_string().replace('-', "_");
-    let schema = format!("thelake_ss_http_dis_{suffix}");
-    if !pg_reachable().await {
-        eprintln!("skip: ducklake-postgres not reachable");
-        return;
-    }
-    let temp = TempDir::new().expect("tempdir");
-    let mut config = postgres_summary_config(&temp, schema.clone());
-    config.session_summary.enabled = false;
-    let config = Arc::new(config);
-    let (router, state) = softprobe_runtime::api::create_router(
-        config,
-        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
-
-    let registry = state.engines.scope_registry().expect("postgres registry");
-    let client = registry.pool().get().await.expect("pg client");
-    ensure_session_summary_tables(&client, &schema)
-        .await
-        .expect("ensure summary ddl");
-    let q = format!("\"{}\"", schema.replace('"', "\"\""));
-    let _ = client
-        .execute(
-            &format!("TRUNCATE {q}.session_summary, {q}.session_summary_dirty"),
-            &[],
-        )
-        .await;
-
-    ingest(&router, llm_span(&filter_fixture()[0])).await;
-    flush(&state).await;
-    assert_eq!(
-        dirty_count(&state, &schema).await,
-        0,
-        "enabled=false must not dirty"
-    );
-
-    let v = search(&router, window()).await;
-    assert!(
-        v["items"].as_array().unwrap().is_empty(),
-        "enabled=false must still read session_summary (empty), never lake: {v}"
     );
 }
 

@@ -271,16 +271,27 @@ pub async fn contract_apply_ingest_query<B: PromotionContractBackend + Sync>(bac
 }
 
 pub async fn contract_update_and_idempotency<B: PromotionContractBackend + Sync>(backend: &B) {
+    // Postgres may already have product hot-attrs active (session_summary always on).
+    let inactive_before = backend.inactive_telemetry_count().await;
+    let active_before = backend.active_telemetry_count().await;
+
     assert_eq!(apply_manifest(backend, MANIFEST_V1).await.0, StatusCode::OK);
     assert_eq!(apply_manifest(backend, MANIFEST_V1).await.0, StatusCode::OK);
     assert_eq!(backend.active_telemetry_count().await, 1);
-    assert_eq!(backend.inactive_telemetry_count().await, 0);
+    // First V1 retires any prior active telemetry_columns (e.g. hot-attrs seed).
+    assert_eq!(
+        backend.inactive_telemetry_count().await,
+        inactive_before + active_before
+    );
 
     assert_eq!(apply_manifest(backend, MANIFEST_V2).await.0, StatusCode::OK);
     assert!(backend.column_exists("traces", "service_name").await);
     assert!(backend.column_exists("traces", "division_name").await);
     assert_eq!(backend.active_telemetry_count().await, 1);
-    assert_eq!(backend.inactive_telemetry_count().await, 1);
+    assert_eq!(
+        backend.inactive_telemetry_count().await,
+        inactive_before + active_before + 1
+    );
 
     let session = format!("contract-v2-{}", Uuid::new_v4());
     assert_eq!(
@@ -295,6 +306,10 @@ pub async fn contract_update_and_idempotency<B: PromotionContractBackend + Sync>
 
     assert_eq!(apply_manifest(backend, MANIFEST_V2).await.0, StatusCode::OK);
     assert_eq!(backend.active_telemetry_count().await, 1);
+    assert_eq!(
+        backend.inactive_telemetry_count().await,
+        inactive_before + active_before + 1
+    );
 }
 
 pub async fn contract_shrink_safe<B: PromotionContractBackend + Sync>(backend: &B) {

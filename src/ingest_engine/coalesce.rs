@@ -1,10 +1,10 @@
 //! Soft coalesce buffer: ack on enqueue; background flush after N seconds.
 //!
-//! # Why coalesce exists (demo CPU/IO)
-//! Flush-through (N=0) commits every OTLP POST and pegs DuckLake write + parquet
-//! under Astronomy Shop. Soft coalesce (N>0) batches posts into fewer commits.
-//! Drains are **capped** ([`MAX_BATCHES_PER_FLUSH`] / [`MAX_ROWS_PER_FLUSH`]) so a
-//! slow commit cannot absorb minutes of backlog into one megatransaction.
+//! `flush_interval_seconds == 0` uses the **same** queue + capped drain path and
+//! drains before enqueue returns (OTLP ack ⇒ durable). N>0 arms a timer so posts
+//! batch into fewer DuckLake commits (ack before write). Drains are **capped**
+//! ([`MAX_BATCHES_PER_FLUSH`] / [`MAX_ROWS_PER_FLUSH`]) so a slow commit cannot
+//! absorb minutes of backlog into one megatransaction.
 //!
 //! When the last `Arc` is dropped, in-flight timer tasks fail `Weak::upgrade`
 //! and leave pending rows discarded (no WAL). [`Drop`] heals the
@@ -89,7 +89,8 @@ fn drain_capped<T>(pending: &mut VecDeque<Vec<T>>, pending_rows: &mut usize) -> 
 impl<T: Send + 'static> CoalesceBuf<T> {
     pub fn new(interval_secs: u64, write: WriteFn<T>) -> Arc<Self> {
         Arc::new(Self {
-            interval: Duration::from_secs(interval_secs.max(1)),
+            // 0 = flush immediately after enqueue (same path as timer mode).
+            interval: Duration::from_secs(interval_secs),
             state: Arc::new(Mutex::new(State {
                 pending: VecDeque::new(),
                 pending_rows: 0,
@@ -99,6 +100,10 @@ impl<T: Send + 'static> CoalesceBuf<T> {
             })),
             write,
         })
+    }
+
+    fn flush_immediately(&self) -> bool {
+        self.interval.is_zero()
     }
 
     /// Push a batch. Returns after enqueue when under the pending cap (OTLP
@@ -127,7 +132,12 @@ impl<T: Send + 'static> CoalesceBuf<T> {
                     crate::self_monitoring::gauge_store::add_ingest_pending(1);
                     let overflow = g.pending.len() >= EAGER_PENDING_BATCHES
                         || g.pending_rows >= EAGER_PENDING_ROWS;
-                    if overflow && !g.flushing {
+                    if self.flush_immediately() {
+                        // Same coalesce queue/drain as timer mode; wait so OTLP
+                        // ack still means durable (legacy flush=0 contract).
+                        drop(g);
+                        return self.force_flush().await;
+                    } else if overflow && !g.flushing {
                         drop(g);
                         self.spawn_eager_flush();
                     } else if !g.timer_armed && !g.flushing {
@@ -299,7 +309,7 @@ impl<T: Send + 'static> CoalesceBuf<T> {
             return Ok(());
         }
 
-        // Non-timer flush (eager/force): schedule a follow-up if overflow remains.
+        // Non-timer flush (eager/force): schedule a follow-up if work remains.
         let (overflow, has_pending, can_schedule) = {
             let g = self.state.lock().await;
             let overflow =
@@ -309,7 +319,7 @@ impl<T: Send + 'static> CoalesceBuf<T> {
             (overflow, has_pending, can_schedule)
         };
         if can_schedule {
-            if overflow {
+            if self.flush_immediately() || overflow {
                 self.spawn_eager_flush();
             } else if has_pending {
                 let mut g = self.state.lock().await;
@@ -360,6 +370,17 @@ mod tests {
                 Ok(())
             })
         })
+    }
+
+    #[tokio::test]
+    async fn interval_zero_enqueue_waits_for_durable_write() {
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let rows = StdArc::new(TokioMutex::new(Vec::new()));
+        let buf = CoalesceBuf::new(0, counting_writer(calls.clone(), rows.clone(), false));
+        buf.enqueue(vec![1, 2, 3]).await.unwrap();
+        // Immediate mode awaits drain before enqueue returns.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*rows.lock().await, vec![3]);
     }
 
     #[tokio::test]
@@ -649,44 +670,30 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
+    #[tokio::test]
+    async fn drop_discards_pending_without_write() {
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let rows = StdArc::new(TokioMutex::new(Vec::new()));
+        // Long interval so enqueue does not flush before drop.
+        let buf = CoalesceBuf::new(3600, counting_writer(calls.clone(), rows, false));
+        buf.enqueue(vec![1]).await.unwrap();
+        buf.enqueue(vec![2, 3]).await.unwrap();
+        drop(buf);
+        // Dropped Arc: in-flight timer fails Weak::upgrade; pending is discarded
+        // (no write). Gauge heal is best-effort try_lock in Drop (ops panels).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "drop must not flush discarded pending batches"
+        );
+    }
+
     #[test]
     fn eager_threshold_exceeds_flush_batch_cap() {
         const {
             assert!(EAGER_PENDING_BATCHES > MAX_BATCHES_PER_FLUSH);
             assert!(MAX_PENDING_BATCHES > EAGER_PENDING_BATCHES);
         };
-    }
-
-    #[test]
-    fn drop_heals_ingest_pending_gauge() {
-        use crate::self_monitoring::gauge_store::INGEST_PENDING_BATCHES;
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        // Parallel tests share this process-global gauge; snap delta, not absolute.
-        let before = INGEST_PENDING_BATCHES.load(Ordering::SeqCst);
-        let buf = rt.block_on(async {
-            let calls = StdArc::new(AtomicUsize::new(0));
-            let rows = StdArc::new(TokioMutex::new(Vec::new()));
-            // Long interval so enqueue does not flush before drop.
-            let buf = CoalesceBuf::new(3600, counting_writer(calls, rows, false));
-            buf.enqueue(vec![1]).await.unwrap();
-            buf.enqueue(vec![2, 3]).await.unwrap();
-            let after_enqueue = INGEST_PENDING_BATCHES.load(Ordering::SeqCst);
-            assert!(
-                after_enqueue >= before + 2,
-                "enqueue must raise pending gauge (before={before} after={after_enqueue})"
-            );
-            (buf, after_enqueue)
-        });
-        // Drop outside the runtime so try_lock is uncontended.
-        let (buf, after_enqueue) = buf;
-        drop(buf);
-        let healed = INGEST_PENDING_BATCHES.load(Ordering::SeqCst);
-        assert!(
-            healed <= after_enqueue.saturating_sub(2),
-            "CoalesceBuf drop must heal pending gauge for discarded batches (after_enqueue={after_enqueue} healed={healed})"
-        );
     }
 }

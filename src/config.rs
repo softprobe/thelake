@@ -32,12 +32,11 @@ pub struct Config {
     pub self_monitoring: SelfMonitoringConfig,
 }
 
-/// Session list summary config (`enabled` requires coalesce + postgres catalog).
+/// Session list summary knobs. Always active when `ducklake.catalog_type=postgres`
+/// (dirty + reduce + rebuild + hot-attrs). Sqlite keeps lake `GROUP BY` list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummaryConfig {
-    #[serde(default)]
-    pub enabled: bool,
     /// Wake interval for `session_summary.reduce` on the shared async job runner.
     #[serde(default = "default_reducer_interval_ms")]
     pub reducer_interval_ms: u64,
@@ -55,7 +54,6 @@ pub struct SessionSummaryConfig {
 impl Default for SessionSummaryConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             reducer_interval_ms: default_reducer_interval_ms(),
             rebuild_interval_ms: default_rebuild_interval_ms(),
             max_sessions_per_reduce: default_max_sessions_per_reduce(),
@@ -81,33 +79,38 @@ fn default_max_reduce_span_seconds() -> u64 {
 }
 
 impl SessionSummaryConfig {
-    /// `enabled` requires soft coalesce, postgres catalog, and positive reducer knobs.
-    pub fn validate(&self, ingest: &IngestConfig, ducklake: &DuckLakeConfig) -> anyhow::Result<()> {
-        if !self.enabled {
+    /// True when the catalog can host `session_summary` (postgres only).
+    pub fn active_for(ducklake: &DuckLakeConfig) -> bool {
+        ducklake.catalog_type == "postgres"
+    }
+
+    /// Postgres catalogs require positive reducer/rebuild knobs.
+    /// `ingest.flush_interval_seconds` may be 0 (immediate coalesce drain) or >0
+    /// (timer); both mark dirty on the same coalesce write path.
+    /// Sqlite: no-op (summary inactive).
+    pub fn validate(
+        &self,
+        _ingest: &IngestConfig,
+        ducklake: &DuckLakeConfig,
+    ) -> anyhow::Result<()> {
+        if !Self::active_for(ducklake) {
             return Ok(());
         }
-        if ingest.flush_interval_seconds == 0 {
-            anyhow::bail!(
-                "session_summary.enabled requires ingest.flush_interval_seconds > 0 (soft coalesce)"
-            );
-        }
-        if ducklake.catalog_type != "postgres" {
-            anyhow::bail!(
-                "session_summary.enabled requires ducklake.catalog_type=postgres (got {})",
-                ducklake.catalog_type
-            );
-        }
         if self.reducer_interval_ms == 0 {
-            anyhow::bail!("session_summary.reducer_interval_ms must be > 0 when enabled");
+            anyhow::bail!("session_summary.reducer_interval_ms must be > 0 for postgres catalog");
         }
         if self.rebuild_interval_ms == 0 {
-            anyhow::bail!("session_summary.rebuild_interval_ms must be > 0 when enabled");
+            anyhow::bail!("session_summary.rebuild_interval_ms must be > 0 for postgres catalog");
         }
         if self.max_sessions_per_reduce == 0 {
-            anyhow::bail!("session_summary.max_sessions_per_reduce must be > 0 when enabled");
+            anyhow::bail!(
+                "session_summary.max_sessions_per_reduce must be > 0 for postgres catalog"
+            );
         }
         if self.max_reduce_span_seconds == 0 {
-            anyhow::bail!("session_summary.max_reduce_span_seconds must be > 0 when enabled");
+            anyhow::bail!(
+                "session_summary.max_reduce_span_seconds must be > 0 for postgres catalog"
+            );
         }
         Ok(())
     }
@@ -210,11 +213,11 @@ fn default_self_monitoring_ops_data_path() -> String {
     "s3://warehouse/_thelake_ops/".to_string()
 }
 
-/// Soft coalesce window for OTLP ingest. `0` = flush-through (commit before ack).
+/// Soft coalesce window for OTLP ingest (`0` = drain before ack returns).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestConfig {
-    /// Seconds to hold rows in memory before one DuckLake write. `0` disables the buffer.
+    /// Seconds to hold rows before a capped DuckLake drain. `0` = drain before ack.
     #[serde(default = "default_ingest_flush_interval_seconds")]
     pub flush_interval_seconds: u64,
 }
@@ -875,18 +878,17 @@ ducklake:
     #[test]
     fn session_summary_defaults_reducer_knobs() {
         let c = Config::default();
-        assert!(!c.session_summary.enabled);
         assert_eq!(c.session_summary.reducer_interval_ms, 10_000);
         assert_eq!(c.session_summary.rebuild_interval_ms, 86_400_000);
         assert_eq!(c.session_summary.max_sessions_per_reduce, 1000);
         assert_eq!(c.session_summary.max_reduce_span_seconds, 604_800);
+        assert!(!super::SessionSummaryConfig::active_for(&c.ducklake)); // default sqlite
     }
 
     #[test]
-    fn session_summary_enabled_rejects_zero_reducer_interval() {
+    fn session_summary_postgres_rejects_zero_reducer_interval() {
         let mut c = Config::default();
         c.ducklake.catalog_type = "postgres".to_string();
-        c.session_summary.enabled = true;
         c.ingest.flush_interval_seconds = 2;
         c.session_summary.reducer_interval_ms = 0;
         let err = c
@@ -897,50 +899,36 @@ ducklake:
     }
 
     #[test]
-    fn session_summary_enabled_rejects_flush_through() {
+    fn session_summary_postgres_ok_with_immediate_flush() {
         let mut c = Config::default();
         c.ducklake.catalog_type = "postgres".to_string();
-        c.session_summary.enabled = true;
         c.ingest.flush_interval_seconds = 0;
-        let err = c
-            .session_summary
+        c.session_summary
             .validate(&c.ingest, &c.ducklake)
-            .expect_err("flush 0");
-        assert!(err.to_string().contains("flush_interval_seconds"));
+            .expect("flush 0 uses same coalesce path");
+        assert!(super::SessionSummaryConfig::active_for(&c.ducklake));
     }
 
     #[test]
-    fn session_summary_enabled_rejects_non_postgres() {
+    fn session_summary_sqlite_skips_knob_validation() {
         let mut c = Config::default();
         c.ducklake.catalog_type = "sqlite".to_string();
-        c.session_summary.enabled = true;
-        c.ingest.flush_interval_seconds = 2;
-        let err = c
-            .session_summary
+        c.ingest.flush_interval_seconds = 0;
+        c.session_summary.reducer_interval_ms = 0;
+        c.session_summary
             .validate(&c.ingest, &c.ducklake)
-            .expect_err("sqlite");
-        assert!(err.to_string().contains("postgres"));
+            .expect("sqlite inactive");
     }
 
     #[test]
-    fn session_summary_enabled_ok_with_coalesce_postgres() {
+    fn session_summary_postgres_ok_with_coalesce() {
         let mut c = Config::default();
         c.ducklake.catalog_type = "postgres".to_string();
-        c.session_summary.enabled = true;
         c.ingest.flush_interval_seconds = 2;
         c.session_summary
             .validate(&c.ingest, &c.ducklake)
             .expect("ok");
-    }
-
-    #[test]
-    fn session_summary_disabled_allows_flush_through() {
-        let mut c = Config::default();
-        c.session_summary.enabled = false;
-        c.ingest.flush_interval_seconds = 0;
-        c.session_summary
-            .validate(&c.ingest, &c.ducklake)
-            .expect("disabled ok");
+        assert!(super::SessionSummaryConfig::active_for(&c.ducklake));
     }
 
     #[test]

@@ -59,7 +59,7 @@ Must complete before Stage 1 reduce/rebuild jobs. **Blocks Stages 1–4.**
 
 Depends on **A** for “where DDL lives” conventions; dirty UPSERT itself does **not** need the runner. Prefer after A.2 so catalog patterns match.
 
-- [x] **1.1** Config: `session_summary.*` + gate: `session_summary.enabled` ⇒ reject if `ingest.flush_interval_seconds == 0`
+- [x] **1.1** Config: `session_summary.*` knobs; postgres catalog ⇒ always on; coalesce handles flush 0 and >0 alike
 - [x] **1.2** Per-tenant DDL: `session_summary` + indexes (list cursor / filters)
 - [x] **1.3** Per-tenant DDL: `session_summary_dirty` (`PRIMARY KEY (session_id)`)
 - [x] **1.4** Ensure tables on tenant bootstrap / scope ensure path (same pattern as other catalog tables)
@@ -67,7 +67,7 @@ Depends on **A** for “where DDL lives” conventions; dirty UPSERT itself does
 - [x] **1.6** Dirty UPSERT best-effort: log + metric on failure; **do not** fail ingest
 - [x] **1.7** Metrics: `dirty_upserts` ≈ flush count (not span count); `dirty_upsert_errors` (no depth gauge in Stage 1 — depth is Stage 2)
 - [x] **1.8** Tests: full matrix — config gates; fold empty/single/multi/missing session_id; LEAST/GREATEST merge; ensure idempotent; coalesce flush → dirty rows; lake Err → no dirty; dirty Err → ingest still Ok; disabled → no dirty
-- [x] **1.9** DRY: single post-traces-commit hook on coalesce spans writer only (flush-through is unreachable when enabled); no duplicated fold/UPSERT
+- [x] **1.9** DRY: single post-traces-commit hook on coalesce spans writer (one mode for flush 0 and >0); no duplicated fold/UPSERT
 
 ---
 
@@ -85,7 +85,7 @@ Depends on **A** + **1**.
 - [x] **2.8** Tests: field-accuracy DuckDB matrix + postgres claim/ack/upsert; concurrent dirty mid-reduce not lost
 - [x] **2.9** **[P]** Metrics: reducer lag, sessions/reduce; dirty depth gauge (Postgres `count(*)` on claim)
 
-**Stage 2 notes (2026-09-18):** Implemented on `feat/session-summary-reduce`. Promoted-only reduce SQL (zero `attributes` MAP). Canonical `traces-query-hot-attrs.yaml` ensured when `session_summary.enabled`. Clamp (not chunk) for oversized windows.
+**Stage 2 notes (2026-09-18):** Implemented on `feat/session-summary-reduce`. Promoted-only reduce SQL (zero `attributes` MAP). Canonical `traces-query-hot-attrs.yaml` ensured on postgres scope ensure. Clamp (not chunk) for oversized windows.
 
 | Task | Evidence |
 |---|---|
@@ -104,7 +104,7 @@ Depends on **2** (summary must be populated). Stage **0** should already be done
 
 - [x] **3.1** `POST /v1/llm/sessions/search` reads `session_summary` (cursor `(start_time, session_id)` desc)
 - [x] **3.2** Filters: time range, agent, has-errors (match current list contract)
-- [x] **3.3** No lake fallback on Postgres: list always `session_summary` (empty → empty). `enabled` gates dirty/reduce only; sqlite keeps lake as sole store
+- [x] **3.3** No lake fallback on Postgres: list always `session_summary` (empty → empty). Postgres ⇒ summary always on; sqlite keeps lake as sole store
 - [x] **3.4** Detail paths unchanged (still `traces` / lake)
 - [x] **3.5** API / Explorer contract tests: list p95 independent of span volume in window
 - [x] **3.6** **[P]** Update Explorer/docs for summary-backed list behavior
@@ -144,7 +144,7 @@ Depends on **2**/**3** working.
 
 Stage 5’s original wording (“promote so reducer prefers typed over MAP”) was **executed in Stage 2**:
 - `reduce_sql` is promoted-only (hard ban on `attributes` / MAP).
-- `traces-query-hot-attrs.yaml` auto-activates when `session_summary.enabled`.
+- `traces-query-hot-attrs.yaml` auto-activates on postgres scope ensure.
 - List filters already hit typed `session_summary` columns.
 - `agent_name` is **auth column** or agent-observation `message_type` — bag `sp.agent.name` is ignored by reduce **by design** (not a missing promotion).
 
@@ -162,7 +162,7 @@ Stage 5’s original wording (“promote so reducer prefers typed over MAP”) w
 - [x] **5.2** Evidence matrix (all must pass):
   - reduce SQL contains **no** `attributes` / `resource_attributes` / bag key literals (`attr_keys` constants in asserts)
   - `REQUIRED_TRACES_HOT_COLS` ⊆ canonical yaml (single source via `llm_promo().reduce_required_cols()`)
-  - `session_summary.enabled` ensure path activates yaml when required cols missing
+  - postgres ensure path activates yaml when required cols missing
   - **Negative:** MAP-only tokens/user/model/agent → summary fields stay NULL/0 (prove no secret MAP extract)
   - **Positive:** auth `agent_name` and agent `message_type` still win (reuse accuracy fixtures; don’t duplicate)
   - list SQL predicates stay typed-only (existing lock)
@@ -187,7 +187,7 @@ Depends on Stages **0**, **A**, **1–4** (and **0b** if compilers changed).
   - Lease shared module: Stage A + reduce/rebuild on `spawn_runner`
 - [x] **V.2** Success criteria in `async-jobs.md` §12 checked for Stage A (multi-replica lease + MemoryLeaseStore); criteria 2–4 wait on Stage C
 - [x] **V.3** Dirty UPSERT rate ≈ lake flush rate, not span rate
-  - Evidence: dirty after coalesce flush only (`http_session_summary_*` + dirty mark-after-commit tests); soft coalesce required when enabled
+  - Evidence: dirty after coalesce flush only (`http_session_summary_*` + dirty mark-after-commit tests); flush 0 and >0 share coalesce path
 - [x] **V.4** No reducer/rebuild SQL without `record_date` + timestamp bounds
   - Evidence: `reduce_sql::tests::{reduce_sql_has_pushdown_and_no_attributes,rebuild_sql_window_wide_no_in_list}`
 - [x] **V.5** Workspace / thelake test gate green for touched crates

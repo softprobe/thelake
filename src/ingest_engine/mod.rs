@@ -1,10 +1,11 @@
-//! Soft coalesce + flush-through ingest for one tenant-bound [`Storage`].
+//! Soft coalesce ingest for one tenant-bound [`Storage`].
 //!
 //! # CPU / PromQL coupling
-//! When `flush_interval_seconds > 0`, OTLP acks on enqueue and a timer drains
-//! capped batches into DuckLake. PromQL range answers stay in the HTTP cache
-//! across commits (TTL + start/end buckets); wiping that cache on every flush
-//! forced dashboard refreshes to re-scan Parquet and pegged query CPU.
+//! OTLP uses one coalesce path: `flush_interval_seconds == 0` drains before
+//! ack returns; `N > 0` acks on enqueue and a timer writes capped batches into
+//! DuckLake. PromQL range answers stay in the HTTP cache across commits (TTL +
+//! start/end buckets); wiping that cache on every flush forced dashboard
+//! refreshes to re-scan Parquet and pegged query CPU.
 
 mod coalesce;
 
@@ -23,11 +24,10 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct IngestEngine {
     storage: Arc<Storage>,
-    tenant_id: String,
     flush_interval_seconds: u64,
-    logs: Option<Arc<CoalesceBuf<Log>>>,
-    spans: Option<Arc<CoalesceBuf<Span>>>,
-    metrics: Option<Arc<CoalesceBuf<Metric>>>,
+    logs: Arc<CoalesceBuf<Log>>,
+    spans: Arc<CoalesceBuf<Span>>,
+    metrics: Arc<CoalesceBuf<Metric>>,
 }
 
 impl IngestEngine {
@@ -38,7 +38,7 @@ impl IngestEngine {
         session_summary_dirty: Option<Arc<SessionSummaryDirty>>,
     ) -> Self {
         let tenant_id = tenant_id.into();
-        let logs = (flush_interval_seconds > 0).then(|| {
+        let logs = {
             let w = storage.writer.clone();
             let tenant = tenant_id.clone();
             CoalesceBuf::new(
@@ -58,11 +58,11 @@ impl IngestEngine {
                     })
                 }),
             )
-        });
-        let spans = (flush_interval_seconds > 0).then(|| {
+        };
+        let spans = {
             let w = storage.writer.clone();
             let tenant = tenant_id.clone();
-            let dirty = session_summary_dirty.clone();
+            let dirty = session_summary_dirty;
             CoalesceBuf::new(
                 flush_interval_seconds,
                 Arc::new(move |batches| {
@@ -89,10 +89,10 @@ impl IngestEngine {
                     })
                 }),
             )
-        });
-        let metrics = (flush_interval_seconds > 0).then(|| {
+        };
+        let metrics = {
             let w = storage.writer.clone();
-            let tenant = tenant_id.clone();
+            let tenant = tenant_id;
             CoalesceBuf::new(
                 flush_interval_seconds,
                 Arc::new(move |batches| {
@@ -113,10 +113,9 @@ impl IngestEngine {
                     })
                 }),
             )
-        });
+        };
         Self {
             storage,
-            tenant_id,
             flush_interval_seconds,
             logs,
             spans,
@@ -132,85 +131,33 @@ impl IngestEngine {
         if items.is_empty() {
             return Ok(());
         }
-        if let Some(buf) = &self.spans {
-            buf.enqueue(items).await
-        } else {
-            // Flush-through: session_summary.enabled is rejected when flush==0, so
-            // dirty is never wired here (no second dirty call site).
-            let rows = items.len() as u64;
-            let r = self.storage.writer.write_span_batches(vec![items]).await;
-            if r.is_ok() {
-                crate::self_monitoring::record_ingest_commit(
-                    &self.tenant_id,
-                    "traces",
-                    rows,
-                    false,
-                );
-            }
-            r
-        }
+        self.spans.enqueue(items).await
     }
 
     pub async fn add_logs(&self, items: Vec<Log>, _request_size: usize) -> Result<()> {
         if items.is_empty() {
             return Ok(());
         }
-        if let Some(buf) = &self.logs {
-            buf.enqueue(items).await
-        } else {
-            let rows = items.len() as u64;
-            let r = self.storage.writer.write_log_batches(vec![items]).await;
-            if r.is_ok() {
-                crate::self_monitoring::record_ingest_commit(&self.tenant_id, "logs", rows, false);
-            }
-            r
-        }
+        self.logs.enqueue(items).await
     }
 
     pub async fn add_metrics(&self, items: Vec<Metric>, _request_size: usize) -> Result<()> {
         if items.is_empty() {
             return Ok(());
         }
-        if let Some(buf) = &self.metrics {
-            buf.enqueue(items).await
-        } else {
-            let rows = items.len() as u64;
-            let r = self.storage.writer.write_metric_batches(vec![items]).await;
-            if r.is_ok() {
-                crate::self_monitoring::record_ingest_commit(
-                    &self.tenant_id,
-                    "metrics",
-                    rows,
-                    false,
-                );
-                crate::compat::prometheus::invalidate_range_result_cache();
-            }
-            r
-        }
+        self.metrics.enqueue(items).await
     }
 
     pub async fn force_flush_spans(&self) -> Result<()> {
-        if let Some(buf) = &self.spans {
-            buf.force_flush().await
-        } else {
-            Ok(())
-        }
+        self.spans.force_flush().await
     }
 
     pub async fn force_flush_logs(&self) -> Result<()> {
-        if let Some(buf) = &self.logs {
-            buf.force_flush().await
-        } else {
-            Ok(())
-        }
+        self.logs.force_flush().await
     }
 
     pub async fn force_flush_metrics(&self) -> Result<()> {
-        if let Some(buf) = &self.metrics {
-            buf.force_flush().await
-        } else {
-            Ok(())
-        }
+        self.metrics.force_flush().await
     }
 
     pub fn flush_interval_seconds(&self) -> u64 {
@@ -251,9 +198,8 @@ mod after_commit_tests {
     }
 
     #[test]
-    fn dirty_handle_none_when_disabled() {
-        let mut config = Config::default();
-        config.session_summary.enabled = false;
+    fn dirty_handle_none_when_sqlite_catalog() {
+        let config = Config::default(); // sqlite
         assert!(session_summary_dirty_for(&config, None, "t", "schema").is_none());
     }
 }
@@ -356,14 +302,14 @@ impl IngestPipeline {
     }
 }
 
-/// Build dirty handle when session_summary is enabled (implies coalesce + postgres).
+/// Build dirty handle when catalog is postgres (session_summary always on).
 pub fn session_summary_dirty_for(
     config: &Config,
     resolver: Option<&DuckLakeScopeResolver>,
     tenant_id: &str,
     metadata_schema: &str,
 ) -> Option<Arc<SessionSummaryDirty>> {
-    if !config.session_summary.enabled {
+    if !crate::config::SessionSummaryConfig::active_for(&config.ducklake) {
         return None;
     }
     let resolver = resolver?;
