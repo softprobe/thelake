@@ -1256,7 +1256,10 @@ pub fn compile_session_observations_sql(
     }
     Ok(format!(
         "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
-        projection = observation_projection(false),
+        // Product session detail (Explorer trajectory) needs sp.input / sp.output
+        // from attributes — skinny list left the page empty. Expand-on-demand was
+        // never wired on ProductSessionDetailView.
+        projection = observation_projection(true),
         where_sql = conditions.join(" AND "),
         fetch = limit + 1
     ))
@@ -2648,9 +2651,9 @@ mod tests {
     }
 
     #[test]
-    fn session_observations_list_is_skinny_without_attributes_events() {
-        // D14: list must not project full attributes/events columns (hot-key
-        // COALESCE may still touch attributes['…']; detail keeps payload cols).
+    fn session_observations_include_attributes_events_for_product_detail() {
+        // Explorer ProductSessionDetailView builds trajectory from sp.input /
+        // sp.output on the /observations page — payload must be present.
         let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -2660,12 +2663,12 @@ mod tests {
         let list = compile_session_observations_sql("sess-1", from, to, 10, None).unwrap();
         let payload = crate::storage::schema::variant::variant_as_json("attributes");
         assert!(
-            !list.contains(&payload),
-            "list must omit full attributes projection: {list}"
+            list.contains(&payload),
+            "session observations must project attributes: {list}"
         );
         assert!(
-            !list.contains(", events"),
-            "list must omit events column: {list}"
+            list.contains(", events"),
+            "session observations must project events: {list}"
         );
         let detail = compile_observation_detail_sql("span-1", from, to).unwrap();
         assert!(detail.contains(&payload), "detail keeps payload: {detail}");
