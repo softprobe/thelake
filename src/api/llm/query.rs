@@ -121,11 +121,13 @@ pub struct ObservationSummary {
 pub struct ObservationDetail {
     #[serde(flatten)]
     pub summary: ObservationSummary,
-    #[serde(default)]
+    /// Omitted when empty so skinny session lists stay distinguishable from
+    /// fat detail (Explorer expand keys off missing/undefined attributes).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub attributes: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scores: Vec<Score>,
 }
 
@@ -1254,7 +1256,7 @@ pub fn compile_session_observations_sql(
     }
     Ok(format!(
         "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
-        projection = observation_projection(true),
+        projection = observation_projection(false),
         where_sql = conditions.join(" AND "),
         fetch = limit + 1
     ))
@@ -2643,6 +2645,97 @@ mod tests {
             assert!(!sql.contains("2026-02-28"), "{sql}");
             assert!(!sql.contains("2026-03-02"), "{sql}");
         }
+    }
+
+    #[test]
+    fn session_observations_list_is_skinny_without_attributes_events() {
+        // D14: list must not project full attributes/events columns (hot-key
+        // COALESCE may still touch attributes['…']; detail keeps payload cols).
+        let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let list = compile_session_observations_sql("sess-1", from, to, 10, None).unwrap();
+        let payload = crate::storage::schema::variant::variant_as_json("attributes");
+        assert!(
+            !list.contains(&payload),
+            "list must omit full attributes projection: {list}"
+        );
+        assert!(
+            !list.contains(", events"),
+            "list must omit events column: {list}"
+        );
+        let detail = compile_observation_detail_sql("span-1", from, to).unwrap();
+        assert!(detail.contains(&payload), "detail keeps payload: {detail}");
+        assert!(detail.contains("events"), "detail keeps payload: {detail}");
+    }
+
+    #[test]
+    fn skinny_observation_detail_omits_empty_attributes_events_on_serialize() {
+        // D14 wire contract: empty bags must be absent so Explorer expand fires
+        // (`attributes != null` gate in SessionDetailView).
+        let skinny = ObservationDetail {
+            summary: ObservationSummary {
+                span_id: "sp-1".into(),
+                trace_id: "tr-1".into(),
+                parent_span_id: None,
+                session_id: Some("ses-1".into()),
+                name: "chat".into(),
+                observation_type: "span".into(),
+                start_time: Utc::now(),
+                end_time: None,
+                status_code: None,
+                model_name: None,
+                model_provider: None,
+                user_id: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                total_cost: None,
+            },
+            attributes: HashMap::new(),
+            events: Vec::new(),
+            scores: Vec::new(),
+        };
+        let json = serde_json::to_value(&skinny).expect("serialize");
+        assert!(
+            json.get("attributes").is_none(),
+            "empty attributes must be omitted: {json}"
+        );
+        assert!(
+            json.get("events").is_none(),
+            "empty events must be omitted: {json}"
+        );
+        let fat = ObservationDetail {
+            attributes: HashMap::from([("k".into(), "v".into())]),
+            events: vec![serde_json::json!({"name": "x"})],
+            ..skinny.clone()
+        };
+        let fat_json = serde_json::to_value(&fat).expect("serialize fat");
+        assert_eq!(fat_json["attributes"]["k"], "v");
+        assert!(fat_json["events"].is_array());
+    }
+
+    #[test]
+    fn one_day_session_fetch_predicates_do_not_name_unrelated_days() {
+        // AC6 compile-side: one-day window → record_date BETWEEN that day only.
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let from = DateTime::parse_from_rfc3339("2026-09-10T16:05:15Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-09-10T16:45:48Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let sql = compile_session_observations_sql("sess-1", from, to, 10, None).unwrap();
+        assert_sql_has_otlp_time_predicates(&sql);
+        assert!(
+            sql.contains("record_date BETWEEN DATE '2026-09-10' AND DATE '2026-09-10'"),
+            "{sql}"
+        );
+        assert!(!sql.contains("2026-09-09"), "{sql}");
+        assert!(!sql.contains("2026-09-11"), "{sql}");
     }
 
     #[test]

@@ -26,11 +26,11 @@ list   ← session_summary
 detail ← traces
 ```
 
-**Hard rule:** reducer/rebuild SQL always includes `record_date` + timestamp `[from,to]` so Parquet files are pruned.
+**Hard rule:** reducer/rebuild SQL always goes through [`QueryWindow`](../src/api/query_window.rs) + `push_otlp_time_predicates` (design D4 in [`design-event-time-layout.md`](./design-event-time-layout.md)): partition day derived from the same `from`/`to` as event-time bounds. Do not invent a second clock or optional time bounds.
 
 **Hard rule:** reducer/rebuild DuckDB connections must configure object-store credentials the same way query workers and compaction do (`httpfs` + `configure_object_store`). A connection that only ATTACHes DuckLake can scan catalog-inlined rows but fails (or silently under-reads) once the window needs Parquet under `gs://` / `s3://`.
 
-**Inlining:** default `data_inlining_row_limit` is **500** (DuckLake-aligned). Larger limits (e.g. former Softprobe 10_000) keep too many live spans in Postgres inlined chunks and make session detail TABLE_SCAN expensive.
+**Inlining:** default `data_inlining_row_limit` is **500** (DuckLake-aligned; D13). Larger limits (e.g. former Softprobe 10_000) keep too many live spans in Postgres inlined chunks and make session detail TABLE_SCAN expensive.
 
 **Dirty write rule:** never per span — once per successful lake flush batch (coalesce drain; `flush_interval_seconds` 0 or >0 share that path).
 
@@ -457,7 +457,7 @@ Replaced reducer with: **durable dirty + leased async job + `FROM traces` aggreg
 5. No DuckLake session-summary table.  
 6. No Explorer window-wide obs scan on list.  
 7. After reduce(S), summary(S) matches aggregate(S) on `traces` over the chosen `[from,to]`.  
-8. No reducer/rebuild SQL ships without `record_date` + timestamp bounds.  
+8. No reducer/rebuild SQL ships without `QueryWindow` day + timestamp bounds (see [`design-event-time-layout.md`](./design-event-time-layout.md)).  
 9. Session-summary reduce uses the same lease module as maintenance; two replicas never dual-compact or dual-reduce one tenant.  
 10. Dirty UPSERT rate ≈ lake flush rate (coalesced batches), never ≈ span rate.
 

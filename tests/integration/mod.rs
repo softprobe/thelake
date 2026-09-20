@@ -1,5 +1,6 @@
 pub mod assertion_agent_columns;
 pub mod authn_contract;
+pub mod event_time_prune;
 pub mod grafana_prom_smoke;
 pub mod http_api;
 pub mod ingest_schema_hotpath;
