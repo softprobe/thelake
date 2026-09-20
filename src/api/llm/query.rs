@@ -1254,7 +1254,7 @@ pub fn compile_session_observations_sql(
     }
     Ok(format!(
         "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
-        projection = observation_projection(true),
+        projection = observation_projection(false),
         where_sql = conditions.join(" AND "),
         fetch = limit + 1
     ))
@@ -2643,6 +2643,54 @@ mod tests {
             assert!(!sql.contains("2026-02-28"), "{sql}");
             assert!(!sql.contains("2026-03-02"), "{sql}");
         }
+    }
+
+    #[test]
+    fn session_observations_list_is_skinny_without_attributes_events() {
+        // D14: list must not project full attributes/events columns (hot-key
+        // COALESCE may still touch attributes['…']; detail keeps payload cols).
+        let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let list = compile_session_observations_sql("sess-1", from, to, 10, None).unwrap();
+        let payload = crate::storage::schema::variant::variant_as_json("attributes");
+        assert!(
+            !list.contains(&payload),
+            "list must omit full attributes projection: {list}"
+        );
+        assert!(
+            !list.contains(", events"),
+            "list must omit events column: {list}"
+        );
+        let detail = compile_observation_detail_sql("span-1", from, to).unwrap();
+        assert!(
+            detail.contains(&payload),
+            "detail keeps payload: {detail}"
+        );
+        assert!(detail.contains("events"), "detail keeps payload: {detail}");
+    }
+
+    #[test]
+    fn one_day_session_fetch_predicates_do_not_name_unrelated_days() {
+        // AC6 compile-side: one-day window → record_date BETWEEN that day only.
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let from = DateTime::parse_from_rfc3339("2026-09-10T16:05:15Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-09-10T16:45:48Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let sql = compile_session_observations_sql("sess-1", from, to, 10, None).unwrap();
+        assert_sql_has_otlp_time_predicates(&sql);
+        assert!(
+            sql.contains("record_date BETWEEN DATE '2026-09-10' AND DATE '2026-09-10'"),
+            "{sql}"
+        );
+        assert!(!sql.contains("2026-09-09"), "{sql}");
+        assert!(!sql.contains("2026-09-11"), "{sql}");
     }
 
     #[test]
