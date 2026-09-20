@@ -102,9 +102,7 @@ fn resolve_tempo_scan_window(
 ) -> Result<(i64, i64), String> {
     match (start_ns, end_ns) {
         (Some(start), Some(end)) if start < end => Ok((start, end)),
-        (Some(start), Some(end)) if start == end => {
-            Err("empty_tempo_window".to_string())
-        }
+        (Some(start), Some(end)) if start == end => Err("empty_tempo_window".to_string()),
         (Some(_), Some(_)) => Err("`start` must be < `end`".to_string()),
         (None, None) => {
             let end = chrono::Utc::now()
