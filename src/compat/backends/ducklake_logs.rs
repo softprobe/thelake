@@ -176,7 +176,8 @@ impl DuckLakeLogsBackend {
     ) -> Result<Vec<RawLogRow>, CompatError> {
         let (start, end) = resolve_loki_scan_window(start_ns, end_ns)
             .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
-        ctx.limits.validate_time_range_ms(Some(start / 1_000_000), Some(end / 1_000_000))?;
+        ctx.limits
+            .validate_time_range_ms(Some(start / 1_000_000), Some(end / 1_000_000))?;
         // Half-open [start, end) with start == end is a valid empty window (Loki oracle).
         if start == end {
             return Ok(Vec::new());
