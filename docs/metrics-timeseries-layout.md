@@ -478,6 +478,14 @@ Implementation must not call a blind global `ducklake_merge_adjacent_files` that
 3. Build/append `metric_samples_5m` from raw older than **2h** (closed hours only).
 4. Build/append `metric_samples_1h` from 5m (or raw) older than **24h**.
 5. Build/append `metric_collapse_job_1h` from 1h (or raw) grouped by `(metric_name, job, hour)`.
+
+Ladder INSERT steps (scalar 5m/1h, hist 5m/1h, collapse) are **pending-day + per
+`record_date`**: each pass probes up to `METRICS_LADDER_MAX_DAYS_PER_PASS` dirty
+days, then runs one partition-scoped INSERT per day. Timestamp lag predicates
+(`ts < now() - lag`) are mirrored as `record_date <= CAST((now() - lag) AS DATE)`.
+PromQL collapse scans add `record_date BETWEEN date(start) AND date(end)`
+alongside `window_ts` bounds.
+
 6. `ducklake_expire_snapshots` with **second-granularity** `older_than` (G5).
 7. `ducklake_cleanup_old_files` with **second-granularity** `older_than` when configured + drop orphan variant stats for files no longer live.
 

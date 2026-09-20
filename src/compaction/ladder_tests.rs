@@ -507,6 +507,7 @@ fn collapse_scan_sql_references_collapse_table() {
     );
     assert!(sql.contains("metric_collapse_job_1h"));
     assert!(!sql.contains("to_timestamp("));
+    assert!(sql.contains("record_date BETWEEN DATE"));
     assert!(crate::compaction::collapse::sql_is_collapse_prom_path(&sql));
 }
 
