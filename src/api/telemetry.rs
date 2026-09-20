@@ -5,6 +5,7 @@
 // After binding tenant context, use tenant-scoped instances/contexts only.
 // ============================================================================
 
+use crate::api::query_window::{push_otlp_time_predicates, QueryWindow};
 use crate::api::sql_support::{sql_string_literal, timestamp_ns_literal_from_str};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
@@ -226,23 +227,18 @@ pub fn compile_search_sql(request: &TelemetrySearchRequest) -> Result<String, St
     if request.cursor.is_some() {
         return Err("cursor pagination is not implemented for this endpoint".to_string());
     }
-    if request.time_range.is_none() && !has_exact_identifier_filter(request.filter.as_ref()) {
-        return Err(
-            "timeRange is required unless filtering by exact session_id or trace_id".to_string(),
-        );
-    }
+    let time_range = request
+        .time_range
+        .as_ref()
+        .ok_or_else(|| "timeRange is required".to_string())?;
+    let window = query_window_from_time_range(time_range)?;
 
+    let filter_pred = match &request.filter {
+        Some(filter) => Some(compile_filter_expr(filter)?),
+        None => None,
+    };
     let mut conditions = Vec::new();
-    if let Some(time_range) = &request.time_range {
-        conditions.push(format!(
-            "timestamp >= {} AND timestamp <= {}",
-            timestamp_ns_literal_from_str(&time_range.from),
-            timestamp_ns_literal_from_str(&time_range.to)
-        ));
-    }
-    if let Some(filter) = &request.filter {
-        conditions.push(compile_filter_expr(filter)?);
-    }
+    push_otlp_time_predicates(&mut conditions, &window, filter_pred);
     let where_sql = if conditions.is_empty() {
         String::new()
     } else {
@@ -267,7 +263,7 @@ pub fn compile_search_sql(request: &TelemetrySearchRequest) -> Result<String, St
 /// Compile detail queries for all correlated telemetry signals.
 pub fn compile_details_sql(
     target: &TelemetryDetailsTarget,
-    time_range: Option<&TelemetryTimeRange>,
+    time_range: &TelemetryTimeRange,
     limit: usize,
 ) -> Result<CompiledDetailsSql, String> {
     let limit = limit.clamp(1, 5000);
@@ -302,49 +298,34 @@ pub fn compile_details_sql(
         _ => return Err("target.kind must be session or trace".to_string()),
     };
 
-    let span_time_filter = time_range.map(|range| {
-        format!(
-            "timestamp >= {} AND timestamp <= {}",
-            timestamp_ns_literal_from_str(&range.from),
-            timestamp_ns_literal_from_str(&range.to)
-        )
-    });
-    let time_filter = time_range.map(|range| {
-        format!(
-            "timestamp >= {} AND timestamp <= {}",
-            timestamp_literal(&range.from),
-            timestamp_literal(&range.to)
-        )
-    });
-    let log_time_filter = time_range.map(|range| {
-        format!(
-            "timestamp >= {} AND timestamp <= {}",
-            timestamp_ns_literal_from_str(&range.from),
-            timestamp_ns_literal_from_str(&range.to)
-        )
-    });
+    let window = query_window_from_time_range(time_range)?;
+    let mut span_conds = Vec::new();
+    push_otlp_time_predicates(&mut span_conds, &window, [span_filter]);
+    let mut log_conds = Vec::new();
+    push_otlp_time_predicates(&mut log_conds, &window, [log_filter]);
+    let metric_time = format!(
+        "timestamp >= {} AND timestamp <= {}",
+        timestamp_literal(&time_range.from),
+        timestamp_literal(&time_range.to)
+    );
 
     Ok(CompiledDetailsSql {
-        spans: detail_sql(
-            "traces",
-            &format!(
+        spans: format!(
+            "SELECT {cols} FROM traces WHERE {where_sql} ORDER BY timestamp ASC LIMIT {limit}",
+            cols = format!(
                 "session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind, timestamp, end_timestamp, status_code, status_message, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, {}",
                 variant_as_json("attributes")
             ),
-            &span_filter,
-            span_time_filter.as_deref(),
-            limit,
+            where_sql = span_conds.join(" AND "),
         ),
-        logs: detail_sql(
-            "logs",
-            &format!(
+        logs: format!(
+            "SELECT {cols} FROM logs WHERE {where_sql} ORDER BY timestamp ASC LIMIT {limit}",
+            cols = format!(
                 "session_id, timestamp, severity_number, severity_text, body, trace_id, span_id, {}, {}",
                 variant_as_json("attributes"),
                 variant_as_json("resource_attributes")
             ),
-            &log_filter,
-            log_time_filter.as_deref(),
-            limit,
+            where_sql = log_conds.join(" AND "),
         ),
         metrics: detail_sql(
             // Metrics are stored in skinny tables.  Keep the detail endpoint on
@@ -357,10 +338,34 @@ pub fn compile_details_sql(
                 variant_as_json("resource_attributes")
             ),
             &metric_filter,
-            time_filter.as_deref(),
+            Some(&metric_time),
             limit,
         ),
     })
+}
+
+fn query_window_from_time_range(time_range: &TelemetryTimeRange) -> Result<QueryWindow, String> {
+    let from = chrono::DateTime::parse_from_rfc3339(&time_range.from)
+        .map_err(|e| format!("invalid timeRange.from: {e}"))?
+        .with_timezone(&chrono::Utc);
+    let to = chrono::DateTime::parse_from_rfc3339(&time_range.to)
+        .map_err(|e| format!("invalid timeRange.to: {e}"))?
+        .with_timezone(&chrono::Utc);
+    QueryWindow::try_new(from, to)
+}
+
+/// Build field_values DISTINCT SQL (OTLP day → identity → timestamp).
+fn compile_field_values_sql(field_sql: &str, window: &QueryWindow, limit: usize) -> String {
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(
+        &mut conditions,
+        window,
+        [format!("{field_sql} IS NOT NULL")],
+    );
+    format!(
+        "SELECT DISTINCT {field_sql} AS value FROM traces WHERE {where_sql} ORDER BY value ASC LIMIT {limit}",
+        where_sql = conditions.join(" AND "),
+    )
 }
 
 pub async fn search(
@@ -476,10 +481,8 @@ pub async fn field_values(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(500)
         .clamp(1, 10_000);
-    let sql = format!(
-        "SELECT DISTINCT {field_sql} AS value FROM traces WHERE {field_sql} IS NOT NULL ORDER BY value ASC LIMIT {limit}",
-        field_sql = spec.sql,
-    );
+    let window = parse_field_values_window(&params).map_err(bad_request)?;
+    let sql = compile_field_values_sql(spec.sql, &window, limit);
     let result = state
         .execute_tenant_scoped_sql(tenant.as_ref().map(|e| &e.0), &sql)
         .await
@@ -494,6 +497,21 @@ pub async fn field_values(
     ))
 }
 
+/// Require `from`/`to` query params for field_values (AC2).
+fn parse_field_values_window(params: &HashMap<String, String>) -> Result<QueryWindow, String> {
+    let from = params
+        .get("from")
+        .ok_or_else(|| "`from` is required".to_string())?;
+    let to = params
+        .get("to")
+        .ok_or_else(|| "`to` is required".to_string())?;
+    query_window_from_time_range(&TelemetryTimeRange {
+        from: from.clone(),
+        to: to.clone(),
+    })
+    .map_err(|e| e.replace("timeRange.from", "from").replace("timeRange.to", "to"))
+}
+
 async fn details_for_target(
     state: AppState,
     tenant: Option<&TenantInfo>,
@@ -501,7 +519,8 @@ async fn details_for_target(
     time_range: Option<TelemetryTimeRange>,
     limit: usize,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let compiled = compile_details_sql(&target, time_range.as_ref(), limit).map_err(bad_request)?;
+    let time_range = time_range.ok_or_else(|| bad_request("timeRange is required".to_string()))?;
+    let compiled = compile_details_sql(&target, &time_range, limit).map_err(bad_request)?;
     let spans = execute_objects(&state, tenant, &compiled.spans).await?;
     let logs = execute_objects(&state, tenant, &compiled.logs).await?;
     let metrics = execute_objects(&state, tenant, &compiled.metrics).await?;
@@ -665,21 +684,6 @@ fn scalar_literal(value: &Value) -> String {
 
 fn timestamp_literal(value: &str) -> String {
     format!("{}::TIMESTAMPTZ", sql_string_literal(value))
-}
-
-fn has_exact_identifier_filter(expr: Option<&TelemetryFilterExpr>) -> bool {
-    match expr {
-        Some(TelemetryFilterExpr::Predicate(filter)) => {
-            matches!(filter.field.as_str(), "session_id" | "trace_id") && filter.op == "eq"
-        }
-        Some(TelemetryFilterExpr::And { and }) => and
-            .iter()
-            .any(|child| has_exact_identifier_filter(Some(child))),
-        Some(TelemetryFilterExpr::Or { or }) => or
-            .iter()
-            .any(|child| has_exact_identifier_filter(Some(child))),
-        None => false,
-    }
 }
 
 fn detail_sql(
@@ -861,17 +865,23 @@ mod tests {
 
     #[test]
     fn session_details_prefer_first_class_session_id_on_spans_and_logs() {
+        let range = TelemetryTimeRange {
+            from: "2023-11-14T22:13:20.000000001Z".into(),
+            to: "2023-11-14T22:13:20.000000002Z".into(),
+        };
         let compiled = compile_details_sql(
             &TelemetryDetailsTarget {
                 kind: "session".into(),
                 id: "sess-1".into(),
             },
-            None,
+            &range,
             50,
         )
         .unwrap();
         assert!(compiled.spans.contains("session_id = 'sess-1'"));
         assert!(compiled.logs.contains("session_id = 'sess-1'"));
+        assert!(compiled.spans.contains("record_date BETWEEN DATE"));
+        assert!(compiled.logs.contains("record_date BETWEEN DATE"));
         // Metrics: skinny metrics layout has no session_id column — bag keys only.
         assert!(compiled
             .metrics
@@ -889,17 +899,116 @@ mod tests {
             from: "2023-11-14T22:13:20.000000001Z".into(),
             to: "2023-11-14T22:13:20.000000002Z".into(),
         };
-        let compiled = compile_details_sql(&target, Some(&range), 100).unwrap();
+        let compiled = compile_details_sql(&target, &range, 100).unwrap();
 
-        assert!(compiled
-            .spans
-            .contains("timestamp >= '2023-11-14T22:13:20.000000001Z'::TIMESTAMP_NS"));
-        assert!(compiled
-            .logs
-            .contains("timestamp >= '2023-11-14T22:13:20.000000001Z'::TIMESTAMP_NS"));
+        assert!(compiled.spans.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(compiled.logs.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(compiled.spans.contains("record_date BETWEEN DATE"));
+        assert!(compiled.logs.contains("record_date BETWEEN DATE"));
         assert!(!compiled.logs.contains("TIMESTAMPTZ"));
-        assert!(compiled.spans.contains("::TIMESTAMP_NS"));
         assert!(compiled.metrics.contains("::TIMESTAMPTZ"));
+    }
+
+    #[test]
+    fn field_values_without_window_rejected() {
+        let empty = HashMap::new();
+        let err = parse_field_values_window(&empty).unwrap_err();
+        assert!(err.contains("`from` is required"));
+
+        let mut only_from = HashMap::new();
+        only_from.insert("from".into(), "2023-11-14T22:13:20Z".into());
+        let err = parse_field_values_window(&only_from).unwrap_err();
+        assert!(err.contains("`to` is required"));
+
+        let request = TelemetrySearchRequest {
+            version: 1,
+            scope: TelemetrySearchScope::Traces,
+            time_range: None,
+            filter: None,
+            columns: Vec::new(),
+            sort: Vec::new(),
+            limit: Some(10),
+            cursor: None,
+        };
+        let err = compile_search_sql(&request).unwrap_err();
+        assert!(err.contains("timeRange is required"));
+    }
+
+    #[test]
+    fn field_values_window_emits_otlp_day_and_timestamp() {
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let mut params = HashMap::new();
+        params.insert("from".into(), "2023-11-14T22:13:20.000000001Z".into());
+        params.insert("to".into(), "2023-11-14T22:13:20.000000002Z".into());
+        let window = parse_field_values_window(&params).unwrap();
+        let sql = compile_field_values_sql("app_id", &window, 100);
+        assert_sql_has_otlp_time_predicates(&sql);
+        assert!(sql.contains("app_id IS NOT NULL"));
+        let day = sql.find("record_date BETWEEN").unwrap();
+        let id = sql.find("app_id IS NOT NULL").unwrap();
+        let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
+        assert!(day < id && id < ts, "predicate order day→identity→ts: {sql}");
+    }
+
+    #[test]
+    fn telemetry_otlp_compilers_inventory_emit_day_and_timestamp() {
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let range = TelemetryTimeRange {
+            from: "2023-11-14T22:13:20.000000001Z".into(),
+            to: "2023-11-14T22:13:20.000000002Z".into(),
+        };
+        for scope in [TelemetrySearchScope::Traces, TelemetrySearchScope::Sessions] {
+            let search = compile_search_sql(&TelemetrySearchRequest {
+                version: 1,
+                scope,
+                time_range: Some(range.clone()),
+                filter: None,
+                columns: Vec::new(),
+                sort: Vec::new(),
+                limit: Some(10),
+                cursor: None,
+            })
+            .unwrap();
+            assert_sql_has_otlp_time_predicates(&search);
+        }
+
+        let filtered = compile_search_sql(&TelemetrySearchRequest {
+            version: 1,
+            scope: TelemetrySearchScope::Traces,
+            time_range: Some(range.clone()),
+            filter: Some(TelemetryFilterExpr::Predicate(TelemetryFilter {
+                field: "session_id".into(),
+                op: "eq".into(),
+                value: Some(json!("sess-1")),
+            })),
+            columns: Vec::new(),
+            sort: Vec::new(),
+            limit: Some(10),
+            cursor: None,
+        })
+        .unwrap();
+        assert_sql_has_otlp_time_predicates(&filtered);
+        let day = filtered.find("record_date BETWEEN").unwrap();
+        let id = filtered.find("session_id = 'sess-1'").unwrap();
+        let ts = filtered.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
+        assert!(day < id && id < ts, "search day→filter→ts: {filtered}");
+
+        let details = compile_details_sql(
+            &TelemetryDetailsTarget {
+                kind: "session".into(),
+                id: "sess-1".into(),
+            },
+            &range,
+            50,
+        )
+        .unwrap();
+        assert_sql_has_otlp_time_predicates(&details.spans);
+        assert_sql_has_otlp_time_predicates(&details.logs);
+        let day = details.spans.find("record_date BETWEEN").unwrap();
+        let id = details.spans.find("session_id = ").unwrap();
+        let ts = details.spans.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
+        assert!(day < id && id < ts, "details predicate order: {}", details.spans);
+        // Metrics keep TIMESTAMPTZ (carve-out); not OTLP day+timestamp inventory.
     }
 
     #[test]

@@ -58,6 +58,26 @@ pub fn push_otlp_time_predicates(
     conditions.push(window.event_time_predicate());
 }
 
+/// Map exclusive-end ns window → [`QueryWindow`] and emit via [`push_otlp_time_predicates`].
+///
+/// Tempo/Loki protocol end is exclusive; inclusive `to` is `end_ns - 1`.
+/// Thin adapter only — does not emit day/timestamp SQL itself.
+pub(crate) fn push_otlp_ns_window_predicates(
+    conditions: &mut Vec<String>,
+    start_ns: i64,
+    end_ns_exclusive: i64,
+    identity: impl IntoIterator<Item = String>,
+) -> Result<(), String> {
+    if start_ns >= end_ns_exclusive {
+        return Err("`start` must be < `end`".to_string());
+    }
+    let from = DateTime::<Utc>::from_timestamp_nanos(start_ns);
+    let to = DateTime::<Utc>::from_timestamp_nanos(end_ns_exclusive - 1);
+    let window = QueryWindow::try_new(from, to)?;
+    push_otlp_time_predicates(conditions, &window, identity);
+    Ok(())
+}
+
 /// Assert SQL embeds the required OTLP time shape (day before timestamp, both sides).
 #[cfg(test)]
 pub(crate) fn assert_sql_has_otlp_time_predicates(sql: &str) {
@@ -200,5 +220,24 @@ mod tests {
                 "D12: do not add execute-time SQL guard module {name}"
             );
         }
+    }
+
+    #[test]
+    fn ns_window_adapter_rejects_inverted_and_maps_exclusive_end() {
+        let mut conditions = Vec::new();
+        assert!(push_otlp_ns_window_predicates(&mut conditions, 10, 10, std::iter::empty()).is_err());
+        conditions.clear();
+        push_otlp_ns_window_predicates(
+            &mut conditions,
+            1_700_000_000_000_000_001,
+            1_700_000_000_000_000_002,
+            ["trace_id = 't'".to_string()],
+        )
+        .unwrap();
+        assert_eq!(conditions.len(), 3);
+        assert!(conditions[0].starts_with("record_date BETWEEN"));
+        assert_eq!(conditions[1], "trace_id = 't'");
+        assert!(conditions[2].contains("'2023-11-14T22:13:20.000000001Z'::TIMESTAMP_NS"));
+        assert!(!conditions[2].contains("'2023-11-14T22:13:20.000000002Z'::TIMESTAMP_NS"));
     }
 }
