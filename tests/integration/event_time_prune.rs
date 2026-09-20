@@ -85,6 +85,16 @@ async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
         "expected lake files under {:?}, got none",
         data_root
     );
+    let all_paths = paths.join("\n");
+    // Positive control: both partition days must exist as files/dirs before prune.
+    assert!(
+        all_paths.contains("2026-09-10"),
+        "day-A partition path missing after write:\n{all_paths}"
+    );
+    assert!(
+        all_paths.contains("2026-09-11"),
+        "day-B partition path missing after write:\n{all_paths}"
+    );
 
     let sql = compile_session_observations_sql(
         session,
@@ -97,8 +107,32 @@ async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
     assert!(sql.contains("record_date BETWEEN DATE '2026-09-10' AND DATE '2026-09-10'"));
     assert!(!sql.contains("DATE '2026-09-11'"));
 
+    // Wide window: EXPLAIN (or ANALYZE) should still be able to see day-B in the plan/files.
+    let wide_sql = compile_session_observations_sql(
+        session,
+        day_a,
+        day_b + chrono::Duration::hours(1),
+        50,
+        None,
+    )
+    .expect("wide compile");
+    let wide_explain = query_engine
+        .execute_query(&format!("EXPLAIN ANALYZE {wide_sql}"))
+        .await
+        .expect("wide explain");
+    let wide_plan = wide_explain
+        .rows
+        .iter()
+        .flat_map(|row| row.iter().filter_map(|c| c.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        wide_plan.contains("2026-09-11") || all_paths.contains("2026-09-11"),
+        "positive control: day-B must be visible in wide plan or on-disk paths\nplan:\n{wide_plan}"
+    );
+
     let explain = query_engine
-        .execute_query(&format!("EXPLAIN {sql}"))
+        .execute_query(&format!("EXPLAIN ANALYZE {sql}"))
         .await
         .expect("explain");
     let plan = explain
@@ -115,9 +149,9 @@ async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
         rows.row_count
     );
 
-    // EXPLAIN must not advertise the other day's partition when D4 bounds are present.
+    // Narrow window: day-B file path must not appear in the analyzed plan.
     assert!(
         !plan.contains("2026-09-11"),
-        "EXPLAIN listed unrelated day 2026-09-11:\n{plan}"
+        "EXPLAIN ANALYZE listed unrelated day 2026-09-11:\n{plan}"
     );
 }
