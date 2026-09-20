@@ -53,7 +53,7 @@ This is a **correctness / mental-model** failure. Latency on session detail is a
 | D11 | **No dual-read era. No feature flags. No M0–M5 staircase.** Ship: helper + required bounds + layout/sort alignment + doc hard-rule rewrite in one change series. Catalogs that cannot evolve: **reset**. |
 | D12 | **No execute-time SQL regex guard.** Enforcement = typed required window at compile APIs + unit tests on every `compile_*`. Ban new optional-bound call sites by deleting the API. |
 | D13 | **Inline:** keep default `data_inlining_row_limit = 500`; treat larger inline as a layout regression. |
-| D14 | **Projection:** session observation list path must not select full `attributes`/`events` in the same effort that claims session fetch is fixed (separate PR OK, same milestone). |
+| D14 | **Projection:** session `/observations` must include `attributes`/`events` — Explorer product detail builds trajectory from `sp.input`/`sp.output` and does not expand-on-demand. Search/list paths may stay skinny. |
 
 **Blocking experiment before any partition-transform migration:** EXPLAIN on current `PARTITIONED BY (record_date)` with helper shape D4 — prove Files Read. Only then consider dropping the DATE column for timestamp transforms. Until that experiment is attached to a verification report, **transforms are out of scope**.
 

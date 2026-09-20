@@ -26,7 +26,7 @@ Delivery phases are **PR slices**, not dual-model eras. After Phase 2, no OTLP L
 | **D11** No dual-read / flags | Rollout notes / this tasks doc: no “support both”; CI test forbids `cfg` feature for dual layout | P1 (doc) + each PR description |
 | **D12** No execute SQL regex guard | No new execute-path predicate parser; enforcement via typed compile + unit tests only | P1 (explicit non-goal test: guard module absent) |
 | **D13** Inline default 500 | Config default / yaml assert `data_inlining_row_limit == 500` | P6 (or P1 if cheap) |
-| **D14** Skinny observation list projection | `compile_session_observations_sql` (list) excludes full attributes/events; expand path separate; unit assert | P6 |
+| **D14** Session observations include attributes/events | `compile_session_observations_sql` projects payload; unit assert; product Explorer trajectory needs `sp.input`/`sp.output` | P6 |
 
 ### Acceptance → phase
 
@@ -170,7 +170,7 @@ Subagent hostile review on branch diff before PR. Must address all fatal finding
 1. Rewrite `session-list-summary.md` hard rule → point at design + QueryWindow.
 2. Commit EXPLAIN fixture / integration proving unrelated days not listed (AC6).
 3. Assert inline default 500 (D13).
-4. Skinny `compile_session_observations_sql` without attributes/events; add expand endpoint or query flag **only if** needed — prefer `include_payload: false` default on list (D14).
+4. `compile_session_observations_sql` **includes** attributes/events (product Explorer trajectory). Search/list may stay skinny; expand-on-demand remains for debug SessionDetailView.
 5. Open metrics follow-up issue with kill date (not eternal carve-out).
 6. Retitle #73.
 
