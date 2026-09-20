@@ -1,9 +1,15 @@
-use crate::compaction::collapse::{collapse_job_1h_from_raw_sql, collapse_job_1h_sql};
+use crate::compaction::collapse::{
+    collapse_job_1h_for_day_sql, collapse_job_1h_from_raw_for_day_sql,
+    collapse_job_1h_from_raw_pending_days_sql, collapse_job_1h_pending_days_sql,
+};
 use crate::compaction::downsample::{
-    downsample_1h_from_5m_sql, downsample_1h_from_raw_sql, downsample_5m_sql,
+    downsample_1h_from_5m_for_day_sql, downsample_1h_from_5m_pending_days_sql,
+    downsample_1h_from_raw_for_day_sql, downsample_1h_from_raw_pending_days_sql,
+    downsample_5m_for_day_sql, downsample_5m_pending_days_sql,
     hist_downsample_1h_from_5m_for_day_sql, hist_downsample_1h_from_5m_pending_days_sql,
-    hist_downsample_1h_from_raw_for_day_sql, hist_downsample_5m_for_day_sql,
-    hist_downsample_5m_pending_days_sql, HIST_DOWNSAMPLE_MAX_DAYS_PER_PASS,
+    hist_downsample_1h_from_raw_for_day_sql, hist_downsample_1h_from_raw_pending_days_sql,
+    hist_downsample_5m_for_day_sql, hist_downsample_5m_pending_days_sql,
+    METRICS_LADDER_MAX_DAYS_PER_PASS,
 };
 use crate::compaction::twcs::{
     closed_day_live_file_count, closed_days_need_complete_merge, day_kind,
@@ -366,6 +372,9 @@ impl MaintenanceExecutor {
     }
 
     /// §7.2 steps 3–5: incremental 5m → 1h → collapse (AC-S2 / AC-M2).
+    ///
+    /// Every ladder INSERT is pending-day + per-`record_date` so DuckLake can
+    /// prune partitions; timestamp lags are mirrored as `record_date <= …`.
     fn run_metrics_ladder(
         &self,
         conn: &Connection,
@@ -394,33 +403,133 @@ impl MaintenanceExecutor {
             Ok(())
         };
 
-        let _ = run_step("downsample_5m", &downsample_5m_sql(&catalog));
+        let _ = self.run_ladder_day_batched(
+            conn,
+            &catalog,
+            &run_step,
+            "downsample_5m",
+            |c, lim| downsample_5m_pending_days_sql(c, lim),
+            |c, d| downsample_5m_for_day_sql(c, Some(d)),
+            false,
+        );
 
-        self.run_hist_downsample_5m_batched(conn, &catalog, &run_step);
+        let _ = self.run_ladder_day_batched(
+            conn,
+            &catalog,
+            &run_step,
+            "hist_downsample_5m",
+            |c, lim| hist_downsample_5m_pending_days_sql(c, lim),
+            |c, d| hist_downsample_5m_for_day_sql(c, Some(d)),
+            false,
+        );
 
-        if run_step(
-            "downsample_1h_from_5m",
-            &downsample_1h_from_5m_sql(&catalog),
-        )
-        .is_err()
+        if self
+            .run_ladder_day_batched(
+                conn,
+                &catalog,
+                &run_step,
+                "downsample_1h_from_5m",
+                |c, lim| downsample_1h_from_5m_pending_days_sql(c, lim),
+                |c, d| downsample_1h_from_5m_for_day_sql(c, Some(d)),
+                true,
+            )
+            .is_err()
         {
-            let fb = downsample_1h_from_raw_sql(&catalog);
-            if let Err(err2) = run_tx(&fb) {
-                warn!("downsample_1h_from_raw fallback failed: {}", err2);
-            }
+            let _ = self.run_ladder_day_batched(
+                conn,
+                &catalog,
+                &run_step,
+                "downsample_1h_from_raw",
+                |c, lim| downsample_1h_from_raw_pending_days_sql(c, lim),
+                |c, d| downsample_1h_from_raw_for_day_sql(c, Some(d)),
+                false,
+            );
         }
 
         if self
-            .run_hist_downsample_1h_from_5m_batched(conn, &catalog, &run_step)
+            .run_ladder_day_batched(
+                conn,
+                &catalog,
+                &run_step,
+                "hist_downsample_1h_from_5m",
+                |c, lim| hist_downsample_1h_from_5m_pending_days_sql(c, lim),
+                |c, d| hist_downsample_1h_from_5m_for_day_sql(c, Some(d)),
+                true,
+            )
             .is_err()
         {
-            self.run_hist_downsample_1h_from_raw_batched(conn, &catalog, &run_step);
+            let _ = self.run_ladder_day_batched(
+                conn,
+                &catalog,
+                &run_step,
+                "hist_downsample_1h_from_raw",
+                |c, lim| hist_downsample_1h_from_raw_pending_days_sql(c, lim),
+                |c, d| hist_downsample_1h_from_raw_for_day_sql(c, Some(d)),
+                false,
+            );
         }
 
-        if run_step("collapse_job_1h", &collapse_job_1h_sql(&catalog)).is_err() {
-            let fb = collapse_job_1h_from_raw_sql(&catalog);
-            if let Err(err2) = run_tx(&fb) {
-                warn!("collapse_job_1h_from_raw fallback failed: {}", err2);
+        if self
+            .run_ladder_day_batched(
+                conn,
+                &catalog,
+                &run_step,
+                "collapse_job_1h",
+                |c, lim| collapse_job_1h_pending_days_sql(c, lim),
+                |c, d| collapse_job_1h_for_day_sql(c, Some(d)),
+                true,
+            )
+            .is_err()
+        {
+            let _ = self.run_ladder_day_batched(
+                conn,
+                &catalog,
+                &run_step,
+                "collapse_job_1h_from_raw",
+                |c, lim| collapse_job_1h_from_raw_pending_days_sql(c, lim),
+                |c, d| collapse_job_1h_from_raw_for_day_sql(c, Some(d)),
+                false,
+            );
+        }
+        Ok(())
+    }
+
+    /// Probe pending `record_date`s then run one INSERT per day (partition prune).
+    ///
+    /// When `fail_fast` is true, the first day/step error propagates (used to
+    /// trigger raw fallbacks). Otherwise day failures are warned and skipped.
+    fn run_ladder_day_batched(
+        &self,
+        conn: &Connection,
+        catalog: &str,
+        run_step: &dyn Fn(&str, &str) -> Result<()>,
+        step: &str,
+        pending_sql: impl Fn(&str, usize) -> String,
+        for_day_sql: impl Fn(&str, NaiveDate) -> String,
+        fail_fast: bool,
+    ) -> Result<()> {
+        let pending = pending_sql(catalog, METRICS_LADDER_MAX_DAYS_PER_PASS);
+        let days = match self.query_pending_downsample_days(conn, &pending) {
+            Ok(d) => d,
+            Err(err) => {
+                warn!("{step} pending-day probe failed: {err}");
+                if fail_fast {
+                    return Err(err);
+                }
+                return Ok(());
+            }
+        };
+        if days.is_empty() {
+            return Ok(());
+        }
+        for day in days {
+            let label = format!("{step}[{day}]");
+            let sql = for_day_sql(catalog, day);
+            if let Err(err) = run_step(&label, &sql) {
+                if fail_fast {
+                    return Err(err);
+                }
+                warn!("{step} day {day} failed: {err}");
             }
         }
         Ok(())
@@ -446,65 +555,6 @@ impl MaintenanceExecutor {
             );
         }
         Ok(days)
-    }
-
-    fn run_hist_downsample_5m_batched(
-        &self,
-        conn: &Connection,
-        catalog: &str,
-        run_step: &dyn Fn(&str, &str) -> Result<()>,
-    ) {
-        let pending =
-            hist_downsample_5m_pending_days_sql(catalog, HIST_DOWNSAMPLE_MAX_DAYS_PER_PASS);
-        let days = match self.query_pending_downsample_days(conn, &pending) {
-            Ok(d) => d,
-            Err(err) => {
-                warn!("hist_downsample_5m pending-day probe failed: {}", err);
-                return;
-            }
-        };
-        if days.is_empty() {
-            return;
-        }
-        for day in days {
-            let label = format!("hist_downsample_5m[{day}]");
-            let sql = hist_downsample_5m_for_day_sql(catalog, Some(day));
-            if let Err(err) = run_step(&label, &sql) {
-                warn!("hist_downsample_5m day {} failed: {}", day, err);
-            }
-        }
-    }
-
-    fn run_hist_downsample_1h_from_5m_batched(
-        &self,
-        conn: &Connection,
-        catalog: &str,
-        run_step: &dyn Fn(&str, &str) -> Result<()>,
-    ) -> Result<()> {
-        let pending =
-            hist_downsample_1h_from_5m_pending_days_sql(catalog, HIST_DOWNSAMPLE_MAX_DAYS_PER_PASS);
-        let days = self.query_pending_downsample_days(conn, &pending)?;
-        if days.is_empty() {
-            return Ok(());
-        }
-        for day in days {
-            let label = format!("hist_downsample_1h_from_5m[{day}]");
-            let sql = hist_downsample_1h_from_5m_for_day_sql(catalog, Some(day));
-            run_step(&label, &sql)?;
-        }
-        Ok(())
-    }
-
-    fn run_hist_downsample_1h_from_raw_batched(
-        &self,
-        _conn: &Connection,
-        catalog: &str,
-        run_step: &dyn Fn(&str, &str) -> Result<()>,
-    ) {
-        let sql = hist_downsample_1h_from_raw_for_day_sql(catalog, None);
-        if let Err(err) = run_step("hist_downsample_1h_from_raw", &sql) {
-            warn!("hist_downsample_1h_from_raw fallback failed: {}", err);
-        }
     }
 
     fn twcs_policy(&self) -> TwcsPolicy {
