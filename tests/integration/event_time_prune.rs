@@ -26,6 +26,34 @@ fn walk_paths(dir: &Path, out: &mut Vec<String>) {
     }
 }
 
+/// Collapse EXPLAIN ASCII-art wrapping so parquet basenames stay searchable.
+fn flatten_plan(plan: &str) -> String {
+    plan.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '=' | '/' | ':'))
+        .collect()
+}
+
+fn files_read_count(plan: &str) -> Option<u32> {
+    let marker = "Total Files Read:";
+    let idx = plan.find(marker)?;
+    plan[idx + marker.len()..]
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|tok| !tok.is_empty())
+        .and_then(|tok| tok.parse().ok())
+}
+
+fn day_b_parquet_stem(paths: &[String]) -> String {
+    let day_b = paths
+        .iter()
+        .find(|p| p.contains("record_date=2026-09-11") && p.ends_with(".parquet"))
+        .unwrap_or_else(|| panic!("day-B parquet missing in paths:\n{}", paths.join("\n")));
+    Path::new(day_b)
+        .file_stem()
+        .expect("stem")
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[tokio::test]
 async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
     let temp = TempDir::new().expect("tempdir");
@@ -86,14 +114,19 @@ async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
         data_root
     );
     let all_paths = paths.join("\n");
-    // Positive control: both partition days must exist as files/dirs before prune.
     assert!(
-        all_paths.contains("2026-09-10"),
+        all_paths.contains("record_date=2026-09-10"),
         "day-A partition path missing after write:\n{all_paths}"
     );
     assert!(
-        all_paths.contains("2026-09-11"),
+        all_paths.contains("record_date=2026-09-11"),
         "day-B partition path missing after write:\n{all_paths}"
+    );
+    // Day-B parquet basename cannot appear in SQL text (only in Files Read / Filename(s)).
+    let day_b_stem = day_b_parquet_stem(&paths);
+    assert!(
+        day_b_stem.starts_with("ducklake-"),
+        "unexpected day-B stem {day_b_stem}"
     );
 
     let sql = compile_session_observations_sql(
@@ -105,9 +138,9 @@ async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
     )
     .expect("compile");
     assert!(sql.contains("record_date BETWEEN DATE '2026-09-10' AND DATE '2026-09-10'"));
+    assert!(!sql.contains(&day_b_stem));
     assert!(!sql.contains("DATE '2026-09-11'"));
 
-    // Wide window: EXPLAIN (or ANALYZE) should still be able to see day-B in the plan/files.
     let wide_sql = compile_session_observations_sql(
         session,
         day_a,
@@ -116,6 +149,8 @@ async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
         None,
     )
     .expect("wide compile");
+    assert!(!wide_sql.contains(&day_b_stem));
+
     let wide_explain = query_engine
         .execute_query(&format!("EXPLAIN ANALYZE {wide_sql}"))
         .await
@@ -126,9 +161,15 @@ async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
         .flat_map(|row| row.iter().filter_map(|c| c.as_str()))
         .collect::<Vec<_>>()
         .join("\n");
+    let wide_flat = flatten_plan(&wide_plan);
+    assert_eq!(
+        files_read_count(&wide_plan),
+        Some(2),
+        "positive control: wide window must read both day files:\n{wide_plan}"
+    );
     assert!(
-        wide_plan.contains("2026-09-11"),
-        "positive control: wide EXPLAIN ANALYZE must list day-B (2026-09-11):\n{wide_plan}"
+        wide_flat.contains(&day_b_stem),
+        "positive control: wide EXPLAIN ANALYZE Filename(s) must include day-B stem {day_b_stem}:\n{wide_plan}"
     );
 
     let explain = query_engine
@@ -141,6 +182,7 @@ async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
         .flat_map(|row| row.iter().filter_map(|c| c.as_str()))
         .collect::<Vec<_>>()
         .join("\n");
+    let plan_flat = flatten_plan(&plan);
 
     let rows = query_engine.execute_query(&sql).await.expect("query");
     assert_eq!(
@@ -149,9 +191,13 @@ async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
         rows.row_count
     );
 
-    // Narrow window: day-B file path must not appear in the analyzed plan.
+    assert_eq!(
+        files_read_count(&plan),
+        Some(1),
+        "narrow window must read exactly one partition file:\n{plan}"
+    );
     assert!(
-        !plan.contains("2026-09-11"),
-        "EXPLAIN ANALYZE listed unrelated day 2026-09-11:\n{plan}"
+        !plan_flat.contains(&day_b_stem),
+        "EXPLAIN ANALYZE Filename(s) listed unrelated day-B file {day_b_stem}:\n{plan}"
     );
 }
