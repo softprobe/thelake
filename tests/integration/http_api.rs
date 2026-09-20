@@ -623,7 +623,6 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
             "/v1/llm/traces/{}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z",
             hex::encode(trace_id)
         ),
-        format!("/v1/llm/sessions/{session_id}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"),
     ] {
         let response = router
             .clone()
@@ -632,6 +631,18 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
+
+    // Session detail requires session_summary (D7). Sqlite catalog → 503.
+    let session_resp = router
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/llm/sessions/{session_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(session_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let telemetry = Request::builder()
         .method("POST")
@@ -865,19 +876,12 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     assert_eq!(trace["scores"].as_array().unwrap().len(), 1);
 
     let session_req = Request::builder()
-        .uri(format!(
-            "/v1/llm/sessions/{session_id}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
-        ))
+        .uri(format!("/v1/llm/sessions/{session_id}"))
         .body(Body::empty())
         .unwrap();
     let session_resp = router.clone().oneshot(session_req).await.expect("session");
-    assert_eq!(session_resp.status(), StatusCode::OK);
-    let session = response_json(session_resp).await;
-    assert_eq!(session["session_id"], session_id);
-    assert_eq!(session["trace_count"], 1);
-    assert_eq!(session["observation_count"], 1);
-    assert_eq!(session["traces"][0]["trace_id"], trace_hex);
-    assert_eq!(session["scores"].as_array().unwrap().len(), 1);
+    // Sqlite catalog has no session_summary registry → 503 (D7).
+    assert_eq!(session_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let missing = Request::builder()
         .uri(
@@ -1547,7 +1551,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
 }
 
 #[tokio::test]
-async fn session_recording_query_returns_ordered_rrweb_events() {
+async fn session_recording_requires_session_summary_registry() {
     let (router, state, _t) = build_router_and_state().await;
     let session_id = "sess-web-recording-1";
     let trace_a: [u8; 16] = [0x11; 16];
@@ -1589,31 +1593,17 @@ async fn session_recording_query_returns_ordered_rrweb_events() {
         .expect("flush spans");
 
     let empty = Request::builder()
-        .uri(
-            "/v1/llm/sessions/sess-no-recording/recording?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z",
-        )
+        .uri("/v1/llm/sessions/sess-no-recording/recording")
         .body(Body::empty())
         .unwrap();
     let empty_resp = router.clone().oneshot(empty).await.expect("empty");
-    assert_eq!(empty_resp.status(), StatusCode::OK);
-    let empty_body = response_json(empty_resp).await;
-    assert_eq!(empty_body["batches"].as_array().unwrap().len(), 0);
-    assert_eq!(empty_body["events"].as_array().unwrap().len(), 0);
+    // No session_summary registry on sqlite → 503 (D7).
+    assert_eq!(empty_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let req = Request::builder()
-        .uri(format!(
-            "/v1/llm/sessions/{session_id}/recording?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
-        ))
+        .uri(format!("/v1/llm/sessions/{session_id}/recording"))
         .body(Body::empty())
         .unwrap();
     let resp = router.oneshot(req).await.expect("recording");
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = response_json(resp).await;
-    assert_eq!(body["session_id"], session_id);
-    assert_eq!(body["batches"].as_array().unwrap().len(), 2);
-    assert_eq!(body["events"].as_array().unwrap().len(), 3);
-    assert_eq!(body["events"][0]["timestamp"], 1000);
-    assert_eq!(body["events"][2]["timestamp"], 2000);
-    assert_eq!(body["batches"][0]["batch_index"], 0);
-    assert_eq!(body["batches"][1]["batch_index"], 1);
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

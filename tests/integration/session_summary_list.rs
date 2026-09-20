@@ -548,30 +548,242 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     );
     assert_summary_only_item(&list["items"][0]);
 
-    let from = (Utc::now() - ChronoDuration::hours(2))
-        .format("%Y-%m-%dT%H:%M:%SZ")
+    let summary_from = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["session_id"] == "detail-sess")
+        .unwrap()["start_time"]
+        .as_str()
+        .unwrap()
         .to_string();
-    let to = (Utc::now() + ChronoDuration::minutes(5))
-        .format("%Y-%m-%dT%H:%M:%SZ")
+    let summary_to = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["session_id"] == "detail-sess")
+        .unwrap()["end_time"]
+        .as_str()
+        .unwrap()
         .to_string();
-    // Encode `:` so http::Uri accepts the query string.
+
+    // D7: lake window comes from session_summary only — no query from/to.
     let detail = Request::builder()
         .method("GET")
-        .uri(format!(
-            "/v1/llm/sessions/detail-sess?from={}&to={}",
-            from.replace(':', "%3A"),
-            to.replace(':', "%3A"),
-        ))
+        .uri("/v1/llm/sessions/detail-sess")
         .body(Body::empty())
         .unwrap();
-    let resp = router.oneshot(detail).await.expect("detail");
+    let resp = router.clone().oneshot(detail).await.expect("detail");
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
     assert_eq!(body["session_id"], "detail-sess");
+    assert_eq!(body["from"], summary_from);
+    assert_eq!(body["to"], summary_to);
     assert!(
         body["traces"].as_array().unwrap().len() >= 1,
         "detail must still return traces from lake: {body}"
     );
+
+    let obs_req = Request::builder()
+        .method("GET")
+        .uri("/v1/llm/sessions/detail-sess/observations")
+        .body(Body::empty())
+        .unwrap();
+    let obs_resp = router.clone().oneshot(obs_req).await.expect("observations");
+    assert_eq!(obs_resp.status(), StatusCode::OK);
+    let obs_body = response_json(obs_resp).await;
+    assert_eq!(obs_body["from"], summary_from);
+    assert_eq!(obs_body["to"], summary_to);
+    assert!(
+        obs_body["observations"].as_array().unwrap().len() >= 1,
+        "observations must read lake under summary window: {obs_body}"
+    );
+
+    let missing = Request::builder()
+        .method("GET")
+        .uri("/v1/llm/sessions/no-such-session")
+        .body(Body::empty())
+        .unwrap();
+    let missing_resp = router.clone().oneshot(missing).await.expect("missing");
+    assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
+
+    let missing_obs = Request::builder()
+        .method("GET")
+        .uri("/v1/llm/sessions/no-such-session/observations")
+        .body(Body::empty())
+        .unwrap();
+    let missing_obs_resp = router.oneshot(missing_obs).await.expect("missing obs");
+    assert_eq!(missing_obs_resp.status(), StatusCode::NOT_FOUND);
+}
+
+fn recording_batch_span(
+    session_id: &str,
+    trace: u8,
+    batch_index: i64,
+    start_ago_s: i64,
+    events_json: &str,
+) -> ExportTraceServiceRequest {
+    let start = Utc::now() - ChronoDuration::seconds(start_ago_s);
+    let end = start + ChronoDuration::milliseconds(500);
+    ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![string_kv(resource::SERVICE_NAME, "softprobe-web")],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: "softprobe.web.record".to_string(),
+                    ..Default::default()
+                }),
+                spans: vec![Span {
+                    trace_id: vec![trace; 16],
+                    span_id: vec![trace.wrapping_add(0x10 + batch_index as u8); 8],
+                    parent_span_id: vec![],
+                    name: "softprobe.web.recording".to_string(),
+                    kind: span::SpanKind::Internal as i32,
+                    start_time_unix_nano: start.timestamp_nanos_opt().unwrap() as u64,
+                    end_time_unix_nano: end.timestamp_nanos_opt().unwrap() as u64,
+                    attributes: vec![
+                        string_kv(sp::SESSION_ID, session_id),
+                        string_kv(sp::OBSERVATION_TYPE, "recording"),
+                        int_kv("sp.recording.batch_index", batch_index),
+                    ],
+                    events: vec![span::Event {
+                        time_unix_nano: start.timestamp_nanos_opt().unwrap() as u64,
+                        name: "sp.recording.batch".to_string(),
+                        attributes: vec![string_kv("sp.recording.events", events_json)],
+                        dropped_attributes_count: 0,
+                    }],
+                    status: Some(Status {
+                        code: 1,
+                        message: String::new(),
+                    }),
+                    ..Default::default()
+                }],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn http_session_recording_uses_summary_window() {
+    let suffix = Uuid::new_v4().to_string().replace('-', "_");
+    let schema = format!("thelake_ss_http_rec_{suffix}");
+    let Some((router, state, _temp, _schema)) = build_summary_router(schema).await else {
+        eprintln!("skip: ducklake-postgres not reachable");
+        return;
+    };
+
+    // Generation span creates session_summary (recording is excluded from reduce).
+    // Window must cover recording batch timestamps below.
+    let gen = SpanSpec {
+        session_id: "rec-sess",
+        trace: 0xe1,
+        start_ago_s: 20,
+        duration_s: 100,
+        error: false,
+        agent: "agent-a",
+        user: "u1",
+        model: "gpt-4o",
+        tokens: 10,
+        cost: 0.01,
+    };
+    ingest(&router, llm_span(&gen)).await;
+    ingest(
+        &router,
+        recording_batch_span(
+            "rec-sess",
+            0xe2,
+            0,
+            70,
+            r#"[{"type":4,"timestamp":1000,"eventIndex":1},{"type":2,"timestamp":1100,"eventIndex":2}]"#,
+        ),
+    )
+    .await;
+    ingest(
+        &router,
+        recording_batch_span(
+            "rec-sess",
+            0xe3,
+            1,
+            50,
+            r#"[{"type":3,"timestamp":2000,"eventIndex":3}]"#,
+        ),
+    )
+    .await;
+    flush(&state).await;
+    assert!(run_reduce(&state).await >= 1);
+
+    let list = search(&router, window()).await;
+    let item = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["session_id"] == "rec-sess")
+        .expect("rec-sess summary");
+    let summary_from = item["start_time"].as_str().unwrap().to_string();
+    let summary_to = item["end_time"].as_str().unwrap().to_string();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/llm/sessions/rec-sess/recording")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.expect("recording");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["session_id"], "rec-sess");
+    assert_eq!(body["from"], summary_from);
+    assert_eq!(body["to"], summary_to);
+    assert_eq!(body["batches"].as_array().unwrap().len(), 2);
+    assert_eq!(body["events"].as_array().unwrap().len(), 3);
+    assert_eq!(body["events"][0]["timestamp"], 1000);
+    assert_eq!(body["events"][2]["timestamp"], 2000);
+    assert_eq!(body["batches"][0]["batch_index"], 0);
+    assert_eq!(body["batches"][1]["batch_index"], 1);
+
+    // Empty recording with summary still present → 200 empty batches.
+    let empty_sess = SpanSpec {
+        session_id: "rec-empty",
+        trace: 0xe4,
+        start_ago_s: 40,
+        duration_s: 10,
+        error: false,
+        agent: "agent-a",
+        user: "u1",
+        model: "gpt-4o",
+        tokens: 10,
+        cost: 0.01,
+    };
+    ingest(&router, llm_span(&empty_sess)).await;
+    flush(&state).await;
+    assert!(run_reduce(&state).await >= 1);
+
+    let empty = Request::builder()
+        .method("GET")
+        .uri("/v1/llm/sessions/rec-empty/recording")
+        .body(Body::empty())
+        .unwrap();
+    let empty_resp = router
+        .clone()
+        .oneshot(empty)
+        .await
+        .expect("empty recording");
+    assert_eq!(empty_resp.status(), StatusCode::OK);
+    let empty_body = response_json(empty_resp).await;
+    assert_eq!(empty_body["batches"].as_array().unwrap().len(), 0);
+    assert_eq!(empty_body["events"].as_array().unwrap().len(), 0);
+
+    let missing = Request::builder()
+        .method("GET")
+        .uri("/v1/llm/sessions/no-rec-session/recording")
+        .body(Body::empty())
+        .unwrap();
+    let missing_resp = router.oneshot(missing).await.expect("missing recording");
+    assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -822,19 +1034,11 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     assert!(before_ids.contains(&"sess-err"), "{before}");
     let before_count = before["items"].as_array().unwrap().len();
 
-    // Lake detail still works (Parquet/traces intact after summary wipe).
-    let from_q = (Utc::now() - ChronoDuration::hours(2))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
-        .replace(':', "%3A");
-    let to_q = (Utc::now() + ChronoDuration::minutes(5))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
-        .replace(':', "%3A");
+    // Detail requires summary (D7); works while summary is populated.
     let detail_before = {
         let req = Request::builder()
             .method("GET")
-            .uri(format!("/v1/llm/sessions/sess-ok?from={from_q}&to={to_q}"))
+            .uri("/v1/llm/sessions/sess-ok")
             .body(Body::empty())
             .unwrap();
         let resp = router.clone().oneshot(req).await.expect("detail");
@@ -857,6 +1061,17 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
         0,
         "list empty after truncate: {empty}"
     );
+
+    // Without summary row, detail is 404 even though Parquet still has spans.
+    let detail_missing = {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/llm/sessions/sess-ok")
+            .body(Body::empty())
+            .unwrap();
+        router.clone().oneshot(req).await.expect("detail missing")
+    };
+    assert_eq!(detail_missing.status(), StatusCode::NOT_FOUND);
 
     // Reject inverted / oversized windows.
     let now = Utc::now();
@@ -928,7 +1143,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     let detail_after = {
         let req = Request::builder()
             .method("GET")
-            .uri(format!("/v1/llm/sessions/sess-ok?from={from_q}&to={to_q}"))
+            .uri("/v1/llm/sessions/sess-ok")
             .body(Body::empty())
             .unwrap();
         let resp = router.clone().oneshot(req).await.expect("detail");

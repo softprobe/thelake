@@ -237,6 +237,41 @@ async fn unit_openapi_llm_schema_contracts() {
         openapi["paths"]["/v1/llm/sessions/{session_id}"]["get"]["operationId"],
         "getSession"
     );
+    let session_params = openapi["paths"]["/v1/llm/sessions/{session_id}"]["get"]["parameters"]
+        .as_array()
+        .expect("session params");
+    let session_param_names: Vec<&str> = session_params
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert!(
+        !session_param_names.contains(&"from") && !session_param_names.contains(&"to"),
+        "session detail must not take query from/to (D7): {session_param_names:?}"
+    );
+    let recording_params = openapi["paths"]["/v1/llm/sessions/{session_id}/recording"]["get"]
+        ["parameters"]
+        .as_array()
+        .expect("recording params");
+    let recording_param_names: Vec<&str> = recording_params
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert!(
+        !recording_param_names.contains(&"from") && !recording_param_names.contains(&"to"),
+        "recording must not take query from/to (D7): {recording_param_names:?}"
+    );
+    let obs_params = openapi["paths"]["/v1/llm/sessions/{session_id}/observations"]["get"]
+        ["parameters"]
+        .as_array()
+        .expect("observations params");
+    let obs_param_names: Vec<&str> = obs_params
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert!(
+        !obs_param_names.contains(&"from") && !obs_param_names.contains(&"to"),
+        "observations must not take query from/to (D7): {obs_param_names:?}"
+    );
     assert!(openapi["components"]["schemas"]["ObservationSearchRequest"].is_object());
     assert!(openapi["components"]["schemas"]["TraceDetail"].is_object());
     assert!(openapi["components"]["schemas"]["SessionDetail"].is_object());
