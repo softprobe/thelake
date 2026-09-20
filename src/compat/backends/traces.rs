@@ -87,15 +87,18 @@ pub struct TraceLookupBounds {
     pub end_ns: Option<i64>,
 }
 
-/// Default lookback when Tempo clients omit start/end (get-by-id / search).
-/// Still emits a real [`QueryWindow`] — never an unbounded lake scan.
-const TEMPO_DEFAULT_LOOKBACK_NS: i64 = 30 * 24 * 60 * 60 * 1_000_000_000;
+/// Default lookback when Tempo clients omit one or both of start/end.
+/// Long enough to cover Phase 3 fixture timestamps (~2023) under CI "now".
+/// Still a finite [`QueryWindow`] — never an unbounded lake scan.
+const TEMPO_DEFAULT_LOOKBACK_NS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000_000;
 
 /// Resolve exclusive Tempo `[start, end)` for lake scans.
 ///
 /// - Both set and `start < end` → use them
-/// - Both omitted → 30d lookback ending at now (Grafana wire compat)
-/// - Partial / inverted / zero-width → error (callers short-circuit zero-width)
+/// - Both omitted → lookback ending at now
+/// - Only `end` → `[end - lookback, end)`
+/// - Only `start` → `[start, start + lookback)`
+/// - Zero-width / inverted → error (callers short-circuit zero-width)
 fn resolve_tempo_scan_window(
     start_ns: Option<i64>,
     end_ns: Option<i64>,
@@ -111,7 +114,20 @@ fn resolve_tempo_scan_window(
             let start = end.saturating_sub(TEMPO_DEFAULT_LOOKBACK_NS);
             Ok((start, end))
         }
-        _ => Err("start and end are required for Tempo trace scans".to_string()),
+        (None, Some(end)) => {
+            let start = end.saturating_sub(TEMPO_DEFAULT_LOOKBACK_NS);
+            if start >= end {
+                return Err("`start` must be < `end`".to_string());
+            }
+            Ok((start, end))
+        }
+        (Some(start), None) => {
+            let end = start.saturating_add(TEMPO_DEFAULT_LOOKBACK_NS);
+            if start >= end {
+                return Err("`start` must be < `end`".to_string());
+            }
+            Ok((start, end))
+        }
     }
 }
 
@@ -530,8 +546,9 @@ mod tests {
     }
 
     #[test]
-    fn trace_scan_defaults_lookback_when_bounds_omitted() {
-        let sql = trace_scan_sql(
+    fn trace_scan_defaults_lookback_when_bounds_omitted_or_partial() {
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let omitted = trace_scan_sql(
             &TraceSearchRequest {
                 tags: BTreeMap::new(),
                 selector: None,
@@ -544,10 +561,24 @@ mod tests {
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         )
         .expect("default lookback");
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
-        assert_sql_has_otlp_time_predicates(&sql);
+        assert_sql_has_otlp_time_predicates(&omitted);
 
-        let half = trace_scan_sql(
+        let end_only = trace_scan_sql(
+            &TraceSearchRequest {
+                tags: BTreeMap::new(),
+                selector: None,
+                min_duration_ns: None,
+                max_duration_ns: None,
+                start_ns: None,
+                end_ns: Some(END_NS),
+                limit: 5,
+            },
+            None,
+        )
+        .expect("end-only lookback");
+        assert_sql_has_otlp_time_predicates(&end_only);
+
+        let start_only = trace_scan_sql(
             &TraceSearchRequest {
                 tags: BTreeMap::new(),
                 selector: None,
@@ -559,8 +590,8 @@ mod tests {
             },
             None,
         )
-        .unwrap_err();
-        assert!(half.contains("required"));
+        .expect("start-only lookback");
+        assert_sql_has_otlp_time_predicates(&start_only);
     }
 
     #[test]
