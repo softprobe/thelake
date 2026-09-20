@@ -87,18 +87,70 @@ pub struct TraceLookupBounds {
     pub end_ns: Option<i64>,
 }
 
+/// Default lookback when Tempo clients omit one or both of start/end.
+/// Long enough to cover Phase 3 fixture timestamps (~2023) under CI "now".
+/// Still a finite [`QueryWindow`] — never an unbounded lake scan.
+const TEMPO_DEFAULT_LOOKBACK_NS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000_000;
+
+/// Resolve exclusive Tempo `[start, end)` for lake scans.
+///
+/// - Both set and `start < end` → use them
+/// - Both omitted → lookback ending at now
+/// - Only `end` → `[end - lookback, end)`
+/// - Only `start` → `[start, start + lookback)`
+/// - Zero-width / inverted → error (callers short-circuit zero-width)
+fn resolve_tempo_scan_window(
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+) -> Result<(i64, i64), String> {
+    match (start_ns, end_ns) {
+        (Some(start), Some(end)) if start < end => Ok((start, end)),
+        (Some(start), Some(end)) if start == end => Err("empty_tempo_window".to_string()),
+        (Some(_), Some(_)) => Err("`start` must be < `end`".to_string()),
+        (None, None) => {
+            let end = chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .ok_or_else(|| "current time out of range".to_string())?;
+            let start = end.saturating_sub(TEMPO_DEFAULT_LOOKBACK_NS);
+            Ok((start, end))
+        }
+        (None, Some(end)) => {
+            let start = end.saturating_sub(TEMPO_DEFAULT_LOOKBACK_NS);
+            if start >= end {
+                return Err("`start` must be < `end`".to_string());
+            }
+            Ok((start, end))
+        }
+        (Some(start), None) => {
+            let end = start.saturating_add(TEMPO_DEFAULT_LOOKBACK_NS);
+            if start >= end {
+                return Err("`start` must be < `end`".to_string());
+            }
+            Ok((start, end))
+        }
+    }
+}
+
 /// Build the bounded raw trace scan. Protocol adapters never construct SQL.
-pub fn trace_scan_sql(request: &TraceSearchRequest, trace_id: Option<&str>) -> String {
-    let mut where_clauses = vec!["1=1".to_string()];
-    if let Some(trace_id) = trace_id {
-        where_clauses.push(format!("trace_id = '{}'", escape(trace_id)));
-    }
-    if let Some(start) = request.start_ns {
-        where_clauses.push(format!("epoch_ns(timestamp) >= {start}"));
-    }
-    if let Some(end) = request.end_ns {
-        where_clauses.push(format!("epoch_ns(timestamp) < {end}"));
-    }
+///
+/// Emits `record_date` + `CAST(timestamp AS TIMESTAMP_NS)` via [`QueryWindow`]
+/// (exclusive end → inclusive). Omitted bounds get a finite default lookback
+/// so every lake scan still has a QueryWindow (AC2); never an open-ended scan.
+pub fn trace_scan_sql(
+    request: &TraceSearchRequest,
+    trace_id: Option<&str>,
+) -> Result<String, String> {
+    let (start_ns, end_ns) = resolve_tempo_scan_window(request.start_ns, request.end_ns)?;
+    let mut where_clauses = Vec::new();
+    let identity = trace_id
+        .map(|id| format!("trace_id = '{}'", escape(id)))
+        .into_iter();
+    crate::api::query_window::push_otlp_ns_window_predicates(
+        &mut where_clauses,
+        start_ns,
+        end_ns,
+        identity,
+    )?;
     let tag_predicates = request
         .tags
         .iter()
@@ -131,7 +183,7 @@ pub fn trace_scan_sql(request: &TraceSearchRequest, trace_id: Option<&str>) -> S
     } else {
         duration_predicates.join(" AND ")
     };
-    format!(
+    Ok(format!(
         "WITH base AS (SELECT trace_id, span_id, parent_span_id, message_type, span_kind, app_id, \
          CAST(epoch_ns(timestamp) AS BIGINT) AS start_time_unix_nano, \
          CAST(epoch_ns(end_timestamp) AS BIGINT) AS end_time_unix_nano, \
@@ -151,7 +203,7 @@ pub fn trace_scan_sql(request: &TraceSearchRequest, trace_id: Option<&str>) -> S
         row_predicate,
         duration_predicate,
         trace_scan_cap(request.limit)
-    )
+    ))
 }
 
 pub fn trace_scan_cap(limit: usize) -> usize {
@@ -448,10 +500,23 @@ mod tests {
     use super::*;
     use crate::compat::tempo::params::parse_tempo_search_params;
 
+    const START_NS: i64 = 1_700_000_000_000_000_000;
+    const END_NS: i64 = 1_700_000_100_000_000_000;
+
+    fn windowed(mut req: TraceSearchRequest) -> TraceSearchRequest {
+        if req.start_ns.is_none() {
+            req.start_ns = Some(START_NS);
+        }
+        if req.end_ns.is_none() {
+            req.end_ns = Some(END_NS);
+        }
+        req
+    }
+
     #[test]
     fn tag_predicates_prefer_product_hot_promoted_columns() {
         let sql = trace_scan_sql(
-            &TraceSearchRequest {
+            &windowed(TraceSearchRequest {
                 tags: BTreeMap::from([
                     (
                         String::from("sp.observation.type"),
@@ -462,12 +527,13 @@ mod tests {
                 selector: None,
                 min_duration_ns: None,
                 max_duration_ns: None,
-                start_ns: None,
-                end_ns: None,
+                start_ns: Some(START_NS),
+                end_ns: Some(END_NS),
                 limit: 5,
-            },
+            }),
             None,
-        );
+        )
+        .expect("sql");
         assert!(sql.contains("COALESCE(observation_type,"));
         let obs = sql.find("observation_type").expect("observation_type");
         let bag = sql
@@ -475,6 +541,80 @@ mod tests {
             .expect("bag fallback");
         assert!(obs < bag, "promoted observation_type must lead bag access");
         assert!(sql.contains("COALESCE(service_name,"));
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        assert_sql_has_otlp_time_predicates(&sql);
+    }
+
+    #[test]
+    fn trace_scan_defaults_lookback_when_bounds_omitted_or_partial() {
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let omitted = trace_scan_sql(
+            &TraceSearchRequest {
+                tags: BTreeMap::new(),
+                selector: None,
+                min_duration_ns: None,
+                max_duration_ns: None,
+                start_ns: None,
+                end_ns: None,
+                limit: 5,
+            },
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .expect("default lookback");
+        assert_sql_has_otlp_time_predicates(&omitted);
+
+        let end_only = trace_scan_sql(
+            &TraceSearchRequest {
+                tags: BTreeMap::new(),
+                selector: None,
+                min_duration_ns: None,
+                max_duration_ns: None,
+                start_ns: None,
+                end_ns: Some(END_NS),
+                limit: 5,
+            },
+            None,
+        )
+        .expect("end-only lookback");
+        assert_sql_has_otlp_time_predicates(&end_only);
+
+        let start_only = trace_scan_sql(
+            &TraceSearchRequest {
+                tags: BTreeMap::new(),
+                selector: None,
+                min_duration_ns: None,
+                max_duration_ns: None,
+                start_ns: Some(START_NS),
+                end_ns: None,
+                limit: 5,
+            },
+            None,
+        )
+        .expect("start-only lookback");
+        assert_sql_has_otlp_time_predicates(&start_only);
+    }
+
+    #[test]
+    fn tempo_trace_scan_inventory_emits_day_and_timestamp() {
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let sql = trace_scan_sql(
+            &windowed(TraceSearchRequest {
+                tags: BTreeMap::new(),
+                selector: None,
+                min_duration_ns: None,
+                max_duration_ns: None,
+                start_ns: Some(START_NS),
+                end_ns: Some(END_NS),
+                limit: 5,
+            }),
+            Some("abc"),
+        )
+        .expect("sql");
+        assert_sql_has_otlp_time_predicates(&sql);
+        let day = sql.find("record_date BETWEEN").unwrap();
+        let id = sql.find("trace_id = 'abc'").unwrap();
+        let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
+        assert!(day < id && id < ts, "day→identity→ts order: {sql}");
     }
 
     #[test]
@@ -485,7 +625,7 @@ mod tests {
         )
         .unwrap();
         let sql = trace_scan_sql(
-            &TraceSearchRequest {
+            &windowed(TraceSearchRequest {
                 tags: params.tags,
                 selector: params.selector,
                 min_duration_ns: params.min_duration_ns,
@@ -493,9 +633,10 @@ mod tests {
                 start_ns: params.start_ns,
                 end_ns: params.end_ns,
                 limit: params.limit,
-            },
+            }),
             Some("trace-1"),
-        );
+        )
+        .expect("sql");
         assert!(sql.contains("FROM traces"));
         assert!(sql.contains("trace_id = 'trace-1'"));
         assert!(sql.contains("LIMIT 10000"));
@@ -509,7 +650,7 @@ mod tests {
         )
         .unwrap();
         let sql = trace_scan_sql(
-            &TraceSearchRequest {
+            &windowed(TraceSearchRequest {
                 tags: BTreeMap::from([(
                     String::from("deployment.environment"),
                     String::from("prod"),
@@ -517,12 +658,13 @@ mod tests {
                 selector: Some(selector),
                 min_duration_ns: Some(1_000_000),
                 max_duration_ns: Some(2_000_000),
-                start_ns: None,
-                end_ns: None,
+                start_ns: Some(START_NS),
+                end_ns: Some(END_NS),
                 limit: 5,
-            },
+            }),
             None,
-        );
+        )
+        .expect("sql");
         assert!(sql.contains("matching_traces AS"));
         assert!(sql.contains("qualified_traces AS"));
         assert!(sql.contains("instrumentation_scope"));
@@ -544,17 +686,18 @@ mod tests {
         let selector =
             crate::compat::tempo::traceql::parse_traceql(r#"{ duration >= 1ms }"#).unwrap();
         let sql = trace_scan_sql(
-            &TraceSearchRequest {
+            &windowed(TraceSearchRequest {
                 selector: Some(selector),
                 tags: BTreeMap::new(),
                 min_duration_ns: None,
                 max_duration_ns: None,
-                start_ns: None,
-                end_ns: None,
+                start_ns: Some(START_NS),
+                end_ns: Some(END_NS),
                 limit: 1,
-            },
+            }),
             None,
-        );
+        )
+        .expect("sql");
         assert!(sql.contains("CAST((COALESCE(end_time_unix_nano, start_time_unix_nano) - start_time_unix_nano) AS BIGINT) >= 1000000"));
         assert!(!sql.contains("CAST(COALESCE(end_time_unix_nano, start_time_unix_nano) - start_time_unix_nano AS VARCHAR)"));
     }
@@ -565,17 +708,18 @@ mod tests {
             crate::compat::tempo::traceql::parse_traceql(r#"{ span.http.status_code >= 500 }"#)
                 .unwrap();
         let sql = trace_scan_sql(
-            &TraceSearchRequest {
+            &windowed(TraceSearchRequest {
                 selector: Some(selector),
                 tags: BTreeMap::new(),
                 min_duration_ns: None,
                 max_duration_ns: None,
-                start_ns: None,
-                end_ns: None,
+                start_ns: Some(START_NS),
+                end_ns: Some(END_NS),
                 limit: 1,
-            },
+            }),
             None,
-        );
+        )
+        .expect("sql");
         // Span attrs COALESCE attributes + resource_attributes, then numeric TRY_CAST.
         assert!(
             sql.contains("TRY_CAST(COALESCE(json_extract_string")
@@ -591,17 +735,18 @@ mod tests {
         let selector =
             crate::compat::tempo::traceql::parse_traceql(r#"{ span.status_code >= 2 }"#).unwrap();
         let sql = trace_scan_sql(
-            &TraceSearchRequest {
+            &windowed(TraceSearchRequest {
                 selector: Some(selector),
                 tags: BTreeMap::new(),
                 min_duration_ns: None,
                 max_duration_ns: None,
-                start_ns: None,
-                end_ns: None,
+                start_ns: Some(START_NS),
+                end_ns: Some(END_NS),
                 limit: 1,
-            },
+            }),
             None,
-        );
+        )
+        .expect("sql");
 
         assert!(sql.contains("WHEN 'STATUS_CODE_ERROR' THEN 2"));
         assert!(sql.contains("WHEN 'error' THEN 2"));

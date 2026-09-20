@@ -88,24 +88,23 @@ impl DuckLakeLogsBackend {
         }
     }
 
-    fn sql_window(start_ns: Option<i64>, end_ns: Option<i64>) -> String {
-        // Loki query bounds and LogHit timestamps are both Unix nanoseconds.
+    fn sql_window(
+        start_ns: i64,
+        end_ns: i64,
+        identity: impl IntoIterator<Item = String>,
+    ) -> Result<String, String> {
         let mut clauses = Vec::new();
-        if let Some(start) = start_ns {
-            clauses.push(format!("epoch_ns(timestamp) >= {start}"));
-        }
-        if let Some(end) = end_ns {
-            clauses.push(format!("epoch_ns(timestamp) < {end}"));
-        }
-        if clauses.is_empty() {
-            String::new()
-        } else {
-            format!(" AND {}", clauses.join(" AND "))
-        }
+        crate::api::query_window::push_otlp_ns_window_predicates(
+            &mut clauses,
+            start_ns,
+            end_ns,
+            identity,
+        )?;
+        Ok(format!(" AND {}", clauses.join(" AND ")))
     }
 
     /// Equality matchers that map to product-hot promotions → column-prefer predicates.
-    fn matcher_pushdown_sql(matchers: &[LabelMatcher]) -> String {
+    fn matcher_pushdown_clauses(matchers: &[LabelMatcher]) -> Vec<String> {
         let mut parts = Vec::new();
         for m in matchers {
             if m.op != MatcherOp::Eq {
@@ -124,11 +123,7 @@ impl DuckLakeLogsBackend {
                 prefer_attr_varchar(Some(col), bag, key)
             ));
         }
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!(" AND {}", parts.join(" AND "))
-        }
+        parts
     }
 
     fn promoted_select_sql() -> String {
@@ -150,15 +145,35 @@ impl DuckLakeLogsBackend {
             start_ns.map(|value| value / 1_000_000),
             end_ns.map(|value| value / 1_000_000),
         )?;
+        let (start, end) = match (start_ns, end_ns) {
+            (Some(start), Some(end)) => (start, end),
+            _ => {
+                return Err(CompatError::new(
+                    CompatErrorCode::BadRequest,
+                    "start and end are required for Loki log scans",
+                ))
+            }
+        };
+        // Half-open [start, end) with start == end is a valid empty window (Loki oracle).
+        if start == end {
+            return Ok(Vec::new());
+        }
+        if start > end {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                "`start` must be < `end`",
+            ));
+        }
+        let window_sql = Self::sql_window(start, end, Self::matcher_pushdown_clauses(matchers))
+            .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
         let cap = ctx.limits.max_series.saturating_mul(100).max(10_000);
         let sql = format!(
             "SELECT CAST(epoch_ns(timestamp) AS BIGINT) AS timestamp_ns, body, \
              CAST(attributes AS JSON) AS attributes, \
              CAST(resource_attributes AS JSON) AS resource_attributes, \
              {promoted} \
-             FROM logs WHERE 1=1{}{} ORDER BY timestamp ASC LIMIT {}",
-            Self::sql_window(start_ns, end_ns),
-            Self::matcher_pushdown_sql(matchers),
+             FROM logs WHERE 1=1{} ORDER BY timestamp ASC LIMIT {}",
+            window_sql,
             cap.saturating_add(1),
             promoted = Self::promoted_select_sql(),
         );
@@ -660,7 +675,7 @@ mod tests {
 
     #[test]
     fn matcher_pushdown_prefers_promoted_columns() {
-        let sql = DuckLakeLogsBackend::matcher_pushdown_sql(&[
+        let clauses = DuckLakeLogsBackend::matcher_pushdown_clauses(&[
             LabelMatcher {
                 name: "service_name".into(),
                 op: MatcherOp::Eq,
@@ -672,6 +687,7 @@ mod tests {
                 value: "app".into(),
             },
         ]);
+        let sql = clauses.join(" AND ");
         assert!(sql.contains("COALESCE(service_name,"));
         assert!(sql.contains("COALESCE(logger_name,"));
         let svc = sql.find("service_name").expect("service_name");
@@ -968,13 +984,58 @@ mod tests {
 
     #[test]
     fn query_bounds_are_nanoseconds_with_exclusive_end() {
-        assert_eq!(
-            DuckLakeLogsBackend::sql_window(
-                Some(1_700_000_000_000_000_001),
-                Some(1_700_000_000_000_000_002),
-            ),
-            " AND epoch_ns(timestamp) >= 1700000000000000001 AND epoch_ns(timestamp) < 1700000000000000002"
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let sql = DuckLakeLogsBackend::sql_window(
+            1_700_000_000_000_000_001,
+            1_700_000_000_000_000_002,
+            std::iter::empty(),
+        )
+        .expect("window");
+        assert_sql_has_otlp_time_predicates(&sql);
+        // Exclusive end 002 → inclusive upper bound is end_ns - 1 (same ns as start here).
+        assert!(
+            sql.contains("'2023-11-14T22:13:20.000000001Z'::TIMESTAMP_NS"),
+            "expected inclusive ns literal, got: {sql}"
         );
+        assert!(
+            !sql.contains("'2023-11-14T22:13:20.000000002Z'::TIMESTAMP_NS"),
+            "exclusive end must not appear as inclusive bound: {sql}"
+        );
+    }
+
+    #[test]
+    fn inverted_window_is_rejected_at_sql_window() {
+        let err = DuckLakeLogsBackend::sql_window(20, 10, std::iter::empty()).unwrap_err();
+        assert!(err.contains("start") || err.contains("`start`"));
+    }
+
+    #[test]
+    fn zero_width_window_is_rejected_at_sql_window() {
+        // scan() short-circuits start == end to empty hits; sql_window still
+        // refuses to build an inverted exclusive→inclusive mapping.
+        let err = DuckLakeLogsBackend::sql_window(10, 10, std::iter::empty()).unwrap_err();
+        assert!(err.contains("start") || err.contains("`start`"));
+    }
+
+    #[test]
+    fn loki_sql_window_inventory_emits_day_and_timestamp() {
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let matchers = DuckLakeLogsBackend::matcher_pushdown_clauses(&[LabelMatcher {
+            name: "service_name".into(),
+            op: MatcherOp::Eq,
+            value: "api".into(),
+        }]);
+        let sql = DuckLakeLogsBackend::sql_window(
+            1_700_000_000_000_000_000,
+            1_700_000_100_000_000_000,
+            matchers,
+        )
+        .expect("window");
+        assert_sql_has_otlp_time_predicates(&sql);
+        let day = sql.find("record_date BETWEEN").unwrap();
+        let id = sql.find("service_name").unwrap();
+        let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
+        assert!(day < id && id < ts, "day→matcher→ts: {sql}");
     }
 
     #[test]

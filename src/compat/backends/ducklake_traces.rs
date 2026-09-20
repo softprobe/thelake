@@ -60,9 +60,14 @@ impl DuckLakeTraceBackend {
         request: &TraceSearchRequest,
         trace_id: Option<&str>,
     ) -> Result<Vec<TraceSpan>, CompatError> {
-        let result = self
-            .execute(ctx, &trace_scan_sql(request, trace_id))
-            .await?;
+        if let (Some(start), Some(end)) = (request.start_ns, request.end_ns) {
+            if start == end {
+                return Ok(Vec::new());
+            }
+        }
+        let sql = trace_scan_sql(request, trace_id)
+            .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
+        let result = self.execute(ctx, &sql).await?;
         let scan_cap = trace_scan_cap(request.limit);
         if scan_reached_cap(result.rows.len(), scan_cap) {
             return Err(CompatError::new(
@@ -1310,5 +1315,24 @@ mod tests {
             assert_eq!(err.code, CompatErrorCode::BadRequest, "{field}: {err:?}");
             assert!(err.message.contains(field), "{field}: {err:?}");
         }
+    }
+
+    #[test]
+    fn tag_discovery_scan_sql_uses_default_lookback_window() {
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let sql = trace_scan_sql(
+            &TraceSearchRequest {
+                tags: BTreeMap::new(),
+                selector: None,
+                min_duration_ns: None,
+                max_duration_ns: None,
+                start_ns: None,
+                end_ns: None,
+                limit: 5,
+            },
+            None,
+        )
+        .expect("default lookback");
+        assert_sql_has_otlp_time_predicates(&sql);
     }
 }

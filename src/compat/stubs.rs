@@ -52,12 +52,24 @@ pub fn declared_compat_probe_paths() -> &'static [(&'static str, &'static str)] 
         ("GET", "/api/v1/metadata"),
         ("GET", "/loki/api/v1/query"),
         ("GET", "/loki/api/v1/query_range"),
-        ("GET", "/loki/api/v1/labels"),
-        ("GET", "/loki/api/v1/label/service_name/values"),
-        ("GET", "/loki/api/v1/series"),
+        (
+            "GET",
+            "/loki/api/v1/labels?start=1700000000000000000&end=1700000001000000000",
+        ),
+        (
+            "GET",
+            "/loki/api/v1/label/service_name/values?start=1700000000000000000&end=1700000001000000000",
+        ),
+        (
+            "GET",
+            "/loki/api/v1/series?start=1700000000000000000&end=1700000001000000000",
+        ),
         ("GET", "/api/traces/abc123"),
         ("GET", "/api/v2/traces/abc123"),
-        ("GET", "/api/search"),
+        (
+            "GET",
+            "/api/search?start=1700000000&end=1700000100",
+        ),
         ("GET", "/api/search/tags"),
         ("GET", "/api/search/tag/http.method/values"),
     ]
