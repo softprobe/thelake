@@ -403,7 +403,8 @@ impl DuckLakeWriter {
         if table_name == "logs" {
             ensure_log_timestamp_precision(conn, &qualified_table)?;
         }
-        if table_name == "traces" || table_name == "logs" {
+        // traces / logs / scores — any OTLP layout table (D10).
+        if crate::storage::schema::otlp_layout::is_otlp_layout_table(table_name) {
             ensure_otlp_table_partition_sort(conn, &qualified_table)?;
         }
 
@@ -743,12 +744,7 @@ impl DuckLakeWriter {
     }
 
     pub(super) fn insert_order_clause(&self, table_name: &str) -> &'static str {
-        match table_name {
-            "traces" => "ORDER BY record_date, app_id, session_id, timestamp",
-            "logs" => "ORDER BY record_date, session_id, timestamp",
-            "scores" => "ORDER BY record_date, name, timestamp",
-            _ => "",
-        }
+        crate::storage::schema::otlp_layout::insert_order_by(table_name)
     }
 
     pub(super) fn reset_tables_for_dev(&self, conn: &Connection) -> Result<()> {

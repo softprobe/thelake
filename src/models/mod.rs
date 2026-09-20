@@ -1,5 +1,6 @@
 pub mod any_value;
 pub mod attr_keys;
+pub mod event_time;
 pub mod log;
 pub mod metric;
 pub mod score;
@@ -12,6 +13,7 @@ pub use any_value::{
     any_value_to_json, any_value_to_stored_string, key_values_to_map, strip_nested_json_prefix,
     NESTED_JSON_PREFIX,
 };
+pub use event_time::partition_day_from_event_time;
 pub use log::Log;
 pub use metric::{Metric, SummaryQuantile, UNSUPPORTED_EXPONENTIAL_HISTOGRAM};
 pub use score::{Score, ScoreDataType, ScoreSource};

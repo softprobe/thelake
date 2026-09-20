@@ -15,7 +15,9 @@ pub use metrics_layout::{
     union_metrics_layout_relation_sql, MetricsLayoutTable, MAINTENANCE_METRICS_FAMILY_TABLES,
     METRICS_LAYOUT_COLLAPSE_TABLES, METRICS_LAYOUT_CORE_TABLES, METRICS_LAYOUT_DOWNSAMPLE_TABLES,
 };
-pub use otlp_layout::ensure_otlp_table_partition_sort;
+pub use otlp_layout::{
+    ensure_otlp_table_partition_sort, insert_order_by, partition_day_from_event_time,
+};
 pub use tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
 pub use variant::{
     encode_attributes_json, hot_map_columns, parquet_select_for_table, parse_projected_json_value,

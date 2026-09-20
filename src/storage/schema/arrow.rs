@@ -1,4 +1,6 @@
-use crate::models::{Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
+use crate::models::{
+    partition_day_from_event_time, Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span,
+};
 use crate::storage::schema::variant::variant_json_to_string_map;
 use anyhow::Result;
 use arrow::array::{
@@ -13,6 +15,11 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tracing::{debug, trace};
+
+fn arrow_days_since_epoch(day: NaiveDate) -> i32 {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    (day - epoch).num_days() as i32
+}
 
 pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<RecordBatch> {
     let arrow_schema = Arc::new(schema.clone());
@@ -121,11 +128,17 @@ pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<Recor
             .collect::<Vec<_>>(),
     ));
     let metadata = build_score_metadata_array(scores, &metadata_field)?;
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     let record_dates: ArrayRef = Arc::new(Date32Array::from(
         scores
             .iter()
-            .map(|score| (score.record_date - epoch).num_days() as i32)
+            .map(|score| {
+                let day = partition_day_from_event_time(score.timestamp);
+                debug_assert_eq!(
+                    score.record_date, day,
+                    "Score.record_date must equal partition_day_from_event_time(timestamp)"
+                );
+                arrow_days_since_epoch(day)
+            })
             .collect::<Vec<_>>(),
     ));
 
@@ -229,11 +242,10 @@ pub fn score_configs_to_record_batch(
     ));
     let metadata =
         build_string_metadata_array(configs.iter().map(|c| &c.metadata), &metadata_field)?;
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     let record_dates: ArrayRef = Arc::new(Date32Array::from(
         configs
             .iter()
-            .map(|c| (c.record_date - epoch).num_days() as i32)
+            .map(|c| arrow_days_since_epoch(partition_day_from_event_time(c.timestamp)))
             .collect::<Vec<_>>(),
     ));
 
@@ -477,7 +489,7 @@ pub fn spans_to_record_batches_by_date(
     let mut by_day: BTreeMap<NaiveDate, Vec<Span>> = BTreeMap::new();
     for span in spans {
         by_day
-            .entry(span.timestamp.date_naive())
+            .entry(partition_day_from_event_time(span.timestamp))
             .or_default()
             .push(span);
     }
@@ -495,7 +507,7 @@ pub fn logs_to_record_batches_by_date(logs: Vec<Log>, schema: &Schema) -> Result
     let mut by_day: BTreeMap<NaiveDate, Vec<Log>> = BTreeMap::new();
     for log in logs {
         by_day
-            .entry(log.timestamp.date_naive())
+            .entry(partition_day_from_event_time(log.timestamp))
             .or_default()
             .push(log);
     }
@@ -705,14 +717,10 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
             .collect::<Vec<_>>(),
     ));
 
-    // record_date: derive from each span's timestamp for proper partition assignment
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    // record_date: sole path via partition_day_from_event_time (D2).
     let record_date_values: Vec<i32> = spans
         .iter()
-        .map(|s| {
-            let span_date = s.timestamp.date_naive();
-            (span_date - epoch).num_days() as i32
-        })
+        .map(|s| arrow_days_since_epoch(partition_day_from_event_time(s.timestamp)))
         .collect();
 
     // Verify all spans have the same record_date (required for partition compatibility)
@@ -985,14 +993,10 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
             .collect::<Vec<_>>(),
     ));
 
-    // record_date: derive from each log's timestamp
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    // record_date: sole path via partition_day_from_event_time (D2).
     let record_date_values: Vec<i32> = logs
         .iter()
-        .map(|l| {
-            let log_date = l.timestamp.date_naive();
-            (log_date - epoch).num_days() as i32
-        })
+        .map(|l| arrow_days_since_epoch(partition_day_from_event_time(l.timestamp)))
         .collect();
 
     // Verify all logs have the same record_date
