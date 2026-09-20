@@ -14,7 +14,7 @@ use crate::query::QueryEngine;
 use crate::storage::schema::variant::variant_json_to_string_map;
 use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 pub struct DuckLakeTraceBackend {
@@ -60,6 +60,11 @@ impl DuckLakeTraceBackend {
         request: &TraceSearchRequest,
         trace_id: Option<&str>,
     ) -> Result<Vec<TraceSpan>, CompatError> {
+        if let (Some(start), Some(end)) = (request.start_ns, request.end_ns) {
+            if start == end {
+                return Ok(Vec::new());
+            }
+        }
         let sql = trace_scan_sql(request, trace_id)
             .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
         let result = self.execute(ctx, &sql).await?;
@@ -322,25 +327,47 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
         Ok(hits)
     }
 
-    async fn search_tags(&self, _ctx: &TenantContext) -> Result<Vec<String>, CompatError> {
-        // Tag discovery without a time window would scan the whole lake (AC2).
-        Err(unbounded_tag_api_error("discovery"))
+    async fn search_tags(&self, ctx: &TenantContext) -> Result<Vec<String>, CompatError> {
+        let request = TraceSearchRequest {
+            tags: BTreeMap::new(),
+            selector: None,
+            min_duration_ns: None,
+            max_duration_ns: None,
+            start_ns: None,
+            end_ns: None,
+            limit: ctx.limits.max_series,
+        };
+        let spans = self.scan(ctx, &request, None).await?;
+        let mut names = BTreeSet::new();
+        for span in spans {
+            names.extend(self.tags_for(&span, usize::MAX).into_keys());
+        }
+        Ok(names.into_iter().collect())
     }
 
     async fn search_tag_values(
         &self,
-        _ctx: &TenantContext,
-        _tag: &str,
+        ctx: &TenantContext,
+        tag: &str,
     ) -> Result<Vec<String>, CompatError> {
-        Err(unbounded_tag_api_error("values"))
+        let request = TraceSearchRequest {
+            tags: BTreeMap::new(),
+            selector: None,
+            min_duration_ns: None,
+            max_duration_ns: None,
+            start_ns: None,
+            end_ns: None,
+            limit: ctx.limits.max_series,
+        };
+        let spans = self.scan(ctx, &request, None).await?;
+        let mut values = BTreeSet::new();
+        for span in spans {
+            if let Some(value) = self.tags_for(&span, usize::MAX).get(tag) {
+                values.insert(value.clone());
+            }
+        }
+        Ok(values.into_iter().collect())
     }
-}
-
-fn unbounded_tag_api_error(kind: &str) -> CompatError {
-    CompatError::new(
-        CompatErrorCode::UnsupportedFeature,
-        format!("trace tag {kind} require a time window; omit is not supported"),
-    )
 }
 
 fn parse_rows(result: &QueryResult) -> Result<Vec<TraceSpan>, CompatError> {
@@ -1291,12 +1318,21 @@ mod tests {
     }
 
     #[test]
-    fn tag_discovery_stays_unsupported_without_window() {
-        let discovery = unbounded_tag_api_error("discovery");
-        assert_eq!(discovery.code, CompatErrorCode::UnsupportedFeature);
-        assert!(discovery.message.contains("time window"));
-        let values = unbounded_tag_api_error("values");
-        assert_eq!(values.code, CompatErrorCode::UnsupportedFeature);
-        assert!(values.message.contains("time window"));
+    fn tag_discovery_scan_sql_uses_default_lookback_window() {
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let sql = trace_scan_sql(
+            &TraceSearchRequest {
+                tags: BTreeMap::new(),
+                selector: None,
+                min_duration_ns: None,
+                max_duration_ns: None,
+                start_ns: None,
+                end_ns: None,
+                limit: 5,
+            },
+            None,
+        )
+        .expect("default lookback");
+        assert_sql_has_otlp_time_predicates(&sql);
     }
 }

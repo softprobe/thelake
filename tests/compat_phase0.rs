@@ -144,8 +144,9 @@ async fn compat_routes_authenticated_return_expected_status() {
         } else if path.starts_with("/loki/") {
             // Phase 2: Loki routes are live. Query endpoints validate their
             // required query parameter; discovery endpoints return empty
-            // success data against an empty lake.
-            if path.ends_with("/query") || path.ends_with("/query_range") {
+            // success data against an empty lake (probes include start/end).
+            let path_only = path.split('?').next().unwrap_or(path);
+            if path_only.ends_with("/query") || path_only.ends_with("/query_range") {
                 assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {json}");
                 assert_eq!(json["status"], "error", "{method} {path}: {json}");
                 assert!(
@@ -166,7 +167,7 @@ async fn compat_routes_authenticated_return_expected_status() {
                 json["softprobe_code"], "bad_request",
                 "{method} {path}: {json}"
             );
-        } else if path == "/api/search" {
+        } else if path.split('?').next() == Some("/api/search") {
             assert_eq!(status, StatusCode::OK, "{method} {path}: {json}");
             assert!(json["traces"].is_array(), "{method} {path}: {json}");
         } else if path == "/api/search/tags" {
@@ -285,7 +286,7 @@ async fn tempo_query_tenant_id_param_does_not_override_auth() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/search?tenant_id=attacker")
+                .uri("/api/search?tenant_id=attacker&start=1700000000&end=1700000100")
                 .header("Authorization", "Bearer good-key")
                 .body(Body::empty())
                 .unwrap(),

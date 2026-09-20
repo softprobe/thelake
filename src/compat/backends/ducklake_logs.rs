@@ -154,6 +154,16 @@ impl DuckLakeLogsBackend {
                 ))
             }
         };
+        // Half-open [start, end) with start == end is a valid empty window (Loki oracle).
+        if start == end {
+            return Ok(Vec::new());
+        }
+        if start > end {
+            return Err(CompatError::new(
+                CompatErrorCode::BadRequest,
+                "`start` must be < `end`",
+            ));
+        }
         let window_sql = Self::sql_window(start, end, Self::matcher_pushdown_clauses(matchers))
             .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
         let cap = ctx.limits.max_series.saturating_mul(100).max(10_000);
@@ -994,8 +1004,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_window_is_rejected() {
-        // Protocol omit is rejected at scan(); sql_window takes required i64.
+    fn inverted_window_is_rejected_at_sql_window() {
+        let err = DuckLakeLogsBackend::sql_window(20, 10, std::iter::empty()).unwrap_err();
+        assert!(err.contains("start") || err.contains("`start`"));
+    }
+
+    #[test]
+    fn zero_width_window_is_rejected_at_sql_window() {
+        // scan() short-circuits start == end to empty hits; sql_window still
+        // refuses to build an inverted exclusive→inclusive mapping.
         let err = DuckLakeLogsBackend::sql_window(10, 10, std::iter::empty()).unwrap_err();
         assert!(err.contains("start") || err.contains("`start`"));
     }

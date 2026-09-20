@@ -87,18 +87,46 @@ pub struct TraceLookupBounds {
     pub end_ns: Option<i64>,
 }
 
+/// Default lookback when Tempo clients omit start/end (get-by-id / search).
+/// Still emits a real [`QueryWindow`] — never an unbounded lake scan.
+const TEMPO_DEFAULT_LOOKBACK_NS: i64 = 30 * 24 * 60 * 60 * 1_000_000_000;
+
+/// Resolve exclusive Tempo `[start, end)` for lake scans.
+///
+/// - Both set and `start < end` → use them
+/// - Both omitted → 30d lookback ending at now (Grafana wire compat)
+/// - Partial / inverted / zero-width → error (callers short-circuit zero-width)
+fn resolve_tempo_scan_window(
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+) -> Result<(i64, i64), String> {
+    match (start_ns, end_ns) {
+        (Some(start), Some(end)) if start < end => Ok((start, end)),
+        (Some(start), Some(end)) if start == end => {
+            Err("empty_tempo_window".to_string())
+        }
+        (Some(_), Some(_)) => Err("`start` must be < `end`".to_string()),
+        (None, None) => {
+            let end = chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .ok_or_else(|| "current time out of range".to_string())?;
+            let start = end.saturating_sub(TEMPO_DEFAULT_LOOKBACK_NS);
+            Ok((start, end))
+        }
+        _ => Err("start and end are required for Tempo trace scans".to_string()),
+    }
+}
+
 /// Build the bounded raw trace scan. Protocol adapters never construct SQL.
 ///
-/// Requires finite `start_ns`/`end_ns` (AC2). Emits `record_date` +
-/// `CAST(timestamp AS TIMESTAMP_NS)` via [`QueryWindow`] (exclusive end → inclusive).
+/// Emits `record_date` + `CAST(timestamp AS TIMESTAMP_NS)` via [`QueryWindow`]
+/// (exclusive end → inclusive). Omitted bounds get a finite default lookback
+/// so every lake scan still has a QueryWindow (AC2); never an open-ended scan.
 pub fn trace_scan_sql(
     request: &TraceSearchRequest,
     trace_id: Option<&str>,
 ) -> Result<String, String> {
-    let (start_ns, end_ns) = match (request.start_ns, request.end_ns) {
-        (Some(start), Some(end)) => (start, end),
-        _ => return Err("start and end are required for Tempo trace scans".to_string()),
-    };
+    let (start_ns, end_ns) = resolve_tempo_scan_window(request.start_ns, request.end_ns)?;
     let mut where_clauses = Vec::new();
     let identity = trace_id
         .map(|id| format!("trace_id = '{}'", escape(id)))
@@ -504,8 +532,8 @@ mod tests {
     }
 
     #[test]
-    fn trace_scan_requires_start_and_end() {
-        let err = trace_scan_sql(
+    fn trace_scan_defaults_lookback_when_bounds_omitted() {
+        let sql = trace_scan_sql(
             &TraceSearchRequest {
                 tags: BTreeMap::new(),
                 selector: None,
@@ -515,10 +543,11 @@ mod tests {
                 end_ns: None,
                 limit: 5,
             },
-            None,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         )
-        .unwrap_err();
-        assert!(err.contains("required"));
+        .expect("default lookback");
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        assert_sql_has_otlp_time_predicates(&sql);
 
         let half = trace_scan_sql(
             &TraceSearchRequest {
