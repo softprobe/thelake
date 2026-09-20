@@ -52,6 +52,21 @@ impl Score {
         if self.trace_id.is_none() && self.span_id.is_none() && self.session_id.is_none() {
             return Err("at least one of trace_id, span_id, or session_id is required");
         }
+        // D8: sort leads with session_id; require session_id or trace_id so the
+        // lead is not a nullable void for layout locality.
+        let session_empty = self
+            .session_id
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        let trace_empty = self
+            .trace_id
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        if session_empty && trace_empty {
+            return Err("session_id or trace_id is required for score layout sort");
+        }
 
         let value_count = usize::from(self.numeric_value.is_some())
             + usize::from(self.string_value.is_some())
@@ -94,7 +109,7 @@ mod tests {
             config_id: None,
             author_id: None,
             metadata: HashMap::new(),
-            record_date: timestamp.date_naive(),
+            record_date: crate::models::partition_day_from_event_time(timestamp),
         }
     }
 
@@ -110,6 +125,27 @@ mod tests {
         assert_eq!(
             score.validate(),
             Err("at least one of trace_id, span_id, or session_id is required")
+        );
+    }
+
+    #[test]
+    fn rejects_span_only_without_session_or_trace() {
+        let mut score = numeric_score();
+        score.trace_id = None;
+        score.session_id = None;
+        score.span_id = Some("span-1".to_string());
+        assert_eq!(
+            score.validate(),
+            Err("session_id or trace_id is required for score layout sort")
+        );
+    }
+
+    #[test]
+    fn record_date_matches_partition_day_helper() {
+        let score = numeric_score();
+        assert_eq!(
+            score.record_date,
+            crate::models::partition_day_from_event_time(score.timestamp)
         );
     }
 

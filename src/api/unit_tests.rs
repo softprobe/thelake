@@ -152,6 +152,7 @@ async fn unit_score_config_list_seeds_defaults_and_validates_scores() {
             json!({
                 "score_id": "score-anno-1",
                 "timestamp": "2026-07-18T23:22:00Z",
+                "session_id": "sess-unit-1",
                 "span_id": "span-unit-1",
                 "name": "correctness",
                 "data_type": "boolean",
@@ -173,6 +174,7 @@ async fn unit_score_config_list_seeds_defaults_and_validates_scores() {
             json!({
                 "score_id": "score-anno-bad",
                 "timestamp": "2026-07-18T23:22:00Z",
+                "session_id": "sess-unit-1",
                 "span_id": "span-unit-1",
                 "name": "correctness",
                 "data_type": "boolean",

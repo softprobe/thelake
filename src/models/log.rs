@@ -46,7 +46,7 @@ pub struct Log {
 
 impl Log {
     pub fn partition_key(&self) -> chrono::NaiveDate {
-        self.timestamp.date_naive()
+        crate::models::partition_day_from_event_time(self.timestamp)
     }
 
     pub fn grouping_key(&self) -> String {
