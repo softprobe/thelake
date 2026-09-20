@@ -1930,7 +1930,13 @@ PY
         loki) base="/loki/api/v1" ;;
         *)    base="/api/v1" ;;
       esac
+      # Loki label discovery is time-bounded (QueryWindow). Grafana's variable
+      # path often omits start/end; Softprobe defaults a lookback, but the
+      # compose seed is pinned to CROSS_* so pass that window explicitly.
       endpoint="/api/datasources/proxy/uid/$ds_uid$base/label/$label/values?match%5B%5D=$encoded_metric"
+      if [[ "$ds_type" == "loki" ]]; then
+        endpoint="${endpoint}&start=${CROSS_START_NS}&end=${CROSS_END_NS}"
+      fi
       if api_get "$endpoint" "$artifact"; then :; else
         status=$?
         return "$status"

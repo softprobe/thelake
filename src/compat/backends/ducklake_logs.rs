@@ -16,6 +16,39 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+/// Default lookback when Loki clients omit one or both of start/end.
+/// Matches Tempo: long enough for Phase 3 fixture timestamps (~2023) under CI
+/// "now", while keeping every lake scan inside a finite [`QueryWindow`].
+const LOKI_DEFAULT_LOOKBACK_NS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000_000;
+
+/// Resolve exclusive Loki `[start, end)` for lake scans.
+///
+/// Grafana label/values discovery often omits bounds; default a finite lookback
+/// so AC2 still holds. Explicit zero-width windows stay empty at `scan`.
+fn resolve_loki_scan_window(
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+) -> Result<(i64, i64), String> {
+    match (start_ns, end_ns) {
+        (Some(start), Some(end)) => Ok((start, end)),
+        (None, None) => {
+            let end = chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .ok_or_else(|| "current time out of range".to_string())?;
+            let start = end.saturating_sub(LOKI_DEFAULT_LOOKBACK_NS);
+            Ok((start, end))
+        }
+        (None, Some(end)) => {
+            let start = end.saturating_sub(LOKI_DEFAULT_LOOKBACK_NS);
+            Ok((start, end))
+        }
+        (Some(start), None) => {
+            let end = start.saturating_add(LOKI_DEFAULT_LOOKBACK_NS);
+            Ok((start, end))
+        }
+    }
+}
+
 /// Product log hot columns from `docs/promotion/logs-query-hot-attrs.yaml`.
 /// `(stream_or_matcher_label, sql_column, bag_column, otel_key)`.
 const LOG_HOT_PROMOTIONS: &[(&str, &str, &str, &str)] = &[
@@ -141,19 +174,9 @@ impl DuckLakeLogsBackend {
         end_ns: Option<i64>,
         matchers: &[LabelMatcher],
     ) -> Result<Vec<RawLogRow>, CompatError> {
-        ctx.limits.validate_time_range_ms(
-            start_ns.map(|value| value / 1_000_000),
-            end_ns.map(|value| value / 1_000_000),
-        )?;
-        let (start, end) = match (start_ns, end_ns) {
-            (Some(start), Some(end)) => (start, end),
-            _ => {
-                return Err(CompatError::new(
-                    CompatErrorCode::BadRequest,
-                    "start and end are required for Loki log scans",
-                ))
-            }
-        };
+        let (start, end) = resolve_loki_scan_window(start_ns, end_ns)
+            .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
+        ctx.limits.validate_time_range_ms(Some(start / 1_000_000), Some(end / 1_000_000))?;
         // Half-open [start, end) with start == end is a valid empty window (Loki oracle).
         if start == end {
             return Ok(Vec::new());
@@ -1001,6 +1024,21 @@ mod tests {
             !sql.contains("'2023-11-14T22:13:20.000000002Z'::TIMESTAMP_NS"),
             "exclusive end must not appear as inclusive bound: {sql}"
         );
+    }
+
+    #[test]
+    fn omitted_loki_bounds_resolve_to_finite_lookback() {
+        let (start, end) = resolve_loki_scan_window(None, None).expect("default window");
+        assert!(end > start);
+        assert_eq!(end - start, LOKI_DEFAULT_LOOKBACK_NS);
+        assert_eq!(
+            resolve_loki_scan_window(Some(10), Some(20)).unwrap(),
+            (10, 20)
+        );
+        let (start_only, end_filled) =
+            resolve_loki_scan_window(Some(1_000), None).expect("start-only");
+        assert_eq!(start_only, 1_000);
+        assert_eq!(end_filled, 1_000 + LOKI_DEFAULT_LOOKBACK_NS);
     }
 
     #[test]

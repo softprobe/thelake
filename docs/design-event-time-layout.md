@@ -129,6 +129,7 @@ Explorer stops passing list `range` into detail lake calls.
 | [`sql_support.rs`](../src/api/sql_support.rs) | Required helper; delete optional |
 | [`reduce_sql.rs`](../src/session_summary/reduce_sql.rs) | Call the same helper |
 | All `compile_*` in `api/llm/query.rs`, telemetry, Tempo, Loki | Required window |
+| Tempo / Loki scan adapters | Omitted client bounds → finite default lookback (still a `QueryWindow`; never unbounded) |
 | Issue #73 | Retitle: required event-time window + single day-from-timestamp; fail closed at compilers |
 
 ---
