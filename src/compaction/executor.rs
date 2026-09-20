@@ -370,7 +370,17 @@ impl MaintenanceExecutor {
         };
         (metadata, remove_orphan_files)
     }
+}
 
+/// Config for one pending-day + per-day INSERT ladder step.
+struct LadderDayBatch<'a> {
+    step: &'a str,
+    pending_sql: fn(&str, usize) -> String,
+    for_day_sql: fn(&str, Option<NaiveDate>) -> String,
+    fail_fast: bool,
+}
+
+impl MaintenanceExecutor {
     /// §7.2 steps 3–5: incremental 5m → 1h → collapse (AC-S2 / AC-M2).
     ///
     /// Every ladder INSERT is pending-day + per-`record_date` so DuckLake can
@@ -407,20 +417,24 @@ impl MaintenanceExecutor {
             conn,
             &catalog,
             &run_step,
-            "downsample_5m",
-            |c, lim| downsample_5m_pending_days_sql(c, lim),
-            |c, d| downsample_5m_for_day_sql(c, Some(d)),
-            false,
+            LadderDayBatch {
+                step: "downsample_5m",
+                pending_sql: downsample_5m_pending_days_sql,
+                for_day_sql: downsample_5m_for_day_sql,
+                fail_fast: false,
+            },
         );
 
         let _ = self.run_ladder_day_batched(
             conn,
             &catalog,
             &run_step,
-            "hist_downsample_5m",
-            |c, lim| hist_downsample_5m_pending_days_sql(c, lim),
-            |c, d| hist_downsample_5m_for_day_sql(c, Some(d)),
-            false,
+            LadderDayBatch {
+                step: "hist_downsample_5m",
+                pending_sql: hist_downsample_5m_pending_days_sql,
+                for_day_sql: hist_downsample_5m_for_day_sql,
+                fail_fast: false,
+            },
         );
 
         if self
@@ -428,10 +442,12 @@ impl MaintenanceExecutor {
                 conn,
                 &catalog,
                 &run_step,
-                "downsample_1h_from_5m",
-                |c, lim| downsample_1h_from_5m_pending_days_sql(c, lim),
-                |c, d| downsample_1h_from_5m_for_day_sql(c, Some(d)),
-                true,
+                LadderDayBatch {
+                    step: "downsample_1h_from_5m",
+                    pending_sql: downsample_1h_from_5m_pending_days_sql,
+                    for_day_sql: downsample_1h_from_5m_for_day_sql,
+                    fail_fast: true,
+                },
             )
             .is_err()
         {
@@ -439,10 +455,12 @@ impl MaintenanceExecutor {
                 conn,
                 &catalog,
                 &run_step,
-                "downsample_1h_from_raw",
-                |c, lim| downsample_1h_from_raw_pending_days_sql(c, lim),
-                |c, d| downsample_1h_from_raw_for_day_sql(c, Some(d)),
-                false,
+                LadderDayBatch {
+                    step: "downsample_1h_from_raw",
+                    pending_sql: downsample_1h_from_raw_pending_days_sql,
+                    for_day_sql: downsample_1h_from_raw_for_day_sql,
+                    fail_fast: false,
+                },
             );
         }
 
@@ -451,10 +469,12 @@ impl MaintenanceExecutor {
                 conn,
                 &catalog,
                 &run_step,
-                "hist_downsample_1h_from_5m",
-                |c, lim| hist_downsample_1h_from_5m_pending_days_sql(c, lim),
-                |c, d| hist_downsample_1h_from_5m_for_day_sql(c, Some(d)),
-                true,
+                LadderDayBatch {
+                    step: "hist_downsample_1h_from_5m",
+                    pending_sql: hist_downsample_1h_from_5m_pending_days_sql,
+                    for_day_sql: hist_downsample_1h_from_5m_for_day_sql,
+                    fail_fast: true,
+                },
             )
             .is_err()
         {
@@ -462,10 +482,12 @@ impl MaintenanceExecutor {
                 conn,
                 &catalog,
                 &run_step,
-                "hist_downsample_1h_from_raw",
-                |c, lim| hist_downsample_1h_from_raw_pending_days_sql(c, lim),
-                |c, d| hist_downsample_1h_from_raw_for_day_sql(c, Some(d)),
-                false,
+                LadderDayBatch {
+                    step: "hist_downsample_1h_from_raw",
+                    pending_sql: hist_downsample_1h_from_raw_pending_days_sql,
+                    for_day_sql: hist_downsample_1h_from_raw_for_day_sql,
+                    fail_fast: false,
+                },
             );
         }
 
@@ -474,10 +496,12 @@ impl MaintenanceExecutor {
                 conn,
                 &catalog,
                 &run_step,
-                "collapse_job_1h",
-                |c, lim| collapse_job_1h_pending_days_sql(c, lim),
-                |c, d| collapse_job_1h_for_day_sql(c, Some(d)),
-                true,
+                LadderDayBatch {
+                    step: "collapse_job_1h",
+                    pending_sql: collapse_job_1h_pending_days_sql,
+                    for_day_sql: collapse_job_1h_for_day_sql,
+                    fail_fast: true,
+                },
             )
             .is_err()
         {
@@ -485,10 +509,12 @@ impl MaintenanceExecutor {
                 conn,
                 &catalog,
                 &run_step,
-                "collapse_job_1h_from_raw",
-                |c, lim| collapse_job_1h_from_raw_pending_days_sql(c, lim),
-                |c, d| collapse_job_1h_from_raw_for_day_sql(c, Some(d)),
-                false,
+                LadderDayBatch {
+                    step: "collapse_job_1h_from_raw",
+                    pending_sql: collapse_job_1h_from_raw_pending_days_sql,
+                    for_day_sql: collapse_job_1h_from_raw_for_day_sql,
+                    fail_fast: false,
+                },
             );
         }
         Ok(())
@@ -503,17 +529,14 @@ impl MaintenanceExecutor {
         conn: &Connection,
         catalog: &str,
         run_step: &dyn Fn(&str, &str) -> Result<()>,
-        step: &str,
-        pending_sql: impl Fn(&str, usize) -> String,
-        for_day_sql: impl Fn(&str, NaiveDate) -> String,
-        fail_fast: bool,
+        batch: LadderDayBatch<'_>,
     ) -> Result<()> {
-        let pending = pending_sql(catalog, METRICS_LADDER_MAX_DAYS_PER_PASS);
+        let pending = (batch.pending_sql)(catalog, METRICS_LADDER_MAX_DAYS_PER_PASS);
         let days = match self.query_pending_downsample_days(conn, &pending) {
             Ok(d) => d,
             Err(err) => {
-                warn!("{step} pending-day probe failed: {err}");
-                if fail_fast {
+                warn!("{} pending-day probe failed: {err}", batch.step);
+                if batch.fail_fast {
                     return Err(err);
                 }
                 return Ok(());
@@ -523,13 +546,13 @@ impl MaintenanceExecutor {
             return Ok(());
         }
         for day in days {
-            let label = format!("{step}[{day}]");
-            let sql = for_day_sql(catalog, day);
+            let label = format!("{}[{day}]", batch.step);
+            let sql = (batch.for_day_sql)(catalog, Some(day));
             if let Err(err) = run_step(&label, &sql) {
-                if fail_fast {
+                if batch.fail_fast {
                     return Err(err);
                 }
-                warn!("{step} day {day} failed: {err}");
+                warn!("{} day {day} failed: {err}", batch.step);
             }
         }
         Ok(())
