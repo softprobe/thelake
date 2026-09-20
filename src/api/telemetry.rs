@@ -509,7 +509,10 @@ fn parse_field_values_window(params: &HashMap<String, String>) -> Result<QueryWi
         from: from.clone(),
         to: to.clone(),
     })
-    .map_err(|e| e.replace("timeRange.from", "from").replace("timeRange.to", "to"))
+    .map_err(|e| {
+        e.replace("timeRange.from", "from")
+            .replace("timeRange.to", "to")
+    })
 }
 
 async fn details_for_target(
@@ -947,7 +950,10 @@ mod tests {
         let day = sql.find("record_date BETWEEN").unwrap();
         let id = sql.find("app_id IS NOT NULL").unwrap();
         let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
-        assert!(day < id && id < ts, "predicate order day→identity→ts: {sql}");
+        assert!(
+            day < id && id < ts,
+            "predicate order day→identity→ts: {sql}"
+        );
     }
 
     #[test]
@@ -1006,8 +1012,15 @@ mod tests {
         assert_sql_has_otlp_time_predicates(&details.logs);
         let day = details.spans.find("record_date BETWEEN").unwrap();
         let id = details.spans.find("session_id = ").unwrap();
-        let ts = details.spans.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
-        assert!(day < id && id < ts, "details predicate order: {}", details.spans);
+        let ts = details
+            .spans
+            .find("CAST(timestamp AS TIMESTAMP_NS)")
+            .unwrap();
+        assert!(
+            day < id && id < ts,
+            "details predicate order: {}",
+            details.spans
+        );
         // Metrics keep TIMESTAMPTZ (carve-out); not OTLP day+timestamp inventory.
     }
 

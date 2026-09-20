@@ -225,7 +225,9 @@ mod tests {
     #[test]
     fn ns_window_adapter_rejects_inverted_and_maps_exclusive_end() {
         let mut conditions = Vec::new();
-        assert!(push_otlp_ns_window_predicates(&mut conditions, 10, 10, std::iter::empty()).is_err());
+        assert!(
+            push_otlp_ns_window_predicates(&mut conditions, 10, 10, std::iter::empty()).is_err()
+        );
         conditions.clear();
         push_otlp_ns_window_predicates(
             &mut conditions,
