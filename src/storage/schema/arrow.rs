@@ -10,7 +10,7 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tracing::{debug, trace};
 
@@ -465,6 +465,46 @@ fn build_promoted_columns_from_attribute_maps_with_overrides(
 }
 
 /// Convert Span batch to Arrow RecordBatch using telemetry Arrow schema
+/// One Arrow batch per UTC calendar day — DuckLake traces are partitioned by
+/// `record_date`, and coalesce may flush spans that straddle midnight together.
+pub fn spans_to_record_batches_by_date(
+    spans: Vec<Span>,
+    schema: &Schema,
+) -> Result<Vec<RecordBatch>> {
+    if spans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut by_day: BTreeMap<NaiveDate, Vec<Span>> = BTreeMap::new();
+    for span in spans {
+        by_day
+            .entry(span.timestamp.date_naive())
+            .or_default()
+            .push(span);
+    }
+    by_day
+        .into_values()
+        .map(|day| spans_to_record_batch(&day, schema))
+        .collect()
+}
+
+/// Same partition rule as [`spans_to_record_batches_by_date`] for logs.
+pub fn logs_to_record_batches_by_date(logs: Vec<Log>, schema: &Schema) -> Result<Vec<RecordBatch>> {
+    if logs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut by_day: BTreeMap<NaiveDate, Vec<Log>> = BTreeMap::new();
+    for log in logs {
+        by_day
+            .entry(log.timestamp.date_naive())
+            .or_default()
+            .push(log);
+    }
+    by_day
+        .into_values()
+        .map(|day| logs_to_record_batch(&day, schema))
+        .collect()
+}
+
 pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBatch> {
     let arrow_schema = Arc::new(schema.clone());
 
@@ -1133,6 +1173,27 @@ mod tests {
         assert_eq!(batch.schema().field(12).name(), "resource_attributes");
         assert_eq!(batch.schema().field(13).name(), "instrumentation_scope");
         assert_eq!(batch.schema().field(14).name(), "links");
+    }
+
+    #[test]
+    fn spans_by_date_splits_midnight_straddle() {
+        let schema = crate::storage::schema::tables::TraceTable::schema();
+        // 2024-01-01 23:00 UTC and 2024-01-02 01:00 UTC
+        let day1 = span_at(1_704_146_400_000_000_000, 1_704_146_400_000_000_001);
+        let day2 = span_at(1_704_153_600_000_000_000, 1_704_153_600_000_000_001);
+        let batches = spans_to_record_batches_by_date(vec![day1, day2], &schema).unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 1);
+        assert_eq!(batches[1].num_rows(), 1);
+        let one = spans_to_record_batches_by_date(
+            vec![span_at(
+                1_704_146_400_000_000_000,
+                1_704_146_400_000_000_001,
+            )],
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(one.len(), 1);
     }
 
     fn log_at(timestamp_ns: i64, observed_timestamp_ns: Option<i64>, body: &str) -> Log {

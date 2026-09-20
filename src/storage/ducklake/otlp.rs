@@ -135,7 +135,7 @@ impl DuckLakeWriter {
                 Self::apply_span_promotions(&mut spans, &columns)?;
                 let schema = Arc::new(TraceTable::schema_with_promoted_columns(&columns));
                 let dk = self.effective_ducklake(&scope);
-                let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
+                let record_batches = Span::to_record_batches_by_date(spans, schema.as_ref())?;
                 self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
                     .await?;
                 return Ok(());
@@ -165,7 +165,8 @@ impl DuckLakeWriter {
                 Self::apply_span_promotions(&mut tenant_spans, &columns)?;
                 let schema = Arc::new(TraceTable::schema_with_promoted_columns(&columns));
                 let dk = self.effective_ducklake(&scope);
-                let record_batches = vec![Span::to_record_batch(&tenant_spans, schema.as_ref())?];
+                let record_batches =
+                    Span::to_record_batches_by_date(tenant_spans, schema.as_ref())?;
                 self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
                     .await?;
             }
@@ -179,7 +180,7 @@ impl DuckLakeWriter {
             let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Traces);
             Self::apply_span_promotions(&mut spans, &columns)?;
             let schema = Arc::new(TraceTable::schema_with_promoted_columns(&columns));
-            let record_batches = vec![Span::to_record_batch(&spans, schema.as_ref())?];
+            let record_batches = Span::to_record_batches_by_date(spans, schema.as_ref())?;
             self.write_record_batches_internal("traces", record_batches)
                 .await
         } else {
@@ -187,7 +188,7 @@ impl DuckLakeWriter {
             let mut record_batches = Vec::new();
             for batch in batches {
                 if !batch.is_empty() {
-                    record_batches.push(Span::to_record_batch(&batch, schema.as_ref())?);
+                    record_batches.extend(Span::to_record_batches_by_date(batch, schema.as_ref())?);
                 }
             }
             self.write_record_batches_internal("traces", record_batches)
@@ -212,7 +213,7 @@ impl DuckLakeWriter {
         Self::apply_log_promotions(&mut logs, &columns)?;
         let schema = Arc::new(OtlpLogsTable::schema_with_promoted_columns(&columns));
         let dk = self.effective_ducklake(scope);
-        let record_batches = vec![arrow::logs_to_record_batch(&logs, schema.as_ref())?];
+        let record_batches = arrow::logs_to_record_batches_by_date(logs, schema.as_ref())?;
         self.write_record_batches_internal_with_ducklake(&dk, "logs", record_batches)
             .await?;
         Ok(())
@@ -254,7 +255,10 @@ impl DuckLakeWriter {
         let mut record_batches = Vec::new();
         for batch in batches {
             if !batch.is_empty() {
-                record_batches.push(arrow::logs_to_record_batch(&batch, schema.as_ref())?);
+                record_batches.extend(arrow::logs_to_record_batches_by_date(
+                    batch,
+                    schema.as_ref(),
+                )?);
             }
         }
         self.write_record_batches_internal("logs", record_batches)

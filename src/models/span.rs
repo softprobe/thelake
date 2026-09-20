@@ -148,6 +148,14 @@ impl Span {
         crate::storage::schema::arrow::spans_to_record_batch(spans, schema)
     }
 
+    /// Split by UTC `record_date` before building Arrow batches (partition rule).
+    pub fn to_record_batches_by_date(
+        spans: Vec<Span>,
+        schema: &arrow::datatypes::Schema,
+    ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
+        crate::storage::schema::arrow::spans_to_record_batches_by_date(spans, schema)
+    }
+
     /// Create a Span from an OTLP span and resource attributes
     pub fn from_otlp(
         otlp_span: opentelemetry_proto::tonic::trace::v1::Span,
