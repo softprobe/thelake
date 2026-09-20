@@ -143,7 +143,7 @@ mod tests {
     fn push_order_is_day_identity_timestamp() {
         let w = sample();
         let mut conditions = Vec::new();
-        push_otlp_time_predicates(&mut conditions, &w, [format!("session_id = 's1'")]);
+        push_otlp_time_predicates(&mut conditions, &w, ["session_id = 's1'".to_string()]);
         assert_eq!(conditions.len(), 3);
         assert_eq!(conditions[0], w.partition_day_predicate());
         assert_eq!(conditions[1], "session_id = 's1'");
