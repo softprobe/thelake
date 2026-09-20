@@ -32,5 +32,5 @@ ducklake:
   data_path: gs://softprobe-datalake-ducklake/ducklake/e2e/placeholder/
   catalog_alias: softprobe
   metadata_schema: main
-  data_inlining_row_limit: 10000
+  data_inlining_row_limit: 500
   writer_pool_size: 4

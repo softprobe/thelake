@@ -36,10 +36,11 @@ ducklake:
   data_path: "./warehouse/ducklake/data/"
   catalog_alias: "softprobe"
   metadata_schema: "softprobe"
-  # Default 10000: small batches stay catalog-inlined (MAP-safe). TWCS
-  # wait-for-next-run (AC-F7) merges live Parquet only — no flush every pass.
+  # Default 500 (DuckLake-aligned). Softprobe briefly used 10000; that left too
+  # many live spans catalog-resident and slowed session detail scans.
+  # TWCS wait-for-next-run (AC-F7) merges live Parquet only — no flush every pass.
   # Set 0 only for fixtures that need Parquet-per-batch.
-  data_inlining_row_limit: 10000
+  data_inlining_row_limit: 500
   # Per-scope DuckDB writer connections (1..=16). Default 4.
   writer_pool_size: 4
 

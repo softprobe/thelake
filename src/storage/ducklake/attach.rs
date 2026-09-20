@@ -1,7 +1,9 @@
-use crate::config::DuckLakeConfig;
-use anyhow::Result;
+use crate::config::{Config, DuckLakeConfig};
+use anyhow::{Context, Result};
 use duckdb::Connection;
+use tracing::warn;
 
+use super::object_store::configure_object_store;
 use super::util::escape_sql_literal;
 
 pub(super) fn catalog_is_attached(conn: &Connection, alias: &str) -> bool {
@@ -23,6 +25,41 @@ pub(crate) const WRITER_DUCKDB_MEMORY: &str = "1GB";
 /// → Grafana scans 200–500 Parquet files per PromQL). One compact connection.
 pub(crate) const COMPACTION_DUCKDB_THREADS: i64 = 2;
 pub(crate) const COMPACTION_DUCKDB_MEMORY: &str = "2GB";
+
+/// Open in-memory DuckDB with httpfs + object-store credentials + DuckLake
+/// catalog extensions loaded — ready for `ATTACH`.
+///
+/// **Required** for any path that may read Parquet under `gs://` / `s3://`
+/// (compaction, session_summary reduce/rebuild). Query workers configure the
+/// same credentials separately on their long-lived pool. A connection that only
+/// ATTACHes can still scan catalog-inlined rows, which is why local-disk
+/// session_summary tests historically passed without this step.
+pub(crate) fn open_object_store_ducklake_connection(
+    config: &Config,
+    ducklake: &DuckLakeConfig,
+    threads: i64,
+    memory_limit: &str,
+) -> Result<Connection> {
+    let conn = open_in_memory_capped(threads, memory_limit).context("DuckDB open failed")?;
+    conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
+        .context("INSTALL/LOAD httpfs")?;
+    configure_object_store(&conn, config, &ducklake.data_path).context("configure object store")?;
+    conn.execute_batch("INSTALL ducklake; LOAD ducklake;")
+        .context("INSTALL/LOAD ducklake")?;
+    match ducklake.catalog_type.as_str() {
+        "postgres" => conn
+            .execute_batch("INSTALL postgres; LOAD postgres;")
+            .context("INSTALL/LOAD postgres")?,
+        "sqlite" => conn
+            .execute_batch("INSTALL sqlite; LOAD sqlite;")
+            .context("INSTALL/LOAD sqlite")?,
+        _ => {}
+    }
+    if let Err(err) = configure_duckdb_resources(&conn, threads, memory_limit) {
+        warn!("Failed to cap DuckDB threads/memory: {err}");
+    }
+    Ok(conn)
+}
 
 /// Open in-memory DuckDB with thread/memory caps applied at database create
 /// time. `SET threads` after INSTALL/LOAD does not fully shrink an nproc-wide
@@ -220,6 +257,81 @@ mod tests {
         assert!(
             COMPACTION_DUCKDB_MEMORY.ends_with("GB"),
             "TWCS merge of closed-day metric_series OOM'd at writer 512MB"
+        );
+    }
+
+    #[test]
+    fn object_store_ducklake_connection_installs_gcs_secret() {
+        let prev_id = std::env::var("GCS_HMAC_ACCESS_KEY_ID").ok();
+        let prev_secret = std::env::var("GCS_HMAC_SECRET").ok();
+        std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", "attach-test-key");
+        std::env::set_var("GCS_HMAC_SECRET", "attach-test-secret");
+
+        let mut config = Config::default();
+        config.ducklake.data_path = "gs://softprobe-test/ducklake/".to_string();
+        let result = open_object_store_ducklake_connection(
+            &config,
+            &config.ducklake,
+            QUERY_DUCKDB_THREADS,
+            QUERY_DUCKDB_MEMORY,
+        );
+
+        match prev_id {
+            Some(v) => std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", v),
+            None => std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID"),
+        }
+        match prev_secret {
+            Some(v) => std::env::set_var("GCS_HMAC_SECRET", v),
+            None => std::env::remove_var("GCS_HMAC_SECRET"),
+        }
+
+        let conn = result.expect("open_object_store_ducklake_connection");
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM duckdb_secrets() WHERE name = 'gcs_hmac'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("duckdb_secrets");
+        assert_eq!(n, 1, "gs:// paths require a GCS secret before Parquet I/O");
+    }
+
+    #[test]
+    fn object_store_ducklake_connection_sets_s3_endpoint() {
+        let prev_id = std::env::var("AWS_ACCESS_KEY_ID").ok();
+        let prev_secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+        std::env::set_var("AWS_ACCESS_KEY_ID", "minioadmin");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "minioadmin");
+
+        let mut config = Config::default();
+        config.object_store.endpoint = Some("http://localhost:9000".to_string());
+        config.object_store.region = "us-east-1".to_string();
+        config.ducklake.data_path = "s3://warehouse/ducklake/".to_string();
+        let result = open_object_store_ducklake_connection(
+            &config,
+            &config.ducklake,
+            QUERY_DUCKDB_THREADS,
+            QUERY_DUCKDB_MEMORY,
+        );
+
+        match prev_id {
+            Some(v) => std::env::set_var("AWS_ACCESS_KEY_ID", v),
+            None => std::env::remove_var("AWS_ACCESS_KEY_ID"),
+        }
+        match prev_secret {
+            Some(v) => std::env::set_var("AWS_SECRET_ACCESS_KEY", v),
+            None => std::env::remove_var("AWS_SECRET_ACCESS_KEY"),
+        }
+
+        let conn = result.expect("open_object_store_ducklake_connection");
+        let endpoint: String = conn
+            .query_row("SELECT current_setting('s3_endpoint')", [], |row| {
+                row.get(0)
+            })
+            .expect("s3_endpoint");
+        assert!(
+            endpoint.contains("localhost:9000"),
+            "expected minio endpoint, got {endpoint}"
         );
     }
 }

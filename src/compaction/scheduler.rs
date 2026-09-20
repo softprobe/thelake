@@ -41,14 +41,12 @@ pub async fn start_maintenance_scheduler(
         jobs.push(Arc::new(SessionSummaryReduceJob::new(
             registry.pool().clone(),
             Some(registry.clone()),
-            config.ducklake.clone(),
-            config.session_summary.clone(),
+            config.clone(),
         )));
         jobs.push(Arc::new(SessionSummaryRebuildJob::new(
             registry.pool().clone(),
             Some(registry),
-            config.ducklake.clone(),
-            config.session_summary.clone(),
+            config.clone(),
         )));
     }
 

@@ -1,6 +1,6 @@
 //! Claim dirty → bounds+clamp → lake aggregate → UPSERT → ack.
 
-use crate::config::DuckLakeConfig;
+use crate::config::{Config, DuckLakeConfig};
 use crate::runtime_engine::quote_pg_ident;
 use crate::session_summary::reduce_sql::compile_session_summary_upsert_sql;
 use anyhow::{anyhow, Context, Result};
@@ -246,20 +246,33 @@ fn attach_ducklake(conn: &Connection, ducklake: &DuckLakeConfig) -> Result<()> {
         ducklake.catalog_alias,
         opts.join(", ")
     );
-    conn.execute_batch(&attach_sql)?;
+    conn.execute_batch(&attach_sql)
+        .with_context(|| format!("DuckLake attach failed for reduce ({})", ducklake.data_path))?;
     Ok(())
 }
 
-fn open_reduce_connection(ducklake: &DuckLakeConfig) -> Result<Connection> {
-    let conn = Connection::open_in_memory().context("open duckdb for reduce")?;
-    crate::storage::ducklake::configure_duckdb_resources(
-        &conn,
+/// Open DuckDB for reduce/rebuild: httpfs + object store + extensions, then ATTACH.
+///
+/// Must mirror compaction / query workers. ATTACH alone can read catalog-inlined
+/// rows; Parquet under `gs://` / `s3://` needs credentials on this connection.
+fn open_reduce_connection(config: &Config, ducklake: &DuckLakeConfig) -> Result<Connection> {
+    let conn = prepare_reduce_duckdb(config, ducklake)?;
+    attach_ducklake(&conn, ducklake)?;
+    Ok(conn)
+}
+
+/// httpfs + object-store secret + ducklake/catalog extensions (no ATTACH).
+///
+/// Shared with compaction via [`crate::storage::ducklake::open_object_store_ducklake_connection`]
+/// so reduce/rebuild cannot drift back to "ATTACH only" (local-disk tests still pass).
+fn prepare_reduce_duckdb(config: &Config, ducklake: &DuckLakeConfig) -> Result<Connection> {
+    crate::storage::ducklake::open_object_store_ducklake_connection(
+        config,
+        ducklake,
         crate::storage::ducklake::COMPACTION_DUCKDB_THREADS,
         crate::storage::ducklake::COMPACTION_DUCKDB_MEMORY,
     )
-    .ok();
-    attach_ducklake(&conn, ducklake)?;
-    Ok(conn)
+    .context("open duckdb for session_summary reduce")
 }
 
 fn micros_to_utc(us: i64) -> Option<DateTime<Utc>> {
@@ -320,6 +333,7 @@ pub fn validate_rebuild_window(
 /// - `session_ids = Some([...])` — reduce (dirty IN-list).
 /// - `session_ids = None` — rebuild (window-wide).
 pub fn aggregate_sessions_from_lake(
+    config: &Config,
     ducklake: &DuckLakeConfig,
     session_ids: Option<&[String]>,
     from: DateTime<Utc>,
@@ -339,7 +353,7 @@ pub fn aggregate_sessions_from_lake(
             to,
         )?,
     };
-    let conn = open_reduce_connection(ducklake)?;
+    let conn = open_reduce_connection(config, ducklake)?;
     let mut stmt = conn.prepare(&sql).context("prepare aggregate SQL")?;
     let mapped = stmt
         .query_map([], map_duck_row)
@@ -353,15 +367,17 @@ pub fn aggregate_sessions_from_lake(
 pub async fn rebuild_tenant_window(
     pool: &Pool,
     metadata_schema: &str,
+    config: &Config,
     ducklake: &DuckLakeConfig,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     max_reduce_span_seconds: u64,
 ) -> Result<usize> {
     validate_rebuild_window(from, to, max_reduce_span_seconds).map_err(|msg| anyhow!(msg))?;
+    let config = config.clone();
     let ducklake = ducklake.clone();
     let rows = tokio::task::spawn_blocking(move || {
-        aggregate_sessions_from_lake(&ducklake, None, from, to)
+        aggregate_sessions_from_lake(&config, &ducklake, None, from, to)
     })
     .await
     .map_err(|e| anyhow!("rebuild join: {e}"))??;
@@ -374,6 +390,7 @@ pub async fn reduce_tenant(
     pool: &Pool,
     metadata_schema: &str,
     tenant_id: &str,
+    config: &Config,
     ducklake: &DuckLakeConfig,
     max_sessions: u64,
     max_reduce_span_seconds: u64,
@@ -410,10 +427,11 @@ pub async fn reduce_tenant(
         .unwrap_or(0);
     crate::self_monitoring::record_session_summary_reducer_lag(tenant_id, lag_secs);
 
+    let config = config.clone();
     let ducklake = ducklake.clone();
     let ids_for_lake = ids.clone();
     let rows = tokio::task::spawn_blocking(move || {
-        aggregate_sessions_from_lake(&ducklake, Some(&ids_for_lake), from, to)
+        aggregate_sessions_from_lake(&config, &ducklake, Some(&ids_for_lake), from, to)
     })
     .await
     .map_err(|e| anyhow!("reduce join: {e}"))??;
@@ -494,5 +512,39 @@ mod tests {
         assert!(validate_rebuild_window(from, to, 86400).is_ok());
         assert!(validate_rebuild_window(to, from, 86400).is_err());
         assert!(validate_rebuild_window(from, to, 3600).is_err());
+    }
+
+    #[test]
+    fn prepare_reduce_duckdb_installs_gcs_secret_for_gs_data_path() {
+        let prev_id = std::env::var("GCS_HMAC_ACCESS_KEY_ID").ok();
+        let prev_secret = std::env::var("GCS_HMAC_SECRET").ok();
+        std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", "reduce-test-key");
+        std::env::set_var("GCS_HMAC_SECRET", "reduce-test-secret");
+
+        let mut config = Config::default();
+        config.ducklake.data_path = "gs://softprobe-test/ducklake/".to_string();
+        let result = prepare_reduce_duckdb(&config, &config.ducklake);
+
+        match prev_id {
+            Some(v) => std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", v),
+            None => std::env::remove_var("GCS_HMAC_ACCESS_KEY_ID"),
+        }
+        match prev_secret {
+            Some(v) => std::env::set_var("GCS_HMAC_SECRET", v),
+            None => std::env::remove_var("GCS_HMAC_SECRET"),
+        }
+
+        let conn = result.expect("prepare_reduce_duckdb");
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM duckdb_secrets() WHERE name = 'gcs_hmac'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("duckdb_secrets");
+        assert_eq!(
+            n, 1,
+            "reduce/rebuild must install GCS secret before scanning Parquet"
+        );
     }
 }
