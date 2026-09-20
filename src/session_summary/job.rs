@@ -1,7 +1,7 @@
 //! Leased `session_summary.reduce` / `session_summary.rebuild` on the shared runner.
 
 use crate::async_jobs::Job;
-use crate::config::{DuckLakeConfig, SessionSummaryConfig};
+use crate::config::{Config, DuckLakeConfig, SessionSummaryConfig};
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::session_summary::hot_attrs::ensure_product_hot_attrs_for_scope;
 use crate::session_summary::reduce::{rebuild_tenant_window, reduce_tenant};
@@ -74,6 +74,8 @@ async fn ensure_hot_attrs_if_registry(
 pub struct SessionSummaryReduceJob {
     pool: Pool,
     scope_registry: Option<DuckLakeScopeResolver>,
+    /// Full runtime config (object-store credentials for Parquet reduce scans).
+    config: Config,
     default_ducklake: DuckLakeConfig,
     cfg: SessionSummaryConfig,
     interval: Duration,
@@ -83,16 +85,14 @@ pub struct SessionSummaryReduceJob {
 }
 
 impl SessionSummaryReduceJob {
-    pub fn new(
-        pool: Pool,
-        scope_registry: Option<DuckLakeScopeResolver>,
-        default_ducklake: DuckLakeConfig,
-        cfg: SessionSummaryConfig,
-    ) -> Self {
+    pub fn new(pool: Pool, scope_registry: Option<DuckLakeScopeResolver>, config: Config) -> Self {
+        let cfg = config.session_summary.clone();
+        let default_ducklake = config.ducklake.clone();
         let interval = Duration::from_millis(cfg.reducer_interval_ms.max(50));
         Self {
             pool,
             scope_registry,
+            config,
             default_ducklake,
             cfg,
             interval,
@@ -103,14 +103,9 @@ impl SessionSummaryReduceJob {
     }
 
     #[cfg(test)]
-    pub fn with_scopes(
-        pool: Pool,
-        default_ducklake: DuckLakeConfig,
-        cfg: SessionSummaryConfig,
-        scopes: Vec<(String, DuckLakeConfig)>,
-    ) -> Self {
-        let mut job = Self::new(pool, None, default_ducklake, cfg);
-        job.fixed_scopes = Some(scopes);
+    pub fn with_scopes(pool: Pool, config: Config, scopes: Vec<(String, DuckLakeConfig)>) -> Self {
+        let mut job = Self::new(pool, None, config);
+        job.fixed_scopes.replace(scopes);
         job
     }
 }
@@ -146,6 +141,7 @@ impl Job for SessionSummaryReduceJob {
             &self.pool,
             &ducklake.metadata_schema,
             scope_key,
+            &self.config,
             &ducklake,
             self.cfg.max_sessions_per_reduce,
             self.cfg.max_reduce_span_seconds,
@@ -159,6 +155,8 @@ impl Job for SessionSummaryReduceJob {
 pub struct SessionSummaryRebuildJob {
     pool: Pool,
     scope_registry: Option<DuckLakeScopeResolver>,
+    /// Full runtime config (object-store credentials for Parquet rebuild scans).
+    config: Config,
     default_ducklake: DuckLakeConfig,
     cfg: SessionSummaryConfig,
     interval: Duration,
@@ -168,16 +166,14 @@ pub struct SessionSummaryRebuildJob {
 }
 
 impl SessionSummaryRebuildJob {
-    pub fn new(
-        pool: Pool,
-        scope_registry: Option<DuckLakeScopeResolver>,
-        default_ducklake: DuckLakeConfig,
-        cfg: SessionSummaryConfig,
-    ) -> Self {
+    pub fn new(pool: Pool, scope_registry: Option<DuckLakeScopeResolver>, config: Config) -> Self {
+        let cfg = config.session_summary.clone();
+        let default_ducklake = config.ducklake.clone();
         let interval = Duration::from_millis(cfg.rebuild_interval_ms.max(50));
         Self {
             pool,
             scope_registry,
+            config,
             default_ducklake,
             cfg,
             interval,
@@ -188,14 +184,9 @@ impl SessionSummaryRebuildJob {
     }
 
     #[cfg(test)]
-    pub fn with_scopes(
-        pool: Pool,
-        default_ducklake: DuckLakeConfig,
-        cfg: SessionSummaryConfig,
-        scopes: Vec<(String, DuckLakeConfig)>,
-    ) -> Self {
-        let mut job = Self::new(pool, None, default_ducklake, cfg);
-        job.fixed_scopes = Some(scopes);
+    pub fn with_scopes(pool: Pool, config: Config, scopes: Vec<(String, DuckLakeConfig)>) -> Self {
+        let mut job = Self::new(pool, None, config);
+        job.fixed_scopes.replace(scopes);
         job
     }
 }
@@ -232,6 +223,7 @@ impl Job for SessionSummaryRebuildJob {
         rebuild_tenant_window(
             &self.pool,
             &ducklake.metadata_schema,
+            &self.config,
             &ducklake,
             from,
             to,

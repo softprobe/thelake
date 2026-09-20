@@ -473,9 +473,9 @@ pub struct DuckLakeConfig {
     #[serde(default = "default_ducklake_metadata_schema")]
     pub metadata_schema: String,
     /// Rows per INSERT at or below this limit may stay catalog-inlined.
-    /// Default `Some(10000)`. TWCS wait-for-next-run (AC-F7): maintenance does
-    /// not flush inlined rows before merge. Set `Some(0)` only when a fixture
-    /// needs Parquet-per-batch (shredding / F-files stress).
+    /// Default `Some(500)` (DuckLake-aligned). TWCS wait-for-next-run (AC-F7):
+    /// maintenance does not flush inlined rows before merge. Set `Some(0)` only
+    /// when a fixture needs Parquet-per-batch (shredding / F-files stress).
     #[serde(default = "default_data_inlining_row_limit")]
     pub data_inlining_row_limit: Option<u64>,
     /// Number of reused ATTACH'd DuckDB writer connections per catalog scope key.
@@ -518,10 +518,11 @@ fn default_ducklake_metadata_schema() -> String {
 }
 
 fn default_data_inlining_row_limit() -> Option<u64> {
-    // AC-F7 wait-for-next-run: small batches stay catalog-inlined; TWCS only
-    // merges live Parquet (no flush-before-TWCS). Override to Some(0) only when
-    // a fixture needs Parquet-per-batch (e.g. shredding / F-files stress).
-    Some(10_000)
+    // DuckLake-aligned default. Softprobe briefly used 10_000; that left too
+    // many live spans in Postgres inlined chunks (slow session detail scans).
+    // AC-F7 wait-for-next-run: TWCS only merges live Parquet (no flush-before-TWCS).
+    // Override to Some(0) only when a fixture needs Parquet-per-batch.
+    Some(500)
 }
 
 fn default_writer_pool_size() -> usize {
@@ -736,14 +737,14 @@ mod tests {
         assert_eq!(c.maintenance.max_snapshot_age_seconds, 60);
         assert_ne!(c.maintenance.max_snapshot_age_seconds, 604800);
         assert_ne!(c.maintenance.max_snapshot_age_seconds, 3600);
-        assert_eq!(c.ducklake.data_inlining_row_limit, Some(10_000));
+        assert_eq!(c.ducklake.data_inlining_row_limit, Some(500));
     }
 
-    /// AC-F7 / T-F7: default inlining is 10_000 (wait-for-next-run TWCS).
+    /// AC-F7 / T-F7: default inlining is 500 (DuckLake-aligned; was 10_000).
     #[test]
-    fn default_data_inlining_row_limit_is_ten_thousand() {
+    fn default_data_inlining_row_limit_is_five_hundred() {
         let c = Config::default();
-        assert_eq!(c.ducklake.data_inlining_row_limit, Some(10_000));
+        assert_eq!(c.ducklake.data_inlining_row_limit, Some(500));
     }
 
     #[test]

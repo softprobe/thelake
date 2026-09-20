@@ -28,6 +28,10 @@ detail ← traces
 
 **Hard rule:** reducer/rebuild SQL always includes `record_date` + timestamp `[from,to]` so Parquet files are pruned.
 
+**Hard rule:** reducer/rebuild DuckDB connections must configure object-store credentials the same way query workers and compaction do (`httpfs` + `configure_object_store`). A connection that only ATTACHes DuckLake can scan catalog-inlined rows but fails (or silently under-reads) once the window needs Parquet under `gs://` / `s3://`.
+
+**Inlining:** default `data_inlining_row_limit` is **500** (DuckLake-aligned). Larger limits (e.g. former Softprobe 10_000) keep too many live spans in Postgres inlined chunks and make session detail TABLE_SCAN expensive.
+
 **Dirty write rule:** never per span — once per successful lake flush batch (coalesce drain; `flush_interval_seconds` 0 or >0 share that path).
 
 **Where/when the reducer runs:** not inline on ingest. It is an **async job** on the shared job runner (same framework as DuckLake maintenance), under a **Postgres job lease** so only one replica reduces a tenant at a time. See [`async-jobs.md`](./async-jobs.md).
@@ -339,6 +343,20 @@ rebuild([from, to]):
 ```
 
 Triggers: ops `POST /v1/llm/sessions/summary/rebuild` with explicit `{from,to}`; periodic leased job every `rebuild_interval_ms` (default 24h) over lookback `max_reduce_span_seconds` (default 7d). Never whole-lake. Ops rejects windows larger than `max_reduce_span_seconds` (no chunking).
+
+DuckDB setup for reduce/rebuild (must match compaction): shared
+`open_object_store_ducklake_connection` → `INSTALL/LOAD httpfs` → object-store
+secret from env/config → `INSTALL/LOAD ducklake` (+ postgres/sqlite) → `ATTACH`.
+Skipping object-store setup is a defect: recent inlined / **local-disk** windows
+may succeed while older Parquet under `gs://` / `s3://` returns opaque
+`query_failed`.
+
+**Why CI missed this:** Stage 3 HTTP tests (`session_summary_list`) use a
+postgres catalog with `data_path` on a **local temp directory**. Even with
+`data_inlining_row_limit=0` (Parquet on disk), DuckDB needs no httpfs/HMAC, so
+rebuild looked green. Production Softprobe stores Parquet on GCS; that path was
+uncovered until `rebuild_reads_parquet_from_minio_object_store` + unit tests on
+`open_object_store_ducklake_connection`.
 
 ---
 

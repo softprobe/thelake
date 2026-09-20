@@ -346,7 +346,7 @@ fn poison_kind(message: &str) -> Poison {
     }
     // Stale ATTACH after inlined catalog table rename (e.g. optional external
     // flush). Rebuild + retry picks up the new name — required now that default
-    // inlining is 10_000 (#55).
+    // inlining is 500 (was 10_000 under #55).
     if head.starts_with("Catalog Error: Failed to read inlined data from DuckLake") {
         return Poison::Collateral;
     }

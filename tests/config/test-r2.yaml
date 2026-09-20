@@ -27,5 +27,5 @@ ducklake:
   data_path: s3://YOUR-R2-BUCKET/ducklake/
   catalog_alias: softprobe
   metadata_schema: main
-  data_inlining_row_limit: 10000
+  data_inlining_row_limit: 500
   writer_pool_size: 4

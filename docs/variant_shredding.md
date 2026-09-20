@@ -40,7 +40,7 @@ Skinny `metric_samples` / hist / postings have **no** attribute bags.
 ## Inlining re-evaluation
 
 MAP bags are Postgres-inline-safe (scores metadata already inlines). Default
-catalog-global `data_inlining_row_limit` is **`10_000`**. Metrics **AC-F7** is
+catalog-global `data_inlining_row_limit` is **`500`**. Metrics **AC-F7** is
 wait-for-next-run: TWCS merges live Parquet only and does **not** flush
 catalog-inlined skinny rows every pass. Batches over the limit write Parquet and
 are compacted on a later maintenance run. Downsample `INSERT … SELECT` reads the

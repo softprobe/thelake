@@ -845,6 +845,7 @@ pub async fn rebuild_session_summary(
     let result = crate::session_summary::rebuild_tenant_window(
         registry.pool(),
         &ducklake.metadata_schema,
+        state.engines.config(),
         &ducklake,
         request.from,
         request.to,
@@ -1876,7 +1877,7 @@ fn storage_error(error: anyhow::Error) -> ApiError {
     };
     warn!("llm query failed [{}]: {}", error_id, raw);
 
-    let kind = classify_storage_error(&raw);
+    let kind = classify_storage_error_chain(&error);
     let status = if kind.retryable {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
@@ -1896,6 +1897,21 @@ fn storage_error(error: anyhow::Error) -> ApiError {
 struct StorageErrorKind {
     code: &'static str,
     retryable: bool,
+}
+
+/// Classify using the full chain: our `.context()` prefixes must not hide DuckDB
+/// `IO Error` / `HTTP Error` markers (reduce/rebuild wrap as `query aggregate: …`).
+fn classify_storage_error_chain(error: &anyhow::Error) -> StorageErrorKind {
+    let top = error.to_string();
+    let top_kind = classify_storage_error(&top);
+    if top_kind.code != "query_failed" {
+        return top_kind;
+    }
+    let root = error.root_cause().to_string();
+    if root != top {
+        return classify_storage_error(&root);
+    }
+    top_kind
 }
 
 /// Match only on the leading marker DuckDB emits, so echoed SQL (which contains
@@ -2022,6 +2038,20 @@ mod tests {
             "HTTP Error: HTTP GET error reading 's3://w/x.parquet' (HTTP 503)"
         ));
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["retryable"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn storage_error_classifies_through_anyhow_context_prefix() {
+        // reduce/rebuild wrap DuckDB faults as `query aggregate: …`. Matching
+        // only the top-level string made every Parquet/GCS failure look like a
+        // permanent binder defect (`query_failed`).
+        let err =
+            anyhow::anyhow!("HTTP Error: HTTP GET error reading 'gs://b/x.parquet' (HTTP 403)")
+                .context("query aggregate");
+        let (status, body) = storage_error(err);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["error"], serde_json::json!("query_unavailable"));
         assert_eq!(body.0["retryable"], serde_json::json!(true));
     }
 

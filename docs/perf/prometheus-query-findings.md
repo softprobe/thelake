@@ -4,7 +4,7 @@
 **Date:** 2026-08-14  
 **Context:** Host killed under OpenTelemetry Demo traffic + Grafana Prom dashboards; DuckDB/PromQL path felt unacceptably slow.  
 **Scope:** Metrics storage + Prometheus-compatible **query** path (`DuckLakeMetricsBackend` + PromQL eval). Traces/logs are out of scope except where shared DuckLake maintenance applies.  
-**Update (2026-09-10 / #55):** Hot bags temporarily restored to MAP; VARIANT shredding deferred. Prefer promoted columns in generated SQL. Full-demo CPU gate: `make bench-demo-cpu-full` (mean Softprobe process CPU &lt; 85% under full OTLP + Grafana `refresh=10s`; PromQL range cache uses TTL freshness under coalesce). Catalog `data_inlining_row_limit` default **10_000** (AC-F7 wait-for-next-run TWCS).
+**Update (2026-09-10 / #55):** Hot bags temporarily restored to MAP; VARIANT shredding deferred. Prefer promoted columns in generated SQL. Full-demo CPU gate: `make bench-demo-cpu-full` (mean Softprobe process CPU &lt; 85% under full OTLP + Grafana `refresh=10s`; PromQL range cache uses TTL freshness under coalesce). Catalog `data_inlining_row_limit` default **500** (AC-F7 wait-for-next-run TWCS).
 
 Related:
 
@@ -58,7 +58,7 @@ Audit date: 2026-08-14 against `src/compat/backends/ducklake_metrics.rs`, `src/q
 - `maintenance.target_file_size_bytes` default **64 MiB**
 - Default-on `ducklake_merge_adjacent_files` + snapshot/orphan cleanup (hourly)
 - Writer sets `target_file_size` + `hive_file_pattern`; metrics `ORDER BY record_date, metric_name, timestamp`
-- DuckLake `data_inlining_row_limit` default **10_000** (small batches stay in catalog metadata)
+- DuckLake `data_inlining_row_limit` default **500** (small batches stay in catalog metadata)
 
 **Gaps:**
 

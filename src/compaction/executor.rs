@@ -905,27 +905,12 @@ impl MaintenanceExecutor {
         &self,
         ducklake: &crate::config::DuckLakeConfig,
     ) -> Result<Connection> {
-        let conn = crate::storage::ducklake::open_in_memory_capped(
+        crate::storage::ducklake::open_object_store_ducklake_connection(
+            &self.config,
+            ducklake,
             crate::storage::ducklake::COMPACTION_DUCKDB_THREADS,
             crate::storage::ducklake::COMPACTION_DUCKDB_MEMORY,
-        )?;
-        conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
-        crate::storage::ducklake::configure_object_store(&conn, &self.config, &ducklake.data_path)?;
-        conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
-        if ducklake.catalog_type == "postgres" {
-            conn.execute_batch("INSTALL postgres; LOAD postgres;")?;
-        }
-        if ducklake.catalog_type == "sqlite" {
-            conn.execute_batch("INSTALL sqlite; LOAD sqlite;")?;
-        }
-        if let Err(err) = crate::storage::ducklake::configure_duckdb_resources(
-            &conn,
-            crate::storage::ducklake::COMPACTION_DUCKDB_THREADS,
-            crate::storage::ducklake::COMPACTION_DUCKDB_MEMORY,
-        ) {
-            warn!("Failed to cap DuckDB compaction threads/memory: {}", err);
-        }
-        Ok(conn)
+        )
     }
 
     fn attach_ducklake(

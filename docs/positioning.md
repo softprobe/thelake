@@ -297,7 +297,7 @@ Until comparative results exist, use **designed to**, **can**, or
   backfilled.
 - PostgreSQL is the multi-tenant promotion path; SQLite promotion is limited
   to a local single-scope catalog.
-- Default `data_inlining_row_limit` is `10_000` (MAP bags + small metric batches
+- Default `data_inlining_row_limit` is `500` (MAP bags + small metric batches
   inline). TWCS wait-for-next-run (AC-F7): no flush-before-merge every pass.
 - Existing VARIANT hot columns require an operator-owned rebuild to MAP.
 - Flush-through ingestion makes one DuckLake commit per collector request, so

@@ -25,7 +25,7 @@ pub use writer::DuckLakeWriter;
 pub(crate) use attach::{
     configure_duckdb_resources, ducklake_attach_options, ducklake_attach_target,
     ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified, open_in_memory_capped,
-    prepare_local_ducklake_paths, COMPACTION_DUCKDB_MEMORY, COMPACTION_DUCKDB_THREADS,
-    QUERY_DUCKDB_MEMORY, QUERY_DUCKDB_THREADS,
+    open_object_store_ducklake_connection, prepare_local_ducklake_paths, COMPACTION_DUCKDB_MEMORY,
+    COMPACTION_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY, QUERY_DUCKDB_THREADS,
 };
 pub(crate) use util::{escape_sql_literal, size_literal};

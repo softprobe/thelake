@@ -141,6 +141,7 @@ async fn run_reduce(state: &AppState) -> usize {
         registry.pool(),
         &dk.metadata_schema,
         "",
+        state.engines.config(),
         &dk,
         cfg.max_sessions_per_reduce,
         cfg.max_reduce_span_seconds,
@@ -939,4 +940,132 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
         detail_after["observation_count"].as_i64().unwrap_or(0) > 0,
         "lake detail still populated: {detail_after}"
     );
+}
+
+fn minio_live() -> bool {
+    std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:9000".parse().expect("addr"),
+        std::time::Duration::from_secs(1),
+    )
+    .is_ok()
+}
+
+/// Same as [`build_summary_router`] but Parquet lands on MinIO (`s3://`).
+///
+/// Local-temp `data_path` cannot catch a missing `configure_object_store` on the
+/// reduce/rebuild DuckDB connection — production GCS can. This path is the
+/// regression gate for that class of bug.
+async fn build_summary_router_on_minio(
+    metadata_schema: String,
+) -> Option<(Router, AppState, TempDir, String)> {
+    if !pg_reachable().await {
+        return None;
+    }
+    if !minio_live() {
+        eprintln!("skip: minio unreachable on :9000 (make setup)");
+        return None;
+    }
+    if std::env::var_os("AWS_ACCESS_KEY_ID").is_none() {
+        std::env::set_var("AWS_ACCESS_KEY_ID", "minioadmin");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "minioadmin");
+    }
+
+    let temp = TempDir::new().expect("tempdir");
+    let mut config = postgres_summary_config(&temp, metadata_schema.clone());
+    let run_id = Uuid::new_v4();
+    config.object_store.endpoint = Some("http://localhost:9000".to_string());
+    config.object_store.region = "us-east-1".to_string();
+    config.ducklake.data_path = format!("s3://warehouse/ss-summary-e2e/{run_id}/");
+    // Force object-store Parquet (no catalog inlining) so rebuild must use httpfs.
+    config.ducklake.data_inlining_row_limit = Some(0);
+
+    let config = Arc::new(config);
+    let (router, state) = softprobe_runtime::api::create_router(
+        config,
+        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
+        None,
+    )
+    .await
+    .expect("router");
+
+    let registry = state.engines.scope_registry().expect("postgres registry");
+    let client = registry.pool().get().await.expect("pg client");
+    ensure_session_summary_tables(&client, &metadata_schema)
+        .await
+        .expect("ensure summary ddl");
+    let q = format!("\"{}\"", metadata_schema.replace('"', "\"\""));
+    let _ = client
+        .execute(
+            &format!("TRUNCATE {q}.session_summary, {q}.session_summary_dirty"),
+            &[],
+        )
+        .await;
+
+    Some((router, state, temp, metadata_schema))
+}
+
+#[tokio::test]
+async fn rebuild_reads_parquet_from_minio_object_store() {
+    let schema = format!("ss_s3_rebuild_{}", Uuid::new_v4().simple());
+    let Some((router, state, _temp, schema)) = build_summary_router_on_minio(schema).await else {
+        eprintln!("skip: postgres/minio unreachable");
+        return;
+    };
+
+    assert!(
+        state
+            .engines
+            .config()
+            .ducklake
+            .data_path
+            .starts_with("s3://"),
+        "test must use object-store data_path"
+    );
+
+    ingest_filter_fixture(&router).await;
+    flush(&state).await;
+    let reduced = run_reduce(&state).await;
+    assert!(
+        reduced >= 3,
+        "reduce over s3:// Parquet must succeed (missing object-store config on reduce conn?)"
+    );
+
+    let registry = state.engines.scope_registry().expect("registry");
+    let client = registry.pool().get().await.expect("client");
+    let q = format!("\"{}\"", schema.replace('"', "\"\""));
+    client
+        .execute(&format!("TRUNCATE {q}.session_summary"), &[])
+        .await
+        .expect("truncate summary");
+
+    let now = Utc::now();
+    let rebuild_req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/sessions/summary/rebuild")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "from": (now - ChronoDuration::hours(6)).to_rfc3339(),
+                "to": (now + ChronoDuration::minutes(5)).to_rfc3339(),
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let rebuild_resp = router.clone().oneshot(rebuild_req).await.unwrap();
+    assert_eq!(
+        rebuild_resp.status(),
+        StatusCode::OK,
+        "rebuild over s3:// Parquet must succeed — this is the regression for \
+         reduce/rebuild DuckDB missing configure_object_store (prod GCS failure mode)"
+    );
+    let rebuild_body = response_json(rebuild_resp).await;
+    assert!(
+        rebuild_body["sessions_upserted"].as_u64().unwrap_or(0) >= 3,
+        "{rebuild_body}"
+    );
+
+    let after = search(&router, window()).await;
+    let after_ids = session_ids(&after);
+    assert!(after_ids.contains(&"sess-ok"), "{after}");
+    assert!(after_ids.contains(&"sess-err"), "{after}");
 }
