@@ -1,6 +1,6 @@
+use crate::api::query_window::{push_otlp_time_predicates, QueryWindow};
 use crate::api::sql_support::{
-    cursor_predicate, encode_cursor, push_optional_time_bounds, sql_string_literal,
-    timestamp_ns_column, timestamp_ns_literal,
+    cursor_predicate, encode_cursor, sql_string_literal, timestamp_ns_column, timestamp_ns_literal,
 };
 use crate::api::AppState;
 use crate::async_jobs::LeaseStore;
@@ -175,8 +175,8 @@ pub struct SessionDetail {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetailQuery {
-    pub from: Option<DateTime<Utc>>,
-    pub to: Option<DateTime<Utc>>,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
     /// When set, only return observations belonging to this product session.
@@ -1166,11 +1166,16 @@ pub fn compile_observation_search_sql(
 
 pub fn compile_observation_detail_sql(
     span_id: &str,
-    from: Option<DateTime<Utc>>,
-    to: Option<DateTime<Utc>>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
 ) -> Result<String, String> {
-    let mut conditions = vec![format!("span_id = {}", sql_string_literal(span_id))];
-    push_optional_time_bounds(&mut conditions, from, to)?;
+    let window = QueryWindow::try_new(from, to)?;
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(
+        &mut conditions,
+        &window,
+        [format!("span_id = {}", sql_string_literal(span_id))],
+    );
     Ok(format!(
         "SELECT {projection} FROM traces WHERE {where_sql} LIMIT 1",
         projection = observation_projection(true),
@@ -1180,15 +1185,17 @@ pub fn compile_observation_detail_sql(
 
 pub fn compile_trace_summary_sql(
     trace_id: &str,
-    from: Option<DateTime<Utc>>,
-    to: Option<DateTime<Utc>>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
     session_id: Option<&str>,
 ) -> Result<String, String> {
-    let mut conditions = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
-    push_optional_time_bounds(&mut conditions, from, to)?;
+    let window = QueryWindow::try_new(from, to)?;
+    let mut identity = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
     if let Some(session_id) = session_id.map(str::trim).filter(|v| !v.is_empty()) {
-        conditions.push(format!("session_id = {}", sql_string_literal(session_id)));
+        identity.push(format!("session_id = {}", sql_string_literal(session_id)));
     }
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(&mut conditions, &window, identity);
     Ok(format!(
         "SELECT {projection} FROM traces WHERE {where_sql} GROUP BY trace_id",
         projection = trace_summary_projection(),
@@ -1198,17 +1205,19 @@ pub fn compile_trace_summary_sql(
 
 pub fn compile_trace_observations_sql(
     trace_id: &str,
-    from: Option<DateTime<Utc>>,
-    to: Option<DateTime<Utc>>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
     limit: usize,
     cursor: Option<&str>,
     session_id: Option<&str>,
 ) -> Result<String, String> {
-    let mut conditions = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
-    push_optional_time_bounds(&mut conditions, from, to)?;
+    let window = QueryWindow::try_new(from, to)?;
+    let mut identity = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
     if let Some(session_id) = session_id.map(str::trim).filter(|v| !v.is_empty()) {
-        conditions.push(format!("session_id = {}", sql_string_literal(session_id)));
+        identity.push(format!("session_id = {}", sql_string_literal(session_id)));
     }
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(&mut conditions, &window, identity);
     if let Some(cursor) = cursor {
         conditions.push(cursor_predicate(cursor, "timestamp", "span_id")?);
     }
@@ -1341,20 +1350,27 @@ pub fn compile_scores_for_span_sql(span_id: &str) -> String {
 
 pub fn compile_scores_for_trace_sql(
     trace_id: &str,
-    from: Option<DateTime<Utc>>,
-    to: Option<DateTime<Utc>>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
 ) -> Result<String, String> {
-    let mut span_conditions = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
-    push_optional_time_bounds(&mut span_conditions, from, to)?;
-    let predicate = format!(
-        "trace_id = {trace} OR span_id IN (SELECT span_id FROM traces WHERE {span_where})",
+    let window = QueryWindow::try_new(from, to)?;
+    let mut span_conditions = Vec::new();
+    push_otlp_time_predicates(
+        &mut span_conditions,
+        &window,
+        [format!("trace_id = {}", sql_string_literal(trace_id))],
+    );
+    let identity = format!(
+        "(trace_id = {trace} OR span_id IN (SELECT span_id FROM traces WHERE {span_where}))",
         trace = sql_string_literal(trace_id),
         span_where = span_conditions.join(" AND ")
     );
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(&mut conditions, &window, [identity]);
     Ok(format!(
-        "SELECT {cols} FROM scores WHERE ({predicate}) ORDER BY timestamp DESC, score_id DESC",
+        "SELECT {cols} FROM scores WHERE {where_sql} ORDER BY timestamp DESC, score_id DESC",
         cols = score_columns(),
-        predicate = predicate
+        where_sql = conditions.join(" AND ")
     ))
 }
 
@@ -2441,23 +2457,20 @@ mod tests {
     }
 
     #[test]
-    fn score_sql_handles_missing_member_ids() {
-        let sql = compile_scores_for_trace_sql("trace-1", None, None).expect("trace scores sql");
-        assert!(sql.contains("trace_id = 'trace-1'"));
-        assert!(sql.contains("span_id IN (SELECT"));
-        assert!(!sql.contains("CAST(timestamp AS TIMESTAMP_NS) >="));
-        assert!(!sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="));
-
+    fn score_sql_requires_time_bounds() {
         let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
         let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let sql = compile_scores_for_trace_sql("trace-1", Some(from), Some(to))
-            .expect("trace scores sql with bounds");
-        assert!(sql.contains("span_id IN (SELECT span_id FROM traces WHERE trace_id = 'trace-1' AND CAST(timestamp AS TIMESTAMP_NS) >="));
+        let sql = compile_scores_for_trace_sql("trace-1", from, to).expect("trace scores sql");
+        assert!(sql.contains("trace_id = 'trace-1'"));
+        assert!(sql.contains("span_id IN (SELECT"));
+        assert!(sql.contains("record_date BETWEEN DATE"));
+        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) >="));
         assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="));
+        assert!(compile_scores_for_trace_sql("trace-1", to, from).is_err());
     }
 
     #[test]
@@ -2564,11 +2577,22 @@ mod tests {
         assert_ns(compile_session_recording_sql("sess-1", from, to, 10).unwrap());
         assert_ns(compile_session_aggregate_sql("sess-1", from, to).unwrap());
         assert_ns(compile_session_traces_sql("sess-1", from, to, 10, None).unwrap());
-        assert_ns(compile_observation_detail_sql("span-1", Some(from), Some(to)).unwrap());
-        assert_ns(compile_trace_summary_sql("trace-1", Some(from), Some(to), None).unwrap());
-        assert_ns(
-            compile_trace_observations_sql("trace-1", Some(from), Some(to), 10, None, None)
-                .unwrap(),
+        assert_ns(compile_observation_detail_sql("span-1", from, to).unwrap());
+        assert_ns(compile_trace_summary_sql("trace-1", from, to, None).unwrap());
+        assert_ns(compile_trace_observations_sql("trace-1", from, to, 10, None, None).unwrap());
+
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        assert_sql_has_otlp_time_predicates(
+            &compile_observation_detail_sql("span-1", from, to).unwrap(),
+        );
+        assert_sql_has_otlp_time_predicates(
+            &compile_trace_summary_sql("trace-1", from, to, None).unwrap(),
+        );
+        assert_sql_has_otlp_time_predicates(
+            &compile_trace_observations_sql("trace-1", from, to, 10, None, None).unwrap(),
+        );
+        assert_sql_has_otlp_time_predicates(
+            &compile_scores_for_trace_sql("trace-1", from, to).unwrap(),
         );
 
         let request = ObservationSearchRequest {
