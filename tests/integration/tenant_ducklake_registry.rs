@@ -2,11 +2,13 @@ use softprobe_runtime::config::Config;
 use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
 use uuid::Uuid;
 
+// Use logs (not traces): recording a traces promo would supersede the product
+// hot-attrs seeded on provision, which must stay complete or ensure panics.
 const MANIFEST_DIVISION: &str = r#"
 specVersion: softprobe.promotion.v1
 target:
   kind: telemetry_columns
-  tables: [traces]
+  tables: [logs]
 columns:
   - name: division_name
     type: string
@@ -20,7 +22,7 @@ const MANIFEST_REGION: &str = r#"
 specVersion: softprobe.promotion.v1
 target:
   kind: telemetry_columns
-  tables: [traces]
+  tables: [logs]
 columns:
   - name: region_code
     type: string
@@ -102,15 +104,11 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
         .expect("provision tenant B");
 
     resolver
-        .record_active_telemetry_promotion_spec(
-            &scope_a,
-            MANIFEST_DIVISION,
-            &["traces".to_string()],
-        )
+        .record_active_telemetry_promotion_spec(&scope_a, MANIFEST_DIVISION, &["logs".to_string()])
         .await
         .expect("record tenant A spec");
     resolver
-        .record_active_telemetry_promotion_spec(&scope_b, MANIFEST_REGION, &["traces".to_string()])
+        .record_active_telemetry_promotion_spec(&scope_b, MANIFEST_REGION, &["logs".to_string()])
         .await
         .expect("record tenant B spec");
 
@@ -125,10 +123,31 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
 
     assert_eq!(resolved_a, scope_a);
     assert_eq!(resolved_b, scope_b);
-    assert_eq!(manifests_a.len(), 1);
-    assert_eq!(manifests_b.len(), 1);
-    assert_eq!(manifests_a[0].columns[0].name, "division_name");
-    assert_eq!(manifests_b[0].columns[0].name, "region_code");
+
+    let names_a: Vec<&str> = manifests_a
+        .iter()
+        .flat_map(|m| m.columns.iter().map(|c| c.name.as_str()))
+        .collect();
+    let names_b: Vec<&str> = manifests_b
+        .iter()
+        .flat_map(|m| m.columns.iter().map(|c| c.name.as_str()))
+        .collect();
+    assert!(
+        names_a.contains(&"division_name"),
+        "tenant A must see its logs promo: {names_a:?}"
+    );
+    assert!(
+        names_b.contains(&"region_code"),
+        "tenant B must see its logs promo: {names_b:?}"
+    );
+    assert!(
+        !names_a.contains(&"region_code"),
+        "tenant A must not see tenant B's column"
+    );
+    assert!(
+        !names_b.contains(&"division_name"),
+        "tenant B must not see tenant A's column"
+    );
 }
 
 async fn postgres_resolver() -> DuckLakeScopeResolver {
