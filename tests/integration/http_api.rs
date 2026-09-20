@@ -616,8 +616,13 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
     );
 
     for uri in [
-        format!("/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"),
-        format!("/v1/llm/traces/{}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z", hex::encode(trace_id)),
+        format!(
+            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+        ),
+        format!(
+            "/v1/llm/traces/{}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z",
+            hex::encode(trace_id)
+        ),
         format!("/v1/llm/sessions/{session_id}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"),
     ] {
         let response = router
@@ -832,7 +837,9 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     assert_eq!(miss["items"].as_array().unwrap().len(), 0);
 
     let obs_req = Request::builder()
-        .uri(format!("/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"))
+        .uri(format!(
+            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+        ))
         .body(Body::empty())
         .unwrap();
     let obs_resp = router.clone().oneshot(obs_req).await.expect("observation");
@@ -844,7 +851,9 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     assert_eq!(obs["scores"][0]["score_id"], "score-llm-query-1");
 
     let trace_req = Request::builder()
-        .uri(format!("/v1/llm/traces/{trace_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"))
+        .uri(format!(
+            "/v1/llm/traces/{trace_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+        ))
         .body(Body::empty())
         .unwrap();
     let trace_resp = router.clone().oneshot(trace_req).await.expect("trace");
@@ -871,7 +880,9 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     assert_eq!(session["scores"].as_array().unwrap().len(), 1);
 
     let missing = Request::builder()
-        .uri("/v1/llm/observations/does-not-exist?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z")
+        .uri(
+            "/v1/llm/observations/does-not-exist?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z",
+        )
         .body(Body::empty())
         .unwrap();
     let missing_resp = router.oneshot(missing).await.expect("missing");
@@ -1257,7 +1268,9 @@ async fn spans_without_events_are_readable() {
 
     // The detail endpoint projects events; on 1.5.2 this is where it died.
     let req = Request::builder()
-        .uri(format!("/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"))
+        .uri(format!(
+            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+        ))
         .body(Body::empty())
         .unwrap();
     let resp = router
@@ -1430,7 +1443,9 @@ async fn inlined_data_stays_readable_across_maintenance() {
     // 3. Inlined read #1: observation detail joins scores through the query
     //    engine's ducklake attachment.
     let req = Request::builder()
-        .uri(format!("/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"))
+        .uri(format!(
+            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+        ))
         .body(Body::empty())
         .unwrap();
     let resp = router.clone().oneshot(req).await.expect("observation");
@@ -1462,7 +1477,9 @@ async fn inlined_data_stays_readable_across_maintenance() {
 
     // 5. Inlined read #2, after maintenance -- the production crash site.
     let req = Request::builder()
-        .uri(format!("/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"))
+        .uri(format!(
+            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+        ))
         .body(Body::empty())
         .unwrap();
     let resp = router
@@ -1514,7 +1531,9 @@ async fn inlined_data_stays_readable_across_maintenance() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     let req = Request::builder()
-        .uri(format!("/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"))
+        .uri(format!(
+            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+        ))
         .body(Body::empty())
         .unwrap();
     let resp = router.oneshot(req).await.expect("final observation");
