@@ -127,8 +127,8 @@ async fn one_day_session_fetch_does_not_list_unrelated_day_files() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        wide_plan.contains("2026-09-11") || all_paths.contains("2026-09-11"),
-        "positive control: day-B must be visible in wide plan or on-disk paths\nplan:\n{wide_plan}"
+        wide_plan.contains("2026-09-11"),
+        "positive control: wide EXPLAIN ANALYZE must list day-B (2026-09-11):\n{wide_plan}"
     );
 
     let explain = query_engine
