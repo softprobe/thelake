@@ -182,9 +182,7 @@ pub struct DetailQuery {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct SessionQuery {
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
+pub struct SessionDetailQuery {
     pub limit: Option<usize>,
     pub cursor: Option<String>,
 }
@@ -317,21 +315,56 @@ pub async fn get_trace(
     }))
 }
 
+/// Resolve lake `QueryWindow` from Postgres `session_summary` only (D7, pad 0).
+///
+/// No query `from`/`to`. Missing row → 404. Missing registry (non-postgres) → 503.
+async fn resolve_session_lake_window(
+    state: &AppState,
+    tenant_ref: Option<&TenantInfo>,
+    session_id: &str,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
+    let Some(registry) = state.engines.scope_registry() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "session_summary unavailable" })),
+        ));
+    };
+    let tenant_id = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
+    let engine = state
+        .engines
+        .engine_for(tenant_id)
+        .await
+        .map_err(storage_error)?;
+    match crate::session_summary::lookup_session_summary_window(
+        registry.pool(),
+        &engine.scope.metadata_schema,
+        session_id,
+    )
+    .await
+    {
+        Ok(Some((from, to))) => Ok((from, to)),
+        Ok(None) => Err(not_found()),
+        Err(crate::session_summary::SessionSummaryListError::BadRequest(msg)) => {
+            Err(bad_request(msg))
+        }
+        Err(crate::session_summary::SessionSummaryListError::Storage(err)) => {
+            Err(storage_error(err))
+        }
+    }
+}
+
 pub async fn get_session(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
     Path(session_id): Path<String>,
-    Query(params): Query<SessionQuery>,
+    Query(params): Query<SessionDetailQuery>,
 ) -> Result<Json<SessionDetail>, ApiError> {
     if session_id.trim().is_empty() {
         return Err(bad_request("session_id is required".to_string()));
     }
-    if params.from > params.to {
-        return Err(bad_request("`from` must be <= `to`".to_string()));
-    }
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let agg_sql =
-        compile_session_aggregate_sql(&session_id, params.from, params.to).map_err(bad_request)?;
+    let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
+    let agg_sql = compile_session_aggregate_sql(&session_id, from, to).map_err(bad_request)?;
     let agg_result = state
         .execute_tenant_scoped_sql(tenant_ref, &agg_sql)
         .await
@@ -343,14 +376,9 @@ pub async fn get_session(
     }
 
     let limit = clamp_limit(params.limit, DEFAULT_SESSION_LIMIT);
-    let traces_sql = compile_session_traces_sql(
-        &session_id,
-        params.from,
-        params.to,
-        limit,
-        params.cursor.as_deref(),
-    )
-    .map_err(bad_request)?;
+    let traces_sql =
+        compile_session_traces_sql(&session_id, from, to, limit, params.cursor.as_deref())
+            .map_err(bad_request)?;
     let traces_result = state
         .execute_tenant_scoped_sql(tenant_ref, &traces_sql)
         .await
@@ -365,15 +393,14 @@ pub async fn get_session(
     let scores = query_scores(
         &state,
         tenant_ref,
-        &compile_scores_for_session_sql(&session_id, params.from, params.to)
-            .map_err(bad_request)?,
+        &compile_scores_for_session_sql(&session_id, from, to).map_err(bad_request)?,
     )
     .await?;
 
     Ok(Json(SessionDetail {
         session_id,
-        from: params.from,
-        to: params.to,
+        from,
+        to,
         trace_count: aggregate.trace_count,
         observation_count: aggregate.observation_count,
         user_ids: aggregate.user_ids,
@@ -401,24 +428,17 @@ pub async fn get_session_observations(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
     Path(session_id): Path<String>,
-    Query(params): Query<SessionQuery>,
+    Query(params): Query<SessionDetailQuery>,
 ) -> Result<Json<SessionObservations>, ApiError> {
     if session_id.trim().is_empty() {
         return Err(bad_request("session_id is required".to_string()));
     }
-    if params.from > params.to {
-        return Err(bad_request("`from` must be <= `to`".to_string()));
-    }
-    let limit = clamp_limit(params.limit, DEFAULT_SEARCH_LIMIT);
-    let sql = compile_session_observations_sql(
-        &session_id,
-        params.from,
-        params.to,
-        limit,
-        params.cursor.as_deref(),
-    )
-    .map_err(bad_request)?;
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
+    let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
+    let limit = clamp_limit(params.limit, DEFAULT_SEARCH_LIMIT);
+    let sql =
+        compile_session_observations_sql(&session_id, from, to, limit, params.cursor.as_deref())
+            .map_err(bad_request)?;
     let result = state
         .execute_tenant_scoped_sql(tenant_ref, &sql)
         .await
@@ -431,8 +451,8 @@ pub async fn get_session_observations(
     let next_cursor = next_cursor_from_details(&mut observations, limit);
     Ok(Json(SessionObservations {
         session_id,
-        from: params.from,
-        to: params.to,
+        from,
+        to,
         observations,
         next_cursor,
     }))
@@ -470,18 +490,15 @@ pub async fn get_session_recording(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
     Path(session_id): Path<String>,
-    Query(params): Query<SessionQuery>,
+    Query(params): Query<SessionDetailQuery>,
 ) -> Result<Json<SessionRecording>, ApiError> {
     if session_id.trim().is_empty() {
         return Err(bad_request("session_id is required".to_string()));
     }
-    if params.from > params.to {
-        return Err(bad_request("`from` must be <= `to`".to_string()));
-    }
-    let limit = clamp_limit(params.limit, DEFAULT_RECORDING_LIMIT);
-    let sql = compile_session_recording_sql(&session_id, params.from, params.to, limit)
-        .map_err(bad_request)?;
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
+    let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
+    let limit = clamp_limit(params.limit, DEFAULT_RECORDING_LIMIT);
+    let sql = compile_session_recording_sql(&session_id, from, to, limit).map_err(bad_request)?;
     let result = state
         .execute_tenant_scoped_sql(tenant_ref, &sql)
         .await
@@ -514,8 +531,8 @@ pub async fn get_session_recording(
 
     Ok(Json(SessionRecording {
         session_id,
-        from: params.from,
-        to: params.to,
+        from,
+        to,
         truncated,
         batches,
         events,
@@ -2605,6 +2622,27 @@ mod tests {
         session_request.from = from;
         session_request.to = to;
         assert_ns(compile_session_search_sql(&session_request, 10).unwrap());
+    }
+
+    #[test]
+    fn session_detail_pad_zero_sql_literals_match_window() {
+        // Pad 0: summary (t0,t1) → SQL literals equal (t0,t1) for detail compilers.
+        let t0 = DateTime::parse_from_rfc3339("2026-03-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = DateTime::parse_from_rfc3339("2026-03-01T12:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for sql in [
+            compile_session_observations_sql("sess-1", t0, t1, 10, None).expect("obs"),
+            compile_session_aggregate_sql("sess-1", t0, t1).expect("agg"),
+            compile_session_recording_sql("sess-1", t0, t1, 10).expect("rec"),
+        ] {
+            assert!(sql.contains("'2026-03-01T12:00:00"), "{sql}");
+            assert!(sql.contains("'2026-03-01T12:05:00"), "{sql}");
+            assert!(!sql.contains("2026-02-28"), "{sql}");
+            assert!(!sql.contains("2026-03-02"), "{sql}");
+        }
     }
 
     #[test]

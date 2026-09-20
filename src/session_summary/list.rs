@@ -70,6 +70,41 @@ pub async fn search_session_summary(
     })
 }
 
+/// Load `start_time`/`end_time` for one session from Postgres `session_summary`.
+///
+/// Used by session detail / observations / recording so lake scans use the
+/// summary window (D7) — not the Explorer list range.
+pub async fn lookup_session_summary_window(
+    pool: &Pool,
+    metadata_schema: &str,
+    session_id: &str,
+) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, SessionSummaryListError> {
+    let schema = quote_pg_ident(metadata_schema);
+    let sql = format!(
+        "SELECT start_time, end_time FROM {schema}.session_summary WHERE session_id = $1 LIMIT 1"
+    );
+    let client = pool
+        .get()
+        .await
+        .context("summary lookup pool")
+        .map_err(SessionSummaryListError::Storage)?;
+    let rows = client
+        .query(&sql, &[&session_id])
+        .await
+        .context("session_summary window SELECT")
+        .map_err(SessionSummaryListError::Storage)?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let start_time: DateTime<Utc> = row
+        .try_get("start_time")
+        .map_err(|e| SessionSummaryListError::Storage(e.into()))?;
+    let end_time: DateTime<Utc> = row
+        .try_get("end_time")
+        .map_err(|e| SessionSummaryListError::Storage(e.into()))?;
+    Ok(Some((start_time, end_time)))
+}
+
 fn map_pg_summary_row(row: &tokio_postgres::Row) -> Result<SessionSummary, tokio_postgres::Error> {
     let user_ids: Vec<String> = row.try_get("user_ids").unwrap_or_default();
     let models: Vec<String> = row.try_get("models").unwrap_or_default();

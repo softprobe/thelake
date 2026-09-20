@@ -457,13 +457,11 @@ async fn openapi_spec() -> Json<serde_json::Value> {
             },
             "/v1/llm/sessions/{session_id}": {
                 "get": {
-                    "summary": "Get a time-bounded session summary",
+                    "summary": "Get a session detail using session_summary start/end as the lake window",
                     "operationId": "getSession",
                     "security": [{ "bearerAuth": [] }],
                     "parameters": [
                         { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string" } },
-                        { "name": "from", "in": "query", "required": true, "schema": { "type": "string", "format": "date-time" } },
-                        { "name": "to", "in": "query", "required": true, "schema": { "type": "string", "format": "date-time" } },
                         { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } },
                         { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string" } }
                     ],
@@ -477,7 +475,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                             }
                         },
                         "400": {
-                            "description": "Missing time range, invalid limit, or malformed cursor",
+                            "description": "Invalid limit or malformed cursor",
                             "content": {
                                 "application/json": {
                                     "schema": { "$ref": "#/components/schemas/ApiError" }
@@ -485,7 +483,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                             }
                         },
                         "404": {
-                            "description": "No session activity in the requested range",
+                            "description": "No session_summary row or no lake activity in the summary window",
                             "content": {
                                 "application/json": {
                                     "schema": { "$ref": "#/components/schemas/ApiError" }
@@ -494,7 +492,46 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                         },
                         "401": { "description": "Missing or invalid bearer token" },
                         "503": {
-                            "description": "Tenant runtime or query unavailable",
+                            "description": "session_summary unavailable or tenant runtime unavailable",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/v1/llm/sessions/{session_id}/observations": {
+                "get": {
+                    "summary": "List session observations using session_summary start/end as the lake window",
+                    "operationId": "getSessionObservations",
+                    "security": [{ "bearerAuth": [] }],
+                    "parameters": [
+                        { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string" } },
+                        { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } },
+                        { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string" } }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Session observations page",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/SessionObservations" }
+                                }
+                            }
+                        },
+                        "404": {
+                            "description": "No session_summary row for this session",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "401": { "description": "Missing or invalid bearer token" },
+                        "503": {
+                            "description": "session_summary unavailable or tenant runtime unavailable",
                             "content": {
                                 "application/json": {
                                     "schema": { "$ref": "#/components/schemas/ApiError" }
@@ -511,8 +548,6 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                     "security": [{ "bearerAuth": [] }],
                     "parameters": [
                         { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string" } },
-                        { "name": "from", "in": "query", "required": true, "schema": { "type": "string", "format": "date-time" } },
-                        { "name": "to", "in": "query", "required": true, "schema": { "type": "string", "format": "date-time" } },
                         { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } }
                     ],
                     "responses": {
@@ -525,7 +560,15 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                             }
                         },
                         "400": {
-                            "description": "Missing time range or invalid limit",
+                            "description": "Invalid limit",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApiError" }
+                                }
+                            }
+                        },
+                        "404": {
+                            "description": "No session_summary row for this session",
                             "content": {
                                 "application/json": {
                                     "schema": { "$ref": "#/components/schemas/ApiError" }
@@ -534,7 +577,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                         },
                         "401": { "description": "Missing or invalid bearer token" },
                         "503": {
-                            "description": "Tenant runtime or query unavailable",
+                            "description": "session_summary unavailable or tenant runtime unavailable",
                             "content": {
                                 "application/json": {
                                     "schema": { "$ref": "#/components/schemas/ApiError" }
@@ -786,6 +829,20 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                         "scores": {
                             "type": "array",
                             "items": { "$ref": "#/components/schemas/Score" }
+                        },
+                        "next_cursor": { "type": "string", "nullable": true }
+                    }
+                },
+                "SessionObservations": {
+                    "type": "object",
+                    "required": ["session_id", "from", "to", "observations"],
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "from": { "type": "string", "format": "date-time" },
+                        "to": { "type": "string", "format": "date-time" },
+                        "observations": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/ObservationDetail" }
                         },
                         "next_cursor": { "type": "string", "nullable": true }
                     }
