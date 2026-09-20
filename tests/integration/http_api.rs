@@ -880,7 +880,9 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     assert_eq!(session["scores"].as_array().unwrap().len(), 1);
 
     let missing = Request::builder()
-        .uri("/v1/llm/observations/does-not-exist?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z")
+        .uri(
+            "/v1/llm/observations/does-not-exist?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z",
+        )
         .body(Body::empty())
         .unwrap();
     let missing_resp = router.oneshot(missing).await.expect("missing");
