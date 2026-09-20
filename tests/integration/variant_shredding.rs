@@ -252,7 +252,9 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     use softprobe_runtime::api::llm::query::{
         compile_observation_search_sql, ObservationSearchRequest,
     };
-    use softprobe_runtime::api::telemetry::{compile_details_sql, TelemetryDetailsTarget};
+    use softprobe_runtime::api::telemetry::{
+        compile_details_sql, TelemetryDetailsTarget, TelemetryTimeRange,
+    };
     use softprobe_runtime::storage::schema::variant::prefer_attr_try_cast;
 
     let temp = TempDir::new().expect("tempdir");
@@ -585,12 +587,16 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     );
 
     // 6) Telemetry details metric filters on attributes + resource_attributes keys.
+    let details_range = TelemetryTimeRange {
+        from: (now - chrono::Duration::hours(1)).to_rfc3339(),
+        to: (now + chrono::Duration::hours(1)).to_rfc3339(),
+    };
     let details = compile_details_sql(
         &TelemetryDetailsTarget {
             kind: "session".into(),
             id: session_id.clone(),
         },
-        None,
+        &details_range,
         100,
     )
     .expect("compile details");
@@ -622,7 +628,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
             kind: "trace".into(),
             id: trace_id.into(),
         },
-        None,
+        &details_range,
         100,
     )
     .expect("compile trace details");

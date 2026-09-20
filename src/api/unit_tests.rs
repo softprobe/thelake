@@ -378,8 +378,12 @@ fn unit_telemetry_details_compiles_correlated_signal_queries() {
         kind: "session".to_string(),
         id: "sess_abc".to_string(),
     };
+    let range = TelemetryTimeRange {
+        from: "2023-11-14T22:13:20Z".into(),
+        to: "2023-11-14T22:13:21Z".into(),
+    };
 
-    let compiled = compile_details_sql(&target, None, 100).expect("compile details");
+    let compiled = compile_details_sql(&target, &range, 100).expect("compile details");
 
     assert!(compiled.spans.contains("FROM traces"));
     assert!(compiled.spans.contains("http_request_body"));
@@ -391,4 +395,5 @@ fn unit_telemetry_details_compiles_correlated_signal_queries() {
     assert!(compiled
         .metrics
         .contains("CAST(attributes['sp.session.id'] AS VARCHAR) = 'sess_abc'"));
+    assert!(compiled.spans.contains("record_date BETWEEN DATE"));
 }

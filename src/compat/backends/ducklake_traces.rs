@@ -14,7 +14,7 @@ use crate::query::QueryEngine;
 use crate::storage::schema::variant::variant_json_to_string_map;
 use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub struct DuckLakeTraceBackend {
@@ -60,9 +60,9 @@ impl DuckLakeTraceBackend {
         request: &TraceSearchRequest,
         trace_id: Option<&str>,
     ) -> Result<Vec<TraceSpan>, CompatError> {
-        let result = self
-            .execute(ctx, &trace_scan_sql(request, trace_id))
-            .await?;
+        let sql = trace_scan_sql(request, trace_id)
+            .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
+        let result = self.execute(ctx, &sql).await?;
         let scan_cap = trace_scan_cap(request.limit);
         if scan_reached_cap(result.rows.len(), scan_cap) {
             return Err(CompatError::new(
@@ -322,47 +322,25 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
         Ok(hits)
     }
 
-    async fn search_tags(&self, ctx: &TenantContext) -> Result<Vec<String>, CompatError> {
-        let request = TraceSearchRequest {
-            tags: BTreeMap::new(),
-            selector: None,
-            min_duration_ns: None,
-            max_duration_ns: None,
-            start_ns: None,
-            end_ns: None,
-            limit: ctx.limits.max_series,
-        };
-        let spans = self.scan(ctx, &request, None).await?;
-        let mut names = BTreeSet::new();
-        for span in spans {
-            names.extend(self.tags_for(&span, usize::MAX).into_keys());
-        }
-        Ok(names.into_iter().collect())
+    async fn search_tags(&self, _ctx: &TenantContext) -> Result<Vec<String>, CompatError> {
+        // Tag discovery without a time window would scan the whole lake (AC2).
+        Err(unbounded_tag_api_error("discovery"))
     }
 
     async fn search_tag_values(
         &self,
-        ctx: &TenantContext,
-        tag: &str,
+        _ctx: &TenantContext,
+        _tag: &str,
     ) -> Result<Vec<String>, CompatError> {
-        let request = TraceSearchRequest {
-            tags: BTreeMap::new(),
-            selector: None,
-            min_duration_ns: None,
-            max_duration_ns: None,
-            start_ns: None,
-            end_ns: None,
-            limit: ctx.limits.max_series,
-        };
-        let spans = self.scan(ctx, &request, None).await?;
-        let mut values = BTreeSet::new();
-        for span in spans {
-            if let Some(value) = self.tags_for(&span, usize::MAX).get(tag) {
-                values.insert(value.clone());
-            }
-        }
-        Ok(values.into_iter().collect())
+        Err(unbounded_tag_api_error("values"))
     }
+}
+
+fn unbounded_tag_api_error(kind: &str) -> CompatError {
+    CompatError::new(
+        CompatErrorCode::UnsupportedFeature,
+        format!("trace tag {kind} require a time window; omit is not supported"),
+    )
 }
 
 fn parse_rows(result: &QueryResult) -> Result<Vec<TraceSpan>, CompatError> {
@@ -1310,5 +1288,15 @@ mod tests {
             assert_eq!(err.code, CompatErrorCode::BadRequest, "{field}: {err:?}");
             assert!(err.message.contains(field), "{field}: {err:?}");
         }
+    }
+
+    #[test]
+    fn tag_discovery_stays_unsupported_without_window() {
+        let discovery = unbounded_tag_api_error("discovery");
+        assert_eq!(discovery.code, CompatErrorCode::UnsupportedFeature);
+        assert!(discovery.message.contains("time window"));
+        let values = unbounded_tag_api_error("values");
+        assert_eq!(values.code, CompatErrorCode::UnsupportedFeature);
+        assert!(values.message.contains("time window"));
     }
 }
