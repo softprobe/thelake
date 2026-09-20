@@ -1,7 +1,5 @@
 use crate::api::query_window::{push_otlp_time_predicates, QueryWindow};
-use crate::api::sql_support::{
-    cursor_predicate, encode_cursor, sql_string_literal, timestamp_ns_column, timestamp_ns_literal,
-};
+use crate::api::sql_support::{cursor_predicate, encode_cursor, sql_string_literal};
 use crate::api::AppState;
 use crate::async_jobs::LeaseStore;
 use crate::authn::TenantInfo;
@@ -234,8 +232,12 @@ pub async fn get_observation(
         .map_err(storage_error)?;
     let row = result.rows.first().ok_or_else(not_found)?;
     let mut detail = map_observation_detail(&result.columns, row).ok_or_else(not_found)?;
-    detail.scores =
-        query_scores(&state, tenant_ref, &compile_scores_for_span_sql(&span_id)).await?;
+    detail.scores = query_scores(
+        &state,
+        tenant_ref,
+        &compile_scores_for_span_sql(&span_id, params.from, params.to).map_err(bad_request)?,
+    )
+    .await?;
     Ok(Json(detail))
 }
 
@@ -526,23 +528,22 @@ pub fn compile_session_recording_sql(
     to: DateTime<Utc>,
     limit: usize,
 ) -> Result<String, String> {
-    if from > to {
-        return Err("`from` must be <= `to`".to_string());
-    }
+    let window = QueryWindow::try_new(from, to)?;
     let obs_type = format!("COALESCE({}, 'span')", expr_observation_type());
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(
+        &mut conditions,
+        &window,
+        [
+            format!("session_id = {}", sql_string_literal(session_id)),
+            format!("{obs_type} = 'recording'"),
+        ],
+    );
     Ok(format!(
-        "SELECT {projection} FROM traces \
-         WHERE session_id = {session} \
-           AND CAST(timestamp AS TIMESTAMP_NS) >= {from_ts} \
-           AND CAST(timestamp AS TIMESTAMP_NS) <= {to_ts} \
-           AND {obs_type} = 'recording' \
-         ORDER BY timestamp ASC, span_id ASC \
-         LIMIT {limit}",
+        "SELECT {projection} FROM traces WHERE {where_sql} \
+         ORDER BY timestamp ASC, span_id ASC LIMIT {limit}",
         projection = observation_projection(true),
-        session = sql_string_literal(session_id),
-        from_ts = timestamp_ns_literal(&from),
-        to_ts = timestamp_ns_literal(&to),
-        obs_type = obs_type,
+        where_sql = conditions.join(" AND "),
         limit = limit,
     ))
 }
@@ -902,21 +903,9 @@ pub fn compile_session_search_sql(
     request: &SessionSearchRequest,
     limit: usize,
 ) -> Result<String, String> {
-    if request.from > request.to {
-        return Err("`from` must be <= `to`".to_string());
-    }
+    let window = QueryWindow::try_new(request.from, request.to)?;
 
-    let mut predicates = vec![
-        format!(
-            "{} >= {}",
-            timestamp_ns_column("timestamp"),
-            timestamp_ns_literal(&request.from)
-        ),
-        format!(
-            "{} <= {}",
-            timestamp_ns_column("timestamp"),
-            timestamp_ns_literal(&request.to)
-        ),
+    let mut identity = vec![
         // Spans without a session id cannot belong to a session row.
         "session_id IS NOT NULL AND session_id <> ''".to_string(),
         // Web recording shares session_id with LLM spans but is not an LLM
@@ -924,7 +913,7 @@ pub fn compile_session_search_sql(
         exclude_recording_observation_sql(),
     ];
     if let Some(user_id) = request.user_id.as_deref().filter(|v| !v.trim().is_empty()) {
-        predicates.push(format!(
+        identity.push(format!(
             "{} = {}",
             expr_user_id(),
             sql_string_literal(user_id)
@@ -935,12 +924,14 @@ pub fn compile_session_search_sql(
         .as_deref()
         .filter(|v| !v.trim().is_empty())
     {
-        predicates.push(format!(
+        identity.push(format!(
             "{} = {}",
             expr_model_name(),
             sql_string_literal(model)
         ));
     }
+    let mut predicates = Vec::new();
+    push_otlp_time_predicates(&mut predicates, &window, identity);
 
     // Cursor paging is defined against (start_time, session_id) descending.
     //
@@ -1107,17 +1098,9 @@ fn next_cursor_from_sessions(items: &mut Vec<SessionSummary>, limit: usize) -> O
 pub fn compile_observation_search_sql(
     request: &ObservationSearchRequest,
 ) -> Result<String, String> {
-    if request.from > request.to {
-        return Err("`from` must be <= `to`".to_string());
-    }
+    let window = QueryWindow::try_new(request.from, request.to)?;
     let limit = clamp_limit(request.limit, DEFAULT_SEARCH_LIMIT);
-    let mut conditions = vec![format!(
-        "{} >= {} AND {} <= {}",
-        timestamp_ns_column("timestamp"),
-        timestamp_ns_literal(&request.from),
-        timestamp_ns_column("timestamp"),
-        timestamp_ns_literal(&request.to)
-    )];
+    let mut identity = Vec::new();
 
     if !request.observation_types.is_empty() {
         let values = request
@@ -1126,20 +1109,20 @@ pub fn compile_observation_search_sql(
             .map(|value| sql_string_literal(value))
             .collect::<Vec<_>>()
             .join(", ");
-        conditions.push(format!(
+        identity.push(format!(
             "COALESCE({}, 'span') IN ({values})",
             expr_observation_type()
         ));
     }
     if let Some(model_name) = &request.model_name {
-        conditions.push(format!(
+        identity.push(format!(
             "{} = {}",
             expr_model_name(),
             sql_string_literal(model_name)
         ));
     }
     if let Some(user_id) = &request.user_id {
-        conditions.push(format!(
+        identity.push(format!(
             "({sp} = {id} OR {enduser} = {id})",
             sp = prefer_attr_varchar(Some(llm_promo().user_id), "attributes", "sp.user.id"),
             enduser = variant_varchar("attributes", "enduser.id"),
@@ -1147,11 +1130,14 @@ pub fn compile_observation_search_sql(
         ));
     }
     if let Some(session_id) = &request.session_id {
-        conditions.push(format!("session_id = {}", sql_string_literal(session_id)));
+        identity.push(format!("session_id = {}", sql_string_literal(session_id)));
     }
     if let Some(trace_id) = &request.trace_id {
-        conditions.push(format!("trace_id = {}", sql_string_literal(trace_id)));
+        identity.push(format!("trace_id = {}", sql_string_literal(trace_id)));
     }
+
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(&mut conditions, &window, identity);
     if let Some(cursor) = &request.cursor {
         conditions.push(cursor_predicate(cursor, "timestamp", "span_id")?);
     }
@@ -1236,23 +1222,16 @@ pub fn compile_session_observations_sql(
     limit: usize,
     cursor: Option<&str>,
 ) -> Result<String, String> {
-    if from > to {
-        return Err("`from` must be <= `to`".to_string());
-    }
-    let mut conditions = vec![
-        format!("session_id = {}", sql_string_literal(session_id)),
-        format!(
-            "{} >= {}",
-            timestamp_ns_column("timestamp"),
-            timestamp_ns_literal(&from)
-        ),
-        format!(
-            "{} <= {}",
-            timestamp_ns_column("timestamp"),
-            timestamp_ns_literal(&to)
-        ),
-        exclude_recording_observation_sql(),
-    ];
+    let window = QueryWindow::try_new(from, to)?;
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(
+        &mut conditions,
+        &window,
+        [
+            format!("session_id = {}", sql_string_literal(session_id)),
+            exclude_recording_observation_sql(),
+        ],
+    );
     if let Some(cursor) = cursor {
         conditions.push(cursor_predicate(cursor, "timestamp", "span_id")?);
     }
@@ -1269,9 +1248,16 @@ pub fn compile_session_aggregate_sql(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<String, String> {
-    if from > to {
-        return Err("`from` must be <= `to`".to_string());
-    }
+    let window = QueryWindow::try_new(from, to)?;
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(
+        &mut conditions,
+        &window,
+        [
+            format!("session_id = {}", sql_string_literal(session_id)),
+            exclude_recording_observation_sql(),
+        ],
+    );
     Ok(format!(
         "SELECT \
             COUNT(DISTINCT trace_id) AS trace_count, \
@@ -1282,19 +1268,13 @@ pub fn compile_session_aggregate_sql(
             SUM({total_cost}) AS total_cost, \
             list(DISTINCT {user_id}) AS user_ids \
          FROM traces \
-         WHERE session_id = {session} \
-           AND CAST(timestamp AS TIMESTAMP_NS) >= {from_ts} \
-           AND CAST(timestamp AS TIMESTAMP_NS) <= {to_ts} \
-           AND {not_recording}",
+         WHERE {where_sql}",
         input_tokens = expr_input_tokens(),
         output_tokens = expr_output_tokens(),
         total_tokens = expr_total_tokens(),
         total_cost = expr_total_cost(),
         user_id = expr_user_id(),
-        session = sql_string_literal(session_id),
-        from_ts = timestamp_ns_literal(&from),
-        to_ts = timestamp_ns_literal(&to),
-        not_recording = exclude_recording_observation_sql(),
+        where_sql = conditions.join(" AND "),
     ))
 }
 
@@ -1305,16 +1285,17 @@ pub fn compile_session_traces_sql(
     limit: usize,
     cursor: Option<&str>,
 ) -> Result<String, String> {
-    if from > to {
-        return Err("`from` must be <= `to`".to_string());
-    }
-    let where_sql = format!(
-        "session_id = {} AND CAST(timestamp AS TIMESTAMP_NS) >= {} AND CAST(timestamp AS TIMESTAMP_NS) <= {} AND {}",
-        sql_string_literal(session_id),
-        timestamp_ns_literal(&from),
-        timestamp_ns_literal(&to),
-        exclude_recording_observation_sql(),
+    let window = QueryWindow::try_new(from, to)?;
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(
+        &mut conditions,
+        &window,
+        [
+            format!("session_id = {}", sql_string_literal(session_id)),
+            exclude_recording_observation_sql(),
+        ],
     );
+    let where_sql = conditions.join(" AND ");
     // Cursor applies to aggregated start_time/trace_id, so filter after GROUP BY.
     let inner = format!(
         "SELECT {projection} FROM traces WHERE {where_sql} GROUP BY trace_id",
@@ -1340,12 +1321,23 @@ fn exclude_recording_observation_sql() -> String {
     format!("COALESCE({}, '') <> 'recording'", expr_observation_type())
 }
 
-pub fn compile_scores_for_span_sql(span_id: &str) -> String {
-    format!(
-        "SELECT {cols} FROM scores WHERE span_id = {span} ORDER BY timestamp DESC, score_id DESC",
+pub fn compile_scores_for_span_sql(
+    span_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<String, String> {
+    let window = QueryWindow::try_new(from, to)?;
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(
+        &mut conditions,
+        &window,
+        [format!("span_id = {}", sql_string_literal(span_id))],
+    );
+    Ok(format!(
+        "SELECT {cols} FROM scores WHERE {where_sql} ORDER BY timestamp DESC, score_id DESC",
         cols = score_columns(),
-        span = sql_string_literal(span_id)
-    )
+        where_sql = conditions.join(" AND ")
+    ))
 }
 
 pub fn compile_scores_for_trace_sql(
@@ -1379,25 +1371,26 @@ pub fn compile_scores_for_session_sql(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<String, String> {
-    if from > to {
-        return Err("`from` must be <= `to`".to_string());
-    }
-    let member_filter = format!(
-        "session_id = {session} AND CAST(timestamp AS TIMESTAMP_NS) >= {from_ts} AND CAST(timestamp AS TIMESTAMP_NS) <= {to_ts}",
-        session = sql_string_literal(session_id),
-        from_ts = timestamp_ns_literal(&from),
-        to_ts = timestamp_ns_literal(&to),
+    let window = QueryWindow::try_new(from, to)?;
+    let mut member_conditions = Vec::new();
+    push_otlp_time_predicates(
+        &mut member_conditions,
+        &window,
+        [format!("session_id = {}", sql_string_literal(session_id))],
     );
-    let predicate = format!(
-        "session_id = {session} \
+    let member_filter = member_conditions.join(" AND ");
+    let identity = format!(
+        "(session_id = {session} \
          OR trace_id IN (SELECT DISTINCT trace_id FROM traces WHERE {member_filter}) \
-         OR span_id IN (SELECT span_id FROM traces WHERE {member_filter})",
+         OR span_id IN (SELECT span_id FROM traces WHERE {member_filter}))",
         session = sql_string_literal(session_id),
     );
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(&mut conditions, &window, [identity]);
     Ok(format!(
-        "SELECT {cols} FROM scores WHERE ({predicate}) ORDER BY timestamp DESC, score_id DESC",
+        "SELECT {cols} FROM scores WHERE {where_sql} ORDER BY timestamp DESC, score_id DESC",
         cols = score_columns(),
-        predicate = predicate
+        where_sql = conditions.join(" AND ")
     ))
 }
 
@@ -2210,9 +2203,9 @@ mod tests {
     #[test]
     fn session_search_aggregates_in_sql_and_bounds_time() {
         let sql = compile_session_search_sql(&session_search_request(), 50).expect("sql");
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        assert_sql_has_otlp_time_predicates(&sql);
         assert!(sql.contains("GROUP BY session_id"));
-        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) >="));
-        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="));
         // spans with no session id must not become a session row
         assert!(sql.contains("session_id IS NOT NULL AND session_id <> ''"));
         // recording spans share session_id but must not inflate LLM session rows
@@ -2652,5 +2645,106 @@ mod tests {
             "attributes": { "content": "hi" }
         })];
         assert!(extract_recording_events(&span_events).is_empty());
+    }
+
+    #[test]
+    fn all_llm_lake_compilers_emit_otlp_day_and_timestamp() {
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // Single inventory: every pub lake compile_* must appear here (AC2).
+        const LAKE_COMPILE_FNS: &[&str] = &[
+            "compile_session_recording_sql",
+            "compile_session_search_sql",
+            "compile_observation_search_sql",
+            "compile_observation_detail_sql",
+            "compile_trace_summary_sql",
+            "compile_trace_observations_sql",
+            "compile_session_observations_sql",
+            "compile_session_aggregate_sql",
+            "compile_session_traces_sql",
+            "compile_scores_for_span_sql",
+            "compile_scores_for_trace_sql",
+            "compile_scores_for_session_sql",
+        ];
+        let src = include_str!("query.rs");
+        for name in LAKE_COMPILE_FNS {
+            assert!(
+                src.contains(&format!("pub fn {name}")),
+                "inventory stale: missing pub fn {name}"
+            );
+            // No Option<DateTime> time args on lake scanners (signature line + following lines).
+            let start = src.find(&format!("pub fn {name}")).expect(name);
+            let sig_end = src[start..].find('{').expect("fn body") + start;
+            let sig = &src[start..sig_end];
+            assert!(
+                !sig.contains("Option<DateTime"),
+                "{name} must not take Option<DateTime> for lake scans: {sig}"
+            );
+        }
+        // No extra pub compile_* for traces/scores slipped in without joining the inventory.
+        for line in src.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("pub fn compile_") {
+                let name_end = rest.find('(').unwrap_or(rest.len());
+                let short = &rest[..name_end];
+                let full = format!("compile_{short}");
+                if full.contains("session_summary") {
+                    continue;
+                }
+                assert!(
+                    LAKE_COMPILE_FNS.contains(&full.as_str())
+                        || full == "compile_session_summary_upsert_sql",
+                    "new pub fn {full} must be added to LAKE_COMPILE_FNS inventory test"
+                );
+            }
+        }
+
+        let sqls = vec![
+            compile_session_recording_sql("s", from, to, 10).unwrap(),
+            compile_session_search_sql(&session_search_request(), 10).unwrap(),
+            compile_observation_search_sql(&ObservationSearchRequest {
+                from,
+                to,
+                observation_types: vec![],
+                model_name: None,
+                user_id: None,
+                session_id: None,
+                trace_id: None,
+                limit: Some(10),
+                cursor: None,
+            })
+            .unwrap(),
+            compile_observation_detail_sql("span", from, to).unwrap(),
+            compile_trace_summary_sql("tr", from, to, None).unwrap(),
+            compile_trace_observations_sql("tr", from, to, 10, None, None).unwrap(),
+            compile_session_observations_sql("s", from, to, 10, None).unwrap(),
+            compile_session_aggregate_sql("s", from, to).unwrap(),
+            compile_session_traces_sql("s", from, to, 10, None).unwrap(),
+            compile_scores_for_span_sql("span", from, to).unwrap(),
+            compile_scores_for_trace_sql("tr", from, to).unwrap(),
+            compile_scores_for_session_sql("s", from, to).unwrap(),
+        ];
+        assert_eq!(sqls.len(), LAKE_COMPILE_FNS.len());
+        for sql in &sqls {
+            assert_sql_has_otlp_time_predicates(sql);
+        }
+
+        // Nested scores: outer scores scan AND traces subquery each need day bounds.
+        let trace_scores = compile_scores_for_trace_sql("tr", from, to).unwrap();
+        assert!(
+            trace_scores.matches("record_date BETWEEN DATE").count() >= 2,
+            "scores-for-trace needs outer + subquery day bounds: {trace_scores}"
+        );
+        let session_scores = compile_scores_for_session_sql("s", from, to).unwrap();
+        assert!(
+            session_scores.matches("record_date BETWEEN DATE").count() >= 2,
+            "scores-for-session needs outer + subquery day bounds: {session_scores}"
+        );
     }
 }
