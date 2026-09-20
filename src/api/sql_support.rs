@@ -66,43 +66,6 @@ pub(crate) fn cursor_predicate(
     ))
 }
 
-/// Push a bounded (or half-bounded) `timestamp` range condition.
-pub(crate) fn push_optional_time_bounds(
-    conditions: &mut Vec<String>,
-    from: Option<DateTime<Utc>>,
-    to: Option<DateTime<Utc>>,
-) -> Result<(), String> {
-    match (from, to) {
-        (Some(from), Some(to)) => {
-            if from > to {
-                return Err("`from` must be <= `to`".to_string());
-            }
-            let col = timestamp_ns_column("timestamp");
-            conditions.push(format!(
-                "{col} >= {} AND {col} <= {}",
-                timestamp_ns_literal(&from),
-                timestamp_ns_literal(&to)
-            ));
-        }
-        (Some(from), None) => {
-            conditions.push(format!(
-                "{} >= {}",
-                timestamp_ns_column("timestamp"),
-                timestamp_ns_literal(&from)
-            ));
-        }
-        (None, Some(to)) => {
-            conditions.push(format!(
-                "{} <= {}",
-                timestamp_ns_column("timestamp"),
-                timestamp_ns_literal(&to)
-            ));
-        }
-        (None, None) => {}
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,18 +85,6 @@ mod tests {
         assert_eq!(decoded.id, "span-1");
         assert_eq!(decoded.t, ts);
         assert!(decode_cursor("%%%not-base64%%%").is_err());
-    }
-
-    #[test]
-    fn time_bounds_reject_inverted_range() {
-        let from = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let to = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let mut conditions = Vec::new();
-        assert!(push_optional_time_bounds(&mut conditions, Some(from), Some(to)).is_err());
     }
 
     #[test]

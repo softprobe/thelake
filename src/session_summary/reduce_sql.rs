@@ -4,7 +4,8 @@
 //! `prefer_attr_*`; reduce/rebuild must not.
 
 use crate::api::llm::query::llm_promo;
-use crate::api::sql_support::{sql_string_literal, timestamp_ns_column, timestamp_ns_literal};
+use crate::api::query_window::{push_otlp_time_predicates, QueryWindow};
+use crate::api::sql_support::sql_string_literal;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 
@@ -38,9 +39,8 @@ pub fn compile_session_summary_aggregate_sql(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<String> {
-    if from > to {
-        bail!("session_summary aggregate SQL requires from <= to");
-    }
+    let window = QueryWindow::try_new(from, to)
+        .map_err(|e| anyhow::anyhow!("session_summary aggregate SQL: {e}"))?;
     if from_table.is_empty() || from_table.contains(';') {
         bail!("invalid from_table for aggregate SQL");
     }
@@ -51,8 +51,6 @@ pub fn compile_session_summary_aggregate_sql(
     }
 
     let promo = llm_promo();
-    let from_date = from.date_naive();
-    let to_date = to.date_naive();
 
     let session_pred = match session_ids {
         Some(ids) => {
@@ -67,17 +65,13 @@ pub fn compile_session_summary_aggregate_sql(
     };
 
     // Predicate order: record_date → session filter → timestamp → exclude recording.
-    let where_sql = format!(
-        "record_date BETWEEN DATE '{from_date}' AND DATE '{to_date}' \
-         AND {session_pred} \
-         AND {ts_col} >= {from_ts} \
-         AND {ts_col} <= {to_ts} \
-         AND COALESCE({obs}, '') <> 'recording'",
-        ts_col = timestamp_ns_column("timestamp"),
-        from_ts = timestamp_ns_literal(&from),
-        to_ts = timestamp_ns_literal(&to),
-        obs = promo.observation_type,
-    );
+    let mut conditions = Vec::new();
+    push_otlp_time_predicates(&mut conditions, &window, [session_pred]);
+    conditions.push(format!(
+        "COALESCE({}, '') <> 'recording'",
+        promo.observation_type
+    ));
+    let where_sql = conditions.join(" AND ");
 
     // Typed agent resolve (no attributes['sp.agent.name']).
     let agent_expr = format!(
@@ -185,9 +179,9 @@ mod tests {
     }
 
     fn assert_aggregate_invariants(sql: &str) {
+        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
         use crate::models::attr_keys::{enduser, sp};
-        assert!(sql.contains("record_date BETWEEN"));
-        assert!(sql.contains("TIMESTAMP_NS"));
+        assert_sql_has_otlp_time_predicates(sql);
         assert!(sql.contains("COUNT(DISTINCT span_id)"));
         assert!(sql.contains("COALESCE(observation_type, '') <> 'recording'"));
         assert!(sql.contains("SUM(input_tokens)"));
@@ -202,9 +196,6 @@ mod tests {
                 "aggregate SQL must not embed bag key {banned}: {sql}"
             );
         }
-        let rd = sql.find("record_date").expect("record_date");
-        let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").expect("ts");
-        assert!(rd < ts, "record_date must precede timestamp predicate");
     }
 
     #[test]
