@@ -12,7 +12,7 @@
 - OTLP trace ingestion over gRPC
 - tenant-scoped DuckLake storage and DuckDB queries
 - telemetry search and detail APIs
-- schema promotion and optional dropdown metadata
+- schema promotion
 
 DuckLake is the only durable telemetry backend. Apache Iceberg, the staged
 Parquet tier, and application WAL have been removed. Optional soft coalesce
@@ -122,8 +122,7 @@ Authentication resolves a tenant before operational work begins. A
 `RuntimeEngine` is then built and cached for that tenant with:
 
 - a tenant-bound DuckLake metadata schema and data path;
-- a tenant-bound writer and query engine;
-- an optional Postgres dropdown catalog.
+- a tenant-bound writer and query engine.
 
 With a PostgreSQL catalog, `DuckLakeScopeResolver` stores scope mappings in the
 configured registry schema. Operational APIs do not accept arbitrary tenant or
@@ -276,17 +275,19 @@ auto-promote them. Canonical contract:
 Every worker loads `httpfs` and DuckLake, configures object-store access, and
 ATTACHes the same DuckLake scope used by its tenant-bound writer.
 
-Public query names remain:
+Public query names:
 
-- `union_spans`, `union_logs`
-- `committed_spans`, `committed_logs`
+- **Preferred:** `traces`, `logs`, `metrics`
+- **Legacy (rewrite shim only):** `union_spans`, `union_logs`, `union_metrics`,
+  plus historical `committed_*` / `buffer_*` / `staged_*` / `iceberg_*` aliases
 
 Because ingest defaults to flush-through (optional soft coalesce does not add a
-queryable buffer tier), union and committed names resolve to the same DuckLake
-tables. Historical `buffer_*`, `staged_*`, and `iceberg_*` aliases are
-compatibility spellings only; there are no corresponding runtime tiers.
-Metric queries target `metric_samples` and the explicitly named rollup tables
-directly.
+queryable buffer tier), preferred and legacy names resolve to the same DuckLake
+tables / metrics layout JOIN. First-party compilers emit preferred names only;
+the query engine still rewrites legacy names for external SQL.
+
+Metric Prom paths target `metric_samples` and the explicitly named rollup tables
+directly (not the public `metrics` / `union_metrics` compatibility relation).
 
 Query surfaces include:
 
@@ -331,8 +332,7 @@ skinny samples, 5m/1h ladder, and `job` collapse — goals and the 39-id
 acceptance suite are in
 [`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
 
-When enabled, the Postgres dropdown catalog is pruned by its active-value
-retention. Iceberg manifest rewrite and Iceberg REST catalog maintenance do not
+Iceberg manifest rewrite and Iceberg REST catalog maintenance do not
 exist in the current path.
 
 ## Configuration

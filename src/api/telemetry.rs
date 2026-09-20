@@ -254,10 +254,10 @@ pub fn compile_search_sql(request: &TelemetrySearchRequest) -> Result<String, St
 
     let sql = match request.scope {
         TelemetrySearchScope::Sessions => format!(
-            "SELECT session_id AS id, 'session' AS kind, session_id, MIN(timestamp) AS start_time, MAX(COALESCE(end_timestamp, timestamp)) AS end_time, COUNT(DISTINCT trace_id) AS trace_count, COUNT(*) AS span_count, SUM(CASE WHEN status_code = 'ERROR' OR http_response_status_code >= 500 THEN 1 ELSE 0 END) AS error_count, date_diff('millisecond', MIN(timestamp), MAX(COALESCE(end_timestamp, timestamp))) AS duration_ms, string_agg(DISTINCT app_id, ',') AS services, any_value(http_request_path) AS entry_path, any_value(status_message) AS last_error FROM union_spans {where_sql} GROUP BY session_id {order_sql} LIMIT {limit}"
+            "SELECT session_id AS id, 'session' AS kind, session_id, MIN(timestamp) AS start_time, MAX(COALESCE(end_timestamp, timestamp)) AS end_time, COUNT(DISTINCT trace_id) AS trace_count, COUNT(*) AS span_count, SUM(CASE WHEN status_code = 'ERROR' OR http_response_status_code >= 500 THEN 1 ELSE 0 END) AS error_count, date_diff('millisecond', MIN(timestamp), MAX(COALESCE(end_timestamp, timestamp))) AS duration_ms, string_agg(DISTINCT app_id, ',') AS services, any_value(http_request_path) AS entry_path, any_value(status_message) AS last_error FROM traces {where_sql} GROUP BY session_id {order_sql} LIMIT {limit}"
         ),
         TelemetrySearchScope::Traces => format!(
-            "SELECT trace_id AS id, 'trace' AS kind, session_id, trace_id, MIN(timestamp) AS start_time, MAX(COALESCE(end_timestamp, timestamp)) AS end_time, COUNT(*) AS span_count, SUM(CASE WHEN status_code = 'ERROR' OR http_response_status_code >= 500 THEN 1 ELSE 0 END) AS error_count, date_diff('millisecond', MIN(timestamp), MAX(COALESCE(end_timestamp, timestamp))) AS duration_ms, string_agg(DISTINCT app_id, ',') AS services, any_value(message_type) AS name, any_value(http_request_path) AS entry_path, any_value(status_message) AS last_error FROM union_spans {where_sql} GROUP BY trace_id, session_id {order_sql} LIMIT {limit}"
+            "SELECT trace_id AS id, 'trace' AS kind, session_id, trace_id, MIN(timestamp) AS start_time, MAX(COALESCE(end_timestamp, timestamp)) AS end_time, COUNT(*) AS span_count, SUM(CASE WHEN status_code = 'ERROR' OR http_response_status_code >= 500 THEN 1 ELSE 0 END) AS error_count, date_diff('millisecond', MIN(timestamp), MAX(COALESCE(end_timestamp, timestamp))) AS duration_ms, string_agg(DISTINCT app_id, ',') AS services, any_value(message_type) AS name, any_value(http_request_path) AS entry_path, any_value(status_message) AS last_error FROM traces {where_sql} GROUP BY trace_id, session_id {order_sql} LIMIT {limit}"
         ),
     };
 
@@ -276,7 +276,7 @@ pub fn compile_details_sql(
         "session" => (
             format!("session_id = {escaped_id}"),
             format!("session_id = {escaped_id}"),
-            // union_metrics (skinny layout) has no first-class session_id /
+            // metrics layout JOIN has no first-class session_id /
             // session_attr_id columns — session keys live in the labels MAP.
             format!(
                 "({a} = {escaped_id} OR {b} = {escaped_id} OR {c} = {escaped_id} OR {d} = {escaped_id} OR {e} = {escaped_id} OR {f} = {escaped_id})",
@@ -326,7 +326,7 @@ pub fn compile_details_sql(
 
     Ok(CompiledDetailsSql {
         spans: detail_sql(
-            "union_spans",
+            "traces",
             &format!(
                 "session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind, timestamp, end_timestamp, status_code, status_message, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, {}",
                 variant_as_json("attributes")
@@ -336,7 +336,7 @@ pub fn compile_details_sql(
             limit,
         ),
         logs: detail_sql(
-            "union_logs",
+            "logs",
             &format!(
                 "session_id, timestamp, severity_number, severity_text, body, trace_id, span_id, {}, {}",
                 variant_as_json("attributes"),
@@ -350,7 +350,7 @@ pub fn compile_details_sql(
             // Metrics are stored in skinny tables.  Keep the detail endpoint on
             // the compatibility relation so it sees the same joined columns as
             // the pre-cutover telemetry API without maintaining a second join.
-            "union_metrics",
+            "metrics",
             &format!(
                 "metric_name, description, unit, metric_type, timestamp, value, {}, {}",
                 variant_as_json("attributes"),
@@ -477,7 +477,7 @@ pub async fn field_values(
         .unwrap_or(500)
         .clamp(1, 10_000);
     let sql = format!(
-        "SELECT DISTINCT {field_sql} AS value FROM union_spans WHERE {field_sql} IS NOT NULL ORDER BY value ASC LIMIT {limit}",
+        "SELECT DISTINCT {field_sql} AS value FROM traces WHERE {field_sql} IS NOT NULL ORDER BY value ASC LIMIT {limit}",
         field_sql = spec.sql,
     );
     let result = state
@@ -872,7 +872,7 @@ mod tests {
         .unwrap();
         assert!(compiled.spans.contains("session_id = 'sess-1'"));
         assert!(compiled.logs.contains("session_id = 'sess-1'"));
-        // Metrics: skinny union_metrics has no session_id column — bag keys only.
+        // Metrics: skinny metrics layout has no session_id column — bag keys only.
         assert!(compiled
             .metrics
             .contains("CAST(attributes['sp.session.id'] AS VARCHAR)"));

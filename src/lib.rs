@@ -3,8 +3,8 @@
 mod test_support;
 
 pub mod api;
+pub mod async_jobs;
 pub mod authn;
-pub mod catalog;
 pub mod compaction;
 pub mod compat;
 pub mod config;
@@ -17,5 +17,6 @@ pub mod query;
 pub mod runtime_api;
 pub mod runtime_engine;
 pub mod self_monitoring;
+pub mod session_summary;
 pub mod softprobe_assertion;
 pub mod storage;

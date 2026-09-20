@@ -7,7 +7,6 @@
 //! Per-tenant [`RuntimeEngine`] cache.
 
 use crate::authn::TenantInfo;
-use crate::catalog::DropdownCatalog;
 use crate::config::{Config, DuckLakeConfig};
 use crate::control_plane::ControlPlaneRuntime;
 use crate::ingest_engine::{IngestEngine, IngestPipeline};
@@ -37,7 +36,6 @@ pub struct RuntimeEngine {
     pub storage: Arc<Storage>,
     pub ingest: Arc<IngestEngine>,
     pub query: Arc<QueryEngine>,
-    pub dropdown_catalog: Option<Arc<DropdownCatalog>>,
 }
 
 /// Global cache: `tenantId` -> tenant-bound runtime (unbounded until restart).
@@ -154,11 +152,9 @@ impl RuntimeEngineManager {
             };
 
         let resolver = self.scope_registry.as_ref();
-        let dropdown_catalog = DropdownCatalog::connect(self.config.as_ref()).await?;
         let storage = Arc::new(
             IngestPipeline::build_tenant_storage(
                 self.config.as_ref(),
-                dropdown_catalog.clone(),
                 resolver.cloned(),
                 tenant_id.to_string(),
                 scope.clone(),
@@ -169,6 +165,14 @@ impl RuntimeEngineManager {
             storage.clone(),
             tenant_id,
             self.config.ingest.flush_interval_seconds,
+            self.config.ingest.buffer_size_mb,
+            self.config.ingest.write_timeout_seconds,
+            crate::ingest_engine::session_summary_dirty_for(
+                self.config.as_ref(),
+                resolver,
+                tenant_id,
+                &scope.metadata_schema,
+            ),
         ));
         let query = Arc::new(
             query_mod::create_query_engine_for_scope_with_liveness(
@@ -186,7 +190,6 @@ impl RuntimeEngineManager {
             storage,
             ingest,
             query,
-            dropdown_catalog,
         }))
     }
 }
@@ -215,6 +218,14 @@ pub struct DuckLakeScopeResolver {
 }
 
 impl DuckLakeScopeResolver {
+    pub fn pool(&self) -> &Pool {
+        &self.pool
+    }
+
+    pub fn registry_schema(&self) -> &str {
+        &self.registry_schema
+    }
+
     pub async fn connect(config: &Config) -> Result<Option<Self>> {
         let dl = &config.ducklake;
         if dl.catalog_type != "postgres" {
@@ -275,12 +286,43 @@ impl DuckLakeScopeResolver {
                 &[],
             )
             .await?;
+        client
+            .execute(
+                &format!(
+                    r#"CREATE TABLE IF NOT EXISTS {}.thelake_job_lease (
+  job_name TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  holder_id TEXT NOT NULL,
+  lease_until TIMESTAMPTZ NOT NULL,
+  heartbeat_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (job_name, scope_key)
+);"#,
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[],
+            )
+            .await?;
+        client
+            .execute(
+                &format!(
+                    r#"CREATE INDEX IF NOT EXISTS thelake_job_lease_until
+ON {}.thelake_job_lease (lease_until);"#,
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[],
+            )
+            .await?;
         Ok(())
     }
 
     async fn ensure_scope_tables(&self, scope: &DuckLakeScope) -> Result<()> {
         let client = self.pool.get().await?;
         ensure_promotion_metadata_tables(&client, &scope.metadata_schema).await?;
+        crate::session_summary::ensure_session_summary_tables(&client, &scope.metadata_schema)
+            .await?;
+        drop(client);
+        // Postgres catalog ⇒ session_summary always on; activate product-hot cols.
+        crate::session_summary::ensure_product_hot_attrs_for_scope(self, scope).await?;
         Ok(())
     }
 
@@ -632,6 +674,6 @@ fn parse_postgres_kv_config(pg: &mut tokio_postgres::Config, metadata_path: &str
     Ok(())
 }
 
-fn quote_pg_ident(input: &str) -> String {
+pub(crate) fn quote_pg_ident(input: &str) -> String {
     format!("\"{}\"", input.replace('"', "\"\""))
 }

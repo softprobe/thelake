@@ -1,4 +1,3 @@
-use crate::catalog::DropdownCatalog;
 use crate::compaction::collapse::{collapse_job_1h_from_raw_sql, collapse_job_1h_sql};
 use crate::compaction::downsample::{
     downsample_1h_from_5m_sql, downsample_1h_from_raw_sql, downsample_5m_sql,
@@ -20,7 +19,6 @@ use crate::storage::schema::MAINTENANCE_METRICS_FAMILY_TABLES;
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, Utc};
 use duckdb::Connection;
-use std::sync::Arc;
 use tracing::{info, warn};
 
 /// Metrics-family tables compacted/expired before traces/logs/scores (AC-M1).
@@ -40,7 +38,6 @@ pub fn maintenance_table_names() -> Vec<&'static str> {
 pub struct MaintenanceExecutor {
     config: Config,
     ducklake: crate::config::DuckLakeConfig,
-    dropdown_catalog: Option<Arc<DropdownCatalog>>,
     scope_registry: Option<DuckLakeScopeResolver>,
 }
 
@@ -113,13 +110,11 @@ pub enum CompactionStatus {
 impl MaintenanceExecutor {
     pub async fn new(
         config: &Config,
-        dropdown_catalog: Option<Arc<DropdownCatalog>>,
         scope_registry: Option<DuckLakeScopeResolver>,
     ) -> Result<Self> {
         Ok(Self {
             config: config.clone(),
             ducklake: config.ducklake.clone(),
-            dropdown_catalog,
             scope_registry,
         })
     }
@@ -136,7 +131,9 @@ impl MaintenanceExecutor {
         self.run_once_ducklake(run_compaction).await
     }
 
-    async fn maintenance_scopes(&self) -> Result<Vec<(String, crate::config::DuckLakeConfig)>> {
+    pub(crate) async fn maintenance_scopes(
+        &self,
+    ) -> Result<Vec<(String, crate::config::DuckLakeConfig)>> {
         let mut scopes = Vec::new();
         let default = self.ducklake.clone();
         let mut saw_default = false;
@@ -161,6 +158,23 @@ impl MaintenanceExecutor {
     }
 
     async fn run_once_ducklake(&self, run_compaction: bool) -> Result<MaintenanceSummary> {
+        let mut results = Vec::new();
+        for (tenant_id, ducklake) in self.maintenance_scopes().await? {
+            let mut part = self
+                .run_tenant_pass(&tenant_id, &ducklake, run_compaction)
+                .await?;
+            results.append(&mut part);
+        }
+        Ok(MaintenanceSummary { tables: results })
+    }
+
+    /// One tenant scope: TWCS/ladder (optional) + metadata expire/orphan.
+    pub(crate) async fn run_tenant_pass(
+        &self,
+        tenant_id: &str,
+        ducklake: &crate::config::DuckLakeConfig,
+        run_compaction: bool,
+    ) -> Result<Vec<TableMaintenanceResult>> {
         // §7.2 pass order per tenant scope:
         // 1 ensure PARTITIONED BY / SORTED BY
         // 2 TWCS merge (metrics family first, partition-scoped plans)
@@ -168,51 +182,48 @@ impl MaintenanceExecutor {
         // 6–7 expire snapshots + orphan cleanup (once per scope)
         let tables = maintenance_table_names();
         let mut results = Vec::new();
-
-        for (tenant_id, ducklake) in self.maintenance_scopes().await? {
-            let label = tenant_id.as_str();
-            let scope_start = std::time::Instant::now();
-            let conn = match self.open_ducklake_connection(&ducklake) {
-                Ok(c) => c,
-                Err(err) => {
-                    warn!("Maintenance skip scope {}: open failed: {}", label, err);
-                    crate::self_monitoring::record_compaction_pass(label, false);
-                    continue;
-                }
-            };
-            if let Err(err) = self.attach_ducklake(&conn, &ducklake) {
-                warn!("Maintenance skip scope {}: attach failed: {}", label, err);
+        let label = tenant_id;
+        let scope_start = std::time::Instant::now();
+        let conn = match self.open_ducklake_connection(ducklake) {
+            Ok(c) => c,
+            Err(err) => {
+                warn!("Maintenance open failed for scope {}: {}", label, err);
                 crate::self_monitoring::record_compaction_pass(label, false);
-                continue;
+                return Err(anyhow!("maintenance open failed for {label}: {err}"));
             }
+        };
+        if let Err(err) = self.attach_ducklake(&conn, ducklake) {
+            warn!("Maintenance attach failed for scope {}: {}", label, err);
+            crate::self_monitoring::record_compaction_pass(label, false);
+            return Err(anyhow!("maintenance attach failed for {label}: {err}"));
+        }
 
-            let files_before = count_parquet_files_under(&ducklake.data_path);
+        let files_before = count_parquet_files_under(&ducklake.data_path);
 
-            // §7.2 step 1 — idempotent layout DDL for metrics family.
-            let layout_catalog = crate::storage::ducklake::layout_catalog_prefix(
-                &ducklake.catalog_alias,
-                &ducklake.metadata_schema,
+        // §7.2 step 1 — idempotent layout DDL for metrics family.
+        let layout_catalog = crate::storage::ducklake::layout_catalog_prefix(
+            &ducklake.catalog_alias,
+            &ducklake.metadata_schema,
+        );
+        if let Err(err) = ensure_metrics_layout_family_tables(&conn, &layout_catalog) {
+            warn!(
+                "Maintenance ensure layout tables failed ({}): {}",
+                label, err
             );
-            if let Err(err) = ensure_metrics_layout_family_tables(&conn, &layout_catalog) {
-                warn!(
-                    "Maintenance ensure layout tables failed ({}): {}",
-                    label, err
-                );
-            }
+        }
 
-            let mut compact_status: std::collections::HashMap<String, CompactionStatus> =
-                std::collections::HashMap::new();
+        let mut compact_status: std::collections::HashMap<String, CompactionStatus> =
+            std::collections::HashMap::new();
 
-            if self.config.maintenance.enabled && run_compaction {
-                // AC-F7 wait-for-next-run: do not flush catalog-inlined rows
-                // before TWCS. Inlined rows stay readable via the catalog; TWCS
-                // only merges Parquet that already exists (batches over the
-                // inlining limit). Paying flush every pass is intentionally
-                // avoided.
-                for table in MAINTENANCE_METRICS_FAMILY_TABLES {
-                    let status = match self
-                        .ducklake_twcs_compact_table(&conn, &ducklake, table, &tenant_id)
-                    {
+        if self.config.maintenance.enabled && run_compaction {
+            // AC-F7 wait-for-next-run: do not flush catalog-inlined rows
+            // before TWCS. Inlined rows stay readable via the catalog; TWCS
+            // only merges Parquet that already exists (batches over the
+            // inlining limit). Paying flush every pass is intentionally
+            // avoided.
+            for table in MAINTENANCE_METRICS_FAMILY_TABLES {
+                let status =
+                    match self.ducklake_twcs_compact_table(&conn, ducklake, table, tenant_id) {
                         Ok(s) => s,
                         Err(err) => {
                             warn!(
@@ -222,101 +233,87 @@ impl MaintenanceExecutor {
                             CompactionStatus::Skipped
                         }
                     };
-                    compact_status.insert((*table).to_string(), status);
-                }
+                compact_status.insert((*table).to_string(), status);
+            }
 
-                if let Err(err) = self.run_metrics_ladder(&conn, &ducklake) {
-                    warn!(
-                        "Maintenance downsample/collapse ladder failed ({}): {}",
-                        label, err
-                    );
-                }
+            if let Err(err) = self.run_metrics_ladder(&conn, ducklake) {
+                warn!(
+                    "Maintenance downsample/collapse ladder failed ({}): {}",
+                    label, err
+                );
+            }
 
-                // Metrics-layout demos have no traces/logs/scores tables.
-                // Only compact when the table exists so we do not ERROR/spam every
-                // minute and contend with PromQL (Grafana 100ms SLO).
-                for table in ["traces", "logs", "scores"] {
-                    let status = if self
-                        .ducklake_table_exists(&conn, &ducklake, table)
-                        .unwrap_or(false)
-                    {
-                        match self.ducklake_compact_table(&conn, &ducklake, table) {
-                            Ok(s) => s,
-                            Err(err) => {
-                                warn!(
-                                    "Maintenance compaction failed for {}.{} ({}): {}",
-                                    ducklake.metadata_schema, table, label, err
-                                );
-                                CompactionStatus::Skipped
-                            }
+            // Metrics-layout demos have no traces/logs/scores tables.
+            // Only compact when the table exists so we do not ERROR/spam every
+            // minute and contend with PromQL (Grafana 100ms SLO).
+            for table in ["traces", "logs", "scores"] {
+                let status = if self
+                    .ducklake_table_exists(&conn, ducklake, table)
+                    .unwrap_or(false)
+                {
+                    match self.ducklake_compact_table(&conn, ducklake, table) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            warn!(
+                                "Maintenance compaction failed for {}.{} ({}): {}",
+                                ducklake.metadata_schema, table, label, err
+                            );
+                            CompactionStatus::Skipped
                         }
-                    } else {
-                        CompactionStatus::Skipped
-                    };
-                    compact_status.insert(table.to_string(), status);
-                }
-            }
-
-            // Expire + orphan cleanup once per scope (not once per table).
-            let (metadata, remove_orphan_files) =
-                self.run_scope_metadata_cleanup(&conn, &ducklake, label);
-
-            // Locked cardinality: status is ok|error only. Emit only when the
-            // action was attempted — disabled/no-op must not mint series.
-            let orphan_enabled = self.config.maintenance.metadata_enabled
-                && self.config.maintenance.remove_orphan_files_enabled;
-            if let Some(orphan_status) =
-                orphan_metric_status(orphan_enabled, remove_orphan_files.status)
-            {
-                crate::self_monitoring::record_orphan_remove(&tenant_id, orphan_status);
-            }
-            if let Some(snap_status) =
-                snapshot_metric_status(self.config.maintenance.metadata_enabled, metadata.skipped)
-            {
-                crate::self_monitoring::record_snapshot_expire(&tenant_id, snap_status);
-            }
-            crate::self_monitoring::record_compaction_pass(&tenant_id, true);
-            let _ = scope_start;
-
-            for table in &tables {
-                let table_ident = format!("{}.{}", ducklake.metadata_schema, table);
-                let compaction = CompactionResult {
-                    status: if self.config.maintenance.enabled {
-                        compact_status
-                            .get(*table)
-                            .cloned()
-                            .unwrap_or(CompactionStatus::Skipped)
-                    } else {
-                        CompactionStatus::Skipped
-                    },
+                    }
+                } else {
+                    CompactionStatus::Skipped
                 };
-                results.push(TableMaintenanceResult {
-                    table: table_ident,
-                    metadata: metadata.clone(),
-                    compaction,
-                    rewrite_manifests: ActionResult {
-                        status: ActionStatus::Unsupported,
-                    },
-                    remove_orphan_files: remove_orphan_files.clone(),
-                });
-            }
-            let files_after = count_parquet_files_under(&ducklake.data_path);
-            warn_if_too_many_parquet_files(label, &ducklake.data_path, files_before, files_after);
-        }
-
-        if let Some(ref dc) = self.dropdown_catalog {
-            if self.config.dropdown_catalog.enabled
-                && self.config.dropdown_catalog.maintenance_prune_enabled
-            {
-                let days = self.config.dropdown_catalog.active_values_days;
-                match dc.prune_older_than_days(days).await {
-                    Ok(n) => info!("dropdown catalog TTL prune removed {} rows", n),
-                    Err(e) => warn!("dropdown catalog TTL prune failed: {}", e),
-                }
+                compact_status.insert(table.to_string(), status);
             }
         }
 
-        Ok(MaintenanceSummary { tables: results })
+        // Expire + orphan cleanup once per scope (not once per table).
+        let (metadata, remove_orphan_files) =
+            self.run_scope_metadata_cleanup(&conn, ducklake, label);
+
+        // Locked cardinality: status is ok|error only. Emit only when the
+        // action was attempted — disabled/no-op must not mint series.
+        let orphan_enabled = self.config.maintenance.metadata_enabled
+            && self.config.maintenance.remove_orphan_files_enabled;
+        if let Some(orphan_status) =
+            orphan_metric_status(orphan_enabled, remove_orphan_files.status)
+        {
+            crate::self_monitoring::record_orphan_remove(tenant_id, orphan_status);
+        }
+        if let Some(snap_status) =
+            snapshot_metric_status(self.config.maintenance.metadata_enabled, metadata.skipped)
+        {
+            crate::self_monitoring::record_snapshot_expire(tenant_id, snap_status);
+        }
+        crate::self_monitoring::record_compaction_pass(tenant_id, true);
+        let _ = scope_start;
+
+        for table in &tables {
+            let table_ident = format!("{}.{}", ducklake.metadata_schema, table);
+            let compaction = CompactionResult {
+                status: if self.config.maintenance.enabled {
+                    compact_status
+                        .get(*table)
+                        .cloned()
+                        .unwrap_or(CompactionStatus::Skipped)
+                } else {
+                    CompactionStatus::Skipped
+                },
+            };
+            results.push(TableMaintenanceResult {
+                table: table_ident,
+                metadata: metadata.clone(),
+                compaction,
+                rewrite_manifests: ActionResult {
+                    status: ActionStatus::Unsupported,
+                },
+                remove_orphan_files: remove_orphan_files.clone(),
+            });
+        }
+        let files_after = count_parquet_files_under(&ducklake.data_path);
+        warn_if_too_many_parquet_files(label, &ducklake.data_path, files_before, files_after);
+        Ok(results)
     }
 
     fn run_scope_metadata_cleanup(
@@ -1076,9 +1073,9 @@ pub const SNAPSHOT_COUNT_BAR_AFTER_PASS: usize = 50;
 /// AC-N6 age bar: no live snapshot older than `A + I`.
 pub fn snapshot_max_age_after_pass_seconds(
     max_snapshot_age_seconds: u64,
-    metadata_interval_seconds: u64,
+    interval_seconds: u64,
 ) -> u64 {
-    max_snapshot_age_seconds.saturating_add(metadata_interval_seconds)
+    max_snapshot_age_seconds.saturating_add(interval_seconds)
 }
 
 /// DuckLake `older_than` interval from an age in seconds (no day flooring).
@@ -1350,12 +1347,12 @@ mod tests {
     fn expire_snapshots_sql_honors_n6_count_and_age_bars() {
         let cfg = crate::config::Config::default();
         assert_eq!(cfg.maintenance.max_snapshot_age_seconds, 60);
-        assert_eq!(cfg.maintenance.metadata_interval_seconds, 60);
+        assert_eq!(cfg.maintenance.interval_seconds, 60);
         assert_eq!(SNAPSHOT_COUNT_BAR_AFTER_PASS, 50);
         assert_eq!(
             snapshot_max_age_after_pass_seconds(
                 cfg.maintenance.max_snapshot_age_seconds,
-                cfg.maintenance.metadata_interval_seconds,
+                cfg.maintenance.interval_seconds,
             ),
             120
         );
@@ -1469,5 +1466,29 @@ mod tests {
         assert_eq!(snapshot_metric_status(false, false), None);
         assert_eq!(snapshot_metric_status(true, false), Some("ok"));
         assert_eq!(snapshot_metric_status(true, true), Some("error"));
+    }
+
+    #[tokio::test]
+    async fn run_tenant_pass_attach_failure_is_err() {
+        let mut cfg = Config::default();
+        cfg.maintenance.enabled = false;
+        cfg.maintenance.metadata_enabled = false;
+        let executor = MaintenanceExecutor::new(&cfg, None)
+            .await
+            .expect("executor");
+        let mut ducklake = cfg.ducklake.clone();
+        // Parent path is a file → prepare_local_ducklake_paths fails → attach Err.
+        let blocker = tempfile::NamedTempFile::new().expect("blocker file");
+        ducklake.catalog_type = "sqlite".into();
+        ducklake.metadata_path = format!("{}/meta.sqlite", blocker.path().display());
+        ducklake.data_path = format!("{}/data/", blocker.path().display());
+        let err = executor
+            .run_tenant_pass("t-attach-fail", &ducklake, false)
+            .await
+            .expect_err("attach must Err");
+        assert!(
+            err.to_string().contains("attach failed") || err.to_string().contains("open failed"),
+            "unexpected: {err}"
+        );
     }
 }

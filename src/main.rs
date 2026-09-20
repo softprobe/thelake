@@ -51,11 +51,9 @@ async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
     // Maintenance needs a writer/catalog; HTTP/gRPC engines are built lazily per tenant.
     let pipeline = IngestPipeline::new(config.as_ref()).await?;
     let storage = pipeline.storage.clone();
-    let dropdown_catalog = pipeline.dropdown_catalog.clone();
 
     if let Some(_handle) = softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
         config.as_ref(),
-        dropdown_catalog.clone(),
         storage.writer.scope_registry().cloned(),
     )
     .await?

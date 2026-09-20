@@ -16,16 +16,164 @@ pub struct Config {
     pub query: QueryConfig,
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
+    /// Shared async job runner + lease settings (maintenance, future session-summary).
+    #[serde(default)]
+    pub async_jobs: AsyncJobsConfig,
     /// Required DuckLake catalog + data warehouse settings.
     pub ducklake: DuckLakeConfig,
-    #[serde(default)]
-    pub dropdown_catalog: DropdownCatalogConfig,
     /// Optional soft coalesce for OTLP ingest (ack-on-enqueue when interval > 0).
     #[serde(default)]
     pub ingest: IngestConfig,
+    /// Derived session list summary + dirty queue (Postgres catalog only).
+    #[serde(default)]
+    pub session_summary: SessionSummaryConfig,
     /// Self-monitoring ops lake (Design 2). Disabled by default.
     #[serde(default)]
     pub self_monitoring: SelfMonitoringConfig,
+}
+
+/// Session list summary knobs. Always active when `ducklake.catalog_type=postgres`
+/// (dirty + reduce + rebuild + hot-attrs). Sqlite keeps lake `GROUP BY` list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSummaryConfig {
+    /// Wake interval for `session_summary.reduce` on the shared async job runner.
+    #[serde(default = "default_reducer_interval_ms")]
+    pub reducer_interval_ms: u64,
+    /// Wake interval for `session_summary.rebuild` (periodic heal lookback).
+    #[serde(default = "default_rebuild_interval_ms")]
+    pub rebuild_interval_ms: u64,
+    /// Max dirty sessions claimed per reduce pass.
+    #[serde(default = "default_max_sessions_per_reduce")]
+    pub max_sessions_per_reduce: u64,
+    /// Clamp reduce `[from,to]` / rebuild lookback + ops max window (seconds).
+    #[serde(default = "default_max_reduce_span_seconds")]
+    pub max_reduce_span_seconds: u64,
+}
+
+impl Default for SessionSummaryConfig {
+    fn default() -> Self {
+        Self {
+            reducer_interval_ms: default_reducer_interval_ms(),
+            rebuild_interval_ms: default_rebuild_interval_ms(),
+            max_sessions_per_reduce: default_max_sessions_per_reduce(),
+            max_reduce_span_seconds: default_max_reduce_span_seconds(),
+        }
+    }
+}
+
+fn default_reducer_interval_ms() -> u64 {
+    10_000
+}
+
+fn default_rebuild_interval_ms() -> u64 {
+    86_400_000
+}
+
+fn default_max_sessions_per_reduce() -> u64 {
+    1000
+}
+
+fn default_max_reduce_span_seconds() -> u64 {
+    604_800
+}
+
+impl SessionSummaryConfig {
+    /// True when the catalog can host `session_summary` (postgres only).
+    pub fn active_for(ducklake: &DuckLakeConfig) -> bool {
+        ducklake.catalog_type == "postgres"
+    }
+
+    /// Postgres catalogs require positive reducer/rebuild knobs.
+    /// `ingest.flush_interval_seconds` may be 0 (immediate coalesce drain) or >0
+    /// (timer); both mark dirty on the same coalesce write path.
+    /// Sqlite: no-op (summary inactive).
+    pub fn validate(
+        &self,
+        _ingest: &IngestConfig,
+        ducklake: &DuckLakeConfig,
+    ) -> anyhow::Result<()> {
+        if !Self::active_for(ducklake) {
+            return Ok(());
+        }
+        if self.reducer_interval_ms == 0 {
+            anyhow::bail!("session_summary.reducer_interval_ms must be > 0 for postgres catalog");
+        }
+        if self.rebuild_interval_ms == 0 {
+            anyhow::bail!("session_summary.rebuild_interval_ms must be > 0 for postgres catalog");
+        }
+        if self.max_sessions_per_reduce == 0 {
+            anyhow::bail!(
+                "session_summary.max_sessions_per_reduce must be > 0 for postgres catalog"
+            );
+        }
+        if self.max_reduce_span_seconds == 0 {
+            anyhow::bail!(
+                "session_summary.max_reduce_span_seconds must be > 0 for postgres catalog"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Cross-replica job leasing for the shared async job runner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AsyncJobsConfig {
+    /// Stable process id; default `thelake-{pid}-{uuid}` when null/empty.
+    #[serde(default)]
+    pub instance_id: Option<String>,
+    #[serde(default = "default_lease_ttl_seconds")]
+    pub lease_ttl_seconds: u64,
+    /// Heartbeat period while holding a lease. Keep well below `lease_ttl_seconds`
+    /// (e.g. ttl ≥ 3× heartbeat) so a slow DB round-trip cannot leave the row stealable.
+    #[serde(default = "default_heartbeat_seconds")]
+    pub heartbeat_seconds: u64,
+}
+
+impl Default for AsyncJobsConfig {
+    fn default() -> Self {
+        Self {
+            instance_id: None,
+            lease_ttl_seconds: default_lease_ttl_seconds(),
+            heartbeat_seconds: default_heartbeat_seconds(),
+        }
+    }
+}
+
+fn default_lease_ttl_seconds() -> u64 {
+    120
+}
+
+fn default_heartbeat_seconds() -> u64 {
+    30
+}
+
+impl AsyncJobsConfig {
+    /// Resolved holder id for lease rows.
+    pub fn resolved_instance_id(&self) -> String {
+        if let Some(id) = self
+            .instance_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return id.to_string();
+        }
+        format!("thelake-{}-{}", std::process::id(), uuid::Uuid::new_v4())
+    }
+
+    /// Reject configs where heartbeat cannot land before the lease expires.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let ttl = self.lease_ttl_seconds.max(1);
+        let hb = self.heartbeat_seconds.max(1);
+        if hb >= ttl {
+            anyhow::bail!(
+                "async_jobs.heartbeat_seconds ({hb}) must be < async_jobs.lease_ttl_seconds ({ttl})"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Reserved ops DuckLake scope + OTel export interval.
@@ -65,19 +213,29 @@ fn default_self_monitoring_ops_data_path() -> String {
     "s3://warehouse/_thelake_ops/".to_string()
 }
 
-/// Soft coalesce window for OTLP ingest. `0` = flush-through (commit before ack).
+/// Soft coalesce window for OTLP ingest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestConfig {
-    /// Seconds to hold rows in memory before one DuckLake write. `0` disables the buffer.
+    /// Seconds to hold rows before a DuckLake drain. `0` = drain as soon as pending.
     #[serde(default = "default_ingest_flush_interval_seconds")]
     pub flush_interval_seconds: u64,
+    /// Soft in-memory coalesce budget in MiB (OTLP body bytes). Clamped to the
+    /// absolute 256 MiB ceiling. Eager flush fires at half of the effective max.
+    #[serde(default = "default_ingest_buffer_size_mb")]
+    pub buffer_size_mb: u64,
+    /// Soft wall-clock limit for one DuckLake ingest write. `0` disables.
+    /// Clamped to 3600s. Prevents a hung INSERT from stalling a signal forever.
+    #[serde(default = "default_ingest_write_timeout_seconds")]
+    pub write_timeout_seconds: u64,
 }
 
 impl Default for IngestConfig {
     fn default() -> Self {
         Self {
             flush_interval_seconds: default_ingest_flush_interval_seconds(),
+            buffer_size_mb: default_ingest_buffer_size_mb(),
+            write_timeout_seconds: default_ingest_write_timeout_seconds(),
         }
     }
 }
@@ -86,49 +244,20 @@ fn default_ingest_flush_interval_seconds() -> u64 {
     0
 }
 
-/// Postgres EAV table ([`crate::catalog::DropdownCatalog`]) for control-plane UI filter dropdowns.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DropdownCatalogConfig {
-    #[serde(default = "default_dropdown_catalog_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_dropdown_catalog_active_days")]
-    pub active_values_days: u32,
-    #[serde(default = "default_dropdown_catalog_maintenance_prune")]
-    pub maintenance_prune_enabled: bool,
-    /// Max (entity_type, entity_value) pairs per single Postgres `INSERT … VALUES …`.
-    #[serde(default = "default_dropdown_catalog_upsert_batch_size")]
-    pub upsert_batch_size: usize,
-    #[serde(default)]
-    pub skip_entity_columns: Vec<String>,
+fn default_ingest_buffer_size_mb() -> u64 {
+    256
 }
 
-impl Default for DropdownCatalogConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_dropdown_catalog_enabled(),
-            active_values_days: default_dropdown_catalog_active_days(),
-            maintenance_prune_enabled: default_dropdown_catalog_maintenance_prune(),
-            upsert_batch_size: default_dropdown_catalog_upsert_batch_size(),
-            skip_entity_columns: Vec::new(),
-        }
-    }
+fn default_ingest_write_timeout_seconds() -> u64 {
+    60
 }
 
-fn default_dropdown_catalog_enabled() -> bool {
-    false
-}
+/// Absolute ceiling for [`IngestConfig::write_timeout_seconds`].
+pub const ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS: u64 = 3600;
 
-fn default_dropdown_catalog_active_days() -> u32 {
-    7
-}
-
-fn default_dropdown_catalog_maintenance_prune() -> bool {
-    true
-}
-
-fn default_dropdown_catalog_upsert_batch_size() -> usize {
-    500
+/// Clamp soft write timeout (`0` = disabled).
+pub fn resolve_write_timeout_seconds(secs: u64) -> u64 {
+    secs.min(ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,21 +348,21 @@ fn default_query_cache_dir() -> Option<String> {
     Some("/var/tmp/softprobe/duckdb".to_string())
 }
 
-/// Compaction + metadata maintenance scheduling.
+/// Compaction + metadata maintenance (one leased job).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceConfig {
-    /// Run `ducklake_merge_adjacent_files` compaction.
+    /// Run `ducklake_merge_adjacent_files` compaction (TWCS) in each maintenance pass.
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_target_file_size_bytes")]
     pub target_file_size_bytes: usize,
+    /// How often the maintenance job tries to run (acquire → pass → release).
     #[serde(default = "default_interval_seconds")]
     pub interval_seconds: u64,
+    /// Run snapshot expire / orphan cleanup in each maintenance pass.
     #[serde(default = "default_true")]
     pub metadata_enabled: bool,
-    #[serde(default = "default_metadata_interval_seconds")]
-    pub metadata_interval_seconds: u64,
     #[serde(default = "default_max_snapshot_age_seconds")]
     pub max_snapshot_age_seconds: u64,
     /// When true (and metadata maintenance runs), call `ducklake_cleanup_old_files`.
@@ -268,7 +397,6 @@ impl Default for MaintenanceConfig {
             target_file_size_bytes: default_target_file_size_bytes(),
             interval_seconds: default_interval_seconds(),
             metadata_enabled: true,
-            metadata_interval_seconds: default_metadata_interval_seconds(),
             max_snapshot_age_seconds: default_max_snapshot_age_seconds(),
             remove_orphan_files_enabled: true,
             remove_orphan_older_than_seconds: default_remove_orphan_older_than_seconds(),
@@ -291,13 +419,8 @@ fn default_target_file_size_bytes() -> usize {
 }
 
 fn default_interval_seconds() -> u64 {
-    // Flush-through OTLP creates many small files under demo/Grafana churn;
-    // merge every 5m by default so query scans do not wait an hour.
-    300
-}
-
-fn default_metadata_interval_seconds() -> u64 {
-    // Expire unused snapshot history often; Prom does not time-travel.
+    // Combined pass (expire + TWCS). Keep near the old metadata cadence so
+    // snapshot age bars stay tight; TWCS no-ops when nothing to merge.
     60
 }
 
@@ -473,6 +596,10 @@ impl Config {
 
         config.apply_env_overrides()?;
         config.validate_ducklake_catalog()?;
+        config.async_jobs.validate()?;
+        config
+            .session_summary
+            .validate(&config.ingest, &config.ducklake)?;
         Ok(config)
     }
 
@@ -571,7 +698,7 @@ fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredential
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{resolve_write_timeout_seconds, Config, ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS};
     use crate::compaction::twcs::TwcsPolicy;
     use std::sync::Mutex;
 
@@ -590,8 +717,7 @@ mod tests {
     #[test]
     fn maintenance_defaults_favor_frequent_compaction() {
         let c = Config::default();
-        assert_eq!(c.maintenance.interval_seconds, 300);
-        assert_eq!(c.maintenance.metadata_interval_seconds, 60);
+        assert_eq!(c.maintenance.interval_seconds, 60);
         assert!(c.maintenance.enabled);
         assert_eq!(c.maintenance.target_file_size_bytes, 64 * 1024 * 1024);
         assert_eq!(c.maintenance.open_day_file_cap, 2);
@@ -633,6 +759,8 @@ ducklake:
         assert_eq!(c.query.max_connections, 10);
         assert_eq!(c.ducklake.metadata_path, "/tmp/meta.sqlite");
         assert_eq!(c.ingest.flush_interval_seconds, 0);
+        assert_eq!(c.ingest.buffer_size_mb, 256);
+        assert_eq!(c.ingest.write_timeout_seconds, 60);
     }
 
     #[test]
@@ -647,6 +775,44 @@ ingest:
 "#;
         let c: Config = serde_yaml::from_str(yaml).expect("ingest ok");
         assert_eq!(c.ingest.flush_interval_seconds, 2);
+        assert_eq!(c.ingest.buffer_size_mb, 256);
+        assert_eq!(c.ingest.write_timeout_seconds, 60);
+    }
+
+    #[test]
+    fn ingest_buffer_size_mb_parses() {
+        let yaml = r#"
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/meta.sqlite
+  data_path: /tmp/data/
+ingest:
+  flush_interval_seconds: 60
+  buffer_size_mb: 1
+"#;
+        let c: Config = serde_yaml::from_str(yaml).expect("ingest ok");
+        assert_eq!(c.ingest.flush_interval_seconds, 60);
+        assert_eq!(c.ingest.buffer_size_mb, 1);
+    }
+
+    #[test]
+    fn ingest_write_timeout_parses_and_clamps() {
+        let yaml = r#"
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/meta.sqlite
+  data_path: /tmp/data/
+ingest:
+  write_timeout_seconds: 15
+"#;
+        let c: Config = serde_yaml::from_str(yaml).expect("ingest ok");
+        assert_eq!(c.ingest.write_timeout_seconds, 15);
+        assert_eq!(resolve_write_timeout_seconds(15), 15);
+        assert_eq!(
+            resolve_write_timeout_seconds(ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS + 10),
+            ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS
+        );
+        assert_eq!(resolve_write_timeout_seconds(0), 0);
     }
 
     #[test]
@@ -762,6 +928,73 @@ ducklake:
         c.ducklake.catalog_type = "duckdb".to_string();
         let err = c.validate_ducklake_catalog().expect_err("duckdb rejected");
         assert!(err.to_string().contains("unsupported"));
+    }
+
+    #[test]
+    fn async_jobs_validate_rejects_heartbeat_ge_ttl() {
+        let mut c = Config::default();
+        c.async_jobs.lease_ttl_seconds = 30;
+        c.async_jobs.heartbeat_seconds = 30;
+        let err = c.async_jobs.validate().expect_err("hb == ttl");
+        assert!(err.to_string().contains("heartbeat_seconds"));
+        c.async_jobs.heartbeat_seconds = 10;
+        c.async_jobs.validate().expect("hb < ttl ok");
+    }
+
+    #[test]
+    fn session_summary_defaults_reducer_knobs() {
+        let c = Config::default();
+        assert_eq!(c.session_summary.reducer_interval_ms, 10_000);
+        assert_eq!(c.session_summary.rebuild_interval_ms, 86_400_000);
+        assert_eq!(c.session_summary.max_sessions_per_reduce, 1000);
+        assert_eq!(c.session_summary.max_reduce_span_seconds, 604_800);
+        assert!(!super::SessionSummaryConfig::active_for(&c.ducklake)); // default sqlite
+    }
+
+    #[test]
+    fn session_summary_postgres_rejects_zero_reducer_interval() {
+        let mut c = Config::default();
+        c.ducklake.catalog_type = "postgres".to_string();
+        c.ingest.flush_interval_seconds = 2;
+        c.session_summary.reducer_interval_ms = 0;
+        let err = c
+            .session_summary
+            .validate(&c.ingest, &c.ducklake)
+            .expect_err("interval 0");
+        assert!(err.to_string().contains("reducer_interval_ms"));
+    }
+
+    #[test]
+    fn session_summary_postgres_ok_with_immediate_flush() {
+        let mut c = Config::default();
+        c.ducklake.catalog_type = "postgres".to_string();
+        c.ingest.flush_interval_seconds = 0;
+        c.session_summary
+            .validate(&c.ingest, &c.ducklake)
+            .expect("flush 0 uses same coalesce path");
+        assert!(super::SessionSummaryConfig::active_for(&c.ducklake));
+    }
+
+    #[test]
+    fn session_summary_sqlite_skips_knob_validation() {
+        let mut c = Config::default();
+        c.ducklake.catalog_type = "sqlite".to_string();
+        c.ingest.flush_interval_seconds = 0;
+        c.session_summary.reducer_interval_ms = 0;
+        c.session_summary
+            .validate(&c.ingest, &c.ducklake)
+            .expect("sqlite inactive");
+    }
+
+    #[test]
+    fn session_summary_postgres_ok_with_coalesce() {
+        let mut c = Config::default();
+        c.ducklake.catalog_type = "postgres".to_string();
+        c.ingest.flush_interval_seconds = 2;
+        c.session_summary
+            .validate(&c.ingest, &c.ducklake)
+            .expect("ok");
+        assert!(super::SessionSummaryConfig::active_for(&c.ducklake));
     }
 
     #[test]

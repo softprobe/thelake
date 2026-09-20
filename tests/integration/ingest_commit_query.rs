@@ -225,7 +225,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
         let escaped = session_id.replace('\'', "''");
         let sql = format!(
-            "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+            "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}'",
             escaped
         );
 
@@ -253,7 +253,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
                 http_response_status_code, \
                 http_response_headers, \
                 http_response_body \
-             FROM union_spans \
+             FROM traces \
              WHERE session_id = '{}' AND http_request_method IS NOT NULL \
              LIMIT 1",
             escaped
@@ -348,10 +348,10 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     if false {
         for (session_idx, session_id) in session_ids.iter().enumerate() {
             let escaped = session_id.replace('\'', "''");
-            // Query union_spans - should include all three tiers (buffer + staged + iceberg)
+            // Query traces - should include all three tiers (buffer + staged + iceberg)
             // After optimizer, staged is empty but union view should refresh and query Iceberg
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+                "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}'",
                 escaped
             );
             let result = test_pipeline.execute_query(&sql).await.expect("query");
@@ -374,7 +374,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
                 http_response_status_code, \
                 http_response_headers, \
                 http_response_body \
-             FROM union_spans \
+             FROM traces \
              WHERE session_id = '{}' AND http_request_method IS NOT NULL \
              LIMIT 1",
                 escaped
@@ -573,15 +573,15 @@ async fn test_duckdb_union_read_realtime_performance() {
     let query_engine = test_pipeline.query_engine();
 
     let base_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}'",
         base_session.replace('\'', "''")
     );
     let staged_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}'",
         staged_session.replace('\'', "''")
     );
     let buffer_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}'",
         buffer_session.replace('\'', "''")
     );
 
@@ -723,7 +723,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         for session_id in &session_ids {
             let escaped = session_id.replace('\'', "''");
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
+                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}'",
                 escaped
             );
             let result = test_pipeline.execute_query(&sql).await.expect("query");
@@ -746,7 +746,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         for session_id in &session_ids {
             let escaped = session_id.replace('\'', "''");
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
+                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}'",
                 escaped
             );
             let result = test_pipeline.execute_query(&sql).await.expect("query");
@@ -763,7 +763,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         for session_id in &session_ids {
             let escaped = session_id.replace('\'', "''");
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
+                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}'",
                 escaped
             );
             let result = test_pipeline.execute_query(&sql).await.expect("query");
@@ -1090,7 +1090,7 @@ async fn test_pinned_metadata_updates_on_commit() {
         "legacy catalog_metadata pointer files must not be written"
     );
 
-    let count_sql = "SELECT COUNT(*) AS count FROM union_spans WHERE app_id = 'app-pin'";
+    let count_sql = "SELECT COUNT(*) AS count FROM traces WHERE app_id = 'app-pin'";
     let first = test_pipeline
         .execute_query(count_sql)
         .await
@@ -1148,7 +1148,7 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         .await
         .expect("stage add");
 
-    // `TestPipeline` always attaches DuckLake; `union_logs` needs catalog tables that exist after
+    // `TestPipeline` always attaches DuckLake; `logs` needs catalog tables that exist after
     // flush, so we do not query before flush here (would error: table `logs` does not exist).
     let query_engine = test_pipeline.query_engine().clone();
 
@@ -1156,7 +1156,7 @@ async fn test_duckdb_union_read_realtime_concurrency() {
 
     // Wait until union view reflects flushed data (staged path listing may be empty).
     let staged_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
+        "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}'",
         staged_session.replace('\'', "''")
     );
     wait_for(
@@ -1169,7 +1169,7 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         },
     )
     .await
-    .expect("union_logs should show flushed rows");
+    .expect("logs should show flushed rows");
 
     // Query AFTER flush to verify staged files are visible
     let staged_result = query_engine
@@ -1196,7 +1196,7 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         let engine = query_engine.clone();
         handles.push(tokio::spawn(async move {
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM union_logs WHERE session_id = '{}'",
+                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}'",
                 session_id.replace('\'', "''")
             );
             let _ = engine.execute_query(&sql).await.expect("warmup");
@@ -1258,7 +1258,7 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
 
     let escaped = session_id.replace('\'', "''");
     let sql = format!(
-        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}'",
         escaped
     );
     wait_for(
@@ -1281,18 +1281,9 @@ async fn test_wal_replay_recovers_spans() {
     let _config = load_test_config();
 }
 
-#[tokio::test]
-async fn test_metadata_maintenance_job_expires_snapshots() {
-    use softprobe_runtime::compaction::executor::MaintenanceExecutor;
-
-    let config = load_test_config();
-    assert!(
-        !config.ducklake.data_path.is_empty(),
-        "DuckLake required for maintenance smoke"
-    );
-    let executor = MaintenanceExecutor::new(&config, None, None).await.unwrap();
-    let _ = executor.run_once().await.unwrap();
-}
+// Snapshot expire + TWCS under the leased MaintenanceJob path are covered by
+// `compaction::maintenance_leased_tests` (compact file counts, expire, multi-tenant,
+// aborted-holder recover). Do not restore a no-assert `run_once` smoke here.
 
 #[tokio::test]
 async fn test_wal_cleanup_after_flush() {
@@ -1384,8 +1375,8 @@ async fn test_wal_cleanup_after_flush() {
 
     println!("✅ Second flush completed (DuckLake flush-through)");
 
-    let sql1 = "SELECT COUNT(*) AS c FROM union_spans WHERE session_id = 'wal-cleanup-test-1'";
-    let sql2 = "SELECT COUNT(*) AS c FROM union_spans WHERE session_id = 'wal-cleanup-test-2'";
+    let sql1 = "SELECT COUNT(*) AS c FROM traces WHERE session_id = 'wal-cleanup-test-1'";
+    let sql2 = "SELECT COUNT(*) AS c FROM traces WHERE session_id = 'wal-cleanup-test-2'";
     let c1 = test_pipeline.execute_query(sql1).await.expect("q1").rows[0][0]
         .as_i64()
         .unwrap_or(0);
@@ -1466,7 +1457,7 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
     println!("🔍 Step 3: Verifying union view shows data from staged files...");
     let escaped = session_id.replace('\'', "''");
     let union_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}'",
         escaped
     );
     let union_result_before = test_pipeline
@@ -1525,7 +1516,7 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         "🧊 Step 9: Verifying data appears in union view (includes Iceberg after optimizer)..."
     );
     let iceberg_sql = format!(
-        "SELECT COUNT(*) AS count FROM union_spans WHERE session_id = '{}'",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}'",
         escaped
     );
     let iceberg_result = test_pipeline

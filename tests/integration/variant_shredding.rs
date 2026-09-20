@@ -189,7 +189,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
     );
 
     let filter_sql = format!(
-        "SELECT COUNT(*)::BIGINT AS c FROM union_spans \
+        "SELECT COUNT(*)::BIGINT AS c FROM traces \
          WHERE session_id = '{sess}' AND {obs} = 'generation'",
         sess = session_id.replace('\'', "''"),
         // Bag-only: this test does not apply promotions (columns may be absent).
@@ -208,7 +208,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
     );
 
     let detail_sql = format!(
-        "SELECT CAST(attributes AS JSON) AS attributes FROM union_spans \
+        "SELECT CAST(attributes AS JSON) AS attributes FROM traces \
          WHERE session_id = '{sess}' AND {obs} = 'generation' LIMIT 1",
         sess = session_id.replace('\'', "''"),
         obs = variant_varchar("attributes", "sp.observation.type"),
@@ -238,7 +238,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
     assert_eq!(metrics.rows[0][0].as_i64(), Some(1));
 
     let log_sql = format!(
-        "SELECT COUNT(*)::BIGINT FROM union_logs WHERE {pred} = '{sess}'",
+        "SELECT COUNT(*)::BIGINT FROM logs WHERE {pred} = '{sess}'",
         pred = variant_varchar("attributes", "sp.session.id"),
         sess = session_id.replace('\'', "''"),
     );
@@ -424,7 +424,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
             {total} AS total_tokens, \
             {cost} AS total_cost, \
             {capture} AS capture_id \
-         FROM union_spans \
+         FROM traces \
          WHERE session_id = '{sess}' AND span_id = 'vk-span-1'",
         obs = prefer_attr_varchar(
             Some("observation_type"),
@@ -478,7 +478,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     let fallback_sql = format!(
         "SELECT COALESCE({obs}, 'span') AS observation_type, \
                 COALESCE({user}, {enduser}) AS user_id \
-         FROM union_spans WHERE span_id = 'vk-span-2'",
+         FROM traces WHERE span_id = 'vk-span-2'",
         obs = prefer_attr_varchar(
             Some("observation_type"),
             "attributes",
@@ -496,7 +496,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 
     // 3) Missing key is NULL (not an error).
     let missing_sql = format!(
-        "SELECT {missing} IS NULL AS is_missing FROM union_spans WHERE span_id = 'vk-span-1'",
+        "SELECT {missing} IS NULL AS is_missing FROM traces WHERE span_id = 'vk-span-1'",
         missing = variant_varchar("attributes", "does.not.exist"),
     );
     let missing = query_engine
@@ -562,7 +562,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 
     // 5) Nested MAP capture-id key (SoftProbe capture_export removed with Redis).
     let capture_sql = format!(
-        "SELECT CAST(attributes AS JSON) AS attributes FROM union_spans \
+        "SELECT CAST(attributes AS JSON) AS attributes FROM traces \
          WHERE CAST(attributes['sp.capture.id'] AS VARCHAR) = '{cap}' \
            AND tenant_id = '{ten}'",
         cap = capture_id.replace('\'', "''"),
@@ -600,14 +600,14 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     assert!(details
         .metrics
         .contains("CAST(resource_attributes['session.id'] AS VARCHAR)"));
-    // AC-D4: public union_metrics is the layout JOIN; session filter must see the gauge.
+    // AC-D4: public metrics relation is the layout JOIN; session filter must see the gauge.
     let metrics = query_engine
         .execute_query(&details.metrics)
         .await
-        .expect("details metrics via union_metrics");
+        .expect("details metrics via metrics relation");
     assert!(
         metrics.row_count >= 1,
-        "AC-D4: expected at least one metric row via union_metrics, got {}",
+        "AC-D4: expected at least one metric row via metrics, got {}",
         metrics.row_count
     );
     let name_idx = metrics
@@ -635,10 +635,10 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     let trace_metrics = query_engine
         .execute_query(&trace_details.metrics)
         .await
-        .expect("trace details metrics via union_metrics");
+        .expect("trace details metrics via metrics relation");
     assert!(
         trace_metrics.row_count >= 1,
-        "AC-D4: expected metric via union_metrics for trace filter"
+        "AC-D4: expected metric via metrics for trace filter"
     );
 
     let logs = query_engine

@@ -1111,7 +1111,7 @@ impl DuckLakeMetricsBackend {
     ) -> Result<Vec<String>, CompatError> {
         Self::check_deadline(ctx)?;
         let probe = self
-            .execute_soft(ctx, "SELECT 1 FROM union_metrics LIMIT 1")
+            .execute_soft(ctx, "SELECT 1 FROM metrics LIMIT 1")
             .await?;
         if probe.row_count == 0 {
             return Ok(Vec::new());

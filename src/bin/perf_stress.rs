@@ -1019,7 +1019,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             "span_error_rate_5m",
             format!(
                 "SELECT COUNT(*) AS errors \
-                 FROM union_spans \
+                 FROM traces \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND (http_response_status_code >= 500 OR status_code = 'ERROR')"
@@ -1029,7 +1029,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             "span_top_5xx_paths_15m",
             format!(
                 "SELECT http_request_path, COUNT(*) AS errors \
-                 FROM union_spans \
+                 FROM traces \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND timestamp >= ({now_ts} - INTERVAL '15 minutes') \
                    AND http_response_status_code >= 500 \
@@ -1044,7 +1044,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT http_request_path, \
                         quantile_cont((EXTRACT(EPOCH FROM end_timestamp) - EXTRACT(EPOCH FROM timestamp)) * 1000.0, 0.95) AS p95_ms \
-                 FROM union_spans \
+                 FROM traces \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND end_timestamp IS NOT NULL \
@@ -1058,7 +1058,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             "span_session_recent",
             format!(
                 "SELECT trace_id, span_id, timestamp, http_request_path, http_response_status_code \
-                 FROM union_spans \
+                 FROM traces \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND session_id = '{session}' \
                  ORDER BY timestamp DESC \
@@ -1069,7 +1069,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             "log_error_rate_5m",
             format!(
                 "SELECT COUNT(*) AS errors \
-                 FROM union_logs \
+                 FROM logs \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND severity_number >= 17"
@@ -1079,7 +1079,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             "log_recent_errors_sample",
             format!(
                 "SELECT timestamp, severity_text, body \
-                 FROM union_logs \
+                 FROM logs \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND severity_number >= 17 \
@@ -1091,7 +1091,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             "log_session_recent",
             format!(
                 "SELECT timestamp, severity_text, body \
-                 FROM union_logs \
+                 FROM logs \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND session_id = '{session}' \
                  ORDER BY timestamp DESC \
@@ -1124,7 +1124,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             "span_error_rate_24h",
             format!(
                 "SELECT COUNT(*) AS errors \
-                 FROM union_spans \
+                 FROM traces \
                  WHERE record_date >= DATE '{date_filter}' \
                    AND timestamp >= ({now_ts} - INTERVAL '24 hours') \
                    AND (http_response_status_code >= 500 OR status_code = 'ERROR')"

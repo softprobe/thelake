@@ -3,6 +3,7 @@ use crate::api::sql_support::{
     timestamp_ns_column, timestamp_ns_literal,
 };
 use crate::api::AppState;
+use crate::async_jobs::LeaseStore;
 use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreDataType, ScoreSource};
 use crate::storage::schema::variant::{
@@ -26,23 +27,25 @@ const MAX_LIMIT: usize = 200;
 /// Softprobe product promotion column names from
 /// `docs/promotion/traces-query-hot-attrs.yaml`.
 ///
-/// Product SQL always COALESCE these ahead of the attribute MAP bag. Columns are
+/// Product list SQL COALESCE these ahead of the attribute MAP bag. Columns are
 /// nullable, so the expression is safe before apply (all-NULL → bag fallback)
 /// and fills after apply. Loading manifests on the query path is unnecessary.
+///
+/// Session-summary **reduce** uses the same names but **promoted-only** (no MAP).
 #[derive(Debug, Clone, Copy)]
-struct LlmAttrPromotions {
-    observation_type: &'static str,
-    model_name: &'static str,
-    model_provider: &'static str,
-    user_id: &'static str,
-    input_tokens: &'static str,
-    output_tokens: &'static str,
-    total_tokens: &'static str,
-    total_cost: &'static str,
+pub(crate) struct LlmAttrPromotions {
+    pub(crate) observation_type: &'static str,
+    pub(crate) model_name: &'static str,
+    pub(crate) model_provider: &'static str,
+    pub(crate) user_id: &'static str,
+    pub(crate) input_tokens: &'static str,
+    pub(crate) output_tokens: &'static str,
+    pub(crate) total_tokens: &'static str,
+    pub(crate) total_cost: &'static str,
 }
 
 impl LlmAttrPromotions {
-    const PRODUCT: Self = Self {
+    pub(crate) const PRODUCT: Self = Self {
         observation_type: "observation_type",
         model_name: "model_name",
         model_provider: "model_provider",
@@ -52,9 +55,25 @@ impl LlmAttrPromotions {
         total_tokens: "total_tokens",
         total_cost: "total_cost",
     };
+
+    /// Typed columns `session_summary.reduce` requires (product-hot subset).
+    ///
+    /// Single source for `hot_attrs::REQUIRED` — do not re-list these names elsewhere.
+    /// `agent_name` is intentionally absent: auth-stamped / agent `message_type`, not yaml promote.
+    pub(crate) const fn reduce_required_cols(&self) -> [&'static str; 7] {
+        [
+            self.observation_type,
+            self.input_tokens,
+            self.output_tokens,
+            self.total_tokens,
+            self.total_cost,
+            self.user_id,
+            self.model_name,
+        ]
+    }
 }
 
-fn llm_promo() -> LlmAttrPromotions {
+pub(crate) fn llm_promo() -> LlmAttrPromotions {
     LlmAttrPromotions::PRODUCT
 }
 
@@ -512,7 +531,7 @@ pub fn compile_session_recording_sql(
     }
     let obs_type = format!("COALESCE({}, 'span')", expr_observation_type());
     Ok(format!(
-        "SELECT {projection} FROM union_spans \
+        "SELECT {projection} FROM traces \
          WHERE session_id = {session} \
            AND CAST(timestamp AS TIMESTAMP_NS) >= {from_ts} \
            AND CAST(timestamp AS TIMESTAMP_NS) <= {to_ts} \
@@ -634,7 +653,7 @@ pub enum SortDirection {
 }
 
 impl SortDirection {
-    fn as_sql(self) -> &'static str {
+    pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Asc => "ASC",
             Self::Desc => "DESC",
@@ -695,7 +714,14 @@ pub struct SessionSearchResponse {
     pub cursor_supported: bool,
 }
 
-/// Session list, aggregated in the database.
+/// Session list.
+///
+/// Postgres catalog: always `session_summary` (empty table → empty page). Soft
+/// coalesce + dirty/reduce are required for that catalog; list does not fall
+/// back to a lake scan.
+///
+/// Non-postgres catalogs (sqlite): lake `GROUP BY session_id` — the only list
+/// store available without a catalog Postgres.
 ///
 /// Without this endpoint a client has to pull raw observations and group them
 /// in memory, which makes every aggregate a per-page partial sum, breaks
@@ -707,6 +733,137 @@ pub async fn search_sessions(
     Json(request): Json<SessionSearchRequest>,
 ) -> Result<Json<SessionSearchResponse>, ApiError> {
     let limit = clamp_limit(request.limit, DEFAULT_SESSION_LIMIT);
+    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
+
+    if let Some(registry) = state.engines.scope_registry() {
+        let tenant_id = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
+        let engine = state
+            .engines
+            .engine_for(tenant_id)
+            .await
+            .map_err(storage_error)?;
+        let schema = &engine.scope.metadata_schema;
+        return match crate::session_summary::search_session_summary(
+            registry.pool(),
+            schema,
+            &request,
+            limit,
+        )
+        .await
+        {
+            Ok(response) => Ok(Json(response)),
+            Err(crate::session_summary::SessionSummaryListError::BadRequest(msg)) => {
+                Err(bad_request(msg))
+            }
+            Err(crate::session_summary::SessionSummaryListError::Storage(err)) => {
+                Err(storage_error(err))
+            }
+        };
+    }
+
+    search_sessions_from_lake(&state, tenant_ref, &request, limit).await
+}
+
+/// Ops: rebuild `session_summary` for an explicit `[from,to]` window (sync).
+///
+/// Rejects inverted / oversized windows. 404 when non-postgres (no registry).
+/// Acquires `session_summary.rebuild` lease for the tenant scope, then runs the
+/// shared lake aggregate → UPSERT path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummaryRebuildRequest {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummaryRebuildResponse {
+    pub sessions_upserted: usize,
+}
+
+pub async fn rebuild_session_summary(
+    State(state): State<AppState>,
+    tenant: Option<Extension<TenantInfo>>,
+    Json(request): Json<SessionSummaryRebuildRequest>,
+) -> Result<Json<SessionSummaryRebuildResponse>, ApiError> {
+    let cfg = &state.engines.config().session_summary;
+    let Some(registry) = state.engines.scope_registry() else {
+        return Err(not_found());
+    };
+
+    crate::session_summary::validate_rebuild_window(
+        request.from,
+        request.to,
+        cfg.max_reduce_span_seconds,
+    )
+    .map_err(bad_request)?;
+
+    let tenant_id = tenant
+        .as_ref()
+        .map(|extension| extension.0.tenant_id.as_str())
+        .unwrap_or("");
+    let engine = state
+        .engines
+        .engine_for(tenant_id)
+        .await
+        .map_err(storage_error)?;
+    let mut ducklake = state.engines.config().ducklake.clone();
+    ducklake.metadata_schema = engine.scope.metadata_schema.clone();
+    ducklake.data_path = engine.scope.data_path.clone();
+
+    let scope = crate::runtime_engine::DuckLakeScope {
+        metadata_schema: ducklake.metadata_schema.clone(),
+        data_path: ducklake.data_path.clone(),
+    };
+    crate::session_summary::ensure_product_hot_attrs_for_scope(registry, &scope)
+        .await
+        .map_err(storage_error)?;
+
+    // Lease key matches RebuildJob: empty tenant → `_default`.
+    let scope_key = if tenant_id.is_empty() {
+        "_default"
+    } else {
+        tenant_id
+    };
+    let leases = crate::async_jobs::PostgresLeaseStore::from_resolver(registry);
+    let holder = format!(
+        "ops-rebuild-{}",
+        state.engines.config().async_jobs.resolved_instance_id()
+    );
+    let ttl =
+        std::time::Duration::from_secs(state.engines.config().async_jobs.lease_ttl_seconds.max(1));
+    let won = leases
+        .try_acquire("session_summary.rebuild", scope_key, &holder, ttl)
+        .await
+        .map_err(storage_error)?;
+    if !won {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "session_summary.rebuild lease held" })),
+        ));
+    }
+
+    let result = crate::session_summary::rebuild_tenant_window(
+        registry.pool(),
+        &ducklake.metadata_schema,
+        &ducklake,
+        request.from,
+        request.to,
+        cfg.max_reduce_span_seconds,
+    )
+    .await;
+    let _ = leases
+        .release("session_summary.rebuild", scope_key, &holder)
+        .await;
+    let sessions_upserted = result.map_err(storage_error)?;
+    Ok(Json(SessionSummaryRebuildResponse { sessions_upserted }))
+}
+
+async fn search_sessions_from_lake(
+    state: &AppState,
+    tenant: Option<&TenantInfo>,
+    request: &SessionSearchRequest,
+    limit: usize,
+) -> Result<Json<SessionSearchResponse>, ApiError> {
     // Must mirror what compile_session_search_sql actually accepts, `order`
     // included. Advertising cursor support for order=asc handed the client a
     // next_cursor that its own follow-up request would reject with 400 -- the
@@ -714,9 +871,9 @@ pub async fn search_sessions(
     // to fix, just with a different status code.
     let cursor_supported =
         request.order_by == SessionOrderBy::StartTime && request.order == SortDirection::Desc;
-    let sql = compile_session_search_sql(&request, limit).map_err(bad_request)?;
+    let sql = compile_session_search_sql(request, limit).map_err(bad_request)?;
     let result = state
-        .execute_tenant_scoped_sql(tenant.as_ref().map(|extension| &extension.0), &sql)
+        .execute_tenant_scoped_sql(tenant, &sql)
         .await
         .map_err(storage_error)?;
 
@@ -877,7 +1034,7 @@ pub fn compile_session_search_sql(
              ) AS agent_name, \
              list(DISTINCT {user_id}) AS user_ids, \
              list(DISTINCT {model_name}) AS models \
-           FROM union_spans \
+           FROM traces \
            WHERE {where_sql} \
            GROUP BY session_id \
            {having_sql} \
@@ -1000,7 +1157,7 @@ pub fn compile_observation_search_sql(
 
     let where_sql = conditions.join(" AND ");
     Ok(format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
+        "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
         projection = observation_projection(false),
         fetch = limit + 1
     ))
@@ -1014,7 +1171,7 @@ pub fn compile_observation_detail_sql(
     let mut conditions = vec![format!("span_id = {}", sql_string_literal(span_id))];
     push_optional_time_bounds(&mut conditions, from, to)?;
     Ok(format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} LIMIT 1",
+        "SELECT {projection} FROM traces WHERE {where_sql} LIMIT 1",
         projection = observation_projection(true),
         where_sql = conditions.join(" AND ")
     ))
@@ -1032,7 +1189,7 @@ pub fn compile_trace_summary_sql(
         conditions.push(format!("session_id = {}", sql_string_literal(session_id)));
     }
     Ok(format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} GROUP BY trace_id",
+        "SELECT {projection} FROM traces WHERE {where_sql} GROUP BY trace_id",
         projection = trace_summary_projection(),
         where_sql = conditions.join(" AND ")
     ))
@@ -1055,7 +1212,7 @@ pub fn compile_trace_observations_sql(
         conditions.push(cursor_predicate(cursor, "timestamp", "span_id")?);
     }
     Ok(format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
+        "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
         projection = observation_projection(true),
         where_sql = conditions.join(" AND "),
         fetch = limit + 1
@@ -1090,7 +1247,7 @@ pub fn compile_session_observations_sql(
         conditions.push(cursor_predicate(cursor, "timestamp", "span_id")?);
     }
     Ok(format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
+        "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
         projection = observation_projection(true),
         where_sql = conditions.join(" AND "),
         fetch = limit + 1
@@ -1114,7 +1271,7 @@ pub fn compile_session_aggregate_sql(
             SUM({total_tokens}) AS total_tokens, \
             SUM({total_cost}) AS total_cost, \
             list(DISTINCT {user_id}) AS user_ids \
-         FROM union_spans \
+         FROM traces \
          WHERE session_id = {session} \
            AND CAST(timestamp AS TIMESTAMP_NS) >= {from_ts} \
            AND CAST(timestamp AS TIMESTAMP_NS) <= {to_ts} \
@@ -1150,7 +1307,7 @@ pub fn compile_session_traces_sql(
     );
     // Cursor applies to aggregated start_time/trace_id, so filter after GROUP BY.
     let inner = format!(
-        "SELECT {projection} FROM union_spans WHERE {where_sql} GROUP BY trace_id",
+        "SELECT {projection} FROM traces WHERE {where_sql} GROUP BY trace_id",
         projection = trace_summary_projection(),
     );
     let outer_cursor = if let Some(cursor) = cursor {
@@ -1189,7 +1346,7 @@ pub fn compile_scores_for_trace_sql(
     let mut span_conditions = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
     push_optional_time_bounds(&mut span_conditions, from, to)?;
     let predicate = format!(
-        "trace_id = {trace} OR span_id IN (SELECT span_id FROM union_spans WHERE {span_where})",
+        "trace_id = {trace} OR span_id IN (SELECT span_id FROM traces WHERE {span_where})",
         trace = sql_string_literal(trace_id),
         span_where = span_conditions.join(" AND ")
     );
@@ -1216,8 +1373,8 @@ pub fn compile_scores_for_session_sql(
     );
     let predicate = format!(
         "session_id = {session} \
-         OR trace_id IN (SELECT DISTINCT trace_id FROM union_spans WHERE {member_filter}) \
-         OR span_id IN (SELECT span_id FROM union_spans WHERE {member_filter})",
+         OR trace_id IN (SELECT DISTINCT trace_id FROM traces WHERE {member_filter}) \
+         OR span_id IN (SELECT span_id FROM traces WHERE {member_filter})",
         session = sql_string_literal(session_id),
     );
     Ok(format!(
@@ -1282,7 +1439,7 @@ fn expr_observation_type() -> String {
     prefer_attr_varchar(
         Some(llm_promo().observation_type),
         "attributes",
-        "sp.observation.type",
+        crate::models::attr_keys::sp::OBSERVATION_TYPE,
     )
 }
 
@@ -1290,7 +1447,7 @@ fn expr_model_name() -> String {
     prefer_attr_varchar(
         Some(llm_promo().model_name),
         "attributes",
-        "gen_ai.request.model",
+        crate::models::attr_keys::gen_ai::REQUEST_MODEL,
     )
 }
 
@@ -1298,7 +1455,7 @@ fn expr_model_provider() -> String {
     prefer_attr_varchar(
         Some(llm_promo().model_provider),
         "attributes",
-        "gen_ai.provider.name",
+        crate::models::attr_keys::gen_ai::PROVIDER_NAME,
     )
 }
 
@@ -1306,21 +1463,29 @@ fn expr_user_id() -> String {
     // enduser.id is bag-only fallback (not in product hot-attrs manifest).
     format!(
         "COALESCE({}, {})",
-        prefer_attr_varchar(Some(llm_promo().user_id), "attributes", "sp.user.id"),
+        prefer_attr_varchar(
+            Some(llm_promo().user_id),
+            "attributes",
+            crate::models::attr_keys::sp::USER_ID,
+        ),
         variant_varchar("attributes", "enduser.id")
     )
 }
 
 /// Session agent name: persisted assertion column, then `sp.agent.name`, else bag-only.
 fn expr_agent_name_attr() -> String {
-    prefer_attr_varchar(Some("agent_name"), "attributes", "sp.agent.name")
+    prefer_attr_varchar(
+        Some("agent_name"),
+        "attributes",
+        crate::models::attr_keys::sp::AGENT_NAME,
+    )
 }
 
 fn expr_input_tokens() -> String {
     prefer_attr_try_cast(
         Some(llm_promo().input_tokens),
         "attributes",
-        "gen_ai.usage.input_tokens",
+        crate::models::attr_keys::gen_ai::USAGE_INPUT_TOKENS,
         "BIGINT",
     )
 }
@@ -1329,7 +1494,7 @@ fn expr_output_tokens() -> String {
     prefer_attr_try_cast(
         Some(llm_promo().output_tokens),
         "attributes",
-        "gen_ai.usage.output_tokens",
+        crate::models::attr_keys::gen_ai::USAGE_OUTPUT_TOKENS,
         "BIGINT",
     )
 }
@@ -1338,7 +1503,7 @@ fn expr_total_tokens() -> String {
     prefer_attr_try_cast(
         Some(llm_promo().total_tokens),
         "attributes",
-        "gen_ai.usage.total_tokens",
+        crate::models::attr_keys::gen_ai::USAGE_TOTAL_TOKENS,
         "BIGINT",
     )
 }
@@ -1347,7 +1512,7 @@ fn expr_total_cost() -> String {
     prefer_attr_try_cast(
         Some(llm_promo().total_cost),
         "attributes",
-        "sp.cost.total",
+        crate::models::attr_keys::sp::COST_TOTAL,
         "DOUBLE",
     )
 }
@@ -2261,7 +2426,7 @@ mod tests {
             .with_timezone(&Utc);
         let sql = compile_scores_for_trace_sql("trace-1", Some(from), Some(to))
             .expect("trace scores sql with bounds");
-        assert!(sql.contains("span_id IN (SELECT span_id FROM union_spans WHERE trace_id = 'trace-1' AND CAST(timestamp AS TIMESTAMP_NS) >="));
+        assert!(sql.contains("span_id IN (SELECT span_id FROM traces WHERE trace_id = 'trace-1' AND CAST(timestamp AS TIMESTAMP_NS) >="));
         assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="));
     }
 

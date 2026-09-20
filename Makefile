@@ -372,6 +372,11 @@ test: ensure-cache
 	@echo "metrics-layout result validator unit tests..."
 	python3 -m unittest scripts.test_validate_metrics_layout_results -v
 
+# Postgres lease contract (ignored in `make test`; needs ducklake-postgres).
+test-lease-pg: ensure-cache check-infra
+	@echo "async_jobs Postgres lease contract..."
+	cargo test $(CARGO_PROFILE_FLAG) --lib postgres_ -- --ignored --test-threads=1
+
 # Phase 1 mini differential vs pinned Prometheus (requires Docker).
 test-prom-diff: ensure-cache
 	@echo "prometheus mini-diff vs pinned $(PROMETHEUS_REFERENCE_IMAGE) (Docker)..."
@@ -697,6 +702,7 @@ bench-demo-cpu-full: ensure-cache
 
 # Grafana manual stack may export CONFIG_FILE; clear it so e2e uses tests/config/test.yaml.
 test-e2e: ensure-cache check-infra
+	@$(MAKE) --no-print-directory test-lease-pg
 	@set -e; \
 	backend="$(E2E_BACKEND)"; \
 	echo "integration-e2e E2E_BACKEND=$$backend..."; \

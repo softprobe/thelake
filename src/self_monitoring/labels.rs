@@ -92,11 +92,15 @@ pub fn classify_sql_kind(sql: &str) -> &'static str {
         }
     } else if s.contains("metric_samples") {
         "metric_samples"
-    } else if s.contains("metric_collapse_job_1h") || s.contains("union_metrics") {
+    } else if s.contains("metric_collapse_job_1h")
+        || s.contains("union_metrics")
+        || s.contains("FROM metrics")
+        || s.contains("from metrics")
+    {
         if s.contains("metric_collapse_job_1h") {
             "metric_collapse_job_1h"
         } else {
-            "union_metrics"
+            "metrics"
         }
     } else if s.contains("promotion_specs") {
         "promotion_specs"
@@ -214,7 +218,11 @@ mod tests {
         );
         assert_eq!(
             classify_sql_kind("SELECT 1 FROM union_metrics LIMIT 1"),
-            "union_metrics"
+            "metrics"
+        );
+        assert_eq!(
+            classify_sql_kind("SELECT 1 FROM metrics LIMIT 1"),
+            "metrics"
         );
         assert_eq!(
             classify_sql_kind("SELECT * FROM softprobe.promotion_specs"),

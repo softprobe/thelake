@@ -140,7 +140,7 @@ pub fn trace_scan_sql(request: &TraceSearchRequest, trace_id: Option<&str>) -> S
          status_code, status_message, \
          CAST(events AS JSON) AS events, \
          observation_type, model_name, model_provider, user_id, session_attr_id, service_name \
-         FROM union_spans WHERE {}), \
+         FROM traces WHERE {}), \
          matching_traces AS (SELECT DISTINCT trace_id FROM base WHERE {}), \
          qualified_traces AS (SELECT trace_id FROM base GROUP BY trace_id HAVING {} ) \
          SELECT base.* FROM base \
@@ -496,7 +496,7 @@ mod tests {
             },
             Some("trace-1"),
         );
-        assert!(sql.contains("FROM union_spans"));
+        assert!(sql.contains("FROM traces"));
         assert!(sql.contains("trace_id = 'trace-1'"));
         assert!(sql.contains("LIMIT 10000"));
         assert!(!sql.contains("tenant_id ="));

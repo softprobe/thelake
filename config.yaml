@@ -18,9 +18,8 @@ query:
 maintenance:
   enabled: true
   target_file_size_bytes: 67108864  # 64MB
-  interval_seconds: 300
+  interval_seconds: 60  # one job cadence (metadata + TWCS each pass)
   metadata_enabled: true
-  metadata_interval_seconds: 60
   max_snapshot_age_seconds: 60
   remove_orphan_files_enabled: true
   remove_orphan_older_than_seconds: 60
@@ -44,12 +43,13 @@ ducklake:
   # Per-scope DuckDB writer connections (1..=16). Default 4.
   writer_pool_size: 4
 
-# UI dropdown EAV (Postgres); requires ducklake.catalog_type=postgres
-dropdown_catalog:
-  enabled: false
-  active_values_days: 7
-  maintenance_prune_enabled: true
-  upsert_batch_size: 500
+# Session list summary knobs (always on for postgres catalog).
+# Dirty marks after every coalesce traces flush (interval 0 = immediate drain).
+# session_summary:
+#   reducer_interval_ms: 10000
+#   rebuild_interval_ms: 86400000
+#   max_sessions_per_reduce: 1000
+#   max_reduce_span_seconds: 604800
 
 # Self-monitoring ops lake (disabled by default). See docs/design.md.
 # self_monitoring:

@@ -2,7 +2,7 @@
 
 use once_cell::sync::OnceCell;
 use opentelemetry::global;
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +37,15 @@ pub struct Instruments {
     /// Prom sample-scan plan: grain table + raw vs downsample vs live UNION.
     pub sample_scans: Counter<u64>,
     pub export_drops: Counter<u64>,
+    pub job_lease_acquire: Counter<u64>,
+    pub job_lease_steal: Counter<u64>,
+    pub job_lease_heartbeat_failure: Counter<u64>,
+    pub job_errors: Counter<u64>,
+    pub session_summary_dirty_upserts: Counter<u64>,
+    pub session_summary_dirty_upsert_errors: Counter<u64>,
+    pub session_summary_sessions_reduced: Counter<u64>,
+    pub session_summary_reducer_lag_seconds: Histogram<u64>,
+    pub session_summary_dirty_depth: Gauge<u64>,
 }
 
 fn register_observables(meter: &Meter) {
@@ -270,6 +279,32 @@ fn build_instruments(meter: &Meter) -> Instruments {
         export_drops: meter
             .u64_counter("thelake.self_monitoring.export_drops")
             .build(),
+        job_lease_acquire: meter.u64_counter("thelake.job.lease_acquire").build(),
+        job_lease_steal: meter.u64_counter("thelake.job.lease_steal").build(),
+        job_lease_heartbeat_failure: meter
+            .u64_counter("thelake.job.lease_heartbeat_failure")
+            .build(),
+        job_errors: meter.u64_counter("thelake.job.errors").build(),
+        session_summary_dirty_upserts: meter
+            .u64_counter("thelake.session_summary.dirty_upserts")
+            .with_description("Successful session_summary_dirty UPSERT calls (≈ coalesce flush)")
+            .build(),
+        session_summary_dirty_upsert_errors: meter
+            .u64_counter("thelake.session_summary.dirty_upsert_errors")
+            .with_description("Failed session_summary_dirty UPSERT calls (ingest still ok)")
+            .build(),
+        session_summary_sessions_reduced: meter
+            .u64_counter("thelake.session_summary.sessions_reduced")
+            .with_description("Sessions written by session_summary.reduce per pass")
+            .build(),
+        session_summary_reducer_lag_seconds: meter
+            .u64_histogram("thelake.session_summary.reducer_lag_seconds")
+            .with_description("Age of oldest claimed dirty row at reduce start")
+            .build(),
+        session_summary_dirty_depth: meter
+            .u64_gauge("thelake.session_summary.dirty_depth")
+            .with_description("Postgres count(*) of session_summary_dirty on claim")
+            .build(),
     }
 }
 
@@ -467,6 +502,62 @@ pub fn record_slow_query(tenant: &str, sql_kind: &str) {
         1,
         &attrs(&[("tenant", tenant), ("sql_kind", sql_kind), ("op", "query")]),
     );
+}
+
+pub fn record_lease_acquire(job: &str, scope: &str, outcome: &str) {
+    let Some(i) = instruments() else { return };
+    i.job_lease_acquire.add(
+        1,
+        &attrs(&[("job", job), ("scope", scope), ("outcome", outcome)]),
+    );
+}
+
+pub fn record_lease_steal(job: &str, scope: &str) {
+    let Some(i) = instruments() else { return };
+    i.job_lease_steal
+        .add(1, &attrs(&[("job", job), ("scope", scope)]));
+}
+
+pub fn record_lease_heartbeat_failure(job: &str, scope: &str) {
+    let Some(i) = instruments() else { return };
+    i.job_lease_heartbeat_failure
+        .add(1, &attrs(&[("job", job), ("scope", scope)]));
+}
+
+pub fn record_job_error(job: &str, scope: &str) {
+    let Some(i) = instruments() else { return };
+    i.job_errors
+        .add(1, &attrs(&[("job", job), ("scope", scope)]));
+}
+
+pub fn record_session_summary_dirty_upsert(tenant: &str) {
+    let Some(i) = instruments() else { return };
+    i.session_summary_dirty_upserts
+        .add(1, &attrs(&[("tenant", tenant), ("op", "session_summary")]));
+}
+
+pub fn record_session_summary_dirty_upsert_error(tenant: &str) {
+    let Some(i) = instruments() else { return };
+    i.session_summary_dirty_upsert_errors
+        .add(1, &attrs(&[("tenant", tenant), ("op", "session_summary")]));
+}
+
+pub fn set_session_summary_dirty_depth(tenant: &str, depth: u64) {
+    let Some(i) = instruments() else { return };
+    i.session_summary_dirty_depth
+        .record(depth, &attrs(&[("tenant", tenant)]));
+}
+
+pub fn record_session_summary_sessions_reduced(tenant: &str, n: u64) {
+    let Some(i) = instruments() else { return };
+    i.session_summary_sessions_reduced
+        .add(n, &attrs(&[("tenant", tenant)]));
+}
+
+pub fn record_session_summary_reducer_lag(tenant: &str, lag_secs: u64) {
+    let Some(i) = instruments() else { return };
+    i.session_summary_reducer_lag_seconds
+        .record(lag_secs, &attrs(&[("tenant", tenant)]));
 }
 
 /// Refresh process CPU/RSS/IO snapshots for ObservableGauges (best-effort).

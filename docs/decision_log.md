@@ -29,16 +29,17 @@ Use DuckLake as the sole durable store for spans, logs, and metrics.
   when rows are not catalog-inlined.
 - Apache Iceberg, Lakekeeper, the staged Parquet tier, and application WAL are
   not supported runtime paths. An optional **soft coalesce** buffer
-  (`ingest.flush_interval_seconds` > 0) may hold rows in memory briefly before
-  one DuckLake write; default `0` remains flush-through. That buffer is not a
+  (`ingest.flush_interval_seconds`) always sits on the OTLP write path: `0`
+  drains immediately after enqueue; `N>0` waits N seconds so posts batch into
+  fewer DuckLake commits. That buffer is not a
   WAL or staged query tier.
 
 ### Consequences
 
-- Default (`flush_interval_seconds: 0`): each OTLP request writes through in one
-  DuckLake transaction; the upstream OpenTelemetry collector owns batching.
-- When soft coalesce is enabled: OTLP returns after enqueue; a background flush
-  commits coalesced batches. Crash or post-ack write failure can lose data;
+- `flush_interval_seconds: 0` still acks inside the coalesce buffer, but
+  `IngestEngine::add_*` awaits drain before returning (readable on HTTP 200).
+- `flush_interval_seconds: N > 0` batches posts for up to N seconds (first-byte
+  deadline) before drain. Crash or post-ack write failure can lose data;
   exporters are not told about background write failures.
 - DuckLake data inlining is used to avoid tiny object-store files for normal
   collector batches.
@@ -58,27 +59,40 @@ it is single-client only.
 SQLite's `META_JOURNAL_MODE 'WAL'` is a database journal setting and must not
 be described as an application ingest WAL.
 
-## Current invariant: flush-through ingest (default)
+## Current invariant: soft coalesce ingest
 
-**Default** (`ingest.flush_interval_seconds: 0`): do not batch telemetry inside
-the runtime. Decode one OTLP request and commit its records immediately through
-`DuckLakeWriter`. If DuckLake conflict retries are exhausted, surface the
-failure so the exporter can retry.
+OTLP always enqueues into `CoalesceBuf` (ack on enqueue) via a channel; a
+**single background worker** per signal owns the pending buffer and alone
+decides when to drain to DuckLake:
 
-**Optional soft coalesce** (`flush_interval_seconds` > 0): acknowledge the OTLP
-request as soon as rows are buffered; flush to DuckLake on a timer (and via
-`force_flush` in tests). Post-ack write failures are logged and dropped — not
-returned to the exporter. Unflushed rows may be lost on crash. This is not a
-WAL or staged tier.
+- **`flush_interval_seconds: 0`** — worker flushes as soon as pending is non-empty;
+  `IngestEngine::add_*` also awaits that drain before returning (HTTP 200 ⇒
+  readable). The coalesce buffer itself still acks on enqueue.
+- **`flush_interval_seconds: N > 0`** — worker waits up to N seconds (from first
+  byte in the window) unless buffered OTLP bytes hit the eager threshold;
+  `add_*` returns after enqueue (ack before durable commit).
+- Enqueue only waits when the soft in-memory byte budget is full (backpressure);
+  budget is released at drain (before write completes). Soft budget is
+  `ingest.buffer_size_mb` (default 256), clamped to absolute ceilings
+  (`128 MiB` eager / `256 MiB` max wire bytes).
+- DuckLake writes are wrapped with `ingest.write_timeout_seconds` (default 60,
+  `0` disables, clamped ≤ 3600) so a hung INSERT fails the flush instead of
+  stalling that signal forever. Coalesce does not add its own write watchdog.
+- `force_flush` (tests) sends `Flush` and waits until the byte budget is empty.
+- Dropping the last `CoalesceBuf` closes the channel; the worker discards
+  pending (no WAL) and exits.
+
+Post-ack write failures are logged and dropped — not returned to the exporter.
+Unflushed rows may be lost on crash. This is not a WAL or staged tier.
 
 **Schema/DDL off the hot path (locked principle):** Schema creation, validation,
 timestamp precision migrations, partition/sort layout, and table options
 (`set_option`) run strictly during writer-pool startup/bootstrap, explicit
 promotion (`POST /v1/promotions/apply`), or maintenance. The warm INSERT path
 executes strictly `BEGIN TRANSACTION; INSERT ...; COMMIT;`. Soft coalesce
-(`ingest.flush_interval_seconds` > 0) amortizes commit frequency, but is **not**
-a mitigation for schema-on-write overhead; warm writes perform zero `DESCRIBE`,
-partition-info, or DDL probes regardless of flush interval.
+amortizes commit frequency when `N > 0`, but is **not** a mitigation for
+schema-on-write overhead; warm writes perform zero `DESCRIBE`, partition-info,
+or DDL probes regardless of flush interval.
 
 The writer may create a temporary local Parquet file to bridge Arrow into
 DuckLake. That file is deleted after commit or failure and is not durable,
