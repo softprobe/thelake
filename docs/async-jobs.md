@@ -170,7 +170,7 @@ ON CONFLICT (session_id) DO UPDATE SET
   updated_at = EXCLUDED.updated_at;
 ```
 
-Never once-per-span. Prefer `ingest.flush_interval_seconds > 0` whenever session-summary is on so flushes (and dirty UPSERTs) stay coarse. Best-effort: failure logs + metric; does not fail ingest.
+Never once-per-span. Dirty UPSERTs ride the coalesce traces flush (`flush_interval_seconds` 0 or >0). Prefer `> 0` in production so flushes stay coarse. Best-effort: failure logs + metric; does not fail ingest.
 
 **Reduce job (lease holder):**
 
@@ -262,10 +262,10 @@ maintenance:          # one job, one interval; each pass runs metadata + TWCS wh
   metadata_enabled: true
 
 session_summary:
-  enabled: true
   reducer_interval_ms: 10000
+  rebuild_interval_ms: 86400000
   max_sessions_per_reduce: 1000
-  max_reduce_span: 7d
+  max_reduce_span_seconds: 604800
 ```
 
 ---

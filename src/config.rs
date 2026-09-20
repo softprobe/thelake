@@ -32,12 +32,11 @@ pub struct Config {
     pub self_monitoring: SelfMonitoringConfig,
 }
 
-/// Session list summary config (`enabled` requires coalesce + postgres catalog).
+/// Session list summary knobs. Always active when `ducklake.catalog_type=postgres`
+/// (dirty + reduce + rebuild + hot-attrs). Sqlite keeps lake `GROUP BY` list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummaryConfig {
-    #[serde(default)]
-    pub enabled: bool,
     /// Wake interval for `session_summary.reduce` on the shared async job runner.
     #[serde(default = "default_reducer_interval_ms")]
     pub reducer_interval_ms: u64,
@@ -55,7 +54,6 @@ pub struct SessionSummaryConfig {
 impl Default for SessionSummaryConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             reducer_interval_ms: default_reducer_interval_ms(),
             rebuild_interval_ms: default_rebuild_interval_ms(),
             max_sessions_per_reduce: default_max_sessions_per_reduce(),
@@ -81,33 +79,38 @@ fn default_max_reduce_span_seconds() -> u64 {
 }
 
 impl SessionSummaryConfig {
-    /// `enabled` requires soft coalesce, postgres catalog, and positive reducer knobs.
-    pub fn validate(&self, ingest: &IngestConfig, ducklake: &DuckLakeConfig) -> anyhow::Result<()> {
-        if !self.enabled {
+    /// True when the catalog can host `session_summary` (postgres only).
+    pub fn active_for(ducklake: &DuckLakeConfig) -> bool {
+        ducklake.catalog_type == "postgres"
+    }
+
+    /// Postgres catalogs require positive reducer/rebuild knobs.
+    /// `ingest.flush_interval_seconds` may be 0 (immediate coalesce drain) or >0
+    /// (timer); both mark dirty on the same coalesce write path.
+    /// Sqlite: no-op (summary inactive).
+    pub fn validate(
+        &self,
+        _ingest: &IngestConfig,
+        ducklake: &DuckLakeConfig,
+    ) -> anyhow::Result<()> {
+        if !Self::active_for(ducklake) {
             return Ok(());
         }
-        if ingest.flush_interval_seconds == 0 {
-            anyhow::bail!(
-                "session_summary.enabled requires ingest.flush_interval_seconds > 0 (soft coalesce)"
-            );
-        }
-        if ducklake.catalog_type != "postgres" {
-            anyhow::bail!(
-                "session_summary.enabled requires ducklake.catalog_type=postgres (got {})",
-                ducklake.catalog_type
-            );
-        }
         if self.reducer_interval_ms == 0 {
-            anyhow::bail!("session_summary.reducer_interval_ms must be > 0 when enabled");
+            anyhow::bail!("session_summary.reducer_interval_ms must be > 0 for postgres catalog");
         }
         if self.rebuild_interval_ms == 0 {
-            anyhow::bail!("session_summary.rebuild_interval_ms must be > 0 when enabled");
+            anyhow::bail!("session_summary.rebuild_interval_ms must be > 0 for postgres catalog");
         }
         if self.max_sessions_per_reduce == 0 {
-            anyhow::bail!("session_summary.max_sessions_per_reduce must be > 0 when enabled");
+            anyhow::bail!(
+                "session_summary.max_sessions_per_reduce must be > 0 for postgres catalog"
+            );
         }
         if self.max_reduce_span_seconds == 0 {
-            anyhow::bail!("session_summary.max_reduce_span_seconds must be > 0 when enabled");
+            anyhow::bail!(
+                "session_summary.max_reduce_span_seconds must be > 0 for postgres catalog"
+            );
         }
         Ok(())
     }
@@ -210,25 +213,51 @@ fn default_self_monitoring_ops_data_path() -> String {
     "s3://warehouse/_thelake_ops/".to_string()
 }
 
-/// Soft coalesce window for OTLP ingest. `0` = flush-through (commit before ack).
+/// Soft coalesce window for OTLP ingest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestConfig {
-    /// Seconds to hold rows in memory before one DuckLake write. `0` disables the buffer.
+    /// Seconds to hold rows before a DuckLake drain. `0` = drain as soon as pending.
     #[serde(default = "default_ingest_flush_interval_seconds")]
     pub flush_interval_seconds: u64,
+    /// Soft in-memory coalesce budget in MiB (OTLP body bytes). Clamped to the
+    /// absolute 256 MiB ceiling. Eager flush fires at half of the effective max.
+    #[serde(default = "default_ingest_buffer_size_mb")]
+    pub buffer_size_mb: u64,
+    /// Soft wall-clock limit for one DuckLake ingest write. `0` disables.
+    /// Clamped to 3600s. Prevents a hung INSERT from stalling a signal forever.
+    #[serde(default = "default_ingest_write_timeout_seconds")]
+    pub write_timeout_seconds: u64,
 }
 
 impl Default for IngestConfig {
     fn default() -> Self {
         Self {
             flush_interval_seconds: default_ingest_flush_interval_seconds(),
+            buffer_size_mb: default_ingest_buffer_size_mb(),
+            write_timeout_seconds: default_ingest_write_timeout_seconds(),
         }
     }
 }
 
 fn default_ingest_flush_interval_seconds() -> u64 {
     0
+}
+
+fn default_ingest_buffer_size_mb() -> u64 {
+    256
+}
+
+fn default_ingest_write_timeout_seconds() -> u64 {
+    60
+}
+
+/// Absolute ceiling for [`IngestConfig::write_timeout_seconds`].
+pub const ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS: u64 = 3600;
+
+/// Clamp soft write timeout (`0` = disabled).
+pub fn resolve_write_timeout_seconds(secs: u64) -> u64 {
+    secs.min(ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -669,7 +698,7 @@ fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredential
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{resolve_write_timeout_seconds, Config, ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS};
     use crate::compaction::twcs::TwcsPolicy;
     use std::sync::Mutex;
 
@@ -730,6 +759,8 @@ ducklake:
         assert_eq!(c.query.max_connections, 10);
         assert_eq!(c.ducklake.metadata_path, "/tmp/meta.sqlite");
         assert_eq!(c.ingest.flush_interval_seconds, 0);
+        assert_eq!(c.ingest.buffer_size_mb, 256);
+        assert_eq!(c.ingest.write_timeout_seconds, 60);
     }
 
     #[test]
@@ -744,6 +775,44 @@ ingest:
 "#;
         let c: Config = serde_yaml::from_str(yaml).expect("ingest ok");
         assert_eq!(c.ingest.flush_interval_seconds, 2);
+        assert_eq!(c.ingest.buffer_size_mb, 256);
+        assert_eq!(c.ingest.write_timeout_seconds, 60);
+    }
+
+    #[test]
+    fn ingest_buffer_size_mb_parses() {
+        let yaml = r#"
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/meta.sqlite
+  data_path: /tmp/data/
+ingest:
+  flush_interval_seconds: 60
+  buffer_size_mb: 1
+"#;
+        let c: Config = serde_yaml::from_str(yaml).expect("ingest ok");
+        assert_eq!(c.ingest.flush_interval_seconds, 60);
+        assert_eq!(c.ingest.buffer_size_mb, 1);
+    }
+
+    #[test]
+    fn ingest_write_timeout_parses_and_clamps() {
+        let yaml = r#"
+ducklake:
+  catalog_type: sqlite
+  metadata_path: /tmp/meta.sqlite
+  data_path: /tmp/data/
+ingest:
+  write_timeout_seconds: 15
+"#;
+        let c: Config = serde_yaml::from_str(yaml).expect("ingest ok");
+        assert_eq!(c.ingest.write_timeout_seconds, 15);
+        assert_eq!(resolve_write_timeout_seconds(15), 15);
+        assert_eq!(
+            resolve_write_timeout_seconds(ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS + 10),
+            ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS
+        );
+        assert_eq!(resolve_write_timeout_seconds(0), 0);
     }
 
     #[test]
@@ -875,18 +944,17 @@ ducklake:
     #[test]
     fn session_summary_defaults_reducer_knobs() {
         let c = Config::default();
-        assert!(!c.session_summary.enabled);
         assert_eq!(c.session_summary.reducer_interval_ms, 10_000);
         assert_eq!(c.session_summary.rebuild_interval_ms, 86_400_000);
         assert_eq!(c.session_summary.max_sessions_per_reduce, 1000);
         assert_eq!(c.session_summary.max_reduce_span_seconds, 604_800);
+        assert!(!super::SessionSummaryConfig::active_for(&c.ducklake)); // default sqlite
     }
 
     #[test]
-    fn session_summary_enabled_rejects_zero_reducer_interval() {
+    fn session_summary_postgres_rejects_zero_reducer_interval() {
         let mut c = Config::default();
         c.ducklake.catalog_type = "postgres".to_string();
-        c.session_summary.enabled = true;
         c.ingest.flush_interval_seconds = 2;
         c.session_summary.reducer_interval_ms = 0;
         let err = c
@@ -897,50 +965,36 @@ ducklake:
     }
 
     #[test]
-    fn session_summary_enabled_rejects_flush_through() {
+    fn session_summary_postgres_ok_with_immediate_flush() {
         let mut c = Config::default();
         c.ducklake.catalog_type = "postgres".to_string();
-        c.session_summary.enabled = true;
         c.ingest.flush_interval_seconds = 0;
-        let err = c
-            .session_summary
+        c.session_summary
             .validate(&c.ingest, &c.ducklake)
-            .expect_err("flush 0");
-        assert!(err.to_string().contains("flush_interval_seconds"));
+            .expect("flush 0 uses same coalesce path");
+        assert!(super::SessionSummaryConfig::active_for(&c.ducklake));
     }
 
     #[test]
-    fn session_summary_enabled_rejects_non_postgres() {
+    fn session_summary_sqlite_skips_knob_validation() {
         let mut c = Config::default();
         c.ducklake.catalog_type = "sqlite".to_string();
-        c.session_summary.enabled = true;
-        c.ingest.flush_interval_seconds = 2;
-        let err = c
-            .session_summary
+        c.ingest.flush_interval_seconds = 0;
+        c.session_summary.reducer_interval_ms = 0;
+        c.session_summary
             .validate(&c.ingest, &c.ducklake)
-            .expect_err("sqlite");
-        assert!(err.to_string().contains("postgres"));
+            .expect("sqlite inactive");
     }
 
     #[test]
-    fn session_summary_enabled_ok_with_coalesce_postgres() {
+    fn session_summary_postgres_ok_with_coalesce() {
         let mut c = Config::default();
         c.ducklake.catalog_type = "postgres".to_string();
-        c.session_summary.enabled = true;
         c.ingest.flush_interval_seconds = 2;
         c.session_summary
             .validate(&c.ingest, &c.ducklake)
             .expect("ok");
-    }
-
-    #[test]
-    fn session_summary_disabled_allows_flush_through() {
-        let mut c = Config::default();
-        c.session_summary.enabled = false;
-        c.ingest.flush_interval_seconds = 0;
-        c.session_summary
-            .validate(&c.ingest, &c.ducklake)
-            .expect("disabled ok");
+        assert!(super::SessionSummaryConfig::active_for(&c.ducklake));
     }
 
     #[test]

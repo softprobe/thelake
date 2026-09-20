@@ -716,9 +716,9 @@ pub struct SessionSearchResponse {
 
 /// Session list.
 ///
-/// Postgres catalog: always `session_summary` (no DuckLake scan). Empty table →
-/// empty page. `session_summary.enabled` gates dirty/reduce writes only — not
-/// this read path (no lake fallback when disabled).
+/// Postgres catalog: always `session_summary` (empty table → empty page). Soft
+/// coalesce + dirty/reduce are required for that catalog; list does not fall
+/// back to a lake scan.
 ///
 /// Non-postgres catalogs (sqlite): lake `GROUP BY session_id` — the only list
 /// store available without a catalog Postgres.
@@ -766,7 +766,7 @@ pub async fn search_sessions(
 
 /// Ops: rebuild `session_summary` for an explicit `[from,to]` window (sync).
 ///
-/// Rejects inverted / oversized windows. 404 when summary disabled or non-postgres.
+/// Rejects inverted / oversized windows. 404 when non-postgres (no registry).
 /// Acquires `session_summary.rebuild` lease for the tenant scope, then runs the
 /// shared lake aggregate → UPSERT path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -786,9 +786,6 @@ pub async fn rebuild_session_summary(
     Json(request): Json<SessionSummaryRebuildRequest>,
 ) -> Result<Json<SessionSummaryRebuildResponse>, ApiError> {
     let cfg = &state.engines.config().session_summary;
-    if !cfg.enabled {
-        return Err(not_found());
-    }
     let Some(registry) = state.engines.scope_registry() else {
         return Err(not_found());
     };
