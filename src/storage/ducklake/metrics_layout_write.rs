@@ -7,13 +7,16 @@ use crate::compat::projection::prometheus::{
     classic_prom_dual_write_allowed, project_prometheus_labels, sanitize_label_name,
 };
 use crate::models::Metric;
-use crate::storage::ducklake::util::escape_sql_literal;
-use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
+use crate::sql::schema::{qualified_table_name, table_spec};
 use crate::storage::schema::variant::encode_attributes_json;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use duckdb::Connection;
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+fn qualified_metrics_layout_table(catalog: &str, name: &str) -> String {
+    qualified_table_name(catalog, table_spec(name).expect("registered metric table"))
+}
 
 /// Matches capability `limits.max_labels_per_series` default.
 pub const DEFAULT_MAX_LABELS_PER_SERIES: usize = 40;
@@ -66,10 +69,10 @@ fn push_classic_prom_gauges(
     base_name: &str,
     base_labels: &BTreeMap<String, String>,
     m: &Metric,
-    record_date: NaiveDate,
+    timestamp: DateTime<Utc>,
     out: &mut PreparedIngest,
     series_seen: &mut HashSet<(NaiveDate, u64)>,
-    posting_seen: &mut HashSet<PostingKey>,
+    posting_seen: &mut HashSet<(String, String, u64, NaiveDate)>,
 ) {
     if !classic_prom_dual_write_allowed(base_name) {
         return;
@@ -85,7 +88,7 @@ fn push_classic_prom_gauges(
             labels.insert(k.to_string(), v);
         }
         let series_id = series_id_hash(&prom_name, &labels);
-        if series_seen.insert((record_date, series_id)) {
+        if series_seen.insert((timestamp.date_naive(), series_id)) {
             out.series.push(SeriesRow {
                 series_id,
                 metric_name: prom_name,
@@ -95,7 +98,7 @@ fn push_classic_prom_gauges(
                 aggregation_temporality: None,
                 is_monotonic: None,
                 labels_json: serde_json::to_string(&labels).unwrap_or_else(|_| "{}".into()),
-                record_date,
+                timestamp,
             });
         }
         for (name, value) in &labels {
@@ -103,9 +106,14 @@ fn push_classic_prom_gauges(
                 label_name: name.clone(),
                 label_value: value.clone(),
                 series_id,
-                record_date,
+                timestamp,
             };
-            if posting_seen.insert(key.clone()) {
+            if posting_seen.insert((
+                key.label_name.clone(),
+                key.label_value.clone(),
+                key.series_id,
+                key.timestamp.date_naive(),
+            )) {
                 out.postings.push(key);
             }
         }
@@ -113,7 +121,6 @@ fn push_classic_prom_gauges(
             series_id,
             timestamp: m.timestamp,
             value,
-            record_date,
             classic_dual_write: true,
         });
     };
@@ -151,7 +158,7 @@ struct SeriesRow {
     aggregation_temporality: Option<String>,
     is_monotonic: Option<bool>,
     labels_json: String,
-    record_date: NaiveDate,
+    timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -159,7 +166,7 @@ struct PostingKey {
     label_name: String,
     label_value: String,
     series_id: u64,
-    record_date: NaiveDate,
+    timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -167,7 +174,6 @@ struct SampleRow {
     series_id: u64,
     timestamp: DateTime<Utc>,
     value: f64,
-    record_date: NaiveDate,
     /// Classic `_bucket`/`_sum`/`_count` dual-write from native histograms.
     classic_dual_write: bool,
 }
@@ -182,7 +188,6 @@ struct HistSampleRow {
     explicit_bounds: Option<Vec<f64>>,
     quantiles_json: Option<String>,
     exemplars_json: Option<String>,
-    record_date: NaiveDate,
 }
 
 struct PreparedIngest {
@@ -220,7 +225,7 @@ fn labels_to_json(
 
 fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
     let mut series_seen: HashSet<(NaiveDate, u64)> = HashSet::new();
-    let mut posting_seen: HashSet<PostingKey> = HashSet::new();
+    let mut posting_seen: HashSet<(String, String, u64, NaiveDate)> = HashSet::new();
     let mut out = PreparedIngest {
         series: Vec::new(),
         postings: Vec::new(),
@@ -236,9 +241,9 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
             max_labels,
         );
         let series_id = series_id_hash(&m.metric_name, &labels);
-        let record_date = m.timestamp.date_naive();
+        let ts = m.timestamp;
 
-        if series_seen.insert((record_date, series_id)) {
+        if series_seen.insert((ts.date_naive(), series_id)) {
             out.series.push(SeriesRow {
                 series_id,
                 metric_name: m.metric_name.clone(),
@@ -248,7 +253,7 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 aggregation_temporality: m.aggregation_temporality.clone(),
                 is_monotonic: m.is_monotonic,
                 labels_json: labels_to_json(&labels, &m.resource_attributes, &m.attributes),
-                record_date,
+                timestamp: ts,
             });
         }
 
@@ -257,9 +262,14 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 label_name: name.clone(),
                 label_value: value.clone(),
                 series_id,
-                record_date,
+                timestamp: ts,
             };
-            if posting_seen.insert(key.clone()) {
+            if posting_seen.insert((
+                key.label_name.clone(),
+                key.label_value.clone(),
+                key.series_id,
+                key.timestamp.date_naive(),
+            )) {
                 out.postings.push(key);
             }
         }
@@ -277,7 +287,6 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                     .as_ref()
                     .and_then(|q| serde_json::to_string(q).ok()),
                 exemplars_json: m.exemplars_json.clone(),
-                record_date,
             });
             // Classic Prom series for fast Grafana path (see push_classic_prom_gauges).
             let base_name = sanitize_label_name(&m.metric_name);
@@ -285,7 +294,7 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 &base_name,
                 &labels,
                 m,
-                record_date,
+                ts,
                 &mut out,
                 &mut series_seen,
                 &mut posting_seen,
@@ -295,7 +304,6 @@ fn prepare_ingest(metrics: &[Metric], max_labels: usize) -> PreparedIngest {
                 series_id,
                 timestamp: m.timestamp,
                 value: m.value,
-                record_date,
                 classic_dual_write: false,
             });
         }
@@ -339,15 +347,7 @@ fn coalesce_samples_to_step(samples: &mut Vec<SampleRow>, step_ms: i64) {
 }
 
 fn sql_str(s: &str) -> String {
-    format!("'{}'", escape_sql_literal(s))
-}
-
-fn sql_date(d: NaiveDate) -> String {
-    format!("DATE '{}'", d)
-}
-
-fn sql_ts(ts: DateTime<Utc>) -> String {
-    format!("TIMESTAMPTZ '{}'", ts.format("%Y-%m-%d %H:%M:%S%.6f+00"))
+    crate::sql::sql_string_literal(s)
 }
 
 fn sql_f64(v: f64) -> String {
@@ -395,7 +395,7 @@ fn insert_series_sql(catalog: &str, rows: &[SeriesRow]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "({id}::UBIGINT, {name}, {mtype}, {unit}, {desc}, {temporality}, {monotonic}, ({labels}::JSON)::MAP(VARCHAR, VARCHAR), {rd})",
+                "({id}::UBIGINT, {name}, {mtype}, {unit}, {desc}, {temporality}, {monotonic}, ({labels}::JSON)::MAP(VARCHAR, VARCHAR), {ts})",
                 id = r.series_id,
                 name = sql_str(&r.metric_name),
                 mtype = sql_str(&r.metric_type),
@@ -411,19 +411,12 @@ fn insert_series_sql(catalog: &str, rows: &[SeriesRow]) -> String {
                     .map(|v| if v { "TRUE" } else { "FALSE" })
                     .unwrap_or("NULL"),
                 labels = sql_str(&r.labels_json),
-                rd = sql_date(r.record_date),
+                ts = crate::sql::timestamptz_literal(&r.timestamp),
             )
         })
         .collect::<Vec<_>>()
         .join(",\n");
-    format!(
-        "INSERT INTO {table} (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date)\n\
-         SELECT * FROM (VALUES\n{values}\n) AS v(series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date)\n\
-         WHERE NOT EXISTS (\n\
-           SELECT 1 FROM {table} e\n\
-           WHERE e.record_date = v.record_date AND e.series_id = v.series_id\n\
-         );"
-    )
+    crate::sql::writer::insert_series_sql(&table, &values)
 }
 
 fn insert_postings_sql(catalog: &str, rows: &[PostingKey]) -> String {
@@ -432,26 +425,16 @@ fn insert_postings_sql(catalog: &str, rows: &[PostingKey]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "({ln}, {lv}, {id}::UBIGINT, {rd})",
+                "({ln}, {lv}, {id}::UBIGINT, {ts})",
                 ln = sql_str(&r.label_name),
                 lv = sql_str(&r.label_value),
                 id = r.series_id,
-                rd = sql_date(r.record_date),
+                ts = crate::sql::timestamptz_literal(&r.timestamp),
             )
         })
         .collect::<Vec<_>>()
         .join(",\n");
-    format!(
-        "INSERT INTO {table} (label_name, label_value, series_id, record_date)\n\
-         SELECT * FROM (VALUES\n{values}\n) AS v(label_name, label_value, series_id, record_date)\n\
-         WHERE NOT EXISTS (\n\
-           SELECT 1 FROM {table} e\n\
-           WHERE e.record_date = v.record_date\n\
-             AND e.label_name = v.label_name\n\
-             AND e.label_value = v.label_value\n\
-             AND e.series_id = v.series_id\n\
-         );"
-    )
+    crate::sql::writer::insert_postings_sql(&table, &values)
 }
 
 fn insert_samples_sql(catalog: &str, rows: &[SampleRow]) -> String {
@@ -460,16 +443,15 @@ fn insert_samples_sql(catalog: &str, rows: &[SampleRow]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "({id}::UBIGINT, {ts}, {val}, {rd})",
+                "({id}::UBIGINT, {ts}, {val})",
                 id = r.series_id,
-                ts = sql_ts(r.timestamp),
+                ts = crate::sql::timestamptz_literal(&r.timestamp),
                 val = sql_f64(r.value),
-                rd = sql_date(r.record_date),
             )
         })
         .collect::<Vec<_>>()
         .join(",\n");
-    format!("INSERT INTO {table} (series_id, timestamp, value, record_date) VALUES\n{values};")
+    crate::sql::writer::insert_samples_sql(&table, &values)
 }
 
 fn insert_hist_sql(catalog: &str, rows: &[HistSampleRow]) -> String {
@@ -483,9 +465,9 @@ fn insert_hist_sql(catalog: &str, rows: &[HistSampleRow]) -> String {
                 .unwrap_or_else(|| "NULL".to_string());
             let sum = r.sum.map(sql_f64).unwrap_or_else(|| "NULL".to_string());
             format!(
-                "({id}::UBIGINT, {ts}, {count}, {sum}, {buckets}, {bounds}, {quantiles}, {exemplars}, {rd})",
+                "({id}::UBIGINT, {ts}, {count}, {sum}, {buckets}, {bounds}, {quantiles}, {exemplars})",
                 id = r.series_id,
-                ts = sql_ts(r.timestamp),
+                ts = crate::sql::timestamptz_literal(&r.timestamp),
                 buckets = sql_u64_array(r.bucket_counts.as_deref()),
                 bounds = sql_f64_array(r.explicit_bounds.as_deref()),
                 quantiles = r
@@ -498,15 +480,11 @@ fn insert_hist_sql(catalog: &str, rows: &[HistSampleRow]) -> String {
                     .as_deref()
                     .map(sql_str)
                     .unwrap_or_else(|| "NULL".into()),
-                rd = sql_date(r.record_date),
             )
         })
         .collect::<Vec<_>>()
         .join(",\n");
-    format!(
-        "INSERT INTO {table} (series_id, timestamp, count, sum, bucket_counts, explicit_bounds, quantiles, exemplars_json, record_date)\n\
-         VALUES\n{values};"
-    )
+    crate::sql::writer::insert_hist_sql(&table, &values)
 }
 
 /// Rows per INSERT. DuckLake with `data_inlining_row_limit=0` writes one
@@ -524,9 +502,9 @@ fn exec_chunked<T>(
             continue;
         }
         let sql = build(chunk);
-        conn.execute_batch(&sql).map_err(|e| {
+        crate::sql::execute_batch_checked(conn, &sql).map_err(|e| {
             anyhow!(
-                "metrics layout insert failed: {e}\nSQL head: {}",
+                "metrics layout write failed: {e}\nSQL head: {}",
                 &sql[..sql.len().min(400)]
             )
         })?;
@@ -546,7 +524,7 @@ pub fn write_metrics_layout_txn(
     }
 
     let prepared = prepare_ingest(metrics, max_labels);
-    conn.execute_batch("BEGIN TRANSACTION;")?;
+    crate::sql::execute_batch_checked(conn, "BEGIN TRANSACTION;")?;
     let write = (|| -> Result<()> {
         exec_chunked(conn, &prepared.series, |c| {
             insert_series_sql(catalog_alias, c)
@@ -564,12 +542,12 @@ pub fn write_metrics_layout_txn(
     })();
     match write {
         Ok(()) => {
-            conn.execute_batch("COMMIT;")
+            crate::sql::execute_batch_checked(conn, "COMMIT;")
                 .map_err(|e| anyhow!("metrics layout COMMIT failed: {e}"))?;
             Ok(())
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK;");
+            let _ = crate::sql::execute_batch_checked(conn, "ROLLBACK;");
             Err(e)
         }
     }
@@ -627,9 +605,10 @@ pub fn count_variant_columns(conn: &Connection, catalog: &str, table_name: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::schema::metrics_layout_table_names;
     use crate::storage::schema::metrics_layout::{
         ensure_metrics_layout_core_tables, ensure_metrics_layout_family_tables,
-        MAINTENANCE_METRICS_FAMILY_TABLES, METRICS_LAYOUT_CORE_TABLES,
+        METRICS_LAYOUT_CORE_TABLES,
     };
     use chrono::TimeZone;
     use std::collections::HashSet;
@@ -753,7 +732,7 @@ mod tests {
         let today = ts.date_naive();
         let series_n: i64 = conn
             .query_row(
-                "SELECT count(*) FROM softprobe.metric_series WHERE record_date = ?",
+                "SELECT count(*) FROM softprobe.metric_series WHERE CAST(timestamp AS DATE) = ?",
                 [today.to_string()],
                 |r| r.get(0),
             )
@@ -798,7 +777,7 @@ mod tests {
             .query_row(
                 "SELECT count(*) FROM softprobe.metric_hist_samples h \
                  JOIN softprobe.metric_series s \
-                   ON h.series_id = s.series_id AND h.record_date = s.record_date \
+                   ON h.series_id = s.series_id  \
                  WHERE s.metric_name = 'layout_latency'",
                 [],
                 |r| r.get(0),
@@ -810,7 +789,7 @@ mod tests {
             .query_row(
                 "SELECT count(*) FROM softprobe.metric_samples sm \
                  JOIN softprobe.metric_series s \
-                   ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
+                   ON sm.series_id = s.series_id  \
                  WHERE s.metric_name = 'layout_latency'",
                 [],
                 |r| r.get(0),
@@ -834,7 +813,7 @@ mod tests {
             .query_row(
                 "SELECT count(*) FROM softprobe.metric_hist_samples h \
                  JOIN softprobe.metric_series s \
-                   ON h.series_id = s.series_id AND h.record_date = s.record_date \
+                   ON h.series_id = s.series_id  \
                  WHERE s.metric_name = 'layout_latency_eval'",
                 [],
                 |r| r.get(0),
@@ -847,7 +826,7 @@ mod tests {
     #[test]
     fn maintenance_tables_include_metric_family() {
         assert_eq!(
-            MAINTENANCE_METRICS_FAMILY_TABLES,
+            metrics_layout_table_names().as_slice(),
             &[
                 "metric_samples",
                 "metric_postings",
@@ -863,7 +842,7 @@ mod tests {
         // Compaction source of truth must match this constant (wired in executor).
         assert_eq!(
             crate::compaction::executor::maintenance_metrics_family_tables(),
-            MAINTENANCE_METRICS_FAMILY_TABLES
+            metrics_layout_table_names().as_slice()
         );
     }
 
@@ -995,34 +974,29 @@ mod tests {
         let ts0 = Utc.with_ymd_and_hms(2026, 8, 21, 12, 0, 0).unwrap();
         let ts1 = ts0 + chrono::Duration::milliseconds(3_000);
         let ts2 = ts0 + chrono::Duration::milliseconds(20_000);
-        let day = ts0.date_naive();
         let mut samples = vec![
             SampleRow {
                 series_id: 1,
                 timestamp: ts0,
                 value: 1.0,
-                record_date: day,
                 classic_dual_write: true,
             },
             SampleRow {
                 series_id: 1,
                 timestamp: ts1,
                 value: 2.0,
-                record_date: day,
                 classic_dual_write: true,
             },
             SampleRow {
                 series_id: 1,
                 timestamp: ts2,
                 value: 3.0,
-                record_date: day,
                 classic_dual_write: true,
             },
             SampleRow {
                 series_id: 2,
                 timestamp: ts0,
                 value: 9.0,
-                record_date: day,
                 classic_dual_write: true,
             },
         ];

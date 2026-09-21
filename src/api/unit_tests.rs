@@ -395,5 +395,6 @@ fn unit_telemetry_details_compiles_correlated_signal_queries() {
     assert!(compiled
         .metrics
         .contains("CAST(attributes['sp.session.id'] AS VARCHAR) = 'sess_abc'"));
-    assert!(compiled.spans.contains("record_date BETWEEN DATE"));
+    assert!(compiled.spans.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+    assert!(!compiled.spans.contains("record_date"));
 }

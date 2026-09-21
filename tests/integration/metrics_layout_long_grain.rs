@@ -63,11 +63,10 @@ async fn materialize_1h_and_collapse(router: &Router) {
     let steps = [
         r#"
 INSERT INTO softprobe.metric_samples_1h
-  (series_id, window_ts, record_date, count, sum, min, max, last, last_ts)
+  (series_id, timestamp, count, sum, min, max, last, last_ts)
 SELECT
   series_id,
-  time_bucket(INTERVAL '1 hour', timestamp) AS window_ts,
-  CAST(time_bucket(INTERVAL '1 hour', timestamp) AS DATE) AS record_date,
+  time_bucket(INTERVAL '1 hour', timestamp) AS timestamp,
   count(*)::UBIGINT AS count,
   sum(value) AS sum,
   min(value) AS min,
@@ -77,17 +76,17 @@ SELECT
 FROM softprobe.metric_samples
 WHERE timestamp < now() - INTERVAL '24 hours'
   AND time_bucket(INTERVAL '1 hour', timestamp) >
-      (SELECT coalesce(max(window_ts), TIMESTAMPTZ '-infinity') FROM softprobe.metric_samples_1h)
+      (SELECT coalesce(max(timestamp), TIMESTAMPTZ '-infinity') FROM softprobe.metric_samples_1h)
 GROUP BY series_id, time_bucket(INTERVAL '1 hour', timestamp)
 "#,
         r#"
 INSERT INTO softprobe.metric_collapse_job_1h
-  (metric_name, job, window_ts, record_date, count, sum, min, max, last)
+  (metric_name, job, timestamp, count, sum, min, max, last)
 SELECT
   s.metric_name,
   p.label_value AS job,
-  h.window_ts,
-  h.record_date,
+  h.timestamp,
+  
   sum(h.count)::UBIGINT AS count,
   sum(h.sum) AS sum,
   min(h.min) AS min,
@@ -95,13 +94,13 @@ SELECT
   sum(h.last) AS last
 FROM softprobe.metric_samples_1h h
 JOIN softprobe.metric_series s
-  ON h.series_id = s.series_id AND h.record_date = s.record_date
+  ON h.series_id = s.series_id 
 JOIN softprobe.metric_postings p
-  ON p.series_id = h.series_id AND p.record_date = h.record_date
+  ON p.series_id = h.series_id 
  AND p.label_name = 'job'
-WHERE h.window_ts >
-      (SELECT coalesce(max(window_ts), TIMESTAMPTZ '-infinity') FROM softprobe.metric_collapse_job_1h)
-GROUP BY s.metric_name, p.label_value, h.window_ts, h.record_date
+WHERE h.timestamp >
+      (SELECT coalesce(max(timestamp), TIMESTAMPTZ '-infinity') FROM softprobe.metric_collapse_job_1h)
+GROUP BY s.metric_name, p.label_value, h.timestamp
 "#,
     ];
     for sql in steps {

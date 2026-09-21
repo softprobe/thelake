@@ -3,9 +3,9 @@
 //! **Hard rule:** never reference `attributes` / MAP bags. List path may use
 //! `prefer_attr_*`; reduce/rebuild must not.
 
-use crate::api::llm::query::llm_promo;
-use crate::api::query_window::{push_otlp_time_predicates, QueryWindow};
-use crate::api::sql_support::sql_string_literal;
+use crate::sql::literal::sql_string_literal;
+use crate::sql::llm::llm_promo;
+use crate::sql::QueryWindow;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 
@@ -64,15 +64,6 @@ pub fn compile_session_summary_aggregate_sql(
         None => "session_id <> ''".to_string(),
     };
 
-    // Predicate order: record_date → session filter → timestamp → exclude recording.
-    let mut conditions = Vec::new();
-    push_otlp_time_predicates(&mut conditions, &window, [session_pred]);
-    conditions.push(format!(
-        "COALESCE({}, '') <> 'recording'",
-        promo.observation_type
-    ));
-    let where_sql = conditions.join(" AND ");
-
     // Typed agent resolve (no attributes['sp.agent.name']).
     let agent_expr = format!(
         "COALESCE( \
@@ -82,33 +73,40 @@ pub fn compile_session_summary_aggregate_sql(
         obs = promo.observation_type,
     );
 
-    Ok(format!(
-        "SELECT \
-           session_id, \
-           CAST(epoch_us(MIN(timestamp)) AS BIGINT) AS start_time_us, \
-           CAST(epoch_us(MAX(COALESCE(end_timestamp, timestamp))) AS BIGINT) AS end_time_us, \
-           COUNT(DISTINCT span_id)::BIGINT AS observation_count, \
-           SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END)::BIGINT AS error_count, \
-           SUM({input_tokens})::BIGINT AS input_tokens, \
-           SUM({output_tokens})::BIGINT AS output_tokens, \
-           SUM({total_tokens})::BIGINT AS total_tokens, \
-           SUM({total_cost}) AS total_cost, \
-           {agent} AS agent_name, \
-           arg_min({user_id}, timestamp) FILTER (WHERE NULLIF({user_id}, '') IS NOT NULL) AS user_id, \
-           arg_min({model_name}, timestamp) FILTER (WHERE NULLIF({model_name}, '') IS NOT NULL) AS model_name \
-         FROM {from_table} \
-         WHERE {where_sql} \
-         GROUP BY session_id",
-        input_tokens = promo.input_tokens,
-        output_tokens = promo.output_tokens,
-        total_tokens = promo.total_tokens,
-        total_cost = promo.total_cost,
-        agent = agent_expr,
-        user_id = promo.user_id,
-        model_name = promo.model_name,
-        from_table = from_table,
-        where_sql = where_sql,
-    ))
+    let observation_type = promo.observation_type;
+    let input_tokens = promo.input_tokens;
+    let output_tokens = promo.output_tokens;
+    let total_tokens = promo.total_tokens;
+    let total_cost = promo.total_cost;
+    let user_id = promo.user_id;
+    let model_name = promo.model_name;
+
+    // Predicate order: identity → timestamp (one clock) → observation filter.
+    Ok(window
+        .bind_scan("", |bound| {
+            let where_sql = format!(
+                "{session_pred} AND {bound} AND COALESCE({observation_type}, '') <> 'recording'"
+            );
+            format!(
+                "SELECT \
+                   session_id, \
+                   CAST(epoch_us(MIN(timestamp)) AS BIGINT) AS start_time_us, \
+                   CAST(epoch_us(MAX(COALESCE(end_timestamp, timestamp))) AS BIGINT) AS end_time_us, \
+                   COUNT(DISTINCT span_id)::BIGINT AS observation_count, \
+                   SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END)::BIGINT AS error_count, \
+                   SUM({input_tokens})::BIGINT AS input_tokens, \
+                   SUM({output_tokens})::BIGINT AS output_tokens, \
+                   SUM({total_tokens})::BIGINT AS total_tokens, \
+                   SUM({total_cost}) AS total_cost, \
+                   {agent_expr} AS agent_name, \
+                   arg_min({user_id}, timestamp) FILTER (WHERE NULLIF({user_id}, '') IS NOT NULL) AS user_id, \
+                   arg_min({model_name}, timestamp) FILTER (WHERE NULLIF({model_name}, '') IS NOT NULL) AS model_name \
+                 FROM {from_table} \
+                 WHERE {where_sql} \
+                 GROUP BY session_id"
+            )
+        })
+        .into_sql())
 }
 
 /// Reduce path: dirty session IN-list required.
@@ -206,10 +204,10 @@ mod tests {
                 .expect("sql");
         assert_aggregate_invariants(&sql);
         assert!(sql.contains("session_id IN"));
-        let rd = sql.find("record_date").unwrap();
+        assert!(!sql.contains("record_date"));
         let sid = sql.find("session_id IN").unwrap();
         let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
-        assert!(rd < sid && sid < ts);
+        assert!(sid < ts);
     }
 
     #[test]

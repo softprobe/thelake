@@ -8,9 +8,7 @@ mod dirty;
 mod hot_attrs;
 mod job;
 mod list;
-mod list_sql;
 mod reduce;
-pub(crate) mod reduce_sql;
 
 pub use ddl::{ensure_session_summary_tables, session_summary_table_ddls};
 pub use dirty::{fold_dirty_hints, DirtyHint, SessionSummaryDirty};

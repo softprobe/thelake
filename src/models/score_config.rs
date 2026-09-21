@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -18,7 +18,6 @@ pub struct ScoreConfig {
     pub author_id: Option<String>,
     #[serde(default)]
     pub metadata: HashMap<String, String>,
-    pub record_date: NaiveDate,
 }
 
 impl ScoreConfig {
@@ -72,7 +71,6 @@ impl ScoreConfig {
     }
 
     pub fn seed_defaults(now: DateTime<Utc>) -> Vec<Self> {
-        let record_date = now.date_naive();
         vec![
             Self {
                 config_id: "cfg-correctness".to_string(),
@@ -85,7 +83,6 @@ impl ScoreConfig {
                 categories: vec![],
                 author_id: Some("system".to_string()),
                 metadata: HashMap::from([("seed".to_string(), "default".to_string())]),
-                record_date,
             },
             Self {
                 config_id: "cfg-quality".to_string(),
@@ -98,7 +95,6 @@ impl ScoreConfig {
                 categories: vec!["good".to_string(), "ok".to_string(), "bad".to_string()],
                 author_id: Some("system".to_string()),
                 metadata: HashMap::from([("seed".to_string(), "default".to_string())]),
-                record_date,
             },
             Self {
                 config_id: "cfg-expected-output".to_string(),
@@ -111,7 +107,6 @@ impl ScoreConfig {
                 categories: vec![],
                 author_id: Some("system".to_string()),
                 metadata: HashMap::from([("seed".to_string(), "default".to_string())]),
-                record_date,
             },
         ]
     }
@@ -135,7 +130,6 @@ mod tests {
             categories: vec![],
             author_id: None,
             metadata: HashMap::new(),
-            record_date: timestamp.date_naive(),
         }
     }
 
@@ -169,7 +163,6 @@ mod tests {
             config_id: Some("cfg-1".to_string()),
             author_id: None,
             metadata: HashMap::new(),
-            record_date: timestamp.date_naive(),
         };
         assert_eq!(config.validate_score(&score), Ok(()));
     }

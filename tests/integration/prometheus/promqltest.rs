@@ -4,6 +4,7 @@
 
 use axum::http::StatusCode;
 use axum::Router;
+use chrono::TimeZone;
 use softprobe_runtime::compat::prometheus::diff_normalize::normalize_prom_response;
 use softprobe_runtime::compat::promql::parse_promql;
 use std::path::{Path, PathBuf};
@@ -448,6 +449,64 @@ async fn otlp_no_recorded_value_omitted_from_instant_query() {
         result.is_empty(),
         "stale/NaN latest sample must omit series, got {body}"
     );
+}
+
+#[tokio::test]
+async fn persistent_series_resolves_across_day_scoped_prometheus_windows() {
+    let (router, _temp) = build_tenant_router().await;
+    let day_a = chrono::Utc
+        .with_ymd_and_hms(2026, 8, 13, 12, 0, 0)
+        .unwrap()
+        .timestamp();
+    let day_b = chrono::Utc
+        .with_ymd_and_hms(2026, 8, 15, 12, 0, 0)
+        .unwrap()
+        .timestamp();
+    ingest_metrics(
+        &router,
+        gauge_otlp(
+            "http.requests",
+            "checkout",
+            41.0,
+            (day_a as u64) * 1_000_000_000,
+        ),
+    )
+    .await;
+    ingest_metrics(
+        &router,
+        gauge_otlp(
+            "http.requests",
+            "checkout",
+            42.0,
+            (day_b as u64) * 1_000_000_000,
+        ),
+    )
+    .await;
+
+    let selector = r#"http_requests{job="checkout"}"#;
+    for day in [day_a, day_b] {
+        let start = day.to_string();
+        let end = (day + 86_399).to_string();
+        let discovery_q = encode_query(&[("match[]", selector), ("start", &start), ("end", &end)]);
+        let (status, series) = get_json(&router, &format!("/api/v1/series?{discovery_q}")).await;
+        assert_eq!(status, StatusCode::OK, "day={day} series={series}");
+        assert_eq!(series["status"], "success");
+        assert_eq!(series["data"].as_array().map(Vec::len), Some(1), "{series}");
+
+        let metadata_q = encode_query(&[
+            ("metric", "http_requests"),
+            ("start", &start),
+            ("end", &end),
+        ]);
+        let (status, metadata) = get_json(&router, &format!("/api/v1/metadata?{metadata_q}")).await;
+        assert_eq!(status, StatusCode::OK, "day={day} metadata={metadata}");
+        assert!(
+            metadata["data"]["http_requests"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()),
+            "day={day} metadata={metadata}"
+        );
+    }
 }
 
 #[tokio::test]

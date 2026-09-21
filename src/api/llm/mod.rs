@@ -2,9 +2,7 @@ pub mod query;
 
 use crate::api::AppState;
 use crate::authn::TenantInfo;
-use crate::models::{
-    partition_day_from_event_time, Score, ScoreConfig, ScoreDataType, ScoreSource,
-};
+use crate::models::{Score, ScoreConfig, ScoreDataType, ScoreSource};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -51,7 +49,6 @@ impl From<CreateScoreRequest> for Score {
             config_id: request.config_id,
             author_id: request.author_id,
             metadata: request.metadata,
-            record_date: partition_day_from_event_time(request.timestamp),
         }
     }
 }
@@ -85,7 +82,6 @@ impl From<CreateScoreConfigRequest> for ScoreConfig {
             categories: request.categories,
             author_id: request.author_id,
             metadata: request.metadata,
-            record_date: partition_day_from_event_time(request.timestamp),
         }
     }
 }

@@ -96,10 +96,10 @@ fn seed_closed_day_small_files(ducklake: &DuckLakeConfig, series_base: u64) -> (
         let sid = series_base + i;
         conn.execute_batch(&format!(
             "INSERT INTO {catalog}.metric_series \
-               (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-               ({sid}, 'leased_maint', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
+               (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, timestamp) VALUES \
+               ({sid}, 'leased_maint', 'gauge', '', '', NULL, NULL, map([], []), TIMESTAMPTZ '{day} 00:00:00+00');\n\
              INSERT INTO {catalog}.metric_samples VALUES \
-               ({sid}, TIMESTAMPTZ '{day} 12:0{i}:00+00', {i}.0, DATE '{day}');"
+               ({sid}, TIMESTAMPTZ '{day} 12:0{i}:00+00', {i}.0);"
         ))
         .unwrap_or_else(|e| panic!("seed series_base={series_base} i={i}: {e}"));
     }
@@ -107,7 +107,7 @@ fn seed_closed_day_small_files(ducklake: &DuckLakeConfig, series_base: u64) -> (
     for i in 0..20u64 {
         conn.execute_batch(&format!(
             "INSERT INTO {catalog}.metric_samples VALUES \
-               ({}, TIMESTAMPTZ '{day} 13:00:{i:02}+00', {i}.0, DATE '{day}');",
+               ({}, TIMESTAMPTZ '{day} 13:00:{i:02}+00', {i}.0);",
             series_base
         ))
         .unwrap_or_else(|e| panic!("extra snap seed i={i}: {e}"));

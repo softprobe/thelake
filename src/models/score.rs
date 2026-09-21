@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -38,7 +38,6 @@ pub struct Score {
     pub author_id: Option<String>,
     #[serde(default)]
     pub metadata: HashMap<String, String>,
-    pub record_date: NaiveDate,
 }
 
 impl Score {
@@ -109,7 +108,6 @@ mod tests {
             config_id: None,
             author_id: None,
             metadata: HashMap::new(),
-            record_date: crate::models::partition_day_from_event_time(timestamp),
         }
     }
 
@@ -137,15 +135,6 @@ mod tests {
         assert_eq!(
             score.validate(),
             Err("session_id or trace_id is required for score layout sort")
-        );
-    }
-
-    #[test]
-    fn record_date_matches_partition_day_helper() {
-        let score = numeric_score();
-        assert_eq!(
-            score.record_date,
-            crate::models::partition_day_from_event_time(score.timestamp)
         );
     }
 

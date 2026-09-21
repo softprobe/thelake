@@ -249,12 +249,12 @@ pub fn compile_search_sql(request: &TelemetrySearchRequest) -> Result<String, St
     let order_sql = compile_order(&request.sort)?;
 
     let sql = match request.scope {
-        TelemetrySearchScope::Sessions => format!(
-            "SELECT session_id AS id, 'session' AS kind, session_id, MIN(timestamp) AS start_time, MAX(COALESCE(end_timestamp, timestamp)) AS end_time, COUNT(DISTINCT trace_id) AS trace_count, COUNT(*) AS span_count, SUM(CASE WHEN status_code = 'ERROR' OR http_response_status_code >= 500 THEN 1 ELSE 0 END) AS error_count, date_diff('millisecond', MIN(timestamp), MAX(COALESCE(end_timestamp, timestamp))) AS duration_ms, string_agg(DISTINCT app_id, ',') AS services, any_value(http_request_path) AS entry_path, any_value(status_message) AS last_error FROM traces {where_sql} GROUP BY session_id {order_sql} LIMIT {limit}"
-        ),
-        TelemetrySearchScope::Traces => format!(
-            "SELECT trace_id AS id, 'trace' AS kind, session_id, trace_id, MIN(timestamp) AS start_time, MAX(COALESCE(end_timestamp, timestamp)) AS end_time, COUNT(*) AS span_count, SUM(CASE WHEN status_code = 'ERROR' OR http_response_status_code >= 500 THEN 1 ELSE 0 END) AS error_count, date_diff('millisecond', MIN(timestamp), MAX(COALESCE(end_timestamp, timestamp))) AS duration_ms, string_agg(DISTINCT app_id, ',') AS services, any_value(message_type) AS name, any_value(http_request_path) AS entry_path, any_value(status_message) AS last_error FROM traces {where_sql} GROUP BY trace_id, session_id {order_sql} LIMIT {limit}"
-        ),
+        TelemetrySearchScope::Sessions => {
+            crate::sql::telemetry::search_sessions_sql(&where_sql, &order_sql, limit)
+        }
+        TelemetrySearchScope::Traces => {
+            crate::sql::telemetry::search_traces_sql(&where_sql, &order_sql, limit)
+        }
     };
 
     Ok(sql)
@@ -319,15 +319,13 @@ pub fn compile_details_sql(
     );
 
     Ok(CompiledDetailsSql {
-        spans: format!(
-            "SELECT {span_cols} FROM traces WHERE {where_sql} ORDER BY timestamp ASC LIMIT {limit}",
-            where_sql = span_conds.join(" AND "),
+        spans: crate::sql::telemetry::details_spans_sql(
+            &span_cols,
+            &span_conds.join(" AND "),
+            limit,
         ),
-        logs: format!(
-            "SELECT {log_cols} FROM logs WHERE {where_sql} ORDER BY timestamp ASC LIMIT {limit}",
-            where_sql = log_conds.join(" AND "),
-        ),
-        metrics: detail_sql(
+        logs: crate::sql::telemetry::details_logs_sql(&log_cols, &log_conds.join(" AND "), limit),
+        metrics: crate::sql::telemetry::detail_sql(
             // Metrics are stored in skinny tables.  Keep the detail endpoint on
             // the compatibility relation so it sees the same joined columns as
             // the pre-cutover telemetry API without maintaining a second join.
@@ -362,10 +360,7 @@ fn compile_field_values_sql(field_sql: &str, window: &QueryWindow, limit: usize)
         window,
         [format!("{field_sql} IS NOT NULL")],
     );
-    format!(
-        "SELECT DISTINCT {field_sql} AS value FROM traces WHERE {where_sql} ORDER BY value ASC LIMIT {limit}",
-        where_sql = conditions.join(" AND "),
-    )
+    crate::sql::telemetry::field_values_sql(field_sql, &conditions.join(" AND "), limit)
 }
 
 pub async fn search(
@@ -689,21 +684,6 @@ fn timestamp_literal(value: &str) -> String {
     format!("{}::TIMESTAMPTZ", sql_string_literal(value))
 }
 
-fn detail_sql(
-    table: &str,
-    columns: &str,
-    id_filter: &str,
-    time_filter: Option<&str>,
-    limit: usize,
-) -> String {
-    let mut parts: Vec<String> = vec![id_filter.to_string()];
-    if let Some(time) = time_filter {
-        parts.push(time.to_string());
-    }
-    let where_sql = parts.join(" AND ");
-    format!("SELECT {columns} FROM {table} WHERE {where_sql} ORDER BY timestamp ASC LIMIT {limit}")
-}
-
 fn time_range_from_query(params: &HashMap<String, String>) -> Option<TelemetryTimeRange> {
     Some(TelemetryTimeRange {
         from: params.get("from")?.clone(),
@@ -883,8 +863,10 @@ mod tests {
         .unwrap();
         assert!(compiled.spans.contains("session_id = 'sess-1'"));
         assert!(compiled.logs.contains("session_id = 'sess-1'"));
-        assert!(compiled.spans.contains("record_date BETWEEN DATE"));
-        assert!(compiled.logs.contains("record_date BETWEEN DATE"));
+        assert!(compiled.spans.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(!compiled.spans.contains("record_date"));
+        assert!(compiled.logs.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(!compiled.logs.contains("record_date"));
         // Metrics: skinny metrics layout has no session_id column — bag keys only.
         assert!(compiled
             .metrics
@@ -906,8 +888,10 @@ mod tests {
 
         assert!(compiled.spans.contains("CAST(timestamp AS TIMESTAMP_NS)"));
         assert!(compiled.logs.contains("CAST(timestamp AS TIMESTAMP_NS)"));
-        assert!(compiled.spans.contains("record_date BETWEEN DATE"));
-        assert!(compiled.logs.contains("record_date BETWEEN DATE"));
+        assert!(compiled.spans.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(!compiled.spans.contains("record_date"));
+        assert!(compiled.logs.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(!compiled.logs.contains("record_date"));
         assert!(!compiled.logs.contains("TIMESTAMPTZ"));
         assert!(compiled.metrics.contains("::TIMESTAMPTZ"));
     }
@@ -947,13 +931,9 @@ mod tests {
         let sql = compile_field_values_sql("app_id", &window, 100);
         assert_sql_has_otlp_time_predicates(&sql);
         assert!(sql.contains("app_id IS NOT NULL"));
-        let day = sql.find("record_date BETWEEN").unwrap();
         let id = sql.find("app_id IS NOT NULL").unwrap();
         let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
-        assert!(
-            day < id && id < ts,
-            "predicate order day→identity→ts: {sql}"
-        );
+        assert!(id < ts, "identity before timestamp: {sql}");
     }
 
     #[test]
@@ -994,10 +974,9 @@ mod tests {
         })
         .unwrap();
         assert_sql_has_otlp_time_predicates(&filtered);
-        let day = filtered.find("record_date BETWEEN").unwrap();
         let id = filtered.find("session_id = 'sess-1'").unwrap();
         let ts = filtered.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
-        assert!(day < id && id < ts, "search day→filter→ts: {filtered}");
+        assert!(id < ts, "search filter before timestamp: {filtered}");
 
         let details = compile_details_sql(
             &TelemetryDetailsTarget {
@@ -1010,15 +989,14 @@ mod tests {
         .unwrap();
         assert_sql_has_otlp_time_predicates(&details.spans);
         assert_sql_has_otlp_time_predicates(&details.logs);
-        let day = details.spans.find("record_date BETWEEN").unwrap();
         let id = details.spans.find("session_id = ").unwrap();
         let ts = details
             .spans
             .find("CAST(timestamp AS TIMESTAMP_NS)")
             .unwrap();
         assert!(
-            day < id && id < ts,
-            "details predicate order: {}",
+            id < ts,
+            "details identity before timestamp: {}",
             details.spans
         );
         // Metrics keep TIMESTAMPTZ (carve-out); not OTLP day+timestamp inventory.

@@ -638,9 +638,9 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                         { "$ref": "#/components/schemas/CreateScoreRequest" },
                         {
                             "type": "object",
-                            "required": ["record_date"],
+                            "required": ["timestamp"],
                             "properties": {
-                                "record_date": { "type": "string", "format": "date" }
+                                "timestamp": { "type": "string", "format": "date-time" }
                             }
                         }
                     ]
@@ -705,9 +705,9 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                         { "$ref": "#/components/schemas/CreateScoreConfigRequest" },
                         {
                             "type": "object",
-                            "required": ["record_date"],
+                            "required": ["timestamp"],
                             "properties": {
-                                "record_date": { "type": "string", "format": "date" }
+                                "timestamp": { "type": "string", "format": "date-time" }
                             }
                         }
                     ]

@@ -2,9 +2,9 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 
-/// Sole assignment path for OTLP partition day from event time (D2 / AC1).
+/// Sole assignment path for calendar day of event time (hive partition keys).
 ///
-/// `record_date` in Parquet is only the storage spelling of `date(timestamp)`.
+/// DuckLake partitions by `year/month/day(timestamp)` — no `record_date` column.
 pub fn partition_day_from_event_time(ts: DateTime<Utc>) -> NaiveDate {
     ts.date_naive()
 }

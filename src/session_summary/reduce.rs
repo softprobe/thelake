@@ -2,7 +2,7 @@
 
 use crate::config::{Config, DuckLakeConfig};
 use crate::runtime_engine::quote_pg_ident;
-use crate::session_summary::reduce_sql::compile_session_summary_upsert_sql;
+use crate::sql::session_summary::compile_session_summary_upsert_sql;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use deadpool_postgres::Pool;
@@ -209,7 +209,7 @@ pub async fn upsert_summary_rows(
     let sql = compile_session_summary_upsert_sql(&schema, rows.len());
     let now = Utc::now();
     let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
-    // Bind order must match SESSION_SUMMARY_UPSERT_COLUMNS in reduce_sql.rs.
+    // Bind order must match SESSION_SUMMARY_UPSERT_COLUMNS in sql/session_summary/reduce_sql.rs.
     for r in rows {
         params.push(Box::new(r.session_id.clone()));
         params.push(Box::new(r.start_time));
@@ -341,17 +341,15 @@ pub fn aggregate_sessions_from_lake(
 ) -> Result<Vec<SummaryRow>> {
     let from_table = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, "traces");
     let sql = match session_ids {
-        Some(ids) => crate::session_summary::reduce_sql::compile_session_summary_reduce_sql(
+        Some(ids) => crate::sql::session_summary::compile_session_summary_reduce_sql(
             &from_table,
             ids,
             from,
             to,
         )?,
-        None => crate::session_summary::reduce_sql::compile_session_summary_rebuild_sql(
-            &from_table,
-            from,
-            to,
-        )?,
+        None => {
+            crate::sql::session_summary::compile_session_summary_rebuild_sql(&from_table, from, to)?
+        }
     };
     let conn = open_reduce_connection(config, ducklake)?;
     let mut stmt = conn.prepare(&sql).context("prepare aggregate SQL")?;

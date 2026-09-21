@@ -266,8 +266,7 @@ FROM traces
 WHERE session_id IN (...)
   AND session_id <> ''
   AND <exclude recording>
-  AND record_date BETWEEN DATE '...' AND DATE '...'   -- REQUIRED partition prune
-  AND CAST(timestamp AS TIMESTAMP_NS) >= ...            -- REQUIRED
+  AND CAST(timestamp AS TIMESTAMP_NS) >= ...            -- REQUIRED (one clock; partition prune)
   AND CAST(timestamp AS TIMESTAMP_NS) <= ...
 GROUP BY session_id;
 ```
@@ -294,7 +293,7 @@ to   = max(dirty.max_ts, now())
 from = least(coalesce(session_summary.start_time, dirty.min_ts), dirty.min_ts)
 ```
 
-Plus `record_date BETWEEN date(from) AND date(to)`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`. Stage 2 **clamps** oversized windows (does not chunk); early history outside the clamp may undercount until Stage 4 rebuild.
+Plus timestamp bounds via `QueryWindow::bind_scan`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`. Stage 2 **clamps** oversized windows (does not chunk); early history outside the clamp may undercount until Stage 4 rebuild.
 
 ### 6.6 Late spans
 
@@ -335,7 +334,7 @@ Same aggregate as reducer; **`[from, to]` required** (ops must pass a window —
 ```text
 rebuild([from, to]):
   SELECT ... FROM traces
-  WHERE record_date BETWEEN date(from) AND date(to)
+  WHERE CAST(timestamp AS TIMESTAMP_NS) >= ... AND CAST(timestamp AS TIMESTAMP_NS) <= ...
     AND timestamp >= from AND timestamp <= to
     AND session_id present AND not recording
   GROUP BY session_id
@@ -397,7 +396,7 @@ Ops: `POST /v1/llm/sessions/summary/rebuild` `{from,to}` triggers leased `sessio
 
 ## 11. Evidence layout / naming
 
-- `traces` partitioned by `record_date`, sorted with `session_id`.  
+- `traces` partitioned by calendar day of `timestamp` (`year`/`month`/`day`), sorted with `session_id`.  
 - New SQL uses **`traces` / `logs`**, not `union_*`.  
 - Stage **0b**: remove `union_*` emitters from query compilers; keep rewrite shim briefly if external SQL still uses old names, then delete shim.  
 - Promote list filter columns so reducer prefers typed columns over MAP bags — **done in Stage 2** (promoted-only reduce; Stage 5 is close-out evidence + non-goals).

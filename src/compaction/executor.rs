@@ -2,15 +2,6 @@ use crate::compaction::collapse::{
     collapse_job_1h_for_day_sql, collapse_job_1h_from_raw_for_day_sql,
     collapse_job_1h_from_raw_pending_days_sql, collapse_job_1h_pending_days_sql,
 };
-use crate::compaction::downsample::{
-    downsample_1h_from_5m_for_day_sql, downsample_1h_from_5m_pending_days_sql,
-    downsample_1h_from_raw_for_day_sql, downsample_1h_from_raw_pending_days_sql,
-    downsample_5m_for_day_sql, downsample_5m_pending_days_sql,
-    hist_downsample_1h_from_5m_for_day_sql, hist_downsample_1h_from_5m_pending_days_sql,
-    hist_downsample_1h_from_raw_for_day_sql, hist_downsample_1h_from_raw_pending_days_sql,
-    hist_downsample_5m_for_day_sql, hist_downsample_5m_pending_days_sql,
-    METRICS_LADDER_MAX_DAYS_PER_PASS,
-};
 use crate::compaction::twcs::{
     closed_day_live_file_count, closed_days_need_complete_merge, day_kind,
     ducklake_merge_adjacent_files_sql, live_file_count_sql, logical_table_row_count_sql,
@@ -20,22 +11,31 @@ use crate::compaction::twcs::{
 };
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
+use crate::sql::compaction::{
+    downsample_1h_from_5m_for_day_sql, downsample_1h_from_5m_pending_days_sql,
+    downsample_1h_from_raw_for_day_sql, downsample_1h_from_raw_pending_days_sql,
+    downsample_5m_for_day_sql, downsample_5m_pending_days_sql,
+    hist_downsample_1h_from_5m_for_day_sql, hist_downsample_1h_from_5m_pending_days_sql,
+    hist_downsample_1h_from_raw_for_day_sql, hist_downsample_1h_from_raw_pending_days_sql,
+    hist_downsample_5m_for_day_sql, hist_downsample_5m_pending_days_sql,
+    METRICS_LADDER_MAX_DAYS_PER_PASS,
+};
 use crate::storage::schema::metrics_layout::ensure_metrics_layout_family_tables;
-use crate::storage::schema::MAINTENANCE_METRICS_FAMILY_TABLES;
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, Utc};
 use duckdb::Connection;
 use tracing::{info, warn};
 
 /// Metrics-family tables compacted/expired before traces/logs/scores (AC-M1).
-pub fn maintenance_metrics_family_tables() -> &'static [&'static str] {
-    MAINTENANCE_METRICS_FAMILY_TABLES
+pub fn maintenance_metrics_family_tables() -> Vec<&'static str> {
+    crate::sql::schema::metrics_layout_table_names()
 }
 
 /// Full ordered maintenance table list: metrics family first, then other telemetry.
 pub fn maintenance_table_names() -> Vec<&'static str> {
-    let mut tables = Vec::with_capacity(MAINTENANCE_METRICS_FAMILY_TABLES.len() + 3);
-    tables.extend_from_slice(MAINTENANCE_METRICS_FAMILY_TABLES);
+    let metrics = maintenance_metrics_family_tables();
+    let mut tables = Vec::with_capacity(metrics.len() + 3);
+    tables.extend_from_slice(&metrics);
     tables.extend_from_slice(&["traces", "logs", "scores"]);
     tables
 }
@@ -227,7 +227,7 @@ impl MaintenanceExecutor {
             // only merges Parquet that already exists (batches over the
             // inlining limit). Paying flush every pass is intentionally
             // avoided.
-            for table in MAINTENANCE_METRICS_FAMILY_TABLES {
+            for table in maintenance_metrics_family_tables() {
                 let status =
                     match self.ducklake_twcs_compact_table(&conn, ducklake, table, tenant_id) {
                         Ok(s) => s,
@@ -383,8 +383,8 @@ struct LadderDayBatch<'a> {
 impl MaintenanceExecutor {
     /// §7.2 steps 3–5: incremental 5m → 1h → collapse (AC-S2 / AC-M2).
     ///
-    /// Every ladder INSERT is pending-day + per-`record_date` so DuckLake can
-    /// prune partitions; timestamp lags are mirrored as `record_date <= …`.
+    /// Every ladder INSERT is pending-day + per-calendar-day so DuckLake can
+    /// prune one-clock year/month/day partitions; lag filters use timestamp.
     fn run_metrics_ladder(
         &self,
         conn: &Connection,
@@ -396,9 +396,12 @@ impl MaintenanceExecutor {
         );
         let run_tx = |sql: &str| -> Result<()> {
             let body = sql.trim().trim_end_matches(';');
-            if let Err(err) = conn.execute_batch(&format!("BEGIN TRANSACTION;\n{body};\nCOMMIT;")) {
-                let _ = conn.execute_batch("ROLLBACK;");
-                return Err(err.into());
+            if let Err(err) = crate::sql::execute_batch_checked(
+                conn,
+                &format!("BEGIN TRANSACTION;\n{body};\nCOMMIT;"),
+            ) {
+                let _ = crate::sql::execute_batch_checked(conn, "ROLLBACK;");
+                return Err(err);
             }
             Ok(())
         };
@@ -563,7 +566,7 @@ impl MaintenanceExecutor {
         conn: &Connection,
         sql: &str,
     ) -> Result<Vec<NaiveDate>> {
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = crate::sql::prepare_checked(conn, sql)?;
         let rows = stmt.query_map([], |row| {
             let raw: String = row.get(0)?;
             Ok(raw)
@@ -573,7 +576,7 @@ impl MaintenanceExecutor {
             let raw = row?;
             days.push(
                 NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").map_err(|e| {
-                    anyhow!("invalid record_date {raw:?} from downsample pending probe: {e}")
+                    anyhow!("invalid partition day {raw:?} from downsample pending probe: {e}")
                 })?,
             );
         }
@@ -850,6 +853,7 @@ impl MaintenanceExecutor {
         table: &str,
     ) -> Result<Option<InlinedFragmentStats>> {
         let row_sql = logical_table_row_count_sql(catalog_alias, table);
+        crate::sql::ensure_fact_scan_bound(&row_sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
         let logical_rows: i64 = match conn.query_row(&row_sql, [], |row| row.get(0)) {
             Ok(v) => v,
             Err(err) => {
@@ -1272,6 +1276,11 @@ fn execute_batch_with_serialization_retry(
     max_attempts: usize,
     action: &str,
 ) -> std::result::Result<(), duckdb::Error> {
+    if let Err(msg) = crate::sql::ensure_fact_scan_bound(sql) {
+        return Err(duckdb::Error::InvalidParameterName(format!(
+            "SQL gate: {msg}"
+        )));
+    }
     let attempts = std::cmp::max(1, max_attempts);
     let mut backoff_ms = 150u64;
     for attempt in 1..=attempts {
@@ -1292,7 +1301,7 @@ fn execute_batch_with_serialization_retry(
 }
 
 fn count_returned_rows(conn: &Connection, sql: &str) -> Result<usize> {
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = crate::sql::prepare_checked(conn, sql)?;
     let mut rows = stmt.query([])?;
     let mut count = 0usize;
     while let Some(_row) = rows.next()? {

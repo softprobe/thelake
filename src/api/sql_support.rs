@@ -14,25 +14,22 @@ pub(crate) struct PageCursor {
 }
 
 pub(crate) fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    crate::sql::literal::sql_string_literal(value)
 }
 
 /// Render a nanosecond-precision literal for trace/span timestamp columns.
 pub(crate) fn timestamp_ns_literal(value: &DateTime<Utc>) -> String {
-    timestamp_ns_literal_from_str(&value.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+    crate::sql::literal::timestamp_ns_literal(value)
 }
 
 /// Render a nanosecond-precision literal from an RFC3339 API value.
 pub(crate) fn timestamp_ns_literal_from_str(value: &str) -> String {
-    format!("{}::TIMESTAMP_NS", sql_string_literal(value))
+    crate::sql::literal::timestamp_ns_literal_from_str(value)
 }
 
 /// Compare a timestamp column to a `TIMESTAMP_NS` literal.
-///
-/// Prod DuckLake tables may still be `TIMESTAMPTZ` while newer schemas use
-/// `TIMESTAMP_NS`. Casting the column makes predicates bind for both.
 pub(crate) fn timestamp_ns_column(column: &str) -> String {
-    format!("CAST({column} AS TIMESTAMP_NS)")
+    crate::sql::literal::timestamp_ns_column(column)
 }
 
 pub(crate) fn encode_cursor(timestamp: DateTime<Utc>, id: &str) -> String {

@@ -1,11 +1,11 @@
 //! Ensure canonical product-hot traces promotions for postgres session_summary.
 
-use crate::api::llm::query::llm_promo;
 use crate::promotion::{
     load_active_telemetry_columns_manifests, parse_promotion_manifest, PromotionManifest,
     TelemetryColumnsManifest, TelemetryTable,
 };
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
+use crate::sql::llm::llm_promo;
 use anyhow::{Context, Result};
 
 /// Canonical Softprobe traces hot-attr manifest (shipped under docs/promotion/).

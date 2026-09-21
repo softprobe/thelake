@@ -40,8 +40,7 @@ pub struct Log {
     pub agent_id: Option<String>,
     /// Softprobe agent display name from assertion auth (not client OTLP).
     pub agent_name: Option<String>,
-    // Field 15: record_date (partition key - computed, not stored in struct)
-    // Derived from timestamp at write time in arrow.rs
+    // Partition day is derived from `timestamp` at write (year/month/day hive keys).
 }
 
 impl Log {

@@ -5,7 +5,7 @@ use crate::api::llm::query::{
 };
 use crate::api::sql_support::encode_cursor;
 use crate::runtime_engine::quote_pg_ident;
-use crate::session_summary::list_sql::compile_session_summary_list_sql;
+use crate::sql::session_summary::compile_session_summary_list_sql;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;

@@ -167,7 +167,7 @@ async fn http_otlp_histogram_ingest_then_sql_and_prom_query() {
             "SELECT h.count, h.sum, CAST(h.bucket_counts AS VARCHAR) \
              FROM softprobe.metric_hist_samples h \
              JOIN softprobe.metric_series s \
-               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+               ON h.series_id = s.series_id \
              WHERE s.metric_name = 'http.server.duration'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -185,7 +185,7 @@ async fn http_otlp_histogram_ingest_then_sql_and_prom_query() {
             "SELECT h.count, h.sum \
              FROM softprobe.metric_hist_samples h \
              JOIN softprobe.metric_series s \
-               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+               ON h.series_id = s.series_id \
              WHERE s.metric_name = 'rpc.latency'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -330,7 +330,7 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
             "SELECT h.count, h.sum, CAST(h.bucket_counts AS VARCHAR), CAST(h.explicit_bounds AS VARCHAR) \
              FROM softprobe.metric_hist_samples h \
              JOIN softprobe.metric_series s \
-               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+               ON h.series_id = s.series_id \
              WHERE s.metric_name = 'http.server.duration'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -352,7 +352,7 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
             "SELECT h.count, h.sum \
              FROM softprobe.metric_hist_samples h \
              JOIN softprobe.metric_series s \
-               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+               ON h.series_id = s.series_id \
              WHERE s.metric_name = 'rpc.latency'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -366,7 +366,7 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
             "SELECT h.exemplars_json \
              FROM softprobe.metric_hist_samples h \
              JOIN softprobe.metric_series s \
-               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+               ON h.series_id = s.series_id \
              WHERE s.metric_name = 'http.server.duration'",
             [],
             |row| row.get(0),
@@ -382,7 +382,7 @@ async fn classic_histogram_and_summary_round_trip_ducklake() {
             "SELECT h.quantiles \
              FROM softprobe.metric_hist_samples h \
              JOIN softprobe.metric_series s \
-               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+               ON h.series_id = s.series_id \
              WHERE s.metric_name = 'rpc.latency'",
             [],
             |row| row.get(0),
@@ -428,7 +428,7 @@ async fn classic_histogram_absent_sum_persists_null_in_ducklake() {
         .query_row(
             "SELECT h.sum FROM softprobe.metric_hist_samples h \
              JOIN softprobe.metric_series s \
-               ON h.series_id = s.series_id AND h.record_date = s.record_date \
+               ON h.series_id = s.series_id \
              WHERE s.metric_name = 'http.server.duration'",
             [],
             |row| row.get(0),

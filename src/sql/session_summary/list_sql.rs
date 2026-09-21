@@ -1,9 +1,11 @@
 //! Postgres `session_summary` list SQL for Stage 3 `sessions/search`.
 //!
 //! Steady-state list path: no DuckLake scan. Filters use typed summary columns.
+//! Postgres side store keeps `start_time` (not lake one-clock `timestamp`).
 
 use crate::api::llm::query::{SessionOrderBy, SessionSearchRequest, SortDirection};
-use crate::api::sql_support::{decode_cursor, sql_string_literal};
+use crate::api::sql_support::decode_cursor;
+use crate::sql::literal::sql_string_literal;
 
 /// Compile a Postgres SELECT against `{schema}.session_summary`.
 ///
@@ -277,7 +279,7 @@ mod tests {
     #[test]
     fn duckdb_helpers_still_available_for_lake_path() {
         // Sanity: lake cursor helpers remain TIMESTAMP_NS for DuckDB.
-        use crate::api::sql_support::{timestamp_ns_column, timestamp_ns_literal};
+        use crate::sql::{timestamp_ns_column, timestamp_ns_literal};
         let _ = timestamp_ns_column("start_time");
         let _ = timestamp_ns_literal(&Utc::now());
     }

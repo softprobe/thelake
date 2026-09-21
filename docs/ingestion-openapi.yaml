@@ -773,11 +773,11 @@ components:
         - $ref: "#/components/schemas/CreateScoreRequest"
         - type: object
           required:
-            - record_date
+            - timestamp
           properties:
-            record_date:
+            timestamp:
               type: string
-              format: date
+              format: date-time
     CreateScoreConfigRequest:
       type: object
       required:
@@ -830,11 +830,11 @@ components:
         - $ref: "#/components/schemas/CreateScoreConfigRequest"
         - type: object
           required:
-            - record_date
+            - timestamp
           properties:
-            record_date:
+            timestamp:
               type: string
-              format: date
+              format: date-time
     ScoreConfigListResponse:
       type: object
       required: [items]

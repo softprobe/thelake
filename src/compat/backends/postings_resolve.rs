@@ -3,108 +3,23 @@
 //! Equality matchers → postings intersect → `series_id` set; then skinny
 //! `metric_samples` / `metric_hist_samples` scan. Does not scan the compatibility relation
 //! or full `union_metrics` for resolve.
+//!
+//! SQL recipes live under [`crate::sql::prom`]; this module owns resolve/runtime/cache.
 
-use crate::compat::backends::grain::{grain_table_sql, select_sample_grain, SampleGrain};
 use crate::compat::backends::metrics::{LabelMatcher, MatcherOp};
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::prometheus::sanitize_label_name;
-use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::NaiveDate;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// One equality posting constraint (`label_name` / candidate values).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct EqualityPosting {
-    pub label_name: String,
-    pub values: Vec<String>,
-}
-
-/// Calendar-day bounds inclusive for `record_date BETWEEN … AND …`.
-///
-/// `None` means no day prune (discovery / selectors without a time window).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecordDateRange {
-    pub start: Option<NaiveDate>,
-    pub end: Option<NaiveDate>,
-}
-
-impl RecordDateRange {
-    pub fn from_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Self {
-        match (start_ms.and_then(ms_to_utc), end_ms.and_then(ms_to_utc)) {
-            (None, None) => Self {
-                start: None,
-                end: None,
-            },
-            (Some(s), Some(e)) => {
-                let mut start = s.date_naive();
-                let mut end = e.date_naive();
-                if start > end {
-                    std::mem::swap(&mut start, &mut end);
-                }
-                Self {
-                    start: Some(start),
-                    end: Some(end),
-                }
-            }
-            (Some(s), None) => {
-                let d = s.date_naive();
-                Self {
-                    start: Some(d),
-                    end: Some(d),
-                }
-            }
-            (None, Some(e)) => {
-                let d = e.date_naive();
-                Self {
-                    start: Some(d),
-                    end: Some(d),
-                }
-            }
-        }
-    }
-
-    /// SQL fragment for WHERE, or empty when unbounded.
-    pub fn sql_predicate(&self, column_prefix: &str) -> String {
-        match (self.start, self.end) {
-            (Some(start), Some(end)) => {
-                let col = if column_prefix.is_empty() {
-                    "record_date".to_string()
-                } else {
-                    format!("{column_prefix}record_date")
-                };
-                format!("{col} BETWEEN DATE '{start}' AND DATE '{end}'")
-            }
-            _ => String::new(),
-        }
-    }
-
-    /// Inclusive calendar days covered by this range, or `None` when unbounded.
-    ///
-    /// Day-scoped posting cache keys require an explicit date; unbounded resolve
-    /// falls back to a single DuckDB INTERSECT (no cache).
-    pub fn inclusive_days(&self) -> Option<Vec<NaiveDate>> {
-        match (self.start, self.end) {
-            (Some(start), Some(end)) => {
-                let mut out = Vec::new();
-                let mut d = start;
-                while d <= end {
-                    out.push(d);
-                    d = d.succ_opt()?;
-                }
-                Some(out)
-            }
-            _ => None,
-        }
-    }
-}
-
-fn ms_to_utc(ms: i64) -> Option<DateTime<Utc>> {
-    let secs = ms.div_euclid(1000);
-    let nsecs = (ms.rem_euclid(1000) * 1_000_000) as u32;
-    Utc.timestamp_opt(secs, nsecs).single()
-}
+pub use crate::sql::prom::{
+    discover_name_values_sql, resolve_series_ids_sql, samples_scan_sql,
+    samples_scan_sql_for_window, samples_time_predicates, samples_time_predicates_bounded,
+    series_meta_sql, single_posting_sql, timestamptz_literal_ms, EqualityPosting, PostingsDayRange,
+    SeriesMetaDayScope,
+};
 
 /// Equality matchers used for postings resolve (`=` only).
 pub fn equality_postings(matchers: &[LabelMatcher]) -> Vec<EqualityPosting> {
@@ -154,679 +69,17 @@ pub fn posting_name_values(prom_name: &str) -> Vec<String> {
     out
 }
 
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-fn sql_in_list(values: &[String]) -> String {
-    values
-        .iter()
-        .map(|v| sql_string_literal(v))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// SQL that resolves `series_id`s via postings intersect (AC-Q7 / §9.1 steps 3–4).
-///
-/// Returns at most `max_series + 1` ids so callers can fail loud without a sample scan.
-pub fn resolve_series_ids_sql(
-    catalog: &str,
-    days: RecordDateRange,
-    equality: &[EqualityPosting],
-    max_series: usize,
-) -> String {
-    let postings = qualified_metrics_layout_table(catalog, "metric_postings");
-    let lim = max_series.saturating_add(1);
-    let day_pred = days.sql_predicate("");
-    let name_day_pred = days.sql_predicate("p.");
-    let name_day_and = if name_day_pred.is_empty() {
-        String::new()
-    } else {
-        format!(" AND {name_day_pred}")
-    };
-    if equality.is_empty() {
-        // No equality → cardinality of all series in the window; fail loud at max_series.
-        let where_clause = if day_pred.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {day_pred}")
-        };
-        return format!(
-            "SELECT DISTINCT series_id \
-             FROM {postings} \
-             {where_clause} \
-             LIMIT {lim}"
-        );
-    }
-    // INTERSECT smallest posting first (__name__ is usually tighter than job/service).
-    let mut ordered = equality.to_vec();
-    ordered.sort_by(|a, b| {
-        let ar = if a.label_name == "__name__" { 0 } else { 1 };
-        let br = if b.label_name == "__name__" { 0 } else { 1 };
-        ar.cmp(&br).then_with(|| a.label_name.cmp(&b.label_name))
-    });
-    let parts: Vec<String> = ordered
-        .iter()
-        .map(|eq| {
-            let name = sql_string_literal(&eq.label_name);
-            format!(
-                "SELECT p.series_id FROM {postings} p \
-                 WHERE p.label_name = {name} AND p.label_value IN ({}){name_day_and}",
-                sql_in_list(&eq.values)
-            )
-        })
-        .collect();
-    if parts.len() == 1 {
-        format!("{} LIMIT {lim}", parts[0])
-    } else {
-        format!("{} LIMIT {lim}", parts.join(" INTERSECT "))
-    }
-}
-
-/// Discovery SQL for `GET /api/v1/label/__name__/values` (AC-Q6).
-///
-/// Reads postings (not `GROUP BY metric_samples`). Joins `metric_series` only for
-/// classic histogram/summary Prom name expansion.
-pub fn discover_name_values_sql(catalog: &str, days: RecordDateRange, max_series: usize) -> String {
-    let postings = qualified_metrics_layout_table(catalog, "metric_postings");
-    let series = qualified_metrics_layout_table(catalog, "metric_series");
-    let lim = max_series.saturating_add(1);
-    let day_pred = days.sql_predicate("p.");
-    let day_and = if day_pred.is_empty() {
-        String::new()
-    } else {
-        format!(" AND {day_pred}")
-    };
-    format!(
-        "SELECT p.label_value, any_value(s.metric_type) AS metric_type \
-         FROM {postings} p \
-         JOIN {series} s \
-           ON p.series_id = s.series_id AND p.record_date = s.record_date \
-         WHERE p.label_name = '__name__'{day_and} \
-         GROUP BY p.label_value \
-         ORDER BY p.label_value \
-         LIMIT {lim}"
-    )
-}
-
-/// Timestamptz literal for zone-map-friendly predicates (§9.1 step 8).
-pub fn timestamptz_literal_ms(ms: i64) -> String {
-    let dt = ms_to_utc(ms).unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap());
-    format!("TIMESTAMPTZ '{}'", dt.format("%Y-%m-%d %H:%M:%S%.3f+00"))
-}
-
-pub fn samples_time_predicates(
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-    time_column: &str,
-) -> String {
-    samples_time_predicates_bounded(start_ms, end_ms, time_column, true)
-}
-
-/// Like [`samples_time_predicates`], but `end_inclusive=false` emits `col < end`
-/// for half-open stitch windows (downsample `[start, stitch)`, raw `[stitch, end]`).
-pub fn samples_time_predicates_bounded(
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-    time_column: &str,
-    end_inclusive: bool,
-) -> String {
-    let mut parts = Vec::new();
-    if let Some(start) = start_ms {
-        parts.push(format!(
-            "sm.{time_column} >= {}",
-            timestamptz_literal_ms(start)
-        ));
-    }
-    if let Some(end) = end_ms {
-        let op = if end_inclusive { "<=" } else { "<" };
-        parts.push(format!(
-            "sm.{time_column} {op} {}",
-            timestamptz_literal_ms(end)
-        ));
-    }
-    // DuckLake partitions on record_date; timestamp predicates alone often still
-    // open F-files / closed-day Parquet while the Prom window sits on EVAL_END.
-    let day_pred = RecordDateRange::from_ms(start_ms, end_ms).sql_predicate("sm.");
-    if !day_pred.is_empty() {
-        parts.push(day_pred);
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(" AND {}", parts.join(" AND "))
-    }
-}
-
-/// Grafana floor is 15s. Bucket raw/hist scans to `step` so a 1h panel does not
-/// materialize 1s scrape rows into PromQL eval (not a query-result cache).
-const STEP_BUCKET_MIN_MS: i64 = 15_000;
-
-fn step_bucket_interval_sql(step_ms: Option<i64>) -> Option<String> {
-    let step = step_ms.filter(|s| *s >= STEP_BUCKET_MIN_MS)?;
-    let secs = (step / 1000).max(1);
-    Some(format!("INTERVAL '{secs} seconds'"))
-}
-
-/// Skinny sample scan after resolve (AC-Q7). No full compatibility-relation scan.
-///
-/// `grain` selects raw / 5m / 1h / hist (§9.1). Downsample empty tables yield empty
-/// results until maintenance builds them — planner still emits the correct FROM.
-#[allow(clippy::too_many_arguments)]
-pub fn samples_scan_sql(
-    catalog: &str,
-    series_ids: &[u64],
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-    _label_proj: &str,
-    include_fidelity: bool,
-    fetch_limit: usize,
-    grain: SampleGrain,
-    step_ms: Option<i64>,
-    hist_arrays: bool,
-) -> String {
-    let time = samples_time_predicates(start_ms, end_ms, grain.time_column());
-    let ids = sql_series_id_list(series_ids);
-    let bucket = step_bucket_interval_sql(step_ms);
-
-    if grain.is_hist() || (include_fidelity && grain == SampleGrain::Raw) {
-        return hist_or_union_scan_sql(
-            catalog,
-            &ids,
-            &time,
-            include_fidelity,
-            fetch_limit,
-            grain,
-            start_ms,
-            end_ms,
-            bucket.as_deref(),
-            hist_arrays,
-        );
-    }
-
-    if grain.is_downsample() && !grain.is_hist() {
-        return gauge_downsample_with_raw_tail(
-            catalog,
-            &ids,
-            start_ms,
-            end_ms,
-            fetch_limit,
-            grain,
-            step_ms,
-        );
-    }
-
-    let samples = grain_table_sql(catalog, grain);
-    let value = grain.value_expr();
-    let ts_col = grain.time_column();
-    if let Some(iv) = bucket {
-        if grain == SampleGrain::Raw {
-            return format!(
-                "SELECT sm.series_id, \
-                 CAST((epoch(time_bucket({iv}, sm.{ts_col})) * 1000) AS BIGINT) AS timestamp_ms, \
-                 arg_max({value}, sm.{ts_col}) AS value, \
-                 NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-                 FROM {samples} sm \
-                 WHERE sm.series_id IN ({ids}){time} \
-                 GROUP BY sm.series_id, time_bucket({iv}, sm.{ts_col}) \
-                 LIMIT {fetch_limit}"
-            );
-        }
-    }
-    format!(
-        "SELECT sm.series_id, \
-         CAST((epoch(sm.{ts_col}) * 1000) AS BIGINT) AS timestamp_ms, \
-         {value} AS value, \
-         NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-         NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-         FROM {samples} sm \
-         WHERE sm.series_id IN ({ids}){time} \
-         LIMIT {fetch_limit}"
-    )
-}
-
-/// Half-open stitch: downsample covers through `align_floor(now - lag, bucket)`;
-/// raw starts there. Using `now - lag` for both sides left a gap of up to one
-/// bucket (closed-bucket materialization ends at the floor, not at `now - lag`).
-fn stitch_raw_start_ms(cutoff_ms: i64, bucket_ms: i64) -> i64 {
-    if bucket_ms <= 0 {
-        return cutoff_ms;
-    }
-    cutoff_ms.div_euclid(bucket_ms) * bucket_ms
-}
-
-/// Gauge FiveMin/OneHour grains: downsample for closed history + raw lag tail.
-///
-/// Mirrors `hist_or_union_scan_sql` (HistFiveMin / HistOneHour). Live Grafana
-/// panels use `end ≈ now`, so a raw-only live path scanned the full multi-day
-/// raw window and blew CPU / 100ms SLO even when `metric_samples_5m` /
-/// `metric_samples_1h` were populated. Archive queries (`end` older than lag)
-/// read downsample only (AC-Q2).
-fn gauge_downsample_with_raw_tail(
-    catalog: &str,
-    ids: &str,
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-    fetch_limit: usize,
-    grain: SampleGrain,
-    step_ms: Option<i64>,
-) -> String {
-    use crate::compat::backends::grain::{FIVE_MIN_LAG_MS, ONE_HOUR_LAG_MS};
-
-    let (lag_ms, bucket_ms) = match grain {
-        SampleGrain::FiveMin => (FIVE_MIN_LAG_MS, FIVE_MIN_LAG_MS),
-        SampleGrain::OneHour => (ONE_HOUR_LAG_MS, ONE_HOUR_LAG_MS),
-        _ => (ONE_HOUR_LAG_MS, ONE_HOUR_LAG_MS),
-    };
-    let bucket = step_bucket_interval_sql(step_ms);
-    let raw_table = grain_table_sql(catalog, SampleGrain::Raw);
-    let ds_table = grain_table_sql(catalog, grain);
-    let ds_time_col = grain.time_column();
-    let ds_value = grain.value_expr();
-
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let end = end_ms.unwrap_or(now_ms);
-    let start = start_ms.unwrap_or(i64::MIN);
-    let cutoff = now_ms.saturating_sub(lag_ms);
-    let stitch = stitch_raw_start_ms(cutoff, bucket_ms);
-
-    let ds_select = |from_ms: i64, to_ms: i64, end_inclusive: bool| -> String {
-        let ds_time =
-            samples_time_predicates_bounded(Some(from_ms), Some(to_ms), ds_time_col, end_inclusive);
-        format!(
-            "SELECT sm.series_id, \
-             CAST((epoch(sm.{ds_time_col}) * 1000) AS BIGINT) AS timestamp_ms, \
-             {ds_value} AS value, \
-             NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-             NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-             FROM {ds_table} sm \
-             WHERE sm.series_id IN ({ids}){ds_time}"
-        )
-    };
-
-    let raw_select = |from_ms: i64, to_ms: i64| -> String {
-        let raw_time = samples_time_predicates(Some(from_ms), Some(to_ms), "timestamp");
-        if let Some(ref iv) = bucket {
-            format!(
-                "SELECT sm.series_id, \
-                 CAST((epoch(time_bucket({iv}, sm.timestamp)) * 1000) AS BIGINT) AS timestamp_ms, \
-                 arg_max(sm.value, sm.timestamp) AS value, \
-                 NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-                 FROM {raw_table} sm \
-                 WHERE sm.series_id IN ({ids}){raw_time} \
-                 GROUP BY sm.series_id, time_bucket({iv}, sm.timestamp)"
-            )
-        } else {
-            format!(
-                "SELECT sm.series_id, \
-                 CAST((epoch(sm.timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
-                 sm.value AS value, \
-                 NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-                 FROM {raw_table} sm \
-                 WHERE sm.series_id IN ({ids}){raw_time}"
-            )
-        }
-    };
-
-    // Fully closed window → downsample only.
-    if end <= cutoff {
-        return format!("{} LIMIT {fetch_limit}", ds_select(start, end, true));
-    }
-
-    // Live window: historical downsample + recent raw (half-open at stitch).
-    let mut parts = Vec::new();
-    let raw_start = start.max(stitch);
-    parts.push(raw_select(raw_start, end));
-    if start < stitch {
-        // Downsample is [start, stitch); raw is [stitch, end].
-        parts.push(ds_select(start, stitch, false));
-    }
-    match parts.len() {
-        1 => format!("{} LIMIT {fetch_limit}", parts[0]),
-        _ => format!(
-            "({}) UNION ALL ({}) LIMIT {fetch_limit}",
-            parts[0], parts[1]
-        ),
-    }
-}
-
-fn sql_series_id_list(series_ids: &[u64]) -> String {
-    if series_ids.is_empty() {
-        "NULL".to_string()
-    } else {
-        series_ids
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
-
-/// How far `series_meta_sql` may look when filling the series-id cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SeriesMetaDayScope {
-    /// Open / near-open days only — partition-prunes for live Grafana series.
-    Recent,
-    /// Miss path: still bound to the Prom query's `record_date` window (not
-    /// full retention) so churned ids cannot re-open the whole lake.
-    QueryWindow,
-}
-
-/// Series identity + labels once per `series_id` (Greptime series metadata,
-/// not VARIANT extracts on every sample row).
-///
-/// Self-monitoring showed `sql_kind=metric_series` at tens of seconds when meta
-/// SQL scanned the full Prom window (or all retained days) of day-duplicated
-/// `metric_series` just to decorate already-resolved ids. The in-process cache
-/// is keyed only by `series_id` (identity is immutable). Prefer:
-/// 1. `Recent` + optional `metric_name` (sort key) for the hot path
-/// 2. `QueryWindow` only for ids still missing after (1)
-pub fn series_meta_sql(
-    catalog: &str,
-    series_ids: &[u64],
-    scope: SeriesMetaDayScope,
-    metric_name: Option<&str>,
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-) -> String {
-    let series = qualified_metrics_layout_table(catalog, "metric_series");
-    let ids = sql_series_id_list(series_ids);
-    let mut preds = vec![format!("s.series_id IN ({ids})")];
-    if let Some(name) = metric_name {
-        preds.push(format!("s.metric_name = {}", sql_string_literal(name)));
-    }
-    let hint = match scope {
-        SeriesMetaDayScope::Recent => {
-            // Two calendar days covers open-day + lag without multi-week partition fanout.
-            preds.push("s.record_date >= CURRENT_DATE - INTERVAL 2 DAY".to_string());
-            "thelake_series_meta_recent"
-        }
-        SeriesMetaDayScope::QueryWindow => {
-            let day_pred = RecordDateRange::from_ms(start_ms, end_ms).sql_predicate("s.");
-            if !day_pred.is_empty() {
-                preds.push(day_pred);
-            }
-            "thelake_series_meta_all"
-        }
-    };
-    let where_sql = preds.join(" AND ");
-    format!(
-        "SELECT /* {hint} */ s.series_id, \
-         s.metric_name, \
-         s.description, \
-         s.unit, \
-         s.metric_type, \
-         CAST(s.labels AS JSON) AS labels_json \
-         FROM {series} s \
-         WHERE {where_sql} \
-         QUALIFY row_number() OVER (PARTITION BY s.series_id ORDER BY s.record_date DESC) = 1"
-    )
-}
-
-fn hist_row_select_sql(
-    catalog: &str,
-    table: &str,
-    ts_col: &str,
-    ids: &str,
-    time: &str,
-    hist_arrays: bool,
-    bucket_iv: Option<&str>,
-) -> String {
-    let hist = qualified_metrics_layout_table(catalog, table);
-    let (count_expr, sum_expr, buckets_expr, bounds_expr) = if hist_arrays {
-        (
-            "sm.count",
-            "sm.sum",
-            "sm.bucket_counts",
-            "sm.explicit_bounds",
-        )
-    } else {
-        ("sm.count", "sm.sum", "NULL::UBIGINT[]", "NULL::DOUBLE[]")
-    };
-    if let Some(iv) = bucket_iv {
-        if hist_arrays {
-            format!(
-                "SELECT sm.series_id, \
-                 CAST((epoch(time_bucket({iv}, sm.{ts_col})) * 1000) AS BIGINT) AS timestamp_ms, \
-                 arg_max(COALESCE(sm.sum, 0.0), sm.{ts_col}) AS value, \
-                 arg_max(sm.count, sm.{ts_col}) AS count, arg_max(sm.sum, sm.{ts_col}) AS sum, \
-                 arg_max(sm.bucket_counts, sm.{ts_col}) AS bucket_counts, \
-                 arg_max(sm.explicit_bounds, sm.{ts_col}) AS explicit_bounds, NULL AS quantiles \
-                 FROM {hist} sm \
-                 WHERE sm.series_id IN ({ids}){time} \
-                 GROUP BY sm.series_id, time_bucket({iv}, sm.{ts_col})"
-            )
-        } else {
-            format!(
-                "SELECT sm.series_id, \
-                 CAST((epoch(time_bucket({iv}, sm.{ts_col})) * 1000) AS BIGINT) AS timestamp_ms, \
-                 arg_max(COALESCE(sm.sum, 0.0), sm.{ts_col}) AS value, \
-                 arg_max(sm.count, sm.{ts_col}) AS count, arg_max(sm.sum, sm.{ts_col}) AS sum, \
-                 NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-                 FROM {hist} sm \
-                 WHERE sm.series_id IN ({ids}){time} \
-                 GROUP BY sm.series_id, time_bucket({iv}, sm.{ts_col})"
-            )
-        }
-    } else {
-        format!(
-            "SELECT sm.series_id, \
-             CAST((epoch(sm.{ts_col}) * 1000) AS BIGINT) AS timestamp_ms, \
-             COALESCE(sm.sum, 0.0) AS value, \
-             {count_expr}, {sum_expr}, {buckets_expr}, {bounds_expr}, NULL AS quantiles \
-             FROM {hist} sm \
-             WHERE sm.series_id IN ({ids}){time}"
-        )
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn hist_or_union_scan_sql(
-    catalog: &str,
-    ids: &str,
-    time: &str,
-    include_fidelity: bool,
-    fetch_limit: usize,
-    grain: SampleGrain,
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-    bucket_iv: Option<&str>,
-    hist_arrays: bool,
-) -> String {
-    if grain.is_hist() {
-        let body = match grain {
-            SampleGrain::Hist => hist_row_select_sql(
-                catalog,
-                "metric_hist_samples",
-                "timestamp",
-                ids,
-                time,
-                hist_arrays,
-                bucket_iv,
-            ),
-            SampleGrain::HistFiveMin => {
-                // 5m hist for older data (guaranteed complete), raw for recent window.
-                use crate::compat::backends::grain::FIVE_MIN_LAG_MS;
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                let end = end_ms.unwrap_or(now_ms);
-                let start = start_ms.unwrap_or(i64::MIN);
-                let cutoff = now_ms.saturating_sub(FIVE_MIN_LAG_MS);
-                let stitch = stitch_raw_start_ms(cutoff, FIVE_MIN_LAG_MS);
-
-                if end <= cutoff {
-                    let ds_time = samples_time_predicates(Some(start), Some(end), "window_ts");
-                    hist_row_select_sql(
-                        catalog,
-                        "metric_hist_samples_5m",
-                        "window_ts",
-                        ids,
-                        &ds_time,
-                        hist_arrays,
-                        bucket_iv,
-                    )
-                } else {
-                    let mut parts = Vec::new();
-                    let raw_start = start.max(stitch);
-                    let raw_time = samples_time_predicates(Some(raw_start), Some(end), "timestamp");
-                    parts.push(hist_row_select_sql(
-                        catalog,
-                        "metric_hist_samples",
-                        "timestamp",
-                        ids,
-                        &raw_time,
-                        hist_arrays,
-                        bucket_iv,
-                    ));
-                    if start < stitch {
-                        let ds_time = samples_time_predicates_bounded(
-                            Some(start),
-                            Some(stitch),
-                            "window_ts",
-                            false,
-                        );
-                        parts.push(hist_row_select_sql(
-                            catalog,
-                            "metric_hist_samples_5m",
-                            "window_ts",
-                            ids,
-                            &ds_time,
-                            hist_arrays,
-                            bucket_iv,
-                        ));
-                    }
-                    match parts.len() {
-                        1 => parts.into_iter().next().unwrap(),
-                        _ => format!("({}) UNION ALL ({})", parts[0], parts[1]),
-                    }
-                }
-            }
-            SampleGrain::HistOneHour => {
-                use crate::compat::backends::grain::ONE_HOUR_LAG_MS;
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                let end = end_ms.unwrap_or(now_ms);
-                let start = start_ms.unwrap_or(i64::MIN);
-                let cutoff = now_ms.saturating_sub(ONE_HOUR_LAG_MS);
-                let stitch = stitch_raw_start_ms(cutoff, ONE_HOUR_LAG_MS);
-
-                if end <= cutoff {
-                    hist_row_select_sql(
-                        catalog,
-                        "metric_hist_samples_1h",
-                        "window_ts",
-                        ids,
-                        time,
-                        hist_arrays,
-                        bucket_iv,
-                    )
-                } else {
-                    let mut parts = Vec::new();
-                    let raw_start = start.max(stitch);
-                    let raw_time = samples_time_predicates(Some(raw_start), Some(end), "timestamp");
-                    parts.push(hist_row_select_sql(
-                        catalog,
-                        "metric_hist_samples",
-                        "timestamp",
-                        ids,
-                        &raw_time,
-                        hist_arrays,
-                        bucket_iv,
-                    ));
-                    if start < stitch {
-                        let ds_time = samples_time_predicates_bounded(
-                            Some(start),
-                            Some(stitch),
-                            "window_ts",
-                            false,
-                        );
-                        parts.push(hist_row_select_sql(
-                            catalog,
-                            "metric_hist_samples_1h",
-                            "window_ts",
-                            ids,
-                            &ds_time,
-                            hist_arrays,
-                            bucket_iv,
-                        ));
-                    }
-                    match parts.len() {
-                        1 => parts.into_iter().next().unwrap(),
-                        _ => format!("({}) UNION ALL ({})", parts[0], parts[1]),
-                    }
-                }
-            }
-            _ => unreachable!("is_hist()"),
-        };
-        return format!("{body} LIMIT {fetch_limit}");
-    }
-
-    let samples = grain_table_sql(catalog, SampleGrain::Raw);
-    let raw_time = samples_time_predicates(start_ms, end_ms, SampleGrain::Raw.time_column());
-    let gauge_sql = format!(
-        "SELECT sm.series_id, \
-         CAST((epoch(sm.timestamp) * 1000) AS BIGINT) AS timestamp_ms, \
-         sm.value, \
-         NULL::UBIGINT AS count, NULL::DOUBLE AS sum, \
-         NULL::UBIGINT[] AS bucket_counts, NULL::DOUBLE[] AS explicit_bounds, NULL AS quantiles \
-         FROM {samples} sm \
-         WHERE sm.series_id IN ({ids}){raw_time}"
-    );
-    if !include_fidelity {
-        return format!("{gauge_sql} LIMIT {fetch_limit}");
-    }
-    let hist_sql = hist_row_select_sql(
-        catalog,
-        "metric_hist_samples",
-        "timestamp",
-        ids,
-        &raw_time,
-        hist_arrays,
-        bucket_iv,
-    );
-    format!("({gauge_sql}) UNION ALL ({hist_sql}) LIMIT {fetch_limit}")
-}
-
-/// Build samples SQL using §9.1 grain selection.
-#[allow(clippy::too_many_arguments)]
-pub fn samples_scan_sql_for_window(
-    catalog: &str,
-    series_ids: &[u64],
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-    step_ms: Option<i64>,
-    label_proj: &str,
-    include_fidelity: bool,
-    is_histogram: bool,
-    hist_arrays: bool,
-    fetch_limit: usize,
-) -> String {
-    let grain = select_sample_grain(start_ms, end_ms, step_ms, is_histogram);
-    samples_scan_sql(
-        catalog,
-        series_ids,
-        start_ms,
-        end_ms,
-        label_proj,
-        include_fidelity,
-        fetch_limit,
-        grain,
-        step_ms,
-        hist_arrays,
-    )
-}
-
 /// Softprobe analog of Greptime SST inverted-index tag→row-group bitmaps
 /// (§4.4 MEASURE / AC-G3): cache equality posting id sets keyed by
-/// `(engine, tenant, record_date, label_name, label_value)` with a short TTL.
+/// `(engine, tenant, calendar_day, label_name, label_value)` with a short TTL.
 ///
-/// Keying by `record_date` prevents serving yesterday's postings for today.
+/// Keying by calendar day prevents serving yesterday's postings for today.
 /// TTL covers same-day ingest freshness without a Puffin/SST index.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PostingCacheKey {
     pub engine_id: usize,
     pub tenant_id: String,
+    /// Calendar day of the posting (not a lake DATE column).
     pub record_date: NaiveDate,
     pub label_name: String,
     pub label_value: String,
@@ -892,23 +145,6 @@ impl PostingSetCache {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
-}
-
-/// SQL for one day-scoped equality posting list (cache fill path).
-pub fn single_posting_sql(
-    catalog: &str,
-    day: NaiveDate,
-    label_name: &str,
-    label_value: &str,
-) -> String {
-    let postings = qualified_metrics_layout_table(catalog, "metric_postings");
-    format!(
-        "SELECT DISTINCT series_id FROM {postings} \
-         WHERE label_name = {} AND label_value = {} AND record_date = DATE '{day}' \
-         ORDER BY series_id",
-        sql_string_literal(label_name),
-        sql_string_literal(label_value),
-    )
 }
 
 /// Merge two sorted unique id slices (union).
@@ -1035,7 +271,7 @@ mod tests {
     use crate::compat::backends::grain::SampleGrain;
     use crate::models::Metric;
     use crate::storage::ducklake::{write_metrics_layout_txn, DEFAULT_MAX_LABELS_PER_SERIES};
-    use chrono::TimeZone;
+    use chrono::{DateTime, TimeZone, Utc};
     use duckdb::Connection;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -1142,7 +378,7 @@ mod tests {
 
     #[test]
     fn inclusive_days_and_single_posting_sql() {
-        let days = RecordDateRange {
+        let days = PostingsDayRange {
             start: Some(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap()),
             end: Some(NaiveDate::from_ymd_opt(2026, 8, 16).unwrap()),
         };
@@ -1158,7 +394,11 @@ mod tests {
             "layout_wide",
         );
         assert!(sql.contains("metric_postings"));
-        assert!(sql.contains("record_date = DATE '2026-08-15'"));
+        assert!(
+            sql.contains("timestamp >="),
+            "single posting must bind timestamp day window: {sql}"
+        );
+        assert!(!sql.contains("CAST(timestamp AS DATE)"), "{sql}");
         assert!(sql.contains("label_name = '__name__'"));
         assert!(sql.contains("label_value = 'layout_wide'"));
     }
@@ -1211,7 +451,7 @@ mod tests {
     /// T-Q6 / AC-Q6: discovery SQL uses metric_postings + label_name='__name__'.
     #[test]
     fn discover_sql_uses_postings() {
-        let days = RecordDateRange {
+        let days = PostingsDayRange {
             start: Some(NaiveDate::from_ymd_opt(2026, 8, 15).unwrap()),
             end: Some(NaiveDate::from_ymd_opt(2026, 8, 15).unwrap()),
         };
@@ -1233,7 +473,7 @@ mod tests {
     /// T-Q7 / AC-Q7: resolve + samples SQL shape (postings + series_id IN).
     #[test]
     fn resolve_and_samples_sql_uses_postings_not_fat() {
-        let days = RecordDateRange {
+        let days = PostingsDayRange {
             start: Some(NaiveDate::from_ymd_opt(2026, 8, 15).unwrap()),
             end: Some(NaiveDate::from_ymd_opt(2026, 8, 15).unwrap()),
         };
@@ -1271,8 +511,8 @@ mod tests {
         assert!(!samples.contains("to_timestamp("));
         assert!(samples.contains("TIMESTAMPTZ "));
         assert!(
-            samples.contains("record_date BETWEEN DATE"),
-            "AC-Q3/G3: sample scan must prune by record_date, got {samples}"
+            samples.contains("timestamp"),
+            "AC-Q3/G3: sample scan must be time-bound, got {samples}"
         );
     }
 
@@ -1301,7 +541,7 @@ mod tests {
             !sql.contains(".metric_samples sm"),
             "AC-Q2: historical window must not use raw metric_samples, got {sql}"
         );
-        assert!(sql.contains("window_ts"));
+        assert!(sql.contains("timestamp"));
         assert!(!sql.contains("to_timestamp("));
     }
 
@@ -1373,7 +613,9 @@ mod tests {
         assert!(sql.contains("CAST(s.labels AS JSON)"));
         assert!(sql.contains("QUALIFY row_number()"));
         assert!(sql.contains("thelake_series_meta_recent"));
-        assert!(sql.contains("CURRENT_DATE - INTERVAL 2 DAY"));
+        assert!(sql.contains("s.timestamp >="));
+        assert!(sql.contains("INTERVAL '2' DAY"));
+        assert!(!sql.contains("CAST(s.timestamp AS DATE)"));
         assert!(sql.contains("metric_name = 'demo_metric'"));
         assert!(!sql.contains("CAST(s.labels['"));
         assert!(sql.contains("series_id IN (42)"));
@@ -1387,21 +629,8 @@ mod tests {
             Some(1_700_086_400_000),
         );
         assert!(all.contains("thelake_series_meta_all"));
-        assert!(all.contains("record_date BETWEEN"));
+        assert!(all.contains("timestamp"));
         assert!(!all.contains("CURRENT_DATE"));
-    }
-
-    #[test]
-    fn stitch_raw_start_aligns_to_closed_bucket_end() {
-        let bucket = 3_600_000i64;
-        // Arbitrary cutoff mid-hour → stitch is the hour floor (closed bucket end).
-        let cutoff = 1_700_005_220_000i64; // not on an hour boundary
-        let stitch = stitch_raw_start_ms(cutoff, bucket);
-        assert_eq!(stitch, cutoff.div_euclid(bucket) * bucket);
-        assert!(stitch <= cutoff);
-        assert!(cutoff - stitch < bucket);
-        // Aligned cutoff is unchanged.
-        assert_eq!(stitch_raw_start_ms(stitch, bucket), stitch);
     }
 
     /// Live 30d panels (`end ≈ now`) must UNION 1h history + raw lag, not raw-only.
@@ -1433,10 +662,15 @@ mod tests {
             sql.contains("metric_samples sm") || sql.contains(".metric_samples sm"),
             "live 30d must keep raw lag tail, got {sql}"
         );
-        // Downsample side must be half-open at stitch (`window_ts < stitch`), not `<=`.
+        // Downsample side must be half-open at stitch (`timestamp < stitch`), not `<=`.
+        // Raw lag arm still uses inclusive `<= end`; only assert on the 1h arm.
+        let ds_arm = sql
+            .split("UNION ALL")
+            .find(|p| p.contains("metric_samples_1h"))
+            .expect("1h downsample arm");
         assert!(
-            sql.contains("window_ts < ") && !sql.contains("window_ts <="),
-            "live stitch must use exclusive downsample end: {sql}"
+            ds_arm.contains("timestamp < ") && !ds_arm.contains("timestamp <="),
+            "live stitch must use exclusive downsample end: {ds_arm}"
         );
     }
 
@@ -1447,22 +681,24 @@ mod tests {
         assert!(pred.contains("TIMESTAMPTZ "));
         assert!(!pred.contains("to_timestamp("));
         assert!(
-            pred.contains("record_date BETWEEN DATE"),
-            "time window must also prune record_date partitions: {pred}"
+            pred.contains("sm.timestamp") && pred.contains(">="),
+            "time window must bind timestamp: {pred}"
         );
+        assert!(!pred.contains("record_date"), "{pred}");
     }
 
     #[test]
     fn stitch_downsample_end_is_exclusive() {
-        let inclusive = samples_time_predicates(Some(1_000), Some(2_000), "window_ts");
+        let inclusive = samples_time_predicates(Some(1_000), Some(2_000), "timestamp");
         let exclusive =
-            samples_time_predicates_bounded(Some(1_000), Some(2_000), "window_ts", false);
+            samples_time_predicates_bounded(Some(1_000), Some(2_000), "timestamp", false);
         assert!(
-            inclusive.contains("window_ts <="),
+            inclusive.contains("timestamp <="),
             "default end must stay inclusive: {inclusive}"
         );
         assert!(
-            exclusive.contains("window_ts < ") && !exclusive.contains("window_ts <="),
+            exclusive.contains("timestamp < TIMESTAMPTZ '1970-01-01 00:00:02.000+00'")
+                && !exclusive.contains("timestamp <= TIMESTAMPTZ '1970-01-01 00:00:02.000+00'"),
             "half-open stitch end must be exclusive: {exclusive}"
         );
     }
@@ -1489,7 +725,7 @@ mod tests {
             op: MatcherOp::Eq,
             value: "layout_wide".into(),
         }]);
-        let days = RecordDateRange::from_ms(Some(1_699_998_200_000), Some(1_700_000_000_000));
+        let days = PostingsDayRange::from_ms(Some(1_699_998_200_000), Some(1_700_000_000_000));
         let sql = resolve_series_ids_sql(
             "softprobe.metrics_layout_local_dev_tenant",
             days,
@@ -1520,7 +756,7 @@ mod tests {
         write_metrics_layout_txn(&conn, &catalog, &metrics, DEFAULT_MAX_LABELS_PER_SERIES)
             .expect("ingest");
 
-        let days = RecordDateRange {
+        let days = PostingsDayRange {
             start: Some(ts.date_naive()),
             end: Some(ts.date_naive()),
         };
@@ -1608,7 +844,7 @@ mod tests {
         write_metrics_layout_txn(&conn, &catalog, &metrics, DEFAULT_MAX_LABELS_PER_SERIES)
             .expect("ingest");
 
-        let days = RecordDateRange {
+        let days = PostingsDayRange {
             start: Some(ts.date_naive()),
             end: Some(ts.date_naive()),
         };
@@ -1649,7 +885,7 @@ mod tests {
         let end = ts;
         let start = ts - chrono::Duration::days(31);
         let days =
-            RecordDateRange::from_ms(Some(start.timestamp_millis()), Some(end.timestamp_millis()));
+            PostingsDayRange::from_ms(Some(start.timestamp_millis()), Some(end.timestamp_millis()));
         assert!(
             days.inclusive_days().map(|d| d.len()).unwrap_or(0) > 1,
             "AC-W4 window must span multiple calendar days"
@@ -1661,8 +897,8 @@ mod tests {
         }]);
         let resolve_sql = resolve_series_ids_sql(&catalog, days, &eq, MAX);
         assert!(
-            resolve_sql.contains("BETWEEN") || resolve_sql.contains("record_date"),
-            "multi-day resolve must prune by record_date: {resolve_sql}"
+            resolve_sql.contains("BETWEEN") || resolve_sql.contains("timestamp"),
+            "multi-day resolve must prune by timestamp: {resolve_sql}"
         );
         assert!(
             resolve_sql.contains(&format!("LIMIT {}", MAX + 1)),
@@ -1705,7 +941,7 @@ mod tests {
         let pods_on = |day: NaiveDate| -> Vec<String> {
             let sql = format!(
                 "SELECT DISTINCT label_value FROM {}.metric_postings \
-                 WHERE record_date = DATE '{day}' AND label_name = 'pod' \
+                 WHERE CAST(timestamp AS DATE) = DATE '{day}' AND label_name = 'pod' \
                  ORDER BY 1",
                 catalog
             );
@@ -1750,7 +986,7 @@ mod tests {
             .query_row(
                 &format!(
                     "SELECT count(*) FROM {catalog}.metric_postings \
-                     WHERE record_date = DATE '{}' AND label_name = 'pod' AND label_value = 'p1'",
+                     WHERE CAST(timestamp AS DATE) = DATE '{}' AND label_name = 'pod' AND label_value = 'p1'",
                     today.date_naive()
                 ),
                 [],
@@ -1761,6 +997,194 @@ mod tests {
             n, 0,
             "AC-C4: dead pod p1 must not appear in today's postings"
         );
+    }
+
+    /// A stable series identity needs one index row in every calendar day it is
+    /// observed. Prom postings resolve and series metadata both use those day
+    /// bounds, so retaining only the first-ever row strands later-day queries.
+    #[test]
+    fn persistent_series_retains_day_scoped_index_rows_and_metadata() {
+        let temp = TempDir::new().expect("temp");
+        let (conn, catalog) = attach_ducklake(&temp);
+        let day_a = Utc.with_ymd_and_hms(2026, 8, 13, 12, 0, 0).unwrap();
+        let day_b = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        write_metrics_layout_txn(
+            &conn,
+            &catalog,
+            &[
+                gauge("persistent_metric", "instance-1", day_a, 1.0),
+                gauge(
+                    "persistent_metric",
+                    "instance-1",
+                    day_a + chrono::Duration::hours(1),
+                    1.5,
+                ),
+            ],
+            DEFAULT_MAX_LABELS_PER_SERIES,
+        )
+        .expect("ingest first-day persistent series");
+        write_metrics_layout_txn(
+            &conn,
+            &catalog,
+            &[gauge("persistent_metric", "instance-1", day_b, 2.0)],
+            DEFAULT_MAX_LABELS_PER_SERIES,
+        )
+        .expect("ingest second-day persistent series");
+
+        let series_id: u64 = conn
+            .query_row(
+                &format!(
+                    "SELECT series_id FROM {catalog}.metric_series \
+                     WHERE metric_name = 'persistent_metric' \
+                     ORDER BY timestamp LIMIT 1"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .expect("series id");
+        let day_bounds = |day: DateTime<Utc>| {
+            let start = day.date_naive().and_hms_opt(0, 0, 0).unwrap();
+            let end = start + chrono::Duration::days(1);
+            (
+                start.and_utc().format("%Y-%m-%d %H:%M:%S+00"),
+                end.and_utc().format("%Y-%m-%d %H:%M:%S+00"),
+            )
+        };
+
+        for day in [day_a, day_b] {
+            let (from, to) = day_bounds(day);
+            let series_rows: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT count(*) FROM {catalog}.metric_series \
+                         WHERE series_id = {series_id} \
+                           AND timestamp >= TIMESTAMPTZ '{from}' \
+                           AND timestamp < TIMESTAMPTZ '{to}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("day-scoped series rows");
+            assert_eq!(series_rows, 1, "metric_series row missing for {day}");
+
+            let posting_rows: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT count(*) FROM {catalog}.metric_postings \
+                         WHERE label_name = '__name__' \
+                           AND series_id = {series_id} \
+                           AND timestamp >= TIMESTAMPTZ '{from}' \
+                           AND timestamp < TIMESTAMPTZ '{to}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("day-scoped posting rows");
+            assert_eq!(posting_rows, 1, "metric_postings row missing for {day}");
+
+            let days = PostingsDayRange {
+                start: Some(day.date_naive()),
+                end: Some(day.date_naive()),
+            };
+            let equality = [EqualityPosting {
+                label_name: "__name__".into(),
+                values: vec!["persistent_metric".into()],
+            }];
+            let resolve_sql = resolve_series_ids_sql(&catalog, days, &equality, 10);
+            let resolved: Vec<u64> = conn
+                .prepare(&resolve_sql)
+                .expect("prepare day resolve")
+                .query_map([], |row| row.get(0))
+                .expect("execute day resolve")
+                .map(|row| row.expect("resolved id"))
+                .collect();
+            assert_eq!(resolved, vec![series_id], "resolve failed for {day}");
+
+            let start_ms = day.timestamp_millis();
+            let end_ms = (day + chrono::Duration::days(1)).timestamp_millis() - 1;
+            let metadata_sql = series_meta_sql(
+                &catalog,
+                &[series_id],
+                SeriesMetaDayScope::QueryWindow,
+                None,
+                Some(start_ms),
+                Some(end_ms),
+            );
+            let metadata_rows: Vec<u64> = conn
+                .prepare(&metadata_sql)
+                .expect("prepare day metadata")
+                .query_map([], |row| row.get(0))
+                .expect("execute day metadata")
+                .map(|row| row.expect("metadata id"))
+                .collect();
+            assert_eq!(metadata_rows, vec![series_id], "metadata failed for {day}");
+        }
+
+        let union_sql = crate::sql::schema::union_metrics_sql(&catalog);
+        let union_rows: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM ({union_sql}) AS metrics \
+                     WHERE metric_name = 'persistent_metric'"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .expect("union metrics rows");
+        assert_eq!(
+            union_rows, 3,
+            "day-index metadata must not multiply persistent samples"
+        );
+    }
+
+    #[test]
+    fn multi_day_resolve_limits_unique_persistent_series_ids() {
+        let temp = TempDir::new().expect("temp");
+        let (conn, catalog) = attach_ducklake(&temp);
+        let day_a = Utc.with_ymd_and_hms(2026, 8, 13, 12, 0, 0).unwrap();
+        let day_b = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        for day in [day_a, day_b] {
+            write_metrics_layout_txn(
+                &conn,
+                &catalog,
+                &[
+                    gauge("persistent_metric", "instance-1", day, 1.0),
+                    gauge("persistent_metric", "instance-2", day, 2.0),
+                ],
+                DEFAULT_MAX_LABELS_PER_SERIES,
+            )
+            .expect("ingest persistent series");
+        }
+
+        let expected: Vec<u64> = conn
+            .prepare(&format!(
+                "SELECT DISTINCT series_id FROM {catalog}.metric_series \
+                 WHERE metric_name = 'persistent_metric' ORDER BY series_id"
+            ))
+            .expect("prepare ids")
+            .query_map([], |row| row.get(0))
+            .expect("query ids")
+            .map(|row| row.expect("id"))
+            .collect();
+        assert_eq!(expected.len(), 2);
+
+        let days = PostingsDayRange {
+            start: Some(day_a.date_naive()),
+            end: Some(day_b.date_naive()),
+        };
+        let equality = [EqualityPosting {
+            label_name: "__name__".into(),
+            values: vec!["persistent_metric".into()],
+        }];
+        let resolve_sql = resolve_series_ids_sql(&catalog, days, &equality, expected.len());
+        let resolved: Vec<u64> = conn
+            .prepare(&resolve_sql)
+            .expect("prepare multi-day resolve")
+            .query_map([], |row| row.get(0))
+            .expect("execute multi-day resolve")
+            .map(|row| row.expect("resolved id"))
+            .collect();
+        assert_eq!(resolved, expected);
     }
 
     fn hist(name: &str, instance: &str, ts: DateTime<Utc>) -> Metric {
@@ -1790,7 +1214,7 @@ mod tests {
     fn hist_prom_sql_uses_hist_samples_and_postings() {
         let end = 1_700_000_000_000i64;
         let start = end - 30 * 60 * 1000;
-        let days = RecordDateRange::from_ms(Some(start), Some(end));
+        let days = PostingsDayRange::from_ms(Some(start), Some(end));
         let eq = equality_postings(&[LabelMatcher {
             name: "__name__".into(),
             op: MatcherOp::Eq,
@@ -1877,7 +1301,7 @@ mod tests {
             );
             let resolve = resolve_series_ids_sql(
                 "softprobe",
-                RecordDateRange::from_ms(Some(start), Some(end)),
+                PostingsDayRange::from_ms(Some(start), Some(end)),
                 &equality_postings(&[LabelMatcher {
                     name: "__name__".into(),
                     op: MatcherOp::Eq,
@@ -1910,7 +1334,7 @@ mod tests {
                 &format!(
                     "SELECT count(*) FROM {catalog}.metric_samples sm \
                      JOIN {catalog}.metric_series s \
-                       ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
+                       ON sm.series_id = s.series_id \
                      WHERE s.metric_name = 'layout_latency'"
                 ),
                 [],
@@ -1925,7 +1349,7 @@ mod tests {
                 &format!(
                     "SELECT count(*) FROM {catalog}.metric_samples sm \
                      JOIN {catalog}.metric_series s \
-                       ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
+                       ON sm.series_id = s.series_id \
                      WHERE s.metric_name = 'layout_latency_count'"
                 ),
                 [],
@@ -1936,7 +1360,7 @@ mod tests {
 
         let start = ts.timestamp_millis() - 15 * 60 * 1000;
         let end = ts.timestamp_millis() + 15 * 60 * 1000;
-        let days = RecordDateRange::from_ms(Some(start), Some(end));
+        let days = PostingsDayRange::from_ms(Some(start), Some(end));
         let eq = equality_postings(&[LabelMatcher {
             name: "__name__".into(),
             op: MatcherOp::Eq,
@@ -2043,7 +1467,7 @@ mod tests {
 
         let start = ts.timestamp_millis() - 15 * 60 * 1000;
         let end = ts.timestamp_millis() + 15 * 60 * 1000;
-        let days = RecordDateRange::from_ms(Some(start), Some(end));
+        let days = PostingsDayRange::from_ms(Some(start), Some(end));
         let eq = equality_postings(&[LabelMatcher {
             name: "__name__".into(),
             op: MatcherOp::Eq,

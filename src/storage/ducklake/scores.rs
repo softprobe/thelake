@@ -7,12 +7,6 @@ use std::collections::HashMap;
 use super::attach::ducklake_qualified_table_name;
 use super::DuckLakeWriter;
 
-/// Projection for score_configs reads via the writer DuckDB pool.
-/// `to_json(metadata)` keeps MAP metadata round-trippable as a JSON object string.
-const SCORE_CONFIG_SELECT: &str = "SELECT config_id::VARCHAR, strftime(timestamp, '%Y-%m-%dT%H:%M:%S.%fZ'), name::VARCHAR, data_type::VARCHAR, \
- description::VARCHAR, min_value, max_value, categories::VARCHAR, author_id::VARCHAR, \
- CAST(to_json(metadata) AS VARCHAR), strftime(record_date, '%Y-%m-%d')";
-
 fn score_config_from_sql_row(row: &duckdb::Row<'_>) -> Result<Option<ScoreConfig>> {
     let config_id: String = row.get(0)?;
     let timestamp_raw: String = row.get(1)?;
@@ -24,7 +18,6 @@ fn score_config_from_sql_row(row: &duckdb::Row<'_>) -> Result<Option<ScoreConfig
     let categories_raw: Option<String> = row.get(7)?;
     let author_id: Option<String> = row.get(8)?;
     let metadata_raw: Option<String> = row.get(9)?;
-    let record_date_raw: String = row.get(10)?;
     let data_type = match data_type_raw.as_str() {
         "numeric" => crate::models::ScoreDataType::Numeric,
         "categorical" => crate::models::ScoreDataType::Categorical,
@@ -36,8 +29,6 @@ fn score_config_from_sql_row(row: &duckdb::Row<'_>) -> Result<Option<ScoreConfig
         .or_else(|_| chrono::DateTime::parse_from_str(&timestamp_raw, "%Y-%m-%dT%H:%M:%S%.fZ"))
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .unwrap_or_else(|_| chrono::Utc::now());
-    let record_date = chrono::NaiveDate::parse_from_str(&record_date_raw, "%Y-%m-%d")
-        .unwrap_or_else(|_| timestamp.date_naive());
     let categories = categories_raw
         .as_deref()
         .filter(|raw| !raw.is_empty())
@@ -59,7 +50,6 @@ fn score_config_from_sql_row(row: &duckdb::Row<'_>) -> Result<Option<ScoreConfig
         categories,
         author_id,
         metadata,
-        record_date,
     }))
 }
 
@@ -109,8 +99,8 @@ impl DuckLakeWriter {
         let score_id = score_id.to_string();
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                let sql =
-                    format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? LIMIT 1)");
+                let sql = crate::sql::writer::score_exists_sql(&table);
+                crate::sql::ensure_fact_scan_bound(&sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
                 match conn.query_row(&sql, [&score_id], |row| row.get::<_, bool>(0)) {
                     Ok(exists) => Ok(exists),
                     Err(error) if error.to_string().contains("does not exist") => Ok(false),
@@ -167,8 +157,7 @@ impl DuckLakeWriter {
         let config_id = config_id.to_string();
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                let sql =
-                    format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE config_id = ? LIMIT 1)");
+                let sql = crate::sql::writer::score_config_exists_sql(&table);
                 match conn.query_row(&sql, [&config_id], |row| row.get::<_, bool>(0)) {
                     Ok(exists) => Ok(exists),
                     Err(error) if error.to_string().contains("does not exist") => Ok(false),
@@ -193,10 +182,7 @@ impl DuckLakeWriter {
         let pool = self.get_or_create_pool(&dk)?;
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                let sql = format!(
-                    "{} FROM {table} ORDER BY timestamp DESC, config_id DESC",
-                    SCORE_CONFIG_SELECT
-                );
+                let sql = crate::sql::writer::score_config_select_sql(&table);
                 let mut stmt = match conn.prepare(&sql) {
                     Ok(stmt) => stmt,
                     Err(error) if error.to_string().contains("does not exist") => {
@@ -232,10 +218,7 @@ impl DuckLakeWriter {
         let config_id = config_id.to_string();
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                let sql = format!(
-                    "{} FROM {table} WHERE config_id = ? LIMIT 1",
-                    SCORE_CONFIG_SELECT
-                );
+                let sql = crate::sql::writer::score_config_by_id_sql(&table);
                 let mut stmt = match conn.prepare(&sql) {
                     Ok(stmt) => stmt,
                     Err(error) if error.to_string().contains("does not exist") => return Ok(None),

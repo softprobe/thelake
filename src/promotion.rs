@@ -548,7 +548,6 @@ fn reserved_telemetry_column_names(table: &TelemetryTable) -> &'static [&'static
             "http_response_status_code",
             "http_response_headers",
             "http_response_body",
-            "record_date",
         ],
         TelemetryTable::Logs => &[
             "session_id",
@@ -561,7 +560,6 @@ fn reserved_telemetry_column_names(table: &TelemetryTable) -> &'static [&'static
             "resource_attributes",
             "trace_id",
             "span_id",
-            "record_date",
         ],
         TelemetryTable::Metrics => &[
             "metric_name",
@@ -580,7 +578,6 @@ fn reserved_telemetry_column_names(table: &TelemetryTable) -> &'static [&'static
             "quantiles",
             "aggregation_temporality",
             "exemplars_json",
-            "record_date",
         ],
     }
 }

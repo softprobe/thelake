@@ -1,13 +1,13 @@
 //! DuckLake-backed maintenance ladder tests (AC-S2, AC-M2, AC-N3, AC-N4, AC-Q9).
 
 use crate::compaction::collapse::{collapse_job_1h_sql, collapse_scan_sql};
-use crate::compaction::downsample::{count_sql, downsample_1h_from_raw_sql, downsample_5m_sql};
 use crate::compaction::executor::{cleanup_old_files_sql, expire_snapshots_sql};
 use crate::compaction::twcs::{
     live_data_file_paths_sql, live_files_spanning_record_dates_sql, logical_table_row_count_sql,
     plan_twcs_merges, twcs_merge_sql, InlinedFragmentStats, PartitionFileStats, TwcsMergePlan,
     TwcsPolicy, TWCS_MAX_COMPACTED_FILES_PER_WAVE,
 };
+use crate::sql::compaction::{count_sql, downsample_1h_from_raw_sql, downsample_5m_sql};
 use crate::storage::schema::metrics_layout::ensure_metrics_layout_family_tables;
 use chrono::{Duration, NaiveDate, Utc};
 use duckdb::Connection;
@@ -71,10 +71,10 @@ fn twcs_tracks_inlined_then_plans_after_parquet_materializes() {
         let sid = 10 + i;
         conn.execute_batch(&format!(
             "INSERT INTO {catalog}.metric_series \
-               (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-               ({sid}, 'inline_track', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
+               (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, timestamp) VALUES \
+               ({sid}, 'inline_track', 'gauge', '', '', NULL, NULL, map([], []), TIMESTAMPTZ '{day} 00:00:00+00');\n\
              INSERT INTO {catalog}.metric_samples VALUES \
-               ({sid}, TIMESTAMPTZ '{day} 12:0{i}:00+00', {i}.0, DATE '{day}');"
+               ({sid}, TIMESTAMPTZ '{day} 12:0{i}:00+00', {i}.0);"
         ))
         .unwrap_or_else(|e| panic!("inline seed i={i}: {e}"));
     }
@@ -151,21 +151,17 @@ fn downsample_keeps_raw_and_second_pass_is_noop() {
     let ts_1h = (Utc::now() - Duration::hours(30))
         .format("%Y-%m-%d %H:%M:%S+00")
         .to_string();
-    let day = (Utc::now() - Duration::hours(30))
-        .date_naive()
-        .format("%Y-%m-%d")
-        .to_string();
 
     conn.execute_batch(&format!(
         "BEGIN TRANSACTION;\n\
          INSERT INTO {catalog}.metric_series \
-           (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-           (1, 'layout_http', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
+           (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, timestamp) VALUES \
+           (1, 'layout_http', 'gauge', '', '', NULL, NULL, map([], []), TIMESTAMPTZ '{ts_1h}');\n\
          INSERT INTO {catalog}.metric_postings VALUES \
-           ('job', 'api', 1, DATE '{day}');\n\
+           ('job', 'api', 1, TIMESTAMPTZ '{ts_1h}');\n\
          INSERT INTO {catalog}.metric_samples VALUES \
-           (1, TIMESTAMPTZ '{ts_1h}', 10.0, DATE '{day}'),\
-           (1, TIMESTAMPTZ '{ts_5m}', 12.0, DATE '{day}');\n\
+           (1, TIMESTAMPTZ '{ts_1h}', 10.0),\
+           (1, TIMESTAMPTZ '{ts_5m}', 12.0);\n\
          COMMIT;"
     ))
     .expect("seed");
@@ -298,10 +294,10 @@ fn twcs_merge_keeps_files_single_record_date() {
             let sid = series_base + i;
             conn.execute_batch(&format!(
                 "INSERT INTO {catalog}.metric_series \
-                   (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-                   ({sid}, 'layout_http', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
+                   (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, timestamp) VALUES \
+               ({sid}, 'layout_http', 'gauge', '', '', NULL, NULL, map([], []), TIMESTAMPTZ '{day} 00:00:00+00');\n\
                  INSERT INTO {catalog}.metric_samples VALUES \
-                   ({sid}, TIMESTAMPTZ '{day} 12:0{i}:00+00', {i}.0, DATE '{day}');"
+                   ({sid}, TIMESTAMPTZ '{day} 12:0{i}:00+00', {i}.0);"
             ))
             .unwrap_or_else(|e| panic!("seed day={day} i={i}: {e}"));
         }
@@ -370,7 +366,9 @@ fn twcs_merge_keeps_files_single_record_date() {
         let lit = abs.to_string_lossy().replace('\'', "''");
         let n_dates: i64 = conn
             .query_row(
-                &format!("SELECT count(DISTINCT record_date) FROM read_parquet('{lit}')"),
+                &format!(
+                    "SELECT count(DISTINCT CAST(timestamp AS DATE)) FROM read_parquet('{lit}')"
+                ),
                 [],
                 |r| r.get(0),
             )
@@ -387,7 +385,9 @@ fn twcs_merge_keeps_files_single_record_date() {
     // Both days still present after merge.
     let days_left: i64 = conn
         .query_row(
-            &format!("SELECT count(DISTINCT record_date) FROM {catalog}.metric_samples"),
+            &format!(
+                "SELECT count(DISTINCT CAST(timestamp AS DATE)) FROM {catalog}.metric_samples"
+            ),
             [],
             |r| r.get(0),
         )
@@ -433,12 +433,12 @@ fn snapshot_expiry_bounds_count_and_keeps_samples() {
     let (conn, catalog) = attach_ducklake(&temp);
     ensure_metrics_layout_family_tables(&conn, &catalog).expect("layout");
 
-    let day = "2026-08-10";
+    let _day = "2026-08-10";
     // ≥ 40 commits → enough snapshots for expiry to matter at small A.
     for i in 0..40 {
         conn.execute_batch(&format!(
             "INSERT INTO {catalog}.metric_samples VALUES \
-               (1, TIMESTAMPTZ '2026-08-10 12:00:{i:02}+00', {i}.0, DATE '{day}');"
+               (1, TIMESTAMPTZ '2026-08-10 12:00:{i:02}+00', {i}.0);"
         ))
         .expect("insert");
     }
@@ -507,7 +507,9 @@ fn collapse_scan_sql_references_collapse_table() {
     );
     assert!(sql.contains("metric_collapse_job_1h"));
     assert!(!sql.contains("to_timestamp("));
-    assert!(sql.contains("record_date BETWEEN DATE"));
+    assert!(sql.contains("timestamp"));
+    assert!(!sql.contains("record_date"));
+    assert!(!sql.contains("window_ts"));
     assert!(crate::compaction::collapse::sql_is_collapse_prom_path(&sql));
 }
 
@@ -538,18 +540,14 @@ fn downsample_1h_visible_on_second_connection_after_commit() {
     let ts_1h = (Utc::now() - Duration::hours(30))
         .format("%Y-%m-%d %H:%M:%S+00")
         .to_string();
-    let day = (Utc::now() - Duration::hours(30))
-        .date_naive()
-        .format("%Y-%m-%d")
-        .to_string();
     writer
         .execute_batch(&format!(
             "BEGIN TRANSACTION;\n\
              INSERT INTO {catalog}.metric_series \
-               (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, record_date) VALUES \
-               (42, 'layout_tall', 'gauge', '', '', NULL, NULL, map([], []), DATE '{day}');\n\
+               (series_id, metric_name, metric_type, unit, description, aggregation_temporality, is_monotonic, labels, timestamp) VALUES \
+               (42, 'layout_tall', 'gauge', '', '', NULL, NULL, map([], []), TIMESTAMPTZ '{ts_1h}');\n\
              INSERT INTO {catalog}.metric_samples VALUES \
-               (42, TIMESTAMPTZ '{ts_1h}', 7.0, DATE '{day}');\n\
+               (42, TIMESTAMPTZ '{ts_1h}', 7.0);\n\
              COMMIT;"
         ))
         .expect("seed raw");

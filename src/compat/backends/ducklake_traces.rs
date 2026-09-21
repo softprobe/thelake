@@ -1,9 +1,8 @@
 //! Typed DuckLake trace query backend for the Tempo adapter.
 
 use super::traces::{
-    persisted_status_code_numeric_value, scan_reached_cap, trace_scan_cap, trace_scan_sql,
-    TraceAttribute, TraceData, TraceEvent, TraceLookupBounds, TraceQueryBackend, TraceSearchHit,
-    TraceSearchRequest, TraceSpan,
+    persisted_status_code_numeric_value, TraceAttribute, TraceData, TraceEvent, TraceLookupBounds,
+    TraceQueryBackend, TraceSearchHit, TraceSearchRequest, TraceSpan,
 };
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::tempo::{project_tempo_link_attributes, project_tempo_tags};
@@ -11,6 +10,7 @@ use crate::compat::tempo::traceql::{is_numeric_field, TraceField, TracePredicate
 use crate::compat::tenant::TenantContext;
 use crate::query::duckdb::QueryResult;
 use crate::query::QueryEngine;
+use crate::sql::tempo::{scan_reached_cap, trace_scan_cap, trace_scan_sql};
 use crate::storage::schema::variant::variant_json_to_string_map;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -65,7 +65,7 @@ impl DuckLakeTraceBackend {
                 return Ok(Vec::new());
             }
         }
-        let sql = trace_scan_sql(request, trace_id)
+        let sql = trace_scan_sql(request.scan_params(), trace_id)
             .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
         let result = self.execute(ctx, &sql).await?;
         let scan_cap = trace_scan_cap(request.limit);
@@ -1320,19 +1320,16 @@ mod tests {
     #[test]
     fn tag_discovery_scan_sql_uses_default_lookback_window() {
         use crate::api::query_window::assert_sql_has_otlp_time_predicates;
-        let sql = trace_scan_sql(
-            &TraceSearchRequest {
-                tags: BTreeMap::new(),
-                selector: None,
-                min_duration_ns: None,
-                max_duration_ns: None,
-                start_ns: None,
-                end_ns: None,
-                limit: 5,
-            },
-            None,
-        )
-        .expect("default lookback");
+        let request = TraceSearchRequest {
+            tags: BTreeMap::new(),
+            selector: None,
+            min_duration_ns: None,
+            max_duration_ns: None,
+            start_ns: None,
+            end_ns: None,
+            limit: 5,
+        };
+        let sql = trace_scan_sql(request.scan_params(), None).expect("default lookback");
         assert_sql_has_otlp_time_predicates(&sql);
     }
 }

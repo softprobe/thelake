@@ -973,7 +973,10 @@ async fn logs_promote_scope_name_to_logger_name_attribute() {
     // CAST keeps this green under both MAP and VARIANT attribute storage.
     let sql = format!(
         "SELECT body, CAST(attributes['logger_name'] AS VARCHAR) AS logger_name \
-         FROM logs WHERE session_id = '{session_id}' ORDER BY timestamp ASC"
+         FROM logs WHERE session_id = '{session_id}' \
+           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
+           AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
+         ORDER BY timestamp ASC"
     );
     let req = Request::builder()
         .method("POST")

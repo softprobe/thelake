@@ -190,7 +190,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
 
     let filter_sql = format!(
         "SELECT COUNT(*)::BIGINT AS c FROM traces \
-         WHERE session_id = '{sess}' AND {obs} = 'generation'",
+         WHERE session_id = '{sess}' AND {obs} = 'generation' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
         sess = session_id.replace('\'', "''"),
         // Bag-only: this test does not apply promotions (columns may be absent).
         obs = variant_varchar("attributes", "sp.observation.type"),
@@ -209,7 +209,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
 
     let detail_sql = format!(
         "SELECT CAST(attributes AS JSON) AS attributes FROM traces \
-         WHERE session_id = '{sess}' AND {obs} = 'generation' LIMIT 1",
+         WHERE session_id = '{sess}' AND {obs} = 'generation' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS LIMIT 1",
         sess = session_id.replace('\'', "''"),
         obs = variant_varchar("attributes", "sp.observation.type"),
     );
@@ -226,9 +226,13 @@ async fn map_bags_hot_paths_and_nested_filters() {
     let metric_sql = format!(
         "SELECT COUNT(*)::BIGINT FROM softprobe.metric_series s \
          JOIN softprobe.metric_samples sm \
-           ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
-         WHERE CAST(s.labels['sp_session_id'] AS VARCHAR) = '{sess}' \
-            OR CAST(s.labels['sp.session.id'] AS VARCHAR) = '{sess}'",
+           ON sm.series_id = s.series_id \
+         WHERE (CAST(s.labels['sp_session_id'] AS VARCHAR) = '{sess}' \
+            OR CAST(s.labels['sp.session.id'] AS VARCHAR) = '{sess}') \
+           AND sm.timestamp >= TIMESTAMPTZ '1970-01-01' \
+           AND sm.timestamp <= TIMESTAMPTZ '2100-01-01' \
+           AND s.timestamp >= TIMESTAMPTZ '1970-01-01' \
+           AND s.timestamp <= TIMESTAMPTZ '2100-01-01'",
         sess = session_id.replace('\'', "''"),
     );
     let metrics = query_engine
@@ -238,7 +242,8 @@ async fn map_bags_hot_paths_and_nested_filters() {
     assert_eq!(metrics.rows[0][0].as_i64(), Some(1));
 
     let log_sql = format!(
-        "SELECT COUNT(*)::BIGINT FROM logs WHERE {pred} = '{sess}'",
+        "SELECT COUNT(*)::BIGINT FROM logs WHERE {pred} = '{sess}' \
+           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
         pred = variant_varchar("attributes", "sp.session.id"),
         sess = session_id.replace('\'', "''"),
     );
@@ -249,12 +254,11 @@ async fn map_bags_hot_paths_and_nested_filters() {
 /// Cover MAP bag key paths used by LLM / telemetry SQL compilers + prefer-promoted SQL.
 #[tokio::test]
 async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
-    use softprobe_runtime::api::llm::query::{
-        compile_observation_search_sql, ObservationSearchRequest,
-    };
+    use softprobe_runtime::api::llm::query::ObservationSearchRequest;
     use softprobe_runtime::api::telemetry::{
         compile_details_sql, TelemetryDetailsTarget, TelemetryTimeRange,
     };
+    use softprobe_runtime::sql::llm::compile_observation_search_sql;
     use softprobe_runtime::storage::schema::variant::prefer_attr_try_cast;
 
     let temp = TempDir::new().expect("tempdir");
@@ -427,7 +431,8 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
             {cost} AS total_cost, \
             {capture} AS capture_id \
          FROM traces \
-         WHERE session_id = '{sess}' AND span_id = 'vk-span-1'",
+         WHERE session_id = '{sess}' AND span_id = 'vk-span-1' \
+           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
         obs = prefer_attr_varchar(
             Some("observation_type"),
             "attributes",
@@ -480,7 +485,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     let fallback_sql = format!(
         "SELECT COALESCE({obs}, 'span') AS observation_type, \
                 COALESCE({user}, {enduser}) AS user_id \
-         FROM traces WHERE span_id = 'vk-span-2'",
+         FROM traces WHERE span_id = 'vk-span-2' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
         obs = prefer_attr_varchar(
             Some("observation_type"),
             "attributes",
@@ -498,7 +503,8 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 
     // 3) Missing key is NULL (not an error).
     let missing_sql = format!(
-        "SELECT {missing} IS NULL AS is_missing FROM traces WHERE span_id = 'vk-span-1'",
+        "SELECT {missing} IS NULL AS is_missing FROM traces WHERE span_id = 'vk-span-1' \
+           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
         missing = variant_varchar("attributes", "does.not.exist"),
     );
     let missing = query_engine
@@ -566,7 +572,9 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     let capture_sql = format!(
         "SELECT CAST(attributes AS JSON) AS attributes FROM traces \
          WHERE CAST(attributes['sp.capture.id'] AS VARCHAR) = '{cap}' \
-           AND tenant_id = '{ten}'",
+           AND tenant_id = '{ten}' \
+           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
+           AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
         cap = capture_id.replace('\'', "''"),
         ten = tenant_id.replace('\'', "''"),
     );
