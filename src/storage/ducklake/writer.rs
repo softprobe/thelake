@@ -263,15 +263,12 @@ impl DuckLakeWriter {
     }
 
     pub(super) fn warm_pool(&self, pool: &WriterPool, dk: &DuckLakeConfig) -> Result<()> {
-        // Warm OTLP tables so the first ingest does not pay ensure under load.
-        let target_file_size_bytes = self.config.maintenance.target_file_size_bytes;
-        pool.with_conn(|conn| {
-            for table in ["traces", "logs"] {
-                Self::ensure_table_with_conn(conn, dk, table, None, target_file_size_bytes)?;
-                pool.mark_table_ready(table);
-            }
-            Ok(())
-        })
+        // Do not ensure/mark OTLP tables ready here. First write must call
+        // `ensure_table_with_conn` with the write-time Arrow schema so promotion
+        // columns (and other evolution) are ADDed before INSERT. Marking ready
+        // with the base schema skips that evolution (see promotion_telemetry_ingest).
+        let _ = (pool, dk);
+        Ok(())
     }
 
     /// DuckDB type for `ALTER TABLE … ADD COLUMN` evolution.
