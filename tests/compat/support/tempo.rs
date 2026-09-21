@@ -15,10 +15,10 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+use crate::compat_support::http::{build_tenant_router_with_state, encode_query_owned};
 #[cfg(feature = "integration-e2e")]
 use crate::compat_support::lifecycle;
 use crate::compat_support::loki::{candidate_reference_image, manifest_reference_image};
-use crate::compat_support::http::{build_tenant_router_with_state, encode_query_owned};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TempoFixture {

@@ -158,7 +158,7 @@ fn seed(
                 error
             ));
         }
-                receipt.tenants[index].logs_sent = true;
+        receipt.tenants[index].logs_sent = true;
         receipt.tenants[index].traces_sent = true;
     }
 
@@ -171,7 +171,7 @@ fn seed(
             let result = query_tenant(&client, base_url, api_key, tenant_id, suffix, receipt);
             match result {
                 Ok(()) => {
-                                        receipt.tenants[index].logs_queryable = true;
+                    receipt.tenants[index].logs_queryable = true;
                     receipt.tenants[index].traces_queryable = true;
                 }
                 Err(error) if attempt == last_attempt => {
@@ -516,10 +516,7 @@ fn tenant_payloads(tenant: &str) -> TenantPayloads {
         ],
     }
     .encode_to_vec();
-    TenantPayloads {
-        logs,
-        traces,
-    }
+    TenantPayloads { logs, traces }
 }
 
 fn resource(tenant: &str) -> Resource {

@@ -562,8 +562,6 @@ fn logs_to_otlp(logs: &[Log]) -> ExportLogsServiceRequest {
     ExportLogsServiceRequest { resource_logs }
 }
 
-
-
 fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
     let trace_id_bytes = hex::decode(&span.trace_id).unwrap_or_else(|_| {
         uuid::Uuid::parse_str(&span.trace_id)
@@ -1199,10 +1197,7 @@ fn print_interference_summary(phases: &[PhaseSnapshot]) {
         );
         println!(
             "Ingest p95 latency (span/log): ingest_only={}/{}ms mixed={}/{}ms",
-            ingest.span.p95_ms,
-            ingest.log.p95_ms,
-            mixed.span.p95_ms,
-            mixed.log.p95_ms
+            ingest.span.p95_ms, ingest.log.p95_ms, mixed.span.p95_ms, mixed.log.p95_ms
         );
     }
     if let (Some(query), Some(mixed)) = (query, mixed) {

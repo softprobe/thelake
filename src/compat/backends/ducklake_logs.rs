@@ -1,10 +1,12 @@
 //! Typed DuckLake log query backend for the Loki adapter.
 
+use crate::compat::backends::label_match::{
+    labels_match, labels_match_any, LabelMatcher, MatcherOp,
+};
 use crate::compat::backends::logs::{
     LogDirection, LogHit, LogLineFilter, LogParser, LogsDiscoveryRequest, LogsQueryBackend,
     LogsQueryRequest,
 };
-use crate::compat::backends::label_match::{labels_match, labels_match_any, LabelMatcher, MatcherOp};
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::loki::{project_loki, DEFAULT_STREAM_LABEL_ALLOWLIST};
 use crate::compat::tenant::TenantContext;
@@ -610,9 +612,7 @@ fn normalized_fields(fields: &BTreeMap<String, String>) -> BTreeMap<String, Stri
         // BTreeMap iteration makes sanitization collisions deterministic: the
         // first raw key in lexical order wins.
         normalized
-            .entry(crate::compat::projection::labels::sanitize_label_name(
-                key,
-            ))
+            .entry(crate::compat::projection::labels::sanitize_label_name(key))
             .or_insert_with(|| value.clone());
     }
     normalized

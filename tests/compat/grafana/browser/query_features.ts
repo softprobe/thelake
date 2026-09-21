@@ -56,14 +56,14 @@ export const QUERY_FEATURE_CATALOG: QueryFeatureTestCase[] = [
     id: 'L-04',
     category: 'loki',
     name: 'loki_line_filter_regex',
-    expr: '{service_name=~".+"} |~ "GET|POST"',
+    expr: '{service_name=~".+"} |~ "HTTP"',
     isRange: true,
     description: 'Loki line filter matching regular expression',
     validate: (data) =>
       Array.isArray(data) &&
       data.length > 0 &&
       data.every((s) =>
-        (s.values || []).every((pt: [string, string]) => /GET|POST/.test(pt[1])),
+        (s.values || []).every((pt: [string, string]) => /HTTP/.test(pt[1])),
       ),
   },
   {

@@ -1,5 +1,5 @@
-use crate::compat::backends::logs::{LogLineFilter, LogParser, LogsQueryRequest};
 use crate::compat::backends::label_match::{LabelMatcher, MatcherOp};
+use crate::compat::backends::logs::{LogLineFilter, LogParser, LogsQueryRequest};
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::labels::sanitize_label_name;
 

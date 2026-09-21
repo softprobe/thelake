@@ -61,8 +61,5 @@ pub fn declared_compat_probe_paths() -> &'static [(&'static str, &'static str)] 
 }
 
 pub fn unsupported_json_body() -> Value {
-    error_envelope(
-        ProtocolScope::Loki,
-        &CompatError::unsupported("compat_api"),
-    )
+    error_envelope(ProtocolScope::Loki, &CompatError::unsupported("compat_api"))
 }

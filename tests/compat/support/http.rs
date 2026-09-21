@@ -19,10 +19,13 @@ use crate::util::tenant::inject_local_sqlite_tenant;
 pub async fn build_tenant_router_with_state() -> (Router, AppState, TempDir) {
     let temp = TempDir::new().expect("temp");
     let config = file_backed_test_config(&temp);
-    let (router, state) =
-        softprobe_runtime::api::create_router(std::sync::Arc::new(config), post(ingest_traces), None)
-            .await
-            .expect("router");
+    let (router, state) = softprobe_runtime::api::create_router(
+        std::sync::Arc::new(config),
+        post(ingest_traces),
+        None,
+    )
+    .await
+    .expect("router");
     let router = router
         .merge(runtime_control_routes().with_state(state.clone()))
         .layer(from_fn(inject_local_sqlite_tenant));

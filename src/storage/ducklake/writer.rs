@@ -1,9 +1,7 @@
 use crate::config::{Config, DuckLakeConfig};
 use crate::promotion::TelemetryTable;
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
-use crate::sql::schema::{
-    insert_order_by, is_otlp_table, LOGS, SCORES, SCORE_CONFIGS, TRACES,
-};
+use crate::sql::schema::{insert_order_by, is_otlp_table, LOGS, SCORES, SCORE_CONFIGS, TRACES};
 use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
 use crate::storage::schema::tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
 use crate::storage::schema::variant::parquet_select_for_table;

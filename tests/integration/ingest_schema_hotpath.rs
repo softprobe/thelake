@@ -71,7 +71,6 @@ fn sample_log(i: usize) -> LogData {
     }
 }
 
-
 async fn assert_warm_writes_zero_probes_contract(
     writer: Arc<DuckLakeWriter>,
     query_dk: DuckLakeConfig,
@@ -143,7 +142,6 @@ async fn assert_warm_writes_zero_probes_contract(
         })
         .expect("query logs");
     assert_eq!(log_n, (N + 1) as i64, "all logs must be committed");
-
 }
 
 #[tokio::test]

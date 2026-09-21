@@ -432,10 +432,9 @@ mod tests {
 
     #[test]
     fn rejects_timestamp_column_without_time_predicate() {
-        let err = ensure_fact_scan_bound(
-            "SELECT timestamp FROM softprobe.logs WHERE body IS NOT NULL",
-        )
-        .unwrap_err();
+        let err =
+            ensure_fact_scan_bound("SELECT timestamp FROM softprobe.logs WHERE body IS NOT NULL")
+                .unwrap_err();
         assert!(err.contains("timestamp bound"), "{err}");
     }
 

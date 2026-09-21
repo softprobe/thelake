@@ -533,13 +533,13 @@ impl DuckDBQueryEngine {
                         let exec_elapsed = exec_start.elapsed();
                         crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY
                             .fetch_sub(1, Ordering::Relaxed);
-                            if core.counts_toward_liveness {
-                                crate::self_monitoring::record_query(
-                                    &core.tenant_id,
-                                    sql_kind,
-                                    exec_elapsed,
-                                );
-                            }
+                        if core.counts_toward_liveness {
+                            crate::self_monitoring::record_query(
+                                &core.tenant_id,
+                                sql_kind,
+                                exec_elapsed,
+                            );
+                        }
                         if result.is_ok() {
                             // Any *customer* success clears the global streak --
                             // see SelfHealCounters. Ops engines must not clear
@@ -1254,7 +1254,10 @@ mod tests {
     fn replace_standalone_ident_skips_string_literals() {
         let s = "SELECT count(*) FROM traces WHERE message_type = 'sp.logs.ingest.requests'";
         let out = replace_standalone_ident(s, "logs", "softprobe.ducklake_softprobe_local.logs");
-        assert_eq!(s, out, "must not rewrite logs inside quoted string literals");
+        assert_eq!(
+            s, out,
+            "must not rewrite logs inside quoted string literals"
+        );
     }
 
     #[test]
@@ -1312,7 +1315,8 @@ mod tests {
     #[test]
     fn replace_standalone_ident_skips_double_quoted_idents_with_dashes() {
         let s = r#"SELECT "col--name", count(*) FROM traces"#;
-        let out = replace_standalone_ident(s, "traces", "softprobe.ducklake_softprobe_local.traces");
+        let out =
+            replace_standalone_ident(s, "traces", "softprobe.ducklake_softprobe_local.traces");
         assert!(
             out.contains("softprobe.ducklake_softprobe_local.traces"),
             "double-quoted -- must not start a line comment: {out}"

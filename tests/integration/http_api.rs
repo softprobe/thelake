@@ -228,7 +228,6 @@ fn telemetry_logs_request(session_id: &str, trace_id: [u8; 16]) -> ExportLogsSer
     }
 }
 
-
 #[tokio::test]
 async fn health_returns_ok_envelope() {
     let (router, _t) = build_router().await;
@@ -377,8 +376,6 @@ async fn logs_json_invalid_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-
-
 #[tokio::test]
 async fn query_sql_empty_returns_400() {
     let (router, _t) = build_router().await;
@@ -424,7 +421,6 @@ async fn logs_protobuf_empty() {
     let resp = router.oneshot(req).await.expect("oneshot");
     assert_eq!(resp.status(), StatusCode::OK);
 }
-
 
 #[tokio::test]
 async fn telemetry_search_sessions_returns_summary_rows() {
@@ -1533,7 +1529,10 @@ async fn metrics_ingest_route_is_not_found() {
 #[tokio::test]
 async fn prometheus_query_routes_are_not_found() {
     let (router, _t) = build_router().await;
-    for uri in ["/api/v1/query?query=up", "/api/v1/query_range?query=up&start=1&end=2&step=15"] {
+    for uri in [
+        "/api/v1/query?query=up",
+        "/api/v1/query_range?query=up&start=1&end=2&step=15",
+    ] {
         let req = Request::builder()
             .method("GET")
             .uri(uri)
