@@ -154,9 +154,6 @@ pub(crate) fn prepare_local_ducklake_paths(dk: &DuckLakeConfig, attach_target: &
     Ok(())
 }
 
-/// Fully qualified DuckLake table name used for CREATE / INSERT (`catalog.table` when
-/// `metadata_schema` is `main`, else `catalog.metadata_schema.table`).
-
 /// Catalog prefix for qualified DuckLake tables (`alias` or `alias.schema`).
 pub(crate) fn catalog_prefix(catalog_alias: &str, metadata_schema: &str) -> String {
     if metadata_schema == "main" {
@@ -166,6 +163,8 @@ pub(crate) fn catalog_prefix(catalog_alias: &str, metadata_schema: &str) -> Stri
     }
 }
 
+/// Fully qualified DuckLake table name used for CREATE / INSERT (`catalog.table` when
+/// `metadata_schema` is `main`, else `catalog.metadata_schema.table`).
 pub(crate) fn ducklake_qualified_table_name(cfg: &DuckLakeConfig, bare_table: &str) -> String {
     format!(
         "{}.{}",

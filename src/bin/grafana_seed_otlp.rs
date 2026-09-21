@@ -569,7 +569,11 @@ mod tests {
 
         assert_eq!(trace_id_for("a"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(trace_id_for("b"), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        let marker = resource
+        assert_ne!(tenant_a.logs, tenant_b.logs);
+        assert_ne!(tenant_a.traces, tenant_b.traces);
+
+        let resource_a = resource("grafana-phase4-tenant-a");
+        let marker = resource_a
             .attributes
             .iter()
             .find(|attribute| attribute.key == "tenant.marker")
