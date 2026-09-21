@@ -941,6 +941,10 @@ impl DuckDBCore {
         } else {
             query_prep.clone()
         };
+        // D12 runs on the final SQL after public/legacy telemetry aliases have
+        // been expanded. Otherwise `FROM metrics` could evade the fact-table
+        // registry while its inlined metric tables were still scanned.
+        crate::sql::ensure_fact_scan_bound(&query_run).map_err(|e| anyhow!("SQL gate: {e}"))?;
         if std::env::var("SOFTPROBE_LOG_SQL").ok().as_deref() == Some("1") {
             eprintln!("SOFTPROBE_LOG_SQL prep={query_prep}\nSOFTPROBE_LOG_SQL run={query_run}");
         }
@@ -1189,8 +1193,10 @@ impl DuckDBCore {
             "tm_all_metric",
             "tm_buf_metric",
         ] {
-            let rel =
-                crate::storage::schema::union_metrics_layout_relation_sql(&metrics_prefix, name);
+            let rel = format!(
+                "({}) AS {name}",
+                crate::sql::schema::union_metrics_sql(&metrics_prefix)
+            );
             s = replace_standalone_ident(&s, name, &rel);
         }
         for name in ["tm_icb_log", "tm_cq_log", "tm_all_log", "tm_buf_log"] {
@@ -1489,8 +1495,10 @@ mod tests {
             prep.contains("tm_all_metric"),
             "public name must rewrite to tm_* alias: {prep}"
         );
-        let rel =
-            crate::storage::schema::union_metrics_layout_relation_sql("softprobe", "tm_all_metric");
+        let rel = format!(
+            "({}) AS tm_all_metric",
+            crate::sql::schema::union_metrics_sql("softprobe")
+        );
         let out = replace_standalone_ident(&prep, "tm_all_metric", &rel);
         assert!(
             out.contains("metric_samples") && out.contains("metric_series"),
@@ -1507,9 +1515,20 @@ mod tests {
         let cq = replace_standalone_ident(
             &committed,
             "tm_cq_metric",
-            &crate::storage::schema::union_metrics_layout_relation_sql("softprobe", "tm_cq_metric"),
+            &format!(
+                "({}) AS tm_cq_metric",
+                crate::sql::schema::union_metrics_sql("softprobe")
+            ),
         );
         assert!(cq.contains("metric_samples"));
+    }
+
+    #[test]
+    fn public_metrics_alias_cannot_bypass_timestamp_gate() {
+        assert!(
+            crate::sql::ensure_fact_scan_bound("SELECT * FROM metrics").is_err(),
+            "the public metrics alias must be subject to the fact-scan gate"
+        );
     }
 
     #[test]

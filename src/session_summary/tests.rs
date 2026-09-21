@@ -323,11 +323,11 @@ async fn postgres_claim_empty_dirty_ok() {
 #[tokio::test]
 #[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
 async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
-    use crate::api::llm::query::llm_promo;
     use crate::config::Config;
     use crate::promotion::load_active_telemetry_columns_manifests;
     use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
     use crate::session_summary::ensure_product_hot_attrs_for_scope;
+    use crate::sql::llm::llm_promo;
     use std::sync::Arc;
     use tempfile::TempDir;
 

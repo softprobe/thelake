@@ -1,112 +1,53 @@
 //! Required event-time window for OTLP DuckLake reads.
 //!
-//! Design: [`design-event-time-layout.md`](../../../docs/design-event-time-layout.md).
-//! Callers pass only [`QueryWindow`]; partition day is always derived — never a second clock.
-//! Emit time SQL **only** via [`push_otlp_time_predicates`].
+//! Re-exports [`crate::sql::QueryWindow`]. Prefer `crate::sql` for new code.
+//! Emit time SQL via [`QueryWindow::bind_scan`] / [`crate::sql::BoundLakeSql`].
 
-use super::sql_support::{timestamp_ns_column, timestamp_ns_literal};
-use chrono::{DateTime, Utc};
+pub use crate::sql::{query_window_from_exclusive_ns, QueryWindow};
 
-/// Finite event-time range. Partition day bounds are derived from `from`/`to` only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QueryWindow {
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
-}
-
-impl QueryWindow {
-    /// Build a window. Rejects inverted ranges.
-    /// Max-span is enforced by callers that need it (e.g. session_summary rebuild), not here.
-    pub fn try_new(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Self, String> {
-        if from > to {
-            return Err("`from` must be <= `to`".to_string());
-        }
-        Ok(Self { from, to })
-    }
-
-    fn partition_day_predicate(&self) -> String {
-        let from_date = self.from.date_naive();
-        let to_date = self.to.date_naive();
-        format!("{OTLP_PARTITION_DAY_COLUMN} BETWEEN DATE '{from_date}' AND DATE '{to_date}'")
-    }
-
-    fn event_time_predicate(&self) -> String {
-        let col = timestamp_ns_column(OTLP_EVENT_TIME_COLUMN);
-        format!(
-            "{col} >= {} AND {col} <= {}",
-            timestamp_ns_literal(&self.from),
-            timestamp_ns_literal(&self.to)
-        )
-    }
-}
-
-/// Default partition-day column on OTLP tables (legacy spelling of `date(timestamp)`).
-pub const OTLP_PARTITION_DAY_COLUMN: &str = "record_date";
-
-/// Default event-time column on OTLP tables.
-pub const OTLP_EVENT_TIME_COLUMN: &str = "timestamp";
-
-/// Push predicates in design order: partition day → `identity`… → event time.
-/// This is the **only** allowed emitter of OTLP day + event-time bounds.
+/// Push identity predicates plus a required `timestamp` bound (one clock).
+/// Prefer [`QueryWindow::bind_scan`] for new recipes.
 pub fn push_otlp_time_predicates(
     conditions: &mut Vec<String>,
     window: &QueryWindow,
     identity: impl IntoIterator<Item = String>,
 ) {
-    conditions.push(window.partition_day_predicate());
     conditions.extend(identity);
-    conditions.push(window.event_time_predicate());
+    conditions.push(window.timestamp_bound_sql(""));
 }
 
-/// Map exclusive-end ns window → [`QueryWindow`] and emit via [`push_otlp_time_predicates`].
-///
-/// Tempo/Loki protocol end is exclusive; inclusive `to` is `end_ns - 1`.
-/// Thin adapter only — does not emit day/timestamp SQL itself.
+/// Map exclusive-end ns window → predicates via [`push_otlp_time_predicates`].
 pub(crate) fn push_otlp_ns_window_predicates(
     conditions: &mut Vec<String>,
     start_ns: i64,
     end_ns_exclusive: i64,
     identity: impl IntoIterator<Item = String>,
 ) -> Result<(), String> {
-    if start_ns >= end_ns_exclusive {
-        return Err("`start` must be < `end`".to_string());
-    }
-    let from = DateTime::<Utc>::from_timestamp_nanos(start_ns);
-    let to = DateTime::<Utc>::from_timestamp_nanos(end_ns_exclusive - 1);
-    let window = QueryWindow::try_new(from, to)?;
+    let window = query_window_from_exclusive_ns(start_ns, end_ns_exclusive)?;
     push_otlp_time_predicates(conditions, &window, identity);
     Ok(())
 }
 
-/// Assert SQL embeds the required OTLP time shape (day before timestamp, both sides).
+/// Assert SQL embeds required OTLP timestamp bounds (no day columns).
 #[cfg(test)]
 pub(crate) fn assert_sql_has_otlp_time_predicates(sql: &str) {
     assert!(
-        sql.contains("record_date BETWEEN DATE"),
-        "missing partition day bound: {sql}"
-    );
-    assert!(
-        sql.contains("CAST(timestamp AS TIMESTAMP_NS) >="),
+        sql.contains("CAST(timestamp AS TIMESTAMP_NS) >=") || sql.contains("timestamp >="),
         "missing event-time lower bound: {sql}"
     );
     assert!(
-        sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="),
+        sql.contains("CAST(timestamp AS TIMESTAMP_NS) <=") || sql.contains("timestamp <="),
         "missing event-time upper bound: {sql}"
     );
-    let rd = sql.find("record_date BETWEEN").expect("record_date");
-    let ts = sql
-        .find("CAST(timestamp AS TIMESTAMP_NS)")
-        .expect("timestamp");
-    assert!(
-        rd < ts,
-        "partition day must precede event-time predicate: {sql}"
-    );
+    for bad in ["record_date", "event_date", "window_ts"] {
+        assert!(!sql.contains(bad), "forbidden time column {bad}: {sql}");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
     use std::fs;
     use std::path::Path;
 
@@ -126,63 +67,20 @@ mod tests {
     }
 
     #[test]
-    fn query_window_fields_are_only_from_to() {
-        // D3: no parallel partition-day field on the window type.
-        let w = sample();
-        let _ = (w.from, w.to);
-        let debug = format!("{w:?}");
-        assert!(debug.contains("from"));
-        assert!(debug.contains("to"));
-        assert!(!debug.contains("record_date"));
-        assert!(!debug.contains("event_date"));
-    }
-
-    #[test]
-    fn partition_day_derived_from_window_only() {
-        let w = sample();
-        assert_eq!(
-            w.partition_day_predicate(),
-            "record_date BETWEEN DATE '2026-09-10' AND DATE '2026-09-10'"
-        );
-    }
-
-    #[test]
-    fn multi_day_window_expands_partition_day() {
-        let w = QueryWindow::try_new(
-            Utc.with_ymd_and_hms(2026, 9, 10, 23, 0, 0).unwrap(),
-            Utc.with_ymd_and_hms(2026, 9, 11, 1, 0, 0).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            w.partition_day_predicate(),
-            "record_date BETWEEN DATE '2026-09-10' AND DATE '2026-09-11'"
-        );
-    }
-
-    #[test]
-    fn push_order_is_day_identity_timestamp() {
+    fn push_emits_timestamp_only() {
         let w = sample();
         let mut conditions = Vec::new();
         push_otlp_time_predicates(&mut conditions, &w, ["session_id = 's1'".to_string()]);
-        assert_eq!(conditions.len(), 3);
-        assert_eq!(conditions[0], w.partition_day_predicate());
-        assert_eq!(conditions[1], "session_id = 's1'");
-        assert_eq!(conditions[2], w.event_time_predicate());
-        let joined = conditions.join(" AND ");
-        assert_sql_has_otlp_time_predicates(&joined);
-    }
-
-    #[test]
-    fn equal_day_single_date_partition() {
-        let w = sample();
-        let day = w.partition_day_predicate();
-        assert!(day.contains("DATE '2026-09-10' AND DATE '2026-09-10'"));
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(conditions[0], "session_id = 's1'");
+        assert!(conditions[1].contains("timestamp"));
+        assert!(!conditions.iter().any(|c| c.contains("record_date")));
+        assert_sql_has_otlp_time_predicates(&conditions.join(" AND "));
     }
 
     #[test]
     fn optional_time_bounds_absent_from_src_tree() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        // Construct so this test file does not contain the banned identifier as a contiguous fn decl.
         let needle = format!("fn push_{}_time_bounds", "optional");
         let mut hits = Vec::new();
         fn walk(dir: &Path, needle: &str, hits: &mut Vec<String>) {
@@ -207,22 +105,6 @@ mod tests {
     }
 
     #[test]
-    fn no_execute_sql_regex_guard_files() {
-        let api = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api");
-        for name in [
-            "sql_guard.rs",
-            "unbounded_sql.rs",
-            "sql_allowlist.rs",
-            "execute_sql_guard.rs",
-        ] {
-            assert!(
-                !api.join(name).exists(),
-                "D12: do not add execute-time SQL guard module {name}"
-            );
-        }
-    }
-
-    #[test]
     fn ns_window_adapter_rejects_inverted_and_maps_exclusive_end() {
         let mut conditions = Vec::new();
         assert!(
@@ -236,10 +118,9 @@ mod tests {
             ["trace_id = 't'".to_string()],
         )
         .unwrap();
-        assert_eq!(conditions.len(), 3);
-        assert!(conditions[0].starts_with("record_date BETWEEN"));
-        assert_eq!(conditions[1], "trace_id = 't'");
-        assert!(conditions[2].contains("'2023-11-14T22:13:20.000000001Z'::TIMESTAMP_NS"));
-        assert!(!conditions[2].contains("'2023-11-14T22:13:20.000000002Z'::TIMESTAMP_NS"));
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(conditions[0], "trace_id = 't'");
+        assert!(conditions[1].contains("'2023-11-14T22:13:20.000000001Z'::TIMESTAMP_NS"));
+        assert!(!conditions[1].contains("record_date"));
     }
 }

@@ -1,10 +1,12 @@
 //! Softprobe TWCS merge policy (§7.1).
 //!
-//! Time window = calendar day (`record_date`). Softprobe **plans** merges per day
-//! (AC-F6) and never schedules a cross-day rewrite intent. DuckLake's
+//! Time window = calendar day of `timestamp` (one-clock hive
+//! `year=`/`month=`/`day=`). Softprobe **plans** merges per day (AC-F6) and
+//! never schedules a cross-day rewrite intent. DuckLake's
 //! `ducklake_merge_adjacent_files` has no `partition_filter` in the versions we
 //! ship; Softprobe therefore executes a bounded unscoped CALL and **relies on
-//! DuckLake partition-local merge** when the table is `PARTITIONED BY (record_date)`.
+//! DuckLake partition-local merge** when the table is
+//! `PARTITIONED BY (year(timestamp), month(timestamp), day(timestamp))`.
 //! Integration `T-F6` proves live files stay single-day after merge; if that fails,
 //! do not claim AC-F6.
 
@@ -16,9 +18,10 @@ pub const TWCS_TRIGGER_FILE_NUM: usize = 2;
 /// Default open-day live file soft cap (AC-F4). Override via `MaintenanceConfig`.
 pub const TWCS_OPEN_DAY_FILE_CAP: usize = 2;
 
-/// Live Parquet stats for one `record_date` partition.
+/// Live Parquet stats for one calendar-day partition (from year/month/day keys).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionFileStats {
+    /// Calendar day reconstructed from one-clock partition keys (not a lake column).
     pub record_date: NaiveDate,
     pub live_file_count: usize,
     pub total_bytes: u64,
@@ -26,9 +29,9 @@ pub struct PartitionFileStats {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DayKind {
-    /// `record_date < today` — may fully merge toward target size.
+    /// Day `< today` — may fully merge toward target size.
     Closed,
-    /// `record_date == today` — soft cap only; do not force single-file merge.
+    /// Day `== today` — soft cap only; do not force single-file merge.
     Open,
 }
 
@@ -145,20 +148,32 @@ pub fn plan_twcs_merges(plan: &TwcsMergePlan<'_>) -> Vec<TwcsMergeAction> {
     actions
 }
 
-/// SQL to list live file counts / bytes per `record_date` for a metrics table.
+/// SQL to list live file counts / bytes per calendar day for a metrics table.
 ///
-/// Uses DuckLake metadata (`ducklake_data_file` + `ducklake_file_partition_value`).
+/// Reconstructs `YYYY-MM-DD` from one-clock partition keys
+/// (`partition_key_index` 0/1/2 = year/month/day). Uses DuckLake metadata
+/// (`ducklake_data_file` + `ducklake_file_partition_value`).
 pub fn partition_live_file_stats_sql(catalog_alias: &str, table: &str) -> String {
     let meta = format!("__ducklake_metadata_{catalog_alias}");
     format!(
-        "SELECT CAST(fp.partition_value AS VARCHAR) AS record_date, \
+        "SELECT printf('%04d-%02d-%02d', \
+                  CAST(y.partition_value AS INTEGER), \
+                  CAST(m.partition_value AS INTEGER), \
+                  CAST(d.partition_value AS INTEGER)) AS partition_day, \
                 count(*)::BIGINT AS live_file_count, \
                 coalesce(sum(df.file_size_bytes), 0)::BIGINT AS total_bytes \
          FROM {meta}.ducklake_data_file df \
          JOIN {meta}.ducklake_table t \
            ON df.table_id = t.table_id \
-         JOIN {meta}.ducklake_file_partition_value fp \
-           ON fp.data_file_id = df.data_file_id AND fp.table_id = t.table_id \
+         JOIN {meta}.ducklake_file_partition_value y \
+           ON y.data_file_id = df.data_file_id AND y.table_id = t.table_id \
+          AND y.partition_key_index = 0 \
+         JOIN {meta}.ducklake_file_partition_value m \
+           ON m.data_file_id = df.data_file_id AND m.table_id = t.table_id \
+          AND m.partition_key_index = 1 \
+         JOIN {meta}.ducklake_file_partition_value d \
+           ON d.data_file_id = df.data_file_id AND d.table_id = t.table_id \
+          AND d.partition_key_index = 2 \
          WHERE t.table_name = '{table}' \
            AND t.end_snapshot IS NULL \
            AND df.end_snapshot IS NULL \
@@ -193,24 +208,44 @@ impl InlinedFragmentStats {
 
 /// SQL: logical row count for a metrics-family table in the attached catalog.
 pub fn logical_table_row_count_sql(catalog_alias: &str, table: &str) -> String {
-    format!("SELECT count(*)::BIGINT FROM {catalog_alias}.{table}")
+    // Wide timestamp bound so D12 accepts this maintenance probe.
+    format!(
+        "SELECT count(*)::BIGINT FROM {catalog_alias}.{table} \
+         WHERE CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
+           AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS"
+    )
 }
 
-/// T-F6: live sample files that map to more than one `record_date` (must be empty).
+/// T-F6: live sample files that map to more than one calendar day (must be empty).
 pub fn live_files_spanning_record_dates_sql(catalog_alias: &str, table: &str) -> String {
     let meta = format!("__ducklake_metadata_{catalog_alias}");
     format!(
-        "SELECT df.data_file_id, count(DISTINCT CAST(fp.partition_value AS VARCHAR)) AS n_dates \
-         FROM {meta}.ducklake_data_file df \
-         JOIN {meta}.ducklake_table t \
-           ON df.table_id = t.table_id \
-         JOIN {meta}.ducklake_file_partition_value fp \
-           ON fp.data_file_id = df.data_file_id AND fp.table_id = t.table_id \
-         WHERE t.table_name = '{table}' \
-           AND t.end_snapshot IS NULL \
-           AND df.end_snapshot IS NULL \
-         GROUP BY df.data_file_id \
-         HAVING count(DISTINCT CAST(fp.partition_value AS VARCHAR)) > 1"
+        "WITH file_days AS ( \
+           SELECT df.data_file_id, \
+                  printf('%04d-%02d-%02d', \
+                    CAST(y.partition_value AS INTEGER), \
+                    CAST(m.partition_value AS INTEGER), \
+                    CAST(d.partition_value AS INTEGER)) AS partition_day \
+           FROM {meta}.ducklake_data_file df \
+           JOIN {meta}.ducklake_table t \
+             ON df.table_id = t.table_id \
+           JOIN {meta}.ducklake_file_partition_value y \
+             ON y.data_file_id = df.data_file_id AND y.table_id = t.table_id \
+            AND y.partition_key_index = 0 \
+           JOIN {meta}.ducklake_file_partition_value m \
+             ON m.data_file_id = df.data_file_id AND m.table_id = t.table_id \
+            AND m.partition_key_index = 1 \
+           JOIN {meta}.ducklake_file_partition_value d \
+             ON d.data_file_id = df.data_file_id AND d.table_id = t.table_id \
+            AND d.partition_key_index = 2 \
+           WHERE t.table_name = '{table}' \
+             AND t.end_snapshot IS NULL \
+             AND df.end_snapshot IS NULL \
+         ) \
+         SELECT data_file_id, count(DISTINCT partition_day) AS n_dates \
+         FROM file_days \
+         GROUP BY data_file_id \
+         HAVING count(DISTINCT partition_day) > 1"
     )
 }
 
@@ -396,7 +431,8 @@ mod tests {
     #[test]
     fn logical_table_row_count_sql_targets_catalog_table() {
         let sql = logical_table_row_count_sql("softprobe", "metric_samples");
-        assert_eq!(sql, "SELECT count(*)::BIGINT FROM softprobe.metric_samples");
+        assert!(sql.contains("FROM softprobe.metric_samples"), "{sql}");
+        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS)"), "{sql}");
     }
 
     #[test]
@@ -605,13 +641,17 @@ mod tests {
         )));
     }
 
-    /// AC-F3: samples partition key is `record_date` only (policy constant).
+    /// AC-F3: partition stats reconstruct calendar day from year/month/day keys.
     #[test]
-    fn twcs_partition_key_is_record_date_only() {
+    fn twcs_partition_stats_use_one_clock_day_keys() {
         let sql = partition_live_file_stats_sql("softprobe", "metric_samples");
-        assert!(sql.contains("partition_value"));
+        assert!(sql.contains("partition_key_index = 0"));
+        assert!(sql.contains("partition_key_index = 1"));
+        assert!(sql.contains("partition_key_index = 2"));
+        assert!(sql.contains("partition_day"));
         assert!(sql.contains("metric_samples"));
         assert!(!sql.contains("metric_name"));
+        assert!(!sql.contains("AS record_date"));
     }
 
     #[test]

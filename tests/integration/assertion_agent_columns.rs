@@ -220,7 +220,11 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .body(Body::from(
             json!({
                 "sql": format!(
-                    "SELECT agent_id, agent_name FROM traces WHERE session_id = '{session_id}' LIMIT 1"
+                    "SELECT agent_id, agent_name FROM traces \
+                     WHERE session_id = '{session_id}' \
+                       AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
+                       AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
+                     LIMIT 1"
                 )
             })
             .to_string(),
@@ -244,7 +248,11 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .body(Body::from(
             json!({
                 "sql": format!(
-                    "SELECT agent_id, agent_name FROM logs WHERE session_id = '{session_id}' LIMIT 1"
+                    "SELECT agent_id, agent_name FROM logs \
+                     WHERE session_id = '{session_id}' \
+                       AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
+                       AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
+                     LIMIT 1"
                 )
             })
             .to_string(),

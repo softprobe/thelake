@@ -13,7 +13,7 @@ use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// DuckLake / union view contract: non-empty counts, HTTP columns, `record_date` partition,
+/// DuckLake / union view contract: non-empty counts, HTTP columns, day-of-timestamp partition,
 /// and distinct session scope (replaces former ad hoc Iceberg SQL checks).
 #[tokio::test]
 async fn strict_trace_union_shape_ducklake_contract() {
@@ -62,7 +62,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
 
     let escaped = session_id.replace('\'', "''");
     let count_sql =
-        format!("SELECT COUNT(*)::BIGINT AS c FROM traces WHERE session_id = '{escaped}'");
+        format!("SELECT COUNT(*)::BIGINT AS c FROM traces WHERE session_id = '{escaped}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
@@ -80,9 +80,11 @@ async fn strict_trace_union_shape_ducklake_contract() {
             http_request_method, \
             http_request_path, \
             http_response_status_code, \
-            record_date::VARCHAR AS rd \
+            strftime(timestamp, '%Y-%m-%d') AS rd \
          FROM traces \
          WHERE session_id = '{escaped}' \
+           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
+           AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
          LIMIT 1"
     );
     let row = test_pipeline
@@ -99,12 +101,16 @@ async fn strict_trace_union_shape_ducklake_contract() {
     let rd = row.rows[0][3].as_str().unwrap_or("");
     assert!(
         !rd.is_empty() && rd != "NULL",
-        "record_date must be populated for partition pruning (got {rd:?})"
+        "day-of-timestamp must be populated for partition pruning (got {rd:?})"
     );
 
     let part_sql = format!(
         "SELECT COUNT(*)::BIGINT AS partitions FROM ( \
-            SELECT record_date FROM traces WHERE session_id = '{escaped}' GROUP BY record_date \
+            SELECT strftime(timestamp, '%Y-%m-%d') AS d FROM traces \
+            WHERE session_id = '{escaped}' \
+              AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
+              AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
+            GROUP BY 1 \
         ) s"
     );
     let pr = test_pipeline
@@ -113,11 +119,11 @@ async fn strict_trace_union_shape_ducklake_contract() {
         .expect("partition query");
     assert!(
         pr.rows[0][0].as_i64().unwrap_or(0) >= 1,
-        "expected at least one record_date partition for the session"
+        "expected at least one calendar-day partition for the session"
     );
 
     let distinct_sql = format!(
-        "SELECT COUNT(DISTINCT session_id)::BIGINT AS d FROM traces WHERE session_id = '{escaped}'"
+        "SELECT COUNT(DISTINCT session_id)::BIGINT AS d FROM traces WHERE session_id = '{escaped}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS"
     );
     let dr = test_pipeline
         .execute_query(&distinct_sql)
@@ -195,7 +201,7 @@ async fn strict_session_correlates_traces_and_logs() {
     pipeline.force_flush_logs().await.expect("flush logs");
 
     let esc = session_id.replace('\'', "''");
-    let span_wait = format!("SELECT COUNT(*)::BIGINT FROM traces WHERE session_id = '{esc}'");
+    let span_wait = format!("SELECT COUNT(*)::BIGINT FROM traces WHERE session_id = '{esc}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
@@ -207,7 +213,7 @@ async fn strict_session_correlates_traces_and_logs() {
     .await
     .expect("traces row for session");
 
-    let log_wait = format!("SELECT COUNT(*)::BIGINT FROM logs WHERE session_id = '{esc}'");
+    let log_wait = format!("SELECT COUNT(*)::BIGINT FROM logs WHERE session_id = '{esc}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
@@ -222,7 +228,7 @@ async fn strict_session_correlates_traces_and_logs() {
     let trace_esc = trace_id.replace('\'', "''");
     let correlate_sql = format!(
         "SELECT COUNT(*)::BIGINT AS n FROM logs \
-         WHERE session_id = '{esc}' AND trace_id = '{trace_esc}'"
+         WHERE session_id = '{esc}' AND trace_id = '{trace_esc}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS"
     );
     let cr = test_pipeline
         .execute_query(&correlate_sql)

@@ -110,8 +110,7 @@ pub struct Span {
     pub http_response_status_code: Option<i32>,
     pub http_response_headers: Option<String>,
     pub http_response_body: Option<String>,
-    // Field 32: record_date (partition key - computed, not stored in struct)
-    // Derived from timestamp at write time in arrow.rs
+    // Partition day is derived from `timestamp` at write (year/month/day hive keys).
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -148,7 +147,7 @@ impl Span {
         crate::storage::schema::arrow::spans_to_record_batch(spans, schema)
     }
 
-    /// Split by UTC `record_date` before building Arrow batches (partition rule).
+    /// Split by UTC calendar day of `timestamp` before building Arrow batches.
     pub fn to_record_batches_by_date(
         spans: Vec<Span>,
         schema: &arrow::datatypes::Schema,

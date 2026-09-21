@@ -5,6 +5,8 @@ use duckdb::Connection;
 use tracing::warn;
 
 pub(crate) fn escape_sql_literal(input: &str) -> String {
+    // Escape only (no quotes) — callers historically wrap the result.
+    // Prefer `crate::sql::sql_string_literal` for new quoted literals.
     input.replace('\'', "''")
 }
 
@@ -111,9 +113,11 @@ fn ensure_timestamp_precision(
                 "table {qualified_table} cannot safely migrate {kind} timestamps: column '{column}' has unsupported type {dtype}"
             ));
         }
-        ddls.push(format!(
-            "ALTER TABLE {qualified_table} ALTER COLUMN {column} SET DATA TYPE TIMESTAMP_NS \
-             USING make_timestamp_ns(epoch_ns({column}));"
+        ddls.push(crate::sql::schema::alter_column_using_sql(
+            qualified_table,
+            column,
+            "TIMESTAMP_NS",
+            &format!("make_timestamp_ns(epoch_ns({column}))"),
         ));
     }
 
@@ -148,9 +152,7 @@ pub(super) fn ensure_trace_fidelity_columns(
     ]
     .into_iter()
     .filter(|(name, _)| !found.contains_key(*name))
-    .map(|(name, sql_type)| {
-        format!("ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {name} {sql_type};")
-    })
+    .map(|(name, sql_type)| crate::sql::schema::add_column_sql(qualified_table, name, sql_type))
     .collect::<Vec<_>>();
     if ddls.is_empty() {
         return Ok(());

@@ -17,21 +17,19 @@
 //! | 11 | Query: label filter + downsample | `label_filter_with_downsample_returns_correct_series` |
 //! | 12 | Grain planner boundaries | `grain::tests::*` + `postings_resolve` SQL shape tests |
 
-use crate::compaction::downsample::{
+use crate::compat::backends::metrics::{LabelMatcher, MatcherOp};
+use crate::compat::backends::postings_resolve::equality_postings;
+use crate::sql::compaction::{
     downsample_1h_from_5m_sql, downsample_1h_from_raw_sql, downsample_5m_sql,
     hist_downsample_1h_from_5m_for_day_sql, hist_downsample_5m_for_day_sql,
 };
-use crate::compat::backends::metrics::{LabelMatcher, MatcherOp};
-use crate::compat::backends::postings_resolve::{
-    equality_postings, resolve_series_ids_sql, samples_scan_sql_for_window, RecordDateRange,
-};
+use crate::sql::prom::{resolve_series_ids_sql, samples_scan_sql_for_window, PostingsDayRange};
 use crate::storage::schema::metrics_layout::ensure_metrics_layout_family_tables;
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use duckdb::Connection;
 use tempfile::TempDir;
 
 /// Fixed historical anchor (matches harness EVAL_END) — always older than downsample lag.
-const EVAL_DAY: &str = "2023-11-14";
 const EVAL_HOUR: &str = "2023-11-14 10:00:00+00";
 
 fn attach_ducklake(temp: &TempDir) -> (Connection, String) {
@@ -48,10 +46,10 @@ fn seed_series(conn: &Connection, catalog: &str, series_id: u64, metric_name: &s
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_series VALUES \
            ({series_id}, '{metric_name}', 'gauge', '', '', NULL, NULL, \
-            map(['job'], ['{job}']), DATE '{EVAL_DAY}');\n\
+            map(['job'], ['{job}']), TIMESTAMPTZ '2023-11-14 10:00:00+00');\n\
          INSERT INTO {catalog}.metric_postings VALUES \
-           ('__name__', '{metric_name}', {series_id}, DATE '{EVAL_DAY}'),\
-           ('job', '{job}', {series_id}, DATE '{EVAL_DAY}');"
+           ('__name__', '{metric_name}', {series_id}, TIMESTAMPTZ '2023-11-14 10:00:00+00'),\
+           ('job', '{job}', {series_id}, TIMESTAMPTZ '2023-11-14 10:00:00+00');"
     ))
     .expect("seed series");
 }
@@ -69,7 +67,7 @@ fn downsample_5m_aggregates_match_raw_oracle() {
     let mut inserts = String::new();
     for (i, v) in values.iter().enumerate() {
         inserts.push_str(&format!(
-            "(1, TIMESTAMPTZ '2023-11-14 10:0{i}:00+00', {v}, DATE '{EVAL_DAY}'),"
+            "(1, TIMESTAMPTZ '2023-11-14 10:0{i}:00+00', {v}),"
         ));
     }
     inserts.pop();
@@ -85,7 +83,7 @@ fn downsample_5m_aggregates_match_raw_oracle() {
         .query_row(
             &format!(
                 "SELECT count, sum, min, max, last FROM {catalog}.metric_samples_5m \
-                 WHERE series_id = 1 AND window_ts = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
+                 WHERE series_id = 1 AND timestamp = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
             ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
@@ -109,14 +107,13 @@ fn downsample_5m_skips_near_cutoff_partial_bucket() {
     let now = Utc::now();
     let closed = now - Duration::minutes(12);
     let recent = now - Duration::minutes(1);
-    let day = now.date_naive();
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_series VALUES \
            (1, 'layout_gauge', 'gauge', '', '', NULL, NULL, \
-            map(['job'], ['api']), DATE '{day}');\n\
+            map(['job'], ['api']), TIMESTAMPTZ '2023-11-14 10:00:00+00');\n\
          INSERT INTO {catalog}.metric_samples VALUES \
-           (1, TIMESTAMPTZ '{}', 1.0, DATE '{day}'),\
-           (1, TIMESTAMPTZ '{}', 99.0, DATE '{day}');",
+           (1, TIMESTAMPTZ '{}', 1.0),\
+           (1, TIMESTAMPTZ '{}', 99.0);",
         closed.format("%Y-%m-%d %H:%M:%S%.3f+00"),
         recent.format("%Y-%m-%d %H:%M:%S%.3f+00"),
     ))
@@ -157,8 +154,8 @@ fn downsample_5m_isolates_series() {
 
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_samples VALUES \
-           (1, TIMESTAMPTZ '{EVAL_HOUR}', 10.0, DATE '{EVAL_DAY}'),\
-           (2, TIMESTAMPTZ '{EVAL_HOUR}', 20.0, DATE '{EVAL_DAY}');"
+           (1, TIMESTAMPTZ '{EVAL_HOUR}', 10.0),\
+           (2, TIMESTAMPTZ '{EVAL_HOUR}', 20.0);"
     ))
     .expect("seed");
 
@@ -169,7 +166,7 @@ fn downsample_5m_isolates_series() {
         .query_row(
             &format!(
                 "SELECT last FROM {catalog}.metric_samples_5m \
-                 WHERE series_id = 1 AND window_ts = TIMESTAMPTZ '{EVAL_HOUR}'"
+                 WHERE series_id = 1 AND timestamp = TIMESTAMPTZ '{EVAL_HOUR}'"
             ),
             [],
             |r| r.get(0),
@@ -179,7 +176,7 @@ fn downsample_5m_isolates_series() {
         .query_row(
             &format!(
                 "SELECT last FROM {catalog}.metric_samples_5m \
-                 WHERE series_id = 2 AND window_ts = TIMESTAMPTZ '{EVAL_HOUR}'"
+                 WHERE series_id = 2 AND timestamp = TIMESTAMPTZ '{EVAL_HOUR}'"
             ),
             [],
             |r| r.get(0),
@@ -203,7 +200,7 @@ fn downsample_1h_from_5m_rollup_matches_oracle() {
         let minute = bucket * 5;
         let value = (bucket + 1) as f64;
         inserts.push_str(&format!(
-            "(1, TIMESTAMPTZ '2023-11-14 10:{minute:02}:00+00', {value}, DATE '{EVAL_DAY}'),"
+            "(1, TIMESTAMPTZ '2023-11-14 10:{minute:02}:00+00', {value}),"
         ));
     }
     inserts.pop();
@@ -221,7 +218,7 @@ fn downsample_1h_from_5m_rollup_matches_oracle() {
         .query_row(
             &format!(
                 "SELECT count, sum, min, max, last FROM {catalog}.metric_samples_1h \
-                 WHERE series_id = 1 AND window_ts = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
+                 WHERE series_id = 1 AND timestamp = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
             ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
@@ -245,8 +242,8 @@ fn downsample_1h_from_raw_when_5m_empty() {
 
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_samples VALUES \
-           (1, TIMESTAMPTZ '2023-11-14 10:00:00+00', 7.0, DATE '{EVAL_DAY}'),\
-           (1, TIMESTAMPTZ '2023-11-14 10:30:00+00', 9.0, DATE '{EVAL_DAY}');"
+           (1, TIMESTAMPTZ '2023-11-14 10:00:00+00', 7.0),\
+           (1, TIMESTAMPTZ '2023-11-14 10:30:00+00', 9.0);"
     ))
     .expect("seed");
 
@@ -266,7 +263,7 @@ fn downsample_1h_from_raw_when_5m_empty() {
         .query_row(
             &format!(
                 "SELECT count, last FROM {catalog}.metric_samples_1h \
-                 WHERE series_id = 1 AND window_ts = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
+                 WHERE series_id = 1 AND timestamp = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
             ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -287,7 +284,7 @@ fn incremental_1h_from_5m_waits_for_complete_hour() {
     // Pass 1: only the first 5m bucket exists in the ladder.
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_samples_5m VALUES \
-           (1, TIMESTAMPTZ '2023-11-14 10:00:00+00', DATE '{EVAL_DAY}', 1::UBIGINT, 1.0, \
+           (1, TIMESTAMPTZ '2023-11-14 10:00:00+00', 1::UBIGINT, 1.0, \
             1.0, 1.0, 1.0, TIMESTAMPTZ '2023-11-14 10:00:00+00');"
     ))
     .expect("partial 5m");
@@ -308,7 +305,7 @@ fn incremental_1h_from_5m_waits_for_complete_hour() {
         let minute = bucket * 5;
         let value = (bucket + 1) as f64;
         inserts.push_str(&format!(
-            "(1, TIMESTAMPTZ '2023-11-14 10:{minute:02}:00+00', DATE '{EVAL_DAY}', \
+            "(1, TIMESTAMPTZ '2023-11-14 10:{minute:02}:00+00', \
              1::UBIGINT, {value}, {value}, {value}, {value}, \
              TIMESTAMPTZ '2023-11-14 10:{minute:02}:00+00'),"
         ));
@@ -325,7 +322,7 @@ fn incremental_1h_from_5m_waits_for_complete_hour() {
         .query_row(
             &format!(
                 "SELECT count, last FROM {catalog}.metric_samples_1h \
-                 WHERE series_id = 1 AND window_ts = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
+                 WHERE series_id = 1 AND timestamp = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
             ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -344,13 +341,13 @@ fn hist_downsample_5m_merges_bucket_counts() {
 
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_series VALUES \
-           (10, 'layout_latency', 'histogram', 's', '', NULL, NULL, map([], []), DATE '{EVAL_DAY}');\n\
+           (10, 'layout_latency', 'histogram', 's', '', NULL, NULL, map([], []), TIMESTAMPTZ '2023-11-14 10:00:00+00');\n\
          INSERT INTO {catalog}.metric_hist_samples \
-           (series_id, timestamp, count, sum, bucket_counts, explicit_bounds, record_date) VALUES \
+           (series_id, timestamp, count, sum, bucket_counts, explicit_bounds) VALUES \
            (10, TIMESTAMPTZ '2023-11-14 10:01:00+00', 2::UBIGINT, 0.2, \
-            [1::UBIGINT, 2::UBIGINT], [0.0, 1.0]::DOUBLE[], DATE '{EVAL_DAY}'),\
+            [1::UBIGINT, 2::UBIGINT], [0.0, 1.0]::DOUBLE[]),\
            (10, TIMESTAMPTZ '2023-11-14 10:03:00+00', 3::UBIGINT, 0.3, \
-            [4::UBIGINT, 5::UBIGINT], [0.0, 1.0]::DOUBLE[], DATE '{EVAL_DAY}');"
+            [4::UBIGINT, 5::UBIGINT], [0.0, 1.0]::DOUBLE[]);"
     ))
     .expect("seed hist");
 
@@ -365,7 +362,7 @@ fn hist_downsample_5m_merges_bucket_counts() {
         .query_row(
             &format!(
                 "SELECT bucket_counts[1], bucket_counts[2] FROM {catalog}.metric_hist_samples_5m \
-                 WHERE series_id = 10 AND window_ts = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
+                 WHERE series_id = 10 AND timestamp = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
             ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -377,7 +374,7 @@ fn hist_downsample_5m_merges_bucket_counts() {
         .query_row(
             &format!(
                 "SELECT count FROM {catalog}.metric_hist_samples_5m \
-                 WHERE series_id = 10 AND window_ts = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
+                 WHERE series_id = 10 AND timestamp = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
             ),
             [],
             |r| r.get(0),
@@ -395,13 +392,13 @@ fn hist_downsample_1h_from_5m_rollup() {
 
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_series VALUES \
-           (10, 'layout_latency', 'histogram', 's', '', NULL, NULL, map([], []), DATE '{EVAL_DAY}');\n\
+           (10, 'layout_latency', 'histogram', 's', '', NULL, NULL, map([], []), TIMESTAMPTZ '2023-11-14 10:00:00+00');\n\
          INSERT INTO {catalog}.metric_hist_samples_5m VALUES \
-           (10, TIMESTAMPTZ '2023-11-14 10:00:00+00', DATE '{EVAL_DAY}', 5::UBIGINT, 0.5, \
+           (10, TIMESTAMPTZ '2023-11-14 10:00:00+00', 5::UBIGINT, 0.5, \
             [1::UBIGINT, 2::UBIGINT], [0.0, 1.0]::DOUBLE[], TIMESTAMPTZ '2023-11-14 10:04:00+00'),\
-           (10, TIMESTAMPTZ '2023-11-14 10:05:00+00', DATE '{EVAL_DAY}', 7::UBIGINT, 0.7, \
+           (10, TIMESTAMPTZ '2023-11-14 10:05:00+00', 7::UBIGINT, 0.7, \
             [3::UBIGINT, 4::UBIGINT], [0.0, 1.0]::DOUBLE[], TIMESTAMPTZ '2023-11-14 10:09:00+00'),\
-           (10, TIMESTAMPTZ '2023-11-14 10:55:00+00', DATE '{EVAL_DAY}', 0::UBIGINT, 0.0, \
+           (10, TIMESTAMPTZ '2023-11-14 10:55:00+00', 0::UBIGINT, 0.0, \
             [0::UBIGINT, 0::UBIGINT], [0.0, 1.0]::DOUBLE[], TIMESTAMPTZ '2023-11-14 10:59:00+00');"
     ))
     .expect("seed hist 5m");
@@ -417,7 +414,7 @@ fn hist_downsample_1h_from_5m_rollup() {
         .query_row(
             &format!(
                 "SELECT bucket_counts[1], bucket_counts[2] FROM {catalog}.metric_hist_samples_1h \
-                 WHERE series_id = 10 AND window_ts = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
+                 WHERE series_id = 10 AND timestamp = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
             ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -429,7 +426,7 @@ fn hist_downsample_1h_from_5m_rollup() {
         .query_row(
             &format!(
                 "SELECT count FROM {catalog}.metric_hist_samples_1h \
-                 WHERE series_id = 10 AND window_ts = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
+                 WHERE series_id = 10 AND timestamp = TIMESTAMPTZ '2023-11-14 10:00:00+00'"
             ),
             [],
             |r| r.get(0),
@@ -453,7 +450,7 @@ fn query_1h_grain_returns_downsampled_last() {
     // One hourly point for a closed hour.
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_samples VALUES \
-           (1, TIMESTAMPTZ '2023-11-14 10:00:00+00', 42.0, DATE '{EVAL_DAY}');"
+           (1, TIMESTAMPTZ '2023-11-14 10:00:00+00', 42.0);"
     ))
     .expect("seed");
     conn.execute_batch(&commit_sql(&downsample_1h_from_raw_sql(&catalog)))
@@ -500,8 +497,8 @@ fn query_5m_grain_returns_downsampled_last() {
 
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_samples VALUES \
-           (1, TIMESTAMPTZ '2023-11-14 10:02:00+00', 11.0, DATE '{EVAL_DAY}'),\
-           (1, TIMESTAMPTZ '2023-11-14 10:04:00+00', 22.0, DATE '{EVAL_DAY}');"
+           (1, TIMESTAMPTZ '2023-11-14 10:02:00+00', 11.0),\
+           (1, TIMESTAMPTZ '2023-11-14 10:04:00+00', 22.0);"
     ))
     .expect("seed");
     conn.execute_batch(&commit_sql(&downsample_5m_sql(&catalog)))
@@ -549,15 +546,15 @@ fn label_filter_with_downsample_returns_correct_series() {
 
     conn.execute_batch(&format!(
         "INSERT INTO {catalog}.metric_samples VALUES \
-           (1, TIMESTAMPTZ '2023-11-14 10:00:00+00', 100.0, DATE '{EVAL_DAY}'),\
-           (2, TIMESTAMPTZ '2023-11-14 10:00:00+00', 200.0, DATE '{EVAL_DAY}');"
+           (1, TIMESTAMPTZ '2023-11-14 10:00:00+00', 100.0),\
+           (2, TIMESTAMPTZ '2023-11-14 10:00:00+00', 200.0);"
     ))
     .expect("seed");
     conn.execute_batch(&commit_sql(&downsample_1h_from_raw_sql(&catalog)))
         .expect("1h");
 
     let day = Utc.with_ymd_and_hms(2023, 11, 14, 12, 0, 0).unwrap();
-    let days = RecordDateRange {
+    let days = PostingsDayRange {
         start: Some(day.date_naive()),
         end: Some(day.date_naive()),
     };

@@ -9,7 +9,11 @@
 //! for ≤2h, `metric_hist_samples_5m` for ≤48h, `metric_hist_samples_1h` beyond —
 //! same ladder as gauges (Greptime/Thanos-style pre-aggregate, not Prom result cache).
 
-use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
+use crate::sql::schema::{qualified_table_name, table_spec};
+
+fn qualified_metrics_layout_table(catalog: &str, name: &str) -> String {
+    qualified_table_name(catalog, table_spec(name).expect("registered metric table"))
+}
 
 /// Raw grain window: end − start ≤ 24h.
 /// Fresh tenants/demos have empty 5m ladders for the first lag window; scanning
@@ -32,9 +36,9 @@ pub const ONE_HOUR_LAG_MS: i64 = 60 * 60 * 1000;
 pub enum SampleGrain {
     /// `metric_samples` (`timestamp`, `value`).
     Raw,
-    /// `metric_samples_5m` (`window_ts`, `last`).
+    /// `metric_samples_5m` (`timestamp`, `last`).
     FiveMin,
-    /// `metric_samples_1h` (`window_ts`, `last`).
+    /// `metric_samples_1h` (`timestamp`, `last`).
     OneHour,
     /// `metric_hist_samples` for classic hist/summary (`_bucket` / `_sum` / `_count`).
     Hist,
@@ -60,7 +64,7 @@ impl SampleGrain {
     pub fn time_column(self) -> &'static str {
         match self {
             Self::Raw | Self::Hist => "timestamp",
-            Self::FiveMin | Self::OneHour | Self::HistFiveMin | Self::HistOneHour => "window_ts",
+            Self::FiveMin | Self::OneHour | Self::HistFiveMin | Self::HistOneHour => "timestamp",
         }
     }
 

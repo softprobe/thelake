@@ -1005,7 +1005,6 @@ fn pick_query_case(seed: u64) -> QueryCase {
 }
 
 fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
-    let date_filter = (Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%d");
     let now_ts = "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)";
     let hit = !seed.is_multiple_of(5);
     let session = if hit {
@@ -1020,8 +1019,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT COUNT(*) AS errors \
                  FROM traces \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
+                 WHERE timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND (http_response_status_code >= 500 OR status_code = 'ERROR')"
             ),
         ),
@@ -1030,8 +1028,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT http_request_path, COUNT(*) AS errors \
                  FROM traces \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND timestamp >= ({now_ts} - INTERVAL '15 minutes') \
+                 WHERE timestamp >= ({now_ts} - INTERVAL '15 minutes') \
                    AND http_response_status_code >= 500 \
                    AND http_request_path IS NOT NULL \
                  GROUP BY 1 \
@@ -1045,8 +1042,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
                 "SELECT http_request_path, \
                         quantile_cont((EXTRACT(EPOCH FROM end_timestamp) - EXTRACT(EPOCH FROM timestamp)) * 1000.0, 0.95) AS p95_ms \
                  FROM traces \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
+                 WHERE timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND end_timestamp IS NOT NULL \
                    AND http_request_path IS NOT NULL \
                  GROUP BY 1 \
@@ -1059,8 +1055,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT trace_id, span_id, timestamp, http_request_path, http_response_status_code \
                  FROM traces \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND session_id = '{session}' \
+                 WHERE session_id = '{session}' \
                  ORDER BY timestamp DESC \
                  LIMIT 50"
             ),
@@ -1070,8 +1065,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT COUNT(*) AS errors \
                  FROM logs \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
+                 WHERE timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND severity_number >= 17"
             ),
         ),
@@ -1080,8 +1074,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT timestamp, severity_text, body \
                  FROM logs \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
+                 WHERE timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND severity_number >= 17 \
                  ORDER BY timestamp DESC \
                  LIMIT 50"
@@ -1092,8 +1085,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT timestamp, severity_text, body \
                  FROM logs \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND session_id = '{session}' \
+                 WHERE session_id = '{session}' \
                  ORDER BY timestamp DESC \
                  LIMIT 50"
             ),
@@ -1103,8 +1095,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT date_trunc('minute', timestamp) AS t, AVG(value) AS avg_latency_ms \
                  FROM metric_samples \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND timestamp >= ({now_ts} - INTERVAL '10 minutes') \
+                 WHERE timestamp >= ({now_ts} - INTERVAL '10 minutes') \
                    AND metric_name = 'stress.metric.latency' \
                  GROUP BY 1 \
                  ORDER BY 1"
@@ -1115,8 +1106,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT MAX(value) AS max_latency_ms \
                  FROM metric_samples \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND timestamp >= ({now_ts} - INTERVAL '5 minutes') \
+                 WHERE timestamp >= ({now_ts} - INTERVAL '5 minutes') \
                    AND metric_name = 'stress.metric.latency'"
             ),
         ),
@@ -1125,8 +1115,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT COUNT(*) AS errors \
                  FROM traces \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND timestamp >= ({now_ts} - INTERVAL '24 hours') \
+                 WHERE timestamp >= ({now_ts} - INTERVAL '24 hours') \
                    AND (http_response_status_code >= 500 OR status_code = 'ERROR')"
             ),
         ),
@@ -1135,8 +1124,7 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
             format!(
                 "SELECT date_trunc('minute', timestamp) AS t, AVG(value) AS avg_latency_ms \
                  FROM metric_samples \
-                 WHERE record_date >= DATE '{date_filter}' \
-                   AND timestamp >= ({now_ts} - INTERVAL '24 hours') \
+                 WHERE timestamp >= ({now_ts} - INTERVAL '24 hours') \
                    AND metric_name = 'stress.metric.latency' \
                  GROUP BY 1 \
                  ORDER BY 1"

@@ -3,7 +3,7 @@
 //! Covers every `session_summary` aggregate field without MAP/`attributes`.
 //! Every case uses [`assert_full_fields`] — spot-checks alone are not enough.
 
-use crate::session_summary::reduce_sql::compile_session_summary_reduce_sql;
+use crate::sql::session_summary::compile_session_summary_reduce_sql;
 use chrono::{TimeZone, Utc};
 use duckdb::Connection;
 

@@ -1,6 +1,9 @@
 use crate::config::{Config, DuckLakeConfig};
 use crate::promotion::TelemetryTable;
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
+use crate::sql::schema::{
+    insert_order_by, is_otlp_table, LOGS, METRICS_LAYOUT_CORE_TABLES, SCORES, SCORE_CONFIGS, TRACES,
+};
 use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
 use crate::storage::schema::tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
 use crate::storage::schema::variant::parquet_select_for_table;
@@ -113,7 +116,7 @@ impl WriterPool {
     ) -> Result<()> {
         let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
         crate::storage::schema::ensure_metrics_layout_family_tables(conn, &catalog)?;
-        for t in crate::storage::schema::METRICS_LAYOUT_CORE_TABLES {
+        for t in METRICS_LAYOUT_CORE_TABLES {
             self.mark_table_ready(t.name);
         }
         self.mark_table_ready("metrics");
@@ -358,15 +361,15 @@ impl DuckLakeWriter {
         let batch = RecordBatch::new_empty(arrow_schema.clone());
         let temp_path = Self::write_temp_parquet(table_name, &[batch])?;
         let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
-        let ddl = format!(
-            "CREATE TABLE IF NOT EXISTS {table} AS {select} FROM read_parquet('{path}') LIMIT 0;",
-            table = qualified_table,
-            select = select_prefix,
-            path = escaped_path
+        let ddl = crate::sql::writer::create_from_parquet_sql(
+            &qualified_table,
+            &select_prefix,
+            &escaped_path,
         );
         let ddl_res = conn.execute_batch(&ddl);
         let _ = std::fs::remove_file(&temp_path);
-        ddl_res.map_err(|e| anyhow!("CREATE TABLE failed for {qualified_table}: {e}"))?;
+        ddl_res
+            .map_err(|e| anyhow!("DuckLake table creation failed for {qualified_table}: {e}"))?;
 
         // Evolve existing tables: ADD any columns present in the Arrow schema
         // (base + product-hot + promotion custom) that the live table lacks.
@@ -378,9 +381,10 @@ impl DuckLakeWriter {
                     continue;
                 }
                 let duck_type = Self::arrow_field_to_duck_add_type(field)?;
-                let alter_sql = format!(
-                    "ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {} {duck_type};",
-                    super::util::quote_duckdb_ident(field.name())
+                let alter_sql = crate::sql::writer::add_column_sql(
+                    &qualified_table,
+                    &super::util::quote_duckdb_ident(field.name()),
+                    duck_type,
                 );
                 conn.execute_batch(&alter_sql).map_err(|e| {
                     anyhow!(
@@ -404,7 +408,7 @@ impl DuckLakeWriter {
             ensure_log_timestamp_precision(conn, &qualified_table)?;
         }
         // traces / logs / scores — any OTLP layout table (D10).
-        if crate::storage::schema::otlp_layout::is_otlp_layout_table(table_name) {
+        if is_otlp_table(table_name) {
             ensure_otlp_table_partition_sort(conn, &qualified_table)?;
         }
 
@@ -583,42 +587,32 @@ impl DuckLakeWriter {
         };
 
         let insert = if let Some(id_column) = dedupe_id_column {
-            format!(
-                "INSERT INTO {table} BY NAME
-                 SELECT incoming.* FROM (
-                   {select} FROM read_parquet('{path}')
-                 ) incoming
-                 WHERE NOT EXISTS (
-                   SELECT 1 FROM {table} existing
-                   WHERE existing.{id_column} = incoming.{id_column}
-                 )
-                 {order_clause};",
-                table = qualified_table,
-                select = select_prefix,
-                path = escaped_path,
-                order_clause = order_clause,
-                id_column = id_column,
+            crate::sql::writer::insert_deduped_parquet_sql(
+                &qualified_table,
+                &select_prefix,
+                &escaped_path,
+                id_column,
+                order_clause,
             )
         } else {
-            format!(
-                "INSERT INTO {table} BY NAME {select} FROM read_parquet('{path}') {order_clause};",
-                table = qualified_table,
-                select = select_prefix,
-                path = escaped_path,
-                order_clause = order_clause,
+            crate::sql::writer::insert_batch_sql(
+                &qualified_table,
+                &select_prefix,
+                Some(&escaped_path),
+                order_clause,
             )
         };
 
         let write_result = tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                conn.execute_batch("BEGIN TRANSACTION;")?;
-                match conn.execute_batch(&insert) {
+                crate::sql::execute_batch_checked(conn, "BEGIN TRANSACTION;")?;
+                match crate::sql::execute_batch_checked(conn, &insert) {
                     Ok(()) => {
-                        conn.execute_batch("COMMIT;")?;
+                        crate::sql::execute_batch_checked(conn, "COMMIT;")?;
                         Ok(())
                     }
                     Err(err) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
+                        let _ = crate::sql::execute_batch_checked(conn, "ROLLBACK;");
                         Err(anyhow!(
                             "DuckLake write failed for {}: {}",
                             qualified_table,
@@ -744,11 +738,11 @@ impl DuckLakeWriter {
     }
 
     pub(super) fn insert_order_clause(&self, table_name: &str) -> &'static str {
-        crate::storage::schema::otlp_layout::insert_order_by(table_name)
+        insert_order_by(table_name)
     }
 
     pub(super) fn reset_tables_for_dev(&self, conn: &Connection) -> Result<()> {
-        for table in ["traces", "logs", "scores", ScoreConfigTable::table_name()] {
+        for table in [TRACES.name, LOGS.name, SCORES.name, SCORE_CONFIGS.name] {
             let qualified = self.qualified_table_name(table);
             conn.execute_batch(&format!("DROP TABLE IF EXISTS {qualified};"))?;
             conn.execute_batch(&format!(
@@ -785,7 +779,7 @@ mod tests {
             DuckLakeWriter::arrow_field_to_duck_add_type(&utf8).unwrap(),
             "VARCHAR"
         );
-        let date = Field::new("record_date", DataType::Date32, false);
+        let date = Field::new("calendar_day", DataType::Date32, false);
         assert_eq!(
             DuckLakeWriter::arrow_field_to_duck_add_type(&date).unwrap(),
             "DATE"

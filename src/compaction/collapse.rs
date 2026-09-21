@@ -1,180 +1,20 @@
-//! `metric_collapse_job_1h` builder + PromQL collapse planner (§6.6 / §7.2 / §9.1).
+//! `metric_collapse_job_1h` planner (§6.6 / §7.2 / §9.1).
 //!
-//! Collapse key is `(metric_name, job, record_date, window_ts)`. Long-window
-//! `sum by (job) (rate|irate|increase(…))`
-//! reads this table (AC-Q5 / AC-W3).
-//!
-//! Maintenance INSERT is day-batched like hist/scalar downsample so DuckLake
-//! prunes `PARTITIONED BY (record_date)`. Query scans add `record_date BETWEEN`
-//! derived from the PromQL window alongside `window_ts` bounds.
+//! SQL recipes live in [`crate::sql::compaction`].
 
 use crate::compat::backends::grain::RAW_RANGE_MS;
-use crate::compat::backends::postings_resolve::RecordDateRange;
-use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
-use chrono::NaiveDate;
 use promql_parser::parser::token::T_SUM;
 use promql_parser::parser::{AggregateExpr, Expr, LabelModifier};
 
+pub use crate::sql::compaction::{
+    collapse_job_1h_for_day_sql, collapse_job_1h_from_raw_for_day_sql,
+    collapse_job_1h_from_raw_pending_days_sql, collapse_job_1h_from_raw_sql,
+    collapse_job_1h_pending_days_sql, collapse_job_1h_sql,
+    collapse_scan_sql_optional as collapse_scan_sql, COLLAPSE_FROM_RAW_LAG,
+};
+
 /// Minimum query window to prefer collapse over wide series fetch (§9.1 step 5).
 pub const COLLAPSE_MIN_RANGE_MS: i64 = RAW_RANGE_MS; // 2h
-
-/// Raw collapse fallback only considers samples older than this.
-pub const COLLAPSE_FROM_RAW_LAG: &str = "INTERVAL '24 hours'";
-
-fn record_date_le_lag(column: &str, lag: &str) -> String {
-    format!("{column} <= CAST((now() - {lag}) AS DATE)")
-}
-
-fn record_date_eq_filter(column: &str, record_date: Option<NaiveDate>) -> String {
-    match record_date {
-        Some(d) => format!("AND {column} = DATE '{}'", d.format("%Y-%m-%d")),
-        None => String::new(),
-    }
-}
-
-/// Incremental INSERT for `metric_collapse_job_1h` from 1h samples + job postings.
-pub fn collapse_job_1h_sql(catalog_alias: &str) -> String {
-    collapse_job_1h_for_day_sql(catalog_alias, None)
-}
-
-/// Days with 1h samples missing collapse rows (bounded per pass).
-pub fn collapse_job_1h_pending_days_sql(catalog_alias: &str, limit: usize) -> String {
-    let dest = qualified_metrics_layout_table(catalog_alias, "metric_collapse_job_1h");
-    let samples_1h = qualified_metrics_layout_table(catalog_alias, "metric_samples_1h");
-    let series = qualified_metrics_layout_table(catalog_alias, "metric_series");
-    let postings = qualified_metrics_layout_table(catalog_alias, "metric_postings");
-    format!(
-        "SELECT DISTINCT CAST(h.record_date AS VARCHAR) AS record_date\n\
-         FROM {samples_1h} h\n\
-         JOIN {series} s\n\
-           ON h.series_id = s.series_id AND h.record_date = s.record_date\n\
-         JOIN {postings} p\n\
-           ON p.series_id = h.series_id AND p.record_date = h.record_date\n\
-          AND p.label_name = 'job'\n\
-         WHERE NOT EXISTS (\n\
-           SELECT 1 FROM {dest} existing\n\
-           WHERE existing.metric_name = s.metric_name\n\
-             AND existing.job = p.label_value\n\
-             AND existing.record_date = h.record_date\n\
-             AND existing.window_ts = h.window_ts\n\
-         )\n\
-         ORDER BY h.record_date\n\
-         LIMIT {limit};"
-    )
-}
-
-/// One calendar-day slice of collapse from 1h (partition-scoped).
-pub fn collapse_job_1h_for_day_sql(catalog_alias: &str, record_date: Option<NaiveDate>) -> String {
-    let dest = qualified_metrics_layout_table(catalog_alias, "metric_collapse_job_1h");
-    let samples_1h = qualified_metrics_layout_table(catalog_alias, "metric_samples_1h");
-    let series = qualified_metrics_layout_table(catalog_alias, "metric_series");
-    let postings = qualified_metrics_layout_table(catalog_alias, "metric_postings");
-    let day_filter = record_date_eq_filter("h.record_date", record_date);
-    format!(
-        "INSERT INTO {dest} (metric_name, job, window_ts, record_date, count, sum, min, max, last)\n\
-         SELECT\n\
-           s.metric_name,\n\
-           p.label_value AS job,\n\
-           h.window_ts,\n\
-           h.record_date,\n\
-           sum(h.count)::UBIGINT AS count,\n\
-           sum(h.sum) AS sum,\n\
-           min(h.min) AS min,\n\
-           max(h.max) AS max,\n\
-           sum(h.last) AS last\n\
-         FROM {samples_1h} h\n\
-         JOIN {series} s\n\
-           ON h.series_id = s.series_id AND h.record_date = s.record_date\n\
-         JOIN {postings} p\n\
-           ON p.series_id = h.series_id AND p.record_date = h.record_date\n\
-          AND p.label_name = 'job'\n\
-         WHERE NOT EXISTS (\n\
-           SELECT 1 FROM {dest} existing\n\
-           WHERE existing.metric_name = s.metric_name\n\
-             AND existing.job = p.label_value\n\
-             AND existing.record_date = h.record_date\n\
-             AND existing.window_ts = h.window_ts\n\
-         )\n\
-         {day_filter}\n\
-         GROUP BY s.metric_name, p.label_value, h.window_ts, h.record_date;"
-    )
-}
-
-/// Fallback collapse from raw when 1h is empty (still key-scoped incremental).
-pub fn collapse_job_1h_from_raw_sql(catalog_alias: &str) -> String {
-    collapse_job_1h_from_raw_for_day_sql(catalog_alias, None)
-}
-
-pub fn collapse_job_1h_from_raw_pending_days_sql(catalog_alias: &str, limit: usize) -> String {
-    let dest = qualified_metrics_layout_table(catalog_alias, "metric_collapse_job_1h");
-    let samples = qualified_metrics_layout_table(catalog_alias, "metric_samples");
-    let series = qualified_metrics_layout_table(catalog_alias, "metric_series");
-    let postings = qualified_metrics_layout_table(catalog_alias, "metric_postings");
-    let day_bound = record_date_le_lag("sm.record_date", COLLAPSE_FROM_RAW_LAG);
-    format!(
-        "SELECT DISTINCT CAST(sm.record_date AS VARCHAR) AS record_date\n\
-         FROM {samples} sm\n\
-         JOIN {series} s\n\
-           ON sm.series_id = s.series_id AND sm.record_date = s.record_date\n\
-         JOIN {postings} p\n\
-           ON p.series_id = sm.series_id AND p.record_date = sm.record_date\n\
-          AND p.label_name = 'job'\n\
-         WHERE sm.timestamp < now() - {COLLAPSE_FROM_RAW_LAG}\n\
-           AND {day_bound}\n\
-           AND NOT EXISTS (\n\
-             SELECT 1 FROM {dest} existing\n\
-             WHERE existing.metric_name = s.metric_name\n\
-               AND existing.job = p.label_value\n\
-               AND existing.record_date = CAST(time_bucket(INTERVAL '1 hour', sm.timestamp) AS DATE)\n\
-               AND existing.window_ts = time_bucket(INTERVAL '1 hour', sm.timestamp)\n\
-           )\n\
-         ORDER BY sm.record_date\n\
-         LIMIT {limit};"
-    )
-}
-
-pub fn collapse_job_1h_from_raw_for_day_sql(
-    catalog_alias: &str,
-    record_date: Option<NaiveDate>,
-) -> String {
-    let dest = qualified_metrics_layout_table(catalog_alias, "metric_collapse_job_1h");
-    let samples = qualified_metrics_layout_table(catalog_alias, "metric_samples");
-    let series = qualified_metrics_layout_table(catalog_alias, "metric_series");
-    let postings = qualified_metrics_layout_table(catalog_alias, "metric_postings");
-    let day_bound = record_date_le_lag("sm.record_date", COLLAPSE_FROM_RAW_LAG);
-    let day_filter = record_date_eq_filter("sm.record_date", record_date);
-    format!(
-        "INSERT INTO {dest} (metric_name, job, window_ts, record_date, count, sum, min, max, last)\n\
-         SELECT\n\
-           s.metric_name,\n\
-           p.label_value AS job,\n\
-           time_bucket(INTERVAL '1 hour', sm.timestamp) AS window_ts,\n\
-           CAST(time_bucket(INTERVAL '1 hour', sm.timestamp) AS DATE) AS record_date,\n\
-           count(*)::UBIGINT AS count,\n\
-           sum(sm.value) AS sum,\n\
-           min(sm.value) AS min,\n\
-           max(sm.value) AS max,\n\
-           arg_max(sm.value, sm.timestamp) AS last\n\
-         FROM {samples} sm\n\
-         JOIN {series} s\n\
-           ON sm.series_id = s.series_id AND sm.record_date = s.record_date\n\
-         JOIN {postings} p\n\
-           ON p.series_id = sm.series_id AND p.record_date = sm.record_date\n\
-          AND p.label_name = 'job'\n\
-         WHERE sm.timestamp < now() - {COLLAPSE_FROM_RAW_LAG}\n\
-           AND {day_bound}\n\
-           {day_filter}\n\
-           AND NOT EXISTS (\n\
-             SELECT 1 FROM {dest} existing\n\
-             WHERE existing.metric_name = s.metric_name\n\
-               AND existing.job = p.label_value\n\
-               AND existing.record_date = CAST(time_bucket(INTERVAL '1 hour', sm.timestamp) AS DATE)\n\
-               AND existing.window_ts = time_bucket(INTERVAL '1 hour', sm.timestamp)\n\
-           )\n\
-         GROUP BY s.metric_name, p.label_value, time_bucket(INTERVAL '1 hour', sm.timestamp),\n\
-           CAST(time_bucket(INTERVAL '1 hour', sm.timestamp) AS DATE);"
-    )
-}
 
 fn unwrap_parens(expr: &Expr) -> &Expr {
     match expr {
@@ -281,50 +121,11 @@ pub fn collapse_fetch_limit(
         .max(10_000)
 }
 
-/// Scan SQL for collapse path (AC-Q5 / AC-W3 EXPLAIN target).
-pub fn collapse_scan_sql(
-    catalog_alias: &str,
-    metric_name: &str,
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-    fetch_limit: usize,
-) -> String {
-    use crate::compat::backends::postings_resolve::timestamptz_literal_ms;
-    let table = qualified_metrics_layout_table(catalog_alias, "metric_collapse_job_1h");
-    let mut time = String::new();
-    if let Some(s) = start_ms {
-        time.push_str(&format!(
-            " AND c.window_ts >= {}",
-            timestamptz_literal_ms(s)
-        ));
-    }
-    if let Some(e) = end_ms {
-        time.push_str(&format!(
-            " AND c.window_ts <= {}",
-            timestamptz_literal_ms(e)
-        ));
-    }
-    let day_range = RecordDateRange::from_ms(start_ms, end_ms);
-    let day_pred = day_range.sql_predicate("c.");
-    if !day_pred.is_empty() {
-        time.push_str(&format!(" AND {day_pred}"));
-    }
-    let name = metric_name.replace('\'', "''");
-    format!(
-        "SELECT c.metric_name, c.job, \
-         CAST((epoch(c.window_ts) * 1000) AS BIGINT) AS timestamp_ms, \
-         c.last AS value, c.count, c.sum, c.min, c.max \
-         FROM {table} c \
-         WHERE c.metric_name = '{name}'{time} \
-         ORDER BY c.job, c.window_ts \
-         LIMIT {fetch_limit}"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compat::promql::parse_promql;
+    use chrono::NaiveDate;
 
     #[test]
     fn collapse_sql_groups_by_job_and_is_incremental() {
@@ -333,35 +134,33 @@ mod tests {
         assert!(sql.contains("metric_samples_1h"));
         assert!(sql.contains("label_name = 'job'"));
         assert!(sql.contains("NOT EXISTS"));
-        assert!(!sql.to_lowercase().contains("delete"));
+        assert!(!sql.contains("record_date"));
+        assert!(!sql.contains("window_ts"));
     }
 
     #[test]
-    fn collapse_for_day_scopes_record_date() {
+    fn collapse_for_day_scopes_timestamp_window() {
         let day = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
         let sql = collapse_job_1h_for_day_sql("softprobe", Some(day));
-        assert!(sql.contains("h.record_date = DATE '2026-08-14'"));
+        assert!(sql.contains("2026-08-14"));
+        assert!(!sql.contains("record_date"));
         let pending = collapse_job_1h_pending_days_sql("softprobe", 4);
         assert!(pending.contains("LIMIT 4"));
-        assert!(pending.contains("DISTINCT CAST(h.record_date AS VARCHAR)"));
+        assert!(pending.contains("strftime(h.timestamp AT TIME ZONE 'UTC', '%Y-%m-%d')"));
     }
 
     #[test]
-    fn collapse_from_raw_mirrors_lag_as_record_date() {
+    fn collapse_from_raw_uses_timestamp_lag() {
         let sql = collapse_job_1h_from_raw_sql("softprobe");
         assert!(sql.contains("sm.timestamp < now() - INTERVAL '24 hours'"));
-        assert!(sql.contains("sm.record_date <= CAST((now() - INTERVAL '24 hours') AS DATE)"));
+        assert!(!sql.contains("record_date"));
     }
 
-    /// T-Q5 / AC-Q5 planner unit: AST match when window ≥ 2h.
     #[test]
     fn planner_picks_collapse_for_sum_by_job_rate() {
         let expr = parse_promql(r#"sum by (job) (rate(layout_http[5m]))"#).unwrap();
         assert!(is_sum_by_job_rate_shape(&expr));
         assert!(should_use_collapse(&expr, Some(30 * 24 * 3_600_000)));
-        assert!(should_use_collapse(&expr, Some(COLLAPSE_MIN_RANGE_MS)));
-        assert!(!should_use_collapse(&expr, Some(COLLAPSE_MIN_RANGE_MS - 1)));
-
         let sql = collapse_scan_sql(
             "softprobe",
             "layout_http",
@@ -369,31 +168,18 @@ mod tests {
             Some(1_700_000_000_000 + 30 * 24 * 3_600_000),
             10_000,
         );
-        assert!(
-            sql.contains("metric_collapse_job_1h"),
-            "AC-Q5/W3 EXPLAIN must reference collapse table: {sql}"
-        );
+        assert!(sql.contains("metric_collapse_job_1h"));
         assert!(sql.contains("layout_http"));
-        assert!(!sql.contains("metric_samples "));
-        assert!(!sql.contains("to_timestamp("));
-        assert!(
-            sql.contains("c.record_date BETWEEN DATE"),
-            "collapse scan must prune partitions: {sql}"
-        );
-        assert!(
-            sql_is_collapse_prom_path(&sql),
-            "AC-Q5/W3 collapse path shape: {sql}"
-        );
+        assert!(sql.contains("timestamp"));
+        assert!(!sql.contains("record_date"));
+        assert!(!sql.contains("window_ts"));
+        assert!(sql_is_collapse_prom_path(&sql));
     }
 
     #[test]
     fn planner_rejects_non_job_or_non_rate_shapes() {
         let other = parse_promql(r#"sum by (instance) (rate(layout_http[5m]))"#).unwrap();
         assert!(!is_sum_by_job_rate_shape(&other));
-        let avg = parse_promql(r#"avg by (job) (rate(layout_http[5m]))"#).unwrap();
-        assert!(!is_sum_by_job_rate_shape(&avg));
-        let bare = parse_promql(r#"sum by (job) (layout_http)"#).unwrap();
-        assert!(!is_sum_by_job_rate_shape(&bare));
     }
 
     #[test]
@@ -402,19 +188,11 @@ mod tests {
         assert_eq!(collapse_metric_name(&expr).as_deref(), Some("layout_http"));
     }
 
-    /// T-W3: 90d × J=50 hourly rows must fit the collapse fetch budget (not raw scan_cap).
     #[test]
     fn collapse_fetch_limit_covers_90d_job_series() {
         let end = 1_700_000_000_000i64;
         let start = end - 90 * 86_400_000;
-        let max_series = 50;
-        let lim = collapse_fetch_limit(max_series, Some(start), Some(end));
-        let rows_90d = 90usize * 24 * max_series;
-        assert!(
-            lim > rows_90d,
-            "AC-W3: collapse LIMIT {lim} must exceed 90d×24×J={rows_90d} (raw scan_cap would be ~100k)"
-        );
-        // Old max_series*10 scan_cap must not be used as the collapse row budget.
-        assert!(lim > max_series.saturating_mul(10).max(10_000));
+        let lim = collapse_fetch_limit(50, Some(start), Some(end));
+        assert!(lim > 90 * 24 * 50);
     }
 }

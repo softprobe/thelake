@@ -41,7 +41,12 @@ async fn coalesce_force_flush_makes_logs_queryable() {
     pipeline.force_flush_logs().await.expect("force_flush");
 
     let after = test_pipeline
-        .execute_query("SELECT count(*) AS c FROM logs WHERE body = 'coalesce force_flush body'")
+        .execute_query(
+            "SELECT count(*) AS c FROM logs \
+             WHERE body = 'coalesce force_flush body' \
+               AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
+               AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+        )
         .await
         .expect("query after flush");
     let after_count = after.rows[0][0].as_i64().unwrap_or(0);

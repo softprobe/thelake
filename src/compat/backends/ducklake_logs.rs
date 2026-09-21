@@ -191,16 +191,7 @@ impl DuckLakeLogsBackend {
         let window_sql = Self::sql_window(start, end, Self::matcher_pushdown_clauses(matchers))
             .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
         let cap = ctx.limits.max_series.saturating_mul(100).max(10_000);
-        let sql = format!(
-            "SELECT CAST(epoch_ns(timestamp) AS BIGINT) AS timestamp_ns, body, \
-             CAST(attributes AS JSON) AS attributes, \
-             CAST(resource_attributes AS JSON) AS resource_attributes, \
-             {promoted} \
-             FROM logs WHERE 1=1{} ORDER BY timestamp ASC LIMIT {}",
-            window_sql,
-            cap.saturating_add(1),
-            promoted = Self::promoted_select_sql(),
-        );
+        let sql = crate::sql::logs::scan_sql(&window_sql, &Self::promoted_select_sql(), cap);
         let result = self.execute(ctx, &sql).await?;
         enforce_scan_cap(&result, cap)?;
         Ok(parse_rows(&result))
@@ -1071,10 +1062,9 @@ mod tests {
         )
         .expect("window");
         assert_sql_has_otlp_time_predicates(&sql);
-        let day = sql.find("record_date BETWEEN").unwrap();
         let id = sql.find("service_name").unwrap();
         let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
-        assert!(day < id && id < ts, "day→matcher→ts: {sql}");
+        assert!(id < ts, "matcher before timestamp: {sql}");
     }
 
     #[test]

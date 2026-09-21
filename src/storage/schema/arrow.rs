@@ -4,8 +4,8 @@ use crate::models::{
 use crate::storage::schema::variant::variant_json_to_string_map;
 use anyhow::Result;
 use arrow::array::{
-    ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array, ListArray, MapArray,
-    StringArray, StructArray, TimestampMicrosecondArray, TimestampNanosecondArray,
+    ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, MapArray, StringArray,
+    StructArray, TimestampMicrosecondArray, TimestampNanosecondArray,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
@@ -15,11 +15,6 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tracing::{debug, trace};
-
-fn arrow_days_since_epoch(day: NaiveDate) -> i32 {
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-    (day - epoch).num_days() as i32
-}
 
 pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<RecordBatch> {
     let arrow_schema = Arc::new(schema.clone());
@@ -128,19 +123,6 @@ pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<Recor
             .collect::<Vec<_>>(),
     ));
     let metadata = build_score_metadata_array(scores, &metadata_field)?;
-    let record_dates: ArrayRef = Arc::new(Date32Array::from(
-        scores
-            .iter()
-            .map(|score| {
-                let day = partition_day_from_event_time(score.timestamp);
-                debug_assert_eq!(
-                    score.record_date, day,
-                    "Score.record_date must equal partition_day_from_event_time(timestamp)"
-                );
-                arrow_days_since_epoch(day)
-            })
-            .collect::<Vec<_>>(),
-    ));
 
     Ok(RecordBatch::try_new(
         arrow_schema,
@@ -160,7 +142,6 @@ pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<Recor
             config_ids,
             author_ids,
             metadata,
-            record_dates,
         ],
     )?)
 }
@@ -242,12 +223,6 @@ pub fn score_configs_to_record_batch(
     ));
     let metadata =
         build_string_metadata_array(configs.iter().map(|c| &c.metadata), &metadata_field)?;
-    let record_dates: ArrayRef = Arc::new(Date32Array::from(
-        configs
-            .iter()
-            .map(|c| arrow_days_since_epoch(partition_day_from_event_time(c.timestamp)))
-            .collect::<Vec<_>>(),
-    ));
 
     Ok(RecordBatch::try_new(
         arrow_schema,
@@ -262,7 +237,6 @@ pub fn score_configs_to_record_batch(
             categories,
             author_ids,
             metadata,
-            record_dates,
         ],
     )?)
 }
@@ -352,7 +326,6 @@ const TRACES_BASE_FIELDS: &[&str] = &[
     "http_response_status_code",
     "http_response_headers",
     "http_response_body",
-    "record_date",
 ];
 
 const LOGS_BASE_FIELDS: &[&str] = &[
@@ -366,7 +339,6 @@ const LOGS_BASE_FIELDS: &[&str] = &[
     "resource_attributes",
     "trace_id",
     "span_id",
-    "record_date",
 ];
 
 fn promoted_array_from_values(
@@ -477,8 +449,8 @@ fn build_promoted_columns_from_attribute_maps_with_overrides(
 }
 
 /// Convert Span batch to Arrow RecordBatch using telemetry Arrow schema
-/// One Arrow batch per UTC calendar day — DuckLake traces are partitioned by
-/// `record_date`, and coalesce may flush spans that straddle midnight together.
+/// One Arrow batch per UTC calendar day — DuckLake partitions by
+/// `year/month/day(timestamp)`; coalesce may flush spans that straddle midnight.
 pub fn spans_to_record_batches_by_date(
     spans: Vec<Span>,
     schema: &Schema,
@@ -717,26 +689,22 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
             .collect::<Vec<_>>(),
     ));
 
-    // record_date: sole path via partition_day_from_event_time (D2).
-    let record_date_values: Vec<i32> = spans
+    // Same-day batch locality: DuckLake year/month/day(timestamp) partition
+    // still benefits from single-day Arrow flushes.
+    let day_values: Vec<_> = spans
         .iter()
-        .map(|s| arrow_days_since_epoch(partition_day_from_event_time(s.timestamp)))
+        .map(|s| partition_day_from_event_time(s.timestamp))
         .collect();
-
-    // Verify all spans have the same record_date (required for partition compatibility)
-    if let Some(first_date) = record_date_values.first() {
-        if record_date_values.iter().any(|&d| d != *first_date) {
-            let unique_dates: std::collections::HashSet<i32> =
-                record_date_values.iter().copied().collect();
+    if let Some(first) = day_values.first() {
+        if day_values.iter().any(|d| d != first) {
+            let unique: std::collections::HashSet<_> = day_values.iter().copied().collect();
             return Err(anyhow::anyhow!(
-                "All spans in a batch must have the same record_date for partition compatibility. Found {} unique dates: {:?}",
-                unique_dates.len(),
-                unique_dates
+                "All spans in a batch must share one calendar day for partition locality. Found {} days: {:?}",
+                unique.len(),
+                unique
             ));
         }
     }
-
-    let record_dates: ArrayRef = Arc::new(Date32Array::from(record_date_values));
 
     // Build promoted columns (in schema order, after base fields)
     let promoted_arrays = build_promoted_columns_for_spans(spans, &arrow_schema)?;
@@ -768,7 +736,6 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
         http_response_status_codes,
         http_response_headers,
         http_response_bodies,
-        record_dates,
     ];
     all_arrays.extend(promoted_arrays);
 
@@ -993,26 +960,21 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
             .collect::<Vec<_>>(),
     ));
 
-    // record_date: sole path via partition_day_from_event_time (D2).
-    let record_date_values: Vec<i32> = logs
+    let day_values: Vec<_> = logs
         .iter()
-        .map(|l| arrow_days_since_epoch(partition_day_from_event_time(l.timestamp)))
+        .map(|l| partition_day_from_event_time(l.timestamp))
         .collect();
-
-    // Verify all logs have the same record_date
-    if let Some(first_date) = record_date_values.first() {
-        if record_date_values.iter().any(|&d| d != *first_date) {
-            let unique_dates: std::collections::HashSet<i32> =
-                record_date_values.iter().copied().collect();
+    if let Some(first) = day_values.first() {
+        if day_values.iter().any(|d| d != first) {
+            let unique: std::collections::HashSet<_> = day_values.iter().copied().collect();
             return Err(anyhow::anyhow!(
-                "All logs in a batch must have the same record_date for partition compatibility. Found {} unique dates: {:?}",
-                unique_dates.len(),
-                unique_dates
+                "All logs in a batch must share one calendar day for partition locality. Found {} days: {:?}",
+                unique.len(),
+                unique
             ));
         }
     }
 
-    let record_dates: ArrayRef = Arc::new(Date32Array::from(record_date_values));
     let agent_ids: Vec<Option<String>> = logs.iter().map(|l| l.agent_id.clone()).collect();
     let agent_names: Vec<Option<String>> = logs.iter().map(|l| l.agent_name.clone()).collect();
     let attr_maps: Vec<&HashMap<String, String>> = logs.iter().map(|l| &l.attributes).collect();
@@ -1037,7 +999,6 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
         resource_attributes_array,
         trace_ids,
         span_ids,
-        record_dates,
     ];
     arrays.extend(promoted_arrays);
 

@@ -47,7 +47,7 @@ fn heartbeat_sample_count(conn: &duckdb::Connection) -> i64 {
         "SELECT count(*) \
          FROM softprobe.metric_samples sm \
          JOIN softprobe.metric_series s \
-           ON sm.series_id = s.series_id AND sm.record_date = s.record_date \
+           ON sm.series_id = s.series_id \
          WHERE s.metric_name = 'layout_ingest_heartbeat'",
         [],
         |r| r.get(0),

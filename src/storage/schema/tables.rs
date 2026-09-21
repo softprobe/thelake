@@ -1,4 +1,5 @@
 use crate::promotion::{PromotionColumn, PromotionDataType};
+use crate::sql::schema::{LOGS, SCORES, SCORE_CONFIGS, TRACES};
 use crate::storage::schema::variant::hot_map_columns;
 use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
 use std::sync::Arc;
@@ -8,6 +9,8 @@ fn utf8() -> DataType {
 }
 
 fn ts_utc() -> DataType {
+    // OTLP scores are the microsecond/TIMESTAMPTZ family. Trace/log event
+    // clocks below intentionally use `ts_utc_nanos` for their nanosecond API.
     DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()))
 }
 
@@ -72,7 +75,7 @@ pub struct TraceTable;
 
 impl TraceTable {
     pub fn table_name() -> &'static str {
-        "traces"
+        TRACES.name
     }
 
     pub fn schema() -> Schema {
@@ -114,7 +117,6 @@ impl TraceTable {
             opt("http_response_status_code", DataType::Int32),
             opt("http_response_headers", utf8()),
             opt("http_response_body", utf8()),
-            req("record_date", DataType::Date32),
             // Product-hot nullable columns (#55). Append after core fields so
             // Arrow builders that fill by legacy position stay aligned.
             // Present before promotion apply so prefer-promoted COALESCE is safe.
@@ -142,7 +144,7 @@ pub struct ScoreTable;
 
 impl ScoreTable {
     pub fn table_name() -> &'static str {
-        "scores"
+        SCORES.name
     }
 
     pub fn schema() -> Schema {
@@ -162,7 +164,6 @@ impl ScoreTable {
             opt("config_id", utf8()),
             opt("author_id", utf8()),
             opt("metadata", string_map()),
-            req("record_date", DataType::Date32),
         ])
     }
 }
@@ -172,7 +173,7 @@ pub struct ScoreConfigTable;
 
 impl ScoreConfigTable {
     pub fn table_name() -> &'static str {
-        "score_configs"
+        SCORE_CONFIGS.name
     }
 
     pub fn schema() -> Schema {
@@ -188,7 +189,6 @@ impl ScoreConfigTable {
             opt("categories", utf8()),
             opt("author_id", utf8()),
             opt("metadata", string_map()),
-            req("record_date", DataType::Date32),
         ])
     }
 }
@@ -198,7 +198,7 @@ pub struct OtlpLogsTable;
 
 impl OtlpLogsTable {
     pub fn table_name() -> &'static str {
-        "logs"
+        LOGS.name
     }
 
     pub fn schema() -> Schema {
@@ -218,7 +218,6 @@ impl OtlpLogsTable {
             opt_hot_map("logs", "resource_attributes"),
             opt("trace_id", utf8()),
             opt("span_id", utf8()),
-            req("record_date", DataType::Date32),
             // Product-hot nullable columns (#55). Append after core fields.
             opt("logger_name", utf8()),
             opt("service_name", utf8()),

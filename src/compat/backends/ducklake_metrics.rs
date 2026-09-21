@@ -6,10 +6,8 @@ use crate::compat::backends::metrics::{
     MetricsDiscoveryRequest, MetricsQueryBackend, MetricsQueryRequest, Sample,
 };
 use crate::compat::backends::postings_resolve::{
-    discover_name_values_sql, enforce_resolved_series_cap, equality_postings,
-    intersect_equality_postings_from_sets, resolve_series_ids_sql, samples_scan_sql_for_window,
-    series_meta_sql, single_posting_sql, timestamptz_literal_ms, EqualityPosting, PostingCacheKey,
-    PostingSetCache, RecordDateRange,
+    enforce_resolved_series_cap, equality_postings, intersect_equality_postings_from_sets,
+    EqualityPosting, PostingCacheKey, PostingSetCache,
 };
 use crate::compat::backends::prom_labels::{
     bindings_for_keys, metrics_promotion_by_source, parse_variant_stats_path,
@@ -23,7 +21,11 @@ use crate::compat::tenant::TenantContext;
 use crate::promotion::telemetry_manifest_from_row;
 use crate::query::duckdb::QueryResult;
 use crate::query::QueryEngine;
-use crate::storage::schema::metrics_layout::qualified_metrics_layout_table;
+use crate::sql::prom::{
+    discover_name_values_sql, resolve_series_ids_sql, samples_scan_sql_for_window,
+    samples_time_predicates_for_column, series_meta_sql, single_posting_sql, PostingsDayRange,
+    SeriesMetaDayScope,
+};
 use crate::storage::schema::variant::variant_varchar;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -291,18 +293,9 @@ impl DuckLakeMetricsBackend {
     }
 
     fn time_predicates(start_ms: Option<i64>, end_ms: Option<i64>) -> String {
-        let mut parts = Vec::new();
-        if let Some(start) = start_ms {
-            parts.push(format!("timestamp >= {}", timestamptz_literal_ms(start)));
-        }
-        if let Some(end) = end_ms {
-            parts.push(format!("timestamp <= {}", timestamptz_literal_ms(end)));
-        }
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!(" AND {}", parts.join(" AND "))
-        }
+        // Reuse one-clock sample bounds (incl. discovery default lookback); metadata
+        // SQL aliases columns without the `sm.` prefix.
+        samples_time_predicates_for_column(start_ms, end_ms, "timestamp")
     }
 
     /// Base cap is `max(max_series*10, 10_000)`. Step-bucketed scans are bounded by
@@ -447,8 +440,6 @@ impl DuckLakeMetricsBackend {
         end_ms: Option<i64>,
         metric_name: Option<&str>,
     ) -> Result<HashMap<u64, SeriesMeta>, CompatError> {
-        use crate::compat::backends::postings_resolve::SeriesMetaDayScope;
-
         let engine_id = Arc::as_ptr(&self.query) as usize;
         let tenant_id = ctx.tenant_id();
         let (mut out, missing) = {
@@ -466,7 +457,7 @@ impl DuckLakeMetricsBackend {
             }
             // Recent: optional metric_name for sort-key prune. QueryWindow miss
             // path drops the name filter so a Prom/OTel name mismatch cannot
-            // strand ids, but keeps the Prom record_date window bound.
+            // strand ids, but keeps the Prom timestamp window bound.
             let name = match scope {
                 SeriesMetaDayScope::Recent => metric_name,
                 SeriesMetaDayScope::QueryWindow => None,
@@ -560,7 +551,7 @@ impl DuckLakeMetricsBackend {
     ) -> Result<Vec<u64>, CompatError> {
         Self::check_deadline(ctx)?;
         let catalog = self.layout_catalog();
-        let days = RecordDateRange::from_ms(start_ms, end_ms);
+        let days = PostingsDayRange::from_ms(start_ms, end_ms);
         let equality = equality_postings(matchers);
         let engine_id = Arc::as_ptr(&self.query) as usize;
         let tenant_id = ctx.tenant_id().to_string();
@@ -609,7 +600,7 @@ impl DuckLakeMetricsBackend {
         &self,
         ctx: &TenantContext,
         catalog: &str,
-        days: RecordDateRange,
+        days: PostingsDayRange,
         equality: &[crate::compat::backends::postings_resolve::EqualityPosting],
     ) -> Result<Vec<u64>, CompatError> {
         let sql = resolve_series_ids_sql(catalog, days, equality, ctx.limits.max_series);
@@ -669,7 +660,7 @@ impl DuckLakeMetricsBackend {
         // Multi-equality cold miss: one INTERSECT answers this request. Then fill
         // each missing posting so the next Grafana refresh is in-process.
         if !needed.is_empty() && equality.len() >= 2 {
-            let days_range = RecordDateRange {
+            let days_range = PostingsDayRange {
                 start: days.first().copied(),
                 end: days.last().copied(),
             };
@@ -735,8 +726,8 @@ impl DuckLakeMetricsBackend {
         Self::check_deadline(ctx)?;
         let sql = single_posting_sql(catalog, day, label_name, label_value);
         debug_assert!(
-            sql.contains("metric_postings") && sql.contains("record_date = DATE"),
-            "cached posting fill must be day-scoped: {sql}"
+            sql.contains("metric_postings") && sql.contains("timestamp >="),
+            "cached posting fill must be day-scoped via timestamp bounds: {sql}"
         );
         let result = self.execute_soft(ctx, &sql).await?;
         let mut ids = Vec::with_capacity(result.rows.len());
@@ -891,10 +882,7 @@ impl DuckLakeMetricsBackend {
         }
         Self::check_deadline(ctx).ok();
         let alias = self.query.catalog_alias();
-        let sql = format!(
-            "SELECT spec_id, manifest_json FROM {alias}.promotion_specs \
-             WHERE status = 'active' AND target_kind = 'telemetry_columns'"
-        );
+        let sql = crate::sql::prom::active_telemetry_promotions_sql(alias);
         let map = match self.execute_soft(ctx, &sql).await {
             Ok(result) => {
                 let mut manifests = Vec::new();
@@ -933,12 +921,7 @@ impl DuckLakeMetricsBackend {
         let alias = self.query.catalog_alias();
         // Prefer metrics-table paths when column/table metadata is available; fall back
         // to distinct variant_path across the catalog if the join is unsupported.
-        let sql = format!(
-            "SELECT DISTINCT vs.variant_path \
-             FROM __ducklake_metadata_{alias}.ducklake_file_variant_stats vs \
-             WHERE vs.variant_path IS NOT NULL \
-             LIMIT 2048"
-        );
+        let sql = crate::sql::prom::variant_identity_keys_sql(alias);
         let keys = match self.execute_soft(ctx, &sql).await {
             Ok(result) => {
                 let mut out = BTreeSet::new();
@@ -1111,7 +1094,7 @@ impl DuckLakeMetricsBackend {
     ) -> Result<Vec<String>, CompatError> {
         Self::check_deadline(ctx)?;
         let probe = self
-            .execute_soft(ctx, "SELECT 1 FROM metrics LIMIT 1")
+            .execute_soft(ctx, crate::sql::prom::METRICS_PROBE_SQL)
             .await?;
         if probe.row_count == 0 {
             return Ok(Vec::new());
@@ -1193,7 +1176,7 @@ impl DuckLakeMetricsBackend {
         Self::check_deadline(ctx)?;
         ctx.limits.validate_time_range_ms(start_ms, end_ms)?;
         let catalog = self.layout_catalog();
-        let days = RecordDateRange::from_ms(start_ms, end_ms);
+        let days = PostingsDayRange::from_ms(start_ms, end_ms);
         let mut sql = discover_name_values_sql(&catalog, days, ctx.limits.max_series);
         // Optional equality pushdown on posting label values (e.g. exact __name__).
         if !sql_matchers.is_empty() {
@@ -1457,7 +1440,7 @@ impl MetricsQueryBackend for DuckLakeMetricsBackend {
             None => ctx.limits.max_series.max(1),
         };
         let catalog = self.layout_catalog();
-        let sql = metadata_scan_sql(&catalog, &time);
+        let sql = crate::sql::prom::metrics_metadata_scan_sql(&catalog, &time);
         let result = self.execute_soft(ctx, &sql).await?;
         Self::check_deadline(ctx)?;
         let want = metric
@@ -1977,27 +1960,6 @@ fn format_le(bound: f64) -> String {
     }
 }
 
-fn metadata_scan_sql(catalog: &str, time: &str) -> String {
-    let series = qualified_metrics_layout_table(catalog, "metric_series");
-    let samples = qualified_metrics_layout_table(catalog, "metric_samples");
-    let hist = qualified_metrics_layout_table(catalog, "metric_hist_samples");
-    let sample_time = time.replace("timestamp", "sm.timestamp");
-    let hist_time = time.replace("timestamp", "hs.timestamp");
-    format!(
-        "SELECT metric_name, \
-         any_value(description) AS description, \
-         any_value(unit) AS unit, \
-         any_value(metric_type) AS metric_type, \
-         any_value(aggregation_temporality) AS aggregation_temporality, \
-         any_value(is_monotonic) AS is_monotonic \
-         FROM {series} \
-         WHERE EXISTS (SELECT 1 FROM {samples} sm WHERE sm.series_id = {series}.series_id{sample_time}) \
-            OR EXISTS (SELECT 1 FROM {hist} hs WHERE hs.series_id = {series}.series_id{hist_time}) \
-         GROUP BY metric_name \
-         ORDER BY metric_name"
-    )
-}
-
 fn scan_cap_exceeded(cap: usize) -> CompatError {
     CompatError::new(
         CompatErrorCode::LimitExceeded,
@@ -2008,9 +1970,7 @@ fn scan_cap_exceeded(cap: usize) -> CompatError {
 }
 
 #[cfg(test)]
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
+use crate::sql::sql_string_literal;
 
 #[cfg(test)]
 fn is_safe_prom_label_name(name: &str) -> bool {
@@ -2429,7 +2389,7 @@ mod tests {
 
     #[test]
     fn metadata_sql_uses_catalog_qualified_skinny_tables() {
-        let sql = metadata_scan_sql("softprobe", "");
+        let sql = crate::sql::prom::metrics_metadata_scan_sql("softprobe", "");
         assert!(
             sql.contains("FROM softprobe.metric_series"),
             "metadata must qualify metric_series, got {sql}"
