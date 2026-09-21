@@ -1,10 +1,9 @@
 //! Protocol-native response envelopes for compatibility stubs and adapters.
 //!
 //! Softprobe stable codes (`unsupported_feature`, …) remain discoverable in the
-//! protocol error message (and Tempo's `softprobe_code` field). Prometheus uses
-//! `errorType: "execution"` for unsupported features.
+//! protocol error message (and Tempo's `softprobe_code` field).
 
-use crate::compat::errors::{CompatError, CompatErrorCode};
+use crate::compat::errors::CompatError;
 use crate::compat::tenant::ProtocolScope;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -13,7 +12,7 @@ use serde_json::{json, Value};
 /// Map a compatibility error into the wire envelope for `protocol`.
 ///
 /// Softprobe stable codes remain discoverable:
-/// - Prometheus/Loki: prefixed in the `error` string (`unsupported_feature: …`)
+/// - Loki: prefixed in the `error` string (`unsupported_feature: …`)
 /// - Tempo: `softprobe_code` field
 ///
 /// Protocol HTTP handlers MUST return [`error_response`], not
@@ -27,11 +26,6 @@ pub fn error_envelope(protocol: ProtocolScope, err: &CompatError) -> Value {
         .unwrap_or(err.message.as_str());
     let message = format!("{}: {}", err.code.as_str(), detail);
     match protocol {
-        ProtocolScope::Prometheus => json!({
-            "status": "error",
-            "errorType": prometheus_error_type(err.code),
-            "error": message,
-        }),
         ProtocolScope::Loki => json!({
             "status": "error",
             "error": message,
@@ -43,33 +37,14 @@ pub fn error_envelope(protocol: ProtocolScope, err: &CompatError) -> Value {
     }
 }
 
-fn prometheus_error_type(code: CompatErrorCode) -> &'static str {
-    match code {
-        CompatErrorCode::UnsupportedFeature => "execution",
-        // Prometheus native types: timeout | canceled | execution | bad_data | unavailable.
-        // Map authz/tenant failures to bad_data (invalid request for this tenant context).
-        CompatErrorCode::BadRequest
-        | CompatErrorCode::LimitExceeded
-        | CompatErrorCode::Unauthorized
-        | CompatErrorCode::Forbidden => "bad_data",
-    }
-}
-
 /// HTTP response with protocol-native JSON body.
 pub fn error_response(protocol: ProtocolScope, err: CompatError) -> Response {
     (err.code.http_status(), Json(error_envelope(protocol, &err))).into_response()
 }
 
-/// Target success envelope shapes for Phase 1+ (fixtures / docs).
+/// Target success envelope shapes for fixtures / docs.
 pub fn success_envelope_minimal(protocol: ProtocolScope) -> Value {
     match protocol {
-        ProtocolScope::Prometheus => json!({
-            "status": "success",
-            "data": {
-                "resultType": "vector",
-                "result": []
-            }
-        }),
         ProtocolScope::Loki => json!({
             "status": "success",
             "data": {
@@ -100,18 +75,6 @@ pub fn softprobe_code_in_message(body: &Value, code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn prometheus_unsupported_uses_execution_error_type() {
-        let err = CompatError::unsupported("prometheus_api");
-        let body = error_envelope(ProtocolScope::Prometheus, &err);
-        assert_eq!(body["status"], "error");
-        assert_eq!(body["errorType"], "execution");
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("unsupported_feature:"));
-    }
 
     #[test]
     fn loki_and_tempo_carry_stable_code() {

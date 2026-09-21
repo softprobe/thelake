@@ -28,7 +28,7 @@ done
   echo "Grafana datasource provisioning directory is missing: $PROVISIONING" >&2
   exit 1
 }
-for datasource in prometheus loki tempo; do
+for datasource in loki tempo; do
   [[ -f "$PROVISIONING/$datasource.yaml" ]] || {
     echo "missing Grafana datasource provisioning: $PROVISIONING/$datasource.yaml" >&2
     exit 1
@@ -38,7 +38,7 @@ for contract_file in "$ROOT_DIR/tests/compat/grafana/e2e"/*.sh; do
   # This file contains the stale-path pattern as the assertion itself; inspect
   # the other static contracts so the regression check cannot self-match.
   [[ "$contract_file" == "$ROOT_DIR/tests/compat/grafana/e2e/phase4_contract_test.sh" ]] && continue
-  if grep -Eq 'provisioning/(prometheus|loki|tempo)\.yaml' "$contract_file"; then
+  if grep -Eq 'provisioning/(loki|tempo)\.yaml' "$contract_file"; then
     echo "Grafana contract uses the stale datasource provisioning path: $contract_file" >&2
     exit 1
   fi
@@ -66,7 +66,6 @@ for case_id in G1 G2 G3 G7 G8; do
     exit 1
   }
 done
-grep -Fq 'run_signal_case G4 prometheus' "$HARNESS"
 grep -Fq 'run_signal_case G5 loki' "$HARNESS"
 grep -Fq 'run_signal_case G6 tempo' "$HARNESS"
 
@@ -110,7 +109,6 @@ if sed -n '/^  for contract in \\/,/^  done$/p' "$HARNESS" | grep -Fq 'artifact_
   exit 1
 fi
 DATASOURCES="$PROVISIONING"
-grep -Fq 'X-Scope-OrgID' "$DATASOURCES/prometheus.yaml"
 grep -Fq 'X-Scope-OrgID' "$DATASOURCES/loki.yaml"
 grep -Fq 'X-Scope-OrgID' "$DATASOURCES/tempo.yaml"
 grep -Fq 'tracesToLogsV2' "$DATASOURCES/tempo.yaml"
@@ -134,8 +132,7 @@ for path in sorted(root.rglob("*.json")):
     dashboards[uid] = dashboard
 
 required = {
-    "softprobe-prom-smoke",
-    "softprobe-loki-smoke",
+        "softprobe-loki-smoke",
     "softprobe-tempo-smoke",
     "softprobe-cross-signal",
 }
@@ -145,11 +142,11 @@ if missing:
 
 cross = dashboards["softprobe-cross-signal"]
 variables = {item.get("name") for item in cross.get("templating", {}).get("list", [])}
-if not {"job", "service"} <= variables:
+if not {"service"} <= variables:
     raise SystemExit(f"cross-signal dashboard variables are incomplete: {variables}")
 
 text = json.dumps(cross, sort_keys=True)
-for uid in ("softprobe-prom-a", "softprobe-loki-a", "softprobe-tempo-a"):
+for uid in ("softprobe-loki-a", "softprobe-tempo-a"):
     if uid not in text:
         raise SystemExit(f"cross-signal dashboard is missing datasource {uid}")
 

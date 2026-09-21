@@ -29,7 +29,6 @@ GRAFANA_REFERENCE_IMAGE_DIGEST="${GRAFANA_REFERENCE_IMAGE_DIGEST:-}"
 GRAFANA_TEMPO_DATASOURCE="${GRAFANA_TEMPO_DATASOURCE:-tests/compat/grafana/provisioning/datasources/tempo.yaml}"
 
 DATASOURCE_UIDS=(
-  softprobe-prom softprobe-prom-a softprobe-prom-b
   softprobe-loki-a softprobe-loki-b
   softprobe-tempo-a softprobe-tempo-b
 )
@@ -44,7 +43,7 @@ import pathlib
 import sys
 
 directory = pathlib.Path(sys.argv[1])
-for sub in ("smoke", "promql", "astronomy", "compose"):
+for sub in ("smoke", "compose"):
     root = directory / sub
     if not root.is_dir():
         continue
@@ -122,7 +121,7 @@ definition = {
     "G1": {"endpoint": {"method": "GET", "path": "/api/health"}, "fixture_id": "grafana-health", "fixture_path": "tests/compat/grafana/provisioning"},
     "G2": {"endpoint": {"method": "GET", "path": "/api/datasources"}, "fixture_id": "grafana-datasources", "fixture_path": "tests/compat/grafana/provisioning/datasources"},
     "G3": {"endpoint": {"method": "GET", "path": "/api/search?type=dash-db"}, "fixture_id": "grafana-dashboards", "fixture_path": "tests/compat/grafana/dashboards"},
-    "G4": {"endpoint": {"method": "POST", "path": "/api/ds/query"}, "fixture_id": "prometheus_success_minimal", "fixture_path": f"{fixture_dir}/prometheus_success_minimal.json"},
+    "G4": {"endpoint": {"method": "POST", "path": "/api/ds/query"}, "fixture_id": "loki_success_minimal", "fixture_path": f"{fixture_dir}/loki_success_minimal.json"},
     "G5": {"endpoint": {"method": "POST", "path": "/api/ds/query"}, "fixture_id": "loki_success_minimal", "fixture_path": f"{fixture_dir}/loki_success_minimal.json"},
     "G6": {"endpoint": {"method": "POST", "path": "/api/ds/query"}, "fixture_id": "tempo_success_minimal", "fixture_path": f"{fixture_dir}/tempo_success_minimal.json"},
     "G7": {"endpoint": {"method": "GET", "path": "/api/datasources/proxy/uid/softprobe-tempo-a/api/search"}, "fixture_id": "grafana-cross-signal", "fixture_path": "tests/compat/grafana/provisioning/datasources"},
@@ -595,7 +594,6 @@ import sys
 
 fixture_dir, signal, uid, tenant = sys.argv[1:]
 fixture_name = {
-    "prometheus": "prometheus_success_minimal.json",
     "loki": "loki_success_minimal.json",
     "tempo": "tempo_success_minimal.json",
 }[signal]
@@ -604,12 +602,7 @@ try:
 except (FileNotFoundError, json.JSONDecodeError) as exc:
     print(json.dumps({"error": f"mock fixture unavailable: {exc}"}))
     raise SystemExit(0)
-if signal == "prometheus":
-    obj["data"]["result"].append({
-        "metric": {"tenant": tenant, "datasource_uid": uid},
-        "value": [1700000000, "1"],
-    })
-elif signal == "loki":
+if signal == "loki":
     obj["data"]["result"].append({
         "stream": {"tenant": tenant, "datasource_uid": uid},
         "values": [["1700000000000000000", json.dumps({
@@ -634,7 +627,7 @@ import sys
 uid, tenant_a, tenant_b = sys.argv[1:]
 is_tenant = uid.endswith("-a") or uid.endswith("-b")
 tenant = tenant_a if uid.endswith("-a") else tenant_b
-signal = "prometheus" if "prom" in uid else "loki" if "loki" in uid else "tempo"
+signal = "loki" if "loki" in uid else "tempo"
 headers = {"httpHeaderName1": "Authorization"}
 secure = {"httpHeaderValue1": True}
 if is_tenant:
@@ -753,27 +746,16 @@ mock_response() {
       printf '%s\n' '{"database":"ok","version":"mock","commit":"mock"}'
       ;;
     /api/datasources)
-      printf '%s\n' '[{"uid":"softprobe-prom"},{"uid":"softprobe-prom-a"},{"uid":"softprobe-prom-b"},{"uid":"softprobe-loki-a"},{"uid":"softprobe-loki-b"},{"uid":"softprobe-tempo-a"},{"uid":"softprobe-tempo-b"}]'
+      printf '%s\n' '[{"uid":"softprobe-loki-a"},{"uid":"softprobe-loki-b"},{"uid":"softprobe-tempo-a"},{"uid":"softprobe-tempo-b"}]'
       ;;
     /api/datasources/uid/*/health)
       printf '%s\n' '{"status":"OK","message":"mock datasource health"}'
       ;;
-    /api/datasources/proxy/uid/*/api/v1/label/*/values*|/api/datasources/proxy/uid/*/loki/api/v1/label/*/values*)
-      if [[ "$endpoint" == *k6_http_reqs* ]]; then
-        printf '%s\n' '{"data":["load-generator","checkout"],"status":"success"}'
-      else
-        printf '%s\n' '{"data":["checkout"],"status":"success"}'
-      fi
+    /api/datasources/proxy/uid/*/loki/api/v1/label/*/values*)
+      printf '%s\n' '{"data":["checkout"],"status":"success"}'
       ;;
     /api/datasources/uid/*)
       mock_datasource "${endpoint##*/}"
-      ;;
-    /api/datasources/proxy/uid/*/api/v1/label/*/values*|/api/datasources/proxy/uid/*/loki/api/v1/label/*/values*)
-      if [[ "$endpoint" == *k6_http_reqs* ]]; then
-        printf '%s\n' '{"data":["load-generator","checkout"],"status":"success"}'
-      else
-        printf '%s\n' '{"data":["checkout"],"status":"success"}'
-      fi
       ;;
     "/api/search?type=dash-db")
       python3 - "$GRAFANA_DASHBOARD_DIR" <<'PY'
@@ -799,8 +781,6 @@ PY
       local trace_endpoint="${endpoint##*/}"
       mock_tempo_trace_response "${trace_endpoint%%\?*}" "$TENANT_B_ID"
       ;;
-    /api/datasources/proxy/uid/softprobe-prom-a/api/v1/query*) mock_signal_response prometheus softprobe-prom-a "$TENANT_A_ID" ;;
-    /api/datasources/proxy/uid/softprobe-prom-b/api/v1/query*) mock_signal_response prometheus softprobe-prom-b "$TENANT_B_ID" ;;
     /api/datasources/proxy/uid/softprobe-loki-a/loki/api/v1/query*) mock_signal_response loki softprobe-loki-a "$TENANT_A_ID" ;;
     /api/datasources/proxy/uid/softprobe-loki-b/loki/api/v1/query*) mock_signal_response loki softprobe-loki-b "$TENANT_B_ID" ;;
     /api/datasources/proxy/uid/softprobe-tempo-a/api/search*) mock_signal_response tempo softprobe-tempo-a "$TENANT_A_ID" ;;
@@ -824,7 +804,7 @@ request = json.loads(payload)
 query = request.get("queries", [{}])[0]
 uid = query.get("datasource", {}).get("uid", "")
 tenant = tenant_a if uid.endswith("-a") else tenant_b
-signal = "prometheus" if "prom" in uid else "loki" if "loki" in uid else "tempo"
+signal = "loki" if "loki" in uid else "tempo"
 if not credential and not scope:
     # A normal Grafana datasource request carries the configured tenant
     # headers even though callers of api_post do not supply probe overrides.
@@ -874,7 +854,7 @@ if "empty_result_probe" in text:
     print(json.dumps({"results": {"A": {"refId": "A", "frames": [{"schema": {"fields": [{"name": "value"}]}, "data": {"values": [[]]}}], "requestHeaders": request_headers}}}))
     raise SystemExit
 if "unsupported" in text:
-    names = {"prometheus": "prometheus_error_unsupported.json", "loki": "loki_error_unsupported.json", "tempo": "tempo_error_unsupported.json"}
+    names = {"loki": "loki_error_unsupported.json", "tempo": "tempo_error_unsupported.json"}
     try:
         fixture = json.loads((pathlib.Path(fixture_dir) / names[signal]).read_text())
     except (FileNotFoundError, json.JSONDecodeError) as exc:
@@ -885,10 +865,8 @@ if "unsupported" in text:
     raise SystemExit
 
 if "label_values" in text:
-    values = ["load-generator"] if "k6_http_reqs" in text else ["checkout"]
+    values = ["checkout"]
     frame = {"schema": {"name": tenant, "fields": [{"name": "value"}]}, "data": {"values": [values]}}
-elif signal == "prometheus":
-    frame = {"schema": {"name": tenant, "fields": [{"name": "value"}]}, "data": {"values": [[1]]}}
 elif signal == "loki":
     frame = {"schema": {"name": tenant, "fields": [{"name": "line"}]}, "data": {"values": [[json.dumps({"tenant": tenant})]]}}
 else:
@@ -987,8 +965,7 @@ direct_softprobe_credential_probe() {
   local signal="$1" probe="$2" credential="$3" scope="$4" artifact="$5" request_artifact="$6"
   local endpoint status response_tmp stderr_tmp curl_status
   case "$signal" in
-    prometheus) endpoint="/api/v1/query?query=up&time=1700000030" ;;
-    loki) endpoint="/loki/api/v1/query_range?query=%7Bservice_name%3D%22checkout%22%7D&start=$CROSS_START_NS&end=$CROSS_END_NS&limit=1" ;;
+        loki) endpoint="/loki/api/v1/query_range?query=%7Bservice_name%3D%22checkout%22%7D&start=$CROSS_START_NS&end=$CROSS_END_NS&limit=1" ;;
     tempo) endpoint="/api/search?limit=1&start=$TRACE_START_S&end=$TRACE_END_S" ;;
     *) return 1 ;;
   esac
@@ -1257,7 +1234,7 @@ obj = json.loads(pathlib.Path(sys.argv[1]).read_text()).get("dashboard", {})
 uid = sys.argv[2]
 if obj.get("uid") != uid:
     raise SystemExit(f"dashboard UID mismatch: expected {uid}")
-allowed = {"softprobe-prom", "softprobe-prom-a", "softprobe-prom-b", "softprobe-loki-a", "softprobe-loki-b", "softprobe-tempo-a", "softprobe-tempo-b"}
+allowed = {"softprobe-loki-a", "softprobe-loki-b", "softprobe-tempo-a", "softprobe-tempo-b"}
 refs = []
 def visit(panel):
     source = panel.get("datasource")
@@ -1527,8 +1504,8 @@ for panel in cross_obj.get("panels", []):
     for item in [panel.get("datasource"), *[target.get("datasource") for target in panel.get("targets", [])]]:
         if isinstance(item, dict) and item.get("uid"):
             refs.add(item["uid"])
-if not {"softprobe-prom-a", "softprobe-loki-a", "softprobe-tempo-a"}.issubset(refs):
-    raise SystemExit("cross-signal dashboard is missing a Prometheus/Loki/Tempo panel reference")
+if not {"softprobe-loki-a", "softprobe-tempo-a"}.issubset(refs):
+    raise SystemExit("cross-signal dashboard is missing a Loki/Tempo panel reference")
 for path, expected in ((loki_a, "softprobe-tempo-a"), (loki_b, "softprobe-tempo-b")):
     fields = json.loads(path.read_text()).get("jsonData", {}).get("derivedFields", [])
     if not any(field.get("datasourceUid") == expected for field in fields):
@@ -1700,12 +1677,7 @@ def has_expected_tenant():
     return raw_trace_id in text or canonical_trace_id in text
 if not has_expected_tenant():
     raise SystemExit(f"{uid} response has no positive evidence for requested tenant {expected}")
-if signal == "prometheus":
-    if obj.get("status") != "success" or obj.get("data", {}).get("resultType") not in {"vector", "matrix", "scalar", "string"}:
-        raise SystemExit(f"{uid} is not a Prometheus success response")
-    if not obj.get("data", {}).get("result"):
-        raise SystemExit(f"{uid} Prometheus response has empty result")
-elif signal == "loki":
+if signal == "loki":
     if obj.get("status") != "success" or obj.get("data", {}).get("resultType") != "streams":
         raise SystemExit(f"{uid} is not a Loki streams response")
     if not obj.get("data", {}).get("result"):
@@ -1788,9 +1760,7 @@ import json
 import sys
 signal, uid, query = sys.argv[1:]
 item = {"refId": "A", "datasource": {"type": signal, "uid": uid}, "intervalMs": 15000, "maxDataPoints": 1000}
-if signal == "prometheus":
-    item["expr"] = query
-elif signal == "loki":
+if signal == "loki":
     item.update({"expr": query, "queryType": "range"})
 else:
     item.update({"query": query, "queryType": "traceql"})
@@ -1894,7 +1864,7 @@ if isinstance(query, str):
         print(json.dumps({
             "label": label,
             "match": metric.strip(),
-            "type": datasource.get("type", "prometheus"),
+            "type": datasource.get("type", "loki"),
             "uid": datasource.get("uid", ""),
         }))
 PY
@@ -1928,7 +1898,10 @@ PY
       encoded_metric="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$metric")"
       case "$ds_type" in
         loki) base="/loki/api/v1" ;;
-        *)    base="/api/v1" ;;
+        *)
+          echo "unsupported dashboard variable datasource type: $ds_type (uid=$uid name=$name)" >&2
+          return 1
+          ;;
       esac
       # Loki label discovery is time-bounded (QueryWindow). Grafana's variable
       # path often omits start/end; Softprobe defaults a lookback, but the
@@ -1974,7 +1947,7 @@ check_dashboard_panels() {
   local tenant_suffix="b"; [[ "$uid" == *-a || "$uid" == *"-prom-a" || "$uid" == *"-loki-a" || "$uid" == *"-tempo-a" ]] && tenant_suffix="a"
   while IFS=$'\t' read -r panel_id panel_type target window; do
     [[ -n "$target" ]] || continue
-    signal="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('datasource',{}).get('type','prometheus'))" "$target")"
+    signal="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('datasource',{}).get('type','loki'))" "$target")"
     target_uid="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('datasource',{}).get('uid',''))" "$target")"
     artifact="$ARTIFACT_DIR/.work/G3-${uid}-panel-${panel_id}.json"
     if [[ "$target" == *'"type": "tempo"'* || "$target" == *'"type":"tempo"'* ]]; then
@@ -2149,9 +2122,8 @@ run_signal_case() {
   local case_id="$1" signal="$2" query="$3" status tenant uid other expected direct explore payload endpoint
   local bundle_args=()
   for tenant in a b; do
-    # Prometheus datasources use the short uid prefix (softprobe-prom-*),
-    # matching the provisioning fixtures; loki/tempo follow the signal name.
-    local prefix="$signal"; [[ "$signal" == "prometheus" ]] && prefix="prom"
+    # Loki/Tempo datasources follow the signal name in the softprobe-<signal>-* uid.
+    local prefix="$signal"
     if [[ "$tenant" == a ]]; then
       uid="softprobe-$prefix-a"; expected="$TENANT_A_ID"; other="$TENANT_B_ID"
     else
@@ -2159,7 +2131,6 @@ run_signal_case() {
     fi
     direct="$ARTIFACT_DIR/.work/${case_id}-${tenant}-direct.json"
     case "$signal" in
-      prometheus) endpoint="/api/datasources/proxy/uid/softprobe-prom-${tenant}/api/v1/query?query=grafana_phase4_requests_total&time=1700000030" ;;
       loki) endpoint="/api/datasources/proxy/uid/$uid/loki/api/v1/query_range?query=%7Bservice_name%3D%22checkout%22%7D%20%7C%3D%20%22error%22&start=$CROSS_START_NS&end=$CROSS_END_NS&limit=10&direction=forward" ;;
       tempo) endpoint="/api/datasources/proxy/uid/$uid/api/search?limit=20&start=$TRACE_START_S&end=$TRACE_END_S" ;;
       *) return 1 ;;
@@ -2312,8 +2283,7 @@ check_cross_signal() {
 
 check_panel_rejection() {
   local signal="$1" tenant="$2" probe="$3"
-  # Prometheus datasources use the short uid prefix (softprobe-prom-*).
-  local prefix="$signal"; [[ "$signal" == "prometheus" ]] && prefix="prom"
+  local prefix="$signal"
   local uid="softprobe-$prefix-$tenant"
   local payload artifact request_artifact status
   payload="$(query_payload "$signal" "$uid" "${probe}_probe")"
@@ -2401,8 +2371,8 @@ check_errors() {
   local case_id=G8 signal tenant uid other payload artifact request_artifact status
   local credential scope expected_scope valid_credential expected_error probe
   local bundle_args=()
-  for signal in prometheus loki tempo; do
-    local prefix="$signal"; [[ "$signal" == "prometheus" ]] && prefix="prom"
+  for signal in loki tempo; do
+    local prefix="$signal"
     for tenant in a b; do
       if [[ "$tenant" == a ]]; then uid="softprobe-$prefix-a"; other="$TENANT_B_ID"; else uid="softprobe-$prefix-b"; other="$TENANT_A_ID"; fi
       artifact="$ARTIFACT_DIR/.work/G8-${signal}-${tenant}.json"
@@ -2429,7 +2399,6 @@ check_errors() {
         fi
       else
         case "$signal" in
-          prometheus) payload="$(query_payload "$signal" "$uid" "unsupported_feature_probe()")" ;;
           loki) payload="$(query_payload "$signal" "$uid" '{service_name="checkout"} | unsupported_feature_probe')" ;;
         esac
         if api_post /api/ds/query "$payload" "$artifact"; then
@@ -2456,7 +2425,7 @@ check_errors() {
       bundle_args+=("${signal}_${tenant}=$artifact")
     done
   done
-  for signal in prometheus loki tempo; do
+  for signal in loki tempo; do
     uid="softprobe-$signal-invalid"
     payload="$(query_payload "$signal" "$uid" "invalid_datasource_auth_probe")"
     artifact="$ARTIFACT_DIR/.work/G8-${signal}-invalid-datasource.json"
@@ -2473,7 +2442,7 @@ check_errors() {
     validate_error_response "$artifact" datasource || return 1
     bundle_args+=("${signal}_invalid=$artifact" "${signal}_invalid_request=$ARTIFACT_DIR/.work/G8-${signal}-invalid-datasource.request.json")
   done
-  for signal in prometheus loki tempo; do
+  for signal in loki tempo; do
     for tenant in a b; do
       if [[ "$tenant" == a ]]; then
         uid="softprobe-$prefix-a"
@@ -2540,7 +2509,7 @@ check_errors() {
       done
     done
   done
-  for signal in prometheus loki tempo; do
+  for signal in loki tempo; do
     for tenant in a b; do
       for probe in malformed_frame empty_result; do
         if check_panel_rejection "$signal" "$tenant" "$probe"; then
@@ -2633,14 +2602,14 @@ main() {
     finish_failure "Grafana dashboard API failure or panel datasource assertion"
   fi
   begin_case G4
-  if run_signal_case G4 prometheus grafana_phase4_requests_total; then :; else
+  if run_signal_case G4 loki '{service_name="checkout"}'; then :; else
     status=$?
     if (( status == 2 )); then
-      record_case G4 environment_skip "Grafana Prometheus datasource unavailable"
-      finish_skip "Grafana Prometheus datasource unavailable"
+      record_case G4 environment_skip "Grafana Loki datasource unavailable"
+      finish_skip "Grafana Loki datasource unavailable"
     fi
-    record_case G4 failure "Grafana Prometheus query or tenant-isolation assertion"
-    finish_failure "Grafana Prometheus query or tenant-isolation assertion"
+    record_case G4 failure "Grafana Loki query or tenant-isolation assertion"
+    finish_failure "Grafana Loki query or tenant-isolation assertion"
   fi
   begin_case G5
   if run_signal_case G5 loki '{service_name="checkout"} |= "error"'; then :; else

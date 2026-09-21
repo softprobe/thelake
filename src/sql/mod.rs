@@ -4,11 +4,9 @@
 //! Callers outside this package must not embed SQL verbs.
 
 pub mod bounds;
-pub mod compaction;
 pub mod literal;
 pub mod llm;
 pub mod logs;
-pub mod prom;
 pub mod promotion;
 pub mod schema;
 pub mod session_summary;
@@ -24,13 +22,13 @@ pub use literal::{
     sql_string_literal, timestamp_ns_column, timestamp_ns_literal, timestamptz_literal,
 };
 
-/// UTC calendar-day expression for a `TIMESTAMPTZ` metric index timestamp.
+/// UTC calendar-day expression for a `TIMESTAMPTZ` index timestamp.
 /// DuckDB otherwise applies `date_trunc` in the session timezone.
 pub fn utc_calendar_day_expr(column: &str) -> String {
     format!("date_trunc('day', {column} AT TIME ZONE 'UTC')")
 }
 
-/// Equality predicate for two metric rows that belong to the same UTC day.
+/// Equality predicate for two rows that belong to the same UTC day.
 pub fn same_utc_calendar_day(left: &str, right: &str) -> String {
     format!(
         "{} = {}",
@@ -40,10 +38,8 @@ pub fn same_utc_calendar_day(left: &str, right: &str) -> String {
 }
 
 pub use schema::{
-    fact_table_specs, insert_order_by, is_otlp_table, metrics_layout_table_names,
-    qualified_table_name, table_spec, TableSpec, LOGS, METRICS_LAYOUT_COLLAPSE_TABLES,
-    METRICS_LAYOUT_CORE_TABLES, METRICS_LAYOUT_DOWNSAMPLE_TABLES, METRIC_SAMPLES,
-    ONE_CLOCK_PARTITION_BY, OTLP_TABLES, SCORES, SCORE_CONFIGS, TRACES,
+    fact_table_specs, insert_order_by, is_otlp_table, qualified_table_name, table_spec, TableSpec,
+    LOGS, ONE_CLOCK_PARTITION_BY, OTLP_TABLES, SCORES, SCORE_CONFIGS, TRACES,
 };
 
 #[cfg(test)]
@@ -197,7 +193,7 @@ mod locality_tests {
     }
 
     #[test]
-    fn representative_trace_log_metric_recipes_are_gate_checked() {
+    fn representative_trace_log_recipes_are_gate_checked() {
         let bounded_trace = crate::sql::telemetry::details_spans_sql(
             "*",
             "CAST(timestamp AS TIMESTAMP_NS) >= '2026-09-10'::TIMESTAMP_NS",
@@ -208,19 +204,7 @@ mod locality_tests {
             "NULL::VARCHAR AS promoted",
             10,
         );
-        let bounded_metric = crate::sql::prom::samples_scan_sql_for_window(
-            "softprobe",
-            &[1],
-            Some(1_789_286_400_000),
-            Some(1_789_372_800_000),
-            None,
-            "NULL::VARCHAR AS labels",
-            false,
-            false,
-            false,
-            10,
-        );
-        for sql in [bounded_trace, bounded_log, bounded_metric] {
+        for sql in [bounded_trace, bounded_log] {
             assert!(
                 crate::sql::ensure_fact_scan_bound(&sql).is_ok(),
                 "recipe must carry its timestamp bound:\n{sql}"

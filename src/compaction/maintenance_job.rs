@@ -53,6 +53,7 @@ impl MaintenanceJob {
 
     /// Pin tenant scopes for tests (avoids needing a Postgres scope registry).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn with_scopes(
         executor: MaintenanceExecutor,
         interval: Duration,

@@ -90,10 +90,7 @@ impl QueryEngine {
         self.duckdb.catalog_alias()
     }
 
-    /// Schema-qualified layout prefix (`softprobe` or `softprobe.<tenant_schema>`).
-    ///
-    /// Must match ingest `layout_catalog_prefix` so Prom postings/sample SQL hits
-    /// the same `metric_*` tables the writer populates.
+    /// Schema-qualified catalog prefix (`softprobe` or `softprobe.<tenant_schema>`).
     pub fn layout_catalog_prefix(&self) -> String {
         self.duckdb.layout_catalog_prefix()
     }

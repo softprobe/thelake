@@ -205,8 +205,6 @@ if isinstance(report, dict):
 
     expected = {}
     required = set(item for item in required_jobs if isinstance(item, str))
-    if "prometheus-diff" in required:
-        expected["prometheus-differential-evidence"] = ("raw.json", "normalized.json")
     if "loki-diff" in required:
         expected["loki-differential-evidence"] = ("raw.json", "normalized.json")
     if "tempo-diff" in required:
@@ -218,7 +216,7 @@ if isinstance(report, dict):
             "G7.outcome.json", "G8.outcome.json",
         )
     if "manifest-conformance" in required:
-        for protocol in ("prometheus", "loki", "tempo"):
+        for protocol in ("loki", "tempo"):
             expected["manifest-conformance-%s-real-evidence" % protocol] = ("report.jsonl", "versions.json")
     if "fast-pr" in required:
         expected["fast-pr-compatibility-evidence"] = ("report.txt",)
@@ -241,7 +239,6 @@ if isinstance(report, dict):
 
 
 excluded_cases = {
-    "prometheus-metadata-discovery",
     "tempo-search-span-selector",
     "tempo-search-tags",
     "tempo-tag-values-peer-service",

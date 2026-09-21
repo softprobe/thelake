@@ -1,17 +1,15 @@
 # Copyright Softprobe / OpenTelemetry Authors overlay
 # SPDX-License-Identifier: Apache-2.0
 #
-# Softprobe demo overlay — full-fidelity Astronomy Shop → Softprobe.
+# Softprobe demo overlay — Astronomy Shop logs + sampled traces → Softprobe.
 #
 # Strategy (CPU via MAP bags + coalesce + pacing, not dropping product signals):
-# - Send full application metrics (no name allow-list). Keep memory limiter +
-#   timeout-dominated batch so Softprobe sees paced posts, not a firehose.
+# - Do not send customer metrics to Softprobe (product metrics signal removed).
 # - Send application logs to Softprobe (coalesced on Softprobe side).
 # - Send traces to Softprobe with probabilistic sampling so Tempo boards stay
-#   online without span storms — metrics+logs stay complete.
-# - Receivers stay Astronomy Shop + k6 + ad scrape + span_metrics (not
-#   docker_stats / host_metrics / redis / postgres collectors — those are
-#   infra noise, not shop dashboards).
+#   online without span storms.
+# - Receivers stay Astronomy Shop + k6 + ad scrape + span_metrics for local
+#   collector debug only — metrics exporters target `debug`, not Softprobe.
 # - Pair with grafana-manual-up.sh: coalesce flush, worker_threads=1,
 #   one-core affinity, product-hot promotions applied.
 
@@ -22,7 +20,7 @@ processors:
     logs:
       log_record:
         - 'not IsMatch(resource.attributes["service.name"], "(?i)^(ad|cart|checkout|currency|email|fraud-detection|frontend|frontend-proxy|payment|product-catalog|quote|recommendation|shipping|accounting|flagd|load-generator)$")'
-  # Keep metrics+logs complete; sample traces only.
+  # Sample traces only; logs stay complete.
   probabilistic_sampler:
     sampling_percentage: 5
   batch/softprobe:
@@ -76,7 +74,8 @@ service:
           memory_limiter/softprobe,
           batch/softprobe,
         ]
-      exporters: [debug, otlphttp/softprobe]
+      # Local collector debug only — Softprobe no longer accepts /v1/metrics.
+      exporters: [debug]
     logs:
       receivers: [otlp]
       processors:

@@ -1,7 +1,3 @@
-use crate::compaction::collapse::{
-    collapse_job_1h_for_day_sql, collapse_job_1h_from_raw_for_day_sql,
-    collapse_job_1h_from_raw_pending_days_sql, collapse_job_1h_pending_days_sql,
-};
 use crate::compaction::twcs::{
     closed_day_live_file_count, closed_days_need_complete_merge, day_kind,
     ducklake_merge_adjacent_files_sql, live_file_count_sql, logical_table_row_count_sql,
@@ -11,33 +7,14 @@ use crate::compaction::twcs::{
 };
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
-use crate::sql::compaction::{
-    downsample_1h_from_5m_for_day_sql, downsample_1h_from_5m_pending_days_sql,
-    downsample_1h_from_raw_for_day_sql, downsample_1h_from_raw_pending_days_sql,
-    downsample_5m_for_day_sql, downsample_5m_pending_days_sql,
-    hist_downsample_1h_from_5m_for_day_sql, hist_downsample_1h_from_5m_pending_days_sql,
-    hist_downsample_1h_from_raw_for_day_sql, hist_downsample_1h_from_raw_pending_days_sql,
-    hist_downsample_5m_for_day_sql, hist_downsample_5m_pending_days_sql,
-    METRICS_LADDER_MAX_DAYS_PER_PASS,
-};
-use crate::storage::schema::metrics_layout::ensure_metrics_layout_family_tables;
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, Utc};
 use duckdb::Connection;
 use tracing::{info, warn};
 
-/// Metrics-family tables compacted/expired before traces/logs/scores (AC-M1).
-pub fn maintenance_metrics_family_tables() -> Vec<&'static str> {
-    crate::sql::schema::metrics_layout_table_names()
-}
-
-/// Full ordered maintenance table list: metrics family first, then other telemetry.
+/// Full ordered maintenance table list (traces / logs / scores).
 pub fn maintenance_table_names() -> Vec<&'static str> {
-    let metrics = maintenance_metrics_family_tables();
-    let mut tables = Vec::with_capacity(metrics.len() + 3);
-    tables.extend_from_slice(&metrics);
-    tables.extend_from_slice(&["traces", "logs", "scores"]);
-    tables
+    vec!["traces", "logs", "scores"]
 }
 
 #[derive(Clone)]
@@ -206,18 +183,6 @@ impl MaintenanceExecutor {
 
         let files_before = count_parquet_files_under(&ducklake.data_path);
 
-        // §7.2 step 1 — idempotent layout DDL for metrics family.
-        let layout_catalog = crate::storage::ducklake::layout_catalog_prefix(
-            &ducklake.catalog_alias,
-            &ducklake.metadata_schema,
-        );
-        if let Err(err) = ensure_metrics_layout_family_tables(&conn, &layout_catalog) {
-            warn!(
-                "Maintenance ensure layout tables failed ({}): {}",
-                label, err
-            );
-        }
-
         let mut compact_status: std::collections::HashMap<String, CompactionStatus> =
             std::collections::HashMap::new();
 
@@ -227,41 +192,16 @@ impl MaintenanceExecutor {
             // only merges Parquet that already exists (batches over the
             // inlining limit). Paying flush every pass is intentionally
             // avoided.
-            for table in maintenance_metrics_family_tables() {
-                let status =
-                    match self.ducklake_twcs_compact_table(&conn, ducklake, table, tenant_id) {
-                        Ok(s) => s,
-                        Err(err) => {
-                            warn!(
-                                "Maintenance TWCS merge failed for {}.{} ({}): {}",
-                                ducklake.metadata_schema, table, label, err
-                            );
-                            CompactionStatus::Skipped
-                        }
-                    };
-                compact_status.insert((*table).to_string(), status);
-            }
-
-            if let Err(err) = self.run_metrics_ladder(&conn, ducklake) {
-                warn!(
-                    "Maintenance downsample/collapse ladder failed ({}): {}",
-                    label, err
-                );
-            }
-
-            // Metrics-layout demos have no traces/logs/scores tables.
-            // Only compact when the table exists so we do not ERROR/spam every
-            // minute and contend with PromQL (Grafana 100ms SLO).
             for table in ["traces", "logs", "scores"] {
                 let status = if self
                     .ducklake_table_exists(&conn, ducklake, table)
                     .unwrap_or(false)
                 {
-                    match self.ducklake_compact_table(&conn, ducklake, table) {
+                    match self.ducklake_twcs_compact_table(&conn, ducklake, table, tenant_id) {
                         Ok(s) => s,
                         Err(err) => {
                             warn!(
-                                "Maintenance compaction failed for {}.{} ({}): {}",
+                                "Maintenance TWCS merge failed for {}.{} ({}): {}",
                                 ducklake.metadata_schema, table, label, err
                             );
                             CompactionStatus::Skipped
@@ -372,217 +312,7 @@ impl MaintenanceExecutor {
     }
 }
 
-/// Config for one pending-day + per-day INSERT ladder step.
-struct LadderDayBatch<'a> {
-    step: &'a str,
-    pending_sql: fn(&str, usize) -> String,
-    for_day_sql: fn(&str, Option<NaiveDate>) -> String,
-    fail_fast: bool,
-}
-
 impl MaintenanceExecutor {
-    /// §7.2 steps 3–5: incremental 5m → 1h → collapse (AC-S2 / AC-M2).
-    ///
-    /// Every ladder INSERT is pending-day + per-calendar-day so DuckLake can
-    /// prune one-clock year/month/day partitions; lag filters use timestamp.
-    fn run_metrics_ladder(
-        &self,
-        conn: &Connection,
-        ducklake: &crate::config::DuckLakeConfig,
-    ) -> Result<()> {
-        let catalog = crate::storage::ducklake::layout_catalog_prefix(
-            &ducklake.catalog_alias,
-            &ducklake.metadata_schema,
-        );
-        let run_tx = |sql: &str| -> Result<()> {
-            let body = sql.trim().trim_end_matches(';');
-            if let Err(err) = crate::sql::execute_batch_checked(
-                conn,
-                &format!("BEGIN TRANSACTION;\n{body};\nCOMMIT;"),
-            ) {
-                let _ = crate::sql::execute_batch_checked(conn, "ROLLBACK;");
-                return Err(err);
-            }
-            Ok(())
-        };
-        let run_step = |label: &str, sql: &str| {
-            if let Err(err) = run_tx(sql) {
-                warn!(
-                    "Metrics ladder step {} soft-failed (will try fallback if any): {}",
-                    label, err
-                );
-                return Err(err);
-            }
-            Ok(())
-        };
-
-        let _ = self.run_ladder_day_batched(
-            conn,
-            &catalog,
-            &run_step,
-            LadderDayBatch {
-                step: "downsample_5m",
-                pending_sql: downsample_5m_pending_days_sql,
-                for_day_sql: downsample_5m_for_day_sql,
-                fail_fast: false,
-            },
-        );
-
-        let _ = self.run_ladder_day_batched(
-            conn,
-            &catalog,
-            &run_step,
-            LadderDayBatch {
-                step: "hist_downsample_5m",
-                pending_sql: hist_downsample_5m_pending_days_sql,
-                for_day_sql: hist_downsample_5m_for_day_sql,
-                fail_fast: false,
-            },
-        );
-
-        if self
-            .run_ladder_day_batched(
-                conn,
-                &catalog,
-                &run_step,
-                LadderDayBatch {
-                    step: "downsample_1h_from_5m",
-                    pending_sql: downsample_1h_from_5m_pending_days_sql,
-                    for_day_sql: downsample_1h_from_5m_for_day_sql,
-                    fail_fast: true,
-                },
-            )
-            .is_err()
-        {
-            let _ = self.run_ladder_day_batched(
-                conn,
-                &catalog,
-                &run_step,
-                LadderDayBatch {
-                    step: "downsample_1h_from_raw",
-                    pending_sql: downsample_1h_from_raw_pending_days_sql,
-                    for_day_sql: downsample_1h_from_raw_for_day_sql,
-                    fail_fast: false,
-                },
-            );
-        }
-
-        if self
-            .run_ladder_day_batched(
-                conn,
-                &catalog,
-                &run_step,
-                LadderDayBatch {
-                    step: "hist_downsample_1h_from_5m",
-                    pending_sql: hist_downsample_1h_from_5m_pending_days_sql,
-                    for_day_sql: hist_downsample_1h_from_5m_for_day_sql,
-                    fail_fast: true,
-                },
-            )
-            .is_err()
-        {
-            let _ = self.run_ladder_day_batched(
-                conn,
-                &catalog,
-                &run_step,
-                LadderDayBatch {
-                    step: "hist_downsample_1h_from_raw",
-                    pending_sql: hist_downsample_1h_from_raw_pending_days_sql,
-                    for_day_sql: hist_downsample_1h_from_raw_for_day_sql,
-                    fail_fast: false,
-                },
-            );
-        }
-
-        if self
-            .run_ladder_day_batched(
-                conn,
-                &catalog,
-                &run_step,
-                LadderDayBatch {
-                    step: "collapse_job_1h",
-                    pending_sql: collapse_job_1h_pending_days_sql,
-                    for_day_sql: collapse_job_1h_for_day_sql,
-                    fail_fast: true,
-                },
-            )
-            .is_err()
-        {
-            let _ = self.run_ladder_day_batched(
-                conn,
-                &catalog,
-                &run_step,
-                LadderDayBatch {
-                    step: "collapse_job_1h_from_raw",
-                    pending_sql: collapse_job_1h_from_raw_pending_days_sql,
-                    for_day_sql: collapse_job_1h_from_raw_for_day_sql,
-                    fail_fast: false,
-                },
-            );
-        }
-        Ok(())
-    }
-
-    /// Probe pending `record_date`s then run one INSERT per day (partition prune).
-    ///
-    /// When `fail_fast` is true, the first day/step error propagates (used to
-    /// trigger raw fallbacks). Otherwise day failures are warned and skipped.
-    fn run_ladder_day_batched(
-        &self,
-        conn: &Connection,
-        catalog: &str,
-        run_step: &dyn Fn(&str, &str) -> Result<()>,
-        batch: LadderDayBatch<'_>,
-    ) -> Result<()> {
-        let pending = (batch.pending_sql)(catalog, METRICS_LADDER_MAX_DAYS_PER_PASS);
-        let days = match self.query_pending_downsample_days(conn, &pending) {
-            Ok(d) => d,
-            Err(err) => {
-                warn!("{} pending-day probe failed: {err}", batch.step);
-                if batch.fail_fast {
-                    return Err(err);
-                }
-                return Ok(());
-            }
-        };
-        if days.is_empty() {
-            return Ok(());
-        }
-        for day in days {
-            let label = format!("{}[{day}]", batch.step);
-            let sql = (batch.for_day_sql)(catalog, Some(day));
-            if let Err(err) = run_step(&label, &sql) {
-                if batch.fail_fast {
-                    return Err(err);
-                }
-                warn!("{} day {day} failed: {err}", batch.step);
-            }
-        }
-        Ok(())
-    }
-
-    fn query_pending_downsample_days(
-        &self,
-        conn: &Connection,
-        sql: &str,
-    ) -> Result<Vec<NaiveDate>> {
-        let mut stmt = crate::sql::prepare_checked(conn, sql)?;
-        let rows = stmt.query_map([], |row| {
-            let raw: String = row.get(0)?;
-            Ok(raw)
-        })?;
-        let mut days = Vec::new();
-        for row in rows {
-            let raw = row?;
-            days.push(
-                NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").map_err(|e| {
-                    anyhow!("invalid partition day {raw:?} from downsample pending probe: {e}")
-                })?,
-            );
-        }
-        Ok(days)
-    }
-
     fn twcs_policy(&self) -> TwcsPolicy {
         TwcsPolicy::from(&self.config.maintenance)
     }
@@ -1019,88 +749,6 @@ impl MaintenanceExecutor {
         Ok(conn.execute_batch(&sql).is_ok())
     }
 
-    fn ducklake_compact_table(
-        &self,
-        conn: &Connection,
-        ducklake: &crate::config::DuckLakeConfig,
-        table: &str,
-    ) -> Result<CompactionStatus> {
-        // Match qualified name used for tables (see ducklake_qualified_table_name).
-        let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
-        let scope = crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
-        let target_file_size =
-            crate::storage::ducklake::size_literal(self.config.maintenance.target_file_size_bytes);
-        let set_target = format!(
-            "CALL {}.set_option('target_file_size', '{}', {});",
-            ducklake.catalog_alias, target_file_size, scope
-        );
-        if let Err(err) = execute_batch_with_serialization_retry(
-            conn,
-            &set_target,
-            COMPACTION_SERIALIZATION_ATTEMPTS,
-            &format!("ducklake set_option target_file_size {}", qualified),
-        ) {
-            if is_ducklake_serialization_conflict(&err) {
-                warn!(
-                    "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
-                    qualified, err
-                );
-                return Ok(CompactionStatus::Skipped);
-            }
-            return Err(anyhow!(
-                "DuckLake set_option failed for {}: {}",
-                qualified,
-                err
-            ));
-        }
-        let policy = self.twcs_policy();
-        let sql = ducklake_merge_adjacent_files_sql(
-            &ducklake.catalog_alias,
-            table,
-            &ducklake.metadata_schema,
-            None,
-            Some(policy.max_merge_file_size_bytes),
-        );
-        // Two waves: under heavy ingest the first merge window can still lose the
-        // serialization race after inner retries; wait and try once more before skip.
-        for wave in 1..=2 {
-            match execute_batch_with_serialization_retry(
-                conn,
-                &sql,
-                COMPACTION_SERIALIZATION_ATTEMPTS,
-                &format!("ducklake_merge_adjacent_files {} wave{}", qualified, wave),
-            ) {
-                Ok(_) => return Ok(CompactionStatus::Completed),
-                Err(err) if is_ducklake_serialization_conflict(&err) && wave < 2 => {
-                    warn!(
-                        "DuckLake compaction conflict on {} wave {}; backing off before retry: {}",
-                        qualified, wave, err
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-                Err(err) if is_ducklake_serialization_conflict(&err) => {
-                    warn!(
-                        "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
-                        qualified, err
-                    );
-                    return Ok(CompactionStatus::Skipped);
-                }
-                Err(err) if is_ducklake_unsupported(&err) => {
-                    return Ok(CompactionStatus::Unsupported);
-                }
-                Err(err) => {
-                    return Err(anyhow!(
-                        "DuckLake compaction failed for {}.{}: {}",
-                        ducklake.metadata_schema,
-                        table,
-                        err
-                    ));
-                }
-            }
-        }
-        Ok(CompactionStatus::Skipped)
-    }
-
     fn ducklake_expire_snapshots(
         &self,
         conn: &Connection,
@@ -1218,7 +866,7 @@ fn is_ducklake_oom(err: &duckdb::Error) -> bool {
 }
 
 /// Inner attempts per merge wave. Paired with a second wave in
-/// [`MaintenanceExecutor::ducklake_compact_table`].
+/// [`MaintenanceExecutor::ducklake_compact_table_wave`].
 const COMPACTION_SERIALIZATION_ATTEMPTS: usize = 8;
 
 /// Soft warn when a scope still has many Parquet files after a maintenance pass.
@@ -1334,33 +982,8 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_compacts_metrics_before_other_tables() {
-        let tables = maintenance_table_names();
-        assert_eq!(tables[0], "metric_samples");
-        assert!(tables.contains(&"traces"));
-        assert!(
-            tables.iter().position(|t| *t == "metric_samples").unwrap()
-                < tables.iter().position(|t| *t == "traces").unwrap()
-        );
-    }
-
-    #[test]
-    fn maintenance_tables_include_metric_family() {
-        assert_eq!(
-            maintenance_metrics_family_tables(),
-            &[
-                "metric_samples",
-                "metric_postings",
-                "metric_series",
-                "metric_hist_samples",
-                "metric_samples_5m",
-                "metric_samples_1h",
-                "metric_hist_samples_5m",
-                "metric_hist_samples_1h",
-                "metric_collapse_job_1h",
-            ]
-        );
-        assert!(!maintenance_metrics_family_tables().contains(&"metrics"));
+    fn maintenance_table_order_is_traces_logs_scores() {
+        assert_eq!(maintenance_table_names(), &["traces", "logs", "scores"]);
     }
 
     #[test]

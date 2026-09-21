@@ -1,127 +1,65 @@
-//! Periodic OTel export into the ops DuckLake scope + slow-query log drain.
+//! Periodic OTel metrics export via standard OTLP (not into DuckLake).
 
 use crate::api::AppState;
 use crate::config::Config;
 use async_trait::async_trait;
 use opentelemetry::global;
 use opentelemetry::KeyValue;
+use opentelemetry_otlp::MetricExporter;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
-use opentelemetry_sdk::metrics::{
-    MetricError, MetricResult, PeriodicReader, SdkMeterProvider, Temporality,
-};
+use opentelemetry_sdk::metrics::{MetricResult, PeriodicReader, SdkMeterProvider, Temporality};
 use opentelemetry_sdk::runtime::Tokio;
 use opentelemetry_sdk::Resource;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::warn;
+use tracing::{info, warn};
 
-use super::convert::metrics_from_resource_metrics;
-use super::events::{init_slow_query_channel, to_log};
-use super::instruments::{install_instruments, record_export_drop, refresh_process_gauges};
+use super::instruments::{install_instruments, refresh_process_gauges};
 use super::inventory::spawn_inventory_loop;
-use super::OPS_TENANT_ID;
 
-static EXPORT_STATE: once_cell::sync::OnceCell<AppState> = once_cell::sync::OnceCell::new();
-
+/// Wraps the OTLP exporter so process gauges refresh on each export tick.
 #[derive(Debug)]
-struct DuckLakePushExporter;
+struct RefreshingOtlpExporter {
+    inner: MetricExporter,
+}
 
 #[async_trait]
-impl PushMetricExporter for DuckLakePushExporter {
+impl PushMetricExporter for RefreshingOtlpExporter {
     async fn export(&self, metrics: &mut ResourceMetrics) -> MetricResult<()> {
-        export_inner(metrics).await
+        refresh_process_gauges();
+        self.inner.export(metrics).await
     }
 
     async fn force_flush(&self) -> MetricResult<()> {
-        Ok(())
+        self.inner.force_flush().await
     }
 
     fn shutdown(&self) -> MetricResult<()> {
-        Ok(())
+        self.inner.shutdown()
     }
 
     fn temporality(&self) -> Temporality {
-        Temporality::Cumulative
+        self.inner.temporality()
     }
 }
 
-async fn export_inner(metrics: &mut ResourceMetrics) -> MetricResult<()> {
-    refresh_process_gauges();
-    let Some(state) = EXPORT_STATE.get() else {
-        return Ok(());
-    };
-    let rows = metrics_from_resource_metrics(metrics);
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let engine = state
-        .engines
-        .engine_for(OPS_TENANT_ID)
-        .await
-        .map_err(|e| MetricError::Other(e.to_string()))?;
-    if let Err(err) = engine.ingest.add_metrics(rows, 0).await {
-        record_export_drop();
-        warn!("self-monitoring metric export failed: {err}");
-        return Err(MetricError::Other(err.to_string()));
-    }
-    // Coalesce with customer ingest (flush_interval). Forcing a commit every
-    // export interval created an ops open-day Parquet storm and stole writer CPU.
-    Ok(())
-}
-
-fn spawn_slow_query_drain(state: AppState) {
-    let mut rx = init_slow_query_channel();
-    tokio::spawn(async move {
-        let mut batch = Vec::new();
-        let mut flush = tokio::time::interval(Duration::from_secs(2));
-        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                ev = rx.recv() => {
-                    match ev {
-                        Some(e) => {
-                            batch.push(to_log(&e));
-                            if batch.len() >= 32 {
-                                flush_logs(&state, &mut batch).await;
-                            }
-                        }
-                        None => {
-                            flush_logs(&state, &mut batch).await;
-                            break;
-                        }
-                    }
-                }
-                _ = flush.tick() => {
-                    flush_logs(&state, &mut batch).await;
-                }
-            }
-        }
-    });
-}
-
-async fn flush_logs(state: &AppState, batch: &mut Vec<crate::models::Log>) {
-    if batch.is_empty() {
-        return;
-    }
-    let logs = std::mem::take(batch);
-    let res = async {
-        let engine = state.engines.engine_for(OPS_TENANT_ID).await?;
-        engine.ingest.add_logs(logs, 0).await
-    }
-    .await;
-    if let Err(err) = res {
-        record_export_drop();
-        warn!("self-monitoring slow-query log export failed: {err}");
-    }
-}
-
-/// Install SDK PeriodicReader → DuckLake exporter and background scrapers.
+/// Install SDK PeriodicReader → OTLP metrics exporter and background scrapers.
+///
+/// Destination uses standard `OTEL_EXPORTER_OTLP_*` / `OTEL_EXPORTER_OTLP_METRICS_*`
+/// environment variables. Fails soft if the exporter cannot be built.
 pub fn spawn_exporter(state: AppState, config: Arc<Config>) {
-    let _ = EXPORT_STATE.set(state.clone());
     let interval = Duration::from_secs(config.self_monitoring.export_interval_seconds.max(1));
 
-    let reader = PeriodicReader::builder(DuckLakePushExporter, Tokio)
+    let exporter = match MetricExporter::builder().with_http().build() {
+        Ok(e) => e,
+        Err(err) => {
+            warn!("self-monitoring OTLP metrics exporter build failed (continuing without export): {err}");
+            return;
+        }
+    };
+
+    let reader = PeriodicReader::builder(RefreshingOtlpExporter { inner: exporter }, Tokio)
         .with_interval(interval)
         .build();
     let provider = SdkMeterProvider::builder()
@@ -135,12 +73,25 @@ pub fn spawn_exporter(state: AppState, config: Arc<Config>) {
     install_instruments();
 
     gauge_store_init_from_config(&config);
-    spawn_slow_query_drain(state.clone());
     spawn_inventory_loop(state, config.self_monitoring.export_interval_seconds.max(1));
+    info!(
+        interval_secs = config.self_monitoring.export_interval_seconds.max(1),
+        "self-monitoring OTLP metrics export started"
+    );
 }
 
 fn gauge_store_init_from_config(config: &Config) {
     use std::sync::atomic::Ordering;
     super::gauge_store::QUERY_WORKERS.store(config.query.max_connections.max(1), Ordering::Relaxed);
     super::gauge_store::WRITER_POOL_SIZE.store(config.ducklake.writer_pool_size, Ordering::Relaxed);
+}
+
+/// Unit-test helper: ensure OTLP exporter builder succeeds with default env.
+#[cfg(test)]
+pub fn try_build_otlp_exporter() -> Result<(), String> {
+    MetricExporter::builder()
+        .with_http()
+        .build()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }

@@ -50,8 +50,8 @@ trap 'rm -rf "$AUTH_TMP"' EXIT
 export MOCK=1 ARTIFACT_DIR="$AUTH_TMP" GRAFANA_SKIP_STATIC_CONTRACTS=1
 # shellcheck disable=SC1090
 source "$HARNESS"
-missing_payload="$(query_payload prometheus softprobe-prom-a missing_credentials_credential_probe)"
-mismatch_payload="$(query_payload prometheus softprobe-prom-a mismatched_tenant_credential_probe)"
+missing_payload="$(query_payload loki softprobe-loki-a missing_credentials_credential_probe)"
+mismatch_payload="$(query_payload loki softprobe-loki-a mismatched_tenant_credential_probe)"
 mock_response_post /api/ds/query "$missing_payload" __missing__ "$TENANT_A_ID" > "$AUTH_TMP/missing.json"
 mock_response_post /api/ds/query "$mismatch_payload" valid-tenant-a-key "$TENANT_B_ID" > "$AUTH_TMP/mismatch.json"
 python3 - "$AUTH_TMP/missing.json" "$AUTH_TMP/mismatch.json" <<'PY'

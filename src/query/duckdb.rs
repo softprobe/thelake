@@ -42,11 +42,6 @@ pub struct DuckDBQueryEngine {
 
 const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql");
 
-/// When a DuckLake catalog is attached, DuckDB treats identifiers containing substrings like
-/// `union_spans` / `committed_spans` as special. Rewrite those legacy names (and preferred
-/// `metrics`) to neutral `tm_*` names before inlining qualified DuckLake tables.
-/// Buffer/staged aliases map to the committed tier (default ingest is flush-through;
-/// soft coalesce N>0 only delays when rows appear there).
 fn is_sql_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -54,7 +49,7 @@ fn is_sql_ident_char(c: char) -> bool {
 /// True when `pos` lies inside a SQL string/identifier literal or comment.
 ///
 /// Recognizes single-quoted strings, double-quoted identifiers, `--` line comments,
-/// and `/* */` block comments so rewrite does not treat apostrophes/`--` inside them
+/// and `/* */` block comments so qualify does not treat apostrophes/`--` inside them
 /// as string/comment toggles.
 fn inside_sql_string_or_comment(s: &str, pos: usize) -> bool {
     let mut in_single = false;
@@ -154,32 +149,16 @@ fn replace_standalone_ident(s: &str, from: &str, to: &str) -> String {
     out
 }
 
-fn rewrite_reserved_telemetry_view_names(sql: &str) -> String {
+/// Expand bare public telemetry names to catalog-qualified DuckLake tables.
+///
+/// Tenant-scoped catalogs expose tables under `catalog.schema.table`; bare
+/// `FROM traces` would miss the attachment and return empty (masked as 0 rows).
+/// Historical Iceberg/buffer aliases are intentionally not rewritten.
+fn qualify_public_telemetry_tables(sql: &str, traces: &str, logs: &str, scores: &str) -> String {
     let mut s = sql.to_string();
-    // Longer / legacy names first so `union_metrics` is not partially consumed by `metrics`.
-    // Preferred public names: `traces` / `logs` / `metrics` (see ducklake_inline_sql).
-    // `union_*` and historical buffer/staged/iceberg/committed aliases stay rewrite-only.
-    const PAIRS: &[(&str, &str)] = &[
-        ("union_metrics", "tm_all_metric"),
-        ("committed_metrics", "tm_cq_metric"),
-        ("buffer_metrics", "tm_cq_metric"),
-        ("iceberg_metrics", "tm_cq_metric"),
-        ("staged_metrics", "tm_cq_metric"),
-        ("metrics", "tm_all_metric"),
-        ("union_logs", "tm_all_log"),
-        ("committed_logs", "tm_cq_log"),
-        ("buffer_logs", "tm_cq_log"),
-        ("iceberg_logs", "tm_cq_log"),
-        ("staged_logs", "tm_cq_log"),
-        ("union_spans", "tm_all_span"),
-        ("committed_spans", "tm_cq_span"),
-        ("buffer_spans", "tm_cq_span"),
-        ("iceberg_spans", "tm_cq_span"),
-        ("staged_spans", "tm_cq_span"),
-    ];
-    for &(from, to) in PAIRS {
-        s = replace_standalone_ident(&s, from, to);
-    }
+    s = replace_standalone_ident(&s, "scores", scores);
+    s = replace_standalone_ident(&s, "traces", traces);
+    s = replace_standalone_ident(&s, "logs", logs);
     s
 }
 
@@ -229,39 +208,11 @@ use once_cell::sync::Lazy;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 
-#[derive(Default)]
-struct ViewCounters {
-    committed: AtomicU64,
-    staged: AtomicU64,
-    union_view: AtomicU64,
-}
-
-static VIEW_COUNTERS: Lazy<ViewCounters> = Lazy::new(ViewCounters::default);
 static CACHE_HTTPFS_CONFIG_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-#[derive(Debug, Clone)]
-pub struct ViewCounterSnapshot {
-    pub committed_recreates: u64,
-    pub staged_recreates: u64,
-    pub union_recreates: u64,
-}
-
-pub fn reset_view_counters() {
-    VIEW_COUNTERS.committed.store(0, Ordering::Relaxed);
-    VIEW_COUNTERS.staged.store(0, Ordering::Relaxed);
-    VIEW_COUNTERS.union_view.store(0, Ordering::Relaxed);
-}
-
-pub fn view_counters_snapshot() -> ViewCounterSnapshot {
-    ViewCounterSnapshot {
-        committed_recreates: VIEW_COUNTERS.committed.load(Ordering::Relaxed),
-        staged_recreates: VIEW_COUNTERS.staged.load(Ordering::Relaxed),
-        union_recreates: VIEW_COUNTERS.union_view.load(Ordering::Relaxed),
-    }
-}
 
 /// Self-heal bookkeeping for poisoned worker connections. Process-global on
-/// purpose (same idiom as VIEW_COUNTERS): /health must answer "is self-heal
-/// failing" across every tenant engine without holding a reference to each.
+/// purpose: /health must answer "is self-heal failing" across every tenant
+/// engine without holding a reference to each.
 ///
 /// Because it is global, `consecutive_failures` is cleared by ANY successful
 /// query, not just by a successful rebuild. Otherwise a single tenant whose
@@ -293,7 +244,7 @@ pub fn self_heal_snapshot() -> SelfHealSnapshot {
 }
 
 /// Test-only: the counters are global, so the /health unhealthy branch is
-/// otherwise unreachable from tests (mirrors [`reset_view_counters`]).
+/// otherwise unreachable from tests.
 pub fn set_self_heal_failures_for_test(value: u64) {
     SELF_HEAL
         .consecutive_failures
@@ -582,27 +533,13 @@ impl DuckDBQueryEngine {
                         let exec_elapsed = exec_start.elapsed();
                         crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY
                             .fetch_sub(1, Ordering::Relaxed);
-                        if core.counts_toward_liveness {
-                            crate::self_monitoring::record_query(
-                                &core.tenant_id,
-                                sql_kind,
-                                exec_elapsed,
-                            );
-                            // Sample-table scans only: expose grain + raw vs
-                            // downsample vs live UNION so long-window CPU
-                            // hotspots are diagnosable without guessing.
-                            if sql_kind.contains("metric_samples")
-                                || sql_kind.contains("metric_hist_samples")
-                            {
-                                let (grain, scan_mode) =
-                                    crate::self_monitoring::classify_sample_scan(&request.sql);
-                                crate::self_monitoring::record_sample_scan(
+                            if core.counts_toward_liveness {
+                                crate::self_monitoring::record_query(
                                     &core.tenant_id,
-                                    grain,
-                                    scan_mode,
+                                    sql_kind,
+                                    exec_elapsed,
                                 );
                             }
-                        }
                         if result.is_ok() {
                             // Any *customer* success clears the global streak --
                             // see SelfHealCounters. Ops engines must not clear
@@ -728,10 +665,7 @@ impl DuckDBQueryEngine {
         &self.config.ducklake.catalog_alias
     }
 
-    /// Layout table prefix matching ingest (`softprobe` or `softprobe.<metadata_schema>`).
-    ///
-    /// Prom resolve/scan and the maintenance ladder must use this — not bare
-    /// [`Self::catalog_alias`] — or they miss tenant-scoped `metric_*` tables.
+    /// Catalog prefix for qualified DuckLake tables (`softprobe` or `softprobe.<metadata_schema>`).
     pub fn layout_catalog_prefix(&self) -> String {
         let cfg = &self.config.ducklake;
         if cfg.metadata_schema == "main" {
@@ -804,15 +738,6 @@ impl DuckDBQueryEngine {
             );
             if self.counts_toward_liveness {
                 crate::self_monitoring::record_slow_query(&self.tenant_id, sql_kind);
-                crate::self_monitoring::try_enqueue_slow_query(
-                    crate::self_monitoring::SlowQueryEvent {
-                        tenant: self.tenant_id.clone(),
-                        sql_kind: sql_kind.to_string(),
-                        elapsed_ms: elapsed.as_millis() as u64,
-                        queue_wait_ms: response.queue_wait.as_millis() as u64,
-                        sql_preview: preview,
-                    },
-                );
             }
         }
         response.result
@@ -935,25 +860,19 @@ impl DuckDBCore {
         // is handled by DuckLake (WAL + busy timeout / ATTACH behavior). Softprobe does not
         // reattach or mem::forget connections after writes.
 
-        let query_prep = rewrite_reserved_telemetry_view_names(query);
-        let query_run = if self.use_attached_catalog() {
-            self.ducklake_inline_sql(&query_prep)
-        } else {
-            query_prep.clone()
-        };
-        // D12 runs on the final SQL after public/legacy telemetry aliases have
-        // been expanded. Otherwise `FROM metrics` could evade the fact-table
-        // registry while its inlined metric tables were still scanned.
+        let query_run = self.ducklake_inline_sql(query);
+        // D12 runs on the final SQL after bare traces/logs/scores have been
+        // expanded to qualified DuckLake table names.
         crate::sql::ensure_fact_scan_bound(&query_run).map_err(|e| anyhow!("SQL gate: {e}"))?;
         if std::env::var("SOFTPROBE_LOG_SQL").ok().as_deref() == Some("1") {
-            eprintln!("SOFTPROBE_LOG_SQL prep={query_prep}\nSOFTPROBE_LOG_SQL run={query_run}");
+            eprintln!("SOFTPROBE_LOG_SQL run={query_run}");
         }
         let diag = std::env::var("PERF_DIAG").ok().as_deref() == Some("1");
 
         // DuckLake publishes snapshots only on COMMIT. SQL-API DML (harness materialize,
         // ad-hoc INSERT) must not leave orphan parquet invisible to Prom workers.
         // CALL expire/merge/cleanup must NOT be txn-wrapped (AC-N3).
-        if self.use_attached_catalog() && sql_needs_softprobe_txn_wrap(&query_run) {
+        if sql_needs_softprobe_txn_wrap(&query_run) {
             let trimmed = query_run.trim().trim_end_matches(';');
             let batch = format!("BEGIN TRANSACTION;\n{trimmed};\nCOMMIT;");
             let query_start = std::time::Instant::now();
@@ -971,7 +890,7 @@ impl DuckDBCore {
                 row_count: 0,
             });
         }
-        if self.use_attached_catalog() && sql_is_ducklake_mutating(&query_run) {
+        if sql_is_ducklake_mutating(&query_run) {
             // CALL / other mutating non-wrap path (expire, merge, cleanup, set_option).
             let trimmed = query_run.trim().trim_end_matches(';');
             let query_start = std::time::Instant::now();
@@ -1168,53 +1087,14 @@ impl DuckDBCore {
         ducklake_qualified_table_name(&self.ducklake_config(), table)
     }
 
-    /// Catalog prefix for layout tables (`softprobe` or `softprobe.<schema>`).
-    fn ducklake_catalog_prefix(&self) -> String {
-        let cfg = self.ducklake_config();
-        if cfg.metadata_schema == "main" {
-            cfg.catalog_alias.clone()
-        } else {
-            format!("{}.{}", cfg.catalog_alias, cfg.metadata_schema)
-        }
-    }
-
-    /// Replace internal telemetry aliases with real DuckLake table refs.
-    ///
-    /// Metrics aliases rewrite to the layout JOIN (§6.7 / AC-D4).
+    /// Replace bare telemetry table names with qualified DuckLake table refs.
     fn ducklake_inline_sql(&self, sql: &str) -> String {
-        let traces = self.ducklake_qualified_table("traces");
-        let logs = self.ducklake_qualified_table("logs");
-        let scores = self.ducklake_qualified_table("scores");
-        let metrics_prefix = self.ducklake_catalog_prefix();
-        let mut s = sql.to_string();
-        for name in [
-            "tm_icb_metric",
-            "tm_cq_metric",
-            "tm_all_metric",
-            "tm_buf_metric",
-        ] {
-            let rel = format!(
-                "({}) AS {name}",
-                crate::sql::schema::union_metrics_sql(&metrics_prefix)
-            );
-            s = replace_standalone_ident(&s, name, &rel);
-        }
-        for name in ["tm_icb_log", "tm_cq_log", "tm_all_log", "tm_buf_log"] {
-            s = replace_standalone_ident(&s, name, &logs);
-        }
-        for name in ["tm_icb_span", "tm_cq_span", "tm_all_span", "tm_buf_span"] {
-            s = replace_standalone_ident(&s, name, &traces);
-        }
-        s = replace_standalone_ident(&s, "scores", &scores);
-        // Tenant-scoped DuckLake catalogs expose traces/logs under catalog.schema.table;
-        // bare `FROM traces` would miss the attachment and return empty (masked as 0 rows).
-        s = replace_standalone_ident(&s, "traces", &traces);
-        s = replace_standalone_ident(&s, "logs", &logs);
-        s
-    }
-
-    fn use_attached_catalog(&self) -> bool {
-        true
+        qualify_public_telemetry_tables(
+            sql,
+            &self.ducklake_qualified_table("traces"),
+            &self.ducklake_qualified_table("logs"),
+            &self.ducklake_qualified_table("scores"),
+        )
     }
 
     fn attach_catalog_if_needed(&self, conn: &Connection) -> Result<()> {
@@ -1363,34 +1243,36 @@ mod tests {
     use tokio::sync::oneshot;
 
     #[test]
-    fn replace_standalone_ident_rewrites_tm_cq_span() {
-        let s = "SELECT count(*) AS c FROM tm_cq_span";
-        let out = replace_standalone_ident(s, "tm_cq_span", "softprobe.softprobe.traces");
+    fn replace_standalone_ident_rewrites_bare_traces() {
+        let s = "SELECT count(*) AS c FROM traces";
+        let out = replace_standalone_ident(s, "traces", "softprobe.softprobe.traces");
         assert!(out.contains("softprobe.softprobe.traces"), "got {out}");
-        assert!(!out.contains("tm_cq_span"));
+        assert!(!out.contains("FROM traces"));
     }
 
     #[test]
     fn replace_standalone_ident_skips_string_literals() {
-        let s = "SELECT count(*) FROM union_metrics WHERE metric_name = 'sp.logs.ingest.requests'";
+        let s = "SELECT count(*) FROM traces WHERE message_type = 'sp.logs.ingest.requests'";
         let out = replace_standalone_ident(s, "logs", "softprobe.ducklake_softprobe_local.logs");
-        assert_eq!(s, out, "must not rewrite logs inside quoted metric names");
+        assert_eq!(s, out, "must not rewrite logs inside quoted string literals");
     }
 
     #[test]
     fn replace_standalone_ident_skips_line_and_block_comments() {
-        let line = "-- user's query\nSELECT * FROM union_spans";
-        let line_out = replace_standalone_ident(line, "union_spans", "tm_all_span");
+        let line = "-- user's query\nSELECT * FROM traces";
+        let line_out =
+            replace_standalone_ident(line, "traces", "softprobe.ducklake_softprobe_local.traces");
         assert!(
-            line_out.contains("tm_all_span"),
+            line_out.contains("softprobe.ducklake_softprobe_local.traces"),
             "line-comment apostrophe must not block rewrite: {line_out}"
         );
-        assert!(!line_out.contains("FROM union_spans"));
+        assert!(!line_out.contains("FROM traces"));
 
-        let block = "SELECT * FROM /* user's table traces */ union_logs";
-        let block_out = replace_standalone_ident(block, "union_logs", "tm_all_log");
+        let block = "SELECT * FROM /* user's table traces */ logs";
+        let block_out =
+            replace_standalone_ident(block, "logs", "softprobe.ducklake_softprobe_local.logs");
         assert!(
-            block_out.contains("tm_all_log"),
+            block_out.contains("softprobe.ducklake_softprobe_local.logs"),
             "block-comment apostrophe must not block rewrite: {block_out}"
         );
         assert!(
@@ -1429,27 +1311,69 @@ mod tests {
 
     #[test]
     fn replace_standalone_ident_skips_double_quoted_idents_with_dashes() {
-        let s = r#"SELECT "col--name", count(*) FROM union_spans"#;
-        let out = replace_standalone_ident(s, "union_spans", "tm_all_span");
+        let s = r#"SELECT "col--name", count(*) FROM traces"#;
+        let out = replace_standalone_ident(s, "traces", "softprobe.ducklake_softprobe_local.traces");
         assert!(
-            out.contains("tm_all_span"),
+            out.contains("softprobe.ducklake_softprobe_local.traces"),
             "double-quoted -- must not start a line comment: {out}"
         );
         assert!(out.contains(r#""col--name""#), "got {out}");
     }
 
     #[test]
-    fn ducklake_inline_pipeline_does_not_double_qualify_union_spans() {
-        let prep = rewrite_reserved_telemetry_view_names("SELECT * FROM union_spans LIMIT 1");
-        assert_eq!(prep, "SELECT * FROM tm_all_span LIMIT 1");
+    fn ducklake_inline_pipeline_does_not_double_qualify_traces() {
         let traces = "softprobe.ducklake_softprobe_local.traces";
-        let after_alias = replace_standalone_ident(&prep, "tm_all_span", traces);
-        assert_eq!(after_alias, format!("SELECT * FROM {traces} LIMIT 1"));
-        let after_bare = replace_standalone_ident(&after_alias, "traces", traces);
+        let logs = "softprobe.ducklake_softprobe_local.logs";
+        let scores = "softprobe.ducklake_softprobe_local.scores";
+        let after_bare =
+            qualify_public_telemetry_tables("SELECT * FROM traces LIMIT 1", traces, logs, scores);
+        assert_eq!(after_bare, format!("SELECT * FROM {traces} LIMIT 1"));
+        let after_again = qualify_public_telemetry_tables(&after_bare, traces, logs, scores);
         assert_eq!(
-            after_bare, after_alias,
-            "bare traces rewrite must not double-qualify expanded tm_* aliases"
+            after_again, after_bare,
+            "bare traces rewrite must not double-qualify already expanded names"
         );
+    }
+
+    #[test]
+    fn qualify_public_telemetry_tables_expands_scores() {
+        let traces = "softprobe.ducklake_softprobe_local.traces";
+        let logs = "softprobe.ducklake_softprobe_local.logs";
+        let scores = "softprobe.ducklake_softprobe_local.scores";
+        let out = qualify_public_telemetry_tables(
+            "SELECT 1 FROM scores WHERE timestamp >= '2026-01-01'",
+            traces,
+            logs,
+            scores,
+        );
+        assert_eq!(
+            out,
+            format!("SELECT 1 FROM {scores} WHERE timestamp >= '2026-01-01'")
+        );
+    }
+
+    #[test]
+    fn qualify_public_telemetry_tables_does_not_rewrite_legacy_aliases() {
+        let traces = "softprobe.ducklake_softprobe_local.traces";
+        let logs = "softprobe.ducklake_softprobe_local.logs";
+        let scores = "softprobe.ducklake_softprobe_local.scores";
+        for legacy in [
+            "union_spans",
+            "union_logs",
+            "committed_spans",
+            "buffer_logs",
+            "staged_spans",
+            "iceberg_logs",
+            "tm_all_span",
+            "tm_cq_log",
+        ] {
+            let sql = format!("SELECT 1 FROM {legacy} LIMIT 1");
+            let out = qualify_public_telemetry_tables(&sql, traces, logs, scores);
+            assert_eq!(
+                out, sql,
+                "legacy alias {legacy} must not be rewritten to a DuckLake table"
+            );
+        }
     }
 
     #[test]
@@ -1468,19 +1392,23 @@ mod tests {
         };
         let traces = ducklake_qualified_table_name(&cfg, "traces");
         let logs = ducklake_qualified_table_name(&cfg, "logs");
+        let scores = ducklake_qualified_table_name(&cfg, "scores");
         assert_eq!(traces, "softprobe.ducklake_softprobe_local.traces");
         assert_eq!(logs, "softprobe.ducklake_softprobe_local.logs");
+        assert_eq!(scores, "softprobe.ducklake_softprobe_local.scores");
 
-        let out = replace_standalone_ident(
+        let out = qualify_public_telemetry_tables(
             "SELECT * FROM traces WHERE record_category = 'Servlet'",
-            "traces",
             &traces,
+            &logs,
+            &scores,
         );
         assert!(
             out.contains("softprobe.ducklake_softprobe_local.traces"),
             "got {out}"
         );
-        let logs_out = replace_standalone_ident("SELECT 1 FROM logs LIMIT 1", "logs", &logs);
+        let logs_out =
+            qualify_public_telemetry_tables("SELECT 1 FROM logs LIMIT 1", &traces, &logs, &scores);
         assert!(
             logs_out.contains("softprobe.ducklake_softprobe_local.logs"),
             "got {logs_out}"
@@ -1488,61 +1416,11 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_union_metrics_inlines_layout_join() {
-        let prep =
-            rewrite_reserved_telemetry_view_names("SELECT metric_name, value FROM union_metrics");
+    fn public_logs_alias_cannot_bypass_timestamp_gate() {
         assert!(
-            prep.contains("tm_all_metric"),
-            "public name must rewrite to tm_* alias: {prep}"
+            crate::sql::ensure_fact_scan_bound("SELECT * FROM logs").is_err(),
+            "the public logs alias must be subject to the fact-scan gate"
         );
-        let rel = format!(
-            "({}) AS tm_all_metric",
-            crate::sql::schema::union_metrics_sql("softprobe")
-        );
-        let out = replace_standalone_ident(&prep, "tm_all_metric", &rel);
-        assert!(
-            out.contains("metric_samples") && out.contains("metric_series"),
-            "AC-D4: must join layout tables, got {out}"
-        );
-        assert!(
-            !out.contains("FROM softprobe.metrics")
-                && !out.contains("FROM softprobe.softprobe.metrics"),
-            "must not scan the obsolete wide metric relation: {out}"
-        );
-        let committed =
-            rewrite_reserved_telemetry_view_names("SELECT value FROM committed_metrics");
-        assert!(committed.contains("tm_cq_metric"));
-        let cq = replace_standalone_ident(
-            &committed,
-            "tm_cq_metric",
-            &format!(
-                "({}) AS tm_cq_metric",
-                crate::sql::schema::union_metrics_sql("softprobe")
-            ),
-        );
-        assert!(cq.contains("metric_samples"));
-    }
-
-    #[test]
-    fn public_metrics_alias_cannot_bypass_timestamp_gate() {
-        assert!(
-            crate::sql::ensure_fact_scan_bound("SELECT * FROM metrics").is_err(),
-            "the public metrics alias must be subject to the fact-scan gate"
-        );
-    }
-
-    #[test]
-    fn rewrite_preferred_metrics_alias_matches_union_metrics() {
-        let preferred = rewrite_reserved_telemetry_view_names("SELECT value FROM metrics");
-        let legacy = rewrite_reserved_telemetry_view_names("SELECT value FROM union_metrics");
-        assert_eq!(preferred, "SELECT value FROM tm_all_metric");
-        assert_eq!(preferred, legacy);
-    }
-
-    #[test]
-    fn rewrite_legacy_union_spans_still_accepted() {
-        let prep = rewrite_reserved_telemetry_view_names("SELECT 1 FROM union_spans");
-        assert_eq!(prep, "SELECT 1 FROM tm_all_span");
     }
 
     #[test]
@@ -1593,24 +1471,24 @@ mod tests {
     #[test]
     fn sql_is_ducklake_mutating_detects_dml() {
         assert!(sql_is_ducklake_mutating(
-            "INSERT INTO softprobe.metric_samples_1h SELECT 1"
+            "INSERT INTO softprobe.traces SELECT 1"
         ));
         assert!(sql_is_ducklake_mutating("  create table t(i int)"));
         assert!(sql_is_ducklake_mutating(
             "CALL softprobe.ducklake_merge_adjacent_files('t')"
         ));
         assert!(!sql_is_ducklake_mutating(
-            "SELECT count(*) FROM softprobe.metric_samples"
+            "SELECT count(*) FROM softprobe.traces"
         ));
         assert!(!sql_is_ducklake_mutating("EXPLAIN SELECT 1"));
         assert!(sql_needs_softprobe_txn_wrap(
-            "INSERT INTO softprobe.metric_samples_1h SELECT 1"
+            "INSERT INTO softprobe.traces SELECT 1"
         ));
         assert!(!sql_needs_softprobe_txn_wrap(
             "CALL ducklake_expire_snapshots('softprobe', older_than => now() - INTERVAL '60 seconds')"
         ));
         assert!(!sql_needs_softprobe_txn_wrap(
-            "CALL ducklake_merge_adjacent_files('softprobe', 'metric_samples')"
+            "CALL ducklake_merge_adjacent_files('softprobe', 'traces')"
         ));
     }
 

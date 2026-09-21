@@ -1,6 +1,5 @@
 //! Phase 0 stub HTTP handlers for declared Loki/Tempo compatibility routes.
 //!
-//! Prometheus routes live in [`crate::compat::prometheus`].
 //! Auth is enforced by [`crate::runtime_api::runtime_auth_middleware`].
 //! Scope-header mismatch is checked here after `TenantInfo` is available.
 //! Error bodies use protocol-native envelopes (see [`crate::compat::envelopes`]).
@@ -17,15 +16,9 @@ pub fn compat_stub_routes() -> Router<AppState> {
     Router::new()
 }
 
-/// Isolation fixture: every declared Phase 0 matrix route path pattern.
+/// Isolation fixture: every declared Loki/Tempo matrix route path pattern.
 pub fn declared_compat_route_templates() -> &'static [&'static str] {
     &[
-        "/api/v1/query",
-        "/api/v1/query_range",
-        "/api/v1/labels",
-        "/api/v1/label/{name}/values",
-        "/api/v1/series",
-        "/api/v1/metadata",
         "/loki/api/v1/query",
         "/loki/api/v1/query_range",
         "/loki/api/v1/labels",
@@ -42,14 +35,6 @@ pub fn declared_compat_route_templates() -> &'static [&'static str] {
 /// Example concrete paths used by isolation tests (path params filled).
 pub fn declared_compat_probe_paths() -> &'static [(&'static str, &'static str)] {
     &[
-        ("GET", "/api/v1/query"),
-        ("POST", "/api/v1/query"),
-        ("GET", "/api/v1/query_range"),
-        ("POST", "/api/v1/query_range"),
-        ("GET", "/api/v1/labels"),
-        ("GET", "/api/v1/label/job/values"),
-        ("GET", "/api/v1/series"),
-        ("GET", "/api/v1/metadata"),
         ("GET", "/loki/api/v1/query"),
         ("GET", "/loki/api/v1/query_range"),
         (
@@ -77,7 +62,7 @@ pub fn declared_compat_probe_paths() -> &'static [(&'static str, &'static str)] 
 
 pub fn unsupported_json_body() -> Value {
     error_envelope(
-        ProtocolScope::Prometheus,
-        &CompatError::unsupported("prometheus_api"),
+        ProtocolScope::Loki,
+        &CompatError::unsupported("compat_api"),
     )
 }

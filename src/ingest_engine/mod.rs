@@ -1,16 +1,12 @@
 //! Soft coalesce ingest for one tenant-bound [`Storage`].
 //!
-//! # CPU / PromQL coupling
 //! OTLP enqueues into a per-signal coalesce buffer and ticks a background flush
 //! worker (`flush_interval_seconds` / eager depth). Enqueue never writes the lake.
-//! PromQL range answers stay in the HTTP cache across commits (TTL + start/end
-//! buckets); wiping that cache on every flush forced dashboard refreshes to
-//! re-scan Parquet and pegged query CPU.
 
 mod coalesce;
 
 use crate::config::{resolve_write_timeout_seconds, Config};
-use crate::models::{Log, Metric, Span};
+use crate::models::{Log, Span};
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::session_summary::{DirtyHint, SessionSummaryDirty};
 use crate::storage::ducklake::DuckLakeWriter;
@@ -29,7 +25,6 @@ pub struct IngestEngine {
     flush_interval_seconds: u64,
     logs: Arc<CoalesceBuf<Log>>,
     spans: Arc<CoalesceBuf<Span>>,
-    metrics: Arc<CoalesceBuf<Metric>>,
 }
 
 /// Bound a DuckLake write so a hung INSERT cannot stall the coalesce worker forever.
@@ -89,7 +84,7 @@ impl IngestEngine {
         };
         let spans = {
             let writer = storage.writer.clone();
-            let tenant = tenant_id.clone();
+            let tenant = tenant_id;
             let dirty = session_summary_dirty;
             CoalesceBuf::with_limits(
                 flush_interval_seconds,
@@ -126,41 +121,11 @@ impl IngestEngine {
                 }),
             )
         };
-        // Do not invalidate PromQL range cache on coalesce commits — TTL covers
-        // freshness; wipe-on-flush pegs Grafana refresh CPU (see module docs).
-        let metrics = {
-            let writer = storage.writer.clone();
-            let tenant = tenant_id;
-            CoalesceBuf::with_limits(
-                flush_interval_seconds,
-                max_pending,
-                eager_pending,
-                Arc::new(move |batches| {
-                    let w = writer.clone();
-                    let tenant = tenant.clone();
-                    Box::pin(async move {
-                        let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
-                        let r = ducklake_write_with_timeout(
-                            write_timeout_seconds,
-                            w.write_metric_batches(batches),
-                        )
-                        .await;
-                        if r.is_ok() {
-                            crate::self_monitoring::record_ingest_commit(
-                                &tenant, "metrics", rows, true,
-                            );
-                        }
-                        r
-                    })
-                }),
-            )
-        };
         Self {
             storage,
             flush_interval_seconds,
             logs,
             spans,
-            metrics,
         }
     }
 
@@ -191,27 +156,12 @@ impl IngestEngine {
         Ok(())
     }
 
-    pub async fn add_metrics(&self, items: Vec<Metric>, request_size: usize) -> Result<()> {
-        if items.is_empty() {
-            return Ok(());
-        }
-        self.metrics.enqueue(items, request_size).await?;
-        if self.flush_interval_seconds == 0 {
-            self.metrics.force_flush().await?;
-        }
-        Ok(())
-    }
-
     pub async fn force_flush_spans(&self) -> Result<()> {
         self.spans.force_flush().await
     }
 
     pub async fn force_flush_logs(&self) -> Result<()> {
         self.logs.force_flush().await
-    }
-
-    pub async fn force_flush_metrics(&self) -> Result<()> {
-        self.metrics.force_flush().await
     }
 
     pub fn flush_interval_seconds(&self) -> u64 {
@@ -317,10 +267,6 @@ impl IngestPipeline {
         self.ingest.add_logs(items, request_size).await
     }
 
-    pub async fn add_metrics(&self, items: Vec<Metric>, request_size: usize) -> Result<()> {
-        self.ingest.add_metrics(items, request_size).await
-    }
-
     pub async fn write_span_batches(&self, batches: Vec<Vec<Span>>) -> Result<()> {
         self.storage.writer.write_span_batches(batches).await
     }
@@ -329,20 +275,12 @@ impl IngestPipeline {
         self.storage.writer.write_log_batches(batches).await
     }
 
-    pub async fn write_metric_batches(&self, batches: Vec<Vec<Metric>>) -> Result<()> {
-        self.storage.writer.write_metric_batches(batches).await
-    }
-
     pub async fn force_flush_spans(&self) -> Result<()> {
         self.ingest.force_flush_spans().await
     }
 
     pub async fn force_flush_logs(&self) -> Result<()> {
         self.ingest.force_flush_logs().await
-    }
-
-    pub async fn force_flush_metrics(&self) -> Result<()> {
-        self.ingest.force_flush_metrics().await
     }
 
     pub fn writer(&self) -> Arc<DuckLakeWriter> {

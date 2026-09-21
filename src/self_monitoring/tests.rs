@@ -16,7 +16,6 @@ fn self_monitoring_config_defaults_disabled() {
     let c = Config::default();
     assert!(!c.self_monitoring.enabled);
     assert_eq!(c.self_monitoring.export_interval_seconds, 60);
-    assert_eq!(c.self_monitoring.ops_metadata_schema, "thelake_ops");
 }
 
 #[test]
@@ -29,13 +28,15 @@ ducklake:
 self_monitoring:
   enabled: true
   export_interval_seconds: 15
-  ops_metadata_schema: thelake_ops
-  ops_data_path: /tmp/ops-data/
 "#;
     let c: Config = serde_yaml::from_str(yaml).expect("parse");
     assert!(c.self_monitoring.enabled);
     assert_eq!(c.self_monitoring.export_interval_seconds, 15);
-    assert_eq!(c.self_monitoring.ops_data_path, "/tmp/ops-data/");
+}
+
+#[test]
+fn otlp_metrics_exporter_builds_with_defaults() {
+    super::export::try_build_otlp_exporter().expect("otlp exporter builds");
 }
 
 #[tokio::test]

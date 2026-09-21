@@ -82,16 +82,16 @@ if ! GRAFANA_RICH_TEMPO_ASSERTIONS=0 bash -c 'source "$1"; validate_tempo_trace_
   exit 1
 fi
 
-prometheus_response="$TMP_DIR/prometheus.json"
-printf '%s\n' '{"status":"success","data":{"resultType":"vector","result":[{"metric":{"job":"checkout"},"value":[1700000030,"1"]}]}}' >"$prometheus_response"
-if bash -c 'source "$1"; validate_signal_response "$2" prometheus grafana-phase4-tenant-a grafana-phase4-tenant-b softprobe-prom-a' _ "$HARNESS" "$prometheus_response"; then
-  echo 'Prometheus validator accepted an ambiguous tenant response' >&2
+loki_response="$TMP_DIR/loki.json"
+printf '%s\n' '{"status":"success","data":{"resultType":"streams","result":[{"stream":{"service_name":"checkout"},"values":[["1700000030000000000","ok"]]}]}}' >"$loki_response"
+if bash -c 'source "$1"; validate_signal_response "$2" loki grafana-phase4-tenant-a grafana-phase4-tenant-b softprobe-loki-a' _ "$HARNESS" "$loki_response"; then
+  echo 'Loki validator accepted an ambiguous tenant response' >&2
   exit 1
 fi
 
 explore_response="$TMP_DIR/explore.json"
 printf '%s\n' '{"results":{"A":{"refId":"A","frames":[{"schema":{"name":"data","fields":[{"name":"value"}]},"data":{"values":[[1]]}}]}}}' >"$explore_response"
-if bash -c 'source "$1"; validate_explore_response "$2" grafana-phase4-tenant-a grafana-phase4-tenant-b softprobe-prom-a prometheus' _ "$HARNESS" "$explore_response"; then
+if bash -c 'source "$1"; validate_explore_response "$2" grafana-phase4-tenant-a grafana-phase4-tenant-b softprobe-loki-a loki' _ "$HARNESS" "$explore_response"; then
   echo 'Explore validator accepted an ambiguous tenant response' >&2
   exit 1
 fi

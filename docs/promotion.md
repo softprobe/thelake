@@ -75,7 +75,7 @@ language examples. Keep large HTTP bodies in `http.request` /
 
 | Kind | Purpose | Effect of apply | Effect of later ingest |
 |------|---------|-----------------|------------------------|
-| `telemetry_columns` | Add nullable columns to `traces`, `logs`, and/or `metric_samples` | Idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` + activate one telemetry spec **per `target_tables` set** (supersede prior for that set only) | Extract values into the new columns for **new** rows |
+| `telemetry_columns` | Add nullable columns to `traces` and/or `logs` | Idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` + activate one telemetry spec **per `target_tables` set** (supersede prior for that set only) | Extract values into the new columns for **new** rows |
 | `business_table` | Create a versioned business table + `*_current` view | Compatibility check, then `CREATE TABLE IF NOT EXISTS` / additive `ADD COLUMN IF NOT EXISTS` / `CREATE OR REPLACE VIEW` + activate one spec per table | Extraction helpers exist; **automatic OTLP ingest materialization is not wired yet** |
 
 Use `telemetry_columns` when you want a first-class filter column on existing
@@ -208,7 +208,7 @@ Other apply `503` codes:
 |-------|----------|-------|
 | `specVersion` | yes | Must be exactly `softprobe.promotion.v1` |
 | `target.kind` | yes | `telemetry_columns` or `business_table` |
-| `target.tables` | telemetry only | Non-empty list from `traces`, `logs`, `metric_samples` |
+| `target.tables` | telemetry only | Non-empty list from `traces`, `logs` |
 | `target.table` | business only | SQL identifier for the logical business table |
 | `target.version` | business only | Integer `> 0` |
 | `columns` | yes | At least one column |
@@ -227,9 +227,9 @@ Other apply `503` codes:
 
 | `from` | Extra fields | Reads from | Ingest support today |
 |--------|--------------|------------|----------------------|
-| `attribute` | `key` | Attributes map | `traces`, `logs`, `metric_samples` |
-| `resource_attribute` | `key` | Resource attributes map | `traces`, `logs`, `metric_samples` |
-| `event_attribute` | `event_name`, `key` | First matching named span event attribute | **`traces` only** — logs/metrics pass empty events, so the column stays `NULL` |
+| `attribute` | `key` | Attributes map | `traces`, `logs` |
+| `resource_attribute` | `key` | Resource attributes map | `traces`, `logs` |
+| `event_attribute` | `event_name`, `key` | First matching named span event attribute | **`traces` only** — logs pass empty events, so the column stays `NULL` |
 | `http_request_body` | `json_path` | Parsed HTTP request body JSON | **`traces` only** |
 | `http_response_body` | `json_path` | Parsed HTTP response body JSON | **`traces` only** |
 
@@ -276,25 +276,6 @@ columns:
       key: service.name
 ```
 
-### Recommended metrics hot labels (Prometheus / Grafana)
-
-For Prom-compatible dashboards, apply the versioned manifest
-[`docs/promotion/metrics-prom-hot-labels.yaml`](./metrics-prom-hot-labels.yaml)
-via `POST /v1/promotions/apply` **before** ingest. It promotes frequent Prom
-dimensions (`service_name` ← `service.name`, `instance_id` ←
-`service.instance.id`, `host_name`, `deployment_environment`, `http_method`,
-`http_route`) onto the canonical metric series catalog.
-
-Bench (`make bench-prom-baseline`) and Grafana manual (`make grafana-up`)
-scripts apply this manifest automatically. Softprobe still does **not**
-auto-promote arbitrary attribute keys; merge this document with any other
-`telemetry_columns` fragment before apply (one active telemetry spec per
-tenant).
-
-The Prometheus query path prefers these typed columns and falls back to
-per-key `CAST(attributes['k'] AS VARCHAR)` / resource MAP access. It never
-`CAST(... AS JSON)` whole attribute blobs on the sample scan.
-
 ### Lifecycle
 
 ```text
@@ -304,7 +285,7 @@ instrument app with attributes (e.g. sp.user.id)
 POST /v1/promotions/apply
         |
         +--> validate manifest
-        +--> ensure traces/logs/metric_samples tables exist
+        +--> ensure traces/logs tables exist
         +--> ALTER TABLE ADD COLUMN IF NOT EXISTS (nullable)
         +--> activate this telemetry spec; deactivate other active telemetry specs
         |
@@ -322,9 +303,9 @@ query either CAST(attributes['sp.user.id'] AS VARCHAR) or user_id
 ### Active-spec lifecycle
 
 - Each tenant has **at most one active** `telemetry_columns` document **per
-  `target_tables` value** (e.g. `traces` and `metric_samples` may both be
-  active). Softprobe Compose applies llm∪mocker for `traces`, then Prom
-  hot-labels for `metric_samples`, without either clobbering the other.
+  `target_tables` value** (e.g. `traces` and `logs` may both be active).
+  Softprobe Compose applies product-hot manifests for `traces` / `logs`
+  without either clobbering the other.
 - Re-applying the **same** YAML is idempotent: DDL uses `IF NOT EXISTS`, and
   the existing `promotion_specs` row is upserted back to `active`.
 - Applying an **updated** YAML for the **same** `target_tables` activates the
@@ -389,16 +370,8 @@ domain modules inside thelake.
 
 Promoted telemetry column names must not collide with canonical columns such
 as `session_id`, `trace_id`, `span_id`, `attributes`, `events`,
-`http_request_body`, `record_date`, and the other base fields defined in
+`http_request_body`, and the other base fields defined in
 `src/storage/schema/tables.rs` / `src/promotion.rs`.
-
-For **metric_samples**, the canonical schema also reserves classic histogram /
-summary fidelity columns: `count`, `sum`, `bucket_counts`,
-`explicit_bounds`, `quantiles`, `aggregation_temporality`, `exemplars_json`.
-Apply-time validation rejects new manifests that declare those names. If an
-already-active promotion still collides after upgrade, metric ingestion fails
-loud via `ensure_promoted_columns_not_reserved` until the promotion is
-deactivated or rebuilt.
 
 ### Query examples
 
@@ -536,7 +509,7 @@ payload storage.
 - [`design.md`](design.md) — runtime architecture
 - [`decision_log.md`](decision_log.md) — current architecture decisions
 - [`variant_shredding.md`](variant_shredding.md) — temporary MAP bags; VARIANT restore criteria
-- [`docs/promotion/`](promotion/) — product-hot manifests (traces/logs/metrics)
+- [`docs/promotion/`](promotion/) — product-hot manifests (traces/logs)
 
 - [`ingestion-openapi.yaml`](ingestion-openapi.yaml) — HTTP contract including apply
 - [`adhoc-duckdb-ducklake.md`](adhoc-duckdb-ducklake.md) — local SQL against DuckLake

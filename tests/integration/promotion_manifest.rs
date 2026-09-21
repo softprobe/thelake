@@ -7,7 +7,7 @@ fn parses_representative_telemetry_manifest() {
 specVersion: softprobe.promotion.v1
 target:
   kind: telemetry_columns
-  tables: [traces, logs, metric_samples]
+  tables: [traces, logs]
 columns:
   - name: division_name
     type: string
@@ -28,7 +28,7 @@ columns:
 
     match manifest {
         PromotionManifest::TelemetryColumns(spec) => {
-            assert_eq!(spec.target.tables.len(), 3);
+            assert_eq!(spec.target.tables.len(), 2);
             assert_eq!(spec.columns[0].name, "division_name");
             assert_eq!(spec.columns[1].name, "checkout_status");
         }

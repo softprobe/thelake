@@ -1,4 +1,4 @@
-use crate::compat::backends::metrics::LabelMatcher;
+use crate::compat::backends::label_match::LabelMatcher;
 use crate::compat::errors::CompatError;
 use crate::compat::tenant::TenantContext;
 use async_trait::async_trait;

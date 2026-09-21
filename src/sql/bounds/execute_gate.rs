@@ -1,26 +1,6 @@
 //! D12: reject unbound fact scans and forbidden time column names.
 
 const FORBIDDEN_TIME_COLUMNS: &[&str] = &["record_date", "event_date", "window_ts"];
-const TELEMETRY_ALIASES: &[&str] = &[
-    "metrics",
-    "union_metrics",
-    "committed_metrics",
-    "buffer_metrics",
-    "staged_metrics",
-    "iceberg_metrics",
-    "traces",
-    "union_spans",
-    "committed_spans",
-    "buffer_spans",
-    "staged_spans",
-    "iceberg_spans",
-    "logs",
-    "union_logs",
-    "committed_logs",
-    "buffer_logs",
-    "staged_logs",
-    "iceberg_logs",
-];
 
 /// Replace string literals and comments with spaces while preserving quoted
 /// identifiers and statement punctuation. Gate matching must inspect SQL code,
@@ -208,13 +188,6 @@ pub fn names_fact_table(sql: &str) -> bool {
             || lower.contains(&format!("join {t}"))
             || lower.contains(&format!("update {t}"))
             || lower.contains(&format!("table {t}"))
-    }) || TELEMETRY_ALIASES.iter().any(|t| {
-        lower.contains(&format!(" {t} "))
-            || lower.contains(&format!(" {t}\n"))
-            || lower.contains(&format!("from {t}"))
-            || lower.contains(&format!("join {t}"))
-            || lower.contains(&format!("into {t}"))
-            || lower.contains(&format!(".{t}"))
     })
 }
 
@@ -413,7 +386,7 @@ mod tests {
         )
         .is_ok());
         assert!(ensure_fact_scan_bound(
-            "SELECT * FROM softprobe.metric_samples WHERE timestamp <= TIMESTAMPTZ '2026-09-11'"
+            "SELECT * FROM softprobe.logs WHERE timestamp <= TIMESTAMPTZ '2026-09-11'"
         )
         .is_ok());
     }
@@ -446,13 +419,13 @@ mod tests {
     #[test]
     fn allows_values_insert_without_timestamp_predicate() {
         assert!(ensure_fact_scan_bound(
-            "INSERT INTO softprobe.metric_series (series_id, metric_name, timestamp)\n\
-             SELECT * FROM (VALUES (1::UBIGINT, 'm', '2026-01-01'::TIMESTAMPTZ));"
+            "INSERT INTO softprobe.scores (score_id, name, timestamp)\n\
+             SELECT * FROM (VALUES ('s1', 'n', '2026-01-01'::TIMESTAMPTZ));"
         )
         .is_ok());
         assert!(ensure_fact_scan_bound(
-            "INSERT INTO softprobe.metric_hist_samples (series_id, timestamp, count)\n\
-             VALUES\n(1::UBIGINT, TIMESTAMPTZ '2026-01-01', 1::UBIGINT);"
+            "INSERT INTO softprobe.logs (session_id, timestamp, body)\n\
+             VALUES\n('sess', TIMESTAMPTZ '2026-01-01', 'hello');"
         )
         .is_ok());
     }
@@ -460,7 +433,7 @@ mod tests {
     #[test]
     fn rejects_timestamp_column_without_time_predicate() {
         let err = ensure_fact_scan_bound(
-            "SELECT timestamp FROM softprobe.metric_samples WHERE value > 0",
+            "SELECT timestamp FROM softprobe.logs WHERE body IS NOT NULL",
         )
         .unwrap_err();
         assert!(err.contains("timestamp bound"), "{err}");
@@ -487,20 +460,7 @@ mod tests {
 
     #[test]
     fn gate_and_registry_have_no_extra_fact_table_owners() {
-        for name in [
-            "traces",
-            "logs",
-            "scores",
-            "metric_series",
-            "metric_postings",
-            "metric_samples",
-            "metric_hist_samples",
-            "metric_samples_5m",
-            "metric_samples_1h",
-            "metric_hist_samples_5m",
-            "metric_hist_samples_1h",
-            "metric_collapse_job_1h",
-        ] {
+        for name in ["traces", "logs", "scores"] {
             assert!(crate::sql::schema::table_spec(name).is_some(), "{name}");
         }
         assert!(!names_fact_table("SELECT * FROM softprobe.score_configs"));

@@ -430,21 +430,21 @@ mod tests {
 
     #[test]
     fn logical_table_row_count_sql_targets_catalog_table() {
-        let sql = logical_table_row_count_sql("softprobe", "metric_samples");
-        assert!(sql.contains("FROM softprobe.metric_samples"), "{sql}");
+        let sql = logical_table_row_count_sql("softprobe", "traces");
+        assert!(sql.contains("FROM softprobe.traces"), "{sql}");
         assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS)"), "{sql}");
     }
 
     #[test]
     fn inlined_only_backlog_flag() {
         assert!(InlinedFragmentStats {
-            table: "metric_samples".into(),
+            table: "traces".into(),
             live_parquet_files: 0,
             logical_row_count: 5,
         }
         .is_inlined_only());
         assert!(!InlinedFragmentStats {
-            table: "metric_samples".into(),
+            table: "traces".into(),
             live_parquet_files: 2,
             logical_row_count: 5,
         }
@@ -460,7 +460,7 @@ mod tests {
         let p = policy();
         let empty: &[PartitionFileStats] = &[];
         assert!(plan_twcs_merges(&TwcsMergePlan {
-            table: "metric_samples",
+            table: "traces",
             catalog_alias: "softprobe",
             schema: "main",
             partitions: empty,
@@ -477,7 +477,7 @@ mod tests {
             total_bytes: 1_000_000,
         }];
         let actions = plan_twcs_merges(&TwcsMergePlan {
-            table: "metric_samples",
+            table: "traces",
             catalog_alias: "softprobe",
             schema: "main",
             partitions: &after_materialize,
@@ -583,7 +583,7 @@ mod tests {
         ];
         let p = policy();
         let actions = plan_twcs_merges(&TwcsMergePlan {
-            table: "metric_samples",
+            table: "traces",
             catalog_alias: "softprobe",
             schema: "main",
             partitions: &parts,
@@ -620,7 +620,7 @@ mod tests {
             );
         }
         let closed_actions = plan_twcs_merges(&TwcsMergePlan {
-            table: "metric_samples",
+            table: "traces",
             catalog_alias: "softprobe",
             schema: "main",
             partitions: &parts,
@@ -644,12 +644,12 @@ mod tests {
     /// AC-F3: partition stats reconstruct calendar day from year/month/day keys.
     #[test]
     fn twcs_partition_stats_use_one_clock_day_keys() {
-        let sql = partition_live_file_stats_sql("softprobe", "metric_samples");
+        let sql = partition_live_file_stats_sql("softprobe", "traces");
         assert!(sql.contains("partition_key_index = 0"));
         assert!(sql.contains("partition_key_index = 1"));
         assert!(sql.contains("partition_key_index = 2"));
         assert!(sql.contains("partition_day"));
-        assert!(sql.contains("metric_samples"));
+        assert!(sql.contains("traces"));
         assert!(!sql.contains("metric_name"));
         assert!(!sql.contains("AS record_date"));
     }
@@ -663,7 +663,7 @@ mod tests {
             total_bytes: 100,
         }];
         let actions = plan_twcs_merges(&TwcsMergePlan {
-            table: "metric_samples",
+            table: "traces",
             catalog_alias: "softprobe",
             schema: "main",
             partitions: &parts,
@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn live_file_count_sql_has_no_partition_join() {
-        let sql = live_file_count_sql("softprobe", "metric_postings");
+        let sql = live_file_count_sql("softprobe", "logs");
         assert!(sql.contains("ducklake_data_file"));
         assert!(!sql.contains("ducklake_file_partition_value"));
     }

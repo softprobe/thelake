@@ -22,8 +22,9 @@ use tower::ServiceExt;
 
 #[cfg(feature = "integration-e2e")]
 use crate::compat_support::lifecycle;
-use crate::compat_support::prometheus::{encode_query_owned, get_json_as, get_json_bearer};
-use crate::compat_support::prometheus_oracle::build_tenant_router_with_state;
+use crate::compat_support::http::{
+    build_tenant_router_with_state, encode_query_owned, get_json_as, get_json_bearer,
+};
 
 pub const PHASE2_EPOCH_NS: i64 = 1_786_827_600_000_000_000;
 pub const FIXTURE_LAG_NS: i64 = 1_000_000_000;

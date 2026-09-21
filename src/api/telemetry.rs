@@ -9,9 +9,7 @@ use crate::api::query_window::{push_otlp_time_predicates, QueryWindow};
 use crate::api::sql_support::{sql_string_literal, timestamp_ns_literal_from_str};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
-use crate::storage::schema::variant::{
-    parse_projected_json_value, variant_as_json, variant_varchar,
-};
+use crate::storage::schema::variant::{parse_projected_json_value, variant_as_json};
 use axum::extract::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -104,7 +102,6 @@ pub struct TelemetryDetailsRequest {
 pub struct CompiledDetailsSql {
     pub spans: String,
     pub logs: String,
-    pub metrics: String,
 }
 
 #[derive(Clone, Copy)]
@@ -268,32 +265,14 @@ pub fn compile_details_sql(
 ) -> Result<CompiledDetailsSql, String> {
     let limit = limit.clamp(1, 5000);
     let escaped_id = sql_string_literal(&target.id);
-    let (span_filter, log_filter, metric_filter) = match target.kind.as_str() {
+    let (span_filter, log_filter) = match target.kind.as_str() {
         "session" => (
             format!("session_id = {escaped_id}"),
             format!("session_id = {escaped_id}"),
-            // metrics layout JOIN has no first-class session_id /
-            // session_attr_id columns — session keys live in the labels MAP.
-            format!(
-                "({a} = {escaped_id} OR {b} = {escaped_id} OR {c} = {escaped_id} OR {d} = {escaped_id} OR {e} = {escaped_id} OR {f} = {escaped_id})",
-                a = variant_varchar("attributes", "sp.session.id"),
-                b = variant_varchar("attributes", "session.id"),
-                c = variant_varchar("attributes", "session_id"),
-                d = variant_varchar("resource_attributes", "sp.session.id"),
-                e = variant_varchar("resource_attributes", "session.id"),
-                f = variant_varchar("resource_attributes", "session_id"),
-            ),
         ),
         "trace" => (
             format!("trace_id = {escaped_id}"),
             format!("trace_id = {escaped_id}"),
-            format!(
-                "({a} = {escaped_id} OR {b} = {escaped_id} OR {c} = {escaped_id} OR {d} = {escaped_id})",
-                a = variant_varchar("attributes", "trace_id"),
-                b = variant_varchar("attributes", "trace.id"),
-                c = variant_varchar("resource_attributes", "trace_id"),
-                d = variant_varchar("resource_attributes", "trace.id"),
-            ),
         ),
         _ => return Err("target.kind must be session or trace".to_string()),
     };
@@ -303,11 +282,6 @@ pub fn compile_details_sql(
     push_otlp_time_predicates(&mut span_conds, &window, [span_filter]);
     let mut log_conds = Vec::new();
     push_otlp_time_predicates(&mut log_conds, &window, [log_filter]);
-    let metric_time = format!(
-        "timestamp >= {} AND timestamp <= {}",
-        timestamp_literal(&time_range.from),
-        timestamp_literal(&time_range.to)
-    );
     let span_cols = format!(
         "session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind, timestamp, end_timestamp, status_code, status_message, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, {}",
         variant_as_json("attributes")
@@ -325,20 +299,6 @@ pub fn compile_details_sql(
             limit,
         ),
         logs: crate::sql::telemetry::details_logs_sql(&log_cols, &log_conds.join(" AND "), limit),
-        metrics: crate::sql::telemetry::detail_sql(
-            // Metrics are stored in skinny tables.  Keep the detail endpoint on
-            // the compatibility relation so it sees the same joined columns as
-            // the pre-cutover telemetry API without maintaining a second join.
-            "metrics",
-            &format!(
-                "metric_name, description, unit, metric_type, timestamp, value, {}, {}",
-                variant_as_json("attributes"),
-                variant_as_json("resource_attributes")
-            ),
-            &metric_filter,
-            Some(&metric_time),
-            limit,
-        ),
     })
 }
 
@@ -521,11 +481,9 @@ async fn details_for_target(
     let compiled = compile_details_sql(&target, &time_range, limit).map_err(bad_request)?;
     let spans = execute_objects(&state, tenant, &compiled.spans).await?;
     let logs = execute_objects(&state, tenant, &compiled.logs).await?;
-    let metrics = execute_objects(&state, tenant, &compiled.metrics).await?;
     let summary = json!({
         "spanCount": spans.len(),
         "logCount": logs.len(),
-        "metricCount": metrics.len(),
         "traceCount": distinct_count(&spans, "trace_id"),
         "errorCount": spans.iter().filter(|row| is_error_span(row)).count(),
         "services": distinct_strings(&spans, "app_id"),
@@ -539,7 +497,6 @@ async fn details_for_target(
         "summary": summary,
         "spans": spans,
         "logs": logs,
-        "metrics": metrics,
     })))
 }
 
@@ -680,10 +637,6 @@ fn scalar_literal(value: &Value) -> String {
     }
 }
 
-fn timestamp_literal(value: &str) -> String {
-    format!("{}::TIMESTAMPTZ", sql_string_literal(value))
-}
-
 fn time_range_from_query(params: &HashMap<String, String>) -> Option<TelemetryTimeRange> {
     Some(TelemetryTimeRange {
         from: params.get("from")?.clone(),
@@ -735,8 +688,7 @@ fn rows_to_search_response(
                     "traceCount": numeric_cell(row.get("trace_count")),
                     "spanCount": numeric_cell(row.get("span_count")),
                     "logCount": 0,
-                    "metricCount": 0,
-                    "errorCount": numeric_cell(row.get("error_count")),
+                                        "errorCount": numeric_cell(row.get("error_count")),
                     "durationMs": numeric_cell(row.get("duration_ms")),
                     "services": services,
                     "entryPath": row.get("entry_path").cloned().unwrap_or(Value::Null),
@@ -867,11 +819,6 @@ mod tests {
         assert!(!compiled.spans.contains("record_date"));
         assert!(compiled.logs.contains("CAST(timestamp AS TIMESTAMP_NS)"));
         assert!(!compiled.logs.contains("record_date"));
-        // Metrics: skinny metrics layout has no session_id column — bag keys only.
-        assert!(compiled
-            .metrics
-            .contains("CAST(attributes['sp.session.id'] AS VARCHAR)"));
-        assert!(!compiled.metrics.contains("session_attr_id"));
     }
 
     #[test]
@@ -893,7 +840,6 @@ mod tests {
         assert!(compiled.logs.contains("CAST(timestamp AS TIMESTAMP_NS)"));
         assert!(!compiled.logs.contains("record_date"));
         assert!(!compiled.logs.contains("TIMESTAMPTZ"));
-        assert!(compiled.metrics.contains("::TIMESTAMPTZ"));
     }
 
     #[test]

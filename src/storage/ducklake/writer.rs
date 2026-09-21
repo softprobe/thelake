@@ -2,7 +2,7 @@ use crate::config::{Config, DuckLakeConfig};
 use crate::promotion::TelemetryTable;
 use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
 use crate::sql::schema::{
-    insert_order_by, is_otlp_table, LOGS, METRICS_LAYOUT_CORE_TABLES, SCORES, SCORE_CONFIGS, TRACES,
+    insert_order_by, is_otlp_table, LOGS, SCORES, SCORE_CONFIGS, TRACES,
 };
 use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
 use crate::storage::schema::tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
@@ -107,20 +107,6 @@ impl WriterPool {
 
     pub(super) fn clear_ready(&self) {
         self.registry.clear();
-    }
-
-    pub(super) fn ensure_metrics_ready(
-        &self,
-        conn: &Connection,
-        dk: &DuckLakeConfig,
-    ) -> Result<()> {
-        let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
-        crate::storage::schema::ensure_metrics_layout_family_tables(conn, &catalog)?;
-        for t in METRICS_LAYOUT_CORE_TABLES {
-            self.mark_table_ready(t.name);
-        }
-        self.mark_table_ready("metrics");
-        Ok(())
     }
 
     pub(super) fn table_lock(&self, table_name: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -279,8 +265,13 @@ impl DuckLakeWriter {
     }
 
     pub(super) fn warm_pool(&self, pool: &WriterPool, dk: &DuckLakeConfig) -> Result<()> {
+        // Warm OTLP tables so the first ingest does not pay ensure under load.
+        let target_file_size_bytes = self.config.maintenance.target_file_size_bytes;
         pool.with_conn(|conn| {
-            pool.ensure_metrics_ready(conn, dk)?;
+            for table in ["traces", "logs"] {
+                Self::ensure_table_with_conn(conn, dk, table, None, target_file_size_bytes)?;
+                pool.mark_table_ready(table);
+            }
             Ok(())
         })
     }
@@ -476,20 +467,9 @@ impl DuckLakeWriter {
         table: &TelemetryTable,
     ) -> Result<()> {
         let pool = self.get_or_create_pool(dk)?;
-        if matches!(table, TelemetryTable::Metrics) {
-            let dk = dk.clone();
-            tokio::task::spawn_blocking({
-                let pool = pool.clone();
-                move || pool.with_conn(|conn| pool.ensure_metrics_ready(conn, &dk))
-            })
-            .await
-            .map_err(|e| anyhow!("metrics layout ensure join failed: {e}"))??;
-            return Ok(());
-        }
         let table_name = match table {
             TelemetryTable::Traces => "traces",
             TelemetryTable::Logs => "logs",
-            TelemetryTable::Metrics => unreachable!("handled above"),
         };
         let dk = dk.clone();
         let table_name_owned = table_name.to_string();

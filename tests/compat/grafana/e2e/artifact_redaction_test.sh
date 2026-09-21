@@ -99,7 +99,7 @@ set +e
 export GRAFANA_SKIP_STATIC_CONTRACTS=1 MOCK=1 GRAFANA_CHECK_DASHBOARD_QUERIES=1 \
     GRAFANA_MOCK_PANEL_LIMIT=1 \
     GRAFANA_DASHBOARD_DIR="$ROOT_DIR/tests/compat/grafana/dashboards/compose" \
-    GRAFANA_DASHBOARD_UIDS='compose-cross-signal compose-loki compose-prom compose-tempo' \
+    GRAFANA_DASHBOARD_UIDS='compose-cross-signal compose-loki compose-tempo' \
     ARTIFACT_DIR="$mock_dir"
 run_bounded "${GRAFANA_MOCK_TIMEOUT_SECONDS:-300}" bash -x "$SCRIPT"
 mock_status=$?
@@ -131,12 +131,12 @@ for name in root.iterdir():
         raise SystemExit(f"unexpected non-allowlisted artifact survived staging: {name.name}")
 if (root / "stale.txt").exists() or (root / ".work/stale.json").exists():
     raise SystemExit("stale artifact survived a fresh Grafana run")
-unsupported = (root / ".work/G8-prometheus-a.json").read_text()
-invalid = (root / ".work/G8-prometheus-invalid-datasource.json").read_text()
+unsupported = (root / ".work/G8-loki-a.json").read_text()
+invalid = (root / ".work/G8-loki-invalid-datasource.json").read_text()
 if "unsupported" not in unsupported or "datasource" not in invalid:
     raise SystemExit("mock G8 did not retain its required explicit failure evidence")
-direct_missing = (root / ".work/G8-prometheus-a-missing_credentials-softprobe.json").read_text()
-direct_mismatch = (root / ".work/G8-prometheus-a-mismatched_tenant-softprobe.json").read_text()
+direct_missing = (root / ".work/G8-loki-a-missing_credentials-softprobe.json").read_text()
+direct_mismatch = (root / ".work/G8-loki-a-mismatched_tenant-softprobe.json").read_text()
 if '"errorSource":"softprobe"' not in direct_missing or '"probe":"missing_credentials"' not in direct_missing:
     raise SystemExit("mock G8 missing-credential probe did not retain direct Softprobe evidence")
 if '"errorSource":"softprobe"' not in direct_mismatch or '"probe":"mismatched_tenant"' not in direct_mismatch:

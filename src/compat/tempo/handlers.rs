@@ -47,7 +47,7 @@ fn tenant_context(tenant: TenantInfo, headers: &HeaderMap) -> Result<TenantConte
 
 fn pairs(uri: &Uri) -> Vec<(String, String)> {
     uri.query()
-        .map(crate::compat::prometheus::pairs_from_query)
+        .map(crate::compat::query_string::pairs_from_query)
         .unwrap_or_default()
 }
 

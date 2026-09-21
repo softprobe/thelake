@@ -6,13 +6,9 @@ use axum::http::{header, Request, Response, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-use opentelemetry_proto::tonic::metrics::v1::{
-    metric::Data, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
-};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span, Status};
 use prost::Message;
@@ -232,44 +228,6 @@ fn telemetry_logs_request(session_id: &str, trace_id: [u8; 16]) -> ExportLogsSer
     }
 }
 
-fn telemetry_metrics_request(session_id: &str, trace_id: &str) -> ExportMetricsServiceRequest {
-    use opentelemetry_proto::tonic::metrics::v1::number_data_point;
-
-    ExportMetricsServiceRequest {
-        resource_metrics: vec![ResourceMetrics {
-            resource: Some(Resource {
-                attributes: vec![
-                    string_kv("service.name", "checkout-api"),
-                    string_kv("sp.session.id", session_id),
-                    string_kv("trace_id", trace_id),
-                ],
-                ..Default::default()
-            }),
-            scope_metrics: vec![ScopeMetrics {
-                scope: None,
-                metrics: vec![Metric {
-                    name: "http.server.duration".to_string(),
-                    description: "HTTP server duration".to_string(),
-                    unit: "ms".to_string(),
-                    data: Some(Data::Gauge(Gauge {
-                        data_points: vec![NumberDataPoint {
-                            attributes: vec![
-                                string_kv("sp.session.id", session_id),
-                                string_kv("trace_id", trace_id),
-                            ],
-                            time_unix_nano: 1_777_802_601_000_000_000,
-                            value: Some(number_data_point::Value::AsDouble(1500.0)),
-                            ..Default::default()
-                        }],
-                    })),
-                    ..Default::default()
-                }],
-                schema_url: String::new(),
-            }],
-            schema_url: String::new(),
-        }],
-    }
-}
 
 #[tokio::test]
 async fn health_returns_ok_envelope() {
@@ -419,32 +377,7 @@ async fn logs_json_invalid_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
-async fn metrics_json_invalid_returns_400() {
-    let (router, _t) = build_router().await;
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/metrics")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from("{"))
-        .unwrap();
-    let resp = router.oneshot(req).await.expect("oneshot");
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
 
-#[tokio::test]
-async fn metrics_json_empty_batch() {
-    let (router, _t) = build_router().await;
-    let body = json!({ "resourceMetrics": [] }).to_string();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/metrics")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = router.oneshot(req).await.expect("oneshot");
-    assert_eq!(resp.status(), StatusCode::OK);
-}
 
 #[tokio::test]
 async fn query_sql_empty_returns_400() {
@@ -492,22 +425,6 @@ async fn logs_protobuf_empty() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-#[tokio::test]
-async fn metrics_protobuf_empty() {
-    let (router, _t) = build_router().await;
-    let mut buf = Vec::new();
-    ExportMetricsServiceRequest::default()
-        .encode(&mut buf)
-        .expect("encode");
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/metrics")
-        .header(header::CONTENT_TYPE, "application/x-protobuf")
-        .body(Body::from(buf))
-        .unwrap();
-    let resp = router.oneshot(req).await.expect("oneshot");
-    assert_eq!(resp.status(), StatusCode::OK);
-}
 
 #[tokio::test]
 async fn telemetry_search_sessions_returns_summary_rows() {
@@ -669,7 +586,7 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
 }
 
 #[tokio::test]
-async fn telemetry_session_details_returns_spans_logs_and_metrics() {
+async fn telemetry_session_details_returns_spans_and_logs() {
     let (router, state, _t) = build_router_and_state().await;
     let session_id = "sess-details-e2e";
     let trace_bytes = [
@@ -686,10 +603,6 @@ async fn telemetry_session_details_returns_spans_logs_and_metrics() {
         (
             "/v1/logs",
             serde_json::to_string(&telemetry_logs_request(session_id, trace_bytes)).unwrap(),
-        ),
-        (
-            "/v1/metrics",
-            serde_json::to_string(&telemetry_metrics_request(session_id, &trace_hex)).unwrap(),
         ),
     ] {
         let req = Request::builder()
@@ -709,11 +622,6 @@ async fn telemetry_session_details_returns_spans_logs_and_metrics() {
         .await
         .expect("flush spans");
     engine.ingest.force_flush_logs().await.expect("flush logs");
-    engine
-        .ingest
-        .force_flush_metrics()
-        .await
-        .expect("flush metrics");
 
     let req = Request::builder()
         .uri(format!(
@@ -731,10 +639,8 @@ async fn telemetry_session_details_returns_spans_logs_and_metrics() {
     assert_eq!(v["id"], session_id);
     assert_eq!(v["summary"]["spanCount"], 1);
     assert_eq!(v["summary"]["logCount"], 1);
-    assert_eq!(v["summary"]["metricCount"], 1);
     assert_eq!(v["spans"][0]["trace_id"], trace_hex);
     assert_eq!(v["logs"][0]["body"], "payment provider timeout");
-    assert_eq!(v["metrics"][0]["metric_name"], "http.server.duration");
 }
 
 #[tokio::test]
@@ -1609,4 +1515,31 @@ async fn session_recording_requires_session_summary_registry() {
         .unwrap();
     let resp = router.oneshot(req).await.expect("recording");
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn metrics_ingest_route_is_not_found() {
+    let (router, _t) = build_router().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/metrics")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn prometheus_query_routes_are_not_found() {
+    let (router, _t) = build_router().await;
+    for uri in ["/api/v1/query?query=up", "/api/v1/query_range?query=up&start=1&end=2&step=15"] {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "uri={uri}");
+    }
 }

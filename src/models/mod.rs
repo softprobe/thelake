@@ -2,7 +2,6 @@ pub mod any_value;
 pub mod attr_keys;
 pub mod event_time;
 pub mod log;
-pub mod metric;
 pub mod score;
 pub mod score_config;
 /// Domain models - single source of truth for data structures
@@ -15,7 +14,6 @@ pub use any_value::{
 };
 pub use event_time::partition_day_from_event_time;
 pub use log::Log;
-pub use metric::{Metric, SummaryQuantile, UNSUPPORTED_EXPONENTIAL_HISTOGRAM};
 pub use score::{Score, ScoreDataType, ScoreSource};
 pub use score_config::ScoreConfig;
 pub use span::{Span, SpanEvent};

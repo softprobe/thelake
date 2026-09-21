@@ -146,11 +146,10 @@ Health and discovery:
 - `GET /openapi.json`
 - `GET /swagger`
 
-OTLP ingestion:
+OTLP ingestion (product signals: traces + logs):
 
 - `POST /v1/traces`
 - `POST /v1/logs`
-- `POST /v1/metrics`
 
 LLM evaluation:
 

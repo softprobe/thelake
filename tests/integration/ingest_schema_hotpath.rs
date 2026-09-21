@@ -4,7 +4,7 @@
 use chrono::Utc;
 use softprobe_runtime::config::DuckLakeConfig;
 use softprobe_runtime::ingest_engine::IngestPipeline;
-use softprobe_runtime::models::{Log as LogData, Metric as MetricData, Span as SpanData};
+use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::storage::ducklake::open_and_attach_ducklake;
 use softprobe_runtime::storage::schema::{
     describe_probe_count, partition_sort_probe_count, total_schema_probe_count,
@@ -71,21 +71,6 @@ fn sample_log(i: usize) -> LogData {
     }
 }
 
-fn sample_metric(i: usize) -> MetricData {
-    let now = Utc::now();
-    let mut attributes = HashMap::new();
-    attributes.insert("metric.iteration".to_string(), i.to_string());
-    MetricData {
-        metric_name: "test_counter".to_string(),
-        description: "hotpath test counter".to_string(),
-        unit: "1".to_string(),
-        metric_type: "counter".to_string(),
-        timestamp: now,
-        value: i as f64,
-        attributes,
-        ..Default::default()
-    }
-}
 
 async fn assert_warm_writes_zero_probes_contract(
     writer: Arc<DuckLakeWriter>,
@@ -103,10 +88,6 @@ async fn assert_warm_writes_zero_probes_contract(
         .write_log_batches(vec![vec![sample_log(0)]])
         .await
         .expect("warm log write");
-    writer
-        .write_metric_batches(vec![vec![sample_metric(0)]])
-        .await
-        .expect("warm metric write");
 
     // Record baseline probe count after warm bootstrap.
     let desc_before = describe_probe_count();
@@ -123,10 +104,6 @@ async fn assert_warm_writes_zero_probes_contract(
             .write_log_batches(vec![vec![sample_log(i)]])
             .await
             .unwrap_or_else(|e| panic!("log write {i} failed: {e}"));
-        writer
-            .write_metric_batches(vec![vec![sample_metric(i)]])
-            .await
-            .unwrap_or_else(|e| panic!("metric write {i} failed: {e}"));
     }
 
     let desc_after = describe_probe_count();
@@ -167,18 +144,6 @@ async fn assert_warm_writes_zero_probes_contract(
         .expect("query logs");
     assert_eq!(log_n, (N + 1) as i64, "all logs must be committed");
 
-    let metric_n: i64 = conn
-        .query_row(
-            &format!("SELECT count(*) FROM {catalog}.metric_samples"),
-            [],
-            |r| r.get(0),
-        )
-        .expect("query metric_samples");
-    assert_eq!(
-        metric_n,
-        (N + 1) as i64,
-        "all metric samples must be committed"
-    );
 }
 
 #[tokio::test]

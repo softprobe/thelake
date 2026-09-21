@@ -27,12 +27,11 @@ pub struct ErrorSpec {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CapabilityLimits {
-    /// Softprobe Prom range ceiling. `0` = unlimited (AC-W1).
+    /// Softprobe query range ceiling. `0` = unlimited (AC-W1).
     pub max_query_range_seconds: u64,
     pub max_series: usize,
     pub max_response_bytes: usize,
     pub max_labels_per_series: usize,
-    pub max_range_eval_points: usize,
     pub query_timeout_seconds: u64,
 }
 

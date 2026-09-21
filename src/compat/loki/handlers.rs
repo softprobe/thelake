@@ -56,7 +56,7 @@ fn tenant_context(tenant: TenantInfo, headers: &HeaderMap) -> Result<TenantConte
 
 fn pairs(uri: &Uri) -> Vec<(String, String)> {
     uri.query()
-        .map(crate::compat::prometheus::pairs_from_query)
+        .map(crate::compat::query_string::pairs_from_query)
         .unwrap_or_default()
 }
 
@@ -194,7 +194,7 @@ async fn label_values_handler(
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };
-    let name = crate::compat::projection::prometheus::sanitize_label_name(&name);
+    let name = crate::compat::projection::labels::sanitize_label_name(&name);
     let request = match discovery_request(&pairs(&uri), &ctx.limits) {
         Ok(request) => request,
         Err(err) => return error_response(PROTOCOL, err),

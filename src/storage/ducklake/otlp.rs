@@ -1,7 +1,7 @@
-use crate::models::{Log, Metric, Span};
+use crate::models::{Log, Span};
 use crate::promotion::{
-    ensure_promoted_columns_not_reserved, extract_telemetry_promoted_value, PromotionColumn,
-    TelemetryColumnsManifest, TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
+    extract_telemetry_promoted_value, PromotionColumn, TelemetryColumnsManifest,
+    TelemetryPromotionEvent, TelemetryPromotionRow, TelemetryTable,
 };
 use crate::runtime_engine::DuckLakeScope;
 use crate::storage::schema::arrow;
@@ -19,10 +19,6 @@ impl DuckLakeWriter {
     }
 
     pub(super) fn flatten_logs(batches: Vec<Vec<Log>>) -> Vec<Log> {
-        batches.into_iter().flatten().collect()
-    }
-
-    pub(super) fn flatten_metrics(batches: Vec<Vec<Metric>>) -> Vec<Metric> {
         batches.into_iter().flatten().collect()
     }
 
@@ -56,7 +52,6 @@ impl DuckLakeWriter {
                 events: &events,
                 http_request_body: span.http_request_body.as_deref(),
                 http_response_body: span.http_response_body.as_deref(),
-                metric_value: None,
             };
             let mut promoted = Vec::new();
             for column in columns {
@@ -80,7 +75,6 @@ impl DuckLakeWriter {
                 events: &[],
                 http_request_body: None,
                 http_response_body: None,
-                metric_value: None,
             };
             let mut promoted = Vec::new();
             for column in columns {
@@ -89,30 +83,6 @@ impl DuckLakeWriter {
                 }
             }
             log.attributes.extend(promoted);
-        }
-        Ok(())
-    }
-
-    pub(super) fn apply_metric_promotions(
-        metrics: &mut [Metric],
-        columns: &[PromotionColumn],
-    ) -> Result<()> {
-        for metric in metrics {
-            let row = TelemetryPromotionRow {
-                resource_attributes: &metric.resource_attributes,
-                attributes: &metric.attributes,
-                events: &[],
-                http_request_body: None,
-                http_response_body: None,
-                metric_value: Some(metric.value),
-            };
-            let mut promoted = Vec::new();
-            for column in columns {
-                if let Some(value) = extract_telemetry_promoted_value(&row, column)? {
-                    promoted.push((column.name.clone(), value));
-                }
-            }
-            metric.attributes.extend(promoted);
         }
         Ok(())
     }
@@ -262,105 +232,6 @@ impl DuckLakeWriter {
             }
         }
         self.write_record_batches_internal("logs", record_batches)
-            .await
-    }
-
-    pub(super) async fn write_tenant_metric_batches(
-        &self,
-        scope: &DuckLakeScope,
-        manifests: &[TelemetryColumnsManifest],
-        batches: Vec<Vec<Metric>>,
-    ) -> Result<()> {
-        if batches.is_empty() {
-            return Ok(());
-        }
-        let mut metrics = Self::flatten_metrics(batches);
-        if metrics.is_empty() {
-            return Ok(());
-        }
-        let columns = Self::telemetry_columns_for_table(manifests, TelemetryTable::Metrics);
-        ensure_promoted_columns_not_reserved(TelemetryTable::Metrics, &columns)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        Self::apply_metric_promotions(&mut metrics, &columns)?;
-        // Layout ingest (§8): series + postings + samples|hist in one txn.
-        let dk = self.effective_ducklake(scope);
-        self.write_metrics_layout_batches(&dk, metrics).await
-    }
-
-    /// One-txn write into metric_series / postings / samples / hist_samples.
-    pub(super) async fn write_metrics_layout_batches(
-        &self,
-        dk: &crate::config::DuckLakeConfig,
-        metrics: Vec<Metric>,
-    ) -> Result<()> {
-        if metrics.is_empty() {
-            return Ok(());
-        }
-        let catalog = super::layout_catalog_prefix(&dk.catalog_alias, &dk.metadata_schema);
-        let max_labels = super::DEFAULT_MAX_LABELS_PER_SERIES;
-        let pool = self.get_or_create_pool(dk)?;
-
-        if !pool.is_table_ready("metric_samples") {
-            let lock = pool.table_lock("metric_samples");
-            let _guard = lock.lock().await;
-            if !pool.is_table_ready("metric_samples") {
-                let dk_clone = dk.clone();
-                let pool_for_ensure = pool.clone();
-                tokio::task::spawn_blocking(move || {
-                    pool_for_ensure
-                        .with_conn(|conn| pool_for_ensure.ensure_metrics_ready(conn, &dk_clone))
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("metrics layout ensure join failed: {e}"))??;
-            }
-        }
-
-        tokio::task::spawn_blocking(move || {
-            pool.with_conn(|conn| {
-                super::write_metrics_layout_txn(conn, &catalog, &metrics, max_labels)
-            })
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("metrics layout writer blocking task join failed: {e}"))?
-    }
-
-    pub async fn write_metric_batches(&self, batches: Vec<Vec<Metric>>) -> Result<()> {
-        if self.use_tenant_scoped_ducklake() {
-            let resolver = self.tenant_ducklake.as_ref().unwrap();
-            // Non-scope-bound writers (single-tenant / tests) use the configured DuckLake scope.
-            let scope = self.tenant_bound_scope().unwrap_or_else(|| DuckLakeScope {
-                metadata_schema: self.ducklake.metadata_schema.clone(),
-                data_path: self.ducklake.data_path.clone(),
-            });
-            let manifests = if self.scope_bound {
-                resolver
-                    .load_active_telemetry_columns_manifests_for_scope(&scope)
-                    .await?
-            } else {
-                resolver
-                    .load_active_telemetry_columns_manifests("")
-                    .await?
-                    .1
-            };
-            return self
-                .write_tenant_metric_batches(&scope, &manifests, batches)
-                .await;
-        }
-        if self.ducklake.catalog_type == "sqlite" {
-            let scope = DuckLakeScope {
-                metadata_schema: self.ducklake.metadata_schema.clone(),
-                data_path: self.ducklake.data_path.clone(),
-            };
-            let manifests = self.load_active_telemetry_manifests_local()?;
-            return self
-                .write_tenant_metric_batches(&scope, &manifests, batches)
-                .await;
-        }
-        let metrics = Self::flatten_metrics(batches);
-        if metrics.is_empty() {
-            return Ok(());
-        }
-        self.write_metrics_layout_batches(&self.ducklake, metrics)
             .await
     }
 

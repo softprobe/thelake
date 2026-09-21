@@ -27,7 +27,6 @@ pub struct TelemetryColumnsTarget {
 pub enum TelemetryTable {
     Traces,
     Logs,
-    Metrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +83,7 @@ pub enum PromotionSource {
 
 /// Minimal telemetry row view used by promotion extraction.
 ///
-/// The ingest path adapts spans/logs/metrics into this shape so selector behavior stays in one
+/// The ingest path adapts spans/logs into this shape so selector behavior stays in one
 /// place and tests do not depend on OTLP protobuf construction.
 pub struct TelemetryPromotionRow<'a> {
     pub resource_attributes: &'a HashMap<String, String>,
@@ -92,7 +91,6 @@ pub struct TelemetryPromotionRow<'a> {
     pub events: &'a [TelemetryPromotionEvent],
     pub http_request_body: Option<&'a str>,
     pub http_response_body: Option<&'a str>,
-    pub metric_value: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -402,7 +400,7 @@ pub fn local_promotion_specs_table_ddl(catalog_alias: &str) -> String {
 ///
 /// Under normal apply, at most one telemetry_columns row is active per
 /// `(tenant, target_tables)` (superseded specs for that table set are marked `inactive`).
-/// Distinct table sets (e.g. `traces` vs `metric_samples`) may both be active. Loaders return a
+/// Distinct table sets (e.g. `traces` vs `logs`) may both be active. Loaders return a
 /// vector so multi-active rows remain readable.
 pub async fn load_active_telemetry_columns_manifests(
     client: &tokio_postgres::Client,
@@ -518,7 +516,6 @@ fn telemetry_table_bare_name(table: &TelemetryTable) -> &'static str {
     match table {
         TelemetryTable::Traces => "traces",
         TelemetryTable::Logs => "logs",
-        TelemetryTable::Metrics => "metric_samples",
     }
 }
 
@@ -560,24 +557,6 @@ fn reserved_telemetry_column_names(table: &TelemetryTable) -> &'static [&'static
             "resource_attributes",
             "trace_id",
             "span_id",
-        ],
-        TelemetryTable::Metrics => &[
-            "metric_name",
-            "description",
-            "unit",
-            "metric_type",
-            "timestamp",
-            "value",
-            "attributes",
-            "resource_attributes",
-            // Canonical metric sample columns.
-            "count",
-            "sum",
-            "bucket_counts",
-            "explicit_bounds",
-            "quantiles",
-            "aggregation_temporality",
-            "exemplars_json",
         ],
     }
 }
@@ -788,7 +767,7 @@ fn validate_business_table_additive(
 /// idempotently; a column repeated with a *different* definition is rejected as
 /// `merge_conflicting_duplicate_column`. The merged manifest is validated the same way a
 /// single-source manifest is (`validate_telemetry_column_additive`), so collisions with reserved
-/// base `traces`/`logs`/`metric_samples` columns are still rejected.
+/// base `traces`/`logs` columns are still rejected.
 pub fn merge_telemetry_columns_manifests(
     manifests: &[TelemetryColumnsManifest],
 ) -> Result<TelemetryColumnsManifest, PromotionValidationError> {
@@ -1375,12 +1354,11 @@ fn validate_telemetry_target(
         let parsed = match table.as_str() {
             "traces" => TelemetryTable::Traces,
             "logs" => TelemetryTable::Logs,
-            "metric_samples" => TelemetryTable::Metrics,
             _ => {
                 return Err(PromotionValidationError::new(
                     "invalid_telemetry_table",
                     format!("target.tables[{idx}]"),
-                    "telemetry tables must be one of traces, logs, metric_samples",
+                    "telemetry tables must be one of traces, logs",
                 ))
             }
         };
@@ -1990,7 +1968,6 @@ columns:
             events: &events,
             http_request_body: None,
             http_response_body: Some(r#"{"payment":{"status":"paid"}}"#),
-            metric_value: None,
         };
 
         assert_eq!(
@@ -2067,7 +2044,6 @@ columns:
             events: &[],
             http_request_body: None,
             http_response_body: None,
-            metric_value: None,
         };
 
         let err = super::extract_telemetry_promoted_value(

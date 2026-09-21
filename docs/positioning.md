@@ -111,8 +111,8 @@ OTLP HTTP/gRPC
 The implementation provides:
 
 - tenant-bound DuckLake catalogs, data paths, writers, and query engines;
-- OTLP trace, log, and metric ingestion without runtime sampling, with HTTP
-  payload fields preserved when instrumentation supplies them;
+- OTLP trace and log ingestion without runtime sampling, with HTTP payload
+  fields preserved when instrumentation supplies them;
 - DuckLake `MAP(VARCHAR, VARCHAR)` columns for hot telemetry attribute maps
   (VARIANT shredding temporarily deferred pending Postgres inlining — #42);
 - tenant-controlled promotion as the governed fast path for query-hot keys
@@ -121,9 +121,10 @@ The implementation provides:
   on subsequent ingest, using tenant-scoped PostgreSQL metadata in production
   or a local single-scope SQLite catalog;
 - open SQL access through DuckDB and DuckLake.
-- (in progress) Prometheus-, Loki-, and Tempo-compatible **query-only** APIs so
-  customers can point existing Grafana datasources at the lake while keeping
-  OTLP as the sole write path — see [compat/matrix.md](compat/matrix.md).
+- Loki- and Tempo-compatible **query-only** APIs so customers can point
+  existing Grafana datasources at the lake while keeping OTLP as the sole
+  write path for traces and logs — see [compat/matrix.md](compat/matrix.md).
+  Product metrics / Prometheus / PromQL are out of scope.
 
 These are real implementation properties. They are not, by themselves,
 evidence of lower total cost or faster queries than another platform.
@@ -255,7 +256,7 @@ It should not initially compete for workloads dominated by:
 
 - ultra-high-rate real-time log search;
 - arbitrary full-text search;
-- subsecond metrics alerting;
+- subsecond metrics alerting or PromQL dashboards;
 - high dashboard concurrency;
 - turnkey enterprise integrations;
 - globally distributed petabyte-scale clusters.
@@ -297,8 +298,8 @@ Until comparative results exist, use **designed to**, **can**, or
   backfilled.
 - PostgreSQL is the multi-tenant promotion path; SQLite promotion is limited
   to a local single-scope catalog.
-- Default `data_inlining_row_limit` is `500` (MAP bags + small metric batches
-  inline). TWCS wait-for-next-run (AC-F7): no flush-before-merge every pass.
+- Default `data_inlining_row_limit` is `500` (MAP bags inline). TWCS
+  wait-for-next-run: no flush-before-merge every pass.
 - Existing VARIANT hot columns require an operator-owned rebuild to MAP.
 - Flush-through ingestion makes one DuckLake commit per collector request, so
   collector batch sizing and catalog contention matter.

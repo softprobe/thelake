@@ -15,7 +15,6 @@ pub mod telemetry;
 
 use crate::authn::TenantInfo;
 use crate::compat::loki::loki_routes;
-use crate::compat::prometheus::prometheus_routes;
 use crate::compat::stubs::compat_stub_routes;
 use crate::compat::tempo::tempo_routes;
 use crate::config::Config;
@@ -66,7 +65,6 @@ impl AppState {
                 let msg = err.to_string();
                 if msg.contains("Table with name traces does not exist")
                     || msg.contains("Table with name logs does not exist")
-                    || msg.contains("Table with name metric_samples does not exist")
                     || msg.contains("Table with name scores does not exist")
                     || msg.contains("Table with name score_configs does not exist")
                 {
@@ -125,7 +123,6 @@ pub async fn create_router(
         .route("/swagger", get(swagger_ui))
         .route("/v1/traces", traces)
         .route("/v1/logs", post(ingestion::logs::ingest_logs))
-        .route("/v1/metrics", post(ingestion::metrics::ingest_metrics))
         .route("/v1/llm/scores", post(llm::create_score))
         .route(
             "/v1/llm/score-configs",
@@ -173,7 +170,6 @@ pub async fn create_router(
             "/v1/telemetry/traces/{trace_id}",
             get(telemetry::trace_details),
         )
-        .merge(prometheus_routes())
         .merge(loki_routes())
         .merge(tempo_routes())
         .merge(compat_stub_routes())
@@ -194,7 +190,6 @@ async fn openapi_spec() -> Json<serde_json::Value> {
             "/ready": { "get": { "summary": "Readiness check" } },
             "/v1/traces": { "post": { "summary": "Ingest traces" } },
             "/v1/logs": { "post": { "summary": "Ingest logs" } },
-            "/v1/metrics": { "post": { "summary": "Ingest metrics" } },
             "/v1/llm/scores": {
                 "post": {
                     "summary": "Create an immutable LLM evaluation score",

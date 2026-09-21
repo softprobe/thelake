@@ -1,7 +1,7 @@
 # Compatibility authentication and tenant isolation
 
 **Status:** Phase 0 contract (updated for Softprobe assertion)  
-**Last updated:** 2026-09-12
+**Last updated:** 2026-09-21
 
 ## Canonical identity
 
@@ -68,20 +68,22 @@ them as **informational consistency checks**, never as the source of truth.
 
 | Protocol | Header | Behavior |
 |----------|--------|----------|
-| Prometheus / Grafana Prom | (none required beyond Bearer/assertion) | Extra org headers ignored for tenancy |
 | Loki | `X-Scope-OrgID` | If present and non-empty, **must equal** authenticated `tenant_id`; otherwise `403` |
 | Tempo | `X-Scope-OrgID` (same convention) | If present and non-empty, **must equal** authenticated `tenant_id`; otherwise `403` |
 
 Missing scope headers are allowed when auth succeeded: the authenticated
 tenant is used.
 
-## Self-monitoring ops Bearer
+## Self-monitoring and reserved tenant id
 
-When self-monitoring is enabled, operators query the ops Prom datasource with a
-Bearer whose auth resolution returns tenant id `thelake-ops`. That id binds to
-the reserved ops DuckLake scope (see `docs/design.md`). Customer API keys must
-not resolve to `thelake-ops`; the ops key must not resolve to a customer tenant.
-Local compose uses `THELAKE_AUTH_STUB_KEY_TENANTS` (`apiKey:tenantId` pairs).
+When `self_monitoring.enabled` is true, thelake exports process Meter
+instruments via the standard OTLP metrics exporter (`OTEL_EXPORTER_OTLP_*`).
+Those process metrics are **not** stored in DuckLake and are not served by a
+product Prometheus API.
+
+Reserved tenant id `thelake-ops` is rejected by `POST /v1/tenants` and by
+default-lake binding so it cannot collide with customer scopes. Customer API
+keys must not resolve to `thelake-ops`.
 
 An unauthorized caller cannot select another tenant by forging `X-Scope-OrgID`
 alone — middleware still requires a valid assertion or Bearer, and a mismatched
@@ -104,7 +106,6 @@ header is denied.
 The following path prefixes require the same runtime auth middleware as
 `/v1/*` (CORS `OPTIONS` preflight exempt where applicable):
 
-- `/api/v1/` — Prometheus-compatible
 - `/loki/api/v1/` — Loki-compatible
 - `/api/traces`, `/api/v2/traces`, `/api/search` — Tempo-compatible
 

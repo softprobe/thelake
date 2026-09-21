@@ -4,7 +4,7 @@
 
 use chrono::Utc;
 use softprobe_runtime::ingest_engine::IngestPipeline;
-use softprobe_runtime::models::{Log as LogData, Metric as MetricData, Span as SpanData};
+use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::query;
 use softprobe_runtime::storage::schema::variant::{prefer_attr_varchar, variant_varchar};
 use std::collections::HashMap;
@@ -133,20 +133,6 @@ async fn map_bags_hot_paths_and_nested_filters() {
         agent_name: None,
     };
 
-    let mut metric_attrs = HashMap::new();
-    metric_attrs.insert("sp.session.id".to_string(), session_id.clone());
-    let metric = MetricData {
-        metric_name: "variant.metric".to_string(),
-        description: "d".to_string(),
-        unit: "1".to_string(),
-        metric_type: "gauge".to_string(),
-        timestamp: now,
-        value: 1.0,
-        attributes: metric_attrs,
-        resource_attributes: HashMap::new(),
-        ..Default::default()
-    };
-
     pipeline
         .write_span_batches(vec![spans])
         .await
@@ -155,10 +141,6 @@ async fn map_bags_hot_paths_and_nested_filters() {
         .write_log_batches(vec![vec![log]])
         .await
         .expect("write logs");
-    pipeline
-        .write_metric_batches(vec![vec![metric]])
-        .await
-        .expect("write metrics");
 
     let conn = attach(&config.ducklake.metadata_path, &config.ducklake.data_path);
     let mut describe = conn
@@ -222,24 +204,6 @@ async fn map_bags_hot_paths_and_nested_filters() {
         attrs.get("sp.observation.type").and_then(|v| v.as_str()),
         Some("generation")
     );
-
-    let metric_sql = format!(
-        "SELECT COUNT(*)::BIGINT FROM softprobe.metric_series s \
-         JOIN softprobe.metric_samples sm \
-           ON sm.series_id = s.series_id \
-         WHERE (CAST(s.labels['sp_session_id'] AS VARCHAR) = '{sess}' \
-            OR CAST(s.labels['sp.session.id'] AS VARCHAR) = '{sess}') \
-           AND sm.timestamp >= TIMESTAMPTZ '1970-01-01' \
-           AND sm.timestamp <= TIMESTAMPTZ '2100-01-01' \
-           AND s.timestamp >= TIMESTAMPTZ '1970-01-01' \
-           AND s.timestamp <= TIMESTAMPTZ '2100-01-01'",
-        sess = session_id.replace('\'', "''"),
-    );
-    let metrics = query_engine
-        .execute_query(&metric_sql)
-        .await
-        .expect("metrics");
-    assert_eq!(metrics.rows[0][0].as_i64(), Some(1));
 
     let log_sql = format!(
         "SELECT COUNT(*)::BIGINT FROM logs WHERE {pred} = '{sess}' \
@@ -347,25 +311,6 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         status_message: None,
     };
 
-    // Metrics correlated via attributes and resource_attributes keys.
-    let mut metric_attrs = HashMap::new();
-    metric_attrs.insert("sp.session.id".into(), session_id.clone());
-    metric_attrs.insert("trace.id".into(), trace_id.to_string());
-    let mut metric_resource = HashMap::new();
-    metric_resource.insert("session.id".into(), session_id.clone());
-    metric_resource.insert("trace_id".into(), trace_id.to_string());
-    let metric = MetricData {
-        metric_name: "vk.metric".into(),
-        description: "d".into(),
-        unit: "1".into(),
-        metric_type: "gauge".into(),
-        timestamp: now,
-        value: 3.0,
-        attributes: metric_attrs,
-        resource_attributes: metric_resource,
-        ..Default::default()
-    };
-
     let mut log_attrs = HashMap::new();
     log_attrs.insert("sp.session.id".into(), session_id.clone());
     let mut log_resource = HashMap::new();
@@ -389,10 +334,6 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         .write_span_batches(vec![vec![span, span_fallback]])
         .await
         .expect("write spans");
-    pipeline
-        .write_metric_batches(vec![vec![metric]])
-        .await
-        .expect("write metrics");
     pipeline
         .write_log_batches(vec![vec![log]])
         .await
@@ -594,7 +535,6 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         Some(capture_id.as_str())
     );
 
-    // 6) Telemetry details metric filters on attributes + resource_attributes keys.
     let details_range = TelemetryTimeRange {
         from: (now - chrono::Duration::hours(1)).to_rfc3339(),
         to: (now + chrono::Duration::hours(1)).to_rfc3339(),
@@ -608,52 +548,6 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         100,
     )
     .expect("compile details");
-    assert!(details
-        .metrics
-        .contains("CAST(attributes['sp.session.id'] AS VARCHAR)"));
-    assert!(details
-        .metrics
-        .contains("CAST(resource_attributes['session.id'] AS VARCHAR)"));
-    // AC-D4: public metrics relation is the layout JOIN; session filter must see the gauge.
-    let metrics = query_engine
-        .execute_query(&details.metrics)
-        .await
-        .expect("details metrics via metrics relation");
-    assert!(
-        metrics.row_count >= 1,
-        "AC-D4: expected at least one metric row via metrics, got {}",
-        metrics.row_count
-    );
-    let name_idx = metrics
-        .columns
-        .iter()
-        .position(|c| c == "metric_name")
-        .expect("metric_name column");
-    assert_eq!(metrics.rows[0][name_idx].as_str(), Some("vk.metric"));
-
-    let trace_details = compile_details_sql(
-        &TelemetryDetailsTarget {
-            kind: "trace".into(),
-            id: trace_id.into(),
-        },
-        &details_range,
-        100,
-    )
-    .expect("compile trace details");
-    assert!(trace_details
-        .metrics
-        .contains("CAST(attributes['trace.id'] AS VARCHAR)"));
-    assert!(trace_details
-        .metrics
-        .contains("CAST(resource_attributes['trace_id'] AS VARCHAR)"));
-    let trace_metrics = query_engine
-        .execute_query(&trace_details.metrics)
-        .await
-        .expect("trace details metrics via metrics relation");
-    assert!(
-        trace_metrics.row_count >= 1,
-        "AC-D4: expected metric via metrics for trace filter"
-    );
 
     let logs = query_engine
         .execute_query(&details.logs)
@@ -704,45 +598,16 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
         );
     }
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let now = Utc::now();
-    let mut attributes = HashMap::new();
-    attributes.insert("sp.observation.type".to_string(), "generation".to_string());
-    let span = SpanData {
-        session_id: "legacy-variant".to_string(),
-        trace_id: "tr-legacy".to_string(),
-        span_id: "sp-legacy".to_string(),
-        parent_span_id: None,
-        app_id: "map-app".to_string(),
-        organization_id: None,
-        tenant_id: None,
-        agent_id: None,
-        agent_name: None,
-        message_type: "chat".to_string(),
-        span_kind: Some("INTERNAL".to_string()),
-        timestamp: now,
-        end_timestamp: Some(now),
-        attributes,
-        resource_attributes: HashMap::new(),
-        events: Vec::new(),
-        http_request_method: None,
-        http_request_path: None,
-        http_request_headers: None,
-        http_request_body: None,
-        http_response_status_code: None,
-        http_response_headers: None,
-        http_response_body: None,
-        status_code: Some("OK".to_string()),
-        status_message: None,
-    };
-
-    let write_result = pipeline.write_span_batches(vec![vec![span]]).await;
+    let pipeline_result = IngestPipeline::new(&config).await;
     match previous_reset {
         Some(value) => std::env::set_var("SPLAKE_RESET_DUCKLAKE", value),
         None => std::env::remove_var("SPLAKE_RESET_DUCKLAKE"),
     }
 
-    let err = write_result.expect_err("leftover VARIANT table must fail fast");
+    let err = match pipeline_result {
+        Ok(_) => panic!("leftover VARIANT table must fail fast at pipeline init"),
+        Err(e) => e,
+    };
     let message = err.to_string();
     assert!(
         message.contains("VARIANT"),

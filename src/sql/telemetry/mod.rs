@@ -37,7 +37,7 @@ pub fn details_logs_sql(log_cols: &str, where_sql: &str, limit: usize) -> String
     format!("SELECT {log_cols} FROM logs WHERE {where_sql} ORDER BY timestamp ASC LIMIT {limit}")
 }
 
-/// Generic detail SELECT (metrics compatibility relation).
+/// Generic detail SELECT over a telemetry relation.
 pub fn detail_sql(
     table: &str,
     columns: &str,

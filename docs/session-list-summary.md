@@ -397,8 +397,7 @@ Ops: `POST /v1/llm/sessions/summary/rebuild` `{from,to}` triggers leased `sessio
 ## 11. Evidence layout / naming
 
 - `traces` partitioned by calendar day of `timestamp` (`year`/`month`/`day`), sorted with `session_id`.  
-- New SQL uses **`traces` / `logs`**, not `union_*`.  
-- Stage **0b**: remove `union_*` emitters from query compilers; keep rewrite shim briefly if external SQL still uses old names, then delete shim.  
+- New SQL uses **`traces` / `logs`** only. Stage **0b** removed `union_*` emitters and deleted the rewrite shim (`remove-legacy-telemetry-sql-aliases`).  
 - Promote list filter columns so reducer prefers typed columns over MAP bags — **done in Stage 2** (promoted-only reduce; Stage 5 is close-out evidence + non-goals).
 
 **Stage 5 non-goals:** no ingest bag→column copy for `sp.agent.name`; no `enduser.id` promotion into `user_id`; agent identity remains auth stamp or agent-observation `message_type`.
@@ -412,7 +411,7 @@ Checkbox task list (sequential order + **[P]** parallel marks): [`session-list-s
 | Stage | Work |
 |---|---|
 | **0** | Explorer: drop list count-scan |
-| **0b** | Emit `traces`/`logs` in compilers; plan delete of `union_*` |
+| **0b** | Emit `traces`/`logs` in compilers; delete `union_*` rewrite shim |
 | **A** | Shared `async_jobs` + `thelake_job_lease`; migrate maintenance scheduler onto it ([`async-jobs.md`](./async-jobs.md) stage A) |
 | **1** | `session_summary` + `session_summary_dirty` DDL; ingest dirty UPSERT |
 | **2** | `session_summary.reduce` job on shared runner |
@@ -469,7 +468,7 @@ Replaced reducer with: **durable dirty + leased async job + `FROM traces` aggreg
 3. `user_id` / `model_name` in v1 vs later.  
 4. Rebuild cadence — **decided Stage 4:** `rebuild_interval_ms` default 24h; lookback = `max_reduce_span_seconds` (default 7d).  
 5. DDL bootstrap vs existing `promotion_specs` ensure path.  
-6. Timeline to delete `union_*` rewrite shim entirely.  
+6. ~~Timeline to delete `union_*` rewrite shim entirely.~~ **Done** (`remove-legacy-telemetry-sql-aliases`).  
 7. Registry schema name for `thelake_job_lease` (shared vs first tenant) — decide with scope-resolver layout.
 
 ---

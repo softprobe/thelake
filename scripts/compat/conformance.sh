@@ -227,7 +227,7 @@ else
   unless contracts.is_a?(Hash)
     errors << "metadata.tenant_isolation.contracts must be a mapping"
   else
-    %w[prometheus loki tempo].each do |protocol|
+    %w[loki tempo].each do |protocol|
       contract = contracts[protocol]
       path = contract.is_a?(Hash) ? contract["path"] : nil
       command = contract.is_a?(Hash) ? contract["command"] : nil
@@ -245,7 +245,7 @@ else
     end
   end
 end
-%w[prometheus loki tempo grafana].each do |protocol|
+%w[loki tempo grafana].each do |protocol|
   reference = canonical_references[protocol]
   unless reference.is_a?(Hash) &&
          reference["image"].is_a?(String) && !reference["image"].empty? &&
@@ -258,7 +258,7 @@ case_reference_pins = document.dig("metadata", "reference_pins", "protocols") if
 unless case_reference_pins.is_a?(Hash)
   errors << "metadata.reference_pins.protocols must declare compatibility reference pins"
 else
-  %w[prometheus loki tempo].each do |protocol|
+  %w[loki tempo].each do |protocol|
     canonical = canonical_references[protocol]
     declared = case_reference_pins[protocol]
     if !declared.is_a?(Hash)
@@ -275,13 +275,12 @@ cases = document.is_a?(Hash) ? document["cases"] : nil
 errors << "manifest cases must be a non-empty sequence" unless cases.is_a?(Array) && !cases.empty?
 errors << "manifest version must be compat.v0" unless document.is_a?(Hash) && document["version"] == "compat.v0"
 required = %w[id protocol endpoint request fixture capability expected normalization reference evidence]
-allowed_protocols = %w[prometheus loki tempo]
+allowed_protocols = %w[loki tempo]
 allowed_methods = %w[GET POST]
 allowed_capability_statuses = %w[phase_1 supported supported_subset ignored unsupported_feature]
 capability_ids = canonical_capability_ids
 declared_features = canonical_unsupported_features
 normalization_policies = {
-  "prometheus" => "src/compat/prometheus/diff_normalize.rs::normalize_prom_response",
   "loki" => "tests/compat/support/loki.rs::normalize_loki_response",
   "tempo" => "tests/compat/support/tempo.rs::normalize_tempo_response"
 }
@@ -618,7 +617,6 @@ reference_only_payload() {
 
 runner_for_protocol() {
 	case "$1" in
-		prometheus) printf '%s\n' 'make test-prom-diff' ;;
 		loki) printf '%s\n' 'make test-loki-diff' ;;
 		tempo) printf '%s\n' 'make test-tempo-diff' ;;
 		*) return 1 ;;
@@ -969,8 +967,8 @@ RUBY
 
 self_check_provenance() {
 	local self_dir="$TMP_DIR/provenance-self-check"
-	local case_json='{"id":"provenance-self-check","protocol":"prometheus"}'
-	local request_json='{"endpoint":{"method":"GET","path":"/api/v1/query"},"request":{"params":{"query":"up"}}}'
+	local case_json='{"id":"provenance-self-check","protocol":"loki"}'
+	local request_json='{"endpoint":{"method":"GET","path":"/loki/api/v1/query"},"request":{"params":{"query":"{job=\"api\"}"}}}'
 	local canonical_request
 	local request_fingerprint
 	local provenance_json
@@ -989,7 +987,7 @@ self_check_provenance() {
   canonical = JSON.generate(request.keys.sort.each_with_object({}) { |key, result| result[key] = request[key] })
   fingerprint = ARGV.fetch(1)
   puts JSON.generate(
-    "case_id" => "provenance-self-check", "protocol" => "prometheus",
+    "case_id" => "provenance-self-check", "protocol" => "loki",
     "canonical_request_json" => request, "canonical_request_json_text" => canonical,
     "request_fingerprint" => fingerprint, "request_fingerprint_algorithm" => "SHA-256",
     "request_sha256" => fingerprint,
@@ -1017,7 +1015,7 @@ self_check_receipt() {
 	local receipt_path="$self_dir/execution-receipt.json"
 	local validation
 	mkdir -p "$self_dir"
-	write_json "$self_dir/selected.json" '{"version":"compat.v0","cases":[{"id":"receipt-case-a","runner_case_id":"runner-a","endpoint":{"method":"GET","path":"/api/v1/query"},"request":{"params":{"query":"up"}},"fixture":{"id":"fixture-a"}},{"id":"receipt-case-b","runner_case_id":"runner-b","endpoint":{"method":"GET","path":"/api/v1/labels"},"request":{"params":{}},"fixture":{"id":"fixture-b"}}]}'
+	write_json "$self_dir/selected.json" '{"version":"compat.v0","cases":[{"id":"receipt-case-a","runner_case_id":"runner-a","endpoint":{"method":"GET","path":"/loki/api/v1/query"},"request":{"params":{"query":"{job=\"api\"}"}},"fixture":{"id":"fixture-a"}},{"id":"receipt-case-b","runner_case_id":"runner-b","endpoint":{"method":"GET","path":"/loki/api/v1/labels"},"request":{"params":{}},"fixture":{"id":"fixture-b"}}]}'
 	ruby -rjson -rdigest - "$self_dir/selected.json" "$receipt_path" <<'RUBY'
 selected_path, receipt_path = ARGV
 selected = JSON.parse(File.read(selected_path))
@@ -1052,7 +1050,7 @@ records = selected.fetch("cases").map do |entry|
 end
 File.write(receipt_path, JSON.generate(
   "run_id" => "receipt-self-check-run",
-  "protocol" => "prometheus",
+  "protocol" => "loki",
   "selected_case_ids" => selected.fetch("cases").map { |entry| entry.fetch("id") },
   "selected_runner_case_ids" => selected.fetch("cases").map { |entry| entry["runner_case_id"] },
   "executed_case_ids" => selected.fetch("cases").map { |entry| entry.fetch("id") },
@@ -1063,9 +1061,9 @@ File.write(receipt_path, JSON.generate(
   "cases" => records
 ))
 RUBY
-	validation=$(validate_execution_receipt "$receipt_path" "$self_dir/selected.json" prometheus receipt-self-check-run pass)
+	validation=$(validate_execution_receipt "$receipt_path" "$self_dir/selected.json" loki receipt-self-check-run pass)
 	[ "$validation" = 'pass|execution_receipt_valid' ] || { echo "self-check failed: valid receipt ($validation)" >&2; return 1; }
-	validation=$(validate_execution_receipt "$self_dir/missing.json" "$self_dir/selected.json" prometheus receipt-self-check-run pass)
+	validation=$(validate_execution_receipt "$self_dir/missing.json" "$self_dir/selected.json" loki receipt-self-check-run pass)
 	[ "$validation" = 'infrastructure_failure|missing_execution_receipt' ] || { echo "self-check failed: missing receipt ($validation)" >&2; return 1; }
 	ruby -rjson -e '
   path = ARGV.fetch(0)
@@ -1073,7 +1071,7 @@ RUBY
   document["cases"][0]["fingerprint"] = "0" * 64
   File.write(path, JSON.generate(document))
 ' "$receipt_path"
-	validation=$(validate_execution_receipt "$receipt_path" "$self_dir/selected.json" prometheus receipt-self-check-run pass)
+	validation=$(validate_execution_receipt "$receipt_path" "$self_dir/selected.json" loki receipt-self-check-run pass)
 	case "$validation" in
 		product_regression\|mismatched_execution_receipt:*fingerprint*) ;;
 		*) echo "self-check failed: mismatched receipt ($validation)" >&2; return 1 ;;
@@ -1378,18 +1376,6 @@ run_protocol_target() {
 	fi
 	local -a protocol_env
 	case "$protocol" in
-		prometheus)
-			protocol_env=(
-				"PROMETHEUS_DIFF_ARTIFACT_DIR=$artifact_dir"
-				"PROMETHEUS_RAW_ARTIFACT=$artifact_dir/raw.json"
-				"PROMETHEUS_NORMALIZED_ARTIFACT=$artifact_dir/normalized.json"
-				"PROMETHEUS_DIFF_RAW_ARTIFACT=$artifact_dir/raw.json"
-				"PROMETHEUS_DIFF_NORMALIZED_ARTIFACT=$artifact_dir/normalized.json"
-			)
-			if [ "$DRIFT" = true ]; then
-				protocol_env+=("PROMETHEUS_REFERENCE_IMAGE=$DRIFT_CANDIDATE_REFERENCE")
-			fi
-			;;
 		loki)
 			protocol_env=(
 				"LOKI_DIFF_ARTIFACT_DIR=$artifact_dir"
@@ -1452,38 +1438,29 @@ self_check_drift() {
 			return 1
 		fi
 		write_json "$case_dir/case_provenance.json" "$(printf '{\"mode\":\"drift\",\"protocol\":\"%s\",\"baseline\":\"%s\",\"candidate\":\"%s\",\"release_evidence\":false}' "$protocol" "$baseline" "$candidate")"
-		if [ "$protocol" = prometheus ]; then
-			write_json "$case_dir/outcome.json" "$(printf '{\"mode\":\"drift\",\"status\":\"drift\",\"classification\":\"drift\",\"review_status\":\"needs_review\",\"reference_image\":\"%s\",\"baseline\":{\"image\":\"%s\"},\"candidate\":{\"image\":\"%s\",\"version\":\"%s\",\"digest\":\"%s\"},\"release_evidence\":false}' "$candidate" "$baseline" "$candidate" "$DRIFT_CANDIDATE_VERSION" "$DRIFT_CANDIDATE_DIGEST")"
-		else
-			write_json "$case_dir/outcome.json" "$(printf '{\"mode\":\"drift\",\"status\":\"drift\",\"classification\":\"drift\",\"review_status\":\"needs_review\",\"baseline\":{\"image\":\"%s\"},\"candidate\":{\"image\":\"%s\",\"version\":\"%s\",\"digest\":\"%s\"},\"release_evidence\":false}' "$baseline" "$candidate" "$DRIFT_CANDIDATE_VERSION" "$DRIFT_CANDIDATE_DIGEST")"
-		fi
+		write_json "$case_dir/outcome.json" "$(printf '{\"mode\":\"drift\",\"status\":\"drift\",\"classification\":\"drift\",\"review_status\":\"needs_review\",\"baseline\":{\"image\":\"%s\"},\"candidate\":{\"image\":\"%s\",\"version\":\"%s\",\"digest\":\"%s\"},\"release_evidence\":false}' "$baseline" "$candidate" "$DRIFT_CANDIDATE_VERSION" "$DRIFT_CANDIDATE_DIGEST")"
 done <<EOF
-prometheus|$(reference_image_for_protocol prometheus)|prom/prometheus:v2.55.0
 loki|$(reference_image_for_protocol loki)|grafana/loki:3.2.0
 tempo|$(reference_image_for_protocol tempo)|grafana/tempo:2.7.0
 EOF
 
 	ruby -rjson - "$self_out" <<'RUBY'
 root = ARGV.fetch(0)
-%w[prometheus loki tempo].each do |protocol|
+%w[loki tempo].each do |protocol|
   path = File.join(root, protocol, "drift-self-check", "outcome.json")
   outcome = JSON.parse(File.read(path))
   abort "invalid drift classification for #{protocol}" unless outcome["classification"] == "drift" && outcome["review_status"] == "needs_review" && outcome["release_evidence"] == false
 end
-prometheus_root = File.join(root, "prometheus", "drift-self-check")
-prometheus_outcome = JSON.parse(File.read(File.join(prometheus_root, "outcome.json")))
-abort "missing Prometheus candidate metadata" unless prometheus_outcome["reference_image"] == "prom/prometheus:v2.55.0"
-abort "Prometheus drift self-check emitted configuration failure placeholder" if File.exist?(File.join(prometheus_root, "configuration_failure.json"))
 report = {
   "mode" => "drift",
   "release_evidence" => false,
   "classification" => "drift",
   "review_status" => "needs_review",
-  "protocols" => %w[prometheus loki tempo]
+  "protocols" => %w[loki tempo]
 }
 File.write(File.join(root, "report.json"), JSON.pretty_generate(report) + "\n")
 RUBY
-	echo "drift self-check: PASS (Prometheus, Loki, Tempo)"
+	echo "drift self-check: PASS (Loki, Tempo)"
 	echo "drift self-check artifacts: $self_out"
 }
 

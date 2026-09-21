@@ -24,50 +24,24 @@ What it starts:
 | DuckLake catalog | Postgres 19 (`postgres:19beta3` until stable `:19` tag ships) on `:5434` |
 | Parquet data | `/tmp/thelake-grafana-manual/data/` |
 | Auth mock | `:18080` → Bearer `local-dev-key` |
-| Grafana | `:3000` → Prom datasource Softprobe |
+| Grafana | `:3000` → Loki + Tempo datasources Softprobe |
 | Traffic | OpenTelemetry Demo **3.0.0** (minimal, Softprobe BYO backend) |
 
 Requires Docker + ~3 GB RAM. Demo cache: `~/.cache/thelake/otel-demo/3.0.0`.
 
-Collector extras send **metrics and filtered application logs** to Softprobe (OTLP
-+ ad Prometheus + spanmetrics), in small batches, so Grafana GOLD panels and Loki
-Explore get live data. Traces stay on the collector `debug` exporter (spanmetrics
-still produced). `grafana-up` refuses to declare ready on lookback-only flat
-Prom series or an empty Loki label list in the live hour window.
+Collector extras send **filtered application logs and sampled traces** to
+Softprobe. `grafana-up` refuses to declare ready on an empty Loki label list in
+the live hour window (unless `THELAKE_REQUIRE_FULL_OTLP=0`).
 
 ### Dashboard folders
-
-#### Astronomy Shop (service monitoring)
-
-Real SRE-style monitoring against live demo metrics:
-
-| Dashboard | Focus |
-|-----------|--------|
-| GOLD overview | Shop-wide HTTP/RPC/spanmetrics rates, business KPIs, loadgen, containers |
-| Ad (Java) | `demo_ad_*`, HTTP server, JVM |
-| Cart (.NET) | cart latency histograms, ASP.NET / .NET runtime |
-| Checkout (Go) | RPC/HTTP client, Go memory/goroutines |
-| Frontend (Node.js) | HTTP server/client, event loop, V8 |
-| Payment (Node.js) | `demo_payment_transactions`, Node runtime |
-| Recommendation (Python) | recommendations, CPython GC, process |
-| Shipping | shipped items, HTTP RED |
-| Currency & Quote | FX conversions, quotes, OTel SDK queues |
-| Product Catalog | spanmetrics (sparse app metrics in this build) |
-| Load generator (k6) | VUs, iterations, duration histograms, failures |
-| Infrastructure | containers, Postgres, nginx, httpcheck |
-
-#### Softprobe PromQL (capability smoke)
-
-Declared PromQL subset coverage (selectors, rate family, aggregations, operators, over_time/math/offset, classic histograms). See [`dashboards/promql/`](dashboards/promql/).
 
 #### Softprobe (Loki / Tempo / cross-signal)
 
 | Fixture | Contract coverage |
 |---------|-------------------|
-| `softprobe-prom-smoke` | Prometheus time-series panels plus the `stat` panel `Checkout request total`. |
 | `softprobe-loki-smoke` | Loki log panel using the `service` label variable and a `service_name` label selector plus `checkout` line filter. |
 | `softprobe-tempo-smoke` | Tempo TraceQL search panel for the `api` service. |
-| `softprobe-cross-signal` | Prometheus `job` and Loki `service` variables plus tenant-A native datasource pivots. |
+| `softprobe-cross-signal` | Loki and Tempo variables plus tenant-A native datasource pivots. |
 
 Cross-signal navigation is concrete and tenant-scoped: Loki datasource derived
 fields target `softprobe-tempo-a`/`softprobe-tempo-b`, while Tempo
@@ -76,34 +50,22 @@ dashboard also provides tenant-A Explore links for the Loki and Tempo native
 datasources. These links complement, rather than replace, the provisioning
 checks in G7.
 
-Unsupported on purpose (capability): `@`, subqueries, `on()`/`ignoring()`,
-`group_left`/`group_right`, histogram quantiles, full function catalog.
-
-### Notes
-
-- Prefer `rate()` / gauges for charts; avoid `avg_over_time()` on cumulative counters.
-- Docker stats use `container_name`, not `job`.
-- High-cardinality `sum(rate(k6_http_reqs))` rises as series appear — prefer `k6_iterations` / business counters.
-- Correctness vs Prometheus: `make test-prom-compat`.
+Customer metrics / Prometheus / PromQL are **out of scope** (removed).
 
 Scripts: [`scripts/grafana-manual-up.sh`](../../../scripts/grafana-manual-up.sh),
 [`scripts/grafana-manual-down.sh`](../../../scripts/grafana-manual-down.sh).
 Demo overlay: [`otel-demo/`](otel-demo/).
 
-## Prom-only CI smoke
+## Browser e2e
 
-- Provisioning: [`provisioning/datasources/prometheus.yaml`](provisioning/datasources/prometheus.yaml)
-- Automated HTTP smoke (Grafana-shaped Prom API + Bearer, no Grafana container):
-  `tests/integration/grafana_prom_smoke.rs` via `make test` / `make test-grafana-prom-smoke`
-
-It does **not** start Grafana, the OTel Demo, or Playwright Explore.
-
-**Correctness vs Prometheus** stays on `make test-prom-compat` (mini-diff + curated promqltest).
+Playwright specs under [`browser/`](browser/) cover Loki Explore, Loki/Tempo
+smoke dashboards, and Tempo protocol envelopes. They do **not** exercise
+PromQL or Prometheus datasources.
 
 ## CI compose smoke
 
 [`docker-compose.ci.yml`](docker-compose.ci.yml) is the self-contained Grafana
-container artifact for the Phase 4 smoke lane. It pins
+container artifact for the smoke lane. It pins
 `grafana/grafana:11.2.0`, mounts [`provisioning/`](provisioning/) and
 [`dashboards/`](dashboards/) read-only, and reports readiness through
 `GET /api/health` on port `3000`.
@@ -112,8 +74,7 @@ The CI compose file receives `GRAFANA_COMPOSE_IMAGE` as the immutable
 `image@digest` derived from `docs/compat/references.v0.yaml`; `make
 test-grafana-system` validates the tag and digest before starting the stack.
 The compose seeder provisions both fixed tenants, sends deterministic OTLP
-metrics/logs/traces, and must report all three signals queryable before Grafana
-starts.
+logs/traces, and must report those signals queryable before Grafana starts.
 `scripts/grafana-system-smoke.sh` derives the expected image/tag from the
 
 Set `SOFTPROBE_URL`, `SOFTPROBE_API_KEY`,
@@ -140,19 +101,19 @@ semantics contract.
 | Case | Required check | Pass condition |
 |------|----------------|----------------|
 | G1 | Start the CI compose service and poll `/api/health`. | Grafana reaches HTTP 200 and reports a healthy database before the timeout. |
-| G2 | Inspect provisioned datasource UIDs. | `softprobe-prom`, `softprobe-prom-a`, `softprobe-prom-b`, `softprobe-loki-a`, `softprobe-loki-b`, `softprobe-tempo-a`, and `softprobe-tempo-b` are present. |
+| G2 | Inspect provisioned datasource UIDs. | `softprobe-loki-a`, `softprobe-loki-b`, `softprobe-tempo-a`, and `softprobe-tempo-b` are present. |
 | G3 | Inspect the provisioned dashboard folder. | Folder `Softprobe` is present and every JSON file under `dashboards/` is loaded without a provisioning error. |
-| G4 | Run the Prometheus Explore smoke for tenants A and B. | Each request uses its tenant bearer key and `X-Scope-OrgID`, returns data, and cannot read the other tenant. |
-| G5 | Run the Loki Explore smoke for tenants A and B. | Each request returns the expected tenant-scoped streams with the matching Loki UID and cannot read the other tenant. |
+| G4 | Loki Explore smoke (`{service_name="checkout"}`) for tenants A and B. | Each request returns tenant-scoped streams with the matching Loki UID and cannot read the other tenant. |
+| G5 | Loki Explore smoke with line filter (`|= "error"`) for tenants A and B. | Same tenant isolation as G4 with a filtered LogQL expression. |
 | G6 | Run the Tempo Explore smoke for tenants A and B. | Trace lookup/search returns the expected tenant-scoped trace with the matching Tempo UID and cannot read the other tenant. |
 | G7 | Follow both cross-signal links. | Loki `trace_id` derived fields target the matching Tempo tenant UID, and Tempo trace-to-logs targets the matching Loki tenant UID. |
 | G8 | Exercise the protocol error/auth boundaries through Grafana. | Missing, invalid, or mismatched tenant credentials fail with the protocol-defined response; Grafana must not silently change it to success. |
 
-The protocol tests are the oracle for G4–G8: Prometheus smoke/differential
-tests, the Loki compatibility suite, and the Tempo compatibility suite define
-the expected status, response shape, semantics, and tenant isolation. Grafana
-smoke results may expose adapter or provisioning regressions, but they must
-not waive or redefine a protocol-test failure.
+The protocol tests are the oracle for G5–G8: the Loki compatibility suite and
+the Tempo compatibility suite define the expected status, response shape,
+semantics, and tenant isolation. Grafana smoke results may expose adapter or
+provisioning regressions, but they must not waive or redefine a protocol-test
+failure.
 
 ### Skip and artifact rules
 

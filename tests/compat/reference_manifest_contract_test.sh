@@ -6,7 +6,7 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 MANIFEST="$ROOT_DIR/docs/compat/references.v0.yaml"
 MAKEFILE="$ROOT_DIR/Makefile"
 
-for service in prometheus loki tempo grafana; do
+for service in loki tempo grafana; do
 	grep -Eq "^  ${service}:" "$MANIFEST"
 	digest=$(ruby -ryaml -e '
 	manifest = YAML.load_file(ARGV.fetch(0))
@@ -35,16 +35,15 @@ ruby -ryaml -e '
 # Regression guard: the canonical manifest currently uses nested mappings;
 # keep the contract valid for that inline YAML shape as well as block style.
 ruby -ryaml -e '
-	reference = YAML.load_file(ARGV.fetch(0)).fetch("references").fetch("prometheus")
-	abort "inline reference mapping regression" unless reference.is_a?(Hash) && reference.fetch("image") == "prom/prometheus"
+	reference = YAML.load_file(ARGV.fetch(0)).fetch("references").fetch("loki")
+	abort "inline reference mapping regression" unless reference.is_a?(Hash) && reference.fetch("image") == "grafana/loki"
 ' "$MANIFEST"
 
-grep -Fq 'PROMETHEUS_REFERENCE_DIGEST ?=' "$MAKEFILE"
 grep -Fq 'LOKI_REFERENCE_DIGEST ?=' "$MAKEFILE"
 grep -Fq 'TEMPO_REFERENCE_DIGEST ?=' "$MAKEFILE"
 grep -Fq 'GRAFANA_REFERENCE_DIGEST ?=' "$MAKEFILE"
 
-for service in prometheus loki tempo grafana; do
+for service in loki tempo grafana; do
 	grep -Fq "\"${service}|\$\$${service}_manifest|\$\$${service}_digest_manifest" "$MAKEFILE" || {
 		echo "missing immutable image@digest check for ${service}" >&2
 		exit 1

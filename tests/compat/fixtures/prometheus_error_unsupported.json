@@ -1,5 +1,0 @@
-{
-  "status": "error",
-  "errorType": "execution",
-  "error": "unsupported_feature: prometheus_api"
-}

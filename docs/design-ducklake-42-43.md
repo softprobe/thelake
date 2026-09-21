@@ -1,10 +1,17 @@
 # Design: DuckLake fork for inline VARIANTs and incremental compaction
 
-Status: proposed
+Status: proposed (VARIANT/TWCS restore path)
 Scope: [thelake#42](https://github.com/softprobe/thelake/issues/42) and [thelake#43](https://github.com/softprobe/thelake/issues/43)
 Baseline: branch `v0.2`, commit `5e01c34`
 
-**Application interim (2026-09-10 / [#55](https://github.com/softprobe/thelake/issues/55)):** Softprobe temporarily stores hot bags as `MAP(VARCHAR, VARCHAR)` and defaults `data_inlining_row_limit=500` (AC-F7 wait-for-next-run TWCS). This design remains the **restore path** for VARIANT shredding once external-catalog VARIANT inlining works. Stale baseline notes below that assume live VARIANT hot columns describe the pre-#55 / restore target state.
+> **Obsolete (2026-09-21):** Product metrics, `metric_*` live layout, Prometheus /
+> PromQL, and issue #43 metric-table architecture sections in this document are
+> **superseded**. Customer metrics were removed (`remove-metrics-signal`). Treat
+> metric rollup / PromQL / `metric_samples*` material below as historical only.
+> The **VARIANT inlining (#42)** and **TWCS / incremental compaction** portions
+> remain the restore path for traces/logs bags and file maintenance.
+
+**Application interim (2026-09-10 / [#55](https://github.com/softprobe/thelake/issues/55)):** Softprobe temporarily stores hot bags as `MAP(VARCHAR, VARCHAR)` and defaults `data_inlining_row_limit=500` (wait-for-next-run TWCS). This design remains the **restore path** for VARIANT shredding once external-catalog VARIANT inlining works. Stale baseline notes below that assume live VARIANT hot columns describe the pre-#55 / restore target state.
 
 ## Decision summary
 
@@ -16,8 +23,8 @@ integration policy:
    wire encoding, a safe reader, and an inline VARIANT statistics surface;
 2. add only the missing native TWCS policy to DuckLake's existing compactor,
    using upstream `newer_than` for incremental candidate selection;
-3. write metrics directly to the #43 canonical raw metric table family and
-   populate explicit 5m/1h/1d rollup levels asynchronously.
+3. ~~write metrics directly to the #43 canonical raw metric table family~~ —
+   **obsolete** (product metrics removed).
 
 Keep the application responsible for selecting *when* maintenance runs and
 for supplying policy configuration. Move row/file selection, partition
@@ -26,9 +33,8 @@ locality, output sizing, and snapshot publication into DuckLake.
 The public API should be additive. Preserve the current behavior of
 `ducklake_merge_adjacent_files` and consume its upstream `newer_than` option.
 The new thelake work is a durable per-scope/table watermark, safe retry,
-observability, metric rollup, and query-routing integration—not a second
-file-selection algorithm. A full compaction remains an explicit
-repair/bootstrap operation.
+observability, and query-routing integration—not a second file-selection
+algorithm. A full compaction remains an explicit repair/bootstrap operation.
 
 This follows official DuckLake prior art: upstream PR
 [#1363](https://github.com/duckdb/ducklake/pull/1363) added `newer_than` to
@@ -37,6 +43,11 @@ This follows official DuckLake prior art: upstream PR
 ## Findings from the baseline
 
 ### thelake
+
+**Historical note:** baseline findings that discuss `/v1/metrics`,
+`DuckLakeMetricsBackend`, PromQL, or `metric_*` tables describe a removed
+product path. Current product signals are OTLP traces + logs with Loki/Tempo
+query compatibility.
 
 - `src/storage/ducklake/writer.rs` stages Arrow batches in a temporary
   Parquet file and inserts them into DuckLake. The temporary file is an input
@@ -986,10 +997,9 @@ metric samples directly to the canonical target family; asynchronous workers
 populate the 5m/1h/1d tables and postings.
 
 Remove the obsolete wide-table schema, its widening logic, its maintenance
-entry, and all tests/documentation describing it. Keep `union_metrics` and
-`committed_metrics` only as compatibility relations over the canonical family.
-Initialize a clean catalog with the canonical schema. No old data is read,
-renamed, migrated, or backfilled.
+entry, and all tests/documentation describing it. Initialize a clean catalog
+with the canonical schema. No old data is read, renamed, migrated, or
+backfilled.
 
 The direct-cutover transaction contract is intentionally simple: create and
 partition every target table, verify the partition metadata, then let the

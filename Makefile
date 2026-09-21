@@ -27,8 +27,8 @@ SHELL := /bin/bash
 	test-grafana-static test-grafana-system test-grafana-browser test-compat \
 	stress test-deploy \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
-	grafana-up grafana-down validate-ops-dashboard \
-	bench-prom-baseline bench-prom-down bench-demo-cpu-full
+	grafana-up grafana-down \
+	bench-demo-cpu-full
 
 COMPOSE ?= $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo "docker compose")
 
@@ -62,18 +62,13 @@ INTEGRATION_E2E_FEATURE = --features integration-e2e
 INTEGRATION_E2E_TESTS = --test tests
 INTEGRATION_PERF_TESTS = \
 	performance::perf_union_read_concurrency \
-	performance::perf_union_read_latency \
-	performance::perf_view_recreate_stability
+	performance::perf_union_read_latency
 
 PERF_SUITE ?= all
 export PERF_TARGET_MS ?= 1000
 export PERF_CONCURRENCY ?= 8
 export PERF_EVENTS_PER_SESSION ?= 1000
 
-# Metrics-layout gate (§10.3): PERF_SUITE=metrics-layout under make test-perf.
-METRICS_LAYOUT_PROFILE ?= pr_floor
-COMPARE_GREPTIME ?= 0
-PERF_LAYOUT_GOAL_SECS ?= 1200
 
 CI_GOAL_SECS ?= 1080
 PERF_GOAL_SECS ?= 720
@@ -86,30 +81,21 @@ COMPAT_REFERENCE_MANIFEST ?= $(CURDIR)/docs/compat/references.v0.yaml
 COMPAT_REFERENCE_CANONICAL_MANIFEST ?= $(CURDIR)/docs/compat/references.v0.yaml
 # One YAML parse for the selected manifest. Fields are emitted in stable
 # protocol order, three tab-delimited values per protocol: image, tag, digest.
-COMPAT_REFERENCE_FIELDS := $(shell ruby -ryaml -e 'references = YAML.safe_load(File.read(ARGV.fetch(0))).fetch("references"); %w[prometheus loki tempo grafana].each { |name| reference = references.fetch(name); puts [reference["image"], reference["tag"], reference["digest"]].join("\t") }' "$(COMPAT_REFERENCE_MANIFEST)")
-COMPAT_REFERENCE_PROMETHEUS_IMAGE := $(word 1,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_PROMETHEUS_TAG := $(word 2,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_PROMETHEUS_DIGEST := $(word 3,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_LOKI_IMAGE := $(word 4,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_LOKI_TAG := $(word 5,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_LOKI_DIGEST := $(word 6,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_TEMPO_IMAGE := $(word 7,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_TEMPO_TAG := $(word 8,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_TEMPO_DIGEST := $(word 9,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_GRAFANA_IMAGE := $(word 10,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_GRAFANA_TAG := $(word 11,$(COMPAT_REFERENCE_FIELDS))
-COMPAT_REFERENCE_GRAFANA_DIGEST := $(word 12,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_FIELDS := $(shell ruby -ryaml -e 'references = YAML.safe_load(File.read(ARGV.fetch(0))).fetch("references"); %w[loki tempo grafana].each { |name| reference = references.fetch(name); puts [reference["image"], reference["tag"], reference["digest"]].join("\t") }' "$(COMPAT_REFERENCE_MANIFEST)")
+COMPAT_REFERENCE_LOKI_IMAGE := $(word 1,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_LOKI_TAG := $(word 2,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_LOKI_DIGEST := $(word 3,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_TEMPO_IMAGE := $(word 4,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_TEMPO_TAG := $(word 5,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_TEMPO_DIGEST := $(word 6,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_GRAFANA_IMAGE := $(word 7,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_GRAFANA_TAG := $(word 8,$(COMPAT_REFERENCE_FIELDS))
+COMPAT_REFERENCE_GRAFANA_DIGEST := $(word 9,$(COMPAT_REFERENCE_FIELDS))
 
-COMPAT_REFERENCE_PROMETHEUS_MANIFEST := $(COMPAT_REFERENCE_PROMETHEUS_IMAGE)@$(COMPAT_REFERENCE_PROMETHEUS_DIGEST)
 COMPAT_REFERENCE_LOKI_MANIFEST := $(COMPAT_REFERENCE_LOKI_IMAGE)@$(COMPAT_REFERENCE_LOKI_DIGEST)
 COMPAT_REFERENCE_TEMPO_MANIFEST := $(COMPAT_REFERENCE_TEMPO_IMAGE)@$(COMPAT_REFERENCE_TEMPO_DIGEST)
 COMPAT_REFERENCE_GRAFANA_MANIFEST := $(COMPAT_REFERENCE_GRAFANA_IMAGE)@$(COMPAT_REFERENCE_GRAFANA_DIGEST)
 COMPAT_REFERENCE_GRAFANA_TAG_IMAGE := $(COMPAT_REFERENCE_GRAFANA_IMAGE):$(COMPAT_REFERENCE_GRAFANA_TAG)
-# Loki Phase 2 differential evidence. The test helper writes failure evidence
-# below SOFTPROBE_COMPAT_ARTIFACT_DIR/loki/<case>/.
-PROMETHEUS_REFERENCE_IMAGE := $(COMPAT_REFERENCE_PROMETHEUS_MANIFEST)
-PROMETHEUS_REFERENCE_VERSION := $(COMPAT_REFERENCE_PROMETHEUS_TAG)
-PROMETHEUS_REFERENCE_DIGEST ?= $(COMPAT_REFERENCE_PROMETHEUS_DIGEST)
 
 # Loki Phase 2 differential evidence. The test helper writes failure evidence
 # below SOFTPROBE_COMPAT_ARTIFACT_DIR/loki/<case>/.
@@ -166,9 +152,9 @@ help:
 	@echo "Infra:    setup | teardown | doctor"
 	@echo "Stress:   stress BACKEND=local|r2|gcs"
 	@echo "Extras:   duckdb-shell | demo-session | drop-tables | generate-telemetry | test-deploy | telemetrygen"
-	@echo "Grafana:  grafana-up | grafana-down | test-grafana-prom-smoke | test-grafana-system | test-grafana-browser"
+	@echo "Grafana:  grafana-up | grafana-down | test-grafana-system | test-grafana-browser"
 	@echo "Compat:   test-compat | check-compat-reference-pins | test-loki-diff | test-tempo-diff"
-	@echo "Bench:    bench-prom-baseline | bench-prom-down | bench-demo-cpu-full"
+	@echo "Bench:    bench-demo-cpu-full"
 	@echo ""
 	@echo "Cache:    $(THELAKE_CACHE_ROOT)  (override THELAKE_CACHE_ROOT=...)"
 	@echo "          make clean keeps cache; make clean-cache wipes it"
@@ -369,29 +355,12 @@ _export-minio-aws = \
 test: ensure-cache
 	@echo "unit + lightweight tests (no e2e infra)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compat_phase0 -- --test-threads=1
-	@echo "metrics-layout result validator unit tests..."
-	python3 -m unittest scripts.test_validate_metrics_layout_results -v
 
 # Postgres lease contract (ignored in `make test`; needs ducklake-postgres).
 test-lease-pg: ensure-cache check-infra
 	@echo "async_jobs Postgres lease contract..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib postgres_ -- --ignored --test-threads=1
 
-# Phase 1 mini differential vs pinned Prometheus (requires Docker).
-test-prom-diff: ensure-cache
-	@echo "prometheus mini-diff vs pinned $(PROMETHEUS_REFERENCE_IMAGE) (Docker)..."
-	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker required for test-prom-diff"; exit 1)
-	PROMETHEUS_REFERENCE_IMAGE="$(PROMETHEUS_REFERENCE_IMAGE)" cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::diff::mini_diff_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
-
-# Curated upstream promqltest subset vs pinned Prometheus (requires Docker).
-test-promqltest: ensure-cache
-	@echo "curated promqltest vs pinned $(PROMETHEUS_REFERENCE_IMAGE) (Docker)..."
-	@docker info >/dev/null 2>&1 || (echo "ERROR: Docker required for test-promqltest"; exit 1)
-	PROMETHEUS_REFERENCE_IMAGE="$(PROMETHEUS_REFERENCE_IMAGE)" cargo test $(CARGO_PROFILE_FLAG) --test tests integration::prometheus::promqltest::curated_promqltest_vs_pinned_prometheus -- --ignored --test-threads=1 --nocapture
-
-# All Prometheus differential gates (mini-diff + curated promqltest).
-test-prom-compat: test-prom-diff test-promqltest
-	@echo "prometheus compatibility gates green"
 
 # Aggregate Phase 5 conformance target. Real mode is the default and retains
 # each protocol runner's Docker/reference-service gates. Mock mode is opt-in
@@ -424,31 +393,24 @@ check-compat-reference-pins:
 	@set -euo pipefail; \
 	test -f "$(COMPAT_REFERENCE_MANIFEST)" || { echo "missing compatibility reference manifest: $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }; \
 	test -f "$(COMPAT_REFERENCE_CANONICAL_MANIFEST)" || { echo "missing canonical compatibility reference manifest: $(COMPAT_REFERENCE_CANONICAL_MANIFEST)" >&2; exit 1; }; \
-	PROMETHEUS_REFERENCE_IMAGE="$(PROMETHEUS_REFERENCE_IMAGE)"; \
-	prometheus_manifest="$(COMPAT_REFERENCE_PROMETHEUS_MANIFEST)"; \
 	loki_manifest="$(COMPAT_REFERENCE_LOKI_MANIFEST)"; \
 	tempo_manifest="$(COMPAT_REFERENCE_TEMPO_MANIFEST)"; \
 	grafana_manifest="$(COMPAT_REFERENCE_GRAFANA_MANIFEST)"; \
-	prometheus_image="$(COMPAT_REFERENCE_PROMETHEUS_IMAGE)"; \
 	loki_image="$(COMPAT_REFERENCE_LOKI_IMAGE)"; \
 	tempo_image="$(COMPAT_REFERENCE_TEMPO_IMAGE)"; \
 	grafana_image="$(COMPAT_REFERENCE_GRAFANA_IMAGE)"; \
-	prometheus_tag="$(COMPAT_REFERENCE_PROMETHEUS_TAG)"; \
 	loki_tag="$(COMPAT_REFERENCE_LOKI_TAG)"; \
 	tempo_tag="$(COMPAT_REFERENCE_TEMPO_TAG)"; \
 	grafana_tag="$(COMPAT_REFERENCE_GRAFANA_TAG)"; \
-	prometheus_digest_manifest="$(COMPAT_REFERENCE_PROMETHEUS_DIGEST)"; \
 	loki_digest_manifest="$(COMPAT_REFERENCE_LOKI_DIGEST)"; \
 	tempo_digest_manifest="$(COMPAT_REFERENCE_TEMPO_DIGEST)"; \
 	grafana_tag_manifest="$(COMPAT_REFERENCE_GRAFANA_TAG_IMAGE)"; \
 	grafana_digest_manifest="$(COMPAT_REFERENCE_GRAFANA_DIGEST)"; \
-	test -n "$$prometheus_image" && test -n "$$prometheus_tag" || { echo "prometheus reference requires a non-empty image and tag" >&2; exit 1; }; \
 	test -n "$$loki_image" && test -n "$$loki_tag" || { echo "loki reference requires a non-empty image and tag" >&2; exit 1; }; \
 	test -n "$$tempo_image" && test -n "$$tempo_tag" || { echo "tempo reference requires a non-empty image and tag" >&2; exit 1; }; \
 	test -n "$$grafana_image" && test -n "$$grafana_tag" || { echo "grafana reference requires a non-empty image and tag" >&2; exit 1; }; \
-	test -n "$$prometheus_manifest" && test -n "$$loki_manifest" && test -n "$$tempo_manifest" && test -n "$$grafana_manifest" || { echo "missing Prometheus, Loki, Tempo, or Grafana reference in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }; \
+	test -n "$$loki_manifest" && test -n "$$tempo_manifest" && test -n "$$grafana_manifest" || { echo "missing Loki, Tempo, or Grafana reference in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }; \
 	for reference in \
-		"prometheus|$$prometheus_manifest|$$prometheus_digest_manifest|$(PROMETHEUS_REFERENCE_IMAGE)" \
 		"loki|$$loki_manifest|$$loki_digest_manifest|$(LOKI_REFERENCE_IMAGE)" \
 		"tempo|$$tempo_manifest|$$tempo_digest_manifest|$(TEMPO_REFERENCE_IMAGE)" \
 		"grafana|$$grafana_manifest|$$grafana_digest_manifest|$(GRAFANA_COMPOSE_IMAGE)"; do \
@@ -457,17 +419,15 @@ check-compat-reference-pins:
 		[[ "$$manifest" == *@"$$digest" ]] || { echo "$$name manifest image does not resolve to its declared digest: $$manifest" >&2; exit 1; }; \
 		test "$$make_image" = "$$manifest" || { echo "$$name reference drift: Make=$$make_image manifest=$$manifest" >&2; exit 1; }; \
 	done; \
-	test "$(PROMETHEUS_REFERENCE_IMAGE)" = "$$prometheus_manifest" || { echo "Prometheus reference drift: Make=$(PROMETHEUS_REFERENCE_IMAGE) manifest=$$prometheus_manifest" >&2; exit 1; }; \
 	test "$(LOKI_REFERENCE_IMAGE)" = "$$loki_manifest" || { echo "Loki reference drift: Make=$(LOKI_REFERENCE_IMAGE) manifest=$$loki_manifest" >&2; exit 1; }; \
 	test "$(TEMPO_REFERENCE_IMAGE)" = "$$tempo_manifest" || { echo "Tempo reference drift: Make=$(TEMPO_REFERENCE_IMAGE) manifest=$$tempo_manifest" >&2; exit 1; }; \
 	test "$(GRAFANA_REFERENCE_IMAGE)" = "$$grafana_tag_manifest" || { echo "Grafana tag drift: Make=$(GRAFANA_REFERENCE_IMAGE) manifest=$$grafana_tag_manifest" >&2; exit 1; }; \
 	test "$(GRAFANA_COMPOSE_IMAGE)" = "$$grafana_manifest" || { echo "Grafana compose image drift: Make=$(GRAFANA_COMPOSE_IMAGE) manifest=$$grafana_manifest" >&2; exit 1; }; \
 	test "$(GRAFANA_REFERENCE_DIGEST)" = "$$grafana_digest_manifest" || { echo "Grafana digest drift: Make=$(GRAFANA_REFERENCE_DIGEST) manifest=$$grafana_digest_manifest" >&2; exit 1; }; \
 	if [ "$${COMPAT_REFERENCE_ALLOW_MANIFEST_OVERRIDE:-0}" != 1 ]; then \
-		ruby -ryaml -e 'canonical = YAML.load_file(ARGV.fetch(0)).fetch("references"); selected = YAML.load_file(ARGV.fetch(1)).fetch("references"); %w[prometheus loki tempo grafana].each { |name| abort "#{name.capitalize} reference drift from canonical manifest" unless selected.fetch(name) == canonical.fetch(name) }' "$(COMPAT_REFERENCE_CANONICAL_MANIFEST)" "$(COMPAT_REFERENCE_MANIFEST)"; \
+		ruby -ryaml -e 'canonical = YAML.load_file(ARGV.fetch(0)).fetch("references"); selected = YAML.load_file(ARGV.fetch(1)).fetch("references"); %w[loki tempo grafana].each { |name| abort "#{name.capitalize} reference drift from canonical manifest" unless selected.fetch(name) == canonical.fetch(name) }' "$(COMPAT_REFERENCE_CANONICAL_MANIFEST)" "$(COMPAT_REFERENCE_MANIFEST)"; \
 	fi; \
 	echo "compatibility reference pins match $(COMPAT_REFERENCE_MANIFEST)"; \
-	echo "  prometheus: $$prometheus_manifest"; \
 	echo "  loki:  $$loki_manifest"; \
 	echo "  tempo: $$tempo_manifest"; \
 	echo "  grafana: $$grafana_manifest"; \
@@ -478,20 +438,18 @@ check-compat-reference-pins:
 
 compat-reference-image:
 	@case "$(SIGNAL)" in \
-		prometheus) printf '%s\n' "$(PROMETHEUS_REFERENCE_IMAGE)" ;; \
 		loki) printf '%s\n' "$(LOKI_REFERENCE_IMAGE)" ;; \
 		tempo) printf '%s\n' "$(TEMPO_REFERENCE_IMAGE)" ;; \
 		grafana) printf '%s\n' "$(GRAFANA_REFERENCE_IMAGE)" ;; \
-		*) echo "usage: make compat-reference-image SIGNAL=prometheus|loki|tempo|grafana" >&2; exit 2 ;; \
+		*) echo "usage: make compat-reference-image SIGNAL=loki|tempo|grafana" >&2; exit 2 ;; \
 	esac
 
 compat-reference-version:
 	@case "$(SIGNAL)" in \
-		prometheus) value="$(COMPAT_REFERENCE_PROMETHEUS_TAG)" ;; \
 		loki) value="$(COMPAT_REFERENCE_LOKI_TAG)" ;; \
 		tempo) value="$(COMPAT_REFERENCE_TEMPO_TAG)" ;; \
 		grafana) value="$(COMPAT_REFERENCE_GRAFANA_TAG)" ;; \
-		*) echo "usage: make compat-reference-version SIGNAL=prometheus|loki|tempo|grafana" >&2; exit 2 ;; \
+		*) echo "usage: make compat-reference-version SIGNAL=loki|tempo|grafana" >&2; exit 2 ;; \
 	esac; \
 	test -n "$$value" || { echo "missing reference tag in $(COMPAT_REFERENCE_MANIFEST)" >&2; exit 1; }; \
 	printf '%s\n' "$$value"
@@ -606,7 +564,7 @@ test-grafana-system: ensure-cache check-compat-reference-pins
 		exit 1; }; \
 	GRAFANA_URL="$$grafana_url" \
 	GRAFANA_DASHBOARD_DIR="tests/compat/grafana/dashboards/compose" \
-	GRAFANA_DASHBOARD_UIDS="compose-cross-signal compose-loki compose-prom compose-tempo" \
+	GRAFANA_DASHBOARD_UIDS="compose-cross-signal compose-loki compose-tempo" \
 	GRAFANA_CHECK_DASHBOARD_QUERIES=1 \
 	GRAFANA_RICH_TEMPO_ASSERTIONS=1 \
 	GRAFANA_ADMIN_USER="$${GF_SECURITY_ADMIN_USER:-admin}" \
@@ -652,17 +610,13 @@ test-tempo-diff: ensure-cache
 	SOFTPROBE_COMPAT_ARTIFACT_DIR="$${SOFTPROBE_COMPAT_ARTIFACT_DIR:-$(TEMPO_DIFF_ARTIFACT_DIR)}" \
 	"$(CURDIR)/scripts/compat/run-with-timeout" "$(TEMPO_DIFF_TIMEOUT_SECS)" cargo test $(CARGO_PROFILE_FLAG) --features integration-e2e --test tests compat_tempo::tempo_phase3_differential_vs_pinned_tempo -- --ignored --test-threads=1 --nocapture
 
-# Grafana Prometheus datasource smoke (#27 Prom-only slice; also covered by `make test`).
-test-grafana-prom-smoke: ensure-cache
-	cargo test $(CARGO_PROFILE_FLAG) --test tests integration::grafana_prom_smoke -- --nocapture
-
 # End-to-end browser automation + Grafana + OTel demo ingestion tests.
 test-grafana-browser: ensure-cache
 	@chmod +x scripts/test-grafana-browser.sh
 	./scripts/test-grafana-browser.sh
 
-# Manual Grafana inspection: host Softprobe + pinned Grafana 11.2.0 + seeded demo metrics.
-# Open http://127.0.0.1:3000 (admin/admin) → Softprobe → Softprobe Prometheus smoke.
+# Manual Grafana inspection: host Softprobe + pinned Grafana 11.2.0 + seeded demo data.
+# Open http://127.0.0.1:3000 (admin/admin) → Softprobe datasources.
 grafana-up: ensure-cache
 	@chmod +x scripts/grafana-manual-up.sh scripts/grafana-manual-down.sh
 	GRAFANA_COMPOSE_IMAGE="$(GRAFANA_COMPOSE_IMAGE)" \
@@ -672,24 +626,6 @@ grafana-up: ensure-cache
 grafana-down:
 	@chmod +x scripts/grafana-manual-down.sh
 	./scripts/grafana-manual-down.sh
-
-# Every thelake-ops dashboard PromQL/LogQL must return data (no skips).
-# Requires manual stack config under THELAKE_GRAFANA_STATE_DIR (make grafana-up once).
-validate-ops-dashboard: ensure-cache
-	@chmod +x scripts/validate-ops-dashboard.sh scripts/validate-ops-dashboard-queries.py
-	./scripts/validate-ops-dashboard.sh
-
-# Softprobe-only Prom micro-benchmark (Option A): hostmetrics OTLP + curated PromQL.
-# Writes docs/perf/results/<stamp>-<label>.{json,md}. Override: BENCH_LABEL=… LEAVE_UP=1
-# Small-file stress: BENCH_FORCE_PARQUET=1 BENCH_LABEL=small-files make bench-prom-baseline
-# Short smoke: BENCH_WARMUP_SECS=15 BENCH_MEASURE_SECS=20 make bench-prom-baseline
-bench-prom-baseline: ensure-cache
-	@chmod +x scripts/bench-prom-baseline.sh scripts/bench-prom-down.sh
-	./scripts/bench-prom-baseline.sh
-
-bench-prom-down:
-	@chmod +x scripts/bench-prom-down.sh
-	./scripts/bench-prom-down.sh
 
 # Full-OTLP + Grafana 10s Softprobe process CPU budget (#55).
 # Mean Softprobe CPU ratio must stay < 0.85 (one core; durable headroom).
@@ -737,24 +673,13 @@ test-perf: ensure-cache
 		all) tests="$(INTEGRATION_PERF_TESTS)" ;; \
 		latency) tests="performance::perf_union_read_latency" ;; \
 		concurrency) tests="performance::perf_union_read_concurrency" ;; \
-		stability) tests="performance::perf_view_recreate_stability" ;; \
-		metrics-layout) tests="" ;; \
-		*) echo "unknown PERF_SUITE=$(PERF_SUITE)"; exit 1 ;; \
+		*) echo "unknown PERF_SUITE=$(PERF_SUITE) (all|latency|concurrency)"; exit 1 ;; \
 	esac; \
-	if [ "$(PERF_SUITE)" = "metrics-layout" ]; then \
-		chmod +x scripts/bench-metrics-layout.sh; \
-		export METRICS_LAYOUT_PROFILE="$(METRICS_LAYOUT_PROFILE)"; \
-		export COMPARE_GREPTIME="$(COMPARE_GREPTIME)"; \
-		export CARGO_PROFILE_FLAG="$(CARGO_PROFILE_FLAG)"; \
-		./scripts/bench-metrics-layout.sh; \
-		goal="$(PERF_LAYOUT_GOAL_SECS)"; \
-	else \
-		$(MAKE) check-infra; \
-		$(_export-minio-aws); \
-		export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local; \
-		./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) --test integration_perf --tests $$tests; \
-		goal="$(PERF_GOAL_SECS)"; \
-	fi; \
+	$(MAKE) check-infra; \
+	$(_export-minio-aws); \
+	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local; \
+	./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) --test integration_perf --tests $$tests; \
+	goal="$(PERF_GOAL_SECS)"; \
 	total=$$(($$(date +%s) - t0)); \
 	echo "TOTAL=$${total}s goal=$${goal}s (test-perf PERF_SUITE=$(PERF_SUITE))"; \
 	$(call enforce-slo,$$total,$$goal,test-perf)
