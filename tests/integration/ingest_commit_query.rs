@@ -908,7 +908,10 @@ async fn test_iceberg_writer_bulk_metric_samples_roundtrip() {
 
         let escaped = metric_name.replace('\'', "''");
         let sql = format!(
-            "SELECT COUNT(*) AS count, SUM(value) AS total FROM union_metrics WHERE metric_name = '{}'",
+            "SELECT COUNT(*) AS count, SUM(value) AS total FROM union_metrics \
+             WHERE metric_name = '{}' \
+               AND timestamp >= TIMESTAMPTZ '1970-01-01' \
+               AND timestamp <= TIMESTAMPTZ '2100-01-01'",
             escaped
         );
 
