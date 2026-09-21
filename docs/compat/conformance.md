@@ -1,18 +1,17 @@
 # Compatibility conformance corpus
 
 `tests/compat/manifests/cases.v0.yaml` is the data-driven case index for the
-Prometheus, Loki, and Tempo compatibility lanes. The manifest remains the
-source of case selection; protocol implementations and upstream code are not
-copied into this corpus.
+Loki and Tempo compatibility lanes. The manifest remains the source of case
+selection; protocol implementations and upstream code are not copied into this
+corpus.
+
+Product metrics / Prometheus cases are out of scope (removed).
 
 ## Fixture provenance
 
 The shared fixtures under `tests/compat/fixtures/` are repository-maintained
 synthetic protocol envelopes. The manifest records the corpus source, license
 statement, attribution policy, and the source commit used for this metadata.
-Any upstream-derived Prometheus corpus material is separate, carries its own
-attribution in `tests/compat/prometheus/promqltest/ATTRIBUTION.md`, and is not
-copied into the signal-neutral fixtures.
 
 When adding a fixture, record its provenance and license in the fixture corpus
 documentation or the fixture's own attribution file. Do not copy upstream
@@ -39,7 +38,7 @@ and protocol documentation identify it as unsupported.
 ## Reference pins
 
 `docs/compat/references.v0.yaml` is the canonical pin file. The manifest
-records the supported Prometheus, Loki, and Tempo image/tag set under
+records the supported Loki and Tempo image/tag set under
 `metadata.reference_pins` for review visibility; changes must keep those values
 aligned with the canonical pin file and each case's `reference` field.
 

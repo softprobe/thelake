@@ -5,7 +5,7 @@
 **Process:** Slices from the one-clock plan. Each slice: TDD → `make ci` (or scoped tests) → **hostile review (coding-rules brief)** → fix → merge.  
 **Rules:** DRY. No dual-read / feature flags / compat shims. No `record_date` / `window_ts`.
 
-Delivery follows [design-sql-and-schema.md](./design-sql-and-schema.md) §3. Metrics layout doc rewrite is a late slice.
+Delivery follows [design-sql-and-schema.md](./design-sql-and-schema.md) §3.
 
 ---
 
@@ -36,7 +36,7 @@ Delivery follows [design-sql-and-schema.md](./design-sql-and-schema.md) §3. Met
 | 3 | Move recipes into `src/sql/`; locality hard-fail |
 | 4 | Schema/writer drop `record_date` / rename `window_ts` → `timestamp` |
 | 5 | Wire gate on all execute paths |
-| 6 | Copy/flip; rewrite `metrics-timeseries-layout.md` |
+| 6 | Copy/flip; verify greenfield EXPLAIN + operators |
 
 ### Hostile review gate (every slice)
 

@@ -1,13 +1,13 @@
 //! Shared helpers for compatibility contract tests.
 
 pub mod auth;
+pub mod http;
 pub mod loki;
-pub mod prometheus;
-pub mod prometheus_oracle;
-pub mod promqltest;
 pub mod tempo;
 
 pub mod conformance {
+    #![allow(dead_code)]
+
     use serde_json::{Map, Value};
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
@@ -875,6 +875,8 @@ pub mod conformance {
 }
 
 pub mod lifecycle {
+    #![allow(dead_code)]
+
     use serde::Serialize;
     use serde_json::Value;
     use std::collections::BTreeMap;
@@ -882,7 +884,7 @@ pub mod lifecycle {
     use std::process::Command;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use crate::compat_support::prometheus::encode_query_owned;
+    use crate::compat_support::http::encode_query_owned;
 
     const POLL_INTERVAL: Duration = Duration::from_millis(250);
 

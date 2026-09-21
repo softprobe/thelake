@@ -1,6 +1,6 @@
-//! Shared Grafana/Prometheus/Loki/Tempo compatibility layer.
+//! Shared Grafana/Loki/Tempo compatibility layer.
 //!
-//! Protocol HTTP adapters (Phases 1–3) stay thin: parse the wire request,
+//! Protocol HTTP adapters stay thin: parse the wire request,
 //! call typed backends with a [`TenantContext`], and encode protocol responses.
 //! Auth, projection, ordering, and error classes live here — not under a
 //! single protocol module.
@@ -12,12 +12,10 @@ pub mod errors;
 pub mod loki;
 pub mod ordering;
 pub mod projection;
-pub mod prometheus;
-pub mod promql;
+pub mod query_string;
 pub mod stubs;
 pub mod tempo;
 pub mod tenant;
-pub mod ttl_lru;
 
 pub use capability::{load_capability_v0, CapabilityManifest};
 pub use errors::{CompatError, CompatErrorCode};

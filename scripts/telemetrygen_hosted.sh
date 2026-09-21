@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Send OTLP traces, metrics, and logs to a hosted softprobe-runtime (or any OTLP/HTTP
+# Send OTLP traces and logs to a hosted softprobe-runtime (or any OTLP/HTTP
 # endpoint) using opentelemetry-collector-contrib's telemetrygen.
 #
 # Requires: telemetrygen on PATH, e.g.
@@ -36,7 +36,7 @@ TELEMETRYGEN_CMD="${TELEMETRYGEN_CMD:-telemetrygen}"
 
 usage() {
   cat <<'EOF'
-Usage: telemetrygen_hosted.sh <traces|metrics|logs|all> [extra telemetrygen args...]
+Usage: telemetrygen_hosted.sh <traces|logs|all> [extra telemetrygen args...]
 
 Examples:
   SOFTPROBE_TOKEN="$KEY" ./telemetrygen_hosted.sh traces --traces 5
@@ -46,9 +46,8 @@ Examples:
 
 Subcommands:
   traces   OTLP HTTP traces -> /v1/traces
-  metrics  OTLP HTTP metrics -> /v1/metrics
   logs     OTLP HTTP logs    -> /v1/logs
-  all      run traces, then metrics, then logs (small batches)
+  all      run traces, then logs (small batches)
 EOF
 }
 
@@ -73,7 +72,7 @@ fi
 # telemetrygen expects --otlp-header in the form key="value" (see telemetrygen traces --help).
 AUTH_HEADER="Authorization=\"Bearer ${SOFTPROBE_TOKEN}\""
 
-# Subcommand (traces|metrics|logs) must be the first argument after the binary (cobra).
+# Subcommand (traces|logs) must be the first argument after the binary (cobra).
 otlp_flags=(
   --otlp-http
   --otlp-endpoint "${OTLP_ENDPOINT}"
@@ -84,10 +83,6 @@ run_traces() {
   "${TELEMETRYGEN_CMD}" traces "${otlp_flags[@]}" --otlp-http-url-path /v1/traces "$@"
 }
 
-run_metrics() {
-  "${TELEMETRYGEN_CMD}" metrics "${otlp_flags[@]}" --otlp-http-url-path /v1/metrics "$@"
-}
-
 run_logs() {
   "${TELEMETRYGEN_CMD}" logs "${otlp_flags[@]}" --otlp-http-url-path /v1/logs "$@"
 }
@@ -96,15 +91,11 @@ case "${SUB}" in
   traces)
     run_traces "$@"
     ;;
-  metrics)
-    run_metrics "$@"
-    ;;
   logs)
     run_logs "$@"
     ;;
   all)
     run_traces --traces 300 --workers 10 "$@"
-    run_metrics --metrics 300 --workers 10 "$@"
     run_logs --logs 300 --workers 10 "$@"
     ;;
   *)

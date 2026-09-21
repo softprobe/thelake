@@ -8,7 +8,6 @@ info:
     This API accepts telemetry payloads on standard OTLP HTTP paths:
     - `POST /v1/traces`
     - `POST /v1/logs`
-    - `POST /v1/metrics`
 
     It also documents the tenant-scoped schema promotion endpoint:
     - `POST /v1/promotions/apply`
@@ -24,8 +23,9 @@ info:
     - `GET /v1/llm/sessions/{session_id}`
 
     For JSON payloads, requests are expected to follow the OpenTelemetry collector export
-    request shapes (`ExportTraceServiceRequest`, `ExportLogsServiceRequest`, and
-    `ExportMetricsServiceRequest`).
+    request shapes (`ExportTraceServiceRequest` and `ExportLogsServiceRequest`).
+
+    Product metrics (`POST /v1/metrics`) are out of scope.
 
     For protobuf payloads, send binary OTLP with `Content-Type: application/x-protobuf`.
 
@@ -131,49 +131,6 @@ paths:
                   value: "Invalid JSON: expected value at line 1 column 1"
                 invalidProtobuf:
                   value: Protobuf decode failed
-        "401":
-          description: Missing or invalid bearer token
-        "403":
-          description: Bearer token could not be resolved to a tenant
-        "413":
-          description: Request exceeds `server.max_body_size`
-        "503":
-          $ref: "#/components/responses/IngestUnavailable"
-  /v1/metrics:
-    post:
-      tags:
-        - ingestion
-      summary: Ingest OTLP metrics
-      operationId: ingestMetrics
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ExportMetricsServiceRequest"
-          application/x-protobuf:
-            schema:
-              type: string
-              format: binary
-              description: Protobuf-encoded `ExportMetricsServiceRequest`
-      responses:
-        "200":
-          description: Request accepted and processed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IngestResponse"
-        "400":
-          description: Invalid JSON/protobuf payload
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/ErrorMessage"
-              examples:
-                invalidJson:
-                  value: Invalid JSON
-                invalidProtobuf:
-                  value: Invalid protobuf
         "401":
           description: Missing or invalid bearer token
         "403":
@@ -710,12 +667,6 @@ components:
       type: object
       description: |
         OTLP logs export request (JSON mapping).
-        See OpenTelemetry protocol spec for the canonical schema.
-      additionalProperties: true
-    ExportMetricsServiceRequest:
-      type: object
-      description: |
-        OTLP metrics export request (JSON mapping).
         See OpenTelemetry protocol spec for the canonical schema.
       additionalProperties: true
     CreateScoreRequest:

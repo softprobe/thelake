@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
         let n = n.max(1);
         // Blocking pool must be >1: inventory/export and DuckLake writes all use
         // spawn_blocking. With max_blocking_threads=1, a long inventory attach
-        // deadlocks OTLP /v1/metrics (idle CPU, collector timeouts).
+        // deadlocks OTLP ingest (idle CPU, collector timeouts).
         let blocking = n.max(4);
         info!("Tokio worker_threads={n} max_blocking_threads={blocking}");
         builder.worker_threads(n);

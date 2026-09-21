@@ -26,6 +26,7 @@ bytes = "1"
 opentelemetry-proto = { version = "0.7", features = ["gen-tonic", "trace", "metrics", "logs"] }
 opentelemetry = { version = "0.27", default-features = false, features = ["metrics"] }
 opentelemetry_sdk = { version = "0.27", default-features = false, features = ["metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "reqwest-client", "reqwest-rustls", "metrics"] }
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 prost = "0.13"
 prost-types = "0.13"
@@ -83,7 +84,6 @@ hmac = "0.12"
 sha2 = "0.10"
 flate2 = "1.0"
 regex = "1"
-promql-parser = "0.10"
 
 # HTTP client (auth service)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
@@ -125,10 +125,6 @@ path = "src/bin/perf_stress.rs"
 [[bin]]
 name = "grafana_seed_otlp"
 path = "src/bin/grafana_seed_otlp.rs"
-
-[[bin]]
-name = "layout_otlp_fixture"
-path = "src/bin/layout_otlp_fixture.rs"
 
 [profile.release]
 opt-level = 2

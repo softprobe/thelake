@@ -2,14 +2,10 @@ use anyhow::Result;
 use chrono::Utc;
 use clap::Parser;
 use opentelemetry_proto::tonic::collector::{
-    logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest,
-    trace::v1::ExportTraceServiceRequest,
+    logs::v1::ExportLogsServiceRequest, trace::v1::ExportTraceServiceRequest,
 };
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-use opentelemetry_proto::tonic::metrics::v1::{
-    Metric as OtlpMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
-};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{
     span, ResourceSpans, ScopeSpans, Span as OtlpSpan, Status,
@@ -23,7 +19,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 
-use softprobe_runtime::models::{Log, Metric, Span};
+use softprobe_runtime::models::{Log, Span};
 
 #[derive(Parser, Clone)]
 #[command(
@@ -46,10 +42,6 @@ struct Args {
     /// Log events per second (offered load; open-loop).
     #[arg(long, default_value_t = 200)]
     log_qps: u32,
-
-    /// Metric events per second (offered load; open-loop).
-    #[arg(long, default_value_t = 200)]
-    metric_qps: u32,
 
     /// Records per OTLP HTTP request (collector-style batching).
     #[arg(long, default_value_t = 1)]
@@ -299,7 +291,6 @@ struct PhaseSnapshot {
     duration_secs: f64,
     span: ProducerSnapshot,
     log: ProducerSnapshot,
-    metric: ProducerSnapshot,
     query: QuerySnapshot,
 }
 
@@ -373,10 +364,8 @@ async fn run_phase(
 
     let span_stats = Arc::new(ProducerStats::default());
     let log_stats = Arc::new(ProducerStats::default());
-    let metric_stats = Arc::new(ProducerStats::default());
     span_stats.set_warmup_end(warmup_end);
     log_stats.set_warmup_end(warmup_end);
-    metric_stats.set_warmup_end(warmup_end);
     let query_stats = Arc::new(QueryStats::new(warmup_start, warmup_duration));
 
     let batch_size = args.batch_size.max(1) as usize;
@@ -412,19 +401,6 @@ async fn run_phase(
                 kind: SignalKind::Log,
             }));
         }
-        if args.metric_qps > 0 {
-            tasks.spawn(run_open_loop_writer(OpenLoopWriterConfig {
-                client: http_client.clone(),
-                url: format!("{}/v1/metrics", base_url),
-                label: "metric",
-                events_per_sec: args.metric_qps,
-                batch_size,
-                deadline,
-                semaphore: Arc::clone(&semaphore),
-                stats: Arc::clone(&metric_stats),
-                kind: SignalKind::Metric,
-            }));
-        }
     }
 
     if phase.enable_query() {
@@ -450,7 +426,6 @@ async fn run_phase(
         duration_secs,
         span: span_stats.snapshot(duration_secs).await,
         log: log_stats.snapshot(duration_secs).await,
-        metric: metric_stats.snapshot(duration_secs).await,
         query: query_stats
             .snapshot((args.duration.saturating_sub(warmup_secs)) as f64)
             .await,
@@ -461,7 +436,6 @@ async fn run_phase(
 enum SignalKind {
     Span,
     Log,
-    Metric,
 }
 
 #[derive(Clone)]
@@ -533,12 +507,6 @@ async fn run_open_loop_writer(cfg: OpenLoopWriterConfig) -> Result<()> {
                         .collect();
                     serde_json::to_value(logs_to_otlp(&logs)).ok()
                 }
-                SignalKind::Metric => {
-                    let metrics: Vec<Metric> = (0..batch_size)
-                        .map(|i| sample_metric(start_counter.wrapping_add(i as u64)))
-                        .collect();
-                    serde_json::to_value(metrics_to_otlp(&metrics)).ok()
-                }
             };
             let Some(body) = body else {
                 tracing::warn!("{label} batch serialize failed");
@@ -594,15 +562,6 @@ fn logs_to_otlp(logs: &[Log]) -> ExportLogsServiceRequest {
     ExportLogsServiceRequest { resource_logs }
 }
 
-fn metrics_to_otlp(metrics: &[Metric]) -> ExportMetricsServiceRequest {
-    let mut resource_metrics = Vec::with_capacity(metrics.len());
-    for metric in metrics {
-        resource_metrics.extend(metric_to_otlp(metric).resource_metrics);
-    }
-    ExportMetricsServiceRequest { resource_metrics }
-}
-
-// Helper functions to convert internal models to OTLP format
 fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
     let trace_id_bytes = hex::decode(&span.trace_id).unwrap_or_else(|_| {
         uuid::Uuid::parse_str(&span.trace_id)
@@ -807,80 +766,6 @@ fn log_to_otlp(log: &Log) -> ExportLogsServiceRequest {
     }
 }
 
-fn metric_to_otlp(metric: &Metric) -> ExportMetricsServiceRequest {
-    let mut attributes = vec![];
-    for (k, v) in &metric.attributes {
-        attributes.push(KeyValue {
-            key: k.clone(),
-            value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(v.clone())),
-            }),
-        });
-    }
-
-    let data_point = NumberDataPoint {
-        attributes,
-        start_time_unix_nano: 0,
-        time_unix_nano: metric.timestamp.timestamp_nanos_opt().unwrap_or(0) as u64,
-        value: Some(
-            opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsDouble(
-                metric.value,
-            ),
-        ),
-        exemplars: vec![],
-        flags: 0,
-    };
-
-    let otlp_metric = OtlpMetric {
-        name: metric.metric_name.clone(),
-        description: metric.description.clone(),
-        unit: metric.unit.clone(),
-        data: Some(
-            opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(
-                opentelemetry_proto::tonic::metrics::v1::Gauge {
-                    data_points: vec![data_point],
-                },
-            ),
-        ),
-        metadata: vec![],
-    };
-
-    let mut resource_attributes = vec![];
-    for (k, v) in &metric.resource_attributes {
-        resource_attributes.push(KeyValue {
-            key: k.clone(),
-            value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(v.clone())),
-            }),
-        });
-    }
-
-    let resource = Resource {
-        attributes: resource_attributes,
-        dropped_attributes_count: 0,
-    };
-
-    let scope = ScopeMetrics {
-        scope: Some(InstrumentationScope {
-            name: "softprobe.stress".to_string(),
-            version: "1.0.0".to_string(),
-            ..Default::default()
-        }),
-        metrics: vec![otlp_metric],
-        schema_url: String::new(),
-    };
-
-    let resource_metrics = ResourceMetrics {
-        resource: Some(resource),
-        scope_metrics: vec![scope],
-        schema_url: String::new(),
-    };
-
-    ExportMetricsServiceRequest {
-        resource_metrics: vec![resource_metrics],
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct SqlQueryRequest {
     sql: String,
@@ -974,32 +859,24 @@ enum QueryCase {
     LogErrorRate5m,
     LogRecentErrorsSample,
     LogSessionRecent,
-    MetricLatencyTimeseries10m,
-    MetricLatencyMax5m,
     SpanErrorRate24h,
-    MetricLatencyTimeseries24h,
 }
 
 fn pick_query_case(seed: u64) -> QueryCase {
-    const SCHEDULE: [QueryCase; 18] = [
+    const SCHEDULE: [QueryCase; 13] = [
         QueryCase::SpanErrorRate5m,
         QueryCase::LogErrorRate5m,
-        QueryCase::MetricLatencyMax5m,
         QueryCase::SpanSessionRecent,
         QueryCase::SpanTop5xxPaths15m,
         QueryCase::LogRecentErrorsSample,
-        QueryCase::MetricLatencyTimeseries10m,
         QueryCase::SpanP95LatencyByPath5m,
         QueryCase::LogSessionRecent,
         QueryCase::SpanSessionRecent,
         QueryCase::SpanErrorRate5m,
         QueryCase::LogErrorRate5m,
-        QueryCase::MetricLatencyMax5m,
         QueryCase::SpanTop5xxPaths15m,
         QueryCase::SpanP95LatencyByPath5m,
-        QueryCase::MetricLatencyTimeseries10m,
         QueryCase::SpanErrorRate24h,
-        QueryCase::MetricLatencyTimeseries24h,
     ];
     SCHEDULE[(seed as usize) % SCHEDULE.len()]
 }
@@ -1090,26 +967,6 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
                  LIMIT 50"
             ),
         ),
-        QueryCase::MetricLatencyTimeseries10m => (
-            "metric_latency_timeseries_10m",
-            format!(
-                "SELECT date_trunc('minute', timestamp) AS t, AVG(value) AS avg_latency_ms \
-                 FROM metric_samples \
-                 WHERE timestamp >= ({now_ts} - INTERVAL '10 minutes') \
-                   AND metric_name = 'stress.metric.latency' \
-                 GROUP BY 1 \
-                 ORDER BY 1"
-            ),
-        ),
-        QueryCase::MetricLatencyMax5m => (
-            "metric_latency_max_5m",
-            format!(
-                "SELECT MAX(value) AS max_latency_ms \
-                 FROM metric_samples \
-                 WHERE timestamp >= ({now_ts} - INTERVAL '5 minutes') \
-                   AND metric_name = 'stress.metric.latency'"
-            ),
-        ),
         QueryCase::SpanErrorRate24h => (
             "span_error_rate_24h",
             format!(
@@ -1117,17 +974,6 @@ fn build_query(case: QueryCase, seed: u64) -> (&'static str, String) {
                  FROM traces \
                  WHERE timestamp >= ({now_ts} - INTERVAL '24 hours') \
                    AND (http_response_status_code >= 500 OR status_code = 'ERROR')"
-            ),
-        ),
-        QueryCase::MetricLatencyTimeseries24h => (
-            "metric_latency_timeseries_24h",
-            format!(
-                "SELECT date_trunc('minute', timestamp) AS t, AVG(value) AS avg_latency_ms \
-                 FROM metric_samples \
-                 WHERE timestamp >= ({now_ts} - INTERVAL '24 hours') \
-                   AND metric_name = 'stress.metric.latency' \
-                 GROUP BY 1 \
-                 ORDER BY 1"
             ),
         ),
     }
@@ -1249,41 +1095,6 @@ fn sample_log(counter: u64) -> Log {
     }
 }
 
-fn sample_metric(counter: u64) -> Metric {
-    let now = Utc::now();
-    let mut attributes = HashMap::new();
-    attributes.insert("stress.key".to_string(), format!("value-{}", counter % 8));
-    attributes.insert(
-        "service.name".to_string(),
-        format!("stress-service-{}", counter % 4),
-    );
-
-    let mut resource_attributes = HashMap::new();
-    resource_attributes.insert(
-        "service.name".to_string(),
-        format!("stress-service-{}", counter % 4),
-    );
-
-    let burst = (counter / 200).is_multiple_of(10);
-    let value = if burst {
-        900.0
-    } else {
-        100.0 + (counter % 50) as f64
-    };
-
-    Metric {
-        metric_name: "stress.metric.latency".to_string(),
-        description: "Stress latency".to_string(),
-        unit: "ms".to_string(),
-        metric_type: "gauge".to_string(),
-        timestamp: now,
-        value,
-        attributes,
-        resource_attributes,
-        ..Default::default()
-    }
-}
-
 async fn print_phase_report(args: &Args, snap: &PhaseSnapshot) {
     println!(
         "\n========== Phase Report: {} ==========",
@@ -1291,8 +1102,8 @@ async fn print_phase_report(args: &Args, snap: &PhaseSnapshot) {
     );
     println!("Duration: {} seconds", args.duration);
     println!(
-        "Offered events/s: span={} log={} metric={} | batch_size={}",
-        args.span_qps, args.log_qps, args.metric_qps, args.batch_size
+        "Offered events/s: span={} log={} | batch_size={}",
+        args.span_qps, args.log_qps, args.batch_size
     );
     println!(
         "Query workers: {} (interval {}ms)",
@@ -1302,10 +1113,9 @@ async fn print_phase_report(args: &Args, snap: &PhaseSnapshot) {
 
     print_producer_snapshot("span", &snap.span);
     print_producer_snapshot("log", &snap.log);
-    print_producer_snapshot("metric", &snap.metric);
 
-    let total_achieved = snap.span.achieved + snap.log.achieved + snap.metric.achieved;
-    let total_offered = snap.span.offered + snap.log.offered + snap.metric.offered;
+    let total_achieved = snap.span.achieved + snap.log.achieved;
+    let total_offered = snap.span.offered + snap.log.offered;
     println!(
         "Total ingest: offered={:.1}/s achieved={:.1}/s ({}/{} events)",
         total_offered as f64 / snap.duration_secs.max(0.001),
@@ -1373,10 +1183,8 @@ fn print_interference_summary(phases: &[PhaseSnapshot]) {
 
     println!("\n========== Interference Summary ==========");
     if let (Some(ingest), Some(mixed)) = (ingest, mixed) {
-        let ingest_total =
-            ingest.span.achieved_eps + ingest.log.achieved_eps + ingest.metric.achieved_eps;
-        let mixed_total =
-            mixed.span.achieved_eps + mixed.log.achieved_eps + mixed.metric.achieved_eps;
+        let ingest_total = ingest.span.achieved_eps + ingest.log.achieved_eps;
+        let mixed_total = mixed.span.achieved_eps + mixed.log.achieved_eps;
         let delta = mixed_total - ingest_total;
         let pct = if ingest_total > 0.0 {
             100.0 * delta / ingest_total
@@ -1388,13 +1196,8 @@ fn print_interference_summary(phases: &[PhaseSnapshot]) {
             ingest_total, mixed_total, delta, pct
         );
         println!(
-            "Ingest p95 latency (span/log/metric): ingest_only={}/{}/{}ms mixed={}/{}/{}ms",
-            ingest.span.p95_ms,
-            ingest.log.p95_ms,
-            ingest.metric.p95_ms,
-            mixed.span.p95_ms,
-            mixed.log.p95_ms,
-            mixed.metric.p95_ms
+            "Ingest p95 latency (span/log): ingest_only={}/{}ms mixed={}/{}ms",
+            ingest.span.p95_ms, ingest.log.p95_ms, mixed.span.p95_ms, mixed.log.p95_ms
         );
     }
     if let (Some(query), Some(mixed)) = (query, mixed) {

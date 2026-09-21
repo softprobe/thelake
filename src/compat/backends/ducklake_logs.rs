@@ -1,10 +1,12 @@
 //! Typed DuckLake log query backend for the Loki adapter.
 
+use crate::compat::backends::label_match::{
+    labels_match, labels_match_any, LabelMatcher, MatcherOp,
+};
 use crate::compat::backends::logs::{
     LogDirection, LogHit, LogLineFilter, LogParser, LogsDiscoveryRequest, LogsQueryBackend,
     LogsQueryRequest,
 };
-use crate::compat::backends::metrics::{labels_match, labels_match_any, LabelMatcher, MatcherOp};
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::loki::{project_loki, DEFAULT_STREAM_LABEL_ALLOWLIST};
 use crate::compat::tenant::TenantContext;
@@ -102,10 +104,7 @@ impl DuckLakeLogsBackend {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(err)) => {
                 let message = err.to_string();
-                if message.contains("Table with name logs does not exist")
-                    || message.contains("Table with name tm_all_log does not exist")
-                    || message.contains("Table with name tm_cq_log does not exist")
-                {
+                if message.contains("Table with name logs does not exist") {
                     Ok(QueryResult {
                         columns: Vec::new(),
                         rows: Vec::new(),
@@ -613,9 +612,7 @@ fn normalized_fields(fields: &BTreeMap<String, String>) -> BTreeMap<String, Stri
         // BTreeMap iteration makes sanitization collisions deterministic: the
         // first raw key in lexical order wins.
         normalized
-            .entry(crate::compat::projection::prometheus::sanitize_label_name(
-                key,
-            ))
+            .entry(crate::compat::projection::labels::sanitize_label_name(key))
             .or_insert_with(|| value.clone());
     }
     normalized
@@ -686,7 +683,7 @@ fn enforce_scan_cap(result: &QueryResult, cap: usize) -> Result<(), CompatError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::backends::metrics::{LabelMatcher, MatcherOp};
+    use crate::compat::backends::label_match::{LabelMatcher, MatcherOp};
 
     #[test]
     fn matcher_pushdown_prefers_promoted_columns() {

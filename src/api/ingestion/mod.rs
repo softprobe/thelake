@@ -1,5 +1,4 @@
 pub mod logs;
-pub mod metrics;
 pub mod traces;
 
 use crate::authn::TenantInfo;

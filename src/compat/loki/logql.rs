@@ -1,7 +1,7 @@
+use crate::compat::backends::label_match::{LabelMatcher, MatcherOp};
 use crate::compat::backends::logs::{LogLineFilter, LogParser, LogsQueryRequest};
-use crate::compat::backends::metrics::{LabelMatcher, MatcherOp};
 use crate::compat::errors::{CompatError, CompatErrorCode};
-use crate::compat::projection::prometheus::sanitize_label_name;
+use crate::compat::projection::labels::sanitize_label_name;
 
 pub fn parse_logql(query: &str) -> Result<LogsQueryRequest, CompatError> {
     let query = query.trim();

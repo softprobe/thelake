@@ -52,9 +52,7 @@ ducklake:
 #   max_sessions_per_reduce: 1000
 #   max_reduce_span_seconds: 604800
 
-# Self-monitoring ops lake (disabled by default). See docs/design.md.
+# Self-monitoring OTLP process instruments (disabled by default). See docs/design.md.
 # self_monitoring:
 #   enabled: false
 #   export_interval_seconds: 60
-#   ops_metadata_schema: thelake_ops
-#   ops_data_path: "./warehouse/_thelake_ops/"

@@ -1,21 +1,16 @@
 # Softprobe Runtime — performance docs
 
-| Doc | Purpose |
-|-----|---------|
-| [prometheus-query-findings.md](prometheus-query-findings.md) | Prom/Grafana findings, improvement plan, open competitor benchmark |
-| [metrics-timeseries-layout.md](../metrics-timeseries-layout.md) | Proposed DuckLake metrics layout: postings + skinny samples + 5m/1h ladder + collapse; goals and test plan |
+| Doc / area | Purpose |
+|------------|---------|
+| [`results/`](results/) | Captured demo CPU / ingest wall-clock artifacts |
+| `make test-perf` | Manual / release performance suites (latency, concurrency, stability) |
+| `make bench-demo-cpu-full` | Full OTEL demo + Grafana refresh CPU gate |
 
-## Local micro-benchmark (Option A)
+Product metrics / Prometheus query benchmarks have been removed along with the
+Prometheus product surface. Prefer Loki/Tempo and evidence-SQL workloads for
+compatibility performance work.
 
-```bash
-make bench-prom-baseline
-# or: BENCH_LABEL=variant-pushdown LEAVE_UP=1 make bench-prom-baseline
-make bench-prom-down
-```
+## Captured results
 
-Harness: `tests/compat/prometheus/benchmark/`.  
-Results land in [`results/`](results/) as `<stamp>-<label>.json` + `.md`.
-
-## Competitor compare (Option B — later)
-
-VictoriaMetrics [prometheus-benchmark](https://github.com/VictoriaMetrics/prometheus-benchmark) via OTLP — see findings doc §5.2.
+JSON/Markdown under [`results/`](results/) named
+`<stamp>-<label>.{json,md}`. See [`results/README.md`](results/README.md).

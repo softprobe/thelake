@@ -35,10 +35,7 @@ impl DuckLakeTraceBackend {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(err)) => {
                 let message = err.to_string();
-                if message.contains("Table with name traces does not exist")
-                    || message.contains("Table with name tm_all_span does not exist")
-                    || message.contains("Table with name tm_cq_span does not exist")
-                {
+                if message.contains("Table with name traces does not exist") {
                     Ok(QueryResult {
                         columns: Vec::new(),
                         rows: Vec::new(),

@@ -69,7 +69,7 @@ pub fn parse_loki_params_with_limits(
             return Err(bad("end must be greater than or equal to start"));
         }
         let range_ns = (i128::from(end) - i128::from(start)) as u128;
-        // 0 = unlimited (AC-W1 / §9.2) — same semantics as Prom validate_time_range_ms.
+        // 0 = unlimited (AC-W1 / §9.2) — same semantics as validate_time_range_ms.
         if limits.max_query_range_seconds > 0
             && range_ns > u128::from(limits.max_query_range_seconds) * 1_000_000_000
         {

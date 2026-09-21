@@ -389,12 +389,8 @@ fn unit_telemetry_details_compiles_correlated_signal_queries() {
     assert!(compiled.spans.contains("http_request_body"));
     assert!(compiled.spans.contains("http_response_body"));
     assert!(compiled.logs.contains("FROM logs"));
-    assert!(compiled.metrics.contains("FROM metrics"));
     assert!(compiled.spans.contains("session_id = 'sess_abc'"));
     assert!(compiled.logs.contains("session_id = 'sess_abc'"));
-    assert!(compiled
-        .metrics
-        .contains("CAST(attributes['sp.session.id'] AS VARCHAR) = 'sess_abc'"));
     assert!(compiled.spans.contains("CAST(timestamp AS TIMESTAMP_NS)"));
     assert!(!compiled.spans.contains("record_date"));
 }

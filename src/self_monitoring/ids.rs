@@ -1,7 +1,7 @@
-//! Self-monitoring ops lake constants and helpers.
+//! Self-monitoring helpers.
 
-/// Reserved tenant id for thelake self-monitoring. Auth must map the ops Bearer
-/// to this id; `POST /v1/tenants` rejects it on every path.
+/// Historical reserved id; still rejected by `POST /v1/tenants` so it cannot
+/// collide with a customer tenant name.
 pub const OPS_TENANT_ID: &str = "thelake-ops";
 
 pub fn is_reserved_tenant_id(tenant_id: &str) -> bool {

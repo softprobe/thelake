@@ -1,7 +1,7 @@
 # Softprobe Runtime Goals
 
 **Status:** Current
-**Last updated:** 2026-08-12
+**Last updated:** 2026-09-21
 
 ## Product goal
 
@@ -15,7 +15,7 @@ operational telemetry.
 ## Current technical goals
 
 1. **Complete capture**
-   - Accept OTLP traces, logs, and metrics.
+   - Accept OTLP **traces and logs** (product signals).
    - Preserve HTTP bodies and business attributes needed for investigation.
    - Avoid sampling in this storage service.
 
@@ -43,26 +43,29 @@ operational telemetry.
    - Run DuckLake-native compaction and retention maintenance.
 
 6. **Schema evolution without parallel storage paths**
-   - Keep canonical trace, log, and metric schemas in one shared module.
+   - Keep canonical trace and log schemas in one shared module.
    - Add tenant-scoped nullable columns through promotion manifests
      (`POST /v1/promotions/apply`).
    - Keep `sp.*` as an explicit instrumentation convention; promote only the
      fields a tenant declares.
 
-7. **Query-only observability compatibility (in progress)**
-   - Keep OTLP as the canonical write path.
-   - Expose Prometheus-, Loki-, and Tempo-compatible **query** APIs so
-     existing Grafana datasources can read lake evidence without a second
-     write pipeline. See [compat/matrix.md](compat/matrix.md).
-   - Prom path should use DuckLake VARIANT shredding / promotion and stay
-     **acceptably** fast for Grafana (not TSDB-class). Findings and open
-     benchmark plan: [perf/prometheus-query-findings.md](perf/prometheus-query-findings.md).
-   - Metrics physical layout (proposed): day-sharded postings + skinny samples
-     + 5m/1h downsamples + `job` collapse — see
-     [metrics-timeseries-layout.md](metrics-timeseries-layout.md).
+7. **Query-only observability compatibility**
+   - Keep OTLP as the canonical write path for traces and logs.
+   - Expose Loki- and Tempo-compatible **query** APIs so existing Grafana
+     datasources can read lake evidence without a second write pipeline. See
+     [compat/matrix.md](compat/matrix.md).
+   - Product metrics / Prometheus / PromQL are **out of scope** (removed).
+
+8. **Process self-monitoring (operators)**
+   - When `self_monitoring.enabled` is true, thelake records process Meter
+     instruments and exports them via the standard OTLP metrics exporter
+     (`OTEL_EXPORTER_OTLP_*` / `OTEL_EXPORTER_OTLP_METRICS_*`).
+   - Process metrics are **not** written into customer or ops DuckLake.
 
 ## Non-goals
 
+- Customer OTLP metrics ingest, `metric_*` product tables as a live path,
+  Prometheus HTTP API, or PromQL.
 - Reintroducing Apache Iceberg or a second durable table format.
 - Maintaining a staged Parquet tier or application WAL. Optional soft coalesce
   (`ingest.flush_interval_seconds` > 0; default 0 = flush-through) is allowed;
@@ -78,7 +81,5 @@ operational telemetry.
 - [Instrumentation guide](instrumentation_guide.md)
 - [Schema promotion](promotion.md)
 - [Ad hoc DuckDB/DuckLake queries](adhoc-duckdb-ducklake.md)
-- [Compatibility matrix (Prom/Loki/Tempo)](compat/matrix.md)
-- [Prometheus query performance findings + benchmark](perf/prometheus-query-findings.md)
-- [Metrics time-series layout (proposed) — goals and ACs](metrics-timeseries-layout.md)
+- [Compatibility matrix (Loki/Tempo)](compat/matrix.md)
 - [Legacy documentation](legacy/README.md)

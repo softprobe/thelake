@@ -51,37 +51,31 @@ assert_workflow_job_matches() {
 	}
 }
 
-assert_matches 'protocol_env\+=[[:space:]]*\("PROMETHEUS_REFERENCE_IMAGE=\$DRIFT_CANDIDATE_REFERENCE"\)'
 assert_matches 'protocol_env\+=[[:space:]]*\("LOKI_REFERENCE_IMAGE=\$DRIFT_CANDIDATE_REFERENCE"\)'
 assert_matches 'protocol_env\+=[[:space:]]*\("TEMPO_REFERENCE_IMAGE=\$DRIFT_CANDIDATE_REFERENCE"\)'
-assert_absent 'protocol_env+=("PROMETHEUS_REFERENCE_IMAGE=$DRIFT_CANDIDATE_IMAGE:$DRIFT_CANDIDATE_VERSION")'
 assert_absent 'protocol_env+=("LOKI_REFERENCE_IMAGE=$DRIFT_CANDIDATE_IMAGE:$DRIFT_CANDIDATE_VERSION")'
 assert_absent 'protocol_env+=("TEMPO_REFERENCE_IMAGE=$DRIFT_CANDIDATE_IMAGE:$DRIFT_CANDIDATE_VERSION")'
+assert_absent 'PROMETHEUS_REFERENCE_IMAGE'
+assert_absent 'drift-prometheus'
 assert_contains '"candidate" => (ARGV[7] == "drift" ? {'
 assert_contains '"image" => ARGV[8], "version" => ENV.fetch("DRIFT_CANDIDATE_VERSION"),'
 assert_contains '"digest" => ENV.fetch("DRIFT_CANDIDATE_DIGEST")'
 assert_contains 'DRIFT_CANDIDATE_REFERENCE'
 assert_matches '"reference_image"[[:space:]]*=>[[:space:]]*\(ARGV\[8\].*ARGV\[8\]\)'
 assert_absent 'candidate_reference_override_unsupported'
-assert_absent '[ "$DRIFT" = true ] && [ "$protocol" != prometheus ]'
 
-assert_workflow_matches 'drift_prometheus_digest:'
 assert_workflow_matches 'drift_loki_digest:'
 assert_workflow_matches 'drift_tempo_digest:'
 
-assert_workflow_matches 'DRIFT_PROMETHEUS_DIGEST:[[:space:]]*\$\{\{[[:space:]]*inputs\.drift_prometheus_digest'
 assert_workflow_matches 'DRIFT_LOKI_DIGEST:[[:space:]]*\$\{\{[[:space:]]*inputs\.drift_loki_digest'
 assert_workflow_matches 'DRIFT_TEMPO_DIGEST:[[:space:]]*\$\{\{[[:space:]]*inputs\.drift_tempo_digest'
-assert_workflow_job_matches 'drift-grafana' 'DRIFT_PROMETHEUS_DIGEST:[[:space:]]*\$\{\{[[:space:]]*inputs\.drift_prometheus_digest'
 assert_workflow_job_matches 'drift-grafana' 'DRIFT_LOKI_DIGEST:[[:space:]]*\$\{\{[[:space:]]*inputs\.drift_loki_digest'
 assert_workflow_job_matches 'drift-grafana' 'DRIFT_TEMPO_DIGEST:[[:space:]]*\$\{\{[[:space:]]*inputs\.drift_tempo_digest'
 assert_workflow_job_matches 'drift-grafana' 'Create candidate reference manifest'
 
-assert_workflow_job_matches 'drift-prometheus' 'DRIFT_CANDIDATE_DIGEST:[[:space:]]*\$\{\{[[:space:]]*inputs\.drift_prometheus_digest'
 assert_workflow_job_matches 'drift-loki' 'DRIFT_CANDIDATE_DIGEST:[[:space:]]*\$\{\{[[:space:]]*inputs\.drift_loki_digest'
 assert_workflow_job_matches 'drift-tempo' 'DRIFT_CANDIDATE_DIGEST:[[:space:]]*\$\{\{[[:space:]]*inputs\.drift_tempo_digest'
 
-assert_workflow_job_matches 'drift-prometheus' '--candidate-digest[[:space:]]+"\$DRIFT_CANDIDATE_DIGEST"'
 assert_workflow_job_matches 'drift-loki' '--candidate-digest[[:space:]]+"\$DRIFT_CANDIDATE_DIGEST"'
 assert_workflow_job_matches 'drift-tempo' '--candidate-digest[[:space:]]+"\$DRIFT_CANDIDATE_DIGEST"'
 

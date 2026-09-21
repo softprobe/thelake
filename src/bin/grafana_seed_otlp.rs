@@ -1,20 +1,16 @@
 //! Deterministic OTLP protobuf seeder for the self-contained Grafana system lane.
 //!
-//! The seeder authenticates each fixed test tenant separately, sends metrics,
-//! logs, and traces through the runtime HTTP OTLP endpoints, then polls the
-//! native compatibility routes until all three signals are queryable without
-//! cross-tenant leakage. Only a credential-free receipt is written.
+//! The seeder authenticates each fixed test tenant separately, sends logs and
+//! traces through the runtime HTTP OTLP endpoints, then polls the native
+//! compatibility routes until both signals are queryable without cross-tenant
+//! leakage. Only a credential-free receipt is written.
 
 use anyhow::{anyhow, Context, Result};
 use opentelemetry_proto::tonic::collector::{
-    logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest,
-    trace::v1::ExportTraceServiceRequest,
+    logs::v1::ExportLogsServiceRequest, trace::v1::ExportTraceServiceRequest,
 };
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-use opentelemetry_proto::tonic::metrics::v1::{
-    metric::Data, number_data_point, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
-};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Span};
 use prost::Message;
@@ -31,12 +27,10 @@ const START_S: u64 = 1_700_000_000;
 const END_S: u64 = 1_700_000_060;
 const START_NS: u64 = START_S * 1_000_000_000;
 const END_NS: u64 = END_S * 1_000_000_000;
-const METRIC_NAME: &str = "grafana_phase4_requests_total";
 const SERVICE_NAME: &str = "checkout";
 
 #[derive(Debug, Clone)]
 struct TenantPayloads {
-    metrics: Vec<u8>,
     logs: Vec<u8>,
     traces: Vec<u8>,
 }
@@ -57,10 +51,8 @@ struct Receipt {
 struct TenantReceipt {
     tenant_id: String,
     scope_provisioned: bool,
-    metrics_sent: bool,
     logs_sent: bool,
     traces_sent: bool,
-    metrics_queryable: bool,
     logs_queryable: bool,
     traces_queryable: bool,
     trace_id: String,
@@ -125,10 +117,8 @@ impl TenantReceipt {
         Self {
             tenant_id,
             scope_provisioned: false,
-            metrics_sent: false,
             logs_sent: false,
             traces_sent: false,
-            metrics_queryable: false,
             logs_queryable: false,
             traces_queryable: false,
             trace_id: trace_id_for(suffix),
@@ -161,15 +151,13 @@ fn seed(
             &mut receipt.tenants[index],
         ) {
             return Err(anyhow!(
-                "tenant {} partial ingest (metrics={}, logs={}, traces={}): {}",
+                "tenant {} partial ingest (logs={}, traces={}): {}",
                 tenant_id,
-                receipt.tenants[index].metrics_sent,
                 receipt.tenants[index].logs_sent,
                 receipt.tenants[index].traces_sent,
                 error
             ));
         }
-        receipt.tenants[index].metrics_sent = true;
         receipt.tenants[index].logs_sent = true;
         receipt.tenants[index].traces_sent = true;
     }
@@ -183,7 +171,6 @@ fn seed(
             let result = query_tenant(&client, base_url, api_key, tenant_id, suffix, receipt);
             match result {
                 Ok(()) => {
-                    receipt.tenants[index].metrics_queryable = true;
                     receipt.tenants[index].logs_queryable = true;
                     receipt.tenants[index].traces_queryable = true;
                 }
@@ -247,8 +234,6 @@ fn send_payloads(
     payloads: &TenantPayloads,
     receipt: &mut TenantReceipt,
 ) -> Result<()> {
-    send_protobuf(client, base_url, api_key, "/v1/metrics", &payloads.metrics)?;
-    receipt.metrics_sent = true;
     send_protobuf(client, base_url, api_key, "/v1/logs", &payloads.logs)?;
     receipt.logs_sent = true;
     send_protobuf(client, base_url, api_key, "/v1/traces", &payloads.traces)?;
@@ -316,22 +301,6 @@ fn query_tenant(
             .header("x-scope-orgid", tenant_id)
     };
 
-    let metrics = headers(client.get(format!("{base_url}/api/v1/query")))
-        .query(&[("query", METRIC_NAME), ("time", "1700000030")])
-        .send()
-        .context("query seeded metrics")?;
-    let metrics = read_json_success(metrics, "/api/v1/query")?;
-    if std::env::var("SEED_DEBUG").ok().as_deref() == Some("1") {
-        // Non-fatal probe trace: show what the server actually returned so
-        // warm-up read inconsistencies are observable without aborting the
-        // retry loop.
-        eprintln!(
-            "SEED_DEBUG tenant={tenant_id} metrics body={}",
-            &metrics.to_string()[..metrics.to_string().len().min(240)]
-        );
-    }
-    assert_tenant_scope(&metrics, tenant_id, other)?;
-
     let logs = headers(client.get(format!("{base_url}/loki/api/v1/query_range")))
         .query(&[
             ("query", r#"{service_name="checkout"}"#),
@@ -362,7 +331,7 @@ fn query_tenant(
         .context("query seeded traces")?;
     let traces = read_json_success(traces, "/api/search")?;
     // Tempo search results carry trace metadata, not tenant labels, so the
-    // tenant-id scope assertion used for metrics/logs does not apply here.
+    // tenant-id scope assertion used for logs does not apply here.
     // Isolation is still proven deterministically: every tenant seeds its own
     // fixed trace ID and must see exactly that one, never the other's.
     let traces_text = traces.to_string();
@@ -430,29 +399,6 @@ fn tenant_payloads(tenant: &str) -> TenantPayloads {
         vec![0x22; 8]
     };
     let resource = resource(tenant);
-    let metrics = ExportMetricsServiceRequest {
-        resource_metrics: vec![ResourceMetrics {
-            resource: Some(resource.clone()),
-            scope_metrics: vec![ScopeMetrics {
-                scope: Some(scope("grafana-seeder")),
-                metrics: vec![Metric {
-                    name: METRIC_NAME.into(),
-                    description: "deterministic Grafana Phase 4 metric".into(),
-                    unit: "1".into(),
-                    data: Some(Data::Gauge(Gauge {
-                        data_points: vec![
-                            number_point(START_NS, 1.0, tenant),
-                            number_point(START_NS + 30_000_000_000, 2.0, tenant),
-                        ],
-                    })),
-                    metadata: Vec::new(),
-                }],
-                schema_url: String::new(),
-            }],
-            schema_url: String::new(),
-        }],
-    }
-    .encode_to_vec();
     let logs = ExportLogsServiceRequest {
         resource_logs: vec![ResourceLogs {
             resource: Some(resource.clone()),
@@ -570,11 +516,7 @@ fn tenant_payloads(tenant: &str) -> TenantPayloads {
         ],
     }
     .encode_to_vec();
-    TenantPayloads {
-        metrics,
-        logs,
-        traces,
-    }
+    TenantPayloads { logs, traces }
 }
 
 fn resource(tenant: &str) -> Resource {
@@ -608,15 +550,6 @@ fn string_any(value: &str) -> AnyValue {
     }
 }
 
-fn number_point(timestamp: u64, value: f64, tenant: &str) -> NumberDataPoint {
-    NumberDataPoint {
-        attributes: vec![kv("tenant.marker", tenant)],
-        time_unix_nano: timestamp,
-        value: Some(number_data_point::Value::AsDouble(value)),
-        ..Default::default()
-    }
-}
-
 fn trace_id_for(suffix: &str) -> String {
     if suffix == "b" {
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()
@@ -628,7 +561,6 @@ fn trace_id_for(suffix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 
     #[test]
     fn payloads_are_deterministic_and_tenant_bound() {
@@ -637,11 +569,11 @@ mod tests {
 
         assert_eq!(trace_id_for("a"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(trace_id_for("b"), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        assert_ne!(tenant_a.metrics, tenant_b.metrics);
+        assert_ne!(tenant_a.logs, tenant_b.logs);
+        assert_ne!(tenant_a.traces, tenant_b.traces);
 
-        let metrics = ExportMetricsServiceRequest::decode(tenant_a.metrics.as_slice()).unwrap();
-        let resource = metrics.resource_metrics[0].resource.as_ref().unwrap();
-        let marker = resource
+        let resource_a = resource("grafana-phase4-tenant-a");
+        let marker = resource_a
             .attributes
             .iter()
             .find(|attribute| attribute.key == "tenant.marker")

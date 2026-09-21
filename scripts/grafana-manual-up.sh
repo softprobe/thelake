@@ -55,24 +55,22 @@ TENANT_SCHEMA="${GRAFANA_TENANT_SCHEMA:-${PG_SCHEMA}_local_dev_tenant}"
 OTEL_DEMO_TAG="${OTEL_DEMO_TAG:-3.0.0}"
 CACHE_ROOT="${THELAKE_CACHE_ROOT:-$HOME/.cache/thelake}"
 DEMO_DIR="${OTEL_DEMO_DIR:-$CACHE_ROOT/otel-demo/$OTEL_DEMO_TAG}"
-# Shared with tests/compat/grafana/browser/query_features.ts (H-04 catalog expr).
-HISTOGRAM_BUCKET_RATE_EXPR_FILE="$ROOT/tests/compat/grafana/browser/catalog_gates/histogram_bucket_rate.expr"
 DEMO_PROJECT="${OTEL_DEMO_COMPOSE_PROJECT:-thelake-otel-demo}"
 STORE_URL="${OTEL_DEMO_STORE_URL:-http://127.0.0.1:8080}"
 # Soft coalesce window for OTLP → DuckLake (0 = flush-through every request).
-# Demo default 60s under full OTLP (metrics+logs+sampled traces).
+# Demo default 60s under full OTLP (logs+sampled traces).
 INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-60}"
 # Pin Softprobe to one CPU so query-worker + blocking-pool cannot exceed 100% process
 # CPU under Grafana refresh=10s (override with THELAKE_CPU_AFFINITY= or empty to disable).
 CPU_AFFINITY="${THELAKE_CPU_AFFINITY:-0}"
-# Full OTLP (metrics+app logs+sampled traces) is the default product profile.
+# Full OTLP (app logs+sampled traces) is the default product profile.
 # Set THELAKE_REQUIRE_FULL_OTLP=0 only for temporary bring-up experiments.
 REQUIRE_FULL_OTLP=1
 case "${THELAKE_REQUIRE_FULL_OTLP:-1}" in
   0|false|FALSE|no|NO|off|OFF) REQUIRE_FULL_OTLP=0 ;;
 esac
 
-mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
+mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 
 port_busy() {
   local port="$1"
@@ -147,10 +145,8 @@ print(m.group(1) if m else fallback)
 Grafana is ready for manual inspection (live Astronomy Shop traffic).
 
   Grafana:     http://127.0.0.1:3000  (admin / admin)
-  Dashboards:  Astronomy Shop → GOLD overview + per-service boards
-               Softprobe PromQL → capability smoke boards
-               thelake ops → self-monitoring (datasource Softprobe Prometheus · ops)
-  Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY; ops: local-ops-key → thelake-ops)
+  Dashboards:  Softprobe Loki / Tempo / cross-signal smoke boards
+  Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY)
   Ingest:      flush_interval_seconds=$flush_shown  (0=flush-through; >0=coalesce; from live config when present)
   DuckLake:    Postgres 19 catalog on $PG_HOST:$PG_PORT (schema $PG_SCHEMA)
   Parquet:     $STATE_DIR/data/
@@ -158,148 +154,10 @@ Grafana is ready for manual inspection (live Astronomy Shop traffic).
   Demo pin:    $OTEL_DEMO_TAG  ($DEMO_DIR)
   Softprobe log: $LOG
 
-Astronomy Shop boards monitor live multi-language demo services.
-PromQL boards cover Softprobe's declared query subset.
+Loki Explore and Tempo search use live demo logs/traces.
 
 Teardown: make grafana-down
 EOF
-}
-
-wait_for_demo_metrics() {
-  echo "==> waiting for Softprobe to see demo metrics"
-  local ok=0
-  local body=""
-  for _ in $(seq 1 90); do
-    body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
-      "$SOFTPROBE_URL_HOST/api/v1/label/__name__/values" 2>/dev/null || true)"
-    if [[ -n "$body" ]] && [[ "$body" != *'"data":[]'* ]] && [[ "$body" == *'"status":"success"'* ]]; then
-      # Prefer evidence of multi-service / spanmetrics / http server metrics.
-      if echo "$body" | grep -Eqi 'http_|traces_span|rpc_|process_|otelcol_|calls|duration'; then
-        ok=1
-        break
-      fi
-      # Any non-empty name list after collector is up is enough to proceed.
-      if echo "$body" | grep -q '"data":\[.'; then
-        ok=1
-        break
-      fi
-    fi
-    sleep 2
-  done
-  if [[ "$ok" != 1 ]]; then
-    echo "ERROR: no metrics appeared in Softprobe after starting OTel Demo." >&2
-    echo "  last /api/v1/label/__name__/values: ${body:-<empty>}" >&2
-    echo "  collector: docker logs otel-collector 2>&1 | tail -40" >&2
-    exit 1
-  fi
-  echo "==> Softprobe metric names: $(echo "$body" | head -c 400)…"
-
-  # Require real scrape continuity — lookback of one sample draws flat Grafana lines.
-  # Prefer a counter that moves under load (not k6_vus, which can be constant).
-  echo "==> waiting for non-identical Prom samples (live scrapes)"
-  local vary=0
-  local end start payload changes q
-  for _ in $(seq 1 90); do
-    end="$(date +%s)"
-    start="$((end - 600))"
-    for q in \
-      'k6_http_reqs' \
-      'http_server_request_duration_count' \
-      'traces_span_metrics_calls' \
-      'demo_ad_served_total' \
-      'k6_iterations'
-    do
-      payload="$(curl -sf -m 30 -H "Authorization: Bearer $API_KEY" \
-        -H "X-Scope-OrgID: $TENANT_ID" \
-        -H 'Content-Type: application/x-www-form-urlencoded' \
-        --data-urlencode "query=$q" \
-        --data "start=$start&end=$end&step=15" \
-        "$SOFTPROBE_URL_HOST/api/v1/query_range" 2>/dev/null || true)"
-      printf '%s' "$payload" > /tmp/thelake-grafana-prom-live.json
-      changes="$(python3 - <<'PY'
-import json
-try:
-    d = json.load(open("/tmp/thelake-grafana-prom-live.json"))
-except Exception:
-    print(0)
-    raise SystemExit
-rows = (d.get("data") or {}).get("result") or []
-best = 0
-for s in rows:
-    vals = [float(v) for _, v in (s.get("values") or [])]
-    ch = sum(1 for a, b in zip(vals, vals[1:]) if a != b)
-    best = max(best, ch)
-print(best)
-PY
-)"
-      if [[ "${changes:-0}" -ge 2 ]]; then
-        vary=1
-        echo "==> live scrapes OK ($q value changes=$changes)"
-        break 2
-      fi
-    done
-    sleep 5
-  done
-  if [[ "$vary" != 1 ]]; then
-    echo "ERROR: Prom series stayed flat (lookback of a single scrape). Ingest is not continuous." >&2
-    echo "  collector: docker logs otel-collector 2>&1 | tail -60" >&2
-    echo "  softprobe: tail -60 $LOG" >&2
-    exit 1
-  fi
-
-  wait_for_histogram_bucket_rates
-}
-
-# rate() on classic _bucket needs ≥2 raw samples per series in the window.
-# Expr is shared with browser H-04 (catalog_gates/histogram_bucket_rate.expr).
-# CPU-budget collector extras drop k6.http.req.* histograms; skip unless full OTLP.
-wait_for_histogram_bucket_rates() {
-  if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
-    echo "==> skipping histogram bucket rate wait (THELAKE_REQUIRE_FULL_OTLP=0)"
-    return 0
-  fi
-  local bucket_q
-  if [[ ! -f "$HISTOGRAM_BUCKET_RATE_EXPR_FILE" ]]; then
-    echo "ERROR: missing H-04 expr file: $HISTOGRAM_BUCKET_RATE_EXPR_FILE" >&2
-    exit 1
-  fi
-  bucket_q="$(tr -d '\n' <"$HISTOGRAM_BUCKET_RATE_EXPR_FILE")"
-  echo "==> waiting for classic histogram bucket rates (H-04)"
-  local bucket_rate_ok=0
-  local end start payload
-  for _ in $(seq 1 120); do
-    end="$(date +%s)"
-    start="$((end - 600))"
-    payload="$(curl -sf -m 30 -H "Authorization: Bearer $API_KEY" \
-      -H "X-Scope-OrgID: $TENANT_ID" \
-      -H 'Content-Type: application/x-www-form-urlencoded' \
-      --data-urlencode "query=$bucket_q" \
-      --data "start=$start&end=$end&step=15" \
-      "$SOFTPROBE_URL_HOST/api/v1/query_range" 2>/dev/null || true)"
-    printf '%s' "$payload" > /tmp/thelake-grafana-prom-bucket-rate.json
-    if python3 - <<'PY'
-import json
-try:
-    d = json.load(open("/tmp/thelake-grafana-prom-bucket-rate.json"))
-except Exception:
-    raise SystemExit(1)
-rows = (d.get("data") or {}).get("result") or []
-ok = sum(1 for s in rows if "le" in ((s.get("metric") or {}))) >= 3
-raise SystemExit(0 if ok else 1)
-PY
-    then
-      bucket_rate_ok=1
-      echo "==> histogram bucket rates OK ($bucket_q)"
-      break
-    fi
-    sleep 5
-  done
-  if [[ "$bucket_rate_ok" != 1 ]]; then
-    echo "ERROR: classic histogram bucket rate query stayed empty (need ≥2 samples/series in 5m)." >&2
-    echo "  query: $bucket_q" >&2
-    echo "  collector: docker logs otel-collector 2>&1 | tail -60" >&2
-    exit 1
-  fi
 }
 
 wait_for_demo_logs() {
@@ -333,59 +191,30 @@ wait_for_demo_logs() {
   echo "==> Softprobe Loki labels (live window): $(echo "$body" | head -c 400)…"
 }
 
-# Reuse if Softprobe + Grafana + demo collector already healthy *and* ingest is live (disabled if GRAFANA_REUSE_STACK=0).
+# Reuse if Softprobe + Grafana + demo collector already healthy *and* Loki ingest is live
+# (disabled if GRAFANA_REUSE_STACK=0).
 if [[ "${GRAFANA_REUSE_STACK:-1}" == "1" ]] \
   && our_softprobe_running \
   && curl -sf "$SOFTPROBE_URL_HOST/ready" >/dev/null 2>&1 \
   && curl -sf -o /dev/null -u admin:admin http://127.0.0.1:3000/api/health >/dev/null 2>&1 \
   && docker inspect -f '{{.State.Running}}' otel-collector 2>/dev/null | grep -q true; then
-  # Flat lookback lines mean the collector is timing out — do not claim "already up".
-  end_now="$(date +%s)"
-  start_now="$((end_now - 600))"
-  live_changes=0
-  for test_q in 'k6_http_reqs' 'demo_ad_served_total' 'k6_iterations' 'http_server_request_duration_count'; do
-    ch="$(curl -sf -m 20 -H "Authorization: Bearer $API_KEY" \
-      -H "X-Scope-OrgID: $TENANT_ID" \
-      -H 'Content-Type: application/x-www-form-urlencoded' \
-      --data-urlencode "query=$test_q" \
-      --data "start=$start_now&end=$end_now&step=15" \
-      "$SOFTPROBE_URL_HOST/api/v1/query_range" 2>/dev/null \
-      | python3 -c 'import sys,json
-try:
- d=json.load(sys.stdin); r=(d.get("data") or {}).get("result") or []; best=0
- for s in r:
-  vals=[float(v) for _,v in (s.get("values") or [])]
-  best=max(best, sum(1 for a,b in zip(vals,vals[1:]) if a!=b))
- print(best)
-except Exception:
- print(0)' || echo 0)"
-    if [[ "${ch:-0}" -ge 1 ]]; then
-      live_changes="$ch"
-      break
-    fi
-  done
-  if [[ "${live_changes:-0}" -ge 1 ]]; then
-    if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
-      wait_for_histogram_bucket_rates
-      echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live Prom OK; Loki/H-04 optional under CPU-budget OTLP)."
-      print_ready
-      exit 0
-    fi
-    end_ns="$(python3 -c 'import time; print(int(time.time()*1e9))')"
-    start_ns="$((end_ns - 3600 * 1000000000))"
-    loki_body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
-      -H "X-Scope-OrgID: $TENANT_ID" \
-      "$SOFTPROBE_URL_HOST/loki/api/v1/labels?start=$start_ns&end=$end_ns" 2>/dev/null || true)"
-    if [[ -n "$loki_body" ]] && [[ "$loki_body" == *'"status":"success"'* ]] \
-      && [[ "$loki_body" == *'"data":['* ]] && [[ "$loki_body" != *'"data":[]'* ]]; then
-      wait_for_histogram_bucket_rates
-      echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live Prom + Loki OK)."
-      print_ready
-      exit 0
-    fi
-    echo "already up with live Prom but Loki labels empty in the last hour; rebuilding stack."
+  if [[ "$REQUIRE_FULL_OTLP" != "1" ]]; then
+    echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector; Loki optional under CPU-budget OTLP)."
+    print_ready
+    exit 0
   fi
-  echo "already up but Prom series are flat (changes=${live_changes:-0}); rebuilding stack for live ingest."
+  end_ns="$(python3 -c 'import time; print(int(time.time()*1e9))')"
+  start_ns="$((end_ns - 3600 * 1000000000))"
+  loki_body="$(curl -sf -H "Authorization: Bearer $API_KEY" \
+    -H "X-Scope-OrgID: $TENANT_ID" \
+    "$SOFTPROBE_URL_HOST/loki/api/v1/labels?start=$start_ns&end=$end_ns" 2>/dev/null || true)"
+  if [[ -n "$loki_body" ]] && [[ "$loki_body" == *'"status":"success"'* ]] \
+    && [[ "$loki_body" == *'"data":['* ]] && [[ "$loki_body" != *'"data":[]'* ]]; then
+    echo "already up (owned Softprobe pid=$(cat "$PID_FILE") + otel-collector, live Loki OK)."
+    print_ready
+    exit 0
+  fi
+  echo "already up but Loki labels empty in the last hour; rebuilding stack."
 fi
 
 if port_busy 8090 && ! our_softprobe_running; then
@@ -446,7 +275,7 @@ reset_grafana_state() {
   if [[ -d "$STATE_DIR/postgres" ]]; then
     docker run --rm -v "$STATE_DIR/postgres:/data" alpine sh -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
   fi
-  mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
+  mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/cache" "$STATE_DIR/postgres"
 }
 
 # GRAFANA_KEEP_DATA=1 keeps parquet + DuckLake Postgres catalog (clean binary restart).
@@ -455,7 +284,7 @@ case "${GRAFANA_KEEP_DATA:-0}" in
   1|true|TRUE|yes|YES|on|ON)
     echo "==> GRAFANA_KEEP_DATA: preserving $STATE_DIR/data and $STATE_DIR/postgres"
     THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" $COMPOSE -f "$COMPOSE_FILE" down --remove-orphans >/dev/null 2>&1 || true
-    mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/data/_thelake_ops" "$STATE_DIR/cache" "$STATE_DIR/postgres"
+    mkdir -p "$STATE_DIR/data/$TENANT_ID" "$STATE_DIR/cache" "$STATE_DIR/postgres"
     ;;
   *)
     reset_grafana_state
@@ -514,7 +343,7 @@ if [[ "$pg_ok" != 1 ]]; then
   exit 1
 fi
 
-# TWCS + metadata default on for ops compaction panels. Browser CI sets
+# TWCS + metadata default on. Browser CI sets
 # THELAKE_MAINTENANCE_ENABLED=false — matching main's Grafana SLO profile
 # (no TWCS / snapshot expire / orphan cleanup under Astronomy Shop load).
 case "${THELAKE_MAINTENANCE_ENABLED:-true}" in
@@ -529,8 +358,8 @@ case "${THELAKE_MAINTENANCE_ENABLED:-true}" in
     ORPHAN_ENABLED=true
     ;;
 esac
-# Default off: ops self-export competes with demo OTLP + Grafana PromQL for the
-# single-core CPU budget. Set THELAKE_SELF_MONITORING_ENABLED=true for ops panels.
+# Default off: OTLP process-instrument export competes with demo OTLP + Grafana
+# for the single-core CPU budget. Set THELAKE_SELF_MONITORING_ENABLED=true to enable.
 case "${THELAKE_SELF_MONITORING_ENABLED:-false}" in
   1|true|TRUE|yes|YES|on|ON) SELF_MONITORING_ENABLED=true ;;
   *) SELF_MONITORING_ENABLED=false ;;
@@ -558,7 +387,7 @@ query:
 ingest:
   flush_interval_seconds: $INGEST_FLUSH_INTERVAL_SECONDS
 
-# Demo: TWCS/metadata on by default (ops panels). Override with THELAKE_MAINTENANCE_ENABLED.
+# Demo: TWCS/metadata on by default. Override with THELAKE_MAINTENANCE_ENABLED.
 maintenance:
   enabled: ${MAINTENANCE_ENABLED}
   target_file_size_bytes: 67108864
@@ -587,13 +416,11 @@ ducklake:
   # multi-core scans of open-day small files pegged Softprobe CPU).
   writer_pool_size: ${THELAKE_WRITER_POOL_SIZE:-1}
 
-# Self-monitoring ops lake (Design 2). Browser CI may set
-# THELAKE_SELF_MONITORING_ENABLED=false to keep k6 freshness under demo load.
+# Self-monitoring OTLP export. Browser CI may set
+# THELAKE_SELF_MONITORING_ENABLED=false under demo load.
 self_monitoring:
   enabled: ${SELF_MONITORING_ENABLED}
   export_interval_seconds: 15
-  ops_metadata_schema: thelake_ops
-  ops_data_path: "$STATE_DIR/data/_thelake_ops/"
 EOF
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
@@ -740,7 +567,7 @@ else
   exit 1
 fi
 
-# Prefer typed hot columns for Prom/LLM/Loki/Tempo before demo traffic.
+# Prefer typed hot columns for LLM/Loki/Tempo before demo traffic.
 # shellcheck source=scripts/lib/apply-product-hot-promotions.sh
 source "$ROOT/scripts/lib/apply-product-hot-promotions.sh"
 apply_product_hot_promotions "$SOFTPROBE_URL_HOST" "$API_KEY"
@@ -767,6 +594,5 @@ demo_compose up --pull missing --remove-orphans --detach
 demo_compose up -d --force-recreate otel-collector >/dev/null 2>&1 || \
   demo_compose restart otel-collector >/dev/null 2>&1 || true
 
-wait_for_demo_metrics
 wait_for_demo_logs
 print_ready

@@ -190,7 +190,7 @@ public class OrderController {
 A **business attribute** is application-domain metadata you want to search or
 correlate on later (user id, order id, booking reference, workflow name). Softprobe
 does **not** invent these fields. Your application must set them explicitly on
-the span (or log/metric attributes).
+the span (or log attributes).
 
 Use the `sp.*` prefix for Softprobe-specific business keys:
 

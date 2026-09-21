@@ -24,11 +24,11 @@ it is not load-bearing for the product thesis until then.
 |-------|---------|------|
 | `traces` | `attributes`, `resource_attributes`, `instrumentation_scope`, `links` | `MAP(VARCHAR, VARCHAR)` |
 | `logs` | `attributes`, `resource_attributes` | `MAP(VARCHAR, VARCHAR)` |
-| `metric_series` | `labels` | `MAP(VARCHAR, VARCHAR)` |
 | `scores` / `score_configs` | `metadata` | `MAP(VARCHAR, VARCHAR)` (unchanged) |
 | nested `traces.events[].attributes` | | `MAP` (unchanged) |
 
-Skinny `metric_samples` / hist / postings have **no** attribute bags.
+Orphaned `metric_series.labels` / skinny metric tables from older catalogs are
+not a product path.
 
 ## Write path
 
@@ -40,11 +40,9 @@ Skinny `metric_samples` / hist / postings have **no** attribute bags.
 ## Inlining re-evaluation
 
 MAP bags are Postgres-inline-safe (scores metadata already inlines). Default
-catalog-global `data_inlining_row_limit` is **`500`**. Metrics **AC-F7** is
-wait-for-next-run: TWCS merges live Parquet only and does **not** flush
-catalog-inlined skinny rows every pass. Batches over the limit write Parquet and
-are compacted on a later maintenance run. Downsample `INSERT … SELECT` reads the
-DuckLake table (inlined ∪ Parquet).
+catalog-global `data_inlining_row_limit` is **`500`**. TWCS merges live Parquet
+and does **not** flush catalog-inlined rows every pass. Batches over the limit
+write Parquet and are compacted on a later maintenance run.
 
 Primary wins of this change: remove VARIANT cast/shredding **and** restore small-batch
 inlining for MAP bags.
@@ -80,6 +78,6 @@ Rebuild options (operator-owned; Softprobe does **not** auto-drop tables):
 
 - [`src/storage/schema/variant.rs`](../src/storage/schema/variant.rs) — bag SQL helpers + prefer-promoted
 - [`src/storage/schema/tables.rs`](../src/storage/schema/tables.rs)
-- [`src/storage/ducklake/`](../src/storage/ducklake/) (`writer.rs`, `otlp.rs`, `util.rs`, `metrics_layout_write.rs`)
-- [`docs/promotion/`](promotion/) — product-hot manifests
+- [`src/storage/ducklake/`](../src/storage/ducklake/) (`writer.rs`, `otlp.rs`, `util.rs`)
+- [`docs/promotion/`](promotion/) — product-hot manifests (traces/logs)
 - Full-demo CPU gate: `make bench-demo-cpu-full`

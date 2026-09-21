@@ -2,23 +2,28 @@
 
 **Status:** Current
 **Storage backend:** DuckLake
-**Last verified against:** `src/` on 2026-07-18
+**Last verified against:** `src/` on 2026-09-21
 
 ## Overview
 
 `softprobe-runtime` is a Rust service that combines:
 
-- OTLP trace, log, and metric ingestion over HTTP
+- OTLP trace and log ingestion over HTTP
 - OTLP trace ingestion over gRPC
 - tenant-scoped DuckLake storage and DuckDB queries
 - telemetry search and detail APIs
 - schema promotion
+- optional process self-monitoring (Meter instruments → standard OTLP metrics export)
 
 DuckLake is the only durable telemetry backend. Apache Iceberg, the staged
 Parquet tier, and application WAL have been removed. Optional soft coalesce
 (`ingest.flush_interval_seconds` > 0) may hold rows in memory briefly before a
 DuckLake write; default `0` is flush-through. Historical documents for removed
 designs are under [`legacy/`](legacy/README.md).
+
+Product metrics (customer OTLP `/v1/metrics`, `metric_*` live path, Prometheus /
+PromQL) have been removed. Existing `metric_*` tables in a catalog, if any, are
+orphaned and are not part of the product surface.
 
 ## Runtime data flow
 
@@ -29,7 +34,7 @@ OTLP HTTP/gRPC request
 authenticate and bind tenant
         |
         v
-decode OTLP -> Span / Log / Metric
+decode OTLP -> Span / Log
         |
         +---- flush_interval_seconds == 0 (default) ----+
         |                                               |
@@ -71,8 +76,7 @@ and is deleted after the transaction; it is not a staged durability tier.
 DuckLake data inlining decides where committed rows live:
 
 - batches at or below `ducklake.data_inlining_row_limit` may stay in the
-  metadata catalog (default is **0** so skinny metrics tables write Parquet
-  TWCS can merge; VARIANT shredding already required Parquet);
+  metadata catalog (default **500**; MAP bags are Postgres-inline-safe);
 - larger writes become Parquet files under `ducklake.data_path`.
 
 Both forms are committed DuckLake data and are queried through the same
@@ -128,34 +132,38 @@ With a PostgreSQL catalog, `DuckLakeScopeResolver` stores scope mappings in the
 configured registry schema. Operational APIs do not accept arbitrary tenant or
 scope parameters after binding.
 
-### Self-monitoring ops scope
+### Self-monitoring (process instruments)
 
-When `self_monitoring.enabled` is true, the reserved tenant id `thelake-ops`
-binds to a dedicated DuckLake scope on the **same** catalog DSN
-(`self_monitoring.ops_metadata_schema` + `ops_data_path`). thelake collects
-process metrics via the OpenTelemetry Meter API (`SdkMeterProvider` +
-`PeriodicReader` + internal `PushMetricExporter` →
-`DuckLakeWriter::write_metric_batches`) — not public OTLP.
+When `self_monitoring.enabled` is true, thelake installs OpenTelemetry Meter
+instruments (`SdkMeterProvider` + `PeriodicReader`) and exports process metrics
+through the **standard OTLP metrics exporter**. Destination is controlled by
+`OTEL_EXPORTER_OTLP_*` / `OTEL_EXPORTER_OTLP_METRICS_*` (HTTP builder). Export
+fails soft if the exporter cannot be built; customer HTTP bind is never blocked.
+
+Process metrics are **not** written into DuckLake (no ops-lake self-export, no
+customer `metric_*` path). Reserved tenant id `thelake-ops` remains rejected by
+`POST /v1/tenants` and default-lake binding so it cannot collide with customer
+scopes.
 
 #### Cardinality rules
 
-Metric attributes only: `tenant`, `signal` (`metrics|logs|traces|none`),
+Metric attributes only: `tenant`, `signal` (`logs|traces|none`),
 `op` (`ingest|write|query|maintenance|export|compact`), `status` (`ok|error`),
 `sql_kind` (fixed enum), `app` (OTLP `service.name`, max 64 → `_other`),
 `table` (maintenance allowlist), `day_kind` (`open|closed`),
 `size_bucket` (`lt_1mb|1_8mb|8_64mb|gte_64mb`). Resource: `service.name=thelake`.
 
-Latency Prom names use `*_duration_milliseconds_{sum,count}` (not `*_latency_ms_*`).
+Latency instrument names use `*_duration_milliseconds_{sum,count}` style.
 
 Orphan remove and snapshot expire counters are emitted **only when the action is
 enabled/attempted** (`maintenance.metadata_enabled` / `remove_orphan_files_enabled`).
 Disabled passes mint nothing (never `status=ok`). Attempted success → `ok`;
 attempted failure (`ActionStatus::Failed`) → `error`.
 
-#### Metric catalog (locked)
+#### Instrument catalog (locked)
 
-| Prom name | Type | Labels |
-|-----------|------|--------|
+| Name | Type | Labels |
+|------|------|--------|
 | `thelake_ingest_requests_total` / `thelake_ingest_errors_total` | counter | tenant, signal, status, app |
 | `thelake_ingest_duration_milliseconds_{sum,count}` | hist | tenant, signal, app |
 | `thelake_write_duration_milliseconds_{sum,count}` | hist | tenant, signal |
@@ -175,17 +183,12 @@ attempted failure (`ActionStatus::Failed`) → `error`.
 | `thelake_query_workers` / `workers_busy` / `ingest_pending_batches` / `writer_pool_size` | gauge | — |
 | `thelake_self_monitoring_export_drops_total` | counter | — |
 
-Anti-recursion: never instrument ops-tenant ingest; inventory uses uninstrumented
-one-shot SQL; ops DuckDB engines set `counts_toward_liveness=false` so slow-query
-events and query histograms are not recorded for ops-plane work. Exporter only
-`write_metric_batches` / `write_log_batches`. `thelake_self_monitoring_export_drops_total`
-is published at 0 on install so dashboards always resolve the series. OTLP decode
-failures on metrics/logs/traces increment `thelake_ingest_errors_total` for customer
-tenants.
-Slow DuckDB queries (≥200ms) also emit ops log events for Loki drill-down.
-`POST /v1/tenants` rejects `thelake-ops`. Ops query workers do not count toward
-`/health` liveness SelfHeal. Bootstrap is best-effort and never blocks customer
-HTTP bind.
+Anti-recursion: never instrument reserved-tenant ingest; inventory uses
+uninstrumented one-shot SQL where applicable. OTLP decode failures on
+logs/traces increment `thelake_ingest_errors_total` for customer tenants.
+Slow DuckDB queries (≥200ms) may emit ops log events for operator drill-down
+(standard logging / OTLP logs path — not product metrics). Bootstrap is
+best-effort and never blocks customer HTTP bind.
 
 ## Telemetry tables
 
@@ -198,43 +201,26 @@ Core columns include:
 - correlation: `session_id`, `trace_id`, `span_id`, `parent_span_id`
 - tenancy/application: `app_id`, `organization_id`, `tenant_id`
 - timing/status: `timestamp`, `end_timestamp`, `status_code`,
-  `status_message`, `record_date`
+  `status_message`
 - OTLP data: `attributes`, `events`, `span_kind`, `message_type`
 - HTTP data: request method/path/headers/body and response
   status/headers/body
 
-Rows are inserted ordered by `record_date`, `app_id`, `session_id`, and
-`timestamp`.
+Rows are inserted ordered by `app_id`, `session_id`, and `timestamp`
+(one-clock partition on calendar day of `timestamp`).
 
 ### `logs`
 
 Core columns include `session_id`, timestamps, severity, body, attributes,
-resource attributes, trace/span correlation, and `record_date`.
+resource attributes, trace/span correlation, and event-time `timestamp`
+(one-clock; no `record_date`).
 
-### Metric samples and rollups
+### Orphaned `metric_*` tables (not product)
 
-Raw samples live in `metric_samples` and are partitioned by `record_date`.
-Core columns include metric name, description, unit, type, timestamp, value,
-attributes, resource attributes, and the OTLP fidelity fields. Asynchronous
-workers populate the explicitly date-partitioned 5m/1h/1d scalar and histogram
-rollup tables plus the separate series postings index.
-
-Phase 0 also stores nullable classic histogram / summary fidelity columns on
-the same row shape (gauge/sum leave them `NULL`):
-
-- `count`, `sum`
-- `bucket_counts`, `explicit_bounds` (classic histogram)
-- `quantiles` (summary: list of `{quantile, value}`)
-- `aggregation_temporality`
-- `exemplars_json`
-
-When OTLP omits histogram `sum` (valid for negative observations), the fidelity
-`sum` column is stored as SQL `NULL`. The scalar `value` column still uses
-`0.0` in that case for backward SQL compatibility — adapters reconstructing
-Prometheus `_sum` must read the fidelity `sum` column, not `value`.
-
-Exponential / native histograms are not stored; those datapoints are skipped
-with a stable `unsupported_feature` log.
+Customer metrics ingest and the Prometheus/PromQL surface are removed. Catalogs
+that previously wrote `metric_samples` / related tables may still contain those
+objects; Softprobe does not DROP them and does not treat them as a live product
+path. New installs should not create them.
 
 ### `scores`
 
@@ -258,9 +244,9 @@ the tenant PostgreSQL metadata schema (`promotion_specs`) in production.
 SQLite supports promotion in its configured local single-scope DuckLake
 catalog.
 
-- **Telemetry columns:** additive nullable columns on `traces` / `logs` /
-  `metric_samples`. Future ingest extracts declared sources into those columns;
-  historical rows stay `NULL`.
+- **Telemetry columns:** additive nullable columns on `traces` / `logs`.
+  Future ingest extracts declared sources into those columns; historical rows
+  stay `NULL`.
 - **Business tables:** versioned `<table>_vN` tables plus `<table>_current`
   views with evidence anchors. Apply provisions schema today; automatic OTLP
   row materialization is not wired yet.
@@ -275,24 +261,19 @@ auto-promote them. Canonical contract:
 Every worker loads `httpfs` and DuckLake, configures object-store access, and
 ATTACHes the same DuckLake scope used by its tenant-bound writer.
 
-Public query names:
+Public query names: `traces`, `logs`, and `scores`. Bare names are expanded to
+the tenant's qualified DuckLake catalog table before execution. Historical
+Iceberg/buffer aliases (`union_*`, `committed_*`, `buffer_*`, `staged_*`,
+`iceberg_*`) are not rewritten.
 
-- **Preferred:** `traces`, `logs`, `metrics`
-- **Legacy (rewrite shim only):** `union_spans`, `union_logs`, `union_metrics`,
-  plus historical `committed_*` / `buffer_*` / `staged_*` / `iceberg_*` aliases
-
-Because ingest defaults to flush-through (optional soft coalesce does not add a
-queryable buffer tier), preferred and legacy names resolve to the same DuckLake
-tables / metrics layout JOIN. First-party compilers emit preferred names only;
-the query engine still rewrites legacy names for external SQL.
-
-Metric Prom paths target `metric_samples` and the explicitly named rollup tables
-directly (not the public `metrics` / `union_metrics` compatibility relation).
+First-party compilers emit preferred names only. Ingest defaults to
+flush-through (optional soft coalesce does not add a queryable buffer tier).
 
 Query surfaces include:
 
 - tenant-scoped `POST /v1/query/sql` for internal/debug use;
 - telemetry search, details, fields, sessions, and traces endpoints;
+- Loki- and Tempo-compatible query APIs (see [`compat/matrix.md`](compat/matrix.md));
 - `GET /v1/data/ducklake-connection` for clients that query DuckLake locally;
 - `make duckdb-shell` for local ad hoc access.
 
@@ -303,12 +284,11 @@ interactive workflow.
 
 The scheduler runs when compaction or metadata maintenance is enabled
 (default interval **300s**). It walks the default DuckLake scope and all
-registered tenant scopes. **Metrics are compacted first**, then traces,
-logs, and scores. Merge calls retry through serialization conflicts (8
+registered tenant scopes. Merge calls retry through serialization conflicts (8
 attempts × 2 waves). After each scope pass, Softprobe logs when Parquet
 file counts remain high (≥200).
 
-For `traces`, `logs`, `metric_samples`, and configured metric rollup tables, it can:
+For `traces`, `logs`, and `scores`, it can:
 
 - set the configured target file size;
 - call `ducklake_merge_adjacent_files`;
@@ -316,14 +296,7 @@ For `traces`, `logs`, `metric_samples`, and configured metric rollup tables, it 
 - clean old DuckLake files.
 
 Operators should still batch OTLP upstream (collector `batch` processor) so
-flush-through ingest does not create one tiny file per export. See
-[`perf/prometheus-query-findings.md`](perf/prometheus-query-findings.md)
-Phase B.
-
-**Proposed** metrics physical layout (not current code): day-sharded postings,
-skinny samples, 5m/1h ladder, and `job` collapse — goals and the 39-id
-acceptance suite are in
-[`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
+flush-through ingest does not create one tiny file per export.
 
 Iceberg manifest rewrite and Iceberg REST catalog maintenance do not
 exist in the current path.
@@ -388,12 +361,6 @@ CI on GitHub runs the same Make entry points (`make ci` after
 `make setup`; see `.github/workflows/ci.yml` — fmt, lint, `test`, and `test-e2e`;
 release packaging is `make release` / `release.yml`). Performance suites are
 manual (`make test-perf` / `.github/workflows/performance.yml`).
-Prometheus/Grafana storage-path findings, improvement phases, and the open
-`prometheus-benchmark` compare plan live in
-[`perf/prometheus-query-findings.md`](perf/prometheus-query-findings.md).
-The proposed metrics layout (DuckLake-only, 30d/90d windows, snapshot/file
-bounds) is [`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
-The proposed 39-id acceptance suite is in
 
 `make test` is unit/lightweight; `make test-e2e` is isolated MinIO/PostgreSQL
 integration. `make duckdb-shell` is the supported manual ATTACH smoke.

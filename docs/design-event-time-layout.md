@@ -1,7 +1,7 @@
 # Event-time layout for OTLP tables (traces / logs / scores)
 
 **Status:** Design — **one-clock clean cutover** (aligned with [`design-sql-and-schema.md`](./design-sql-and-schema.md)). Prior “keep `record_date` + dual predicates” plan **superseded**.  
-**Scope:** DuckLake `traces`, `logs`, `scores` (metrics follow the same law in the sql/schema design)  
+**Scope:** DuckLake `traces`, `logs`, `scores`  
 **Related:** [`design-sql-and-schema.md`](./design-sql-and-schema.md), [#73](https://github.com/softprobe/thelake/issues/73)
 
 **Constraints:** (1) simplicity (2) clean cutover — one-time copy OK, no compat (3) no room for mistake

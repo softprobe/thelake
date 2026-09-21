@@ -19,21 +19,6 @@ on:
           - real
           - mock
           - drift
-      drift_prometheus_image:
-        description: Candidate Prometheus repository for drift mode
-        required: false
-        default: ""
-        type: string
-      drift_prometheus_version:
-        description: Candidate Prometheus version for drift mode
-        required: false
-        default: ""
-        type: string
-      drift_prometheus_digest:
-        description: Candidate Prometheus immutable digest for drift mode
-        required: false
-        default: ""
-        type: string
       drift_loki_image:
         description: Candidate Loki repository for drift mode
         required: false
@@ -124,128 +109,6 @@ jobs:
           command -v curl
           curl --version
 
-  prometheus-diff:
-    name: Prometheus differential
-    if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
-    needs: [real-preflight]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CI: "true"
-      CARGO_INCREMENTAL: "0"
-      PROMETHEUS_DIFF_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/prometheus
-      SOFTPROBE_COMPAT_ARTIFACT_DIR: ${{ github.workspace }}/target/compat/prometheus
-      PROMETHEUS_RAW_ARTIFACT: ${{ github.workspace }}/target/compat/prometheus/raw.json
-      PROMETHEUS_NORMALIZED_ARTIFACT: ${{ github.workspace }}/target/compat/prometheus/normalized.json
-      DUCKDB_DOWNLOAD_LIB: "1"
-      SOFTPROBE_API_KEY: ${{ secrets.SOFTPROBE_API_KEY }}
-      SOFTPROBE_TENANT_A_API_KEY: ${{ secrets.SOFTPROBE_TENANT_A_API_KEY }}
-      SOFTPROBE_TENANT_B_API_KEY: ${{ secrets.SOFTPROBE_TENANT_B_API_KEY }}
-
-    steps:
-      - name: Pre-clean workspace permissions
-        run: |
-          set -euo pipefail
-          WS="${GITHUB_WORKSPACE:-$PWD}"
-          if [[ -d "$WS" ]]; then
-            sudo rm -rf "$WS/warehouse" || true
-            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
-          fi
-
-      - name: Checkout
-        uses: actions/checkout@v5
-      - name: Ensure compatibility toolchain
-        uses: ./.github/actions/compat-deps
-
-      - name: Verify pinned compatibility references
-        run: make check-compat-reference-pins
-
-      - name: Run Prometheus differential gates
-        run: make test-prom-compat
-
-      - name: Require passing Prometheus result and evidence
-        run: |
-          set -euo pipefail
-          root="$PROMETHEUS_DIFF_ARTIFACT_DIR"
-          python3 - "$root" <<'PY'
-          import json, pathlib, sys
-          root = pathlib.Path(sys.argv[1])
-          required_root = ("raw.json", "normalized.json")
-          for name in required_root:
-              path = root / name
-              if not path.is_file() or path.stat().st_size == 0:
-                  raise SystemExit(f"missing or empty Prometheus evidence: {path}")
-          required_case = ("request.raw.json", "request.normalized.json", "lake.raw.json", "lake.normalized.json", "oracle.raw.json", "oracle.normalized.json")
-          cases = sorted({path.parent for path in root.rglob("request.raw.json")})
-          if not cases:
-              raise SystemExit("Prometheus evidence has no per-case request artifact")
-          for case in cases:
-              for name in required_case:
-                  path = case / name
-                  if not path.is_file() or path.stat().st_size == 0:
-                      raise SystemExit(f"missing or empty Prometheus case evidence: {path}")
-          bad = {"skipped", "environment_skip", "infrastructure_failure", "product_regression", "fail", "failed", "error"}
-          for path in root.rglob("*.json"):
-              try:
-                  obj = json.loads(path.read_text())
-              except (OSError, ValueError) as exc:
-                  raise SystemExit(f"invalid Prometheus evidence JSON: {path}: {exc}")
-              if path.name.endswith("outcome.json") and (not isinstance(obj, dict) or obj.get("status") != "pass"):
-                  raise SystemExit(f"non-passing Prometheus outcome: {path}")
-              if isinstance(obj, dict) and obj.get("status") in bad:
-                  raise SystemExit(f"non-passing Prometheus result: {path}")
-          PY
-
-      - name: Stage sanitized Prometheus evidence
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p target/compat/upload/prometheus
-          python3 - target/compat/prometheus target/compat/upload/prometheus <<'PY'
-          import os, pathlib, re, shutil, sys
-          source, destination = map(pathlib.Path, sys.argv[1:])
-          if not source.is_dir(): raise SystemExit(f"missing evidence directory: {source}")
-          values = [os.environ.get(name, "") for name in ("SOFTPROBE_API_KEY", "SOFTPROBE_TENANT_A_API_KEY", "SOFTPROBE_TENANT_B_API_KEY")]
-          values = [value for value in values if value]
-          bearer = re.compile(r"(?i)(Bearer\s+)[^\s\"']+")
-          for path in source.rglob("*"):
-              if not path.is_file() or ".work" in path.parts: continue
-              target = destination / path.relative_to(source); target.parent.mkdir(parents=True, exist_ok=True)
-              try: text = path.read_text()
-              except UnicodeDecodeError: shutil.copy2(path, target); continue
-              for value in values: text = text.replace(value, "[REDACTED]")
-              text = re.sub(r"(?im)^[ \t]*[\"']?authorization[\"']?\s*:\s*[^\r\n]*(?:\r?\n|$)", "", text)
-              target.write_text(bearer.sub(r"\1[REDACTED]", text))
-          PY
-
-      - name: Scan Prometheus evidence for credentials and require upload inputs
-        if: always()
-        run: |
-          set -euo pipefail
-          test -d target/compat/upload/prometheus
-          test -s target/compat/prometheus/raw.json
-          test -s target/compat/prometheus/normalized.json
-          python3 - target/compat/upload/prometheus <<'PY'
-          import os, pathlib, re, sys
-          root = pathlib.Path(sys.argv[1])
-          values = [os.environ.get(name, "") for name in ("SOFTPROBE_API_KEY", "SOFTPROBE_TENANT_A_API_KEY", "SOFTPROBE_TENANT_B_API_KEY")]
-          values = [value.encode() for value in values if value]
-          authorization = re.compile(rb"(?im)^\s*[\"']?authorization[\"']?\s*:")
-          files = [path for path in root.rglob("*") if path.is_file()]
-          if not files: raise SystemExit("Prometheus upload evidence is empty")
-          for path in files:
-              data = path.read_bytes()
-              if any(value in data for value in values) or authorization.search(data):
-                  raise SystemExit(f"unsanitized credential or Authorization header in {path}")
-          PY
-
-      - name: Upload Prometheus evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: prometheus-differential-evidence
-          path: target/compat/upload/prometheus/
-          if-no-files-found: error
 
   loki-diff:
     name: Loki differential
@@ -482,7 +345,7 @@ jobs:
     # always() lets the job record prerequisite failures and still upload its
     # own evidence. The service-backed steps below are gated on success.
     if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
-    needs: [real-preflight, prometheus-diff, loki-diff, tempo-diff]
+    needs: [real-preflight, loki-diff, tempo-diff]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -529,14 +392,12 @@ jobs:
       - name: Require successful protocol prerequisites for real validation
         if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
         env:
-          PROMETHEUS_RESULT: ${{ needs.prometheus-diff.result }}
           LOKI_RESULT: ${{ needs.loki-diff.result }}
           TEMPO_RESULT: ${{ needs.tempo-diff.result }}
         run: |
           set -euo pipefail
           failed=0
           for prerequisite in \
-            "prometheus-diff=$PROMETHEUS_RESULT" \
             "loki-diff=$LOKI_RESULT" \
             "tempo-diff=$TEMPO_RESULT"; do
             if [[ "${prerequisite#*=}" != success ]]; then
@@ -688,13 +549,13 @@ jobs:
     # The matrix is deliberately after all protocol and Grafana prerequisites.
     # Mock mode still reaches this job because the prerequisite jobs are skipped.
     if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
-    needs: [real-preflight, prometheus-diff, loki-diff, tempo-diff, grafana-system]
+    needs: [real-preflight, loki-diff, tempo-diff, grafana-system]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        protocol: [prometheus, loki, tempo]
+        protocol: [loki, tempo]
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
@@ -732,7 +593,6 @@ jobs:
       - name: Require successful prerequisites for real conformance
         if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
         env:
-          PROMETHEUS_RESULT: ${{ needs.prometheus-diff.result }}
           LOKI_RESULT: ${{ needs.loki-diff.result }}
           TEMPO_RESULT: ${{ needs.tempo-diff.result }}
           GRAFANA_RESULT: ${{ needs.grafana-system.result }}
@@ -740,7 +600,6 @@ jobs:
           set -euo pipefail
           failed=0
           for prerequisite in \
-            "prometheus-diff=$PROMETHEUS_RESULT" \
             "loki-diff=$LOKI_RESULT" \
             "tempo-diff=$TEMPO_RESULT" \
             "grafana-system=$GRAFANA_RESULT"; do
@@ -869,9 +728,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      DRIFT_PROMETHEUS_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
-      DRIFT_PROMETHEUS_VERSION: ${{ inputs.drift_prometheus_version || vars.COMPAT_DRIFT_PROMETHEUS_VERSION || secrets.COMPAT_DRIFT_PROMETHEUS_VERSION }}
-      DRIFT_PROMETHEUS_DIGEST: ${{ inputs.drift_prometheus_digest || vars.COMPAT_DRIFT_PROMETHEUS_DIGEST || secrets.COMPAT_DRIFT_PROMETHEUS_DIGEST }}
       DRIFT_LOKI_IMAGE: ${{ inputs.drift_loki_image || vars.COMPAT_DRIFT_LOKI_IMAGE || secrets.COMPAT_DRIFT_LOKI_IMAGE }}
       DRIFT_LOKI_VERSION: ${{ inputs.drift_loki_version || vars.COMPAT_DRIFT_LOKI_VERSION || secrets.COMPAT_DRIFT_LOKI_VERSION }}
       DRIFT_LOKI_DIGEST: ${{ inputs.drift_loki_digest || vars.COMPAT_DRIFT_LOKI_DIGEST || secrets.COMPAT_DRIFT_LOKI_DIGEST }}
@@ -909,10 +765,10 @@ jobs:
               "release_evidence": False,
               "status": "pending",
               "candidate": {key.removeprefix("DRIFT_").lower(): os.environ.get(key, "") for key in (
-                  "DRIFT_PROMETHEUS_IMAGE", "DRIFT_PROMETHEUS_VERSION", "DRIFT_PROMETHEUS_DIGEST", "DRIFT_LOKI_IMAGE", "DRIFT_LOKI_VERSION", "DRIFT_LOKI_DIGEST",
+                  "DRIFT_LOKI_IMAGE", "DRIFT_LOKI_VERSION", "DRIFT_LOKI_DIGEST",
                   "DRIFT_TEMPO_IMAGE", "DRIFT_TEMPO_VERSION", "DRIFT_TEMPO_DIGEST", "DRIFT_GRAFANA_IMAGE", "DRIFT_GRAFANA_VERSION", "DRIFT_GRAFANA_DIGEST")},
               "baseline": {key.removeprefix("BASELINE_").lower(): os.environ.get(key, "") for key in (
-                  "BASELINE_PROMETHEUS_IMAGE", "BASELINE_PROMETHEUS_VERSION", "BASELINE_LOKI_IMAGE", "BASELINE_LOKI_VERSION",
+                  "BASELINE_LOKI_IMAGE", "BASELINE_LOKI_VERSION",
                   "BASELINE_TEMPO_IMAGE", "BASELINE_TEMPO_VERSION", "BASELINE_GRAFANA_IMAGE", "BASELINE_GRAFANA_VERSION")},
           }
           json.dump(data, open("target/compat/drift/preflight/metadata.json", "w"), indent=2)
@@ -925,8 +781,7 @@ jobs:
           python3 - <<'PY'
           import os, re
           pairs = (
-              ("PROMETHEUS", os.environ["BASELINE_PROMETHEUS_IMAGE"], os.environ["BASELINE_PROMETHEUS_VERSION"]),
-              ("LOKI", os.environ["BASELINE_LOKI_IMAGE"], os.environ["BASELINE_LOKI_VERSION"]),
+                            ("LOKI", os.environ["BASELINE_LOKI_IMAGE"], os.environ["BASELINE_LOKI_VERSION"]),
               ("TEMPO", os.environ["BASELINE_TEMPO_IMAGE"], os.environ["BASELINE_TEMPO_VERSION"]),
               ("GRAFANA", os.environ["BASELINE_GRAFANA_IMAGE"], os.environ["BASELINE_GRAFANA_VERSION"]),
           )
@@ -941,12 +796,12 @@ jobs:
                   raise SystemExit(f"mutable candidate {name.lower()} version")
               if version == baseline_version:
                   raise SystemExit(f"candidate {name.lower()} version is unchanged from baseline")
-          for name in ("PROMETHEUS", "LOKI", "TEMPO", "GRAFANA"):
+          for name in ("LOKI", "TEMPO", "GRAFANA"):
               digest = os.environ.get(f"DRIFT_{name}_DIGEST", "")
               if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
                   raise SystemExit(f"{name.lower()} drift candidate requires an immutable sha256 digest")
           PY
-          for signal in prometheus loki tempo grafana; do
+          for signal in loki tempo grafana; do
             upper=$(printf '%s' "$signal" | tr '[:lower:]' '[:upper:]')
             image_var="DRIFT_${upper}_IMAGE"
             digest_var="DRIFT_${upper}_DIGEST"
@@ -991,40 +846,6 @@ jobs:
           path: target/compat/drift/preflight/
           if-no-files-found: error
 
-  drift-prometheus:
-    name: Drift Prometheus candidate
-    if: ${{ inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
-    needs: [drift-preflight]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      DRIFT_CANDIDATE_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
-      DRIFT_CANDIDATE_VERSION: ${{ inputs.drift_prometheus_version || vars.COMPAT_DRIFT_PROMETHEUS_VERSION || secrets.COMPAT_DRIFT_PROMETHEUS_VERSION }}
-      DRIFT_CANDIDATE_DIGEST: ${{ inputs.drift_prometheus_digest || vars.COMPAT_DRIFT_PROMETHEUS_DIGEST || secrets.COMPAT_DRIFT_PROMETHEUS_DIGEST }}
-      OUT: ${{ github.workspace }}/target/compat/drift/prometheus
-    steps:
-      - name: Pre-clean workspace permissions
-        run: |
-          set -euo pipefail
-          WS="${GITHUB_WORKSPACE:-$PWD}"
-          if [[ -d "$WS" ]]; then
-            sudo rm -rf "$WS/warehouse" || true
-            sudo chown -R "$(id -u):$(id -g)" "$WS" || true
-          fi
-      - uses: actions/checkout@v5
-      - name: Ensure compatibility toolchain
-        uses: ./.github/actions/compat-deps
-      - name: Load baseline references from manifest
-        run: scripts/compat/export-reference-env.sh >> "$GITHUB_ENV"
-      - name: Run Prometheus drift contract
-        run: scripts/compat/conformance.sh --drift --protocol prometheus --out "$OUT" --candidate-image "$DRIFT_CANDIDATE_IMAGE" --candidate-version "$DRIFT_CANDIDATE_VERSION" --candidate-digest "$DRIFT_CANDIDATE_DIGEST" --baseline-image "$DRIFT_BASELINE_IMAGE" --baseline-version "$DRIFT_BASELINE_VERSION"
-      - name: Upload Prometheus drift evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: compatibility-drift-prometheus-evidence
-          path: target/compat/drift/prometheus/
-          if-no-files-found: error
 
   drift-loki:
     name: Drift Loki candidate
@@ -1103,9 +924,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      DRIFT_PROMETHEUS_IMAGE: ${{ inputs.drift_prometheus_image || vars.COMPAT_DRIFT_PROMETHEUS_IMAGE || secrets.COMPAT_DRIFT_PROMETHEUS_IMAGE }}
-      DRIFT_PROMETHEUS_VERSION: ${{ inputs.drift_prometheus_version || vars.COMPAT_DRIFT_PROMETHEUS_VERSION || secrets.COMPAT_DRIFT_PROMETHEUS_VERSION }}
-      DRIFT_PROMETHEUS_DIGEST: ${{ inputs.drift_prometheus_digest || vars.COMPAT_DRIFT_PROMETHEUS_DIGEST || secrets.COMPAT_DRIFT_PROMETHEUS_DIGEST }}
       DRIFT_LOKI_IMAGE: ${{ inputs.drift_loki_image || vars.COMPAT_DRIFT_LOKI_IMAGE || secrets.COMPAT_DRIFT_LOKI_IMAGE }}
       DRIFT_LOKI_VERSION: ${{ inputs.drift_loki_version || vars.COMPAT_DRIFT_LOKI_VERSION || secrets.COMPAT_DRIFT_LOKI_VERSION }}
       DRIFT_LOKI_DIGEST: ${{ inputs.drift_loki_digest || vars.COMPAT_DRIFT_LOKI_DIGEST || secrets.COMPAT_DRIFT_LOKI_DIGEST }}
@@ -1144,7 +962,6 @@ jobs:
             document = YAML.load_file(path)
             refs = document.fetch("references")
             values = {
-              "prometheus" => [ENV.fetch("DRIFT_PROMETHEUS_IMAGE"), ENV.fetch("DRIFT_PROMETHEUS_VERSION"), ENV.fetch("DRIFT_PROMETHEUS_DIGEST")],
               "loki" => [ENV.fetch("DRIFT_LOKI_IMAGE"), ENV.fetch("DRIFT_LOKI_VERSION"), ENV.fetch("DRIFT_LOKI_DIGEST")],
               "tempo" => [ENV.fetch("DRIFT_TEMPO_IMAGE"), ENV.fetch("DRIFT_TEMPO_VERSION"), ENV.fetch("DRIFT_TEMPO_DIGEST")],
               "grafana" => [ENV.fetch("DRIFT_GRAFANA_IMAGE"), ENV.fetch("DRIFT_GRAFANA_VERSION"), ENV.fetch("DRIFT_GRAFANA_DIGEST")]
@@ -1195,7 +1012,7 @@ jobs:
   drift-report:
     name: Scheduled candidate drift report
     if: ${{ always() && (inputs.selector == 'drift' || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0')) }}
-    needs: [drift-preflight, drift-prometheus, drift-loki, drift-tempo, drift-grafana]
+    needs: [drift-preflight, drift-loki, drift-tempo, drift-grafana]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1209,7 +1026,6 @@ jobs:
       - name: Build non-release drift report
         env:
           PREFLIGHT_RESULT: ${{ needs.drift-preflight.result }}
-          PROMETHEUS_RESULT: ${{ needs.drift-prometheus.result }}
           LOKI_RESULT: ${{ needs.drift-loki.result }}
           TEMPO_RESULT: ${{ needs.drift-tempo.result }}
           GRAFANA_RESULT: ${{ needs.drift-grafana.result }}
@@ -1221,7 +1037,6 @@ jobs:
           root = pathlib.Path("target/compat/drift/downloaded")
           expected = {
               "compatibility-drift-preflight-evidence": ("metadata.json",),
-              "compatibility-drift-prometheus-evidence": ("versions.json", "report.jsonl"),
               "compatibility-drift-loki-evidence": ("versions.json", "report.jsonl"),
               "compatibility-drift-tempo-evidence": ("versions.json", "report.jsonl"),
               "compatibility-drift-grafana-evidence": ("summary.json",),
@@ -1239,7 +1054,7 @@ jobs:
                   matches = list(path.rglob(name))
                   if not matches or any(item.stat().st_size == 0 for item in matches):
                       errors.append(f"missing or empty {name} in {artifact}")
-              is_protocol_artifact = artifact.startswith("compatibility-drift-") and artifact.endswith("-evidence") and artifact.split("-")[-2] in {"prometheus", "loki", "tempo"}
+              is_protocol_artifact = artifact.startswith("compatibility-drift-") and artifact.endswith("-evidence") and artifact.split("-")[-2] in {"loki", "tempo"}
               if is_protocol_artifact:
                   configuration_failures = list(path.rglob("configuration_failure.json"))
                   if configuration_failures:
@@ -1260,7 +1075,7 @@ jobs:
                       for name in ("raw.json", "normalized.json", "diff.json"):
                           if not list(path.rglob(name)):
                               errors.append(f"missing drift semantic artifact {name} in {artifact}")
-          jobs = {name: os.environ.get(name, "unknown") for name in ("PREFLIGHT_RESULT", "PROMETHEUS_RESULT", "LOKI_RESULT", "TEMPO_RESULT", "GRAFANA_RESULT")}
+          jobs = {name: os.environ.get(name, "unknown") for name in ("PREFLIGHT_RESULT", "LOKI_RESULT", "TEMPO_RESULT", "GRAFANA_RESULT")}
           drift_only = True
           mock = False
           result_names = jobs
@@ -1412,15 +1227,12 @@ jobs:
           set -euo pipefail
           bash tests/compat/conformance_artifacts_test.sh
           cargo test --test tests compat_phase0:: -- --test-threads=1
-          cargo test --test tests compat_prometheus:: -- --test-threads=1
           cargo test --test tests compat_loki::loki_phase2_contract_cases -- --test-threads=1
           cargo test --test tests compat_tempo::tempo_phase3_contract_cases -- --test-threads=1
 
       - name: Run parser and serializer checks
         run: |
           set -euo pipefail
-          cargo test --lib compat::promql::parse:: -- --test-threads=1
-          cargo test --lib compat::prometheus::params:: -- --test-threads=1
           cargo test --lib compat::loki::params:: -- --test-threads=1
           cargo test --lib compat::loki::encode:: -- --test-threads=1
 
@@ -1455,7 +1267,6 @@ jobs:
     needs:
       - fast-pr
       - real-preflight
-      - prometheus-diff
       - loki-diff
       - tempo-diff
       - grafana-system
@@ -1468,7 +1279,6 @@ jobs:
       DRIFT_ONLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') || (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
       FAST_PR_RESULT: ${{ needs.fast-pr.result }}
       REAL_PREFLIGHT_RESULT: ${{ needs.real-preflight.result }}
-      PROMETHEUS_RESULT: ${{ needs.prometheus-diff.result }}
       LOKI_RESULT: ${{ needs.loki-diff.result }}
       TEMPO_RESULT: ${{ needs.tempo-diff.result }}
       GRAFANA_RESULT: ${{ needs.grafana-system.result }}
@@ -1510,7 +1320,6 @@ jobs:
           result_names = {
               "fast-pr": os.environ.get("FAST_PR_RESULT", "unknown"),
               "real-preflight": os.environ.get("REAL_PREFLIGHT_RESULT", "unknown"),
-              "prometheus-diff": os.environ.get("PROMETHEUS_RESULT", "unknown"),
               "loki-diff": os.environ.get("LOKI_RESULT", "unknown"),
               "tempo-diff": os.environ.get("TEMPO_RESULT", "unknown"),
               "grafana-system": os.environ.get("GRAFANA_RESULT", "unknown"),
@@ -1522,7 +1331,7 @@ jobs:
               required = {"grafana-system", "manifest-conformance"}
           else:
               required = {
-                  "real-preflight", "prometheus-diff", "loki-diff", "tempo-diff",
+                  "real-preflight", "loki-diff", "tempo-diff",
                   "grafana-system", "manifest-conformance",
               }
               if event_name == "pull_request":
@@ -1533,14 +1342,13 @@ jobs:
                   expected_artifacts["fast-pr-compatibility-evidence"] = ("report.txt",)
               if not mock:
                   expected_artifacts.update({
-                      "prometheus-differential-evidence": ("raw.json", "normalized.json"),
                       "loki-differential-evidence": ("raw.json", "normalized.json"),
                       "tempo-differential-evidence": ("raw.json", "normalized.json"),
                       "grafana-system-real-evidence": ("outcome.json", "summary.json", "G1.outcome.json", "G2.outcome.json", "G3.outcome.json", "G4.outcome.json", "G5.outcome.json", "G6.outcome.json", "G7.outcome.json", "G8.outcome.json"),
                   })
               else:
                   expected_artifacts["grafana-system-mock-evidence"] = ("NOTICE.txt",)
-              for protocol in ("prometheus", "loki", "tempo"):
+              for protocol in ("loki", "tempo"):
                   expected_artifacts[f"manifest-conformance-{protocol}-{'mock' if mock else 'real'}-evidence"] = ("report.jsonl", "versions.json")
           errors = []
           infrastructure_skips = []
@@ -1624,7 +1432,6 @@ jobs:
 
           if not mock and not drift_only:
               excluded_cases = {
-                  "prometheus-metadata-discovery",
                   "tempo-search-span-selector",
                   "tempo-search-tags",
                   "tempo-tag-values-peer-service",

@@ -43,8 +43,8 @@ fn capability_manifest_parses_and_pins_unsupported_feature() {
 fn every_declared_compat_route_has_isolation_probe() {
     let probes = declared_compat_probe_paths();
     assert!(
-        probes.len() >= 16,
-        "expected full matrix probe list, got {}",
+        probes.len() >= 10,
+        "expected Loki/Tempo matrix probe list, got {}",
         probes.len()
     );
     for (method, path) in probes {
@@ -62,7 +62,7 @@ async fn compat_routes_deny_missing_and_invalid_bearer() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/query")
+                .uri("/loki/api/v1/query")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -104,44 +104,7 @@ async fn compat_routes_authenticated_return_expected_status() {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-        if path.starts_with("/api/v1/") {
-            // Phase 1: discovery succeeds (empty lake → empty data).
-            // query / query_range without params → bad_data (400).
-            if path == "/api/v1/labels"
-                || path.starts_with("/api/v1/label/")
-                || path == "/api/v1/series"
-                || path == "/api/v1/metadata"
-            {
-                assert_eq!(status, StatusCode::OK, "{method} {path}: {json}");
-                assert_eq!(json["status"], "success", "{method} {path}: {json}");
-                if path == "/api/v1/labels"
-                    || path.starts_with("/api/v1/label/")
-                    || path == "/api/v1/series"
-                {
-                    assert!(
-                        json["data"].is_array(),
-                        "{method} {path}: expected array data {json}"
-                    );
-                    if path == "/api/v1/labels" || path.starts_with("/api/v1/label/") {
-                        assert_eq!(
-                            json["data"].as_array().unwrap().len(),
-                            0,
-                            "{method} {path}: empty lake labels should be []"
-                        );
-                    }
-                } else if path == "/api/v1/metadata" {
-                    assert!(
-                        json["data"].is_object(),
-                        "{method} {path}: expected object data {json}"
-                    );
-                }
-            } else {
-                // query / query_range without `query` → bad_data
-                assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {json}");
-                assert_eq!(json["status"], "error", "{method} {path}: {json}");
-                assert_eq!(json["errorType"], "bad_data", "{method} {path}: {json}");
-            }
-        } else if path.starts_with("/loki/") {
+        if path.starts_with("/loki/") {
             // Phase 2: Loki routes are live. Query endpoints validate their
             // required query parameter; discovery endpoints return empty
             // success data against an empty lake (probes include start/end).
@@ -254,28 +217,28 @@ async fn tempo_mismatched_scope_header_is_forbidden() {
 }
 
 #[tokio::test]
-async fn compat_query_tenant_id_param_does_not_override_auth() {
+async fn loki_query_tenant_id_param_does_not_override_auth() {
     // Negative isolation: query-string tenant_id must not change authenticated scope.
     let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
     let resp = router
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/query?query=up&tenant_id=attacker")
+                .uri("/loki/api/v1/labels?start=1700000000000000000&end=1700000001000000000&tenant_id=attacker")
                 .header("Authorization", "Bearer good-key")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    // Authenticated for tenant-compat; empty lake → success with empty vector.
+    // Authenticated for tenant-compat; empty lake → success with empty labels.
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["status"], "success");
-    assert_eq!(json["data"]["resultType"], "vector");
+    assert_eq!(json["data"], serde_json::json!([]));
 }
 
 #[tokio::test]
@@ -299,54 +262,6 @@ async fn tempo_query_tenant_id_param_does_not_override_auth() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["traces"], serde_json::json!([]));
-}
-
-#[tokio::test]
-async fn compat_query_tenant_id_body_does_not_override_auth() {
-    // Negative isolation: form body tenant_id must not change authenticated scope.
-    let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
-    let resp = router
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/query")
-                .header("Authorization", "Bearer good-key")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("query=up&tenant_id=attacker"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["status"], "success");
-    assert_eq!(json["data"]["resultType"], "vector");
-}
-
-#[tokio::test]
-async fn prometheus_labels_empty_lake_success() {
-    let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
-    let resp = router
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/labels")
-                .header("Authorization", "Bearer good-key")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["status"], "success");
-    assert_eq!(json["data"], serde_json::json!([]));
 }
 
 #[test]

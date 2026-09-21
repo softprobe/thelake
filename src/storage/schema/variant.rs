@@ -26,8 +26,6 @@ pub fn hot_map_columns(table_name: &str) -> &'static [&'static str] {
             "links",
         ],
         "logs" => &["attributes", "resource_attributes"],
-        // Skinny metric_samples have no attribute bags; series labels are the hot MAP.
-        "metric_series" => &["labels"],
         _ => &[],
     }
 }

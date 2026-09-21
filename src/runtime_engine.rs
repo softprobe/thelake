@@ -125,33 +125,17 @@ impl RuntimeEngineManager {
         #[cfg(test)]
         self.build_counter.fetch_add(1, Ordering::Relaxed);
 
-        let (scope, counts_toward_liveness) =
-            if crate::self_monitoring::is_reserved_tenant_id(tenant_id) {
-                let sm = &self.config.self_monitoring;
-                if !sm.enabled {
-                    bail!("self-monitoring is disabled; cannot bind ops tenant");
-                }
-                if sm.ops_metadata_schema.trim().is_empty() || sm.ops_data_path.trim().is_empty() {
-                    bail!("self_monitoring.ops_metadata_schema and ops_data_path are required");
-                }
-                (
-                    crate::self_monitoring::ops_scope_from_config(self.config.as_ref()),
-                    false,
-                )
-            } else {
-                let resolver = self.scope_registry.as_ref();
-                let scope = if let Some(resolver) = resolver {
-                    resolver.resolve_or_create(tenant_id).await?
-                } else {
-                    DuckLakeScope {
-                        metadata_schema: self.config.ducklake.metadata_schema.clone(),
-                        data_path: self.config.ducklake.data_path.clone(),
-                    }
-                };
-                (scope, true)
-            };
-
         let resolver = self.scope_registry.as_ref();
+        let scope = if let Some(resolver) = resolver {
+            resolver.resolve_or_create(tenant_id).await?
+        } else {
+            DuckLakeScope {
+                metadata_schema: self.config.ducklake.metadata_schema.clone(),
+                data_path: self.config.ducklake.data_path.clone(),
+            }
+        };
+        let counts_toward_liveness = true;
+
         let storage = Arc::new(
             IngestPipeline::build_tenant_storage(
                 self.config.as_ref(),
@@ -476,8 +460,8 @@ RETURNING scope_id;"#,
         let schema = scope.metadata_schema.replace('"', "\"\"");
         tx.execute(
             &format!(
-                // Supersede only the same (target_kind, target_tables) pair so traces and
-                // metric_samples telemetry_columns specs can both stay active.
+                // Supersede only the same (target_kind, target_tables) pair so distinct
+                // telemetry_columns specs (e.g. traces vs logs) can both stay active.
                 r#"UPDATE "{schema}".promotion_specs
 SET status = 'inactive'
 WHERE status = 'active'

@@ -2,7 +2,7 @@
   "case": "missing_authorization",
   "request": {
     "method": "GET",
-    "path": "/api/v1/query",
+    "path": "/loki/api/v1/labels",
     "headers": {}
   },
   "expect": {

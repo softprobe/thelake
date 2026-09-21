@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::prometheus::sanitize_label_name;
+use super::labels::sanitize_label_name;
 
 /// Conservative default stream-label allowlist (low cardinality).
 pub const DEFAULT_STREAM_LABEL_ALLOWLIST: &[&str] = &[

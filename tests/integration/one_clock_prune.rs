@@ -12,7 +12,7 @@ use axum::Router;
 use chrono::{TimeZone, Utc};
 use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::config::Config;
-use softprobe_runtime::models::{Log, Metric, Span, SpanEvent};
+use softprobe_runtime::models::{Log, Span, SpanEvent};
 use softprobe_runtime::runtime_api::runtime_control_routes;
 use softprobe_runtime::storage::ducklake::DuckLakeWriter;
 use tempfile::TempDir;
@@ -86,23 +86,6 @@ fn timestamp_type(conn: &duckdb::Connection, table: &str) -> String {
         |row| row.get(0),
     )
     .unwrap_or_else(|e| panic!("timestamp type for {table}: {e}"))
-}
-
-fn metric(name: &str, timestamp: chrono::DateTime<Utc>, value: f64) -> Metric {
-    Metric {
-        metric_name: name.into(),
-        description: "one-clock integration metric".into(),
-        unit: "1".into(),
-        metric_type: "gauge".into(),
-        timestamp,
-        value,
-        attributes: HashMap::from([(String::from("job"), String::from("one-clock"))]),
-        resource_attributes: HashMap::from([(
-            String::from("service.name"),
-            String::from("contract"),
-        )]),
-        ..Metric::default()
-    }
 }
 
 fn span(day: u32, id: &str) -> Span {
@@ -192,32 +175,6 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     let data_path = config.ducklake.data_path.clone();
     let writer = DuckLakeWriter::new(&config, None).await.expect("writer");
 
-    let metrics = [
-        metric(
-            "persistent_metric",
-            Utc.with_ymd_and_hms(2026, 1, 10, 12, 0, 0).unwrap(),
-            1.0,
-        ),
-        metric(
-            "persistent_metric",
-            Utc.with_ymd_and_hms(2026, 2, 10, 12, 0, 0).unwrap(),
-            2.0,
-        ),
-        metric(
-            "persistent_metric",
-            Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0).unwrap(),
-            3.0,
-        ),
-        metric(
-            "persistent_metric",
-            Utc.with_ymd_and_hms(2026, 9, 11, 12, 0, 0).unwrap(),
-            4.0,
-        ),
-    ];
-    writer
-        .write_metric_batches(vec![metrics.to_vec()])
-        .await
-        .expect("metrics writer");
     writer
         .write_span_batches(vec![vec![span(10, "a"), span(11, "b")]])
         .await
@@ -230,13 +187,7 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     let mut paths = Vec::new();
     walk_paths(Path::new(&data_path), &mut paths);
     let joined = paths.join("\n");
-    for table in [
-        "metric_samples",
-        "metric_series",
-        "metric_postings",
-        "traces",
-        "logs",
-    ] {
+    for table in ["traces", "logs"] {
         assert!(
             joined.contains(&format!("{table}/year=2026/month=9/day=10")),
             "{table} day A:\n{joined}"
@@ -252,36 +203,15 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     );
 
     let conn = attach(&metadata_path, &data_path);
-    assert_eq!(
-        timestamp_type(&conn, "metric_samples"),
-        "TIMESTAMP WITH TIME ZONE"
-    );
-    assert_eq!(
-        timestamp_type(&conn, "metric_series"),
-        "TIMESTAMP WITH TIME ZONE"
-    );
     assert_eq!(timestamp_type(&conn, "traces"), "TIMESTAMP_NS");
     assert_eq!(timestamp_type(&conn, "logs"), "TIMESTAMP_NS");
 
-    let series_days: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM softprobe.metric_series \
-             WHERE timestamp >= TIMESTAMPTZ '2026-09-10' AND timestamp < TIMESTAMPTZ '2026-09-12'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("persistent series query");
-    assert_eq!(
-        series_days, 2,
-        "series metadata must persist on both query days"
-    );
-
-    let narrow = "SELECT series_id, value FROM softprobe.metric_samples \
-                  WHERE timestamp >= TIMESTAMPTZ '2026-09-10' \
-                    AND timestamp < TIMESTAMPTZ '2026-09-11'";
-    let wide = "SELECT series_id, value FROM softprobe.metric_samples \
-                WHERE timestamp >= TIMESTAMPTZ '2026-09-10' \
-                  AND timestamp < TIMESTAMPTZ '2026-09-12'";
+    let narrow = "SELECT trace_id FROM softprobe.traces \
+                  WHERE timestamp >= '2026-09-10'::TIMESTAMP_NS \
+                    AND timestamp < '2026-09-11'::TIMESTAMP_NS";
+    let wide = "SELECT trace_id FROM softprobe.traces \
+                WHERE timestamp >= '2026-09-10'::TIMESTAMP_NS \
+                  AND timestamp < '2026-09-12'::TIMESTAMP_NS";
     let wide_plan = explain_plan(&conn, wide);
     assert_eq!(
         files_read_count(&wide_plan),
@@ -294,16 +224,6 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
         Some(1),
         "narrow plan:\n{narrow_plan}"
     );
-    assert_eq!(
-        conn.query_row(narrow, [], |row| row.get::<_, u64>(0))
-            .unwrap_or_default(),
-        conn.query_row(
-            "SELECT series_id FROM softprobe.metric_samples WHERE timestamp = TIMESTAMPTZ '2026-09-10 12:00:00+00'",
-            [],
-            |row| row.get::<_, u64>(0),
-        )
-        .unwrap()
-    );
     assert!(
         !flatten_plan(&narrow_plan).contains("day=11"),
         "narrow plan opened day B:\n{narrow_plan}"
@@ -311,19 +231,11 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
 }
 
 #[tokio::test]
-async fn recipe_gate_covers_traces_logs_metrics_and_alias_expansion() {
+async fn recipe_gate_covers_traces_logs_and_alias_expansion() {
     let temp = TempDir::new().expect("tempdir");
     let mut config = crate::util::config::file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
     let writer = DuckLakeWriter::new(&config, None).await.expect("writer");
-    writer
-        .write_metric_batches(vec![vec![metric(
-            "gate_metric",
-            Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0).unwrap(),
-            1.0,
-        )]])
-        .await
-        .expect("metric seed");
     writer
         .write_span_batches(vec![vec![span(10, "gate")]])
         .await
@@ -334,11 +246,7 @@ async fn recipe_gate_covers_traces_logs_metrics_and_alias_expansion() {
         .expect("log seed");
 
     let router = build_router(config).await;
-    for sql in [
-        "SELECT count(*) FROM traces",
-        "SELECT count(*) FROM logs",
-        "SELECT count(*) FROM metrics",
-    ] {
+    for sql in ["SELECT count(*) FROM traces", "SELECT count(*) FROM logs"] {
         assert_eq!(
             post_sql(&router, sql).await,
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -348,7 +256,6 @@ async fn recipe_gate_covers_traces_logs_metrics_and_alias_expansion() {
     for sql in [
         "SELECT count(*) FROM traces WHERE timestamp >= '2026-09-10'::TIMESTAMP_NS",
         "SELECT count(*) FROM logs WHERE timestamp <= '2026-09-11'::TIMESTAMP_NS",
-        "SELECT count(*) FROM metrics WHERE timestamp >= TIMESTAMPTZ '2026-09-10'",
     ] {
         assert_eq!(post_sql(&router, sql).await, StatusCode::OK, "{sql}");
     }

@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Deterministic cross-signal dashboard with native Prometheus, Loki, and Tempo panels, tenant-A pivots, and dashboard variables.",
+  "description": "Deterministic cross-signal dashboard with native Loki and Tempo panels, tenant-A pivots, and dashboard variables.",
   "editable": false,
   "id": null,
   "links": [
@@ -28,41 +28,13 @@
   "panels": [
     {
       "datasource": {
-        "type": "prometheus",
-        "uid": "softprobe-prom-a"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 0
-      },
-      "id": 1,
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "softprobe-prom-a"
-          },
-          "editorMode": "code",
-          "expr": "k6_vus",
-          "legendFormat": "vus",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Metrics",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
         "type": "loki",
         "uid": "softprobe-loki-a"
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 8,
+        "w": 12,
+        "x": 0,
         "y": 0
       },
       "id": 2,
@@ -78,7 +50,7 @@
             "uid": "softprobe-loki-a"
           },
           "editorMode": "code",
-          "expr": "{}",
+          "expr": "{service_name=~\"$service\"}",
           "queryType": "range",
           "refId": "A"
         }
@@ -93,8 +65,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
+        "w": 12,
+        "x": 12,
         "y": 0
       },
       "id": 3,
@@ -125,25 +97,6 @@
   ],
   "templating": {
     "list": [
-      {
-        "current": {
-          "text": "load-generator",
-          "value": "load-generator"
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "softprobe-prom-a"
-        },
-        "definition": "label_values(k6_http_reqs, job)",
-        "includeAll": false,
-        "label": "Metric job",
-        "name": "job",
-        "options": [],
-        "query": "label_values(k6_http_reqs, job)",
-        "refresh": 1,
-        "skipUrlSync": false,
-        "type": "query"
-      },
       {
         "current": {
           "text": "checkout",

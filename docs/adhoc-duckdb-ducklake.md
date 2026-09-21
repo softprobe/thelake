@@ -23,7 +23,7 @@ If `CONFIG_FILE` is wrong, you will ATTACH to an empty or wrong schema and see n
 make duckdb-shell
 ```
 
-The script prints the resolved config path and DuckLake scope from the generated init header, adds **`traces` / `logs` / `metric_samples` views only when those tables exist**, and runs a **`SELECT 1`** smoke before the REPL.
+The script prints the resolved config path and DuckLake scope from the generated init header, adds **`traces` / `logs` views only when those tables exist**, and runs a **`SELECT 1`** smoke before the REPL.
 
 ## Manual ATTACH (reference)
 
@@ -37,9 +37,4 @@ python3 scripts/duckdb_ducklake_render_init.py --config "$CONFIG_FILE" --meta /d
 
 Qualified names follow the runtime: **`catalog_alias.metadata_schema.table`** when `metadata_schema` is not `main`, else **`catalog_alias.table`**.
 
-## `union_spans` / `union_logs` / `union_metrics` (legacy)
-
-Those names are rewritten by the **runtime** query engine to the same DuckLake
-tables / metrics layout JOIN as **`traces` / `logs` / `metrics`**. Prefer the
-latter in new SQL. A plain `duckdb` CLI session does not apply the rewrite —
-query **`traces` / `logs`** views (after ingest) or the qualified DuckLake tables.
+Orphaned `metric_*` names from older catalogs are not a product path.

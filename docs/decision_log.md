@@ -21,7 +21,7 @@ catalog, snapshots, data-file management, and DuckDB integration directly.
 
 ### Decision
 
-Use DuckLake as the sole durable store for spans, logs, and metrics.
+Use DuckLake as the sole durable store for spans and logs.
 
 - PostgreSQL is the production/multi-tenant catalog.
 - SQLite is the local multi-client catalog.
@@ -33,6 +33,7 @@ Use DuckLake as the sole durable store for spans, logs, and metrics.
   drains immediately after enqueue; `N>0` waits N seconds so posts batch into
   fewer DuckLake commits. That buffer is not a
   WAL or staged query tier.
+- Customer product metrics are out of scope (see ADR-016).
 
 ### Consequences
 
@@ -46,9 +47,8 @@ Use DuckLake as the sole durable store for spans, logs, and metrics.
 - Query workers ATTACH the same tenant DuckLake scope as ingest.
 - Maintenance uses DuckLake merge, snapshot expiry, and old-file cleanup
   procedures.
-- Historical `union_*`, `committed_*`, `buffer_*`, `staged_*`, and
-  `iceberg_*` query names may resolve to the same committed DuckLake tables for
-  compatibility; they do not imply multiple physical tiers.
+- Public SQL table names are `traces`, `logs`, and `scores` only. Historical
+  Iceberg/buffer aliases are not rewritten.
 
 ## Current invariant: catalog backend policy
 
@@ -139,14 +139,13 @@ covers query-hot keys.
 ### Decision
 
 1. Store hot telemetry bags as `MAP(VARCHAR, VARCHAR)` temporarily
-   (traces/logs bags + `metric_series.labels`).
+   (traces/logs bags).
 2. Remove the `::JSON::VARIANT` INSERT bridge; fail-fast if leftover VARIANT.
 3. Set catalog-global `data_inlining_row_limit=500` (DuckLake default; MAP is
    Postgres-inline-safe). Softprobe previously used `10_000`, which left too many
    live spans catalog-resident and slowed session detail scans — revised 2026-09-20.
-   Rewrite metrics **AC-F7** to wait-for-next-run TWCS: do not flush inlined
-   rows every maintenance pass; TWCS only merges live Parquet. Downsample reads
-   the DuckLake table (inlined ∪ Parquet), so accuracy is unaffected.
+   TWCS wait-for-next-run: do not flush inlined rows every maintenance pass; TWCS
+   only merges live Parquet.
 4. Ship product-hot promotion manifests; demo/bench apply them. Softprobe does
    not auto-bootstrap promotions on cold start.
 5. All Softprobe SQL compilers prefer promoted columns when an active promotion
@@ -164,33 +163,56 @@ covers query-hot keys.
 - Canonical notes: [`variant_shredding.md`](variant_shredding.md),
   [`promotion.md`](promotion.md).
 
-## Proposed: metrics time-series layout on DuckLake
+## ADR-016: Product metrics removed (traces + logs only)
 
-**Date:** 2026-08-15 (redesign after GreptimeDB study; original goals 2026-08-14)
-**Status:** Proposed — not accepted until the verification report maps every
-AC-\* id in [`metrics-timeseries-layout.md`](metrics-timeseries-layout.md).
+**Date:** 2026-09-21
+**Status:** Accepted
+**Related:** `openspec/changes/remove-metrics-signal/`
 
 ### Context
 
-The original wide event representation cannot serve Grafana under Astronomy Shop ingest:
-mixed-name Parquet files, day-floored snapshot expiry (thousands of live
-snapshots), and `max_query_range_seconds = 86400`. Product constraints still
-forbid a second TSDB, an application WAL, and deleting tenant data to make
-queries fast.
+Product metrics (OTLP ingest → `metric_*` DuckLake layout → Prometheus/PromQL)
+were the most complex signal in thelake and lost value quickly compared to
+forever-retained traces and logs. Keeping them forced a large compaction
+ladder, PromQL surface, and Grafana Prom compat tax that did not match the
+product thesis.
 
-### Decision (proposed)
+Process instrumentation remains useful for operators, but exporting it back
+into thelake (ops DuckLake + Prom) reintroduced the deleted product path.
 
-Keep DuckLake as the only store. **Learn from GreptimeDB** (TWCS, inverted-index *ideas*, metric-engine multiplexing, Flow-style rollups) without forking or embedding it. Split metrics into per-day `metric_series` + `metric_postings` + skinny samples/hist, with **TWCS-shaped** maintenance, 5m/1h downsamples, and `metric_collapse_job_1h`. **Remove** Softprobe-imposed Prom `max_query_range` (retention/TTL bounds data, like Greptime). Expire snapshots at **second** granularity.
+### Decision
 
-**Programmable Softprobe∶Greptime gate (G9):** shared OTLP fixtures; Softprobe_p95 ≤ **10 ×** Greptime_p95 on a pinned query set under `make test-perf` (`COMPARE_GREPTIME=1`). Beating Greptime remains a non-goal. Expected healthy gap ~2–10× (§4.4). Matching Greptime p50 requires reopening G1 or flush-through — not a silent sidecar.
+- Remove customer OTLP metrics ingest (`POST /v1/metrics`), live `metric_*`
+  write/query/compaction, Prometheus HTTP API, and PromQL.
+- Product surface is **OTLP traces + logs** with Loki/Tempo query
+  compatibility.
+- Retain self-monitoring Meter instruments and `record_*` call sites; export
+  via standard OTLP (`OTEL_EXPORTER_OTLP_*` / `OTEL_EXPORTER_OTLP_METRICS_*`)
+  when `self_monitoring.enabled` is true.
+- No DuckLake self-export of process metrics.
+- Existing `metric_*` tables in a catalog are left **orphaned** (no DROP
+  migration).
 
-**Query range:** no Softprobe-imposed Prom max (not 90d / not 180d). Like Greptime, retention/TTL decides availability; planner uses 1h/collapse for all windows > 48h. Tested SLO windows remain 30d / 90d / 180d.
+### Consequences
 
-### Consequences (if accepted)
+- Breaking for any client that relied on `/v1/metrics` or Prometheus
+  `/api/v1/*`.
+- Supersedes DuckLake-export requirements from
+  `add-self-monitoring-ops-lake`.
+- Docs under `docs/metrics-timeseries-layout.md`,
+  `docs/compat/phase1-prometheus.md`, and Prom-focused perf notes are removed
+  or marked obsolete.
 
-- Flush-through ingest still commits once per OTLP request; snapshot **count** is `ceil(age / commit_interval) + headroom`.
-- Prom resolves series from day postings (not SST row-group prune) and fails loud at `max_series`.
-- SQL names `union_metrics` / `committed_metrics` remain as compatibility relations; Prom must not scan that path.
-- Layout + G9 tests live under `make test-perf` (no new public Make target).
-- Research clone `./greptime` is reference + **external** bench target only.
-- Ready gate: 49 AC ids, `release_full` JSON schema, Greptime ratio rows required.
+## Proposed: metrics time-series layout on DuckLake (superseded)
+
+**Date:** 2026-08-15 (redesign after GreptimeDB study; original goals 2026-08-14)
+**Status:** **Superseded by ADR-016** — not accepted; product metrics removed.
+
+### Context
+
+Historical proposal for day-sharded postings, skinny samples, 5m/1h ladder,
+and `job` collapse on DuckLake. See ADR-016.
+
+### Decision (superseded)
+
+Do not implement. Product metrics and Prometheus are gone.

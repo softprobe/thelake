@@ -9,7 +9,6 @@ metadata:
   reference_pins:
     manifest: docs/compat/references.v0.yaml
     protocols:
-      prometheus: {image: prom/prometheus, tag: "v2.54.1", digest: "sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94"}
       loki: {image: grafana/loki, tag: "3.1.1", digest: "sha256:e689cc634841c937de4d7ea6157f17e29cf257d6a320f1c293ab18d46cfea986"}
       tempo: {image: grafana/tempo, tag: "2.6.1", digest: "sha256:ef4384fce6e8ad22b95b243d8fc165628cda655376fd50e7850536ad89d71d50"}
   # Every release case inherits one of these validated references. The shared
@@ -17,7 +16,6 @@ metadata:
   tenant_isolation:
     shared_helper: tests/compat/support/auth.rs
     contracts:
-      prometheus: {path: tests/compat/prometheus/mod.rs, command: "cargo test --lib compat::prometheus"}
       loki: {path: tests/compat/loki/mod.rs, command: "cargo test --lib compat::loki"}
       tempo: {path: tests/compat/tempo/mod.rs, command: "cargo test --lib compat::tempo"}
   drift_review:
@@ -31,120 +29,10 @@ metadata:
 # Validator-consumed declarations. These are the same documented features
 # referenced by the per-case diff-approval entries below.
 unsupported_feature_allowlist:
-  prometheus.query: [native_histogram_functions]
   loki.query_range: [interval_sampling]
   tempo.search: [tag_query_filters]
 
 cases:
-  - id: prometheus-query-selector-instant
-    protocol: prometheus
-    runner_case_id: selector_instant
-    endpoint: {method: GET, path: /api/v1/query}
-    request:
-      params: {query: 'http_requests{job="checkout"}', time: "1700000120"}
-    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
-    capability: {id: prometheus.query, status: phase_1}
-    expected: {status: 200, envelope: success}
-    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
-    reference: {service: prometheus, version: "v2.54.1"}
-    evidence: {retain: true}
-    unsupported_feature_allowlist:
-      - {capability: prometheus.query, feature: native_histogram_functions, path: "$.data"}
-
-  - id: prometheus-query-aggregation
-    protocol: prometheus
-    runner_case_id: sum_by_job
-    endpoint: {method: GET, path: /api/v1/query}
-    request:
-      params: {query: 'sum by (job) (http_requests)', time: "1700000120"}
-    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
-    capability: {id: prometheus.query, status: phase_1}
-    expected: {status: 200, envelope: success}
-    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
-    reference: {service: prometheus, version: "v2.54.1"}
-    evidence: {retain: true}
-
-  - id: prometheus-query-rate-counter-instant
-    protocol: prometheus
-    runner_case_id: rate_counter
-    endpoint: {method: GET, path: /api/v1/query}
-    request:
-      params: {query: 'rate(demo_counter_total[2m])', time: "1700000120"}
-    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
-    capability: {id: prometheus.query, status: phase_1}
-    expected: {status: 200, envelope: success}
-    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
-    reference: {service: prometheus, version: "v2.54.1"}
-    evidence: {retain: true}
-
-  - id: prometheus-query-range-selector
-    protocol: prometheus
-    runner_case_id: range_selector
-    endpoint: {method: GET, path: /api/v1/query_range}
-    request:
-      params: {query: 'http_requests{job="api"}', start: "1700000000", end: "1700000120", step: "60"}
-    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
-    capability: {id: prometheus.query_range, status: phase_1}
-    expected: {status: 200, envelope: success}
-    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
-    reference: {service: prometheus, version: "v2.54.1"}
-    evidence: {retain: true}
-
-  - id: prometheus-labels-discovery
-    protocol: prometheus
-    runner_case_id: labels
-    endpoint: {method: GET, path: /api/v1/labels}
-    request: {params: {'match[]': 'http_requests{job="api"}'}}
-    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
-    capability: {id: prometheus.labels, status: supported}
-    expected: {status: 200, envelope: success}
-    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
-    reference: {service: prometheus, version: "v2.54.1"}
-    evidence: {retain: true}
-
-  - id: prometheus-label-values-discovery
-    protocol: prometheus
-    runner_case_id: label_values
-    endpoint: {method: GET, path: /api/v1/label/job/values}
-    request: {params: {'match[]': 'http_requests{job="api"}'}}
-    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
-    capability: {id: prometheus.labels, status: supported}
-    expected: {status: 200, envelope: success}
-    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
-    reference: {service: prometheus, version: "v2.54.1"}
-    evidence: {retain: true}
-
-  - id: prometheus-series-discovery
-    protocol: prometheus
-    runner_case_id: series
-    endpoint: {method: GET, path: /api/v1/series}
-    request: {params: {'match[]': 'http_requests{job="api"}', start: "1700000000", end: "1700000120"}}
-    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
-    capability: {id: prometheus.series, status: supported}
-    expected: {status: 200, envelope: success}
-    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
-    reference: {service: prometheus, version: "v2.54.1"}
-    evidence: {retain: true}
-
-  - id: prometheus-metadata-discovery
-    protocol: prometheus
-    endpoint: {method: GET, path: /api/v1/metadata}
-    request: {params: {metric: http_requests, limit: "10"}}
-    fixture: {id: prometheus_success_minimal, path: tests/compat/fixtures/prometheus_success_minimal.json}
-    capability: {id: prometheus.metadata, status: supported}
-    expected: {status: 200, envelope: success}
-    normalization: {policy: "src/compat/prometheus/diff_normalize.rs::normalize_prom_response"}
-    reference: {service: prometheus, version: "v2.54.1"}
-    evidence: {retain: true}
-    # Differential runs preload samples as TSDB blocks via promtool, which
-    # drops scrape-time HELP/TYPE metadata, so the reference always answers
-    # with empty data here while Softprobe legitimately reports ingested
-    # metric metadata. Lake-side contract coverage still exercises this
-    # endpoint; revisit if the reference harness gains a scraping setup.
-    conformance_exclusion:
-      reason: "block-preloaded Prometheus cannot serve /api/v1/metadata (no scrape-time metadata)"
-      release_evidence: false
-
   - id: loki-query-forward-duplicate-nanoseconds
     protocol: loki
     runner_case_id: loki-query-forward-duplicate-nanoseconds
