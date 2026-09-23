@@ -160,7 +160,7 @@ async fn run_reduce(state: &AppState) -> usize {
 }
 
 async fn dirty_count(state: &AppState, schema: &str) -> i64 {
-    let client = catalog_client(state).await;
+    let client = catalog_client(&state).await;
     let q = format!("\"{}\"", schema.replace('"', "\"\""));
     client
         .query_one(
@@ -1055,7 +1055,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     };
     assert_eq!(detail_before["session_id"], "sess-ok");
 
-    let client = catalog_client(state).await;
+    let client = catalog_client(&state).await;
     let q = format!("\"{}\"", schema.replace('"', "\"\""));
     client
         .execute(&format!("TRUNCATE {q}.session_summary"), &[])

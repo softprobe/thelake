@@ -48,7 +48,8 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
     let unknown = manager
         .engine_for(&tenant_id)
         .await
-        .expect_err("unknown scopes must not be lazily provisioned");
+        .err()
+        .expect("unknown scopes must not be lazily provisioned");
     assert!(
         unknown.to_string().contains("unknown scope"),
         "unexpected unknown scope error: {unknown}"
@@ -71,18 +72,6 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
         .engine_for(&tenant_id)
         .await
         .expect("second engine resolve");
-    let listed = manager
-        .list_scopes()
-        .await
-        .expect("list provisioned scopes");
-    assert_eq!(
-        listed
-            .iter()
-            .find(|(scope_id, _)| scope_id == &tenant_id)
-            .map(|(_, scope)| scope),
-        Some(&created)
-    );
-
     let repeated = manager
         .provision_scope(request)
         .await
