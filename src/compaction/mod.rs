@@ -14,13 +14,13 @@ mod status;
 pub(crate) mod twcs;
 mod watermark;
 
-pub use engine::{maintenance_table_names, MaintenanceEngine, MaintenanceScope};
 #[cfg(test)]
 pub(crate) use engine::deduplicate_physical_scopes;
+pub use engine::{maintenance_table_names, MaintenanceEngine, MaintenanceScope};
 pub use maintenance_job::{PhysicalScopeMaintenanceJob, PHYSICAL_SCOPE_MAINTENANCE_JOB};
 pub use status::{
-    pass_compaction_ok, ActionResult, ActionStatus, MaintenanceSummary,
-    MetadataMaintenanceResult, TableMaintenanceResult,
+    pass_compaction_ok, ActionResult, ActionStatus, MaintenanceSummary, MetadataMaintenanceResult,
+    TableMaintenanceResult,
 };
 
 pub use twcs::{open_day_files_for_merge, PartitionFileStats, TwcsPolicy};

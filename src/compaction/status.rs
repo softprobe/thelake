@@ -94,8 +94,14 @@ mod tests {
 
     #[test]
     fn pass_compaction_ok_rules() {
-        assert!(pass_compaction_ok(&[ActionStatus::Completed, ActionStatus::Skipped]));
-        assert!(!pass_compaction_ok(&[ActionStatus::Completed, ActionStatus::Failed]));
+        assert!(pass_compaction_ok(&[
+            ActionStatus::Completed,
+            ActionStatus::Skipped
+        ]));
+        assert!(!pass_compaction_ok(&[
+            ActionStatus::Completed,
+            ActionStatus::Failed
+        ]));
         assert!(!pass_compaction_ok(&[ActionStatus::Unsupported]));
     }
 }

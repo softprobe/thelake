@@ -6,8 +6,8 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::sql::literal::{sql_string_literal, timestamp_ns_column, timestamptz_literal};
 use crate::runtime_engine::quote_pg_ident;
+use crate::sql::literal::{sql_string_literal, timestamp_ns_column, timestamptz_literal};
 
 fn meta_schema(catalog_alias: &str) -> String {
     format!("__ducklake_metadata_{catalog_alias}")

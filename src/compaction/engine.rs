@@ -301,10 +301,7 @@ impl MaintenanceEngine {
         drop(conn);
 
         for table in advance_tables {
-            if let Err(err) = watermarks
-                .advance(scope_key, &table, run_started_at)
-                .await
-            {
+            if let Err(err) = watermarks.advance(scope_key, &table, run_started_at).await {
                 warn!(
                     "Compaction watermark advance failed for {}/{}: {}",
                     scope_key, table, err
@@ -626,8 +623,7 @@ mod tests {
         let src = include_str!("engine.rs");
         let production = src.split("#[cfg(test)]").next().unwrap();
         assert!(
-            production.contains("if outcome.drained")
-                && production.contains("advance_tables.push"),
+            production.contains("if outcome.drained") && production.contains("advance_tables.push"),
             "watermark advance must be gated on MergeOutcome.drained"
         );
         assert!(
@@ -656,8 +652,7 @@ mod tests {
         let src = include_str!("engine.rs");
         let production = src.split("#[cfg(test)]").next().unwrap();
         assert!(
-            production.contains("fences.get(table)")
-                && production.contains("ActionStatus::Failed"),
+            production.contains("fences.get(table)") && production.contains("ActionStatus::Failed"),
             "missing fence must fail closed"
         );
         // Only compact_table_incremental performs merges; no unscoped CALL helper.

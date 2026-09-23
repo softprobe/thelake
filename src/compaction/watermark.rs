@@ -33,11 +33,7 @@ impl WatermarkStore {
         Ok(())
     }
 
-    pub(crate) async fn get(
-        &self,
-        scope_key: &str,
-        table: &str,
-    ) -> Result<Option<DateTime<Utc>>> {
+    pub(crate) async fn get(&self, scope_key: &str, table: &str) -> Result<Option<DateTime<Utc>>> {
         self.ensure_table().await?;
         let client = self.pool.get().await?;
         let row = client
@@ -165,10 +161,7 @@ mod tests {
             .advance("scope-a", "traces", later)
             .await
             .expect("advance");
-        assert_eq!(
-            store.get("scope-a", "traces").await.unwrap(),
-            Some(later)
-        );
+        assert_eq!(store.get("scope-a", "traces").await.unwrap(), Some(later));
     }
 
     #[tokio::test]
@@ -186,10 +179,7 @@ mod tests {
             )
             .await
             .expect_err("advance with no row must fail");
-        assert!(
-            err.to_string().contains("no row"),
-            "unexpected: {err}"
-        );
+        assert!(err.to_string().contains("no row"), "unexpected: {err}");
     }
 
     #[tokio::test]

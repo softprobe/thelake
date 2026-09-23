@@ -54,9 +54,7 @@ pub fn should_merge_partition(
     policy: &TwcsPolicy,
 ) -> bool {
     match kind {
-        DayKind::Closed => {
-            !closed_day_meets_file_bar(stats.live_file_count, stats.total_bytes)
-        }
+        DayKind::Closed => !closed_day_meets_file_bar(stats.live_file_count, stats.total_bytes),
         DayKind::Open => stats.live_file_count > policy.open_day_file_cap,
     }
 }
@@ -269,11 +267,7 @@ mod tests {
             live_file_count: 2,
             total_bytes: 65 * 1024 * 1024,
         };
-        assert!(!should_merge_partition(
-            &two_over,
-            day_kind(day, today),
-            &p
-        ));
+        assert!(!should_merge_partition(&two_over, day_kind(day, today), &p));
     }
 
     #[test]

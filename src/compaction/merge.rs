@@ -184,21 +184,17 @@ fn twcs_compact_waves(
     let label = kind.label();
     let max_waves = kind.max_waves(policy);
     for wave in 0..max_waves {
-        let partitions = match load_partition_stats_after(
-            conn,
-            &ducklake.catalog_alias,
-            table,
-            newer_than,
-        ) {
-            Ok(v) => v,
-            Err(err) => {
-                warn!(
-                    "TWCS {label}-day stats failed for {}: {}; stopping waves",
-                    table, err
-                );
-                return Ok(ActionStatus::Failed);
-            }
-        };
+        let partitions =
+            match load_partition_stats_after(conn, &ducklake.catalog_alias, table, newer_than) {
+                Ok(v) => v,
+                Err(err) => {
+                    warn!(
+                        "TWCS {label}-day stats failed for {}: {}; stopping waves",
+                        table, err
+                    );
+                    return Ok(ActionStatus::Failed);
+                }
+            };
 
         let (needs_work, files_before, max_compacted) = match kind {
             WaveKind::Closed => {
@@ -259,15 +255,11 @@ fn twcs_compact_waves(
             max_compacted,
             policy.max_merge_file_size_bytes,
         )?;
-        let partitions_after = match load_partition_stats_after(
-            conn,
-            &ducklake.catalog_alias,
-            table,
-            newer_than,
-        ) {
-            Ok(v) => v,
-            Err(_) => return Ok(ActionStatus::Failed),
-        };
+        let partitions_after =
+            match load_partition_stats_after(conn, &ducklake.catalog_alias, table, newer_than) {
+                Ok(v) => v,
+                Err(_) => return Ok(ActionStatus::Failed),
+            };
         let files_after = match kind {
             WaveKind::Closed => closed_day_live_file_count(&partitions_after, today),
             WaveKind::Open => open_day_files_for_merge(&partitions_after, today, None),
@@ -327,11 +319,8 @@ fn ducklake_compact_table_wave(
     let scope = crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
     let target_file_size =
         crate::storage::ducklake::size_literal(config.maintenance.target_file_size_bytes);
-    let set_target = ducklake_set_target_file_size_sql(
-        &ducklake.catalog_alias,
-        &target_file_size,
-        &scope,
-    );
+    let set_target =
+        ducklake_set_target_file_size_sql(&ducklake.catalog_alias, &target_file_size, &scope);
     if let Err(err) = execute_batch_with_serialization_retry(
         conn,
         &set_target,
