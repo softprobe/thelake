@@ -17,7 +17,10 @@ use crate::promotion::{
     PromotionSpecLoadError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
-use crate::workspace_scope::{PhysicalScope, WorkspaceBinding, WorkspaceScopeMode};
+use crate::workspace_scope::{
+    effective_workspace_id, PhysicalScope, WorkspaceBinding, WorkspaceScopeMode,
+    DEFAULT_WORKSPACE_ID,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -272,11 +275,7 @@ impl RuntimeEngineManager {
         // The unauthenticated local/default runtime has no external tenant ID, but
         // workspace-bound engines still need a non-empty identity for their access
         // contract. Keep the empty ID only for resolving the configured default scope.
-        let bound_tenant_id = if tenant_id.trim().is_empty() {
-            "_default"
-        } else {
-            tenant_id
-        };
+        let bound_tenant_id = effective_workspace_id(tenant_id);
 
         let resolver = &self.scope_registry;
         let binding = resolver.resolve_or_create_binding(tenant_id).await?;
@@ -578,7 +577,7 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
         if workspace_id.trim().is_empty() {
             self.ensure_scope().await?;
             return WorkspaceBinding::new(
-                "_default",
+                DEFAULT_WORKSPACE_ID,
                 self.default_physical_scope.clone(),
                 self.workspace_scope_mode,
             )

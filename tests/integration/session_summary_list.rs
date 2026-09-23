@@ -146,7 +146,7 @@ async fn run_reduce(state: &AppState) -> usize {
         .await
         .expect("maintenance engine");
     let scope = maintenance
-        .resolve_scope("_default")
+        .resolve_scope(softprobe_runtime::workspace_scope::DEFAULT_WORKSPACE_ID)
         .await
         .expect("default maintenance scope");
     maintenance

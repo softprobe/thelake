@@ -8,6 +8,21 @@ use crate::config::DuckLakeConfig;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Sentinel workspace id for the process-default / unauthenticated lake.
+///
+/// Empty tenant or workspace ids resolve to this identity for engines, leases,
+/// maintenance scope lists, and readiness probes.
+pub const DEFAULT_WORKSPACE_ID: &str = "_default";
+
+/// Map empty (or whitespace-only) workspace ids to [`DEFAULT_WORKSPACE_ID`].
+pub fn effective_workspace_id(workspace_id: &str) -> &str {
+    if workspace_id.trim().is_empty() {
+        DEFAULT_WORKSPACE_ID
+    } else {
+        workspace_id
+    }
+}
+
 /// Selects whether workspaces receive isolated or shared physical storage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -189,9 +204,18 @@ impl std::error::Error for SharedScopeError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceBinding, WorkspaceScopeMode,
+        effective_workspace_id, PhysicalScope, SharedScopeError, SharedScopeErrorCode,
+        WorkspaceBinding, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID,
     };
     use crate::config::DuckLakeConfig;
+
+    #[test]
+    fn effective_workspace_id_maps_empty_to_default() {
+        assert_eq!(effective_workspace_id(""), DEFAULT_WORKSPACE_ID);
+        assert_eq!(effective_workspace_id("   "), DEFAULT_WORKSPACE_ID);
+        assert_eq!(effective_workspace_id("ws-1"), "ws-1");
+        assert_eq!(DEFAULT_WORKSPACE_ID, "_default");
+    }
 
     #[test]
     fn scope_mode_defaults_to_isolated_and_round_trips() {

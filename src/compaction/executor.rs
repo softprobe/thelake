@@ -7,7 +7,7 @@ use crate::compaction::twcs::{
 };
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
-use crate::workspace_scope::PhysicalScope;
+use crate::workspace_scope::{PhysicalScope, DEFAULT_WORKSPACE_ID};
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, Utc};
 use deadpool_postgres::Pool;
@@ -236,7 +236,7 @@ impl MaintenanceEngine {
             scopes.push((scope_id, dk));
         }
         if !saw_default {
-            scopes.insert(0, ("_default".to_string(), default));
+            scopes.insert(0, (DEFAULT_WORKSPACE_ID.to_string(), default));
         }
         Ok(scopes)
     }

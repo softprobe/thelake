@@ -736,12 +736,8 @@ pub async fn rebuild_session_summary(
         .as_ref()
         .map(|extension| extension.0.tenant_id.as_str())
         .unwrap_or("");
-    // Lease key matches SessionSummaryRebuildJob: empty tenant → `_default`.
-    let scope_key = if tenant_id.is_empty() {
-        "_default"
-    } else {
-        tenant_id
-    };
+    // Lease key matches SessionSummaryRebuildJob: empty tenant → default workspace.
+    let scope_key = crate::workspace_scope::effective_workspace_id(tenant_id);
     let leases = crate::async_jobs::PostgresLeaseStore::from_engines(&state.engines);
     let holder = format!(
         "ops-rebuild-{}",

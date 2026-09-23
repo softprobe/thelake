@@ -4,6 +4,7 @@ use crate::async_jobs::Job;
 use crate::compaction::MaintenanceEngine;
 use crate::config::{Config, DuckLakeConfig, SessionSummaryConfig};
 use crate::runtime_engine::DuckLakeScopeResolver;
+use crate::workspace_scope::DEFAULT_WORKSPACE_ID;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -52,7 +53,7 @@ async fn list_summary_scopes(
         scopes.push((scope_id, dk));
     }
     if !saw_default {
-        scopes.insert(0, ("_default".to_string(), default));
+        scopes.insert(0, (DEFAULT_WORKSPACE_ID.to_string(), default));
     }
     Ok(scopes)
 }

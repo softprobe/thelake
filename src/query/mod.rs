@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::workspace_scope::{
     PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceScopeMode,
+    DEFAULT_WORKSPACE_ID,
 };
 use std::sync::Arc;
 
@@ -18,13 +19,14 @@ pub struct QueryEngine {
 }
 
 pub async fn create_query_engine(config: &Config) -> anyhow::Result<QueryEngine> {
-    let duckdb =
-        Arc::new(duckdb::DuckDBQueryEngine::new_with_liveness(config, true, "_default").await?);
+    let duckdb = Arc::new(
+        duckdb::DuckDBQueryEngine::new_with_liveness(config, true, DEFAULT_WORKSPACE_ID).await?,
+    );
 
     Ok(QueryEngine {
         duckdb,
         record_self_monitoring: true,
-        tenant_id: "_default".into(),
+        tenant_id: DEFAULT_WORKSPACE_ID.into(),
     })
 }
 
