@@ -291,39 +291,27 @@ async fn shared_scope_stamps_writes_and_filters_typed_queries_per_workspace() {
     let shared_session = format!("shared-session-{suffix}");
 
     tokio::try_join!(
-        engine_a
-            .ingest
-            .add_spans(vec![span(&workspace_a, &trace_a, &shared_session)], 0),
-        engine_b
-            .ingest
-            .add_spans(vec![span(&workspace_b, &trace_b, &shared_session)], 0),
-        engine_a
-            .ingest
-            .add_logs(vec![log(&workspace_a, &trace_a, &shared_session)], 0),
-        engine_b
-            .ingest
-            .add_logs(vec![log(&workspace_b, &trace_b, &shared_session)], 0),
+        engine_a.add_spans(vec![span(&workspace_a, &trace_a, &shared_session)], 0),
+        engine_b.add_spans(vec![span(&workspace_b, &trace_b, &shared_session)], 0),
+        engine_a.add_logs(vec![log(&workspace_a, &trace_a, &shared_session)], 0),
+        engine_b.add_logs(vec![log(&workspace_b, &trace_b, &shared_session)], 0),
     )
     .expect("concurrent shared writes");
 
     let config_id = format!("shared-config-{suffix}");
     tokio::try_join!(
-        engine_a
-            .ingest
-            .add_score_configs(vec![score_config(&config_id, &workspace_a)]),
-        engine_b
-            .ingest
-            .add_score_configs(vec![score_config(&config_id, &workspace_b)]),
+        engine_a.add_score_configs(vec![score_config(&config_id, &workspace_a)]),
+        engine_b.add_score_configs(vec![score_config(&config_id, &workspace_b)]),
     )
     .expect("concurrent shared score-config writes");
     tokio::try_join!(
-        engine_a.ingest.add_scores(vec![score(
+        engine_a.add_scores(vec![score(
             "shared-score",
             &trace_a,
             &config_id,
             &workspace_a,
         )]),
-        engine_b.ingest.add_scores(vec![score(
+        engine_b.add_scores(vec![score(
             "shared-score",
             &trace_b,
             &config_id,
@@ -346,18 +334,10 @@ async fn shared_scope_stamps_writes_and_filters_typed_queries_per_workspace() {
         assert!(details_b["logs"].as_array().unwrap().is_empty());
     }
 
-    assert!(engine_a.ingest.score_exists("shared-score").await.unwrap());
-    assert!(engine_b.ingest.score_exists("shared-score").await.unwrap());
-    assert!(engine_a
-        .ingest
-        .score_config_exists(&config_id)
-        .await
-        .unwrap());
-    assert!(engine_b
-        .ingest
-        .score_config_exists(&config_id)
-        .await
-        .unwrap());
+    assert!(engine_a.score_exists("shared-score").await.unwrap());
+    assert!(engine_b.score_exists("shared-score").await.unwrap());
+    assert!(engine_a.score_config_exists(&config_id).await.unwrap());
+    assert!(engine_b.score_config_exists(&config_id).await.unwrap());
 
     let (config_status_a, configs_a) = list_score_configs(&router, &workspace_a).await;
     assert_eq!(

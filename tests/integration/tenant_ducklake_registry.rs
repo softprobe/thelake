@@ -1,7 +1,10 @@
 use softprobe_runtime::config::Config;
-use softprobe_runtime::promotion::{parse_promotion_manifest, PromotionManifest};
+use softprobe_runtime::promotion::{
+    load_active_telemetry_columns_manifests, parse_promotion_manifest, PromotionManifest,
+};
 use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
 use std::sync::Arc;
+use tokio_postgres::NoTls;
 use uuid::Uuid;
 
 // Use logs (not traces): recording a traces promo would supersede the product
@@ -43,7 +46,7 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
     let data_path = format!("./target/registry-test-data/{tenant_id}/");
 
     let unknown = manager
-        .resolve_scope(&tenant_id)
+        .engine_for(&tenant_id)
         .await
         .expect_err("unknown scopes must not be lazily provisioned");
     assert!(
@@ -60,23 +63,31 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
         .provision_scope(request.clone())
         .await
         .expect("provision tenant");
-    let first = manager
-        .resolve_scope(&tenant_id)
+    manager
+        .engine_for(&tenant_id)
         .await
-        .expect("first resolve");
-    let second = manager
-        .resolve_scope(&tenant_id)
+        .expect("first engine resolve");
+    manager
+        .engine_for(&tenant_id)
         .await
-        .expect("second resolve");
-
-    assert_eq!(created, first);
-    assert_eq!(first, second);
+        .expect("second engine resolve");
+    let listed = manager
+        .list_scopes()
+        .await
+        .expect("list provisioned scopes");
+    assert_eq!(
+        listed
+            .iter()
+            .find(|(scope_id, _)| scope_id == &tenant_id)
+            .map(|(_, scope)| scope),
+        Some(&created)
+    );
 
     let repeated = manager
         .provision_scope(request)
         .await
         .expect("idempotent provision");
-    assert_eq!(repeated, first);
+    assert_eq!(repeated, created);
 }
 
 #[tokio::test]
@@ -126,27 +137,21 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
         panic!("expected telemetry manifest for tenant B");
     };
     engine_a
-        .admin
-        .apply_and_record_telemetry_promotion(MANIFEST_DIVISION, &spec_a, &["logs".to_string()])
+        .apply_telemetry_promotion(MANIFEST_DIVISION, &spec_a, &["logs".to_string()])
         .await
         .expect("record tenant A spec");
     engine_b
-        .admin
-        .apply_and_record_telemetry_promotion(MANIFEST_REGION, &spec_b, &["logs".to_string()])
+        .apply_telemetry_promotion(MANIFEST_REGION, &spec_b, &["logs".to_string()])
         .await
         .expect("record tenant B spec");
 
-    let (resolved_a, manifests_a) = manager
-        .load_active_telemetry_columns_manifests(&tenant_a)
+    let client = postgres_client().await;
+    let manifests_a = load_active_telemetry_columns_manifests(&client, &scope_a.metadata_schema)
         .await
         .expect("load tenant A manifests");
-    let (resolved_b, manifests_b) = manager
-        .load_active_telemetry_columns_manifests(&tenant_b)
+    let manifests_b = load_active_telemetry_columns_manifests(&client, &scope_b.metadata_schema)
         .await
         .expect("load tenant B manifests");
-
-    assert_eq!(resolved_a, scope_a);
-    assert_eq!(resolved_b, scope_b);
 
     let names_a: Vec<&str> = manifests_a
         .iter()
@@ -178,6 +183,19 @@ async fn postgres_manager() -> RuntimeEngineManager {
     RuntimeEngineManager::connect(Arc::new(postgres_config()), None)
         .await
         .expect("connect runtime engine manager")
+}
+
+async fn postgres_client() -> tokio_postgres::Client {
+    let (client, connection) = tokio_postgres::connect(
+        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
+        NoTls,
+    )
+    .await
+    .expect("connect ducklake postgres");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client
 }
 
 fn postgres_config() -> Config {

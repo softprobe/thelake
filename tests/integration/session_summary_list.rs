@@ -60,6 +60,17 @@ async fn pg_reachable() -> bool {
     )
 }
 
+async fn catalog_client(state: &AppState) -> tokio_postgres::Client {
+    let metadata_path = state.engines.config().ducklake.metadata_path.clone();
+    let (client, connection) = tokio_postgres::connect(&metadata_path, tokio_postgres::NoTls)
+        .await
+        .expect("connect ducklake postgres");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client
+}
+
 async fn build_summary_router(
     metadata_schema: String,
 ) -> Option<(Router, AppState, TempDir, String)> {
@@ -76,7 +87,7 @@ async fn build_summary_router(
     .await
     .expect("router");
 
-    let client = state.engines.catalog_pool().get().await.expect("pg client");
+    let client = catalog_client(&state).await;
     ensure_session_summary_tables(&client, &metadata_schema)
         .await
         .expect("ensure summary ddl");
@@ -121,7 +132,6 @@ async fn flush(state: &AppState) {
         .engine_for_id("")
         .await
         .expect("engine")
-        .ingest
         .force_flush_spans()
         .await
         .expect("flush");
@@ -150,7 +160,7 @@ async fn run_reduce(state: &AppState) -> usize {
 }
 
 async fn dirty_count(state: &AppState, schema: &str) -> i64 {
-    let client = state.engines.catalog_pool().get().await.expect("client");
+    let client = catalog_client(state).await;
     let q = format!("\"{}\"", schema.replace('"', "\"\""));
     client
         .query_one(
@@ -1045,7 +1055,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     };
     assert_eq!(detail_before["session_id"], "sess-ok");
 
-    let client = state.engines.catalog_pool().get().await.expect("client");
+    let client = catalog_client(state).await;
     let q = format!("\"{}\"", schema.replace('"', "\"\""));
     client
         .execute(&format!("TRUNCATE {q}.session_summary"), &[])
@@ -1200,7 +1210,7 @@ async fn build_summary_router_on_minio(
     .await
     .expect("router");
 
-    let client = state.engines.catalog_pool().get().await.expect("pg client");
+    let client = catalog_client(&state).await;
     ensure_session_summary_tables(&client, &metadata_schema)
         .await
         .expect("ensure summary ddl");
@@ -1241,7 +1251,7 @@ async fn rebuild_reads_parquet_from_minio_object_store() {
         "reduce over s3:// Parquet must succeed (missing object-store config on reduce conn?)"
     );
 
-    let client = state.engines.catalog_pool().get().await.expect("client");
+    let client = catalog_client(&state).await;
     let q = format!("\"{}\"", schema.replace('"', "\"\""));
     client
         .execute(&format!("TRUNCATE {q}.session_summary"), &[])

@@ -162,7 +162,6 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
     // Provision does not create telemetry Iceberg tables; a tenant with no ingest has no `traces`
     // table yet. Materialize B's table with a decoy session so we can COUNT tenant A's session_id.
     engine_b
-        .ingest
         .add_spans(
             vec![isolation_span(
                 &tenant_b,
@@ -174,7 +173,6 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         .await
         .expect("bootstrap traces table for tenant B");
     engine_a
-        .ingest
         .add_spans(vec![isolation_span(&tenant_a, &session_id, &trace_id)], 0)
         .await
         .expect("write spans for tenant A");

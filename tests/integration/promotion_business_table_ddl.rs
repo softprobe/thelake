@@ -108,8 +108,7 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     };
 
     let spec_id = match engine
-        .admin
-        .apply_business_promotion_guarded(BUSINESS_MANIFEST, &spec)
+        .apply_business_promotion(BUSINESS_MANIFEST, &spec)
         .await
     {
         Ok(spec_id) => spec_id,
