@@ -1,8 +1,9 @@
 //! Typed DuckLake trace query backend for the Tempo adapter.
 
 use super::traces::{
-    persisted_status_code_numeric_value, TraceAttribute, TraceData, TraceEvent, TraceLookupBounds,
-    TraceQueryBackend, TraceSearchHit, TraceSearchRequest, TraceSpan,
+    persisted_status_code_numeric_value, visible_span_attributes, TraceAttribute, TraceData,
+    TraceEvent, TraceLookupBounds, TraceQueryBackend, TraceSearchHit, TraceSearchRequest,
+    TraceSpan,
 };
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::tempo::{project_tempo_link_attributes, project_tempo_tags};
@@ -91,8 +92,7 @@ impl DuckLakeTraceBackend {
                 .entry("service.name".into())
                 .or_insert_with(|| service.clone());
         }
-        let attributes = span
-            .attributes
+        let attributes = visible_span_attributes(span)
             .iter()
             .map(|attribute| (attribute.key.clone(), attribute.value.clone()))
             .collect::<HashMap<_, _>>();

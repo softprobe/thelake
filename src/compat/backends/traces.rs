@@ -42,6 +42,22 @@ pub struct TraceData {
     pub spans: Vec<TraceSpan>,
 }
 
+/// Return span attributes that are visible on the Tempo protocol surface.
+///
+/// `service_name` is retained as a typed field for storage and query planning,
+/// but when it is duplicated in the attribute bag it is an internal ingestion
+/// representation rather than a user-visible Tempo attribute.
+pub(crate) fn visible_span_attributes(span: &TraceSpan) -> Vec<TraceAttribute> {
+    span.attributes
+        .iter()
+        .filter(|attribute| {
+            !(attribute.key == "service_name"
+                && span.service_name.as_deref() == Some(attribute.value.as_str()))
+        })
+        .cloned()
+        .collect()
+}
+
 pub(crate) fn persisted_status_code_numeric_value(value: &str) -> Option<i64> {
     crate::compat::tempo::traceql::canonical_status_code(value)
 }

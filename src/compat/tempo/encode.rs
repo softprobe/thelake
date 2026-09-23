@@ -1,4 +1,6 @@
-use crate::compat::backends::traces::{TraceAttribute, TraceData, TraceSearchHit, TraceSpan};
+use crate::compat::backends::traces::{
+    visible_span_attributes, TraceAttribute, TraceData, TraceSearchHit, TraceSpan,
+};
 use crate::compat::errors::CompatError;
 use crate::compat::errors::CompatErrorCode;
 use axum::response::{IntoResponse, Response};
@@ -214,14 +216,7 @@ fn span(span: &crate::compat::backends::traces::TraceSpan) -> Result<Value, Comp
 }
 
 fn wire_span_attributes(span: &crate::compat::backends::traces::TraceSpan) -> Vec<TraceAttribute> {
-    span.attributes
-        .iter()
-        .filter(|attribute| {
-            !(attribute.key == "service_name"
-                && span.service_name.as_deref() == Some(attribute.value.as_str()))
-        })
-        .cloned()
-        .collect()
+    visible_span_attributes(span)
 }
 
 fn wire_id(value: &str, expected_len: usize, field: &str) -> Result<String, CompatError> {
