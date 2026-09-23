@@ -171,6 +171,7 @@ pub struct RuntimeEngineManager {
     config: Arc<Config>,
     engines: DashMap<String, Arc<RuntimeEngine>>,
     creation_locks: DashMap<String, Arc<Mutex<()>>>,
+    scope_locks: DashMap<String, Arc<Mutex<()>>>,
     control_plane: Option<ControlPlaneRuntime>,
     scope_registry: DuckLakeScopeResolver,
     #[cfg(test)]
@@ -188,6 +189,7 @@ impl RuntimeEngineManager {
             config,
             engines: DashMap::new(),
             creation_locks: DashMap::new(),
+            scope_locks: DashMap::new(),
             control_plane,
             scope_registry,
             #[cfg(test)]
@@ -278,6 +280,12 @@ impl RuntimeEngineManager {
 
         let resolver = &self.scope_registry;
         let binding = resolver.resolve_or_create_binding(tenant_id).await?;
+        let scope_lock = self
+            .scope_locks
+            .entry(binding.physical_scope.key())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _scope_hold = scope_lock.lock().await;
         let counts_toward_liveness = true;
 
         let ingest = IngestPipeline::build_tenant_ingest(
