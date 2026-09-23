@@ -1,5 +1,7 @@
 use softprobe_runtime::config::Config;
 
+use super::config::apply_workspace_scope_mode;
+
 pub fn load_test_config() -> Config {
     if let Ok(config_file) = std::env::var("CONFIG_FILE") {
         if std::path::Path::new(&config_file).exists() {
@@ -7,6 +9,8 @@ pub fn load_test_config() -> Config {
             let mut config = Config::load().expect("Failed to load config");
             assign_unique_ducklake_paths(&mut config);
             configure_synchronous_ingest(&mut config);
+            apply_workspace_scope_mode(&mut config);
+            configure_local_object_store_credentials(&config);
             warn_if_config_needs_minio_hostname(&config);
             return config;
         }
@@ -24,6 +28,8 @@ pub fn load_test_config() -> Config {
     let mut config = Config::load().expect("Failed to load test config");
     assign_unique_ducklake_paths(&mut config);
     configure_synchronous_ingest(&mut config);
+    apply_workspace_scope_mode(&mut config);
+    configure_local_object_store_credentials(&config);
     warn_if_config_needs_minio_hostname(&config);
     config
 }
@@ -32,6 +38,20 @@ fn configure_synchronous_ingest(config: &mut Config) {
     // Tests use the single production ingest path. Immediate coalescing makes
     // write visibility deterministic without a direct writer escape hatch.
     config.ingest.flush_interval_seconds = 0;
+}
+
+fn configure_local_object_store_credentials(config: &Config) {
+    if config.ducklake.data_path.starts_with("s3://")
+        && config
+            .object_store
+            .endpoint
+            .as_deref()
+            .is_some_and(|endpoint| endpoint.contains("localhost:9000"))
+    {
+        std::env::set_var("AWS_ACCESS_KEY_ID", "minioadmin");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "minioadmin");
+        std::env::set_var("AWS_REGION", "us-east-1");
+    }
 }
 
 fn assign_unique_ducklake_paths(config: &mut Config) {

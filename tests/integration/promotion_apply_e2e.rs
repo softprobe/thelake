@@ -18,6 +18,7 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use crate::util::config::apply_workspace_scope_mode;
 use crate::util::promotion_contract::{
     contract_apply_ingest_query, contract_business_compatibility, contract_shrink_safe,
     contract_update_and_idempotency, PromotionContractBackend,
@@ -58,6 +59,7 @@ async fn setup() -> PostgresBackend {
     config.ducklake.metadata_schema = format!("sp_promo_reg_{short}");
     config.ducklake.data_path = data_path.clone();
     config.ducklake.data_inlining_row_limit = Some(0);
+    apply_workspace_scope_mode(&mut config);
 
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await

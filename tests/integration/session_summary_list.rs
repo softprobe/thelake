@@ -25,6 +25,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use crate::util::config::apply_workspace_scope_mode;
 use crate::util::otlp::{double_kv, int_kv, string_kv};
 
 fn postgres_summary_config(temp: &TempDir, metadata_schema: String) -> Config {
@@ -40,6 +41,7 @@ fn postgres_summary_config(temp: &TempDir, metadata_schema: String) -> Config {
     config.ducklake.metadata_schema = metadata_schema;
     config.ducklake.data_path = temp.path().join("data").to_string_lossy().into();
     config.ducklake.data_inlining_row_limit = Some(0);
+    apply_workspace_scope_mode(&mut config);
 
     config.ingest.flush_interval_seconds = 2;
     // Postgres catalog ⇒ session_summary always active.

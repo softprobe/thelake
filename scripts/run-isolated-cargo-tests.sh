@@ -6,6 +6,7 @@
 #
 # Usage:
 #   ./scripts/run-isolated-cargo-tests.sh --features integration-e2e --test tests --list-prefix integration::
+#   ./scripts/run-isolated-cargo-tests.sh --features integration-e2e --test tests --list-prefix integration::http_api:: --exclude-prefix integration::http_api::query_sql_
 #   ./scripts/run-isolated-cargo-tests.sh --features integration-e2e --test integration_perf --tests performance::perf_union_read_latency
 set -euo pipefail
 
@@ -15,6 +16,7 @@ cd "$ROOT"
 CARGO_ARGS=()
 LIST_PREFIX=""
 EXPLICIT_TESTS=()
+EXCLUDE_PREFIXES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,6 +30,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --list-prefix)
       LIST_PREFIX="$2"
+      shift 2
+      ;;
+    --exclude-prefix)
+      EXCLUDE_PREFIXES+=("$2")
       shift 2
       ;;
     --tests)
@@ -135,7 +141,14 @@ else
   fi
   while IFS= read -r name; do
     [[ -n "${name}" ]] || continue
-    TESTS+=("${name}")
+    excluded=0
+    for prefix in "${EXCLUDE_PREFIXES[@]}"; do
+      if [[ "${name}" == "${prefix}"* ]]; then
+        excluded=1
+        break
+      fi
+    done
+    [[ "${excluded}" -eq 0 ]] && TESTS+=("${name}")
   done < <("${TEST_BIN}" --list 2>/dev/null | awk -v pfx="${LIST_PREFIX}" '
     $0 ~ ("^" pfx) {
       name=$1
@@ -152,15 +165,18 @@ fi
 
 echo "Running ${#TESTS[@]} isolated test process(es)..."
 failed=0
+failed_tests=()
 for t in "${TESTS[@]}"; do
   echo "🧪 ${t}"
   if ! "${TEST_BIN}" "${t}" --exact --test-threads=1 --nocapture; then
     failed=1
-    break
+    failed_tests+=("${t}")
   fi
 done
 
 if [[ "${failed}" -ne 0 ]]; then
+  echo "❌ failed tests:"
+  printf '  %s\n' "${failed_tests[@]}"
   exit 1
 fi
 echo "✅ isolated suite completed (${#TESTS[@]} tests)"

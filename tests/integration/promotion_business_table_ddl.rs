@@ -8,6 +8,8 @@ use tempfile::TempDir;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
+use crate::util::config::apply_workspace_scope_mode;
+
 #[tokio::test]
 async fn creates_versioned_business_table_and_current_view_from_manifest() {
     let (client, connection) = tokio_postgres::connect(
@@ -84,6 +86,7 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     config.ducklake.data_path = business_data_path.clone();
     config.ducklake.data_inlining_row_limit = Some(0);
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
+    apply_workspace_scope_mode(&mut config);
 
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await

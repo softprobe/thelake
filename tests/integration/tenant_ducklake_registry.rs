@@ -7,6 +7,8 @@ use std::sync::Arc;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
+use crate::util::config::apply_workspace_scope_mode;
+
 // Use logs (not traces): recording a traces promo would supersede the product
 // hot-attrs seeded on provision, which must stay complete or ensure panics.
 const MANIFEST_DIVISION: &str = r#"
@@ -198,6 +200,7 @@ fn postgres_config() -> Config {
     // DuckLake data path local so the test never probes cloud instance
     // metadata for credentials while building a tenant-bound engine.
     config.ducklake.data_path = "./warehouse/ducklake/registry-test-data/".to_string();
+    apply_workspace_scope_mode(&mut config);
 
     config
 }

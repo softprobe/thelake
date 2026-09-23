@@ -21,6 +21,8 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use crate::util::config::apply_workspace_scope_mode;
+
 fn postgres_registry_config(temp: &TempDir, registry_schema: String) -> Config {
     let mut config = Config::default();
     config.maintenance.enabled = false;
@@ -35,6 +37,7 @@ fn postgres_registry_config(temp: &TempDir, registry_schema: String) -> Config {
     config.ducklake.data_path = temp.path().join("default_data").to_string_lossy().into();
     config.ducklake.data_inlining_row_limit = Some(0);
     config.ingest.flush_interval_seconds = 0;
+    apply_workspace_scope_mode(&mut config);
     config
 }
 

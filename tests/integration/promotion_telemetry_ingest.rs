@@ -9,6 +9,8 @@ use tempfile::TempDir;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
+use crate::util::config::apply_workspace_scope_mode;
+
 #[tokio::test]
 async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     let temp = TempDir::new().expect("tempdir");
@@ -26,6 +28,7 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
         .to_string();
     config.ducklake.data_path = tenant_data_path.clone();
     config.ducklake.data_inlining_row_limit = Some(0);
+    apply_workspace_scope_mode(&mut config);
     let data_path = config.ducklake.data_path.clone();
     let metadata_path = config.ducklake.metadata_path.clone();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());

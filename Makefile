@@ -21,7 +21,7 @@ SHELL := /bin/bash
 .PHONY: help ensure-cache doctor setup teardown check-infra \
 	clean clean-cache build build-release package publish test-publish-tags \
 	lint fmt check-fmt \
-	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
+	test test-e2e test-e2e-isolated test-e2e-shared test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
 	test-grafana-static test-grafana-system test-grafana-browser test-compat \
@@ -636,8 +636,13 @@ bench-demo-cpu-full: ensure-cache
 	@chmod +x scripts/bench-demo-cpu-full.sh scripts/grafana-manual-up.sh scripts/grafana-manual-down.sh
 	./scripts/bench-demo-cpu-full.sh
 
+# The E2E gate is a mode matrix. Each mode runs in fresh processes so a test
+# cannot inherit a runtime, DuckDB connection, or catalog binding from the
+# other mode.
+test-e2e: test-e2e-isolated test-e2e-shared
+
 # Grafana manual stack may export CONFIG_FILE; clear it so e2e uses tests/config/test.yaml.
-test-e2e: ensure-cache check-infra
+test-e2e-isolated: ensure-cache check-infra
 	@$(MAKE) --no-print-directory test-lease-pg
 	@set -e; \
 	backend="$(E2E_BACKEND)"; \
@@ -665,6 +670,30 @@ test-e2e: ensure-cache check-infra
 			./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration:: ;; \
 		*) echo "unknown E2E_BACKEND=$$backend (local|gcs|r2)"; exit 1 ;; \
 	esac
+
+# Shared mode intentionally runs the contracts that can use tenant-bound
+# RuntimeEngine/query surfaces. Physical-scope registry, promotion-success,
+# raw-SQL, and low-level direct-DuckDB tests remain isolated-mode contracts;
+# tenant_shared_scope is the shared replacement for those access guarantees.
+test-e2e-shared: ensure-cache check-infra
+	@$(MAKE) --no-print-directory test-lease-pg
+	@set -e; \
+	$(_export-minio-aws); \
+	unset CONFIG_FILE; \
+	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local WORKSPACE_SCOPE_MODE=shared; \
+	for prefix in \
+		integration::authn_contract:: \
+		integration::event_time_prune:: \
+		integration::integration:: \
+		integration::http_api:: \
+		integration::session_summary_list:: \
+		integration::tenant_shared_scope::; do \
+		echo "integration-e2e WORKSPACE_SCOPE_MODE=shared prefix=$$prefix"; \
+		./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) \
+			--list-prefix "$$prefix" \
+			--exclude-prefix integration::http_api::logs_promote_scope_name_to_logger_name_attribute \
+			--exclude-prefix integration::http_api::query_sql_select_literal; \
+	done
 
 test-perf: ensure-cache
 	@set -e; \
