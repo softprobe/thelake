@@ -1107,9 +1107,10 @@ async fn inlined_data_stays_readable_across_maintenance() {
 
     // 4. A maintenance pass over the same catalog (production runs this
     //    hourly; the outage query came 23 minutes after one).
-    //    run_once_ducklake funnels every failure into warn! + Skipped, so
-    //    `.expect()` can never fire -- assert on the summary instead, or a
-    //    pass that did nothing at all would look like success.
+    //    Compaction hard failures surface as ActionStatus::Failed in the
+    //    summary (run_once still returns Ok); the leased MaintenanceJob
+    //    treats Failed/Unsupported as job Err. Assert summary fields so a
+    //    no-op pass cannot look like success.
     let maintenance = state
         .engines
         .maintenance_engine()

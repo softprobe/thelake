@@ -4,11 +4,9 @@
 //! pollute customer query latency / slow-query series or contend on workers.
 
 use crate::api::AppState;
-use crate::compaction::executor::maintenance_table_names;
-use crate::compaction::twcs::{
-    live_file_sizes_sql, open_day_files_for_merge, partition_live_file_stats_sql,
-    PartitionFileStats,
-};
+use crate::compaction::maintenance_table_names;
+use crate::compaction::twcs::{open_day_files_for_merge, PartitionFileStats};
+use crate::sql::maintenance::{live_file_sizes_sql, partition_live_file_stats_sql};
 use chrono::{NaiveDate, Utc};
 use serde_json::Value;
 use tracing::warn;

@@ -4,8 +4,8 @@
 
 use crate::async_jobs::Job;
 #[cfg(test)]
-use crate::compaction::executor::deduplicate_physical_scopes;
-use crate::compaction::executor::MaintenanceEngine;
+use crate::compaction::deduplicate_physical_scopes;
+use crate::compaction::MaintenanceEngine;
 use crate::config::DuckLakeConfig;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -95,14 +95,20 @@ impl Job for PhysicalScopeMaintenanceJob {
         self.executor
             .ensure_physical_scope_bootstrap(&ducklake)
             .await?;
-        let pass = self
+        let results = self
             .executor
             .run_physical_scope_pass(scope_key, &ducklake, self.compaction_enabled)
-            .await;
-        if pass.is_ok() {
-            crate::self_monitoring::record_maintenance();
+            .await?;
+        if self.compaction_enabled {
+            let statuses: Vec<_> = results.iter().map(|r| r.compaction.status).collect();
+            if !crate::compaction::pass_compaction_ok(&statuses) {
+                return Err(anyhow!(
+                    "compaction failed for scope {scope_key}: {statuses:?}"
+                ));
+            }
         }
-        pass.map(|_| ())
+        crate::self_monitoring::record_maintenance();
+        Ok(())
     }
 }
 
@@ -133,6 +139,31 @@ mod tests {
         assert!(m.lock().is_err());
         *lock_mutex(&m) = 2;
         assert_eq!(*lock_mutex(&m), 2);
+    }
+
+    #[test]
+    fn job_fails_when_compaction_status_failed_or_unsupported() {
+        use crate::compaction::{pass_compaction_ok, ActionStatus};
+        assert!(!pass_compaction_ok(&[ActionStatus::Failed]));
+        assert!(!pass_compaction_ok(&[ActionStatus::Unsupported]));
+        assert!(pass_compaction_ok(&[
+            ActionStatus::Skipped,
+            ActionStatus::Completed
+        ]));
+        // PhysicalScopeMaintenanceJob::run maps !pass_compaction_ok → Err.
+        let src = include_str!("maintenance_job.rs");
+        let run_impl = src
+            .split("async fn run(")
+            .nth(1)
+            .expect("Job::run")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("end of run");
+        assert!(
+            run_impl.contains("pass_compaction_ok")
+                && run_impl.contains("compaction failed for scope"),
+            "leased job must Err when compaction Failed/Unsupported"
+        );
     }
 
     #[tokio::test]

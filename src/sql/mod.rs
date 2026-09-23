@@ -7,6 +7,7 @@ pub mod bounds;
 pub mod literal;
 pub mod llm;
 pub mod logs;
+pub mod maintenance;
 pub mod promotion;
 pub mod schema;
 pub mod session_summary;
@@ -160,6 +161,9 @@ mod locality_tests {
         // Test fixtures and explicitly classified connection/bootstrap SQL are
         // the only exceptions. Keep this file-level list narrow: directory-wide
         // exemptions hide production fact SQL regressions.
+        //
+        // STOP: make sure you fully understand this list before adding to it. You must be careful to add
+        // an exemption only when the SQL is absolutely safe to skip the gate check!!!
         let allowed = [
             "/bin/",
             "_tests.rs",
@@ -168,8 +172,6 @@ mod locality_tests {
             "/promotion.rs",
             "/runtime_engine.rs",
             "/async_jobs/tests.rs",
-            "/compaction/twcs.rs",
-            "/compaction/executor.rs",
             "/session_summary/ddl.rs",
             "/session_summary/dirty.rs",
             "/session_summary/list.rs",

@@ -142,12 +142,14 @@ else
   while IFS= read -r name; do
     [[ -n "${name}" ]] || continue
     excluded=0
-    for prefix in "${EXCLUDE_PREFIXES[@]}"; do
-      if [[ "${name}" == "${prefix}"* ]]; then
-        excluded=1
-        break
-      fi
-    done
+    if ((${#EXCLUDE_PREFIXES[@]} > 0)); then
+      for prefix in "${EXCLUDE_PREFIXES[@]}"; do
+        if [[ "${name}" == "${prefix}"* ]]; then
+          excluded=1
+          break
+        fi
+      done
+    fi
     [[ "${excluded}" -eq 0 ]] && TESTS+=("${name}")
   done < <("${TEST_BIN}" --list 2>/dev/null | awk -v pfx="${LIST_PREFIX}" '
     $0 ~ ("^" pfx) {

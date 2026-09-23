@@ -139,7 +139,7 @@ Job {
 2. For each due `(job, scope)`: `try_acquire` → `run` with heartbeat → **release**.
 3. Never runs two holders for the same `(job_name, scope_key)`.
 
-Maintenance logic stays in `compaction::executor` (domain). Session-summary reduce stays in a `session_summary` module (domain). **Only** scheduling + leasing are shared.
+Maintenance logic stays in `compaction` (domain; SQL in `sql::maintenance`). Session-summary reduce stays in a `session_summary` module (domain). **Only** scheduling + leasing are shared.
 
 ---
 
@@ -285,6 +285,6 @@ session_summary:
 ## 13. References
 
 - Leased scheduler entry: `src/compaction/scheduler.rs` → `async_jobs::spawn_runner`  
-- Pass body: `src/compaction/executor.rs`  
+- Pass body: `src/compaction/engine.rs` (+ `merge.rs`); SQL: `src/sql/maintenance/`  
 - Session list summary: [`session-list-summary.md`](./session-list-summary.md)  
 - Design maintenance section: [`design.md`](./design.md)

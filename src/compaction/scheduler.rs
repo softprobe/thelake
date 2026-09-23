@@ -1,6 +1,6 @@
 use crate::async_jobs::{self, Job};
-use crate::compaction::executor::MaintenanceEngine;
-use crate::compaction::maintenance_job::PhysicalScopeMaintenanceJob;
+use crate::compaction::MaintenanceEngine;
+use crate::compaction::PhysicalScopeMaintenanceJob;
 use crate::runtime_engine::RuntimeEngineManager;
 use crate::session_summary::{SessionSummaryRebuildJob, SessionSummaryReduceJob};
 use anyhow::Result;

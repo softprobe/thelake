@@ -650,7 +650,7 @@ fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredential
 #[cfg(test)]
 mod tests {
     use super::{resolve_write_timeout_seconds, Config, ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS};
-    use crate::compaction::twcs::TwcsPolicy;
+    use crate::compaction::TwcsPolicy;
     use std::sync::Mutex;
 
     static CONFIG_TEST_MUTEX: Mutex<()> = Mutex::new(());
