@@ -38,6 +38,9 @@ pub struct Score {
     pub author_id: Option<String>,
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+    /// Authenticated workspace ownership, stamped by `IngestEngine`.
+    #[serde(default, skip_serializing)]
+    pub tenant_id: Option<String>,
 }
 
 impl Score {
@@ -108,6 +111,7 @@ mod tests {
             config_id: None,
             author_id: None,
             metadata: HashMap::new(),
+            tenant_id: None,
         }
     }
 

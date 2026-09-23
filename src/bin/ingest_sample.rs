@@ -4,14 +4,19 @@ use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
 use prost::Message;
-use softprobe_runtime::compaction::executor::MaintenanceExecutor;
 use softprobe_runtime::config::Config;
+use softprobe_runtime::runtime_engine::RuntimeEngineManager;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
     if std::env::var("MAINTENANCE_RUN_ONCE").ok().as_deref() == Some("1") {
         let config = Config::load().expect("failed to load config");
-        let executor = MaintenanceExecutor::new(&config, None)
+        let engines = RuntimeEngineManager::connect(Arc::new(config), None)
+            .await
+            .expect("failed to connect runtime engines");
+        let executor = engines
+            .maintenance_engine()
             .await
             .expect("failed to create maintenance executor");
         let summary = executor.run_once().await.expect("maintenance run failed");

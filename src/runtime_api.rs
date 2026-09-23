@@ -9,7 +9,8 @@ use crate::promotion::{
     BusinessApplyError, BusinessTableManifest, PromotionDataType, PromotionManifest,
     TelemetryColumnsManifest, TelemetryTable,
 };
-use crate::runtime_engine::{DuckLakeScope, ScopeProvisioningRequest};
+use crate::runtime_engine::ScopeProvisioningRequest;
+use crate::workspace_scope::{PhysicalScope, SharedScopeError, WorkspaceScopeMode};
 use axum::{
     extract::{Extension, Request, State},
     http::{header, HeaderMap, Method, StatusCode},
@@ -149,22 +150,24 @@ struct DuckLakeConnectionMaterial {
 
 fn ducklake_connection_material(
     tenant: &TenantInfo,
-    scope: &DuckLakeScope,
+    scope: &PhysicalScope,
 ) -> Result<DuckLakeConnectionMaterial, String> {
     let config = Config::load().map_err(|e| format!("runtime config load failed: {e}"))?;
     let ducklake = &config.ducklake;
-    let ducklake_pg_uri = postgres_ducklake_metadata_path(ducklake);
-    // DuckLake schema and data path come from the tenant scope resolved for this process.
+    let ducklake_pg_uri = if scope.metadata_path.trim().is_empty() {
+        postgres_ducklake_metadata_path(ducklake)
+    } else {
+        postgres_ducklake_metadata_path(&crate::config::DuckLakeConfig {
+            metadata_path: scope.metadata_path.clone(),
+            ..ducklake.clone()
+        })
+    };
+    // All physical connection identity comes from the resolved scope.
     let ducklake_data_path = scope.data_path.clone();
     let ducklake_metadata_schema = scope.metadata_schema.clone();
     let creds = config.resolve_object_store_credentials(&ducklake_data_path);
 
-    if ducklake.catalog_type != "postgres" {
-        return Err(format!(
-            "ducklake.catalog_type must be postgres for agent setup, got {}",
-            ducklake.catalog_type
-        ));
-    }
+    // The normal runtime path is always the Postgres DuckLake catalog.
     if ducklake_pg_uri.trim().is_empty() {
         return Err("DuckLake Postgres metadata path is required".to_string());
     }
@@ -226,7 +229,6 @@ mod data_connection_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
-        config.ducklake.catalog_type = "postgres".to_string();
         config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
         config.ducklake.data_path = "./warehouse/ducklake/data/".to_string();
@@ -247,9 +249,12 @@ mod data_connection_tests {
             agent_id: None,
             agent_name: None,
         };
-        let scope = DuckLakeScope {
+        let scope = PhysicalScope {
+            metadata_path: "host=pg port=5432 dbname=ducklake user=reader password=secret"
+                .to_string(),
             metadata_schema: "tenant_tenant_123".to_string(),
             data_path: "./warehouse/ducklake/data/".to_string(),
+            catalog_alias: "softprobe".to_string(),
         };
 
         let material = ducklake_connection_material(&tenant, &scope).expect("connection material");
@@ -276,7 +281,6 @@ mod data_connection_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
-        config.ducklake.catalog_type = "postgres".to_string();
         config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
         config.ducklake.data_path = "gs://bucket/ducklake/data/".to_string();
@@ -297,9 +301,12 @@ mod data_connection_tests {
             agent_id: None,
             agent_name: None,
         };
-        let scope = DuckLakeScope {
+        let scope = PhysicalScope {
+            metadata_path: "host=pg port=5432 dbname=ducklake user=reader password=secret"
+                .to_string(),
             metadata_schema: "tenant_tenant_123".to_string(),
             data_path: "gs://bucket/ducklake/data/".to_string(),
+            catalog_alias: "softprobe".to_string(),
         };
 
         let material = ducklake_connection_material(&tenant, &scope).expect("connection material");
@@ -327,7 +334,6 @@ mod data_connection_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
-        config.ducklake.catalog_type = "postgres".to_string();
         config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
         config.ducklake.data_path = "s3://bucket/ducklake/data/".to_string();
@@ -348,9 +354,12 @@ mod data_connection_tests {
             agent_id: None,
             agent_name: None,
         };
-        let scope = DuckLakeScope {
+        let scope = PhysicalScope {
+            metadata_path: "host=pg port=5432 dbname=ducklake user=reader password=secret"
+                .to_string(),
             metadata_schema: "tenant_tenant_123".to_string(),
             data_path: "s3://bucket/ducklake/data/".to_string(),
+            catalog_alias: "softprobe".to_string(),
         };
 
         let material = ducklake_connection_material(&tenant, &scope).expect("connection material");
@@ -370,7 +379,6 @@ mod data_connection_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("runtime.yaml");
         let mut config = Config::default();
-        config.ducklake.catalog_type = "postgres".to_string();
         config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
         config.ducklake.data_path = "gs://bucket/ducklake/data/".to_string();
@@ -392,9 +400,12 @@ mod data_connection_tests {
             agent_id: None,
             agent_name: None,
         };
-        let scope = DuckLakeScope {
+        let scope = PhysicalScope {
+            metadata_path: "host=pg port=5432 dbname=ducklake user=reader password=secret"
+                .to_string(),
             metadata_schema: "tenant_tenant_123".to_string(),
             data_path: "gs://bucket/ducklake/data/".to_string(),
+            catalog_alias: "softprobe".to_string(),
         };
 
         let err =
@@ -476,14 +487,7 @@ async fn v1_provision_scope(
         ));
     }
 
-    let Some(tenant_ducklake) = state.engines.scope_registry() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(
-                json!({"error": {"code": "tenant_provisioning_unavailable", "message": "tenant registry is not configured"}}),
-            ),
-        ));
-    };
+    let engines = &state.engines;
 
     let hints = body.storage_hints.ok_or_else(|| {
         (
@@ -502,7 +506,7 @@ async fn v1_provision_scope(
         ));
     }
 
-    if let Ok(existing) = tenant_ducklake.resolve_scope(&tenant_id).await {
+    if let Ok(existing) = engines.resolve_scope(&tenant_id).await {
         if existing.metadata_schema == metadata_schema && existing.data_path == data_path {
             let mut scope = json!({
                 "ducklakeMetadataSchema": existing.metadata_schema,
@@ -526,7 +530,7 @@ async fn v1_provision_scope(
         ));
     }
 
-    let scope = tenant_ducklake
+    let scope = engines
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: metadata_schema.clone(),
@@ -579,18 +583,19 @@ async fn v1_ducklake_connection(
     State(state): State<AppState>,
     Extension(tenant): Extension<TenantInfo>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let Some(tenant_ducklake) = state.engines.scope_registry() else {
+    if state.engines.config().ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
         return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::CONFLICT,
             Json(json!({
                 "error": {
-                    "code": "ducklake_connection_unavailable",
-                    "message": "tenant DuckLake resolver is unavailable"
+                    "code": "shared_scope_connection_unavailable",
+                    "message": "direct DuckLake connection material is unavailable in shared scope mode"
                 }
             })),
         ));
-    };
-    let scope = tenant_ducklake
+    }
+    let scope = state
+        .engines
         .resolve_scope(&tenant.tenant_id)
         .await
         .map_err(|err| {
@@ -661,13 +666,13 @@ async fn apply_telemetry_promotion(
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
     let tables = telemetry_table_names(&spec.target.tables);
-    // Writer facade serializes DDL + spec activation (Postgres advisory lock / SQLite mutex).
+    // Writer facade serializes DDL + spec activation through Postgres.
     engine
-        .storage
-        .writer
-        .apply_and_record_telemetry_promotion(&engine.scope, &manifest_yaml, &spec, &tables)
+        .apply_telemetry_promotion(&manifest_yaml, &spec, &tables)
         .await
-        .map_err(|err| promotion_apply_error("promotion_schema_apply_failed", err))?;
+        .map_err(|err| {
+            promotion_apply_error_preserving_shared_scope("promotion_schema_apply_failed", err)
+        })?;
     Ok(Json(json!({
         "specVersion": "softprobe.promotion.apply.v1",
         "applied": true,
@@ -689,12 +694,9 @@ async fn apply_business_table_promotion(
         .engine_for_tenant(&tenant)
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
-    // Writer facade dispatches: Postgres uses pg advisory lock; SQLite uses a process-global mutex.
-    // Both serialize load -> compatibility check -> DDL -> record.
+    // Both paths serialize load -> compatibility check -> DDL -> record.
     engine
-        .storage
-        .writer
-        .apply_business_promotion_guarded(&engine.scope, &manifest_yaml, &spec)
+        .apply_business_promotion(&manifest_yaml, &spec)
         .await
         .map_err(|err| match err {
             BusinessApplyError::Incompatible(e) => (
@@ -708,7 +710,7 @@ async fn apply_business_table_promotion(
                 })),
             ),
             BusinessApplyError::Other(e) => {
-                promotion_apply_error("promotion_schema_apply_failed", e)
+                promotion_apply_error_preserving_shared_scope("promotion_schema_apply_failed", e)
             }
         })?;
     Ok(Json(json!({
@@ -736,6 +738,17 @@ fn promotion_apply_error(
             }
         })),
     )
+}
+
+fn promotion_apply_error_preserving_shared_scope(
+    fallback_code: &'static str,
+    err: anyhow::Error,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let code = err
+        .downcast_ref::<SharedScopeError>()
+        .map(|error| error.code().as_str())
+        .unwrap_or(fallback_code);
+    promotion_apply_error(code, err)
 }
 
 fn telemetry_table_names(tables: &[TelemetryTable]) -> Vec<String> {

@@ -32,11 +32,11 @@ pub(crate) fn push_otlp_ns_window_predicates(
 #[cfg(test)]
 pub(crate) fn assert_sql_has_otlp_time_predicates(sql: &str) {
     assert!(
-        sql.contains("CAST(timestamp AS TIMESTAMP_NS) >=") || sql.contains("timestamp >="),
+        sql.contains("make_timestamp_ns(epoch_ns(timestamp)) >=") || sql.contains("timestamp >="),
         "missing event-time lower bound: {sql}"
     );
     assert!(
-        sql.contains("CAST(timestamp AS TIMESTAMP_NS) <=") || sql.contains("timestamp <="),
+        sql.contains("make_timestamp_ns(epoch_ns(timestamp)) <=") || sql.contains("timestamp <="),
         "missing event-time upper bound: {sql}"
     );
     for bad in ["record_date", "event_date", "window_ts"] {

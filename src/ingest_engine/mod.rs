@@ -1,4 +1,4 @@
-//! Soft coalesce ingest for one tenant-bound [`Storage`].
+//! Soft coalesce ingest for one tenant-bound writer.
 //!
 //! OTLP enqueues into a per-signal coalesce buffer and ticks a background flush
 //! worker (`flush_interval_seconds` / eager depth). Enqueue never writes the lake.
@@ -6,11 +6,14 @@
 mod coalesce;
 
 use crate::config::{resolve_write_timeout_seconds, Config};
-use crate::models::{Log, Span};
-use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
+use crate::models::{Log, Score, ScoreConfig, Span};
+use crate::promotion::{BusinessApplyError, BusinessTableManifest, TelemetryColumnsManifest};
+use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::session_summary::{DirtyHint, SessionSummaryDirty};
 use crate::storage::ducklake::DuckLakeWriter;
-use crate::storage::Storage;
+use crate::workspace_scope::{
+    PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceScopeMode,
+};
 use anyhow::{anyhow, Result};
 use coalesce::CoalesceBuf;
 use std::future::Future;
@@ -18,13 +21,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Operational ingest surface for one tenant-bound [`Storage`].
+/// Operational ingest surface for one authenticated workspace.
 #[derive(Clone)]
 pub struct IngestEngine {
-    storage: Arc<Storage>,
+    writer: Arc<DuckLakeWriter>,
+    scope: PhysicalScope,
+    tenant_id: String,
     flush_interval_seconds: u64,
     logs: Arc<CoalesceBuf<Log>>,
     spans: Arc<CoalesceBuf<Span>>,
+}
+
+/// Administrative schema/promotion surface for one authenticated workspace.
+///
+/// Promotion changes are deliberately separate from the ingest data path:
+/// callers cannot reach schema DDL through the ordinary signal-write facade.
+#[derive(Clone)]
+pub struct AdminEngine {
+    writer: Arc<DuckLakeWriter>,
+    scope: PhysicalScope,
+    workspace_scope_mode: WorkspaceScopeMode,
 }
 
 /// Bound a DuckLake write so a hung INSERT cannot stall the coalesce worker forever.
@@ -44,8 +60,8 @@ where
 }
 
 impl IngestEngine {
-    pub fn from_storage(
-        storage: Arc<Storage>,
+    pub(crate) fn from_writer(
+        writer: Arc<DuckLakeWriter>,
         tenant_id: impl Into<String>,
         flush_interval_seconds: u64,
         buffer_size_mb: u64,
@@ -53,10 +69,11 @@ impl IngestEngine {
         session_summary_dirty: Option<Arc<SessionSummaryDirty>>,
     ) -> Self {
         let tenant_id = tenant_id.into();
+        let scope = writer.configured_scope();
         let (max_pending, eager_pending) = coalesce::resolve_byte_limits(buffer_size_mb);
         let write_timeout_seconds = resolve_write_timeout_seconds(write_timeout_seconds);
         let logs = {
-            let writer = storage.writer.clone();
+            let writer = writer.clone();
             let tenant = tenant_id.clone();
             CoalesceBuf::with_limits(
                 flush_interval_seconds,
@@ -83,8 +100,8 @@ impl IngestEngine {
             )
         };
         let spans = {
-            let writer = storage.writer.clone();
-            let tenant = tenant_id;
+            let writer = writer.clone();
+            let tenant = tenant_id.clone();
             let dirty = session_summary_dirty;
             CoalesceBuf::with_limits(
                 flush_interval_seconds,
@@ -96,7 +113,7 @@ impl IngestEngine {
                     let dirty = dirty.clone();
                     Box::pin(async move {
                         let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
-                        // Fold before write — write_span_batches consumes batches.
+                        // Fold before the storage commit because the commit consumes batches.
                         let hints = if dirty.is_some() {
                             crate::session_summary::fold_dirty_hints(batches.iter().flatten())
                         } else {
@@ -122,21 +139,20 @@ impl IngestEngine {
             )
         };
         Self {
-            storage,
+            writer,
+            scope,
+            tenant_id,
             flush_interval_seconds,
             logs,
             spans,
         }
     }
 
-    pub fn writer(&self) -> Arc<DuckLakeWriter> {
-        self.storage.writer.clone()
-    }
-
-    pub async fn add_spans(&self, items: Vec<Span>, request_size: usize) -> Result<()> {
+    pub async fn add_spans(&self, mut items: Vec<Span>, request_size: usize) -> Result<()> {
         if items.is_empty() {
             return Ok(());
         }
+        self.bind_spans_to_workspace(&mut items);
         self.spans.enqueue(items, request_size).await?;
         // Interval 0: callers expect drain before return (HTTP 200 ⇒ readable).
         if self.flush_interval_seconds == 0 {
@@ -149,6 +165,8 @@ impl IngestEngine {
         if items.is_empty() {
             return Ok(());
         }
+        let mut items = items;
+        self.bind_logs_to_workspace(&mut items);
         self.logs.enqueue(items, request_size).await?;
         if self.flush_interval_seconds == 0 {
             self.logs.force_flush().await?;
@@ -167,6 +185,113 @@ impl IngestEngine {
     pub fn flush_interval_seconds(&self) -> u64 {
         self.flush_interval_seconds
     }
+
+    pub(crate) async fn ensure_shared_schema(&self) -> Result<()> {
+        self.writer.ensure_shared_schema().await
+    }
+
+    /// Add scores through the authenticated workspace write path.
+    pub async fn add_scores(&self, items: Vec<Score>) -> Result<()> {
+        let mut items = items;
+        self.bind_scores_to_workspace(&mut items);
+        self.writer.write_score_batches(vec![items]).await
+    }
+
+    pub async fn score_exists(&self, score_id: &str) -> Result<bool> {
+        self.writer.score_exists(score_id).await
+    }
+
+    /// Add score configurations through the authenticated workspace write path.
+    pub async fn add_score_configs(&self, items: Vec<ScoreConfig>) -> Result<()> {
+        let mut items = items;
+        self.bind_score_configs_to_workspace(&mut items);
+        self.writer.write_score_config_batches(vec![items]).await
+    }
+
+    pub async fn score_config_exists(&self, config_id: &str) -> Result<bool> {
+        self.writer.score_config_exists(config_id).await
+    }
+
+    pub async fn list_score_configs(&self) -> Result<Vec<ScoreConfig>> {
+        self.writer.list_score_configs().await
+    }
+
+    pub async fn get_score_config(&self, config_id: &str) -> Result<Option<ScoreConfig>> {
+        self.writer.get_score_config(config_id).await
+    }
+
+    fn bind_spans_to_workspace(&self, spans: &mut [Span]) {
+        for span in spans {
+            span.tenant_id = Some(self.tenant_id.clone());
+        }
+    }
+
+    fn bind_logs_to_workspace(&self, logs: &mut [Log]) {
+        for log in logs {
+            log.tenant_id = Some(self.tenant_id.clone());
+        }
+    }
+
+    fn bind_scores_to_workspace(&self, scores: &mut [Score]) {
+        for score in scores {
+            score.tenant_id = Some(self.tenant_id.clone());
+        }
+    }
+
+    fn bind_score_configs_to_workspace(&self, configs: &mut [ScoreConfig]) {
+        for config in configs {
+            config.tenant_id = Some(self.tenant_id.clone());
+        }
+    }
+}
+
+impl AdminEngine {
+    pub(crate) fn from_ingest(ingest: &Arc<IngestEngine>) -> Self {
+        Self {
+            writer: ingest.writer.clone(),
+            scope: ingest.scope.clone(),
+            workspace_scope_mode: ingest.writer.workspace_scope_mode(),
+        }
+    }
+
+    fn ensure_promotion_supported(&self) -> Result<()> {
+        ensure_promotion_scope_supported(self.workspace_scope_mode)
+    }
+
+    pub async fn apply_and_record_telemetry_promotion(
+        &self,
+        manifest_yaml: &str,
+        spec: &TelemetryColumnsManifest,
+        target_tables: &[String],
+    ) -> Result<String> {
+        self.ensure_promotion_supported()?;
+        self.writer
+            .apply_and_record_telemetry_promotion(&self.scope, manifest_yaml, spec, target_tables)
+            .await
+    }
+
+    pub async fn apply_business_promotion_guarded(
+        &self,
+        manifest_yaml: &str,
+        spec: &BusinessTableManifest,
+    ) -> std::result::Result<String, BusinessApplyError> {
+        if let Err(error) = self.ensure_promotion_supported() {
+            return Err(BusinessApplyError::Other(error));
+        }
+        self.writer
+            .apply_business_promotion_guarded(&self.scope, manifest_yaml, spec)
+            .await
+    }
+}
+
+fn ensure_promotion_scope_supported(mode: WorkspaceScopeMode) -> Result<()> {
+    if mode == WorkspaceScopeMode::Shared {
+        return Err(anyhow!(SharedScopeError::new(
+            SharedScopeErrorCode::PromotionUnsupported,
+            "workspace promotions are unavailable in shared scope",
+        )));
+    }
+    Ok(())
 }
 
 /// Apply traces commit side effects only when the lake write succeeded.
@@ -201,17 +326,51 @@ mod after_commit_tests {
         maybe_after_traces_commit(true, "t", 1, true, &[], None).await;
     }
 
+    #[tokio::test]
+    async fn score_operations_are_exposed_by_ingest_engine() {
+        let (engine, _temp) = crate::test_support::sample_ingest()
+            .await
+            .expect("sample ingest");
+        assert!(!engine.scope.data_path.is_empty());
+
+        assert!(!engine
+            .score_exists("missing-score")
+            .await
+            .expect("score lookup"));
+        assert!(engine
+            .list_score_configs()
+            .await
+            .expect("score config list")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn ingest_engine_rebinds_spans_to_its_workspace() {
+        let (engine, _temp) = crate::test_support::sample_ingest()
+            .await
+            .expect("sample ingest");
+        let mut spans = vec![crate::session_summary::test_span::span_at("s", 1)];
+        spans[0].tenant_id = Some("spoofed-tenant".to_string());
+
+        engine.bind_spans_to_workspace(&mut spans);
+
+        assert_eq!(spans[0].tenant_id.as_deref(), Some("default"));
+    }
+
     #[test]
-    fn dirty_handle_none_when_sqlite_catalog() {
-        let config = Config::default(); // sqlite
-        assert!(session_summary_dirty_for(&config, None, "t", "schema").is_none());
+    fn admin_promotions_reject_shared_scope_before_storage() {
+        let error = ensure_promotion_scope_supported(WorkspaceScopeMode::Shared)
+            .expect_err("shared promotions must be rejected");
+        assert!(error
+            .to_string()
+            .contains("shared_scope_promotion_unsupported"));
+        assert!(ensure_promotion_scope_supported(WorkspaceScopeMode::Isolated).is_ok());
     }
 }
 
 /// Test / single-tenant pipeline with a long-lived [`IngestEngine`] (shared coalesce state).
 #[derive(Clone)]
 pub struct IngestPipeline {
-    pub storage: Storage,
     cache_dir: Option<PathBuf>,
     ingest: Arc<IngestEngine>,
 }
@@ -221,15 +380,14 @@ impl IngestPipeline {
         let tenant_ducklake = DuckLakeScopeResolver::connect(config).await?;
         let writer = Arc::new(DuckLakeWriter::new(config, tenant_ducklake.clone()).await?);
         let cache_dir = config.query.cache_dir.as_ref().map(PathBuf::from);
-        let storage = Storage::new(writer);
         let dirty = session_summary_dirty_for(
             config,
-            tenant_ducklake.as_ref(),
+            &tenant_ducklake,
             "default",
             &config.ducklake.metadata_schema,
         );
-        let ingest = Arc::new(IngestEngine::from_storage(
-            Arc::new(storage.clone()),
+        let ingest = Arc::new(IngestEngine::from_writer(
+            writer,
             "default",
             config.ingest.flush_interval_seconds,
             config.ingest.buffer_size_mb,
@@ -237,26 +395,46 @@ impl IngestPipeline {
             dirty,
         ));
 
-        Ok(Self {
-            storage,
-            cache_dir,
-            ingest,
-        })
+        Ok(Self { cache_dir, ingest })
     }
 
-    /// Build [`Storage`] (tenant-bound writer) for one registry row.
-    pub async fn build_tenant_storage(
+    /// Build an ingest facade bound to one authenticated workspace and scope.
+    pub(crate) async fn build_tenant_ingest(
         config: &Config,
-        tenant_ducklake: Option<DuckLakeScopeResolver>,
-        _tenant_id: String,
-        scope: DuckLakeScope,
-    ) -> Result<Storage> {
-        let mut scoped_config = config.clone();
-        scoped_config.ducklake.metadata_schema = scope.metadata_schema;
-        scoped_config.ducklake.data_path = scope.data_path;
+        tenant_ducklake: DuckLakeScopeResolver,
+        binding: crate::workspace_scope::WorkspaceBinding,
+    ) -> Result<Arc<IngestEngine>> {
+        let tenant_id = binding.workspace_id.clone();
+        let scope = binding.physical_scope;
         let writer =
-            Arc::new(DuckLakeWriter::new_scope_bound(&scoped_config, tenant_ducklake).await?);
-        Ok(Storage::new(writer))
+            Self::build_tenant_writer(config, tenant_ducklake.clone(), tenant_id.clone(), &scope)
+                .await?;
+        let dirty =
+            session_summary_dirty_for(config, &tenant_ducklake, &tenant_id, &scope.metadata_schema);
+        Ok(Arc::new(IngestEngine::from_writer(
+            writer,
+            tenant_id,
+            config.ingest.flush_interval_seconds,
+            config.ingest.buffer_size_mb,
+            config.ingest.write_timeout_seconds,
+            dirty,
+        )))
+    }
+
+    async fn build_tenant_writer(
+        config: &Config,
+        tenant_ducklake: DuckLakeScopeResolver,
+        tenant_id: String,
+        scope: &PhysicalScope,
+    ) -> Result<Arc<DuckLakeWriter>> {
+        let mut scoped_config = config.clone();
+        scoped_config.ducklake.metadata_path = scope.metadata_path.clone();
+        scoped_config.ducklake.metadata_schema = scope.metadata_schema.clone();
+        scoped_config.ducklake.data_path = scope.data_path.clone();
+        scoped_config.ducklake.catalog_alias = scope.catalog_alias.clone();
+        Ok(Arc::new(
+            DuckLakeWriter::new_scope_bound(&scoped_config, tenant_ducklake, tenant_id).await?,
+        ))
     }
 
     pub async fn add_spans(&self, items: Vec<Span>, request_size: usize) -> Result<()> {
@@ -267,24 +445,12 @@ impl IngestPipeline {
         self.ingest.add_logs(items, request_size).await
     }
 
-    pub async fn write_span_batches(&self, batches: Vec<Vec<Span>>) -> Result<()> {
-        self.storage.writer.write_span_batches(batches).await
-    }
-
-    pub async fn write_log_batches(&self, batches: Vec<Vec<Log>>) -> Result<()> {
-        self.storage.writer.write_log_batches(batches).await
-    }
-
     pub async fn force_flush_spans(&self) -> Result<()> {
         self.ingest.force_flush_spans().await
     }
 
     pub async fn force_flush_logs(&self) -> Result<()> {
         self.ingest.force_flush_logs().await
-    }
-
-    pub fn writer(&self) -> Arc<DuckLakeWriter> {
-        self.storage.writer.clone()
     }
 
     pub fn cache_dir(&self) -> Option<PathBuf> {
@@ -296,22 +462,19 @@ impl IngestPipeline {
     }
 }
 
-/// Build dirty handle when catalog is postgres (session_summary always on).
-pub fn session_summary_dirty_for(
+/// Build the durable dirty handle for one tenant's session_summary queue.
+pub(crate) fn session_summary_dirty_for(
     config: &Config,
-    resolver: Option<&DuckLakeScopeResolver>,
+    resolver: &DuckLakeScopeResolver,
     tenant_id: &str,
     metadata_schema: &str,
 ) -> Option<Arc<SessionSummaryDirty>> {
-    if !crate::config::SessionSummaryConfig::active_for(&config.ducklake) {
-        return None;
-    }
-    let resolver = resolver?;
-    Some(Arc::new(SessionSummaryDirty::new(
-        resolver.pool().clone(),
-        metadata_schema,
-        tenant_id,
-    )))
+    let dirty = if config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
+        SessionSummaryDirty::new_for_workspace(resolver.pool().clone(), metadata_schema, tenant_id)
+    } else {
+        SessionSummaryDirty::new(resolver.pool().clone(), metadata_schema, tenant_id)
+    };
+    Some(Arc::new(dirty))
 }
 
 #[cfg(test)]

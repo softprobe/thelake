@@ -11,15 +11,6 @@ use std::time::Instant;
 // Note: perf + config helpers live under `tests/util/`.
 
 #[tokio::test]
-async fn test_config_loading() {
-    let config = load_test_config();
-    assert!(
-        matches!(config.ducklake.catalog_type.as_str(), "sqlite" | "postgres"),
-        "DuckLake catalog_type should be sqlite or postgres for local e2e"
-    );
-}
-
-#[tokio::test]
 async fn test_ingestion_perf_5000_spans_under_one_second() {
     let config = load_test_config();
     // Allow buffering without forcing flush during perf check
@@ -225,7 +216,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
         let escaped = session_id.replace('\'', "''");
         let sql = format!(
-            "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+            "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
             escaped
         );
 
@@ -255,8 +246,8 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
                 http_response_body \
              FROM traces \
              WHERE session_id = '{}' AND http_request_method IS NOT NULL \
-               AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-               AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
+               AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
+               AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS \
              LIMIT 1",
             escaped
         );
@@ -353,7 +344,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
             // Query traces - should include all three tiers (buffer + staged + iceberg)
             // After optimizer, staged is empty but union view should refresh and query Iceberg
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+                "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
                 escaped
             );
             let result = test_pipeline.execute_query(&sql).await.expect("query");
@@ -378,8 +369,8 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
                 http_response_body \
              FROM traces \
              WHERE session_id = '{}' AND http_request_method IS NOT NULL \
-               AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-               AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
+               AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
+               AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS \
              LIMIT 1",
                 escaped
             );
@@ -577,15 +568,15 @@ async fn test_duckdb_union_read_realtime_performance() {
     let query_engine = test_pipeline.query_engine();
 
     let base_sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         base_session.replace('\'', "''")
     );
     let staged_sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         staged_session.replace('\'', "''")
     );
     let buffer_sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         buffer_session.replace('\'', "''")
     );
 
@@ -685,6 +676,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
                 resource_attributes,
                 trace_id,
                 span_id,
+                tenant_id: None,
                 agent_id: None,
                 agent_name: None,
             });
@@ -727,7 +719,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         for session_id in &session_ids {
             let escaped = session_id.replace('\'', "''");
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
                 escaped
             );
             let result = test_pipeline.execute_query(&sql).await.expect("query");
@@ -750,7 +742,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         for session_id in &session_ids {
             let escaped = session_id.replace('\'', "''");
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
                 escaped
             );
             let result = test_pipeline.execute_query(&sql).await.expect("query");
@@ -767,7 +759,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
         for session_id in &session_ids {
             let escaped = session_id.replace('\'', "''");
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
                 escaped
             );
             let result = test_pipeline.execute_query(&sql).await.expect("query");
@@ -854,12 +846,13 @@ async fn test_http_fields_in_span_model() {
     println!("✅ HTTP response body: {:?}", span.http_response_body);
 
     // Verify the span can be converted to Arrow RecordBatch
-    let config = load_test_config();
+    let mut config = load_test_config();
+    config.ingest.flush_interval_seconds = 0;
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.pipeline;
 
     // Write the span and verify it succeeds
-    let result = pipeline.write_span_batches(vec![vec![span]]).await;
+    let result = pipeline.add_spans(vec![span], 0).await;
     assert!(
         result.is_ok(),
         "Failed to write span with HTTP fields: {:?}",
@@ -921,7 +914,7 @@ async fn test_pinned_metadata_updates_on_commit() {
         "legacy catalog_metadata pointer files must not be written"
     );
 
-    let count_sql = "SELECT COUNT(*) AS count FROM traces WHERE app_id = 'app-pin' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS";
+    let count_sql = "SELECT COUNT(*) AS count FROM traces WHERE app_id = 'app-pin' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS";
     let first = test_pipeline
         .execute_query(count_sql)
         .await
@@ -970,6 +963,7 @@ async fn test_duckdb_union_read_realtime_concurrency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            tenant_id: None,
             agent_id: None,
             agent_name: None,
         });
@@ -987,7 +981,7 @@ async fn test_duckdb_union_read_realtime_concurrency() {
 
     // Wait until union view reflects flushed data (staged path listing may be empty).
     let staged_sql = format!(
-        "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+        "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         staged_session.replace('\'', "''")
     );
     wait_for(
@@ -1027,7 +1021,7 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         let engine = query_engine.clone();
         handles.push(tokio::spawn(async move {
             let sql = format!(
-                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
                 session_id.replace('\'', "''")
             );
             let _ = engine.execute_query(&sql).await.expect("warmup");
@@ -1089,7 +1083,7 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
 
     let escaped = session_id.replace('\'', "''");
     let sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         escaped
     );
     wait_for(
@@ -1112,7 +1106,7 @@ async fn test_wal_replay_recovers_spans() {
     let _config = load_test_config();
 }
 
-// Snapshot expire + TWCS under the leased MaintenanceJob path are covered by
+// Snapshot expire + TWCS under the leased PhysicalScopeMaintenanceJob path are covered by
 // `compaction::maintenance_leased_tests` (compact file counts, expire, multi-tenant,
 // aborted-holder recover). Do not restore a no-assert `run_once` smoke here.
 
@@ -1206,8 +1200,8 @@ async fn test_wal_cleanup_after_flush() {
 
     println!("✅ Second flush completed (DuckLake flush-through)");
 
-    let sql1 = "SELECT COUNT(*) AS c FROM traces WHERE session_id = 'wal-cleanup-test-1' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS";
-    let sql2 = "SELECT COUNT(*) AS c FROM traces WHERE session_id = 'wal-cleanup-test-2' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS";
+    let sql1 = "SELECT COUNT(*) AS c FROM traces WHERE session_id = 'wal-cleanup-test-1' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS";
+    let sql2 = "SELECT COUNT(*) AS c FROM traces WHERE session_id = 'wal-cleanup-test-2' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS";
     let c1 = test_pipeline.execute_query(sql1).await.expect("q1").rows[0][0]
         .as_i64()
         .unwrap_or(0);
@@ -1288,7 +1282,7 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
     println!("🔍 Step 3: Verifying union view shows data from staged files...");
     let escaped = session_id.replace('\'', "''");
     let union_sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         escaped
     );
     let union_result_before = test_pipeline
@@ -1347,7 +1341,7 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         "🧊 Step 9: Verifying data appears in union view (includes Iceberg after optimizer)..."
     );
     let iceberg_sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         escaped
     );
     let iceberg_result = test_pipeline

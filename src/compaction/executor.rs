@@ -7,8 +7,10 @@ use crate::compaction::twcs::{
 };
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
+use crate::workspace_scope::PhysicalScope;
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, Utc};
+use deadpool_postgres::Pool;
 use duckdb::Connection;
 use tracing::{info, warn};
 
@@ -18,10 +20,26 @@ pub fn maintenance_table_names() -> Vec<&'static str> {
 }
 
 #[derive(Clone)]
-pub struct MaintenanceExecutor {
+/// Physical-scope maintenance facade.
+///
+/// This is the only production owner of DuckDB connections used for
+/// compaction, metadata cleanup, and session-summary reduction. The raw
+/// connection helpers remain implementation details of this module.
+pub struct MaintenanceEngine {
     config: Config,
     ducklake: crate::config::DuckLakeConfig,
-    scope_registry: Option<DuckLakeScopeResolver>,
+    scope_registry: DuckLakeScopeResolver,
+}
+
+/// Opaque physical scope selected by `MaintenanceEngine`.
+///
+/// Callers can pass this capability back to maintenance operations, but cannot
+/// inspect or replace its catalog configuration.
+#[derive(Clone)]
+pub struct MaintenanceScope {
+    scope_key: String,
+    ducklake: crate::config::DuckLakeConfig,
+    pool: Pool,
 }
 
 #[derive(Debug, Clone)]
@@ -90,16 +108,41 @@ pub enum CompactionStatus {
     Unsupported,
 }
 
-impl MaintenanceExecutor {
-    pub async fn new(
-        config: &Config,
-        scope_registry: Option<DuckLakeScopeResolver>,
-    ) -> Result<Self> {
-        Ok(Self {
+impl MaintenanceEngine {
+    pub(crate) fn from_config(config: &Config, scope_registry: DuckLakeScopeResolver) -> Self {
+        Self {
             config: config.clone(),
             ducklake: config.ducklake.clone(),
             scope_registry,
-        })
+        }
+    }
+
+    pub(crate) async fn new(
+        config: &Config,
+        scope_registry: DuckLakeScopeResolver,
+    ) -> Result<Self> {
+        Ok(Self::from_config(config, scope_registry))
+    }
+
+    /// Build a maintenance facade from the process engine manager.
+    pub(crate) async fn from_engines(
+        engines: &crate::runtime_engine::RuntimeEngineManager,
+    ) -> Result<Self> {
+        Self::new(engines.config(), engines.scope_registry().clone()).await
+    }
+
+    /// Validate every physical scope before the service reports readiness.
+    /// This exercises the same open-and-attach path used by scheduled
+    /// maintenance without running retention or compaction mutations.
+    pub(crate) async fn validate_startup(&self) -> Result<()> {
+        for (scope_key, ducklake) in self.physical_scopes().await? {
+            let conn = self
+                .open_ducklake_connection(&ducklake)
+                .map_err(|error| anyhow!("maintenance open failed for {scope_key}: {error}"))?;
+            self.attach_ducklake(&conn, &ducklake)
+                .map_err(|error| anyhow!("maintenance attach failed for {scope_key}: {error}"))?;
+        }
+        Ok(())
     }
 
     pub async fn run_once(&self) -> Result<MaintenanceSummary> {
@@ -114,25 +157,83 @@ impl MaintenanceExecutor {
         self.run_once_ducklake(run_compaction).await
     }
 
-    pub(crate) async fn maintenance_scopes(
+    pub async fn resolve_scope(&self, scope_key: &str) -> Result<MaintenanceScope> {
+        let ducklake = self
+            .workspace_scopes()
+            .await?
+            .into_iter()
+            .find(|(key, _)| key == scope_key)
+            .map(|(_, ducklake)| ducklake)
+            .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))?;
+        Ok(MaintenanceScope {
+            scope_key: scope_key.to_string(),
+            ducklake,
+            pool: self.scope_registry.pool().clone(),
+        })
+    }
+
+    /// Reduce dirty session summaries through the physical-scope maintenance
+    /// boundary. The reducer may use DuckDB internally, but callers never
+    /// receive its connection or choose its attach policy.
+    pub async fn reduce_session_summary(
+        &self,
+        scope: &MaintenanceScope,
+        max_sessions: u64,
+        max_reduce_span_seconds: u64,
+    ) -> Result<usize> {
+        let pool = &scope.pool;
+        crate::session_summary::reduce_tenant(
+            pool,
+            &scope.ducklake.metadata_schema,
+            &scope.scope_key,
+            &self.config,
+            &scope.ducklake,
+            max_sessions,
+            max_reduce_span_seconds,
+        )
+        .await
+    }
+
+    /// Rebuild session summaries through the physical-scope maintenance
+    /// boundary.
+    pub async fn rebuild_session_summary(
+        &self,
+        scope: &MaintenanceScope,
+        from: chrono::DateTime<Utc>,
+        to: chrono::DateTime<Utc>,
+        max_reduce_span_seconds: u64,
+    ) -> Result<usize> {
+        let pool = &scope.pool;
+        crate::session_summary::rebuild_tenant_window(
+            pool,
+            &scope.ducklake.metadata_schema,
+            &self.config,
+            &scope.ducklake,
+            &scope.scope_key,
+            from,
+            to,
+            max_reduce_span_seconds,
+        )
+        .await
+    }
+
+    pub(crate) async fn workspace_scopes(
         &self,
     ) -> Result<Vec<(String, crate::config::DuckLakeConfig)>> {
         let mut scopes = Vec::new();
         let default = self.ducklake.clone();
         let mut saw_default = false;
-        if let Some(registry) = &self.scope_registry {
-            for (scope_id, scope) in registry.list_scopes().await? {
-                let mut dk = default.clone();
-                dk.metadata_schema = scope.metadata_schema;
-                dk.data_path = scope.data_path;
-                if dk.metadata_schema == default.metadata_schema
-                    && dk.data_path == default.data_path
-                {
-                    saw_default = true;
-                }
-                // scope_id is the tenant id used by RuntimeEngine / inventory gauges.
-                scopes.push((scope_id, dk));
+        for (scope_id, scope) in self.scope_registry.list_scopes().await? {
+            let mut dk = default.clone();
+            dk.metadata_path = scope.metadata_path;
+            dk.metadata_schema = scope.metadata_schema;
+            dk.data_path = scope.data_path;
+            dk.catalog_alias = scope.catalog_alias;
+            if dk.metadata_schema == default.metadata_schema && dk.data_path == default.data_path {
+                saw_default = true;
             }
+            // scope_id is the tenant id used by RuntimeEngine / inventory gauges.
+            scopes.push((scope_id, dk));
         }
         if !saw_default {
             scopes.insert(0, ("_default".to_string(), default));
@@ -140,32 +241,53 @@ impl MaintenanceExecutor {
         Ok(scopes)
     }
 
+    /// Return each physical DuckLake scope once. Workspace summary jobs use
+    /// `workspace_scopes`; compaction and metadata jobs use this list so a
+    /// shared physical scope is maintained once per pass.
+    pub(crate) async fn physical_scopes(
+        &self,
+    ) -> Result<Vec<(String, crate::config::DuckLakeConfig)>> {
+        Ok(deduplicate_physical_scopes(self.workspace_scopes().await?))
+    }
+
+    /// Run idempotent product-hot schema bootstrap once for a physical scope.
+    /// Workspace summary jobs must not trigger this physical-scope operation.
+    pub(crate) async fn ensure_physical_scope_bootstrap(
+        &self,
+        ducklake: &crate::config::DuckLakeConfig,
+    ) -> Result<()> {
+        let scope = PhysicalScope::from_ducklake(ducklake);
+        crate::session_summary::ensure_product_hot_attrs_for_scope(&self.scope_registry, &scope)
+            .await?;
+        Ok(())
+    }
+
     async fn run_once_ducklake(&self, run_compaction: bool) -> Result<MaintenanceSummary> {
         let mut results = Vec::new();
-        for (tenant_id, ducklake) in self.maintenance_scopes().await? {
+        for (scope_key, ducklake) in self.physical_scopes().await? {
             let mut part = self
-                .run_tenant_pass(&tenant_id, &ducklake, run_compaction)
+                .run_physical_scope_pass(&scope_key, &ducklake, run_compaction)
                 .await?;
             results.append(&mut part);
         }
         Ok(MaintenanceSummary { tables: results })
     }
 
-    /// One tenant scope: TWCS/ladder (optional) + metadata expire/orphan.
-    pub(crate) async fn run_tenant_pass(
+    /// One physical scope: TWCS/ladder (optional) + metadata expire/orphan.
+    pub(crate) async fn run_physical_scope_pass(
         &self,
-        tenant_id: &str,
+        scope_key: &str,
         ducklake: &crate::config::DuckLakeConfig,
         run_compaction: bool,
     ) -> Result<Vec<TableMaintenanceResult>> {
-        // §7.2 pass order per tenant scope:
+        // §7.2 pass order per physical scope:
         // 1 ensure PARTITIONED BY / SORTED BY
         // 2 TWCS merge (metrics family first, partition-scoped plans)
         // 3–5 downsample 5m → 1h → collapse
         // 6–7 expire snapshots + orphan cleanup (once per scope)
         let tables = maintenance_table_names();
         let mut results = Vec::new();
-        let label = tenant_id;
+        let label = scope_key;
         let scope_start = std::time::Instant::now();
         let conn = match self.open_ducklake_connection(ducklake) {
             Ok(c) => c,
@@ -197,7 +319,7 @@ impl MaintenanceExecutor {
                     .ducklake_table_exists(&conn, ducklake, table)
                     .unwrap_or(false)
                 {
-                    match self.ducklake_twcs_compact_table(&conn, ducklake, table, tenant_id) {
+                    match self.ducklake_twcs_compact_table(&conn, ducklake, table, scope_key) {
                         Ok(s) => s,
                         Err(err) => {
                             warn!(
@@ -225,14 +347,14 @@ impl MaintenanceExecutor {
         if let Some(orphan_status) =
             orphan_metric_status(orphan_enabled, remove_orphan_files.status)
         {
-            crate::self_monitoring::record_orphan_remove(tenant_id, orphan_status);
+            crate::self_monitoring::record_orphan_remove(scope_key, orphan_status);
         }
         if let Some(snap_status) =
             snapshot_metric_status(self.config.maintenance.metadata_enabled, metadata.skipped)
         {
-            crate::self_monitoring::record_snapshot_expire(tenant_id, snap_status);
+            crate::self_monitoring::record_snapshot_expire(scope_key, snap_status);
         }
-        crate::self_monitoring::record_compaction_pass(tenant_id, true);
+        crate::self_monitoring::record_compaction_pass(scope_key, true);
         let _ = scope_start;
 
         for table in &tables {
@@ -312,7 +434,21 @@ impl MaintenanceExecutor {
     }
 }
 
-impl MaintenanceExecutor {
+pub(crate) fn deduplicate_physical_scopes(
+    workspace_scopes: Vec<(String, crate::config::DuckLakeConfig)>,
+) -> Vec<(String, crate::config::DuckLakeConfig)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut physical = Vec::new();
+    for (_workspace_id, ducklake) in workspace_scopes {
+        let key = PhysicalScope::from_ducklake(&ducklake).key();
+        if seen.insert(key.clone()) {
+            physical.push((key, ducklake));
+        }
+    }
+    physical
+}
+
+impl MaintenanceEngine {
     fn twcs_policy(&self) -> TwcsPolicy {
         TwcsPolicy::from(&self.config.maintenance)
     }
@@ -712,11 +848,12 @@ impl MaintenanceExecutor {
         &self,
         ducklake: &crate::config::DuckLakeConfig,
     ) -> Result<Connection> {
-        crate::storage::ducklake::open_object_store_ducklake_connection(
-            &self.config,
-            ducklake,
-            crate::storage::ducklake::COMPACTION_DUCKDB_THREADS,
-            crate::storage::ducklake::COMPACTION_DUCKDB_MEMORY,
+        let access = crate::workspace_scope::DuckLakeAccess::Physical(
+            crate::workspace_scope::PhysicalScope::from_ducklake(ducklake),
+        );
+        crate::storage::ducklake::DuckLakeSessionFactory::new(&self.config).open(
+            &access,
+            crate::storage::ducklake::DuckLakeSessionKind::Maintenance,
         )
     }
 
@@ -725,16 +862,11 @@ impl MaintenanceExecutor {
         conn: &Connection,
         ducklake: &crate::config::DuckLakeConfig,
     ) -> Result<()> {
-        let attach_target = crate::storage::ducklake::ducklake_attach_target(ducklake);
-        crate::storage::ducklake::prepare_local_ducklake_paths(ducklake, &attach_target)?;
-        let opts = crate::storage::ducklake::ducklake_attach_options(ducklake);
-        let attach_sql = format!(
-            "ATTACH 'ducklake:{}' AS {} ({});",
-            crate::storage::ducklake::escape_sql_literal(&attach_target),
-            ducklake.catalog_alias,
-            opts.join(", ")
+        let access = crate::workspace_scope::DuckLakeAccess::Physical(
+            crate::workspace_scope::PhysicalScope::from_ducklake(ducklake),
         );
-        conn.execute_batch(&attach_sql)?;
+        crate::storage::ducklake::DuckLakeSessionFactory::new(&self.config)
+            .attach(conn, &access)?;
         Ok(())
     }
 
@@ -866,7 +998,7 @@ fn is_ducklake_oom(err: &duckdb::Error) -> bool {
 }
 
 /// Inner attempts per merge wave. Paired with a second wave in
-/// [`MaintenanceExecutor::ducklake_compact_table_wave`].
+/// [`MaintenanceEngine::ducklake_compact_table_wave`].
 const COMPACTION_SERIALIZATION_ATTEMPTS: usize = 8;
 
 /// Soft warn when a scope still has many Parquet files after a maintenance pass.
@@ -984,6 +1116,28 @@ mod tests {
     #[test]
     fn maintenance_table_order_is_traces_logs_scores() {
         assert_eq!(maintenance_table_names(), &["traces", "logs", "scores"]);
+    }
+
+    #[test]
+    fn physical_scope_maintenance_deduplicates_shared_bindings() {
+        let shared = crate::config::DuckLakeConfig {
+            metadata_schema: "shared_scope".into(),
+            data_path: "s3://warehouse/shared".into(),
+            ..crate::config::DuckLakeConfig::default()
+        };
+        let isolated = crate::config::DuckLakeConfig {
+            metadata_schema: "isolated_scope".into(),
+            data_path: "s3://warehouse/isolated".into(),
+            ..shared.clone()
+        };
+        let scopes = deduplicate_physical_scopes(vec![
+            ("workspace-a".into(), shared.clone()),
+            ("workspace-b".into(), shared),
+            ("workspace-c".into(), isolated),
+        ]);
+        assert_eq!(scopes.len(), 2);
+        assert!(scopes[0].0.starts_with("ducklake:"));
+        assert!(scopes[1].0.starts_with("ducklake:"));
     }
 
     #[test]
@@ -1163,17 +1317,18 @@ mod tests {
         let mut cfg = Config::default();
         cfg.maintenance.enabled = false;
         cfg.maintenance.metadata_enabled = false;
-        let executor = MaintenanceExecutor::new(&cfg, None)
+        let resolver = crate::runtime_engine::DuckLakeScopeResolver::connect(&cfg)
+            .await
+            .expect("connect resolver");
+        let executor = MaintenanceEngine::new(&cfg, resolver)
             .await
             .expect("executor");
         let mut ducklake = cfg.ducklake.clone();
         // Parent path is a file → prepare_local_ducklake_paths fails → attach Err.
         let blocker = tempfile::NamedTempFile::new().expect("blocker file");
-        ducklake.catalog_type = "sqlite".into();
-        ducklake.metadata_path = format!("{}/meta.sqlite", blocker.path().display());
         ducklake.data_path = format!("{}/data/", blocker.path().display());
         let err = executor
-            .run_tenant_pass("t-attach-fail", &ducklake, false)
+            .run_physical_scope_pass("t-attach-fail", &ducklake, false)
             .await
             .expect_err("attach must Err");
         assert!(

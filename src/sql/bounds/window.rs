@@ -136,7 +136,7 @@ mod tests {
                 format!("SELECT 1 FROM t c WHERE c.id = 1 AND {bound}")
             })
             .into_sql();
-        assert!(sql.contains("CAST(c.timestamp AS TIMESTAMP_NS)"));
+        assert!(sql.contains("make_timestamp_ns(epoch_ns(c.timestamp))"));
         assert!(!sql.contains("record_date"));
         assert!(!sql.contains("window_ts"));
     }

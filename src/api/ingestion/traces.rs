@@ -250,7 +250,7 @@ async fn process_traces_inner(
 
     let engine = state.engine_for_id(&tid).await?;
     let write_start = std::time::Instant::now();
-    engine.ingest.add_spans(spans, body_size).await?;
+    engine.add_spans(spans, body_size).await?;
     if crate::self_monitoring::instrument_customer_tenant(&tid) {
         crate::self_monitoring::record_write(&tid, "traces", app.as_deref(), write_start.elapsed());
     }

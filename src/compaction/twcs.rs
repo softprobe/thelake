@@ -211,8 +211,8 @@ pub fn logical_table_row_count_sql(catalog_alias: &str, table: &str) -> String {
     // Wide timestamp bound so D12 accepts this maintenance probe.
     format!(
         "SELECT count(*)::BIGINT FROM {catalog_alias}.{table} \
-         WHERE CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-           AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS"
+         WHERE make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
+           AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS"
     )
 }
 
@@ -432,7 +432,10 @@ mod tests {
     fn logical_table_row_count_sql_targets_catalog_table() {
         let sql = logical_table_row_count_sql("softprobe", "traces");
         assert!(sql.contains("FROM softprobe.traces"), "{sql}");
-        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS)"), "{sql}");
+        assert!(
+            sql.contains("make_timestamp_ns(epoch_ns(timestamp))"),
+            "{sql}"
+        );
     }
 
     #[test]

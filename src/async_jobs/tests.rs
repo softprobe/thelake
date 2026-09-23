@@ -1154,16 +1154,3 @@ async fn memory_steal_records_without_panic() {
     crate::self_monitoring::record_lease_acquire("j", "steal-metric", "lose");
     crate::self_monitoring::record_job_error("j", "steal-metric");
 }
-
-#[tokio::test]
-async fn lease_store_for_none_is_memory() {
-    let store = crate::async_jobs::lease_store_for(None);
-    assert!(store
-        .try_acquire("j", "mem-path", "a", Duration::from_secs(60))
-        .await
-        .unwrap());
-    assert!(!store
-        .try_acquire("j", "mem-path", "b", Duration::from_secs(60))
-        .await
-        .unwrap());
-}

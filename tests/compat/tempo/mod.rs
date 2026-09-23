@@ -538,7 +538,8 @@ async fn tempo_phase3_tag_projection_matches_tempo_event_and_link_tags() {
             "link.source",
             "peer.service",
             "queue.name",
-            "service.name"
+            "service.name",
+            "service_name"
         ])
     );
 }

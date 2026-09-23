@@ -28,8 +28,8 @@ use crate::util::storage_config::load_test_config;
 // =============================================================================
 
 /// Wide one-clock bound so warm COUNT(*) queries satisfy D12 without day filters.
-const PERF_TS_BOUND: &str = "CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-     AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS";
+const PERF_TS_BOUND: &str = "make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
+     AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS";
 
 fn load_perf_config() -> Config {
     if let Ok(config_file) = std::env::var("PERF_CONFIG_FILE") {
@@ -40,7 +40,6 @@ fn load_perf_config() -> Config {
     // SQLite metadata (`database is locked`); prefer Postgres whenever the local catalog is up.
     let backend = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
     if backend == "local" || backend == "gcs" {
-        config.ducklake.catalog_type = "postgres".to_string();
         config.ducklake.metadata_path =
             "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     }
@@ -236,14 +235,16 @@ async fn perf_union_read_latency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            tenant_id: None,
             agent_id: None,
             agent_name: None,
         });
     }
     pipeline
-        .write_log_batches(vec![base_logs])
+        .add_logs(base_logs, per_session * 256)
         .await
-        .expect("base write");
+        .expect("base ingest");
+    pipeline.force_flush_logs().await.expect("base flush");
 
     let mut staged_logs = Vec::new();
     for i in 0..per_session {
@@ -258,6 +259,7 @@ async fn perf_union_read_latency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            tenant_id: None,
             agent_id: None,
             agent_name: None,
         });
@@ -280,6 +282,7 @@ async fn perf_union_read_latency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            tenant_id: None,
             agent_id: None,
             agent_name: None,
         });
@@ -310,7 +313,7 @@ async fn perf_union_read_latency() {
         base_session.replace('\'', "''"),
         PERF_TS_BOUND,
     );
-    // Retry query to handle R2 eventual consistency after write_log_batches
+    // Retry query to handle R2 eventual consistency after the base ingest flush.
     let warmup =
         retry_query_until_count(&query_engine, &warmup_iceberg_sql, per_session as i64, 15)
             .await
@@ -449,14 +452,16 @@ async fn perf_union_read_concurrency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            tenant_id: None,
             agent_id: None,
             agent_name: None,
         });
     }
     pipeline
-        .write_log_batches(vec![base_logs])
+        .add_logs(base_logs, per_session * 256)
         .await
-        .expect("base write");
+        .expect("base ingest");
+    pipeline.force_flush_logs().await.expect("base flush");
 
     let mut staged_logs = Vec::new();
     for i in 0..per_session {
@@ -471,6 +476,7 @@ async fn perf_union_read_concurrency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            tenant_id: None,
             agent_id: None,
             agent_name: None,
         });
@@ -493,6 +499,7 @@ async fn perf_union_read_concurrency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            tenant_id: None,
             agent_id: None,
             agent_name: None,
         });
@@ -524,7 +531,7 @@ async fn perf_union_read_concurrency() {
         base_session.replace('\'', "''"),
         PERF_TS_BOUND,
     );
-    // Retry query to handle R2 eventual consistency after write_log_batches
+    // Retry query to handle R2 eventual consistency after the base ingest flush.
     let warmup = retry_query_until_count(&query_engine, &warmup_sql, per_session as i64, 15)
         .await
         .expect("warmup should eventually return data");

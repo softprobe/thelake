@@ -27,7 +27,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
-use std::sync::Arc;
 
 const PROTOCOL: ProtocolScope = ProtocolScope::Loki;
 const INSTANT_QUERY_LOOKBACK_NS: i64 = 30_000_000_000;
@@ -42,7 +41,7 @@ pub(crate) async fn backend_for(
             format!("tenant engine unavailable: {err}"),
         )
     })?;
-    Ok(DuckLakeLogsBackend::new(Arc::clone(&engine.query)))
+    Ok(DuckLakeLogsBackend::new(engine.query_engine()))
 }
 
 fn tenant_context(tenant: TenantInfo, headers: &HeaderMap) -> Result<TenantContext, CompatError> {

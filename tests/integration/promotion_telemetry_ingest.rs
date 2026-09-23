@@ -1,10 +1,10 @@
 use chrono::Utc;
 use softprobe_runtime::config::Config;
-use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::Span;
 use softprobe_runtime::promotion::ensure_promotion_metadata_tables;
-use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
+use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tempfile::TempDir;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
@@ -14,11 +14,11 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     let temp = TempDir::new().expect("tempdir");
     let mut config = Config::default();
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
-    config.ducklake.catalog_type = "postgres".to_string();
     config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     config.ducklake.catalog_alias = "softprobe".to_string();
     config.ducklake.metadata_schema = format!("softprobe_registry_{suffix}");
+    config.ingest.flush_interval_seconds = 0;
     let tenant_data_path = temp
         .path()
         .join("tenant-data")
@@ -31,38 +31,31 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
 
     let tenant_id = format!("tenant-promoted-{suffix}");
-    let resolver = DuckLakeScopeResolver::connect(&config)
+    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("resolver")
-        .expect("postgres resolver");
-    resolver
+        .expect("connect runtime engines");
+    let tenant_schema = format!("softprobe_promoted_data_{suffix}");
+    manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
-            metadata_schema: format!("softprobe_promoted_data_{suffix}"),
+            metadata_schema: tenant_schema.clone(),
             data_path: tenant_data_path,
         })
         .await
         .expect("provision tenant");
-    let scope = resolver
-        .resolve_scope(&tenant_id)
-        .await
-        .expect("tenant scope");
-    insert_active_trace_promotion_spec(&scope.metadata_schema).await;
+    insert_active_trace_promotion_spec(&tenant_schema).await;
 
     // Bind writer to the provisioned tenant scope (not the registry schema on config).
-    let storage = IngestPipeline::build_tenant_storage(
-        &config,
-        Some(resolver),
-        tenant_id.clone(),
-        scope.clone(),
-    )
-    .await
-    .expect("tenant storage");
-    storage
-        .writer
-        .write_span_batches(vec![vec![promoted_span(&tenant_id)]])
+    let ingest = manager
+        .engine_for(&tenant_id)
         .await
-        .expect("write promoted span");
+        .expect("tenant engine")
+        .ingest
+        .clone();
+    ingest
+        .add_spans(vec![promoted_span(&tenant_id)], 0)
+        .await
+        .expect("ingest promoted span");
 
     let conn = duckdb::Connection::open_in_memory().expect("duckdb");
     conn.execute_batch("INSTALL ducklake; INSTALL postgres; LOAD postgres;")
@@ -71,13 +64,13 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
         "ATTACH 'ducklake:postgres:{}' AS softprobe (DATA_PATH '{}', METADATA_SCHEMA '{}', META_SCHEMA '{}', DATA_INLINING_ROW_LIMIT 0);",
         metadata_path.replace('\'', "''"),
         data_path.replace('\'', "''"),
-        scope.metadata_schema.replace('\'', "''"),
-        scope.metadata_schema.replace('\'', "''"),
+        tenant_schema.replace('\'', "''"),
+        tenant_schema.replace('\'', "''"),
     ))
     .expect("attach tenant ducklake");
     let sql = format!(
         r#"SELECT service_name, division_name FROM softprobe.{}.traces WHERE session_id = 's-promoted'"#,
-        scope.metadata_schema
+        tenant_schema
     );
     let (service_name, division_name): (String, String) = conn
         .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?)))

@@ -8,7 +8,6 @@ use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::query;
 use softprobe_runtime::storage::schema::variant::{prefer_attr_varchar, variant_varchar};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -23,21 +22,12 @@ fn assert_map_dtype(dtype: &str, column: &str) {
     );
 }
 
-fn attach(metadata_path: &str, data_path: &str) -> duckdb::Connection {
-    let connection = duckdb::Connection::open_in_memory().expect("duckdb");
-    connection
-        .execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
-        .expect("extensions");
-    connection
-        .execute_batch(&format!(
-            "ATTACH 'ducklake:sqlite:{}' AS softprobe \
-             (DATA_PATH '{}', META_JOURNAL_MODE 'WAL', META_BUSY_TIMEOUT 5000, \
-              DATA_INLINING_ROW_LIMIT 0);",
-            metadata_path.replace('\'', "''"),
-            data_path.replace('\'', "''"),
-        ))
-        .expect("attach");
-    connection
+fn attach(metadata_path: &str, metadata_schema: &str, data_path: &str) -> duckdb::Connection {
+    crate::util::promotion_file_backed::attach_softprobe_ducklake(
+        metadata_path,
+        metadata_schema,
+        data_path,
+    )
 }
 
 fn attributes_object(value: &Value) -> serde_json::Map<String, Value> {
@@ -58,7 +48,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
     config.ducklake.data_inlining_row_limit = Some(0);
 
     let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let query_engine = query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
+    let query_engine = query::create_query_engine(&config)
         .await
         .expect("query engine");
 
@@ -129,23 +119,20 @@ async fn map_bags_hot_paths_and_nested_filters() {
         resource_attributes: log_resource,
         trace_id: Some("tr-0".to_string()),
         span_id: Some("sp-0".to_string()),
+        tenant_id: None,
         agent_id: None,
         agent_name: None,
     };
 
-    pipeline
-        .write_span_batches(vec![spans])
-        .await
-        .expect("write spans");
-    pipeline
-        .write_log_batches(vec![vec![log]])
-        .await
-        .expect("write logs");
+    pipeline.add_spans(spans, 0).await.expect("write spans");
+    pipeline.add_logs(vec![log], 0).await.expect("write logs");
 
-    let conn = attach(&config.ducklake.metadata_path, &config.ducklake.data_path);
-    let mut describe = conn
-        .prepare("DESCRIBE softprobe.traces;")
-        .expect("describe");
+    let conn = attach(
+        &config.ducklake.metadata_path,
+        &config.ducklake.metadata_schema,
+        &config.ducklake.data_path,
+    );
+    let mut describe = conn.prepare("DESCRIBE traces;").expect("describe");
     let types: HashMap<String, String> = describe
         .query_map([], |row| {
             let name: String = row.get(0)?;
@@ -172,7 +159,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
 
     let filter_sql = format!(
         "SELECT COUNT(*)::BIGINT AS c FROM traces \
-         WHERE session_id = '{sess}' AND {obs} = 'generation' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+         WHERE session_id = '{sess}' AND {obs} = 'generation' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         sess = session_id.replace('\'', "''"),
         // Bag-only: this test does not apply promotions (columns may be absent).
         obs = variant_varchar("attributes", "sp.observation.type"),
@@ -191,7 +178,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
 
     let detail_sql = format!(
         "SELECT CAST(attributes AS JSON) AS attributes FROM traces \
-         WHERE session_id = '{sess}' AND {obs} = 'generation' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS LIMIT 1",
+         WHERE session_id = '{sess}' AND {obs} = 'generation' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS LIMIT 1",
         sess = session_id.replace('\'', "''"),
         obs = variant_varchar("attributes", "sp.observation.type"),
     );
@@ -207,7 +194,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
 
     let log_sql = format!(
         "SELECT COUNT(*)::BIGINT FROM logs WHERE {pred} = '{sess}' \
-           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+           AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         pred = variant_varchar("attributes", "sp.session.id"),
         sess = session_id.replace('\'', "''"),
     );
@@ -230,7 +217,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     config.ducklake.data_inlining_row_limit = Some(0);
 
     let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let query_engine = query::create_query_engine(&config, Arc::new(pipeline.storage.clone()))
+    let query_engine = query::create_query_engine(&config)
         .await
         .expect("query engine");
 
@@ -326,35 +313,37 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         resource_attributes: log_resource,
         trace_id: Some(trace_id.into()),
         span_id: Some("vk-span-1".into()),
+        tenant_id: None,
         agent_id: None,
         agent_name: None,
     };
 
     pipeline
-        .write_span_batches(vec![vec![span, span_fallback]])
+        .add_spans(vec![span, span_fallback], 0)
         .await
         .expect("write spans");
-    pipeline
-        .write_log_batches(vec![vec![log]])
-        .await
-        .expect("write logs");
+    pipeline.add_logs(vec![log], 0).await.expect("write logs");
 
     // Prefer-promoted COALESCE(col, bag) requires the column to exist at bind time.
     // Add nullable product-hot columns (empty) so compiled LLM SQL can run; values
     // still resolve from the MAP bag until a real promotion apply+re-ingest.
     {
-        let conn = attach(&config.ducklake.metadata_path, &config.ducklake.data_path);
+        let conn = attach(
+            &config.ducklake.metadata_path,
+            &config.ducklake.metadata_schema,
+            &config.ducklake.data_path,
+        );
         conn.execute_batch(
-            "ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS observation_type VARCHAR;
-             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS model_name VARCHAR;
-             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS model_provider VARCHAR;
-             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS user_id VARCHAR;
-             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS input_tokens BIGINT;
-             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS output_tokens BIGINT;
-             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS total_tokens BIGINT;
-             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS total_cost DOUBLE;
-             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS session_attr_id VARCHAR;
-             ALTER TABLE softprobe.traces ADD COLUMN IF NOT EXISTS service_name VARCHAR;",
+            "ALTER TABLE traces ADD COLUMN IF NOT EXISTS observation_type VARCHAR;
+             ALTER TABLE traces ADD COLUMN IF NOT EXISTS model_name VARCHAR;
+             ALTER TABLE traces ADD COLUMN IF NOT EXISTS model_provider VARCHAR;
+             ALTER TABLE traces ADD COLUMN IF NOT EXISTS user_id VARCHAR;
+             ALTER TABLE traces ADD COLUMN IF NOT EXISTS input_tokens BIGINT;
+             ALTER TABLE traces ADD COLUMN IF NOT EXISTS output_tokens BIGINT;
+             ALTER TABLE traces ADD COLUMN IF NOT EXISTS total_tokens BIGINT;
+             ALTER TABLE traces ADD COLUMN IF NOT EXISTS total_cost DOUBLE;
+             ALTER TABLE traces ADD COLUMN IF NOT EXISTS session_attr_id VARCHAR;
+             ALTER TABLE traces ADD COLUMN IF NOT EXISTS service_name VARCHAR;",
         )
         .expect("add nullable prefer-promoted columns");
     }
@@ -373,7 +362,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
             {capture} AS capture_id \
          FROM traces \
          WHERE session_id = '{sess}' AND span_id = 'vk-span-1' \
-           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+           AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         obs = prefer_attr_varchar(
             Some("observation_type"),
             "attributes",
@@ -426,7 +415,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     let fallback_sql = format!(
         "SELECT COALESCE({obs}, 'span') AS observation_type, \
                 COALESCE({user}, {enduser}) AS user_id \
-         FROM traces WHERE span_id = 'vk-span-2' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+         FROM traces WHERE span_id = 'vk-span-2' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         obs = prefer_attr_varchar(
             Some("observation_type"),
             "attributes",
@@ -445,7 +434,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     // 3) Missing key is NULL (not an error).
     let missing_sql = format!(
         "SELECT {missing} IS NULL AS is_missing FROM traces WHERE span_id = 'vk-span-1' \
-           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+           AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         missing = variant_varchar("attributes", "does.not.exist"),
     );
     let missing = query_engine
@@ -510,14 +499,16 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     assert_eq!(miss_result.row_count, 0);
 
     // 5) Nested MAP capture-id key (SoftProbe capture_export removed with Redis).
+    //
+    // `IngestPipeline::new` always stamps writes with its own bound workspace id
+    // (anti-spoofing; see `bind_spans_to_workspace`), so the capture id (already
+    // globally unique) is what disambiguates this row rather than `tenant_id`.
     let capture_sql = format!(
         "SELECT CAST(attributes AS JSON) AS attributes FROM traces \
          WHERE CAST(attributes['sp.capture.id'] AS VARCHAR) = '{cap}' \
-           AND tenant_id = '{ten}' \
-           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-           AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+           AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
+           AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         cap = capture_id.replace('\'', "''"),
-        ten = tenant_id.replace('\'', "''"),
     );
     let capture_result = query_engine
         .execute_query(&capture_sql)
@@ -580,14 +571,16 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
     // Fresh catalog: create leftover VARIANT table first (no DROP). Writer CREATE IF NOT EXISTS
     // leaves it alone; ensure_hot_map_column_types must then fail fast (#55).
     {
-        let conn = attach(&config.ducklake.metadata_path, &config.ducklake.data_path);
-        conn.execute_batch(
-            "CREATE TABLE softprobe.traces AS SELECT '{}'::JSON::VARIANT AS attributes;",
-        )
-        .expect("create leftover variant table");
+        let conn = attach(
+            &config.ducklake.metadata_path,
+            &config.ducklake.metadata_schema,
+            &config.ducklake.data_path,
+        );
+        conn.execute_batch("CREATE TABLE traces AS SELECT '{}'::JSON::VARIANT AS attributes;")
+            .expect("create leftover variant table");
         let dtype: String = conn
             .query_row(
-                "SELECT column_type FROM (DESCRIBE softprobe.traces) WHERE column_name = 'attributes';",
+                "SELECT column_type FROM (DESCRIBE traces) WHERE column_name = 'attributes';",
                 [],
                 |row| row.get(0),
             )
@@ -630,7 +623,7 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
         status_message: None,
     };
 
-    let write_result = pipeline.write_span_batches(vec![vec![span]]).await;
+    let write_result = pipeline.add_spans(vec![span], 0).await;
     match previous_reset {
         Some(value) => std::env::set_var("SPLAKE_RESET_DUCKLAKE", value),
         None => std::env::remove_var("SPLAKE_RESET_DUCKLAKE"),

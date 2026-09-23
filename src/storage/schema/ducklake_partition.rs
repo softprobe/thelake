@@ -21,7 +21,7 @@ pub fn total_schema_probe_count() -> usize {
 }
 
 /// Consolidated DESCRIBE table helper tracking probes. Returns lowercase column names.
-pub fn describe_table_columns(
+pub(crate) fn describe_table_columns(
     conn: &Connection,
     qualified_table: &str,
 ) -> Result<HashMap<String, String>> {
@@ -47,7 +47,7 @@ pub fn describe_table_columns(
 }
 
 /// True when a live DuckLake table already has partition + sort metadata.
-pub fn table_partition_sort_ready(
+pub(crate) fn table_partition_sort_ready(
     conn: &Connection,
     catalog_or_qualified: &str,
     table_name: &str,

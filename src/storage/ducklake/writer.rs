@@ -1,10 +1,11 @@
 use crate::config::{Config, DuckLakeConfig};
 use crate::promotion::TelemetryTable;
-use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
+use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::sql::schema::{insert_order_by, is_otlp_table, LOGS, SCORES, SCORE_CONFIGS, TRACES};
 use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
 use crate::storage::schema::tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
 use crate::storage::schema::variant::parquet_select_for_table;
+use crate::workspace_scope::{DuckLakeAccess, PhysicalScope, WorkspaceBinding};
 use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
 use anyhow::{anyhow, Result};
@@ -17,13 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::{info, warn};
 
-use super::attach::{
-    apply_ducklake_retry_settings, catalog_is_attached, configure_duckdb_resources,
-    ducklake_attach_options, ducklake_attach_target, ducklake_qualified_table_name,
-    ducklake_set_option_scope_for_qualified, open_in_memory_capped, prepare_local_ducklake_paths,
-    WRITER_DUCKDB_MEMORY, WRITER_DUCKDB_THREADS,
-};
-use super::object_store::configure_object_store;
+use super::attach::{ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified};
 use super::util::{
     ensure_hot_map_column_types, ensure_log_timestamp_precision, ensure_trace_fidelity_columns,
     ensure_trace_timestamp_precision, escape_sql_literal, size_literal,
@@ -119,48 +114,78 @@ impl WriterPool {
     }
 }
 
-pub struct DuckLakeWriter {
+pub(crate) struct DuckLakeWriter {
     pub(super) config: Config,
     pub(super) ducklake: DuckLakeConfig,
-    /// When set with `catalog_type = postgres`, commits route to per-tenant metadata schemas.
-    pub(super) tenant_ducklake: Option<DuckLakeScopeResolver>,
+    /// Registry resolver: commits route to per-tenant metadata schemas through it.
+    pub(super) tenant_ducklake: DuckLakeScopeResolver,
     /// When true, this writer is permanently bound to `ducklake.metadata_schema` / `data_path`
-    /// (built via [`IngestPipeline::build_tenant_storage`]). When false, postgres writers with a
+    /// (built via [`IngestPipeline::build_tenant_ingest`]). When false, postgres writers with a
     /// registry resolver route each batch by `span.tenant_id` even if config carries a non-main
     /// registry schema name.
     pub(super) scope_bound: bool,
+    pub(super) workspace_id: Option<String>,
     /// Per catalog-scope pools of reused ATTACH'd DuckDB connections.
     pub(super) writer_pools: Mutex<HashMap<String, Arc<WriterPool>>>,
 }
 
 impl DuckLakeWriter {
-    pub async fn new(
-        config: &Config,
-        tenant_ducklake: Option<DuckLakeScopeResolver>,
-    ) -> Result<Self> {
-        Self::new_inner(config, tenant_ducklake, false).await
+    pub(crate) fn workspace_scope_mode(&self) -> crate::workspace_scope::WorkspaceScopeMode {
+        self.config.ducklake.workspace_scope_mode
+    }
+
+    pub(super) fn shared_workspace_id(&self) -> Result<Option<&str>> {
+        if self.workspace_scope_mode() != crate::workspace_scope::WorkspaceScopeMode::Shared {
+            return Ok(None);
+        }
+        self.workspace_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("shared DuckLake access requires a workspace-bound writer"))
+            .map(Some)
+    }
+
+    pub(super) fn validate_shared_ownership(
+        &self,
+        tenant_id: Option<&str>,
+        record_kind: &str,
+    ) -> Result<()> {
+        let Some(workspace_id) = self.shared_workspace_id()? else {
+            return Ok(());
+        };
+        if tenant_id != Some(workspace_id) {
+            return Err(anyhow!(
+                "shared {record_kind} writes require tenant_id to match the authenticated workspace"
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn new(config: &Config, tenant_ducklake: DuckLakeScopeResolver) -> Result<Self> {
+        Self::new_inner(config, tenant_ducklake, false, None).await
     }
 
     /// Writer permanently bound to one DuckLake scope (per-tenant runtime engine).
     pub async fn new_scope_bound(
         config: &Config,
-        tenant_ducklake: Option<DuckLakeScopeResolver>,
+        tenant_ducklake: DuckLakeScopeResolver,
+        workspace_id: impl Into<String>,
     ) -> Result<Self> {
-        Self::new_inner(config, tenant_ducklake, true).await
+        Self::new_inner(config, tenant_ducklake, true, Some(workspace_id.into())).await
     }
 
     pub(super) async fn new_inner(
         config: &Config,
-        tenant_ducklake: Option<DuckLakeScopeResolver>,
+        tenant_ducklake: DuckLakeScopeResolver,
         scope_bound: bool,
+        workspace_id: Option<String>,
     ) -> Result<Self> {
-        config.validate_ducklake_catalog()?;
         let ducklake = config.ducklake.clone();
         let writer = Self {
             config: config.clone(),
             ducklake,
             tenant_ducklake,
             scope_bound,
+            workspace_id,
             writer_pools: Mutex::new(HashMap::new()),
         };
         writer.initialize_catalog()?;
@@ -172,13 +197,8 @@ impl DuckLakeWriter {
         Ok(writer)
     }
 
-    pub fn scope_registry(&self) -> Option<&DuckLakeScopeResolver> {
-        self.tenant_ducklake.as_ref()
-    }
-
-    /// `true` when DuckLake writes are partitioned per authenticated tenant (Postgres catalog + registry).
-    pub fn tenant_scoped_ingest_enabled(&self) -> bool {
-        self.use_tenant_scoped_ducklake()
+    pub(crate) fn configured_scope(&self) -> PhysicalScope {
+        PhysicalScope::from_ducklake(&self.ducklake)
     }
 
     pub(super) fn initialize_catalog(&self) -> Result<()> {
@@ -223,8 +243,8 @@ impl DuckLakeWriter {
 
     pub(super) fn conn_cache_key(dk: &DuckLakeConfig) -> String {
         format!(
-            "{}|{}|{}|{}",
-            dk.catalog_type, dk.metadata_path, dk.metadata_schema, dk.data_path
+            "{}|{}|{}",
+            dk.metadata_path, dk.metadata_schema, dk.data_path
         )
     }
 
@@ -244,7 +264,6 @@ impl DuckLakeWriter {
                 // pool members ATTACH the already-initialized Postgres schema (with retry on races).
                 for _ in 0..size {
                     let conn = self.open_connection_for(dk)?;
-                    apply_ducklake_retry_settings(&conn)?;
                     self.attach_ducklake_for(&conn, dk)?;
                     self.ensure_schema_for(&conn, dk)?;
                     conns.push(Mutex::new(conn));
@@ -435,25 +454,18 @@ impl DuckLakeWriter {
         pool.with_conn(f)
     }
 
-    pub(super) fn use_tenant_scoped_ducklake(&self) -> bool {
-        self.tenant_ducklake.is_some() && self.ducklake.catalog_type == "postgres"
-    }
-
-    pub(super) fn effective_ducklake(&self, scope: &DuckLakeScope) -> DuckLakeConfig {
+    pub(super) fn effective_ducklake(&self, scope: &PhysicalScope) -> DuckLakeConfig {
         let mut dk = self.ducklake.clone();
         dk.metadata_schema = scope.metadata_schema.clone();
         dk.data_path = scope.data_path.clone();
         dk
     }
 
-    pub(super) fn tenant_bound_scope(&self) -> Option<DuckLakeScope> {
-        if !self.scope_bound || self.ducklake.catalog_type != "postgres" {
+    pub(super) fn tenant_bound_scope(&self) -> Option<PhysicalScope> {
+        if !self.scope_bound {
             return None;
         }
-        Some(DuckLakeScope {
-            metadata_schema: self.ducklake.metadata_schema.clone(),
-            data_path: self.ducklake.data_path.clone(),
-        })
+        Some(PhysicalScope::from_ducklake(&self.ducklake))
     }
 
     pub(super) async fn ensure_telemetry_table_for(
@@ -490,21 +502,53 @@ impl DuckLakeWriter {
         Ok(())
     }
 
+    /// Create/evolve the complete shared physical schema before shared workers
+    /// install workspace-filtered views. This is intentionally idempotent and
+    /// does not depend on any workspace's promotion manifest.
+    pub(crate) async fn ensure_shared_schema(&self) -> Result<()> {
+        if self.workspace_scope_mode() != crate::workspace_scope::WorkspaceScopeMode::Shared {
+            return Ok(());
+        }
+        let pool = self.get_or_create_pool(&self.ducklake)?;
+        let dk = self.ducklake.clone();
+        let target_file_size_bytes = self.config.maintenance.target_file_size_bytes;
+        tokio::task::spawn_blocking(move || {
+            pool.with_conn(|conn| {
+                for table_name in ["traces", "logs", "scores", "score_configs"] {
+                    let qualified_table = ducklake_qualified_table_name(&dk, table_name);
+                    match crate::storage::schema::describe_table_columns(conn, &qualified_table) {
+                        Ok(columns) if !columns.contains_key("tenant_id") => {
+                            return Err(anyhow::anyhow!(
+                                "{}: table {table_name} is missing tenant_id; migrate it before shared startup",
+                                crate::workspace_scope::SharedScopeError::new(
+                                    crate::workspace_scope::SharedScopeErrorCode::SchemaIncompatible,
+                                    format!("shared workspace table {table_name} has no ownership column"),
+                                )
+                            ));
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.to_string().contains("does not exist") => {}
+                        Err(error) => return Err(error),
+                    }
+                    Self::ensure_table_with_conn(
+                        conn,
+                        &dk,
+                        table_name,
+                        None,
+                        target_file_size_bytes,
+                    )?;
+                }
+                crate::query::workspace_views::validate_shared_workspace_schema(conn, &dk)
+            })
+        })
+        .await
+        .map_err(|error| anyhow!("shared schema initialization task failed: {error}"))??;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub async fn spans_schema(&self) -> Result<Arc<Schema>> {
         Ok(Arc::new(TraceTable::schema()))
-    }
-
-    pub async fn logs_schema(&self) -> Result<Arc<Schema>> {
-        Ok(Arc::new(OtlpLogsTable::schema()))
-    }
-
-    pub(super) async fn write_record_batches_internal(
-        &self,
-        table_name: &str,
-        record_batches: Vec<RecordBatch>,
-    ) -> Result<()> {
-        self.write_record_batches_internal_with_ducklake(&self.ducklake, table_name, record_batches)
-            .await
     }
 
     pub(super) async fn write_record_batches_internal_with_ducklake(
@@ -562,13 +606,23 @@ impl DuckLakeWriter {
         };
 
         let insert = if let Some(id_column) = dedupe_id_column {
-            crate::sql::writer::insert_deduped_parquet_sql(
-                &qualified_table,
-                &select_prefix,
-                &escaped_path,
-                id_column,
-                order_clause,
-            )
+            if self.workspace_scope_mode() == crate::workspace_scope::WorkspaceScopeMode::Shared {
+                crate::sql::writer::insert_deduped_parquet_sql_for_workspace(
+                    &qualified_table,
+                    &select_prefix,
+                    &escaped_path,
+                    id_column,
+                    order_clause,
+                )
+            } else {
+                crate::sql::writer::insert_deduped_parquet_sql(
+                    &qualified_table,
+                    &select_prefix,
+                    &escaped_path,
+                    id_column,
+                    order_clause,
+                )
+            }
         } else {
             crate::sql::writer::insert_batch_sql(
                 &qualified_table,
@@ -635,61 +689,33 @@ impl DuckLakeWriter {
     }
 
     pub(super) fn open_connection_for(&self, dk: &DuckLakeConfig) -> Result<Connection> {
-        // Cap at open — SET threads after INSTALL/LOAD leaves an nproc TaskScheduler.
-        let conn = open_in_memory_capped(WRITER_DUCKDB_THREADS, WRITER_DUCKDB_MEMORY)?;
-        conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
-        configure_object_store(&conn, &self.config, &dk.data_path)?;
-        conn.execute_batch("INSTALL ducklake; LOAD ducklake;")?;
-        if dk.catalog_type == "postgres" {
-            conn.execute_batch("INSTALL postgres; LOAD postgres;")?;
-        }
-        if dk.catalog_type == "sqlite" {
-            conn.execute_batch("INSTALL sqlite; LOAD sqlite;")?;
-        }
-        if let Err(err) =
-            configure_duckdb_resources(&conn, WRITER_DUCKDB_THREADS, WRITER_DUCKDB_MEMORY)
-        {
-            warn!("Failed to cap DuckDB writer threads/memory: {}", err);
-        }
-        Ok(conn)
+        let access = self.session_access(dk)?;
+        super::attach::DuckLakeSessionFactory::new(&self.config)
+            .open(&access, super::attach::DuckLakeSessionKind::Writer)
     }
 
     pub(super) fn attach_ducklake_for(&self, conn: &Connection, dk: &DuckLakeConfig) -> Result<()> {
-        let attach_target = ducklake_attach_target(dk);
-        prepare_local_ducklake_paths(dk, &attach_target)?;
+        let access = self.session_access(dk)?;
+        super::attach::DuckLakeSessionFactory::new(&self.config).attach(conn, &access)?;
+        Ok(())
+    }
 
-        let options = ducklake_attach_options(dk);
-        let sql = format!(
-            "ATTACH 'ducklake:{target}' AS {alias} ({opts});",
-            target = escape_sql_literal(&attach_target),
-            alias = dk.catalog_alias,
-            opts = options.join(", ")
-        );
-        match conn.execute_batch(&sql) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                let message = err.to_string();
-                if catalog_is_attached(conn, &dk.catalog_alias) {
-                    return Ok(());
-                }
-                // Writer-pool bootstrap can race DuckLake metadata CREATE TABLE on the same
-                // Postgres schema. Retry once after the first connection finishes initializing.
-                let retryable = message.to_lowercase().contains("already exists")
-                    || message.contains("ducklake_metadata");
-                if retryable {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    match conn.execute_batch(&sql) {
-                        Ok(()) => return Ok(()),
-                        Err(err2) if catalog_is_attached(conn, &dk.catalog_alias) => return Ok(()),
-                        Err(err2) => {
-                            return Err(anyhow!(
-                                "DuckLake attach failed after retry: {err2} (first: {message})"
-                            ));
-                        }
-                    }
-                }
-                Err(anyhow!("DuckLake attach failed: {message}"))
-            }
+    fn session_access(&self, dk: &DuckLakeConfig) -> Result<DuckLakeAccess> {
+        let scope = PhysicalScope::from_ducklake(dk);
+        if self.scope_bound {
+            let workspace_id = self
+                .workspace_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("scope-bound writer has no workspace binding"))?;
+            let binding = WorkspaceBinding::new(
+                workspace_id,
+                scope,
+                self.config.ducklake.workspace_scope_mode,
+            )
+            .map_err(|error| anyhow!(error))?;
+            Ok(DuckLakeAccess::Workspace(binding))
+        } else {
+            Ok(DuckLakeAccess::Physical(scope))
         }
     }
 
@@ -788,19 +814,23 @@ mod tests {
     #[tokio::test]
     async fn spans_schema_has_no_process_global_promoted_columns() {
         let config = Config::default();
+        let resolver = crate::runtime_engine::DuckLakeScopeResolver::connect(&config)
+            .await
+            .expect("connect ducklake scope resolver");
         let writer = DuckLakeWriter {
-            config,
+            config: config.clone(),
             ducklake: DuckLakeConfig {
-                catalog_type: "sqlite".to_string(),
-                metadata_path: ":memory:".to_string(),
+                metadata_path: config.ducklake.metadata_path.clone(),
                 data_path: "/tmp/unused".to_string(),
                 catalog_alias: "softprobe".to_string(),
                 metadata_schema: "main".to_string(),
+                workspace_scope_mode: crate::workspace_scope::WorkspaceScopeMode::Isolated,
                 data_inlining_row_limit: None,
                 writer_pool_size: 1,
             },
-            tenant_ducklake: None,
+            tenant_ducklake: resolver,
             scope_bound: false,
+            workspace_id: None,
             writer_pools: Mutex::new(HashMap::new()),
         };
 
@@ -919,6 +949,7 @@ mod tests {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            tenant_id: None,
             agent_id: None,
             agent_name: None,
         };

@@ -7,9 +7,14 @@ use crate::sql::llm::{
     clamp_limit, compile_observation_detail_sql, compile_observation_search_sql,
     compile_scores_for_session_sql, compile_scores_for_span_sql, compile_scores_for_trace_sql,
     compile_session_aggregate_sql, compile_session_observations_sql, compile_session_recording_sql,
-    compile_session_search_sql, compile_session_traces_sql, compile_trace_observations_sql,
-    compile_trace_summary_sql, DEFAULT_SEARCH_LIMIT, DEFAULT_SESSION_LIMIT, DEFAULT_TRACE_LIMIT,
+    compile_session_traces_sql, compile_trace_observations_sql, compile_trace_summary_sql,
+    DEFAULT_SEARCH_LIMIT, DEFAULT_SESSION_LIMIT, DEFAULT_TRACE_LIMIT,
 };
+// `compile_session_search_sql` is exercised only by this module's unit tests
+// (production session search is served by the Postgres-backed
+// `session_summary::search_session_summary_for_workspace` path).
+#[cfg(test)]
+use crate::sql::llm::compile_session_search_sql;
 use crate::storage::schema::variant::variant_json_to_string_map;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
@@ -21,6 +26,10 @@ use std::collections::{BTreeSet, HashMap};
 use tracing::warn;
 
 type ApiError = (StatusCode, Json<Value>);
+
+fn trusted_query(sql: impl Into<String>) -> Result<crate::sql::trusted::TrustedSql, ApiError> {
+    crate::sql::trusted::approved_query(sql).map_err(|error| storage_error(anyhow::anyhow!(error)))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservationSearchRequest {
@@ -142,7 +151,7 @@ pub async fn search_observations(
     let sql = compile_observation_search_sql(&request).map_err(bad_request)?;
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
     let result = state
-        .execute_tenant_scoped_sql(tenant_ref, &sql)
+        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(sql)?)
         .await
         .map_err(storage_error)?;
 
@@ -172,7 +181,7 @@ pub async fn get_observation(
         compile_observation_detail_sql(&span_id, params.from, params.to).map_err(bad_request)?;
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
     let result = state
-        .execute_tenant_scoped_sql(tenant_ref, &sql)
+        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(sql)?)
         .await
         .map_err(storage_error)?;
     let row = result.rows.first().ok_or_else(not_found)?;
@@ -204,7 +213,7 @@ pub async fn get_trace(
     )
     .map_err(bad_request)?;
     let summary_result = state
-        .execute_tenant_scoped_sql(tenant_ref, &summary_sql)
+        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(summary_sql)?)
         .await
         .map_err(storage_error)?;
     let summary_row = summary_result.rows.first().ok_or_else(not_found)?;
@@ -221,7 +230,7 @@ pub async fn get_trace(
     )
     .map_err(bad_request)?;
     let obs_result = state
-        .execute_tenant_scoped_sql(tenant_ref, &obs_sql)
+        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(obs_sql)?)
         .await
         .map_err(storage_error)?;
     let mut observations = obs_result
@@ -264,27 +273,23 @@ pub async fn get_trace(
 
 /// Resolve lake `QueryWindow` from Postgres `session_summary` only (D7, pad 0).
 ///
-/// No query `from`/`to`. Missing row → 404. Missing registry (non-postgres) → 503.
+/// No query `from`/`to`. Missing row → 404.
 async fn resolve_session_lake_window(
     state: &AppState,
     tenant_ref: Option<&TenantInfo>,
     session_id: &str,
 ) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
-    let Some(registry) = state.engines.scope_registry() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "session_summary unavailable" })),
-        ));
-    };
     let tenant_id = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
     let engine = state
         .engines
         .engine_for(tenant_id)
         .await
         .map_err(storage_error)?;
-    match crate::session_summary::lookup_session_summary_window(
-        registry.pool(),
-        &engine.scope.metadata_schema,
+    let summary_scope = engine.session_summary_scope();
+    match crate::session_summary::lookup_session_summary_window_for_workspace(
+        &summary_scope.pool,
+        &summary_scope.metadata_schema,
+        summary_scope.workspace_id.as_deref(),
         session_id,
     )
     .await
@@ -313,7 +318,7 @@ pub async fn get_session(
     let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
     let agg_sql = compile_session_aggregate_sql(&session_id, from, to).map_err(bad_request)?;
     let agg_result = state
-        .execute_tenant_scoped_sql(tenant_ref, &agg_sql)
+        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(agg_sql)?)
         .await
         .map_err(storage_error)?;
     let agg_row = agg_result.rows.first().ok_or_else(not_found)?;
@@ -327,7 +332,7 @@ pub async fn get_session(
         compile_session_traces_sql(&session_id, from, to, limit, params.cursor.as_deref())
             .map_err(bad_request)?;
     let traces_result = state
-        .execute_tenant_scoped_sql(tenant_ref, &traces_sql)
+        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(traces_sql)?)
         .await
         .map_err(storage_error)?;
     let mut traces = traces_result
@@ -387,7 +392,7 @@ pub async fn get_session_observations(
         compile_session_observations_sql(&session_id, from, to, limit, params.cursor.as_deref())
             .map_err(bad_request)?;
     let result = state
-        .execute_tenant_scoped_sql(tenant_ref, &sql)
+        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(sql)?)
         .await
         .map_err(storage_error)?;
     let mut observations = result
@@ -447,7 +452,7 @@ pub async fn get_session_recording(
     let limit = clamp_limit(params.limit, DEFAULT_RECORDING_LIMIT);
     let sql = compile_session_recording_sql(&session_id, from, to, limit).map_err(bad_request)?;
     let result = state
-        .execute_tenant_scoped_sql(tenant_ref, &sql)
+        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(sql)?)
         .await
         .map_err(storage_error)?;
 
@@ -655,12 +660,9 @@ pub struct SessionSearchResponse {
 
 /// Session list.
 ///
-/// Postgres catalog: always `session_summary` (empty table → empty page). Soft
-/// coalesce + dirty/reduce are required for that catalog; list does not fall
-/// back to a lake scan.
-///
-/// Non-postgres catalogs (sqlite): lake `GROUP BY session_id` — the only list
-/// store available without a catalog Postgres.
+/// Always backed by Postgres `session_summary` (empty table → empty page).
+/// Soft coalesce + dirty/reduce keep it current; list never falls back to a
+/// lake scan.
 ///
 /// Without this endpoint a client has to pull raw observations and group them
 /// in memory, which makes every aggregate a per-page partial sum, breaks
@@ -674,38 +676,35 @@ pub async fn search_sessions(
     let limit = clamp_limit(request.limit, DEFAULT_SESSION_LIMIT);
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
 
-    if let Some(registry) = state.engines.scope_registry() {
-        let tenant_id = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
-        let engine = state
-            .engines
-            .engine_for(tenant_id)
-            .await
-            .map_err(storage_error)?;
-        let schema = &engine.scope.metadata_schema;
-        return match crate::session_summary::search_session_summary(
-            registry.pool(),
-            schema,
-            &request,
-            limit,
-        )
+    let tenant_id = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
+    let engine = state
+        .engines
+        .engine_for(tenant_id)
         .await
-        {
-            Ok(response) => Ok(Json(response)),
-            Err(crate::session_summary::SessionSummaryListError::BadRequest(msg)) => {
-                Err(bad_request(msg))
-            }
-            Err(crate::session_summary::SessionSummaryListError::Storage(err)) => {
-                Err(storage_error(err))
-            }
-        };
+        .map_err(storage_error)?;
+    let summary_scope = engine.session_summary_scope();
+    match crate::session_summary::search_session_summary_for_workspace(
+        &summary_scope.pool,
+        &summary_scope.metadata_schema,
+        summary_scope.workspace_id.as_deref(),
+        &request,
+        limit,
+    )
+    .await
+    {
+        Ok(response) => Ok(Json(response)),
+        Err(crate::session_summary::SessionSummaryListError::BadRequest(msg)) => {
+            Err(bad_request(msg))
+        }
+        Err(crate::session_summary::SessionSummaryListError::Storage(err)) => {
+            Err(storage_error(err))
+        }
     }
-
-    search_sessions_from_lake(&state, tenant_ref, &request, limit).await
 }
 
 /// Ops: rebuild `session_summary` for an explicit `[from,to]` window (sync).
 ///
-/// Rejects inverted / oversized windows. 404 when non-postgres (no registry).
+/// Rejects inverted / oversized windows.
 /// Acquires `session_summary.rebuild` lease for the tenant scope, then runs the
 /// shared lake aggregate → UPSERT path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -725,9 +724,6 @@ pub async fn rebuild_session_summary(
     Json(request): Json<SessionSummaryRebuildRequest>,
 ) -> Result<Json<SessionSummaryRebuildResponse>, ApiError> {
     let cfg = &state.engines.config().session_summary;
-    let Some(registry) = state.engines.scope_registry() else {
-        return Err(not_found());
-    };
 
     crate::session_summary::validate_rebuild_window(
         request.from,
@@ -740,30 +736,13 @@ pub async fn rebuild_session_summary(
         .as_ref()
         .map(|extension| extension.0.tenant_id.as_str())
         .unwrap_or("");
-    let engine = state
-        .engines
-        .engine_for(tenant_id)
-        .await
-        .map_err(storage_error)?;
-    let mut ducklake = state.engines.config().ducklake.clone();
-    ducklake.metadata_schema = engine.scope.metadata_schema.clone();
-    ducklake.data_path = engine.scope.data_path.clone();
-
-    let scope = crate::runtime_engine::DuckLakeScope {
-        metadata_schema: ducklake.metadata_schema.clone(),
-        data_path: ducklake.data_path.clone(),
-    };
-    crate::session_summary::ensure_product_hot_attrs_for_scope(registry, &scope)
-        .await
-        .map_err(storage_error)?;
-
-    // Lease key matches RebuildJob: empty tenant → `_default`.
+    // Lease key matches SessionSummaryRebuildJob: empty tenant → `_default`.
     let scope_key = if tenant_id.is_empty() {
         "_default"
     } else {
         tenant_id
     };
-    let leases = crate::async_jobs::PostgresLeaseStore::from_resolver(registry);
+    let leases = crate::async_jobs::PostgresLeaseStore::from_engines(&state.engines);
     let holder = format!(
         "ops-rebuild-{}",
         state.engines.config().async_jobs.resolved_instance_id()
@@ -771,70 +750,47 @@ pub async fn rebuild_session_summary(
     let ttl =
         std::time::Duration::from_secs(state.engines.config().async_jobs.lease_ttl_seconds.max(1));
     let won = leases
-        .try_acquire("session_summary.rebuild", scope_key, &holder, ttl)
+        .try_acquire(
+            crate::session_summary::WORKSPACE_SESSION_SUMMARY_REBUILD_JOB,
+            scope_key,
+            &holder,
+            ttl,
+        )
         .await
         .map_err(storage_error)?;
     if !won {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({ "error": "session_summary.rebuild lease held" })),
+            Json(json!({ "error": "workspace_session_summary_rebuild lease held" })),
         ));
     }
 
-    let result = crate::session_summary::rebuild_tenant_window(
-        registry.pool(),
-        &ducklake.metadata_schema,
-        state.engines.config(),
-        &ducklake,
-        request.from,
-        request.to,
-        cfg.max_reduce_span_seconds,
-    )
-    .await;
+    let maintenance = state
+        .engines
+        .maintenance_engine()
+        .await
+        .map_err(storage_error)?;
+    let maintenance_scope = maintenance
+        .resolve_scope(scope_key)
+        .await
+        .map_err(storage_error)?;
+    let result = maintenance
+        .rebuild_session_summary(
+            &maintenance_scope,
+            request.from,
+            request.to,
+            cfg.max_reduce_span_seconds,
+        )
+        .await;
     let _ = leases
-        .release("session_summary.rebuild", scope_key, &holder)
+        .release(
+            crate::session_summary::WORKSPACE_SESSION_SUMMARY_REBUILD_JOB,
+            scope_key,
+            &holder,
+        )
         .await;
     let sessions_upserted = result.map_err(storage_error)?;
     Ok(Json(SessionSummaryRebuildResponse { sessions_upserted }))
-}
-
-async fn search_sessions_from_lake(
-    state: &AppState,
-    tenant: Option<&TenantInfo>,
-    request: &SessionSearchRequest,
-    limit: usize,
-) -> Result<Json<SessionSearchResponse>, ApiError> {
-    // Must mirror what compile_session_search_sql actually accepts, `order`
-    // included. Advertising cursor support for order=asc handed the client a
-    // next_cursor that its own follow-up request would reject with 400 -- the
-    // same "page 1 works, page 2 always fails" shape this endpoint was meant
-    // to fix, just with a different status code.
-    let cursor_supported =
-        request.order_by == SessionOrderBy::StartTime && request.order == SortDirection::Desc;
-    let sql = compile_session_search_sql(request, limit).map_err(bad_request)?;
-    let result = state
-        .execute_tenant_scoped_sql(tenant, &sql)
-        .await
-        .map_err(storage_error)?;
-
-    let mut items = result
-        .rows
-        .iter()
-        .filter_map(|row| map_session_summary(&result.columns, row))
-        .collect::<Vec<_>>();
-
-    let next_cursor = if cursor_supported {
-        next_cursor_from_sessions(&mut items, limit)
-    } else {
-        items.truncate(limit);
-        None
-    };
-
-    Ok(Json(SessionSearchResponse {
-        items,
-        next_cursor,
-        cursor_supported,
-    }))
 }
 
 async fn query_scores(
@@ -843,7 +799,7 @@ async fn query_scores(
     sql: &str,
 ) -> Result<Vec<Score>, ApiError> {
     let result = state
-        .execute_tenant_scoped_sql(tenant, sql)
+        .execute_tenant_scoped_trusted_sql(tenant, trusted_query(sql.to_string())?)
         .await
         .map_err(storage_error)?;
     Ok(result
@@ -912,38 +868,13 @@ struct SessionAggregate {
     user_ids: Vec<String>,
 }
 
-fn string_list(columns: &[String], row: &[Value], key: &str) -> Vec<String> {
-    match column_value(columns, row, key) {
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|item| item.as_str().map(str::to_string))
-            .filter(|value| !value.is_empty())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn map_session_summary(columns: &[String], row: &[Value]) -> Option<SessionSummary> {
-    Some(SessionSummary {
-        session_id: required_string(columns, row, "session_id")?,
-        start_time: optional_timestamp(columns, row, "start_time")?,
-        end_time: optional_timestamp(columns, row, "end_time"),
-        trace_count: optional_i64(columns, row, "trace_count").unwrap_or(0),
-        observation_count: optional_i64(columns, row, "observation_count").unwrap_or(0),
-        error_count: optional_i64(columns, row, "error_count").unwrap_or(0),
-        input_tokens: optional_i64(columns, row, "input_tokens"),
-        output_tokens: optional_i64(columns, row, "output_tokens"),
-        total_tokens: optional_i64(columns, row, "total_tokens"),
-        total_cost: optional_f64(columns, row, "total_cost"),
-        agent_name: optional_string(columns, row, "agent_name"),
-        user_ids: string_list(columns, row, "user_ids"),
-        models: string_list(columns, row, "models"),
-    })
-}
-
-fn next_cursor_from_sessions(items: &mut Vec<SessionSummary>, limit: usize) -> Option<String> {
+/// Truncate `items` to `limit` and return an opaque cursor when the page was
+/// actually cut short. Shared by the live search path ([`crate::session_summary::list`])
+/// and covered here by unit tests against plain [`SessionSummary`] fixtures.
+pub(crate) fn next_cursor_from_sessions(
+    items: &mut Vec<SessionSummary>,
+    limit: usize,
+) -> Option<String> {
     if items.len() <= limit {
         return None;
     }
@@ -1013,6 +944,7 @@ fn map_score(columns: &[String], row: &[Value]) -> Option<Score> {
         config_id: optional_string(columns, row, "config_id"),
         author_id: optional_string(columns, row, "author_id"),
         metadata: map_string_map(column_value(columns, row, "metadata")),
+        tenant_id: optional_string(columns, row, "tenant_id"),
     })
 }
 
@@ -1455,7 +1387,7 @@ mod tests {
         let sql = compile_session_search_sql(&request, 50).expect("sql");
         let group_by = sql.find("GROUP BY session_id").expect("group by");
         let cursor_at = sql
-            .rfind("CAST(start_time AS TIMESTAMP_NS) <")
+            .rfind("make_timestamp_ns(epoch_ns(start_time)) <")
             .expect("cursor predicate");
         assert!(
             cursor_at > group_by,
@@ -1690,7 +1622,7 @@ mod tests {
             cursor: None,
         };
         let sql = compile_observation_search_sql(&request).expect("sql");
-        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) >="));
+        assert!(sql.contains("make_timestamp_ns(epoch_ns(timestamp)) >="));
         assert!(sql.contains("LIMIT 201"));
         assert!(sql.contains("gpt-4o''; DROP TABLE traces; --"));
         assert!(sql.contains(&format!(
@@ -1784,7 +1716,7 @@ mod tests {
         assert_eq!(decoded.t, ts);
         assert!(decode_cursor("%%%not-base64%%%").is_err());
         let predicate = cursor_predicate(&encoded, "timestamp", "span_id").unwrap();
-        assert!(predicate.contains("CAST(timestamp AS TIMESTAMP_NS) <"));
+        assert!(predicate.contains("make_timestamp_ns(epoch_ns(timestamp)) <"));
         assert!(predicate.contains("span_id <"));
     }
 
@@ -1799,10 +1731,10 @@ mod tests {
         let sql = compile_scores_for_trace_sql("trace-1", from, to).expect("trace scores sql");
         assert!(sql.contains("trace_id = 'trace-1'"));
         assert!(sql.contains("span_id IN (SELECT"));
-        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(sql.contains("make_timestamp_ns(epoch_ns(timestamp))"));
         assert!(!sql.contains("record_date"));
-        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) >="));
-        assert!(sql.contains("CAST(timestamp AS TIMESTAMP_NS) <="));
+        assert!(sql.contains("make_timestamp_ns(epoch_ns(timestamp)) >="));
+        assert!(sql.contains("make_timestamp_ns(epoch_ns(timestamp)) <="));
         assert!(compile_scores_for_trace_sql("trace-1", to, from).is_err());
     }
 
@@ -2052,7 +1984,7 @@ mod tests {
         let sql = compile_session_observations_sql("sess-1", from, to, 10, None).unwrap();
         assert_sql_has_otlp_time_predicates(&sql);
         assert!(
-            sql.contains("CAST(timestamp AS TIMESTAMP_NS)") && !sql.contains("record_date"),
+            sql.contains("make_timestamp_ns(epoch_ns(timestamp))") && !sql.contains("record_date"),
             "{sql}"
         );
         assert!(!sql.contains("2026-09-09"), "{sql}");
@@ -2191,7 +2123,7 @@ mod tests {
         let trace_scores = compile_scores_for_trace_sql("tr", from, to).unwrap();
         assert!(
             trace_scores
-                .matches("CAST(timestamp AS TIMESTAMP_NS)")
+                .matches("make_timestamp_ns(epoch_ns(timestamp))")
                 .count()
                 >= 2,
             "scores-for-trace needs outer + subquery day bounds: {trace_scores}"
@@ -2199,7 +2131,7 @@ mod tests {
         let session_scores = compile_scores_for_session_sql("s", from, to).unwrap();
         assert!(
             session_scores
-                .matches("CAST(timestamp AS TIMESTAMP_NS)")
+                .matches("make_timestamp_ns(epoch_ns(timestamp))")
                 .count()
                 >= 2,
             "scores-for-session needs outer + subquery day bounds: {session_scores}"

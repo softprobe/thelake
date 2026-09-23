@@ -325,9 +325,10 @@ async fn postgres_claim_empty_dirty_ok() {
 async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
     use crate::config::Config;
     use crate::promotion::load_active_telemetry_columns_manifests;
-    use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
+    use crate::runtime_engine::DuckLakeScopeResolver;
     use crate::session_summary::ensure_product_hot_attrs_for_scope;
     use crate::sql::llm::llm_promo;
+    use crate::workspace_scope::PhysicalScope;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -338,7 +339,6 @@ async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
     config.shrink_pools_for_tests();
     config.maintenance.enabled = false;
     config.maintenance.metadata_enabled = false;
-    config.ducklake.catalog_type = "postgres".to_string();
     config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     config.ducklake.metadata_schema = schema.clone();
@@ -346,15 +346,14 @@ async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
     config.ingest.flush_interval_seconds = 2;
     let config = Arc::new(config);
 
-    let Some(resolver) = DuckLakeScopeResolver::connect(&config)
+    let resolver = DuckLakeScopeResolver::connect(&config)
         .await
-        .expect("connect")
-    else {
-        panic!("expected postgres catalog");
-    };
-    let scope = DuckLakeScope {
+        .expect("connect");
+    let scope = PhysicalScope {
+        metadata_path: config.ducklake.metadata_path.clone(),
         metadata_schema: schema.clone(),
         data_path: config.ducklake.data_path.clone(),
+        catalog_alias: config.ducklake.catalog_alias.clone(),
     };
 
     // Connect already ensures when enabled; deactivate to prove ensure re-activates.

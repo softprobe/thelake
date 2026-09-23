@@ -4,11 +4,11 @@ pub mod otlp_layout;
 pub mod tables;
 pub mod variant;
 
+pub(crate) use ducklake_partition::describe_table_columns;
 pub use ducklake_partition::{
-    describe_probe_count, describe_table_columns, partition_sort_probe_count,
-    table_partition_sort_ready, total_schema_probe_count,
+    describe_probe_count, partition_sort_probe_count, total_schema_probe_count,
 };
-pub use otlp_layout::{ensure_otlp_table_partition_sort, insert_order_by};
+pub use otlp_layout::insert_order_by;
 pub use tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
 pub use variant::{
     encode_attributes_json, hot_map_columns, parquet_select_for_table, parse_projected_json_value,

@@ -195,7 +195,7 @@ fn has_timestamp_bound(sql: &str) -> bool {
     let lower = code_view(sql).to_ascii_lowercase();
     // Require a real timestamp *predicate*: column (optionally CAST) compared via
     // >= / <= / > / < / BETWEEN. Rejects "SELECT timestamp … WHERE value > 0".
-    // Matches both `timestamp >=` and `CAST(timestamp AS TIMESTAMP_NS) >=`.
+    // Matches both `timestamp >=` and `make_timestamp_ns(epoch_ns(timestamp)) >=`.
     let bytes = lower.as_bytes();
     let needle = b"timestamp";
     let mut i = 0;
@@ -216,12 +216,13 @@ fn has_timestamp_bound(sql: &str) -> bool {
         let rest = &lower[after..];
         let rest = rest.trim_start();
         let rest = if let Some(r) = rest.strip_prefix("as ") {
-            // CAST(timestamp AS TIMESTAMP_NS)
+            // Legacy CAST(timestamp AS TIMESTAMP_NS)
             let r = r.trim_start();
             let r = r.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
             r.trim_start().trim_start_matches(')').trim_start()
         } else {
-            rest
+            // make_timestamp_ns(epoch_ns(timestamp)) >= ...
+            rest.trim_start_matches(')').trim_start()
         };
         if rest.starts_with(">=")
             || rest.starts_with("<=")
@@ -302,14 +303,14 @@ fn sql_is_mutating_fact_ddl(sql: &str) -> bool {
 }
 
 /// Shared checked `execute_batch` for paths that hold a raw `Connection`.
-pub fn execute_batch_checked(conn: &duckdb::Connection, sql: &str) -> anyhow::Result<()> {
+pub(crate) fn execute_batch_checked(conn: &duckdb::Connection, sql: &str) -> anyhow::Result<()> {
     ensure_fact_scan_bound(sql).map_err(anyhow::Error::msg)?;
     conn.execute_batch(sql)
         .map_err(|e| anyhow::anyhow!("execute_batch failed: {e}"))
 }
 
 /// Shared checked `prepare` so raw `Connection` callers cannot bypass D12.
-pub fn prepare_checked<'a>(
+pub(crate) fn prepare_checked<'a>(
     conn: &'a duckdb::Connection,
     sql: &str,
 ) -> anyhow::Result<duckdb::Statement<'a>> {
@@ -339,7 +340,7 @@ mod tests {
     #[test]
     fn accepts_bound_fact_scan() {
         assert!(ensure_fact_scan_bound(
-            "SELECT * FROM softprobe.traces WHERE CAST(timestamp AS TIMESTAMP_NS) >= '2026-09-10'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2026-09-11'::TIMESTAMP_NS"
+            "SELECT * FROM softprobe.traces WHERE make_timestamp_ns(epoch_ns(timestamp)) >= '2026-09-10'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2026-09-11'::TIMESTAMP_NS"
         )
         .is_ok());
     }

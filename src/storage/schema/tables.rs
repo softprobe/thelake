@@ -164,6 +164,7 @@ impl ScoreTable {
             opt("config_id", utf8()),
             opt("author_id", utf8()),
             opt("metadata", string_map()),
+            opt("tenant_id", utf8()),
         ])
     }
 }
@@ -189,6 +190,7 @@ impl ScoreConfigTable {
             opt("categories", utf8()),
             opt("author_id", utf8()),
             opt("metadata", string_map()),
+            opt("tenant_id", utf8()),
         ])
     }
 }
@@ -218,6 +220,9 @@ impl OtlpLogsTable {
             opt_hot_map("logs", "resource_attributes"),
             opt("trace_id", utf8()),
             opt("span_id", utf8()),
+            // Authenticated workspace ownership is part of the stable base
+            // layout; product-hot columns remain append-only after it.
+            opt("tenant_id", utf8()),
             // Product-hot nullable columns (#55). Append after core fields.
             opt("logger_name", utf8()),
             opt("service_name", utf8()),
@@ -274,6 +279,11 @@ mod tests {
             scores.field_with_name("metadata").unwrap().data_type(),
             DataType::Map(_, _)
         ));
+        assert!(scores.field_with_name("tenant_id").is_ok());
+        assert!(ScoreConfigTable::schema()
+            .field_with_name("tenant_id")
+            .is_ok());
+        assert!(logs.field_with_name("tenant_id").is_ok());
     }
 
     #[test]

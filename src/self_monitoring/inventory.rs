@@ -83,15 +83,16 @@ pub fn spawn_inventory_loop(state: AppState, interval_secs: u64) {
 
 async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
     let tables = maintenance_table_names();
-    let catalog = engine.query.catalog_alias().to_string();
-    let tenant = engine.tenant_id.clone();
+    let query = engine.query_engine();
+    let catalog = query.catalog_alias().to_string();
+    let tenant = engine.tenant_id().to_string();
     let mut sqls: Vec<String> = Vec::with_capacity(tables.len() * 2);
     for table in &tables {
         sqls.push(partition_live_file_stats_sql(&catalog, table));
         sqls.push(live_file_sizes_sql(&catalog, table));
     }
     let sql_refs: Vec<&str> = sqls.iter().map(|s| s.as_str()).collect();
-    let results = match engine.query.execute_queries_uninstrumented(sql_refs).await {
+    let results = match query.execute_queries_uninstrumented(sql_refs).await {
         Ok(r) => r,
         Err(err) => {
             warn!(tenant = %tenant, "inventory scrape failed: {err}");

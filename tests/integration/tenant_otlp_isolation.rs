@@ -10,10 +10,10 @@ use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
 use softprobe_runtime::authn::{Resolver, TenantInfo};
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp::GrpcTraceService;
-use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::Span as ModelSpan;
-use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
+use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tonic::Request;
@@ -28,13 +28,13 @@ fn postgres_registry_config(temp: &TempDir, registry_schema: String) -> Config {
     config.shrink_pools_for_tests();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
 
-    config.ducklake.catalog_type = "postgres".to_string();
     config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     config.ducklake.catalog_alias = "softprobe".to_string();
     config.ducklake.metadata_schema = registry_schema;
     config.ducklake.data_path = temp.path().join("default_data").to_string_lossy().into();
     config.ducklake.data_inlining_row_limit = Some(0);
+    config.ingest.flush_interval_seconds = 0;
     config
 }
 
@@ -128,12 +128,11 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
     let path_a = temp.path().join("data_a").to_string_lossy().to_string();
     let path_b = temp.path().join("data_b").to_string_lossy().to_string();
 
-    let resolver = DuckLakeScopeResolver::connect(&config)
+    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("connect resolver")
-        .expect("postgres resolver");
+        .expect("connect runtime engines");
 
-    resolver
+    manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_a.clone(),
             metadata_schema: meta_a.clone(),
@@ -141,7 +140,7 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         })
         .await
         .expect("provision A");
-    resolver
+    manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_b.clone(),
             metadata_schema: meta_b.clone(),
@@ -150,25 +149,33 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         .await
         .expect("provision B");
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let engine_b = manager
+        .engine_for(&tenant_b)
+        .await
+        .expect("tenant B engine");
+    let engine_a = manager
+        .engine_for(&tenant_a)
+        .await
+        .expect("tenant A engine");
     let session_id = format!("sess-iso-{suffix}");
     let trace_id = format!("trace-iso-{suffix}");
     // Provision does not create telemetry Iceberg tables; a tenant with no ingest has no `traces`
     // table yet. Materialize B's table with a decoy session so we can COUNT tenant A's session_id.
-    pipeline
-        .write_span_batches(vec![vec![isolation_span(
-            &tenant_b,
-            &format!("sess-bootstrap-{suffix}"),
-            &format!("trace-bootstrap-{suffix}"),
-        )]])
+    engine_b
+        .ingest
+        .add_spans(
+            vec![isolation_span(
+                &tenant_b,
+                &format!("sess-bootstrap-{suffix}"),
+                &format!("trace-bootstrap-{suffix}"),
+            )],
+            0,
+        )
         .await
         .expect("bootstrap traces table for tenant B");
-    pipeline
-        .write_span_batches(vec![vec![isolation_span(
-            &tenant_a,
-            &session_id,
-            &trace_id,
-        )]])
+    engine_a
+        .ingest
+        .add_spans(vec![isolation_span(&tenant_a, &session_id, &trace_id)], 0)
         .await
         .expect("write spans for tenant A");
 
@@ -266,11 +273,10 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     let tenant_schema = format!("softprobe_grpc_it_data_{suffix}");
     let tenant_data_path = format!("s3://warehouse/grpc_it/{}/", suffix);
 
-    let resolver_reg = DuckLakeScopeResolver::connect(&config)
+    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("resolver")
-        .expect("postgres resolver");
-    resolver_reg
+        .expect("connect runtime engines");
+    manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: tenant_schema.clone(),

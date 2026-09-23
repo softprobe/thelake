@@ -12,7 +12,11 @@ use super::util::escape_sql_literal;
 /// - `s3://` → `AWS_*` (or EC2 instance metadata)
 ///
 /// See <https://duckdb.org/docs/current/guides/network_cloud_storage/gcs_import.html>.
-pub fn configure_object_store(conn: &Connection, config: &Config, data_path: &str) -> Result<()> {
+pub(crate) fn configure_object_store(
+    conn: &Connection,
+    config: &Config,
+    data_path: &str,
+) -> Result<()> {
     if data_path.starts_with("gs://") {
         let creds = config.resolve_object_store_credentials(data_path);
         let (Some(key_id), Some(secret)) = (creds.access_key_id, creds.secret_access_key) else {
@@ -59,10 +63,4 @@ pub fn configure_object_store(conn: &Connection, config: &Config, data_path: &st
         [&config.object_store.region as &dyn ToSql],
     )?;
     Ok(())
-}
-
-/// Backward-compatible alias used by older call sites / docs.
-pub fn configure_httpfs_gcs_for_data_path(conn: &Connection, data_path: &str) -> Result<()> {
-    let config = Config::default();
-    configure_object_store(conn, &config, data_path)
 }

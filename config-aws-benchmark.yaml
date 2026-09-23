@@ -21,7 +21,6 @@ maintenance:
   interval_seconds: 3600
 
 ducklake:
-  catalog_type: "postgres"
   metadata_path: "host=YOUR_PG_HOST port=5432 dbname=ducklake user=ducklake password=YOUR_PASSWORD"
   data_path: "s3://YOUR-AWS-BUCKET/ducklake/"
   catalog_alias: "softprobe"

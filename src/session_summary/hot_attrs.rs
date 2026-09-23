@@ -4,8 +4,9 @@ use crate::promotion::{
     load_active_telemetry_columns_manifests, parse_promotion_manifest, PromotionManifest,
     TelemetryColumnsManifest, TelemetryTable,
 };
-use crate::runtime_engine::{DuckLakeScope, DuckLakeScopeResolver};
+use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::sql::llm::llm_promo;
+use crate::workspace_scope::PhysicalScope;
 use anyhow::{Context, Result};
 
 /// Canonical Softprobe traces hot-attr manifest (shipped under docs/promotion/).
@@ -79,9 +80,9 @@ fn require_reduce_hot_coverage(schema: &str, manifests: &[TelemetryColumnsManife
 ///
 /// **Non-goals (Stage 5):** does not promote `sp.agent.name` into `agent_name` (auth /
 /// agent observation only), and does not promote `enduser.id` into `user_id`.
-pub async fn ensure_product_hot_attrs_for_scope(
+pub(crate) async fn ensure_product_hot_attrs_for_scope(
     resolver: &DuckLakeScopeResolver,
-    scope: &DuckLakeScope,
+    scope: &PhysicalScope,
 ) -> Result<()> {
     let client = resolver.pool().get().await?;
     let active = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)

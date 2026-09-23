@@ -62,7 +62,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
 
     let escaped = session_id.replace('\'', "''");
     let count_sql =
-        format!("SELECT COUNT(*)::BIGINT AS c FROM traces WHERE session_id = '{escaped}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS");
+        format!("SELECT COUNT(*)::BIGINT AS c FROM traces WHERE session_id = '{escaped}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
@@ -83,8 +83,8 @@ async fn strict_trace_union_shape_ducklake_contract() {
             strftime(timestamp, '%Y-%m-%d') AS rd \
          FROM traces \
          WHERE session_id = '{escaped}' \
-           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-           AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
+           AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
+           AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS \
          LIMIT 1"
     );
     let row = test_pipeline
@@ -108,8 +108,8 @@ async fn strict_trace_union_shape_ducklake_contract() {
         "SELECT COUNT(*)::BIGINT AS partitions FROM ( \
             SELECT strftime(timestamp, '%Y-%m-%d') AS d FROM traces \
             WHERE session_id = '{escaped}' \
-              AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-              AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
+              AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
+              AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS \
             GROUP BY 1 \
         ) s"
     );
@@ -123,7 +123,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
     );
 
     let distinct_sql = format!(
-        "SELECT COUNT(DISTINCT session_id)::BIGINT AS d FROM traces WHERE session_id = '{escaped}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS"
+        "SELECT COUNT(DISTINCT session_id)::BIGINT AS d FROM traces WHERE session_id = '{escaped}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS"
     );
     let dr = test_pipeline
         .execute_query(&distinct_sql)
@@ -201,7 +201,7 @@ async fn strict_session_correlates_traces_and_logs() {
     pipeline.force_flush_logs().await.expect("flush logs");
 
     let esc = session_id.replace('\'', "''");
-    let span_wait = format!("SELECT COUNT(*)::BIGINT FROM traces WHERE session_id = '{esc}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS");
+    let span_wait = format!("SELECT COUNT(*)::BIGINT FROM traces WHERE session_id = '{esc}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
@@ -213,7 +213,7 @@ async fn strict_session_correlates_traces_and_logs() {
     .await
     .expect("traces row for session");
 
-    let log_wait = format!("SELECT COUNT(*)::BIGINT FROM logs WHERE session_id = '{esc}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS");
+    let log_wait = format!("SELECT COUNT(*)::BIGINT FROM logs WHERE session_id = '{esc}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
@@ -228,7 +228,7 @@ async fn strict_session_correlates_traces_and_logs() {
     let trace_esc = trace_id.replace('\'', "''");
     let correlate_sql = format!(
         "SELECT COUNT(*)::BIGINT AS n FROM logs \
-         WHERE session_id = '{esc}' AND trace_id = '{trace_esc}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS"
+         WHERE session_id = '{esc}' AND trace_id = '{trace_esc}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS"
     );
     let cr = test_pipeline
         .execute_query(&correlate_sql)

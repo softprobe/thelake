@@ -402,7 +402,7 @@
       "expect": {
         "status": 200,
         "envelope": "tag_names",
-        "values": ["db.system", "deployment.environment", "exception.message", "exception.type", "http.method", "http.route", "link.kind", "link.source", "peer.service", "queue.name", "service.name"]
+        "values": ["db.system", "deployment.environment", "exception.message", "exception.type", "http.method", "http.route", "link.kind", "link.source", "peer.service", "queue.name", "service.name", "service_name"]
       },
       "differential": true
     },

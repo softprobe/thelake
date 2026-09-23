@@ -211,7 +211,6 @@ pub async fn flush_traces(state: &softprobe_runtime::api::AppState, tenant_id: &
         .engine_for_id(tenant_id)
         .await
         .expect("tenant engine")
-        .ingest
         .force_flush_spans()
         .await
         .expect("flush traces");

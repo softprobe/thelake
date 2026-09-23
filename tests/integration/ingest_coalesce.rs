@@ -26,6 +26,7 @@ async fn coalesce_force_flush_makes_logs_queryable() {
         resource_attributes: HashMap::new(),
         trace_id: Some("trace-coalesce-1".to_string()),
         span_id: Some("span-coalesce-1".to_string()),
+        tenant_id: None,
         agent_id: None,
         agent_name: None,
     };
@@ -44,8 +45,8 @@ async fn coalesce_force_flush_makes_logs_queryable() {
         .execute_query(
             "SELECT count(*) AS c FROM logs \
              WHERE body = 'coalesce force_flush body' \
-               AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-               AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
+               AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
+               AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
         )
         .await
         .expect("query after flush");

@@ -22,7 +22,6 @@ fn self_monitoring_config_defaults_disabled() {
 fn self_monitoring_yaml_parses() {
     let yaml = r#"
 ducklake:
-  catalog_type: sqlite
   metadata_path: /tmp/meta.sqlite
   data_path: /tmp/data/
 self_monitoring:

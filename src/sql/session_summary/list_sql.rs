@@ -23,6 +23,15 @@ pub fn compile_session_summary_list_sql(
     request: &SessionSearchRequest,
     limit: usize,
 ) -> Result<String, String> {
+    compile_session_summary_list_sql_for_workspace(schema_quoted, None, request, limit)
+}
+
+pub fn compile_session_summary_list_sql_for_workspace(
+    schema_quoted: &str,
+    workspace_id: Option<&str>,
+    request: &SessionSearchRequest,
+    limit: usize,
+) -> Result<String, String> {
     if request.from > request.to {
         return Err("`from` must be <= `to`".to_string());
     }
@@ -31,6 +40,12 @@ pub fn compile_session_summary_list_sql(
         format!("start_time >= {}", pg_timestamptz_literal(&request.from)),
         format!("start_time <= {}", pg_timestamptz_literal(&request.to)),
     ];
+    if let Some(workspace_id) = workspace_id {
+        predicates.insert(
+            0,
+            format!("tenant_id = {}", sql_string_literal(workspace_id)),
+        );
+    }
 
     if request.has_errors == Some(true) {
         predicates.push("error_count > 0".to_string());
@@ -248,6 +263,18 @@ mod tests {
             sql.contains("agent_name = 'O''Brien'"),
             "must trim + escape quotes: {sql}"
         );
+    }
+
+    #[test]
+    fn workspace_list_sql_filters_summary_rows_by_ownership() {
+        let sql = compile_session_summary_list_sql_for_workspace(
+            "\"meta\"",
+            Some("workspace'42"),
+            &base_request(),
+            10,
+        )
+        .unwrap();
+        assert!(sql.contains("tenant_id = 'workspace''42'"));
     }
 
     #[test]

@@ -96,7 +96,9 @@ impl DuckLakeLogsBackend {
                 "query deadline exceeded",
             ));
         }
-        match tokio::time::timeout(ctx.remaining(), self.query.execute_query(sql)).await {
+        let trusted = crate::sql::trusted::approved_query(sql.to_string())
+            .map_err(|err| CompatError::new(CompatErrorCode::BadRequest, err.to_string()))?;
+        match tokio::time::timeout(ctx.remaining(), self.query.execute_trusted(trusted)).await {
             Err(_) => Err(CompatError::new(
                 CompatErrorCode::LimitExceeded,
                 "query deadline exceeded",
@@ -1060,7 +1062,7 @@ mod tests {
         .expect("window");
         assert_sql_has_otlp_time_predicates(&sql);
         let id = sql.find("service_name").unwrap();
-        let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
+        let ts = sql.find("make_timestamp_ns(epoch_ns(timestamp))").unwrap();
         assert!(id < ts, "matcher before timestamp: {sql}");
     }
 

@@ -9,7 +9,7 @@ use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
-use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
+use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -53,18 +53,16 @@ async fn setup() -> PostgresBackend {
     config.maintenance.enabled = false;
     config.maintenance.metadata_enabled = false;
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
-    config.ducklake.catalog_type = "postgres".to_string();
     config.ducklake.metadata_path = POSTGRES_DSN.to_string();
     config.ducklake.catalog_alias = "softprobe".to_string();
     config.ducklake.metadata_schema = format!("sp_promo_reg_{short}");
     config.ducklake.data_path = data_path.clone();
     config.ducklake.data_inlining_row_limit = Some(0);
 
-    let resolver = DuckLakeScopeResolver::connect(&config)
+    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("resolver")
-        .expect("postgres resolver");
-    resolver
+        .expect("connect runtime engines");
+    manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: metadata_schema.clone(),

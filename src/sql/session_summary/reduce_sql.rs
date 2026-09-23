@@ -39,6 +39,16 @@ pub fn compile_session_summary_aggregate_sql(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<String> {
+    compile_session_summary_aggregate_sql_for_workspace(from_table, session_ids, None, from, to)
+}
+
+pub fn compile_session_summary_aggregate_sql_for_workspace(
+    from_table: &str,
+    session_ids: Option<&[String]>,
+    workspace_id: Option<&str>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<String> {
     let window = QueryWindow::try_new(from, to)
         .map_err(|e| anyhow::anyhow!("session_summary aggregate SQL: {e}"))?;
     if from_table.is_empty() || from_table.contains(';') {
@@ -63,6 +73,9 @@ pub fn compile_session_summary_aggregate_sql(
         }
         None => "session_id <> ''".to_string(),
     };
+    let ownership_pred = workspace_id
+        .map(|id| format!("tenant_id = {}", sql_string_literal(id)))
+        .unwrap_or_default();
 
     // Typed agent resolve (no attributes['sp.agent.name']).
     let agent_expr = format!(
@@ -84,9 +97,15 @@ pub fn compile_session_summary_aggregate_sql(
     // Predicate order: identity → timestamp (one clock) → observation filter.
     Ok(window
         .bind_scan("", |bound| {
-            let where_sql = format!(
-                "{session_pred} AND {bound} AND COALESCE({observation_type}, '') <> 'recording'"
-            );
+            let where_sql = if ownership_pred.is_empty() {
+                format!(
+                    "{session_pred} AND {bound} AND COALESCE({observation_type}, '') <> 'recording'"
+                )
+            } else {
+                format!(
+                    "{ownership_pred} AND {session_pred} AND {bound} AND COALESCE({observation_type}, '') <> 'recording'"
+                )
+            };
             format!(
                 "SELECT \
                    session_id, \
@@ -116,7 +135,29 @@ pub fn compile_session_summary_reduce_sql(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<String> {
-    compile_session_summary_aggregate_sql(from_table, Some(session_ids), from, to)
+    compile_session_summary_aggregate_sql_for_workspace(
+        from_table,
+        Some(session_ids),
+        None,
+        from,
+        to,
+    )
+}
+
+pub fn compile_session_summary_reduce_sql_for_workspace(
+    from_table: &str,
+    session_ids: &[String],
+    workspace_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<String> {
+    compile_session_summary_aggregate_sql_for_workspace(
+        from_table,
+        Some(session_ids),
+        Some(workspace_id),
+        from,
+        to,
+    )
 }
 
 /// Rebuild path: window-wide (no IN-list).
@@ -125,7 +166,16 @@ pub fn compile_session_summary_rebuild_sql(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<String> {
-    compile_session_summary_aggregate_sql(from_table, None, from, to)
+    compile_session_summary_rebuild_sql_for_workspace(from_table, None, from, to)
+}
+
+pub fn compile_session_summary_rebuild_sql_for_workspace(
+    from_table: &str,
+    workspace_id: Option<&str>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<String> {
+    compile_session_summary_aggregate_sql_for_workspace(from_table, None, workspace_id, from, to)
 }
 
 /// Build `($1, $2, …), ($n, …)` for a multi-row INSERT.
@@ -161,6 +211,41 @@ pub fn compile_session_summary_upsert_sql(schema_quoted: &str, row_count: usize)
         "INSERT INTO {schema_quoted}.session_summary ({col_list}) VALUES {values} \
          ON CONFLICT (session_id) DO UPDATE SET \
            {set_list}"
+    )
+}
+
+pub fn compile_session_summary_upsert_sql_for_workspace(
+    schema_quoted: &str,
+    row_count: usize,
+) -> String {
+    let cols = [
+        "tenant_id",
+        "session_id",
+        "start_time",
+        "end_time",
+        "observation_count",
+        "error_count",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "total_cost",
+        "agent_name",
+        "user_id",
+        "model_name",
+        "updated_at",
+    ];
+    let values = multi_row_values_placeholders(row_count, cols.len());
+    let set_list = cols
+        .iter()
+        .filter(|column| **column != "tenant_id" && **column != "session_id")
+        .map(|column| format!("{column} = EXCLUDED.{column}"))
+        .collect::<Vec<_>>()
+        .join(",\n           ");
+    format!(
+        "INSERT INTO {schema_quoted}.session_summary ({}) VALUES {values} \
+         ON CONFLICT (tenant_id, session_id) DO UPDATE SET \
+           {set_list}",
+        cols.join(", ")
     )
 }
 
@@ -206,7 +291,7 @@ mod tests {
         assert!(sql.contains("session_id IN"));
         assert!(!sql.contains("record_date"));
         let sid = sql.find("session_id IN").unwrap();
-        let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
+        let ts = sql.find("make_timestamp_ns(epoch_ns(timestamp))").unwrap();
         assert!(sid < ts);
     }
 
@@ -243,5 +328,23 @@ mod tests {
             "2 rows × {cols} params; last placeholder missing in {sql}"
         );
         assert!(sql.contains(SESSION_SUMMARY_UPSERT_COLUMNS.join(", ").as_str()));
+    }
+
+    #[test]
+    fn workspace_reduce_and_upsert_use_composite_ownership_keys() {
+        let (from, to) = sample_window();
+        let reduce = compile_session_summary_reduce_sql_for_workspace(
+            "traces",
+            &["s1".into()],
+            "workspace'42",
+            from,
+            to,
+        )
+        .expect("workspace reduce SQL");
+        assert!(reduce.contains("tenant_id = 'workspace''42'"));
+
+        let upsert = compile_session_summary_upsert_sql_for_workspace("\"meta\"", 1);
+        assert!(upsert.contains("(tenant_id, session_id) DO UPDATE"));
+        assert!(upsert.contains("INSERT INTO \"meta\".session_summary (tenant_id, session_id"));
     }
 }

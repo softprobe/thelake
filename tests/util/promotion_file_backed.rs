@@ -18,12 +18,15 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::util::config::file_backed_test_config;
-use crate::util::tenant::inject_local_sqlite_tenant as inject_tenant;
+use crate::util::tenant::{
+    inject_local_sqlite_tenant as inject_tenant, provision_local_sqlite_tenant,
+};
 
 pub struct FileBackedPromotionEnv {
     pub _temp: TempDir,
     pub router: Router,
     pub metadata_path: String,
+    pub metadata_schema: String,
     pub data_path: String,
 }
 
@@ -31,12 +34,14 @@ pub async fn setup_file_backed_promotion_env() -> FileBackedPromotionEnv {
     let temp = TempDir::new().expect("tempdir");
     let config = file_backed_test_config(&temp);
     let metadata_path = config.ducklake.metadata_path.clone();
+    let metadata_schema = config.ducklake.metadata_schema.clone();
     let data_path = config.ducklake.data_path.clone();
 
     let (router, state) =
         softprobe_runtime::api::create_router(Arc::new(config), post(ingest_traces), None)
             .await
             .expect("router");
+    provision_local_sqlite_tenant(&state).await;
     let router = router
         .merge(runtime_control_routes().with_state(state))
         .layer(from_fn(inject_tenant));
@@ -45,6 +50,7 @@ pub async fn setup_file_backed_promotion_env() -> FileBackedPromotionEnv {
         _temp: temp,
         router,
         metadata_path,
+        metadata_schema,
         data_path,
     }
 }
@@ -118,20 +124,46 @@ pub async fn ingest_otlp_logs_protobuf(router: Router, body: Vec<u8>) {
     assert_eq!(ingest.status(), StatusCode::OK);
 }
 
-pub fn attach_softprobe_ducklake(metadata_path: &str, data_path: &str) -> duckdb::Connection {
+/// Attach the same Postgres-backed DuckLake catalog the router's writer used, then
+/// `USE` its schema so callers can write bare (unqualified) table names regardless
+/// of the per-test-run schema name assigned by [`file_backed_test_config`].
+pub fn attach_softprobe_ducklake(
+    metadata_path: &str,
+    metadata_schema: &str,
+    data_path: &str,
+) -> duckdb::Connection {
     let connection = duckdb::Connection::open_in_memory().expect("duckdb");
     connection
-        .execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
+        .execute_batch("INSTALL ducklake; INSTALL postgres; LOAD ducklake; LOAD postgres;")
         .expect("extensions");
+    let mut opts = vec![
+        format!("DATA_PATH '{}'", data_path.replace('\'', "''")),
+        "DATA_INLINING_ROW_LIMIT 0".to_string(),
+    ];
+    if metadata_schema != "main" {
+        let schema = metadata_schema.replace('\'', "''");
+        opts.push(format!("METADATA_SCHEMA '{schema}'"));
+        opts.push(format!("META_SCHEMA '{schema}'"));
+    }
     connection
         .execute_batch(&format!(
-            "ATTACH 'ducklake:sqlite:{}' AS softprobe \
-             (DATA_PATH '{}', META_JOURNAL_MODE 'WAL', META_BUSY_TIMEOUT 5000, \
-              DATA_INLINING_ROW_LIMIT 0);",
+            "ATTACH 'ducklake:postgres:{}' AS softprobe ({});",
             metadata_path.replace('\'', "''"),
-            data_path.replace('\'', "''"),
+            opts.join(", "),
         ))
         .expect("attach");
+    // ATTACH does not itself expose a never-before-seen METADATA_SCHEMA for
+    // navigation; DuckLake only makes a ducklake schema `USE`-able once it has
+    // been created at least once (either by an earlier writer in this schema,
+    // or here for tests that attach before any writer has touched it).
+    connection
+        .execute_batch(&format!(
+            "CREATE SCHEMA IF NOT EXISTS softprobe.{metadata_schema};"
+        ))
+        .expect("create schema");
+    connection
+        .execute_batch(&format!("USE softprobe.{metadata_schema};"))
+        .expect("use schema");
     connection
 }
 

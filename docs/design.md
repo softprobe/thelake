@@ -128,7 +128,7 @@ Authentication resolves a tenant before operational work begins. A
 - a tenant-bound DuckLake metadata schema and data path;
 - a tenant-bound writer and query engine.
 
-With a PostgreSQL catalog, `DuckLakeScopeResolver` stores scope mappings in the
+With a PostgreSQL catalog, `RuntimeEngineManager` stores scope mappings in the
 configured registry schema. Operational APIs do not accept arbitrary tenant or
 scope parameters after binding.
 
@@ -308,8 +308,7 @@ The canonical shape is `config.yaml`; defaults and validation live in
 
 Important DuckLake settings:
 
-- `catalog_type`: `postgres` or `sqlite`
-- `metadata_path`: PostgreSQL connection string or SQLite path
+- `metadata_path`: PostgreSQL connection string (the DuckLake catalog is always Postgres)
 - `data_path`: local, `s3://`, or `gs://` data location
 - `catalog_alias`
 - `metadata_schema`

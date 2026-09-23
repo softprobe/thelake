@@ -1,7 +1,11 @@
 //! Backend-neutral end-to-end promotion contract.
 //!
-//! PostgreSQL and SQLite fixtures implement only setup/query primitives; every lifecycle scenario,
+//! PostgreSQL fixtures implement only setup/query primitives; every lifecycle scenario,
 //! manifest, OTLP request, and assertion is defined once here.
+//!
+//! Callers live under `integration-e2e` and optional local promotion suites; keep the
+//! helpers compiled even when those modules are filtered out.
+#![allow(dead_code)]
 
 use async_trait::async_trait;
 use axum::body::Body;

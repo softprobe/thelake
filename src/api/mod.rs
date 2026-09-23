@@ -18,10 +18,6 @@ use crate::compat::loki::loki_routes;
 use crate::compat::stubs::compat_stub_routes;
 use crate::compat::tempo::tempo_routes;
 use crate::config::Config;
-use crate::ingest_engine::IngestPipeline;
-use crate::query::{self as query_engine, QueryEngine};
-use crate::runtime_engine::DuckLakeScopeResolver;
-use crate::storage::Storage;
 use axum::{
     response::Html,
     routing::{get, post, MethodRouter},
@@ -52,14 +48,46 @@ impl AppState {
     }
 
     /// Execute SQL on the tenant-bound query engine (scope fixed at engine construction).
-    pub async fn execute_tenant_scoped_sql(
+    pub(crate) async fn execute_tenant_scoped_sql(
         &self,
         tenant: Option<&TenantInfo>,
         sql: &str,
     ) -> anyhow::Result<crate::query::duckdb::QueryResult> {
         let tenant_id = tenant.map(|t| t.tenant_id.as_str()).unwrap_or("");
         let engine = self.engines.engine_for(tenant_id).await?;
-        match engine.query.execute_query(sql).await {
+        match engine.execute_query(sql).await {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("Table with name traces does not exist")
+                    || msg.contains("Table with name logs does not exist")
+                    || msg.contains("Table with name scores does not exist")
+                    || msg.contains("Table with name score_configs does not exist")
+                {
+                    return Ok(crate::query::duckdb::QueryResult {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        row_count: 0,
+                    });
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// Execute SQL emitted by an internal typed query builder.
+    ///
+    /// Shared mode exposes only tenant-filtered logical views to query workers;
+    /// callers must therefore use the opaque trusted boundary instead of the
+    /// arbitrary-SQL compatibility path.
+    pub(crate) async fn execute_tenant_scoped_trusted_sql(
+        &self,
+        tenant: Option<&TenantInfo>,
+        query: crate::sql::trusted::TrustedSql,
+    ) -> anyhow::Result<crate::query::duckdb::QueryResult> {
+        let tenant_id = tenant.map(|t| t.tenant_id.as_str()).unwrap_or("");
+        let engine = self.engines.engine_for(tenant_id).await?;
+        match engine.execute_trusted(query).await {
             Ok(result) => Ok(result),
             Err(err) => {
                 let msg = err.to_string();
@@ -80,41 +108,39 @@ impl AppState {
     }
 }
 
-pub struct AppPipeline {
-    pub storage: Storage,
-    pub query_engine: QueryEngine,
-}
-
-impl AppPipeline {
-    pub async fn new(config: &Config) -> anyhow::Result<Self> {
-        let pipeline = IngestPipeline::new(config).await?;
-        let storage = pipeline.storage.clone();
-        let query_engine =
-            query_engine::create_query_engine(config, Arc::new(storage.clone())).await?;
-        Ok(Self {
-            storage,
-            query_engine,
-        })
-    }
-}
-
 /// HTTP router + [`AppState`]. Per-tenant DuckLake/query engines are created
-/// lazily on first request via [`RuntimeEngineManager`] — callers must not
-/// pre-build an unused [`AppPipeline`] just to satisfy this API.
+/// lazily on first request via [`RuntimeEngineManager`].
 pub async fn create_router(
     config: Arc<Config>,
     traces: MethodRouter<AppState>,
     control_plane: Option<ControlPlaneRuntime>,
 ) -> anyhow::Result<(Router, AppState)> {
-    let scope_registry = DuckLakeScopeResolver::connect(config.as_ref()).await?;
-    let runtime_engine_manager = Arc::new(RuntimeEngineManager::new(
-        config,
-        control_plane.clone(),
-        scope_registry,
-    ));
+    let shared_mode =
+        config.ducklake.workspace_scope_mode == crate::workspace_scope::WorkspaceScopeMode::Shared;
+    let runtime_engine_manager =
+        Arc::new(RuntimeEngineManager::connect(config, control_plane.clone()).await?);
     let state = AppState {
         engines: runtime_engine_manager,
     };
+
+    // Shared mode is a startup contract, not a lazy per-request feature flag.
+    // Build the default bound engine before returning the router so ownership
+    // schema incompatibility, DuckLake attach failures, and filtered-view
+    // initialization prevent the service from becoming ready.
+    if shared_mode {
+        state
+            .engines
+            .engine_for("")
+            .await
+            .map_err(|error| anyhow::anyhow!("shared DuckLake startup gate: {error}"))?;
+        state
+            .engines
+            .maintenance_engine()
+            .await?
+            .validate_startup()
+            .await
+            .map_err(|error| anyhow::anyhow!("shared maintenance startup gate: {error}"))?;
+    }
 
     let router = Router::new()
         .route("/health", get(health::health_check))

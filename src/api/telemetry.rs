@@ -329,8 +329,10 @@ pub async fn search(
     Json(request): Json<TelemetrySearchRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let sql = compile_search_sql(&request).map_err(bad_request)?;
+    let trusted = crate::sql::trusted::approved_query(sql)
+        .map_err(|error| storage_error(anyhow::anyhow!(error)))?;
     let result = state
-        .execute_tenant_scoped_sql(tenant.as_ref().map(|e| &e.0), &sql)
+        .execute_tenant_scoped_trusted_sql(tenant.as_ref().map(|e| &e.0), trusted)
         .await
         .map_err(storage_error)?;
     let rows = rows_to_search_response(&request.scope, &result.columns, &result.rows);
@@ -438,8 +440,10 @@ pub async fn field_values(
         .clamp(1, 10_000);
     let window = parse_field_values_window(&params).map_err(bad_request)?;
     let sql = compile_field_values_sql(spec.sql, &window, limit);
+    let trusted = crate::sql::trusted::approved_query(sql)
+        .map_err(|error| storage_error(anyhow::anyhow!(error)))?;
     let result = state
-        .execute_tenant_scoped_sql(tenant.as_ref().map(|e| &e.0), &sql)
+        .execute_tenant_scoped_trusted_sql(tenant.as_ref().map(|e| &e.0), trusted)
         .await
         .map_err(storage_error)?;
     let values = result
@@ -505,8 +509,10 @@ async fn execute_objects(
     tenant: Option<&TenantInfo>,
     sql: &str,
 ) -> Result<Vec<Value>, (StatusCode, Json<Value>)> {
+    let trusted = crate::sql::trusted::approved_query(sql)
+        .map_err(|error| storage_error(anyhow::anyhow!(error)))?;
     let result = state
-        .execute_tenant_scoped_sql(tenant, sql)
+        .execute_tenant_scoped_trusted_sql(tenant, trusted)
         .await
         .map_err(storage_error)?;
     Ok(rows_to_objects(&result.columns, &result.rows))
@@ -815,9 +821,13 @@ mod tests {
         .unwrap();
         assert!(compiled.spans.contains("session_id = 'sess-1'"));
         assert!(compiled.logs.contains("session_id = 'sess-1'"));
-        assert!(compiled.spans.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(compiled
+            .spans
+            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
         assert!(!compiled.spans.contains("record_date"));
-        assert!(compiled.logs.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(compiled
+            .logs
+            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
         assert!(!compiled.logs.contains("record_date"));
     }
 
@@ -833,11 +843,19 @@ mod tests {
         };
         let compiled = compile_details_sql(&target, &range, 100).unwrap();
 
-        assert!(compiled.spans.contains("CAST(timestamp AS TIMESTAMP_NS)"));
-        assert!(compiled.logs.contains("CAST(timestamp AS TIMESTAMP_NS)"));
-        assert!(compiled.spans.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(compiled
+            .spans
+            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
+        assert!(compiled
+            .logs
+            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
+        assert!(compiled
+            .spans
+            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
         assert!(!compiled.spans.contains("record_date"));
-        assert!(compiled.logs.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+        assert!(compiled
+            .logs
+            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
         assert!(!compiled.logs.contains("record_date"));
         assert!(!compiled.logs.contains("TIMESTAMPTZ"));
     }
@@ -878,7 +896,7 @@ mod tests {
         assert_sql_has_otlp_time_predicates(&sql);
         assert!(sql.contains("app_id IS NOT NULL"));
         let id = sql.find("app_id IS NOT NULL").unwrap();
-        let ts = sql.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
+        let ts = sql.find("make_timestamp_ns(epoch_ns(timestamp))").unwrap();
         assert!(id < ts, "identity before timestamp: {sql}");
     }
 
@@ -921,7 +939,9 @@ mod tests {
         .unwrap();
         assert_sql_has_otlp_time_predicates(&filtered);
         let id = filtered.find("session_id = 'sess-1'").unwrap();
-        let ts = filtered.find("CAST(timestamp AS TIMESTAMP_NS)").unwrap();
+        let ts = filtered
+            .find("make_timestamp_ns(epoch_ns(timestamp))")
+            .unwrap();
         assert!(id < ts, "search filter before timestamp: {filtered}");
 
         let details = compile_details_sql(
@@ -938,7 +958,7 @@ mod tests {
         let id = details.spans.find("session_id = ").unwrap();
         let ts = details
             .spans
-            .find("CAST(timestamp AS TIMESTAMP_NS)")
+            .find("make_timestamp_ns(epoch_ns(timestamp))")
             .unwrap();
         assert!(
             id < ts,

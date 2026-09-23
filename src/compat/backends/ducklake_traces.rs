@@ -30,7 +30,9 @@ impl DuckLakeTraceBackend {
         if ctx.remaining().is_zero() {
             return Err(deadline());
         }
-        match tokio::time::timeout(ctx.remaining(), self.query.execute_query(sql)).await {
+        let trusted = crate::sql::trusted::approved_query(sql.to_string())
+            .map_err(|err| CompatError::new(CompatErrorCode::BadRequest, err.to_string()))?;
+        match tokio::time::timeout(ctx.remaining(), self.query.execute_trusted(trusted)).await {
             Err(_) => Err(deadline()),
             Ok(Ok(result)) => Ok(result),
             Ok(Err(err)) => {

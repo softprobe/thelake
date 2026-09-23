@@ -15,7 +15,6 @@ pub mod promotion_manifest;
 pub mod promotion_metadata;
 pub mod promotion_mocker_v1;
 pub mod promotion_product_hot_attrs;
-pub mod promotion_sqlite_local;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_telemetry_columns;
 #[cfg(feature = "integration-e2e")]
@@ -26,6 +25,8 @@ pub mod tenant_ducklake_registry;
 pub mod tenant_otlp_isolation;
 #[cfg(feature = "integration-e2e")]
 pub mod tenant_promotion_specs;
+#[cfg(feature = "integration-e2e")]
+pub mod tenant_shared_scope;
 pub mod variant_shredding;
 
 #[cfg(feature = "integration-e2e")]
