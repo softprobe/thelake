@@ -1,7 +1,6 @@
 use crate::config::Config;
 use crate::workspace_scope::{
-    PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceScopeMode,
-    DEFAULT_WORKSPACE_ID,
+    PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID,
 };
 use std::sync::Arc;
 
