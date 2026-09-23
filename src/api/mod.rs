@@ -23,11 +23,37 @@ use axum::{
     routing::{get, post, MethodRouter},
     Json, Router,
 };
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde_json::json;
 use std::sync::Arc;
 
 pub use crate::control_plane::ControlPlaneRuntime;
 pub use crate::runtime_engine::{RuntimeEngine, RuntimeEngineManager};
+
+/// DuckDB catalog miss for optional OTLP/score tables before first ingest.
+static MISSING_OPTIONAL_TABLE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"Table with name (?:traces|logs|scores|score_configs) does not exist")
+        .expect("valid missing-optional-table regex")
+});
+
+fn empty_query_result() -> crate::query::duckdb::QueryResult {
+    crate::query::duckdb::QueryResult {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        row_count: 0,
+    }
+}
+
+fn map_missing_optional_table(
+    err: anyhow::Error,
+) -> anyhow::Result<crate::query::duckdb::QueryResult> {
+    if MISSING_OPTIONAL_TABLE.is_match(&err.to_string()) {
+        Ok(empty_query_result())
+    } else {
+        Err(err)
+    }
+}
 
 /// Unified application state for Axum router
 #[derive(Clone)]
@@ -57,21 +83,7 @@ impl AppState {
         let engine = self.engines.engine_for(tenant_id).await?;
         match engine.execute_query(sql).await {
             Ok(result) => Ok(result),
-            Err(err) => {
-                let msg = err.to_string();
-                if msg.contains("Table with name traces does not exist")
-                    || msg.contains("Table with name logs does not exist")
-                    || msg.contains("Table with name scores does not exist")
-                    || msg.contains("Table with name score_configs does not exist")
-                {
-                    return Ok(crate::query::duckdb::QueryResult {
-                        columns: Vec::new(),
-                        rows: Vec::new(),
-                        row_count: 0,
-                    });
-                }
-                Err(err)
-            }
+            Err(err) => map_missing_optional_table(err),
         }
     }
 
@@ -89,21 +101,7 @@ impl AppState {
         let engine = self.engines.engine_for(tenant_id).await?;
         match engine.execute_trusted(query).await {
             Ok(result) => Ok(result),
-            Err(err) => {
-                let msg = err.to_string();
-                if msg.contains("Table with name traces does not exist")
-                    || msg.contains("Table with name logs does not exist")
-                    || msg.contains("Table with name scores does not exist")
-                    || msg.contains("Table with name score_configs does not exist")
-                {
-                    return Ok(crate::query::duckdb::QueryResult {
-                        columns: Vec::new(),
-                        rows: Vec::new(),
-                        row_count: 0,
-                    });
-                }
-                Err(err)
-            }
+            Err(err) => map_missing_optional_table(err),
         }
     }
 }

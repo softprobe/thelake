@@ -415,3 +415,25 @@ fn unit_telemetry_details_compiles_correlated_signal_queries() {
         .contains("make_timestamp_ns(epoch_ns(timestamp))"));
     assert!(!compiled.spans.contains("record_date"));
 }
+
+#[test]
+fn map_missing_optional_table_returns_empty_for_known_tables() {
+    for name in ["traces", "logs", "scores", "score_configs"] {
+        let err = anyhow::anyhow!("Catalog Error: Table with name {name} does not exist!");
+        let result = super::map_missing_optional_table(err).expect("mapped to empty");
+        assert_eq!(result.row_count, 0);
+        assert!(result.columns.is_empty());
+        assert!(result.rows.is_empty());
+    }
+}
+
+#[test]
+fn map_missing_optional_table_preserves_other_errors() {
+    let err = anyhow::anyhow!("Catalog Error: Table with name spans does not exist!");
+    match super::map_missing_optional_table(err) {
+        Ok(_) => panic!("unrelated missing table must not map to empty"),
+        Err(mapped) => assert!(mapped
+            .to_string()
+            .contains("Table with name spans does not exist")),
+    }
+}
