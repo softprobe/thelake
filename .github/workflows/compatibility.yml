@@ -1204,6 +1204,19 @@ jobs:
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
 
+      - name: Start DuckLake Postgres catalog
+        run: |
+          set -euo pipefail
+          docker compose up -d ducklake-postgres
+          for attempt in {1..60}; do
+            if docker exec ducklake-postgres pg_isready -U ducklake -d ducklake >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose logs ducklake-postgres
+          exit 1
+
       - name: Add cargo to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
@@ -1219,7 +1232,7 @@ jobs:
       - name: Run lint
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run unit tests without containers
+      - name: Run unit tests with DuckLake Postgres
         run: cargo test --lib -- --test-threads=1
 
       - name: Run compatibility contract and fixture checks
@@ -1250,7 +1263,8 @@ jobs:
           cat > target/compat/fast-pr/report.txt <<'EOF'
           Fast PR compatibility lane ran formatting, library check, lint, unit,
           compatibility contract, parser, serializer, and tenant-isolation checks.
-          This lane uses no reference-service containers.
+          This lane uses no protocol reference-service containers; it starts only
+          the Postgres catalog required by the production DuckLake path.
           EOF
 
       - name: Upload fast PR evidence
@@ -1260,6 +1274,10 @@ jobs:
           name: fast-pr-compatibility-evidence
           path: target/compat/fast-pr/
           if-no-files-found: error
+
+      - name: Stop DuckLake Postgres catalog
+        if: always()
+        run: docker compose down --volumes --remove-orphans
 
   compatibility-report:
     name: Consolidated compatibility report
