@@ -468,19 +468,19 @@ impl Default for DuckLakeConfig {
     }
 }
 
-fn default_ducklake_metadata_path() -> String {
+pub(crate) fn default_ducklake_metadata_path() -> String {
     "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string()
 }
 
-fn default_ducklake_data_path() -> String {
+pub(crate) fn default_ducklake_data_path() -> String {
     "./warehouse/ducklake/data/".to_string()
 }
 
-fn default_ducklake_catalog_alias() -> String {
+pub(crate) fn default_ducklake_catalog_alias() -> String {
     "softprobe".to_string()
 }
 
-fn default_ducklake_metadata_schema() -> String {
+pub(crate) fn default_ducklake_metadata_schema() -> String {
     "softprobe".to_string()
 }
 

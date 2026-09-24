@@ -64,7 +64,7 @@ fn profile_enabled() -> bool {
     std::env::var("PERF_CACHE_PROFILE").ok().as_deref() == Some("1")
 }
 
-fn format_result(result: &softprobe_runtime::query::duckdb::QueryResult) -> String {
+fn format_result(result: &softprobe_runtime::storage::duckdb::QueryResult) -> String {
     let mut output = String::new();
     output.push_str(&format!("columns: {:?}\n", result.columns));
     for row in &result.rows {
@@ -150,7 +150,7 @@ async fn retry_query_until_count(
     sql: &str,
     expected_count: i64,
     max_retries: u32,
-) -> Result<softprobe_runtime::query::duckdb::QueryResult, anyhow::Error> {
+) -> Result<softprobe_runtime::storage::duckdb::QueryResult, anyhow::Error> {
     let is_r2 = std::env::var("E2E_BACKEND").ok().as_deref() == Some("r2");
     let max_retries = if is_r2 {
         max_retries.max(10)

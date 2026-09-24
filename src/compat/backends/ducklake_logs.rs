@@ -10,8 +10,8 @@ use crate::compat::backends::logs::{
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::loki::{project_loki, DEFAULT_STREAM_LABEL_ALLOWLIST};
 use crate::compat::tenant::TenantContext;
-use crate::query::duckdb::QueryResult;
 use crate::query::QueryEngine;
+use crate::storage::duckdb::QueryResult;
 use crate::storage::schema::variant::{prefer_attr_varchar, variant_json_to_string_map};
 use async_trait::async_trait;
 use serde_json::Value;

@@ -153,18 +153,14 @@ fn ducklake_connection_material(
     scope: &PhysicalScope,
 ) -> Result<DuckLakeConnectionMaterial, String> {
     let config = Config::load().map_err(|e| format!("runtime config load failed: {e}"))?;
-    let ducklake = &config.ducklake;
-    let ducklake_pg_uri = if scope.metadata_path.trim().is_empty() {
-        postgres_ducklake_metadata_path(ducklake)
+    let ducklake_pg_uri = if scope.catalog_dsn().trim().is_empty() {
+        postgres_ducklake_metadata_path(&config.ducklake.metadata_path)
     } else {
-        postgres_ducklake_metadata_path(&crate::config::DuckLakeConfig {
-            metadata_path: scope.metadata_path.clone(),
-            ..ducklake.clone()
-        })
+        postgres_ducklake_metadata_path(scope.catalog_dsn())
     };
     // All physical connection identity comes from the resolved scope.
-    let ducklake_data_path = scope.data_path.clone();
-    let ducklake_metadata_schema = scope.metadata_schema.clone();
+    let ducklake_data_path = scope.warehouse_uri().to_owned();
+    let ducklake_metadata_schema = scope.pg_namespace().to_owned();
     let creds = config.resolve_object_store_credentials(&ducklake_data_path);
 
     // The normal runtime path is always the Postgres DuckLake catalog.
@@ -199,8 +195,8 @@ fn ducklake_connection_material(
     })
 }
 
-fn postgres_ducklake_metadata_path(ducklake: &crate::config::DuckLakeConfig) -> String {
-    let metadata_path = ducklake.metadata_path.trim();
+fn postgres_ducklake_metadata_path(metadata_path: &str) -> String {
+    let metadata_path = metadata_path.trim();
     if metadata_path.starts_with("postgres:") {
         metadata_path.trim_start_matches("postgres:").to_string()
     } else {
@@ -249,13 +245,12 @@ mod data_connection_tests {
             agent_id: None,
             agent_name: None,
         };
-        let scope = PhysicalScope {
-            metadata_path: "host=pg port=5432 dbname=ducklake user=reader password=secret"
-                .to_string(),
-            metadata_schema: "tenant_tenant_123".to_string(),
-            data_path: "./warehouse/ducklake/data/".to_string(),
-            catalog_alias: "softprobe".to_string(),
-        };
+        let scope = PhysicalScope::new(
+            "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string(),
+            "./warehouse/ducklake/data/".to_string(),
+            "softprobe".to_string(),
+            "tenant_tenant_123".to_string(),
+        );
 
         let material = ducklake_connection_material(&tenant, &scope).expect("connection material");
         assert_eq!(material.version, 1);
@@ -301,13 +296,12 @@ mod data_connection_tests {
             agent_id: None,
             agent_name: None,
         };
-        let scope = PhysicalScope {
-            metadata_path: "host=pg port=5432 dbname=ducklake user=reader password=secret"
-                .to_string(),
-            metadata_schema: "tenant_tenant_123".to_string(),
-            data_path: "gs://bucket/ducklake/data/".to_string(),
-            catalog_alias: "softprobe".to_string(),
-        };
+        let scope = PhysicalScope::new(
+            "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string(),
+            "gs://bucket/ducklake/data/".to_string(),
+            "softprobe".to_string(),
+            "tenant_tenant_123".to_string(),
+        );
 
         let material = ducklake_connection_material(&tenant, &scope).expect("connection material");
         assert_eq!(
@@ -354,13 +348,12 @@ mod data_connection_tests {
             agent_id: None,
             agent_name: None,
         };
-        let scope = PhysicalScope {
-            metadata_path: "host=pg port=5432 dbname=ducklake user=reader password=secret"
-                .to_string(),
-            metadata_schema: "tenant_tenant_123".to_string(),
-            data_path: "s3://bucket/ducklake/data/".to_string(),
-            catalog_alias: "softprobe".to_string(),
-        };
+        let scope = PhysicalScope::new(
+            "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string(),
+            "s3://bucket/ducklake/data/".to_string(),
+            "softprobe".to_string(),
+            "tenant_tenant_123".to_string(),
+        );
 
         let material = ducklake_connection_material(&tenant, &scope).expect("connection material");
         assert_eq!(material.gcs_hmac_access_key_id, "AKIATEST");
@@ -400,13 +393,12 @@ mod data_connection_tests {
             agent_id: None,
             agent_name: None,
         };
-        let scope = PhysicalScope {
-            metadata_path: "host=pg port=5432 dbname=ducklake user=reader password=secret"
-                .to_string(),
-            metadata_schema: "tenant_tenant_123".to_string(),
-            data_path: "gs://bucket/ducklake/data/".to_string(),
-            catalog_alias: "softprobe".to_string(),
-        };
+        let scope = PhysicalScope::new(
+            "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string(),
+            "gs://bucket/ducklake/data/".to_string(),
+            "softprobe".to_string(),
+            "tenant_tenant_123".to_string(),
+        );
 
         let err =
             ducklake_connection_material(&tenant, &scope).expect_err("missing hmac should fail");
@@ -507,10 +499,10 @@ async fn v1_provision_scope(
     }
 
     if let Ok(existing) = engines.resolve_scope(&tenant_id).await {
-        if existing.metadata_schema == metadata_schema && existing.data_path == data_path {
+        if existing.matches_warehouse_hints(&metadata_schema, &data_path) {
             let mut scope = json!({
-                "ducklakeMetadataSchema": existing.metadata_schema,
-                "ducklakeDataPath": existing.data_path,
+                "ducklakeMetadataSchema": existing.pg_namespace(),
+                "ducklakeDataPath": existing.warehouse_uri(),
             });
             if let Some(b) = hints.gcs_bucket.as_ref().filter(|s| !s.trim().is_empty()) {
                 scope["gcsBucket"] = json!(b);
@@ -545,8 +537,8 @@ async fn v1_provision_scope(
         })?;
 
     let mut scope_json = json!({
-        "ducklakeMetadataSchema": scope.metadata_schema,
-        "ducklakeDataPath": scope.data_path,
+        "ducklakeMetadataSchema": scope.pg_namespace(),
+        "ducklakeDataPath": scope.warehouse_uri(),
     });
     if let Some(b) = hints.gcs_bucket.as_ref().filter(|s| !s.trim().is_empty()) {
         scope_json["gcsBucket"] = json!(b);

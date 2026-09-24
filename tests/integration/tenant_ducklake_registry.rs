@@ -89,6 +89,8 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
     let tenant_a = format!("tenant_promo_registry_a_{suffix}");
     let tenant_b = format!("tenant_promo_registry_b_{suffix}");
 
+    let schema_a = format!("promo_a_{suffix}");
+    let schema_b = format!("promo_b_{suffix}");
     let scope_a = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_a.clone(),
@@ -96,7 +98,7 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
             // generated schema name comfortably below that limit so the
             // registry contract does not accidentally create a truncated
             // catalog that cannot be re-attached by DuckLake.
-            metadata_schema: format!("promo_a_{suffix}"),
+            metadata_schema: schema_a.clone(),
             data_path: format!("./target/registry-test-data/{tenant_a}/"),
         })
         .await
@@ -104,7 +106,7 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
     let scope_b = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_b.clone(),
-            metadata_schema: format!("promo_b_{suffix}"),
+            metadata_schema: schema_b.clone(),
             data_path: format!("./target/registry-test-data/{tenant_b}/"),
         })
         .await
@@ -133,7 +135,7 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
         .await
         .expect("record tenant A spec");
     let client = postgres_client().await;
-    let manifests_a = load_active_telemetry_columns_manifests(&client, &scope_a.metadata_schema)
+    let manifests_a = load_active_telemetry_columns_manifests(&client, &schema_a)
         .await
         .expect("load tenant A manifests");
     engine_b
@@ -141,7 +143,7 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
         .await
         .expect("record tenant B spec");
     let client = postgres_client().await;
-    let manifests_b = load_active_telemetry_columns_manifests(&client, &scope_b.metadata_schema)
+    let manifests_b = load_active_telemetry_columns_manifests(&client, &schema_b)
         .await
         .expect("load tenant B manifests");
 
@@ -167,10 +169,9 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
             "shared workspaces bind one physical scope"
         );
         let client = postgres_client().await;
-        let shared_manifests =
-            load_active_telemetry_columns_manifests(&client, &scope_a.metadata_schema)
-                .await
-                .expect("load shared physical-scope manifests");
+        let shared_manifests = load_active_telemetry_columns_manifests(&client, &schema_a)
+            .await
+            .expect("load shared physical-scope manifests");
         let shared_names: Vec<&str> = shared_manifests
             .iter()
             .flat_map(|m| m.columns.iter().map(|c| c.name.as_str()))

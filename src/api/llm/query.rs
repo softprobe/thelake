@@ -288,7 +288,7 @@ async fn resolve_session_lake_window(
     let summary_scope = engine.session_summary_scope();
     match crate::session_summary::lookup_session_summary_window_for_workspace(
         &summary_scope.pool,
-        &summary_scope.metadata_schema,
+        summary_scope.physical.pg_namespace(),
         summary_scope.workspace_id.as_deref(),
         session_id,
     )
@@ -685,7 +685,7 @@ pub async fn search_sessions(
     let summary_scope = engine.session_summary_scope();
     match crate::session_summary::search_session_summary_for_workspace(
         &summary_scope.pool,
-        &summary_scope.metadata_schema,
+        summary_scope.physical.pg_namespace(),
         summary_scope.workspace_id.as_deref(),
         &request,
         limit,

@@ -15,8 +15,9 @@ mod writer;
 
 pub(crate) use writer::DuckLakeWriter;
 
+pub use attach::AttachedSession;
 pub(crate) use attach::{
-    ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified, DuckLakeSessionFactory,
-    DuckLakeSessionKind,
+    ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified,
+    open_attached_connection, DuckLakeSessionFactory, DuckLakeSessionKind,
 };
 pub(crate) use util::size_literal;

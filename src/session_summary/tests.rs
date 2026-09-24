@@ -349,12 +349,12 @@ async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
     let resolver = DuckLakeScopeResolver::connect(&config)
         .await
         .expect("connect");
-    let scope = PhysicalScope {
-        metadata_path: config.ducklake.metadata_path.clone(),
-        metadata_schema: schema.clone(),
-        data_path: config.ducklake.data_path.clone(),
-        catalog_alias: config.ducklake.catalog_alias.clone(),
-    };
+    let scope = PhysicalScope::new(
+        config.ducklake.metadata_path.clone(),
+        config.ducklake.data_path.clone(),
+        config.ducklake.catalog_alias.clone(),
+        schema.clone(),
+    );
 
     // Connect already ensures when enabled; deactivate to prove ensure re-activates.
     let client = resolver.pool().get().await.expect("client");

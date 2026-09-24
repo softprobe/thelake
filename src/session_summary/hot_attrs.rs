@@ -85,7 +85,7 @@ pub(crate) async fn ensure_product_hot_attrs_for_scope(
     scope: &PhysicalScope,
 ) -> Result<()> {
     let client = resolver.pool().get().await?;
-    let active = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
+    let active = load_active_telemetry_columns_manifests(&client, scope.pg_namespace())
         .await
         .map_err(|e| anyhow::anyhow!("load active telemetry promotions: {e}"))?;
     if active_covers_required(&active) {
@@ -96,7 +96,7 @@ pub(crate) async fn ensure_product_hot_attrs_for_scope(
         .any(|m| m.target.tables.contains(&TelemetryTable::Traces));
     // Incomplete operator traces promo: never soft-fail or overwrite — panic.
     if has_traces {
-        require_reduce_hot_coverage(&scope.metadata_schema, &active);
+        require_reduce_hot_coverage(scope.pg_namespace(), &active);
     }
     // Validate shipped yaml still parses before activating.
     let _ = traces_hot_manifest()?;
@@ -105,10 +105,10 @@ pub(crate) async fn ensure_product_hot_attrs_for_scope(
         .record_active_telemetry_promotion_spec(scope, TRACES_QUERY_HOT_ATTRS_YAML, &tables)
         .await
         .context("activate traces-query-hot-attrs for session_summary")?;
-    let active = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
+    let active = load_active_telemetry_columns_manifests(&client, scope.pg_namespace())
         .await
         .map_err(|e| anyhow::anyhow!("reload active telemetry promotions: {e}"))?;
-    require_reduce_hot_coverage(&scope.metadata_schema, &active);
+    require_reduce_hot_coverage(scope.pg_namespace(), &active);
     Ok(())
 }
 

@@ -58,7 +58,7 @@ pub struct RuntimeEngine {
 /// module needs; callers do not receive the tenant's physical binding.
 pub(crate) struct TenantSummaryScope {
     pub(crate) pool: Pool,
-    pub(crate) metadata_schema: String,
+    pub(crate) physical: crate::workspace_scope::PhysicalScope,
     pub(crate) workspace_id: Option<String>,
 }
 
@@ -78,7 +78,7 @@ impl RuntimeEngine {
         self.ingest.add_spans(items, request_size).await
     }
 
-    pub async fn execute_query(&self, sql: &str) -> Result<crate::query::duckdb::QueryResult> {
+    pub async fn execute_query(&self, sql: &str) -> Result<crate::storage::duckdb::QueryResult> {
         self.query.execute_query(sql).await
     }
 
@@ -93,7 +93,7 @@ impl RuntimeEngine {
     pub(crate) async fn execute_trusted(
         &self,
         query: crate::sql::trusted::TrustedSql,
-    ) -> Result<crate::query::duckdb::QueryResult> {
+    ) -> Result<crate::storage::duckdb::QueryResult> {
         self.query.execute_trusted(query).await
     }
 
@@ -170,7 +170,7 @@ impl RuntimeEngine {
     pub(crate) fn session_summary_scope(&self) -> TenantSummaryScope {
         TenantSummaryScope {
             pool: self.catalog_pool.clone(),
-            metadata_schema: self.binding.physical_scope.metadata_schema.clone(),
+            physical: self.binding.physical_scope.clone(),
             workspace_id: (self.binding.mode == WorkspaceScopeMode::Shared)
                 .then(|| self.binding.workspace_id.clone()),
         }
@@ -289,7 +289,7 @@ impl RuntimeEngineManager {
         let binding = resolver.resolve_or_create_binding(tenant_id).await?;
         let scope_lock = self
             .scope_locks
-            .entry(binding.physical_scope.key())
+            .entry(binding.physical_scope.id().registry_token().to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _scope_hold = scope_lock.lock().await;
@@ -338,18 +338,21 @@ pub struct ScopeProvisioningRequest {
 #[derive(Clone)]
 pub(crate) struct DuckLakeScopeResolver {
     pool: Pool,
-    registry_schema: String,
     default_physical_scope: PhysicalScope,
     workspace_scope_mode: WorkspaceScopeMode,
 }
 
 impl DuckLakeScopeResolver {
+    pub(crate) fn default_physical_scope(&self) -> &PhysicalScope {
+        &self.default_physical_scope
+    }
+
     pub(crate) fn pool(&self) -> &Pool {
         &self.pool
     }
 
     pub(crate) fn registry_schema(&self) -> &str {
-        &self.registry_schema
+        self.default_physical_scope.pg_namespace()
     }
 
     /// Always connects on the normal runtime path: `metadata_path` is the
@@ -373,7 +376,6 @@ impl DuckLakeScopeResolver {
         let pool = Pool::builder(mgr).max_size(8).build()?;
         Ok(Self {
             pool,
-            registry_schema: dl.metadata_schema.clone(),
             default_physical_scope: PhysicalScope::from_ducklake(dl),
             workspace_scope_mode: dl.workspace_scope_mode,
         })
@@ -389,7 +391,7 @@ impl DuckLakeScopeResolver {
             .execute(
                 &format!(
                     "CREATE SCHEMA IF NOT EXISTS {};",
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -404,7 +406,7 @@ impl DuckLakeScopeResolver {
   provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );"#,
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -423,7 +425,7 @@ impl DuckLakeScopeResolver {
   UNIQUE (metadata_path, catalog_alias,
           ducklake_metadata_schema, data_path)
 );"#,
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -432,7 +434,7 @@ impl DuckLakeScopeResolver {
             .execute(
                 &format!(
                     "ALTER TABLE {}.physical_scope DROP COLUMN IF EXISTS catalog_type;",
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -446,8 +448,8 @@ impl DuckLakeScopeResolver {
   provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );"#,
-                    quote_pg_ident(&self.registry_schema),
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema()),
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -463,7 +465,7 @@ impl DuckLakeScopeResolver {
   heartbeat_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (job_name, scope_key)
 );"#,
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -473,7 +475,7 @@ impl DuckLakeScopeResolver {
                 &format!(
                     r#"CREATE INDEX IF NOT EXISTS thelake_job_lease_until
 ON {}.thelake_job_lease (lease_until);"#,
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -492,24 +494,25 @@ ON {}.thelake_job_lease (lease_until);"#,
             .query(
                 &format!(
                     "SELECT scope_id, ducklake_metadata_schema, data_path FROM {}.scope_registry;",
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
             .await?;
         for row in rows {
             let workspace_id: String = row.get(0);
-            let mut physical = self.default_physical_scope.clone();
-            physical.metadata_schema = row.get(1);
-            physical.data_path = row.get(2);
+            let physical = self
+                .default_physical_scope
+                .with_pg_namespace(row.get::<_, String>(1))
+                .with_warehouse_uri(row.get::<_, String>(2));
             self.insert_physical_scope(client, &physical).await?;
-            let physical_scope_id = physical.key();
+            let physical_scope_id = physical.id().registry_token().to_string();
             client
                 .execute(
                     &format!(
                         "INSERT INTO {}.workspace_scope_binding (workspace_id, physical_scope_id) \
                          VALUES ($1, $2) ON CONFLICT (workspace_id) DO NOTHING;",
-                        quote_pg_ident(&self.registry_schema)
+                        quote_pg_ident(self.registry_schema())
                     ),
                     &[&workspace_id, &physical_scope_id],
                 )
@@ -523,7 +526,7 @@ ON {}.thelake_job_lease (lease_until);"#,
         client: &impl deadpool_postgres::GenericClient,
         physical: &PhysicalScope,
     ) -> Result<()> {
-        let physical_scope_id = physical.key();
+        let physical_scope_id = physical.id().registry_token().to_string();
         client
             .execute(
                 &format!(
@@ -531,14 +534,14 @@ ON {}.thelake_job_lease (lease_until);"#,
   (physical_scope_id, metadata_path, ducklake_metadata_schema, data_path, catalog_alias)
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[
                     &physical_scope_id,
-                    &physical.metadata_path,
-                    &physical.metadata_schema,
-                    &physical.data_path,
-                    &physical.catalog_alias,
+                    &physical.catalog_dsn(),
+                    &physical.pg_namespace(),
+                    &physical.warehouse_uri(),
+                    &physical.attach_alias(),
                 ],
             )
             .await?;
@@ -547,20 +550,20 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
 
     async fn ensure_scope_tables(&self, scope: &PhysicalScope) -> Result<()> {
         let client = self.pool.get().await?;
-        ensure_promotion_metadata_tables(&client, &scope.metadata_schema).await?;
+        ensure_promotion_metadata_tables(&client, scope.pg_namespace()).await?;
         if self.workspace_scope_mode == WorkspaceScopeMode::Shared {
             crate::session_summary::ensure_shared_session_summary_tables(
                 &client,
-                &scope.metadata_schema,
+                scope.pg_namespace(),
             )
             .await?;
             crate::session_summary::validate_shared_session_summary_tables(
                 &client,
-                &scope.metadata_schema,
+                scope.pg_namespace(),
             )
             .await?;
         } else {
-            crate::session_summary::ensure_session_summary_tables(&client, &scope.metadata_schema)
+            crate::session_summary::ensure_session_summary_tables(&client, scope.pg_namespace())
                 .await?;
         }
         drop(client);
@@ -606,8 +609,8 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
                      FROM {}.workspace_scope_binding wb \
                      JOIN {}.physical_scope ps ON ps.physical_scope_id = wb.physical_scope_id \
                      WHERE wb.workspace_id = $1;",
-                    quote_pg_ident(&self.registry_schema),
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema()),
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[&workspace_id],
             )
@@ -615,12 +618,8 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
         let Some(row) = row else {
             bail!("unknown scope: {workspace_id}");
         };
-        let physical = PhysicalScope {
-            metadata_path: row.get(0),
-            metadata_schema: row.get(1),
-            data_path: row.get(2),
-            catalog_alias: row.get(3),
-        };
+        let physical =
+            PhysicalScope::from_registry_row(row.get(0), row.get(1), row.get(2), row.get(3));
         WorkspaceBinding::new(workspace_id, physical, self.workspace_scope_mode).map_err(Into::into)
     }
 
@@ -652,16 +651,16 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
         // scope. The request names the workspace only; it cannot select a
         // second catalog or data root.
         let scope = match self.workspace_scope_mode {
-            WorkspaceScopeMode::Isolated => PhysicalScope {
-                metadata_schema: request.metadata_schema,
-                data_path: request.data_path,
-                ..self.default_physical_scope.clone()
-            },
+            WorkspaceScopeMode::Isolated => PhysicalScope::from_provision(
+                &self.default_physical_scope,
+                request.metadata_schema,
+                request.data_path,
+            ),
             WorkspaceScopeMode::Shared => self.default_physical_scope.clone(),
         };
         let mut client = self.pool.get().await?;
         let physical = scope.clone();
-        let physical_scope_id = physical.key();
+        let physical_scope_id = physical.id().registry_token().to_string();
         let transaction = client.transaction().await?;
         self.insert_physical_scope(&transaction, &physical).await?;
         let row = transaction
@@ -674,8 +673,8 @@ ON CONFLICT (workspace_id) DO UPDATE SET
   updated_at = NOW()
 WHERE {}.workspace_scope_binding.physical_scope_id = EXCLUDED.physical_scope_id
 RETURNING workspace_id;"#,
-                    quote_pg_ident(&self.registry_schema),
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema()),
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[&request.scope_id, &physical_scope_id],
             )
@@ -708,8 +707,8 @@ RETURNING workspace_id;"#,
                      FROM {}.workspace_scope_binding wb \
                      JOIN {}.physical_scope ps ON ps.physical_scope_id = wb.physical_scope_id \
                      ORDER BY wb.workspace_id;",
-                    quote_pg_ident(&self.registry_schema),
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema()),
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -719,12 +718,12 @@ RETURNING workspace_id;"#,
             .map(|row| {
                 (
                     row.get::<_, String>(0),
-                    PhysicalScope {
-                        metadata_path: row.get(1),
-                        metadata_schema: row.get(2),
-                        data_path: row.get(3),
-                        catalog_alias: row.get(4),
-                    },
+                    PhysicalScope::from_registry_row(
+                        row.get(1),
+                        row.get(2),
+                        row.get(3),
+                        row.get(4),
+                    ),
                 )
             })
             .collect())
@@ -741,7 +740,7 @@ RETURNING workspace_id;"#,
             self.resolve_scope(scope_id).await?
         };
         let client = self.pool.get().await?;
-        let manifests = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
+        let manifests = load_active_telemetry_columns_manifests(&client, scope.pg_namespace())
             .await
             .map_err(map_spec_load_error)?;
         Ok((scope, manifests))
@@ -753,7 +752,7 @@ RETURNING workspace_id;"#,
         scope: &PhysicalScope,
     ) -> Result<Vec<TelemetryColumnsManifest>> {
         let client = self.pool.get().await?;
-        let manifests = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
+        let manifests = load_active_telemetry_columns_manifests(&client, scope.pg_namespace())
             .await
             .map_err(map_spec_load_error)?;
         Ok(manifests)
@@ -765,7 +764,7 @@ RETURNING workspace_id;"#,
         scope: &PhysicalScope,
     ) -> Result<Vec<BusinessTableManifest>> {
         let client = self.pool.get().await?;
-        let schema = quote_pg_ident(&scope.metadata_schema);
+        let schema = quote_pg_ident(scope.pg_namespace());
         let rows = client
             .query(
                 &format!(
@@ -792,7 +791,7 @@ WHERE status = 'active' AND target_kind = 'business_table';"#
         manifest_yaml: &str,
         activation: &PromotionSpecActivation,
     ) -> Result<String> {
-        let schema = scope.metadata_schema.replace('"', "\"\"");
+        let schema = scope.pg_namespace().replace('"', "\"\"");
         tx.execute(
             &format!(
                 // Supersede only the same (target_kind, target_tables) pair so distinct
@@ -841,7 +840,7 @@ ON CONFLICT (spec_id) DO UPDATE SET
         scope: &PhysicalScope,
         table_name: &str,
     ) -> Result<Option<BusinessTableManifest>> {
-        let schema = scope.metadata_schema.replace('"', "\"\"");
+        let schema = scope.pg_namespace().replace('"', "\"\"");
         let rows = tx
             .query(
                 &format!(
@@ -868,7 +867,7 @@ LIMIT 1;"#
     ) -> Result<()> {
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
-            &[&format!("{}:{lock_suffix}", scope.metadata_schema)],
+            &[&format!("{}:{lock_suffix}", scope.pg_namespace())],
         )
         .await?;
         Ok(())
@@ -989,6 +988,14 @@ fn parse_postgres_kv_config(pg: &mut tokio_postgres::Config, metadata_path: &str
         }
     }
     Ok(())
+}
+
+/// Config → [`PhysicalScope`] ingress only. Does not open a registry pool.
+///
+/// Prefer [`DuckLakeScopeResolver::default_physical_scope`] when a resolver
+/// already exists; use this for bootstrap paths that only need identity.
+pub(crate) fn physical_scope_from_config(config: &Config) -> PhysicalScope {
+    PhysicalScope::from_ducklake(&config.ducklake)
 }
 
 pub(crate) fn quote_pg_ident(input: &str) -> String {

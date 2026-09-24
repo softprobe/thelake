@@ -1134,11 +1134,11 @@ async fn inlined_data_stays_readable_across_maintenance() {
         .await
         .expect("maintenance executor");
     let summary = maintenance.run_once().await.expect("maintenance run");
-    // `table` is `<metadata_schema>.<table>` (executor.rs builds `table_ident`).
+    // `table` is the bare lake table name (executor uses the inventory label).
     let scores_result = summary
         .tables
         .iter()
-        .find(|t| t.table.ends_with(".scores"))
+        .find(|t| t.table == "scores" || t.table.ends_with(".scores"))
         .unwrap_or_else(|| panic!("no scores entry in maintenance summary: {summary:?}"));
     assert!(
         !scores_result.metadata.skipped,

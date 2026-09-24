@@ -99,7 +99,8 @@ impl DuckLakeWriter {
         // surface. It must never route by tenant_id from the payload.
         let scope = self
             .tenant_bound_scope()
-            .unwrap_or_else(|| PhysicalScope::from_ducklake(&self.ducklake));
+            .cloned()
+            .unwrap_or_else(|| self.physical.clone());
         let manifests = if self.scope_bound {
             resolver
                 .load_active_telemetry_columns_manifests_for_scope(&scope)
@@ -117,9 +118,8 @@ impl DuckLakeWriter {
         let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Traces);
         Self::apply_span_promotions(&mut spans, &columns)?;
         let schema = Arc::new(TraceTable::schema_with_promoted_columns(&columns));
-        let dk = self.effective_ducklake(&scope);
         let record_batches = Span::to_record_batches_by_date(spans, schema.as_ref())?;
-        self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
+        self.write_record_batches_internal_with_ducklake(&scope, "traces", record_batches)
             .await
     }
 
@@ -142,9 +142,8 @@ impl DuckLakeWriter {
         let columns = Self::telemetry_columns_for_table(manifests, TelemetryTable::Logs);
         Self::apply_log_promotions(&mut logs, &columns)?;
         let schema = Arc::new(OtlpLogsTable::schema_with_promoted_columns(&columns));
-        let dk = self.effective_ducklake(scope);
         let record_batches = arrow::logs_to_record_batches_by_date(logs, schema.as_ref())?;
-        self.write_record_batches_internal_with_ducklake(&dk, "logs", record_batches)
+        self.write_record_batches_internal_with_ducklake(scope, "logs", record_batches)
             .await?;
         Ok(())
     }
@@ -154,7 +153,8 @@ impl DuckLakeWriter {
         // Non-scope-bound writers (single-tenant / tests) use the configured DuckLake scope.
         let scope = self
             .tenant_bound_scope()
-            .unwrap_or_else(|| PhysicalScope::from_ducklake(&self.ducklake));
+            .cloned()
+            .unwrap_or_else(|| self.physical.clone());
         let manifests = if self.scope_bound {
             resolver
                 .load_active_telemetry_columns_manifests_for_scope(&scope)

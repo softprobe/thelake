@@ -205,14 +205,14 @@ fn register_observables(meter: &Meter) {
     let _ = meter
         .u64_observable_counter("thelake.self_heal.rebuilds")
         .with_callback(|observer| {
-            let snap = crate::query::duckdb::self_heal_snapshot();
+            let snap = crate::storage::duckdb::self_heal_snapshot();
             observer.observe(snap.rebuilds, &[]);
         })
         .build();
     let _ = meter
         .u64_observable_gauge("thelake.self_heal.consecutive_failures")
         .with_callback(|observer| {
-            let snap = crate::query::duckdb::self_heal_snapshot();
+            let snap = crate::storage::duckdb::self_heal_snapshot();
             observer.observe(snap.consecutive_failures, &[]);
         })
         .build();

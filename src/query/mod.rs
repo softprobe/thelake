@@ -1,16 +1,16 @@
 use crate::config::Config;
+use crate::storage::duckdb::{DuckDBQueryEngine, QueryResult};
 use crate::workspace_scope::{
-    PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID,
+    DuckLakeAccess, PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceBinding,
+    WorkspaceScopeMode, DEFAULT_WORKSPACE_ID,
 };
 use std::sync::Arc;
 
-pub(crate) mod cache;
-pub mod duckdb;
 pub(crate) mod workspace_views;
 
 #[derive(Clone)]
 pub struct QueryEngine {
-    duckdb: Arc<duckdb::DuckDBQueryEngine>,
+    duckdb: Arc<DuckDBQueryEngine>,
     /// When false (ops/self-monitoring engine), skip process self-monitoring
     /// query instruments (anti-recursion).
     record_self_monitoring: bool,
@@ -43,15 +43,8 @@ pub struct HttpSpan {
 }
 
 pub async fn create_query_engine(config: &Config) -> anyhow::Result<QueryEngine> {
-    let duckdb = Arc::new(
-        duckdb::DuckDBQueryEngine::new_with_liveness(config, true, DEFAULT_WORKSPACE_ID).await?,
-    );
-
-    Ok(QueryEngine {
-        duckdb,
-        record_self_monitoring: true,
-        tenant_id: DEFAULT_WORKSPACE_ID.into(),
-    })
+    let scope = crate::runtime_engine::physical_scope_from_config(config);
+    create_query_engine_for_scope_with_liveness(config, &scope, true, DEFAULT_WORKSPACE_ID).await
 }
 
 /// Build a query engine for a bound physical scope with SelfHeal liveness participation.
@@ -61,24 +54,15 @@ pub(crate) async fn create_query_engine_for_scope_with_liveness(
     counts_toward_liveness: bool,
     tenant_id: &str,
 ) -> anyhow::Result<QueryEngine> {
-    if scope.metadata_schema.trim().is_empty() && scope.data_path.trim().is_empty() {
-        let duckdb = Arc::new(
-            duckdb::DuckDBQueryEngine::new_with_liveness(config, counts_toward_liveness, tenant_id)
-                .await?,
-        );
-        return Ok(QueryEngine {
-            duckdb,
-            record_self_monitoring: counts_toward_liveness,
-            tenant_id: tenant_id.to_string(),
-        });
-    }
-    let mut cfg = config.clone();
-    cfg.ducklake.metadata_path = scope.metadata_path.clone();
-    cfg.ducklake.metadata_schema = scope.metadata_schema.clone();
-    cfg.ducklake.data_path = scope.data_path.clone();
-    cfg.ducklake.catalog_alias = scope.catalog_alias.clone();
+    let binding = WorkspaceBinding::new(
+        tenant_id,
+        scope.clone(),
+        config.ducklake.workspace_scope_mode,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    let access = DuckLakeAccess::Workspace(binding);
     let duckdb = Arc::new(
-        duckdb::DuckDBQueryEngine::new_with_liveness(&cfg, counts_toward_liveness, tenant_id)
+        DuckDBQueryEngine::new_with_liveness(config, access, counts_toward_liveness, tenant_id)
             .await?,
     );
     Ok(QueryEngine {
@@ -304,7 +288,7 @@ impl QueryEngine {
     pub async fn search_observations(
         &self,
         request: &crate::api::llm::query::ObservationSearchRequest,
-    ) -> anyhow::Result<duckdb::QueryResult> {
+    ) -> anyhow::Result<QueryResult> {
         let sql =
             crate::sql::llm::compile_observation_search_sql(request).map_err(anyhow::Error::msg)?;
         let query =
@@ -318,7 +302,7 @@ impl QueryEngine {
         target: &crate::api::telemetry::TelemetryDetailsTarget,
         time_range: &crate::api::telemetry::TelemetryTimeRange,
         limit: usize,
-    ) -> anyhow::Result<duckdb::QueryResult> {
+    ) -> anyhow::Result<QueryResult> {
         let sql = crate::api::telemetry::compile_details_sql(target, time_range, limit)
             .map_err(anyhow::Error::msg)?
             .logs;
@@ -327,17 +311,14 @@ impl QueryEngine {
         self.execute_trusted(query).await
     }
 
-    pub async fn execute_query(&self, query: &str) -> anyhow::Result<duckdb::QueryResult> {
+    pub async fn execute_query(&self, query: &str) -> anyhow::Result<QueryResult> {
         self.ensure_raw_sql_allowed()?;
         let _ = self.record_self_monitoring;
         self.duckdb.execute_query(query).await
     }
 
     /// Metadata / inventory SQL: dedicated connection, no self-monitoring.
-    pub async fn execute_query_uninstrumented(
-        &self,
-        query: &str,
-    ) -> anyhow::Result<duckdb::QueryResult> {
+    pub async fn execute_query_uninstrumented(&self, query: &str) -> anyhow::Result<QueryResult> {
         self.ensure_raw_sql_allowed()?;
         self.duckdb.execute_query_uninstrumented(query).await
     }
@@ -347,7 +328,7 @@ impl QueryEngine {
     pub(crate) async fn execute_trusted(
         &self,
         query: crate::sql::trusted::TrustedSql,
-    ) -> anyhow::Result<duckdb::QueryResult> {
+    ) -> anyhow::Result<QueryResult> {
         self.duckdb.execute_trusted(query).await
     }
 
@@ -355,7 +336,7 @@ impl QueryEngine {
     pub(crate) async fn execute_queries_uninstrumented(
         &self,
         queries: Vec<&str>,
-    ) -> anyhow::Result<Vec<anyhow::Result<duckdb::QueryResult>>> {
+    ) -> anyhow::Result<Vec<anyhow::Result<QueryResult>>> {
         self.ensure_raw_sql_allowed()?;
         self.duckdb.execute_queries_uninstrumented(queries).await
     }

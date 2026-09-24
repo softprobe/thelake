@@ -3,6 +3,8 @@ pub mod otlp;
 pub mod promotion_contract;
 pub mod promotion_file_backed;
 pub mod promotion_fixtures;
+#[cfg(feature = "integration-e2e")]
+pub mod scope;
 pub mod tenant;
 
 // E2E-only helpers. `integration_perf` needs pipeline + storage_config; the rest

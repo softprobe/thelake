@@ -30,7 +30,7 @@ pub fn maintenance_table_names() -> Vec<&'static str> {
 /// compaction, metadata cleanup, and session-summary reduction.
 pub struct MaintenanceEngine {
     config: Config,
-    ducklake: crate::config::DuckLakeConfig,
+    default_physical: PhysicalScope,
     scope_registry: DuckLakeScopeResolver,
 }
 
@@ -38,7 +38,7 @@ pub struct MaintenanceEngine {
 #[derive(Clone)]
 pub struct MaintenanceScope {
     scope_key: String,
-    ducklake: crate::config::DuckLakeConfig,
+    physical: PhysicalScope,
     pool: Pool,
 }
 
@@ -46,7 +46,7 @@ impl MaintenanceEngine {
     pub(crate) fn from_config(config: &Config, scope_registry: DuckLakeScopeResolver) -> Self {
         Self {
             config: config.clone(),
-            ducklake: config.ducklake.clone(),
+            default_physical: scope_registry.default_physical_scope().clone(),
             scope_registry,
         }
     }
@@ -74,11 +74,11 @@ impl MaintenanceEngine {
     /// Validate every physical scope before the service reports readiness.
     pub(crate) async fn validate_startup(&self) -> Result<()> {
         self.watermark_store().ensure_table().await?;
-        for (scope_key, ducklake) in self.physical_scopes().await? {
+        for (scope_key, physical) in self.physical_scopes().await? {
             let conn = self
-                .open_ducklake_connection(&ducklake)
+                .open_ducklake_connection(&physical)
                 .map_err(|error| anyhow!("maintenance open failed for {scope_key}: {error}"))?;
-            self.attach_ducklake(&conn, &ducklake)
+            self.attach_ducklake(&conn, &physical)
                 .map_err(|error| anyhow!("maintenance attach failed for {scope_key}: {error}"))?;
         }
         Ok(())
@@ -92,9 +92,9 @@ impl MaintenanceEngine {
     pub async fn run_pass(&self, run_compaction: bool) -> Result<MaintenanceSummary> {
         crate::self_monitoring::record_maintenance();
         let mut results = Vec::new();
-        for (scope_key, ducklake) in self.physical_scopes().await? {
+        for (scope_key, physical) in self.physical_scopes().await? {
             let mut part = self
-                .run_physical_scope_pass(&scope_key, &ducklake, run_compaction)
+                .run_physical_scope_pass(&scope_key, &physical, run_compaction)
                 .await?;
             results.append(&mut part);
         }
@@ -102,16 +102,16 @@ impl MaintenanceEngine {
     }
 
     pub async fn resolve_scope(&self, scope_key: &str) -> Result<MaintenanceScope> {
-        let ducklake = self
+        let physical = self
             .workspace_scopes()
             .await?
             .into_iter()
             .find(|(key, _)| key == scope_key)
-            .map(|(_, ducklake)| ducklake)
+            .map(|(_, physical)| physical)
             .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))?;
         Ok(MaintenanceScope {
             scope_key: scope_key.to_string(),
-            ducklake,
+            physical,
             pool: self.scope_registry.pool().clone(),
         })
     }
@@ -124,10 +124,10 @@ impl MaintenanceEngine {
     ) -> Result<usize> {
         crate::session_summary::reduce_tenant(
             &scope.pool,
-            &scope.ducklake.metadata_schema,
+            scope.physical.pg_namespace(),
             &scope.scope_key,
             &self.config,
-            &scope.ducklake,
+            &scope.physical,
             max_sessions,
             max_reduce_span_seconds,
         )
@@ -143,9 +143,9 @@ impl MaintenanceEngine {
     ) -> Result<usize> {
         crate::session_summary::rebuild_tenant_window(
             &scope.pool,
-            &scope.ducklake.metadata_schema,
+            scope.physical.pg_namespace(),
             &self.config,
-            &scope.ducklake,
+            &scope.physical,
             &scope.scope_key,
             from,
             to,
@@ -154,22 +154,15 @@ impl MaintenanceEngine {
         .await
     }
 
-    pub(crate) async fn workspace_scopes(
-        &self,
-    ) -> Result<Vec<(String, crate::config::DuckLakeConfig)>> {
+    pub(crate) async fn workspace_scopes(&self) -> Result<Vec<(String, PhysicalScope)>> {
         let mut scopes = Vec::new();
-        let default = self.ducklake.clone();
+        let default = self.default_physical.clone();
         let mut saw_default = false;
         for (scope_id, scope) in self.scope_registry.list_scopes().await? {
-            let mut dk = default.clone();
-            dk.metadata_path = scope.metadata_path;
-            dk.metadata_schema = scope.metadata_schema;
-            dk.data_path = scope.data_path;
-            dk.catalog_alias = scope.catalog_alias;
-            if dk.metadata_schema == default.metadata_schema && dk.data_path == default.data_path {
+            if scope.same_warehouse_as(&default) {
                 saw_default = true;
             }
-            scopes.push((scope_id, dk));
+            scopes.push((scope_id, scope));
         }
         if !saw_default {
             scopes.insert(0, (DEFAULT_WORKSPACE_ID.to_string(), default));
@@ -177,18 +170,15 @@ impl MaintenanceEngine {
         Ok(scopes)
     }
 
-    pub(crate) async fn physical_scopes(
-        &self,
-    ) -> Result<Vec<(String, crate::config::DuckLakeConfig)>> {
+    pub(crate) async fn physical_scopes(&self) -> Result<Vec<(String, PhysicalScope)>> {
         Ok(deduplicate_physical_scopes(self.workspace_scopes().await?))
     }
 
     pub(crate) async fn ensure_physical_scope_bootstrap(
         &self,
-        ducklake: &crate::config::DuckLakeConfig,
+        physical: &PhysicalScope,
     ) -> Result<()> {
-        let scope = PhysicalScope::from_ducklake(ducklake);
-        crate::session_summary::ensure_product_hot_attrs_for_scope(&self.scope_registry, &scope)
+        crate::session_summary::ensure_product_hot_attrs_for_scope(&self.scope_registry, physical)
             .await?;
         Ok(())
     }
@@ -197,14 +187,14 @@ impl MaintenanceEngine {
     pub(crate) async fn run_physical_scope_pass(
         &self,
         scope_key: &str,
-        ducklake: &crate::config::DuckLakeConfig,
+        physical: &PhysicalScope,
         run_compaction: bool,
     ) -> Result<Vec<TableMaintenanceResult>> {
         let tables = maintenance_table_names();
         let mut results = Vec::new();
         let label = scope_key;
         let run_started_at = Utc::now();
-        let files_before = count_parquet_files_under(&ducklake.data_path);
+        let files_before = count_parquet_files_under(physical.warehouse_uri());
         let watermarks = self.watermark_store();
         let mut compact_status: std::collections::HashMap<String, ActionStatus> =
             std::collections::HashMap::new();
@@ -224,7 +214,10 @@ impl MaintenanceEngine {
                     Err(err) => {
                         warn!(
                             "Compaction watermark failed for {}.{} ({}): {}",
-                            ducklake.metadata_schema, table, label, err
+                            physical.pg_namespace(),
+                            table,
+                            label,
+                            err
                         );
                         compact_status.insert(table.to_string(), ActionStatus::Failed);
                     }
@@ -232,7 +225,7 @@ impl MaintenanceEngine {
             }
         }
 
-        let conn = match self.open_ducklake_connection(ducklake) {
+        let conn = match self.open_ducklake_connection(physical) {
             Ok(c) => c,
             Err(err) => {
                 warn!("Maintenance open failed for scope {}: {}", label, err);
@@ -240,7 +233,7 @@ impl MaintenanceEngine {
                 return Err(anyhow!("maintenance open failed for {label}: {err}"));
             }
         };
-        if let Err(err) = self.attach_ducklake(&conn, ducklake) {
+        if let Err(err) = self.attach_ducklake(&conn, physical) {
             warn!("Maintenance attach failed for scope {}: {}", label, err);
             crate::self_monitoring::record_compaction_pass(label, false);
             return Err(anyhow!("maintenance attach failed for {label}: {err}"));
@@ -254,7 +247,7 @@ impl MaintenanceEngine {
                     continue;
                 }
                 let status = if !self
-                    .ducklake_table_exists(&conn, ducklake, table)
+                    .ducklake_table_exists(&conn, physical, table)
                     .unwrap_or(false)
                 {
                     ActionStatus::Skipped
@@ -269,7 +262,7 @@ impl MaintenanceEngine {
                         match compact_table_incremental(
                             &self.config,
                             &conn,
-                            ducklake,
+                            physical,
                             table,
                             scope_key,
                             watermark,
@@ -283,7 +276,10 @@ impl MaintenanceEngine {
                             Err(err) => {
                                 warn!(
                                     "Maintenance TWCS merge failed for {}.{} ({}): {}",
-                                    ducklake.metadata_schema, table, label, err
+                                    physical.pg_namespace(),
+                                    table,
+                                    label,
+                                    err
                                 );
                                 ActionStatus::Failed
                             }
@@ -297,7 +293,7 @@ impl MaintenanceEngine {
         }
 
         let (metadata, remove_orphan_files) =
-            self.run_scope_metadata_cleanup(&conn, ducklake, label);
+            self.run_scope_metadata_cleanup(&conn, physical, label);
         drop(conn);
 
         for table in advance_tables {
@@ -332,7 +328,7 @@ impl MaintenanceEngine {
         crate::self_monitoring::record_compaction_pass(scope_key, pass_ok);
 
         for table in &tables {
-            let table_ident = format!("{}.{}", ducklake.metadata_schema, table);
+            let table_ident = table.to_string();
             let compaction = ActionResult {
                 status: if self.config.maintenance.enabled && run_compaction {
                     compact_status
@@ -353,19 +349,19 @@ impl MaintenanceEngine {
                 remove_orphan_files: remove_orphan_files.clone(),
             });
         }
-        let files_after = count_parquet_files_under(&ducklake.data_path);
-        warn_if_too_many_parquet_files(label, &ducklake.data_path, files_before, files_after);
+        let files_after = count_parquet_files_under(physical.warehouse_uri());
+        warn_if_too_many_parquet_files(label, physical.warehouse_uri(), files_before, files_after);
         Ok(results)
     }
 
     fn run_scope_metadata_cleanup(
         &self,
         conn: &Connection,
-        ducklake: &crate::config::DuckLakeConfig,
+        physical: &PhysicalScope,
         label: &str,
     ) -> (MetadataMaintenanceResult, ActionResult) {
         let metadata = if self.config.maintenance.metadata_enabled {
-            match self.ducklake_expire_snapshots(conn, ducklake) {
+            match self.ducklake_expire_snapshots(conn, physical) {
                 Ok(expired) => MetadataMaintenanceResult {
                     expired_snapshots: expired,
                     skipped: false,
@@ -388,7 +384,7 @@ impl MaintenanceEngine {
         let remove_orphan_files = if self.config.maintenance.metadata_enabled
             && self.config.maintenance.remove_orphan_files_enabled
         {
-            match self.ducklake_cleanup_files(conn, ducklake) {
+            match self.ducklake_cleanup_files(conn, physical) {
                 Ok(()) => ActionResult {
                     status: ActionStatus::Completed,
                 },
@@ -407,27 +403,16 @@ impl MaintenanceEngine {
         (metadata, remove_orphan_files)
     }
 
-    fn open_ducklake_connection(
-        &self,
-        ducklake: &crate::config::DuckLakeConfig,
-    ) -> Result<Connection> {
-        let access = crate::workspace_scope::DuckLakeAccess::Physical(
-            crate::workspace_scope::PhysicalScope::from_ducklake(ducklake),
-        );
+    fn open_ducklake_connection(&self, physical: &PhysicalScope) -> Result<Connection> {
+        let access = crate::workspace_scope::DuckLakeAccess::Physical(physical.clone());
         crate::storage::ducklake::DuckLakeSessionFactory::new(&self.config).open(
             &access,
             crate::storage::ducklake::DuckLakeSessionKind::Maintenance,
         )
     }
 
-    fn attach_ducklake(
-        &self,
-        conn: &Connection,
-        ducklake: &crate::config::DuckLakeConfig,
-    ) -> Result<()> {
-        let access = crate::workspace_scope::DuckLakeAccess::Physical(
-            crate::workspace_scope::PhysicalScope::from_ducklake(ducklake),
-        );
+    fn attach_ducklake(&self, conn: &Connection, physical: &PhysicalScope) -> Result<()> {
+        let access = crate::workspace_scope::DuckLakeAccess::Physical(physical.clone());
         crate::storage::ducklake::DuckLakeSessionFactory::new(&self.config)
             .attach(conn, &access)?;
         Ok(())
@@ -436,10 +421,10 @@ impl MaintenanceEngine {
     fn ducklake_table_exists(
         &self,
         conn: &Connection,
-        ducklake: &crate::config::DuckLakeConfig,
+        physical: &PhysicalScope,
         table: &str,
     ) -> Result<bool> {
-        let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
+        let qualified = crate::storage::ducklake::ducklake_qualified_table_name(physical, table);
         let sql = crate::sql::maintenance::table_exists_probe_sql(&qualified);
         Ok(conn.execute_batch(&sql).is_ok())
     }
@@ -447,40 +432,36 @@ impl MaintenanceEngine {
     fn ducklake_expire_snapshots(
         &self,
         conn: &Connection,
-        ducklake: &crate::config::DuckLakeConfig,
+        physical: &PhysicalScope,
     ) -> Result<usize> {
         let age_seconds = self.config.maintenance.max_snapshot_age_seconds;
-        let dry_run_sql = expire_snapshots_sql(&ducklake.catalog_alias, age_seconds, true);
+        let dry_run_sql = expire_snapshots_sql(physical.attach_alias(), age_seconds, true);
         let planned = count_returned_rows(conn, &dry_run_sql)?;
-        let sql = expire_snapshots_sql(&ducklake.catalog_alias, age_seconds, false);
+        let sql = expire_snapshots_sql(physical.attach_alias(), age_seconds, false);
         crate::sql::execute_batch_checked(conn, &sql)?;
         Ok(planned)
     }
 
-    fn ducklake_cleanup_files(
-        &self,
-        conn: &Connection,
-        ducklake: &crate::config::DuckLakeConfig,
-    ) -> Result<()> {
+    fn ducklake_cleanup_files(&self, conn: &Connection, physical: &PhysicalScope) -> Result<()> {
         let age = self.config.maintenance.remove_orphan_older_than_seconds;
         // Only drain ducklake_files_scheduled_for_deletion — never delete_orphaned_files.
         crate::sql::execute_batch_checked(
             conn,
-            &cleanup_old_files_sql(&ducklake.catalog_alias, age),
+            &cleanup_old_files_sql(physical.attach_alias(), age),
         )?;
         Ok(())
     }
 }
 
 pub(crate) fn deduplicate_physical_scopes(
-    workspace_scopes: Vec<(String, crate::config::DuckLakeConfig)>,
-) -> Vec<(String, crate::config::DuckLakeConfig)> {
+    workspace_scopes: Vec<(String, PhysicalScope)>,
+) -> Vec<(String, PhysicalScope)> {
     let mut seen = std::collections::HashSet::new();
     let mut physical = Vec::new();
-    for (_workspace_id, ducklake) in workspace_scopes {
-        let key = PhysicalScope::from_ducklake(&ducklake).key();
+    for (_workspace_id, scope) in workspace_scopes {
+        let key = scope.id().registry_token().to_string();
         if seen.insert(key.clone()) {
-            physical.push((key, ducklake));
+            physical.push((key, scope));
         }
     }
     physical
@@ -547,16 +528,15 @@ mod tests {
 
     #[test]
     fn physical_scope_maintenance_deduplicates_shared_bindings() {
-        let shared = crate::config::DuckLakeConfig {
-            metadata_schema: "shared_scope".into(),
-            data_path: "s3://warehouse/shared".into(),
-            ..crate::config::DuckLakeConfig::default()
-        };
-        let isolated = crate::config::DuckLakeConfig {
-            metadata_schema: "isolated_scope".into(),
-            data_path: "s3://warehouse/isolated".into(),
-            ..shared.clone()
-        };
+        let shared = PhysicalScope::new(
+            "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
+            "s3://warehouse/shared",
+            "softprobe",
+            "shared_scope",
+        );
+        let isolated = shared
+            .with_pg_namespace("isolated_scope")
+            .with_warehouse_uri("s3://warehouse/isolated");
         let scopes = deduplicate_physical_scopes(vec![
             ("workspace-a".into(), shared.clone()),
             ("workspace-b".into(), shared),
@@ -590,11 +570,11 @@ mod tests {
         let executor = MaintenanceEngine::new(&cfg, resolver)
             .await
             .expect("executor");
-        let mut ducklake = cfg.ducklake.clone();
         let blocker = tempfile::NamedTempFile::new().expect("blocker file");
-        ducklake.data_path = format!("{}/data/", blocker.path().display());
+        let physical = PhysicalScope::from_ducklake(&cfg.ducklake)
+            .with_warehouse_uri(format!("{}/data/", blocker.path().display()));
         let err = executor
-            .run_physical_scope_pass("t-attach-fail", &ducklake, false)
+            .run_physical_scope_pass("t-attach-fail", &physical, false)
             .await
             .expect_err("attach must Err");
         assert!(

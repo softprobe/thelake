@@ -1,10 +1,10 @@
-use super::workspace_views;
 use crate::config::Config;
-use crate::query::cache::CacheSettings;
+use crate::query::workspace_views;
+use crate::storage::duckdb::cache::CacheSettings;
 use crate::storage::ducklake::{
     ducklake_qualified_table_name, DuckLakeSessionFactory, DuckLakeSessionKind,
 };
-use crate::workspace_scope::{DuckLakeAccess, PhysicalScope, WorkspaceBinding};
+use crate::workspace_scope::DuckLakeAccess;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use duckdb::types::Value as DuckValue;
@@ -33,13 +33,12 @@ pub struct DuckDBQueryEngine {
     workers: Vec<WorkerHandle>,
     next_worker: AtomicUsize,
     config: Config,
+    access: DuckLakeAccess,
     /// In-flight identical SQL shares one worker (Grafana panel stampede), not a result TTL.
     inflight: Arc<Mutex<InflightMap>>,
     tenant_id: String,
     counts_toward_liveness: bool,
 }
-
-const DUCKDB_SESSION_INIT_SQL: &str = include_str!("sql/duckdb_session_init.sql");
 
 fn is_sql_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -366,6 +365,7 @@ struct ConnectionState {
 #[derive(Clone)]
 struct DuckDBCore {
     config: Config,
+    access: DuckLakeAccess,
     cache: CacheSettings,
     /// When false, rebuild failures do not increment process-global SelfHeal
     /// counters used by `/health` liveness (ops engines).
@@ -434,11 +434,13 @@ impl DuckDBQueryEngine {
     /// failures never trip process `/health` liveness.
     pub(crate) async fn new_with_liveness(
         config: &Config,
+        access: DuckLakeAccess,
         counts_toward_liveness: bool,
         tenant_id: &str,
     ) -> Result<Self> {
         let core = DuckDBCore {
             config: config.clone(),
+            access: access.clone(),
             cache: CacheSettings::new(config),
             counts_toward_liveness,
             tenant_id: tenant_id.to_string(),
@@ -650,6 +652,7 @@ impl DuckDBQueryEngine {
             workers,
             next_worker: AtomicUsize::new(0),
             config: config.clone(),
+            access,
             inflight: Arc::new(Mutex::new(HashMap::new())),
             tenant_id: core.tenant_id.clone(),
             counts_toward_liveness: core.counts_toward_liveness,
@@ -658,7 +661,7 @@ impl DuckDBQueryEngine {
 
     /// Catalog alias for `__ducklake_metadata_<alias>` / `{alias}.promotion_specs`.
     pub(crate) fn catalog_alias(&self) -> &str {
-        &self.config.ducklake.catalog_alias
+        self.access.physical_scope().attach_alias()
     }
 
     pub(crate) fn workspace_scope_mode(&self) -> crate::workspace_scope::WorkspaceScopeMode {
@@ -669,9 +672,9 @@ impl DuckDBQueryEngine {
         &self,
         query: crate::sql::trusted::TrustedSql,
     ) -> Result<QueryResult> {
-        let scope = crate::workspace_scope::PhysicalScope::from_ducklake(&self.config.ducklake);
+        let scope = self.access.physical_scope();
         query
-            .validate_for_scope(&scope)
+            .validate_for_scope(scope)
             .map_err(|error| anyhow!(error))?;
         self.execute_query(query.as_str()).await
     }
@@ -759,6 +762,7 @@ impl DuckDBQueryEngine {
     ) -> Result<Vec<Result<QueryResult>>> {
         let core = DuckDBCore {
             config: self.config.clone(),
+            access: self.access.clone(),
             cache: CacheSettings::new(&self.config),
             counts_toward_liveness: false,
             tenant_id: self.tenant_id.clone(),
@@ -798,7 +802,7 @@ impl Drop for DuckDBQueryEngine {
 
 impl DuckDBCore {
     fn open_connection(&self) -> Result<Connection> {
-        let access = self.session_access()?;
+        let access = self.session_access();
         DuckLakeSessionFactory::new(&self.config).open(&access, DuckLakeSessionKind::Query)
     }
 
@@ -818,7 +822,7 @@ impl DuckDBCore {
         if self.config.ducklake.workspace_scope_mode
             == crate::workspace_scope::WorkspaceScopeMode::Shared
         {
-            workspace_views::install(&conn, &self.ducklake_config(), &self.tenant_id)?;
+            workspace_views::install(&conn, self.access.physical_scope(), &self.tenant_id)?;
         }
         Ok(ConnectionState {
             conn,
@@ -1015,37 +1019,19 @@ impl DuckDBCore {
     }
 
     fn configure_connection(&self, conn: &Connection) -> Result<()> {
-        conn.execute_batch(DUCKDB_SESSION_INIT_SQL)?;
-
-        // 1) Native object cache for parsed objects/metadata (best-effort; depends on DuckDB build).
-        if let Err(err) = conn.execute("SET enable_object_cache = true;", []) {
-            warn!("Failed to enable DuckDB object cache: {}", err);
-        }
-
-        // 2) Native external file cache for raw bytes (in-memory). This complements cache_httpfs'
-        // on-disk persistence; we disable cache_httpfs in-memory caching to avoid double-caching.
-        if let Err(err) = conn.execute("SET enable_external_file_cache = true;", []) {
-            warn!("Failed to enable DuckDB external file cache: {}", err);
-        }
-        if let Err(err) = conn.execute("SET enable_http_metadata_cache = true;", []) {
-            warn!("Failed to enable DuckDB HTTP metadata cache: {}", err);
-        }
-        if let Err(err) = conn.execute("SET parquet_metadata_cache = true;", []) {
-            warn!("Failed to enable DuckDB parquet metadata cache: {}", err);
-        }
-        if let Err(err) = conn.execute("SET experimental_metadata_reuse = true;", []) {
-            warn!("Failed to enable DuckDB metadata reuse: {}", err);
-        }
+        // Extension INSTALL/LOAD, resource caps, version guessing, query tuning, and
+        // cache_httpfs SETs live in duckdb_init.sql (applied by SessionFactory).
+        // Only filesystem wrapping remains here — it is lazy/best-effort until S3/httpfs
+        // registers after first real I/O.
         if self.cache.cache_dir.is_some()
             && std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1")
         {
             return Ok(());
         }
 
-        if let Err(err) = self.cache.configure(conn) {
-            // Avoid log spam when DuckDB build doesn't support wrapping 'httpfs' or cache_httpfs knobs.
+        if let Err(err) = self.cache.wrap_filesystems(conn) {
             if !CACHE_HTTPFS_CONFIG_WARNED.swap(true, Ordering::Relaxed) {
-                warn!("Failed to configure cache_httpfs: {}", err);
+                warn!("Failed to wrap cache_httpfs filesystems: {}", err);
             }
         }
 
@@ -1055,7 +1041,7 @@ impl DuckDBCore {
     /// Must match [`crate::storage::ducklake::ducklake_qualified_table_name`] (writer DDL uses
     /// `catalog.table` when `metadata_schema` is `main`, not `catalog.main.table`).
     fn ducklake_qualified_table(&self, table: &str) -> String {
-        ducklake_qualified_table_name(&self.ducklake_config(), table)
+        ducklake_qualified_table_name(self.access.physical_scope(), table)
     }
 
     /// Replace bare telemetry table names with qualified DuckLake table refs.
@@ -1078,25 +1064,14 @@ impl DuckDBCore {
     }
 
     fn attach_catalog_if_needed(&self, conn: &Connection) -> Result<()> {
-        let access = self.session_access()?;
+        let access = self.session_access();
         DuckLakeSessionFactory::new(&self.config)
             .attach(conn, &access)
             .map(|_| ())
     }
 
-    fn session_access(&self) -> Result<DuckLakeAccess> {
-        let scope = PhysicalScope::from_ducklake(&self.ducklake_config());
-        let binding = WorkspaceBinding::new(
-            self.tenant_id.clone(),
-            scope,
-            self.config.ducklake.workspace_scope_mode,
-        )
-        .map_err(|error| anyhow!(error))?;
-        Ok(DuckLakeAccess::Workspace(binding))
-    }
-
-    fn ducklake_config(&self) -> crate::config::DuckLakeConfig {
-        self.config.ducklake.clone()
+    fn session_access(&self) -> DuckLakeAccess {
+        self.access.clone()
     }
 }
 
@@ -1181,6 +1156,7 @@ fn duck_value_to_json(value: DuckValue) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_scope::{PhysicalScope, WorkspaceBinding};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::sync::oneshot;
@@ -1335,22 +1311,18 @@ mod tests {
 
     #[test]
     fn ducklake_inline_sql_qualifies_bare_traces_and_logs() {
-        use crate::config::DuckLakeConfig;
         use crate::storage::ducklake::ducklake_qualified_table_name;
 
-        let cfg = DuckLakeConfig {
-            metadata_path: "host=localhost dbname=ducklake".to_string(),
-            data_path: "s3://warehouse/tenant/".to_string(),
-            catalog_alias: "softprobe".to_string(),
-            metadata_schema: "ducklake_softprobe_local".to_string(),
-            workspace_scope_mode: crate::workspace_scope::WorkspaceScopeMode::Isolated,
-            data_inlining_row_limit: Some(0),
-            writer_pool_size: 1,
-        };
-        let traces = ducklake_qualified_table_name(&cfg, "traces");
-        let logs = ducklake_qualified_table_name(&cfg, "logs");
-        let scores = ducklake_qualified_table_name(&cfg, "scores");
-        let score_configs = ducklake_qualified_table_name(&cfg, "score_configs");
+        let scope = PhysicalScope::new(
+            "host=localhost dbname=ducklake",
+            "s3://warehouse/tenant/",
+            "softprobe",
+            "ducklake_softprobe_local",
+        );
+        let traces = ducklake_qualified_table_name(&scope, "traces");
+        let logs = ducklake_qualified_table_name(&scope, "logs");
+        let scores = ducklake_qualified_table_name(&scope, "scores");
+        let score_configs = ducklake_qualified_table_name(&scope, "score_configs");
         assert_eq!(traces, "softprobe.ducklake_softprobe_local.traces");
         assert_eq!(logs, "softprobe.ducklake_softprobe_local.logs");
         assert_eq!(scores, "softprobe.ducklake_softprobe_local.scores");
@@ -1383,9 +1355,15 @@ mod tests {
     fn shared_query_keeps_logical_table_names_for_filtered_views() {
         let mut config = Config::default();
         config.ducklake.workspace_scope_mode = crate::workspace_scope::WorkspaceScopeMode::Shared;
+        let scope = PhysicalScope::from_ducklake(&config.ducklake);
+        let access = DuckLakeAccess::Workspace(
+            WorkspaceBinding::new("workspace-a", scope, config.ducklake.workspace_scope_mode)
+                .expect("binding"),
+        );
         let core = DuckDBCore {
             cache: CacheSettings::new(&config),
             config,
+            access,
             counts_toward_liveness: true,
             tenant_id: "workspace-a".to_string(),
         };
@@ -1407,9 +1385,15 @@ mod tests {
             config.ducklake.metadata_schema = "main".to_string();
             config.ducklake.workspace_scope_mode =
                 crate::workspace_scope::WorkspaceScopeMode::Shared;
+            let scope = PhysicalScope::from_ducklake(&config.ducklake);
+            let access = DuckLakeAccess::Workspace(
+                WorkspaceBinding::new(tenant_id, scope, config.ducklake.workspace_scope_mode)
+                    .expect("binding"),
+            );
             let core = DuckDBCore {
                 cache: CacheSettings::new(&config),
                 config,
+                access,
                 counts_toward_liveness: false,
                 tenant_id: tenant_id.to_string(),
             };
@@ -1479,15 +1463,6 @@ mod tests {
         assert!(
             !json.to_string().contains("Text("),
             "keys must not contain Debug wrapper"
-        );
-    }
-
-    #[test]
-    fn session_init_sql_contains_required_settings() {
-        assert!(
-            DUCKDB_SESSION_INIT_SQL.contains("SET unsafe_enable_version_guessing = false;"),
-            "session init must disable DuckLake version guessing so interactive \
-             queries read the latest committed snapshot instead of a stale one"
         );
     }
 

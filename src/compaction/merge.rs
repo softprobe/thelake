@@ -16,6 +16,7 @@ use crate::sql::maintenance::{
     ducklake_merge_adjacent_files_sql, ducklake_set_target_file_size_sql,
     logical_table_row_count_sql, partition_live_file_stats_after_sql,
 };
+use crate::workspace_scope::PhysicalScope;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use duckdb::Connection;
@@ -32,7 +33,7 @@ pub(crate) struct MergeOutcome {
 pub(crate) fn compact_table_incremental(
     config: &Config,
     conn: &Connection,
-    ducklake: &crate::config::DuckLakeConfig,
+    scope: &PhysicalScope,
     table: &str,
     scope_key: &str,
     watermark: DateTime<Utc>,
@@ -44,10 +45,10 @@ pub(crate) fn compact_table_incremental(
     };
     let mut last = ActionStatus::Skipped;
 
-    if let Ok(Some(pending)) = load_inlined_fragment_stats(conn, &ducklake.catalog_alias, table) {
+    if let Ok(Some(pending)) = load_inlined_fragment_stats(conn, scope.attach_alias(), table) {
         info!(
             "TWCS backlog {}.{}: logical_rows={} live_parquet_files={} inlined_only={}",
-            ducklake.metadata_schema,
+            scope.pg_namespace(),
             table,
             pending.logical_row_count,
             pending.live_parquet_files,
@@ -55,13 +56,14 @@ pub(crate) fn compact_table_incremental(
         );
     }
 
-    let initial = match load_partition_stats_after(conn, &ducklake.catalog_alias, table, watermark)
-    {
+    let initial = match load_partition_stats_after(conn, scope.attach_alias(), table, watermark) {
         Ok(v) => v,
         Err(err) => {
             warn!(
                 "TWCS post-watermark stats failed for {}.{}: {}; not draining",
-                ducklake.metadata_schema, table, err
+                scope.pg_namespace(),
+                table,
+                err
             );
             return Ok(MergeOutcome {
                 status: ActionStatus::Failed,
@@ -79,7 +81,7 @@ pub(crate) fn compact_table_incremental(
     last = twcs_compact_waves(
         config,
         conn,
-        ducklake,
+        scope,
         table,
         today,
         last,
@@ -98,7 +100,7 @@ pub(crate) fn compact_table_incremental(
     last = twcs_compact_waves(
         config,
         conn,
-        ducklake,
+        scope,
         table,
         today,
         last,
@@ -114,12 +116,14 @@ pub(crate) fn compact_table_incremental(
         });
     }
 
-    let after = match load_partition_stats_after(conn, &ducklake.catalog_alias, table, watermark) {
+    let after = match load_partition_stats_after(conn, scope.attach_alias(), table, watermark) {
         Ok(v) => v,
         Err(err) => {
             warn!(
                 "TWCS post-merge stats failed for {}.{}: {}; retaining watermark",
-                ducklake.metadata_schema, table, err
+                scope.pg_namespace(),
+                table,
+                err
             );
             return Ok(MergeOutcome {
                 status: last,
@@ -131,12 +135,15 @@ pub(crate) fn compact_table_incremental(
     if drained {
         info!(
             "TWCS drain complete for {}.{}; watermark may advance",
-            ducklake.metadata_schema, table
+            scope.pg_namespace(),
+            table
         );
     } else {
         info!(
             "TWCS drain incomplete for {}.{}; retaining watermark {}",
-            ducklake.metadata_schema, table, watermark
+            scope.pg_namespace(),
+            table,
+            watermark
         );
     }
     Ok(MergeOutcome {
@@ -171,7 +178,7 @@ impl WaveKind {
 fn twcs_compact_waves(
     config: &Config,
     conn: &Connection,
-    ducklake: &crate::config::DuckLakeConfig,
+    scope: &PhysicalScope,
     table: &str,
     today: NaiveDate,
     mut last: ActionStatus,
@@ -185,7 +192,7 @@ fn twcs_compact_waves(
     let max_waves = kind.max_waves(policy);
     for wave in 0..max_waves {
         let partitions =
-            match load_partition_stats_after(conn, &ducklake.catalog_alias, table, newer_than) {
+            match load_partition_stats_after(conn, scope.attach_alias(), table, newer_than) {
                 Ok(v) => v,
                 Err(err) => {
                     warn!(
@@ -228,7 +235,7 @@ fn twcs_compact_waves(
                 "TWCS closed-day wave {}/{}: work pending for {}.{} ({} post-watermark closed files); max_compacted_files={}",
                 wave + 1,
                 max_waves,
-                ducklake.metadata_schema,
+                scope.pg_namespace(),
                 table,
                 files_before,
                 max_compacted
@@ -237,7 +244,7 @@ fn twcs_compact_waves(
                 "TWCS open-day wave {}/{}: {}.{} has {} post-watermark live files (cap {}); max_compacted_files={}",
                 wave + 1,
                 max_waves,
-                ducklake.metadata_schema,
+                scope.pg_namespace(),
                 table,
                 files_before,
                 policy.open_day_file_cap,
@@ -249,14 +256,14 @@ fn twcs_compact_waves(
         last = ducklake_compact_table_wave(
             config,
             conn,
-            ducklake,
+            scope,
             table,
             mode,
             max_compacted,
             policy.max_merge_file_size_bytes,
         )?;
         let partitions_after =
-            match load_partition_stats_after(conn, &ducklake.catalog_alias, table, newer_than) {
+            match load_partition_stats_after(conn, scope.attach_alias(), table, newer_than) {
                 Ok(v) => v,
                 Err(_) => return Ok(ActionStatus::Failed),
             };
@@ -308,19 +315,20 @@ fn twcs_compact_waves(
 fn ducklake_compact_table_wave(
     config: &Config,
     conn: &Connection,
-    ducklake: &crate::config::DuckLakeConfig,
+    scope: &PhysicalScope,
     table: &str,
     mode: MergeMode,
     max_compacted_files: u64,
     max_file_size_bytes: u64,
 ) -> Result<ActionStatus> {
     let policy = TwcsPolicy::from(&config.maintenance);
-    let qualified = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, table);
-    let scope = crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
+    let qualified = crate::storage::ducklake::ducklake_qualified_table_name(scope, table);
+    let option_scope =
+        crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
     let target_file_size =
         crate::storage::ducklake::size_literal(config.maintenance.target_file_size_bytes);
     let set_target =
-        ducklake_set_target_file_size_sql(&ducklake.catalog_alias, &target_file_size, &scope);
+        ducklake_set_target_file_size_sql(scope.attach_alias(), &target_file_size, &option_scope);
     if let Err(err) = execute_batch_with_serialization_retry(
         conn,
         &set_target,
@@ -341,9 +349,9 @@ fn ducklake_compact_table_wave(
         ));
     }
     let sql = ducklake_merge_adjacent_files_sql(
-        &ducklake.catalog_alias,
+        scope.attach_alias(),
         table,
-        &ducklake.metadata_schema,
+        scope.pg_namespace(),
         Some(mode.newer_than()),
         Some(max_compacted_files),
         Some(max_file_size_bytes),
@@ -395,7 +403,7 @@ fn ducklake_compact_table_wave(
                 return ducklake_compact_table_wave(
                     config,
                     conn,
-                    ducklake,
+                    scope,
                     table,
                     mode,
                     policy.max_compacted_files_per_wave,
@@ -405,7 +413,7 @@ fn ducklake_compact_table_wave(
             Err(err) => {
                 return Err(anyhow!(
                     "DuckLake compaction failed for {}.{}: {}",
-                    ducklake.metadata_schema,
+                    scope.pg_namespace(),
                     table,
                     err
                 ));

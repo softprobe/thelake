@@ -100,9 +100,8 @@ impl DuckLakeWriter {
 
         let schema = ScoreTable::schema();
         let record_batch = arrow::scores_to_record_batch(&scores, &schema)?;
-        let dk = self.ducklake.clone();
         self.write_record_batches_internal_with_ducklake(
-            &dk,
+            &self.physical,
             ScoreTable::table_name(),
             vec![record_batch],
         )
@@ -110,9 +109,8 @@ impl DuckLakeWriter {
     }
 
     pub async fn score_exists(&self, score_id: &str) -> Result<bool> {
-        let dk = self.ducklake.clone();
-        let table = ducklake_qualified_table_name(&dk, ScoreTable::table_name());
-        let pool = self.get_or_create_pool(&dk)?;
+        let table = ducklake_qualified_table_name(&self.physical, ScoreTable::table_name());
+        let pool = self.get_or_create_pool(&self.physical)?;
         let score_id = score_id.to_string();
         let workspace_id = self.shared_workspace_id()?.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
@@ -152,9 +150,8 @@ impl DuckLakeWriter {
 
         let schema = ScoreConfigTable::schema();
         let record_batch = arrow::score_configs_to_record_batch(&configs, &schema)?;
-        let dk = self.ducklake.clone();
         self.write_record_batches_internal_with_ducklake(
-            &dk,
+            &self.physical,
             ScoreConfigTable::table_name(),
             vec![record_batch],
         )
@@ -162,9 +159,8 @@ impl DuckLakeWriter {
     }
 
     pub async fn score_config_exists(&self, config_id: &str) -> Result<bool> {
-        let dk = self.ducklake.clone();
-        let table = ducklake_qualified_table_name(&dk, ScoreConfigTable::table_name());
-        let pool = self.get_or_create_pool(&dk)?;
+        let table = ducklake_qualified_table_name(&self.physical, ScoreConfigTable::table_name());
+        let pool = self.get_or_create_pool(&self.physical)?;
         let config_id = config_id.to_string();
         let workspace_id = self.shared_workspace_id()?.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
@@ -190,9 +186,8 @@ impl DuckLakeWriter {
     }
 
     pub async fn list_score_configs(&self) -> Result<Vec<ScoreConfig>> {
-        let dk = self.ducklake.clone();
-        let table = ducklake_qualified_table_name(&dk, ScoreConfigTable::table_name());
-        let pool = self.get_or_create_pool(&dk)?;
+        let table = ducklake_qualified_table_name(&self.physical, ScoreConfigTable::table_name());
+        let pool = self.get_or_create_pool(&self.physical)?;
         let workspace_id = self.shared_workspace_id()?.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
@@ -227,9 +222,8 @@ impl DuckLakeWriter {
     }
 
     pub async fn get_score_config(&self, config_id: &str) -> Result<Option<ScoreConfig>> {
-        let dk = self.ducklake.clone();
-        let table = ducklake_qualified_table_name(&dk, ScoreConfigTable::table_name());
-        let pool = self.get_or_create_pool(&dk)?;
+        let table = ducklake_qualified_table_name(&self.physical, ScoreConfigTable::table_name());
+        let pool = self.get_or_create_pool(&self.physical)?;
         let config_id = config_id.to_string();
         let workspace_id = self.shared_workspace_id()?.map(str::to_owned);
         tokio::task::spawn_blocking(move || {

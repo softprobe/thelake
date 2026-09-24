@@ -1,12 +1,16 @@
 //! Workspace-to-DuckLake scope contracts.
 //!
-//! This module defines the value types used to describe a workspace's logical
-//! binding to a physical DuckLake scope. Runtime access policy is implemented
-//! by the ingest, query, and maintenance engines in later layers.
+//! [`PhysicalScope`] is an opaque immutable catalog identity. Callers pass the
+//! token into capabilities; they do not read path/schema/alias strings.
+//! Qualification, ATTACH, and registry packing stay in storage/runtime.
 
-use crate::config::DuckLakeConfig;
+use crate::config::{
+    default_ducklake_catalog_alias, default_ducklake_data_path, default_ducklake_metadata_path,
+    default_ducklake_metadata_schema, DuckLakeConfig,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 /// Sentinel workspace id for the process-default / unauthenticated lake.
 ///
@@ -43,40 +47,259 @@ impl fmt::Display for WorkspaceScopeMode {
     }
 }
 
-/// The physical DuckLake inputs that identify one storage scope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Opaque identity for maps, dedupe, and registry primary keys.
+///
+/// Not a DSN API and not a SQL prefix. Business callers must not depend on the
+/// inner encoding.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopeId(String);
+
+impl ScopeId {
+    pub(crate) fn from_encoded(encoded: String) -> Self {
+        Self(encoded)
+    }
+
+    /// Registry / lock map token. Crate-internal only.
+    pub(crate) fn registry_token(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Hash for ScopeId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl fmt::Debug for ScopeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ScopeId(redacted)")
+    }
+}
+
+impl fmt::Display for ScopeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Stable non-secret label: length only (encoding embeds DSN).
+        write!(f, "scope:{}", self.0.len())
+    }
+}
+
+/// Opaque immutable DuckLake catalog identity.
+///
+/// Public surface is construction + [`Self::id`] + [`Self::open_attached_connection`].
+/// Path/schema/alias strings are private; storage/runtime use `pub(crate)` codecs.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhysicalScope {
-    pub metadata_path: String,
-    pub data_path: String,
-    pub catalog_alias: String,
-    pub metadata_schema: String,
+    #[serde(default = "default_ducklake_metadata_path")]
+    metadata_path: String,
+    #[serde(default = "default_ducklake_data_path")]
+    data_path: String,
+    #[serde(default = "default_ducklake_catalog_alias")]
+    catalog_alias: String,
+    #[serde(default = "default_ducklake_metadata_schema")]
+    metadata_schema: String,
+}
+
+impl Default for PhysicalScope {
+    fn default() -> Self {
+        Self::from_ducklake(&DuckLakeConfig::default())
+    }
+}
+
+impl fmt::Debug for PhysicalScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PhysicalScope")
+            .field("catalog_alias", &self.catalog_alias)
+            .field("metadata_schema", &self.metadata_schema)
+            .field("data_path", &"<redacted>")
+            .field("metadata_path", &"<redacted>")
+            .finish()
+    }
+}
+
+impl fmt::Display for PhysicalScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.{}@{}",
+            self.catalog_alias,
+            self.metadata_schema,
+            self.id()
+        )
+    }
 }
 
 impl PhysicalScope {
-    /// Capture the physical scope selected by the runtime configuration.
-    pub fn from_ducklake(config: &DuckLakeConfig) -> Self {
+    /// Boundary constructor: all identity parts supplied together (immutable).
+    /// Crate-internal / unit tests. Integration tests mutate `DuckLakeConfig` POJO
+    /// fields then call [`Self::from_ducklake`].
+    pub(crate) fn new(
+        metadata_path: impl Into<String>,
+        data_path: impl Into<String>,
+        catalog_alias: impl Into<String>,
+        metadata_schema: impl Into<String>,
+    ) -> Self {
         Self {
-            metadata_path: config.metadata_path.clone(),
-            data_path: config.data_path.clone(),
-            catalog_alias: config.catalog_alias.clone(),
-            metadata_schema: config.metadata_schema.clone(),
+            metadata_path: metadata_path.into(),
+            data_path: data_path.into(),
+            catalog_alias: catalog_alias.into(),
+            metadata_schema: metadata_schema.into(),
         }
     }
 
-    /// Return a deterministic, unambiguous key for scope-local registries.
-    pub fn key(&self) -> String {
-        let mut key = String::from("ducklake:");
+    /// Capture the physical scope selected by the runtime configuration.
+    pub fn from_ducklake(config: &DuckLakeConfig) -> Self {
+        Self::new(
+            config.metadata_path.clone(),
+            config.data_path.clone(),
+            config.catalog_alias.clone(),
+            config.metadata_schema.clone(),
+        )
+    }
+
+    /// Opaque map/dedupe/registry identity.
+    pub fn id(&self) -> ScopeId {
+        let mut encoded = String::from("ducklake:");
         for part in [
             &self.metadata_path,
             &self.data_path,
             &self.catalog_alias,
             &self.metadata_schema,
         ] {
-            key.push_str(&part.len().to_string());
-            key.push(':');
-            key.push_str(part);
+            encoded.push_str(&part.len().to_string());
+            encoded.push(':');
+            encoded.push_str(part);
         }
-        key
+        ScopeId::from_encoded(encoded)
+    }
+
+    /// Immutable rebuilder: same identity with a different Postgres metadata schema.
+    pub(crate) fn with_pg_namespace(&self, metadata_schema: impl Into<String>) -> Self {
+        Self::new(
+            self.metadata_path.clone(),
+            self.data_path.clone(),
+            self.catalog_alias.clone(),
+            metadata_schema,
+        )
+    }
+
+    /// Immutable rebuilder: same identity with a different warehouse URI/path.
+    pub(crate) fn with_warehouse_uri(&self, data_path: impl Into<String>) -> Self {
+        Self::new(
+            self.metadata_path.clone(),
+            data_path,
+            self.catalog_alias.clone(),
+            self.metadata_schema.clone(),
+        )
+    }
+
+    /// Immutable rebuilder: same identity with a different catalog DSN.
+    #[cfg(test)]
+    pub(crate) fn with_catalog_dsn(&self, metadata_path: impl Into<String>) -> Self {
+        Self::new(
+            metadata_path,
+            self.data_path.clone(),
+            self.catalog_alias.clone(),
+            self.metadata_schema.clone(),
+        )
+    }
+
+    /// Test/ops: in-memory DuckDB with ATTACH+USE complete. Bare table names work.
+    pub fn open_attached_connection(
+        &self,
+        data_inlining_row_limit: Option<u64>,
+    ) -> crate::storage::ducklake::AttachedSession {
+        crate::storage::ducklake::open_attached_connection(self, data_inlining_row_limit)
+    }
+
+    /// Provision from default scope + request overrides (schema + data path).
+    pub(crate) fn from_provision(
+        default: &Self,
+        metadata_schema: impl Into<String>,
+        data_path: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            default.metadata_path.clone(),
+            data_path,
+            default.catalog_alias.clone(),
+            metadata_schema,
+        )
+    }
+
+    /// Registry SELECT row → scope.
+    pub(crate) fn from_registry_row(
+        metadata_path: String,
+        metadata_schema: String,
+        data_path: String,
+        catalog_alias: String,
+    ) -> Self {
+        Self::new(metadata_path, data_path, catalog_alias, metadata_schema)
+    }
+
+    // --- crate-private codecs for storage/runtime (not public getters) ---
+
+    pub(crate) fn catalog_dsn(&self) -> &str {
+        &self.metadata_path
+    }
+
+    pub(crate) fn warehouse_uri(&self) -> &str {
+        &self.data_path
+    }
+
+    pub(crate) fn attach_alias(&self) -> &str {
+        &self.catalog_alias
+    }
+
+    pub(crate) fn pg_namespace(&self) -> &str {
+        &self.metadata_schema
+    }
+
+    pub(crate) fn is_default_duckdb_namespace(&self) -> bool {
+        self.metadata_schema == "main"
+    }
+
+    pub(crate) fn catalog_prefix(&self) -> String {
+        if self.is_default_duckdb_namespace() {
+            self.catalog_alias.clone()
+        } else {
+            format!("{}.{}", self.catalog_alias, self.metadata_schema)
+        }
+    }
+
+    pub(crate) fn qualified_table(&self, bare_table: &str) -> String {
+        format!("{}.{}", self.catalog_prefix(), bare_table)
+    }
+
+    pub(crate) fn attach_serialization_key(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.metadata_path, self.metadata_schema, self.data_path, self.catalog_alias
+        )
+    }
+
+    pub(crate) fn writer_pool_key(&self) -> String {
+        format!(
+            "{}|{}|{}",
+            self.metadata_path, self.metadata_schema, self.data_path
+        )
+    }
+
+    pub(crate) fn same_warehouse_as(&self, other: &Self) -> bool {
+        self.metadata_schema == other.metadata_schema && self.data_path == other.data_path
+    }
+
+    pub(crate) fn matches_warehouse_hints(&self, metadata_schema: &str, data_path: &str) -> bool {
+        self.metadata_schema == metadata_schema && self.data_path == data_path
+    }
+
+    pub(crate) fn forbidden_sql_identifiers(&self) -> Vec<String> {
+        vec![
+            self.metadata_schema.clone(),
+            self.catalog_alias.clone(),
+            format!("__ducklake_metadata_{}", self.catalog_alias),
+            self.metadata_path.clone(),
+            self.data_path.clone(),
+        ]
     }
 }
 
@@ -228,21 +451,28 @@ mod tests {
     fn physical_scope_is_derived_from_ducklake_configuration() {
         let config = DuckLakeConfig::default();
         let scope = PhysicalScope::from_ducklake(&config);
-        assert_eq!(scope.metadata_path, config.metadata_path);
-        assert_eq!(scope.data_path, config.data_path);
-        assert_eq!(scope.catalog_alias, config.catalog_alias);
-        assert_eq!(scope.metadata_schema, config.metadata_schema);
-        assert!(!scope.key().is_empty());
+        assert_eq!(scope.catalog_dsn(), config.metadata_path.as_str());
+        assert_eq!(scope.warehouse_uri(), config.data_path.as_str());
+        assert_eq!(scope.attach_alias(), config.catalog_alias.as_str());
+        assert_eq!(scope.pg_namespace(), config.metadata_schema.as_str());
+        assert!(!scope.id().registry_token().is_empty());
     }
 
     #[test]
-    fn physical_scope_key_changes_when_a_scope_input_changes() {
+    fn physical_scope_id_changes_when_a_scope_input_changes() {
         let config = DuckLakeConfig::default();
         let first = PhysicalScope::from_ducklake(&config);
-        let mut changed_config = config;
-        changed_config.metadata_path.push_str("-other");
-        let second = PhysicalScope::from_ducklake(&changed_config);
-        assert_ne!(first.key(), second.key());
+        let second = first.with_catalog_dsn(format!("{}-other", first.catalog_dsn()));
+        assert_ne!(first.id(), second.id());
+    }
+
+    #[test]
+    fn catalog_prefix_hides_main_namespace() {
+        let main = PhysicalScope::new("dsn", "/data/", "softprobe", "main");
+        assert_eq!(main.catalog_prefix(), "softprobe");
+        let named = PhysicalScope::new("dsn", "/data/", "softprobe", "tenant_a");
+        assert_eq!(named.catalog_prefix(), "softprobe.tenant_a");
+        assert_eq!(named.qualified_table("traces"), "softprobe.tenant_a.traces");
     }
 
     #[test]
@@ -296,8 +526,8 @@ mod tests {
             "src/storage/schema/otlp_layout.rs",
             "src/storage/schema/ducklake_partition.rs",
             "src/storage/ducklake/util.rs",
-            "src/query/duckdb.rs",
-            "src/query/cache.rs",
+            "src/storage/duckdb/engine.rs",
+            "src/storage/duckdb/cache.rs",
             "src/compaction/engine.rs",
             "src/compaction/merge.rs",
             "src/compaction/session_summary_access.rs",

@@ -77,16 +77,11 @@ impl TrustedSql {
 }
 
 fn physical_identifiers(scope: &PhysicalScope) -> Vec<String> {
-    [
-        scope.catalog_alias.clone(),
-        scope.metadata_schema.clone(),
-        format!("__ducklake_metadata_{}", scope.catalog_alias),
-        scope.metadata_path.clone(),
-        scope.data_path.clone(),
-    ]
-    .into_iter()
-    .filter(|value| !value.trim().is_empty())
-    .collect()
+    scope
+        .forbidden_sql_identifiers()
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect()
 }
 
 fn contains_sql_token(sql: &str, token: &str) -> bool {

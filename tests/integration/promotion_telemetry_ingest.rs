@@ -19,7 +19,9 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     config.ducklake.catalog_alias = "softprobe".to_string();
-    config.ducklake.metadata_schema = format!("softprobe_registry_{suffix}");
+    // Shared mode binds to the process-default catalog; keep request schema identical.
+    let tenant_schema = format!("softprobe_promoted_{suffix}");
+    config.ducklake.metadata_schema = tenant_schema.clone();
     config.ingest.flush_interval_seconds = 0;
     let tenant_data_path = temp
         .path()
@@ -36,16 +38,15 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
-    let tenant_schema = format!("softprobe_promoted_data_{suffix}");
-    let physical_scope = manager
+    let _physical_scope = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: tenant_schema.clone(),
-            data_path: tenant_data_path,
+            data_path: tenant_data_path.clone(),
         })
         .await
         .expect("provision tenant");
-    insert_active_trace_promotion_spec(&physical_scope.metadata_schema).await;
+    insert_active_trace_promotion_spec(&tenant_schema).await;
 
     // Bind writer to the provisioned tenant scope (not the registry schema on config).
     let engine = manager.engine_for(&tenant_id).await.expect("tenant engine");
@@ -54,20 +55,14 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
         .await
         .expect("ingest promoted span");
 
-    let conn = duckdb::Connection::open_in_memory().expect("duckdb");
-    conn.execute_batch("INSTALL ducklake; INSTALL postgres; LOAD postgres;")
-        .expect("ducklake extensions");
-    conn.execute_batch(&format!(
-        "ATTACH 'ducklake:postgres:{}' AS softprobe (DATA_PATH '{}', METADATA_SCHEMA '{}', META_SCHEMA '{}', DATA_INLINING_ROW_LIMIT 0);",
-        metadata_path.replace('\'', "''"),
-        physical_scope.data_path.replace('\'', "''"),
-        physical_scope.metadata_schema.replace('\'', "''"),
-        physical_scope.metadata_schema.replace('\'', "''"),
-    ))
-    .expect("attach tenant ducklake");
+    let conn = crate::util::scope::physical_scope(
+        metadata_path.clone(),
+        tenant_data_path.clone(),
+        tenant_schema.clone(),
+    )
+    .open_attached_connection(Some(0));
     let sql = format!(
-        r#"SELECT service_name, division_name FROM softprobe.{}.traces WHERE session_id = 's-promoted'"#,
-        physical_scope.metadata_schema
+        r#"SELECT service_name, division_name FROM traces WHERE session_id = 's-promoted'"#
     );
     let (service_name, division_name): (String, String) = conn
         .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?)))

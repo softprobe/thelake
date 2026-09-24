@@ -41,12 +41,9 @@ fn walk_paths(dir: &Path, out: &mut Vec<String>) {
     }
 }
 
-fn attach(metadata_path: &str, metadata_schema: &str, data_path: &str) -> duckdb::Connection {
-    crate::util::promotion_file_backed::attach_softprobe_ducklake(
-        metadata_path,
-        metadata_schema,
-        data_path,
-    )
+fn attach(config: &softprobe_runtime::config::DuckLakeConfig) -> duckdb::Connection {
+    softprobe_runtime::workspace_scope::PhysicalScope::from_ducklake(config)
+        .open_attached_connection(Some(0))
 }
 
 fn explain_plan(conn: &duckdb::Connection, sql: &str) -> String {
@@ -130,7 +127,6 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     // Force every production write to publish a parquet file so EXPLAIN observes
     // physical day pruning rather than DuckLake catalog-inline rows.
     config.ducklake.data_inlining_row_limit = Some(0);
-    let metadata_path = config.ducklake.metadata_path.clone();
     let data_path = config.ducklake.data_path.clone();
     let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
 
@@ -161,7 +157,7 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
         "legacy partition path:\n{joined}"
     );
 
-    let conn = attach(&metadata_path, &config.ducklake.metadata_schema, &data_path);
+    let conn = attach(&config.ducklake);
     assert_eq!(timestamp_type(&conn, "traces"), "TIMESTAMP_NS");
     assert_eq!(timestamp_type(&conn, "logs"), "TIMESTAMP_NS");
 

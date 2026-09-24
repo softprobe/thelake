@@ -67,20 +67,11 @@ impl DuckLakeWriter {
         scope: &PhysicalScope,
         spec: &TelemetryColumnsManifest,
     ) -> Result<Vec<String>> {
-        let dk = self.effective_ducklake(scope);
         for table in &spec.target.tables {
-            self.ensure_telemetry_table_for(&dk, table).await?;
+            self.ensure_telemetry_table_for(scope, table).await?;
         }
-        let ddls = self.with_attached_conn(&dk, |conn| {
-            let prefix = if dk.metadata_schema == "main" {
-                dk.catalog_alias.clone()
-            } else {
-                format!(
-                    "{}.{}",
-                    quote_duckdb_ident(&dk.catalog_alias),
-                    quote_duckdb_ident(&dk.metadata_schema)
-                )
-            };
+        let ddls = self.with_attached_conn(scope, |conn| {
+            let prefix = scope.catalog_prefix();
             let ddls = telemetry_column_add_ddls(&prefix, spec)
                 .map_err(|err| anyhow!("telemetry promotion validation failed: {err}"))?;
             for ddl in &ddls {
@@ -100,21 +91,22 @@ impl DuckLakeWriter {
         scope: &PhysicalScope,
         spec: &BusinessTableManifest,
     ) -> Result<Vec<String>> {
-        let dk = self.effective_ducklake(scope);
-        let ddls = self.with_attached_conn(&dk, |conn| {
+        let ddls = self.with_attached_conn(scope, |conn| {
             // Prefer catalog.schema when metadata lives outside `main`; fall back to catalog-only
             // (matches write-path table name candidates when ATTACH uses METADATA_SCHEMA).
-            let prefixes = if dk.metadata_schema == "main" {
-                vec![dk.catalog_alias.clone()]
-            } else {
-                vec![
-                    format!(
-                        "{}.{}",
-                        quote_duckdb_ident(&dk.catalog_alias),
-                        quote_duckdb_ident(&dk.metadata_schema)
-                    ),
-                    dk.catalog_alias.clone(),
-                ]
+            let prefixes = {
+                if scope.is_default_duckdb_namespace() {
+                    vec![scope.attach_alias().to_owned()]
+                } else {
+                    vec![
+                        format!(
+                            "{}.{}",
+                            quote_duckdb_ident(scope.attach_alias()),
+                            quote_duckdb_ident(scope.pg_namespace())
+                        ),
+                        scope.attach_alias().to_owned(),
+                    ]
+                }
             };
             let mut last_err: Option<anyhow::Error> = None;
             for prefix in prefixes {

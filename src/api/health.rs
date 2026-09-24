@@ -4,7 +4,7 @@ use axum::Json;
 use serde_json::json;
 
 use crate::api::AppState;
-use crate::query::duckdb;
+use crate::storage::duckdb;
 
 /// Liveness gives up only when self-heal has failed this many times in a row
 /// with nothing succeeding in between (the counter is cleared by any successful

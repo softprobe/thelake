@@ -20,8 +20,8 @@ use uuid::Uuid;
 
 use crate::util::otlp::{int_kv, string_kv};
 use crate::util::promotion_file_backed::{
-    apply_promotion_yaml, assert_traces_columns_exist, attach_softprobe_ducklake,
-    ingest_otlp_protobuf, setup_file_backed_promotion_env,
+    apply_promotion_yaml, assert_traces_columns_exist, ingest_otlp_protobuf,
+    setup_file_backed_promotion_env,
 };
 use crate::util::promotion_fixtures::{LLM_GENERATION_V1_YAML, MOCKER_ROLLING_V1_YAML};
 
@@ -165,8 +165,7 @@ async fn simulated_mocker_rolling_manifest_promotes_record_fields_and_http_bodie
         .expect("encode");
     ingest_otlp_protobuf(env.router.clone(), body).await;
 
-    let connection =
-        attach_softprobe_ducklake(&env.metadata_path, &env.metadata_schema, &env.data_path);
+    let connection = env.physical().open_attached_connection(Some(0));
     assert_traces_columns_exist(
         &connection,
         &[

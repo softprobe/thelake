@@ -37,8 +37,8 @@ static MISSING_OPTIONAL_TABLE: Lazy<Regex> = Lazy::new(|| {
         .expect("valid missing-optional-table regex")
 });
 
-fn empty_query_result() -> crate::query::duckdb::QueryResult {
-    crate::query::duckdb::QueryResult {
+fn empty_query_result() -> crate::storage::duckdb::QueryResult {
+    crate::storage::duckdb::QueryResult {
         columns: Vec::new(),
         rows: Vec::new(),
         row_count: 0,
@@ -47,7 +47,7 @@ fn empty_query_result() -> crate::query::duckdb::QueryResult {
 
 fn map_missing_optional_table(
     err: anyhow::Error,
-) -> anyhow::Result<crate::query::duckdb::QueryResult> {
+) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
     if MISSING_OPTIONAL_TABLE.is_match(&err.to_string()) {
         Ok(empty_query_result())
     } else {
@@ -78,7 +78,7 @@ impl AppState {
         &self,
         tenant: Option<&TenantInfo>,
         sql: &str,
-    ) -> anyhow::Result<crate::query::duckdb::QueryResult> {
+    ) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
         let tenant_id = tenant.map(|t| t.tenant_id.as_str()).unwrap_or("");
         let engine = self.engines.engine_for(tenant_id).await?;
         match engine.execute_query(sql).await {
@@ -96,7 +96,7 @@ impl AppState {
         &self,
         tenant: Option<&TenantInfo>,
         query: crate::sql::trusted::TrustedSql,
-    ) -> anyhow::Result<crate::query::duckdb::QueryResult> {
+    ) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
         let tenant_id = tenant.map(|t| t.tenant_id.as_str()).unwrap_or("");
         let engine = self.engines.engine_for(tenant_id).await?;
         match engine.execute_trusted(query).await {

@@ -41,9 +41,9 @@ fn otlp_metrics_exporter_builds_with_defaults() {
 #[tokio::test]
 async fn health_stays_ok_when_only_export_drops_rise() {
     use crate::api::health::health_check;
-    use crate::query::duckdb;
     use crate::self_monitoring::instruments::ensure_noop_instruments_for_test;
     use crate::self_monitoring::record_export_drop;
+    use crate::storage::duckdb;
     use axum::http::StatusCode;
 
     ensure_noop_instruments_for_test();

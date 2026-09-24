@@ -68,7 +68,7 @@ impl IngestEngine {
         session_summary_dirty: Option<Arc<SessionSummaryDirty>>,
     ) -> Self {
         let tenant_id = tenant_id.into();
-        let scope = writer.configured_scope();
+        let scope = writer.configured_scope().clone();
         let (max_pending, eager_pending) = coalesce::resolve_byte_limits(buffer_size_mb);
         let write_timeout_seconds = resolve_write_timeout_seconds(write_timeout_seconds);
         let logs = {
@@ -311,7 +311,7 @@ mod after_commit_tests {
         let (engine, _temp) = crate::test_support::sample_ingest()
             .await
             .expect("sample ingest");
-        assert!(!engine.scope.data_path.is_empty());
+        assert!(!engine.scope.warehouse_uri().is_empty());
 
         assert!(!engine
             .score_exists("missing-score")
@@ -349,19 +349,22 @@ impl IngestPipeline {
     pub async fn new(config: &Config) -> Result<Self> {
         let tenant_ducklake = DuckLakeScopeResolver::connect(config).await?;
         let tenant_id = DEFAULT_WORKSPACE_ID;
+        let physical = tenant_ducklake.default_physical_scope().clone();
         let writer = Arc::new(
-            DuckLakeWriter::new_scope_bound(config, tenant_ducklake.clone(), tenant_id).await?,
+            DuckLakeWriter::new_scope_bound(
+                config,
+                tenant_ducklake.clone(),
+                tenant_id,
+                physical.clone(),
+            )
+            .await?,
         );
         // The standalone pipeline is a tenant-bound engine too. Ensure its
         // physical schema before any query worker attaches the catalog.
         writer.ensure_shared_schema().await?;
         let cache_dir = config.query.cache_dir.as_ref().map(PathBuf::from);
-        let dirty = session_summary_dirty_for(
-            config,
-            &tenant_ducklake,
-            tenant_id,
-            &config.ducklake.metadata_schema,
-        );
+        let dirty =
+            session_summary_dirty_for(config, &tenant_ducklake, tenant_id, physical.pg_namespace());
         let ingest = Arc::new(IngestEngine::from_writer(
             writer,
             tenant_id,
@@ -386,7 +389,7 @@ impl IngestPipeline {
             Self::build_tenant_writer(config, tenant_ducklake.clone(), tenant_id.clone(), &scope)
                 .await?;
         let dirty =
-            session_summary_dirty_for(config, &tenant_ducklake, &tenant_id, &scope.metadata_schema);
+            session_summary_dirty_for(config, &tenant_ducklake, &tenant_id, scope.pg_namespace());
         Ok(Arc::new(IngestEngine::from_writer(
             writer,
             tenant_id,
@@ -403,13 +406,9 @@ impl IngestPipeline {
         tenant_id: String,
         scope: &PhysicalScope,
     ) -> Result<Arc<DuckLakeWriter>> {
-        let mut scoped_config = config.clone();
-        scoped_config.ducklake.metadata_path = scope.metadata_path.clone();
-        scoped_config.ducklake.metadata_schema = scope.metadata_schema.clone();
-        scoped_config.ducklake.data_path = scope.data_path.clone();
-        scoped_config.ducklake.catalog_alias = scope.catalog_alias.clone();
         Ok(Arc::new(
-            DuckLakeWriter::new_scope_bound(&scoped_config, tenant_ducklake, tenant_id).await?,
+            DuckLakeWriter::new_scope_bound(config, tenant_ducklake, tenant_id, scope.clone())
+                .await?,
         ))
     }
 

@@ -1,24 +1,19 @@
-use crate::config::{Config, DuckLakeConfig};
-use crate::workspace_scope::DuckLakeAccess;
+use crate::config::Config;
+use crate::storage::duckdb::init::{apply_duckdb_init, DuckDbInitParams};
+use crate::workspace_scope::{DuckLakeAccess, PhysicalScope};
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use tracing::warn;
 
 use super::object_store::configure_object_store;
 use super::util::escape_sql_literal;
 
 static ATTACH_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
-fn attach_lock(ducklake: &DuckLakeConfig) -> Arc<Mutex<()>> {
-    let key = format!(
-        "{}|{}|{}|{}",
-        ducklake.metadata_path,
-        ducklake.metadata_schema,
-        ducklake.data_path,
-        ducklake.catalog_alias
-    );
+fn attach_lock(scope: &PhysicalScope) -> Arc<Mutex<()>> {
+    let key = scope.attach_serialization_key();
     let locks = ATTACH_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut locks = locks
         .lock()
@@ -36,12 +31,9 @@ struct PostgresAttachLock<'a> {
 }
 
 impl<'a> PostgresAttachLock<'a> {
-    fn acquire(conn: &'a Connection, ducklake: &DuckLakeConfig) -> Result<Self> {
-        let target = ducklake.metadata_path.as_str();
-        let scope_key = format!(
-            "{}|{}|{}|{}",
-            target, ducklake.metadata_schema, ducklake.data_path, ducklake.catalog_alias
-        );
+    fn acquire(conn: &'a Connection, scope: &PhysicalScope) -> Result<Self> {
+        let target = scope.catalog_dsn();
+        let scope_key = scope.attach_serialization_key();
         let remote_lock = format!(
             "SELECT pg_advisory_lock(hashtextextended('{}', 0));",
             escape_sql_literal(&scope_key)
@@ -122,59 +114,79 @@ impl<'a> DuckLakeSessionFactory<'a> {
         access: &DuckLakeAccess,
         kind: DuckLakeSessionKind,
     ) -> Result<Connection> {
-        let ducklake = self.ducklake_config(access);
+        let scope = access.physical_scope();
         let (threads, memory_limit) = kind.resources();
-        self.open_with_resources(&ducklake, threads, memory_limit)
+        let cache_dir = self.query_cache_httpfs_dir(kind)?;
+        self.open_with_resources(scope, kind, threads, memory_limit, cache_dir.as_deref())
+    }
+
+    fn query_cache_httpfs_dir(&self, kind: DuckLakeSessionKind) -> Result<Option<PathBuf>> {
+        if !matches!(kind, DuckLakeSessionKind::Query) {
+            return Ok(None);
+        }
+        if std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1") {
+            return Ok(None);
+        }
+        let Some(base) = self.config.query.cache_dir.as_ref() else {
+            return Ok(None);
+        };
+        let cache_path = PathBuf::from(base).join("duckdb_http_cache");
+        std::fs::create_dir_all(&cache_path).with_context(|| {
+            format!(
+                "create DuckDB cache_httpfs directory {}",
+                cache_path.display()
+            )
+        })?;
+        Ok(Some(cache_path))
     }
 
     fn open_with_resources(
         &self,
-        ducklake: &DuckLakeConfig,
+        scope: &PhysicalScope,
+        kind: DuckLakeSessionKind,
         threads: i64,
         memory_limit: &str,
+        cache_directory: Option<&Path>,
     ) -> Result<Connection> {
         let conn = open_in_memory_capped(threads, memory_limit).context("DuckDB open failed")?;
-        conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
-            .context("INSTALL/LOAD httpfs")?;
-        configure_object_store(&conn, self.config, &ducklake.data_path)
+        let params = match kind {
+            DuckLakeSessionKind::Query => {
+                DuckDbInitParams::query(threads, memory_limit, cache_directory)
+            }
+            DuckLakeSessionKind::Writer | DuckLakeSessionKind::Maintenance => {
+                DuckDbInitParams::session(threads, memory_limit)
+            }
+        };
+        apply_duckdb_init(&conn, &params).context("DuckDB init")?;
+        configure_object_store(&conn, self.config, scope.warehouse_uri())
             .context("configure object store")?;
-        conn.execute_batch("INSTALL ducklake; LOAD ducklake;")
-            .context("INSTALL/LOAD ducklake")?;
-        // DuckLake uses the Postgres catalog on every runtime path.
-        conn.execute_batch("INSTALL postgres; LOAD postgres;")
-            .context("INSTALL/LOAD postgres")?;
-        apply_ducklake_retry_settings(&conn).context("configure DuckLake retry settings")?;
-        if let Err(err) = configure_duckdb_resources(&conn, threads, memory_limit) {
-            warn!("Failed to cap DuckDB threads/memory: {err}");
-        }
         Ok(conn)
     }
 
-    pub(crate) fn attach(&self, conn: &Connection, access: &DuckLakeAccess) -> Result<String> {
-        let ducklake = self.ducklake_config(access);
-        self.attach_ducklake(conn, &ducklake)
+    pub(crate) fn attach(&self, conn: &Connection, access: &DuckLakeAccess) -> Result<()> {
+        self.attach_ducklake(conn, access.physical_scope())
     }
 
-    fn attach_ducklake(&self, conn: &Connection, ducklake: &DuckLakeConfig) -> Result<String> {
+    fn attach_ducklake(&self, conn: &Connection, scope: &PhysicalScope) -> Result<()> {
         // DuckLake catalog creation is a cross-connection operation. Serialize
         // first attach attempts within this process so two engines cannot both
         // enter the extension's non-idempotent CREATE TABLE path. The
         // CREATE_IF_NOT_EXISTS=false-first flow below still makes later
         // connections attach read/write catalogs without reinitializing them.
-        let lock = attach_lock(ducklake);
+        let lock = attach_lock(scope);
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // Normal runtime path: always the Postgres DuckLake catalog.
-        let _postgres_lock = PostgresAttachLock::acquire(conn, ducklake)?;
+        let _postgres_lock = PostgresAttachLock::acquire(conn, scope)?;
         // DuckLake's default ATTACH mode initializes a catalog when it is
         // missing. That initialization is not idempotent across independent
         // DuckDB connections: a second connection can race or re-enter the
         // CREATE TABLE path and report `ducklake_metadata already exists`.
         // Connect to an existing catalog first; only a genuinely missing
         // catalog is allowed to take the creation path.
-        match self.attach_ducklake_once(conn, ducklake, false) {
-            Ok(prefix) => Ok(prefix),
+        match self.attach_ducklake_once(conn, scope, false) {
+            Ok(()) => Ok(()),
             Err(existing_error) if ducklake_catalog_is_missing(&existing_error.to_string()) => {
-                self.attach_ducklake_once(conn, ducklake, true)
+                self.attach_ducklake_once(conn, scope, true)
             }
             Err(error) => Err(error),
         }
@@ -183,26 +195,27 @@ impl<'a> DuckLakeSessionFactory<'a> {
     fn attach_ducklake_once(
         &self,
         conn: &Connection,
-        ducklake: &DuckLakeConfig,
+        scope: &PhysicalScope,
         create_if_not_exists: bool,
-    ) -> Result<String> {
-        prepare_local_ducklake_paths(ducklake)?;
-        let options = ducklake_attach_options(ducklake, create_if_not_exists);
+    ) -> Result<()> {
+        prepare_local_ducklake_paths(scope)?;
+        let options = ducklake_attach_options_for_scope(
+            scope,
+            create_if_not_exists,
+            self.config.ducklake.data_inlining_row_limit,
+        );
         let sql = format!(
             "ATTACH 'ducklake:postgres:{target}' AS {alias} ({opts});",
-            target = escape_sql_literal(&ducklake.metadata_path),
-            alias = ducklake.catalog_alias,
+            target = escape_sql_literal(scope.catalog_dsn()),
+            alias = scope.attach_alias(),
             opts = options.join(", ")
         );
         match conn.execute_batch(&sql) {
             Ok(()) => {}
             Err(err) => {
                 let message = err.to_string();
-                if catalog_is_attached(conn, &ducklake.catalog_alias) {
-                    return Ok(catalog_prefix(
-                        &ducklake.catalog_alias,
-                        &ducklake.metadata_schema,
-                    ));
+                if catalog_is_attached(conn, scope.attach_alias()) {
+                    return Ok(());
                 }
                 if message.to_lowercase().contains("already exists")
                     || (message.contains("ducklake_metadata")
@@ -211,11 +224,8 @@ impl<'a> DuckLakeSessionFactory<'a> {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     match conn.execute_batch(&sql) {
                         Ok(()) => {}
-                        Err(_retry_err) if catalog_is_attached(conn, &ducklake.catalog_alias) => {
-                            return Ok(catalog_prefix(
-                                &ducklake.catalog_alias,
-                                &ducklake.metadata_schema,
-                            ));
+                        Err(_retry_err) if catalog_is_attached(conn, scope.attach_alias()) => {
+                            return Ok(());
                         }
                         Err(retry_err) => {
                             return Err(anyhow::anyhow!(
@@ -226,17 +236,19 @@ impl<'a> DuckLakeSessionFactory<'a> {
                 } else if message.contains("__ducklake_metadata_")
                     && message.contains("does not exist")
                 {
-                    let mut fallback_options = vec![format!(
-                        "DATA_PATH '{}'",
-                        escape_sql_literal(&ducklake.data_path)
-                    )];
-                    if let Some(limit) = ducklake.data_inlining_row_limit {
-                        fallback_options.push(format!("DATA_INLINING_ROW_LIMIT {limit}"));
-                    }
+                    // Keep full scope identity (METADATA_SCHEMA / META_SCHEMA). A
+                    // DATA_PATH-only fallback attaches the default catalog while
+                    // callers still qualify as alias.schema.table → empty probes
+                    // and "table does not exist" on every shared/non-main scope.
+                    let fallback_options = ducklake_attach_options_for_scope(
+                        scope,
+                        false,
+                        self.config.ducklake.data_inlining_row_limit,
+                    );
                     let fallback_sql = format!(
                         "ATTACH 'ducklake:postgres:{target}' AS {alias} ({opts});",
-                        target = escape_sql_literal(&ducklake.metadata_path),
-                        alias = ducklake.catalog_alias,
+                        target = escape_sql_literal(scope.catalog_dsn()),
+                        alias = scope.attach_alias(),
                         opts = fallback_options.join(", ")
                     );
                     conn.execute_batch(&fallback_sql).map_err(|fallback_err| {
@@ -248,20 +260,7 @@ impl<'a> DuckLakeSessionFactory<'a> {
             }
         }
 
-        Ok(catalog_prefix(
-            &ducklake.catalog_alias,
-            &ducklake.metadata_schema,
-        ))
-    }
-
-    fn ducklake_config(&self, access: &DuckLakeAccess) -> DuckLakeConfig {
-        let scope = access.physical_scope();
-        let mut ducklake = self.config.ducklake.clone();
-        ducklake.metadata_path = scope.metadata_path.clone();
-        ducklake.data_path = scope.data_path.clone();
-        ducklake.catalog_alias = scope.catalog_alias.clone();
-        ducklake.metadata_schema = scope.metadata_schema.clone();
-        ducklake
+        Ok(())
     }
 }
 
@@ -281,37 +280,16 @@ pub(crate) fn open_in_memory_capped(threads: i64, memory_limit: &str) -> Result<
         .map_err(|e| anyhow::anyhow!("DuckDB open failed: {e}"))
 }
 
-/// Cap CPU and RAM for an already-open DuckDB connection (best-effort follow-up).
-pub(crate) fn configure_duckdb_resources(
-    conn: &Connection,
-    threads: i64,
-    memory_limit: &str,
-) -> Result<()> {
-    conn.execute(&format!("SET threads = {threads}"), [])?;
-    conn.execute(&format!("SET memory_limit = '{memory_limit}'"), [])?;
-    Ok(())
-}
-
-/// Pin DuckLake extension conflict-retry defaults (official concurrent-write mechanism).
-pub(super) fn apply_ducklake_retry_settings(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "SET ducklake_max_retry_count = 10;\n\
-         SET ducklake_retry_backoff = 1.5;\n\
-         SET ducklake_retry_wait_ms = 100;",
-    )?;
-    Ok(())
-}
-
-/// ATTACH options shared by writer / query / compaction.
-///
-/// The normal runtime path is always the Postgres DuckLake catalog, so
-/// `METADATA_SCHEMA`/`META_SCHEMA` are the only backend-specific options built
-/// here.
-pub(crate) fn ducklake_attach_options(
-    dk: &DuckLakeConfig,
+/// ATTACH options from an opaque scope + inlining policy.
+pub(crate) fn ducklake_attach_options_for_scope(
+    scope: &PhysicalScope,
     create_if_not_exists: bool,
+    data_inlining_row_limit: Option<u64>,
 ) -> Vec<String> {
-    let mut options = vec![format!("DATA_PATH '{}'", escape_sql_literal(&dk.data_path))];
+    let mut options = vec![format!(
+        "DATA_PATH '{}'",
+        escape_sql_literal(scope.warehouse_uri())
+    )];
     options.push(format!(
         "CREATE_IF_NOT_EXISTS {}",
         if create_if_not_exists {
@@ -320,12 +298,12 @@ pub(crate) fn ducklake_attach_options(
             "false"
         }
     ));
-    if dk.metadata_schema != "main" {
-        let schema = escape_sql_literal(&dk.metadata_schema);
+    if !scope.is_default_duckdb_namespace() {
+        let schema = escape_sql_literal(scope.pg_namespace());
         options.push(format!("METADATA_SCHEMA '{}'", schema));
         options.push(format!("META_SCHEMA '{}'", schema));
     }
-    if let Some(limit) = dk.data_inlining_row_limit {
+    if let Some(limit) = data_inlining_row_limit {
         options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
     }
     options
@@ -333,31 +311,74 @@ pub(crate) fn ducklake_attach_options(
 
 /// Ensure local filesystem paths exist before ATTACH.
 ///
-/// Local (non-URI) `DATA_PATH` must exist so DuckLake can create files under it.
-pub(crate) fn prepare_local_ducklake_paths(dk: &DuckLakeConfig) -> Result<()> {
-    if !dk.data_path.contains("://") {
-        std::fs::create_dir_all(&dk.data_path)?;
+/// Local (non-URI) warehouse paths must exist so DuckLake can create files under them.
+pub(crate) fn prepare_local_ducklake_paths(scope: &PhysicalScope) -> Result<()> {
+    let data_path = scope.warehouse_uri();
+    if !data_path.contains("://") {
+        std::fs::create_dir_all(data_path)?;
     }
     Ok(())
 }
 
-/// Catalog prefix for qualified DuckLake tables (`alias` or `alias.schema`).
-pub(crate) fn catalog_prefix(catalog_alias: &str, metadata_schema: &str) -> String {
-    if metadata_schema == "main" {
-        catalog_alias.to_string()
-    } else {
-        format!("{catalog_alias}.{metadata_schema}")
-    }
+/// Fully qualified DuckLake table name used for CREATE / INSERT.
+pub(crate) fn ducklake_qualified_table_name(scope: &PhysicalScope, bare_table: &str) -> String {
+    scope.qualified_table(bare_table)
 }
 
-/// Fully qualified DuckLake table name used for CREATE / INSERT (`catalog.table` when
-/// `metadata_schema` is `main`, else `catalog.metadata_schema.table`).
-pub(crate) fn ducklake_qualified_table_name(cfg: &DuckLakeConfig, bare_table: &str) -> String {
-    format!(
-        "{}.{}",
-        catalog_prefix(&cfg.catalog_alias, &cfg.metadata_schema),
-        bare_table
+/// Opaque DuckDB session returned by catalog attach helpers.
+pub type AttachedSession = duckdb::Connection;
+
+/// Test/ops helper: in-memory DuckDB with extensions loaded, catalog attached, and
+/// schema selected so callers can use bare table names.
+pub(crate) fn open_attached_connection(
+    scope: &crate::workspace_scope::PhysicalScope,
+    data_inlining_row_limit: Option<u64>,
+) -> AttachedSession {
+    let connection = open_in_memory_capped(QUERY_DUCKDB_THREADS, "512MB").expect("duckdb");
+    apply_duckdb_init(
+        &connection,
+        &DuckDbInitParams::session(QUERY_DUCKDB_THREADS, "512MB"),
     )
+    .expect("DuckDB init");
+    let warehouse = scope.warehouse_uri();
+    if warehouse.contains("://") {
+        let mut config = crate::config::Config::default();
+        if std::env::var("AWS_ACCESS_KEY_ID").is_ok() {
+            config.object_store.endpoint = Some(
+                std::env::var("AWS_S3_ENDPOINT")
+                    .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+            );
+        }
+        configure_object_store(&connection, &config, warehouse).expect("object store");
+    }
+    let opts = ducklake_attach_options_for_scope(scope, false, data_inlining_row_limit);
+    let opts: Vec<String> = opts
+        .into_iter()
+        .filter(|o| !o.starts_with("CREATE_IF_NOT_EXISTS"))
+        .collect();
+    connection
+        .execute_batch(&format!(
+            "ATTACH 'ducklake:postgres:{}' AS {} ({});",
+            escape_sql_literal(scope.catalog_dsn()),
+            scope.attach_alias(),
+            opts.join(", "),
+        ))
+        .expect("attach");
+    let alias = scope.attach_alias();
+    let schema = scope.pg_namespace();
+    if !scope.is_default_duckdb_namespace() {
+        connection
+            .execute_batch(&format!("CREATE SCHEMA IF NOT EXISTS {alias}.{schema};"))
+            .expect("create schema");
+        connection
+            .execute_batch(&format!("USE {alias}.{schema};"))
+            .expect("use schema");
+    } else {
+        connection
+            .execute_batch(&format!("USE {alias};"))
+            .expect("use catalog");
+    }
+    connection
 }
 
 /// Scoping clause for `CALL <catalog>.set_option(...)` matching a qualified table name.
@@ -402,7 +423,9 @@ mod tests {
 
     #[test]
     fn query_resource_caps_pin_single_thread() {
-        let config = Config::default();
+        let mut config = Config::default();
+        // Unit tests do not require community cache_httpfs.
+        config.query.cache_dir = None;
         let scope = PhysicalScope::from_ducklake(&config.ducklake);
         let access = DuckLakeAccess::Workspace(
             WorkspaceBinding::new("query-test", scope, WorkspaceScopeMode::Isolated)
@@ -419,7 +442,8 @@ mod tests {
 
     #[test]
     fn session_factory_opens_all_resource_profiles() {
-        let config = Config::default();
+        let mut config = Config::default();
+        config.query.cache_dir = None;
         let access = DuckLakeAccess::Physical(PhysicalScope::from_ducklake(&config.ducklake));
         for (kind, expected_threads, expected_memory) in [
             (
@@ -477,6 +501,7 @@ mod tests {
         std::env::set_var("GCS_HMAC_SECRET", "attach-test-secret");
 
         let mut config = Config::default();
+        config.query.cache_dir = None;
         config.ducklake.data_path = "gs://softprobe-test/ducklake/".to_string();
         let access = DuckLakeAccess::Physical(PhysicalScope::from_ducklake(&config.ducklake));
         let result = DuckLakeSessionFactory::new(&config).open(&access, DuckLakeSessionKind::Query);
@@ -509,6 +534,7 @@ mod tests {
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "minioadmin");
 
         let mut config = Config::default();
+        config.query.cache_dir = None;
         config.object_store.endpoint = Some("http://localhost:9000".to_string());
         config.object_store.region = "us-east-1".to_string();
         config.ducklake.data_path = "s3://warehouse/ducklake/".to_string();
@@ -541,6 +567,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let suffix = uuid::Uuid::new_v4().to_string().replace('-', "_");
         let mut config = Config::default();
+        config.query.cache_dir = None;
         config.ducklake.metadata_schema = format!("thelake_attach_{suffix}");
         config.ducklake.data_path = dir.path().join("data").to_string_lossy().into_owned();
 
@@ -549,8 +576,7 @@ mod tests {
         let conn = factory
             .open(&access, DuckLakeSessionKind::Query)
             .expect("open session");
-        let catalog = factory.attach(&conn, &access).expect("attach catalog");
-        assert_eq!(catalog, format!("softprobe.thelake_attach_{suffix}"));
+        factory.attach(&conn, &access).expect("attach catalog");
         assert!(catalog_is_attached(&conn, "softprobe"));
         let retry_count: i64 = conn
             .query_row(
@@ -583,6 +609,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let suffix = uuid::Uuid::new_v4().to_string().replace('-', "_");
         let mut config = Config::default();
+        config.query.cache_dir = None;
         config.ducklake.metadata_schema = format!("thelake_attach_fail_{suffix}");
         config.ducklake.data_path = dir.path().join("data").to_string_lossy().into_owned();
         config.ducklake.catalog_alias = "bad-alias".to_string();

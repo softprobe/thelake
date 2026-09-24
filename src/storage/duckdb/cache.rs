@@ -1,11 +1,10 @@
-use crate::config::Config;
 use anyhow::{anyhow, Result};
-use duckdb::{Connection, ToSql};
+use duckdb::Connection;
 use once_cell::sync::Lazy;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const DUCKDB_CACHE_HTTPFS_INIT_SQL: &str = include_str!("sql/duckdb_cache_httpfs_init.sql");
+use crate::config::Config;
 
 #[derive(Clone)]
 pub(crate) struct CacheSettings {
@@ -19,40 +18,13 @@ impl CacheSettings {
         }
     }
 
-    pub(crate) fn configure(&self, conn: &Connection) -> Result<()> {
-        if let Some(cache_dir) = &self.cache_dir {
-            configure_cache_httpfs(cache_dir, conn)?;
+    /// Wrap S3/httpfs with cache_httpfs after the extension was loaded by duckdb_init.sql.
+    pub(crate) fn wrap_filesystems(&self, conn: &Connection) -> Result<()> {
+        if self.cache_dir.is_none() {
+            return Ok(());
         }
-
-        Ok(())
+        wrap_filesystem(conn)
     }
-}
-
-fn configure_cache_httpfs(cache_dir: &Path, conn: &Connection) -> Result<()> {
-    let cache_path = cache_dir.join("duckdb_http_cache");
-    std::fs::create_dir_all(&cache_path)?;
-    let cache_dir_str = cache_path.to_string_lossy().to_string();
-    // 3) cache_httpfs for persistent on-disk caching + glob caching (useful when we use globs like **/*.parquet).
-    // We keep cache_httpfs' disk cache enabled, but disable its in-memory caching so we don't double-cache
-    // with DuckDB's native external_file_cache.
-    //
-    // Note: cache_httpfs is not bundled by default; we must INSTALL it before LOAD.
-    conn.execute_batch(DUCKDB_CACHE_HTTPFS_INIT_SQL)
-        .map_err(|err| {
-            anyhow!(
-                "Failed to initialize cache_httpfs via community registry: {}. \
-            Ensure DuckDB is built with extension support and the community registry is available.",
-                err
-            )
-        })?;
-    // Enable glob result caching (best-effort; setting may vary by extension version).
-    let _ = conn.execute("SET cache_httpfs_enable_glob_cache = true;", []);
-    conn.execute(
-        "SET cache_httpfs_cache_directory = ?;",
-        [&cache_dir_str as &dyn ToSql],
-    )?;
-    wrap_filesystem(conn)?;
-    Ok(())
 }
 
 /// Wrap S3 and httpfs filesystems with cache_httpfs for persistent on-disk caching.
@@ -105,22 +77,3 @@ fn wrap_filesystem(conn: &Connection) -> Result<()> {
 }
 
 static CACHE_PROFILE_INIT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cache_httpfs_init_sql_installs_before_loads() {
-        let install = DUCKDB_CACHE_HTTPFS_INIT_SQL
-            .find("INSTALL cache_httpfs")
-            .expect("expected INSTALL cache_httpfs in init SQL");
-        let load = DUCKDB_CACHE_HTTPFS_INIT_SQL
-            .find("LOAD cache_httpfs")
-            .expect("expected LOAD cache_httpfs in init SQL");
-        assert!(
-            install < load,
-            "expected INSTALL cache_httpfs to appear before LOAD cache_httpfs"
-        );
-    }
-}

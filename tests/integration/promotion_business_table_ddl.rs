@@ -81,7 +81,9 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     config.ducklake.catalog_alias = "softprobe".to_string();
     // Keep schema names ≤63 chars (Postgres identifier limit) to avoid silent truncation collisions.
     let short = &suffix[..8.min(suffix.len())];
-    config.ducklake.metadata_schema = format!("sp_biz_reg_{short}");
+    // Shared mode binds to the process-default catalog; keep request schema identical.
+    let business_metadata_schema = format!("sp_biz_{short}");
+    config.ducklake.metadata_schema = business_metadata_schema.clone();
     let business_data_path = temp.path().join("data").to_string_lossy().to_string();
     config.ducklake.data_path = business_data_path.clone();
     config.ducklake.data_inlining_row_limit = Some(0);
@@ -92,8 +94,7 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         .await
         .expect("connect runtime engines");
     let business_tenant_id = format!("tenant-biz-{short}");
-    let business_metadata_schema = format!("sp_biz_data_{short}");
-    let physical_scope = manager
+    let _physical_scope = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: business_tenant_id.clone(),
             metadata_schema: business_metadata_schema.clone(),
@@ -118,8 +119,8 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         Err(_) => panic!("apply business table promotion"),
     };
     assert!(!spec_id.is_empty());
-    assert_ducklake_table_exists(&physical_scope.metadata_schema, "checkout_orders_v1").await;
-    assert_ducklake_view_exists(&physical_scope.metadata_schema, "checkout_orders_current").await;
+    assert_ducklake_table_exists(&business_metadata_schema, "checkout_orders_v1").await;
+    assert_ducklake_view_exists(&business_metadata_schema, "checkout_orders_current").await;
 }
 
 async fn relation_exists(

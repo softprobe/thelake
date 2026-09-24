@@ -6,7 +6,7 @@ use crate::async_jobs::Job;
 #[cfg(test)]
 use crate::compaction::deduplicate_physical_scopes;
 use crate::compaction::MaintenanceEngine;
-use crate::config::DuckLakeConfig;
+use crate::workspace_scope::PhysicalScope;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::sync::{Mutex, MutexGuard};
@@ -17,13 +17,13 @@ fn lock_mutex<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn lookup_cached_scope(
-    cached: &[(String, DuckLakeConfig)],
+    cached: &[(String, PhysicalScope)],
     scope_key: &str,
-) -> Option<DuckLakeConfig> {
+) -> Option<PhysicalScope> {
     cached
         .iter()
         .find(|(id, _)| id == scope_key)
-        .map(|(_, dk)| dk.clone())
+        .map(|(_, scope)| scope.clone())
 }
 
 pub const PHYSICAL_SCOPE_MAINTENANCE_JOB: &str = "physical_scope_maintenance";
@@ -32,11 +32,11 @@ pub struct PhysicalScopeMaintenanceJob {
     executor: MaintenanceEngine,
     interval: Duration,
     compaction_enabled: bool,
-    cached_scopes: Mutex<Vec<(String, DuckLakeConfig)>>,
+    cached_scopes: Mutex<Vec<(String, PhysicalScope)>>,
     /// When set, `scope_keys` returns these instead of asking the registry
     /// (multi-tenant fixtures without Postgres).
     #[cfg(test)]
-    fixed_scopes: Option<Vec<(String, DuckLakeConfig)>>,
+    fixed_scopes: Option<Vec<(String, PhysicalScope)>>,
 }
 
 impl PhysicalScopeMaintenanceJob {
@@ -58,7 +58,7 @@ impl PhysicalScopeMaintenanceJob {
         executor: MaintenanceEngine,
         interval: Duration,
         compaction_enabled: bool,
-        scopes: Vec<(String, DuckLakeConfig)>,
+        scopes: Vec<(String, PhysicalScope)>,
     ) -> Self {
         let mut job = Self::new(executor, interval, compaction_enabled);
         job.fixed_scopes = Some(scopes);
@@ -90,14 +90,14 @@ impl Job for PhysicalScopeMaintenanceJob {
     }
 
     async fn run(&self, scope_key: &str) -> Result<()> {
-        let ducklake = lookup_cached_scope(&lock_mutex(&self.cached_scopes), scope_key)
+        let physical = lookup_cached_scope(&lock_mutex(&self.cached_scopes), scope_key)
             .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))?;
         self.executor
-            .ensure_physical_scope_bootstrap(&ducklake)
+            .ensure_physical_scope_bootstrap(&physical)
             .await?;
         let results = self
             .executor
-            .run_physical_scope_pass(scope_key, &ducklake, self.compaction_enabled)
+            .run_physical_scope_pass(scope_key, &physical, self.compaction_enabled)
             .await?;
         if self.compaction_enabled {
             let statuses: Vec<_> = results.iter().map(|r| r.compaction.status).collect();
@@ -120,10 +120,12 @@ mod tests {
     fn lookup_cached_scope_miss_and_hit() {
         let cached = vec![(
             "t1".into(),
-            DuckLakeConfig {
-                metadata_schema: "s1".into(),
-                ..DuckLakeConfig::default()
-            },
+            PhysicalScope::new(
+                "host=localhost dbname=ducklake",
+                "./warehouse/",
+                "softprobe",
+                "s1",
+            ),
         )];
         assert!(lookup_cached_scope(&cached, "t1").is_some());
         assert!(lookup_cached_scope(&cached, "new-tenant").is_none());
@@ -169,11 +171,12 @@ mod tests {
     #[tokio::test]
     async fn fixed_workspace_bindings_share_one_physical_job_key() {
         let config = crate::config::Config::default();
-        let shared = crate::config::DuckLakeConfig {
-            metadata_schema: "shared_scope".into(),
-            data_path: "s3://warehouse/shared".into(),
-            ..config.ducklake.clone()
-        };
+        let shared = PhysicalScope::new(
+            config.ducklake.metadata_path.clone(),
+            "s3://warehouse/shared",
+            config.ducklake.catalog_alias.clone(),
+            "shared_scope",
+        );
         let resolver = crate::runtime_engine::DuckLakeScopeResolver::connect(&config)
             .await
             .expect("connect resolver");
