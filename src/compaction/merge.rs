@@ -45,7 +45,7 @@ pub(crate) fn compact_table_incremental(
     };
     let mut last = ActionStatus::Skipped;
 
-    if let Ok(Some(pending)) = load_inlined_fragment_stats(conn, scope.attach_alias(), table) {
+    if let Ok(Some(pending)) = load_inlined_fragment_stats(conn, scope, table) {
         info!(
             "TWCS backlog {}.{}: logical_rows={} live_parquet_files={} inlined_only={}",
             scope.pg_namespace(),
@@ -454,17 +454,18 @@ fn load_partition_stats_after(
 
 fn load_inlined_fragment_stats(
     conn: &Connection,
-    catalog_alias: &str,
+    scope: &PhysicalScope,
     table: &str,
 ) -> Result<Option<InlinedFragmentStats>> {
-    let row_sql = logical_table_row_count_sql(catalog_alias, table);
+    let qualified = crate::storage::ducklake::ducklake_qualified_table_name(scope, table);
+    let row_sql = logical_table_row_count_sql(&qualified);
     crate::sql::ensure_fact_scan_bound(&row_sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
     let logical_rows: i64 = match conn.query_row(&row_sql, [], |row| row.get(0)) {
         Ok(v) => v,
         Err(err) => {
             warn!(
                 "TWCS logical-row probe failed for {}: {}; treating as empty",
-                table, err
+                qualified, err
             );
             return Ok(None);
         }
@@ -473,7 +474,8 @@ fn load_inlined_fragment_stats(
         return Ok(None);
     }
     // Live parquet count is best-effort for logging only (not used for drain).
-    let file_sql = crate::sql::maintenance::live_file_count_sql(catalog_alias, table);
+    let file_sql =
+        crate::sql::maintenance::live_file_count_sql(scope.attach_alias(), table);
     crate::sql::ensure_fact_scan_bound(&file_sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
     let files = conn
         .query_row(&file_sql, [], |row| row.get::<_, i64>(0))
@@ -553,6 +555,26 @@ mod tests {
             !prod.contains("fn twcs_compact_closed_days")
                 && !prod.contains("fn twcs_compact_open_day"),
             "duplicate wave loops must be removed"
+        );
+    }
+
+    #[test]
+    fn logical_row_probe_uses_physical_scope_qualification() {
+        let prod = include_str!("merge.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("cfg(test) marker");
+        assert!(
+            prod.contains("ducklake_qualified_table_name(scope, table)"),
+            "inlined fragment probe must qualify via PhysicalScope"
+        );
+        assert!(
+            !prod.contains("logical_table_row_count_sql(catalog_alias"),
+            "must not build product-table probe from bare catalog_alias"
+        );
+        assert!(
+            !prod.contains("load_inlined_fragment_stats(conn, scope.attach_alias()"),
+            "must not pass attach_alias alone into the logical-row probe"
         );
     }
 }
