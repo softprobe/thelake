@@ -284,7 +284,19 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
         })
         .await
         .expect("provision tenant");
-    assert!(hints.matches_warehouse_hints(&tenant_schema, &tenant_data_path));
+    // Shared mode ignores request warehouse overrides (logical binding only).
+    // Isolated mode must bind the requested schema/path.
+    if config.ducklake.workspace_scope_mode
+        == softprobe_runtime::workspace_scope::WorkspaceScopeMode::Isolated
+    {
+        assert!(
+            hints.matches_warehouse_hints(&tenant_schema, &tenant_data_path),
+            "isolated provision must bind requested warehouse hints"
+        );
+    } else {
+        assert!(!hints.metadata_schema.is_empty());
+        assert!(!hints.data_path.is_empty());
+    }
 
     Mock::given(method("POST"))
         .and(path("/"))
