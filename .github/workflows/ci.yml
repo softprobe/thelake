@@ -12,6 +12,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  DUCKDB_DOWNLOAD_LIB: "1"
+
 jobs:
   ci:
     name: Lint and test
