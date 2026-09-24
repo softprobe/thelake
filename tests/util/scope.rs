@@ -1,19 +1,11 @@
 //! Integration-test attach helpers that never name crate-internal catalog identity.
 //!
 //! The only allowed crate-boundary path for opening an attached DuckDB session
-//! from outside `softprobe_runtime` production APIs.
+//! from outside `softprobe_runtime` production APIs when an explicit warehouse
+//! path/schema is required. Default-config attach uses
+//! `open_attached_from_config` directly (public storage façade).
 
-use softprobe_runtime::storage::ducklake::{
-    open_attached_from_config, open_attached_from_warehouse, AttachedSession,
-};
-
-/// Attach using DuckLakeConfig POJO fields (default catalog identity).
-pub fn open_attached(
-    config: &softprobe_runtime::config::DuckLakeConfig,
-    data_inlining_row_limit: Option<u64>,
-) -> AttachedSession {
-    open_attached_from_config(config, data_inlining_row_limit)
-}
+use softprobe_runtime::storage::ducklake::{open_attached_from_warehouse, AttachedSession};
 
 /// Attach using explicit warehouse path/schema (isolation / provisioned-scope checks).
 pub fn open_attached_warehouse(
