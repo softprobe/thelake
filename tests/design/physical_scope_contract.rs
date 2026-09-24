@@ -356,6 +356,9 @@ fn api_and_compat_must_not_reach_engine_internals() {
         ".physical_scope(",
         ".pool()",
         "scope_registry(",
+        "MaintenanceScope",
+        "engines.resolve_scope(",
+        ".resolve_scope(",
         "DuckLakeScopeResolver",
         "TenantSummaryScope",
         "session_summary_scope",
@@ -364,7 +367,6 @@ fn api_and_compat_must_not_reach_engine_internals() {
         ".pg_namespace()",
         ".warehouse_uri()",
         ".catalog_dsn()",
-        "engines.resolve_scope(",
         "PhysicalScope::",
         "use crate::workspace_scope::PhysicalScope",
     ];
@@ -457,8 +459,13 @@ fn manager_provision_returns_storage_hints_not_physical_scope() {
         "RuntimeEngineManager must expose scope_storage_hints"
     );
     assert!(
-        manager_impl.contains("pub async fn ducklake_connection_material_for("),
-        "RuntimeEngineManager must own ducklake connection materialization"
+        manager_impl.contains("pub fn lease_store(")
+            && manager_impl.contains("pub async fn maintenance_engine("),
+        "RuntimeEngineManager must expose lease_store and maintenance_engine"
+    );
+    assert!(
+        !manager_impl.contains("fn scope_registry("),
+        "RuntimeEngineManager must not expose scope_registry"
     );
     assert!(
         !manager_impl

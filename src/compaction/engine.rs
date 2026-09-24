@@ -36,7 +36,7 @@ pub struct MaintenanceEngine {
 
 /// Opaque physical scope selected by `MaintenanceEngine`.
 #[derive(Clone)]
-pub struct MaintenanceScope {
+pub(crate) struct MaintenanceScope {
     scope_key: String,
     physical: PhysicalScope,
     pool: Pool,
@@ -56,12 +56,6 @@ impl MaintenanceEngine {
         scope_registry: DuckLakeScopeResolver,
     ) -> Result<Self> {
         Ok(Self::from_config(config, scope_registry))
-    }
-
-    pub(crate) async fn from_engines(
-        engines: &crate::runtime_engine::RuntimeEngineManager,
-    ) -> Result<Self> {
-        Self::new(engines.config(), engines.scope_registry().clone()).await
     }
 
     fn watermark_store(&self) -> WatermarkStore {
@@ -101,7 +95,7 @@ impl MaintenanceEngine {
         Ok(MaintenanceSummary { tables: results })
     }
 
-    pub async fn resolve_scope(&self, scope_key: &str) -> Result<MaintenanceScope> {
+    pub(crate) async fn resolve_scope(&self, scope_key: &str) -> Result<MaintenanceScope> {
         let physical = self
             .workspace_scopes()
             .await?
@@ -116,7 +110,30 @@ impl MaintenanceEngine {
         })
     }
 
-    pub async fn reduce_session_summary(
+    pub async fn reduce_session_summary_for_key(
+        &self,
+        scope_key: &str,
+        max_sessions: u64,
+        max_reduce_span_seconds: u64,
+    ) -> Result<usize> {
+        let scope = self.resolve_scope(scope_key).await?;
+        self.reduce_session_summary(&scope, max_sessions, max_reduce_span_seconds)
+            .await
+    }
+
+    pub async fn rebuild_session_summary_for_key(
+        &self,
+        scope_key: &str,
+        from: chrono::DateTime<Utc>,
+        to: chrono::DateTime<Utc>,
+        max_reduce_span_seconds: u64,
+    ) -> Result<usize> {
+        let scope = self.resolve_scope(scope_key).await?;
+        self.rebuild_session_summary(&scope, from, to, max_reduce_span_seconds)
+            .await
+    }
+
+    pub(crate) async fn reduce_session_summary(
         &self,
         scope: &MaintenanceScope,
         max_sessions: u64,
@@ -134,7 +151,7 @@ impl MaintenanceEngine {
         .await
     }
 
-    pub async fn rebuild_session_summary(
+    pub(crate) async fn rebuild_session_summary(
         &self,
         scope: &MaintenanceScope,
         from: chrono::DateTime<Utc>,
@@ -606,10 +623,7 @@ mod tests {
             keys.iter().all(|k| k.starts_with("ducklake:")),
             "maintenance keys must be physical tokens, got {keys:?}"
         );
-        let workspace_keys = engine
-            .workspace_scope_keys()
-            .await
-            .expect("workspace keys");
+        let workspace_keys = engine.workspace_scope_keys().await.expect("workspace keys");
         assert!(!workspace_keys.is_empty());
     }
 

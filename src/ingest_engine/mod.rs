@@ -69,24 +69,20 @@ impl IngestEngine {
         let writer = Arc::new(DuckLakeWriter::new(config, binding).await?);
 
         if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
-            let scope = writer.physical_scope();
+            let schema = writer.metadata_schema();
             let telemetry = resolver
-                .load_active_telemetry_columns_manifests_for_scope(scope)
+                .load_active_telemetry_columns_manifests_for_scope(schema)
                 .await?;
             let business = resolver
-                .load_active_business_table_manifests_for_scope(scope)
+                .load_active_business_table_manifests_for_scope(schema)
                 .await?;
             writer
                 .apply_dev_reset_if_requested(&telemetry, &business)
                 .await?;
         }
 
-        let dirty = session_summary_dirty_for(
-            config,
-            &resolver,
-            &tenant_id,
-            writer.physical_scope().pg_namespace(),
-        );
+        let dirty =
+            session_summary_dirty_for(config, &resolver, &tenant_id, writer.metadata_schema());
         Ok(Arc::new(Self::from_writer(
             writer,
             resolver,
@@ -140,9 +136,8 @@ impl IngestEngine {
                     let tenant = tenant.clone();
                     Box::pin(async move {
                         let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
-                        let scope = w.physical_scope().clone();
                         let manifests = resolver
-                            .load_active_telemetry_columns_manifests_for_scope(&scope)
+                            .load_active_telemetry_columns_manifests_for_scope(w.metadata_schema())
                             .await?;
                         let r = ducklake_write_with_timeout(
                             write_timeout_seconds,
@@ -181,9 +176,8 @@ impl IngestEngine {
                         } else {
                             Vec::new()
                         };
-                        let scope = w.physical_scope().clone();
                         let manifests = resolver
-                            .load_active_telemetry_columns_manifests_for_scope(&scope)
+                            .load_active_telemetry_columns_manifests_for_scope(w.metadata_schema())
                             .await?;
                         let r = ducklake_write_with_timeout(
                             write_timeout_seconds,
@@ -325,14 +319,18 @@ impl AdminEngine {
         spec: &TelemetryColumnsManifest,
         target_tables: &[String],
     ) -> Result<String> {
-        let scope = self.writer.physical_scope().clone();
         self.resolver
-            .apply_telemetry_promotion_guarded(&scope, manifest_yaml, target_tables, || async {
-                self.writer
-                    .apply_telemetry_column_promotion(spec)
-                    .await
-                    .map(|_| ())
-            })
+            .apply_telemetry_promotion_guarded(
+                self.writer.metadata_schema(),
+                manifest_yaml,
+                target_tables,
+                || async {
+                    self.writer
+                        .apply_telemetry_column_promotion(spec)
+                        .await
+                        .map(|_| ())
+                },
+            )
             .await
     }
 
@@ -341,14 +339,18 @@ impl AdminEngine {
         manifest_yaml: &str,
         spec: &BusinessTableManifest,
     ) -> std::result::Result<String, BusinessApplyError> {
-        let scope = self.writer.physical_scope().clone();
         self.resolver
-            .apply_business_promotion_guarded(&scope, manifest_yaml, spec, || async {
-                self.writer
-                    .apply_business_table_promotion(spec)
-                    .await
-                    .map(|_| ())
-            })
+            .apply_business_promotion_guarded(
+                self.writer.metadata_schema(),
+                manifest_yaml,
+                spec,
+                || async {
+                    self.writer
+                        .apply_business_table_promotion(spec)
+                        .await
+                        .map(|_| ())
+                },
+            )
             .await
     }
 }

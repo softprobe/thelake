@@ -257,9 +257,14 @@ impl RuntimeEngineManager {
         self.config.as_ref()
     }
 
-    /// Crate-internal registry handle for ingest/maintenance composition.
-    pub(crate) fn scope_registry(&self) -> &DuckLakeScopeResolver {
-        &self.scope_registry
+    /// Postgres lease store for the process catalog registry.
+    pub fn lease_store(&self) -> crate::async_jobs::PostgresLeaseStore {
+        crate::async_jobs::PostgresLeaseStore::from_resolver(&self.scope_registry)
+    }
+
+    /// Construct the process maintenance façade (owns a registry clone).
+    pub async fn maintenance_engine(&self) -> Result<crate::compaction::MaintenanceEngine> {
+        crate::compaction::MaintenanceEngine::new(self.config(), self.scope_registry.clone()).await
     }
 
     /// Idempotently create or verify a workspace → physical-scope binding.
@@ -792,9 +797,11 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
             self.ensure_scope().await?;
             return Ok(self.default_physical_scope.clone());
         }
-        Ok(DuckLakeAccess::Workspace(self.resolve_binding(scope_id).await?)
-            .physical_scope()
-            .clone())
+        Ok(
+            DuckLakeAccess::Workspace(self.resolve_binding(scope_id).await?)
+                .physical_scope()
+                .clone(),
+        )
     }
 
     /// Idempotently create or verify a scope registry entry and its metadata tables.
@@ -895,25 +902,25 @@ RETURNING workspace_id;"#,
             .collect())
     }
 
-    /// Load active telemetry promotion manifests for an already bound scope.
-    pub async fn load_active_telemetry_columns_manifests_for_scope(
+    /// Load active telemetry promotion manifests for a bound metadata schema.
+    pub(crate) async fn load_active_telemetry_columns_manifests_for_scope(
         &self,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
     ) -> Result<Vec<TelemetryColumnsManifest>> {
         let client = self.pool.get().await?;
-        let manifests = load_active_telemetry_columns_manifests(&client, scope.pg_namespace())
+        let manifests = load_active_telemetry_columns_manifests(&client, metadata_schema)
             .await
             .map_err(map_spec_load_error)?;
         Ok(manifests)
     }
 
-    /// Load every active business-table promotion for an already bound scope.
+    /// Load every active business-table promotion for a bound metadata schema.
     pub(crate) async fn load_active_business_table_manifests_for_scope(
         &self,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
     ) -> Result<Vec<BusinessTableManifest>> {
         let client = self.pool.get().await?;
-        let schema = quote_pg_ident(scope.pg_namespace());
+        let schema = quote_pg_ident(metadata_schema);
         let rows = client
             .query(
                 &format!(
@@ -936,11 +943,11 @@ WHERE status = 'active' AND target_kind = 'business_table';"#
 
     async fn activate_spec_tx(
         tx: &deadpool_postgres::Transaction<'_>,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         manifest_yaml: &str,
         activation: &PromotionSpecActivation,
     ) -> Result<String> {
-        let schema = scope.pg_namespace().replace('"', "\"\"");
+        let schema = metadata_schema.replace('"', "\"\"");
         tx.execute(
             &format!(
                 // Supersede only the same (target_kind, target_tables) pair so distinct
@@ -986,10 +993,10 @@ ON CONFLICT (spec_id) DO UPDATE SET
 
     async fn load_business_manifest_tx(
         tx: &deadpool_postgres::Transaction<'_>,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         table_name: &str,
     ) -> Result<Option<BusinessTableManifest>> {
-        let schema = scope.pg_namespace().replace('"', "\"\"");
+        let schema = metadata_schema.replace('"', "\"\"");
         let rows = tx
             .query(
                 &format!(
@@ -1011,12 +1018,12 @@ LIMIT 1;"#
 
     async fn lock_promotion_tx(
         tx: &deadpool_postgres::Transaction<'_>,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         lock_suffix: &str,
     ) -> Result<()> {
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
-            &[&format!("{}:{lock_suffix}", scope.pg_namespace())],
+            &[&format!("{metadata_schema}:{lock_suffix}")],
         )
         .await?;
         Ok(())
@@ -1026,15 +1033,16 @@ LIMIT 1;"#
     /// Runtime apply uses [`Self::apply_telemetry_promotion_guarded`] instead.
     pub(crate) async fn record_active_telemetry_promotion_spec(
         &self,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         manifest_yaml: &str,
         target_tables: &[String],
     ) -> Result<String> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
-        Self::lock_promotion_tx(&tx, scope, "telemetry_columns").await?;
+        Self::lock_promotion_tx(&tx, metadata_schema, "telemetry_columns").await?;
         let activation = telemetry_spec_activation(manifest_yaml, target_tables);
-        let spec_id = Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await?;
+        let spec_id =
+            Self::activate_spec_tx(&tx, metadata_schema, manifest_yaml, &activation).await?;
         tx.commit().await?;
         Ok(spec_id)
     }
@@ -1042,7 +1050,7 @@ LIMIT 1;"#
     /// Apply telemetry DDL and activation through the shared lifecycle under a Postgres lock.
     pub(crate) async fn apply_telemetry_promotion_guarded<F, Fut>(
         &self,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         manifest_yaml: &str,
         target_tables: &[String],
         apply_ddl: F,
@@ -1053,10 +1061,10 @@ LIMIT 1;"#
     {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
-        Self::lock_promotion_tx(&tx, scope, "telemetry_columns").await?;
+        Self::lock_promotion_tx(&tx, metadata_schema, "telemetry_columns").await?;
         let activation = telemetry_spec_activation(manifest_yaml, target_tables);
         let spec_id = run_telemetry_apply(apply_ddl, || async {
-            Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await
+            Self::activate_spec_tx(&tx, metadata_schema, manifest_yaml, &activation).await
         })
         .await?;
         tx.commit().await?;
@@ -1066,7 +1074,7 @@ LIMIT 1;"#
     /// Apply business load/validate/DDL/activation through the Postgres lifecycle.
     pub(crate) async fn apply_business_promotion_guarded<F, Fut>(
         &self,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         manifest_yaml: &str,
         spec: &BusinessTableManifest,
         apply_ddl: F,
@@ -1078,15 +1086,21 @@ LIMIT 1;"#
         let table_name = spec.target.table.as_str();
         let mut client = self.pool.get().await.map_err(anyhow_other)?;
         let tx = client.transaction().await.map_err(anyhow_other)?;
-        Self::lock_promotion_tx(&tx, scope, &format!("business_table:{table_name}"))
-            .await
-            .map_err(BusinessApplyError::Other)?;
+        Self::lock_promotion_tx(
+            &tx,
+            metadata_schema,
+            &format!("business_table:{table_name}"),
+        )
+        .await
+        .map_err(BusinessApplyError::Other)?;
         let activation = business_spec_activation(table_name, manifest_yaml);
         let spec_id = run_business_apply(
             spec,
-            || async { Self::load_business_manifest_tx(&tx, scope, table_name).await },
+            || async { Self::load_business_manifest_tx(&tx, metadata_schema, table_name).await },
             apply_ddl,
-            || async { Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await },
+            || async {
+                Self::activate_spec_tx(&tx, metadata_schema, manifest_yaml, &activation).await
+            },
         )
         .await?;
         tx.commit().await.map_err(anyhow_other)?;

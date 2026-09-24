@@ -748,13 +748,9 @@ pub async fn rebuild_session_summary(
         .maintenance_engine()
         .await
         .map_err(storage_error)?;
-    let maintenance_scope = maintenance
-        .resolve_scope(scope_key)
-        .await
-        .map_err(storage_error)?;
     let result = maintenance
-        .rebuild_session_summary(
-            &maintenance_scope,
+        .rebuild_session_summary_for_key(
+            scope_key,
             request.from,
             request.to,
             cfg.max_reduce_span_seconds,

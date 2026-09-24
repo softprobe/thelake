@@ -126,8 +126,14 @@ pub(crate) struct DuckLakeWriter {
 }
 
 impl DuckLakeWriter {
-    pub(crate) fn physical_scope(&self) -> &PhysicalScope {
+    /// Ducklake-internal physical identity (scores/otlp/promotion only).
+    pub(super) fn physical_scope(&self) -> &PhysicalScope {
         self.access.physical_scope()
+    }
+
+    /// Bound Postgres metadata schema — the only codec engines need upward.
+    pub(crate) fn metadata_schema(&self) -> &str {
+        self.access.physical_scope().pg_namespace()
     }
 
     pub(crate) fn workspace_scope_mode(&self) -> crate::workspace_scope::WorkspaceScopeMode {

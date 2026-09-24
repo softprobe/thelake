@@ -66,13 +66,31 @@ fn engine_types_do_not_export_writer_or_resolver_fields() {
         "pub fn writer(",
         "pub fn resolver(",
         "pub fn physical_scope(",
-        "pub fn pool(",
+        "pub(crate) fn physical_scope(",
     ] {
         assert!(
             !ingest.contains(needle),
             "IngestEngine/AdminEngine must not export internals via {needle}"
         );
     }
+
+    let writer = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/storage/ducklake/writer.rs"
+    ));
+    assert!(
+        writer.contains("pub(super) fn physical_scope("),
+        "DuckLakeWriter::physical_scope must be pub(super) (ducklake-only)"
+    );
+    assert!(
+        !writer.contains("pub(crate) fn physical_scope(")
+            && !writer.contains("pub fn physical_scope("),
+        "DuckLakeWriter must not expose physical_scope upward to engines"
+    );
+    assert!(
+        writer.contains("pub(crate) fn metadata_schema("),
+        "DuckLakeWriter must expose metadata_schema for engine composition"
+    );
 
     let runtime = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

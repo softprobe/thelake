@@ -147,13 +147,9 @@ async fn run_reduce(state: &AppState) -> usize {
         .maintenance_engine()
         .await
         .expect("maintenance engine");
-    let scope = maintenance
-        .resolve_scope(softprobe_runtime::workspace_scope::DEFAULT_WORKSPACE_ID)
-        .await
-        .expect("default maintenance scope");
     maintenance
-        .reduce_session_summary(
-            &scope,
+        .reduce_session_summary_for_key(
+            softprobe_runtime::workspace_scope::DEFAULT_WORKSPACE_ID,
             cfg.max_sessions_per_reduce,
             cfg.max_reduce_span_seconds,
         )

@@ -1,7 +1,6 @@
 //! Leased `session_summary.reduce` / `session_summary.rebuild` on the shared runner.
 //!
-//! Jobs list workspace keys and call [`MaintenanceEngine`] façades only —
-//! physical scope / pool identity stays inside the engine.
+//! Jobs list workspace keys and call [`MaintenanceEngine`] key façades only.
 
 use crate::async_jobs::Job;
 use crate::compaction::MaintenanceEngine;
@@ -48,10 +47,9 @@ impl Job for SessionSummaryReduceJob {
     }
 
     async fn run(&self, scope_key: &str) -> Result<()> {
-        let scope = self.maintenance.resolve_scope(scope_key).await?;
         self.maintenance
-            .reduce_session_summary(
-                &scope,
+            .reduce_session_summary_for_key(
+                scope_key,
                 self.cfg.max_sessions_per_reduce,
                 self.cfg.max_reduce_span_seconds,
             )
@@ -96,9 +94,8 @@ impl Job for SessionSummaryRebuildJob {
     async fn run(&self, scope_key: &str) -> Result<()> {
         let to = Utc::now();
         let from = to - ChronoDuration::seconds(self.cfg.max_reduce_span_seconds as i64);
-        let scope = self.maintenance.resolve_scope(scope_key).await?;
         self.maintenance
-            .rebuild_session_summary(&scope, from, to, self.cfg.max_reduce_span_seconds)
+            .rebuild_session_summary_for_key(scope_key, from, to, self.cfg.max_reduce_span_seconds)
             .await?;
         Ok(())
     }
@@ -107,17 +104,17 @@ impl Job for SessionSummaryRebuildJob {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn session_summary_jobs_do_not_touch_physical_scope() {
+    fn session_summary_jobs_use_key_facades_only() {
         let src = include_str!("job.rs");
         let production = src.split("#[cfg(test)]").next().expect("production");
         for needle in [
             "PhysicalScope",
             "DuckLakeScopeResolver",
-            "default_physical_scope",
+            "MaintenanceScope",
+            "reduce_session_summary(&",
+            "rebuild_session_summary(&",
+            ".resolve_scope(",
             ".pool()",
-            "cached_scopes",
-            "lookup_cached_scope",
-            "list_summary_scopes",
         ] {
             assert!(
                 !production.contains(needle),
@@ -125,11 +122,10 @@ mod tests {
             );
         }
         assert!(
-            production.contains("workspace_scope_keys")
-                && production.contains("resolve_scope")
-                && production.contains("reduce_session_summary")
-                && production.contains("rebuild_session_summary"),
-            "jobs must use MaintenanceEngine façades only"
+            production.contains("reduce_session_summary_for_key")
+                && production.contains("rebuild_session_summary_for_key")
+                && production.contains("workspace_scope_keys"),
+            "jobs must use MaintenanceEngine key façades only"
         );
     }
 }

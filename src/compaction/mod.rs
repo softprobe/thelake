@@ -14,7 +14,7 @@ mod status;
 pub(crate) mod twcs;
 mod watermark;
 
-pub use engine::{maintenance_table_names, MaintenanceEngine, MaintenanceScope};
+pub use engine::{maintenance_table_names, MaintenanceEngine};
 pub use maintenance_job::{PhysicalScopeMaintenanceJob, PHYSICAL_SCOPE_MAINTENANCE_JOB};
 pub use status::{
     pass_compaction_ok, ActionResult, ActionStatus, MaintenanceSummary, MetadataMaintenanceResult,
@@ -22,14 +22,3 @@ pub use status::{
 };
 
 pub use twcs::{open_day_files_for_merge, PartitionFileStats, TwcsPolicy};
-
-use crate::runtime_engine::RuntimeEngineManager;
-use anyhow::Result;
-
-impl RuntimeEngineManager {
-    /// Construct the process maintenance facade. Prefer this over building
-    /// [`MaintenanceEngine`] directly so registry ownership stays with the manager.
-    pub async fn maintenance_engine(&self) -> Result<MaintenanceEngine> {
-        MaintenanceEngine::from_engines(self).await
-    }
-}

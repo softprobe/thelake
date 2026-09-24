@@ -102,7 +102,11 @@ pub(crate) async fn ensure_product_hot_attrs_for_scope(
     let _ = traces_hot_manifest()?;
     let tables = vec![TRACES_TABLE.to_string()];
     resolver
-        .record_active_telemetry_promotion_spec(scope, TRACES_QUERY_HOT_ATTRS_YAML, &tables)
+        .record_active_telemetry_promotion_spec(
+            scope.pg_namespace(),
+            TRACES_QUERY_HOT_ATTRS_YAML,
+            &tables,
+        )
         .await
         .context("activate traces-query-hot-attrs for session_summary")?;
     let active = load_active_telemetry_columns_manifests(&client, scope.pg_namespace())

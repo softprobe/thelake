@@ -174,10 +174,3 @@ pub fn spawn_runner(
 
     Some(handle)
 }
-
-/// Build the Postgres-backed lease store for this process's scope registry.
-pub(crate) fn lease_store_for(
-    scope_registry: &crate::runtime_engine::DuckLakeScopeResolver,
-) -> Arc<dyn LeaseStore> {
-    Arc::new(PostgresLeaseStore::from_resolver(scope_registry))
-}

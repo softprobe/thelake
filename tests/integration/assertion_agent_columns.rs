@@ -229,14 +229,10 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .maintenance_engine()
         .await
         .expect("maintenance engine");
-    let summary_scope = maintenance
-        .resolve_scope(tenant_key)
-        .await
-        .expect("maintenance scope");
     let session_cfg = &state.engines.config().session_summary;
     maintenance
-        .reduce_session_summary(
-            &summary_scope,
+        .reduce_session_summary_for_key(
+            tenant_key,
             session_cfg.max_sessions_per_reduce,
             session_cfg.max_reduce_span_seconds,
         )

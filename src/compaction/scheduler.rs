@@ -41,7 +41,7 @@ pub async fn start_maintenance_scheduler(
         return Ok(None);
     }
 
-    let leases = async_jobs::lease_store_for(engines.scope_registry());
+    let leases = Arc::new(engines.lease_store());
     Ok(async_jobs::spawn_runner(&config.async_jobs, leases, jobs))
 }
 
