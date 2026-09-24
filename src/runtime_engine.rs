@@ -82,6 +82,14 @@ impl RuntimeEngine {
         self.query.execute_query(sql).await
     }
 
+    pub async fn count_traces(&self, filter: crate::query::TraceCountFilter) -> Result<u64> {
+        self.query.count_traces(filter).await
+    }
+
+    pub async fn count_logs(&self, filter: crate::query::LogCountFilter) -> Result<u64> {
+        self.query.count_logs(filter).await
+    }
+
     pub(crate) async fn execute_trusted(
         &self,
         query: crate::sql::trusted::TrustedSql,
@@ -640,15 +648,17 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
             bail!("ducklake data path is required");
         }
 
-        let mut scope = self.default_physical_scope.clone();
-        scope.metadata_schema = request.metadata_schema;
-        scope.data_path = request.data_path;
-        if self.workspace_scope_mode == WorkspaceScopeMode::Shared
-            && (scope.metadata_schema != self.default_physical_scope.metadata_schema
-                || scope.data_path != self.default_physical_scope.data_path)
-        {
-            bail!("shared scope provisioning conflicts with configured physical scope");
-        }
+        // Shared workspaces are logical bindings to the one configured physical
+        // scope. The request names the workspace only; it cannot select a
+        // second catalog or data root.
+        let scope = match self.workspace_scope_mode {
+            WorkspaceScopeMode::Isolated => PhysicalScope {
+                metadata_schema: request.metadata_schema,
+                data_path: request.data_path,
+                ..self.default_physical_scope.clone()
+            },
+            WorkspaceScopeMode::Shared => self.default_physical_scope.clone(),
+        };
         let mut client = self.pool.get().await?;
         let physical = scope.clone();
         let physical_scope_id = physical.key();
@@ -747,6 +757,33 @@ RETURNING workspace_id;"#,
             .await
             .map_err(map_spec_load_error)?;
         Ok(manifests)
+    }
+
+    /// Load every active business-table promotion for an already bound scope.
+    pub(crate) async fn load_active_business_table_manifests_for_scope(
+        &self,
+        scope: &PhysicalScope,
+    ) -> Result<Vec<BusinessTableManifest>> {
+        let client = self.pool.get().await?;
+        let schema = quote_pg_ident(&scope.metadata_schema);
+        let rows = client
+            .query(
+                &format!(
+                    r#"SELECT spec_id, manifest_json FROM {schema}.promotion_specs
+WHERE status = 'active' AND target_kind = 'business_table';"#
+                ),
+                &[],
+            )
+            .await?;
+        let manifests = rows
+            .into_iter()
+            .map(|row| {
+                let spec_id: String = row.get(0);
+                let manifest_json: String = row.get(1);
+                business_manifest_from_row(&spec_id, &manifest_json).map_err(map_spec_load_error)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(manifests.into_iter().flatten().collect())
     }
 
     async fn activate_spec_tx(

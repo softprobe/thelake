@@ -1,22 +1,13 @@
 //! One-clock production contract: real writers create calendar-day files and
 //! timestamp-bounded recipes prune them without legacy date columns.
 
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
-
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::routing::post;
-use axum::Router;
 use chrono::{TimeZone, Utc};
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
-use softprobe_runtime::config::Config;
 use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::{Log, Span, SpanEvent};
-use softprobe_runtime::runtime_api::runtime_control_routes;
+use softprobe_runtime::query::{LogCountFilter, TraceCountFilter};
+use std::collections::HashMap;
+use std::path::Path;
 use tempfile::TempDir;
-use tower::ServiceExt;
 
 /// Locked partition clause (no DATE identity column).
 pub const ONE_CLOCK_PARTITION_BY: &str = "year(timestamp), month(timestamp), day(timestamp)";
@@ -131,29 +122,6 @@ fn log(day: u32, id: &str) -> Log {
     }
 }
 
-async fn build_router(config: Config) -> Router {
-    let (router, state) =
-        softprobe_runtime::api::create_router(Arc::new(config), post(ingest_traces), None)
-            .await
-            .expect("router");
-    router.merge(runtime_control_routes().with_state(state))
-}
-
-async fn post_sql(router: &Router, sql: &str) -> StatusCode {
-    let request = Request::builder()
-        .method("POST")
-        .uri("/v1/query/sql")
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::json!({ "sql": sql }).to_string()))
-        .expect("sql request");
-    router
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("sql response")
-        .status()
-}
-
 #[tokio::test]
 async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     let temp = TempDir::new().expect("tempdir");
@@ -222,7 +190,7 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
 }
 
 #[tokio::test]
-async fn recipe_gate_covers_traces_logs_and_alias_expansion() {
+async fn typed_query_gate_covers_traces_and_logs() {
     let temp = TempDir::new().expect("tempdir");
     let mut config = crate::util::config::file_backed_test_config(&temp);
     config.ingest.flush_interval_seconds = 0;
@@ -237,20 +205,29 @@ async fn recipe_gate_covers_traces_logs_and_alias_expansion() {
         .await
         .expect("log seed");
 
-    let router = build_router(config).await;
-    for sql in ["SELECT count(*) FROM traces", "SELECT count(*) FROM logs"] {
-        assert_eq!(
-            post_sql(&router, sql).await,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "{sql}"
-        );
-    }
-    for sql in [
-        "SELECT count(*) FROM traces WHERE timestamp >= '2026-09-10'::TIMESTAMP_NS",
-        "SELECT count(*) FROM logs WHERE timestamp <= '2026-09-11'::TIMESTAMP_NS",
-    ] {
-        assert_eq!(post_sql(&router, sql).await, StatusCode::OK, "{sql}");
-    }
+    let query = softprobe_runtime::query::create_query_engine(&config)
+        .await
+        .expect("query engine");
+    assert_eq!(
+        query
+            .count_traces(TraceCountFilter {
+                session_id: Some("persistent-session".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("trace count"),
+        1
+    );
+    assert_eq!(
+        query
+            .count_logs(LogCountFilter {
+                session_id: Some("persistent-session".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("log count"),
+        1
+    );
 }
 
 #[test]

@@ -93,7 +93,7 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         .expect("connect runtime engines");
     let business_tenant_id = format!("tenant-biz-{short}");
     let business_metadata_schema = format!("sp_biz_data_{short}");
-    manager
+    let physical_scope = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: business_tenant_id.clone(),
             metadata_schema: business_metadata_schema.clone(),
@@ -118,8 +118,8 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         Err(_) => panic!("apply business table promotion"),
     };
     assert!(!spec_id.is_empty());
-    assert_ducklake_table_exists(&business_metadata_schema, "checkout_orders_v1").await;
-    assert_ducklake_view_exists(&business_metadata_schema, "checkout_orders_current").await;
+    assert_ducklake_table_exists(&physical_scope.metadata_schema, "checkout_orders_v1").await;
+    assert_ducklake_view_exists(&physical_scope.metadata_schema, "checkout_orders_current").await;
 }
 
 async fn relation_exists(

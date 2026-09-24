@@ -64,7 +64,7 @@ async fn setup() -> PostgresBackend {
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
-    manager
+    let physical_scope = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: metadata_schema.clone(),
@@ -99,7 +99,7 @@ async fn setup() -> PostgresBackend {
         router,
         metadata_path,
         data_path,
-        metadata_schema,
+        metadata_schema: physical_scope.metadata_schema,
         api_key: "promotion-contract-key".to_string(),
     }
 }

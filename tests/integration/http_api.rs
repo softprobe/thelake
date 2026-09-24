@@ -390,18 +390,28 @@ async fn query_sql_empty_returns_400() {
 }
 
 #[tokio::test]
-async fn query_sql_select_literal() {
+async fn telemetry_search_select_literal() {
     let (router, _t) = build_router().await;
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/query/sql")
+        .uri("/v1/telemetry/search")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({ "sql": "SELECT 1 AS n" }).to_string()))
+        .body(Body::from(
+            json!({
+                "version": 1,
+                "scope": "traces",
+                "timeRange": {
+                    "from": "2026-05-03T10:00:00Z",
+                    "to": "2026-05-03T11:00:00Z"
+                },
+                "limit": 1
+            })
+            .to_string(),
+        ))
         .unwrap();
     let resp = router.oneshot(req).await.expect("oneshot");
     assert_eq!(resp.status(), StatusCode::OK);
     let v = response_json(resp).await;
-    assert!(v["columns"].is_array());
     assert!(v["rows"].is_array());
 }
 
@@ -863,29 +873,36 @@ async fn logs_promote_scope_name_to_logger_name_attribute() {
         .await
         .expect("flush logs");
 
-    // CAST keeps this green under both MAP and VARIANT attribute storage.
-    let sql = format!(
-        "SELECT body, CAST(attributes['logger_name'] AS VARCHAR) AS logger_name \
-         FROM logs WHERE session_id = '{session_id}' \
-           AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
-           AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS \
-         ORDER BY timestamp ASC"
-    );
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/query/sql")
+        .uri("/v1/telemetry/details")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({ "sql": sql }).to_string()))
+        .body(Body::from(
+            json!({
+                "version": 1,
+                "target": { "kind": "session", "id": session_id },
+                "timeRange": {
+                    "from": "2026-05-03T10:00:00Z",
+                    "to": "2026-05-03T11:00:00Z"
+                },
+                "limit": 10
+            })
+            .to_string(),
+        ))
         .unwrap();
     let resp = router.oneshot(req).await.expect("query");
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let v = response_json(resp).await;
-    let rows = v["rows"].as_array().expect("rows");
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let rows = v["logs"].as_array().expect("logs");
     assert_eq!(rows.len(), 2, "{v}");
-    assert_eq!(rows[0][0], "promoted-from-scope");
-    assert_eq!(rows[0][1], "agent.transform.success");
-    assert_eq!(rows[1][0], "explicit-attribute-wins");
-    assert_eq!(rows[1][1], "explicit.logger");
+    assert_eq!(rows[0]["body"], "promoted-from-scope");
+    assert_eq!(
+        rows[0]["attributes"]["logger_name"],
+        "agent.transform.success"
+    );
+    assert_eq!(rows[1]["body"], "explicit-attribute-wins");
+    assert_eq!(rows[1]["attributes"]["logger_name"], "explicit.logger");
 }
 
 /// Session search pagination with sub-millisecond cursors is covered by

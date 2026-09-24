@@ -37,3 +37,5 @@ pub mod ingest_commit_query;
 pub mod integration;
 #[cfg(feature = "integration-e2e")]
 pub mod session_summary_list;
+#[cfg(feature = "integration-e2e")]
+pub mod storage_contract_validation;

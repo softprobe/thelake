@@ -6,6 +6,7 @@ services:
   ducklake-postgres:
     image: postgres:17
     container_name: ducklake-postgres
+    shm_size: 1gb
     environment:
       - POSTGRES_PASSWORD=ducklake
       - POSTGRES_USER=ducklake

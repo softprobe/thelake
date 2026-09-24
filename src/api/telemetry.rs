@@ -283,11 +283,11 @@ pub fn compile_details_sql(
     let mut log_conds = Vec::new();
     push_otlp_time_predicates(&mut log_conds, &window, [log_filter]);
     let span_cols = format!(
-        "session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind, timestamp, end_timestamp, status_code, status_message, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, {}",
+        "session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind, timestamp, end_timestamp, status_code, status_message, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, agent_id, agent_name, {}",
         variant_as_json("attributes")
     );
     let log_cols = format!(
-        "session_id, timestamp, severity_number, severity_text, body, trace_id, span_id, {}, {}",
+        "session_id, timestamp, severity_number, severity_text, body, trace_id, span_id, agent_id, agent_name, {}, {}",
         variant_as_json("attributes"),
         variant_as_json("resource_attributes")
     );

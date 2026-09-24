@@ -6,7 +6,6 @@
 #
 # Usage:
 #   ./scripts/run-isolated-cargo-tests.sh --features integration-e2e --test tests --list-prefix integration::
-#   ./scripts/run-isolated-cargo-tests.sh --features integration-e2e --test tests --list-prefix integration::http_api:: --exclude-prefix integration::http_api::query_sql_
 #   ./scripts/run-isolated-cargo-tests.sh --features integration-e2e --test integration_perf --tests performance::perf_union_read_latency
 set -euo pipefail
 
@@ -16,7 +15,6 @@ cd "$ROOT"
 CARGO_ARGS=()
 LIST_PREFIX=""
 EXPLICIT_TESTS=()
-EXCLUDE_PREFIXES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,10 +28,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --list-prefix)
       LIST_PREFIX="$2"
-      shift 2
-      ;;
-    --exclude-prefix)
-      EXCLUDE_PREFIXES+=("$2")
       shift 2
       ;;
     --tests)
@@ -141,16 +135,7 @@ else
   fi
   while IFS= read -r name; do
     [[ -n "${name}" ]] || continue
-    excluded=0
-    if ((${#EXCLUDE_PREFIXES[@]} > 0)); then
-      for prefix in "${EXCLUDE_PREFIXES[@]}"; do
-        if [[ "${name}" == "${prefix}"* ]]; then
-          excluded=1
-          break
-        fi
-      done
-    fi
-    [[ "${excluded}" -eq 0 ]] && TESTS+=("${name}")
+    TESTS+=("${name}")
   done < <("${TEST_BIN}" --list 2>/dev/null | awk -v pfx="${LIST_PREFIX}" '
     $0 ~ ("^" pfx) {
       name=$1

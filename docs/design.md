@@ -238,11 +238,12 @@ no PATCH; replace a config by inserting a new `config_id`. Human annotation
 
 ## Schema promotion
 
-Promotion is tenant-scoped and applied through authenticated
-`POST /v1/promotions/apply`, not process-global YAML. Active manifests live in
-the tenant PostgreSQL metadata schema (`promotion_specs`) in production.
-SQLite supports promotion in its configured local single-scope DuckLake
-catalog.
+Promotion is applied through authenticated `POST /v1/promotions/apply`, not
+process-global YAML. In isolated scope, active manifests live in the workspace
+PostgreSQL metadata schema (`promotion_specs`). In shared scope, they live in
+the one physical-scope schema and the resulting DDL and ingest extraction are
+global to every workspace using that scope. SQLite supports promotion in its
+configured local single-scope DuckLake catalog.
 
 - **Telemetry columns:** additive nullable columns on `traces` / `logs`.
   Future ingest extracts declared sources into those columns; historical rows

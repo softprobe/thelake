@@ -49,13 +49,6 @@ impl TestPipeline {
         }
     }
 
-    pub async fn execute_query(
-        &self,
-        sql: &str,
-    ) -> anyhow::Result<softprobe_runtime::query::duckdb::QueryResult> {
-        self.query_engine.execute_query(sql).await
-    }
-
     pub fn query_engine(&self) -> &QueryEngine {
         &self.query_engine
     }

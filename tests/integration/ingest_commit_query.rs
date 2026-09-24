@@ -4,6 +4,7 @@ use crate::util::poll::wait_for;
 use crate::util::storage_config::load_test_config;
 use chrono::Utc;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData, SpanEvent};
+use softprobe_runtime::query::{LogCountFilter, TraceCountFilter};
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
@@ -214,15 +215,15 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
             session_id
         );
 
-        let escaped = session_id.replace('\'', "''");
-        let sql = format!(
-            "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-            escaped
-        );
-
         let query_timer = Timer::start(&format!("Query session {}", session_idx + 1));
-        let result = test_pipeline.execute_query(&sql).await.expect("query");
-        let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
+        let found = test_pipeline
+            .query_engine()
+            .count_traces(TraceCountFilter {
+                session_id: Some(session_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query") as usize;
 
         let query_duration = query_timer.stop();
         total_query_duration += query_duration;
@@ -235,39 +236,19 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
             spans_per_session, session_id, found
         );
 
-        let http_sql = format!(
-            "SELECT \
-                http_request_method, \
-                http_request_path, \
-                http_request_headers, \
-                http_request_body, \
-                http_response_status_code, \
-                http_response_headers, \
-                http_response_body \
-             FROM traces \
-             WHERE session_id = '{}' AND http_request_method IS NOT NULL \
-               AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
-               AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS \
-             LIMIT 1",
-            escaped
-        );
         let http_result = test_pipeline
-            .execute_query(&http_sql)
+            .query_engine()
+            .find_http_span(session_id)
             .await
             .expect("http query");
-        assert_eq!(
-            http_result.row_count, 1,
-            "Expected HTTP fields row for session {}",
-            session_id
-        );
-        let row = &http_result.rows[0];
-        let method = row[0].as_str().unwrap_or("");
-        let path = row[1].as_str().unwrap_or("");
-        let headers = row[2].as_str().unwrap_or("");
-        let body = row[3].as_str().unwrap_or("");
-        let status = row[4].as_i64().unwrap_or(0);
-        let resp_headers = row[5].as_str().unwrap_or("");
-        let resp_body = row[6].as_str().unwrap_or("");
+        let http_result = http_result.expect("HTTP fields row");
+        let method = http_result.request_method.as_deref().unwrap_or("");
+        let path = http_result.request_path.as_deref().unwrap_or("");
+        let headers = http_result.request_headers.as_deref().unwrap_or("");
+        let body = http_result.request_body.as_deref().unwrap_or("");
+        let status = http_result.response_status_code.unwrap_or_default();
+        let resp_headers = http_result.response_headers.as_deref().unwrap_or("");
+        let resp_body = http_result.response_body.as_deref().unwrap_or("");
 
         assert_eq!(
             method, "POST",
@@ -334,103 +315,6 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     pipeline.force_flush_spans().await.expect("force flush");
 
     println!("⚙️  Running optimizer to commit staged spans to Iceberg...");
-
-    // After optimizer commits, data is in Iceberg and should be immediately queryable via union view.
-    // For DuckLake-backed tests we currently validate staged cleanup and pre-optimizer union-read.
-    // Legacy Iceberg-only post-optimizer assertions (removed with Iceberg cleanup).
-    if false {
-        for (session_idx, session_id) in session_ids.iter().enumerate() {
-            let escaped = session_id.replace('\'', "''");
-            // Query traces - should include all three tiers (buffer + staged + iceberg)
-            // After optimizer, staged is empty but union view should refresh and query Iceberg
-            let sql = format!(
-                "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-                escaped
-            );
-            let result = test_pipeline.execute_query(&sql).await.expect("query");
-            let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
-
-            assert_eq!(
-                found, spans_per_session,
-                "Expected union view to return {} spans for session {} after optimizer, found {}",
-                spans_per_session, session_id, found
-            );
-
-            // Check if HTTP fields are present in union view
-            // Note: HTTP fields are only on the first span (i==0) of each session
-            let http_sql = format!(
-                "SELECT \
-                http_request_method, \
-                http_request_path, \
-                http_request_headers, \
-                http_request_body, \
-                http_response_status_code, \
-                http_response_headers, \
-                http_response_body \
-             FROM traces \
-             WHERE session_id = '{}' AND http_request_method IS NOT NULL \
-               AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
-               AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS \
-             LIMIT 1",
-                escaped
-            );
-            let http_result = test_pipeline
-                .execute_query(&http_sql)
-                .await
-                .expect("http query");
-
-            assert_eq!(
-            http_result.row_count, 1,
-            "Expected HTTP fields row for session {} in union view. All {} spans were committed, so the first span with HTTP fields should be present.",
-            session_id, spans_per_session
-        );
-            let row = &http_result.rows[0];
-            let method = row[0].as_str().unwrap_or("");
-            let path = row[1].as_str().unwrap_or("");
-            let headers = row[2].as_str().unwrap_or("");
-            let body = row[3].as_str().unwrap_or("");
-            let status = row[4].as_i64().unwrap_or(0);
-            let resp_headers = row[5].as_str().unwrap_or("");
-            let resp_body = row[6].as_str().unwrap_or("");
-
-            assert_eq!(
-                method, "POST",
-                "HTTP method should be POST for session {}",
-                session_idx
-            );
-            assert_eq!(
-                path,
-                format!("/api/v1/session/{}", session_idx),
-                "HTTP path should match for session {}",
-                session_idx
-            );
-            assert!(
-                headers.contains("Authorization"),
-                "HTTP request headers should contain Authorization for session {}",
-                session_idx
-            );
-            assert!(
-                body.contains("session_id"),
-                "HTTP request body should contain session_id for session {}",
-                session_idx
-            );
-            assert_eq!(
-                status, 200,
-                "HTTP response status should be 200 for session {}",
-                session_idx
-            );
-            assert!(
-                resp_headers.contains("X-Request-Id"),
-                "HTTP response headers should contain X-Request-Id for session {}",
-                session_idx
-            );
-            assert!(
-                resp_body.contains("success"),
-                "HTTP response body should contain success for session {}",
-                session_idx
-            );
-        }
-    }
 
     println!("\n✅ WAL, local cache, and optimizer paths validated for spans");
 }
@@ -567,44 +451,31 @@ async fn test_duckdb_union_read_realtime_performance() {
 
     let query_engine = test_pipeline.query_engine();
 
-    let base_sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        base_session.replace('\'', "''")
-    );
-    let staged_sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        staged_session.replace('\'', "''")
-    );
-    let buffer_sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        buffer_session.replace('\'', "''")
-    );
-
     let base_count = query_engine
-        .execute_query(&base_sql)
+        .count_traces(TraceCountFilter {
+            session_id: Some(base_session.clone()),
+            ..Default::default()
+        })
         .await
-        .expect("base query")
-        .rows[0][0]
-        .as_i64()
-        .unwrap_or(0);
+        .expect("base query") as i64;
     assert_eq!(base_count, 200, "Union-read should see committed rows");
 
     let staged_count = query_engine
-        .execute_query(&staged_sql)
+        .count_traces(TraceCountFilter {
+            session_id: Some(staged_session.clone()),
+            ..Default::default()
+        })
         .await
-        .expect("staged query")
-        .rows[0][0]
-        .as_i64()
-        .unwrap_or(0);
+        .expect("staged query") as i64;
     assert_eq!(staged_count, 100, "Union-read should see staged rows");
 
     let buffer_count = query_engine
-        .execute_query(&buffer_sql)
+        .count_traces(TraceCountFilter {
+            session_id: Some(buffer_session.clone()),
+            ..Default::default()
+        })
         .await
-        .expect("buffer query")
-        .rows[0][0]
-        .as_i64()
-        .unwrap_or(0);
+        .expect("buffer query") as i64;
     assert_eq!(buffer_count, 50, "Union-read should see buffered rows");
 }
 
@@ -713,64 +584,6 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
     write_metrics.print_report();
     println!("✅ Flush completed (DuckLake flush-through)");
     println!("✅ Querying back each session through DuckDB union view...");
-
-    // Legacy Iceberg-only post-optimizer assertions (removed with Iceberg cleanup).
-    if false {
-        for session_id in &session_ids {
-            let escaped = session_id.replace('\'', "''");
-            let sql = format!(
-                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-                escaped
-            );
-            let result = test_pipeline.execute_query(&sql).await.expect("query");
-            let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
-            assert_eq!(
-                found, logs_per_session,
-                "Expected exactly {} logs for session {}, found {}",
-                logs_per_session, session_id, found
-            );
-        }
-
-        println!(
-            "✅ WAL-backed union-read validated for {} log sessions",
-            num_sessions
-        );
-
-        println!("🔄 Forcing flush to staged local cache...");
-        pipeline.force_flush_logs().await.expect("force flush");
-
-        for session_id in &session_ids {
-            let escaped = session_id.replace('\'', "''");
-            let sql = format!(
-                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-                escaped
-            );
-            let result = test_pipeline.execute_query(&sql).await.expect("query");
-            let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
-            assert_eq!(
-                found, logs_per_session,
-                "Expected staged union-read to return {} logs for session {}",
-                logs_per_session, session_id
-            );
-        }
-
-        println!("⚙️  Running optimizer to commit staged logs to Iceberg...");
-
-        for session_id in &session_ids {
-            let escaped = session_id.replace('\'', "''");
-            let sql = format!(
-                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-                escaped
-            );
-            let result = test_pipeline.execute_query(&sql).await.expect("query");
-            let found = result.rows[0][0].as_i64().unwrap_or(0) as usize;
-            assert_eq!(
-                found, logs_per_session,
-                "Expected union view to return {} logs for session {} after optimizer",
-                logs_per_session, session_id
-            );
-        }
-    }
 
     println!("✅ WAL, local cache, and optimizer paths validated for logs");
 }
@@ -914,13 +727,15 @@ async fn test_pinned_metadata_updates_on_commit() {
         "legacy catalog_metadata pointer files must not be written"
     );
 
-    let count_sql = "SELECT COUNT(*) AS count FROM traces WHERE app_id = 'app-pin' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS";
     let first = test_pipeline
-        .execute_query(count_sql)
+        .query_engine()
+        .count_traces(TraceCountFilter {
+            app_id: Some("app-pin".to_string()),
+            ..Default::default()
+        })
         .await
         .expect("query after first flush");
-    let first_count = first.rows[0][0].as_i64().unwrap_or(0);
-    assert_eq!(first_count, 10, "expected 10 spans after first flush");
+    assert_eq!(first, 10, "expected 10 spans after first flush");
 
     pipeline
         .add_spans(spans, 10 * 256)
@@ -929,11 +744,14 @@ async fn test_pinned_metadata_updates_on_commit() {
     pipeline.force_flush_spans().await.expect("force flush");
 
     let second = test_pipeline
-        .execute_query(count_sql)
+        .query_engine()
+        .count_traces(TraceCountFilter {
+            app_id: Some("app-pin".to_string()),
+            ..Default::default()
+        })
         .await
         .expect("query after second flush");
-    let second_count = second.rows[0][0].as_i64().unwrap_or(0);
-    assert_eq!(second_count, 20, "expected 20 spans after second flush");
+    assert_eq!(second, 20, "expected 20 spans after second flush");
     assert!(
         !pointer_dir.join("traces.json").exists(),
         "legacy catalog_metadata pointer files must not be written"
@@ -980,34 +798,36 @@ async fn test_duckdb_union_read_realtime_concurrency() {
     pipeline.force_flush_logs().await.expect("stage flush");
 
     // Wait until union view reflects flushed data (staged path listing may be empty).
-    let staged_sql = format!(
-        "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        staged_session.replace('\'', "''")
-    );
     wait_for(
         Duration::from_secs(5),
         Duration::from_millis(200),
         || async {
-            let staged_result = query_engine.execute_query(&staged_sql).await?;
-            let c = staged_result.rows[0][0].as_i64().unwrap_or(0);
-            Ok(c >= per_session as i64)
+            let c = query_engine
+                .count_logs(LogCountFilter {
+                    session_id: Some(staged_session.clone()),
+                    ..Default::default()
+                })
+                .await?;
+            Ok(c >= per_session as u64)
         },
     )
     .await
     .expect("logs should show flushed rows");
 
     // Query AFTER flush to verify staged files are visible
-    let staged_result = query_engine
-        .execute_query(&staged_sql)
+    let staged_count = query_engine
+        .count_logs(LogCountFilter {
+            session_id: Some(staged_session.clone()),
+            ..Default::default()
+        })
         .await
         .expect("staged query");
-    let staged_count = staged_result.rows[0][0].as_i64().unwrap_or(0);
     println!(
         "🔍 Staged query result (after flush): {} rows",
         staged_count
     );
     assert_eq!(
-        staged_count, per_session as i64,
+        staged_count, per_session as u64,
         "Expected {} rows in staged",
         per_session
     );
@@ -1020,22 +840,21 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         let session_id = sessions[i % sessions.len()].clone();
         let engine = query_engine.clone();
         handles.push(tokio::spawn(async move {
-            let sql = format!(
-                "SELECT COUNT(*) AS count FROM logs WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-                session_id.replace('\'', "''")
-            );
-            let _ = engine.execute_query(&sql).await.expect("warmup");
+            let filter = LogCountFilter {
+                session_id: Some(session_id),
+                ..Default::default()
+            };
+            let _ = engine.count_logs(filter.clone()).await.expect("warmup");
             let start = Instant::now();
-            let result = engine.execute_query(&sql).await.expect("query");
+            let count = engine.count_logs(filter).await.expect("query");
             let duration = start.elapsed();
-            let count = result.rows[0][0].as_i64().unwrap_or(0);
             (duration, count)
         }));
     }
 
     for handle in handles {
         let (_duration, count) = handle.await.expect("task");
-        assert_eq!(count, per_session as i64, "Expected {} rows", per_session);
+        assert_eq!(count, per_session as u64, "Expected {} rows", per_session);
     }
 }
 
@@ -1081,17 +900,17 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
         .await
         .expect("add spans");
 
-    let escaped = session_id.replace('\'', "''");
-    let sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        escaped
-    );
     wait_for(
         Duration::from_secs(5),
         Duration::from_millis(200),
         || async {
-            let result = test_pipeline.execute_query(&sql).await?;
-            let count = result.rows[0][0].as_i64().unwrap_or(0);
+            let count = test_pipeline
+                .query_engine()
+                .count_traces(TraceCountFilter {
+                    session_id: Some(session_id.clone()),
+                    ..Default::default()
+                })
+                .await?;
             Ok(count == 1)
         },
     )
@@ -1200,14 +1019,22 @@ async fn test_wal_cleanup_after_flush() {
 
     println!("✅ Second flush completed (DuckLake flush-through)");
 
-    let sql1 = "SELECT COUNT(*) AS c FROM traces WHERE session_id = 'wal-cleanup-test-1' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS";
-    let sql2 = "SELECT COUNT(*) AS c FROM traces WHERE session_id = 'wal-cleanup-test-2' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS";
-    let c1 = test_pipeline.execute_query(sql1).await.expect("q1").rows[0][0]
-        .as_i64()
-        .unwrap_or(0);
-    let c2 = test_pipeline.execute_query(sql2).await.expect("q2").rows[0][0]
-        .as_i64()
-        .unwrap_or(0);
+    let c1 = test_pipeline
+        .query_engine()
+        .count_traces(TraceCountFilter {
+            session_id: Some("wal-cleanup-test-1".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("q1");
+    let c2 = test_pipeline
+        .query_engine()
+        .count_traces(TraceCountFilter {
+            session_id: Some("wal-cleanup-test-2".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("q2");
     assert_eq!(c1, 50, "expected 50 spans for session 1");
     assert_eq!(c2, 50, "expected 50 spans for session 2");
 }
@@ -1280,16 +1107,15 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
 
     // Step 3: Verify union view shows data from staged files
     println!("🔍 Step 3: Verifying union view shows data from staged files...");
-    let escaped = session_id.replace('\'', "''");
-    let union_sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        escaped
-    );
-    let union_result_before = test_pipeline
-        .execute_query(&union_sql)
+    let union_count_before = test_pipeline
+        .query_engine()
+        .count_traces(TraceCountFilter {
+            session_id: Some(session_id.clone()),
+            ..Default::default()
+        })
         .await
         .expect("query union view");
-    let union_count_before = union_result_before.rows[0][0].as_i64().unwrap_or(0) as usize;
+    let union_count_before = union_count_before as usize;
     assert_eq!(
         union_count_before, expected_count,
         "Expected union view to show {} spans from staged files, found {}",
@@ -1316,11 +1142,15 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
 
     // Step 8: Verify union view doesn't double count (should still be expected_count, not 2x)
     println!("🔍 Step 8: Verifying union view doesn't double count...");
-    let union_result_after = test_pipeline
-        .execute_query(&union_sql)
+    let union_count_after = test_pipeline
+        .query_engine()
+        .count_traces(TraceCountFilter {
+            session_id: Some(session_id.clone()),
+            ..Default::default()
+        })
         .await
         .expect("query union view after commit");
-    let union_count_after = union_result_after.rows[0][0].as_i64().unwrap_or(0) as usize;
+    let union_count_after = union_count_after as usize;
     assert_eq!(
         union_count_after, expected_count,
         "Expected union view to show {} spans (not doubled), found {}. This indicates double counting!",
@@ -1340,15 +1170,15 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
     println!(
         "🧊 Step 9: Verifying data appears in union view (includes Iceberg after optimizer)..."
     );
-    let iceberg_sql = format!(
-        "SELECT COUNT(*) AS count FROM traces WHERE session_id = '{}' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        escaped
-    );
-    let iceberg_result = test_pipeline
-        .execute_query(&iceberg_sql)
+    let iceberg_count = test_pipeline
+        .query_engine()
+        .count_traces(TraceCountFilter {
+            session_id: Some(session_id.clone()),
+            ..Default::default()
+        })
         .await
         .expect("query union view");
-    let iceberg_count = iceberg_result.rows[0][0].as_i64().unwrap_or(0) as usize;
+    let iceberg_count = iceberg_count as usize;
     assert_eq!(
         iceberg_count, expected_count,
         "Expected union view to show {} spans after commit (from Iceberg), found {}",
@@ -1358,11 +1188,15 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
 
     // Step 10: Verify union view still returns correct count (final check)
     println!("🔍 Step 10: Final verification - union view still returns correct count...");
-    let final_union_result = test_pipeline
-        .execute_query(&union_sql)
+    let final_union_count = test_pipeline
+        .query_engine()
+        .count_traces(TraceCountFilter {
+            session_id: Some(session_id),
+            ..Default::default()
+        })
         .await
         .expect("final union view query");
-    let final_union_count = final_union_result.rows[0][0].as_i64().unwrap_or(0) as usize;
+    let final_union_count = final_union_count as usize;
     assert_eq!(
         final_union_count, expected_count,
         "Final check: Expected union view to show {} spans, found {}",

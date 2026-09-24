@@ -11,6 +11,7 @@ use softprobe_runtime::async_jobs::{LeaseStore, PostgresLeaseStore};
 use softprobe_runtime::authn::TenantInfo;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
+use softprobe_runtime::promotion::{parse_promotion_manifest, PromotionManifest};
 use softprobe_runtime::runtime_api::runtime_control_routes;
 use softprobe_runtime::runtime_engine::ScopeProvisioningRequest;
 use std::collections::HashMap;
@@ -244,8 +245,30 @@ async fn get_trace(router: &Router, workspace: &str, trace_id: &str) -> (StatusC
     json_response(router.clone().oneshot(request).await.expect("route")).await
 }
 
+async fn ducklake_relation_exists(schema: &str, relation: &str) -> bool {
+    let (client, connection) = tokio_postgres::connect(
+        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
+        NoTls,
+    )
+    .await
+    .expect("connect DuckLake catalog");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let sql = format!(
+        r#"SELECT count(*) FROM "{}".ducklake_table WHERE table_name = $1;"#,
+        schema.replace('"', "\"\"")
+    );
+    client
+        .query_one(&sql, &[&relation])
+        .await
+        .expect("query DuckLake relation metadata")
+        .get::<_, i64>(0)
+        == 1
+}
+
 #[tokio::test]
-async fn shared_scope_stamps_writes_and_filters_typed_queries_per_workspace() {
+async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
     let dsn = "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake";
     let (client, connection) = tokio_postgres::connect(dsn, NoTls)
         .await
@@ -270,7 +293,15 @@ async fn shared_scope_stamps_writes_and_filters_typed_queries_per_workspace() {
     let shared_data = config.ducklake.data_path.clone();
     let workspace_a = format!("shared_a_{suffix}");
     let workspace_b = format!("shared_b_{suffix}");
-    for workspace in [&workspace_a, &workspace_b] {
+    let shared_scope = engines
+        .provision_scope(ScopeProvisioningRequest {
+            scope_id: workspace_a.to_string(),
+            metadata_schema: shared_schema.clone(),
+            data_path: shared_data.clone(),
+        })
+        .await
+        .expect("provision shared workspace A");
+    for workspace in [&workspace_b] {
         engines
             .provision_scope(ScopeProvisioningRequest {
                 scope_id: workspace.to_string(),
@@ -566,11 +597,161 @@ columns:
             .unwrap(),
     )
     .await;
-    assert_eq!(promotion_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(promotion_status, StatusCode::OK, "{promotion_body}");
+    assert_eq!(promotion_body["applied"], true);
+
+    let promoted_trace_a = format!("promo-a-{suffix}");
+    let promoted_trace_b = format!("promo-b-{suffix}");
+    let promoted_value = "global-promotion-value";
+    let mut promoted_log_a = log(&workspace_a, &promoted_trace_a, &shared_session);
+    promoted_log_a
+        .attributes
+        .insert("shared.scope.test".to_string(), promoted_value.to_string());
+    let mut promoted_log_b = log(&workspace_b, &promoted_trace_b, &shared_session);
+    promoted_log_b
+        .attributes
+        .insert("shared.scope.test".to_string(), promoted_value.to_string());
+    tokio::try_join!(
+        engine_a.add_spans(
+            vec![span(&workspace_a, &promoted_trace_a, &shared_session,)],
+            0
+        ),
+        engine_b.add_spans(
+            vec![span(&workspace_b, &promoted_trace_b, &shared_session,)],
+            0
+        ),
+        engine_a.add_logs(vec![promoted_log_a], 0),
+        engine_b.add_logs(vec![promoted_log_b], 0),
+    )
+    .expect("ingest through both shared workspaces after global promotion");
+
+    let (promoted_status_a, promoted_details_a) =
+        typed_details(&router, &workspace_a, &promoted_trace_a).await;
     assert_eq!(
-        promotion_body["error"]["code"],
-        "shared_scope_promotion_unsupported"
+        promoted_status_a,
+        StatusCode::OK,
+        "workspace A promoted query: {promoted_details_a}"
     );
+    assert_eq!(
+        promoted_details_a["logs"][0]["attributes"]["shared_scope_test_column"],
+        promoted_value
+    );
+    let (promoted_status_b, promoted_details_b) =
+        typed_details(&router, &workspace_b, &promoted_trace_b).await;
+    assert_eq!(
+        promoted_status_b,
+        StatusCode::OK,
+        "workspace B promoted query: {promoted_details_b}"
+    );
+    assert_eq!(
+        promoted_details_b["logs"][0]["attributes"]["shared_scope_test_column"],
+        promoted_value
+    );
+
+    let business_manifest = r#"
+specVersion: softprobe.promotion.v1
+target:
+  kind: business_table
+  table: shared_orders
+  version: 1
+rowSelector:
+  attribute:
+    key: sp.workflow
+    equals: checkout
+columns:
+  - name: order_id
+    type: string
+    nullable: false
+    source:
+      from: http_response_body
+      json_path: $.order.id
+"#;
+    let PromotionManifest::BusinessTable(business_spec) =
+        parse_promotion_manifest(business_manifest).expect("business promotion manifest")
+    else {
+        panic!("expected business promotion manifest");
+    };
+    let mut business_request = Request::builder()
+        .method("POST")
+        .uri("/v1/promotions/apply")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"manifestYaml": business_manifest}).to_string(),
+        ))
+        .expect("business promotion request");
+    business_request
+        .extensions_mut()
+        .insert(tenant(&workspace_a));
+    let (business_status, business_body) = json_response(
+        control_router
+            .clone()
+            .oneshot(business_request)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(business_status, StatusCode::OK, "{business_body}");
+    assert_eq!(business_body["applied"], true);
+    assert!(
+        ducklake_relation_exists(&shared_scope.metadata_schema, "shared_orders_v1").await,
+        "business table promoted by A must exist in B's physical scope"
+    );
+    assert!(
+        engine_b
+            .apply_business_promotion(business_manifest, &business_spec)
+            .await
+            .is_ok(),
+        "workspace B can observe the shared business promotion"
+    );
+
+    let previous_reset = std::env::var_os("SPLAKE_RESET_DUCKLAKE");
+    std::env::set_var("SPLAKE_RESET_DUCKLAKE", "1");
+    let restarted_manager = softprobe_runtime::runtime_engine::RuntimeEngineManager::connect(
+        Arc::new(config.clone()),
+        None,
+    )
+    .await
+    .expect("restart manager");
+    let restarted_b = restarted_manager
+        .engine_for(&workspace_b)
+        .await
+        .expect("restart workspace B engine");
+    let restarted_trace = format!("restart-promo-{suffix}");
+    let mut restarted_log = log(&workspace_b, &restarted_trace, &shared_session);
+    restarted_log
+        .attributes
+        .insert("shared.scope.test".to_string(), promoted_value.to_string());
+    restarted_b
+        .add_spans(
+            vec![span(&workspace_b, &restarted_trace, &shared_session)],
+            0,
+        )
+        .await
+        .expect("restart span write");
+    restarted_b
+        .add_logs(vec![restarted_log], 0)
+        .await
+        .expect("restart log write");
+    let (restart_status, restart_details) =
+        typed_details(&router, &workspace_b, &restarted_trace).await;
+    assert_eq!(
+        restart_status,
+        StatusCode::OK,
+        "restart query: {restart_details}"
+    );
+    assert_eq!(
+        restart_details["logs"][0]["attributes"]["shared_scope_test_column"], promoted_value,
+        "telemetry promotion must be replayed after reset"
+    );
+    assert!(
+        ducklake_relation_exists(&shared_scope.metadata_schema, "shared_orders_v1").await,
+        "business promotion must be replayed after reset"
+    );
+    if let Some(value) = previous_reset {
+        std::env::set_var("SPLAKE_RESET_DUCKLAKE", value);
+    } else {
+        std::env::remove_var("SPLAKE_RESET_DUCKLAKE");
+    }
 
     let mut connection_request = Request::builder()
         .method("GET")

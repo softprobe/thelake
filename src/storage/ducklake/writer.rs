@@ -15,8 +15,10 @@ use parquet::file::properties::WriterProperties;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tracing::{info, warn};
+
+static RESET_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
 
 use super::attach::{ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified};
 use super::util::{
@@ -160,10 +162,6 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    pub async fn new(config: &Config, tenant_ducklake: DuckLakeScopeResolver) -> Result<Self> {
-        Self::new_inner(config, tenant_ducklake, false, None).await
-    }
-
     /// Writer permanently bound to one DuckLake scope (per-tenant runtime engine).
     pub async fn new_scope_bound(
         config: &Config,
@@ -188,7 +186,7 @@ impl DuckLakeWriter {
             workspace_id,
             writer_pools: Mutex::new(HashMap::new()),
         };
-        writer.initialize_catalog()?;
+        writer.initialize_catalog().await?;
         info!(
             "DuckLake writer initialized (scope_bound={}, writer_pool_size={})",
             scope_bound,
@@ -201,41 +199,74 @@ impl DuckLakeWriter {
         PhysicalScope::from_ducklake(&self.ducklake)
     }
 
-    pub(super) fn initialize_catalog(&self) -> Result<()> {
+    pub(super) async fn initialize_catalog(&self) -> Result<()> {
         let pool = self.get_or_create_pool(&self.ducklake)?;
         if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
+            let reset_lock = RESET_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+            let reset_lock = {
+                let mut locks = reset_lock
+                    .lock()
+                    .map_err(|_| anyhow!("DuckLake reset lock map poisoned"))?;
+                locks
+                    .entry(Self::conn_cache_key(&self.ducklake))
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone()
+            };
+            let _reset_guard = reset_lock.lock().await;
             pool.with_conn(|conn| self.reset_tables_for_dev(conn))?;
             self.warm_pool(&pool, &self.ducklake)?;
-            pool.with_conn(|conn| self.reapply_active_promotions(conn, &self.ducklake))?;
+            for table in [TelemetryTable::Traces, TelemetryTable::Logs] {
+                self.ensure_telemetry_table_for(&self.ducklake, &table)
+                    .await?;
+            }
+            self.reapply_active_promotions(&pool, &self.ducklake)
+                .await?;
         }
         Ok(())
     }
 
-    pub(super) fn reapply_active_promotions(
+    pub(super) async fn reapply_active_promotions(
         &self,
-        conn: &Connection,
+        pool: &WriterPool,
         dk: &DuckLakeConfig,
     ) -> Result<()> {
-        if let Ok(manifests) =
-            super::promotion::load_active_telemetry_manifests(conn, &dk.catalog_alias)
-        {
-            let prefix = if dk.metadata_schema == "main" {
-                dk.catalog_alias.clone()
-            } else {
-                format!(
-                    "{}.{}",
-                    super::util::quote_duckdb_ident(&dk.catalog_alias),
-                    super::util::quote_duckdb_ident(&dk.metadata_schema)
-                )
-            };
-            for manifest in manifests {
-                if let Ok(ddls) = crate::promotion::telemetry_column_add_ddls(&prefix, &manifest) {
-                    for ddl in ddls {
-                        if let Err(err) = conn.execute_batch(&ddl) {
-                            warn!("failed to reapply promotion DDL after reset: {err}");
-                        }
-                    }
-                }
+        let scope = PhysicalScope::from_ducklake(dk);
+        let telemetry = self
+            .tenant_ducklake
+            .load_active_telemetry_columns_manifests_for_scope(&scope)
+            .await?;
+        let business = self
+            .tenant_ducklake
+            .load_active_business_table_manifests_for_scope(&scope)
+            .await?;
+
+        let prefix = if dk.metadata_schema == "main" {
+            dk.catalog_alias.clone()
+        } else {
+            format!(
+                "{}.{}",
+                super::util::quote_duckdb_ident(&dk.catalog_alias),
+                super::util::quote_duckdb_ident(&dk.metadata_schema)
+            )
+        };
+        for manifest in telemetry {
+            for ddl in crate::promotion::telemetry_column_add_ddls(&prefix, &manifest)
+                .map_err(|err| anyhow!("failed to rebuild telemetry promotion: {err}"))?
+            {
+                pool.with_conn(|conn| {
+                    conn.execute_batch(&ddl)
+                        .map_err(|err| anyhow!("failed to rebuild telemetry promotion: {err}"))
+                })?;
+            }
+        }
+        for manifest in business {
+            let ddls = crate::promotion::business_table_create_ddls(&prefix, &manifest)
+                .map_err(|err| anyhow!("failed to rebuild business promotion: {err}"))?;
+            for ddl in ddls {
+                pool.with_conn(|conn| {
+                    conn.execute_batch(&ddl)
+                        .map_err(|err| anyhow!("failed to rebuild business promotion: {err}"))
+                })?;
             }
         }
         Ok(())
@@ -503,12 +534,10 @@ impl DuckLakeWriter {
     }
 
     /// Create/evolve the complete shared physical schema before shared workers
-    /// install workspace-filtered views. This is intentionally idempotent and
-    /// does not depend on any workspace's promotion manifest.
+    /// install workspace-filtered views. This is intentionally idempotent,
+    /// validates legacy schemas in every mode, and does not depend on any
+    /// workspace's promotion manifest.
     pub(crate) async fn ensure_shared_schema(&self) -> Result<()> {
-        if self.workspace_scope_mode() != crate::workspace_scope::WorkspaceScopeMode::Shared {
-            return Ok(());
-        }
         let pool = self.get_or_create_pool(&self.ducklake)?;
         let dk = self.ducklake.clone();
         let target_file_size_bytes = self.config.maintenance.target_file_size_bytes;
@@ -746,10 +775,12 @@ impl DuckLakeWriter {
         for table in [TRACES.name, LOGS.name, SCORES.name, SCORE_CONFIGS.name] {
             let qualified = self.qualified_table_name(table);
             conn.execute_batch(&format!("DROP TABLE IF EXISTS {qualified};"))?;
-            conn.execute_batch(&format!(
-                "DROP TABLE IF EXISTS {}.{};",
-                self.ducklake.catalog_alias, table
-            ))?;
+            if self.ducklake.metadata_schema == "main" {
+                conn.execute_batch(&format!(
+                    "DROP TABLE IF EXISTS {}.{};",
+                    self.ducklake.catalog_alias, table
+                ))?;
+            }
         }
         let key = Self::conn_cache_key(&self.ducklake);
         if let Ok(guard) = self.writer_pools.lock() {

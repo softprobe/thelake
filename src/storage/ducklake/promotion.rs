@@ -1,58 +1,18 @@
 //! Promotion specs store and DuckLakeWriter apply/load methods.
 //!
-//! Specs persist as `{catalog_alias}.promotion_specs` through the writer's attached DuckDB
-//! connection. Apply is serialized under the tenant DuckLake resolver's Postgres advisory lock
+//! Specs persist in the physical scope's Postgres DuckLake metadata schema. Apply is serialized
+//! under the tenant DuckLake resolver's Postgres advisory lock
 //! (`DuckLakeScopeResolver::apply_telemetry_promotion_guarded` /
 //! `apply_business_promotion_guarded`), which the normal runtime path always has.
 
+use super::util::quote_duckdb_ident;
+use super::DuckLakeWriter;
 use crate::promotion::{
-    business_table_create_ddls, telemetry_column_add_ddls, telemetry_manifest_from_row,
-    BusinessApplyError, BusinessTableManifest, PromotionSpecLoadError, TelemetryColumnsManifest,
+    business_table_create_ddls, telemetry_column_add_ddls, BusinessApplyError,
+    BusinessTableManifest, TelemetryColumnsManifest,
 };
 use crate::workspace_scope::PhysicalScope;
 use anyhow::{anyhow, Result};
-use duckdb::Connection;
-
-use super::util::quote_duckdb_ident;
-use super::DuckLakeWriter;
-
-fn table_missing(err: &duckdb::Error) -> bool {
-    let msg = err.to_string().to_lowercase();
-    msg.contains("does not exist") || msg.contains("not found") || msg.contains("catalog error")
-}
-
-/// Load active telemetry manifests from the local DuckLake catalog.
-///
-/// A missing `promotion_specs` table means no promotions have been applied yet — returns empty.
-pub(super) fn load_active_telemetry_manifests(
-    conn: &Connection,
-    catalog_alias: &str,
-) -> Result<Vec<TelemetryColumnsManifest>, PromotionSpecLoadError> {
-    let catalog = quote_duckdb_ident(catalog_alias);
-    let sql = format!(
-        "SELECT spec_id, manifest_json FROM {catalog}.promotion_specs \
-WHERE status = 'active' AND target_kind = 'telemetry_columns';"
-    );
-    let mut stmt = match conn.prepare(&sql) {
-        Ok(s) => s,
-        Err(err) if table_missing(&err) => return Ok(Vec::new()),
-        Err(err) => return Err(PromotionSpecLoadError::Backend(err.to_string())),
-    };
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|err| PromotionSpecLoadError::Backend(err.to_string()))?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (spec_id, manifest_json) =
-            row.map_err(|err| PromotionSpecLoadError::Backend(err.to_string()))?;
-        if let Some(m) = telemetry_manifest_from_row(&spec_id, &manifest_json)? {
-            out.push(m);
-        }
-    }
-    Ok(out)
-}
 
 impl DuckLakeWriter {
     /// Apply telemetry DDL and activate the spec under the Postgres advisory

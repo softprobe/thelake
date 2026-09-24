@@ -2,10 +2,8 @@
 //! DESCRIBE / partition-info / sort-info probes (Issue #51).
 
 use chrono::Utc;
-use softprobe_runtime::config::Config;
-use softprobe_runtime::config::DuckLakeConfig;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
-use softprobe_runtime::query;
+use softprobe_runtime::query::{LogCountFilter, TraceCountFilter};
 use softprobe_runtime::runtime_engine::{RuntimeEngine, RuntimeEngineManager};
 use softprobe_runtime::storage::schema::{
     describe_probe_count, partition_sort_probe_count, total_schema_probe_count,
@@ -72,11 +70,7 @@ fn sample_log(i: usize) -> LogData {
     }
 }
 
-async fn assert_warm_writes_zero_probes_contract(
-    runtime: &RuntimeEngine,
-    query_dk: DuckLakeConfig,
-    tenant_id: Option<&str>,
-) {
+async fn assert_warm_writes_zero_probes_contract(runtime: &RuntimeEngine, tenant_id: Option<&str>) {
     let _guard = HOTPATH_CONTRACT_LOCK.lock().await;
 
     // Perform one initial write across signals to ensure cold paths / pool creation are complete.
@@ -128,39 +122,20 @@ async fn assert_warm_writes_zero_probes_contract(
     );
 
     // Verify all rows were committed and queryable through the query engine.
-    let mut query_config = Config {
-        ducklake: query_dk,
-        ..Config::default()
-    };
-    query_config.shrink_pools_for_tests();
-    let query_engine = query::create_query_engine(&query_config)
-        .await
-        .expect("query engine");
-    let span_result = query_engine
-        .execute_query_uninstrumented(
-            "SELECT count(*) FROM traces \
-             WHERE timestamp >= TIMESTAMP '1970-01-01' \
-               AND timestamp < TIMESTAMP '2100-01-01'",
-        )
+    let span_n = runtime
+        .count_traces(TraceCountFilter::default())
         .await
         .expect("query traces");
-    let span_n = span_result.rows[0][0].as_i64().expect("trace count");
-    assert_eq!(span_n, (N + 1) as i64, "all traces must be committed");
+    assert_eq!(span_n, (N + 1) as u64, "all traces must be committed");
 
-    let log_result = query_engine
-        .execute_query_uninstrumented(
-            "SELECT count(*) FROM logs \
-             WHERE timestamp >= TIMESTAMP '1970-01-01' \
-               AND timestamp < TIMESTAMP '2100-01-01'",
-        )
+    let log_n = runtime
+        .count_logs(LogCountFilter::default())
         .await
         .expect("query logs");
-    let log_n = log_result.rows[0][0].as_i64().expect("log count");
-    assert_eq!(log_n, (N + 1) as i64, "all logs must be committed");
+    assert_eq!(log_n, (N + 1) as u64, "all logs must be committed");
 }
 
 #[tokio::test]
-#[ignore = "global DESCRIBE probe counter races other tests under --test-threads>1; run alone to verify"]
 async fn warm_writes_perform_zero_schema_probes_postgres() {
     let pg_host = std::env::var("PG_HOST").unwrap_or_else(|_| "localhost".to_string());
     let pg_port = std::env::var("PG_PORT").unwrap_or_else(|_| "5432".to_string());
@@ -205,9 +180,5 @@ async fn warm_writes_perform_zero_schema_probes_postgres() {
 
     let runtime = manager.engine_for(&tenant_id).await.expect("tenant engine");
 
-    let mut query_dk = config.ducklake.clone();
-    query_dk.metadata_schema = tenant_schema;
-    query_dk.data_path = tenant_data;
-
-    assert_warm_writes_zero_probes_contract(runtime.as_ref(), query_dk, Some(&tenant_id)).await;
+    assert_warm_writes_zero_probes_contract(runtime.as_ref(), Some(&tenant_id)).await;
 }

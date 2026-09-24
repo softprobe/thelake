@@ -78,7 +78,7 @@ pub async fn ready_check(State(state): State<AppState>) -> (StatusCode, Json<ser
             )
             .await
     });
-    let reason = match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
+    let reason = match tokio::time::timeout(std::time::Duration::from_secs(30), probe).await {
         Ok(Ok(Ok(_))) => {
             return (
                 StatusCode::OK,

@@ -11,9 +11,7 @@ use crate::promotion::{BusinessApplyError, BusinessTableManifest, TelemetryColum
 use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::session_summary::{DirtyHint, SessionSummaryDirty};
 use crate::storage::ducklake::DuckLakeWriter;
-use crate::workspace_scope::{
-    PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceScopeMode,
-};
+use crate::workspace_scope::{PhysicalScope, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID};
 use anyhow::{anyhow, Result};
 use coalesce::CoalesceBuf;
 use std::future::Future;
@@ -36,11 +34,12 @@ pub struct IngestEngine {
 ///
 /// Promotion changes are deliberately separate from the ingest data path:
 /// callers cannot reach schema DDL through the ordinary signal-write facade.
+/// In shared mode the bound physical scope makes these changes global to every
+/// workspace using that scope.
 #[derive(Clone)]
 pub struct AdminEngine {
     writer: Arc<DuckLakeWriter>,
     scope: PhysicalScope,
-    workspace_scope_mode: WorkspaceScopeMode,
 }
 
 /// Bound a DuckLake write so a hung INSERT cannot stall the coalesce worker forever.
@@ -250,12 +249,7 @@ impl AdminEngine {
         Self {
             writer: ingest.writer.clone(),
             scope: ingest.scope.clone(),
-            workspace_scope_mode: ingest.writer.workspace_scope_mode(),
         }
-    }
-
-    fn ensure_promotion_supported(&self) -> Result<()> {
-        ensure_promotion_scope_supported(self.workspace_scope_mode)
     }
 
     pub async fn apply_and_record_telemetry_promotion(
@@ -264,7 +258,6 @@ impl AdminEngine {
         spec: &TelemetryColumnsManifest,
         target_tables: &[String],
     ) -> Result<String> {
-        self.ensure_promotion_supported()?;
         self.writer
             .apply_and_record_telemetry_promotion(&self.scope, manifest_yaml, spec, target_tables)
             .await
@@ -275,23 +268,10 @@ impl AdminEngine {
         manifest_yaml: &str,
         spec: &BusinessTableManifest,
     ) -> std::result::Result<String, BusinessApplyError> {
-        if let Err(error) = self.ensure_promotion_supported() {
-            return Err(BusinessApplyError::Other(error));
-        }
         self.writer
             .apply_business_promotion_guarded(&self.scope, manifest_yaml, spec)
             .await
     }
-}
-
-fn ensure_promotion_scope_supported(mode: WorkspaceScopeMode) -> Result<()> {
-    if mode == WorkspaceScopeMode::Shared {
-        return Err(anyhow!(SharedScopeError::new(
-            SharedScopeErrorCode::PromotionUnsupported,
-            "workspace promotions are unavailable in shared scope",
-        )));
-    }
-    Ok(())
 }
 
 /// Apply traces commit side effects only when the lake write succeeded.
@@ -354,17 +334,7 @@ mod after_commit_tests {
 
         engine.bind_spans_to_workspace(&mut spans);
 
-        assert_eq!(spans[0].tenant_id.as_deref(), Some("default"));
-    }
-
-    #[test]
-    fn admin_promotions_reject_shared_scope_before_storage() {
-        let error = ensure_promotion_scope_supported(WorkspaceScopeMode::Shared)
-            .expect_err("shared promotions must be rejected");
-        assert!(error
-            .to_string()
-            .contains("shared_scope_promotion_unsupported"));
-        assert!(ensure_promotion_scope_supported(WorkspaceScopeMode::Isolated).is_ok());
+        assert_eq!(spans[0].tenant_id.as_deref(), Some(DEFAULT_WORKSPACE_ID));
     }
 }
 
@@ -378,17 +348,23 @@ pub struct IngestPipeline {
 impl IngestPipeline {
     pub async fn new(config: &Config) -> Result<Self> {
         let tenant_ducklake = DuckLakeScopeResolver::connect(config).await?;
-        let writer = Arc::new(DuckLakeWriter::new(config, tenant_ducklake.clone()).await?);
+        let tenant_id = DEFAULT_WORKSPACE_ID;
+        let writer = Arc::new(
+            DuckLakeWriter::new_scope_bound(config, tenant_ducklake.clone(), tenant_id).await?,
+        );
+        // The standalone pipeline is a tenant-bound engine too. Ensure its
+        // physical schema before any query worker attaches the catalog.
+        writer.ensure_shared_schema().await?;
         let cache_dir = config.query.cache_dir.as_ref().map(PathBuf::from);
         let dirty = session_summary_dirty_for(
             config,
             &tenant_ducklake,
-            "default",
+            tenant_id,
             &config.ducklake.metadata_schema,
         );
         let ingest = Arc::new(IngestEngine::from_writer(
             writer,
-            "default",
+            tenant_id,
             config.ingest.flush_interval_seconds,
             config.ingest.buffer_size_mb,
             config.ingest.write_timeout_seconds,

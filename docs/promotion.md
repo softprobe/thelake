@@ -172,13 +172,16 @@ Promotion apply and ingest-time telemetry extraction work on both backends:
 
 | Backend | Scope model | Spec storage | Apply serialization |
 |---------|-------------|--------------|---------------------|
-| **PostgreSQL** | Multi-tenant (per-tenant metadata schema via scope registry) | `{tenant_schema}.promotion_specs` | `pg_advisory_xact_lock` across DDL + activate |
+| **PostgreSQL / isolated scope** | One physical scope per workspace | `{tenant_schema}.promotion_specs` | `pg_advisory_xact_lock` across DDL + activate |
+| **PostgreSQL / shared scope** | Many workspaces share one physical scope | `{shared_schema}.promotion_specs` | `pg_advisory_xact_lock` across DDL + activate |
 | **SQLite** (local/dev) | Single configured catalog scope | `{catalog_alias}.promotion_specs` in the DuckLake catalog | Process-global mutex across DDL + activate |
 
 Both backends serialize the full apply critical section (physical DDL +
 activate/deactivate). Physical DDL still runs on DuckLake (outside the Postgres
 metadata transaction); the lock/mutex only prevents concurrent applies from
-interleaving.
+interleaving. In shared PostgreSQL scope, promotion is physical-scope-wide:
+one workspace applies the manifest, and every workspace bound to that scope
+uses the resulting columns and active manifests.
 
 SQLite promotion is intentionally **single-scope**: every tenant id in a local
 process shares the configured DuckLake catalog. Multi-tenant isolation still
@@ -478,7 +481,8 @@ that ingest path is wired.
 
 | Backend | Location | Tables |
 |---------|----------|--------|
-| PostgreSQL | Each tenant metadata schema | `promotion_specs`, `promotion_errors` |
+| PostgreSQL / isolated scope | Each workspace metadata schema | `promotion_specs`, `promotion_errors` |
+| PostgreSQL / shared scope | The shared physical-scope metadata schema | `promotion_specs`, `promotion_errors` |
 | SQLite (local) | DuckLake catalog (`softprobe.promotion_specs`) | `promotion_specs` (control table; errors table remains Postgres-oriented for now) |
 
 These are control/diagnostic tables for the promotion system, not telemetry
@@ -487,8 +491,10 @@ payload storage.
 ## Operator checklist
 
 1. For **production multi-tenant** promotion, use a **PostgreSQL** DuckLake
-   catalog with tenant scopes. For **local/dev**, SQLite single-scope
-   promotion (apply + ingest extraction + query) is supported.
+   catalog. Isolated scope keeps promotion metadata per workspace; shared
+   scope makes promotion metadata and resulting columns global to that physical
+   lake scope. For **local/dev**, SQLite single-scope promotion (apply + ingest
+   extraction + query) is supported.
 2. Instrument consistent business attributes (`sp.user.id`, …).
 3. Verify MAP nested-field queries work before promoting anything.
 4. Promote only high-value filters you query often.

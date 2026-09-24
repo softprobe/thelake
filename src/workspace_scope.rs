@@ -147,7 +147,6 @@ pub enum SharedScopeErrorCode {
     SchemaIncompatible,
     RawSqlForbidden,
     ConnectionUnavailable,
-    PromotionUnsupported,
 }
 
 impl SharedScopeErrorCode {
@@ -158,7 +157,6 @@ impl SharedScopeErrorCode {
             Self::SchemaIncompatible => "shared_scope_schema_incompatible",
             Self::RawSqlForbidden => "shared_scope_raw_sql_forbidden",
             Self::ConnectionUnavailable => "shared_scope_connection_unavailable",
-            Self::PromotionUnsupported => "shared_scope_promotion_unsupported",
         }
     }
 }
@@ -276,10 +274,6 @@ mod tests {
         assert_eq!(
             SharedScopeErrorCode::ConnectionUnavailable.as_str(),
             "shared_scope_connection_unavailable"
-        );
-        assert_eq!(
-            SharedScopeErrorCode::PromotionUnsupported.as_str(),
-            "shared_scope_promotion_unsupported"
         );
         let error = SharedScopeError::new(
             SharedScopeErrorCode::RawSqlForbidden,

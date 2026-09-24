@@ -21,7 +21,7 @@ SHELL := /bin/bash
 .PHONY: help ensure-cache doctor setup teardown check-infra \
 	clean clean-cache build build-release package publish test-publish-tags \
 	lint fmt check-fmt \
-	test test-e2e test-e2e-isolated test-e2e-shared test-perf ci release _release test-loki-diff test-tempo-diff \
+	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
 	test-grafana-static test-grafana-system test-grafana-browser test-compat \
@@ -59,7 +59,6 @@ define enforce-slo
 endef
 
 INTEGRATION_E2E_FEATURE = --features integration-e2e
-INTEGRATION_E2E_TESTS = --test tests
 INTEGRATION_PERF_TESTS = \
 	performance::perf_union_read_concurrency \
 	performance::perf_union_read_latency
@@ -636,64 +635,12 @@ bench-demo-cpu-full: ensure-cache
 	@chmod +x scripts/bench-demo-cpu-full.sh scripts/grafana-manual-up.sh scripts/grafana-manual-down.sh
 	./scripts/bench-demo-cpu-full.sh
 
-# The E2E gate is a mode matrix. Each mode runs in fresh processes so a test
-# cannot inherit a runtime, DuckDB connection, or catalog binding from the
-# other mode.
-test-e2e: test-e2e-isolated test-e2e-shared
-
-# Grafana manual stack may export CONFIG_FILE; clear it so e2e uses tests/config/test.yaml.
-test-e2e-isolated: ensure-cache check-infra
+# The E2E gate is one simple, exhaustive mode matrix. Both jobs enumerate the
+# same integration:: selector in fresh processes, so every scenario runs under
+# both DuckLake workspace-scope implementations.
+test-e2e: ensure-cache check-infra
 	@$(MAKE) --no-print-directory test-lease-pg
-	@set -e; \
-	backend="$(E2E_BACKEND)"; \
-	echo "integration-e2e E2E_BACKEND=$$backend..."; \
-	$(_export-minio-aws); \
-	unset CONFIG_FILE; \
-	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=$$backend; \
-	case "$$backend" in \
-		local) \
-			./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration:: ;; \
-		gcs) \
-			: "$${GCS_HMAC_ACCESS_KEY_ID:?Set GCS_HMAC_ACCESS_KEY_ID}"; \
-			: "$${GCS_HMAC_SECRET:?Set GCS_HMAC_SECRET}"; \
-			GCS_BUCKET=$${GCS_BUCKET:-softprobe-datalake-ducklake}; \
-			RUN_ID=$$(date +%Y%m%d-%H%M%S)-$$$$; \
-			export GCS_BUCKET GCS_HMAC_ACCESS_KEY_ID GCS_HMAC_SECRET; \
-			export GCS_E2E_PREFIX="gs://$$GCS_BUCKET/ducklake/e2e/$$RUN_ID/"; \
-			echo "GCS prefix $$GCS_E2E_PREFIX"; \
-			trap 'gcloud storage rm -r "$$GCS_E2E_PREFIX"** >/dev/null 2>&1 || gcloud storage rm -r "$$GCS_E2E_PREFIX" >/dev/null 2>&1 || true' EXIT; \
-			./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration:: ;; \
-		r2) \
-			if [ -z "$${E2E_DISABLE_TLS_VALIDATION:-}" ] && ! curl -sf https://www.google.com >/dev/null 2>&1; then \
-				export E2E_DISABLE_TLS_VALIDATION=1; \
-			fi; \
-			./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) --list-prefix integration:: ;; \
-		*) echo "unknown E2E_BACKEND=$$backend (local|gcs|r2)"; exit 1 ;; \
-	esac
-
-# Shared mode intentionally runs the contracts that can use tenant-bound
-# RuntimeEngine/query surfaces. Physical-scope registry, promotion-success,
-# raw-SQL, and low-level direct-DuckDB tests remain isolated-mode contracts;
-# tenant_shared_scope is the shared replacement for those access guarantees.
-test-e2e-shared: ensure-cache check-infra
-	@$(MAKE) --no-print-directory test-lease-pg
-	@set -e; \
-	$(_export-minio-aws); \
-	unset CONFIG_FILE; \
-	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local WORKSPACE_SCOPE_MODE=shared; \
-	for prefix in \
-		integration::authn_contract:: \
-		integration::event_time_prune:: \
-		integration::integration:: \
-		integration::http_api:: \
-		integration::session_summary_list:: \
-		integration::tenant_shared_scope::; do \
-		echo "integration-e2e WORKSPACE_SCOPE_MODE=shared prefix=$$prefix"; \
-		./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) $(INTEGRATION_E2E_TESTS) \
-			--list-prefix "$$prefix" \
-			--exclude-prefix integration::http_api::logs_promote_scope_name_to_logger_name_attribute \
-			--exclude-prefix integration::http_api::query_sql_select_literal; \
-	done
+	@E2E_BACKEND="$(E2E_BACKEND)" ./scripts/run-e2e-matrix.sh
 
 test-perf: ensure-cache
 	@set -e; \

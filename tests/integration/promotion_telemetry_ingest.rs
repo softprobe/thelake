@@ -29,7 +29,6 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     config.ducklake.data_path = tenant_data_path.clone();
     config.ducklake.data_inlining_row_limit = Some(0);
     apply_workspace_scope_mode(&mut config);
-    let data_path = config.ducklake.data_path.clone();
     let metadata_path = config.ducklake.metadata_path.clone();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
 
@@ -38,7 +37,7 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
         .await
         .expect("connect runtime engines");
     let tenant_schema = format!("softprobe_promoted_data_{suffix}");
-    manager
+    let physical_scope = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: tenant_schema.clone(),
@@ -46,7 +45,7 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
         })
         .await
         .expect("provision tenant");
-    insert_active_trace_promotion_spec(&tenant_schema).await;
+    insert_active_trace_promotion_spec(&physical_scope.metadata_schema).await;
 
     // Bind writer to the provisioned tenant scope (not the registry schema on config).
     let engine = manager.engine_for(&tenant_id).await.expect("tenant engine");
@@ -61,14 +60,14 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     conn.execute_batch(&format!(
         "ATTACH 'ducklake:postgres:{}' AS softprobe (DATA_PATH '{}', METADATA_SCHEMA '{}', META_SCHEMA '{}', DATA_INLINING_ROW_LIMIT 0);",
         metadata_path.replace('\'', "''"),
-        data_path.replace('\'', "''"),
-        tenant_schema.replace('\'', "''"),
-        tenant_schema.replace('\'', "''"),
+        physical_scope.data_path.replace('\'', "''"),
+        physical_scope.metadata_schema.replace('\'', "''"),
+        physical_scope.metadata_schema.replace('\'', "''"),
     ))
     .expect("attach tenant ducklake");
     let sql = format!(
         r#"SELECT service_name, division_name FROM softprobe.{}.traces WHERE session_id = 's-promoted'"#,
-        tenant_schema
+        physical_scope.metadata_schema
     );
     let (service_name, division_name): (String, String) = conn
         .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?)))

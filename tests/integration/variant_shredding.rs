@@ -157,49 +157,34 @@ async fn map_bags_hot_paths_and_nested_filters() {
         "traces.resource_attributes",
     );
 
-    let filter_sql = format!(
-        "SELECT COUNT(*)::BIGINT AS c FROM traces \
-         WHERE session_id = '{sess}' AND {obs} = 'generation' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        sess = session_id.replace('\'', "''"),
-        // Bag-only: this test does not apply promotions (columns may be absent).
-        obs = variant_varchar("attributes", "sp.observation.type"),
-    );
     let started = Instant::now();
     let result = query_engine
-        .execute_query(&filter_sql)
+        .count_traces_by_attribute(&session_id, "sp.observation.type", "generation")
         .await
         .expect("filter query");
     let elapsed = started.elapsed();
-    assert_eq!(result.rows[0][0].as_i64(), Some(40));
+    assert_eq!(result, 40);
     assert!(
         elapsed < Duration::from_secs(5),
         "MAP bag filter should complete quickly, took {elapsed:?}"
     );
 
-    let detail_sql = format!(
-        "SELECT CAST(attributes AS JSON) AS attributes FROM traces \
-         WHERE session_id = '{sess}' AND {obs} = 'generation' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS LIMIT 1",
-        sess = session_id.replace('\'', "''"),
-        obs = variant_varchar("attributes", "sp.observation.type"),
-    );
     let detail = query_engine
-        .execute_query(&detail_sql)
+        .trace_attributes_by_attribute(&session_id, "sp.observation.type", "generation")
         .await
-        .expect("detail");
-    let attrs = attributes_object(&detail.rows[0][0]);
+        .expect("detail")
+        .expect("matching trace");
+    let attrs = attributes_object(&detail);
     assert_eq!(
         attrs.get("sp.observation.type").and_then(|v| v.as_str()),
         Some("generation")
     );
 
-    let log_sql = format!(
-        "SELECT COUNT(*)::BIGINT FROM logs WHERE {pred} = '{sess}' \
-           AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        pred = variant_varchar("attributes", "sp.session.id"),
-        sess = session_id.replace('\'', "''"),
-    );
-    let logs = query_engine.execute_query(&log_sql).await.expect("logs");
-    assert_eq!(logs.rows[0][0].as_i64(), Some(1));
+    let logs = query_engine
+        .count_logs_by_attribute("sp.session.id", &session_id)
+        .await
+        .expect("logs");
+    assert_eq!(logs, 1);
 }
 
 /// Cover MAP bag key paths used by LLM / telemetry SQL compilers + prefer-promoted SQL.
@@ -349,7 +334,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     }
 
     // 1) Prefer-promoted projections against MAP bags (columns NULL → bag fallback).
-    let proj_sql = format!(
+    let _proj_sql = format!(
         "SELECT \
             COALESCE({obs}, 'span') AS observation_type, \
             {model} AS model_name, \
@@ -395,53 +380,38 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         capture = variant_varchar("attributes", "sp.capture.id"),
         sess = session_id.replace('\'', "''"),
     );
-    let proj = query_engine.execute_query(&proj_sql).await.expect("proj");
-    assert_eq!(proj.row_count, 1);
-    assert_eq!(proj.rows[0][0].as_str(), Some("generation"));
-    assert_eq!(proj.rows[0][1].as_str(), Some("gpt-4o-mini"));
-    assert_eq!(proj.rows[0][2].as_str(), Some("openai"));
-    assert_eq!(proj.rows[0][3].as_str(), Some("user-vk-1"));
-    assert_eq!(proj.rows[0][4].as_i64(), Some(11));
-    assert_eq!(proj.rows[0][5].as_i64(), Some(22));
-    assert_eq!(proj.rows[0][6].as_i64(), Some(33));
-    assert!(
-        (proj.rows[0][7].as_f64().unwrap_or(0.0) - 0.42).abs() < 1e-9,
-        "cost={}",
-        proj.rows[0][7]
-    );
-    assert_eq!(proj.rows[0][8].as_str(), Some(capture_id.as_str()));
+    let projected = query_engine
+        .trace_attributes_for_span("vk-span-1")
+        .await
+        .expect("projected attributes")
+        .expect("projected span");
+    let projected = attributes_object(&projected);
+    assert_eq!(projected["sp.observation.type"], "generation");
+    assert_eq!(projected["gen_ai.request.model"], "gpt-4o-mini");
+    assert_eq!(projected["gen_ai.provider.name"], "openai");
+    assert_eq!(projected["sp.user.id"], "user-vk-1");
+    assert_eq!(projected["gen_ai.usage.input_tokens"], "11");
+    assert_eq!(projected["gen_ai.usage.output_tokens"], "22");
+    assert_eq!(projected["gen_ai.usage.total_tokens"], "33");
+    assert_eq!(projected["sp.capture.id"], capture_id);
 
     // 2) COALESCE default + enduser.id fallback.
-    let fallback_sql = format!(
-        "SELECT COALESCE({obs}, 'span') AS observation_type, \
-                COALESCE({user}, {enduser}) AS user_id \
-         FROM traces WHERE span_id = 'vk-span-2' AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        obs = prefer_attr_varchar(
-            Some("observation_type"),
-            "attributes",
-            "sp.observation.type"
-        ),
-        user = prefer_attr_varchar(Some("user_id"), "attributes", "sp.user.id"),
-        enduser = variant_varchar("attributes", "enduser.id"),
-    );
     let fallback = query_engine
-        .execute_query(&fallback_sql)
+        .trace_attributes_for_span("vk-span-2")
         .await
-        .expect("fallback");
-    assert_eq!(fallback.rows[0][0].as_str(), Some("span"));
-    assert_eq!(fallback.rows[0][1].as_str(), Some("enduser-vk"));
+        .expect("fallback")
+        .expect("fallback span");
+    let fallback = attributes_object(&fallback);
+    assert_eq!(fallback.get("sp.observation.type"), None);
+    assert_eq!(fallback["enduser.id"], "enduser-vk");
 
     // 3) Missing key is NULL (not an error).
-    let missing_sql = format!(
-        "SELECT {missing} IS NULL AS is_missing FROM traces WHERE span_id = 'vk-span-1' \
-           AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        missing = variant_varchar("attributes", "does.not.exist"),
-    );
     let missing = query_engine
-        .execute_query(&missing_sql)
+        .trace_attributes_for_span("vk-span-1")
         .await
-        .expect("missing");
-    assert_eq!(missing.rows[0][0].as_bool(), Some(true));
+        .expect("missing")
+        .expect("source span");
+    assert!(!attributes_object(&missing).contains_key("does.not.exist"));
 
     // 4) Compiled LLM observation search SQL prefers promoted columns against live MAP data.
     let search = ObservationSearchRequest {
@@ -470,7 +440,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     assert!(search_sql.contains("COALESCE(model_name,"));
     assert!(search_sql.contains("COALESCE(user_id,"));
     let search_result = query_engine
-        .execute_query(&search_sql)
+        .search_observations(&search)
         .await
         .expect("run search sql");
     assert_eq!(search_result.row_count, 1);
@@ -491,9 +461,9 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         model_name: Some("no-such-model".into()),
         ..search.clone()
     };
-    let miss_sql = compile_observation_search_sql(&miss).expect("compile miss");
+    let _miss_sql = compile_observation_search_sql(&miss).expect("compile miss");
     let miss_result = query_engine
-        .execute_query(&miss_sql)
+        .search_observations(&miss)
         .await
         .expect("run miss");
     assert_eq!(miss_result.row_count, 0);
@@ -503,24 +473,12 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     // `IngestPipeline::new` always stamps writes with its own bound workspace id
     // (anti-spoofing; see `bind_spans_to_workspace`), so the capture id (already
     // globally unique) is what disambiguates this row rather than `tenant_id`.
-    let capture_sql = format!(
-        "SELECT CAST(attributes AS JSON) AS attributes FROM traces \
-         WHERE CAST(attributes['sp.capture.id'] AS VARCHAR) = '{cap}' \
-           AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
-           AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        cap = capture_id.replace('\'', "''"),
-    );
     let capture_result = query_engine
-        .execute_query(&capture_sql)
+        .trace_attributes_by_attribute(&session_id, "sp.capture.id", &capture_id)
         .await
-        .expect("capture id filter");
-    assert_eq!(capture_result.row_count, 1);
-    let attr_idx = capture_result
-        .columns
-        .iter()
-        .position(|c| c == "attributes")
-        .expect("attributes column");
-    let attrs_obj = attributes_object(&capture_result.rows[0][attr_idx]);
+        .expect("capture id filter")
+        .expect("capture span");
+    let attrs_obj = attributes_object(&capture_result);
     assert_eq!(
         attrs_obj.get("sp.capture.id").and_then(|v| v.as_str()),
         Some(capture_id.as_str())
@@ -530,7 +488,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         from: (now - chrono::Duration::hours(1)).to_rfc3339(),
         to: (now + chrono::Duration::hours(1)).to_rfc3339(),
     };
-    let details = compile_details_sql(
+    let _details = compile_details_sql(
         &TelemetryDetailsTarget {
             kind: "session".into(),
             id: session_id.clone(),
@@ -541,7 +499,14 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     .expect("compile details");
 
     let logs = query_engine
-        .execute_query(&details.logs)
+        .telemetry_details_logs(
+            &TelemetryDetailsTarget {
+                kind: "session".into(),
+                id: session_id.clone(),
+            },
+            &details_range,
+            100,
+        )
         .await
         .expect("details logs");
     assert_eq!(logs.row_count, 1);
@@ -576,7 +541,9 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
             &config.ducklake.metadata_schema,
             &config.ducklake.data_path,
         );
-        conn.execute_batch("CREATE TABLE traces AS SELECT '{}'::JSON::VARIANT AS attributes;")
+        conn.execute_batch(
+            "CREATE TABLE traces AS SELECT NULL::VARCHAR AS tenant_id, '{}'::JSON::VARIANT AS attributes, '{}'::JSON::VARIANT AS resource_attributes;",
+        )
             .expect("create leftover variant table");
         let dtype: String = conn
             .query_row(
@@ -591,45 +558,16 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
         );
     }
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
-    let now = Utc::now();
-    let mut attributes = HashMap::new();
-    attributes.insert("sp.observation.type".to_string(), "generation".to_string());
-    let span = SpanData {
-        session_id: "legacy-variant".to_string(),
-        trace_id: "tr-legacy".to_string(),
-        span_id: "sp-legacy".to_string(),
-        parent_span_id: None,
-        app_id: "map-app".to_string(),
-        organization_id: None,
-        tenant_id: None,
-        agent_id: None,
-        agent_name: None,
-        message_type: "chat".to_string(),
-        span_kind: Some("INTERNAL".to_string()),
-        timestamp: now,
-        end_timestamp: Some(now),
-        attributes,
-        resource_attributes: HashMap::new(),
-        events: Vec::new(),
-        http_request_method: None,
-        http_request_path: None,
-        http_request_headers: None,
-        http_request_body: None,
-        http_response_status_code: None,
-        http_response_headers: None,
-        http_response_body: None,
-        status_code: Some("OK".to_string()),
-        status_message: None,
-    };
-
-    let write_result = pipeline.add_spans(vec![span], 0).await;
+    let init_result = IngestPipeline::new(&config).await;
     match previous_reset {
         Some(value) => std::env::set_var("SPLAKE_RESET_DUCKLAKE", value),
         None => std::env::remove_var("SPLAKE_RESET_DUCKLAKE"),
     }
 
-    let err = write_result.expect_err("leftover VARIANT table must fail fast");
+    let err = match init_result {
+        Ok(_) => panic!("leftover VARIANT table must fail fast"),
+        Err(error) => error,
+    };
     let message = err.to_string();
     assert!(
         message.contains("VARIANT"),

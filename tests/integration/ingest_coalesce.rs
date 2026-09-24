@@ -4,6 +4,7 @@ use crate::util::pipeline::TestPipeline;
 use crate::util::storage_config::load_test_config;
 use chrono::Utc;
 use softprobe_runtime::models::Log as LogData;
+use softprobe_runtime::query::LogCountFilter;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -42,14 +43,12 @@ async fn coalesce_force_flush_makes_logs_queryable() {
     pipeline.force_flush_logs().await.expect("force_flush");
 
     let after = test_pipeline
-        .execute_query(
-            "SELECT count(*) AS c FROM logs \
-             WHERE body = 'coalesce force_flush body' \
-               AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
-               AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
-        )
+        .query_engine()
+        .count_logs(LogCountFilter {
+            body: Some("coalesce force_flush body".to_string()),
+            ..Default::default()
+        })
         .await
         .expect("query after flush");
-    let after_count = after.rows[0][0].as_i64().unwrap_or(0);
-    assert_eq!(after_count, 1, "force_flush must commit coalesced logs");
+    assert_eq!(after, 1, "force_flush must commit coalesced logs");
 }

@@ -3,6 +3,7 @@ use softprobe_runtime::promotion::{
     load_active_telemetry_columns_manifests, parse_promotion_manifest, PromotionManifest,
 };
 use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
+use softprobe_runtime::workspace_scope::WorkspaceScopeMode;
 use std::sync::Arc;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
@@ -29,7 +30,7 @@ const MANIFEST_REGION: &str = r#"
 specVersion: softprobe.promotion.v1
 target:
   kind: telemetry_columns
-  tables: [logs]
+  tables: [traces]
 columns:
   - name: region_code
     type: string
@@ -131,15 +132,15 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
         .apply_telemetry_promotion(MANIFEST_DIVISION, &spec_a, &["logs".to_string()])
         .await
         .expect("record tenant A spec");
-    engine_b
-        .apply_telemetry_promotion(MANIFEST_REGION, &spec_b, &["logs".to_string()])
-        .await
-        .expect("record tenant B spec");
-
     let client = postgres_client().await;
     let manifests_a = load_active_telemetry_columns_manifests(&client, &scope_a.metadata_schema)
         .await
         .expect("load tenant A manifests");
+    engine_b
+        .apply_telemetry_promotion(MANIFEST_REGION, &spec_b, &["traces".to_string()])
+        .await
+        .expect("record tenant B spec");
+    let client = postgres_client().await;
     let manifests_b = load_active_telemetry_columns_manifests(&client, &scope_b.metadata_schema)
         .await
         .expect("load tenant B manifests");
@@ -160,14 +161,33 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
         names_b.contains(&"region_code"),
         "tenant B must see its logs promo: {names_b:?}"
     );
-    assert!(
-        !names_a.contains(&"region_code"),
-        "tenant A must not see tenant B's column"
-    );
-    assert!(
-        !names_b.contains(&"division_name"),
-        "tenant B must not see tenant A's column"
-    );
+    if manager.config().ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
+        assert_eq!(
+            scope_a, scope_b,
+            "shared workspaces bind one physical scope"
+        );
+        let client = postgres_client().await;
+        let shared_manifests =
+            load_active_telemetry_columns_manifests(&client, &scope_a.metadata_schema)
+                .await
+                .expect("load shared physical-scope manifests");
+        let shared_names: Vec<&str> = shared_manifests
+            .iter()
+            .flat_map(|m| m.columns.iter().map(|c| c.name.as_str()))
+            .collect();
+        assert!(
+            shared_names.contains(&"division_name"),
+            "shared promotion names: {shared_names:?}"
+        );
+        assert!(
+            shared_names.contains(&"region_code"),
+            "shared promotion names: {shared_names:?}"
+        );
+    } else {
+        assert_ne!(scope_a, scope_b, "isolated workspaces need separate scopes");
+        assert!(!names_a.contains(&"region_code"));
+        assert!(!names_b.contains(&"division_name"));
+    }
 }
 
 async fn postgres_manager() -> RuntimeEngineManager {
@@ -195,7 +215,8 @@ fn postgres_config() -> Config {
     config.query.max_connections = 1;
     config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
-    config.ducklake.metadata_schema = "softprobe_registry_test".to_string();
+    config.ducklake.metadata_schema =
+        format!("softprobe_registry_test_{}", Uuid::new_v4().simple());
     // This registry contract exercises Postgres metadata only. Keep the
     // DuckLake data path local so the test never probes cloud instance
     // metadata for credentials while building a tenant-bound engine.

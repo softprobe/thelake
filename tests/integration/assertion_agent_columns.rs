@@ -243,57 +243,36 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .await
         .expect("reduce_session_summary");
 
-    let traces_sql = Request::builder()
+    let details_request = Request::builder()
         .method("POST")
-        .uri("/v1/query/sql")
+        .uri("/v1/telemetry/details")
         .header(header::CONTENT_TYPE, "application/json")
         .header(ASSERTION_HEADER, &token)
         .body(Body::from(
             json!({
-                "sql": format!(
-                    "SELECT agent_id, agent_name FROM traces \
-                     WHERE session_id = '{session_id}' \
-                       AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
-                       AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS \
-                     LIMIT 1"
-                )
+                "version": 1,
+                "target": { "kind": "session", "id": session_id },
+                "timeRange": {
+                    "from": "1970-01-01T00:00:00Z",
+                    "to": "2100-01-01T00:00:00Z"
+                },
+                "limit": 10
             })
             .to_string(),
         ))
         .unwrap();
-    let traces_resp = router
+    let details_resp = router
         .clone()
-        .oneshot(traces_sql)
+        .oneshot(details_request)
         .await
-        .expect("sql traces");
-    assert_eq!(traces_resp.status(), StatusCode::OK);
-    let traces = response_json(traces_resp).await;
-    assert_eq!(traces["rows"][0][0], agent_id);
-    assert_eq!(traces["rows"][0][1], agent_name);
-
-    let logs_sql = Request::builder()
-        .method("POST")
-        .uri("/v1/query/sql")
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(ASSERTION_HEADER, &token)
-        .body(Body::from(
-            json!({
-                "sql": format!(
-                    "SELECT agent_id, agent_name FROM logs \
-                     WHERE session_id = '{session_id}' \
-                       AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
-                       AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS \
-                     LIMIT 1"
-                )
-            })
-            .to_string(),
-        ))
-        .unwrap();
-    let logs_resp = router.clone().oneshot(logs_sql).await.expect("sql logs");
-    assert_eq!(logs_resp.status(), StatusCode::OK);
-    let logs = response_json(logs_resp).await;
-    assert_eq!(logs["rows"][0][0], agent_id);
-    assert_eq!(logs["rows"][0][1], agent_name);
+        .expect("telemetry details");
+    let details_status = details_resp.status();
+    let details = response_json(details_resp).await;
+    assert_eq!(details_status, StatusCode::OK, "{details}");
+    assert_eq!(details["spans"][0]["agent_id"], agent_id);
+    assert_eq!(details["spans"][0]["agent_name"], agent_name);
+    assert_eq!(details["logs"][0]["agent_id"], agent_id);
+    assert_eq!(details["logs"][0]["agent_name"], agent_name);
 
     let search = Request::builder()
         .method("POST")
