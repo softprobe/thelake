@@ -474,8 +474,7 @@ fn load_inlined_fragment_stats(
         return Ok(None);
     }
     // Live parquet count is best-effort for logging only (not used for drain).
-    let file_sql =
-        crate::sql::maintenance::live_file_count_sql(scope.attach_alias(), table);
+    let file_sql = crate::sql::maintenance::live_file_count_sql(scope.attach_alias(), table);
     crate::sql::ensure_fact_scan_bound(&file_sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
     let files = conn
         .query_row(&file_sql, [], |row| row.get::<_, i64>(0))
