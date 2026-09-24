@@ -210,7 +210,7 @@ async fn perf_union_read_latency() {
 
     let warmup_workers = std::cmp::max(1, config.query.max_connections);
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let per_session = std::env::var("PERF_EVENTS_PER_SESSION")
         .ok()
@@ -423,7 +423,7 @@ async fn perf_union_read_concurrency() {
 
     let warmup_workers = std::cmp::max(1, config.query.max_connections);
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let per_session = std::env::var("PERF_EVENTS_PER_SESSION")
         .ok()

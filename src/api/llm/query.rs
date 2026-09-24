@@ -10,9 +10,8 @@ use crate::sql::llm::{
     compile_session_traces_sql, compile_trace_observations_sql, compile_trace_summary_sql,
     DEFAULT_SEARCH_LIMIT, DEFAULT_SESSION_LIMIT, DEFAULT_TRACE_LIMIT,
 };
-// `compile_session_search_sql` is exercised only by this module's unit tests
-// (production session search is served by the Postgres-backed
-// `session_summary::search_session_summary_for_workspace` path).
+// Production session search is served by RuntimeEngine::search_session_summary
+// (Postgres session_summary). compile_session_search_sql remains unit-test only.
 #[cfg(test)]
 use crate::sql::llm::compile_session_search_sql;
 use crate::storage::schema::variant::variant_json_to_string_map;
@@ -285,15 +284,7 @@ async fn resolve_session_lake_window(
         .engine_for(tenant_id)
         .await
         .map_err(storage_error)?;
-    let summary_scope = engine.session_summary_scope();
-    match crate::session_summary::lookup_session_summary_window_for_workspace(
-        &summary_scope.pool,
-        summary_scope.physical.pg_namespace(),
-        summary_scope.workspace_id.as_deref(),
-        session_id,
-    )
-    .await
-    {
+    match engine.lookup_session_summary_window(session_id).await {
         Ok(Some((from, to))) => Ok((from, to)),
         Ok(None) => Err(not_found()),
         Err(crate::session_summary::SessionSummaryListError::BadRequest(msg)) => {
@@ -682,16 +673,7 @@ pub async fn search_sessions(
         .engine_for(tenant_id)
         .await
         .map_err(storage_error)?;
-    let summary_scope = engine.session_summary_scope();
-    match crate::session_summary::search_session_summary_for_workspace(
-        &summary_scope.pool,
-        summary_scope.physical.pg_namespace(),
-        summary_scope.workspace_id.as_deref(),
-        &request,
-        limit,
-    )
-    .await
-    {
+    match engine.search_session_summary(&request, limit).await {
         Ok(response) => Ok(Json(response)),
         Err(crate::session_summary::SessionSummaryListError::BadRequest(msg)) => {
             Err(bad_request(msg))

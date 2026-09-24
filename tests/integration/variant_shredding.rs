@@ -3,7 +3,7 @@
 //! VARIANT shredding is deferred until DuckLake+Postgres VARIANT inlining is reliable.
 
 use chrono::Utc;
-use softprobe_runtime::ingest_engine::IngestPipeline;
+use softprobe_runtime::ingest_engine::IngestEngine;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::query;
 use softprobe_runtime::storage::schema::variant::{prefer_attr_varchar, variant_varchar};
@@ -44,7 +44,9 @@ async fn map_bags_hot_paths_and_nested_filters() {
     let mut config = file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let pipeline = IngestEngine::bound_default(&config)
+        .await
+        .expect("pipeline");
     let query_engine = query::create_query_engine(&config)
         .await
         .expect("query engine");
@@ -194,7 +196,9 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     let mut config = file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let pipeline = IngestEngine::bound_default(&config)
+        .await
+        .expect("pipeline");
     let query_engine = query::create_query_engine(&config)
         .await
         .expect("query engine");
@@ -459,7 +463,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 
     // 5) Nested MAP capture-id key (SoftProbe capture_export removed with Redis).
     //
-    // `IngestPipeline::new` always stamps writes with its own bound workspace id
+    // `IngestEngine::bound_default` always stamps writes with its own bound workspace id
     // (anti-spoofing; see `bind_spans_to_workspace`), so the capture id (already
     // globally unique) is what disambiguates this row rather than `tenant_id`.
     let capture_result = query_engine
@@ -543,7 +547,7 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
         );
     }
 
-    let init_result = IngestPipeline::new(&config).await;
+    let init_result = IngestEngine::bound_default(&config).await;
     match previous_reset {
         Some(value) => std::env::set_var("SPLAKE_RESET_DUCKLAKE", value),
         None => std::env::remove_var("SPLAKE_RESET_DUCKLAKE"),

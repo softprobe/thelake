@@ -1,12 +1,13 @@
 use softprobe_runtime::config::Config;
-use softprobe_runtime::ingest_engine::IngestPipeline;
+use softprobe_runtime::ingest_engine::IngestEngine;
 use softprobe_runtime::query::{self, QueryEngine};
+use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
 
 pub struct TestPipeline {
     pub cache_dir: TempDir,
-    pub pipeline: IngestPipeline,
+    pub ingest: Arc<IngestEngine>,
     query_engine: QueryEngine,
 }
 
@@ -25,7 +26,9 @@ impl TestPipeline {
             // Default to object storage for integration tests to validate committed data persistence.
             config.ducklake.data_path = format!("s3://warehouse/ducklake/tests/{}/", run_id);
         }
-        let pipeline = IngestPipeline::new(&config).await.expect("ingest pipeline");
+        let ingest = IngestEngine::bound_default(&config)
+            .await
+            .expect("ingest engine");
 
         // Query-engine worker start can flake under CI load (ATTACH / Postgres
         // catalog busy after a long suite). One retry is enough in practice.
@@ -44,7 +47,7 @@ impl TestPipeline {
 
         Self {
             cache_dir,
-            pipeline,
+            ingest,
             query_engine,
         }
     }

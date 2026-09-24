@@ -9,7 +9,7 @@
 use crate::authn::TenantInfo;
 use crate::config::{Config, DuckLakeConfig};
 use crate::control_plane::ControlPlaneRuntime;
-use crate::ingest_engine::{AdminEngine, IngestEngine, IngestPipeline};
+use crate::ingest_engine::{AdminEngine, IngestEngine};
 use crate::promotion::{
     business_manifest_from_row, business_spec_activation, ensure_promotion_metadata_tables,
     load_active_telemetry_columns_manifests, run_business_apply, run_telemetry_apply,
@@ -18,7 +18,7 @@ use crate::promotion::{
 };
 use crate::query::{self as query_mod, QueryEngine};
 use crate::workspace_scope::{
-    effective_workspace_id, PhysicalScope, WorkspaceBinding, WorkspaceScopeMode,
+    effective_workspace_id, DuckLakeAccess, PhysicalScope, WorkspaceBinding, WorkspaceScopeMode,
     DEFAULT_WORKSPACE_ID,
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -48,18 +48,21 @@ fn validate_metadata_schema_name(schema: &str) -> Result<()> {
 pub struct RuntimeEngine {
     tenant_id: String,
     binding: WorkspaceBinding,
+    /// Stashed at build — never re-derived via a binding getter.
+    physical: PhysicalScope,
     catalog_pool: Pool,
     ingest: Arc<IngestEngine>,
     admin: Arc<AdminEngine>,
     query: Arc<QueryEngine>,
 }
 
-/// Internal summary-query capability. It carries only what the summary
-/// module needs; callers do not receive the tenant's physical binding.
-pub(crate) struct TenantSummaryScope {
-    pub(crate) pool: Pool,
-    pub(crate) physical: crate::workspace_scope::PhysicalScope,
-    pub(crate) workspace_id: Option<String>,
+/// Private catalog binding for session-summary SQL. Not part of the engine API —
+/// use [`RuntimeEngine::lookup_session_summary_window`] /
+/// [`RuntimeEngine::search_session_summary`].
+struct TenantSummaryScope {
+    pool: Pool,
+    physical: crate::workspace_scope::PhysicalScope,
+    workspace_id: Option<String>,
 }
 
 impl RuntimeEngine {
@@ -167,13 +170,51 @@ impl RuntimeEngine {
         self.query.clone()
     }
 
-    pub(crate) fn session_summary_scope(&self) -> TenantSummaryScope {
+    fn session_summary_scope(&self) -> TenantSummaryScope {
         TenantSummaryScope {
             pool: self.catalog_pool.clone(),
-            physical: self.binding.physical_scope.clone(),
+            physical: self.physical.clone(),
             workspace_id: (self.binding.mode == WorkspaceScopeMode::Shared)
                 .then(|| self.binding.workspace_id.clone()),
         }
+    }
+
+    /// Lookup `[start_time, end_time]` for a session from Postgres `session_summary`.
+    pub(crate) async fn lookup_session_summary_window(
+        &self,
+        session_id: &str,
+    ) -> Result<
+        Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        crate::session_summary::SessionSummaryListError,
+    > {
+        let scope = self.session_summary_scope();
+        crate::session_summary::lookup_session_summary_window_for_workspace(
+            &scope.pool,
+            scope.physical.pg_namespace(),
+            scope.workspace_id.as_deref(),
+            session_id,
+        )
+        .await
+    }
+
+    /// List sessions from Postgres `session_summary` for this tenant binding.
+    pub(crate) async fn search_session_summary(
+        &self,
+        request: &crate::api::llm::query::SessionSearchRequest,
+        limit: usize,
+    ) -> Result<
+        crate::api::llm::query::SessionSearchResponse,
+        crate::session_summary::SessionSummaryListError,
+    > {
+        let scope = self.session_summary_scope();
+        crate::session_summary::search_session_summary_for_workspace(
+            &scope.pool,
+            scope.physical.pg_namespace(),
+            scope.workspace_id.as_deref(),
+            request,
+            limit,
+        )
+        .await
     }
 }
 
@@ -222,16 +263,46 @@ impl RuntimeEngineManager {
     }
 
     /// Idempotently create or verify a workspace → physical-scope binding.
+    ///
+    /// Returns warehouse hints only — callers never receive [`PhysicalScope`].
     pub async fn provision_scope(
         &self,
         request: ScopeProvisioningRequest,
-    ) -> Result<PhysicalScope> {
-        self.scope_registry.provision_scope(request).await
+    ) -> Result<ScopeStorageHints> {
+        let scope = self.scope_registry.provision_scope(request).await?;
+        Ok(ScopeStorageHints::from_physical(&scope))
     }
 
-    /// Resolve an existing workspace binding's physical scope.
+    /// Resolve warehouse hints for an existing workspace binding.
+    ///
+    /// Prefer this over digging into physical-scope codecs from handlers.
+    pub async fn scope_storage_hints(&self, scope_id: &str) -> Result<ScopeStorageHints> {
+        let scope = self.scope_registry.resolve_scope(scope_id).await?;
+        Ok(ScopeStorageHints::from_physical(&scope))
+    }
+
+    /// Resolve an existing workspace binding's physical scope (crate-internal).
     pub(crate) async fn resolve_scope(&self, scope_id: &str) -> Result<PhysicalScope> {
         self.scope_registry.resolve_scope(scope_id).await
+    }
+
+    /// Build DuckLake connection material for isolated-mode tenants.
+    ///
+    /// Shared mode refuses — direct catalog credentials are not exposed.
+    pub async fn ducklake_connection_material_for(
+        &self,
+        tenant: &TenantInfo,
+    ) -> Result<DuckLakeConnectionMaterial, String> {
+        if self.config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
+            return Err(
+                "direct DuckLake connection material is unavailable in shared scope mode".into(),
+            );
+        }
+        let scope = self
+            .resolve_scope(&tenant.tenant_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        DuckLakeConnectionMaterial::from_tenant_scope(tenant, &scope, self.config.as_ref())
     }
 
     pub fn list_cached_tenant_ids(&self) -> Vec<String> {
@@ -287,25 +358,24 @@ impl RuntimeEngineManager {
 
         let resolver = &self.scope_registry;
         let binding = resolver.resolve_or_create_binding(tenant_id).await?;
+        let physical = DuckLakeAccess::Workspace(binding.clone())
+            .physical_scope()
+            .clone();
         let scope_lock = self
             .scope_locks
-            .entry(binding.physical_scope.id().registry_token().to_string())
+            .entry(binding.registry_lock_token())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _scope_hold = scope_lock.lock().await;
         let counts_toward_liveness = true;
 
-        let ingest = IngestPipeline::build_tenant_ingest(
-            self.config.as_ref(),
-            resolver.clone(),
-            binding.clone(),
-        )
-        .await?;
+        let ingest =
+            IngestEngine::bound(self.config.as_ref(), resolver.clone(), binding.clone()).await?;
         ingest.ensure_shared_schema().await?;
         let query = Arc::new(
             query_mod::create_query_engine_for_scope_with_liveness(
                 self.config.as_ref(),
-                &binding.physical_scope,
+                &physical,
                 counts_toward_liveness,
                 bound_tenant_id,
             )
@@ -315,6 +385,7 @@ impl RuntimeEngineManager {
         Ok(Arc::new(RuntimeEngine {
             tenant_id: bound_tenant_id.to_string(),
             binding,
+            physical,
             catalog_pool: resolver.pool().clone(),
             ingest,
             admin,
@@ -328,6 +399,106 @@ pub struct ScopeProvisioningRequest {
     pub scope_id: String,
     pub metadata_schema: String,
     pub data_path: String,
+}
+
+/// Public warehouse hints for a provisioned workspace (no physical-scope codecs).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeStorageHints {
+    pub metadata_schema: String,
+    pub data_path: String,
+}
+
+impl ScopeStorageHints {
+    fn from_physical(scope: &PhysicalScope) -> Self {
+        Self {
+            metadata_schema: scope.pg_namespace().to_string(),
+            data_path: scope.warehouse_uri().to_string(),
+        }
+    }
+
+    pub fn matches_warehouse_hints(&self, metadata_schema: &str, data_path: &str) -> bool {
+        self.metadata_schema == metadata_schema && self.data_path == data_path
+    }
+}
+
+/// DuckLake connection credentials returned by the control API (isolated mode).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuckLakeConnectionMaterial {
+    pub version: u8,
+    pub tenant_id: String,
+    pub ducklake_pg_uri: String,
+    pub ducklake_metadata_schema: String,
+    pub ducklake_data_path: String,
+    pub gcs_bucket: String,
+    /// Object-store access key (`GCS_HMAC_*` for `gs://`, `AWS_ACCESS_KEY_ID` for `s3://`).
+    pub gcs_hmac_access_key_id: String,
+    /// Object-store secret (`GCS_HMAC_SECRET` / `AWS_SECRET_ACCESS_KEY`).
+    pub gcs_hmac_secret: String,
+    /// Optional STS / EC2 role session token for `s3://` (`AWS_SESSION_TOKEN`).
+    pub session_token: String,
+    pub schema_version: String,
+}
+
+impl DuckLakeConnectionMaterial {
+    pub(crate) fn from_tenant_scope(
+        tenant: &TenantInfo,
+        scope: &PhysicalScope,
+        config: &Config,
+    ) -> Result<Self, String> {
+        let ducklake_pg_uri = if scope.catalog_dsn().trim().is_empty() {
+            strip_postgres_uri_prefix(&config.ducklake.metadata_path)
+        } else {
+            strip_postgres_uri_prefix(scope.catalog_dsn())
+        };
+        let ducklake_data_path = scope.warehouse_uri().to_owned();
+        let ducklake_metadata_schema = scope.pg_namespace().to_owned();
+        let creds = config.resolve_object_store_credentials(&ducklake_data_path);
+
+        if ducklake_pg_uri.trim().is_empty() {
+            return Err("DuckLake Postgres metadata path is required".to_string());
+        }
+        if ducklake_data_path.trim().is_empty() {
+            return Err("DuckLake data path is required".to_string());
+        }
+        if path_requires_object_store_creds(&ducklake_data_path) && !creds.is_complete() {
+            return Err(
+                "GCS/S3 DuckLake data path requires object-store credentials in the environment \
+                 (GCS_HMAC_ACCESS_KEY_ID/GCS_HMAC_SECRET for gs://, or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY for s3://)"
+                    .to_string(),
+            );
+        }
+        if tenant.bucket_name.trim().is_empty() {
+            return Err("tenant is missing bucket_name".to_string());
+        }
+
+        Ok(Self {
+            version: 1,
+            tenant_id: tenant.tenant_id.clone(),
+            ducklake_pg_uri,
+            ducklake_metadata_schema,
+            ducklake_data_path,
+            gcs_bucket: tenant.bucket_name.clone(),
+            gcs_hmac_access_key_id: creds.access_key_id.unwrap_or_default(),
+            gcs_hmac_secret: creds.secret_access_key.unwrap_or_default(),
+            session_token: creds.session_token.unwrap_or_default(),
+            schema_version: "1".to_string(),
+        })
+    }
+}
+
+fn strip_postgres_uri_prefix(metadata_path: &str) -> String {
+    let metadata_path = metadata_path.trim();
+    if metadata_path.starts_with("postgres:") {
+        metadata_path.trim_start_matches("postgres:").to_string()
+    } else {
+        metadata_path.to_string()
+    }
+}
+
+fn path_requires_object_store_creds(data_path: &str) -> bool {
+    let p = data_path.trim();
+    p.starts_with("gs://") || p.starts_with("s3://")
 }
 
 /// Process-wide Postgres registry for workspace → physical-scope bindings.
@@ -575,14 +746,6 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
         Ok(())
     }
 
-    /// Resolve the DuckLake scope for `scope_id` from the durable registry.
-    ///
-    /// When `scope_id` is empty, returns the process-default scope.
-    pub async fn resolve_or_create(&self, scope_id: &str) -> Result<PhysicalScope> {
-        let binding = self.resolve_or_create_binding(scope_id).await?;
-        Ok(binding.physical_scope)
-    }
-
     /// Resolve a workspace binding from the durable registry.
     pub async fn resolve_or_create_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
         if workspace_id.trim().is_empty() {
@@ -595,7 +758,8 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
             .map_err(Into::into);
         }
         let binding = self.resolve_binding(workspace_id).await?;
-        self.ensure_scope_tables(&binding.physical_scope).await?;
+        self.ensure_scope_tables(DuckLakeAccess::Workspace(binding.clone()).physical_scope())
+            .await?;
         Ok(binding)
     }
 
@@ -628,7 +792,9 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
             self.ensure_scope().await?;
             return Ok(self.default_physical_scope.clone());
         }
-        Ok(self.resolve_binding(scope_id).await?.physical_scope)
+        Ok(DuckLakeAccess::Workspace(self.resolve_binding(scope_id).await?)
+            .physical_scope()
+            .clone())
     }
 
     /// Idempotently create or verify a scope registry entry and its metadata tables.
@@ -727,23 +893,6 @@ RETURNING workspace_id;"#,
                 )
             })
             .collect())
-    }
-
-    /// Resolve scope and load active telemetry column manifests from Postgres.
-    pub async fn load_active_telemetry_columns_manifests(
-        &self,
-        scope_id: &str,
-    ) -> Result<(PhysicalScope, Vec<TelemetryColumnsManifest>)> {
-        let scope = if scope_id.is_empty() {
-            self.resolve_or_create(scope_id).await?
-        } else {
-            self.resolve_scope(scope_id).await?
-        };
-        let client = self.pool.get().await?;
-        let manifests = load_active_telemetry_columns_manifests(&client, scope.pg_namespace())
-            .await
-            .map_err(map_spec_load_error)?;
-        Ok((scope, manifests))
     }
 
     /// Load active telemetry promotion manifests for an already bound scope.

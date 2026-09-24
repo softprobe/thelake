@@ -2,7 +2,7 @@
 //! timestamp-bounded recipes prune them without legacy date columns.
 
 use chrono::{TimeZone, Utc};
-use softprobe_runtime::ingest_engine::IngestPipeline;
+use softprobe_runtime::ingest_engine::IngestEngine;
 use softprobe_runtime::models::{Log, Span, SpanEvent};
 use softprobe_runtime::query::{LogCountFilter, TraceCountFilter};
 use std::collections::HashMap;
@@ -128,7 +128,9 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     // physical day pruning rather than DuckLake catalog-inline rows.
     config.ducklake.data_inlining_row_limit = Some(0);
     let data_path = config.ducklake.data_path.clone();
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let pipeline = IngestEngine::bound_default(&config)
+        .await
+        .expect("pipeline");
 
     pipeline
         .add_spans(vec![span(10, "a"), span(11, "b")], 0)
@@ -191,7 +193,9 @@ async fn typed_query_gate_covers_traces_and_logs() {
     let mut config = crate::util::config::file_backed_test_config(&temp);
     config.ingest.flush_interval_seconds = 0;
     config.ducklake.data_inlining_row_limit = Some(0);
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let pipeline = IngestEngine::bound_default(&config)
+        .await
+        .expect("pipeline");
     pipeline
         .add_spans(vec![span(10, "gate")], 0)
         .await

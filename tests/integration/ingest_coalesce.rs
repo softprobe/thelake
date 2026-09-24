@@ -12,7 +12,7 @@ async fn coalesce_force_flush_makes_logs_queryable() {
     let mut config = load_test_config();
     config.ingest.flush_interval_seconds = 60; // only force_flush should commit
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let mut attributes = HashMap::new();
     attributes.insert("logger_name".to_string(), "coalesce-test".to_string());

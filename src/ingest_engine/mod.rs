@@ -11,11 +11,10 @@ use crate::promotion::{BusinessApplyError, BusinessTableManifest, TelemetryColum
 use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::session_summary::{DirtyHint, SessionSummaryDirty};
 use crate::storage::ducklake::DuckLakeWriter;
-use crate::workspace_scope::{PhysicalScope, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID};
+use crate::workspace_scope::{WorkspaceBinding, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID};
 use anyhow::{anyhow, Result};
 use coalesce::CoalesceBuf;
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,7 +22,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct IngestEngine {
     writer: Arc<DuckLakeWriter>,
-    scope: PhysicalScope,
+    resolver: DuckLakeScopeResolver,
     tenant_id: String,
     flush_interval_seconds: u64,
     logs: Arc<CoalesceBuf<Log>>,
@@ -39,7 +38,7 @@ pub struct IngestEngine {
 #[derive(Clone)]
 pub struct AdminEngine {
     writer: Arc<DuckLakeWriter>,
-    scope: PhysicalScope,
+    resolver: DuckLakeScopeResolver,
 }
 
 /// Bound a DuckLake write so a hung INSERT cannot stall the coalesce worker forever.
@@ -59,8 +58,65 @@ where
 }
 
 impl IngestEngine {
-    pub(crate) fn from_writer(
+    /// Bind ingest to one workspace: create the writer, optional atomic dev reset,
+    /// and coalesce flush workers that load promotion manifests before each write.
+    pub(crate) async fn bound(
+        config: &Config,
+        resolver: DuckLakeScopeResolver,
+        binding: WorkspaceBinding,
+    ) -> Result<Arc<Self>> {
+        let tenant_id = binding.workspace_id.clone();
+        let writer = Arc::new(DuckLakeWriter::new(config, binding).await?);
+
+        if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
+            let scope = writer.physical_scope();
+            let telemetry = resolver
+                .load_active_telemetry_columns_manifests_for_scope(scope)
+                .await?;
+            let business = resolver
+                .load_active_business_table_manifests_for_scope(scope)
+                .await?;
+            writer
+                .apply_dev_reset_if_requested(&telemetry, &business)
+                .await?;
+        }
+
+        let dirty = session_summary_dirty_for(
+            config,
+            &resolver,
+            &tenant_id,
+            writer.physical_scope().pg_namespace(),
+        );
+        Ok(Arc::new(Self::from_writer(
+            writer,
+            resolver,
+            tenant_id,
+            config.ingest.flush_interval_seconds,
+            config.ingest.buffer_size_mb,
+            config.ingest.write_timeout_seconds,
+            dirty,
+        )))
+    }
+
+    /// Test/default helper: connect the registry and bind [`DEFAULT_WORKSPACE_ID`].
+    pub async fn bound_default(config: &Config) -> Result<Arc<Self>> {
+        let resolver = DuckLakeScopeResolver::connect(config).await?;
+        let binding = WorkspaceBinding::new(
+            DEFAULT_WORKSPACE_ID,
+            resolver.default_physical_scope().clone(),
+            config.ducklake.workspace_scope_mode,
+        )
+        .map_err(|error| anyhow!(error))?;
+        let ingest = Self::bound(config, resolver, binding).await?;
+        // Match former IngestPipeline::new: ensure physical schema before any
+        // query worker or leftover-table fail-fast checks attach the catalog.
+        ingest.ensure_shared_schema().await?;
+        Ok(ingest)
+    }
+
+    fn from_writer(
         writer: Arc<DuckLakeWriter>,
+        resolver: DuckLakeScopeResolver,
         tenant_id: impl Into<String>,
         flush_interval_seconds: u64,
         buffer_size_mb: u64,
@@ -68,11 +124,11 @@ impl IngestEngine {
         session_summary_dirty: Option<Arc<SessionSummaryDirty>>,
     ) -> Self {
         let tenant_id = tenant_id.into();
-        let scope = writer.configured_scope().clone();
         let (max_pending, eager_pending) = coalesce::resolve_byte_limits(buffer_size_mb);
         let write_timeout_seconds = resolve_write_timeout_seconds(write_timeout_seconds);
         let logs = {
             let writer = writer.clone();
+            let resolver = resolver.clone();
             let tenant = tenant_id.clone();
             CoalesceBuf::with_limits(
                 flush_interval_seconds,
@@ -80,12 +136,17 @@ impl IngestEngine {
                 eager_pending,
                 Arc::new(move |batches| {
                     let w = writer.clone();
+                    let resolver = resolver.clone();
                     let tenant = tenant.clone();
                     Box::pin(async move {
                         let rows: u64 = batches.iter().map(|b| b.len() as u64).sum();
+                        let scope = w.physical_scope().clone();
+                        let manifests = resolver
+                            .load_active_telemetry_columns_manifests_for_scope(&scope)
+                            .await?;
                         let r = ducklake_write_with_timeout(
                             write_timeout_seconds,
-                            w.write_log_batches(batches),
+                            w.write_log_batches(&manifests, batches),
                         )
                         .await;
                         if r.is_ok() {
@@ -100,6 +161,7 @@ impl IngestEngine {
         };
         let spans = {
             let writer = writer.clone();
+            let resolver = resolver.clone();
             let tenant = tenant_id.clone();
             let dirty = session_summary_dirty;
             CoalesceBuf::with_limits(
@@ -108,6 +170,7 @@ impl IngestEngine {
                 eager_pending,
                 Arc::new(move |batches| {
                     let w = writer.clone();
+                    let resolver = resolver.clone();
                     let tenant = tenant.clone();
                     let dirty = dirty.clone();
                     Box::pin(async move {
@@ -118,9 +181,13 @@ impl IngestEngine {
                         } else {
                             Vec::new()
                         };
+                        let scope = w.physical_scope().clone();
+                        let manifests = resolver
+                            .load_active_telemetry_columns_manifests_for_scope(&scope)
+                            .await?;
                         let r = ducklake_write_with_timeout(
                             write_timeout_seconds,
-                            w.write_span_batches(batches),
+                            w.write_span_batches(&manifests, batches),
                         )
                         .await;
                         maybe_after_traces_commit(
@@ -139,7 +206,7 @@ impl IngestEngine {
         };
         Self {
             writer,
-            scope,
+            resolver,
             tenant_id,
             flush_interval_seconds,
             logs,
@@ -248,7 +315,7 @@ impl AdminEngine {
     pub(crate) fn from_ingest(ingest: &Arc<IngestEngine>) -> Self {
         Self {
             writer: ingest.writer.clone(),
-            scope: ingest.scope.clone(),
+            resolver: ingest.resolver.clone(),
         }
     }
 
@@ -258,8 +325,14 @@ impl AdminEngine {
         spec: &TelemetryColumnsManifest,
         target_tables: &[String],
     ) -> Result<String> {
-        self.writer
-            .apply_and_record_telemetry_promotion(&self.scope, manifest_yaml, spec, target_tables)
+        let scope = self.writer.physical_scope().clone();
+        self.resolver
+            .apply_telemetry_promotion_guarded(&scope, manifest_yaml, target_tables, || async {
+                self.writer
+                    .apply_telemetry_column_promotion(spec)
+                    .await
+                    .map(|_| ())
+            })
             .await
     }
 
@@ -268,8 +341,14 @@ impl AdminEngine {
         manifest_yaml: &str,
         spec: &BusinessTableManifest,
     ) -> std::result::Result<String, BusinessApplyError> {
-        self.writer
-            .apply_business_promotion_guarded(&self.scope, manifest_yaml, spec)
+        let scope = self.writer.physical_scope().clone();
+        self.resolver
+            .apply_business_promotion_guarded(&scope, manifest_yaml, spec, || async {
+                self.writer
+                    .apply_business_table_promotion(spec)
+                    .await
+                    .map(|_| ())
+            })
             .await
     }
 }
@@ -311,7 +390,6 @@ mod after_commit_tests {
         let (engine, _temp) = crate::test_support::sample_ingest()
             .await
             .expect("sample ingest");
-        assert!(!engine.scope.warehouse_uri().is_empty());
 
         assert!(!engine
             .score_exists("missing-score")
@@ -335,105 +413,6 @@ mod after_commit_tests {
         engine.bind_spans_to_workspace(&mut spans);
 
         assert_eq!(spans[0].tenant_id.as_deref(), Some(DEFAULT_WORKSPACE_ID));
-    }
-}
-
-/// Test / single-tenant pipeline with a long-lived [`IngestEngine`] (shared coalesce state).
-#[derive(Clone)]
-pub struct IngestPipeline {
-    cache_dir: Option<PathBuf>,
-    ingest: Arc<IngestEngine>,
-}
-
-impl IngestPipeline {
-    pub async fn new(config: &Config) -> Result<Self> {
-        let tenant_ducklake = DuckLakeScopeResolver::connect(config).await?;
-        let tenant_id = DEFAULT_WORKSPACE_ID;
-        let physical = tenant_ducklake.default_physical_scope().clone();
-        let writer = Arc::new(
-            DuckLakeWriter::new_scope_bound(
-                config,
-                tenant_ducklake.clone(),
-                tenant_id,
-                physical.clone(),
-            )
-            .await?,
-        );
-        // The standalone pipeline is a tenant-bound engine too. Ensure its
-        // physical schema before any query worker attaches the catalog.
-        writer.ensure_shared_schema().await?;
-        let cache_dir = config.query.cache_dir.as_ref().map(PathBuf::from);
-        let dirty =
-            session_summary_dirty_for(config, &tenant_ducklake, tenant_id, physical.pg_namespace());
-        let ingest = Arc::new(IngestEngine::from_writer(
-            writer,
-            tenant_id,
-            config.ingest.flush_interval_seconds,
-            config.ingest.buffer_size_mb,
-            config.ingest.write_timeout_seconds,
-            dirty,
-        ));
-
-        Ok(Self { cache_dir, ingest })
-    }
-
-    /// Build an ingest facade bound to one authenticated workspace and scope.
-    pub(crate) async fn build_tenant_ingest(
-        config: &Config,
-        tenant_ducklake: DuckLakeScopeResolver,
-        binding: crate::workspace_scope::WorkspaceBinding,
-    ) -> Result<Arc<IngestEngine>> {
-        let tenant_id = binding.workspace_id.clone();
-        let scope = binding.physical_scope;
-        let writer =
-            Self::build_tenant_writer(config, tenant_ducklake.clone(), tenant_id.clone(), &scope)
-                .await?;
-        let dirty =
-            session_summary_dirty_for(config, &tenant_ducklake, &tenant_id, scope.pg_namespace());
-        Ok(Arc::new(IngestEngine::from_writer(
-            writer,
-            tenant_id,
-            config.ingest.flush_interval_seconds,
-            config.ingest.buffer_size_mb,
-            config.ingest.write_timeout_seconds,
-            dirty,
-        )))
-    }
-
-    async fn build_tenant_writer(
-        config: &Config,
-        tenant_ducklake: DuckLakeScopeResolver,
-        tenant_id: String,
-        scope: &PhysicalScope,
-    ) -> Result<Arc<DuckLakeWriter>> {
-        Ok(Arc::new(
-            DuckLakeWriter::new_scope_bound(config, tenant_ducklake, tenant_id, scope.clone())
-                .await?,
-        ))
-    }
-
-    pub async fn add_spans(&self, items: Vec<Span>, request_size: usize) -> Result<()> {
-        self.ingest.add_spans(items, request_size).await
-    }
-
-    pub async fn add_logs(&self, items: Vec<Log>, request_size: usize) -> Result<()> {
-        self.ingest.add_logs(items, request_size).await
-    }
-
-    pub async fn force_flush_spans(&self) -> Result<()> {
-        self.ingest.force_flush_spans().await
-    }
-
-    pub async fn force_flush_logs(&self) -> Result<()> {
-        self.ingest.force_flush_logs().await
-    }
-
-    pub fn cache_dir(&self) -> Option<PathBuf> {
-        self.cache_dir.clone()
-    }
-
-    pub fn ingest_engine(&self) -> Arc<IngestEngine> {
-        self.ingest.clone()
     }
 }
 

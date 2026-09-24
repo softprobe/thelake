@@ -25,7 +25,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
     let now = Utc::now();
 
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let span = SpanData {
         session_id: session_id.clone(),
@@ -110,7 +110,7 @@ async fn strict_session_correlates_traces_and_logs() {
     let now = Utc::now();
 
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let span = SpanData {
         session_id: session_id.clone(),

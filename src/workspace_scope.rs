@@ -288,10 +288,6 @@ impl PhysicalScope {
         self.metadata_schema == other.metadata_schema && self.data_path == other.data_path
     }
 
-    pub(crate) fn matches_warehouse_hints(&self, metadata_schema: &str, data_path: &str) -> bool {
-        self.metadata_schema == metadata_schema && self.data_path == data_path
-    }
-
     pub(crate) fn forbidden_sql_identifiers(&self) -> Vec<String> {
         vec![
             self.metadata_schema.clone(),
@@ -304,10 +300,13 @@ impl PhysicalScope {
 }
 
 /// The logical workspace-to-physical-scope binding used by engine contracts.
+///
+/// Physical identity is crate-private: handlers and protocol adapters must not
+/// reach through to [`PhysicalScope`]; use RuntimeEngine / manager façades.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceBinding {
     pub workspace_id: String,
-    pub physical_scope: PhysicalScope,
+    physical_scope: PhysicalScope,
     pub mode: WorkspaceScopeMode,
 }
 
@@ -327,6 +326,13 @@ impl WorkspaceBinding {
             mode,
         })
     }
+
+    /// Stable lock / lease map key for this binding's warehouse identity.
+    ///
+    /// Does not expose [`PhysicalScope`] codecs — only an opaque token.
+    pub(crate) fn registry_lock_token(&self) -> String {
+        self.physical_scope.id().registry_token().to_string()
+    }
 }
 
 /// Classified capability used to construct a DuckLake session.
@@ -339,7 +345,8 @@ pub enum DuckLakeAccess {
 }
 
 impl DuckLakeAccess {
-    pub fn physical_scope(&self) -> &PhysicalScope {
+    /// Storage/attach path only — the sole crate funnel from a binding to physical.
+    pub(crate) fn physical_scope(&self) -> &PhysicalScope {
         match self {
             Self::Workspace(binding) => &binding.physical_scope,
             Self::Physical(scope) => scope,

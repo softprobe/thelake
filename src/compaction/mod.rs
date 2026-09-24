@@ -14,8 +14,6 @@ mod status;
 pub(crate) mod twcs;
 mod watermark;
 
-#[cfg(test)]
-pub(crate) use engine::deduplicate_physical_scopes;
 pub use engine::{maintenance_table_names, MaintenanceEngine, MaintenanceScope};
 pub use maintenance_job::{PhysicalScopeMaintenanceJob, PHYSICAL_SCOPE_MAINTENANCE_JOB};
 pub use status::{

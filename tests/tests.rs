@@ -3,6 +3,8 @@ mod util;
 
 #[path = "design/physical_scope_contract.rs"]
 mod physical_scope_contract;
+#[path = "design/writer_binding_contract.rs"]
+mod writer_binding_contract;
 
 #[path = "compat/loki/mod.rs"]
 mod compat_loki;

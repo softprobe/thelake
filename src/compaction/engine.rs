@@ -170,8 +170,37 @@ impl MaintenanceEngine {
         Ok(scopes)
     }
 
+    /// Workspace ids for per-tenant jobs (session_summary). Not warehouse-deduped.
+    pub async fn workspace_scope_keys(&self) -> Result<Vec<String>> {
+        Ok(self
+            .workspace_scopes()
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
+    }
+
     pub(crate) async fn physical_scopes(&self) -> Result<Vec<(String, PhysicalScope)>> {
         Ok(deduplicate_physical_scopes(self.workspace_scopes().await?))
+    }
+
+    /// Deduped physical-scope keys for lake maintenance (one pass per warehouse).
+    pub async fn maintenance_scope_keys(&self) -> Result<Vec<String>> {
+        Ok(self
+            .physical_scopes()
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
+    }
+
+    async fn lookup_physical_scope(&self, scope_key: &str) -> Result<PhysicalScope> {
+        self.physical_scopes()
+            .await?
+            .into_iter()
+            .find(|(id, _)| id == scope_key)
+            .map(|(_, physical)| physical)
+            .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))
     }
 
     pub(crate) async fn ensure_physical_scope_bootstrap(
@@ -181,6 +210,18 @@ impl MaintenanceEngine {
         crate::session_summary::ensure_product_hot_attrs_for_scope(&self.scope_registry, physical)
             .await?;
         Ok(())
+    }
+
+    /// Resolve by maintenance key, bootstrap, then run one TWCS/metadata pass.
+    pub async fn run_pass_for_key(
+        &self,
+        scope_key: &str,
+        run_compaction: bool,
+    ) -> Result<Vec<TableMaintenanceResult>> {
+        let physical = self.lookup_physical_scope(scope_key).await?;
+        self.ensure_physical_scope_bootstrap(&physical).await?;
+        self.run_physical_scope_pass(scope_key, &physical, run_compaction)
+            .await
     }
 
     /// One physical scope: TWCS (optional, newer_than-scoped) + metadata expire/orphan.
@@ -545,6 +586,31 @@ mod tests {
         assert_eq!(scopes.len(), 2);
         assert!(scopes[0].0.starts_with("ducklake:"));
         assert!(scopes[1].0.starts_with("ducklake:"));
+    }
+
+    #[tokio::test]
+    async fn maintenance_scope_keys_are_warehouse_deduped() {
+        let config = Config::default();
+        let resolver = crate::runtime_engine::DuckLakeScopeResolver::connect(&config)
+            .await
+            .expect("connect resolver");
+        let engine = MaintenanceEngine::new(&config, resolver)
+            .await
+            .expect("engine");
+        let keys = engine
+            .maintenance_scope_keys()
+            .await
+            .expect("maintenance keys");
+        assert!(!keys.is_empty());
+        assert!(
+            keys.iter().all(|k| k.starts_with("ducklake:")),
+            "maintenance keys must be physical tokens, got {keys:?}"
+        );
+        let workspace_keys = engine
+            .workspace_scope_keys()
+            .await
+            .expect("workspace keys");
+        assert!(!workspace_keys.is_empty());
     }
 
     #[test]

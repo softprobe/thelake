@@ -217,6 +217,205 @@ fn from_ducklake_is_ingress_only_outside_cfg_test() {
 }
 
 #[test]
+fn api_and_compat_must_not_reach_engine_internals() {
+    let roots = [
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/compat"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime_api.rs"),
+    ];
+    let forbidden = [
+        ".physical_scope(",
+        ".pool()",
+        "scope_registry(",
+        "DuckLakeScopeResolver",
+        "TenantSummaryScope",
+        "session_summary_scope",
+        "binding.physical_scope",
+        "pub physical_scope:",
+        ".pg_namespace()",
+        ".warehouse_uri()",
+        ".catalog_dsn()",
+        "engines.resolve_scope(",
+        "PhysicalScope::",
+        "use crate::workspace_scope::PhysicalScope",
+    ];
+    let mut hits = Vec::new();
+    for root in &roots {
+        if root.is_file() {
+            if let Ok(contents) = std::fs::read_to_string(root) {
+                let production = strip_cfg_test_modules(&contents);
+                for (idx, line) in production.lines().enumerate() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                        continue;
+                    }
+                    for needle in forbidden {
+                        if trimmed.contains(needle) {
+                            hits.push(format!("{}:{}: {}", root.display(), idx + 1, trimmed));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        visit_rs(root, &mut |path, contents| {
+            let production = strip_cfg_test_modules(contents);
+            for (idx, line) in production.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                for needle in forbidden {
+                    if trimmed.contains(needle) {
+                        hits.push(format!("{}:{}: {}", path.display(), idx + 1, trimmed));
+                    }
+                }
+            }
+        });
+    }
+    assert!(
+        hits.is_empty(),
+        "handlers must use engine façades only (no binding/physical/pool codecs):\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
+fn workspace_binding_does_not_expose_physical_scope() {
+    let workspace = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/workspace_scope.rs"
+    ));
+    assert!(
+        !workspace.contains("pub physical_scope: PhysicalScope"),
+        "WorkspaceBinding.physical_scope must not be a public field"
+    );
+    // Same-module DuckLakeAccess may read the private field; Binding must not
+    // hand out PhysicalScope via a getter (that re-opens the leak).
+    let binding_impl = workspace
+        .split("impl WorkspaceBinding")
+        .nth(1)
+        .and_then(|rest| rest.split("impl DuckLakeAccess").next())
+        .expect("WorkspaceBinding impl");
+    assert!(
+        !binding_impl.contains("fn physical_scope("),
+        "WorkspaceBinding must not expose a physical_scope getter"
+    );
+    assert!(
+        binding_impl.contains("fn registry_lock_token("),
+        "WorkspaceBinding may expose opaque registry_lock_token only"
+    );
+}
+
+#[test]
+fn manager_provision_returns_storage_hints_not_physical_scope() {
+    let runtime = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/runtime_engine.rs"
+    ));
+    // Manager façade signature (not DuckLakeScopeResolver::provision_scope).
+    let manager_impl = runtime
+        .split("impl RuntimeEngineManager")
+        .nth(1)
+        .expect("RuntimeEngineManager impl");
+    assert!(
+        manager_impl.contains("pub async fn provision_scope(")
+            && manager_impl.contains("Result<ScopeStorageHints>"),
+        "RuntimeEngineManager::provision_scope must return ScopeStorageHints"
+    );
+    assert!(
+        manager_impl.contains("pub async fn scope_storage_hints("),
+        "RuntimeEngineManager must expose scope_storage_hints"
+    );
+    assert!(
+        manager_impl.contains("pub async fn ducklake_connection_material_for("),
+        "RuntimeEngineManager must own ducklake connection materialization"
+    );
+    assert!(
+        !manager_impl
+            .split("pub async fn provision_scope(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub async fn").next())
+            .expect("provision_scope body")
+            .contains("Result<PhysicalScope>"),
+        "RuntimeEngineManager::provision_scope must not return PhysicalScope"
+    );
+}
+
+#[test]
+fn api_llm_query_uses_runtime_engine_summary_facade() {
+    let query = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/api/llm/query.rs"));
+    for needle in [
+        "session_summary_scope",
+        "TenantSummaryScope",
+        "summary_scope.physical",
+        ".physical.pg_namespace",
+        "lookup_session_summary_window_for_workspace",
+        "search_session_summary_for_workspace",
+    ] {
+        assert!(
+            !query.contains(needle),
+            "api/llm/query.rs must use RuntimeEngine summary methods only (found {needle})"
+        );
+    }
+    assert!(
+        query.contains("lookup_session_summary_window"),
+        "api/llm/query.rs must call RuntimeEngine::lookup_session_summary_window"
+    );
+    assert!(
+        query.contains("search_session_summary"),
+        "api/llm/query.rs must call RuntimeEngine::search_session_summary"
+    );
+
+    let runtime = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/runtime_engine.rs"
+    ));
+    assert!(
+        runtime.contains("struct TenantSummaryScope {"),
+        "TenantSummaryScope must remain a private helper inside runtime_engine"
+    );
+    assert!(
+        !runtime.contains("pub(crate) struct TenantSummaryScope")
+            && !runtime.contains("pub struct TenantSummaryScope"),
+        "TenantSummaryScope must not be exported"
+    );
+    assert!(
+        !runtime.contains("pub(crate) fn session_summary_scope"),
+        "session_summary_scope must stay private to RuntimeEngine"
+    );
+}
+
+#[test]
+fn leased_jobs_must_not_import_physical_scope() {
+    let roots = [
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/compaction/maintenance_job.rs"
+        ),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/session_summary/job.rs"),
+    ];
+    for path in roots {
+        let src = std::fs::read_to_string(path).expect("read job source");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(&src);
+        for needle in [
+            "use crate::workspace_scope::PhysicalScope",
+            "PhysicalScope::",
+            ": PhysicalScope",
+            "&PhysicalScope",
+            "DuckLakeScopeResolver",
+            "default_physical_scope",
+            ".pool()",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "{path} must use engine key façades only (found {needle})"
+            );
+        }
+    }
+}
+
+#[test]
 fn ducklake_qualified_table_name_takes_physical_scope_not_config() {
     let attach = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
