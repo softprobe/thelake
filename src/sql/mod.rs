@@ -9,6 +9,7 @@ pub mod llm;
 pub mod logs;
 pub mod maintenance;
 pub mod promotion;
+pub mod query;
 pub mod schema;
 pub mod session_summary;
 pub mod telemetry;

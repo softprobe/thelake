@@ -48,11 +48,18 @@ jobs:
       - name: Doctor
         run: make doctor
 
+      - name: Start local test infra
+        run: make setup
+
       - name: CI checks (fmt, lint, unit tests)
         run: |
           make check-fmt
           make lint
           make test
+
+      - name: Teardown local infra
+        if: always()
+        run: make teardown
 
   e2e-isolated:
     name: E2E (isolated DuckLake)

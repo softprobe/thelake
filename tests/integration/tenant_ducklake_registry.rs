@@ -219,8 +219,9 @@ fn postgres_config() -> Config {
         format!("softprobe_registry_test_{}", Uuid::new_v4().simple());
     // This registry contract exercises Postgres metadata only. Keep the
     // DuckLake data path local so the test never probes cloud instance
-    // metadata for credentials while building a tenant-bound engine.
-    config.ducklake.data_path = "./warehouse/ducklake/registry-test-data/".to_string();
+    // metadata for credentials while building a tenant-bound engine. Keep it
+    // under target: the Docker MinIO service owns warehouse/ on CI runners.
+    config.ducklake.data_path = "./target/registry-test-data/shared/".to_string();
     apply_workspace_scope_mode(&mut config);
 
     config

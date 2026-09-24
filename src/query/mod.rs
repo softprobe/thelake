@@ -119,9 +119,8 @@ impl QueryEngine {
                 crate::sql::literal::sql_string_literal(&trace_id)
             ));
         }
-        let query = crate::sql::trusted::approved_query(format!(
-            "SELECT COUNT(*)::BIGINT AS count FROM logs WHERE {}",
-            predicates.join(" AND ")
+        let query = crate::sql::trusted::approved_query(crate::sql::query::count_logs_sql(
+            &predicates.join(" AND "),
         ))
         .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
@@ -137,9 +136,8 @@ impl QueryEngine {
     pub async fn count_traces(&self, filter: TraceCountFilter) -> anyhow::Result<u64> {
         let mut predicates = bounded_timestamp_predicates();
         add_trace_filter_predicates(&mut predicates, filter);
-        let query = crate::sql::trusted::approved_query(format!(
-            "SELECT COUNT(*)::BIGINT AS count FROM traces WHERE {}",
-            predicates.join(" AND ")
+        let query = crate::sql::trusted::approved_query(crate::sql::query::count_traces_sql(
+            &predicates.join(" AND "),
         ))
         .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
@@ -159,9 +157,8 @@ impl QueryEngine {
             crate::sql::literal::sql_string_literal(session_id)
         ));
         predicates.push("http_request_method IS NOT NULL".to_string());
-        let query = crate::sql::trusted::approved_query(format!(
-            "SELECT http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body FROM traces WHERE {} LIMIT 1",
-            predicates.join(" AND ")
+        let query = crate::sql::trusted::approved_query(crate::sql::query::find_http_span_sql(
+            &predicates.join(" AND "),
         ))
         .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
@@ -204,9 +201,8 @@ impl QueryEngine {
             "session_id = {}",
             crate::sql::literal::sql_string_literal(session_id)
         ));
-        let query = crate::sql::trusted::approved_query(format!(
-            "SELECT COUNT(*)::BIGINT FROM (SELECT strftime(timestamp, '%Y-%m-%d') FROM traces WHERE {} GROUP BY 1) days",
-            predicates.join(" AND ")
+        let query = crate::sql::trusted::approved_query(crate::sql::query::count_trace_days_sql(
+            &predicates.join(" AND "),
         ))
         .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
@@ -266,9 +262,8 @@ impl QueryEngine {
             crate::storage::schema::variant::variant_varchar("attributes", key),
             crate::sql::literal::sql_string_literal(value)
         ));
-        let query = crate::sql::trusted::approved_query(format!(
-            "SELECT CAST(attributes AS JSON) FROM traces WHERE {} LIMIT 1",
-            predicates.join(" AND ")
+        let query = crate::sql::trusted::approved_query(crate::sql::query::trace_attributes_sql(
+            &predicates.join(" AND "),
         ))
         .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
@@ -291,9 +286,8 @@ impl QueryEngine {
             "span_id = {}",
             crate::sql::literal::sql_string_literal(span_id)
         ));
-        let query = crate::sql::trusted::approved_query(format!(
-            "SELECT CAST(attributes AS JSON) FROM traces WHERE {} LIMIT 1",
-            predicates.join(" AND ")
+        let query = crate::sql::trusted::approved_query(crate::sql::query::trace_attributes_sql(
+            &predicates.join(" AND "),
         ))
         .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
@@ -386,9 +380,9 @@ fn bounded_timestamp_predicates() -> Vec<String> {
 
 impl QueryEngine {
     async fn count_rows(&self, table: &str, predicates: Vec<String>) -> anyhow::Result<u64> {
-        let query = crate::sql::trusted::approved_query(format!(
-            "SELECT COUNT(*)::BIGINT FROM {table} WHERE {}",
-            predicates.join(" AND ")
+        let query = crate::sql::trusted::approved_query(crate::sql::query::count_rows_sql(
+            table,
+            &predicates.join(" AND "),
         ))
         .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
