@@ -5,7 +5,8 @@
 //! shared-scope policy. The constructor is kept behind this module so future
 //! builders can become the only producers of trusted statements.
 
-use crate::workspace_scope::{PhysicalScope, SharedScopeErrorCode};
+use crate::storage::ducklake::PhysicalScope;
+use crate::workspace_scope::SharedScopeErrorCode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrustedSql(String);
@@ -77,16 +78,11 @@ impl TrustedSql {
 }
 
 fn physical_identifiers(scope: &PhysicalScope) -> Vec<String> {
-    [
-        scope.catalog_alias.clone(),
-        scope.metadata_schema.clone(),
-        format!("__ducklake_metadata_{}", scope.catalog_alias),
-        scope.metadata_path.clone(),
-        scope.data_path.clone(),
-    ]
-    .into_iter()
-    .filter(|value| !value.trim().is_empty())
-    .collect()
+    scope
+        .forbidden_sql_identifiers()
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect()
 }
 
 fn contains_sql_token(sql: &str, token: &str) -> bool {
@@ -142,7 +138,7 @@ impl std::error::Error for TrustedSqlError {}
 #[cfg(test)]
 mod tests {
     use super::{TrustedSql, TrustedSqlError};
-    use crate::{config::DuckLakeConfig, workspace_scope::PhysicalScope};
+    use crate::{config::DuckLakeConfig, storage::ducklake::PhysicalScope};
 
     #[test]
     fn trusted_sql_is_opaque_and_non_empty() {

@@ -64,7 +64,7 @@ fn profile_enabled() -> bool {
     std::env::var("PERF_CACHE_PROFILE").ok().as_deref() == Some("1")
 }
 
-fn format_result(result: &softprobe_runtime::query::duckdb::QueryResult) -> String {
+fn format_result(result: &softprobe_runtime::storage::duckdb::QueryResult) -> String {
     let mut output = String::new();
     output.push_str(&format!("columns: {:?}\n", result.columns));
     for row in &result.rows {
@@ -150,7 +150,7 @@ async fn retry_query_until_count(
     sql: &str,
     expected_count: i64,
     max_retries: u32,
-) -> Result<softprobe_runtime::query::duckdb::QueryResult, anyhow::Error> {
+) -> Result<softprobe_runtime::storage::duckdb::QueryResult, anyhow::Error> {
     let is_r2 = std::env::var("E2E_BACKEND").ok().as_deref() == Some("r2");
     let max_retries = if is_r2 {
         max_retries.max(10)
@@ -210,7 +210,7 @@ async fn perf_union_read_latency() {
 
     let warmup_workers = std::cmp::max(1, config.query.max_connections);
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let per_session = std::env::var("PERF_EVENTS_PER_SESSION")
         .ok()
@@ -423,7 +423,7 @@ async fn perf_union_read_concurrency() {
 
     let warmup_workers = std::cmp::max(1, config.query.max_connections);
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let per_session = std::env::var("PERF_EVENTS_PER_SESSION")
         .ok()

@@ -74,49 +74,26 @@ fn isolation_span(tenant_id: &str, session_id: &str, trace_id: &str) -> ModelSpa
 }
 
 fn trace_count_for_session(
-    conn: &duckdb::Connection,
     metadata_path: &str,
     data_path: &str,
-    meta_schema: &str,
+    metadata_schema: &str,
     session_id: &str,
 ) -> i64 {
-    // File-backed tenant DATA_PATH: keep extension load minimal (httpfs + path-style S3 breaks attach).
-    // s3:// tenant paths (gRPC parity test): match tests/fixtures/legacy_verify_session.sql so MinIO
-    // does not return HTTP 301 (virtual-host style) on parquet reads.
-    let needs_object_store = data_path.starts_with("s3://") || data_path.starts_with("gs://");
-    if needs_object_store {
-        conn.execute_batch(
-            "INSTALL httpfs; LOAD httpfs; INSTALL ducklake; LOAD ducklake; INSTALL postgres; LOAD postgres;",
-        )
-        .expect("ducklake extensions");
-        conn.execute_batch(
-            "SET s3_endpoint = 'localhost:9000';
-             SET s3_url_style = 'path';
-             SET s3_use_ssl = false;
-             SET s3_access_key_id = 'minioadmin';
-             SET s3_secret_access_key = 'minioadmin';
-             SET s3_region = 'us-east-1';",
-        )
-        .expect("minio httpfs for ducklake data_path");
-    } else {
-        conn.execute_batch("INSTALL ducklake; INSTALL postgres; LOAD postgres;")
-            .expect("ducklake extensions");
-    }
-    let attach = format!(
-        "ATTACH 'ducklake:postgres:{}' AS q (DATA_PATH '{}', METADATA_SCHEMA '{}', META_SCHEMA '{}', DATA_INLINING_ROW_LIMIT 0);",
-        metadata_path.replace('\'', "''"),
-        data_path.replace('\'', "''"),
-        meta_schema.replace('\'', "''"),
-        meta_schema.replace('\'', "''"),
+    let conn = crate::util::scope::open_attached_warehouse(
+        metadata_path,
+        data_path,
+        metadata_schema,
+        Some(0),
     );
-    conn.execute_batch(&attach).expect("attach");
-    let sql = format!(
-        "SELECT count(*) FROM q.{}.traces WHERE session_id = '{}';",
-        meta_schema,
-        session_id.replace('\'', "''")
-    );
-    conn.query_row(&sql, [], |row| row.get(0))
-        .expect("count traces")
+    conn.query_row(
+        &format!(
+            "SELECT count(*) FROM traces WHERE session_id = '{}'",
+            session_id.replace('\'', "''")
+        ),
+        [],
+        |row| row.get(0),
+    )
+    .expect("count traces")
 }
 
 #[tokio::test]
@@ -205,27 +182,13 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         assert_eq!(n_a, 1, "workspace A view must contain its session");
     } else {
         let metadata_path = config.ducklake.metadata_path.clone();
-        let conn = duckdb::Connection::open_in_memory().expect("duckdb");
-        let n_b = trace_count_for_session(
-            &conn,
-            &scope_b.metadata_path,
-            &scope_b.data_path,
-            &scope_b.metadata_schema,
-            &session_id,
-        );
+        let n_b = trace_count_for_session(&metadata_path, &path_b, &meta_b, &session_id);
         assert_eq!(
             n_b, 0,
             "tenant B DuckLake must not contain tenant A's session"
         );
 
-        let conn2 = duckdb::Connection::open_in_memory().expect("duckdb");
-        let n_a = trace_count_for_session(
-            &conn2,
-            &metadata_path,
-            &scope_a.data_path,
-            &scope_a.metadata_schema,
-            &session_id,
-        );
+        let n_a = trace_count_for_session(&metadata_path, &path_a, &meta_a, &session_id);
         assert_eq!(n_a, 1, "tenant A scope must contain ingested span");
     }
 }
@@ -313,7 +276,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
-    let physical_scope = manager
+    let hints = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: tenant_schema.clone(),
@@ -321,6 +284,19 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
         })
         .await
         .expect("provision tenant");
+    // Shared mode ignores request warehouse overrides (logical binding only).
+    // Isolated mode must bind the requested schema/path.
+    if config.ducklake.workspace_scope_mode
+        == softprobe_runtime::workspace_scope::WorkspaceScopeMode::Isolated
+    {
+        assert!(
+            hints.matches_warehouse_hints(&tenant_schema, &tenant_data_path),
+            "isolated provision must bind requested warehouse hints"
+        );
+    } else {
+        assert!(!hints.metadata_schema.is_empty());
+        assert!(!hints.data_path.is_empty());
+    }
 
     Mock::given(method("POST"))
         .and(path("/"))
@@ -372,22 +348,20 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
 
     // Ingest is flush-through; no separate pipeline flush needed.
 
-    let metadata_path = physical_scope.metadata_path.clone();
-    let conn = duckdb::Connection::open_in_memory().expect("duckdb");
+    std::env::set_var("AWS_S3_ENDPOINT", "http://localhost:9000");
+    // Verify against the provisioned warehouse (shared mode ignores request overrides).
+    let metadata_path = config.ducklake.metadata_path.clone();
     let n: i64 = trace_count_for_session(
-        &conn,
         &metadata_path,
-        &physical_scope.data_path,
-        &physical_scope.metadata_schema,
+        &hints.data_path,
+        &hints.metadata_schema,
         &format!("grpc-sess-{suffix}"),
     );
     assert_eq!(n, 1, "gRPC export must land in tenant-scoped traces table");
-    let conn2 = duckdb::Connection::open_in_memory().expect("duckdb");
     let n2: i64 = trace_count_for_session(
-        &conn2,
         &metadata_path,
-        &physical_scope.data_path,
-        &physical_scope.metadata_schema,
+        &hints.data_path,
+        &hints.metadata_schema,
         &format!("http-sess-{suffix}"),
     );
     assert_eq!(

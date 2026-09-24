@@ -10,6 +10,11 @@ pub(crate) fn escape_sql_literal(input: &str) -> String {
     input.replace('\'', "''")
 }
 
+/// Process-wide kill switch for query-path cache_httpfs (SessionFactory + workers).
+pub(crate) fn cache_httpfs_disabled_by_env() -> bool {
+    std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1")
+}
+
 fn is_map_dtype(dtype: &str) -> bool {
     let normalized = dtype.to_ascii_uppercase();
     normalized == "MAP" || normalized.starts_with("MAP(") || normalized.starts_with("MAP ")

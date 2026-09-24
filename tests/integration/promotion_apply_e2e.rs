@@ -43,7 +43,11 @@ async fn setup() -> PostgresBackend {
     let suffix = Uuid::new_v4().simple().to_string();
     let short = &suffix[..8];
     let tenant_id = format!("tenant-promo-{short}");
-    let metadata_schema = format!("sp_promo_data_{short}");
+    // One catalog schema for registry + data. Shared mode binds workspaces to the
+    // process-default physical scope (config schema); isolated mode provisions the
+    // same schema via request overrides. Verification must not invent a second
+    // schema that apply never touches.
+    let metadata_schema = format!("sp_promo_{short}");
     let data_path = temp
         .path()
         .join("tenant-data")
@@ -56,7 +60,7 @@ async fn setup() -> PostgresBackend {
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
     config.ducklake.metadata_path = POSTGRES_DSN.to_string();
     config.ducklake.catalog_alias = "softprobe".to_string();
-    config.ducklake.metadata_schema = format!("sp_promo_reg_{short}");
+    config.ducklake.metadata_schema = metadata_schema.clone();
     config.ducklake.data_path = data_path.clone();
     config.ducklake.data_inlining_row_limit = Some(0);
     apply_workspace_scope_mode(&mut config);
@@ -64,7 +68,7 @@ async fn setup() -> PostgresBackend {
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
-    let physical_scope = manager
+    let _physical = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: metadata_schema.clone(),
@@ -99,29 +103,19 @@ async fn setup() -> PostgresBackend {
         router,
         metadata_path,
         data_path,
-        metadata_schema: physical_scope.metadata_schema,
+        metadata_schema,
         api_key: "promotion-contract-key".to_string(),
     }
 }
 
 impl PostgresBackend {
     fn attach(&self) -> duckdb::Connection {
-        let connection = duckdb::Connection::open_in_memory().expect("duckdb");
-        connection
-            .execute_batch("INSTALL ducklake; INSTALL postgres; LOAD postgres;")
-            .expect("extensions");
-        connection
-            .execute_batch(&format!(
-                "ATTACH 'ducklake:postgres:{}' AS softprobe \
-                 (DATA_PATH '{}', METADATA_SCHEMA '{}', META_SCHEMA '{}', \
-                  DATA_INLINING_ROW_LIMIT 0);",
-                self.metadata_path.replace('\'', "''"),
-                self.data_path.replace('\'', "''"),
-                self.metadata_schema.replace('\'', "''"),
-                self.metadata_schema.replace('\'', "''"),
-            ))
-            .expect("attach");
-        connection
+        crate::util::scope::open_attached_warehouse(
+            self.metadata_path.clone(),
+            self.data_path.clone(),
+            self.metadata_schema.clone(),
+            Some(0),
+        )
     }
 
     async fn count_specs(&self, status: &str) -> i64 {

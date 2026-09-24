@@ -627,9 +627,20 @@ async fn runner_continues_after_scope_run_error() {
         lease_ttl_seconds: 60,
     };
     let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Poll rather than a fixed sleep: under suite load the first wake can take
+    // longer than 100ms (HB spawn/join around each scope).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let seen = loop {
+        let snapshot = ran.ran.lock().unwrap().clone();
+        if snapshot.iter().any(|s| s == "bad") && snapshot.iter().any(|s| s == "good") {
+            break snapshot;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break snapshot;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     handle.abort();
-    let seen = ran.ran.lock().unwrap().clone();
     assert!(
         seen.iter().any(|s| s == "bad"),
         "failing scope must still be attempted: {seen:?}"

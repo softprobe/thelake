@@ -5,7 +5,6 @@ use crate::promotion::{
 };
 use crate::storage::schema::arrow;
 use crate::storage::schema::tables::{OtlpLogsTable, TraceTable};
-use crate::workspace_scope::PhysicalScope;
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -85,7 +84,11 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    pub(crate) async fn write_span_batches(&self, batches: Vec<Vec<Span>>) -> Result<()> {
+    pub(crate) async fn write_span_batches(
+        &self,
+        manifests: &[TelemetryColumnsManifest],
+        batches: Vec<Vec<Span>>,
+    ) -> Result<()> {
         if batches.is_empty() {
             return Ok(());
         }
@@ -94,38 +97,24 @@ impl DuckLakeWriter {
                 self.validate_shared_ownership(span.tenant_id.as_deref(), "span")?;
             }
         }
-        let resolver = &self.tenant_ducklake;
-        // An unbound writer is a single configured-scope composition/test
-        // surface. It must never route by tenant_id from the payload.
-        let scope = self
-            .tenant_bound_scope()
-            .unwrap_or_else(|| PhysicalScope::from_ducklake(&self.ducklake));
-        let manifests = if self.scope_bound {
-            resolver
-                .load_active_telemetry_columns_manifests_for_scope(&scope)
-                .await?
-        } else {
-            resolver
-                .load_active_telemetry_columns_manifests("")
-                .await?
-                .1
-        };
         let mut spans = Self::flatten_spans(batches);
         if spans.is_empty() {
             return Ok(());
         }
-        let columns = Self::telemetry_columns_for_table(&manifests, TelemetryTable::Traces);
+        let columns = Self::telemetry_columns_for_table(manifests, TelemetryTable::Traces);
         Self::apply_span_promotions(&mut spans, &columns)?;
         let schema = Arc::new(TraceTable::schema_with_promoted_columns(&columns));
-        let dk = self.effective_ducklake(&scope);
         let record_batches = Span::to_record_batches_by_date(spans, schema.as_ref())?;
-        self.write_record_batches_internal_with_ducklake(&dk, "traces", record_batches)
-            .await
+        self.write_record_batches_internal_with_ducklake(
+            self.physical_scope(),
+            "traces",
+            record_batches,
+        )
+        .await
     }
 
-    pub(super) async fn write_tenant_log_batches(
+    pub(crate) async fn write_log_batches(
         &self,
-        scope: &PhysicalScope,
         manifests: &[TelemetryColumnsManifest],
         batches: Vec<Vec<Log>>,
     ) -> Result<()> {
@@ -142,30 +131,12 @@ impl DuckLakeWriter {
         let columns = Self::telemetry_columns_for_table(manifests, TelemetryTable::Logs);
         Self::apply_log_promotions(&mut logs, &columns)?;
         let schema = Arc::new(OtlpLogsTable::schema_with_promoted_columns(&columns));
-        let dk = self.effective_ducklake(scope);
         let record_batches = arrow::logs_to_record_batches_by_date(logs, schema.as_ref())?;
-        self.write_record_batches_internal_with_ducklake(&dk, "logs", record_batches)
-            .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn write_log_batches(&self, batches: Vec<Vec<Log>>) -> Result<()> {
-        let resolver = &self.tenant_ducklake;
-        // Non-scope-bound writers (single-tenant / tests) use the configured DuckLake scope.
-        let scope = self
-            .tenant_bound_scope()
-            .unwrap_or_else(|| PhysicalScope::from_ducklake(&self.ducklake));
-        let manifests = if self.scope_bound {
-            resolver
-                .load_active_telemetry_columns_manifests_for_scope(&scope)
-                .await?
-        } else {
-            resolver
-                .load_active_telemetry_columns_manifests("")
-                .await?
-                .1
-        };
-        self.write_tenant_log_batches(&scope, &manifests, batches)
-            .await
+        self.write_record_batches_internal_with_ducklake(
+            self.physical_scope(),
+            "logs",
+            record_batches,
+        )
+        .await
     }
 }

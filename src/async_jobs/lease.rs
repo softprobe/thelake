@@ -159,7 +159,7 @@ impl PostgresLeaseStore {
 
     /// Lease store backed by the process catalog registry.
     pub fn from_engines(engines: &crate::runtime_engine::RuntimeEngineManager) -> Self {
-        Self::from_resolver(engines.scope_registry())
+        engines.lease_store()
     }
 }
 

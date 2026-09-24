@@ -9,7 +9,7 @@
 use crate::authn::TenantInfo;
 use crate::config::{Config, DuckLakeConfig};
 use crate::control_plane::ControlPlaneRuntime;
-use crate::ingest_engine::{AdminEngine, IngestEngine, IngestPipeline};
+use crate::ingest_engine::{AdminEngine, IngestEngine};
 use crate::promotion::{
     business_manifest_from_row, business_spec_activation, ensure_promotion_metadata_tables,
     load_active_telemetry_columns_manifests, run_business_apply, run_telemetry_apply,
@@ -17,9 +17,9 @@ use crate::promotion::{
     PromotionSpecLoadError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
+use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
 use crate::workspace_scope::{
-    effective_workspace_id, PhysicalScope, WorkspaceBinding, WorkspaceScopeMode,
-    DEFAULT_WORKSPACE_ID,
+    effective_workspace_id, WorkspaceBinding, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
@@ -48,18 +48,21 @@ fn validate_metadata_schema_name(schema: &str) -> Result<()> {
 pub struct RuntimeEngine {
     tenant_id: String,
     binding: WorkspaceBinding,
+    /// Stashed at build — never re-derived via a binding getter.
+    physical: PhysicalScope,
     catalog_pool: Pool,
     ingest: Arc<IngestEngine>,
     admin: Arc<AdminEngine>,
     query: Arc<QueryEngine>,
 }
 
-/// Internal summary-query capability. It carries only what the summary
-/// module needs; callers do not receive the tenant's physical binding.
-pub(crate) struct TenantSummaryScope {
-    pub(crate) pool: Pool,
-    pub(crate) metadata_schema: String,
-    pub(crate) workspace_id: Option<String>,
+/// Private catalog binding for session-summary SQL. Not part of the engine API —
+/// use [`RuntimeEngine::lookup_session_summary_window`] /
+/// [`RuntimeEngine::search_session_summary`].
+struct TenantSummaryScope {
+    pool: Pool,
+    physical: PhysicalScope,
+    workspace_id: Option<String>,
 }
 
 impl RuntimeEngine {
@@ -78,7 +81,7 @@ impl RuntimeEngine {
         self.ingest.add_spans(items, request_size).await
     }
 
-    pub async fn execute_query(&self, sql: &str) -> Result<crate::query::duckdb::QueryResult> {
+    pub async fn execute_query(&self, sql: &str) -> Result<crate::storage::duckdb::QueryResult> {
         self.query.execute_query(sql).await
     }
 
@@ -93,7 +96,7 @@ impl RuntimeEngine {
     pub(crate) async fn execute_trusted(
         &self,
         query: crate::sql::trusted::TrustedSql,
-    ) -> Result<crate::query::duckdb::QueryResult> {
+    ) -> Result<crate::storage::duckdb::QueryResult> {
         self.query.execute_trusted(query).await
     }
 
@@ -167,13 +170,51 @@ impl RuntimeEngine {
         self.query.clone()
     }
 
-    pub(crate) fn session_summary_scope(&self) -> TenantSummaryScope {
+    fn session_summary_scope(&self) -> TenantSummaryScope {
         TenantSummaryScope {
             pool: self.catalog_pool.clone(),
-            metadata_schema: self.binding.physical_scope.metadata_schema.clone(),
+            physical: self.physical.clone(),
             workspace_id: (self.binding.mode == WorkspaceScopeMode::Shared)
                 .then(|| self.binding.workspace_id.clone()),
         }
+    }
+
+    /// Lookup `[start_time, end_time]` for a session from Postgres `session_summary`.
+    pub(crate) async fn lookup_session_summary_window(
+        &self,
+        session_id: &str,
+    ) -> Result<
+        Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        crate::session_summary::SessionSummaryListError,
+    > {
+        let scope = self.session_summary_scope();
+        crate::session_summary::lookup_session_summary_window_for_workspace(
+            &scope.pool,
+            scope.physical.pg_namespace(),
+            scope.workspace_id.as_deref(),
+            session_id,
+        )
+        .await
+    }
+
+    /// List sessions from Postgres `session_summary` for this tenant binding.
+    pub(crate) async fn search_session_summary(
+        &self,
+        request: &crate::api::llm::query::SessionSearchRequest,
+        limit: usize,
+    ) -> Result<
+        crate::api::llm::query::SessionSearchResponse,
+        crate::session_summary::SessionSummaryListError,
+    > {
+        let scope = self.session_summary_scope();
+        crate::session_summary::search_session_summary_for_workspace(
+            &scope.pool,
+            scope.physical.pg_namespace(),
+            scope.workspace_id.as_deref(),
+            request,
+            limit,
+        )
+        .await
     }
 }
 
@@ -216,22 +257,57 @@ impl RuntimeEngineManager {
         self.config.as_ref()
     }
 
-    /// Crate-internal registry handle for ingest/maintenance composition.
-    pub(crate) fn scope_registry(&self) -> &DuckLakeScopeResolver {
-        &self.scope_registry
+    /// Postgres lease store for the process catalog registry.
+    pub fn lease_store(&self) -> crate::async_jobs::PostgresLeaseStore {
+        crate::async_jobs::PostgresLeaseStore::from_resolver(&self.scope_registry)
+    }
+
+    /// Construct the process maintenance façade (owns a registry clone).
+    pub async fn maintenance_engine(&self) -> Result<crate::compaction::MaintenanceEngine> {
+        crate::compaction::MaintenanceEngine::new(self.config(), self.scope_registry.clone()).await
     }
 
     /// Idempotently create or verify a workspace → physical-scope binding.
+    ///
+    /// Returns warehouse hints only — callers never receive [`PhysicalScope`].
     pub async fn provision_scope(
         &self,
         request: ScopeProvisioningRequest,
-    ) -> Result<PhysicalScope> {
-        self.scope_registry.provision_scope(request).await
+    ) -> Result<ScopeStorageHints> {
+        let scope = self.scope_registry.provision_scope(request).await?;
+        Ok(ScopeStorageHints::from_physical(&scope))
     }
 
-    /// Resolve an existing workspace binding's physical scope.
+    /// Resolve warehouse hints for an existing workspace binding.
+    ///
+    /// Prefer this over digging into physical-scope codecs from handlers.
+    pub async fn scope_storage_hints(&self, scope_id: &str) -> Result<ScopeStorageHints> {
+        let scope = self.scope_registry.resolve_scope(scope_id).await?;
+        Ok(ScopeStorageHints::from_physical(&scope))
+    }
+
+    /// Resolve an existing workspace binding's physical scope (crate-internal).
     pub(crate) async fn resolve_scope(&self, scope_id: &str) -> Result<PhysicalScope> {
         self.scope_registry.resolve_scope(scope_id).await
+    }
+
+    /// Build DuckLake connection material for isolated-mode tenants.
+    ///
+    /// Shared mode refuses — direct catalog credentials are not exposed.
+    pub async fn ducklake_connection_material_for(
+        &self,
+        tenant: &TenantInfo,
+    ) -> Result<DuckLakeConnectionMaterial, String> {
+        if self.config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
+            return Err(
+                "direct DuckLake connection material is unavailable in shared scope mode".into(),
+            );
+        }
+        let scope = self
+            .resolve_scope(&tenant.tenant_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        DuckLakeConnectionMaterial::from_tenant_scope(tenant, &scope, self.config.as_ref())
     }
 
     pub fn list_cached_tenant_ids(&self) -> Vec<String> {
@@ -287,25 +363,24 @@ impl RuntimeEngineManager {
 
         let resolver = &self.scope_registry;
         let binding = resolver.resolve_or_create_binding(tenant_id).await?;
+        let physical = DuckLakeAccess::Workspace(binding.clone())
+            .physical_scope()
+            .clone();
         let scope_lock = self
             .scope_locks
-            .entry(binding.physical_scope.key())
+            .entry(binding.registry_lock_token())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _scope_hold = scope_lock.lock().await;
         let counts_toward_liveness = true;
 
-        let ingest = IngestPipeline::build_tenant_ingest(
-            self.config.as_ref(),
-            resolver.clone(),
-            binding.clone(),
-        )
-        .await?;
+        let ingest =
+            IngestEngine::bound(self.config.as_ref(), resolver.clone(), binding.clone()).await?;
         ingest.ensure_shared_schema().await?;
         let query = Arc::new(
             query_mod::create_query_engine_for_scope_with_liveness(
                 self.config.as_ref(),
-                &binding.physical_scope,
+                &physical,
                 counts_toward_liveness,
                 bound_tenant_id,
             )
@@ -315,6 +390,7 @@ impl RuntimeEngineManager {
         Ok(Arc::new(RuntimeEngine {
             tenant_id: bound_tenant_id.to_string(),
             binding,
+            physical,
             catalog_pool: resolver.pool().clone(),
             ingest,
             admin,
@@ -330,6 +406,106 @@ pub struct ScopeProvisioningRequest {
     pub data_path: String,
 }
 
+/// Public warehouse hints for a provisioned workspace (no physical-scope codecs).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeStorageHints {
+    pub metadata_schema: String,
+    pub data_path: String,
+}
+
+impl ScopeStorageHints {
+    fn from_physical(scope: &PhysicalScope) -> Self {
+        Self {
+            metadata_schema: scope.pg_namespace().to_string(),
+            data_path: scope.warehouse_uri().to_string(),
+        }
+    }
+
+    pub fn matches_warehouse_hints(&self, metadata_schema: &str, data_path: &str) -> bool {
+        self.metadata_schema == metadata_schema && self.data_path == data_path
+    }
+}
+
+/// DuckLake connection credentials returned by the control API (isolated mode).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuckLakeConnectionMaterial {
+    pub version: u8,
+    pub tenant_id: String,
+    pub ducklake_pg_uri: String,
+    pub ducklake_metadata_schema: String,
+    pub ducklake_data_path: String,
+    pub gcs_bucket: String,
+    /// Object-store access key (`GCS_HMAC_*` for `gs://`, `AWS_ACCESS_KEY_ID` for `s3://`).
+    pub gcs_hmac_access_key_id: String,
+    /// Object-store secret (`GCS_HMAC_SECRET` / `AWS_SECRET_ACCESS_KEY`).
+    pub gcs_hmac_secret: String,
+    /// Optional STS / EC2 role session token for `s3://` (`AWS_SESSION_TOKEN`).
+    pub session_token: String,
+    pub schema_version: String,
+}
+
+impl DuckLakeConnectionMaterial {
+    pub(crate) fn from_tenant_scope(
+        tenant: &TenantInfo,
+        scope: &PhysicalScope,
+        config: &Config,
+    ) -> Result<Self, String> {
+        let ducklake_pg_uri = if scope.catalog_dsn().trim().is_empty() {
+            strip_postgres_uri_prefix(&config.ducklake.metadata_path)
+        } else {
+            strip_postgres_uri_prefix(scope.catalog_dsn())
+        };
+        let ducklake_data_path = scope.warehouse_uri().to_owned();
+        let ducklake_metadata_schema = scope.pg_namespace().to_owned();
+        let creds = config.resolve_object_store_credentials(&ducklake_data_path);
+
+        if ducklake_pg_uri.trim().is_empty() {
+            return Err("DuckLake Postgres metadata path is required".to_string());
+        }
+        if ducklake_data_path.trim().is_empty() {
+            return Err("DuckLake data path is required".to_string());
+        }
+        if path_requires_object_store_creds(&ducklake_data_path) && !creds.is_complete() {
+            return Err(
+                "GCS/S3 DuckLake data path requires object-store credentials in the environment \
+                 (GCS_HMAC_ACCESS_KEY_ID/GCS_HMAC_SECRET for gs://, or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY for s3://)"
+                    .to_string(),
+            );
+        }
+        if tenant.bucket_name.trim().is_empty() {
+            return Err("tenant is missing bucket_name".to_string());
+        }
+
+        Ok(Self {
+            version: 1,
+            tenant_id: tenant.tenant_id.clone(),
+            ducklake_pg_uri,
+            ducklake_metadata_schema,
+            ducklake_data_path,
+            gcs_bucket: tenant.bucket_name.clone(),
+            gcs_hmac_access_key_id: creds.access_key_id.unwrap_or_default(),
+            gcs_hmac_secret: creds.secret_access_key.unwrap_or_default(),
+            session_token: creds.session_token.unwrap_or_default(),
+            schema_version: "1".to_string(),
+        })
+    }
+}
+
+fn strip_postgres_uri_prefix(metadata_path: &str) -> String {
+    let metadata_path = metadata_path.trim();
+    if metadata_path.starts_with("postgres:") {
+        metadata_path.trim_start_matches("postgres:").to_string()
+    } else {
+        metadata_path.to_string()
+    }
+}
+
+fn path_requires_object_store_creds(data_path: &str) -> bool {
+    let p = data_path.trim();
+    p.starts_with("gs://") || p.starts_with("s3://")
+}
+
 /// Process-wide Postgres registry for workspace → physical-scope bindings.
 ///
 /// Owned only by [`RuntimeEngineManager`]. Not part of the public crate API —
@@ -338,18 +514,21 @@ pub struct ScopeProvisioningRequest {
 #[derive(Clone)]
 pub(crate) struct DuckLakeScopeResolver {
     pool: Pool,
-    registry_schema: String,
     default_physical_scope: PhysicalScope,
     workspace_scope_mode: WorkspaceScopeMode,
 }
 
 impl DuckLakeScopeResolver {
+    pub(crate) fn default_physical_scope(&self) -> &PhysicalScope {
+        &self.default_physical_scope
+    }
+
     pub(crate) fn pool(&self) -> &Pool {
         &self.pool
     }
 
     pub(crate) fn registry_schema(&self) -> &str {
-        &self.registry_schema
+        self.default_physical_scope.pg_namespace()
     }
 
     /// Always connects on the normal runtime path: `metadata_path` is the
@@ -373,7 +552,6 @@ impl DuckLakeScopeResolver {
         let pool = Pool::builder(mgr).max_size(8).build()?;
         Ok(Self {
             pool,
-            registry_schema: dl.metadata_schema.clone(),
             default_physical_scope: PhysicalScope::from_ducklake(dl),
             workspace_scope_mode: dl.workspace_scope_mode,
         })
@@ -389,7 +567,7 @@ impl DuckLakeScopeResolver {
             .execute(
                 &format!(
                     "CREATE SCHEMA IF NOT EXISTS {};",
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -404,7 +582,7 @@ impl DuckLakeScopeResolver {
   provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );"#,
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -423,7 +601,7 @@ impl DuckLakeScopeResolver {
   UNIQUE (metadata_path, catalog_alias,
           ducklake_metadata_schema, data_path)
 );"#,
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -432,7 +610,7 @@ impl DuckLakeScopeResolver {
             .execute(
                 &format!(
                     "ALTER TABLE {}.physical_scope DROP COLUMN IF EXISTS catalog_type;",
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -446,8 +624,8 @@ impl DuckLakeScopeResolver {
   provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );"#,
-                    quote_pg_ident(&self.registry_schema),
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema()),
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -463,7 +641,7 @@ impl DuckLakeScopeResolver {
   heartbeat_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (job_name, scope_key)
 );"#,
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -473,7 +651,7 @@ impl DuckLakeScopeResolver {
                 &format!(
                     r#"CREATE INDEX IF NOT EXISTS thelake_job_lease_until
 ON {}.thelake_job_lease (lease_until);"#,
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -492,24 +670,25 @@ ON {}.thelake_job_lease (lease_until);"#,
             .query(
                 &format!(
                     "SELECT scope_id, ducklake_metadata_schema, data_path FROM {}.scope_registry;",
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
             .await?;
         for row in rows {
             let workspace_id: String = row.get(0);
-            let mut physical = self.default_physical_scope.clone();
-            physical.metadata_schema = row.get(1);
-            physical.data_path = row.get(2);
+            let physical = self
+                .default_physical_scope
+                .with_pg_namespace(row.get::<_, String>(1))
+                .with_warehouse_uri(row.get::<_, String>(2));
             self.insert_physical_scope(client, &physical).await?;
-            let physical_scope_id = physical.key();
+            let physical_scope_id = physical.id().registry_token().to_string();
             client
                 .execute(
                     &format!(
                         "INSERT INTO {}.workspace_scope_binding (workspace_id, physical_scope_id) \
                          VALUES ($1, $2) ON CONFLICT (workspace_id) DO NOTHING;",
-                        quote_pg_ident(&self.registry_schema)
+                        quote_pg_ident(self.registry_schema())
                     ),
                     &[&workspace_id, &physical_scope_id],
                 )
@@ -523,7 +702,7 @@ ON {}.thelake_job_lease (lease_until);"#,
         client: &impl deadpool_postgres::GenericClient,
         physical: &PhysicalScope,
     ) -> Result<()> {
-        let physical_scope_id = physical.key();
+        let physical_scope_id = physical.id().registry_token().to_string();
         client
             .execute(
                 &format!(
@@ -531,14 +710,14 @@ ON {}.thelake_job_lease (lease_until);"#,
   (physical_scope_id, metadata_path, ducklake_metadata_schema, data_path, catalog_alias)
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[
                     &physical_scope_id,
-                    &physical.metadata_path,
-                    &physical.metadata_schema,
-                    &physical.data_path,
-                    &physical.catalog_alias,
+                    &physical.catalog_dsn(),
+                    &physical.pg_namespace(),
+                    &physical.warehouse_uri(),
+                    &physical.attach_alias(),
                 ],
             )
             .await?;
@@ -547,20 +726,20 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
 
     async fn ensure_scope_tables(&self, scope: &PhysicalScope) -> Result<()> {
         let client = self.pool.get().await?;
-        ensure_promotion_metadata_tables(&client, &scope.metadata_schema).await?;
+        ensure_promotion_metadata_tables(&client, scope.pg_namespace()).await?;
         if self.workspace_scope_mode == WorkspaceScopeMode::Shared {
             crate::session_summary::ensure_shared_session_summary_tables(
                 &client,
-                &scope.metadata_schema,
+                scope.pg_namespace(),
             )
             .await?;
             crate::session_summary::validate_shared_session_summary_tables(
                 &client,
-                &scope.metadata_schema,
+                scope.pg_namespace(),
             )
             .await?;
         } else {
-            crate::session_summary::ensure_session_summary_tables(&client, &scope.metadata_schema)
+            crate::session_summary::ensure_session_summary_tables(&client, scope.pg_namespace())
                 .await?;
         }
         drop(client);
@@ -570,14 +749,6 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
         // same guarded operation for recovery after restarts.
         crate::session_summary::ensure_product_hot_attrs_for_scope(self, scope).await?;
         Ok(())
-    }
-
-    /// Resolve the DuckLake scope for `scope_id` from the durable registry.
-    ///
-    /// When `scope_id` is empty, returns the process-default scope.
-    pub async fn resolve_or_create(&self, scope_id: &str) -> Result<PhysicalScope> {
-        let binding = self.resolve_or_create_binding(scope_id).await?;
-        Ok(binding.physical_scope)
     }
 
     /// Resolve a workspace binding from the durable registry.
@@ -592,7 +763,8 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
             .map_err(Into::into);
         }
         let binding = self.resolve_binding(workspace_id).await?;
-        self.ensure_scope_tables(&binding.physical_scope).await?;
+        self.ensure_scope_tables(DuckLakeAccess::Workspace(binding.clone()).physical_scope())
+            .await?;
         Ok(binding)
     }
 
@@ -606,8 +778,8 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
                      FROM {}.workspace_scope_binding wb \
                      JOIN {}.physical_scope ps ON ps.physical_scope_id = wb.physical_scope_id \
                      WHERE wb.workspace_id = $1;",
-                    quote_pg_ident(&self.registry_schema),
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema()),
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[&workspace_id],
             )
@@ -615,12 +787,8 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
         let Some(row) = row else {
             bail!("unknown scope: {workspace_id}");
         };
-        let physical = PhysicalScope {
-            metadata_path: row.get(0),
-            metadata_schema: row.get(1),
-            data_path: row.get(2),
-            catalog_alias: row.get(3),
-        };
+        let physical =
+            PhysicalScope::from_registry_row(row.get(0), row.get(1), row.get(2), row.get(3));
         WorkspaceBinding::new(workspace_id, physical, self.workspace_scope_mode).map_err(Into::into)
     }
 
@@ -629,7 +797,11 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
             self.ensure_scope().await?;
             return Ok(self.default_physical_scope.clone());
         }
-        Ok(self.resolve_binding(scope_id).await?.physical_scope)
+        Ok(
+            DuckLakeAccess::Workspace(self.resolve_binding(scope_id).await?)
+                .physical_scope()
+                .clone(),
+        )
     }
 
     /// Idempotently create or verify a scope registry entry and its metadata tables.
@@ -652,16 +824,16 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
         // scope. The request names the workspace only; it cannot select a
         // second catalog or data root.
         let scope = match self.workspace_scope_mode {
-            WorkspaceScopeMode::Isolated => PhysicalScope {
-                metadata_schema: request.metadata_schema,
-                data_path: request.data_path,
-                ..self.default_physical_scope.clone()
-            },
+            WorkspaceScopeMode::Isolated => PhysicalScope::from_provision(
+                &self.default_physical_scope,
+                request.metadata_schema,
+                request.data_path,
+            ),
             WorkspaceScopeMode::Shared => self.default_physical_scope.clone(),
         };
         let mut client = self.pool.get().await?;
         let physical = scope.clone();
-        let physical_scope_id = physical.key();
+        let physical_scope_id = physical.id().registry_token().to_string();
         let transaction = client.transaction().await?;
         self.insert_physical_scope(&transaction, &physical).await?;
         let row = transaction
@@ -674,8 +846,8 @@ ON CONFLICT (workspace_id) DO UPDATE SET
   updated_at = NOW()
 WHERE {}.workspace_scope_binding.physical_scope_id = EXCLUDED.physical_scope_id
 RETURNING workspace_id;"#,
-                    quote_pg_ident(&self.registry_schema),
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema()),
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[&request.scope_id, &physical_scope_id],
             )
@@ -708,8 +880,8 @@ RETURNING workspace_id;"#,
                      FROM {}.workspace_scope_binding wb \
                      JOIN {}.physical_scope ps ON ps.physical_scope_id = wb.physical_scope_id \
                      ORDER BY wb.workspace_id;",
-                    quote_pg_ident(&self.registry_schema),
-                    quote_pg_ident(&self.registry_schema)
+                    quote_pg_ident(self.registry_schema()),
+                    quote_pg_ident(self.registry_schema())
                 ),
                 &[],
             )
@@ -719,53 +891,36 @@ RETURNING workspace_id;"#,
             .map(|row| {
                 (
                     row.get::<_, String>(0),
-                    PhysicalScope {
-                        metadata_path: row.get(1),
-                        metadata_schema: row.get(2),
-                        data_path: row.get(3),
-                        catalog_alias: row.get(4),
-                    },
+                    PhysicalScope::from_registry_row(
+                        row.get(1),
+                        row.get(2),
+                        row.get(3),
+                        row.get(4),
+                    ),
                 )
             })
             .collect())
     }
 
-    /// Resolve scope and load active telemetry column manifests from Postgres.
-    pub async fn load_active_telemetry_columns_manifests(
+    /// Load active telemetry promotion manifests for a bound metadata schema.
+    pub(crate) async fn load_active_telemetry_columns_manifests_for_scope(
         &self,
-        scope_id: &str,
-    ) -> Result<(PhysicalScope, Vec<TelemetryColumnsManifest>)> {
-        let scope = if scope_id.is_empty() {
-            self.resolve_or_create(scope_id).await?
-        } else {
-            self.resolve_scope(scope_id).await?
-        };
-        let client = self.pool.get().await?;
-        let manifests = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
-            .await
-            .map_err(map_spec_load_error)?;
-        Ok((scope, manifests))
-    }
-
-    /// Load active telemetry promotion manifests for an already bound scope.
-    pub async fn load_active_telemetry_columns_manifests_for_scope(
-        &self,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
     ) -> Result<Vec<TelemetryColumnsManifest>> {
         let client = self.pool.get().await?;
-        let manifests = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
+        let manifests = load_active_telemetry_columns_manifests(&client, metadata_schema)
             .await
             .map_err(map_spec_load_error)?;
         Ok(manifests)
     }
 
-    /// Load every active business-table promotion for an already bound scope.
+    /// Load every active business-table promotion for a bound metadata schema.
     pub(crate) async fn load_active_business_table_manifests_for_scope(
         &self,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
     ) -> Result<Vec<BusinessTableManifest>> {
         let client = self.pool.get().await?;
-        let schema = quote_pg_ident(&scope.metadata_schema);
+        let schema = quote_pg_ident(metadata_schema);
         let rows = client
             .query(
                 &format!(
@@ -788,11 +943,11 @@ WHERE status = 'active' AND target_kind = 'business_table';"#
 
     async fn activate_spec_tx(
         tx: &deadpool_postgres::Transaction<'_>,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         manifest_yaml: &str,
         activation: &PromotionSpecActivation,
     ) -> Result<String> {
-        let schema = scope.metadata_schema.replace('"', "\"\"");
+        let schema = metadata_schema.replace('"', "\"\"");
         tx.execute(
             &format!(
                 // Supersede only the same (target_kind, target_tables) pair so distinct
@@ -838,10 +993,10 @@ ON CONFLICT (spec_id) DO UPDATE SET
 
     async fn load_business_manifest_tx(
         tx: &deadpool_postgres::Transaction<'_>,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         table_name: &str,
     ) -> Result<Option<BusinessTableManifest>> {
-        let schema = scope.metadata_schema.replace('"', "\"\"");
+        let schema = metadata_schema.replace('"', "\"\"");
         let rows = tx
             .query(
                 &format!(
@@ -863,12 +1018,12 @@ LIMIT 1;"#
 
     async fn lock_promotion_tx(
         tx: &deadpool_postgres::Transaction<'_>,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         lock_suffix: &str,
     ) -> Result<()> {
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
-            &[&format!("{}:{lock_suffix}", scope.metadata_schema)],
+            &[&format!("{metadata_schema}:{lock_suffix}")],
         )
         .await?;
         Ok(())
@@ -878,15 +1033,16 @@ LIMIT 1;"#
     /// Runtime apply uses [`Self::apply_telemetry_promotion_guarded`] instead.
     pub(crate) async fn record_active_telemetry_promotion_spec(
         &self,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         manifest_yaml: &str,
         target_tables: &[String],
     ) -> Result<String> {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
-        Self::lock_promotion_tx(&tx, scope, "telemetry_columns").await?;
+        Self::lock_promotion_tx(&tx, metadata_schema, "telemetry_columns").await?;
         let activation = telemetry_spec_activation(manifest_yaml, target_tables);
-        let spec_id = Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await?;
+        let spec_id =
+            Self::activate_spec_tx(&tx, metadata_schema, manifest_yaml, &activation).await?;
         tx.commit().await?;
         Ok(spec_id)
     }
@@ -894,7 +1050,7 @@ LIMIT 1;"#
     /// Apply telemetry DDL and activation through the shared lifecycle under a Postgres lock.
     pub(crate) async fn apply_telemetry_promotion_guarded<F, Fut>(
         &self,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         manifest_yaml: &str,
         target_tables: &[String],
         apply_ddl: F,
@@ -905,10 +1061,10 @@ LIMIT 1;"#
     {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
-        Self::lock_promotion_tx(&tx, scope, "telemetry_columns").await?;
+        Self::lock_promotion_tx(&tx, metadata_schema, "telemetry_columns").await?;
         let activation = telemetry_spec_activation(manifest_yaml, target_tables);
         let spec_id = run_telemetry_apply(apply_ddl, || async {
-            Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await
+            Self::activate_spec_tx(&tx, metadata_schema, manifest_yaml, &activation).await
         })
         .await?;
         tx.commit().await?;
@@ -918,7 +1074,7 @@ LIMIT 1;"#
     /// Apply business load/validate/DDL/activation through the Postgres lifecycle.
     pub(crate) async fn apply_business_promotion_guarded<F, Fut>(
         &self,
-        scope: &PhysicalScope,
+        metadata_schema: &str,
         manifest_yaml: &str,
         spec: &BusinessTableManifest,
         apply_ddl: F,
@@ -930,15 +1086,21 @@ LIMIT 1;"#
         let table_name = spec.target.table.as_str();
         let mut client = self.pool.get().await.map_err(anyhow_other)?;
         let tx = client.transaction().await.map_err(anyhow_other)?;
-        Self::lock_promotion_tx(&tx, scope, &format!("business_table:{table_name}"))
-            .await
-            .map_err(BusinessApplyError::Other)?;
+        Self::lock_promotion_tx(
+            &tx,
+            metadata_schema,
+            &format!("business_table:{table_name}"),
+        )
+        .await
+        .map_err(BusinessApplyError::Other)?;
         let activation = business_spec_activation(table_name, manifest_yaml);
         let spec_id = run_business_apply(
             spec,
-            || async { Self::load_business_manifest_tx(&tx, scope, table_name).await },
+            || async { Self::load_business_manifest_tx(&tx, metadata_schema, table_name).await },
             apply_ddl,
-            || async { Self::activate_spec_tx(&tx, scope, manifest_yaml, &activation).await },
+            || async {
+                Self::activate_spec_tx(&tx, metadata_schema, manifest_yaml, &activation).await
+            },
         )
         .await?;
         tx.commit().await.map_err(anyhow_other)?;
@@ -989,6 +1151,14 @@ fn parse_postgres_kv_config(pg: &mut tokio_postgres::Config, metadata_path: &str
         }
     }
     Ok(())
+}
+
+/// Config → [`PhysicalScope`] ingress only. Does not open a registry pool.
+///
+/// Prefer [`DuckLakeScopeResolver::default_physical_scope`] when a resolver
+/// already exists; use this for bootstrap paths that only need identity.
+pub(crate) fn physical_scope_from_config(config: &Config) -> PhysicalScope {
+    PhysicalScope::from_ducklake(&config.ducklake)
 }
 
 pub(crate) fn quote_pg_ident(input: &str) -> String {

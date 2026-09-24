@@ -1,5 +1,4 @@
 use crate::async_jobs::{self, Job};
-use crate::compaction::MaintenanceEngine;
 use crate::compaction::PhysicalScopeMaintenanceJob;
 use crate::runtime_engine::RuntimeEngineManager;
 use crate::session_summary::{SessionSummaryRebuildJob, SessionSummaryReduceJob};
@@ -18,32 +17,31 @@ pub async fn start_maintenance_scheduler(
     let metadata_enabled = config.maintenance.metadata_enabled;
     let compaction_enabled = config.maintenance.enabled;
     let mut jobs: Vec<Arc<dyn Job>> = Vec::new();
-    let scope_registry = engines.scope_registry().clone();
+    let maintenance = engines.maintenance_engine().await?;
 
     if metadata_enabled || compaction_enabled {
         let wake = Duration::from_secs(config.maintenance.interval_seconds.max(1));
-        let executor = MaintenanceEngine::new(config, scope_registry.clone()).await?;
         jobs.push(Arc::new(PhysicalScopeMaintenanceJob::new(
-            executor,
+            maintenance.clone(),
             wake,
             compaction_enabled,
         )));
     }
 
     jobs.push(Arc::new(SessionSummaryReduceJob::new(
-        scope_registry.clone(),
-        config.clone(),
+        maintenance.clone(),
+        config,
     )));
     jobs.push(Arc::new(SessionSummaryRebuildJob::new(
-        scope_registry.clone(),
-        config.clone(),
+        maintenance.clone(),
+        config,
     )));
 
     if jobs.is_empty() {
         return Ok(None);
     }
 
-    let leases = async_jobs::lease_store_for(&scope_registry);
+    let leases = Arc::new(engines.lease_store());
     Ok(async_jobs::spawn_runner(&config.async_jobs, leases, jobs))
 }
 
@@ -70,5 +68,17 @@ mod tests {
             .expect("scheduler");
         assert!(out.is_some());
         out.unwrap().abort();
+    }
+
+    #[test]
+    fn scheduler_does_not_construct_jobs_with_raw_resolver() {
+        let src = include_str!("scheduler.rs");
+        let production = src.split("#[cfg(test)]").next().expect("production");
+        assert!(
+            production.contains("maintenance_engine()")
+                && !production.contains("MaintenanceEngine::new(")
+                && !production.contains("SessionSummaryReduceJob::new(\n        scope_registry"),
+            "scheduler must build jobs from manager.maintenance_engine()"
+        );
     }
 }

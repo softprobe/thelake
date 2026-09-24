@@ -6,7 +6,7 @@ use crate::promotion::{
 };
 use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::sql::llm::llm_promo;
-use crate::workspace_scope::PhysicalScope;
+use crate::storage::ducklake::PhysicalScope;
 use anyhow::{Context, Result};
 
 /// Canonical Softprobe traces hot-attr manifest (shipped under docs/promotion/).
@@ -85,7 +85,7 @@ pub(crate) async fn ensure_product_hot_attrs_for_scope(
     scope: &PhysicalScope,
 ) -> Result<()> {
     let client = resolver.pool().get().await?;
-    let active = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
+    let active = load_active_telemetry_columns_manifests(&client, scope.pg_namespace())
         .await
         .map_err(|e| anyhow::anyhow!("load active telemetry promotions: {e}"))?;
     if active_covers_required(&active) {
@@ -96,19 +96,23 @@ pub(crate) async fn ensure_product_hot_attrs_for_scope(
         .any(|m| m.target.tables.contains(&TelemetryTable::Traces));
     // Incomplete operator traces promo: never soft-fail or overwrite — panic.
     if has_traces {
-        require_reduce_hot_coverage(&scope.metadata_schema, &active);
+        require_reduce_hot_coverage(scope.pg_namespace(), &active);
     }
     // Validate shipped yaml still parses before activating.
     let _ = traces_hot_manifest()?;
     let tables = vec![TRACES_TABLE.to_string()];
     resolver
-        .record_active_telemetry_promotion_spec(scope, TRACES_QUERY_HOT_ATTRS_YAML, &tables)
+        .record_active_telemetry_promotion_spec(
+            scope.pg_namespace(),
+            TRACES_QUERY_HOT_ATTRS_YAML,
+            &tables,
+        )
         .await
         .context("activate traces-query-hot-attrs for session_summary")?;
-    let active = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
+    let active = load_active_telemetry_columns_manifests(&client, scope.pg_namespace())
         .await
         .map_err(|e| anyhow::anyhow!("reload active telemetry promotions: {e}"))?;
-    require_reduce_hot_coverage(&scope.metadata_schema, &active);
+    require_reduce_hot_coverage(scope.pg_namespace(), &active);
     Ok(())
 }
 

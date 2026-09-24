@@ -14,8 +14,7 @@ use uuid::Uuid;
 use crate::util::otlp::{double_kv, int_kv, string_kv};
 use crate::util::promotion_file_backed::{
     apply_promotion_yaml, assert_logs_columns_exist, assert_traces_columns_exist,
-    attach_softprobe_ducklake, ingest_otlp_logs_protobuf, ingest_otlp_protobuf,
-    setup_file_backed_promotion_env,
+    ingest_otlp_logs_protobuf, ingest_otlp_protobuf, setup_file_backed_promotion_env,
 };
 
 fn traces_manifest() -> &'static str {
@@ -113,8 +112,7 @@ async fn product_traces_hot_attrs_manifest_promotes_on_ingest() {
         .expect("encode");
     ingest_otlp_protobuf(env.router.clone(), body).await;
 
-    let connection =
-        attach_softprobe_ducklake(&env.metadata_path, &env.metadata_schema, &env.data_path);
+    let connection = env.open_attached();
     assert_traces_columns_exist(
         &connection,
         &[
@@ -177,8 +175,7 @@ async fn product_logs_hot_attrs_manifest_promotes_on_ingest() {
     log_request(&session_id).encode(&mut body).expect("encode");
     ingest_otlp_logs_protobuf(env.router.clone(), body).await;
 
-    let connection =
-        attach_softprobe_ducklake(&env.metadata_path, &env.metadata_schema, &env.data_path);
+    let connection = env.open_attached();
     assert_logs_columns_exist(
         &connection,
         &[

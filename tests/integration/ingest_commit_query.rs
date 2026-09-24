@@ -16,7 +16,7 @@ async fn test_ingestion_perf_5000_spans_under_one_second() {
     let config = load_test_config();
     // Allow buffering without forcing flush during perf check
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let now = Utc::now();
     let count = 5_000usize;
@@ -72,7 +72,7 @@ async fn test_ingestion_perf_5000_spans_under_one_second() {
 async fn test_iceberg_writer_bulk_session_roundtrip() {
     let config = load_test_config();
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     // Create multiple sessions with spans to test multi-session row groups
     let num_sessions = 5;
@@ -200,7 +200,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     write_metrics.print_report();
     write_metrics.assert_performance_target(5000, "Multi-session WAL write time");
 
-    // Local staged/WAL paths are not always listed via `IngestPipeline` (flush goes to DuckLake writer).
+    // Local staged/WAL paths are not always listed via `IngestEngine` (flush goes to DuckLake writer).
     println!("✅ Flush completed (DuckLake flush-through)");
     println!("✅ Querying back each session to verify row group isolation...");
 
@@ -323,7 +323,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 async fn test_duckdb_union_read_realtime_performance() {
     let config = load_test_config();
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let now = Utc::now();
     let base_session = format!("union-base-{}", uuid::Uuid::new_v4());
@@ -483,7 +483,7 @@ async fn test_duckdb_union_read_realtime_performance() {
 async fn test_iceberg_writer_bulk_log_roundtrip() {
     let config = load_test_config();
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     // Create multiple sessions with logs to test multi-session row groups
     let test_type = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
@@ -662,7 +662,7 @@ async fn test_http_fields_in_span_model() {
     let mut config = load_test_config();
     config.ingest.flush_interval_seconds = 0;
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     // Write the span and verify it succeeds
     let result = pipeline.add_spans(vec![span], 0).await;
@@ -681,7 +681,7 @@ async fn test_pinned_metadata_updates_on_commit() {
     let config = load_test_config();
 
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
     let now = Utc::now();
 
     let mut spans = Vec::new();
@@ -762,7 +762,7 @@ async fn test_pinned_metadata_updates_on_commit() {
 async fn test_duckdb_union_read_realtime_concurrency() {
     let config = load_test_config();
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let now = Utc::now();
     let staged_session = format!("perf-staged-{}", uuid::Uuid::new_v4());
@@ -863,7 +863,7 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
     let config = load_test_config();
 
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     let session_id = format!("sql-flush-{}", uuid::Uuid::new_v4());
     let now = Utc::now();
@@ -934,7 +934,7 @@ async fn test_wal_cleanup_after_flush() {
     let config = load_test_config();
 
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
 
     // First flush: create WAL files
     let mut first_batch = Vec::new();
@@ -1053,7 +1053,7 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
 
     let config = load_test_config();
     let test_pipeline = TestPipeline::new(config).await;
-    let pipeline = &test_pipeline.pipeline;
+    let pipeline = &test_pipeline.ingest;
     let now = Utc::now();
 
     // Create a unique session ID for this test

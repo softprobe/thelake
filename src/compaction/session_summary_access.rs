@@ -3,8 +3,9 @@
 //! Reducers are maintenance work, not a second application-facing DuckDB
 //! access mode. Only `MaintenanceEngine` reaches these helpers.
 
-use crate::config::{Config, DuckLakeConfig};
+use crate::config::Config;
 use crate::session_summary::SummaryRow;
+use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
@@ -13,11 +14,9 @@ use duckdb::Connection;
 /// Kept crate-visible for the focused object-store configuration test.
 pub(crate) fn prepare_session_summary_duckdb(
     config: &Config,
-    ducklake: &DuckLakeConfig,
+    scope: &PhysicalScope,
 ) -> Result<Connection> {
-    let access = crate::workspace_scope::DuckLakeAccess::Physical(
-        crate::workspace_scope::PhysicalScope::from_ducklake(ducklake),
-    );
+    let access = DuckLakeAccess::Physical(scope.clone());
     crate::storage::ducklake::DuckLakeSessionFactory::new(config)
         .open(
             &access,
@@ -26,14 +25,9 @@ pub(crate) fn prepare_session_summary_duckdb(
         .context("open duckdb for session_summary reduce")
 }
 
-fn open_session_summary_connection(
-    config: &Config,
-    ducklake: &DuckLakeConfig,
-) -> Result<Connection> {
-    let conn = prepare_session_summary_duckdb(config, ducklake)?;
-    let access = crate::workspace_scope::DuckLakeAccess::Physical(
-        crate::workspace_scope::PhysicalScope::from_ducklake(ducklake),
-    );
+fn open_session_summary_connection(config: &Config, scope: &PhysicalScope) -> Result<Connection> {
+    let conn = prepare_session_summary_duckdb(config, scope)?;
+    let access = DuckLakeAccess::Physical(scope.clone());
     crate::storage::ducklake::DuckLakeSessionFactory::new(config).attach(&conn, &access)?;
     Ok(conn)
 }
@@ -75,13 +69,13 @@ fn map_duck_row(row: &duckdb::Row<'_>) -> duckdb::Result<SummaryRow> {
 /// alias.
 pub(crate) fn aggregate_sessions_from_lake(
     config: &Config,
-    ducklake: &DuckLakeConfig,
+    scope: &PhysicalScope,
     session_ids: Option<&[String]>,
     workspace_id: Option<&str>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<Vec<SummaryRow>> {
-    let from_table = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, "traces");
+    let from_table = crate::storage::ducklake::ducklake_qualified_table_name(scope, "traces");
     let sql = match session_ids {
         Some(ids) if workspace_id.is_some() => {
             crate::sql::session_summary::compile_session_summary_reduce_sql_for_workspace(
@@ -105,7 +99,7 @@ pub(crate) fn aggregate_sessions_from_lake(
             to,
         )?,
     };
-    let conn = open_session_summary_connection(config, ducklake)?;
+    let conn = open_session_summary_connection(config, scope)?;
     let mut stmt = conn.prepare(&sql).context("prepare aggregate SQL")?;
     stmt.query_map([], map_duck_row)
         .context("query aggregate")?

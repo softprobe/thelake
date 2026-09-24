@@ -293,7 +293,7 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
     let shared_data = config.ducklake.data_path.clone();
     let workspace_a = format!("shared_a_{suffix}");
     let workspace_b = format!("shared_b_{suffix}");
-    let shared_scope = engines
+    let _shared_scope = engines
         .provision_scope(ScopeProvisioningRequest {
             scope_id: workspace_a.to_string(),
             metadata_schema: shared_schema.clone(),
@@ -693,7 +693,7 @@ columns:
     assert_eq!(business_status, StatusCode::OK, "{business_body}");
     assert_eq!(business_body["applied"], true);
     assert!(
-        ducklake_relation_exists(&shared_scope.metadata_schema, "shared_orders_v1").await,
+        ducklake_relation_exists(&shared_schema, "shared_orders_v1").await,
         "business table promoted by A must exist in B's physical scope"
     );
     assert!(
@@ -744,7 +744,7 @@ columns:
         "telemetry promotion must be replayed after reset"
     );
     assert!(
-        ducklake_relation_exists(&shared_scope.metadata_schema, "shared_orders_v1").await,
+        ducklake_relation_exists(&shared_schema, "shared_orders_v1").await,
         "business promotion must be replayed after reset"
     );
     if let Some(value) = previous_reset {

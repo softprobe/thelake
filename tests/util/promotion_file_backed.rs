@@ -12,7 +12,9 @@ use axum::Router;
 use http_body_util::BodyExt;
 use serde_json::json;
 use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::config::DuckLakeConfig;
 use softprobe_runtime::runtime_api::runtime_control_routes;
+use softprobe_runtime::storage::ducklake::{open_attached_from_config, AttachedSession};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -25,17 +27,19 @@ use crate::util::tenant::{
 pub struct FileBackedPromotionEnv {
     pub _temp: TempDir,
     pub router: Router,
-    pub metadata_path: String,
-    pub metadata_schema: String,
-    pub data_path: String,
+    ducklake: DuckLakeConfig,
+}
+
+impl FileBackedPromotionEnv {
+    pub fn open_attached(&self) -> AttachedSession {
+        open_attached_from_config(&self.ducklake, Some(0))
+    }
 }
 
 pub async fn setup_file_backed_promotion_env() -> FileBackedPromotionEnv {
     let temp = TempDir::new().expect("tempdir");
     let config = file_backed_test_config(&temp);
-    let metadata_path = config.ducklake.metadata_path.clone();
-    let metadata_schema = config.ducklake.metadata_schema.clone();
-    let data_path = config.ducklake.data_path.clone();
+    let ducklake = config.ducklake.clone();
 
     let (router, state) =
         softprobe_runtime::api::create_router(Arc::new(config), post(ingest_traces), None)
@@ -49,9 +53,7 @@ pub async fn setup_file_backed_promotion_env() -> FileBackedPromotionEnv {
     FileBackedPromotionEnv {
         _temp: temp,
         router,
-        metadata_path,
-        metadata_schema,
-        data_path,
+        ducklake,
     }
 }
 
@@ -122,49 +124,6 @@ pub async fn ingest_otlp_logs_protobuf(router: Router, body: Vec<u8>) {
         .await
         .expect("ingest logs");
     assert_eq!(ingest.status(), StatusCode::OK);
-}
-
-/// Attach the same Postgres-backed DuckLake catalog the router's writer used, then
-/// `USE` its schema so callers can write bare (unqualified) table names regardless
-/// of the per-test-run schema name assigned by [`file_backed_test_config`].
-pub fn attach_softprobe_ducklake(
-    metadata_path: &str,
-    metadata_schema: &str,
-    data_path: &str,
-) -> duckdb::Connection {
-    let connection = duckdb::Connection::open_in_memory().expect("duckdb");
-    connection
-        .execute_batch("INSTALL ducklake; INSTALL postgres; LOAD ducklake; LOAD postgres;")
-        .expect("extensions");
-    let mut opts = vec![
-        format!("DATA_PATH '{}'", data_path.replace('\'', "''")),
-        "DATA_INLINING_ROW_LIMIT 0".to_string(),
-    ];
-    if metadata_schema != "main" {
-        let schema = metadata_schema.replace('\'', "''");
-        opts.push(format!("METADATA_SCHEMA '{schema}'"));
-        opts.push(format!("META_SCHEMA '{schema}'"));
-    }
-    connection
-        .execute_batch(&format!(
-            "ATTACH 'ducklake:postgres:{}' AS softprobe ({});",
-            metadata_path.replace('\'', "''"),
-            opts.join(", "),
-        ))
-        .expect("attach");
-    // ATTACH does not itself expose a never-before-seen METADATA_SCHEMA for
-    // navigation; DuckLake only makes a ducklake schema `USE`-able once it has
-    // been created at least once (either by an earlier writer in this schema,
-    // or here for tests that attach before any writer has touched it).
-    connection
-        .execute_batch(&format!(
-            "CREATE SCHEMA IF NOT EXISTS softprobe.{metadata_schema};"
-        ))
-        .expect("create schema");
-    connection
-        .execute_batch(&format!("USE softprobe.{metadata_schema};"))
-        .expect("use schema");
-    connection
 }
 
 pub fn assert_traces_columns_exist(connection: &duckdb::Connection, columns: &[&str]) {

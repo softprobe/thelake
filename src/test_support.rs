@@ -49,6 +49,6 @@ pub async fn local_router() -> anyhow::Result<(Router, TempDir)> {
 pub async fn sample_ingest() -> anyhow::Result<(std::sync::Arc<IngestEngine>, TempDir)> {
     let temp = TempDir::new()?;
     let config = file_backed_test_config(&temp);
-    let pipeline = crate::ingest_engine::IngestPipeline::new(&config).await?;
-    Ok((pipeline.ingest_engine(), temp))
+    let ingest = IngestEngine::bound_default(&config).await?;
+    Ok((ingest, temp))
 }

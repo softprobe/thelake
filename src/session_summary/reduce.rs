@@ -1,8 +1,9 @@
 //! Claim dirty → bounds+clamp → lake aggregate → UPSERT → ack.
 
-use crate::config::{Config, DuckLakeConfig};
+use crate::config::Config;
 use crate::runtime_engine::quote_pg_ident;
 use crate::sql::session_summary::compile_session_summary_upsert_sql;
+use crate::storage::ducklake::PhysicalScope;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use deadpool_postgres::Pool;
@@ -436,7 +437,7 @@ pub(crate) async fn rebuild_tenant_window(
     pool: &Pool,
     metadata_schema: &str,
     config: &Config,
-    ducklake: &DuckLakeConfig,
+    scope: &PhysicalScope,
     tenant_id: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
@@ -446,13 +447,13 @@ pub(crate) async fn rebuild_tenant_window(
     let workspace_scoped =
         config.ducklake.workspace_scope_mode == crate::workspace_scope::WorkspaceScopeMode::Shared;
     let config = config.clone();
-    let ducklake = ducklake.clone();
+    let scope = scope.clone();
     let tenant_id_for_lake = tenant_id.to_string();
     let rows = tokio::task::spawn_blocking(move || {
         let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
         crate::compaction::session_summary_access::aggregate_sessions_from_lake(
             &config,
-            &ducklake,
+            &scope,
             None,
             workspace_filter,
             from,
@@ -475,7 +476,7 @@ pub(crate) async fn reduce_tenant(
     metadata_schema: &str,
     tenant_id: &str,
     config: &Config,
-    ducklake: &DuckLakeConfig,
+    scope: &PhysicalScope,
     max_sessions: u64,
     max_reduce_span_seconds: u64,
 ) -> Result<usize> {
@@ -526,14 +527,14 @@ pub(crate) async fn reduce_tenant(
     crate::self_monitoring::record_session_summary_reducer_lag(tenant_id, lag_secs);
 
     let config = config.clone();
-    let ducklake = ducklake.clone();
+    let scope = scope.clone();
     let ids_for_lake = ids.clone();
     let tenant_id_for_lake = tenant_id.to_string();
     let rows = tokio::task::spawn_blocking(move || {
         let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
         crate::compaction::session_summary_access::aggregate_sessions_from_lake(
             &config,
-            &ducklake,
+            &scope,
             Some(&ids_for_lake),
             workspace_filter,
             from,
@@ -638,9 +639,9 @@ mod tests {
 
         let mut config = Config::default();
         config.ducklake.data_path = "gs://softprobe-test/ducklake/".to_string();
+        let scope = PhysicalScope::from_ducklake(&config.ducklake);
         let result = crate::compaction::session_summary_access::prepare_session_summary_duckdb(
-            &config,
-            &config.ducklake,
+            &config, &scope,
         );
 
         match prev_id {

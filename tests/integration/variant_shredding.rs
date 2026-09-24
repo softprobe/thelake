@@ -3,7 +3,7 @@
 //! VARIANT shredding is deferred until DuckLake+Postgres VARIANT inlining is reliable.
 
 use chrono::Utc;
-use softprobe_runtime::ingest_engine::IngestPipeline;
+use softprobe_runtime::ingest_engine::IngestEngine;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::query;
 use softprobe_runtime::storage::schema::variant::{prefer_attr_varchar, variant_varchar};
@@ -22,12 +22,8 @@ fn assert_map_dtype(dtype: &str, column: &str) {
     );
 }
 
-fn attach(metadata_path: &str, metadata_schema: &str, data_path: &str) -> duckdb::Connection {
-    crate::util::promotion_file_backed::attach_softprobe_ducklake(
-        metadata_path,
-        metadata_schema,
-        data_path,
-    )
+fn attach(config: &softprobe_runtime::config::DuckLakeConfig) -> duckdb::Connection {
+    softprobe_runtime::storage::ducklake::open_attached_from_config(config, Some(0))
 }
 
 fn attributes_object(value: &Value) -> serde_json::Map<String, Value> {
@@ -47,7 +43,9 @@ async fn map_bags_hot_paths_and_nested_filters() {
     let mut config = file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let pipeline = IngestEngine::bound_default(&config)
+        .await
+        .expect("pipeline");
     let query_engine = query::create_query_engine(&config)
         .await
         .expect("query engine");
@@ -127,11 +125,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
     pipeline.add_spans(spans, 0).await.expect("write spans");
     pipeline.add_logs(vec![log], 0).await.expect("write logs");
 
-    let conn = attach(
-        &config.ducklake.metadata_path,
-        &config.ducklake.metadata_schema,
-        &config.ducklake.data_path,
-    );
+    let conn = attach(&config.ducklake);
     let mut describe = conn.prepare("DESCRIBE traces;").expect("describe");
     let types: HashMap<String, String> = describe
         .query_map([], |row| {
@@ -201,7 +195,9 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     let mut config = file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let pipeline = IngestEngine::bound_default(&config)
+        .await
+        .expect("pipeline");
     let query_engine = query::create_query_engine(&config)
         .await
         .expect("query engine");
@@ -313,11 +309,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     // Add nullable product-hot columns (empty) so compiled LLM SQL can run; values
     // still resolve from the MAP bag until a real promotion apply+re-ingest.
     {
-        let conn = attach(
-            &config.ducklake.metadata_path,
-            &config.ducklake.metadata_schema,
-            &config.ducklake.data_path,
-        );
+        let conn = attach(&config.ducklake);
         conn.execute_batch(
             "ALTER TABLE traces ADD COLUMN IF NOT EXISTS observation_type VARCHAR;
              ALTER TABLE traces ADD COLUMN IF NOT EXISTS model_name VARCHAR;
@@ -470,7 +462,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 
     // 5) Nested MAP capture-id key (SoftProbe capture_export removed with Redis).
     //
-    // `IngestPipeline::new` always stamps writes with its own bound workspace id
+    // `IngestEngine::bound_default` always stamps writes with its own bound workspace id
     // (anti-spoofing; see `bind_spans_to_workspace`), so the capture id (already
     // globally unique) is what disambiguates this row rather than `tenant_id`.
     let capture_result = query_engine
@@ -536,11 +528,7 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
     // Fresh catalog: create leftover VARIANT table first (no DROP). Writer CREATE IF NOT EXISTS
     // leaves it alone; ensure_hot_map_column_types must then fail fast (#55).
     {
-        let conn = attach(
-            &config.ducklake.metadata_path,
-            &config.ducklake.metadata_schema,
-            &config.ducklake.data_path,
-        );
+        let conn = attach(&config.ducklake);
         conn.execute_batch(
             "CREATE TABLE traces AS SELECT NULL::VARCHAR AS tenant_id, '{}'::JSON::VARIANT AS attributes, '{}'::JSON::VARIANT AS resource_attributes;",
         )
@@ -558,7 +546,7 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
         );
     }
 
-    let init_result = IngestPipeline::new(&config).await;
+    let init_result = IngestEngine::bound_default(&config).await;
     match previous_reset {
         Some(value) => std::env::set_var("SPLAKE_RESET_DUCKLAKE", value),
         None => std::env::remove_var("SPLAKE_RESET_DUCKLAKE"),
