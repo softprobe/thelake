@@ -134,8 +134,17 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
         .apply_telemetry_promotion(MANIFEST_DIVISION, &spec_a, &["logs".to_string()])
         .await
         .expect("record tenant A spec");
+    // Shared mode binds both workspaces to the process-default catalog; load
+    // promotion specs from the bound schema, not the ignored request overrides.
+    let (load_schema_a, load_schema_b) = match manager.config().ducklake.workspace_scope_mode {
+        WorkspaceScopeMode::Shared => {
+            let shared = manager.config().ducklake.metadata_schema.clone();
+            (shared.clone(), shared)
+        }
+        WorkspaceScopeMode::Isolated => (schema_a.clone(), schema_b.clone()),
+    };
     let client = postgres_client().await;
-    let manifests_a = load_active_telemetry_columns_manifests(&client, &schema_a)
+    let manifests_a = load_active_telemetry_columns_manifests(&client, &load_schema_a)
         .await
         .expect("load tenant A manifests");
     engine_b
@@ -143,7 +152,7 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
         .await
         .expect("record tenant B spec");
     let client = postgres_client().await;
-    let manifests_b = load_active_telemetry_columns_manifests(&client, &schema_b)
+    let manifests_b = load_active_telemetry_columns_manifests(&client, &load_schema_b)
         .await
         .expect("load tenant B manifests");
 
@@ -169,7 +178,7 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
             "shared workspaces bind one physical scope"
         );
         let client = postgres_client().await;
-        let shared_manifests = load_active_telemetry_columns_manifests(&client, &schema_a)
+        let shared_manifests = load_active_telemetry_columns_manifests(&client, &load_schema_a)
             .await
             .expect("load shared physical-scope manifests");
         let shared_names: Vec<&str> = shared_manifests

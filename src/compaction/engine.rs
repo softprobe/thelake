@@ -328,7 +328,7 @@ impl MaintenanceEngine {
         crate::self_monitoring::record_compaction_pass(scope_key, pass_ok);
 
         for table in &tables {
-            let table_ident = table.to_string();
+            let table_ident = format!("{}.{}", physical.pg_namespace(), table);
             let compaction = ActionResult {
                 status: if self.config.maintenance.enabled && run_compaction {
                     compact_status

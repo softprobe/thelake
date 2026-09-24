@@ -275,7 +275,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
-    let _physical_scope = manager
+    let physical = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: tenant_schema.clone(),
@@ -334,17 +334,11 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
 
     // Ingest is flush-through; no separate pipeline flush needed.
 
-    let metadata_path = config.ducklake.metadata_path.clone();
     std::env::set_var("AWS_S3_ENDPOINT", "http://localhost:9000");
-    let n: i64 = trace_count_for_session(
-        &crate::util::scope::physical_scope(&metadata_path, &tenant_data_path, &tenant_schema),
-        &format!("grpc-sess-{suffix}"),
-    );
+    // Verify against the bound physical scope (shared mode ignores request overrides).
+    let n: i64 = trace_count_for_session(&physical, &format!("grpc-sess-{suffix}"));
     assert_eq!(n, 1, "gRPC export must land in tenant-scoped traces table");
-    let n2: i64 = trace_count_for_session(
-        &crate::util::scope::physical_scope(&metadata_path, &tenant_data_path, &tenant_schema),
-        &format!("http-sess-{suffix}"),
-    );
+    let n2: i64 = trace_count_for_session(&physical, &format!("http-sess-{suffix}"));
     assert_eq!(
         n2, 1,
         "HTTP-path export must share the same DuckLake scope as gRPC"
