@@ -94,7 +94,7 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         .await
         .expect("connect runtime engines");
     let business_tenant_id = format!("tenant-biz-{short}");
-    let _physical_scope = manager
+    let _hints = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: business_tenant_id.clone(),
             metadata_schema: business_metadata_schema.clone(),

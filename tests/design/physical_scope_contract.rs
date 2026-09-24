@@ -40,16 +40,58 @@ fn physical_scope_type_is_crate_internal() {
     );
 
     let lib = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
+    for (idx, line) in lib.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        assert!(
+            !(trimmed.contains("pub use") && trimmed.contains("PhysicalScope")),
+            "lib.rs must not pub-use PhysicalScope (line {}): {trimmed}",
+            idx + 1
+        );
+    }
+}
+
+#[test]
+fn public_attach_facades_exist_and_physical_scope_does_not_host_attach() {
+    let attach = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/storage/ducklake/attach.rs"
+    ));
+    let ducklake_mod = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/storage/ducklake/mod.rs"
+    ));
+    let workspace = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/workspace_scope.rs"
+    ));
+
     assert!(
-        !lib.contains("pub use") || !lib.contains("PhysicalScope"),
-        "lib.rs must not pub-use PhysicalScope"
+        attach.contains("pub fn open_attached_from_config(")
+            && attach.contains("pub fn open_attached_from_warehouse("),
+        "attach.rs must expose public config/warehouse façades"
     );
-    // Module is public for WorkspaceScopeMode / binding errors, but PhysicalScope
-    // itself must not be re-exported.
     assert!(
-        !lib.contains("pub use crate::workspace_scope::PhysicalScope")
-            && !lib.contains("pub use workspace_scope::PhysicalScope"),
-        "PhysicalScope must not be re-exported from lib.rs"
+        attach.contains("pub(crate) fn open_attached_connection("),
+        "open_attached_connection must stay pub(crate) (PhysicalScope-taking)"
+    );
+    assert!(
+        !attach.contains("pub fn open_attached_connection("),
+        "open_attached_connection must not be a public product API"
+    );
+    assert!(
+        ducklake_mod.contains("pub use attach::{open_attached_from_config, open_attached_from_warehouse, AttachedSession}")
+            || (ducklake_mod.contains("open_attached_from_config")
+                && ducklake_mod.contains("open_attached_from_warehouse")
+                && ducklake_mod.contains("pub use attach::")),
+        "ducklake/mod.rs must re-export the public attach façades"
+    );
+    assert!(
+        !workspace.contains("fn open_attached_connection(")
+            && !workspace.contains("open_attached_connection"),
+        "PhysicalScope must not host open_attached_connection"
     );
 }
 

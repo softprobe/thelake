@@ -38,7 +38,7 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
-    let _physical_scope = manager
+    let _hints = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: tenant_schema.clone(),

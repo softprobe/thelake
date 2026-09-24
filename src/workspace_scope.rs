@@ -134,8 +134,8 @@ impl fmt::Display for PhysicalScope {
 
 impl PhysicalScope {
     /// Boundary constructor: all identity parts supplied together (immutable).
-    /// Crate-internal / unit tests. Integration tests mutate `DuckLakeConfig` POJO
-    /// fields then call [`Self::from_ducklake`].
+    /// Crate-internal only (unit tests / storage attach). Outside the crate, use
+    /// `open_attached_from_config` / `open_attached_from_warehouse` façades.
     pub(crate) fn new(
         metadata_path: impl Into<String>,
         data_path: impl Into<String>,
