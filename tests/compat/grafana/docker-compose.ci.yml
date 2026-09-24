@@ -38,8 +38,9 @@ services:
     networks: [grafana_compat]
 
   minio:
-    # Docker Hub minio/* is no longer pullable; same digests on Quay.
-    image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    # Official MinIO images are no longer publicly pullable; pgsty fork drop-in.
+    # Digest of pgsty/minio:latest (immutable pin for compose contract).
+    image: pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -56,7 +57,8 @@ services:
     networks: [grafana_compat]
 
   minio-init:
-    image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    # Digest of pgsty/mc:latest (immutable pin for compose contract).
+    image: pgsty/mc@sha256:cfc83108c3abb371f8fb84d99c1fdc88f8c237e022409b0081fb7c0a3be634dd
     depends_on:
       minio:
         condition: service_healthy
