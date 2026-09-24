@@ -111,10 +111,13 @@ fn partition_live_file_stats_sql_inner(
 }
 
 /// Logical row count probe — carries a wide timestamp bound for D12.
-pub fn logical_table_row_count_sql(catalog_alias: &str, table: &str) -> String {
+///
+/// `qualified_table` must be the full DuckLake product path
+/// (e.g. `softprobe.thelake.traces`), same contract as [`table_exists_probe_sql`].
+pub fn logical_table_row_count_sql(qualified_table: &str) -> String {
     let ts = timestamp_ns_column("timestamp");
     format!(
-        "SELECT count(*)::BIGINT FROM {catalog_alias}.{table} \
+        "SELECT count(*)::BIGINT FROM {qualified_table} \
          WHERE {ts} >= '1970-01-01'::TIMESTAMP_NS \
            AND {ts} <= '2100-01-01'::TIMESTAMP_NS"
     )
@@ -332,8 +335,17 @@ mod tests {
     }
 
     #[test]
-    fn logical_row_count_carries_timestamp_bound() {
-        let sql = logical_table_row_count_sql("softprobe", "traces");
+    fn logical_row_count_uses_schema_qualified_table_and_timestamp_bound() {
+        let qualified = "softprobe.thelake.traces";
+        let sql = logical_table_row_count_sql(qualified);
+        assert!(
+            sql.contains(qualified),
+            "probe must use fully qualified product table, got: {sql}"
+        );
+        assert!(
+            sql.contains(".thelake."),
+            "non-main metadata schema must appear in FROM clause: {sql}"
+        );
         assert!(crate::sql::ensure_fact_scan_bound(&sql).is_ok());
     }
 
