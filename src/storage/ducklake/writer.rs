@@ -558,7 +558,7 @@ impl DuckLakeWriter {
                         target_file_size_bytes,
                     )?;
                 }
-                crate::query::workspace_views::validate_shared_workspace_schema(conn, &scope)
+                crate::storage::ducklake::validate_shared_workspace_schema(conn, &scope)
             })
         })
         .await

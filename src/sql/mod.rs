@@ -185,7 +185,7 @@ mod locality_tests {
             "/storage/ducklake/promotion.rs",
             "/storage/duckdb/cache.rs",
             "/storage/duckdb/engine.rs",
-            "/query/workspace_views.rs",
+            "/storage/ducklake/workspace_views.rs",
         ];
         let hard: Vec<_> = hits
             .into_iter()

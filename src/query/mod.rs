@@ -6,8 +6,6 @@ use crate::workspace_scope::{
 };
 use std::sync::Arc;
 
-pub(crate) mod workspace_views;
-
 #[derive(Clone)]
 pub struct QueryEngine {
     duckdb: Arc<DuckDBQueryEngine>,

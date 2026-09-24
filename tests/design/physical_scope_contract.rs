@@ -157,6 +157,27 @@ fn src_outside_storage_must_not_assemble_metadata_schema_attach_options() {
 }
 
 #[test]
+fn create_query_engine_uses_physical_scope_ingress_not_resolver_pool() {
+    let query_mod = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/query/mod.rs"));
+    let create_fn = query_mod
+        .split("pub async fn create_query_engine")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split("pub(crate) async fn create_query_engine_for_scope")
+                .next()
+        })
+        .expect("create_query_engine body");
+    assert!(
+        create_fn.contains("physical_scope_from_config"),
+        "create_query_engine must take PhysicalScope via physical_scope_from_config"
+    );
+    assert!(
+        !create_fn.contains("DuckLakeScopeResolver::connect"),
+        "create_query_engine must not open a registry pool just for default identity"
+    );
+}
+
+#[test]
 fn from_ducklake_is_ingress_only_outside_cfg_test() {
     let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let allowed = [

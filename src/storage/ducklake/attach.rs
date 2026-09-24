@@ -124,7 +124,7 @@ impl<'a> DuckLakeSessionFactory<'a> {
         if !matches!(kind, DuckLakeSessionKind::Query) {
             return Ok(None);
         }
-        if std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1") {
+        if crate::storage::ducklake::cache_httpfs_disabled_by_env() {
             return Ok(None);
         }
         let Some(base) = self.config.query.cache_dir.as_ref() else {

@@ -1,4 +1,5 @@
-use crate::storage::ducklake::ducklake_qualified_table_name;
+use super::ducklake_qualified_table_name;
+use super::util::escape_sql_literal;
 use crate::workspace_scope::PhysicalScope;
 use anyhow::{Context, Result};
 use duckdb::Connection;
@@ -9,10 +10,6 @@ const WORKSPACE_TABLES: [(&str, &str); 4] = [
     ("scores", "scores"),
     ("score_configs", "score_configs"),
 ];
-
-fn escape_sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
-}
 
 pub(crate) fn create_view_sql(
     scope: &PhysicalScope,

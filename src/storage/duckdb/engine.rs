@@ -1,6 +1,7 @@
 use crate::config::Config;
-use crate::query::workspace_views;
 use crate::storage::duckdb::cache::CacheSettings;
+use crate::storage::duckdb::cache::{cache_httpfs_disabled_by_env, wrap_one, WrapAttempt};
+use crate::storage::ducklake::workspace_views;
 use crate::storage::ducklake::{
     ducklake_qualified_table_name, DuckLakeSessionFactory, DuckLakeSessionKind,
 };
@@ -953,10 +954,7 @@ impl DuckDBCore {
     }
 
     fn try_wrap_cache_httpfs_filesystems(&self, state: &mut ConnectionState) {
-        if self.cache.cache_dir.is_none() {
-            return;
-        }
-        if std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1") {
+        if self.cache.cache_dir.is_none() || cache_httpfs_disabled_by_env() {
             return;
         }
         if !state.cache_httpfs_wrap_supported {
@@ -964,54 +962,38 @@ impl DuckDBCore {
         }
 
         if !state.cache_httpfs_wrapped_s3 {
-            match state
-                .conn
-                .execute("SELECT cache_httpfs_wrap_cache_filesystem('s3');", [])
-            {
-                Ok(_) => {
+            match wrap_one(&state.conn, "s3") {
+                Ok(WrapAttempt::Wrapped) => {
                     state.cache_httpfs_wrapped_s3 = true;
                     info!("cache_httpfs wrapped filesystem: s3");
                 }
+                Ok(WrapAttempt::NotReady) => {}
+                Ok(WrapAttempt::Unsupported) => {
+                    state.cache_httpfs_wrap_supported = false;
+                    warn!("cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused");
+                }
                 Err(err) => {
-                    let message = err.to_string();
-                    if message.contains("already wrapped") {
-                        state.cache_httpfs_wrapped_s3 = true;
-                        info!("cache_httpfs wrapped filesystem: s3 (already wrapped)");
-                    } else if message.contains("hasn't been registered yet") {
-                        // Will retry later once filesystem is registered by real usage.
-                    } else if message.contains("does not exist")
-                        || message.contains("Catalog Error")
-                            && message.contains("cache_httpfs_wrap_cache_filesystem")
-                    {
-                        state.cache_httpfs_wrap_supported = false;
-                        warn!("cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused");
+                    if !CACHE_HTTPFS_CONFIG_WARNED.swap(true, Ordering::Relaxed) {
+                        warn!("Failed to wrap cache_httpfs filesystem s3: {err}");
                     }
                 }
             }
         }
 
         if !state.cache_httpfs_wrapped_httpfs && state.cache_httpfs_wrap_supported {
-            match state
-                .conn
-                .execute("SELECT cache_httpfs_wrap_cache_filesystem('httpfs');", [])
-            {
-                Ok(_) => {
+            match wrap_one(&state.conn, "httpfs") {
+                Ok(WrapAttempt::Wrapped) => {
                     state.cache_httpfs_wrapped_httpfs = true;
                     info!("cache_httpfs wrapped filesystem: httpfs");
                 }
+                Ok(WrapAttempt::NotReady) => {}
+                Ok(WrapAttempt::Unsupported) => {
+                    state.cache_httpfs_wrap_supported = false;
+                    warn!("cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused");
+                }
                 Err(err) => {
-                    let message = err.to_string();
-                    if message.contains("already wrapped") {
-                        state.cache_httpfs_wrapped_httpfs = true;
-                        info!("cache_httpfs wrapped filesystem: httpfs (already wrapped)");
-                    } else if message.contains("hasn't been registered yet") {
-                        // Will retry later once filesystem is registered by real usage.
-                    } else if message.contains("does not exist")
-                        || message.contains("Catalog Error")
-                            && message.contains("cache_httpfs_wrap_cache_filesystem")
-                    {
-                        state.cache_httpfs_wrap_supported = false;
-                        warn!("cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused");
+                    if !CACHE_HTTPFS_CONFIG_WARNED.swap(true, Ordering::Relaxed) {
+                        warn!("Failed to wrap cache_httpfs filesystem httpfs: {err}");
                     }
                 }
             }
@@ -1023,12 +1005,6 @@ impl DuckDBCore {
         // cache_httpfs SETs live in duckdb_init.sql (applied by SessionFactory).
         // Only filesystem wrapping remains here — it is lazy/best-effort until S3/httpfs
         // registers after first real I/O.
-        if self.cache.cache_dir.is_some()
-            && std::env::var("PERF_DISABLE_CACHE_HTTPFS").ok().as_deref() == Some("1")
-        {
-            return Ok(());
-        }
-
         if let Err(err) = self.cache.wrap_filesystems(conn) {
             if !CACHE_HTTPFS_CONFIG_WARNED.swap(true, Ordering::Relaxed) {
                 warn!("Failed to wrap cache_httpfs filesystems: {}", err);

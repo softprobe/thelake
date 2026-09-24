@@ -528,6 +528,7 @@ mod tests {
             "src/storage/ducklake/util.rs",
             "src/storage/duckdb/engine.rs",
             "src/storage/duckdb/cache.rs",
+            "src/storage/ducklake/workspace_views.rs",
             "src/compaction/engine.rs",
             "src/compaction/merge.rs",
             "src/compaction/session_summary_access.rs",
