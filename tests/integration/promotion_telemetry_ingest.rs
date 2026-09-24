@@ -55,12 +55,12 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
         .await
         .expect("ingest promoted span");
 
-    let conn = crate::util::scope::physical_scope(
+    let conn = crate::util::scope::open_attached_warehouse(
         metadata_path.clone(),
         tenant_data_path.clone(),
         tenant_schema.clone(),
-    )
-    .open_attached_connection(Some(0));
+        Some(0),
+    );
     let sql = format!(
         r#"SELECT service_name, division_name FROM traces WHERE session_id = 's-promoted'"#
     );

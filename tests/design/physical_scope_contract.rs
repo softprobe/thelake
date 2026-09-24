@@ -4,6 +4,135 @@
 //! plan. Weakening or deleting them to pass CI is itself a contract violation.
 
 #[test]
+fn physical_scope_type_is_crate_internal() {
+    let workspace = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/workspace_scope.rs"
+    ));
+    assert!(
+        workspace.contains("pub(crate) struct PhysicalScope"),
+        "PhysicalScope must be pub(crate), not a public product type"
+    );
+    assert!(
+        !workspace.contains("pub struct PhysicalScope"),
+        "PhysicalScope must not be pub struct"
+    );
+    assert!(
+        workspace.contains("pub(crate) struct ScopeId"),
+        "ScopeId must be pub(crate)"
+    );
+    assert!(
+        workspace.contains("pub(crate) enum DuckLakeAccess"),
+        "DuckLakeAccess must be pub(crate)"
+    );
+    assert!(
+        workspace.contains("pub(crate) fn from_ducklake("),
+        "from_ducklake must be pub(crate) ingress only"
+    );
+    assert!(
+        workspace.contains("pub(crate) fn new(")
+            && workspace
+                .split("impl WorkspaceBinding")
+                .nth(1)
+                .expect("WorkspaceBinding impl")
+                .contains("pub(crate) fn new("),
+        "WorkspaceBinding::new must be pub(crate) (takes PhysicalScope)"
+    );
+
+    let lib = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
+    assert!(
+        !lib.contains("pub use") || !lib.contains("PhysicalScope"),
+        "lib.rs must not pub-use PhysicalScope"
+    );
+    // Module is public for WorkspaceScopeMode / binding errors, but PhysicalScope
+    // itself must not be re-exported.
+    assert!(
+        !lib.contains("pub use crate::workspace_scope::PhysicalScope")
+            && !lib.contains("pub use workspace_scope::PhysicalScope"),
+        "PhysicalScope must not be re-exported from lib.rs"
+    );
+}
+
+#[test]
+fn handlers_must_not_import_physical_scope() {
+    let roots = [
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/compat"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime_api.rs"),
+    ];
+    let mut hits = Vec::new();
+    for root in &roots {
+        if root.is_file() {
+            if let Ok(contents) = std::fs::read_to_string(root) {
+                let production = strip_cfg_test_modules(&contents);
+                for (idx, line) in production.lines().enumerate() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                        continue;
+                    }
+                    if trimmed.contains("PhysicalScope")
+                        || trimmed.contains("DuckLakeAccess")
+                        || trimmed.contains("ScopeId")
+                    {
+                        hits.push(format!("{}:{}: {}", root.display(), idx + 1, trimmed));
+                    }
+                }
+            }
+            continue;
+        }
+        visit_rs(root, &mut |path, contents| {
+            let production = strip_cfg_test_modules(contents);
+            for (idx, line) in production.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                if trimmed.contains("PhysicalScope")
+                    || trimmed.contains("DuckLakeAccess")
+                    || trimmed.contains("ScopeId")
+                {
+                    hits.push(format!("{}:{}: {}", path.display(), idx + 1, trimmed));
+                }
+            }
+        });
+    }
+    assert!(
+        hits.is_empty(),
+        "handlers must not name PhysicalScope/DuckLakeAccess/ScopeId:\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
+fn integration_tests_must_not_name_physical_scope() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut hits = Vec::new();
+    visit_rs(&root, &mut |path, contents| {
+        // Design contracts document the type by name.
+        if path.components().any(|c| c.as_os_str() == "design") {
+            return;
+        }
+        for (idx, line) in contents.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            if trimmed.contains("workspace_scope::PhysicalScope")
+                || trimmed.contains("PhysicalScope::")
+                || (trimmed.contains("use ") && trimmed.contains("PhysicalScope"))
+            {
+                hits.push(format!("{}:{}: {}", path.display(), idx + 1, trimmed));
+            }
+        }
+    });
+    assert!(
+        hits.is_empty(),
+        "integration tests must use attach façades, not PhysicalScope:\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
 fn physical_scope_and_config_forbid_public_identity_getters_and_fields() {
     let workspace = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -180,14 +309,14 @@ fn create_query_engine_uses_physical_scope_ingress_not_resolver_pool() {
 #[test]
 fn from_ducklake_is_ingress_only_outside_cfg_test() {
     let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let allowed = [
-        std::path::Path::new("runtime_engine.rs"),
-        std::path::Path::new("workspace_scope.rs"),
-    ];
     let mut hits = Vec::new();
     visit_rs(&src_root, &mut |path, contents| {
         let rel = path.strip_prefix(&src_root).unwrap_or(path);
-        if allowed.iter().any(|a| rel.ends_with(a)) {
+        // Allowed config→scope ingress sites only.
+        if rel.ends_with("runtime_engine.rs")
+            || rel.ends_with("workspace_scope.rs")
+            || rel == std::path::Path::new("storage/ducklake/attach.rs")
+        {
             return;
         }
         if path
@@ -210,8 +339,8 @@ fn from_ducklake_is_ingress_only_outside_cfg_test() {
     });
     assert!(
         hits.is_empty(),
-        "PhysicalScope::from_ducklake escaped ingress (runtime_engine / workspace_scope) \
-         in non-test production code:\n{}",
+        "PhysicalScope::from_ducklake escaped ingress (runtime_engine / workspace_scope / \
+         storage/ducklake/attach) in non-test production code:\n{}",
         hits.join("\n")
     );
 }

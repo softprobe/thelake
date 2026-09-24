@@ -85,7 +85,7 @@ async fn simulated_llm_generation_manifest_promotes_generation_fields() {
         .expect("encode");
     ingest_otlp_protobuf(env.router.clone(), body).await;
 
-    let connection = env.physical().open_attached_connection(Some(0));
+    let connection = env.open_attached();
     assert_traces_columns_exist(
         &connection,
         &[

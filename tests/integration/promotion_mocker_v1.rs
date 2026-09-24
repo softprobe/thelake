@@ -165,7 +165,7 @@ async fn simulated_mocker_rolling_manifest_promotes_record_fields_and_http_bodie
         .expect("encode");
     ingest_otlp_protobuf(env.router.clone(), body).await;
 
-    let connection = env.physical().open_attached_connection(Some(0));
+    let connection = env.open_attached();
     assert_traces_columns_exist(
         &connection,
         &[

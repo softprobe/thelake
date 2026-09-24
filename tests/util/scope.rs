@@ -1,18 +1,32 @@
-//! Build opaque [`PhysicalScope`] from POJO DuckLakeConfig fields (test boundary).
+//! Integration-test attach helpers that never name crate-internal catalog identity.
+//!
+//! The only allowed crate-boundary path for opening an attached DuckDB session
+//! from outside `softprobe_runtime` production APIs.
 
-use softprobe_runtime::config::DuckLakeConfig;
-use softprobe_runtime::workspace_scope::PhysicalScope;
+use softprobe_runtime::storage::ducklake::{
+    open_attached_from_config, open_attached_from_warehouse, AttachedSession,
+};
 
-/// Construct a [`PhysicalScope`] via config POJO fields (no public PhysicalScope::new).
-pub fn physical_scope(
+/// Attach using DuckLakeConfig POJO fields (default catalog identity).
+pub fn open_attached(
+    config: &softprobe_runtime::config::DuckLakeConfig,
+    data_inlining_row_limit: Option<u64>,
+) -> AttachedSession {
+    open_attached_from_config(config, data_inlining_row_limit)
+}
+
+/// Attach using explicit warehouse path/schema (isolation / provisioned-scope checks).
+pub fn open_attached_warehouse(
     metadata_path: impl Into<String>,
     data_path: impl Into<String>,
     metadata_schema: impl Into<String>,
-) -> PhysicalScope {
-    let mut ducklake = DuckLakeConfig::default();
-    ducklake.metadata_path = metadata_path.into();
-    ducklake.data_path = data_path.into();
-    ducklake.metadata_schema = metadata_schema.into();
-    ducklake.catalog_alias = "softprobe".to_string();
-    PhysicalScope::from_ducklake(&ducklake)
+    data_inlining_row_limit: Option<u64>,
+) -> AttachedSession {
+    open_attached_from_warehouse(
+        metadata_path,
+        data_path,
+        metadata_schema,
+        "softprobe",
+        data_inlining_row_limit,
+    )
 }

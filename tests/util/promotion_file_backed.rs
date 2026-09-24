@@ -12,8 +12,9 @@ use axum::Router;
 use http_body_util::BodyExt;
 use serde_json::json;
 use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::config::DuckLakeConfig;
 use softprobe_runtime::runtime_api::runtime_control_routes;
-use softprobe_runtime::workspace_scope::PhysicalScope;
+use softprobe_runtime::storage::ducklake::{open_attached_from_config, AttachedSession};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -26,19 +27,19 @@ use crate::util::tenant::{
 pub struct FileBackedPromotionEnv {
     pub _temp: TempDir,
     pub router: Router,
-    physical: PhysicalScope,
+    ducklake: DuckLakeConfig,
 }
 
 impl FileBackedPromotionEnv {
-    pub fn physical(&self) -> &PhysicalScope {
-        &self.physical
+    pub fn open_attached(&self) -> AttachedSession {
+        open_attached_from_config(&self.ducklake, Some(0))
     }
 }
 
 pub async fn setup_file_backed_promotion_env() -> FileBackedPromotionEnv {
     let temp = TempDir::new().expect("tempdir");
     let config = file_backed_test_config(&temp);
-    let physical = PhysicalScope::from_ducklake(&config.ducklake);
+    let ducklake = config.ducklake.clone();
 
     let (router, state) =
         softprobe_runtime::api::create_router(Arc::new(config), post(ingest_traces), None)
@@ -52,7 +53,7 @@ pub async fn setup_file_backed_promotion_env() -> FileBackedPromotionEnv {
     FileBackedPromotionEnv {
         _temp: temp,
         router,
-        physical,
+        ducklake,
     }
 }
 

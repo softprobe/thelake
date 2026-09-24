@@ -74,10 +74,17 @@ fn isolation_span(tenant_id: &str, session_id: &str, trace_id: &str) -> ModelSpa
 }
 
 fn trace_count_for_session(
-    scope: &softprobe_runtime::workspace_scope::PhysicalScope,
+    metadata_path: &str,
+    data_path: &str,
+    metadata_schema: &str,
     session_id: &str,
 ) -> i64 {
-    let conn = scope.open_attached_connection(Some(0));
+    let conn = crate::util::scope::open_attached_warehouse(
+        metadata_path,
+        data_path,
+        metadata_schema,
+        Some(0),
+    );
     conn.query_row(
         &format!(
             "SELECT count(*) FROM traces WHERE session_id = '{}'",
@@ -175,19 +182,13 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         assert_eq!(n_a, 1, "workspace A view must contain its session");
     } else {
         let metadata_path = config.ducklake.metadata_path.clone();
-        let n_b = trace_count_for_session(
-            &crate::util::scope::physical_scope(&metadata_path, &path_b, &meta_b),
-            &session_id,
-        );
+        let n_b = trace_count_for_session(&metadata_path, &path_b, &meta_b, &session_id);
         assert_eq!(
             n_b, 0,
             "tenant B DuckLake must not contain tenant A's session"
         );
 
-        let n_a = trace_count_for_session(
-            &crate::util::scope::physical_scope(&metadata_path, &path_a, &meta_a),
-            &session_id,
-        );
+        let n_a = trace_count_for_session(&metadata_path, &path_a, &meta_a, &session_id);
         assert_eq!(n_a, 1, "tenant A scope must contain ingested span");
     }
 }
@@ -275,7 +276,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
-    let physical = manager
+    let hints = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: tenant_schema.clone(),
@@ -283,6 +284,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
         })
         .await
         .expect("provision tenant");
+    assert!(hints.matches_warehouse_hints(&tenant_schema, &tenant_data_path));
 
     Mock::given(method("POST"))
         .and(path("/"))
@@ -335,10 +337,21 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     // Ingest is flush-through; no separate pipeline flush needed.
 
     std::env::set_var("AWS_S3_ENDPOINT", "http://localhost:9000");
-    // Verify against the bound physical scope (shared mode ignores request overrides).
-    let n: i64 = trace_count_for_session(&physical, &format!("grpc-sess-{suffix}"));
+    // Verify against the provisioned warehouse (shared mode ignores request overrides).
+    let metadata_path = config.ducklake.metadata_path.clone();
+    let n: i64 = trace_count_for_session(
+        &metadata_path,
+        &hints.data_path,
+        &hints.metadata_schema,
+        &format!("grpc-sess-{suffix}"),
+    );
     assert_eq!(n, 1, "gRPC export must land in tenant-scoped traces table");
-    let n2: i64 = trace_count_for_session(&physical, &format!("http-sess-{suffix}"));
+    let n2: i64 = trace_count_for_session(
+        &metadata_path,
+        &hints.data_path,
+        &hints.metadata_schema,
+        &format!("http-sess-{suffix}"),
+    );
     assert_eq!(
         n2, 1,
         "HTTP-path export must share the same DuckLake scope as gRPC"

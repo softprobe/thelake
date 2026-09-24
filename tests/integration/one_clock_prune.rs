@@ -42,8 +42,7 @@ fn walk_paths(dir: &Path, out: &mut Vec<String>) {
 }
 
 fn attach(config: &softprobe_runtime::config::DuckLakeConfig) -> duckdb::Connection {
-    softprobe_runtime::workspace_scope::PhysicalScope::from_ducklake(config)
-        .open_attached_connection(Some(0))
+    softprobe_runtime::storage::ducklake::open_attached_from_config(config, Some(0))
 }
 
 fn explain_plan(conn: &duckdb::Connection, sql: &str) -> String {

@@ -328,6 +328,35 @@ pub(crate) fn ducklake_qualified_table_name(scope: &PhysicalScope, bare_table: &
 /// Opaque DuckDB session returned by catalog attach helpers.
 pub type AttachedSession = duckdb::Connection;
 
+/// Open an attached DuckDB session for the configured DuckLake POJO identity.
+///
+/// Public façade for integration/ops — does not expose [`PhysicalScope`].
+pub fn open_attached_from_config(
+    config: &crate::config::DuckLakeConfig,
+    data_inlining_row_limit: Option<u64>,
+) -> AttachedSession {
+    open_attached_connection(
+        &PhysicalScope::from_ducklake(config),
+        data_inlining_row_limit,
+    )
+}
+
+/// Open an attached DuckDB session for explicit warehouse path/schema identity.
+///
+/// Public façade for isolation checks — does not expose [`PhysicalScope`].
+pub fn open_attached_from_warehouse(
+    metadata_path: impl Into<String>,
+    data_path: impl Into<String>,
+    metadata_schema: impl Into<String>,
+    catalog_alias: impl Into<String>,
+    data_inlining_row_limit: Option<u64>,
+) -> AttachedSession {
+    open_attached_connection(
+        &PhysicalScope::new(metadata_path, data_path, catalog_alias, metadata_schema),
+        data_inlining_row_limit,
+    )
+}
+
 /// Test/ops helper: in-memory DuckDB with extensions loaded, catalog attached, and
 /// schema selected so callers can use bare table names.
 pub(crate) fn open_attached_connection(

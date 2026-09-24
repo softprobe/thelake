@@ -49,10 +49,10 @@ impl fmt::Display for WorkspaceScopeMode {
 
 /// Opaque identity for maps, dedupe, and registry primary keys.
 ///
-/// Not a DSN API and not a SQL prefix. Business callers must not depend on the
-/// inner encoding.
+/// Crate-internal — not a DSN API and not a SQL prefix. Business callers must
+/// not depend on the inner encoding.
 #[derive(Clone, PartialEq, Eq)]
-pub struct ScopeId(String);
+pub(crate) struct ScopeId(String);
 
 impl ScopeId {
     pub(crate) fn from_encoded(encoded: String) -> Self {
@@ -86,10 +86,13 @@ impl fmt::Display for ScopeId {
 
 /// Opaque immutable DuckLake catalog identity.
 ///
-/// Public surface is construction + [`Self::id`] + [`Self::open_attached_connection`].
+/// Crate-internal token: storage/runtime pass it into capabilities; handlers and
+/// external crates never import this type. Public product API is workspace id +
+/// engine façades only.
+///
 /// Path/schema/alias strings are private; storage/runtime use `pub(crate)` codecs.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PhysicalScope {
+pub(crate) struct PhysicalScope {
     #[serde(default = "default_ducklake_metadata_path")]
     metadata_path: String,
     #[serde(default = "default_ducklake_data_path")]
@@ -148,7 +151,9 @@ impl PhysicalScope {
     }
 
     /// Capture the physical scope selected by the runtime configuration.
-    pub fn from_ducklake(config: &DuckLakeConfig) -> Self {
+    ///
+    /// Config → scope ingress only. Crate-internal (handlers never call this).
+    pub(crate) fn from_ducklake(config: &DuckLakeConfig) -> Self {
         Self::new(
             config.metadata_path.clone(),
             config.data_path.clone(),
@@ -158,7 +163,7 @@ impl PhysicalScope {
     }
 
     /// Opaque map/dedupe/registry identity.
-    pub fn id(&self) -> ScopeId {
+    pub(crate) fn id(&self) -> ScopeId {
         let mut encoded = String::from("ducklake:");
         for part in [
             &self.metadata_path,
@@ -202,14 +207,6 @@ impl PhysicalScope {
             self.catalog_alias.clone(),
             self.metadata_schema.clone(),
         )
-    }
-
-    /// Test/ops: in-memory DuckDB with ATTACH+USE complete. Bare table names work.
-    pub fn open_attached_connection(
-        &self,
-        data_inlining_row_limit: Option<u64>,
-    ) -> crate::storage::ducklake::AttachedSession {
-        crate::storage::ducklake::open_attached_connection(self, data_inlining_row_limit)
     }
 
     /// Provision from default scope + request overrides (schema + data path).
@@ -311,7 +308,8 @@ pub struct WorkspaceBinding {
 }
 
 impl WorkspaceBinding {
-    pub fn new(
+    /// Crate-internal constructor — physical identity is not a public product type.
+    pub(crate) fn new(
         workspace_id: impl Into<String>,
         physical_scope: PhysicalScope,
         mode: WorkspaceScopeMode,
@@ -336,8 +334,10 @@ impl WorkspaceBinding {
 }
 
 /// Classified capability used to construct a DuckLake session.
+///
+/// Crate-internal ATTACH token — not part of the public product API.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DuckLakeAccess {
+pub(crate) enum DuckLakeAccess {
     /// Authenticated workspace access for ingest or query operations.
     Workspace(WorkspaceBinding),
     /// Complete physical-scope access for maintenance and catalog operations.

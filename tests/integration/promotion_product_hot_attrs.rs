@@ -112,7 +112,7 @@ async fn product_traces_hot_attrs_manifest_promotes_on_ingest() {
         .expect("encode");
     ingest_otlp_protobuf(env.router.clone(), body).await;
 
-    let connection = env.physical().open_attached_connection(Some(0));
+    let connection = env.open_attached();
     assert_traces_columns_exist(
         &connection,
         &[
@@ -175,7 +175,7 @@ async fn product_logs_hot_attrs_manifest_promotes_on_ingest() {
     log_request(&session_id).encode(&mut body).expect("encode");
     ingest_otlp_logs_protobuf(env.router.clone(), body).await;
 
-    let connection = env.physical().open_attached_connection(Some(0));
+    let connection = env.open_attached();
     assert_logs_columns_exist(
         &connection,
         &[

@@ -23,8 +23,7 @@ fn assert_map_dtype(dtype: &str, column: &str) {
 }
 
 fn attach(config: &softprobe_runtime::config::DuckLakeConfig) -> duckdb::Connection {
-    softprobe_runtime::workspace_scope::PhysicalScope::from_ducklake(config)
-        .open_attached_connection(Some(0))
+    softprobe_runtime::storage::ducklake::open_attached_from_config(config, Some(0))
 }
 
 fn attributes_object(value: &Value) -> serde_json::Map<String, Value> {

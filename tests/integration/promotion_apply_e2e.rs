@@ -110,12 +110,12 @@ async fn setup() -> PostgresBackend {
 
 impl PostgresBackend {
     fn attach(&self) -> duckdb::Connection {
-        crate::util::scope::physical_scope(
+        crate::util::scope::open_attached_warehouse(
             self.metadata_path.clone(),
             self.data_path.clone(),
             self.metadata_schema.clone(),
+            Some(0),
         )
-        .open_attached_connection(Some(0))
     }
 
     async fn count_specs(&self, status: &str) -> i64 {
