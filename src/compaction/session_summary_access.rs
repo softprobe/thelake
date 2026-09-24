@@ -5,7 +5,7 @@
 
 use crate::config::Config;
 use crate::session_summary::SummaryRow;
-use crate::workspace_scope::PhysicalScope;
+use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
@@ -16,7 +16,7 @@ pub(crate) fn prepare_session_summary_duckdb(
     config: &Config,
     scope: &PhysicalScope,
 ) -> Result<Connection> {
-    let access = crate::workspace_scope::DuckLakeAccess::Physical(scope.clone());
+    let access = DuckLakeAccess::Physical(scope.clone());
     crate::storage::ducklake::DuckLakeSessionFactory::new(config)
         .open(
             &access,
@@ -27,7 +27,7 @@ pub(crate) fn prepare_session_summary_duckdb(
 
 fn open_session_summary_connection(config: &Config, scope: &PhysicalScope) -> Result<Connection> {
     let conn = prepare_session_summary_duckdb(config, scope)?;
-    let access = crate::workspace_scope::DuckLakeAccess::Physical(scope.clone());
+    let access = DuckLakeAccess::Physical(scope.clone());
     crate::storage::ducklake::DuckLakeSessionFactory::new(config).attach(&conn, &access)?;
     Ok(conn)
 }

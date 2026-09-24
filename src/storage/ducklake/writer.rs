@@ -1,10 +1,15 @@
+#[cfg(test)]
+use super::physical_scope::DEFAULT_WORKSPACE_ID;
+use super::{
+    DuckLakeAccess, PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceBinding,
+    WorkspaceScopeMode,
+};
 use crate::config::Config;
 use crate::promotion::{BusinessTableManifest, TelemetryColumnsManifest, TelemetryTable};
 use crate::sql::schema::{insert_order_by, is_otlp_table, LOGS, SCORES, SCORE_CONFIGS, TRACES};
 use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
 use crate::storage::schema::tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
 use crate::storage::schema::variant::parquet_select_for_table;
-use crate::workspace_scope::{DuckLakeAccess, PhysicalScope, WorkspaceBinding};
 use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
 use anyhow::{anyhow, Result};
@@ -136,12 +141,12 @@ impl DuckLakeWriter {
         self.access.physical_scope().pg_namespace()
     }
 
-    pub(crate) fn workspace_scope_mode(&self) -> crate::workspace_scope::WorkspaceScopeMode {
+    pub(crate) fn workspace_scope_mode(&self) -> WorkspaceScopeMode {
         self.binding.mode
     }
 
     pub(super) fn shared_workspace_id(&self) -> Result<Option<&str>> {
-        if self.workspace_scope_mode() != crate::workspace_scope::WorkspaceScopeMode::Shared {
+        if self.workspace_scope_mode() != WorkspaceScopeMode::Shared {
             return Ok(None);
         }
         Ok(Some(self.binding.workspace_id.as_str()))
@@ -513,8 +518,8 @@ impl DuckLakeWriter {
                         Ok(columns) if !columns.contains_key("tenant_id") => {
                             return Err(anyhow::anyhow!(
                                 "{}: table {table_name} is missing tenant_id; migrate it before shared startup",
-                                crate::workspace_scope::SharedScopeError::new(
-                                    crate::workspace_scope::SharedScopeErrorCode::SchemaIncompatible,
+                                SharedScopeError::new(
+                                    SharedScopeErrorCode::SchemaIncompatible,
                                     format!("shared workspace table {table_name} has no ownership column"),
                                 )
                             ));
@@ -599,7 +604,7 @@ impl DuckLakeWriter {
         };
 
         let insert = if let Some(id_column) = dedupe_id_column {
-            if self.workspace_scope_mode() == crate::workspace_scope::WorkspaceScopeMode::Shared {
+            if self.workspace_scope_mode() == WorkspaceScopeMode::Shared {
                 crate::sql::writer::insert_deduped_parquet_sql_for_workspace(
                     &qualified_table,
                     &select_prefix,
@@ -802,17 +807,17 @@ mod tests {
     async fn spans_schema_has_no_process_global_promoted_columns() {
         let config = Config::default();
         let binding = WorkspaceBinding::new(
-            crate::workspace_scope::DEFAULT_WORKSPACE_ID,
+            DEFAULT_WORKSPACE_ID,
             PhysicalScope::from_ducklake(&DuckLakeConfig {
                 metadata_path: config.ducklake.metadata_path.clone(),
                 data_path: "/tmp/unused".to_string(),
                 catalog_alias: "softprobe".to_string(),
                 metadata_schema: "main".to_string(),
-                workspace_scope_mode: crate::workspace_scope::WorkspaceScopeMode::Isolated,
+                workspace_scope_mode: WorkspaceScopeMode::Isolated,
                 data_inlining_row_limit: None,
                 writer_pool_size: 1,
             }),
-            crate::workspace_scope::WorkspaceScopeMode::Isolated,
+            WorkspaceScopeMode::Isolated,
         )
         .expect("binding");
         let access = DuckLakeAccess::Workspace(binding.clone());

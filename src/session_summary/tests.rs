@@ -328,7 +328,7 @@ async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
     use crate::runtime_engine::DuckLakeScopeResolver;
     use crate::session_summary::ensure_product_hot_attrs_for_scope;
     use crate::sql::llm::llm_promo;
-    use crate::workspace_scope::PhysicalScope;
+    use crate::storage::ducklake::PhysicalScope;
     use std::sync::Arc;
     use tempfile::TempDir;
 

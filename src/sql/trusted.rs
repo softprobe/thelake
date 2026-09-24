@@ -5,7 +5,8 @@
 //! shared-scope policy. The constructor is kept behind this module so future
 //! builders can become the only producers of trusted statements.
 
-use crate::workspace_scope::{PhysicalScope, SharedScopeErrorCode};
+use crate::storage::ducklake::PhysicalScope;
+use crate::workspace_scope::SharedScopeErrorCode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrustedSql(String);
@@ -137,7 +138,7 @@ impl std::error::Error for TrustedSqlError {}
 #[cfg(test)]
 mod tests {
     use super::{TrustedSql, TrustedSqlError};
-    use crate::{config::DuckLakeConfig, workspace_scope::PhysicalScope};
+    use crate::{config::DuckLakeConfig, storage::ducklake::PhysicalScope};
 
     #[test]
     fn trusted_sql_is_opaque_and_non_empty() {

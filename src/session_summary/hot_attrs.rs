@@ -6,7 +6,7 @@ use crate::promotion::{
 };
 use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::sql::llm::llm_promo;
-use crate::workspace_scope::PhysicalScope;
+use crate::storage::ducklake::PhysicalScope;
 use anyhow::{Context, Result};
 
 /// Canonical Softprobe traces hot-attr manifest (shipped under docs/promotion/).

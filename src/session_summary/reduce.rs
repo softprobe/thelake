@@ -3,7 +3,7 @@
 use crate::config::Config;
 use crate::runtime_engine::quote_pg_ident;
 use crate::sql::session_summary::compile_session_summary_upsert_sql;
-use crate::workspace_scope::PhysicalScope;
+use crate::storage::ducklake::PhysicalScope;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use deadpool_postgres::Pool;
@@ -639,7 +639,7 @@ mod tests {
 
         let mut config = Config::default();
         config.ducklake.data_path = "gs://softprobe-test/ducklake/".to_string();
-        let scope = crate::workspace_scope::PhysicalScope::from_ducklake(&config.ducklake);
+        let scope = PhysicalScope::from_ducklake(&config.ducklake);
         let result = crate::compaction::session_summary_access::prepare_session_summary_duckdb(
             &config, &scope,
         );

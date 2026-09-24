@@ -16,7 +16,7 @@ use crate::sql::maintenance::{
     ducklake_merge_adjacent_files_sql, ducklake_set_target_file_size_sql,
     logical_table_row_count_sql, partition_live_file_stats_after_sql,
 };
-use crate::workspace_scope::PhysicalScope;
+use crate::storage::ducklake::PhysicalScope;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use duckdb::Connection;

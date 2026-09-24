@@ -8,12 +8,17 @@
 mod attach;
 mod object_store;
 mod otlp;
+pub(crate) mod physical_scope;
 mod promotion;
 mod scores;
 mod util;
 pub(crate) mod workspace_views;
 mod writer;
 
+pub(crate) use physical_scope::{
+    DuckLakeAccess, PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceBinding,
+    WorkspaceScopeMode,
+};
 pub(crate) use writer::DuckLakeWriter;
 
 pub(crate) use attach::{

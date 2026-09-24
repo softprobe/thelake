@@ -1,8 +1,9 @@
 use crate::config::Config;
 use crate::storage::duckdb::{DuckDBQueryEngine, QueryResult};
+use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
 use crate::workspace_scope::{
-    DuckLakeAccess, PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceBinding,
-    WorkspaceScopeMode, DEFAULT_WORKSPACE_ID,
+    SharedScopeError, SharedScopeErrorCode, WorkspaceBinding, WorkspaceScopeMode,
+    DEFAULT_WORKSPACE_ID,
 };
 use std::sync::Arc;
 

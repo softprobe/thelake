@@ -5,7 +5,9 @@ use crate::storage::ducklake::workspace_views;
 use crate::storage::ducklake::{
     ducklake_qualified_table_name, DuckLakeSessionFactory, DuckLakeSessionKind,
 };
-use crate::workspace_scope::DuckLakeAccess;
+use crate::storage::ducklake::{DuckLakeAccess, WorkspaceScopeMode};
+#[cfg(test)]
+use crate::storage::ducklake::{PhysicalScope, WorkspaceBinding};
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use duckdb::types::Value as DuckValue;
@@ -665,7 +667,7 @@ impl DuckDBQueryEngine {
         self.access.physical_scope().attach_alias()
     }
 
-    pub(crate) fn workspace_scope_mode(&self) -> crate::workspace_scope::WorkspaceScopeMode {
+    pub(crate) fn workspace_scope_mode(&self) -> WorkspaceScopeMode {
         self.config.ducklake.workspace_scope_mode
     }
 
@@ -820,9 +822,7 @@ impl DuckDBCore {
         if attach_catalog {
             self.attach_catalog_if_needed(&conn)?;
         }
-        if self.config.ducklake.workspace_scope_mode
-            == crate::workspace_scope::WorkspaceScopeMode::Shared
-        {
+        if self.config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
             workspace_views::install(&conn, self.access.physical_scope(), &self.tenant_id)?;
         }
         Ok(ConnectionState {
@@ -1022,9 +1022,7 @@ impl DuckDBCore {
 
     /// Replace bare telemetry table names with qualified DuckLake table refs.
     fn ducklake_inline_sql(&self, sql: &str) -> String {
-        if self.config.ducklake.workspace_scope_mode
-            == crate::workspace_scope::WorkspaceScopeMode::Shared
-        {
+        if self.config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
             // Shared-mode workers expose filtered logical views. Keeping the
             // SQL logical prevents callers from bypassing those views with the
             // physical catalog qualification used by isolated mode.
@@ -1132,7 +1130,7 @@ fn duck_value_to_json(value: DuckValue) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_scope::{PhysicalScope, WorkspaceBinding};
+
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::sync::oneshot;
@@ -1330,7 +1328,7 @@ mod tests {
     #[test]
     fn shared_query_keeps_logical_table_names_for_filtered_views() {
         let mut config = Config::default();
-        config.ducklake.workspace_scope_mode = crate::workspace_scope::WorkspaceScopeMode::Shared;
+        config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Shared;
         let scope = PhysicalScope::from_ducklake(&config.ducklake);
         let access = DuckLakeAccess::Workspace(
             WorkspaceBinding::new("workspace-a", scope, config.ducklake.workspace_scope_mode)
@@ -1359,8 +1357,7 @@ mod tests {
             let mut config = Config::default();
             config.ducklake.catalog_alias = "softprobe".to_string();
             config.ducklake.metadata_schema = "main".to_string();
-            config.ducklake.workspace_scope_mode =
-                crate::workspace_scope::WorkspaceScopeMode::Shared;
+            config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Shared;
             let scope = PhysicalScope::from_ducklake(&config.ducklake);
             let access = DuckLakeAccess::Workspace(
                 WorkspaceBinding::new(tenant_id, scope, config.ducklake.workspace_scope_mode)

@@ -5,33 +5,41 @@
 
 #[test]
 fn physical_scope_type_is_crate_internal() {
+    let scope = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/storage/ducklake/physical_scope.rs"
+    ));
     let workspace = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/workspace_scope.rs"
     ));
     assert!(
-        workspace.contains("pub(crate) struct PhysicalScope"),
-        "PhysicalScope must be pub(crate), not a public product type"
+        scope.contains("pub(crate) struct PhysicalScope"),
+        "PhysicalScope must live in storage/ducklake as pub(crate)"
     );
     assert!(
-        !workspace.contains("pub struct PhysicalScope"),
+        !scope.contains("pub struct PhysicalScope"),
         "PhysicalScope must not be pub struct"
     );
     assert!(
-        workspace.contains("pub(crate) struct ScopeId"),
+        !workspace.contains("struct PhysicalScope") && !workspace.contains("PhysicalScope"),
+        "workspace_scope must not define or name PhysicalScope (storage owns it)"
+    );
+    assert!(
+        scope.contains("pub(crate) struct ScopeId"),
         "ScopeId must be pub(crate)"
     );
     assert!(
-        workspace.contains("pub(crate) enum DuckLakeAccess"),
+        scope.contains("pub(crate) enum DuckLakeAccess"),
         "DuckLakeAccess must be pub(crate)"
     );
     assert!(
-        workspace.contains("pub(crate) fn from_ducklake("),
+        scope.contains("pub(crate) fn from_ducklake("),
         "from_ducklake must be pub(crate) ingress only"
     );
     assert!(
-        workspace.contains("pub(crate) fn new(")
-            && workspace
+        scope.contains("pub(crate) fn new(")
+            && scope
                 .split("impl WorkspaceBinding")
                 .nth(1)
                 .expect("WorkspaceBinding impl")
@@ -63,9 +71,9 @@ fn public_attach_facades_exist_and_physical_scope_does_not_host_attach() {
         env!("CARGO_MANIFEST_DIR"),
         "/src/storage/ducklake/mod.rs"
     ));
-    let workspace = include_str!(concat!(
+    let scope = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/workspace_scope.rs"
+        "/src/storage/ducklake/physical_scope.rs"
     ));
 
     assert!(
@@ -89,8 +97,8 @@ fn public_attach_facades_exist_and_physical_scope_does_not_host_attach() {
         "ducklake/mod.rs must re-export the public attach façades"
     );
     assert!(
-        !workspace.contains("fn open_attached_connection(")
-            && !workspace.contains("open_attached_connection"),
+        !scope.contains("fn open_attached_connection(")
+            && !scope.contains("open_attached_connection"),
         "PhysicalScope must not host open_attached_connection"
     );
 }
@@ -160,6 +168,7 @@ fn integration_tests_must_not_name_physical_scope() {
                 continue;
             }
             if trimmed.contains("workspace_scope::PhysicalScope")
+                || trimmed.contains("storage::ducklake::PhysicalScope")
                 || trimmed.contains("PhysicalScope::")
                 || (trimmed.contains("use ") && trimmed.contains("PhysicalScope"))
             {
@@ -178,11 +187,11 @@ fn integration_tests_must_not_name_physical_scope() {
 fn physical_scope_and_config_forbid_public_identity_getters_and_fields() {
     let workspace = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/workspace_scope.rs"
+        "/src/storage/ducklake/physical_scope.rs"
     ));
 
     let physical_impl = physical_scope_impl_block(workspace)
-        .expect("workspace_scope.rs must contain impl PhysicalScope");
+        .expect("physical_scope.rs must contain impl PhysicalScope");
 
     // Config remains a POJO DTO (YAML ingress). Opacity is enforced on PhysicalScope.
     for needle in [
@@ -210,6 +219,7 @@ fn physical_scope_and_config_forbid_public_identity_getters_and_fields() {
     let config = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/config.rs"));
     assert!(
         !config.contains("physical: crate::workspace_scope::PhysicalScope")
+            && !config.contains("physical: crate::storage::ducklake::PhysicalScope")
             && !config.contains("physical: PhysicalScope"),
         "DuckLakeConfig must not own PhysicalScope; config is a POJO"
     );
@@ -276,8 +286,8 @@ fn main_namespace_branching_stays_inside_storage_ducklake() {
         {
             return;
         }
-        // workspace_scope owns is_default_duckdb_namespace implementation.
-        if path.ends_with("workspace_scope.rs") {
+        // physical_scope owns is_default_duckdb_namespace implementation.
+        if path.ends_with("physical_scope.rs") {
             return;
         }
         for (idx, line) in contents.lines().enumerate() {
@@ -356,7 +366,7 @@ fn from_ducklake_is_ingress_only_outside_cfg_test() {
         let rel = path.strip_prefix(&src_root).unwrap_or(path);
         // Allowed config→scope ingress sites only.
         if rel.ends_with("runtime_engine.rs")
-            || rel.ends_with("workspace_scope.rs")
+            || rel.ends_with("physical_scope.rs")
             || rel == std::path::Path::new("storage/ducklake/attach.rs")
         {
             return;
@@ -381,7 +391,7 @@ fn from_ducklake_is_ingress_only_outside_cfg_test() {
     });
     assert!(
         hits.is_empty(),
-        "PhysicalScope::from_ducklake escaped ingress (runtime_engine / workspace_scope / \
+        "PhysicalScope::from_ducklake escaped ingress (runtime_engine / physical_scope / \
          storage/ducklake/attach) in non-test production code:\n{}",
         hits.join("\n")
     );
@@ -411,6 +421,7 @@ fn api_and_compat_must_not_reach_engine_internals() {
         ".catalog_dsn()",
         "PhysicalScope::",
         "use crate::workspace_scope::PhysicalScope",
+        "use crate::storage::ducklake::PhysicalScope",
     ];
     let mut hits = Vec::new();
     for root in &roots {
@@ -457,7 +468,7 @@ fn api_and_compat_must_not_reach_engine_internals() {
 fn workspace_binding_does_not_expose_physical_scope() {
     let workspace = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/workspace_scope.rs"
+        "/src/storage/ducklake/physical_scope.rs"
     ));
     assert!(
         !workspace.contains("pub physical_scope: PhysicalScope"),
@@ -578,6 +589,7 @@ fn leased_jobs_must_not_import_physical_scope() {
         let production = src.split("#[cfg(test)]").next().unwrap_or(&src);
         for needle in [
             "use crate::workspace_scope::PhysicalScope",
+            "use crate::storage::ducklake::PhysicalScope",
             "PhysicalScope::",
             ": PhysicalScope",
             "&PhysicalScope",

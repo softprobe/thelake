@@ -17,9 +17,9 @@ use crate::promotion::{
     PromotionSpecLoadError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
+use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
 use crate::workspace_scope::{
-    effective_workspace_id, DuckLakeAccess, PhysicalScope, WorkspaceBinding, WorkspaceScopeMode,
-    DEFAULT_WORKSPACE_ID,
+    effective_workspace_id, WorkspaceBinding, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
@@ -61,7 +61,7 @@ pub struct RuntimeEngine {
 /// [`RuntimeEngine::search_session_summary`].
 struct TenantSummaryScope {
     pool: Pool,
-    physical: crate::workspace_scope::PhysicalScope,
+    physical: PhysicalScope,
     workspace_id: Option<String>,
 }
 

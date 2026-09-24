@@ -11,7 +11,8 @@ use crate::compaction::status::{
 use crate::compaction::watermark::WatermarkStore;
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
-use crate::workspace_scope::{PhysicalScope, DEFAULT_WORKSPACE_ID};
+use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
+use crate::workspace_scope::DEFAULT_WORKSPACE_ID;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use deadpool_postgres::Pool;
@@ -462,7 +463,7 @@ impl MaintenanceEngine {
     }
 
     fn open_ducklake_connection(&self, physical: &PhysicalScope) -> Result<Connection> {
-        let access = crate::workspace_scope::DuckLakeAccess::Physical(physical.clone());
+        let access = DuckLakeAccess::Physical(physical.clone());
         crate::storage::ducklake::DuckLakeSessionFactory::new(&self.config).open(
             &access,
             crate::storage::ducklake::DuckLakeSessionKind::Maintenance,
@@ -470,7 +471,7 @@ impl MaintenanceEngine {
     }
 
     fn attach_ducklake(&self, conn: &Connection, physical: &PhysicalScope) -> Result<()> {
-        let access = crate::workspace_scope::DuckLakeAccess::Physical(physical.clone());
+        let access = DuckLakeAccess::Physical(physical.clone());
         crate::storage::ducklake::DuckLakeSessionFactory::new(&self.config)
             .attach(conn, &access)?;
         Ok(())

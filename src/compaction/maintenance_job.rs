@@ -102,7 +102,7 @@ mod tests {
             "job must call MaintenanceEngine key façades"
         );
         assert!(
-            !production.contains("use crate::workspace_scope::PhysicalScope")
+            !production.contains("PhysicalScope")
                 && !production.contains("physical_scopes(")
                 && !production.contains("ensure_physical_scope_bootstrap")
                 && !production.contains("run_physical_scope_pass"),

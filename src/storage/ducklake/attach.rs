@@ -1,6 +1,6 @@
+use super::{DuckLakeAccess, PhysicalScope};
 use crate::config::Config;
 use crate::storage::duckdb::init::{apply_duckdb_init, DuckDbInitParams};
-use crate::workspace_scope::{DuckLakeAccess, PhysicalScope};
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use std::collections::HashMap;
@@ -360,7 +360,7 @@ pub fn open_attached_from_warehouse(
 /// Test/ops helper: in-memory DuckDB with extensions loaded, catalog attached, and
 /// schema selected so callers can use bare table names.
 pub(crate) fn open_attached_connection(
-    scope: &crate::workspace_scope::PhysicalScope,
+    scope: &PhysicalScope,
     data_inlining_row_limit: Option<u64>,
 ) -> AttachedSession {
     let connection = open_in_memory_capped(QUERY_DUCKDB_THREADS, "512MB").expect("duckdb");
@@ -434,7 +434,7 @@ pub(crate) fn ducklake_set_option_scope_for_qualified(qualified_table: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_scope::{
+    use crate::storage::ducklake::physical_scope::{
         DuckLakeAccess, PhysicalScope, WorkspaceBinding, WorkspaceScopeMode,
     };
 

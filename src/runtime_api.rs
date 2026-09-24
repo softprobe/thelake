@@ -133,7 +133,7 @@ mod data_connection_tests {
     use crate::authn::TenantInfo;
     use crate::config::Config;
     use crate::runtime_engine::DuckLakeConnectionMaterial;
-    use crate::workspace_scope::PhysicalScope;
+    use crate::storage::ducklake::PhysicalScope;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {

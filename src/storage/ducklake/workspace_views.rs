@@ -1,6 +1,6 @@
 use super::ducklake_qualified_table_name;
 use super::util::escape_sql_literal;
-use crate::workspace_scope::PhysicalScope;
+use super::PhysicalScope;
 use anyhow::{Context, Result};
 use duckdb::Connection;
 
@@ -64,8 +64,8 @@ pub(crate) fn validate_shared_workspace_schema(
         if !has_tenant_id_column(conn, scope, physical_name)? {
             return Err(anyhow::anyhow!(
                 "{}: table {physical_name} is missing tenant_id",
-                crate::workspace_scope::SharedScopeError::new(
-                    crate::workspace_scope::SharedScopeErrorCode::SchemaIncompatible,
+                super::SharedScopeError::new(
+                    super::SharedScopeErrorCode::SchemaIncompatible,
                     format!("shared workspace table {physical_name} has no ownership column"),
                 )
             ));
@@ -91,8 +91,8 @@ pub(crate) fn install(conn: &Connection, scope: &PhysicalScope, workspace_id: &s
 
 #[cfg(test)]
 mod tests {
+    use super::PhysicalScope;
     use super::*;
-    use crate::workspace_scope::PhysicalScope;
 
     #[test]
     fn view_sql_filters_the_physical_table_by_escaped_workspace() {
