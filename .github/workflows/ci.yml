@@ -53,7 +53,6 @@ jobs:
 
   e2e-isolated:
     name: E2E (isolated DuckLake)
-    needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -100,7 +99,6 @@ jobs:
 
   e2e-shared:
     name: E2E (shared DuckLake)
-    needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
