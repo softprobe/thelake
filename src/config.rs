@@ -32,8 +32,8 @@ pub struct Config {
     pub self_monitoring: SelfMonitoringConfig,
 }
 
-/// Session list summary knobs. Always active when `ducklake.catalog_type=postgres`
-/// (dirty + reduce + rebuild + hot-attrs). Sqlite keeps lake `GROUP BY` list.
+/// Session list summary knobs. Always active for the Postgres DuckLake
+/// catalog; dirty + reduce + rebuild + hot-attrs share the same runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummaryConfig {
@@ -79,38 +79,21 @@ fn default_max_reduce_span_seconds() -> u64 {
 }
 
 impl SessionSummaryConfig {
-    /// True when the catalog can host `session_summary` (postgres only).
-    pub fn active_for(ducklake: &DuckLakeConfig) -> bool {
-        ducklake.catalog_type == "postgres"
-    }
-
-    /// Postgres catalogs require positive reducer/rebuild knobs.
+    /// Positive reducer/rebuild knobs are required on the normal runtime path.
     /// `ingest.flush_interval_seconds` may be 0 (immediate coalesce drain) or >0
     /// (timer); both mark dirty on the same coalesce write path.
-    /// Sqlite: no-op (summary inactive).
-    pub fn validate(
-        &self,
-        _ingest: &IngestConfig,
-        ducklake: &DuckLakeConfig,
-    ) -> anyhow::Result<()> {
-        if !Self::active_for(ducklake) {
-            return Ok(());
-        }
+    pub fn validate(&self) -> anyhow::Result<()> {
         if self.reducer_interval_ms == 0 {
-            anyhow::bail!("session_summary.reducer_interval_ms must be > 0 for postgres catalog");
+            anyhow::bail!("session_summary.reducer_interval_ms must be > 0");
         }
         if self.rebuild_interval_ms == 0 {
-            anyhow::bail!("session_summary.rebuild_interval_ms must be > 0 for postgres catalog");
+            anyhow::bail!("session_summary.rebuild_interval_ms must be > 0");
         }
         if self.max_sessions_per_reduce == 0 {
-            anyhow::bail!(
-                "session_summary.max_sessions_per_reduce must be > 0 for postgres catalog"
-            );
+            anyhow::bail!("session_summary.max_sessions_per_reduce must be > 0");
         }
         if self.max_reduce_span_seconds == 0 {
-            anyhow::bail!(
-                "session_summary.max_reduce_span_seconds must be > 0 for postgres catalog"
-            );
+            anyhow::bail!("session_summary.max_reduce_span_seconds must be > 0");
         }
         Ok(())
     }
@@ -446,10 +429,9 @@ fn default_max_merge_file_size_bytes() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DuckLakeConfig {
-    /// Catalog backend: `postgres` (production / multi-tenant) or `sqlite` (local multi-client).
-    /// `duckdb` is rejected — DuckLake documents it as single-client only.
-    #[serde(default = "default_ducklake_catalog_type")]
-    pub catalog_type: String,
+    /// Bare Postgres connection KV string (`host=... port=... dbname=...`).
+    /// Used by the always-on control-plane registry and by DuckLake ATTACH
+    /// (which prefixes `postgres:` in one place in the session factory).
     #[serde(default = "default_ducklake_metadata_path")]
     pub metadata_path: String,
     #[serde(default = "default_ducklake_data_path")]
@@ -458,6 +440,9 @@ pub struct DuckLakeConfig {
     pub catalog_alias: String,
     #[serde(default = "default_ducklake_metadata_schema")]
     pub metadata_schema: String,
+    /// Workspace storage mode. Isolated preserves the current default behavior.
+    #[serde(default)]
+    pub workspace_scope_mode: crate::workspace_scope::WorkspaceScopeMode,
     /// Rows per INSERT at or below this limit may stay catalog-inlined.
     /// Default `Some(500)` (DuckLake-aligned). TWCS wait-for-next-run (AC-F7):
     /// maintenance does not flush inlined rows before merge. Set `Some(0)` only
@@ -472,23 +457,19 @@ pub struct DuckLakeConfig {
 impl Default for DuckLakeConfig {
     fn default() -> Self {
         Self {
-            catalog_type: default_ducklake_catalog_type(),
             metadata_path: default_ducklake_metadata_path(),
             data_path: default_ducklake_data_path(),
             catalog_alias: default_ducklake_catalog_alias(),
             metadata_schema: default_ducklake_metadata_schema(),
+            workspace_scope_mode: crate::workspace_scope::WorkspaceScopeMode::default(),
             data_inlining_row_limit: default_data_inlining_row_limit(),
             writer_pool_size: default_writer_pool_size(),
         }
     }
 }
 
-fn default_ducklake_catalog_type() -> String {
-    "sqlite".to_string()
-}
-
 fn default_ducklake_metadata_path() -> String {
-    "./warehouse/ducklake/metadata.sqlite".to_string()
+    "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string()
 }
 
 fn default_ducklake_data_path() -> String {
@@ -500,7 +481,7 @@ fn default_ducklake_catalog_alias() -> String {
 }
 
 fn default_ducklake_metadata_schema() -> String {
-    "main".to_string()
+    "softprobe".to_string()
 }
 
 fn default_data_inlining_row_limit() -> Option<u64> {
@@ -545,20 +526,6 @@ impl ObjectStoreCredentials {
 }
 
 impl Config {
-    /// Reject unsupported DuckLake catalog backends (official multi-client = postgres or sqlite).
-    pub fn validate_ducklake_catalog(&self) -> anyhow::Result<()> {
-        match self.ducklake.catalog_type.as_str() {
-            "postgres" | "sqlite" => Ok(()),
-            "duckdb" => anyhow::bail!(
-                "ducklake.catalog_type=duckdb is unsupported (DuckLake single-client only). \
-                 Use sqlite for local multi-client concurrency or postgres for production."
-            ),
-            other => {
-                anyhow::bail!("unsupported ducklake.catalog_type={other}; use postgres or sqlite")
-            }
-        }
-    }
-
     /// Single query worker + single writer connection for in-process / local tests.
     /// Keeps production defaults (`max_connections=10`, `writer_pool_size=4`) elsewhere.
     pub fn shrink_pools_for_tests(&mut self) {
@@ -582,11 +549,8 @@ impl Config {
         };
 
         config.apply_env_overrides()?;
-        config.validate_ducklake_catalog()?;
         config.async_jobs.validate()?;
-        config
-            .session_summary
-            .validate(&config.ingest, &config.ducklake)?;
+        config.session_summary.validate()?;
         Ok(config)
     }
 
@@ -686,7 +650,7 @@ fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredential
 #[cfg(test)]
 mod tests {
     use super::{resolve_write_timeout_seconds, Config, ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS};
-    use crate::compaction::twcs::TwcsPolicy;
+    use crate::compaction::TwcsPolicy;
     use std::sync::Mutex;
 
     static CONFIG_TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -698,7 +662,7 @@ mod tests {
         let parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize");
         assert_eq!(parsed.server.port, c.server.port);
         assert_eq!(parsed.object_store.region, c.object_store.region);
-        assert_eq!(parsed.ducklake.catalog_type, c.ducklake.catalog_type);
+        assert_eq!(parsed.ducklake.metadata_path, c.ducklake.metadata_path);
     }
 
     #[test]
@@ -737,7 +701,6 @@ mod tests {
     fn minimal_yaml_only_requires_ducklake() {
         let yaml = r#"
 ducklake:
-  catalog_type: sqlite
   metadata_path: /tmp/meta.sqlite
   data_path: /tmp/data/
 "#;
@@ -754,7 +717,6 @@ ducklake:
     fn ingest_flush_interval_parses() {
         let yaml = r#"
 ducklake:
-  catalog_type: sqlite
   metadata_path: /tmp/meta.sqlite
   data_path: /tmp/data/
 ingest:
@@ -770,7 +732,6 @@ ingest:
     fn ingest_buffer_size_mb_parses() {
         let yaml = r#"
 ducklake:
-  catalog_type: sqlite
   metadata_path: /tmp/meta.sqlite
   data_path: /tmp/data/
 ingest:
@@ -786,7 +747,6 @@ ingest:
     fn ingest_write_timeout_parses_and_clamps() {
         let yaml = r#"
 ducklake:
-  catalog_type: sqlite
   metadata_path: /tmp/meta.sqlite
   data_path: /tmp/data/
 ingest:
@@ -808,7 +768,7 @@ ingest:
 storage:
   s3_region: us-east-1
 ducklake:
-  catalog_type: sqlite
+  metadata_path: /tmp/reject-legacy.sqlite
 "#;
         let err = serde_yaml::from_str::<Config>(yaml).expect_err("legacy rejected");
         let msg = err.to_string();
@@ -825,7 +785,7 @@ query:
   max_connections: 2
   max_memory_per_query: "2GB"
 ducklake:
-  catalog_type: sqlite
+  metadata_path: /tmp/reject-unused.sqlite
 "#;
         let err = serde_yaml::from_str::<Config>(yaml).expect_err("unused knobs rejected");
         assert!(err.to_string().contains("unknown field"));
@@ -910,11 +870,48 @@ ducklake:
     }
 
     #[test]
-    fn reject_duckdb_catalog_type() {
+    fn shared_workspace_scope_defaults_to_isolated() {
+        let c = Config::default();
+        assert_eq!(
+            c.ducklake.workspace_scope_mode,
+            crate::workspace_scope::WorkspaceScopeMode::Isolated
+        );
+    }
+
+    #[test]
+    fn shared_workspace_scope_is_allowed_with_postgres_catalog() {
+        // The normal runtime path is always the Postgres DuckLake catalog.
         let mut c = Config::default();
-        c.ducklake.catalog_type = "duckdb".to_string();
-        let err = c.validate_ducklake_catalog().expect_err("duckdb rejected");
-        assert!(err.to_string().contains("unsupported"));
+        c.ducklake.metadata_path = "postgres:host=localhost dbname=ducklake".to_string();
+        c.ducklake.workspace_scope_mode = crate::workspace_scope::WorkspaceScopeMode::Shared;
+        c.session_summary
+            .validate()
+            .expect("valid summary defaults");
+    }
+
+    #[test]
+    fn workspace_scope_mode_parses_from_yaml() {
+        let yaml = r#"
+ducklake:
+  metadata_path: postgres:host=localhost dbname=ducklake
+  data_path: s3://warehouse/
+  workspace_scope_mode: shared
+"#;
+        let c: Config = serde_yaml::from_str(yaml).expect("shared mode parses");
+        assert_eq!(
+            c.ducklake.workspace_scope_mode,
+            crate::workspace_scope::WorkspaceScopeMode::Shared
+        );
+    }
+
+    #[test]
+    fn unknown_workspace_scope_mode_is_rejected() {
+        let yaml = r#"
+ducklake:
+  workspace_scope_mode: per_user
+"#;
+        let error = serde_yaml::from_str::<Config>(yaml).expect_err("unknown mode");
+        assert!(error.to_string().contains("workspace_scope_mode"));
     }
 
     #[test]
@@ -935,53 +932,34 @@ ducklake:
         assert_eq!(c.session_summary.rebuild_interval_ms, 86_400_000);
         assert_eq!(c.session_summary.max_sessions_per_reduce, 1000);
         assert_eq!(c.session_summary.max_reduce_span_seconds, 604_800);
-        assert!(!super::SessionSummaryConfig::active_for(&c.ducklake)); // default sqlite
     }
 
     #[test]
     fn session_summary_postgres_rejects_zero_reducer_interval() {
         let mut c = Config::default();
-        c.ducklake.catalog_type = "postgres".to_string();
+        c.ducklake.metadata_path = "postgres:host=localhost dbname=ducklake".to_string();
         c.ingest.flush_interval_seconds = 2;
         c.session_summary.reducer_interval_ms = 0;
-        let err = c
-            .session_summary
-            .validate(&c.ingest, &c.ducklake)
-            .expect_err("interval 0");
+        let err = c.session_summary.validate().expect_err("interval 0");
         assert!(err.to_string().contains("reducer_interval_ms"));
     }
 
     #[test]
     fn session_summary_postgres_ok_with_immediate_flush() {
         let mut c = Config::default();
-        c.ducklake.catalog_type = "postgres".to_string();
+        c.ducklake.metadata_path = "postgres:host=localhost dbname=ducklake".to_string();
         c.ingest.flush_interval_seconds = 0;
         c.session_summary
-            .validate(&c.ingest, &c.ducklake)
+            .validate()
             .expect("flush 0 uses same coalesce path");
-        assert!(super::SessionSummaryConfig::active_for(&c.ducklake));
-    }
-
-    #[test]
-    fn session_summary_sqlite_skips_knob_validation() {
-        let mut c = Config::default();
-        c.ducklake.catalog_type = "sqlite".to_string();
-        c.ingest.flush_interval_seconds = 0;
-        c.session_summary.reducer_interval_ms = 0;
-        c.session_summary
-            .validate(&c.ingest, &c.ducklake)
-            .expect("sqlite inactive");
     }
 
     #[test]
     fn session_summary_postgres_ok_with_coalesce() {
         let mut c = Config::default();
-        c.ducklake.catalog_type = "postgres".to_string();
+        c.ducklake.metadata_path = "postgres:host=localhost dbname=ducklake".to_string();
         c.ingest.flush_interval_seconds = 2;
-        c.session_summary
-            .validate(&c.ingest, &c.ducklake)
-            .expect("ok");
-        assert!(super::SessionSummaryConfig::active_for(&c.ducklake));
+        c.session_summary.validate().expect("ok");
     }
 
     #[test]

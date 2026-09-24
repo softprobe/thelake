@@ -36,6 +36,9 @@ pub struct Log {
     // Links logs to traces for distributed tracing
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
+    /// Authenticated workspace ownership, stamped by `IngestEngine`.
+    #[serde(default, skip_serializing)]
+    pub tenant_id: Option<String>,
     /// Softprobe agent id from assertion auth (not client OTLP).
     pub agent_id: Option<String>,
     /// Softprobe agent display name from assertion auth (not client OTLP).
@@ -145,6 +148,7 @@ impl Log {
             resource_attributes: resource_attributes.clone(),
             trace_id,
             span_id,
+            tenant_id: None,
             agent_id: None,
             agent_name: None,
         })
@@ -246,6 +250,7 @@ mod tests {
                 .collect(),
             trace_id: None,
             span_id: None,
+            tenant_id: None,
             agent_id: None,
             agent_name: None,
         }

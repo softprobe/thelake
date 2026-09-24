@@ -1,9 +1,29 @@
 //! Shared axum middleware that injects a local-SQLite tenant for router-level tests.
 
 use axum::middleware::Next;
+use softprobe_runtime::api::AppState;
 use softprobe_runtime::authn::TenantInfo;
+use softprobe_runtime::runtime_engine::ScopeProvisioningRequest;
 
 pub const LOCAL_SQLITE_TENANT_ID: &str = "local-sqlite-tenant";
+
+/// Register [`LOCAL_SQLITE_TENANT_ID`] in the durable scope registry, reusing
+/// this process's configured physical scope. Production requires an explicit
+/// `POST /v1/tenants` admin provisioning step before a tenant can resolve a
+/// DuckLake scope; router-level tests that bypass real auth via
+/// [`inject_local_sqlite_tenant`] must provision it directly instead.
+pub async fn provision_local_sqlite_tenant(state: &AppState) {
+    let ducklake = state.engines.config().ducklake.clone();
+    state
+        .engines
+        .provision_scope(ScopeProvisioningRequest {
+            scope_id: LOCAL_SQLITE_TENANT_ID.to_string(),
+            metadata_schema: ducklake.metadata_schema,
+            data_path: ducklake.data_path,
+        })
+        .await
+        .expect("provision local-sqlite-tenant scope");
+}
 
 /// Header used by multi-tenant Prom isolation tests to select the injected tenant.
 pub const TEST_TENANT_HEADER: &str = "x-test-tenant-id";

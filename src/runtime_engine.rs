@@ -9,7 +9,7 @@
 use crate::authn::TenantInfo;
 use crate::config::{Config, DuckLakeConfig};
 use crate::control_plane::ControlPlaneRuntime;
-use crate::ingest_engine::{IngestEngine, IngestPipeline};
+use crate::ingest_engine::{AdminEngine, IngestEngine, IngestPipeline};
 use crate::promotion::{
     business_manifest_from_row, business_spec_activation, ensure_promotion_metadata_tables,
     load_active_telemetry_columns_manifests, run_business_apply, run_telemetry_apply,
@@ -17,7 +17,10 @@ use crate::promotion::{
     PromotionSpecLoadError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
-use crate::storage::Storage;
+use crate::workspace_scope::{
+    effective_workspace_id, PhysicalScope, WorkspaceBinding, WorkspaceScopeMode,
+    DEFAULT_WORKSPACE_ID,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -29,13 +32,149 @@ use tokio_postgres::NoTls;
 
 pub type TenantId = String;
 
-/// One tenant's ingest + query + storage (canonical tenant-bound surface).
+const POSTGRES_IDENTIFIER_MAX_BYTES: usize = 63;
+
+fn validate_metadata_schema_name(schema: &str) -> Result<()> {
+    if schema.len() > POSTGRES_IDENTIFIER_MAX_BYTES {
+        bail!(
+            "ducklake metadata schema exceeds PostgreSQL's {}-byte identifier limit",
+            POSTGRES_IDENTIFIER_MAX_BYTES
+        );
+    }
+    Ok(())
+}
+
+/// One tenant's canonical bound ingest and query surfaces.
 pub struct RuntimeEngine {
-    pub tenant_id: String,
-    pub scope: DuckLakeScope,
-    pub storage: Arc<Storage>,
-    pub ingest: Arc<IngestEngine>,
-    pub query: Arc<QueryEngine>,
+    tenant_id: String,
+    binding: WorkspaceBinding,
+    catalog_pool: Pool,
+    ingest: Arc<IngestEngine>,
+    admin: Arc<AdminEngine>,
+    query: Arc<QueryEngine>,
+}
+
+/// Internal summary-query capability. It carries only what the summary
+/// module needs; callers do not receive the tenant's physical binding.
+pub(crate) struct TenantSummaryScope {
+    pub(crate) pool: Pool,
+    pub(crate) metadata_schema: String,
+    pub(crate) workspace_id: Option<String>,
+}
+
+impl RuntimeEngine {
+    /// Stable logical identity of this tenant-bound runtime.
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    /// Tenant-scoped write API. Storage scope and buffering are fixed when the
+    /// runtime is built and are not part of this operation's contract.
+    pub async fn add_spans(
+        &self,
+        items: Vec<crate::models::Span>,
+        request_size: usize,
+    ) -> Result<()> {
+        self.ingest.add_spans(items, request_size).await
+    }
+
+    pub async fn execute_query(&self, sql: &str) -> Result<crate::query::duckdb::QueryResult> {
+        self.query.execute_query(sql).await
+    }
+
+    pub async fn count_traces(&self, filter: crate::query::TraceCountFilter) -> Result<u64> {
+        self.query.count_traces(filter).await
+    }
+
+    pub async fn count_logs(&self, filter: crate::query::LogCountFilter) -> Result<u64> {
+        self.query.count_logs(filter).await
+    }
+
+    pub(crate) async fn execute_trusted(
+        &self,
+        query: crate::sql::trusted::TrustedSql,
+    ) -> Result<crate::query::duckdb::QueryResult> {
+        self.query.execute_trusted(query).await
+    }
+
+    pub async fn add_logs(
+        &self,
+        items: Vec<crate::models::Log>,
+        request_size: usize,
+    ) -> Result<()> {
+        self.ingest.add_logs(items, request_size).await
+    }
+
+    pub async fn force_flush_logs(&self) -> Result<()> {
+        self.ingest.force_flush_logs().await
+    }
+
+    pub async fn force_flush_spans(&self) -> Result<()> {
+        self.ingest.force_flush_spans().await
+    }
+
+    pub async fn add_scores(&self, items: Vec<crate::models::Score>) -> Result<()> {
+        self.ingest.add_scores(items).await
+    }
+
+    pub async fn score_exists(&self, score_id: &str) -> Result<bool> {
+        self.ingest.score_exists(score_id).await
+    }
+
+    pub async fn list_score_configs(&self) -> Result<Vec<crate::models::ScoreConfig>> {
+        self.ingest.list_score_configs().await
+    }
+
+    pub async fn add_score_configs(&self, items: Vec<crate::models::ScoreConfig>) -> Result<()> {
+        self.ingest.add_score_configs(items).await
+    }
+
+    pub async fn score_config_exists(&self, config_id: &str) -> Result<bool> {
+        self.ingest.score_config_exists(config_id).await
+    }
+
+    pub async fn get_score_config(
+        &self,
+        config_id: &str,
+    ) -> Result<Option<crate::models::ScoreConfig>> {
+        self.ingest.get_score_config(config_id).await
+    }
+
+    pub async fn apply_telemetry_promotion(
+        &self,
+        manifest_yaml: &str,
+        spec: &TelemetryColumnsManifest,
+        target_tables: &[String],
+    ) -> Result<String> {
+        self.admin
+            .apply_and_record_telemetry_promotion(manifest_yaml, spec, target_tables)
+            .await
+    }
+
+    pub async fn apply_business_promotion(
+        &self,
+        manifest_yaml: &str,
+        spec: &BusinessTableManifest,
+    ) -> std::result::Result<String, BusinessApplyError> {
+        self.admin
+            .apply_business_promotion_guarded(manifest_yaml, spec)
+            .await
+    }
+
+    /// Internal query capability for protocol adapters and trusted query
+    /// builders. Callers cannot inspect the bound physical scope.
+    pub(crate) fn query_engine(&self) -> Arc<QueryEngine> {
+        self.query.clone()
+    }
+
+    pub(crate) fn session_summary_scope(&self) -> TenantSummaryScope {
+        TenantSummaryScope {
+            pool: self.catalog_pool.clone(),
+            metadata_schema: self.binding.physical_scope.metadata_schema.clone(),
+            workspace_id: (self.binding.mode == WorkspaceScopeMode::Shared)
+                .then(|| self.binding.workspace_id.clone()),
+        }
+    }
 }
 
 /// Global cache: `tenantId` -> tenant-bound runtime (unbounded until restart).
@@ -43,40 +182,56 @@ pub struct RuntimeEngineManager {
     config: Arc<Config>,
     engines: DashMap<String, Arc<RuntimeEngine>>,
     creation_locks: DashMap<String, Arc<Mutex<()>>>,
+    scope_locks: DashMap<String, Arc<Mutex<()>>>,
     control_plane: Option<ControlPlaneRuntime>,
-    scope_registry: Option<DuckLakeScopeResolver>,
+    scope_registry: DuckLakeScopeResolver,
     #[cfg(test)]
     build_counter: AtomicUsize,
 }
 
 impl RuntimeEngineManager {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    /// Connect the catalog registry and build the process-wide engine cache.
+    pub async fn connect(
         config: Arc<Config>,
         control_plane: Option<ControlPlaneRuntime>,
-        scope_registry: Option<DuckLakeScopeResolver>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let scope_registry = DuckLakeScopeResolver::connect(config.as_ref()).await?;
+        Ok(Self {
             config,
             engines: DashMap::new(),
             creation_locks: DashMap::new(),
+            scope_locks: DashMap::new(),
             control_plane,
             scope_registry,
             #[cfg(test)]
             build_counter: AtomicUsize::new(0),
-        }
+        })
     }
 
     pub fn control_plane(&self) -> Option<&ControlPlaneRuntime> {
         self.control_plane.as_ref()
     }
 
-    pub fn scope_registry(&self) -> Option<&DuckLakeScopeResolver> {
-        self.scope_registry.as_ref()
-    }
-
     pub fn config(&self) -> &Config {
         self.config.as_ref()
+    }
+
+    /// Crate-internal registry handle for ingest/maintenance composition.
+    pub(crate) fn scope_registry(&self) -> &DuckLakeScopeResolver {
+        &self.scope_registry
+    }
+
+    /// Idempotently create or verify a workspace → physical-scope binding.
+    pub async fn provision_scope(
+        &self,
+        request: ScopeProvisioningRequest,
+    ) -> Result<PhysicalScope> {
+        self.scope_registry.provision_scope(request).await
+    }
+
+    /// Resolve an existing workspace binding's physical scope.
+    pub(crate) async fn resolve_scope(&self, scope_id: &str) -> Result<PhysicalScope> {
+        self.scope_registry.resolve_scope(scope_id).await
     }
 
     pub fn list_cached_tenant_ids(&self) -> Vec<String> {
@@ -125,66 +280,47 @@ impl RuntimeEngineManager {
         #[cfg(test)]
         self.build_counter.fetch_add(1, Ordering::Relaxed);
 
-        let resolver = self.scope_registry.as_ref();
-        let scope = if let Some(resolver) = resolver {
-            resolver.resolve_or_create(tenant_id).await?
-        } else {
-            DuckLakeScope {
-                metadata_schema: self.config.ducklake.metadata_schema.clone(),
-                data_path: self.config.ducklake.data_path.clone(),
-            }
-        };
+        // The unauthenticated local/default runtime has no external tenant ID, but
+        // workspace-bound engines still need a non-empty identity for their access
+        // contract. Keep the empty ID only for resolving the configured default scope.
+        let bound_tenant_id = effective_workspace_id(tenant_id);
+
+        let resolver = &self.scope_registry;
+        let binding = resolver.resolve_or_create_binding(tenant_id).await?;
+        let scope_lock = self
+            .scope_locks
+            .entry(binding.physical_scope.key())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _scope_hold = scope_lock.lock().await;
         let counts_toward_liveness = true;
 
-        let storage = Arc::new(
-            IngestPipeline::build_tenant_storage(
-                self.config.as_ref(),
-                resolver.cloned(),
-                tenant_id.to_string(),
-                scope.clone(),
-            )
-            .await?,
-        );
-        let ingest = Arc::new(IngestEngine::from_storage(
-            storage.clone(),
-            tenant_id,
-            self.config.ingest.flush_interval_seconds,
-            self.config.ingest.buffer_size_mb,
-            self.config.ingest.write_timeout_seconds,
-            crate::ingest_engine::session_summary_dirty_for(
-                self.config.as_ref(),
-                resolver,
-                tenant_id,
-                &scope.metadata_schema,
-            ),
-        ));
+        let ingest = IngestPipeline::build_tenant_ingest(
+            self.config.as_ref(),
+            resolver.clone(),
+            binding.clone(),
+        )
+        .await?;
+        ingest.ensure_shared_schema().await?;
         let query = Arc::new(
             query_mod::create_query_engine_for_scope_with_liveness(
                 self.config.as_ref(),
-                storage.clone(),
-                &scope,
+                &binding.physical_scope,
                 counts_toward_liveness,
-                tenant_id,
+                bound_tenant_id,
             )
             .await?,
         );
+        let admin = Arc::new(AdminEngine::from_ingest(&ingest));
         Ok(Arc::new(RuntimeEngine {
-            tenant_id: tenant_id.to_string(),
-            scope,
-            storage,
+            tenant_id: bound_tenant_id.to_string(),
+            binding,
+            catalog_pool: resolver.pool().clone(),
             ingest,
+            admin,
             query,
         }))
     }
-}
-
-/// DuckLake storage scope resolved from the durable scope registry.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DuckLakeScope {
-    /// SQL schema inside the shared Postgres DuckLake metadata database.
-    pub metadata_schema: String,
-    /// Object-store data path for this deployment (from config).
-    pub data_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,31 +330,37 @@ pub struct ScopeProvisioningRequest {
     pub data_path: String,
 }
 
+/// Process-wide Postgres registry for workspace → physical-scope bindings.
+///
+/// Owned only by [`RuntimeEngineManager`]. Not part of the public crate API —
+/// request handlers use [`RuntimeEngineManager::engine_for`]; admin/ops use the
+/// manager facades (`provision_scope`, `catalog_pool`, …).
 #[derive(Clone)]
-pub struct DuckLakeScopeResolver {
+pub(crate) struct DuckLakeScopeResolver {
     pool: Pool,
     registry_schema: String,
-    default_scope: DuckLakeScope,
+    default_physical_scope: PhysicalScope,
+    workspace_scope_mode: WorkspaceScopeMode,
 }
 
 impl DuckLakeScopeResolver {
-    pub fn pool(&self) -> &Pool {
+    pub(crate) fn pool(&self) -> &Pool {
         &self.pool
     }
 
-    pub fn registry_schema(&self) -> &str {
+    pub(crate) fn registry_schema(&self) -> &str {
         &self.registry_schema
     }
 
-    pub async fn connect(config: &Config) -> Result<Option<Self>> {
+    /// Always connects on the normal runtime path: `metadata_path` is the
+    /// Postgres connection string for both the control-plane registry and the
+    /// DuckLake catalog. There is no config flag to opt out.
+    pub(crate) async fn connect(config: &Config) -> Result<Self> {
         let dl = &config.ducklake;
-        if dl.catalog_type != "postgres" {
-            return Ok(None);
-        }
         let resolver = Self::build_pool(dl)?;
         resolver.ensure_registry().await?;
         resolver.ensure_scope().await?;
-        Ok(Some(resolver))
+        Ok(resolver)
     }
 
     fn build_pool(dl: &DuckLakeConfig) -> Result<Self> {
@@ -229,23 +371,20 @@ impl DuckLakeScopeResolver {
         };
         let mgr = Manager::from_config(pg, NoTls, mgr_config);
         let pool = Pool::builder(mgr).max_size(8).build()?;
-        let default_scope = DuckLakeScope {
-            metadata_schema: dl.metadata_schema.clone(),
-            data_path: dl.data_path.clone(),
-        };
         Ok(Self {
             pool,
             registry_schema: dl.metadata_schema.clone(),
-            default_scope,
+            default_physical_scope: PhysicalScope::from_ducklake(dl),
+            workspace_scope_mode: dl.workspace_scope_mode,
         })
     }
 
     async fn ensure_scope(&self) -> Result<()> {
-        self.ensure_scope_tables(&self.default_scope).await
+        self.ensure_scope_tables(&self.default_physical_scope).await
     }
 
     async fn ensure_registry(&self) -> Result<()> {
-        let client = self.pool.get().await?;
+        let mut client = self.pool.get().await?;
         client
             .execute(
                 &format!(
@@ -265,6 +404,49 @@ impl DuckLakeScopeResolver {
   provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );"#,
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[],
+            )
+            .await?;
+        client
+            .execute(
+                &format!(
+                    r#"CREATE TABLE IF NOT EXISTS {}.physical_scope (
+  physical_scope_id TEXT PRIMARY KEY,
+  metadata_path TEXT NOT NULL,
+  ducklake_metadata_schema TEXT NOT NULL,
+  data_path TEXT NOT NULL,
+  catalog_alias TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (metadata_path, catalog_alias,
+          ducklake_metadata_schema, data_path)
+);"#,
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[],
+            )
+            .await?;
+        client
+            .execute(
+                &format!(
+                    "ALTER TABLE {}.physical_scope DROP COLUMN IF EXISTS catalog_type;",
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[],
+            )
+            .await?;
+        client
+            .execute(
+                &format!(
+                    r#"CREATE TABLE IF NOT EXISTS {}.workspace_scope_binding (
+  workspace_id TEXT PRIMARY KEY,
+  physical_scope_id TEXT NOT NULL REFERENCES {}.physical_scope(physical_scope_id),
+  provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);"#,
+                    quote_pg_ident(&self.registry_schema),
                     quote_pg_ident(&self.registry_schema)
                 ),
                 &[],
@@ -296,16 +478,96 @@ ON {}.thelake_job_lease (lease_until);"#,
                 &[],
             )
             .await?;
+        let transaction = client.transaction().await?;
+        self.migrate_legacy_scope_registry(&transaction).await?;
+        transaction.commit().await?;
         Ok(())
     }
 
-    async fn ensure_scope_tables(&self, scope: &DuckLakeScope) -> Result<()> {
+    async fn migrate_legacy_scope_registry<C>(&self, client: &C) -> Result<()>
+    where
+        C: deadpool_postgres::GenericClient + Sync,
+    {
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT scope_id, ducklake_metadata_schema, data_path FROM {}.scope_registry;",
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[],
+            )
+            .await?;
+        for row in rows {
+            let workspace_id: String = row.get(0);
+            let mut physical = self.default_physical_scope.clone();
+            physical.metadata_schema = row.get(1);
+            physical.data_path = row.get(2);
+            self.insert_physical_scope(client, &physical).await?;
+            let physical_scope_id = physical.key();
+            client
+                .execute(
+                    &format!(
+                        "INSERT INTO {}.workspace_scope_binding (workspace_id, physical_scope_id) \
+                         VALUES ($1, $2) ON CONFLICT (workspace_id) DO NOTHING;",
+                        quote_pg_ident(&self.registry_schema)
+                    ),
+                    &[&workspace_id, &physical_scope_id],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn insert_physical_scope(
+        &self,
+        client: &impl deadpool_postgres::GenericClient,
+        physical: &PhysicalScope,
+    ) -> Result<()> {
+        let physical_scope_id = physical.key();
+        client
+            .execute(
+                &format!(
+                    r#"INSERT INTO {}.physical_scope
+  (physical_scope_id, metadata_path, ducklake_metadata_schema, data_path, catalog_alias)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[
+                    &physical_scope_id,
+                    &physical.metadata_path,
+                    &physical.metadata_schema,
+                    &physical.data_path,
+                    &physical.catalog_alias,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn ensure_scope_tables(&self, scope: &PhysicalScope) -> Result<()> {
         let client = self.pool.get().await?;
         ensure_promotion_metadata_tables(&client, &scope.metadata_schema).await?;
-        crate::session_summary::ensure_session_summary_tables(&client, &scope.metadata_schema)
+        if self.workspace_scope_mode == WorkspaceScopeMode::Shared {
+            crate::session_summary::ensure_shared_session_summary_tables(
+                &client,
+                &scope.metadata_schema,
+            )
             .await?;
+            crate::session_summary::validate_shared_session_summary_tables(
+                &client,
+                &scope.metadata_schema,
+            )
+            .await?;
+        } else {
+            crate::session_summary::ensure_session_summary_tables(&client, &scope.metadata_schema)
+                .await?;
+        }
         drop(client);
-        // Postgres catalog ⇒ session_summary always on; activate product-hot cols.
+        // Product-hot activation is physical-scope-scoped and idempotent. Run
+        // it at scope initialization so summary jobs remain correct even when
+        // the periodic maintenance job is disabled; maintenance repeats the
+        // same guarded operation for recovery after restarts.
         crate::session_summary::ensure_product_hot_attrs_for_scope(self, scope).await?;
         Ok(())
     }
@@ -313,96 +575,140 @@ ON {}.thelake_job_lease (lease_until);"#,
     /// Resolve the DuckLake scope for `scope_id` from the durable registry.
     ///
     /// When `scope_id` is empty, returns the process-default scope.
-    pub async fn resolve_or_create(&self, scope_id: &str) -> Result<DuckLakeScope> {
+    pub async fn resolve_or_create(&self, scope_id: &str) -> Result<PhysicalScope> {
+        let binding = self.resolve_or_create_binding(scope_id).await?;
+        Ok(binding.physical_scope)
+    }
+
+    /// Resolve a workspace binding from the durable registry.
+    pub async fn resolve_or_create_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
+        if workspace_id.trim().is_empty() {
+            self.ensure_scope().await?;
+            return WorkspaceBinding::new(
+                DEFAULT_WORKSPACE_ID,
+                self.default_physical_scope.clone(),
+                self.workspace_scope_mode,
+            )
+            .map_err(Into::into);
+        }
+        let binding = self.resolve_binding(workspace_id).await?;
+        self.ensure_scope_tables(&binding.physical_scope).await?;
+        Ok(binding)
+    }
+
+    async fn resolve_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                &format!(
+                    "SELECT ps.metadata_path, ps.ducklake_metadata_schema, ps.data_path, \
+                            ps.catalog_alias \
+                     FROM {}.workspace_scope_binding wb \
+                     JOIN {}.physical_scope ps ON ps.physical_scope_id = wb.physical_scope_id \
+                     WHERE wb.workspace_id = $1;",
+                    quote_pg_ident(&self.registry_schema),
+                    quote_pg_ident(&self.registry_schema)
+                ),
+                &[&workspace_id],
+            )
+            .await?;
+        let Some(row) = row else {
+            bail!("unknown scope: {workspace_id}");
+        };
+        let physical = PhysicalScope {
+            metadata_path: row.get(0),
+            metadata_schema: row.get(1),
+            data_path: row.get(2),
+            catalog_alias: row.get(3),
+        };
+        WorkspaceBinding::new(workspace_id, physical, self.workspace_scope_mode).map_err(Into::into)
+    }
+
+    async fn resolve_scope_legacy(&self, scope_id: &str) -> Result<PhysicalScope> {
         if scope_id.trim().is_empty() {
             self.ensure_scope().await?;
-            return Ok(self.default_scope.clone());
+            return Ok(self.default_physical_scope.clone());
         }
-        self.resolve_scope(scope_id).await
+        Ok(self.resolve_binding(scope_id).await?.physical_scope)
     }
 
     /// Idempotently create or verify a scope registry entry and its metadata tables.
     pub async fn provision_scope(
         &self,
         request: ScopeProvisioningRequest,
-    ) -> Result<DuckLakeScope> {
+    ) -> Result<PhysicalScope> {
         if request.scope_id.trim().is_empty() {
             bail!("scope_id is required");
         }
         if request.metadata_schema.trim().is_empty() {
             bail!("ducklake metadata schema is required");
         }
+        validate_metadata_schema_name(&request.metadata_schema)?;
         if request.data_path.trim().is_empty() {
             bail!("ducklake data path is required");
         }
 
-        let scope = DuckLakeScope {
-            metadata_schema: request.metadata_schema,
-            data_path: request.data_path,
+        // Shared workspaces are logical bindings to the one configured physical
+        // scope. The request names the workspace only; it cannot select a
+        // second catalog or data root.
+        let scope = match self.workspace_scope_mode {
+            WorkspaceScopeMode::Isolated => PhysicalScope {
+                metadata_schema: request.metadata_schema,
+                data_path: request.data_path,
+                ..self.default_physical_scope.clone()
+            },
+            WorkspaceScopeMode::Shared => self.default_physical_scope.clone(),
         };
-        let client = self.pool.get().await?;
-        let row = client
+        let mut client = self.pool.get().await?;
+        let physical = scope.clone();
+        let physical_scope_id = physical.key();
+        let transaction = client.transaction().await?;
+        self.insert_physical_scope(&transaction, &physical).await?;
+        let row = transaction
             .query_opt(
                 &format!(
-                    r#"INSERT INTO {}.scope_registry
-  (scope_id, ducklake_metadata_schema, data_path)
-VALUES ($1, $2, $3)
-ON CONFLICT (scope_id) DO UPDATE SET
-  updated_at = {}.scope_registry.updated_at
-WHERE {}.scope_registry.ducklake_metadata_schema = EXCLUDED.ducklake_metadata_schema
-  AND {}.scope_registry.data_path = EXCLUDED.data_path
-RETURNING scope_id;"#,
-                    quote_pg_ident(&self.registry_schema),
-                    quote_pg_ident(&self.registry_schema),
+                    r#"INSERT INTO {}.workspace_scope_binding
+  (workspace_id, physical_scope_id)
+VALUES ($1, $2)
+ON CONFLICT (workspace_id) DO UPDATE SET
+  updated_at = NOW()
+WHERE {}.workspace_scope_binding.physical_scope_id = EXCLUDED.physical_scope_id
+RETURNING workspace_id;"#,
                     quote_pg_ident(&self.registry_schema),
                     quote_pg_ident(&self.registry_schema)
                 ),
-                &[&request.scope_id, &scope.metadata_schema, &scope.data_path],
+                &[&request.scope_id, &physical_scope_id],
             )
             .await?;
         if row.is_none() {
             bail!("scope conflict for scope {}", request.scope_id);
         }
+        transaction.commit().await?;
 
         self.ensure_scope_tables(&scope).await?;
         Ok(scope)
     }
 
     /// Resolve an existing scope registry entry.
-    pub async fn resolve_scope(&self, scope_id: &str) -> Result<DuckLakeScope> {
-        if scope_id.trim().is_empty() {
-            bail!("scope_id is required");
-        }
-
-        let client = self.pool.get().await?;
-        let row = client
-            .query_opt(
-                &format!(
-                    "SELECT ducklake_metadata_schema, data_path FROM {}.scope_registry WHERE scope_id = $1;",
-                    quote_pg_ident(&self.registry_schema)
-                ),
-                &[&scope_id],
-            )
-            .await?;
-        let Some(row) = row else {
-            bail!("unknown scope: {scope_id}");
-        };
-        let scope = DuckLakeScope {
-            metadata_schema: row.get(0),
-            data_path: row.get(1),
-        };
+    pub async fn resolve_scope(&self, scope_id: &str) -> Result<PhysicalScope> {
+        let scope = self.resolve_scope_legacy(scope_id).await?;
         self.ensure_scope_tables(&scope).await?;
         Ok(scope)
     }
 
     /// List all provisioned DuckLake scopes from the registry (for maintenance).
     /// Returns `(scope_id, scope)` — `scope_id` is the tenant id used for ops labels.
-    pub async fn list_scopes(&self) -> Result<Vec<(String, DuckLakeScope)>> {
+    pub async fn list_scopes(&self) -> Result<Vec<(String, PhysicalScope)>> {
         let client = self.pool.get().await?;
         let rows = client
             .query(
                 &format!(
-                    "SELECT scope_id, ducklake_metadata_schema, data_path FROM {}.scope_registry ORDER BY scope_id;",
+                    "SELECT wb.workspace_id, ps.metadata_path, \
+                            ps.ducklake_metadata_schema, ps.data_path, ps.catalog_alias \
+                     FROM {}.workspace_scope_binding wb \
+                     JOIN {}.physical_scope ps ON ps.physical_scope_id = wb.physical_scope_id \
+                     ORDER BY wb.workspace_id;",
+                    quote_pg_ident(&self.registry_schema),
                     quote_pg_ident(&self.registry_schema)
                 ),
                 &[],
@@ -413,9 +719,11 @@ RETURNING scope_id;"#,
             .map(|row| {
                 (
                     row.get::<_, String>(0),
-                    DuckLakeScope {
-                        metadata_schema: row.get(1),
-                        data_path: row.get(2),
+                    PhysicalScope {
+                        metadata_path: row.get(1),
+                        metadata_schema: row.get(2),
+                        data_path: row.get(3),
+                        catalog_alias: row.get(4),
                     },
                 )
             })
@@ -426,7 +734,7 @@ RETURNING scope_id;"#,
     pub async fn load_active_telemetry_columns_manifests(
         &self,
         scope_id: &str,
-    ) -> Result<(DuckLakeScope, Vec<TelemetryColumnsManifest>)> {
+    ) -> Result<(PhysicalScope, Vec<TelemetryColumnsManifest>)> {
         let scope = if scope_id.is_empty() {
             self.resolve_or_create(scope_id).await?
         } else {
@@ -442,7 +750,7 @@ RETURNING scope_id;"#,
     /// Load active telemetry promotion manifests for an already bound scope.
     pub async fn load_active_telemetry_columns_manifests_for_scope(
         &self,
-        scope: &DuckLakeScope,
+        scope: &PhysicalScope,
     ) -> Result<Vec<TelemetryColumnsManifest>> {
         let client = self.pool.get().await?;
         let manifests = load_active_telemetry_columns_manifests(&client, &scope.metadata_schema)
@@ -451,9 +759,36 @@ RETURNING scope_id;"#,
         Ok(manifests)
     }
 
+    /// Load every active business-table promotion for an already bound scope.
+    pub(crate) async fn load_active_business_table_manifests_for_scope(
+        &self,
+        scope: &PhysicalScope,
+    ) -> Result<Vec<BusinessTableManifest>> {
+        let client = self.pool.get().await?;
+        let schema = quote_pg_ident(&scope.metadata_schema);
+        let rows = client
+            .query(
+                &format!(
+                    r#"SELECT spec_id, manifest_json FROM {schema}.promotion_specs
+WHERE status = 'active' AND target_kind = 'business_table';"#
+                ),
+                &[],
+            )
+            .await?;
+        let manifests = rows
+            .into_iter()
+            .map(|row| {
+                let spec_id: String = row.get(0);
+                let manifest_json: String = row.get(1);
+                business_manifest_from_row(&spec_id, &manifest_json).map_err(map_spec_load_error)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(manifests.into_iter().flatten().collect())
+    }
+
     async fn activate_spec_tx(
         tx: &deadpool_postgres::Transaction<'_>,
-        scope: &DuckLakeScope,
+        scope: &PhysicalScope,
         manifest_yaml: &str,
         activation: &PromotionSpecActivation,
     ) -> Result<String> {
@@ -503,7 +838,7 @@ ON CONFLICT (spec_id) DO UPDATE SET
 
     async fn load_business_manifest_tx(
         tx: &deadpool_postgres::Transaction<'_>,
-        scope: &DuckLakeScope,
+        scope: &PhysicalScope,
         table_name: &str,
     ) -> Result<Option<BusinessTableManifest>> {
         let schema = scope.metadata_schema.replace('"', "\"\"");
@@ -528,7 +863,7 @@ LIMIT 1;"#
 
     async fn lock_promotion_tx(
         tx: &deadpool_postgres::Transaction<'_>,
-        scope: &DuckLakeScope,
+        scope: &PhysicalScope,
         lock_suffix: &str,
     ) -> Result<()> {
         tx.execute(
@@ -541,9 +876,9 @@ LIMIT 1;"#
 
     /// Low-level metadata operation used by resolver-isolation tests and maintenance tooling.
     /// Runtime apply uses [`Self::apply_telemetry_promotion_guarded`] instead.
-    pub async fn record_active_telemetry_promotion_spec(
+    pub(crate) async fn record_active_telemetry_promotion_spec(
         &self,
-        scope: &DuckLakeScope,
+        scope: &PhysicalScope,
         manifest_yaml: &str,
         target_tables: &[String],
     ) -> Result<String> {
@@ -557,9 +892,9 @@ LIMIT 1;"#
     }
 
     /// Apply telemetry DDL and activation through the shared lifecycle under a Postgres lock.
-    pub async fn apply_telemetry_promotion_guarded<F, Fut>(
+    pub(crate) async fn apply_telemetry_promotion_guarded<F, Fut>(
         &self,
-        scope: &DuckLakeScope,
+        scope: &PhysicalScope,
         manifest_yaml: &str,
         target_tables: &[String],
         apply_ddl: F,
@@ -580,10 +915,10 @@ LIMIT 1;"#
         Ok(spec_id)
     }
 
-    /// Apply business load/validate/DDL/activation through the same lifecycle used by SQLite.
-    pub async fn apply_business_promotion_guarded<F, Fut>(
+    /// Apply business load/validate/DDL/activation through the Postgres lifecycle.
+    pub(crate) async fn apply_business_promotion_guarded<F, Fut>(
         &self,
-        scope: &DuckLakeScope,
+        scope: &PhysicalScope,
         manifest_yaml: &str,
         spec: &BusinessTableManifest,
         apply_ddl: F,
@@ -626,11 +961,9 @@ fn map_spec_load_error(err: PromotionSpecLoadError) -> anyhow::Error {
 }
 
 fn parse_postgres_kv_config(pg: &mut tokio_postgres::Config, metadata_path: &str) -> Result<()> {
-    let conn_str = metadata_path
-        .trim()
-        .strip_prefix("postgres:")
-        .unwrap_or(metadata_path.trim())
-        .trim();
+    // Bare Postgres KV string only (`host=... port=...`). DuckLake attach adds
+    // the `postgres:` scheme in one place; do not sniff schemes here.
+    let conn_str = metadata_path.trim();
     for part in conn_str.split_whitespace() {
         let (k, v) = part
             .split_once('=')
@@ -660,4 +993,24 @@ fn parse_postgres_kv_config(pg: &mut tokio_postgres::Config, metadata_path: &str
 
 pub(crate) fn quote_pg_ident(input: &str) -> String {
     format!("\"{}\"", input.replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_metadata_schema_name;
+    use super::{QueryEngine, RuntimeEngine};
+    use std::sync::Arc;
+
+    #[test]
+    fn tenant_runtime_exposes_logical_accessors() {
+        let _tenant_id: fn(&RuntimeEngine) -> &str = RuntimeEngine::tenant_id;
+        let _query: fn(&RuntimeEngine) -> Arc<QueryEngine> = RuntimeEngine::query_engine;
+    }
+
+    #[test]
+    fn metadata_schema_name_respects_postgres_identifier_limit() {
+        assert!(validate_metadata_schema_name(&"a".repeat(63)).is_ok());
+        assert!(validate_metadata_schema_name(&"a".repeat(64)).is_err());
+        assert!(validate_metadata_schema_name(&"é".repeat(32)).is_err());
+    }
 }

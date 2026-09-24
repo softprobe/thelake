@@ -1090,6 +1090,7 @@ fn sample_log(counter: u64) -> Log {
         resource_attributes,
         trace_id: Some(uuid::Uuid::new_v4().to_string()),
         span_id: Some(uuid::Uuid::new_v4().to_string()),
+        tenant_id: None,
         agent_id: None,
         agent_name: None,
     }

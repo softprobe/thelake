@@ -6,7 +6,6 @@ use softprobe_runtime::api::{self, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp;
-use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -48,24 +47,22 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
-    // Maintenance needs a writer/catalog; HTTP/gRPC engines are built lazily per tenant.
-    let pipeline = IngestPipeline::new(config.as_ref()).await?;
-    let storage = pipeline.storage.clone();
-
-    if let Some(_handle) = softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
-        config.as_ref(),
-        storage.writer.scope_registry().cloned(),
-    )
-    .await?
-    {
-        info!("Maintenance scheduler started");
-    }
-
     let control_plane = control_plane_runtime_from_env()?;
     let traces = post(ingest_traces);
 
     let (mut app, state) =
         api::create_router(config.clone(), traces, Some(control_plane.clone())).await?;
+
+    // The router construction is the shared-mode startup gate. Do not start
+    // maintenance or any secondary storage path until it has completed schema
+    // validation, catalog attachment, and filtered-view initialization.
+    if let Some(_handle) =
+        softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(state.engines.clone())
+            .await?
+    {
+        info!("Maintenance scheduler started");
+    }
+
     app = app.merge(runtime_control_routes().with_state(state.clone()));
 
     // CorsLayer must be outermost: browsers send OPTIONS preflight without

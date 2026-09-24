@@ -19,7 +19,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use serde_json::json;
-use std::sync::Arc;
 
 const PROTOCOL: ProtocolScope = ProtocolScope::Tempo;
 
@@ -33,7 +32,7 @@ async fn backend_for(
             format!("tenant engine unavailable: {err}"),
         )
     })?;
-    Ok(DuckLakeTraceBackend::new(Arc::clone(&engine.query)))
+    Ok(DuckLakeTraceBackend::new(engine.query_engine()))
 }
 
 fn tenant_context(tenant: TenantInfo, headers: &HeaderMap) -> Result<TenantContext, CompatError> {

@@ -4,6 +4,7 @@ use crate::util::pipeline::TestPipeline;
 use crate::util::storage_config::load_test_config;
 use chrono::Utc;
 use softprobe_runtime::models::Log as LogData;
+use softprobe_runtime::query::LogCountFilter;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -26,6 +27,7 @@ async fn coalesce_force_flush_makes_logs_queryable() {
         resource_attributes: HashMap::new(),
         trace_id: Some("trace-coalesce-1".to_string()),
         span_id: Some("span-coalesce-1".to_string()),
+        tenant_id: None,
         agent_id: None,
         agent_name: None,
     };
@@ -41,14 +43,12 @@ async fn coalesce_force_flush_makes_logs_queryable() {
     pipeline.force_flush_logs().await.expect("force_flush");
 
     let after = test_pipeline
-        .execute_query(
-            "SELECT count(*) AS c FROM logs \
-             WHERE body = 'coalesce force_flush body' \
-               AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-               AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS",
-        )
+        .query_engine()
+        .count_logs(LogCountFilter {
+            body: Some("coalesce force_flush body".to_string()),
+            ..Default::default()
+        })
         .await
         .expect("query after flush");
-    let after_count = after.rows[0][0].as_i64().unwrap_or(0);
-    assert_eq!(after_count, 1, "force_flush must commit coalesced logs");
+    assert_eq!(after, 1, "force_flush must commit coalesced logs");
 }

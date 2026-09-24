@@ -7,6 +7,8 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+use super::config::apply_workspace_scope_mode;
+
 pub async fn start_test_server() -> (String, TempDir) {
     let mut config = Config::default();
     config.object_store.endpoint = Some("http://localhost:9000".to_string());
@@ -21,13 +23,11 @@ pub async fn start_test_server() -> (String, TempDir) {
     config.query.cache_dir = Some(cache_dir.path().to_string_lossy().to_string());
     let dl_dir = cache_dir.path().join("ducklake");
     std::fs::create_dir_all(&dl_dir).expect("ducklake dir");
-    config.ducklake.catalog_type = "sqlite".to_string();
-    config.ducklake.metadata_path = dl_dir
-        .join(format!("metadata-{}.sqlite", Uuid::new_v4()))
-        .to_string_lossy()
-        .to_string();
+    // Isolate concurrent test runs in the shared local Postgres catalog.
+    config.ducklake.metadata_schema = format!("thelake_http_{}", Uuid::new_v4().simple());
     config.ducklake.data_path = dl_dir.join("data").to_string_lossy().to_string();
     std::fs::create_dir_all(&config.ducklake.data_path).expect("ducklake data dir");
+    apply_workspace_scope_mode(&mut config);
 
     let config = Arc::new(config);
     let (app, _) = api::create_router(config, post(ingest_traces), None)

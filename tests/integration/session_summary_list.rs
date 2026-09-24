@@ -19,12 +19,13 @@ use serde_json::{json, Value};
 use softprobe_runtime::api::AppState;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::attr_keys::{gen_ai, resource, sp};
-use softprobe_runtime::session_summary::{ensure_session_summary_tables, reduce_tenant};
+use softprobe_runtime::session_summary::ensure_session_summary_tables;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use crate::util::config::apply_workspace_scope_mode;
 use crate::util::otlp::{double_kv, int_kv, string_kv};
 
 fn postgres_summary_config(temp: &TempDir, metadata_schema: String) -> Config {
@@ -34,13 +35,13 @@ fn postgres_summary_config(temp: &TempDir, metadata_schema: String) -> Config {
     config.shrink_pools_for_tests();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
 
-    config.ducklake.catalog_type = "postgres".to_string();
     config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     config.ducklake.catalog_alias = "softprobe".to_string();
     config.ducklake.metadata_schema = metadata_schema;
     config.ducklake.data_path = temp.path().join("data").to_string_lossy().into();
     config.ducklake.data_inlining_row_limit = Some(0);
+    apply_workspace_scope_mode(&mut config);
 
     config.ingest.flush_interval_seconds = 2;
     // Postgres catalog ⇒ session_summary always active.
@@ -61,6 +62,17 @@ async fn pg_reachable() -> bool {
     )
 }
 
+async fn catalog_client(state: &AppState) -> tokio_postgres::Client {
+    let metadata_path = state.engines.config().ducklake.metadata_path.clone();
+    let (client, connection) = tokio_postgres::connect(&metadata_path, tokio_postgres::NoTls)
+        .await
+        .expect("connect ducklake postgres");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client
+}
+
 async fn build_summary_router(
     metadata_schema: String,
 ) -> Option<(Router, AppState, TempDir, String)> {
@@ -77,8 +89,7 @@ async fn build_summary_router(
     .await
     .expect("router");
 
-    let registry = state.engines.scope_registry().expect("postgres registry");
-    let client = registry.pool().get().await.expect("pg client");
+    let client = catalog_client(&state).await;
     ensure_session_summary_tables(&client, &metadata_schema)
         .await
         .expect("ensure summary ddl");
@@ -123,7 +134,6 @@ async fn flush(state: &AppState) {
         .engine_for_id("")
         .await
         .expect("engine")
-        .ingest
         .force_flush_spans()
         .await
         .expect("flush");
@@ -131,28 +141,28 @@ async fn flush(state: &AppState) {
 
 /// Run the same pipeline the leased job runs (claim dirty → lake agg → UPSERT).
 async fn run_reduce(state: &AppState) -> usize {
-    let engine = state.engine_for_id("").await.expect("engine");
-    let registry = state.engines.scope_registry().expect("registry");
-    let mut dk = state.engines.config().ducklake.clone();
-    dk.metadata_schema = engine.scope.metadata_schema.clone();
-    dk.data_path = engine.scope.data_path.clone();
     let cfg = &state.engines.config().session_summary;
-    reduce_tenant(
-        registry.pool(),
-        &dk.metadata_schema,
-        "",
-        state.engines.config(),
-        &dk,
-        cfg.max_sessions_per_reduce,
-        cfg.max_reduce_span_seconds,
-    )
-    .await
-    .expect("reduce_tenant")
+    let maintenance = state
+        .engines
+        .maintenance_engine()
+        .await
+        .expect("maintenance engine");
+    let scope = maintenance
+        .resolve_scope(softprobe_runtime::workspace_scope::DEFAULT_WORKSPACE_ID)
+        .await
+        .expect("default maintenance scope");
+    maintenance
+        .reduce_session_summary(
+            &scope,
+            cfg.max_sessions_per_reduce,
+            cfg.max_reduce_span_seconds,
+        )
+        .await
+        .expect("reduce_session_summary")
 }
 
 async fn dirty_count(state: &AppState, schema: &str) -> i64 {
-    let registry = state.engines.scope_registry().expect("registry");
-    let client = registry.pool().get().await.expect("client");
+    let client = catalog_client(&state).await;
     let q = format!("\"{}\"", schema.replace('"', "\"\""));
     client
         .query_one(
@@ -1047,8 +1057,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     };
     assert_eq!(detail_before["session_id"], "sess-ok");
 
-    let registry = state.engines.scope_registry().expect("registry");
-    let client = registry.pool().get().await.expect("client");
+    let client = catalog_client(&state).await;
     let q = format!("\"{}\"", schema.replace('"', "\"\""));
     client
         .execute(&format!("TRUNCATE {q}.session_summary"), &[])
@@ -1203,8 +1212,7 @@ async fn build_summary_router_on_minio(
     .await
     .expect("router");
 
-    let registry = state.engines.scope_registry().expect("postgres registry");
-    let client = registry.pool().get().await.expect("pg client");
+    let client = catalog_client(&state).await;
     ensure_session_summary_tables(&client, &metadata_schema)
         .await
         .expect("ensure summary ddl");
@@ -1245,8 +1253,7 @@ async fn rebuild_reads_parquet_from_minio_object_store() {
         "reduce over s3:// Parquet must succeed (missing object-store config on reduce conn?)"
     );
 
-    let registry = state.engines.scope_registry().expect("registry");
-    let client = registry.pool().get().await.expect("client");
+    let client = catalog_client(&state).await;
     let q = format!("\"{}\"", schema.replace('"', "\"\""));
     client
         .execute(&format!("TRUNCATE {q}.session_summary"), &[])

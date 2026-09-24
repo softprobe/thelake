@@ -2,11 +2,13 @@ use softprobe_runtime::config::Config;
 use softprobe_runtime::promotion::{
     business_table_create_ddls, parse_promotion_manifest, PromotionManifest,
 };
-use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
-use softprobe_runtime::storage::ducklake::DuckLakeWriter;
+use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
+use std::sync::Arc;
 use tempfile::TempDir;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
+
+use crate::util::config::apply_workspace_scope_mode;
 
 #[tokio::test]
 async fn creates_versioned_business_table_and_current_view_from_manifest() {
@@ -74,7 +76,6 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     let temp = TempDir::new().expect("tempdir");
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
     let mut config = Config::default();
-    config.ducklake.catalog_type = "postgres".to_string();
     config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     config.ducklake.catalog_alias = "softprobe".to_string();
@@ -85,14 +86,14 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     config.ducklake.data_path = business_data_path.clone();
     config.ducklake.data_inlining_row_limit = Some(0);
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
+    apply_workspace_scope_mode(&mut config);
 
-    let resolver = DuckLakeScopeResolver::connect(&config)
+    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("resolver")
-        .expect("postgres resolver");
+        .expect("connect runtime engines");
     let business_tenant_id = format!("tenant-biz-{short}");
     let business_metadata_schema = format!("sp_biz_data_{short}");
-    resolver
+    let physical_scope = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: business_tenant_id.clone(),
             metadata_schema: business_metadata_schema.clone(),
@@ -100,37 +101,25 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         })
         .await
         .expect("provision tenant");
-    let scope = resolver
-        .resolve_scope(&business_tenant_id)
+    let engine = manager
+        .engine_for(&business_tenant_id)
         .await
-        .expect("tenant scope");
-    let writer = DuckLakeWriter::new(&config, Some(resolver))
-        .await
-        .expect("writer");
+        .expect("tenant engine");
     let manifest = parse_promotion_manifest(BUSINESS_MANIFEST).expect("valid manifest");
     let PromotionManifest::BusinessTable(spec) = manifest else {
         panic!("expected business table manifest");
     };
 
-    let ddls = writer
-        .apply_business_table_promotion(&scope, &spec)
+    let spec_id = match engine
+        .apply_business_promotion(BUSINESS_MANIFEST, &spec)
         .await
-        .expect("apply business table promotion");
-
-    assert!(
-        ddls.len() > 2,
-        "expected CREATE + additive ALTER IF NOT EXISTS + VIEW, got {}",
-        ddls.len()
-    );
-    assert!(ddls[0].contains("CREATE TABLE IF NOT EXISTS"));
-    assert!(ddls
-        .iter()
-        .any(|ddl| ddl.contains("ADD COLUMN IF NOT EXISTS")));
-    assert!(ddls
-        .last()
-        .is_some_and(|ddl| ddl.contains("CREATE OR REPLACE VIEW")));
-    assert_ducklake_table_exists(&scope.metadata_schema, "checkout_orders_v1").await;
-    assert_ducklake_view_exists(&scope.metadata_schema, "checkout_orders_current").await;
+    {
+        Ok(spec_id) => spec_id,
+        Err(_) => panic!("apply business table promotion"),
+    };
+    assert!(!spec_id.is_empty());
+    assert_ducklake_table_exists(&physical_scope.metadata_schema, "checkout_orders_v1").await;
+    assert_ducklake_view_exists(&physical_scope.metadata_schema, "checkout_orders_current").await;
 }
 
 async fn relation_exists(

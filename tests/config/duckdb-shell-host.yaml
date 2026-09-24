@@ -21,7 +21,6 @@ maintenance:
   enabled: false
 
 ducklake:
-  catalog_type: postgres
   metadata_path: host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake
   data_path: s3://warehouse/ducklake/data/
   catalog_alias: softprobe

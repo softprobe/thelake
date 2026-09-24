@@ -10,16 +10,20 @@ use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
 use softprobe_runtime::authn::{Resolver, TenantInfo};
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp::GrpcTraceService;
-use softprobe_runtime::ingest_engine::IngestPipeline;
 use softprobe_runtime::models::Span as ModelSpan;
-use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
+use softprobe_runtime::query::TraceCountFilter;
+use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
+use softprobe_runtime::workspace_scope::WorkspaceScopeMode;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tonic::Request;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use crate::util::config::apply_workspace_scope_mode;
 
 fn postgres_registry_config(temp: &TempDir, registry_schema: String) -> Config {
     let mut config = Config::default();
@@ -28,13 +32,14 @@ fn postgres_registry_config(temp: &TempDir, registry_schema: String) -> Config {
     config.shrink_pools_for_tests();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
 
-    config.ducklake.catalog_type = "postgres".to_string();
     config.ducklake.metadata_path =
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     config.ducklake.catalog_alias = "softprobe".to_string();
     config.ducklake.metadata_schema = registry_schema;
     config.ducklake.data_path = temp.path().join("default_data").to_string_lossy().into();
     config.ducklake.data_inlining_row_limit = Some(0);
+    config.ingest.flush_interval_seconds = 0;
+    apply_workspace_scope_mode(&mut config);
     config
 }
 
@@ -128,12 +133,11 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
     let path_a = temp.path().join("data_a").to_string_lossy().to_string();
     let path_b = temp.path().join("data_b").to_string_lossy().to_string();
 
-    let resolver = DuckLakeScopeResolver::connect(&config)
+    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("connect resolver")
-        .expect("postgres resolver");
+        .expect("connect runtime engines");
 
-    resolver
+    let scope_a = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_a.clone(),
             metadata_schema: meta_a.clone(),
@@ -141,7 +145,7 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         })
         .await
         .expect("provision A");
-    resolver
+    let scope_b = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_b.clone(),
             metadata_schema: meta_b.clone(),
@@ -150,40 +154,80 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         .await
         .expect("provision B");
 
-    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    let engine_b = manager
+        .engine_for(&tenant_b)
+        .await
+        .expect("tenant B engine");
+    let engine_a = manager
+        .engine_for(&tenant_a)
+        .await
+        .expect("tenant A engine");
     let session_id = format!("sess-iso-{suffix}");
     let trace_id = format!("trace-iso-{suffix}");
     // Provision does not create telemetry Iceberg tables; a tenant with no ingest has no `traces`
     // table yet. Materialize B's table with a decoy session so we can COUNT tenant A's session_id.
-    pipeline
-        .write_span_batches(vec![vec![isolation_span(
-            &tenant_b,
-            &format!("sess-bootstrap-{suffix}"),
-            &format!("trace-bootstrap-{suffix}"),
-        )]])
+    engine_b
+        .add_spans(
+            vec![isolation_span(
+                &tenant_b,
+                &format!("sess-bootstrap-{suffix}"),
+                &format!("trace-bootstrap-{suffix}"),
+            )],
+            0,
+        )
         .await
         .expect("bootstrap traces table for tenant B");
-    pipeline
-        .write_span_batches(vec![vec![isolation_span(
-            &tenant_a,
-            &session_id,
-            &trace_id,
-        )]])
+    engine_a
+        .add_spans(vec![isolation_span(&tenant_a, &session_id, &trace_id)], 0)
         .await
         .expect("write spans for tenant A");
 
-    let metadata_path = config.ducklake.metadata_path.clone();
+    if config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
+        assert_eq!(
+            scope_a, scope_b,
+            "shared workspaces bind one physical scope"
+        );
+        let n_b = engine_b
+            .count_traces(TraceCountFilter {
+                session_id: Some(session_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("workspace B filtered query");
+        let n_a = engine_a
+            .count_traces(TraceCountFilter {
+                session_id: Some(session_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("workspace A filtered query");
+        assert_eq!(n_b, 0, "workspace B view must hide tenant A's session");
+        assert_eq!(n_a, 1, "workspace A view must contain its session");
+    } else {
+        let metadata_path = config.ducklake.metadata_path.clone();
+        let conn = duckdb::Connection::open_in_memory().expect("duckdb");
+        let n_b = trace_count_for_session(
+            &conn,
+            &scope_b.metadata_path,
+            &scope_b.data_path,
+            &scope_b.metadata_schema,
+            &session_id,
+        );
+        assert_eq!(
+            n_b, 0,
+            "tenant B DuckLake must not contain tenant A's session"
+        );
 
-    let conn = duckdb::Connection::open_in_memory().expect("duckdb");
-    let n_b = trace_count_for_session(&conn, &metadata_path, &path_b, &meta_b, &session_id);
-    assert_eq!(
-        n_b, 0,
-        "tenant B DuckLake must not contain tenant A's session"
-    );
-
-    let conn2 = duckdb::Connection::open_in_memory().expect("duckdb");
-    let n_a = trace_count_for_session(&conn2, &metadata_path, &path_a, &meta_a, &session_id);
-    assert_eq!(n_a, 1, "tenant A scope must contain ingested span");
+        let conn2 = duckdb::Connection::open_in_memory().expect("duckdb");
+        let n_a = trace_count_for_session(
+            &conn2,
+            &metadata_path,
+            &scope_a.data_path,
+            &scope_a.metadata_schema,
+            &session_id,
+        );
+        assert_eq!(n_a, 1, "tenant A scope must contain ingested span");
+    }
 }
 
 fn otlp_export_with_session(session: &str) -> ExportTraceServiceRequest {
@@ -266,11 +310,10 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     let tenant_schema = format!("softprobe_grpc_it_data_{suffix}");
     let tenant_data_path = format!("s3://warehouse/grpc_it/{}/", suffix);
 
-    let resolver_reg = DuckLakeScopeResolver::connect(&config)
+    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("resolver")
-        .expect("postgres resolver");
-    resolver_reg
+        .expect("connect runtime engines");
+    let physical_scope = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: tenant_schema.clone(),
@@ -329,13 +372,13 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
 
     // Ingest is flush-through; no separate pipeline flush needed.
 
-    let metadata_path = config.ducklake.metadata_path.clone();
+    let metadata_path = physical_scope.metadata_path.clone();
     let conn = duckdb::Connection::open_in_memory().expect("duckdb");
     let n: i64 = trace_count_for_session(
         &conn,
         &metadata_path,
-        &tenant_data_path,
-        &tenant_schema,
+        &physical_scope.data_path,
+        &physical_scope.metadata_schema,
         &format!("grpc-sess-{suffix}"),
     );
     assert_eq!(n, 1, "gRPC export must land in tenant-scoped traces table");
@@ -343,8 +386,8 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     let n2: i64 = trace_count_for_session(
         &conn2,
         &metadata_path,
-        &tenant_data_path,
-        &tenant_schema,
+        &physical_scope.data_path,
+        &physical_scope.metadata_schema,
         &format!("http-sess-{suffix}"),
     );
     assert_eq!(

@@ -26,8 +26,7 @@ maintenance:
   interval_seconds: 3600
 
 ducklake:
-  catalog_type: sqlite
-  metadata_path: /tmp/splake-gcs-e2e/metadata.sqlite
+  metadata_path: "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake"
   # Make/test harness rewrites this to a unique gs://softprobe-datalake-ducklake/ducklake/e2e/<id>/ prefix.
   data_path: gs://softprobe-datalake-ducklake/ducklake/e2e/placeholder/
   catalog_alias: softprobe

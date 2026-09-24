@@ -10,6 +10,7 @@ use crate::util::poll::wait_for;
 use crate::util::storage_config::load_test_config;
 use chrono::Utc;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
+use softprobe_runtime::query::{LogCountFilter, TraceCountFilter};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -60,79 +61,41 @@ async fn strict_trace_union_shape_ducklake_contract() {
         .expect("add span");
     pipeline.force_flush_spans().await.expect("flush spans");
 
-    let escaped = session_id.replace('\'', "''");
-    let count_sql =
-        format!("SELECT COUNT(*)::BIGINT AS c FROM traces WHERE session_id = '{escaped}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
         || async {
-            let r = test_pipeline.execute_query(&count_sql).await?;
-            let c = r.rows[0][0].as_i64().unwrap_or(0);
+            let c = test_pipeline
+                .query_engine()
+                .count_traces(TraceCountFilter {
+                    session_id: Some(session_id.clone()),
+                    ..Default::default()
+                })
+                .await?;
             Ok(c >= 1)
         },
     )
     .await
     .expect("traces should show the flushed span");
 
-    let detail_sql = format!(
-        "SELECT \
-            http_request_method, \
-            http_request_path, \
-            http_response_status_code, \
-            strftime(timestamp, '%Y-%m-%d') AS rd \
-         FROM traces \
-         WHERE session_id = '{escaped}' \
-           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-           AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
-         LIMIT 1"
-    );
     let row = test_pipeline
-        .execute_query(&detail_sql)
+        .query_engine()
+        .find_http_span(&session_id)
         .await
         .expect("detail query");
-    assert_eq!(row.row_count, 1, "expected one row for session");
-    assert_eq!(row.rows[0][0].as_str().unwrap_or(""), "GET");
-    assert_eq!(
-        row.rows[0][1].as_str().unwrap_or(""),
-        "/api/strict-contract"
-    );
-    assert_eq!(row.rows[0][2].as_i64().unwrap_or(0), 201);
-    let rd = row.rows[0][3].as_str().unwrap_or("");
-    assert!(
-        !rd.is_empty() && rd != "NULL",
-        "day-of-timestamp must be populated for partition pruning (got {rd:?})"
-    );
+    let row = row.expect("expected one row for session");
+    assert_eq!(row.request_method.as_deref(), Some("GET"));
+    assert_eq!(row.request_path.as_deref(), Some("/api/strict-contract"));
+    assert_eq!(row.response_status_code, Some(201));
 
-    let part_sql = format!(
-        "SELECT COUNT(*)::BIGINT AS partitions FROM ( \
-            SELECT strftime(timestamp, '%Y-%m-%d') AS d FROM traces \
-            WHERE session_id = '{escaped}' \
-              AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-              AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
-            GROUP BY 1 \
-        ) s"
-    );
-    let pr = test_pipeline
-        .execute_query(&part_sql)
+    let partitions = test_pipeline
+        .query_engine()
+        .count_trace_days(&session_id)
         .await
         .expect("partition query");
     assert!(
-        pr.rows[0][0].as_i64().unwrap_or(0) >= 1,
-        "expected at least one calendar-day partition for the session"
-    );
-
-    let distinct_sql = format!(
-        "SELECT COUNT(DISTINCT session_id)::BIGINT AS d FROM traces WHERE session_id = '{escaped}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS"
-    );
-    let dr = test_pipeline
-        .execute_query(&distinct_sql)
-        .await
-        .expect("distinct session");
-    assert_eq!(
-        dr.rows[0][0].as_i64().unwrap_or(0),
-        1,
-        "session filter must resolve to exactly one session id"
+        partitions >= 1,
+        "expected at least one calendar-day partition"
     );
 }
 
@@ -188,6 +151,7 @@ async fn strict_session_correlates_traces_and_logs() {
         resource_attributes: HashMap::new(),
         trace_id: Some(trace_id.clone()),
         span_id: Some("strict-span-a".to_string()),
+        tenant_id: None,
         agent_id: None,
         agent_name: None,
     };
@@ -200,42 +164,51 @@ async fn strict_session_correlates_traces_and_logs() {
     pipeline.force_flush_spans().await.expect("flush spans");
     pipeline.force_flush_logs().await.expect("flush logs");
 
-    let esc = session_id.replace('\'', "''");
-    let span_wait = format!("SELECT COUNT(*)::BIGINT FROM traces WHERE session_id = '{esc}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
         || async {
-            let r = test_pipeline.execute_query(&span_wait).await?;
-            Ok(r.rows[0][0].as_i64().unwrap_or(0) >= 1)
+            Ok(test_pipeline
+                .query_engine()
+                .count_traces(TraceCountFilter {
+                    session_id: Some(session_id.clone()),
+                    ..Default::default()
+                })
+                .await?
+                >= 1)
         },
     )
     .await
     .expect("traces row for session");
 
-    let log_wait = format!("SELECT COUNT(*)::BIGINT FROM logs WHERE session_id = '{esc}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS");
     wait_for(
         Duration::from_secs(30),
         Duration::from_millis(200),
         || async {
-            let r = test_pipeline.execute_query(&log_wait).await?;
-            Ok(r.rows[0][0].as_i64().unwrap_or(0) >= 1)
+            Ok(test_pipeline
+                .query_engine()
+                .count_logs(LogCountFilter {
+                    session_id: Some(session_id.clone()),
+                    ..Default::default()
+                })
+                .await?
+                >= 1)
         },
     )
     .await
     .expect("logs row for session");
 
-    let trace_esc = trace_id.replace('\'', "''");
-    let correlate_sql = format!(
-        "SELECT COUNT(*)::BIGINT AS n FROM logs \
-         WHERE session_id = '{esc}' AND trace_id = '{trace_esc}' AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS"
-    );
     let cr = test_pipeline
-        .execute_query(&correlate_sql)
+        .query_engine()
+        .count_logs(LogCountFilter {
+            session_id: Some(session_id),
+            trace_id: Some(trace_id),
+            ..Default::default()
+        })
         .await
         .expect("correlate");
     assert!(
-        cr.rows[0][0].as_i64().unwrap_or(0) >= 1,
+        cr >= 1,
         "log must carry the same trace_id as the span for session-level drill-down"
     );
 }

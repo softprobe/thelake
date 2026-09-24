@@ -123,6 +123,12 @@ pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<Recor
             .collect::<Vec<_>>(),
     ));
     let metadata = build_score_metadata_array(scores, &metadata_field)?;
+    let tenant_ids: ArrayRef = Arc::new(StringArray::from(
+        scores
+            .iter()
+            .map(|score| score.tenant_id.as_deref())
+            .collect::<Vec<_>>(),
+    ));
 
     Ok(RecordBatch::try_new(
         arrow_schema,
@@ -142,6 +148,7 @@ pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<Recor
             config_ids,
             author_ids,
             metadata,
+            tenant_ids,
         ],
     )?)
 }
@@ -223,6 +230,12 @@ pub fn score_configs_to_record_batch(
     ));
     let metadata =
         build_string_metadata_array(configs.iter().map(|c| &c.metadata), &metadata_field)?;
+    let tenant_ids: ArrayRef = Arc::new(StringArray::from(
+        configs
+            .iter()
+            .map(|config| config.tenant_id.as_deref())
+            .collect::<Vec<_>>(),
+    ));
 
     Ok(RecordBatch::try_new(
         arrow_schema,
@@ -237,6 +250,7 @@ pub fn score_configs_to_record_batch(
             categories,
             author_ids,
             metadata,
+            tenant_ids,
         ],
     )?)
 }
@@ -339,6 +353,7 @@ const LOGS_BASE_FIELDS: &[&str] = &[
     "resource_attributes",
     "trace_id",
     "span_id",
+    "tenant_id",
 ];
 
 fn promoted_array_from_values(
@@ -960,6 +975,12 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
             .collect::<Vec<_>>(),
     ));
 
+    let tenant_ids: ArrayRef = Arc::new(StringArray::from(
+        logs.iter()
+            .map(|l| l.tenant_id.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+
     let day_values: Vec<_> = logs
         .iter()
         .map(|l| partition_day_from_event_time(l.timestamp))
@@ -999,6 +1020,7 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
         resource_attributes_array,
         trace_ids,
         span_ids,
+        tenant_ids,
     ];
     arrays.extend(promoted_arrays);
 
@@ -1173,6 +1195,7 @@ mod tests {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
+            tenant_id: Some("workspace-a".into()),
             agent_id: None,
             agent_name: None,
         }
@@ -1201,6 +1224,13 @@ mod tests {
 
         assert_eq!(timestamps.value(0), timestamp_ns);
         assert_eq!(observed_timestamps.value(0), observed_timestamp_ns);
+        let tenant_ids = batch
+            .column_by_name("tenant_id")
+            .expect("logs must carry tenant_id")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("tenant_id must be a string column");
+        assert_eq!(tenant_ids.value(0), "workspace-a");
     }
 
     #[test]

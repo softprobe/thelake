@@ -303,7 +303,7 @@ pub enum BusinessApplyError {
     Other(anyhow::Error),
 }
 
-/// Shared business apply lifecycle. Both PostgreSQL and SQLite execute this exact sequence.
+/// Shared business apply lifecycle for the Postgres catalog.
 pub async fn run_business_apply<
     LoadCurrent,
     LoadFuture,
@@ -371,7 +371,7 @@ pub fn business_manifest_from_row(
 ///
 /// Qualifies as `{catalog_alias}.promotion_specs` so the table lives in the attached DuckLake
 /// catalog (not the ephemeral in-memory DuckDB `main`). No `CREATE SCHEMA` — DuckLake catalogs
-/// already expose the alias as the qualification root for local SQLite.
+/// already expose the alias as the qualification root for DuckLake.
 pub fn local_promotion_specs_table_ddl(catalog_alias: &str) -> String {
     let catalog = quote_sql_ident(catalog_alias);
     // DuckLake tables do not support PRIMARY KEY / UNIQUE constraints. Uniqueness of

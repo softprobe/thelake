@@ -104,7 +104,6 @@ section is `ducklake`:
 
 ```yaml
 ducklake:
-  catalog_type: "postgres" # postgres (production) or sqlite (local)
   metadata_path: "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake"
   data_path: "./warehouse/ducklake/data/"
   catalog_alias: "softprobe"

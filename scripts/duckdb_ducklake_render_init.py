@@ -63,16 +63,12 @@ def escape_sql_literal(s: str) -> str:
 
 
 def attach_target(dl: dict[str, str]) -> str:
-    ct = dl.get("catalog_type", "duckdb")
     mp = dl.get("metadata_path", "")
     if not mp:
         sys.stderr.write("ducklake.metadata_path is empty\n")
         sys.exit(1)
-    if ct == "postgres":
-        return mp if mp.startswith("postgres:") else f"postgres:{mp}"
-    if ct == "sqlite":
-        return mp if mp.startswith("sqlite:") else f"sqlite:{mp}"
-    return mp
+    # The DuckLake catalog is always Postgres in production.
+    return mp if mp.startswith("postgres:") else f"postgres:{mp}"
 
 
 def env_first(*names: str) -> str:
@@ -143,7 +139,6 @@ def render_attach_sql(
     dl: dict[str, str],
     object_store: dict[str, str] | None,
 ) -> str:
-    ct = dl.get("catalog_type", "duckdb")
     alias = dl.get("catalog_alias", "softprobe")
     schema = dl.get("metadata_schema", "main")
     data_path = dl.get("data_path", "")
@@ -159,18 +154,16 @@ def render_attach_sql(
         "LOAD httpfs;",
         "INSTALL ducklake;",
         "LOAD ducklake;",
+        "INSTALL postgres;",
+        "LOAD postgres;",
     ]
-    if ct == "postgres":
-        parts += ["INSTALL postgres;", "LOAD postgres;"]
-    elif ct == "sqlite":
-        parts += ["INSTALL sqlite;", "LOAD sqlite;"]
 
     parts += render_object_store_sql(data_path, object_store)
 
     opts = [f"DATA_PATH '{escape_sql_literal(data_path)}'"]
     if lim not in ("", "null", "None"):
         opts.append(f"DATA_INLINING_ROW_LIMIT {lim}")
-    if ct == "postgres" and schema != "main":
+    if schema != "main":
         esc = escape_sql_literal(schema)
         opts.append(f"METADATA_SCHEMA '{esc}'")
         opts.append(f"META_SCHEMA '{esc}'")

@@ -8,18 +8,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const DUCKDB_CACHE_HTTPFS_INIT_SQL: &str = include_str!("sql/duckdb_cache_httpfs_init.sql");
 
 #[derive(Clone)]
-pub struct CacheSettings {
-    pub cache_dir: Option<PathBuf>,
+pub(crate) struct CacheSettings {
+    pub(crate) cache_dir: Option<PathBuf>,
 }
 
 impl CacheSettings {
-    pub fn new(config: &Config) -> Self {
+    pub(crate) fn new(config: &Config) -> Self {
         Self {
             cache_dir: config.query.cache_dir.as_ref().map(PathBuf::from),
         }
     }
 
-    pub fn configure(&self, conn: &Connection) -> Result<()> {
+    pub(crate) fn configure(&self, conn: &Connection) -> Result<()> {
         if let Some(cache_dir) = &self.cache_dir {
             configure_cache_httpfs(cache_dir, conn)?;
         }

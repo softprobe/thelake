@@ -175,14 +175,9 @@ pub fn spawn_runner(
     Some(handle)
 }
 
-/// Build the lease store for this process: Postgres when a scope registry exists,
-/// otherwise in-memory (sqlite / single-node).
-pub fn lease_store_for(
-    scope_registry: Option<&crate::runtime_engine::DuckLakeScopeResolver>,
+/// Build the Postgres-backed lease store for this process's scope registry.
+pub(crate) fn lease_store_for(
+    scope_registry: &crate::runtime_engine::DuckLakeScopeResolver,
 ) -> Arc<dyn LeaseStore> {
-    if let Some(reg) = scope_registry {
-        Arc::new(PostgresLeaseStore::from_resolver(reg))
-    } else {
-        Arc::new(MemoryLeaseStore::new())
-    }
+    Arc::new(PostgresLeaseStore::from_resolver(scope_registry))
 }

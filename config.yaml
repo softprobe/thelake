@@ -31,7 +31,6 @@ maintenance:
   max_merge_file_size_bytes: 8388608  # 8MB — skip already-compacted files
 
 ducklake:
-  catalog_type: "postgres"
   metadata_path: "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake"
   data_path: "./warehouse/ducklake/data/"
   catalog_alias: "softprobe"

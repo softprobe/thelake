@@ -21,6 +21,7 @@ use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::api::{create_router, AppState, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
+use softprobe_runtime::runtime_engine::ScopeProvisioningRequest;
 use softprobe_runtime::softprobe_assertion::ASSERTION_HEADER;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,15 +49,15 @@ fn string_kv(key: &str, value: &str) -> KeyValue {
     }
 }
 
-fn agent_trace_request(session_id: &str) -> ExportTraceServiceRequest {
+fn agent_trace_request(session_id: &str, start_unix_nano: u64) -> ExportTraceServiceRequest {
     let span = Span {
         trace_id: vec![0x11; 16],
         span_id: vec![0x22; 8],
         parent_span_id: vec![],
         name: "agent-run".to_string(),
         kind: span::SpanKind::Internal as i32,
-        start_time_unix_nano: 1_721_349_720_000_000_000,
-        end_time_unix_nano: 1_721_349_721_000_000_000,
+        start_time_unix_nano: start_unix_nano,
+        end_time_unix_nano: start_unix_nano + 1_000_000_000,
         attributes: vec![
             string_kv("sp.session.id", session_id),
             string_kv("sp.observation.type", "agent"),
@@ -86,7 +87,7 @@ fn agent_trace_request(session_id: &str) -> ExportTraceServiceRequest {
     }
 }
 
-fn agent_logs_request(session_id: &str) -> ExportLogsServiceRequest {
+fn agent_logs_request(session_id: &str, time_unix_nano: u64) -> ExportLogsServiceRequest {
     ExportLogsServiceRequest {
         resource_logs: vec![ResourceLogs {
             resource: Some(Resource {
@@ -99,7 +100,7 @@ fn agent_logs_request(session_id: &str) -> ExportLogsServiceRequest {
                     ..Default::default()
                 }),
                 log_records: vec![LogRecord {
-                    time_unix_nano: 1_721_349_720_000_000_000,
+                    time_unix_nano,
                     severity_number: 9,
                     severity_text: "INFO".to_string(),
                     body: Some(AnyValue {
@@ -149,6 +150,18 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
     let secret = "assert-agent-columns-secret";
     let (router, state, _temp) = assertion_router(secret).await;
     let tenant_key = "ws-assert-agent-cols";
+    // Production requires an explicit `POST /v1/tenants` admin provisioning step
+    // before a tenant can resolve a DuckLake scope; register it directly here.
+    let ducklake = state.engines.config().ducklake.clone();
+    state
+        .engines
+        .provision_scope(ScopeProvisioningRequest {
+            scope_id: tenant_key.to_string(),
+            metadata_schema: ducklake.metadata_schema,
+            data_path: ducklake.data_path,
+        })
+        .await
+        .expect("provision assertion tenant scope");
     let agent_id = "support-refund-agent";
     let agent_name = "Support Refund Agent";
     let session_id = "sess-assert-agent-1";
@@ -166,8 +179,9 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         secret,
     );
 
+    let now_unix_nano = (now * 1_000_000_000) as u64;
     let mut trace_buf = Vec::new();
-    agent_trace_request(session_id)
+    agent_trace_request(session_id, now_unix_nano)
         .encode(&mut trace_buf)
         .expect("encode traces");
     let trace_resp = router
@@ -186,7 +200,7 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
     assert_eq!(trace_resp.status(), StatusCode::OK);
 
     let mut log_buf = Vec::new();
-    agent_logs_request(session_id)
+    agent_logs_request(session_id, now_unix_nano)
         .encode(&mut log_buf)
         .expect("encode logs");
     let log_resp = router
@@ -205,64 +219,60 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
     assert_eq!(log_resp.status(), StatusCode::OK);
 
     let engine = state.engine_for_id(tenant_key).await.expect("engine");
-    engine
-        .ingest
-        .force_flush_spans()
-        .await
-        .expect("flush spans");
-    engine.ingest.force_flush_logs().await.expect("flush logs");
+    engine.force_flush_spans().await.expect("flush spans");
+    engine.force_flush_logs().await.expect("flush logs");
 
-    let traces_sql = Request::builder()
+    // sessions/search is backed exclusively by the reduced `session_summary`
+    // table; drive the same claim-dirty → reduce pipeline the leased job runs.
+    let maintenance = state
+        .engines
+        .maintenance_engine()
+        .await
+        .expect("maintenance engine");
+    let summary_scope = maintenance
+        .resolve_scope(tenant_key)
+        .await
+        .expect("maintenance scope");
+    let session_cfg = &state.engines.config().session_summary;
+    maintenance
+        .reduce_session_summary(
+            &summary_scope,
+            session_cfg.max_sessions_per_reduce,
+            session_cfg.max_reduce_span_seconds,
+        )
+        .await
+        .expect("reduce_session_summary");
+
+    let details_request = Request::builder()
         .method("POST")
-        .uri("/v1/query/sql")
+        .uri("/v1/telemetry/details")
         .header(header::CONTENT_TYPE, "application/json")
         .header(ASSERTION_HEADER, &token)
         .body(Body::from(
             json!({
-                "sql": format!(
-                    "SELECT agent_id, agent_name FROM traces \
-                     WHERE session_id = '{session_id}' \
-                       AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-                       AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
-                     LIMIT 1"
-                )
+                "version": 1,
+                "target": { "kind": "session", "id": session_id },
+                "timeRange": {
+                    "from": "1970-01-01T00:00:00Z",
+                    "to": "2100-01-01T00:00:00Z"
+                },
+                "limit": 10
             })
             .to_string(),
         ))
         .unwrap();
-    let traces_resp = router
+    let details_resp = router
         .clone()
-        .oneshot(traces_sql)
+        .oneshot(details_request)
         .await
-        .expect("sql traces");
-    assert_eq!(traces_resp.status(), StatusCode::OK);
-    let traces = response_json(traces_resp).await;
-    assert_eq!(traces["rows"][0][0], agent_id);
-    assert_eq!(traces["rows"][0][1], agent_name);
-
-    let logs_sql = Request::builder()
-        .method("POST")
-        .uri("/v1/query/sql")
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(ASSERTION_HEADER, &token)
-        .body(Body::from(
-            json!({
-                "sql": format!(
-                    "SELECT agent_id, agent_name FROM logs \
-                     WHERE session_id = '{session_id}' \
-                       AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-                       AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
-                     LIMIT 1"
-                )
-            })
-            .to_string(),
-        ))
-        .unwrap();
-    let logs_resp = router.clone().oneshot(logs_sql).await.expect("sql logs");
-    assert_eq!(logs_resp.status(), StatusCode::OK);
-    let logs = response_json(logs_resp).await;
-    assert_eq!(logs["rows"][0][0], agent_id);
-    assert_eq!(logs["rows"][0][1], agent_name);
+        .expect("telemetry details");
+    let details_status = details_resp.status();
+    let details = response_json(details_resp).await;
+    assert_eq!(details_status, StatusCode::OK, "{details}");
+    assert_eq!(details["spans"][0]["agent_id"], agent_id);
+    assert_eq!(details["spans"][0]["agent_name"], agent_name);
+    assert_eq!(details["logs"][0]["agent_id"], agent_id);
+    assert_eq!(details["logs"][0]["agent_name"], agent_name);
 
     let search = Request::builder()
         .method("POST")
@@ -271,8 +281,8 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .header(ASSERTION_HEADER, &token)
         .body(Body::from(
             json!({
-                "from": "2024-07-18T00:00:00Z",
-                "to": "2024-07-20T00:00:00Z",
+                "from": (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+                "to": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
                 "agent_name": agent_name,
                 "limit": 20
             })

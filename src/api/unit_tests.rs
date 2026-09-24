@@ -13,6 +13,7 @@ use crate::api::telemetry::{
     TelemetrySortDirection, TelemetryTimeRange,
 };
 use crate::authn::TenantInfo;
+use crate::runtime_engine::ScopeProvisioningRequest;
 use crate::test_support::local_router_and_state;
 use std::sync::Arc;
 
@@ -26,10 +27,27 @@ fn test_tenant() -> TenantInfo {
     }
 }
 
+/// Register `workspace_id` in the durable scope registry, reusing this
+/// process's default physical scope (isolated mode allows a workspace to
+/// share the configured metadata schema/data path).
+async fn provision_test_scope(state: &crate::api::AppState, workspace_id: &str) {
+    let ducklake = state.engines.config().ducklake.clone();
+    state
+        .engines
+        .provision_scope(ScopeProvisioningRequest {
+            scope_id: workspace_id.to_string(),
+            metadata_schema: ducklake.metadata_schema,
+            data_path: ducklake.data_path,
+        })
+        .await
+        .expect("provision test scope");
+}
+
 #[tokio::test]
 async fn unit_runtime_engine_manager_cache_hit_same_arc() {
     let (_router, state, _t) = local_router_and_state().await.expect("router");
     let t = test_tenant();
+    provision_test_scope(&state, &t.tenant_id).await;
     let e1 = state.engine_for_tenant(&t).await.expect("engine");
     let e2 = state.engine_for_tenant(&t).await.expect("engine");
     assert!(Arc::ptr_eq(&e1, &e2));
@@ -39,6 +57,7 @@ async fn unit_runtime_engine_manager_cache_hit_same_arc() {
 async fn unit_runtime_engine_manager_single_flight_build_once() {
     let (_router, state, _t) = local_router_and_state().await.expect("router");
     let tenant_id = "unit-test-single-flight".to_string();
+    provision_test_scope(&state, &tenant_id).await;
     let (a, b, c, d) = tokio::join!(
         state.engine_for_id(&tenant_id),
         state.engine_for_id(&tenant_id),
@@ -391,6 +410,30 @@ fn unit_telemetry_details_compiles_correlated_signal_queries() {
     assert!(compiled.logs.contains("FROM logs"));
     assert!(compiled.spans.contains("session_id = 'sess_abc'"));
     assert!(compiled.logs.contains("session_id = 'sess_abc'"));
-    assert!(compiled.spans.contains("CAST(timestamp AS TIMESTAMP_NS)"));
+    assert!(compiled
+        .spans
+        .contains("make_timestamp_ns(epoch_ns(timestamp))"));
     assert!(!compiled.spans.contains("record_date"));
+}
+
+#[test]
+fn map_missing_optional_table_returns_empty_for_known_tables() {
+    for name in ["traces", "logs", "scores", "score_configs"] {
+        let err = anyhow::anyhow!("Catalog Error: Table with name {name} does not exist!");
+        let result = super::map_missing_optional_table(err).expect("mapped to empty");
+        assert_eq!(result.row_count, 0);
+        assert!(result.columns.is_empty());
+        assert!(result.rows.is_empty());
+    }
+}
+
+#[test]
+fn map_missing_optional_table_preserves_other_errors() {
+    let err = anyhow::anyhow!("Catalog Error: Table with name spans does not exist!");
+    match super::map_missing_optional_table(err) {
+        Ok(_) => panic!("unrelated missing table must not map to empty"),
+        Err(mapped) => assert!(mapped
+            .to_string()
+            .contains("Table with name spans does not exist")),
+    }
 }

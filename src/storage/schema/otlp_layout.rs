@@ -14,7 +14,10 @@ use crate::sql::schema::{
 pub use crate::models::partition_day_from_event_time;
 
 /// Idempotent one-clock `SET PARTITIONED BY` + `SET SORTED BY`.
-pub fn ensure_otlp_table_partition_sort(conn: &Connection, qualified_table: &str) -> Result<()> {
+pub(crate) fn ensure_otlp_table_partition_sort(
+    conn: &Connection,
+    qualified_table: &str,
+) -> Result<()> {
     let table_name = qualified_table
         .rsplit('.')
         .next()

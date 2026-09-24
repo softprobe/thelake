@@ -152,15 +152,18 @@ fi
 
 echo "Running ${#TESTS[@]} isolated test process(es)..."
 failed=0
+failed_tests=()
 for t in "${TESTS[@]}"; do
   echo "🧪 ${t}"
   if ! "${TEST_BIN}" "${t}" --exact --test-threads=1 --nocapture; then
     failed=1
-    break
+    failed_tests+=("${t}")
   fi
 done
 
 if [[ "${failed}" -ne 0 ]]; then
+  echo "❌ failed tests:"
+  printf '  %s\n' "${failed_tests[@]}"
   exit 1
 fi
 echo "✅ isolated suite completed (${#TESTS[@]} tests)"

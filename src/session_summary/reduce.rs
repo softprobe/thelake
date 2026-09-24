@@ -6,7 +6,6 @@ use crate::sql::session_summary::compile_session_summary_upsert_sql;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use deadpool_postgres::Pool;
-use duckdb::Connection;
 use tracing::warn;
 
 /// One claimed dirty row (snapshot of `updated_at` for ack).
@@ -80,6 +79,7 @@ pub fn batch_reduce_window(
     Some((batch_from?, batch_to?))
 }
 
+#[allow(dead_code)]
 pub async fn claim_dirty(
     pool: &Pool,
     metadata_schema: &str,
@@ -112,6 +112,39 @@ pub async fn claim_dirty(
     Ok((claims, snapshot))
 }
 
+pub async fn claim_dirty_for_workspace(
+    pool: &Pool,
+    metadata_schema: &str,
+    workspace_id: &str,
+    limit: u64,
+) -> Result<(Vec<DirtyClaim>, DateTime<Utc>)> {
+    let client = pool.get().await.context("claim workspace dirty pool")?;
+    let schema = quote_pg_ident(metadata_schema);
+    let snapshot = Utc::now();
+    let rows = client
+        .query(
+            &format!(
+                "SELECT session_id, min_ts, max_ts, updated_at \
+                 FROM {schema}.session_summary_dirty \
+                 WHERE tenant_id = $1 ORDER BY updated_at ASC LIMIT {limit}"
+            ),
+            &[&workspace_id],
+        )
+        .await
+        .context("claim workspace dirty SELECT")?;
+    let claims = rows
+        .into_iter()
+        .map(|r| DirtyClaim {
+            session_id: r.get(0),
+            min_ts: r.get(1),
+            max_ts: r.get(2),
+            updated_at: r.get(3),
+        })
+        .collect();
+    Ok((claims, snapshot))
+}
+
+#[allow(dead_code)]
 pub async fn dirty_depth(pool: &Pool, metadata_schema: &str) -> Result<i64> {
     let client = pool.get().await.context("dirty_depth pool")?;
     let schema = quote_pg_ident(metadata_schema);
@@ -126,6 +159,26 @@ pub async fn dirty_depth(pool: &Pool, metadata_schema: &str) -> Result<i64> {
     Ok(n)
 }
 
+pub async fn dirty_depth_for_workspace(
+    pool: &Pool,
+    metadata_schema: &str,
+    workspace_id: &str,
+) -> Result<i64> {
+    let client = pool.get().await.context("workspace dirty_depth pool")?;
+    let schema = quote_pg_ident(metadata_schema);
+    Ok(client
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint FROM {schema}.session_summary_dirty WHERE tenant_id = $1"
+            ),
+            &[&workspace_id],
+        )
+        .await
+        .context("workspace dirty depth")?
+        .get(0))
+}
+
+#[allow(dead_code)]
 pub async fn load_summary_start_times(
     pool: &Pool,
     metadata_schema: &str,
@@ -160,6 +213,46 @@ pub async fn load_summary_start_times(
     Ok(out)
 }
 
+pub async fn load_summary_start_times_for_workspace(
+    pool: &Pool,
+    metadata_schema: &str,
+    workspace_id: &str,
+    session_ids: &[String],
+) -> Result<std::collections::HashMap<String, DateTime<Utc>>> {
+    let mut out = std::collections::HashMap::new();
+    if session_ids.is_empty() {
+        return Ok(out);
+    }
+    let client = pool.get().await.context("load workspace summary starts")?;
+    let schema = quote_pg_ident(metadata_schema);
+    let mut sql = format!(
+        "SELECT session_id, start_time FROM {schema}.session_summary WHERE tenant_id = $1 AND session_id IN ("
+    );
+    let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
+        vec![Box::new(workspace_id.to_string())];
+    for (i, id) in session_ids.iter().enumerate() {
+        if i > 0 {
+            sql.push(',');
+        }
+        sql.push_str(&format!("${}", i + 2));
+        params.push(Box::new(id.clone()));
+    }
+    sql.push(')');
+    let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+        .iter()
+        .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    for row in client
+        .query(&sql, &refs[..])
+        .await
+        .context("load workspace summary start_time")?
+    {
+        out.insert(row.get(0), row.get(1));
+    }
+    Ok(out)
+}
+
+#[allow(dead_code)]
 pub async fn ack_dirty(
     pool: &Pool,
     metadata_schema: &str,
@@ -196,6 +289,42 @@ pub async fn ack_dirty(
     Ok(n)
 }
 
+pub async fn ack_dirty_for_workspace(
+    pool: &Pool,
+    metadata_schema: &str,
+    workspace_id: &str,
+    session_ids: &[String],
+    snapshot: DateTime<Utc>,
+) -> Result<u64> {
+    if session_ids.is_empty() {
+        return Ok(0);
+    }
+    let client = pool.get().await.context("ack workspace dirty pool")?;
+    let schema = quote_pg_ident(metadata_schema);
+    let mut sql = format!(
+        "DELETE FROM {schema}.session_summary_dirty WHERE tenant_id = $1 AND updated_at <= $2 AND session_id IN ("
+    );
+    let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
+        vec![Box::new(workspace_id.to_string()), Box::new(snapshot)];
+    for (i, id) in session_ids.iter().enumerate() {
+        if i > 0 {
+            sql.push(',');
+        }
+        sql.push_str(&format!("${}", i + 3));
+        params.push(Box::new(id.clone()));
+    }
+    sql.push(')');
+    let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+        .iter()
+        .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    client
+        .execute(&sql, &refs[..])
+        .await
+        .context("ack workspace dirty DELETE")
+}
+
+#[allow(dead_code)]
 pub async fn upsert_summary_rows(
     pool: &Pool,
     metadata_schema: &str,
@@ -236,75 +365,48 @@ pub async fn upsert_summary_rows(
     Ok(())
 }
 
-fn attach_ducklake(conn: &Connection, ducklake: &DuckLakeConfig) -> Result<()> {
-    let attach_target = crate::storage::ducklake::ducklake_attach_target(ducklake);
-    crate::storage::ducklake::prepare_local_ducklake_paths(ducklake, &attach_target)?;
-    let opts = crate::storage::ducklake::ducklake_attach_options(ducklake);
-    let attach_sql = format!(
-        "ATTACH 'ducklake:{}' AS {} ({});",
-        crate::storage::ducklake::escape_sql_literal(&attach_target),
-        ducklake.catalog_alias,
-        opts.join(", ")
+pub async fn upsert_summary_rows_for_workspace(
+    pool: &Pool,
+    metadata_schema: &str,
+    workspace_id: &str,
+    rows: &[SummaryRow],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let client = pool.get().await.context("upsert workspace summary pool")?;
+    let schema = quote_pg_ident(metadata_schema);
+    let sql = crate::sql::session_summary::compile_session_summary_upsert_sql_for_workspace(
+        &schema,
+        rows.len(),
     );
-    conn.execute_batch(&attach_sql)
-        .with_context(|| format!("DuckLake attach failed for reduce ({})", ducklake.data_path))?;
+    let now = Utc::now();
+    let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
+    for r in rows {
+        params.push(Box::new(workspace_id.to_string()));
+        params.push(Box::new(r.session_id.clone()));
+        params.push(Box::new(r.start_time));
+        params.push(Box::new(r.end_time));
+        params.push(Box::new(r.observation_count));
+        params.push(Box::new(r.error_count));
+        params.push(Box::new(r.input_tokens));
+        params.push(Box::new(r.output_tokens));
+        params.push(Box::new(r.total_tokens));
+        params.push(Box::new(r.total_cost));
+        params.push(Box::new(r.agent_name.clone()));
+        params.push(Box::new(r.user_id.clone()));
+        params.push(Box::new(r.model_name.clone()));
+        params.push(Box::new(now));
+    }
+    let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+        .iter()
+        .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    client
+        .execute(&sql, &param_refs[..])
+        .await
+        .context("workspace session_summary UPSERT")?;
     Ok(())
-}
-
-/// Open DuckDB for reduce/rebuild: httpfs + object store + extensions, then ATTACH.
-///
-/// Must mirror compaction / query workers. ATTACH alone can read catalog-inlined
-/// rows; Parquet under `gs://` / `s3://` needs credentials on this connection.
-fn open_reduce_connection(config: &Config, ducklake: &DuckLakeConfig) -> Result<Connection> {
-    let conn = prepare_reduce_duckdb(config, ducklake)?;
-    attach_ducklake(&conn, ducklake)?;
-    Ok(conn)
-}
-
-/// httpfs + object-store secret + ducklake/catalog extensions (no ATTACH).
-///
-/// Shared with compaction via [`crate::storage::ducklake::open_object_store_ducklake_connection`]
-/// so reduce/rebuild cannot drift back to "ATTACH only" (local-disk tests still pass).
-fn prepare_reduce_duckdb(config: &Config, ducklake: &DuckLakeConfig) -> Result<Connection> {
-    crate::storage::ducklake::open_object_store_ducklake_connection(
-        config,
-        ducklake,
-        crate::storage::ducklake::COMPACTION_DUCKDB_THREADS,
-        crate::storage::ducklake::COMPACTION_DUCKDB_MEMORY,
-    )
-    .context("open duckdb for session_summary reduce")
-}
-
-fn micros_to_utc(us: i64) -> Option<DateTime<Utc>> {
-    DateTime::from_timestamp_micros(us)
-}
-
-fn map_duck_row(row: &duckdb::Row<'_>) -> duckdb::Result<SummaryRow> {
-    let start_us: i64 = row.get(1)?;
-    let end_us: Option<i64> = row.get(2)?;
-    let start_time = micros_to_utc(start_us)
-        .ok_or_else(|| duckdb::Error::InvalidParameterName(format!("start_time_us={start_us}")))?;
-    let end_time = match end_us {
-        Some(us) => Some(
-            micros_to_utc(us)
-                .ok_or_else(|| duckdb::Error::InvalidParameterName(format!("end_time_us={us}")))?,
-        ),
-        None => None,
-    };
-    Ok(SummaryRow {
-        session_id: row.get(0)?,
-        start_time,
-        end_time,
-        observation_count: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-        error_count: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
-        input_tokens: row.get(5)?,
-        output_tokens: row.get(6)?,
-        total_tokens: row.get(7)?,
-        total_cost: row.get(8)?,
-        agent_name: row.get(9)?,
-        user_id: row.get(10)?,
-        model_name: row.get(11)?,
-    })
 }
 
 /// Reject inverted or oversized rebuild windows (ops + periodic share this).
@@ -328,63 +430,47 @@ pub fn validate_rebuild_window(
     Ok(())
 }
 
-/// Run promoted-only aggregate against DuckLake `traces`.
-///
-/// - `session_ids = Some([...])` — reduce (dirty IN-list).
-/// - `session_ids = None` — rebuild (window-wide).
-pub fn aggregate_sessions_from_lake(
-    config: &Config,
-    ducklake: &DuckLakeConfig,
-    session_ids: Option<&[String]>,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-) -> Result<Vec<SummaryRow>> {
-    let from_table = crate::storage::ducklake::ducklake_qualified_table_name(ducklake, "traces");
-    let sql = match session_ids {
-        Some(ids) => crate::sql::session_summary::compile_session_summary_reduce_sql(
-            &from_table,
-            ids,
-            from,
-            to,
-        )?,
-        None => {
-            crate::sql::session_summary::compile_session_summary_rebuild_sql(&from_table, from, to)?
-        }
-    };
-    let conn = open_reduce_connection(config, ducklake)?;
-    let mut stmt = conn.prepare(&sql).context("prepare aggregate SQL")?;
-    let mapped = stmt
-        .query_map([], map_duck_row)
-        .context("query aggregate")?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("map aggregate rows")?;
-    Ok(mapped)
-}
-
 /// Window rebuild: lake aggregate (no IN-list) → absolute UPSERT. No dirty claim/ack.
-pub async fn rebuild_tenant_window(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn rebuild_tenant_window(
     pool: &Pool,
     metadata_schema: &str,
     config: &Config,
     ducklake: &DuckLakeConfig,
+    tenant_id: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     max_reduce_span_seconds: u64,
 ) -> Result<usize> {
     validate_rebuild_window(from, to, max_reduce_span_seconds).map_err(|msg| anyhow!(msg))?;
+    let workspace_scoped =
+        config.ducklake.workspace_scope_mode == crate::workspace_scope::WorkspaceScopeMode::Shared;
     let config = config.clone();
     let ducklake = ducklake.clone();
+    let tenant_id_for_lake = tenant_id.to_string();
     let rows = tokio::task::spawn_blocking(move || {
-        aggregate_sessions_from_lake(&config, &ducklake, None, from, to)
+        let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
+        crate::compaction::session_summary_access::aggregate_sessions_from_lake(
+            &config,
+            &ducklake,
+            None,
+            workspace_filter,
+            from,
+            to,
+        )
     })
     .await
     .map_err(|e| anyhow!("rebuild join: {e}"))??;
-    upsert_summary_rows(pool, metadata_schema, &rows).await?;
+    if workspace_scoped {
+        upsert_summary_rows_for_workspace(pool, metadata_schema, tenant_id, &rows).await?;
+    } else {
+        upsert_summary_rows(pool, metadata_schema, &rows).await?;
+    }
     Ok(rows.len())
 }
 
 /// Full reduce pipeline for one tenant. Empty dirty → Ok no-op.
-pub async fn reduce_tenant(
+pub(crate) async fn reduce_tenant(
     pool: &Pool,
     metadata_schema: &str,
     tenant_id: &str,
@@ -393,7 +479,13 @@ pub async fn reduce_tenant(
     max_sessions: u64,
     max_reduce_span_seconds: u64,
 ) -> Result<usize> {
-    let depth = match dirty_depth(pool, metadata_schema).await {
+    let workspace_scoped =
+        config.ducklake.workspace_scope_mode == crate::workspace_scope::WorkspaceScopeMode::Shared;
+    let depth = match if workspace_scoped {
+        dirty_depth_for_workspace(pool, metadata_schema, tenant_id).await
+    } else {
+        dirty_depth(pool, metadata_schema).await
+    } {
         Ok(n) => n,
         Err(err) => {
             warn!(
@@ -406,13 +498,21 @@ pub async fn reduce_tenant(
     };
     crate::self_monitoring::set_session_summary_dirty_depth(tenant_id, depth.max(0) as u64);
 
-    let (claims, snapshot) = claim_dirty(pool, metadata_schema, max_sessions).await?;
+    let (claims, snapshot) = if workspace_scoped {
+        claim_dirty_for_workspace(pool, metadata_schema, tenant_id, max_sessions).await?
+    } else {
+        claim_dirty(pool, metadata_schema, max_sessions).await?
+    };
     if claims.is_empty() {
         return Ok(0);
     }
 
     let ids: Vec<String> = claims.iter().map(|c| c.session_id.clone()).collect();
-    let starts = load_summary_start_times(pool, metadata_schema, &ids).await?;
+    let starts = if workspace_scoped {
+        load_summary_start_times_for_workspace(pool, metadata_schema, tenant_id, &ids).await?
+    } else {
+        load_summary_start_times(pool, metadata_schema, &ids).await?
+    };
     let span = ChronoDuration::seconds(max_reduce_span_seconds as i64);
     let now = Utc::now();
     let (from, to) = batch_reduce_window(&claims, &starts, now, span)
@@ -428,14 +528,31 @@ pub async fn reduce_tenant(
     let config = config.clone();
     let ducklake = ducklake.clone();
     let ids_for_lake = ids.clone();
+    let tenant_id_for_lake = tenant_id.to_string();
     let rows = tokio::task::spawn_blocking(move || {
-        aggregate_sessions_from_lake(&config, &ducklake, Some(&ids_for_lake), from, to)
+        let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
+        crate::compaction::session_summary_access::aggregate_sessions_from_lake(
+            &config,
+            &ducklake,
+            Some(&ids_for_lake),
+            workspace_filter,
+            from,
+            to,
+        )
     })
     .await
     .map_err(|e| anyhow!("reduce join: {e}"))??;
 
-    upsert_summary_rows(pool, metadata_schema, &rows).await?;
-    let acked = ack_dirty(pool, metadata_schema, &ids, snapshot).await?;
+    if workspace_scoped {
+        upsert_summary_rows_for_workspace(pool, metadata_schema, tenant_id, &rows).await?;
+    } else {
+        upsert_summary_rows(pool, metadata_schema, &rows).await?;
+    }
+    let acked = if workspace_scoped {
+        ack_dirty_for_workspace(pool, metadata_schema, tenant_id, &ids, snapshot).await?
+    } else {
+        ack_dirty(pool, metadata_schema, &ids, snapshot).await?
+    };
     if acked < ids.len() as u64 {
         warn!(
             tenant = %tenant_id,
@@ -521,7 +638,10 @@ mod tests {
 
         let mut config = Config::default();
         config.ducklake.data_path = "gs://softprobe-test/ducklake/".to_string();
-        let result = prepare_reduce_duckdb(&config, &config.ducklake);
+        let result = crate::compaction::session_summary_access::prepare_session_summary_duckdb(
+            &config,
+            &config.ducklake,
+        );
 
         match prev_id {
             Some(v) => std::env::set_var("GCS_HMAC_ACCESS_KEY_ID", v),

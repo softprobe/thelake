@@ -9,7 +9,7 @@ use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
-use softprobe_runtime::runtime_engine::{DuckLakeScopeResolver, ScopeProvisioningRequest};
+use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -18,6 +18,7 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use crate::util::config::apply_workspace_scope_mode;
 use crate::util::promotion_contract::{
     contract_apply_ingest_query, contract_business_compatibility, contract_shrink_safe,
     contract_update_and_idempotency, PromotionContractBackend,
@@ -53,18 +54,17 @@ async fn setup() -> PostgresBackend {
     config.maintenance.enabled = false;
     config.maintenance.metadata_enabled = false;
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
-    config.ducklake.catalog_type = "postgres".to_string();
     config.ducklake.metadata_path = POSTGRES_DSN.to_string();
     config.ducklake.catalog_alias = "softprobe".to_string();
     config.ducklake.metadata_schema = format!("sp_promo_reg_{short}");
     config.ducklake.data_path = data_path.clone();
     config.ducklake.data_inlining_row_limit = Some(0);
+    apply_workspace_scope_mode(&mut config);
 
-    let resolver = DuckLakeScopeResolver::connect(&config)
+    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("resolver")
-        .expect("postgres resolver");
-    resolver
+        .expect("connect runtime engines");
+    let physical_scope = manager
         .provision_scope(ScopeProvisioningRequest {
             scope_id: tenant_id.clone(),
             metadata_schema: metadata_schema.clone(),
@@ -99,7 +99,7 @@ async fn setup() -> PostgresBackend {
         router,
         metadata_path,
         data_path,
-        metadata_schema,
+        metadata_schema: physical_scope.metadata_schema,
         api_key: "promotion-contract-key".to_string(),
     }
 }

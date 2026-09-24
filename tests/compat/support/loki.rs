@@ -316,7 +316,6 @@ pub async fn flush_logs(state: &softprobe_runtime::api::AppState, tenant_id: &st
         .engine_for_id(tenant_id)
         .await
         .expect("tenant engine")
-        .ingest
         .force_flush_logs()
         .await
         .expect("flush logs");

@@ -390,18 +390,28 @@ async fn query_sql_empty_returns_400() {
 }
 
 #[tokio::test]
-async fn query_sql_select_literal() {
+async fn telemetry_search_select_literal() {
     let (router, _t) = build_router().await;
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/query/sql")
+        .uri("/v1/telemetry/search")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({ "sql": "SELECT 1 AS n" }).to_string()))
+        .body(Body::from(
+            json!({
+                "version": 1,
+                "scope": "traces",
+                "timeRange": {
+                    "from": "2026-05-03T10:00:00Z",
+                    "to": "2026-05-03T11:00:00Z"
+                },
+                "limit": 1
+            })
+            .to_string(),
+        ))
         .unwrap();
     let resp = router.oneshot(req).await.expect("oneshot");
     assert_eq!(resp.status(), StatusCode::OK);
     let v = response_json(resp).await;
-    assert!(v["columns"].is_array());
     assert!(v["rows"].is_array());
 }
 
@@ -442,11 +452,7 @@ async fn telemetry_search_sessions_returns_summary_rows() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let engine = state.engine_for_id("").await.expect("engine");
-    engine
-        .ingest
-        .force_flush_spans()
-        .await
-        .expect("flush spans");
+    engine.force_flush_spans().await.expect("flush spans");
 
     let body = json!({
         "version": 1,
@@ -504,7 +510,6 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
         .engine_for_id("")
         .await
         .expect("engine")
-        .ingest
         .force_flush_spans()
         .await
         .expect("flush spans");
@@ -545,7 +550,8 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    // Session detail requires session_summary (D7). Sqlite catalog → 503.
+    // Session detail requires a reduced session_summary row; none exists yet for
+    // this session (no reduce has run), so lookup is a 404, not an error.
     let session_resp = router
         .clone()
         .oneshot(
@@ -555,7 +561,7 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
         )
         .await
         .unwrap();
-    assert_eq!(session_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(session_resp.status(), StatusCode::NOT_FOUND);
 
     let telemetry = Request::builder()
         .method("POST")
@@ -612,12 +618,8 @@ async fn telemetry_session_details_returns_spans_and_logs() {
     }
 
     let engine = state.engine_for_id("").await.expect("engine");
-    engine
-        .ingest
-        .force_flush_spans()
-        .await
-        .expect("flush spans");
-    engine.ingest.force_flush_logs().await.expect("flush logs");
+    engine.force_flush_spans().await.expect("flush spans");
+    engine.force_flush_logs().await.expect("flush logs");
 
     let req = Request::builder()
         .uri(format!(
@@ -641,6 +643,7 @@ async fn telemetry_session_details_returns_spans_and_logs() {
 
 #[tokio::test]
 async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (router, state, _t) = build_router_and_state().await;
     let session_id = "sess-llm-query-e2e";
     let trace_bytes = [
@@ -664,11 +667,7 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     assert_eq!(ingest_resp.status(), StatusCode::OK);
 
     let engine = state.engine_for_id("").await.expect("engine");
-    engine
-        .ingest
-        .force_flush_spans()
-        .await
-        .expect("flush spans");
+    engine.force_flush_spans().await.expect("flush spans");
 
     let score_body = json!({
         "score_id": "score-llm-query-1",
@@ -756,7 +755,10 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
         .body(Body::empty())
         .unwrap();
     let obs_resp = router.clone().oneshot(obs_req).await.expect("observation");
-    assert_eq!(obs_resp.status(), StatusCode::OK);
+    if obs_resp.status() != StatusCode::OK {
+        let body = response_json(obs_resp).await;
+        panic!("DEBUG observation failed: {body}");
+    }
     let obs = response_json(obs_resp).await;
     assert_eq!(obs["span_id"], span_hex);
     assert_eq!(obs["attributes"]["sp.observation.type"], "generation");
@@ -782,8 +784,8 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
         .body(Body::empty())
         .unwrap();
     let session_resp = router.clone().oneshot(session_req).await.expect("session");
-    // Sqlite catalog has no session_summary registry → 503 (D7).
-    assert_eq!(session_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // No reduce has run yet → summary row missing → 404 (not a registry outage).
+    assert_eq!(session_resp.status(), StatusCode::NOT_FOUND);
 
     let missing = Request::builder()
         .uri(
@@ -867,286 +869,45 @@ async fn logs_promote_scope_name_to_logger_name_attribute() {
         .engine_for_id("")
         .await
         .expect("engine")
-        .ingest
         .force_flush_logs()
         .await
         .expect("flush logs");
 
-    // CAST keeps this green under both MAP and VARIANT attribute storage.
-    let sql = format!(
-        "SELECT body, CAST(attributes['logger_name'] AS VARCHAR) AS logger_name \
-         FROM logs WHERE session_id = '{session_id}' \
-           AND CAST(timestamp AS TIMESTAMP_NS) >= '1970-01-01'::TIMESTAMP_NS \
-           AND CAST(timestamp AS TIMESTAMP_NS) <= '2100-01-01'::TIMESTAMP_NS \
-         ORDER BY timestamp ASC"
-    );
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/query/sql")
+        .uri("/v1/telemetry/details")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({ "sql": sql }).to_string()))
+        .body(Body::from(
+            json!({
+                "version": 1,
+                "target": { "kind": "session", "id": session_id },
+                "timeRange": {
+                    "from": "2026-05-03T10:00:00Z",
+                    "to": "2026-05-03T11:00:00Z"
+                },
+                "limit": 10
+            })
+            .to_string(),
+        ))
         .unwrap();
     let resp = router.oneshot(req).await.expect("query");
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let v = response_json(resp).await;
-    let rows = v["rows"].as_array().expect("rows");
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let rows = v["logs"].as_array().expect("logs");
     assert_eq!(rows.len(), 2, "{v}");
-    assert_eq!(rows[0][0], "promoted-from-scope");
-    assert_eq!(rows[0][1], "agent.transform.success");
-    assert_eq!(rows[1][0], "explicit-attribute-wins");
-    assert_eq!(rows[1][1], "explicit.logger");
+    assert_eq!(rows[0]["body"], "promoted-from-scope");
+    assert_eq!(
+        rows[0]["attributes"]["logger_name"],
+        "agent.transform.success"
+    );
+    assert_eq!(rows[1]["body"], "explicit-attribute-wins");
+    assert_eq!(rows[1]["attributes"]["logger_name"], "explicit.logger");
 }
 
-/// Full keyset pagination of `/v1/llm/sessions/search`, asserting every session
-/// is seen exactly once.
-///
-/// The existing coverage for this endpoint asserts on generated SQL strings,
-/// which cannot catch the failure this pins: cursor literals were rendered at
-/// millisecond precision while `start_time` is a microsecond `MIN(timestamp)`,
-/// so the predicate came out below the true value and silently dropped every
-/// session sharing that millisecond. The last page returned zero rows with a
-/// null `next_cursor` and no error -- data loss that looks exactly like
-/// "reached the end". Sessions here deliberately sit at sub-millisecond
-/// offsets, including two in the same millisecond to exercise the session_id
-/// tiebreak.
-#[tokio::test]
-async fn llm_sessions_search_pages_without_dropping_rows() {
-    let (router, state, _t) = build_router_and_state().await;
+/// Session search pagination with sub-millisecond cursors is covered by
+/// `session_summary_list` (integration-e2e), which runs dirty→reduce before search.
 
-    // Microsecond offsets within a single millisecond window.
-    let offsets_us: [u64; 6] = [0, 400, 456, 1_000, 1_000, 1_500];
-    let base_ns: u64 = 1_721_349_720_000_000_000;
-    for (i, off) in offsets_us.iter().enumerate() {
-        let mut request = llm_generation_request(
-            &format!("sess-page-{i}"),
-            [0x70 + i as u8; 16],
-            [0x80 + i as u8; 8],
-        );
-        let span = &mut request.resource_spans[0].scope_spans[0].spans[0];
-        span.start_time_unix_nano = base_ns + off * 1_000;
-        span.end_time_unix_nano = span.start_time_unix_nano + 1_000_000;
-        let mut buf = Vec::new();
-        request.encode(&mut buf).expect("encode");
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/traces")
-            .header(header::CONTENT_TYPE, "application/x-protobuf")
-            .body(Body::from(buf))
-            .unwrap();
-        let resp = router.clone().oneshot(req).await.expect("ingest");
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-    state
-        .engine_for_id("")
-        .await
-        .expect("engine")
-        .ingest
-        .force_flush_spans()
-        .await
-        .expect("flush spans");
-
-    let mut seen: Vec<String> = Vec::new();
-    let mut cursor: Option<String> = None;
-    // Bounded so a cursor that fails to advance fails the test instead of
-    // looping forever.
-    for page in 0..10 {
-        let mut body = json!({
-            "from": "2024-07-18T00:00:00Z",
-            "to": "2024-07-20T00:00:00Z",
-            "order_by": "start_time",
-            "order": "desc",
-            "limit": 2
-        });
-        if let Some(c) = &cursor {
-            body["cursor"] = json!(c);
-        }
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/llm/sessions/search")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap();
-        let resp = router.clone().oneshot(req).await.expect("search");
-        assert_eq!(resp.status(), StatusCode::OK, "page {page}");
-        let v = response_json(resp).await;
-
-        for item in v["items"].as_array().expect("items") {
-            seen.push(item["session_id"].as_str().expect("session_id").to_string());
-        }
-        match v["next_cursor"].as_str() {
-            Some(next) => cursor = Some(next.to_string()),
-            None => break,
-        }
-    }
-
-    let mut unique = seen.clone();
-    unique.sort();
-    unique.dedup();
-    assert_eq!(
-        unique.len(),
-        seen.len(),
-        "pagination returned duplicates: {seen:?}"
-    );
-    assert_eq!(
-        unique.len(),
-        offsets_us.len(),
-        "pagination dropped sessions: saw {seen:?}"
-    );
-}
-
-/// Lake-path (summary disabled / sqlite) contract: every list filter is applied
-/// server-side. Summary-path filter matrix lives in
-/// `session_summary::list_filters_tests` (postgres, `make test-lease-pg`).
-#[tokio::test]
-async fn llm_sessions_search_applies_every_filter() {
-    let (router, state, _t) = build_router_and_state().await;
-
-    async fn ingest(router: &Router, mut request: ExportTraceServiceRequest, start_ns: u64) {
-        let span = &mut request.resource_spans[0].scope_spans[0].spans[0];
-        span.start_time_unix_nano = start_ns;
-        span.end_time_unix_nano = start_ns + 1_000_000_000;
-        let mut buf = Vec::new();
-        request.encode(&mut buf).expect("encode");
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/traces")
-            .header(header::CONTENT_TYPE, "application/x-protobuf")
-            .body(Body::from(buf))
-            .unwrap();
-        let resp = router.clone().oneshot(req).await.expect("ingest");
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    // sess-ok: OK generation, user-llm-1, gpt-4o, agent attr agent-a
-    let mut ok = llm_generation_request("sess-ok", [0xa1; 16], [0xb1; 8]);
-    ok.resource_spans[0].scope_spans[0].spans[0]
-        .attributes
-        .push(string_kv("sp.agent.name", "agent-a"));
-    ingest(&router, ok, 1_721_349_720_000_000_000).await;
-
-    // sess-err: ERROR status, user-err, claude, agent-b
-    let mut err = llm_generation_request("sess-err", [0xa2; 16], [0xb2; 8]);
-    {
-        let span = &mut err.resource_spans[0].scope_spans[0].spans[0];
-        span.status = Some(Status {
-            code: 2, // ERROR
-            message: "boom".into(),
-        });
-        for kv in &mut span.attributes {
-            if kv.key == "sp.user.id" {
-                *kv = string_kv("sp.user.id", "user-err");
-            }
-            if kv.key == "gen_ai.request.model" {
-                *kv = string_kv("gen_ai.request.model", "claude");
-            }
-        }
-        span.attributes.push(string_kv("sp.agent.name", "agent-b"));
-    }
-    ingest(&router, err, 1_721_349_721_000_000_000).await;
-
-    // sess-mix: OK, user-llm-1, claude, agent-a
-    let mut mix = llm_generation_request("sess-mix", [0xa3; 16], [0xb3; 8]);
-    {
-        let span = &mut mix.resource_spans[0].scope_spans[0].spans[0];
-        for kv in &mut span.attributes {
-            if kv.key == "gen_ai.request.model" {
-                *kv = string_kv("gen_ai.request.model", "claude");
-            }
-        }
-        span.attributes.push(string_kv("sp.agent.name", "agent-a"));
-    }
-    ingest(&router, mix, 1_721_349_722_000_000_000).await;
-
-    state
-        .engine_for_id("")
-        .await
-        .expect("engine")
-        .ingest
-        .force_flush_spans()
-        .await
-        .expect("flush");
-
-    async fn search(router: &Router, body: Value) -> Value {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/llm/sessions/search")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap();
-        let resp = router.clone().oneshot(req).await.expect("search");
-        assert_eq!(resp.status(), StatusCode::OK, "{body}");
-        response_json(resp).await
-    }
-
-    fn session_ids(v: &Value) -> Vec<&str> {
-        v["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|i| i["session_id"].as_str().unwrap())
-            .collect()
-    }
-
-    let window = json!({
-        "from": "2024-07-18T00:00:00Z",
-        "to": "2024-07-20T00:00:00Z",
-        "order_by": "start_time",
-        "order": "desc",
-        "limit": 50
-    });
-
-    let all = search(&router, window.clone()).await;
-    assert_eq!(session_ids(&all), vec!["sess-mix", "sess-err", "sess-ok"]);
-
-    let mut body = window.clone();
-    body["has_errors"] = json!(true);
-    assert_eq!(session_ids(&search(&router, body).await), vec!["sess-err"]);
-
-    let mut body = window.clone();
-    body["has_errors"] = json!(false);
-    let no_err_body = search(&router, body).await;
-    let no_err = session_ids(&no_err_body);
-    assert!(no_err.contains(&"sess-ok") && no_err.contains(&"sess-mix"));
-    assert!(!no_err.contains(&"sess-err"));
-
-    let mut body = window.clone();
-    body["agent_name"] = json!("agent-a");
-    assert_eq!(
-        session_ids(&search(&router, body).await),
-        vec!["sess-mix", "sess-ok"]
-    );
-
-    let mut body = window.clone();
-    body["user_id"] = json!("user-err");
-    assert_eq!(session_ids(&search(&router, body).await), vec!["sess-err"]);
-
-    let mut body = window.clone();
-    body["model_name"] = json!("claude");
-    assert_eq!(
-        session_ids(&search(&router, body).await),
-        vec!["sess-mix", "sess-err"]
-    );
-
-    let mut body = window.clone();
-    body["agent_name"] = json!("agent-a");
-    body["user_id"] = json!("user-llm-1");
-    body["model_name"] = json!("claude");
-    body["has_errors"] = json!(false);
-    assert_eq!(session_ids(&search(&router, body).await), vec!["sess-mix"]);
-}
-
-/// Guards the DuckDB floor set in Cargo.toml.
-///
-/// DuckDB 1.5.2 crashes with "INTERNAL Error: Attempted to access index 0
-/// within vector of size 0" when the ducklake reader hits an empty-array
-/// VARIANT value, and then invalidates the whole database so every later
-/// query on that connection fails until the process restarts. Production ran
-/// 1.5.2 with 84% of the `events` column equal to `[]`; on 2026-08-03 one
-/// detail request took the entire query layer down for hours.
-///
-/// Spans without events serialize to exactly that shape, so this reads one
-/// back end-to-end. It passes on 1.5.5 and fails on 1.5.2 -- which is the
-/// point: it is the executable form of the version floor.
 #[tokio::test]
 async fn spans_without_events_are_readable() {
     let (router, state, _t) = build_router_and_state().await;
@@ -1170,7 +931,6 @@ async fn spans_without_events_are_readable() {
         .engine_for_id("")
         .await
         .expect("engine")
-        .ingest
         .force_flush_spans()
         .await
         .expect("flush spans");
@@ -1242,8 +1002,6 @@ async fn spans_without_events_are_readable() {
 /// metadata) remain the primary inlined path this test walks across maintenance.
 #[tokio::test]
 async fn inlined_data_stays_readable_across_maintenance() {
-    use softprobe_runtime::compaction::executor::MaintenanceExecutor;
-
     fn parquet_count(dir: &std::path::Path) -> usize {
         let mut n = 0;
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -1303,11 +1061,11 @@ async fn inlined_data_stays_readable_across_maintenance() {
         .engine_for_id("")
         .await
         .expect("engine")
-        .ingest
         .force_flush_spans()
         .await
         .expect("flush spans");
-    let _traces_parquet = parquet_count(&data_dir.join("main").join("traces"));
+    let schema_dir = data_dir.join(&config.ducklake.metadata_schema);
+    let _traces_parquet = parquet_count(&schema_dir.join("traces"));
     // MAP + limit=10_000 may inline (0 parquet) or write Parquet; both are OK.
 
     // 2. One score -> the scores table has MAP metadata and should inline under
@@ -1336,10 +1094,11 @@ async fn inlined_data_stays_readable_across_maintenance() {
     // Parquet" alone would also pass if the layout assumption
     // (<data_path>/<metadata_schema>/<table>/) ever broke. Anchor on the
     // traces directory existing to tell the two apart.
-    let scores_dir = data_dir.join("main").join("scores");
+    let scores_dir = schema_dir.join("scores");
     assert!(
-        data_dir.join("main").join("traces").is_dir(),
-        "expected <data_path>/main/<table>/ layout; found: {:?}",
+        schema_dir.join("traces").is_dir(),
+        "expected <data_path>/{}/<table>/ layout; found: {:?}",
+        config.ducklake.metadata_schema,
         std::fs::read_dir(&data_dir).map(|e| e.flatten().map(|x| x.path()).collect::<Vec<_>>())
     );
     assert_eq!(
@@ -1365,10 +1124,13 @@ async fn inlined_data_stays_readable_across_maintenance() {
 
     // 4. A maintenance pass over the same catalog (production runs this
     //    hourly; the outage query came 23 minutes after one).
-    //    run_once_ducklake funnels every failure into warn! + Skipped, so
-    //    `.expect()` can never fire -- assert on the summary instead, or a
-    //    pass that did nothing at all would look like success.
-    let maintenance = MaintenanceExecutor::new(config.as_ref(), None)
+    //    Compaction hard failures surface as ActionStatus::Failed in the
+    //    summary (run_once still returns Ok); the leased MaintenanceJob
+    //    treats Failed/Unsupported as job Err. Assert summary fields so a
+    //    no-op pass cannot look like success.
+    let maintenance = state
+        .engines
+        .maintenance_engine()
         .await
         .expect("maintenance executor");
     let summary = maintenance.run_once().await.expect("maintenance run");
@@ -1455,8 +1217,12 @@ async fn inlined_data_stays_readable_across_maintenance() {
     );
 }
 
+/// Session recording lookup requires a reduced `session_summary` row; the
+/// registry itself is always present (mandatory Postgres catalog), so a
+/// missing/unreduced session is a plain 404, never a registry-availability
+/// error.
 #[tokio::test]
-async fn session_recording_requires_session_summary_registry() {
+async fn session_recording_requires_session_summary_row() {
     let (router, state, _t) = build_router_and_state().await;
     let session_id = "sess-web-recording-1";
     let trace_a: [u8; 16] = [0x11; 16];
@@ -1491,26 +1257,23 @@ async fn session_recording_requires_session_summary_registry() {
     }
 
     let engine = state.engine_for_id("").await.expect("engine");
-    engine
-        .ingest
-        .force_flush_spans()
-        .await
-        .expect("flush spans");
+    engine.force_flush_spans().await.expect("flush spans");
 
     let empty = Request::builder()
         .uri("/v1/llm/sessions/sess-no-recording/recording")
         .body(Body::empty())
         .unwrap();
     let empty_resp = router.clone().oneshot(empty).await.expect("empty");
-    // No session_summary registry on sqlite → 503 (D7).
-    assert_eq!(empty_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(empty_resp.status(), StatusCode::NOT_FOUND);
 
+    // Even the session with real ingested spans has no session_summary row
+    // yet (no reduce has run), so it is also a 404, not a server error.
     let req = Request::builder()
         .uri(format!("/v1/llm/sessions/{session_id}/recording"))
         .body(Body::empty())
         .unwrap();
     let resp = router.oneshot(req).await.expect("recording");
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

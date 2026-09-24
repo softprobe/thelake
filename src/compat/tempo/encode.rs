@@ -1,4 +1,6 @@
-use crate::compat::backends::traces::{TraceAttribute, TraceData, TraceSearchHit, TraceSpan};
+use crate::compat::backends::traces::{
+    visible_span_attributes, TraceAttribute, TraceData, TraceSearchHit, TraceSpan,
+};
 use crate::compat::errors::CompatError;
 use crate::compat::errors::CompatErrorCode;
 use axum::response::{IntoResponse, Response};
@@ -174,7 +176,7 @@ fn span(span: &crate::compat::backends::traces::TraceSpan) -> Result<Value, Comp
     if let Some(end) = span.end_time_unix_nano {
         value.insert("endTimeUnixNano".into(), Value::String(end.to_string()));
     }
-    value.insert("attributes".into(), attributes(&span.attributes));
+    value.insert("attributes".into(), attributes(&wire_span_attributes(span)));
     if !span.events.is_empty() {
         value.insert(
             "events".into(),
@@ -211,6 +213,10 @@ fn span(span: &crate::compat::backends::traces::TraceSpan) -> Result<Value, Comp
         value.insert("status".into(), Value::Object(status));
     }
     Ok(Value::Object(value))
+}
+
+fn wire_span_attributes(span: &crate::compat::backends::traces::TraceSpan) -> Vec<TraceAttribute> {
+    visible_span_attributes(span)
 }
 
 fn wire_id(value: &str, expected_len: usize, field: &str) -> Result<String, CompatError> {
@@ -303,10 +309,16 @@ mod tests {
                 kind: Some("SPAN_KIND_SERVER".into()),
                 start_time_unix_nano: 1_700_000_000_123_456_789,
                 end_time_unix_nano: Some(1_700_000_000_223_456_789),
-                attributes: vec![TraceAttribute {
-                    key: "k".into(),
-                    value: "v".into(),
-                }],
+                attributes: vec![
+                    TraceAttribute {
+                        key: "k".into(),
+                        value: "v".into(),
+                    },
+                    TraceAttribute {
+                        key: "service_name".into(),
+                        value: "api".into(),
+                    },
+                ],
                 status_code: Some("STATUS_CODE_ERROR".into()),
                 status_message: Some("boom".into()),
                 events: vec![TraceEvent {
@@ -341,6 +353,13 @@ mod tests {
         assert_eq!(
             json["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["status"]["message"],
             "boom"
+        );
+        assert!(
+            !json["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|attribute| attribute["key"] == "service_name")
         );
         assert_eq!(
             json["trace"]["resourceSpans"][0]["resource"]["attributes"][1]["key"],

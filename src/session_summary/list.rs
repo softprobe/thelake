@@ -1,11 +1,10 @@
 //! Stage 3: list sessions from catalog Postgres `session_summary`.
 
 use crate::api::llm::query::{
-    SessionOrderBy, SessionSearchRequest, SessionSearchResponse, SessionSummary, SortDirection,
+    next_cursor_from_sessions, SessionOrderBy, SessionSearchRequest, SessionSearchResponse,
+    SessionSummary, SortDirection,
 };
-use crate::api::sql_support::encode_cursor;
 use crate::runtime_engine::quote_pg_ident;
-use crate::sql::session_summary::compile_session_summary_list_sql;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
@@ -33,9 +32,24 @@ pub async fn search_session_summary(
     request: &SessionSearchRequest,
     limit: usize,
 ) -> Result<SessionSearchResponse, SessionSummaryListError> {
+    search_session_summary_for_workspace(pool, metadata_schema, None, request, limit).await
+}
+
+pub async fn search_session_summary_for_workspace(
+    pool: &Pool,
+    metadata_schema: &str,
+    workspace_id: Option<&str>,
+    request: &SessionSearchRequest,
+    limit: usize,
+) -> Result<SessionSearchResponse, SessionSummaryListError> {
     let schema = quote_pg_ident(metadata_schema);
-    let sql = compile_session_summary_list_sql(&schema, request, limit)
-        .map_err(SessionSummaryListError::BadRequest)?;
+    let sql = crate::sql::session_summary::compile_session_summary_list_sql_for_workspace(
+        &schema,
+        workspace_id,
+        request,
+        limit,
+    )
+    .map_err(SessionSummaryListError::BadRequest)?;
     let client = pool
         .get()
         .await
@@ -79,9 +93,21 @@ pub async fn lookup_session_summary_window(
     metadata_schema: &str,
     session_id: &str,
 ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, SessionSummaryListError> {
+    lookup_session_summary_window_for_workspace(pool, metadata_schema, None, session_id).await
+}
+
+pub async fn lookup_session_summary_window_for_workspace(
+    pool: &Pool,
+    metadata_schema: &str,
+    workspace_id: Option<&str>,
+    session_id: &str,
+) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, SessionSummaryListError> {
     let schema = quote_pg_ident(metadata_schema);
+    let ownership = workspace_id
+        .map(|id| format!("tenant_id = {} AND ", crate::sql::sql_string_literal(id)))
+        .unwrap_or_default();
     let sql = format!(
-        "SELECT start_time, end_time FROM {schema}.session_summary WHERE session_id = $1 LIMIT 1"
+        "SELECT start_time, end_time FROM {schema}.session_summary WHERE {ownership}session_id = $1 LIMIT 1"
     );
     let client = pool
         .get()
@@ -123,14 +149,4 @@ fn map_pg_summary_row(row: &tokio_postgres::Row) -> Result<SessionSummary, tokio
         user_ids,
         models,
     })
-}
-
-fn next_cursor_from_sessions(items: &mut Vec<SessionSummary>, limit: usize) -> Option<String> {
-    if items.len() <= limit {
-        return None;
-    }
-    items.truncate(limit);
-    items
-        .last()
-        .map(|item| encode_cursor(item.start_time, &item.session_id))
 }

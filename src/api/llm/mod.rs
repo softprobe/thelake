@@ -49,6 +49,7 @@ impl From<CreateScoreRequest> for Score {
             config_id: request.config_id,
             author_id: request.author_id,
             metadata: request.metadata,
+            tenant_id: None,
         }
     }
 }
@@ -82,6 +83,7 @@ impl From<CreateScoreConfigRequest> for ScoreConfig {
             categories: request.categories,
             author_id: request.author_id,
             metadata: request.metadata,
+            tenant_id: None,
         }
     }
 }
@@ -120,18 +122,13 @@ pub async fn create_score(
     })?;
 
     if let Some(config_id) = score.config_id.as_deref() {
-        let config = engine
-            .storage
-            .writer
-            .get_score_config(config_id)
-            .await
-            .map_err(|error| {
-                warn!("score config lookup failed: {}", error);
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({ "error": "score config lookup failed" })),
-                )
-            })?;
+        let config = engine.get_score_config(config_id).await.map_err(|error| {
+            warn!("score config lookup failed: {}", error);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "score config lookup failed" })),
+            )
+        })?;
         let Some(config) = config else {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -147,8 +144,6 @@ pub async fn create_score(
     }
 
     if engine
-        .storage
-        .writer
         .score_exists(&score.score_id)
         .await
         .map_err(|error| {
@@ -163,9 +158,7 @@ pub async fn create_score(
     }
 
     engine
-        .storage
-        .writer
-        .write_score_batches(vec![vec![score.clone()]])
+        .add_scores(vec![score.clone()])
         .await
         .map_err(|error| {
             warn!("score write failed: {}", error);
@@ -208,8 +201,6 @@ pub async fn create_score_config(
     })?;
 
     if engine
-        .storage
-        .writer
         .score_config_exists(&config.config_id)
         .await
         .map_err(|error| {
@@ -221,8 +212,6 @@ pub async fn create_score_config(
         })?
     {
         let stored = engine
-            .storage
-            .writer
             .get_score_config(&config.config_id)
             .await
             .map_err(|error| {
@@ -237,9 +226,7 @@ pub async fn create_score_config(
     }
 
     engine
-        .storage
-        .writer
-        .write_score_config_batches(vec![vec![config.clone()]])
+        .add_score_configs(vec![config.clone()])
         .await
         .map_err(|error| {
             warn!("score config write failed: {}", error);
@@ -275,50 +262,33 @@ pub async fn list_score_configs(
     // Score-config reads use the writer DuckLake pool (same connection family as
     // writes). Query-engine SQL mapping for MAP/date columns was unreliable for
     // this table; keep one read path to avoid empty-list re-seed loops.
-    let mut items = engine
-        .storage
-        .writer
-        .list_score_configs()
-        .await
-        .map_err(|error| {
-            warn!("score config list failed: {}", error);
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "score config list failed" })),
-            )
-        })?;
+    let mut items = engine.list_score_configs().await.map_err(|error| {
+        warn!("score config list failed: {}", error);
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "score config list failed" })),
+        )
+    })?;
     if items.is_empty() {
         for seed in ScoreConfig::seed_defaults(Utc::now()) {
             if engine
-                .storage
-                .writer
                 .score_config_exists(&seed.config_id)
                 .await
                 .unwrap_or(false)
             {
                 continue;
             }
-            if let Err(error) = engine
-                .storage
-                .writer
-                .write_score_config_batches(vec![vec![seed]])
-                .await
-            {
+            if let Err(error) = engine.add_score_configs(vec![seed]).await {
                 warn!("score config seed write skipped: {}", error);
             }
         }
-        items = engine
-            .storage
-            .writer
-            .list_score_configs()
-            .await
-            .map_err(|error| {
-                warn!("score config list after seed failed: {}", error);
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({ "error": "score config list failed" })),
-                )
-            })?;
+        items = engine.list_score_configs().await.map_err(|error| {
+            warn!("score config list after seed failed: {}", error);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "score config list failed" })),
+            )
+        })?;
     }
     Ok(Json(ScoreConfigListResponse { items }))
 }

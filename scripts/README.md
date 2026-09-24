@@ -1,14 +1,17 @@
 # thelake/scripts — Make-owned helpers only
 
-Do not add parallel entrypoints. Product compile, gates, and stress are Makefile
-targets; these scripts are thin helpers invoked by Make.
+Product compile, gates, and stress remain Makefile targets; these scripts are
+thin helpers invoked by Make. The E2E matrix helper is the single deliberate
+parallel runner, and it always runs the same complete integration selector in
+both workspace-scope modes.
 
 ## Surviving scripts → Make owner
 
 | Script | Make target |
 |--------|-------------|
 | `assert-duckdb-version.sh` | `build-release` (stages `dist/`) |
-| `run-isolated-cargo-tests.sh` | `test-e2e`, `test-perf` |
+| `run-e2e-matrix.sh` | `test-e2e` |
+| `run-isolated-cargo-tests.sh` | `test-e2e-matrix.sh`, `test-perf` |
 | `stress-test.sh` | `stress BACKEND=local\|r2\|gcs` |
 | `interactive_query.sh` + `duckdb_ducklake_*` | `duckdb-shell` |
 | `interactive_query_ducklake_production.sh` | `duckdb-shell-prod` |

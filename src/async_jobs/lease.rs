@@ -1,4 +1,4 @@
-//! Cross-replica job leases. One trait; Postgres (multi-replica) or memory (sqlite/tests).
+//! Cross-replica job leases. One trait; Postgres in production or memory in tests.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -44,7 +44,7 @@ struct MemoryEntry {
     lease_until: Instant,
 }
 
-/// In-process lease map — sqlite / single-node / unit tests.
+/// In-process lease map — single-node / unit tests.
 #[derive(Default)]
 pub struct MemoryLeaseStore {
     inner: Mutex<HashMap<(String, String), MemoryEntry>>,
@@ -153,8 +153,13 @@ impl PostgresLeaseStore {
         Self { pool, table }
     }
 
-    pub fn from_resolver(resolver: &crate::runtime_engine::DuckLakeScopeResolver) -> Self {
+    pub(crate) fn from_resolver(resolver: &crate::runtime_engine::DuckLakeScopeResolver) -> Self {
         Self::new(resolver.pool().clone(), resolver.registry_schema())
+    }
+
+    /// Lease store backed by the process catalog registry.
+    pub fn from_engines(engines: &crate::runtime_engine::RuntimeEngineManager) -> Self {
+        Self::from_resolver(engines.scope_registry())
     }
 }
 

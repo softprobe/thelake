@@ -18,6 +18,7 @@ fn score_config_from_sql_row(row: &duckdb::Row<'_>) -> Result<Option<ScoreConfig
     let categories_raw: Option<String> = row.get(7)?;
     let author_id: Option<String> = row.get(8)?;
     let metadata_raw: Option<String> = row.get(9)?;
+    let tenant_id: Option<String> = row.get(10)?;
     let data_type = match data_type_raw.as_str() {
         "numeric" => crate::models::ScoreDataType::Numeric,
         "categorical" => crate::models::ScoreDataType::Categorical,
@@ -50,15 +51,47 @@ fn score_config_from_sql_row(row: &duckdb::Row<'_>) -> Result<Option<ScoreConfig
         categories,
         author_id,
         metadata,
+        tenant_id,
     }))
 }
 
 impl DuckLakeWriter {
-    pub async fn write_score_batches(&self, batches: Vec<Vec<Score>>) -> Result<()> {
+    fn validate_shared_score_ownership(&self, scores: &[Score]) -> Result<()> {
+        let Some(workspace_id) = self.shared_workspace_id()? else {
+            return Ok(());
+        };
+        if scores
+            .iter()
+            .any(|score| score.tenant_id.as_deref() != Some(workspace_id))
+        {
+            return Err(anyhow!(
+                "shared score writes require tenant_id to match the authenticated workspace"
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_shared_score_config_ownership(&self, configs: &[ScoreConfig]) -> Result<()> {
+        let Some(workspace_id) = self.shared_workspace_id()? else {
+            return Ok(());
+        };
+        if configs
+            .iter()
+            .any(|config| config.tenant_id.as_deref() != Some(workspace_id))
+        {
+            return Err(anyhow!(
+                "shared score config writes require tenant_id to match the authenticated workspace"
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn write_score_batches(&self, batches: Vec<Vec<Score>>) -> Result<()> {
         let scores: Vec<Score> = batches.into_iter().flatten().collect();
         if scores.is_empty() {
             return Ok(());
         }
+        self.validate_shared_score_ownership(&scores)?;
         for score in &scores {
             score
                 .validate()
@@ -67,39 +100,29 @@ impl DuckLakeWriter {
 
         let schema = ScoreTable::schema();
         let record_batch = arrow::scores_to_record_batch(&scores, &schema)?;
-        if self.use_tenant_scoped_ducklake() {
-            let scope = self
-                .tenant_bound_scope()
-                .ok_or_else(|| anyhow!("score writes require a tenant-bound DuckLake writer"))?;
-            let dk = self.effective_ducklake(&scope);
-            return self
-                .write_record_batches_internal_with_ducklake(
-                    &dk,
-                    ScoreTable::table_name(),
-                    vec![record_batch],
-                )
-                .await;
-        }
-
-        self.write_record_batches_internal(ScoreTable::table_name(), vec![record_batch])
-            .await
+        let dk = self.ducklake.clone();
+        self.write_record_batches_internal_with_ducklake(
+            &dk,
+            ScoreTable::table_name(),
+            vec![record_batch],
+        )
+        .await
     }
 
     pub async fn score_exists(&self, score_id: &str) -> Result<bool> {
-        let dk = if self.use_tenant_scoped_ducklake() {
-            let scope = self
-                .tenant_bound_scope()
-                .ok_or_else(|| anyhow!("score lookup requires a tenant-bound DuckLake writer"))?;
-            self.effective_ducklake(&scope)
-        } else {
-            self.ducklake.clone()
-        };
+        let dk = self.ducklake.clone();
         let table = ducklake_qualified_table_name(&dk, ScoreTable::table_name());
         let pool = self.get_or_create_pool(&dk)?;
         let score_id = score_id.to_string();
+        let workspace_id = self.shared_workspace_id()?.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                let sql = crate::sql::writer::score_exists_sql(&table);
+                let sql = workspace_id.as_deref().map_or_else(
+                    || crate::sql::writer::score_exists_sql(&table),
+                    |workspace_id| {
+                        crate::sql::writer::score_exists_sql_for_workspace(&table, workspace_id)
+                    },
+                );
                 crate::sql::ensure_fact_scan_bound(&sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
                 match conn.query_row(&sql, [&score_id], |row| row.get::<_, bool>(0)) {
                     Ok(exists) => Ok(exists),
@@ -112,11 +135,15 @@ impl DuckLakeWriter {
         .map_err(|error| anyhow!("DuckLake score lookup task failed: {error}"))?
     }
 
-    pub async fn write_score_config_batches(&self, batches: Vec<Vec<ScoreConfig>>) -> Result<()> {
+    pub(crate) async fn write_score_config_batches(
+        &self,
+        batches: Vec<Vec<ScoreConfig>>,
+    ) -> Result<()> {
         let configs: Vec<ScoreConfig> = batches.into_iter().flatten().collect();
         if configs.is_empty() {
             return Ok(());
         }
+        self.validate_shared_score_config_ownership(&configs)?;
         for config in &configs {
             config
                 .validate()
@@ -125,39 +152,32 @@ impl DuckLakeWriter {
 
         let schema = ScoreConfigTable::schema();
         let record_batch = arrow::score_configs_to_record_batch(&configs, &schema)?;
-        if self.use_tenant_scoped_ducklake() {
-            let scope = self.tenant_bound_scope().ok_or_else(|| {
-                anyhow!("score config writes require a tenant-bound DuckLake writer")
-            })?;
-            let dk = self.effective_ducklake(&scope);
-            return self
-                .write_record_batches_internal_with_ducklake(
-                    &dk,
-                    ScoreConfigTable::table_name(),
-                    vec![record_batch],
-                )
-                .await;
-        }
-
-        self.write_record_batches_internal(ScoreConfigTable::table_name(), vec![record_batch])
-            .await
+        let dk = self.ducklake.clone();
+        self.write_record_batches_internal_with_ducklake(
+            &dk,
+            ScoreConfigTable::table_name(),
+            vec![record_batch],
+        )
+        .await
     }
 
     pub async fn score_config_exists(&self, config_id: &str) -> Result<bool> {
-        let dk = if self.use_tenant_scoped_ducklake() {
-            let scope = self.tenant_bound_scope().ok_or_else(|| {
-                anyhow!("score config lookup requires a tenant-bound DuckLake writer")
-            })?;
-            self.effective_ducklake(&scope)
-        } else {
-            self.ducklake.clone()
-        };
+        let dk = self.ducklake.clone();
         let table = ducklake_qualified_table_name(&dk, ScoreConfigTable::table_name());
         let pool = self.get_or_create_pool(&dk)?;
         let config_id = config_id.to_string();
+        let workspace_id = self.shared_workspace_id()?.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                let sql = crate::sql::writer::score_config_exists_sql(&table);
+                let sql = workspace_id.as_deref().map_or_else(
+                    || crate::sql::writer::score_config_exists_sql(&table),
+                    |workspace_id| {
+                        crate::sql::writer::score_config_exists_sql_for_workspace(
+                            &table,
+                            workspace_id,
+                        )
+                    },
+                );
                 match conn.query_row(&sql, [&config_id], |row| row.get::<_, bool>(0)) {
                     Ok(exists) => Ok(exists),
                     Err(error) if error.to_string().contains("does not exist") => Ok(false),
@@ -170,19 +190,21 @@ impl DuckLakeWriter {
     }
 
     pub async fn list_score_configs(&self) -> Result<Vec<ScoreConfig>> {
-        let dk = if self.use_tenant_scoped_ducklake() {
-            let scope = self.tenant_bound_scope().ok_or_else(|| {
-                anyhow!("score config list requires a tenant-bound DuckLake writer")
-            })?;
-            self.effective_ducklake(&scope)
-        } else {
-            self.ducklake.clone()
-        };
+        let dk = self.ducklake.clone();
         let table = ducklake_qualified_table_name(&dk, ScoreConfigTable::table_name());
         let pool = self.get_or_create_pool(&dk)?;
+        let workspace_id = self.shared_workspace_id()?.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                let sql = crate::sql::writer::score_config_select_sql(&table);
+                let sql = workspace_id.as_deref().map_or_else(
+                    || crate::sql::writer::score_config_select_sql(&table),
+                    |workspace_id| {
+                        crate::sql::writer::score_config_select_sql_for_workspace(
+                            &table,
+                            workspace_id,
+                        )
+                    },
+                );
                 let mut stmt = match conn.prepare(&sql) {
                     Ok(stmt) => stmt,
                     Err(error) if error.to_string().contains("does not exist") => {
@@ -205,20 +227,22 @@ impl DuckLakeWriter {
     }
 
     pub async fn get_score_config(&self, config_id: &str) -> Result<Option<ScoreConfig>> {
-        let dk = if self.use_tenant_scoped_ducklake() {
-            let scope = self.tenant_bound_scope().ok_or_else(|| {
-                anyhow!("score config lookup requires a tenant-bound DuckLake writer")
-            })?;
-            self.effective_ducklake(&scope)
-        } else {
-            self.ducklake.clone()
-        };
+        let dk = self.ducklake.clone();
         let table = ducklake_qualified_table_name(&dk, ScoreConfigTable::table_name());
         let pool = self.get_or_create_pool(&dk)?;
         let config_id = config_id.to_string();
+        let workspace_id = self.shared_workspace_id()?.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
-                let sql = crate::sql::writer::score_config_by_id_sql(&table);
+                let sql = workspace_id.as_deref().map_or_else(
+                    || crate::sql::writer::score_config_by_id_sql(&table),
+                    |workspace_id| {
+                        crate::sql::writer::score_config_by_id_sql_for_workspace(
+                            &table,
+                            workspace_id,
+                        )
+                    },
+                );
                 let mut stmt = match conn.prepare(&sql) {
                     Ok(stmt) => stmt,
                     Err(error) if error.to_string().contains("does not exist") => return Ok(None),

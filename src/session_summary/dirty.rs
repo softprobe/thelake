@@ -58,6 +58,7 @@ pub struct SessionSummaryDirty {
     pool: Pool,
     metadata_schema: String,
     tenant_id: String,
+    workspace_scoped: bool,
 }
 
 impl SessionSummaryDirty {
@@ -70,6 +71,20 @@ impl SessionSummaryDirty {
             pool,
             metadata_schema: metadata_schema.into(),
             tenant_id: tenant_id.into(),
+            workspace_scoped: false,
+        }
+    }
+
+    pub fn new_for_workspace(
+        pool: Pool,
+        metadata_schema: impl Into<String>,
+        workspace_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            pool,
+            metadata_schema: metadata_schema.into(),
+            tenant_id: workspace_id.into(),
+            workspace_scoped: true,
         }
     }
 
@@ -111,34 +126,59 @@ impl SessionSummaryDirty {
             .await
             .map_err(|e| anyhow!("session_summary dirty pool get: {e}"))?;
         let schema = quote_pg_ident(&self.metadata_schema);
-        let mut sql = format!(
-            "INSERT INTO {schema}.session_summary_dirty (session_id, min_ts, max_ts, updated_at) VALUES "
-        );
+        let columns = if self.workspace_scoped {
+            "tenant_id, session_id, min_ts, max_ts, updated_at"
+        } else {
+            "session_id, min_ts, max_ts, updated_at"
+        };
+        let arity = if self.workspace_scoped { 5 } else { 4 };
+        let mut sql = format!("INSERT INTO {schema}.session_summary_dirty ({columns}) VALUES ");
         let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
         let now = Utc::now();
         for (i, h) in hints.iter().enumerate() {
             if i > 0 {
                 sql.push(',');
             }
-            let base = i * 4;
-            sql.push_str(&format!(
-                "(${}, ${}, ${}, ${})",
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4
-            ));
+            let base = i * arity;
+            if self.workspace_scoped {
+                sql.push_str(&format!(
+                    "(${}, ${}, ${}, ${}, ${})",
+                    base + 1,
+                    base + 2,
+                    base + 3,
+                    base + 4,
+                    base + 5
+                ));
+                params.push(Box::new(self.tenant_id.clone()));
+            } else {
+                sql.push_str(&format!(
+                    "(${}, ${}, ${}, ${})",
+                    base + 1,
+                    base + 2,
+                    base + 3,
+                    base + 4
+                ));
+            }
             params.push(Box::new(h.session_id.clone()));
             params.push(Box::new(h.min_ts));
             params.push(Box::new(h.max_ts));
             params.push(Box::new(now));
         }
-        sql.push_str(
-            " ON CONFLICT (session_id) DO UPDATE SET \
-             min_ts = LEAST(session_summary_dirty.min_ts, EXCLUDED.min_ts), \
-             max_ts = GREATEST(session_summary_dirty.max_ts, EXCLUDED.max_ts), \
-             updated_at = EXCLUDED.updated_at",
-        );
+        if self.workspace_scoped {
+            sql.push_str(
+                " ON CONFLICT (tenant_id, session_id) DO UPDATE SET \
+                 min_ts = LEAST(session_summary_dirty.min_ts, EXCLUDED.min_ts), \
+                 max_ts = GREATEST(session_summary_dirty.max_ts, EXCLUDED.max_ts), \
+                 updated_at = EXCLUDED.updated_at",
+            );
+        } else {
+            sql.push_str(
+                " ON CONFLICT (session_id) DO UPDATE SET \
+                 min_ts = LEAST(session_summary_dirty.min_ts, EXCLUDED.min_ts), \
+                 max_ts = GREATEST(session_summary_dirty.max_ts, EXCLUDED.max_ts), \
+                 updated_at = EXCLUDED.updated_at",
+            );
+        }
         let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
             .iter()
             .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))

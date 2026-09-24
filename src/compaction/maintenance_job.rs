@@ -1,9 +1,11 @@
-//! Maintenance as a shared [`Job`] — one job_name `maintenance` per tenant.
+//! Physical-scope maintenance as a shared [`Job`].
 //! Each pass runs enabled metadata cleanup and TWCS together (TWCS no-ops when
 //! the lake has nothing to merge).
 
 use crate::async_jobs::Job;
-use crate::compaction::executor::MaintenanceExecutor;
+#[cfg(test)]
+use crate::compaction::deduplicate_physical_scopes;
+use crate::compaction::MaintenanceEngine;
 use crate::config::DuckLakeConfig;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -24,8 +26,10 @@ fn lookup_cached_scope(
         .map(|(_, dk)| dk.clone())
 }
 
-pub struct MaintenanceJob {
-    executor: MaintenanceExecutor,
+pub const PHYSICAL_SCOPE_MAINTENANCE_JOB: &str = "physical_scope_maintenance";
+
+pub struct PhysicalScopeMaintenanceJob {
+    executor: MaintenanceEngine,
     interval: Duration,
     compaction_enabled: bool,
     cached_scopes: Mutex<Vec<(String, DuckLakeConfig)>>,
@@ -35,12 +39,8 @@ pub struct MaintenanceJob {
     fixed_scopes: Option<Vec<(String, DuckLakeConfig)>>,
 }
 
-impl MaintenanceJob {
-    pub fn new(
-        executor: MaintenanceExecutor,
-        interval: Duration,
-        compaction_enabled: bool,
-    ) -> Self {
+impl PhysicalScopeMaintenanceJob {
+    pub fn new(executor: MaintenanceEngine, interval: Duration, compaction_enabled: bool) -> Self {
         Self {
             executor,
             interval: interval.max(Duration::from_millis(50)),
@@ -55,7 +55,7 @@ impl MaintenanceJob {
     #[cfg(test)]
     #[allow(dead_code)]
     pub fn with_scopes(
-        executor: MaintenanceExecutor,
+        executor: MaintenanceEngine,
         interval: Duration,
         compaction_enabled: bool,
         scopes: Vec<(String, DuckLakeConfig)>,
@@ -67,9 +67,9 @@ impl MaintenanceJob {
 }
 
 #[async_trait]
-impl Job for MaintenanceJob {
+impl Job for PhysicalScopeMaintenanceJob {
     fn name(&self) -> &'static str {
-        "maintenance"
+        PHYSICAL_SCOPE_MAINTENANCE_JOB
     }
 
     fn interval(&self) -> Duration {
@@ -79,11 +79,11 @@ impl Job for MaintenanceJob {
     async fn scope_keys(&self) -> Result<Vec<String>> {
         #[cfg(test)]
         let scopes = match &self.fixed_scopes {
-            Some(fixed) => fixed.clone(),
-            None => self.executor.maintenance_scopes().await?,
+            Some(fixed) => deduplicate_physical_scopes(fixed.clone()),
+            None => self.executor.physical_scopes().await?,
         };
         #[cfg(not(test))]
-        let scopes = self.executor.maintenance_scopes().await?;
+        let scopes = self.executor.physical_scopes().await?;
         let ids: Vec<String> = scopes.iter().map(|(id, _)| id.clone()).collect();
         *lock_mutex(&self.cached_scopes) = scopes;
         Ok(ids)
@@ -92,14 +92,23 @@ impl Job for MaintenanceJob {
     async fn run(&self, scope_key: &str) -> Result<()> {
         let ducklake = lookup_cached_scope(&lock_mutex(&self.cached_scopes), scope_key)
             .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))?;
-        let pass = self
+        self.executor
+            .ensure_physical_scope_bootstrap(&ducklake)
+            .await?;
+        let results = self
             .executor
-            .run_tenant_pass(scope_key, &ducklake, self.compaction_enabled)
-            .await;
-        if pass.is_ok() {
-            crate::self_monitoring::record_maintenance();
+            .run_physical_scope_pass(scope_key, &ducklake, self.compaction_enabled)
+            .await?;
+        if self.compaction_enabled {
+            let statuses: Vec<_> = results.iter().map(|r| r.compaction.status).collect();
+            if !crate::compaction::pass_compaction_ok(&statuses) {
+                return Err(anyhow!(
+                    "compaction failed for scope {scope_key}: {statuses:?}"
+                ));
+            }
         }
-        pass.map(|_| ())
+        crate::self_monitoring::record_maintenance();
+        Ok(())
     }
 }
 
@@ -130,5 +139,59 @@ mod tests {
         assert!(m.lock().is_err());
         *lock_mutex(&m) = 2;
         assert_eq!(*lock_mutex(&m), 2);
+    }
+
+    #[test]
+    fn job_fails_when_compaction_status_failed_or_unsupported() {
+        use crate::compaction::{pass_compaction_ok, ActionStatus};
+        assert!(!pass_compaction_ok(&[ActionStatus::Failed]));
+        assert!(!pass_compaction_ok(&[ActionStatus::Unsupported]));
+        assert!(pass_compaction_ok(&[
+            ActionStatus::Skipped,
+            ActionStatus::Completed
+        ]));
+        // PhysicalScopeMaintenanceJob::run maps !pass_compaction_ok → Err.
+        let src = include_str!("maintenance_job.rs");
+        let run_impl = src
+            .split("async fn run(")
+            .nth(1)
+            .expect("Job::run")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("end of run");
+        assert!(
+            run_impl.contains("pass_compaction_ok")
+                && run_impl.contains("compaction failed for scope"),
+            "leased job must Err when compaction Failed/Unsupported"
+        );
+    }
+
+    #[tokio::test]
+    async fn fixed_workspace_bindings_share_one_physical_job_key() {
+        let config = crate::config::Config::default();
+        let shared = crate::config::DuckLakeConfig {
+            metadata_schema: "shared_scope".into(),
+            data_path: "s3://warehouse/shared".into(),
+            ..config.ducklake.clone()
+        };
+        let resolver = crate::runtime_engine::DuckLakeScopeResolver::connect(&config)
+            .await
+            .expect("connect resolver");
+        let job = PhysicalScopeMaintenanceJob::with_scopes(
+            MaintenanceEngine::new(&config, resolver)
+                .await
+                .expect("engine"),
+            Duration::from_secs(60),
+            false,
+            vec![
+                ("workspace-a".into(), shared.clone()),
+                ("workspace-b".into(), shared),
+            ],
+        );
+
+        let keys = job.scope_keys().await.expect("scope keys");
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].starts_with("ducklake:"));
+        assert_eq!(job.name(), PHYSICAL_SCOPE_MAINTENANCE_JOB);
     }
 }

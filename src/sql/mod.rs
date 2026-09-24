@@ -7,17 +7,21 @@ pub mod bounds;
 pub mod literal;
 pub mod llm;
 pub mod logs;
+pub mod maintenance;
 pub mod promotion;
+pub mod query;
 pub mod schema;
 pub mod session_summary;
 pub mod telemetry;
 pub mod tempo;
+// The typed boundary is introduced before its first engine consumer so the
+// contract can be reviewed independently of the query migration.
+#[allow(dead_code)]
+pub(crate) mod trusted;
 pub mod writer;
 
-pub use bounds::{
-    ensure_fact_scan_bound, execute_batch_checked, prepare_checked, query_window_from_exclusive_ns,
-    BoundLakeSql, QueryWindow,
-};
+pub(crate) use bounds::{ensure_fact_scan_bound, execute_batch_checked, prepare_checked};
+pub use bounds::{query_window_from_exclusive_ns, BoundLakeSql, QueryWindow};
 pub use literal::{
     sql_string_literal, timestamp_ns_column, timestamp_ns_literal, timestamptz_literal,
 };
@@ -158,6 +162,9 @@ mod locality_tests {
         // Test fixtures and explicitly classified connection/bootstrap SQL are
         // the only exceptions. Keep this file-level list narrow: directory-wide
         // exemptions hide production fact SQL regressions.
+        //
+        // STOP: make sure you fully understand this list before adding to it. You must be careful to add
+        // an exemption only when the SQL is absolutely safe to skip the gate check!!!
         let allowed = [
             "/bin/",
             "_tests.rs",
@@ -166,8 +173,6 @@ mod locality_tests {
             "/promotion.rs",
             "/runtime_engine.rs",
             "/async_jobs/tests.rs",
-            "/compaction/twcs.rs",
-            "/compaction/executor.rs",
             "/session_summary/ddl.rs",
             "/session_summary/dirty.rs",
             "/session_summary/list.rs",
@@ -180,6 +185,7 @@ mod locality_tests {
             "/storage/ducklake/promotion.rs",
             "/query/cache.rs",
             "/query/duckdb.rs",
+            "/query/workspace_views.rs",
         ];
         let hard: Vec<_> = hits
             .into_iter()
@@ -196,7 +202,7 @@ mod locality_tests {
     fn representative_trace_log_recipes_are_gate_checked() {
         let bounded_trace = crate::sql::telemetry::details_spans_sql(
             "*",
-            "CAST(timestamp AS TIMESTAMP_NS) >= '2026-09-10'::TIMESTAMP_NS",
+            "make_timestamp_ns(epoch_ns(timestamp)) >= '2026-09-10'::TIMESTAMP_NS",
             10,
         );
         let bounded_log = crate::sql::logs::scan_sql(
@@ -217,6 +223,64 @@ mod locality_tests {
                 10
             ))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn domain_duckdb_connections_stay_inside_approved_engines() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut violations = Vec::new();
+        let approved = [
+            "/ingest_engine/",
+            "/query/",
+            "/compaction/",
+            "/storage/",
+            "/sql/bounds/",
+            "/sql/mod.rs",
+        ];
+
+        fn walk(path: &Path, approved: &[&str], violations: &mut Vec<String>) {
+            let Ok(entries) = fs::read_dir(path) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, approved, violations);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let file_name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                if file_name.ends_with("_tests.rs") || file_name == "tests.rs" {
+                    continue;
+                }
+                let text = without_cfg_test_modules(&fs::read_to_string(&path).unwrap_or_default());
+                let uses_connection = text.lines().any(|line| {
+                    line.contains("duckdb::Connection")
+                        || line.contains("use duckdb::Connection")
+                        || line.contains("use duckdb::{Connection")
+                });
+                let uses_writer = text.contains("DuckLakeWriter");
+                if (uses_connection || uses_writer)
+                    && !approved
+                        .iter()
+                        .any(|fragment| path.to_string_lossy().contains(fragment))
+                {
+                    violations.push(path.display().to_string());
+                }
+            }
+        }
+
+        walk(&root, &approved, &mut violations);
+        assert!(
+            violations.is_empty(),
+            "domain DuckDB connection access outside approved engines:\n{}",
+            violations.join("\n")
         );
     }
 }

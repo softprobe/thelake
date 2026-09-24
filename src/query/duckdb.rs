@@ -1,11 +1,10 @@
+use super::workspace_views;
 use crate::config::Config;
 use crate::query::cache::CacheSettings;
-use crate::runtime_engine::DuckLakeScope;
 use crate::storage::ducklake::{
-    configure_duckdb_resources, ducklake_qualified_table_name, escape_sql_literal,
-    open_in_memory_capped, QUERY_DUCKDB_MEMORY, QUERY_DUCKDB_THREADS,
+    ducklake_qualified_table_name, DuckLakeSessionFactory, DuckLakeSessionKind,
 };
-use crate::storage::TieredStorage;
+use crate::workspace_scope::{DuckLakeAccess, PhysicalScope, WorkspaceBinding};
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use duckdb::types::Value as DuckValue;
@@ -154,8 +153,15 @@ fn replace_standalone_ident(s: &str, from: &str, to: &str) -> String {
 /// Tenant-scoped catalogs expose tables under `catalog.schema.table`; bare
 /// `FROM traces` would miss the attachment and return empty (masked as 0 rows).
 /// Historical Iceberg/buffer aliases are intentionally not rewritten.
-fn qualify_public_telemetry_tables(sql: &str, traces: &str, logs: &str, scores: &str) -> String {
+fn qualify_public_telemetry_tables(
+    sql: &str,
+    traces: &str,
+    logs: &str,
+    scores: &str,
+    score_configs: &str,
+) -> String {
     let mut s = sql.to_string();
+    s = replace_standalone_ident(&s, "score_configs", score_configs);
     s = replace_standalone_ident(&s, "scores", scores);
     s = replace_standalone_ident(&s, "traces", traces);
     s = replace_standalone_ident(&s, "logs", logs);
@@ -424,15 +430,10 @@ impl Drop for InflightLease {
 }
 
 impl DuckDBQueryEngine {
-    pub async fn new(config: &Config, tiered_storage: Arc<dyn TieredStorage>) -> Result<Self> {
-        Self::new_with_liveness(config, tiered_storage, true, "_default").await
-    }
-
     /// `counts_toward_liveness=false` for ops/self-monitoring engines so rebuild
     /// failures never trip process `/health` liveness.
-    pub async fn new_with_liveness(
+    pub(crate) async fn new_with_liveness(
         config: &Config,
-        _tiered_storage: Arc<dyn TieredStorage>,
         counts_toward_liveness: bool,
         tenant_id: &str,
     ) -> Result<Self> {
@@ -446,11 +447,6 @@ impl DuckDBQueryEngine {
             std::cmp::max(1, config.query.max_connections),
             Ordering::Relaxed,
         );
-        // Install extensions once to ensure they're available
-        let temp_conn = core.open_connection()?;
-        core.install_extensions(&temp_conn)?;
-        drop(temp_conn); // Extensions are installed globally, connection no longer needed
-
         let worker_count = std::cmp::max(1, config.query.max_connections);
         let mut workers = Vec::with_capacity(worker_count);
         // Workers report startup outcome so a failed one cannot stay in the pool.
@@ -661,23 +657,28 @@ impl DuckDBQueryEngine {
     }
 
     /// Catalog alias for `__ducklake_metadata_<alias>` / `{alias}.promotion_specs`.
-    pub fn catalog_alias(&self) -> &str {
+    pub(crate) fn catalog_alias(&self) -> &str {
         &self.config.ducklake.catalog_alias
     }
 
-    /// Catalog prefix for qualified DuckLake tables (`softprobe` or `softprobe.<metadata_schema>`).
-    pub fn layout_catalog_prefix(&self) -> String {
-        let cfg = &self.config.ducklake;
-        if cfg.metadata_schema == "main" {
-            cfg.catalog_alias.clone()
-        } else {
-            format!("{}.{}", cfg.catalog_alias, cfg.metadata_schema)
-        }
+    pub(crate) fn workspace_scope_mode(&self) -> crate::workspace_scope::WorkspaceScopeMode {
+        self.config.ducklake.workspace_scope_mode
+    }
+
+    pub(crate) async fn execute_trusted(
+        &self,
+        query: crate::sql::trusted::TrustedSql,
+    ) -> Result<QueryResult> {
+        let scope = crate::workspace_scope::PhysicalScope::from_ducklake(&self.config.ducklake);
+        query
+            .validate_for_scope(&scope)
+            .map_err(|error| anyhow!(error))?;
+        self.execute_query(query.as_str()).await
     }
 
     /// Execute arbitrary SQL query and return results as JSON
     /// Used by Grafana SQL API endpoint
-    pub async fn execute_query(&self, query: &str) -> Result<QueryResult> {
+    pub(crate) async fn execute_query(&self, query: &str) -> Result<QueryResult> {
         let key = sql_coalesce_key(query);
         // Guard must drop before any `.await` — `std::sync::MutexGuard` is `!Send`.
         let waiter = {
@@ -745,14 +746,14 @@ impl DuckDBQueryEngine {
 
     /// One-shot metadata SQL on a dedicated connection (no worker pool, no
     /// self-monitoring instruments). Used by inventory scrapes.
-    pub async fn execute_query_uninstrumented(&self, query: &str) -> Result<QueryResult> {
+    pub(crate) async fn execute_query_uninstrumented(&self, query: &str) -> Result<QueryResult> {
         let mut rows = self.execute_queries_uninstrumented(vec![query]).await?;
         rows.pop()
             .ok_or_else(|| anyhow!("inventory query returned no result"))?
     }
 
     /// Run several metadata SQLs on one open+attach connection (inventory).
-    pub async fn execute_queries_uninstrumented(
+    pub(crate) async fn execute_queries_uninstrumented(
         &self,
         queries: Vec<&str>,
     ) -> Result<Vec<Result<QueryResult>>> {
@@ -774,31 +775,6 @@ impl DuckDBQueryEngine {
         })
         .await
         .map_err(|e| anyhow!("inventory query join: {e}"))?
-    }
-
-    /// Execute one query with a tenant-specific DuckLake metadata schema.
-    ///
-    /// Worker connections intentionally keep the process-level DuckLake attachment for general
-    /// agent SQL. Tenant-authenticated control endpoints use this one-shot path when they need to
-    /// query the exact DuckLake scope resolved from Postgres control metadata.
-    pub async fn execute_query_in_ducklake_scope(
-        &self,
-        query: &str,
-        scope: &DuckLakeScope,
-    ) -> Result<QueryResult> {
-        let mut config = self.config.clone();
-        config.ducklake.metadata_schema = scope.metadata_schema.clone();
-        config.ducklake.data_path = scope.data_path.clone();
-
-        let core = DuckDBCore {
-            cache: CacheSettings::new(&config),
-            config,
-            counts_toward_liveness: true,
-            tenant_id: self.tenant_id.clone(),
-        };
-        let conn = core.open_connection()?;
-        let mut state = core.init_connection_state_with(conn)?;
-        core.execute_query_on_state(&mut state, query)
     }
 }
 
@@ -822,27 +798,28 @@ impl Drop for DuckDBQueryEngine {
 
 impl DuckDBCore {
     fn open_connection(&self) -> Result<Connection> {
-        // Cap at open so TaskScheduler never starts at nproc.
-        let conn = open_in_memory_capped(QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)?;
-        Ok(conn)
-    }
-
-    fn install_extensions(&self, conn: &Connection) -> Result<()> {
-        conn.execute_batch("INSTALL httpfs;")?;
-        // DuckLake is the primary committed storage path.
-        conn.execute_batch("INSTALL ducklake;")?;
-        if self.ducklake_config().catalog_type == "postgres" {
-            conn.execute_batch("INSTALL postgres;")?;
-        }
-        if self.ducklake_config().catalog_type == "sqlite" {
-            conn.execute_batch("INSTALL sqlite;")?;
-        }
-        Ok(())
+        let access = self.session_access()?;
+        DuckLakeSessionFactory::new(&self.config).open(&access, DuckLakeSessionKind::Query)
     }
 
     fn init_connection_state_with(&self, conn: Connection) -> Result<ConnectionState> {
+        self.init_connection_state_with_options(conn, true)
+    }
+
+    fn init_connection_state_with_options(
+        &self,
+        conn: Connection,
+        attach_catalog: bool,
+    ) -> Result<ConnectionState> {
         self.configure_connection(&conn)?;
-        self.attach_catalog_if_needed(&conn)?;
+        if attach_catalog {
+            self.attach_catalog_if_needed(&conn)?;
+        }
+        if self.config.ducklake.workspace_scope_mode
+            == crate::workspace_scope::WorkspaceScopeMode::Shared
+        {
+            workspace_views::install(&conn, &self.ducklake_config(), &self.tenant_id)?;
+        }
         Ok(ConnectionState {
             conn,
             cache_httpfs_wrap_supported: true,
@@ -851,12 +828,20 @@ impl DuckDBCore {
         })
     }
 
+    #[cfg(test)]
+    fn init_connection_state_for_prepared_catalog(
+        &self,
+        conn: Connection,
+    ) -> Result<ConnectionState> {
+        self.init_connection_state_with_options(conn, false)
+    }
+
     fn execute_query_on_state(
         &self,
         state: &mut ConnectionState,
         query: &str,
     ) -> Result<QueryResult> {
-        // Catalog visibility: postgres metadata is visible without reconnect; sqlite concurrency
+        // Catalog visibility: Postgres metadata is visible without reconnect.
         // is handled by DuckLake (WAL + busy timeout / ATTACH behavior). Softprobe does not
         // reattach or mem::forget connections after writes.
 
@@ -1031,20 +1016,6 @@ impl DuckDBCore {
 
     fn configure_connection(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(DUCKDB_SESSION_INIT_SQL)?;
-        if let Err(err) =
-            configure_duckdb_resources(conn, QUERY_DUCKDB_THREADS, QUERY_DUCKDB_MEMORY)
-        {
-            warn!("Failed to cap DuckDB threads/memory: {}", err);
-        }
-        // Extension loading is connection-scoped. Match interactive production query behavior
-        // by explicitly loading the DuckLake backend extension in each worker connection.
-        match self.ducklake_config().catalog_type.as_str() {
-            "postgres" => conn.execute_batch("LOAD postgres;")?,
-            "sqlite" => conn.execute_batch("LOAD sqlite;")?,
-            _ => {}
-        }
-        let dk = &self.config.ducklake;
-        crate::storage::ducklake::configure_object_store(conn, &self.config, &dk.data_path)?;
 
         // 1) Native object cache for parsed objects/metadata (best-effort; depends on DuckDB build).
         if let Err(err) = conn.execute("SET enable_object_cache = true;", []) {
@@ -1089,67 +1060,39 @@ impl DuckDBCore {
 
     /// Replace bare telemetry table names with qualified DuckLake table refs.
     fn ducklake_inline_sql(&self, sql: &str) -> String {
+        if self.config.ducklake.workspace_scope_mode
+            == crate::workspace_scope::WorkspaceScopeMode::Shared
+        {
+            // Shared-mode workers expose filtered logical views. Keeping the
+            // SQL logical prevents callers from bypassing those views with the
+            // physical catalog qualification used by isolated mode.
+            return sql.to_string();
+        }
         qualify_public_telemetry_tables(
             sql,
             &self.ducklake_qualified_table("traces"),
             &self.ducklake_qualified_table("logs"),
             &self.ducklake_qualified_table("scores"),
+            &self.ducklake_qualified_table("score_configs"),
         )
     }
 
     fn attach_catalog_if_needed(&self, conn: &Connection) -> Result<()> {
-        let sql = {
-            let ducklake = self.ducklake_config();
-            let attach_target = crate::storage::ducklake::ducklake_attach_target(&ducklake);
-            crate::storage::ducklake::prepare_local_ducklake_paths(&ducklake, &attach_target)?;
-            let options = crate::storage::ducklake::ducklake_attach_options(&ducklake);
-            format!(
-                "ATTACH 'ducklake:{}' AS {} ({});",
-                escape_sql_literal(&attach_target),
-                ducklake.catalog_alias,
-                options.join(", ")
-            )
-        };
-        match conn.execute_batch(&sql) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                let message = err.to_string();
-                if message.contains("already exists") || message.contains("already attached") {
-                    Ok(())
-                } else if message.contains("__ducklake_metadata_")
-                    && message.contains("does not exist")
-                {
-                    let ducklake = self.ducklake_config();
-                    // Backward-compatible fallback for catalogs initialized without custom metadata schema.
-                    let attach_target = crate::storage::ducklake::ducklake_attach_target(&ducklake);
-                    crate::storage::ducklake::prepare_local_ducklake_paths(
-                        &ducklake,
-                        &attach_target,
-                    )?;
-                    let mut fallback_options = vec![format!(
-                        "DATA_PATH '{}'",
-                        escape_sql_literal(&ducklake.data_path)
-                    )];
-                    if ducklake.catalog_type == "sqlite" {
-                        fallback_options.push("META_JOURNAL_MODE 'WAL'".to_string());
-                        fallback_options.push("META_BUSY_TIMEOUT 5000".to_string());
-                    }
-                    if let Some(limit) = ducklake.data_inlining_row_limit {
-                        fallback_options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
-                    }
-                    let fallback_sql = format!(
-                        "ATTACH 'ducklake:{}' AS {} ({});",
-                        escape_sql_literal(&attach_target),
-                        ducklake.catalog_alias,
-                        fallback_options.join(", ")
-                    );
-                    conn.execute_batch(&fallback_sql)
-                        .map_err(|fallback_err| anyhow!("DuckDB ATTACH failed: {}", fallback_err))
-                } else {
-                    Err(anyhow!("DuckDB ATTACH failed: {}", err))
-                }
-            }
-        }
+        let access = self.session_access()?;
+        DuckLakeSessionFactory::new(&self.config)
+            .attach(conn, &access)
+            .map(|_| ())
+    }
+
+    fn session_access(&self) -> Result<DuckLakeAccess> {
+        let scope = PhysicalScope::from_ducklake(&self.ducklake_config());
+        let binding = WorkspaceBinding::new(
+            self.tenant_id.clone(),
+            scope,
+            self.config.ducklake.workspace_scope_mode,
+        )
+        .map_err(|error| anyhow!(error))?;
+        Ok(DuckLakeAccess::Workspace(binding))
     }
 
     fn ducklake_config(&self) -> crate::config::DuckLakeConfig {
@@ -1329,10 +1272,17 @@ mod tests {
         let traces = "softprobe.ducklake_softprobe_local.traces";
         let logs = "softprobe.ducklake_softprobe_local.logs";
         let scores = "softprobe.ducklake_softprobe_local.scores";
-        let after_bare =
-            qualify_public_telemetry_tables("SELECT * FROM traces LIMIT 1", traces, logs, scores);
+        let score_configs = "softprobe.ducklake_softprobe_local.score_configs";
+        let after_bare = qualify_public_telemetry_tables(
+            "SELECT * FROM traces LIMIT 1",
+            traces,
+            logs,
+            scores,
+            score_configs,
+        );
         assert_eq!(after_bare, format!("SELECT * FROM {traces} LIMIT 1"));
-        let after_again = qualify_public_telemetry_tables(&after_bare, traces, logs, scores);
+        let after_again =
+            qualify_public_telemetry_tables(&after_bare, traces, logs, scores, score_configs);
         assert_eq!(
             after_again, after_bare,
             "bare traces rewrite must not double-qualify already expanded names"
@@ -1344,11 +1294,13 @@ mod tests {
         let traces = "softprobe.ducklake_softprobe_local.traces";
         let logs = "softprobe.ducklake_softprobe_local.logs";
         let scores = "softprobe.ducklake_softprobe_local.scores";
+        let score_configs = "softprobe.ducklake_softprobe_local.score_configs";
         let out = qualify_public_telemetry_tables(
             "SELECT 1 FROM scores WHERE timestamp >= '2026-01-01'",
             traces,
             logs,
             scores,
+            score_configs,
         );
         assert_eq!(
             out,
@@ -1361,6 +1313,7 @@ mod tests {
         let traces = "softprobe.ducklake_softprobe_local.traces";
         let logs = "softprobe.ducklake_softprobe_local.logs";
         let scores = "softprobe.ducklake_softprobe_local.scores";
+        let score_configs = "softprobe.ducklake_softprobe_local.score_configs";
         for legacy in [
             "union_spans",
             "union_logs",
@@ -1372,7 +1325,7 @@ mod tests {
             "tm_cq_log",
         ] {
             let sql = format!("SELECT 1 FROM {legacy} LIMIT 1");
-            let out = qualify_public_telemetry_tables(&sql, traces, logs, scores);
+            let out = qualify_public_telemetry_tables(&sql, traces, logs, scores, score_configs);
             assert_eq!(
                 out, sql,
                 "legacy alias {legacy} must not be rewritten to a DuckLake table"
@@ -1386,17 +1339,18 @@ mod tests {
         use crate::storage::ducklake::ducklake_qualified_table_name;
 
         let cfg = DuckLakeConfig {
-            catalog_type: "postgres".to_string(),
             metadata_path: "host=localhost dbname=ducklake".to_string(),
             data_path: "s3://warehouse/tenant/".to_string(),
             catalog_alias: "softprobe".to_string(),
             metadata_schema: "ducklake_softprobe_local".to_string(),
+            workspace_scope_mode: crate::workspace_scope::WorkspaceScopeMode::Isolated,
             data_inlining_row_limit: Some(0),
             writer_pool_size: 1,
         };
         let traces = ducklake_qualified_table_name(&cfg, "traces");
         let logs = ducklake_qualified_table_name(&cfg, "logs");
         let scores = ducklake_qualified_table_name(&cfg, "scores");
+        let score_configs = ducklake_qualified_table_name(&cfg, "score_configs");
         assert_eq!(traces, "softprobe.ducklake_softprobe_local.traces");
         assert_eq!(logs, "softprobe.ducklake_softprobe_local.logs");
         assert_eq!(scores, "softprobe.ducklake_softprobe_local.scores");
@@ -1406,17 +1360,90 @@ mod tests {
             &traces,
             &logs,
             &scores,
+            &score_configs,
         );
         assert!(
             out.contains("softprobe.ducklake_softprobe_local.traces"),
             "got {out}"
         );
-        let logs_out =
-            qualify_public_telemetry_tables("SELECT 1 FROM logs LIMIT 1", &traces, &logs, &scores);
+        let logs_out = qualify_public_telemetry_tables(
+            "SELECT 1 FROM logs LIMIT 1",
+            &traces,
+            &logs,
+            &scores,
+            &score_configs,
+        );
         assert!(
             logs_out.contains("softprobe.ducklake_softprobe_local.logs"),
             "got {logs_out}"
         );
+    }
+
+    #[test]
+    fn shared_query_keeps_logical_table_names_for_filtered_views() {
+        let mut config = Config::default();
+        config.ducklake.workspace_scope_mode = crate::workspace_scope::WorkspaceScopeMode::Shared;
+        let core = DuckDBCore {
+            cache: CacheSettings::new(&config),
+            config,
+            counts_toward_liveness: true,
+            tenant_id: "workspace-a".to_string(),
+        };
+
+        let sql =
+            core.ducklake_inline_sql("SELECT * FROM traces JOIN score_configs USING (config_id)");
+
+        assert_eq!(
+            sql,
+            "SELECT * FROM traces JOIN score_configs USING (config_id)"
+        );
+    }
+
+    #[test]
+    fn shared_connection_initializer_recreates_filtered_views_for_each_connection() {
+        for tenant_id in ["workspace-a", "workspace-b"] {
+            let mut config = Config::default();
+            config.ducklake.catalog_alias = "softprobe".to_string();
+            config.ducklake.metadata_schema = "main".to_string();
+            config.ducklake.workspace_scope_mode =
+                crate::workspace_scope::WorkspaceScopeMode::Shared;
+            let core = DuckDBCore {
+                cache: CacheSettings::new(&config),
+                config,
+                counts_toward_liveness: false,
+                tenant_id: tenant_id.to_string(),
+            };
+            let state = core
+                .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
+                .unwrap();
+
+            let visible_id: String = state
+                .conn
+                .query_row("SELECT id FROM traces", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(visible_id, format!("{tenant_id}-row"));
+        }
+    }
+
+    fn prepared_catalog_connection() -> Connection {
+        let conn = Connection::open_in_memory().expect("open prepared catalog connection");
+        conn.execute_batch(
+            "ATTACH ':memory:' AS softprobe;
+             CREATE TABLE softprobe.traces (tenant_id VARCHAR, id VARCHAR);
+             CREATE TABLE softprobe.logs (tenant_id VARCHAR, id VARCHAR);
+             CREATE TABLE softprobe.scores (tenant_id VARCHAR, id VARCHAR);
+             CREATE TABLE softprobe.score_configs (tenant_id VARCHAR, id VARCHAR);
+             INSERT INTO softprobe.traces VALUES
+               ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
+             INSERT INTO softprobe.logs VALUES
+               ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
+             INSERT INTO softprobe.scores VALUES
+               ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
+             INSERT INTO softprobe.score_configs VALUES
+               ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');",
+        )
+        .expect("seed prepared catalog");
+        conn
     }
 
     #[test]
@@ -1456,15 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn session_init_sql_contains_required_loads() {
-        assert!(
-            DUCKDB_SESSION_INIT_SQL.contains("LOAD httpfs;"),
-            "expected session init to load httpfs"
-        );
-        assert!(
-            DUCKDB_SESSION_INIT_SQL.contains("LOAD ducklake;"),
-            "expected session init to load ducklake"
-        );
+    fn session_init_sql_contains_required_settings() {
         assert!(
             DUCKDB_SESSION_INIT_SQL.contains("SET unsafe_enable_version_guessing = false;"),
             "session init must disable DuckLake version guessing so interactive \

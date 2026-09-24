@@ -21,8 +21,7 @@ maintenance:
   interval_seconds: 3600
 
 ducklake:
-  catalog_type: "sqlite"
-  metadata_path: "/tmp/datalake-local-test/metadata.sqlite"
+  metadata_path: "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake"
   data_path: "s3://YOUR-BUCKET/ducklake/"
   catalog_alias: "softprobe"
   metadata_schema: "main"

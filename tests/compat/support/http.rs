@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::util::config::file_backed_test_config;
-use crate::util::tenant::inject_local_sqlite_tenant;
+use crate::util::tenant::{inject_local_sqlite_tenant, provision_local_sqlite_tenant};
 
 pub async fn build_tenant_router_with_state() -> (Router, AppState, TempDir) {
     let temp = TempDir::new().expect("temp");
@@ -26,6 +26,7 @@ pub async fn build_tenant_router_with_state() -> (Router, AppState, TempDir) {
     )
     .await
     .expect("router");
+    provision_local_sqlite_tenant(&state).await;
     let router = router
         .merge(runtime_control_routes().with_state(state.clone()))
         .layer(from_fn(inject_local_sqlite_tenant));

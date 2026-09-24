@@ -406,7 +406,6 @@ maintenance:
   max_merge_file_size_bytes: 8388608
 
 ducklake:
-  catalog_type: "postgres"
   metadata_path: "host=$PG_HOST port=$PG_PORT dbname=ducklake user=ducklake password=ducklake"
   data_path: "$STATE_DIR/data/"
   catalog_alias: "softprobe"

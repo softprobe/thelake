@@ -1,8 +1,9 @@
 //! Typed DuckLake trace query backend for the Tempo adapter.
 
 use super::traces::{
-    persisted_status_code_numeric_value, TraceAttribute, TraceData, TraceEvent, TraceLookupBounds,
-    TraceQueryBackend, TraceSearchHit, TraceSearchRequest, TraceSpan,
+    persisted_status_code_numeric_value, visible_span_attributes, TraceAttribute, TraceData,
+    TraceEvent, TraceLookupBounds, TraceQueryBackend, TraceSearchHit, TraceSearchRequest,
+    TraceSpan,
 };
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::tempo::{project_tempo_link_attributes, project_tempo_tags};
@@ -30,7 +31,9 @@ impl DuckLakeTraceBackend {
         if ctx.remaining().is_zero() {
             return Err(deadline());
         }
-        match tokio::time::timeout(ctx.remaining(), self.query.execute_query(sql)).await {
+        let trusted = crate::sql::trusted::approved_query(sql.to_string())
+            .map_err(|err| CompatError::new(CompatErrorCode::BadRequest, err.to_string()))?;
+        match tokio::time::timeout(ctx.remaining(), self.query.execute_trusted(trusted)).await {
             Err(_) => Err(deadline()),
             Ok(Ok(result)) => Ok(result),
             Ok(Err(err)) => {
@@ -89,8 +92,7 @@ impl DuckLakeTraceBackend {
                 .entry("service.name".into())
                 .or_insert_with(|| service.clone());
         }
-        let attributes = span
-            .attributes
+        let attributes = visible_span_attributes(span)
             .iter()
             .map(|attribute| (attribute.key.clone(), attribute.value.clone()))
             .collect::<HashMap<_, _>>();

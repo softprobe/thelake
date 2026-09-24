@@ -153,7 +153,7 @@ async fn process_logs_inner(
     }
     let engine = state.engine_for_id(&tenant_id).await?;
     let write_start = std::time::Instant::now();
-    engine.ingest.add_logs(logs, body_size).await?;
+    engine.add_logs(logs, body_size).await?;
     if crate::self_monitoring::instrument_customer_tenant(&tenant_id) {
         crate::self_monitoring::record_write(
             &tenant_id,

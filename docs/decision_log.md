@@ -113,10 +113,11 @@ the durable scope registry.
 Business identifiers use an application-owned `sp.*` attribute convention.
 Softprobe does not invent or auto-promote those keys.
 
-Schema promotion is tenant-scoped:
+Schema promotion is physical-scope-scoped:
 
 - apply manifests with authenticated `POST /v1/promotions/apply`;
-- store active specs in the tenant metadata schema (`promotion_specs`);
+- store active specs in the bound physical-scope metadata schema
+  (`promotion_specs`); shared scopes therefore share promotion state;
 - add only nullable telemetry columns, extracted on **future** ingest;
 - do not configure promotion through process-global `config.yaml`.
 

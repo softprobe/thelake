@@ -128,7 +128,7 @@ Authentication resolves a tenant before operational work begins. A
 - a tenant-bound DuckLake metadata schema and data path;
 - a tenant-bound writer and query engine.
 
-With a PostgreSQL catalog, `DuckLakeScopeResolver` stores scope mappings in the
+With a PostgreSQL catalog, `RuntimeEngineManager` stores scope mappings in the
 configured registry schema. Operational APIs do not accept arbitrary tenant or
 scope parameters after binding.
 
@@ -238,11 +238,12 @@ no PATCH; replace a config by inserting a new `config_id`. Human annotation
 
 ## Schema promotion
 
-Promotion is tenant-scoped and applied through authenticated
-`POST /v1/promotions/apply`, not process-global YAML. Active manifests live in
-the tenant PostgreSQL metadata schema (`promotion_specs`) in production.
-SQLite supports promotion in its configured local single-scope DuckLake
-catalog.
+Promotion is applied through authenticated `POST /v1/promotions/apply`, not
+process-global YAML. In isolated scope, active manifests live in the workspace
+PostgreSQL metadata schema (`promotion_specs`). In shared scope, they live in
+the one physical-scope schema and the resulting DDL and ingest extraction are
+global to every workspace using that scope. SQLite supports promotion in its
+configured local single-scope DuckLake catalog.
 
 - **Telemetry columns:** additive nullable columns on `traces` / `logs`.
   Future ingest extracts declared sources into those columns; historical rows
@@ -308,8 +309,7 @@ The canonical shape is `config.yaml`; defaults and validation live in
 
 Important DuckLake settings:
 
-- `catalog_type`: `postgres` or `sqlite`
-- `metadata_path`: PostgreSQL connection string or SQLite path
+- `metadata_path`: PostgreSQL connection string (the DuckLake catalog is always Postgres)
 - `data_path`: local, `s3://`, or `gs://` data location
 - `catalog_alias`
 - `metadata_schema`

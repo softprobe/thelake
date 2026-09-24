@@ -165,7 +165,8 @@ async fn simulated_mocker_rolling_manifest_promotes_record_fields_and_http_bodie
         .expect("encode");
     ingest_otlp_protobuf(env.router.clone(), body).await;
 
-    let connection = attach_softprobe_ducklake(&env.metadata_path, &env.data_path);
+    let connection =
+        attach_softprobe_ducklake(&env.metadata_path, &env.metadata_schema, &env.data_path);
     assert_traces_columns_exist(
         &connection,
         &[
@@ -184,7 +185,7 @@ async fn simulated_mocker_rolling_manifest_promotes_record_fields_and_http_bodie
         .query_row(
             &format!(
                 "SELECT record_category, record_operation, http_request_body, http_response_body \
-                 FROM softprobe.traces \
+                 FROM traces \
                  WHERE trace_id = '{trace_hex}' AND record_category = 'Servlet'"
             ),
             [],
@@ -207,7 +208,7 @@ async fn simulated_mocker_rolling_manifest_promotes_record_fields_and_http_bodie
     let servlet_app_id: Option<String> = connection
         .query_row(
             &format!(
-                "SELECT app_id FROM softprobe.traces \
+                "SELECT app_id FROM traces \
                  WHERE trace_id = '{trace_hex}' AND record_category = 'Servlet'"
             ),
             [],
@@ -224,7 +225,7 @@ async fn simulated_mocker_rolling_manifest_promotes_record_fields_and_http_bodie
         .query_row(
             &format!(
                 "SELECT record_category, record_operation, http_request_body, http_response_body \
-                 FROM softprobe.traces \
+                 FROM traces \
                  WHERE trace_id = '{trace_hex}' AND record_category = 'HttpClient'"
             ),
             [],
@@ -247,7 +248,7 @@ async fn simulated_mocker_rolling_manifest_promotes_record_fields_and_http_bodie
     let servlet_only_count: i64 = connection
         .query_row(
             &format!(
-                "SELECT count(*) FROM softprobe.traces \
+                "SELECT count(*) FROM traces \
                  WHERE trace_id = '{trace_hex}' AND record_category = 'Servlet'"
             ),
             [],
@@ -259,7 +260,7 @@ async fn simulated_mocker_rolling_manifest_promotes_record_fields_and_http_bodie
     let client_only_count: i64 = connection
         .query_row(
             &format!(
-                "SELECT count(*) FROM softprobe.traces \
+                "SELECT count(*) FROM traces \
                  WHERE trace_id = '{trace_hex}' AND record_category = 'HttpClient'"
             ),
             [],

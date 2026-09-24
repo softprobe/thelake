@@ -17,9 +17,14 @@ pub fn timestamp_ns_literal_from_str(value: &str) -> String {
     format!("{}::TIMESTAMP_NS", sql_string_literal(value))
 }
 
-/// Cast a column to `TIMESTAMP_NS` for comparisons.
+/// Normalize a timestamp column to `TIMESTAMP_NS` for comparisons.
+///
+/// DuckLake on Postgres may surface event-time columns as `TIMESTAMPTZ` for
+/// inlined rows; `CAST(... AS TIMESTAMP_NS)` is unimplemented for that type.
+/// `epoch_ns` accepts TIMESTAMP / TIMESTAMPTZ / TIMESTAMP_NS, and
+/// `make_timestamp_ns` rebuilds a timezone-free ns clock for comparisons.
 pub fn timestamp_ns_column(column: &str) -> String {
-    format!("CAST({column} AS TIMESTAMP_NS)")
+    format!("make_timestamp_ns(epoch_ns({column}))")
 }
 
 /// Timezone-bearing metric literal. Metrics tables intentionally use

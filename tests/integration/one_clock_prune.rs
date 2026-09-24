@@ -1,22 +1,13 @@
 //! One-clock production contract: real writers create calendar-day files and
 //! timestamp-bounded recipes prune them without legacy date columns.
 
+use chrono::{TimeZone, Utc};
+use softprobe_runtime::ingest_engine::IngestPipeline;
+use softprobe_runtime::models::{Log, Span, SpanEvent};
+use softprobe_runtime::query::{LogCountFilter, TraceCountFilter};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
-
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::routing::post;
-use axum::Router;
-use chrono::{TimeZone, Utc};
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
-use softprobe_runtime::config::Config;
-use softprobe_runtime::models::{Log, Span, SpanEvent};
-use softprobe_runtime::runtime_api::runtime_control_routes;
-use softprobe_runtime::storage::ducklake::DuckLakeWriter;
 use tempfile::TempDir;
-use tower::ServiceExt;
 
 /// Locked partition clause (no DATE identity column).
 pub const ONE_CLOCK_PARTITION_BY: &str = "year(timestamp), month(timestamp), day(timestamp)";
@@ -50,21 +41,12 @@ fn walk_paths(dir: &Path, out: &mut Vec<String>) {
     }
 }
 
-fn attach(metadata_path: &str, data_path: &str) -> duckdb::Connection {
-    let connection = duckdb::Connection::open_in_memory().expect("duckdb");
-    connection
-        .execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
-        .expect("extensions");
-    connection
-        .execute_batch(&format!(
-            "ATTACH 'ducklake:sqlite:{}' AS softprobe \
-             (DATA_PATH '{}', META_JOURNAL_MODE 'WAL', META_BUSY_TIMEOUT 5000, \
-              DATA_INLINING_ROW_LIMIT 0);",
-            metadata_path.replace('\'', "''"),
-            data_path.replace('\'', "''"),
-        ))
-        .expect("attach");
-    connection
+fn attach(metadata_path: &str, metadata_schema: &str, data_path: &str) -> duckdb::Connection {
+    crate::util::promotion_file_backed::attach_softprobe_ducklake(
+        metadata_path,
+        metadata_schema,
+        data_path,
+    )
 }
 
 fn explain_plan(conn: &duckdb::Connection, sql: &str) -> String {
@@ -79,9 +61,7 @@ fn explain_plan(conn: &duckdb::Connection, sql: &str) -> String {
 
 fn timestamp_type(conn: &duckdb::Connection, table: &str) -> String {
     conn.query_row(
-        &format!(
-            "SELECT column_type FROM (DESCRIBE softprobe.{table}) WHERE column_name = 'timestamp'"
-        ),
+        &format!("SELECT column_type FROM (DESCRIBE {table}) WHERE column_name = 'timestamp'"),
         [],
         |row| row.get(0),
     )
@@ -136,53 +116,32 @@ fn log(day: u32, id: &str) -> Log {
         resource_attributes: HashMap::new(),
         trace_id: Some(format!("trace-{id}")),
         span_id: Some(format!("span-{id}")),
+        tenant_id: None,
         agent_id: None,
         agent_name: None,
     }
-}
-
-async fn build_router(config: Config) -> Router {
-    let (router, state) =
-        softprobe_runtime::api::create_router(Arc::new(config), post(ingest_traces), None)
-            .await
-            .expect("router");
-    router.merge(runtime_control_routes().with_state(state))
-}
-
-async fn post_sql(router: &Router, sql: &str) -> StatusCode {
-    let request = Request::builder()
-        .method("POST")
-        .uri("/v1/query/sql")
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::json!({ "sql": sql }).to_string()))
-        .expect("sql request");
-    router
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("sql response")
-        .status()
 }
 
 #[tokio::test]
 async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     let temp = TempDir::new().expect("tempdir");
     let mut config = crate::util::config::file_backed_test_config(&temp);
+    config.ingest.flush_interval_seconds = 0;
     // Force every production write to publish a parquet file so EXPLAIN observes
     // physical day pruning rather than DuckLake catalog-inline rows.
     config.ducklake.data_inlining_row_limit = Some(0);
     let metadata_path = config.ducklake.metadata_path.clone();
     let data_path = config.ducklake.data_path.clone();
-    let writer = DuckLakeWriter::new(&config, None).await.expect("writer");
+    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
 
-    writer
-        .write_span_batches(vec![vec![span(10, "a"), span(11, "b")]])
+    pipeline
+        .add_spans(vec![span(10, "a"), span(11, "b")], 0)
         .await
-        .expect("traces writer");
-    writer
-        .write_log_batches(vec![vec![log(10, "a"), log(11, "b")]])
+        .expect("traces ingest");
+    pipeline
+        .add_logs(vec![log(10, "a"), log(11, "b")], 0)
         .await
-        .expect("logs writer");
+        .expect("logs ingest");
 
     let mut paths = Vec::new();
     walk_paths(Path::new(&data_path), &mut paths);
@@ -202,14 +161,14 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
         "legacy partition path:\n{joined}"
     );
 
-    let conn = attach(&metadata_path, &data_path);
+    let conn = attach(&metadata_path, &config.ducklake.metadata_schema, &data_path);
     assert_eq!(timestamp_type(&conn, "traces"), "TIMESTAMP_NS");
     assert_eq!(timestamp_type(&conn, "logs"), "TIMESTAMP_NS");
 
-    let narrow = "SELECT trace_id FROM softprobe.traces \
+    let narrow = "SELECT trace_id FROM traces \
                   WHERE timestamp >= '2026-09-10'::TIMESTAMP_NS \
                     AND timestamp < '2026-09-11'::TIMESTAMP_NS";
-    let wide = "SELECT trace_id FROM softprobe.traces \
+    let wide = "SELECT trace_id FROM traces \
                 WHERE timestamp >= '2026-09-10'::TIMESTAMP_NS \
                   AND timestamp < '2026-09-12'::TIMESTAMP_NS";
     let wide_plan = explain_plan(&conn, wide);
@@ -231,34 +190,44 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
 }
 
 #[tokio::test]
-async fn recipe_gate_covers_traces_logs_and_alias_expansion() {
+async fn typed_query_gate_covers_traces_and_logs() {
     let temp = TempDir::new().expect("tempdir");
     let mut config = crate::util::config::file_backed_test_config(&temp);
+    config.ingest.flush_interval_seconds = 0;
     config.ducklake.data_inlining_row_limit = Some(0);
-    let writer = DuckLakeWriter::new(&config, None).await.expect("writer");
-    writer
-        .write_span_batches(vec![vec![span(10, "gate")]])
+    let pipeline = IngestPipeline::new(&config).await.expect("pipeline");
+    pipeline
+        .add_spans(vec![span(10, "gate")], 0)
         .await
         .expect("trace seed");
-    writer
-        .write_log_batches(vec![vec![log(10, "gate")]])
+    pipeline
+        .add_logs(vec![log(10, "gate")], 0)
         .await
         .expect("log seed");
 
-    let router = build_router(config).await;
-    for sql in ["SELECT count(*) FROM traces", "SELECT count(*) FROM logs"] {
-        assert_eq!(
-            post_sql(&router, sql).await,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "{sql}"
-        );
-    }
-    for sql in [
-        "SELECT count(*) FROM traces WHERE timestamp >= '2026-09-10'::TIMESTAMP_NS",
-        "SELECT count(*) FROM logs WHERE timestamp <= '2026-09-11'::TIMESTAMP_NS",
-    ] {
-        assert_eq!(post_sql(&router, sql).await, StatusCode::OK, "{sql}");
-    }
+    let query = softprobe_runtime::query::create_query_engine(&config)
+        .await
+        .expect("query engine");
+    assert_eq!(
+        query
+            .count_traces(TraceCountFilter {
+                session_id: Some("persistent-session".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("trace count"),
+        1
+    );
+    assert_eq!(
+        query
+            .count_logs(LogCountFilter {
+                session_id: Some("persistent-session".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("log count"),
+        1
+    );
 }
 
 #[test]

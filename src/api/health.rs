@@ -70,9 +70,15 @@ pub async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
 /// attempt -- and the in-handler budget is generous; the k8s probe's own
 /// `timeoutSeconds` bounds each attempt.
 pub async fn ready_check(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let probe =
-        tokio::spawn(async move { state.execute_tenant_scoped_sql(None, "SELECT 1").await });
-    let reason = match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
+    let probe = tokio::spawn(async move {
+        state
+            .execute_tenant_scoped_trusted_sql(
+                None,
+                crate::sql::trusted::approved_query("SELECT 1").expect("static readiness query"),
+            )
+            .await
+    });
+    let reason = match tokio::time::timeout(std::time::Duration::from_secs(30), probe).await {
         Ok(Ok(Ok(_))) => {
             return (
                 StatusCode::OK,
