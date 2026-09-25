@@ -703,9 +703,6 @@ impl DuckLakeWriter {
     }
 
     pub(super) fn ensure_schema_for(&self, conn: &Connection, scope: &PhysicalScope) -> Result<()> {
-        if scope.is_default_duckdb_namespace() {
-            return Ok(());
-        }
         conn.execute_batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS {}.{};",
             scope.attach_alias(),
@@ -735,13 +732,6 @@ impl DuckLakeWriter {
         for table in [TRACES.name, LOGS.name, SCORES.name, SCORE_CONFIGS.name] {
             let qualified = self.qualified_table_name(table);
             conn.execute_batch(&format!("DROP TABLE IF EXISTS {qualified};"))?;
-            if scope.is_default_duckdb_namespace() {
-                conn.execute_batch(&format!(
-                    "DROP TABLE IF EXISTS {}.{};",
-                    scope.attach_alias(),
-                    table
-                ))?;
-            }
         }
         let key = Self::conn_cache_key(scope);
         if let Ok(guard) = self.writer_pools.lock() {

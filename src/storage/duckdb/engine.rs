@@ -1014,8 +1014,8 @@ impl DuckDBCore {
         Ok(())
     }
 
-    /// Must match [`crate::storage::ducklake::ducklake_qualified_table_name`] (writer DDL uses
-    /// `catalog.table` when `metadata_schema` is `main`, not `catalog.main.table`).
+    /// Must match [`crate::storage::ducklake::ducklake_qualified_table_name`]
+    /// (`catalog.schema.table`, including when schema is `main`).
     fn ducklake_qualified_table(&self, table: &str) -> String {
         ducklake_qualified_table_name(self.access.physical_scope(), table)
     }
@@ -1386,17 +1386,18 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open prepared catalog connection");
         conn.execute_batch(
             "ATTACH ':memory:' AS softprobe;
-             CREATE TABLE softprobe.traces (tenant_id VARCHAR, id VARCHAR);
-             CREATE TABLE softprobe.logs (tenant_id VARCHAR, id VARCHAR);
-             CREATE TABLE softprobe.scores (tenant_id VARCHAR, id VARCHAR);
-             CREATE TABLE softprobe.score_configs (tenant_id VARCHAR, id VARCHAR);
-             INSERT INTO softprobe.traces VALUES
+             CREATE SCHEMA IF NOT EXISTS softprobe.main;
+             CREATE TABLE softprobe.main.traces (tenant_id VARCHAR, id VARCHAR);
+             CREATE TABLE softprobe.main.logs (tenant_id VARCHAR, id VARCHAR);
+             CREATE TABLE softprobe.main.scores (tenant_id VARCHAR, id VARCHAR);
+             CREATE TABLE softprobe.main.score_configs (tenant_id VARCHAR, id VARCHAR);
+             INSERT INTO softprobe.main.traces VALUES
                ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
-             INSERT INTO softprobe.logs VALUES
+             INSERT INTO softprobe.main.logs VALUES
                ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
-             INSERT INTO softprobe.scores VALUES
+             INSERT INTO softprobe.main.scores VALUES
                ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
-             INSERT INTO softprobe.score_configs VALUES
+             INSERT INTO softprobe.main.score_configs VALUES
                ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');",
         )
         .expect("seed prepared catalog");
