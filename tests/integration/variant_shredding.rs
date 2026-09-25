@@ -339,7 +339,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
             {capture} AS capture_id \
          FROM traces \
          WHERE session_id = '{sess}' AND span_id = 'vk-span-1' \
-           AND make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS",
+           AND timestamp >= '1970-01-01'::TIMESTAMP_NS AND timestamp <= '2100-01-01'::TIMESTAMP_NS",
         obs = prefer_attr_varchar(
             Some("observation_type"),
             "attributes",

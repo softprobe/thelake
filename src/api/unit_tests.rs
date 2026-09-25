@@ -410,9 +410,7 @@ fn unit_telemetry_details_compiles_correlated_signal_queries() {
     assert!(compiled.logs.contains("FROM logs"));
     assert!(compiled.spans.contains("session_id = 'sess_abc'"));
     assert!(compiled.logs.contains("session_id = 'sess_abc'"));
-    assert!(compiled
-        .spans
-        .contains("make_timestamp_ns(epoch_ns(timestamp))"));
+    assert!(compiled.spans.contains("timestamp"));
     assert!(!compiled.spans.contains("record_date"));
 }
 

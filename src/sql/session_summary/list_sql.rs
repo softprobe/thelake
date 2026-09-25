@@ -306,8 +306,7 @@ mod tests {
     #[test]
     fn duckdb_helpers_still_available_for_lake_path() {
         // Sanity: lake cursor helpers remain TIMESTAMP_NS for DuckDB.
-        use crate::sql::{timestamp_ns_column, timestamp_ns_literal};
-        let _ = timestamp_ns_column("start_time");
+        use crate::sql::timestamp_ns_literal;
         let _ = timestamp_ns_literal(&Utc::now());
     }
 }

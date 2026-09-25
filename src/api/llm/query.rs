@@ -1360,12 +1360,14 @@ mod tests {
         ));
         let sql = compile_session_search_sql(&request, 50).expect("sql");
         let group_by = sql.find("GROUP BY session_id").expect("group by");
-        let cursor_at = sql
-            .rfind("make_timestamp_ns(epoch_ns(start_time)) <")
-            .expect("cursor predicate");
+        let cursor_at = sql.rfind("start_time <").expect("cursor predicate");
         assert!(
             cursor_at > group_by,
             "cursor predicate must sit after the aggregation, got: {sql}"
+        );
+        assert!(
+            !sql.contains("make_timestamp_ns(epoch_ns(start_time))"),
+            "cursor must not wrap start_time: {sql}"
         );
     }
 
@@ -1596,7 +1598,7 @@ mod tests {
             cursor: None,
         };
         let sql = compile_observation_search_sql(&request).expect("sql");
-        assert!(sql.contains("make_timestamp_ns(epoch_ns(timestamp)) >="));
+        assert!(sql.contains("timestamp >="));
         assert!(sql.contains("LIMIT 201"));
         assert!(sql.contains("gpt-4o''; DROP TABLE traces; --"));
         assert!(sql.contains(&format!(
@@ -1690,7 +1692,7 @@ mod tests {
         assert_eq!(decoded.t, ts);
         assert!(decode_cursor("%%%not-base64%%%").is_err());
         let predicate = cursor_predicate(&encoded, "timestamp", "span_id").unwrap();
-        assert!(predicate.contains("make_timestamp_ns(epoch_ns(timestamp)) <"));
+        assert!(predicate.contains("timestamp <"));
         assert!(predicate.contains("span_id <"));
     }
 
@@ -1705,10 +1707,15 @@ mod tests {
         let sql = compile_scores_for_trace_sql("trace-1", from, to).expect("trace scores sql");
         assert!(sql.contains("trace_id = 'trace-1'"));
         assert!(sql.contains("span_id IN (SELECT"));
-        assert!(sql.contains("make_timestamp_ns(epoch_ns(timestamp))"));
+        assert!(sql.contains("TIMESTAMPTZ '"), "scores outer clock: {sql}");
+        assert!(
+            sql.contains("::TIMESTAMP_NS"),
+            "traces subquery clock: {sql}"
+        );
+        assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
         assert!(!sql.contains("record_date"));
-        assert!(sql.contains("make_timestamp_ns(epoch_ns(timestamp)) >="));
-        assert!(sql.contains("make_timestamp_ns(epoch_ns(timestamp)) <="));
+        assert!(sql.contains("timestamp >="));
+        assert!(sql.contains("timestamp <="));
         assert!(compile_scores_for_trace_sql("trace-1", to, from).is_err());
     }
 
@@ -1724,6 +1731,9 @@ mod tests {
         assert!(sql.contains("session_id = 'sess-1'"));
         assert!(sql.contains("trace_id IN (SELECT"));
         assert!(sql.contains("span_id IN (SELECT"));
+        assert!(sql.contains("TIMESTAMPTZ '"), "scores outer: {sql}");
+        assert!(sql.contains("::TIMESTAMP_NS"), "traces subquery: {sql}");
+        assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
 
         assert!(compile_scores_for_session_sql("sess-1", to, from).is_err());
     }
@@ -1958,7 +1968,7 @@ mod tests {
         let sql = compile_session_observations_sql("sess-1", from, to, 10, None).unwrap();
         assert_sql_has_otlp_time_predicates(&sql);
         assert!(
-            sql.contains("make_timestamp_ns(epoch_ns(timestamp))") && !sql.contains("record_date"),
+            sql.contains("timestamp") && !sql.contains("record_date"),
             "{sql}"
         );
         assert!(!sql.contains("2026-09-09"), "{sql}");
@@ -2096,18 +2106,12 @@ mod tests {
         // Nested scores: outer scores scan AND traces subquery each need day bounds.
         let trace_scores = compile_scores_for_trace_sql("tr", from, to).unwrap();
         assert!(
-            trace_scores
-                .matches("make_timestamp_ns(epoch_ns(timestamp))")
-                .count()
-                >= 2,
+            trace_scores.matches("timestamp").count() >= 2,
             "scores-for-trace needs outer + subquery day bounds: {trace_scores}"
         );
         let session_scores = compile_scores_for_session_sql("s", from, to).unwrap();
         assert!(
-            session_scores
-                .matches("make_timestamp_ns(epoch_ns(timestamp))")
-                .count()
-                >= 2,
+            session_scores.matches("timestamp").count() >= 2,
             "scores-for-session needs outer + subquery day bounds: {session_scores}"
         );
     }

@@ -492,7 +492,7 @@ pub fn compile_scores_for_span_sql(
     let window = QueryWindow::try_new(from, to)?;
     let sid = sql_string_literal(span_id);
     Ok(window
-        .bind_scan("", |bound| {
+        .bind_scan_timestamptz("", |bound| {
             format!(
                 "SELECT {cols} FROM scores WHERE span_id = {sid} AND {bound} ORDER BY timestamp DESC, score_id DESC",
                 cols = score_columns(),
@@ -509,12 +509,12 @@ pub fn compile_scores_for_trace_sql(
     let window = QueryWindow::try_new(from, to)?;
     let tid = sql_string_literal(trace_id);
     Ok(window
-        .bind_scan("", |bound| {
+        .bind_scan_ns_and_tz("", |ns_bound, tz_bound| {
             let identity = format!(
-                "(trace_id = {tid} OR span_id IN (SELECT span_id FROM traces WHERE trace_id = {tid} AND {bound}))"
+                "(trace_id = {tid} OR span_id IN (SELECT span_id FROM traces WHERE trace_id = {tid} AND {ns_bound}))"
             );
             format!(
-                "SELECT {cols} FROM scores WHERE {identity} AND {bound} ORDER BY timestamp DESC, score_id DESC",
+                "SELECT {cols} FROM scores WHERE {identity} AND {tz_bound} ORDER BY timestamp DESC, score_id DESC",
                 cols = score_columns(),
             )
         })
@@ -529,14 +529,14 @@ pub fn compile_scores_for_session_sql(
     let window = QueryWindow::try_new(from, to)?;
     let sid = sql_string_literal(session_id);
     Ok(window
-        .bind_scan("", |bound| {
+        .bind_scan_ns_and_tz("", |ns_bound, tz_bound| {
             let identity = format!(
                 "(session_id = {sid} \
-         OR trace_id IN (SELECT DISTINCT trace_id FROM traces WHERE session_id = {sid} AND {bound}) \
-         OR span_id IN (SELECT span_id FROM traces WHERE session_id = {sid} AND {bound}))"
+         OR trace_id IN (SELECT DISTINCT trace_id FROM traces WHERE session_id = {sid} AND {ns_bound}) \
+         OR span_id IN (SELECT span_id FROM traces WHERE session_id = {sid} AND {ns_bound}))"
             );
             format!(
-                "SELECT {cols} FROM scores WHERE {identity} AND {bound} ORDER BY timestamp DESC, score_id DESC",
+                "SELECT {cols} FROM scores WHERE {identity} AND {tz_bound} ORDER BY timestamp DESC, score_id DESC",
                 cols = score_columns(),
             )
         })

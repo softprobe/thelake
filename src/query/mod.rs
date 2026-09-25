@@ -353,8 +353,8 @@ impl QueryEngine {
 
 fn bounded_timestamp_predicates() -> Vec<String> {
     vec![
-        "make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS".to_string(),
-        "make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS".to_string(),
+        "timestamp >= '1970-01-01'::TIMESTAMP_NS".to_string(),
+        "timestamp <= '2100-01-01'::TIMESTAMP_NS".to_string(),
     ]
 }
 

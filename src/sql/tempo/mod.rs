@@ -80,7 +80,7 @@ fn resolve_tempo_scan_window(
 
 /// Build the bounded raw trace scan. Protocol adapters never construct SQL.
 ///
-/// Emits `make_timestamp_ns(epoch_ns(timestamp))` lower/upper via [`QueryWindow`]
+/// Emits `timestamp` lower/upper via [`QueryWindow`]
 /// (exclusive end → inclusive). Omitted bounds get a finite default lookback
 /// so every lake scan still has a QueryWindow; never an open-ended scan.
 pub fn trace_scan_sql(
@@ -478,7 +478,7 @@ mod tests {
         assert_sql_has_otlp_time_predicates(&sql);
         assert!(!sql.contains("record_date"));
         let id = sql.find("trace_id = 'abc'").unwrap();
-        let ts = sql.find("make_timestamp_ns(epoch_ns(timestamp))").unwrap();
+        let ts = sql.find("timestamp >=").unwrap();
         assert!(id < ts, "identity before timestamp: {sql}");
     }
 

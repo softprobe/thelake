@@ -29,15 +29,23 @@ pub(crate) fn push_otlp_ns_window_predicates(
 }
 
 /// Assert SQL embeds required OTLP timestamp bounds (no day columns).
+///
+/// Product bounds must be **bare** `timestamp >=` / `<=`. The
+/// `make_timestamp_ns(epoch_ns(timestamp))` wrap disables DuckLake day prune
+/// (greenfield EXPLAIN in `one_clock_prune`: wrap opens more than one day file).
 #[cfg(test)]
 pub(crate) fn assert_sql_has_otlp_time_predicates(sql: &str) {
     assert!(
-        sql.contains("make_timestamp_ns(epoch_ns(timestamp)) >=") || sql.contains("timestamp >="),
+        sql.contains("timestamp >="),
         "missing event-time lower bound: {sql}"
     );
     assert!(
-        sql.contains("make_timestamp_ns(epoch_ns(timestamp)) <=") || sql.contains("timestamp <="),
+        sql.contains("timestamp <="),
         "missing event-time upper bound: {sql}"
+    );
+    assert!(
+        !sql.contains("make_timestamp_ns(epoch_ns(timestamp))"),
+        "wrapped timestamp bound breaks day prune: {sql}"
     );
     for bad in ["record_date", "event_date", "window_ts"] {
         assert!(!sql.contains(bad), "forbidden time column {bad}: {sql}");

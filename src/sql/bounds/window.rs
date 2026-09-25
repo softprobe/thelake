@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 
-use crate::sql::literal::{timestamp_ns_column, timestamp_ns_literal};
+use crate::sql::literal::{timestamp_ns_literal, timestamptz_literal};
 
 /// Finite event-time range. Sole lake time window type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,11 +35,17 @@ impl QueryWindow {
         Ok(Self { from, to })
     }
 
-    /// Event-time predicate fragment: `{alias}timestamp` lower/upper only.
+    /// Event-time predicate for **TIMESTAMP_NS** tables (`traces` / `logs`).
     ///
     /// `alias` is a column prefix such as `"c."` or `""`.
+    ///
+    /// **Must stay bare `timestamp` comparisons.** Wrapping in
+    /// `make_timestamp_ns(epoch_ns(...))` disables DuckLake year/month/day
+    /// partition prune (greenfield EXPLAIN in `one_clock_prune`: bare → 1 file,
+    /// wrap → more than one day file).
+    /// See `docs/fixtures/one-clock-prune-explain.md`.
     pub fn timestamp_bound_sql(&self, alias: &str) -> String {
-        let col = timestamp_ns_column(&format!("{alias}timestamp"));
+        let col = format!("{alias}timestamp");
         format!(
             "{col} >= {} AND {col} <= {}",
             timestamp_ns_literal(&self.from),
@@ -47,11 +53,51 @@ impl QueryWindow {
         )
     }
 
-    /// Assemble SQL that must embed the window's `timestamp` bound fragment.
+    /// Event-time predicate for **TIMESTAMPTZ** tables (`scores`).
+    ///
+    /// Same bare-column rule as [`Self::timestamp_bound_sql`] — do not wrap.
+    /// Scores use the microsecond/TIMESTAMPTZ family (`storage::schema::tables`).
+    pub fn timestamptz_bound_sql(&self, alias: &str) -> String {
+        let col = format!("{alias}timestamp");
+        format!(
+            "{col} >= {} AND {col} <= {}",
+            timestamptz_literal(&self.from),
+            timestamptz_literal(&self.to)
+        )
+    }
+
+    /// Assemble SQL that must embed the TIMESTAMP_NS window bound (traces/logs).
     pub fn bind_scan(self, alias: &str, assemble: impl FnOnce(&str) -> String) -> BoundLakeSql {
         let bound = self.timestamp_bound_sql(alias);
         let sql = assemble(&bound);
         assert_bound_kept(&sql, &bound);
+        BoundLakeSql { sql }
+    }
+
+    /// Assemble SQL over **scores** only (TIMESTAMPTZ clock).
+    pub fn bind_scan_timestamptz(
+        self,
+        alias: &str,
+        assemble: impl FnOnce(&str) -> String,
+    ) -> BoundLakeSql {
+        let bound = self.timestamptz_bound_sql(alias);
+        let sql = assemble(&bound);
+        assert_bound_kept(&sql, &bound);
+        BoundLakeSql { sql }
+    }
+
+    /// Assemble SQL that touches both TIMESTAMP_NS (`traces`/`logs`) and
+    /// TIMESTAMPTZ (`scores`) fact clocks — each gets a matching bare bound.
+    pub fn bind_scan_ns_and_tz(
+        self,
+        alias: &str,
+        assemble: impl FnOnce(/* ns */ &str, /* tz */ &str) -> String,
+    ) -> BoundLakeSql {
+        let ns = self.timestamp_bound_sql(alias);
+        let tz = self.timestamptz_bound_sql(alias);
+        let sql = assemble(&ns, &tz);
+        assert_bound_kept(&sql, &ns);
+        assert_bound_kept(&sql, &tz);
         BoundLakeSql { sql }
     }
 
@@ -136,7 +182,11 @@ mod tests {
                 format!("SELECT 1 FROM t c WHERE c.id = 1 AND {bound}")
             })
             .into_sql();
-        assert!(sql.contains("make_timestamp_ns(epoch_ns(c.timestamp))"));
+        assert!(sql.contains("c.timestamp >="));
+        assert!(
+            !sql.contains("make_timestamp_ns(epoch_ns("),
+            "wrapped timestamp bounds break day prune"
+        );
         assert!(!sql.contains("record_date"));
         assert!(!sql.contains("window_ts"));
     }
@@ -145,6 +195,30 @@ mod tests {
     #[should_panic(expected = "dropped timestamp bound")]
     fn bind_scan_panics_if_bound_dropped() {
         let _ = sample().bind_scan("", |_bound| "SELECT 1 FROM traces".into());
+    }
+
+    #[test]
+    fn bind_scan_timestamptz_uses_tz_literals() {
+        let sql = sample()
+            .bind_scan_timestamptz("", |bound| format!("SELECT 1 FROM scores WHERE {bound}"))
+            .into_sql();
+        assert!(sql.contains("TIMESTAMPTZ '"));
+        assert!(!sql.contains("::TIMESTAMP_NS"));
+        assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
+    }
+
+    #[test]
+    fn bind_scan_ns_and_tz_embeds_both_clocks() {
+        let sql = sample()
+            .bind_scan_ns_and_tz("", |ns, tz| {
+                format!(
+                    "SELECT 1 FROM scores WHERE {tz} AND EXISTS (SELECT 1 FROM traces WHERE {ns})"
+                )
+            })
+            .into_sql();
+        assert!(sql.contains("::TIMESTAMP_NS"));
+        assert!(sql.contains("TIMESTAMPTZ '"));
+        assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
     }
 
     #[test]

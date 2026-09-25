@@ -821,13 +821,9 @@ mod tests {
         .unwrap();
         assert!(compiled.spans.contains("session_id = 'sess-1'"));
         assert!(compiled.logs.contains("session_id = 'sess-1'"));
-        assert!(compiled
-            .spans
-            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
+        assert!(compiled.spans.contains("timestamp"));
         assert!(!compiled.spans.contains("record_date"));
-        assert!(compiled
-            .logs
-            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
+        assert!(compiled.logs.contains("timestamp"));
         assert!(!compiled.logs.contains("record_date"));
     }
 
@@ -843,19 +839,11 @@ mod tests {
         };
         let compiled = compile_details_sql(&target, &range, 100).unwrap();
 
-        assert!(compiled
-            .spans
-            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
-        assert!(compiled
-            .logs
-            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
-        assert!(compiled
-            .spans
-            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
+        assert!(compiled.spans.contains("timestamp"));
+        assert!(compiled.logs.contains("timestamp"));
+        assert!(compiled.spans.contains("timestamp"));
         assert!(!compiled.spans.contains("record_date"));
-        assert!(compiled
-            .logs
-            .contains("make_timestamp_ns(epoch_ns(timestamp))"));
+        assert!(compiled.logs.contains("timestamp"));
         assert!(!compiled.logs.contains("record_date"));
         assert!(!compiled.logs.contains("TIMESTAMPTZ"));
     }
@@ -896,7 +884,7 @@ mod tests {
         assert_sql_has_otlp_time_predicates(&sql);
         assert!(sql.contains("app_id IS NOT NULL"));
         let id = sql.find("app_id IS NOT NULL").unwrap();
-        let ts = sql.find("make_timestamp_ns(epoch_ns(timestamp))").unwrap();
+        let ts = sql.find("timestamp >=").unwrap();
         assert!(id < ts, "identity before timestamp: {sql}");
     }
 
@@ -939,9 +927,7 @@ mod tests {
         .unwrap();
         assert_sql_has_otlp_time_predicates(&filtered);
         let id = filtered.find("session_id = 'sess-1'").unwrap();
-        let ts = filtered
-            .find("make_timestamp_ns(epoch_ns(timestamp))")
-            .unwrap();
+        let ts = filtered.find("timestamp >=").unwrap();
         assert!(id < ts, "search filter before timestamp: {filtered}");
 
         let details = compile_details_sql(
@@ -956,10 +942,7 @@ mod tests {
         assert_sql_has_otlp_time_predicates(&details.spans);
         assert_sql_has_otlp_time_predicates(&details.logs);
         let id = details.spans.find("session_id = ").unwrap();
-        let ts = details
-            .spans
-            .find("make_timestamp_ns(epoch_ns(timestamp))")
-            .unwrap();
+        let ts = details.spans.find("timestamp >=").unwrap();
         assert!(
             id < ts,
             "details identity before timestamp: {}",
