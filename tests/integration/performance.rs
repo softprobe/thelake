@@ -28,8 +28,8 @@ use crate::util::storage_config::load_test_config;
 // =============================================================================
 
 /// Wide one-clock bound so warm COUNT(*) queries satisfy D12 without day filters.
-const PERF_TS_BOUND: &str = "make_timestamp_ns(epoch_ns(timestamp)) >= '1970-01-01'::TIMESTAMP_NS \
-     AND make_timestamp_ns(epoch_ns(timestamp)) <= '2100-01-01'::TIMESTAMP_NS";
+const PERF_TS_BOUND: &str = "timestamp >= '1970-01-01'::TIMESTAMP_NS \
+     AND timestamp <= '2100-01-01'::TIMESTAMP_NS";
 
 fn load_perf_config() -> Config {
     if let Ok(config_file) = std::env::var("PERF_CONFIG_FILE") {

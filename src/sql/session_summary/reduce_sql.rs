@@ -291,7 +291,7 @@ mod tests {
         assert!(sql.contains("session_id IN"));
         assert!(!sql.contains("record_date"));
         let sid = sql.find("session_id IN").unwrap();
-        let ts = sql.find("make_timestamp_ns(epoch_ns(timestamp))").unwrap();
+        let ts = sql.find("timestamp >=").unwrap();
         assert!(sid < ts);
     }
 

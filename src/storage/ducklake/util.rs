@@ -118,6 +118,7 @@ fn ensure_timestamp_precision(
                 "table {qualified_table} cannot safely migrate {kind} timestamps: column '{column}' has unsupported type {dtype}"
             ));
         }
+        // DDL only — never reuse this expression in scan WHERE (breaks day prune).
         ddls.push(crate::sql::schema::alter_column_using_sql(
             qualified_table,
             column,

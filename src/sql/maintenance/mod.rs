@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::runtime_engine::quote_pg_ident;
-use crate::sql::literal::{sql_string_literal, timestamp_ns_column, timestamptz_literal};
+use crate::sql::literal::{sql_string_literal, timestamptz_literal};
 
 fn meta_schema(catalog_alias: &str) -> String {
     format!("__ducklake_metadata_{catalog_alias}")
@@ -115,11 +115,12 @@ fn partition_live_file_stats_sql_inner(
 /// `qualified_table` must be the full DuckLake product path
 /// (e.g. `softprobe.thelake.traces`), same contract as [`table_exists_probe_sql`].
 pub fn logical_table_row_count_sql(qualified_table: &str) -> String {
-    let ts = timestamp_ns_column("timestamp");
+    // Bare `timestamp` (not epoch_ns wrap) — wrap disables day prune; wide window
+    // still scans all days by design for TWCS backlog sizing.
     format!(
         "SELECT count(*)::BIGINT FROM {qualified_table} \
-         WHERE {ts} >= '1970-01-01'::TIMESTAMP_NS \
-           AND {ts} <= '2100-01-01'::TIMESTAMP_NS"
+         WHERE timestamp >= '1970-01-01'::TIMESTAMP_NS \
+           AND timestamp <= '2100-01-01'::TIMESTAMP_NS"
     )
 }
 
@@ -198,11 +199,10 @@ pub fn live_file_sizes_sql(catalog_alias: &str, table: &str) -> String {
 }
 
 pub fn table_exists_probe_sql(qualified_table: &str) -> String {
-    let ts = timestamp_ns_column("timestamp");
     format!(
         "SELECT 1 FROM {qualified_table} \
-         WHERE {ts} >= '1970-01-01'::TIMESTAMP_NS \
-           AND {ts} <= '2100-01-01'::TIMESTAMP_NS \
+         WHERE timestamp >= '1970-01-01'::TIMESTAMP_NS \
+           AND timestamp <= '2100-01-01'::TIMESTAMP_NS \
          LIMIT 0;"
     )
 }

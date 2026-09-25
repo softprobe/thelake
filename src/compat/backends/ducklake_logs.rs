@@ -1062,7 +1062,7 @@ mod tests {
         .expect("window");
         assert_sql_has_otlp_time_predicates(&sql);
         let id = sql.find("service_name").unwrap();
-        let ts = sql.find("make_timestamp_ns(epoch_ns(timestamp))").unwrap();
+        let ts = sql.find("timestamp >=").unwrap();
         assert!(id < ts, "matcher before timestamp: {sql}");
     }
 

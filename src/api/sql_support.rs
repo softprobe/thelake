@@ -27,11 +27,6 @@ pub(crate) fn timestamp_ns_literal_from_str(value: &str) -> String {
     crate::sql::literal::timestamp_ns_literal_from_str(value)
 }
 
-/// Compare a timestamp column to a `TIMESTAMP_NS` literal.
-pub(crate) fn timestamp_ns_column(column: &str) -> String {
-    crate::sql::literal::timestamp_ns_column(column)
-}
-
 pub(crate) fn encode_cursor(timestamp: DateTime<Utc>, id: &str) -> String {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     let payload = PageCursor {
@@ -55,9 +50,9 @@ pub(crate) fn cursor_predicate(
     id_col: &str,
 ) -> Result<String, String> {
     let decoded = decode_cursor(cursor)?;
-    let ts_col = timestamp_ns_column(timestamp_col);
+    // Bare column — wrapping in make_timestamp_ns(epoch_ns(...)) breaks day prune.
     Ok(format!(
-        "({ts_col} < {ts} OR ({ts_col} = {ts} AND {id_col} < {id}))",
+        "({timestamp_col} < {ts} OR ({timestamp_col} = {ts} AND {id_col} < {id}))",
         ts = timestamp_ns_literal(&decoded.t),
         id = sql_string_literal(&decoded.id),
     ))

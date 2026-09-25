@@ -184,6 +184,42 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
         !flatten_plan(&narrow_plan).contains("day=11"),
         "narrow plan opened day B:\n{narrow_plan}"
     );
+
+    // Product QueryWindow shape must prune identically to bare (design law).
+    let product = softprobe_runtime::sql::QueryWindow::try_new(
+        Utc.with_ymd_and_hms(2026, 9, 10, 0, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2026, 9, 10, 23, 59, 59).unwrap(),
+    )
+    .unwrap()
+    .bind_scan("", |bound| {
+        format!("SELECT trace_id FROM traces WHERE {bound}")
+    })
+    .into_sql();
+    assert!(
+        !product.contains("make_timestamp_ns(epoch_ns("),
+        "QueryWindow must not wrap timestamp: {product}"
+    );
+    let product_plan = explain_plan(&conn, &product);
+    assert_eq!(
+        files_read_count(&product_plan),
+        Some(1),
+        "product QueryWindow bound must day-prune:\n{product_plan}"
+    );
+    assert!(
+        !flatten_plan(&product_plan).contains("day=11"),
+        "product bound opened day B:\n{product_plan}"
+    );
+
+    // Locked anti-pattern: epoch_ns wrap disables prune (prod-proven).
+    let wrapped = "SELECT trace_id FROM traces \
+         WHERE make_timestamp_ns(epoch_ns(timestamp)) >= '2026-09-10'::TIMESTAMP_NS \
+           AND make_timestamp_ns(epoch_ns(timestamp)) < '2026-09-11'::TIMESTAMP_NS";
+    let wrapped_plan = explain_plan(&conn, wrapped);
+    let wrapped_files = files_read_count(&wrapped_plan).expect("wrapped files");
+    assert!(
+        wrapped_files > 1,
+        "expected wrapped bound to fail day prune (files={wrapped_files}):\n{wrapped_plan}"
+    );
 }
 
 #[tokio::test]

@@ -22,9 +22,7 @@ pub mod writer;
 
 pub(crate) use bounds::{ensure_fact_scan_bound, execute_batch_checked, prepare_checked};
 pub use bounds::{query_window_from_exclusive_ns, BoundLakeSql, QueryWindow};
-pub use literal::{
-    sql_string_literal, timestamp_ns_column, timestamp_ns_literal, timestamptz_literal,
-};
+pub use literal::{sql_string_literal, timestamp_ns_literal, timestamptz_literal};
 
 /// UTC calendar-day expression for a `TIMESTAMPTZ` index timestamp.
 /// DuckDB otherwise applies `date_trunc` in the session timezone.
@@ -202,7 +200,7 @@ mod locality_tests {
     fn representative_trace_log_recipes_are_gate_checked() {
         let bounded_trace = crate::sql::telemetry::details_spans_sql(
             "*",
-            "make_timestamp_ns(epoch_ns(timestamp)) >= '2026-09-10'::TIMESTAMP_NS",
+            "timestamp >= '2026-09-10'::TIMESTAMP_NS",
             10,
         );
         let bounded_log = crate::sql::logs::scan_sql(

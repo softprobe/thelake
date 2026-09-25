@@ -72,3 +72,5 @@ mooncake/
 .tmp/
 playwright-report/
 test-results/
+
+.tools/
