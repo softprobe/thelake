@@ -135,7 +135,7 @@ mod tests {
         validate_shared_workspace_schema(&connection, &scope).expect("ownership columns");
 
         connection
-            .execute_batch("ALTER TABLE softprobe.logs DROP COLUMN tenant_id;")
+            .execute_batch("ALTER TABLE softprobe.main.logs DROP COLUMN tenant_id;")
             .expect("drop ownership column");
         let error = validate_shared_workspace_schema(&connection, &scope)
             .expect_err("missing ownership column must fail closed");
@@ -190,17 +190,18 @@ mod tests {
         connection
             .execute_batch(
                 "ATTACH ':memory:' AS softprobe;
-                 CREATE TABLE softprobe.traces (tenant_id VARCHAR, id VARCHAR);
-                 CREATE TABLE softprobe.logs (tenant_id VARCHAR, id VARCHAR);
-                 CREATE TABLE softprobe.scores (tenant_id VARCHAR, id VARCHAR);
-                 CREATE TABLE softprobe.score_configs (tenant_id VARCHAR, id VARCHAR);
-                 INSERT INTO softprobe.traces VALUES
+                 CREATE SCHEMA IF NOT EXISTS softprobe.main;
+                 CREATE TABLE softprobe.main.traces (tenant_id VARCHAR, id VARCHAR);
+                 CREATE TABLE softprobe.main.logs (tenant_id VARCHAR, id VARCHAR);
+                 CREATE TABLE softprobe.main.scores (tenant_id VARCHAR, id VARCHAR);
+                 CREATE TABLE softprobe.main.score_configs (tenant_id VARCHAR, id VARCHAR);
+                 INSERT INTO softprobe.main.traces VALUES
                    ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
-                 INSERT INTO softprobe.logs VALUES
+                 INSERT INTO softprobe.main.logs VALUES
                    ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
-                 INSERT INTO softprobe.scores VALUES
+                 INSERT INTO softprobe.main.scores VALUES
                    ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
-                 INSERT INTO softprobe.score_configs VALUES
+                 INSERT INTO softprobe.main.score_configs VALUES
                    ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');",
             )
             .expect("seed fixture tables");

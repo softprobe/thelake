@@ -286,10 +286,6 @@ fn main_namespace_branching_stays_inside_storage_ducklake() {
         {
             return;
         }
-        // physical_scope owns is_default_duckdb_namespace implementation.
-        if path.ends_with("physical_scope.rs") {
-            return;
-        }
         for (idx, line) in contents.lines().enumerate() {
             if line.contains("metadata_schema == \"main\"")
                 || line.contains("metadata_schema != \"main\"")
@@ -690,6 +686,52 @@ fn visit_rs(dir: &std::path::Path, f: &mut dyn FnMut(&std::path::Path, &str)) {
             }
         }
     }
+}
+
+#[test]
+fn catalog_prefix_must_not_elide_main() {
+    let physical = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/storage/ducklake/physical_scope.rs"
+    ));
+    let impl_block = physical_scope_impl_block(physical).expect("PhysicalScope impl");
+    let prefix_fn = impl_block
+        .split("fn catalog_prefix(")
+        .nth(1)
+        .and_then(|rest| {
+            let brace = rest.find('{')?;
+            let mut depth = 0usize;
+            for (i, ch) in rest[brace..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(&rest[..=brace + i]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        })
+        .expect("catalog_prefix body");
+    assert!(
+        !prefix_fn.contains("is_default_duckdb_namespace")
+            && !prefix_fn.contains("== \"main\"")
+            && !prefix_fn.contains("!= \"main\""),
+        "catalog_prefix must not branch on main:\n{prefix_fn}"
+    );
+    assert!(
+        prefix_fn.contains("catalog_alias") && prefix_fn.contains("metadata_schema"),
+        "catalog_prefix must always compose catalog.schema"
+    );
+    // Unit test pins three-part main (source of truth for behavior).
+    assert!(
+        physical.contains("softprobe.main.traces")
+            && physical.contains("catalog_prefix_always_includes_schema"),
+        "physical_scope unit tests must lock softprobe.main.traces"
+    );
 }
 
 /// First `impl PhysicalScope { ... }` block (brace-balanced).

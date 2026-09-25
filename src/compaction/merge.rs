@@ -575,5 +575,16 @@ mod tests {
             !prod.contains("load_inlined_fragment_stats(conn, scope.attach_alias()"),
             "must not pass attach_alias alone into the logical-row probe"
         );
+        let sql = crate::sql::maintenance::logical_table_row_count_sql("softprobe.main.traces");
+        assert!(
+            sql.contains("FROM softprobe.main.traces"),
+            "product probe SQL must keep catalog.schema.table: {sql}"
+        );
+        assert!(
+            !sql.contains("FROM softprobe.traces ")
+                && !sql.contains("FROM softprobe.traces\n")
+                && !sql.ends_with("FROM softprobe.traces"),
+            "must not elide schema for main in product probes: {sql}"
+        );
     }
 }

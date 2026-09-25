@@ -47,39 +47,19 @@ impl DuckLakeWriter {
     ) -> Result<Vec<String>> {
         let scope = self.physical_scope().clone();
         let ddls = self.with_attached_conn(|conn| {
-            // Prefer catalog.schema when metadata lives outside `main`; fall back to catalog-only
-            // (matches write-path table name candidates when ATTACH uses METADATA_SCHEMA).
-            let prefixes = {
-                if scope.is_default_duckdb_namespace() {
-                    vec![scope.attach_alias().to_owned()]
-                } else {
-                    vec![
-                        format!(
-                            "{}.{}",
-                            quote_duckdb_ident(scope.attach_alias()),
-                            quote_duckdb_ident(scope.pg_namespace())
-                        ),
-                        scope.attach_alias().to_owned(),
-                    ]
-                }
-            };
-            let mut last_err: Option<anyhow::Error> = None;
-            for prefix in prefixes {
-                let ddls = business_table_create_ddls(&prefix, spec)
-                    .map_err(|err| anyhow!("business table promotion validation failed: {err}"))?;
-                match ddls
-                    .iter()
-                    .try_for_each(|ddl| conn.execute_batch(ddl).map(|_| ()))
-                {
-                    Ok(()) => return Ok(ddls),
-                    Err(err) => {
-                        last_err = Some(anyhow!(
-                            "business table promotion failed with prefix {prefix}: {err}"
-                        ));
-                    }
-                }
+            let prefix = format!(
+                "{}.{}",
+                quote_duckdb_ident(scope.attach_alias()),
+                quote_duckdb_ident(scope.pg_namespace())
+            );
+            let ddls = business_table_create_ddls(&prefix, spec)
+                .map_err(|err| anyhow!("business table promotion validation failed: {err}"))?;
+            for ddl in &ddls {
+                conn.execute_batch(ddl).map_err(|err| {
+                    anyhow!("business table promotion failed with prefix {prefix}: {err}")
+                })?;
             }
-            Err(last_err.unwrap_or_else(|| anyhow!("business table promotion failed")))
+            Ok(ddls)
         })?;
         Ok(ddls)
     }

@@ -251,16 +251,9 @@ impl PhysicalScope {
         &self.metadata_schema
     }
 
-    pub(crate) fn is_default_duckdb_namespace(&self) -> bool {
-        self.metadata_schema == "main"
-    }
-
+    /// Always `catalog.schema` — never elide `main` (avoids 2-part vs 3-part footguns).
     pub(crate) fn catalog_prefix(&self) -> String {
-        if self.is_default_duckdb_namespace() {
-            self.catalog_alias.clone()
-        } else {
-            format!("{}.{}", self.catalog_alias, self.metadata_schema)
-        }
+        format!("{}.{}", self.catalog_alias, self.metadata_schema)
     }
 
     pub(crate) fn qualified_table(&self, bare_table: &str) -> String {
@@ -474,9 +467,10 @@ mod tests {
     }
 
     #[test]
-    fn catalog_prefix_hides_main_namespace() {
+    fn catalog_prefix_always_includes_schema() {
         let main = PhysicalScope::new("dsn", "/data/", "softprobe", "main");
-        assert_eq!(main.catalog_prefix(), "softprobe");
+        assert_eq!(main.catalog_prefix(), "softprobe.main");
+        assert_eq!(main.qualified_table("traces"), "softprobe.main.traces");
         let named = PhysicalScope::new("dsn", "/data/", "softprobe", "tenant_a");
         assert_eq!(named.catalog_prefix(), "softprobe.tenant_a");
         assert_eq!(named.qualified_table("traces"), "softprobe.tenant_a.traces");

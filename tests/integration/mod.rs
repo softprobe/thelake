@@ -20,6 +20,8 @@ pub mod promotion_telemetry_columns;
 #[cfg(feature = "integration-e2e")]
 pub mod promotion_telemetry_ingest;
 #[cfg(feature = "integration-e2e")]
+pub mod qualification_contract;
+#[cfg(feature = "integration-e2e")]
 pub mod tenant_ducklake_registry;
 #[cfg(feature = "integration-e2e")]
 pub mod tenant_otlp_isolation;

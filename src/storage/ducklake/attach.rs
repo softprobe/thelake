@@ -298,11 +298,9 @@ pub(crate) fn ducklake_attach_options_for_scope(
             "false"
         }
     ));
-    if !scope.is_default_duckdb_namespace() {
-        let schema = escape_sql_literal(scope.pg_namespace());
-        options.push(format!("METADATA_SCHEMA '{}'", schema));
-        options.push(format!("META_SCHEMA '{}'", schema));
-    }
+    let schema = escape_sql_literal(scope.pg_namespace());
+    options.push(format!("METADATA_SCHEMA '{}'", schema));
+    options.push(format!("META_SCHEMA '{}'", schema));
     if let Some(limit) = data_inlining_row_limit {
         options.push(format!("DATA_INLINING_ROW_LIMIT {}", limit));
     }
@@ -395,23 +393,17 @@ pub(crate) fn open_attached_connection(
         .expect("attach");
     let alias = scope.attach_alias();
     let schema = scope.pg_namespace();
-    if !scope.is_default_duckdb_namespace() {
-        connection
-            .execute_batch(&format!("CREATE SCHEMA IF NOT EXISTS {alias}.{schema};"))
-            .expect("create schema");
-        connection
-            .execute_batch(&format!("USE {alias}.{schema};"))
-            .expect("use schema");
-    } else {
-        connection
-            .execute_batch(&format!("USE {alias};"))
-            .expect("use catalog");
-    }
+    connection
+        .execute_batch(&format!("CREATE SCHEMA IF NOT EXISTS {alias}.{schema};"))
+        .expect("create schema");
+    connection
+        .execute_batch(&format!("USE {alias}.{schema};"))
+        .expect("use schema");
     connection
 }
 
 /// Scoping clause for `CALL <catalog>.set_option(...)` matching a qualified table name.
-/// Two-part `catalog.table` → `table_name` only; three-part → `schema` + `table_name`.
+/// Three-part `catalog.schema.table` → `schema` + `table_name`; legacy two-part → `table_name` only.
 pub(crate) fn ducklake_set_option_scope_for_qualified(qualified_table: &str) -> String {
     let parts: Vec<&str> = qualified_table.split('.').collect();
     match parts.len() {
@@ -441,12 +433,17 @@ mod tests {
     #[test]
     fn set_option_scope_matches_qualified_table_shape() {
         assert_eq!(
-            ducklake_set_option_scope_for_qualified("softprobe.traces"),
-            "table_name => 'traces'"
+            ducklake_set_option_scope_for_qualified("softprobe.main.traces"),
+            "schema => 'main', table_name => 'traces'"
         );
         assert_eq!(
             ducklake_set_option_scope_for_qualified("softprobe.tenant_a.traces"),
             "schema => 'tenant_a', table_name => 'traces'"
+        );
+        // Legacy two-part still maps to table_name-only (should not appear for product paths).
+        assert_eq!(
+            ducklake_set_option_scope_for_qualified("softprobe.traces"),
+            "table_name => 'traces'"
         );
     }
 
