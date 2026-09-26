@@ -56,6 +56,8 @@ pub static PROCESS_CPU_MILLI: AtomicU64 = AtomicU64::new(0); // cpu% * 10 (ratio
 pub static PROCESS_THREADS: AtomicU64 = AtomicU64::new(0);
 pub static PROCESS_DISK_READ: AtomicU64 = AtomicU64::new(0);
 pub static PROCESS_DISK_WRITE: AtomicU64 = AtomicU64::new(0);
+/// Shared async-job runner wake period (min across Job::interval), milliseconds.
+pub static ASYNC_JOBS_WAKE_MS: AtomicU64 = AtomicU64::new(0);
 
 pub fn set_table_inventory(tenant: &str, table: &str, inv: TableInventory) {
     TABLE_INV.insert(

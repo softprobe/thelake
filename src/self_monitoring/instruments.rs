@@ -46,6 +46,37 @@ pub struct Instruments {
     pub session_summary_sessions_reduced: Counter<u64>,
     pub session_summary_reducer_lag_seconds: Histogram<u64>,
     pub session_summary_dirty_depth: Gauge<u64>,
+    /// Wall time of one leased `Job::run` (maintenance, session_summary, …).
+    pub job_duration_ms: Histogram<f64>,
+    /// Wall time of one maintenance/TWCS sub-step (bounded `step` label).
+    pub maintenance_step_duration_ms: Histogram<f64>,
+    /// DuckLake ingest commit (coalesce flush or flush-through write) wall time.
+    pub ingest_commit_duration_ms: Histogram<f64>,
+    /// session_summary.reduce sub-step wall time (claim / aggregate / upsert / ack / total).
+    pub session_summary_reduce_duration_ms: Histogram<f64>,
+    /// session_summary_dirty UPSERT wall time (best-effort after traces commit).
+    pub session_summary_dirty_upsert_duration_ms: Histogram<f64>,
+}
+
+/// Bounded `step` values for [`record_maintenance_step`] (cardinality lock).
+pub mod maintenance_step {
+    pub const OPEN_ATTACH: &str = "open_attach";
+    pub const BACKLOG_PROBE: &str = "backlog_probe";
+    pub const PARTITION_STATS: &str = "partition_stats";
+    pub const TWCS_CLOSED: &str = "twcs_closed";
+    pub const TWCS_OPEN: &str = "twcs_open";
+    pub const EXPIRE_SNAPSHOTS: &str = "expire_snapshots";
+    pub const ORPHAN_CLEANUP: &str = "orphan_cleanup";
+    pub const PASS_TOTAL: &str = "pass_total";
+}
+
+/// Bounded `step` values for [`record_session_summary_reduce_step`].
+pub mod reduce_step {
+    pub const CLAIM: &str = "claim";
+    pub const AGGREGATE: &str = "aggregate";
+    pub const UPSERT: &str = "upsert";
+    pub const ACK: &str = "ack";
+    pub const TOTAL: &str = "total";
 }
 
 fn register_observables(meter: &Meter) {
@@ -201,6 +232,13 @@ fn register_observables(meter: &Meter) {
             );
         })
         .build();
+    let _ = meter
+        .u64_observable_gauge("thelake.async_jobs.wake_ms")
+        .with_description("Configured shared async-job runner wake period (min Job::interval)")
+        .with_callback(|observer| {
+            observer.observe(gauge_store::ASYNC_JOBS_WAKE_MS.load(Ordering::Relaxed), &[]);
+        })
+        .build();
 
     let _ = meter
         .u64_observable_counter("thelake.self_heal.rebuilds")
@@ -305,6 +343,31 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .u64_gauge("thelake.session_summary.dirty_depth")
             .with_description("Postgres count(*) of session_summary_dirty on claim")
             .build(),
+        job_duration_ms: meter
+            .f64_histogram("thelake.job.duration")
+            .with_description("Leased async job run wall time (one Job::run)")
+            .with_unit("ms")
+            .build(),
+        maintenance_step_duration_ms: meter
+            .f64_histogram("thelake.maintenance.step.duration")
+            .with_description("Maintenance/TWCS sub-step wall time (open_attach, backlog_probe, …)")
+            .with_unit("ms")
+            .build(),
+        ingest_commit_duration_ms: meter
+            .f64_histogram("thelake.ingest.commit.duration")
+            .with_description("DuckLake ingest commit wall time (coalesce or flush-through)")
+            .with_unit("ms")
+            .build(),
+        session_summary_reduce_duration_ms: meter
+            .f64_histogram("thelake.session_summary.reduce.duration")
+            .with_description("session_summary.reduce sub-step wall time")
+            .with_unit("ms")
+            .build(),
+        session_summary_dirty_upsert_duration_ms: meter
+            .f64_histogram("thelake.session_summary.dirty_upsert.duration")
+            .with_description("session_summary_dirty UPSERT wall time after traces commit")
+            .with_unit("ms")
+            .build(),
     }
 }
 
@@ -392,7 +455,13 @@ pub fn record_write(tenant: &str, signal: &str, app: Option<&str>, elapsed: Dura
 /// Record a completed DuckLake ingest commit (coalesced or flush-through).
 ///
 /// When coalesce is on, `rate(commits)` must stay well below `rate(requests)`.
-pub fn record_ingest_commit(tenant: &str, signal: &str, rows: u64, coalesced: bool) {
+pub fn record_ingest_commit(
+    tenant: &str,
+    signal: &str,
+    rows: u64,
+    coalesced: bool,
+    elapsed: Duration,
+) {
     let Some(i) = instruments() else { return };
     let path = if coalesced {
         "coalesce"
@@ -412,6 +481,8 @@ pub fn record_ingest_commit(tenant: &str, signal: &str, rows: u64, coalesced: bo
     if coalesced {
         i.ingest_coalesce_flushes.add(1, &a);
     }
+    i.ingest_commit_duration_ms
+        .record(elapsed.as_secs_f64() * 1000.0, &a);
 }
 
 pub fn record_query(tenant: &str, sql_kind: &str, elapsed: Duration) {
@@ -530,10 +601,46 @@ pub fn record_job_error(job: &str, scope: &str) {
         .add(1, &attrs(&[("job", job), ("scope", scope)]));
 }
 
-pub fn record_session_summary_dirty_upsert(tenant: &str) {
+/// Record configured shared-runner wake (min across jobs), for Grafana vs pass duration.
+pub fn set_async_jobs_wake_ms(wake_ms: u64) {
+    gauge_store::ASYNC_JOBS_WAKE_MS.store(wake_ms, Ordering::Relaxed);
+}
+
+/// Wall time for one leased `Job::run` (status: ok | error | panic).
+pub fn record_job_duration(job: &str, scope: &str, status: &str, elapsed: Duration) {
     let Some(i) = instruments() else { return };
-    i.session_summary_dirty_upserts
-        .add(1, &attrs(&[("tenant", tenant), ("op", "session_summary")]));
+    i.job_duration_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &attrs(&[
+            ("job", job),
+            ("scope", scope),
+            ("status", status),
+            ("op", "job"),
+        ]),
+    );
+}
+
+/// Wall time for one maintenance/TWCS sub-step. `step` must be a [`maintenance_step`] const.
+pub fn record_maintenance_step(scope: &str, step: &str, table: Option<&str>, elapsed: Duration) {
+    let Some(i) = instruments() else { return };
+    let table = table.unwrap_or("_");
+    i.maintenance_step_duration_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &attrs(&[
+            ("scope", scope),
+            ("step", step),
+            ("table", table),
+            ("op", "maintenance"),
+        ]),
+    );
+}
+
+pub fn record_session_summary_dirty_upsert(tenant: &str, elapsed: Duration) {
+    let Some(i) = instruments() else { return };
+    let a = attrs(&[("tenant", tenant), ("op", "session_summary")]);
+    i.session_summary_dirty_upserts.add(1, &a);
+    i.session_summary_dirty_upsert_duration_ms
+        .record(elapsed.as_secs_f64() * 1000.0, &a);
 }
 
 pub fn record_session_summary_dirty_upsert_error(tenant: &str) {
@@ -558,6 +665,19 @@ pub fn record_session_summary_reducer_lag(tenant: &str, lag_secs: u64) {
     let Some(i) = instruments() else { return };
     i.session_summary_reducer_lag_seconds
         .record(lag_secs, &attrs(&[("tenant", tenant)]));
+}
+
+/// Wall time for one session_summary.reduce sub-step. `step` must be a [`reduce_step`] const.
+pub fn record_session_summary_reduce_step(tenant: &str, step: &str, elapsed: Duration) {
+    let Some(i) = instruments() else { return };
+    i.session_summary_reduce_duration_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &attrs(&[
+            ("tenant", tenant),
+            ("step", step),
+            ("op", "session_summary"),
+        ]),
+    );
 }
 
 /// Refresh process CPU/RSS/IO snapshots for ObservableGauges (best-effort).

@@ -66,6 +66,7 @@ pub fn spawn_runner(
         jobs = jobs.len(),
         "async job runner starting"
     );
+    self_monitoring::set_async_jobs_wake_ms(wake.as_millis() as u64);
 
     let handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(wake);
@@ -144,9 +145,18 @@ pub fn spawn_runner(
 
                     // RAII: stop HB even if `job.run` panics.
                     let _hb_guard = HeartbeatStopGuard(Some(hb_stop_tx));
+                    let run_started = std::time::Instant::now();
                     let run_result = AssertUnwindSafe(job.run(&scope)).catch_unwind().await;
+                    let run_elapsed = run_started.elapsed();
                     drop(_hb_guard);
                     let _ = hb_task.await;
+
+                    let status = match &run_result {
+                        Ok(Ok(())) => "ok",
+                        Ok(Err(_)) => "error",
+                        Err(_) => "panic",
+                    };
+                    self_monitoring::record_job_duration(job.name(), &scope, status, run_elapsed);
 
                     match &run_result {
                         Ok(Ok(())) => {}

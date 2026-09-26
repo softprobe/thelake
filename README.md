@@ -229,7 +229,7 @@ PR CI (`make ci`, dev profile) does not build `dist/`.
 Local/emergency image push: `make build-release && make publish TAG=vX.Y.Z`
 (on Mac, `TARGET_PLATFORM=linux/amd64 make build-release` re-enters the same
 Make recipe in a linux/amd64 container). `publish` refuses incomplete `dist/`.
-Optional BuildKit registry cache (`…/splake:buildcache`) speeds base layers
+Optional BuildKit registry cache (`…/thelake:buildcache`) speeds base layers
 only — do not deploy `:buildcache` as a runtime image.
 
 ## Website

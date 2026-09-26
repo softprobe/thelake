@@ -98,9 +98,13 @@ impl SessionSummaryDirty {
         if hints.is_empty() {
             return;
         }
+        let started = std::time::Instant::now();
         match self.upsert_dirty(hints).await {
             Ok(()) => {
-                crate::self_monitoring::record_session_summary_dirty_upsert(&self.tenant_id);
+                crate::self_monitoring::record_session_summary_dirty_upsert(
+                    &self.tenant_id,
+                    started.elapsed(),
+                );
             }
             Err(err) => {
                 warn!(

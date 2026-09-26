@@ -131,7 +131,7 @@ GRAFANA_SYSTEM_COMPOSE_PROJECT ?= thelake-grafana-system
 GRAFANA_URL ?= http://127.0.0.1:3000
 GRAFANA_SYSTEM_TIMEOUT_SECS ?= 900
 
-AR_IMAGE ?= us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/splake
+AR_IMAGE ?= us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/thelake
 CACHE_REF ?= $(AR_IMAGE):buildcache
 FALLBACK_BUILDER_NAME ?= thelake-builder
 DIST_DIR ?= dist
@@ -226,7 +226,7 @@ _ensure-dist:
 	fi
 
 package: _ensure-dist
-	docker build --platform linux/amd64 -t softprobe/splake:local .
+	docker build --platform linux/amd64 -t softprobe/thelake:local .
 
 publish:
 	@set -euo pipefail; \

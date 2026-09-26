@@ -480,6 +480,7 @@ pub(crate) async fn reduce_tenant(
     max_sessions: u64,
     max_reduce_span_seconds: u64,
 ) -> Result<usize> {
+    let reduce_started = std::time::Instant::now();
     let workspace_scoped =
         config.ducklake.workspace_scope_mode == crate::workspace_scope::WorkspaceScopeMode::Shared;
     let depth = match if workspace_scoped {
@@ -499,12 +500,23 @@ pub(crate) async fn reduce_tenant(
     };
     crate::self_monitoring::set_session_summary_dirty_depth(tenant_id, depth.max(0) as u64);
 
+    let claim_started = std::time::Instant::now();
     let (claims, snapshot) = if workspace_scoped {
         claim_dirty_for_workspace(pool, metadata_schema, tenant_id, max_sessions).await?
     } else {
         claim_dirty(pool, metadata_schema, max_sessions).await?
     };
+    crate::self_monitoring::record_session_summary_reduce_step(
+        tenant_id,
+        crate::self_monitoring::reduce_step::CLAIM,
+        claim_started.elapsed(),
+    );
     if claims.is_empty() {
+        crate::self_monitoring::record_session_summary_reduce_step(
+            tenant_id,
+            crate::self_monitoring::reduce_step::TOTAL,
+            reduce_started.elapsed(),
+        );
         return Ok(0);
     }
 
@@ -530,6 +542,7 @@ pub(crate) async fn reduce_tenant(
     let scope = scope.clone();
     let ids_for_lake = ids.clone();
     let tenant_id_for_lake = tenant_id.to_string();
+    let aggregate_started = std::time::Instant::now();
     let rows = tokio::task::spawn_blocking(move || {
         let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
         crate::compaction::session_summary_access::aggregate_sessions_from_lake(
@@ -543,17 +556,35 @@ pub(crate) async fn reduce_tenant(
     })
     .await
     .map_err(|e| anyhow!("reduce join: {e}"))??;
+    crate::self_monitoring::record_session_summary_reduce_step(
+        tenant_id,
+        crate::self_monitoring::reduce_step::AGGREGATE,
+        aggregate_started.elapsed(),
+    );
 
+    let upsert_started = std::time::Instant::now();
     if workspace_scoped {
         upsert_summary_rows_for_workspace(pool, metadata_schema, tenant_id, &rows).await?;
     } else {
         upsert_summary_rows(pool, metadata_schema, &rows).await?;
     }
+    crate::self_monitoring::record_session_summary_reduce_step(
+        tenant_id,
+        crate::self_monitoring::reduce_step::UPSERT,
+        upsert_started.elapsed(),
+    );
+
+    let ack_started = std::time::Instant::now();
     let acked = if workspace_scoped {
         ack_dirty_for_workspace(pool, metadata_schema, tenant_id, &ids, snapshot).await?
     } else {
         ack_dirty(pool, metadata_schema, &ids, snapshot).await?
     };
+    crate::self_monitoring::record_session_summary_reduce_step(
+        tenant_id,
+        crate::self_monitoring::reduce_step::ACK,
+        ack_started.elapsed(),
+    );
     if acked < ids.len() as u64 {
         warn!(
             tenant = %tenant_id,
@@ -563,6 +594,11 @@ pub(crate) async fn reduce_tenant(
         );
     }
     crate::self_monitoring::record_session_summary_sessions_reduced(tenant_id, rows.len() as u64);
+    crate::self_monitoring::record_session_summary_reduce_step(
+        tenant_id,
+        crate::self_monitoring::reduce_step::TOTAL,
+        reduce_started.elapsed(),
+    );
     Ok(rows.len())
 }
 
