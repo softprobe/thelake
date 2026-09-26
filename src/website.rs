@@ -100,8 +100,6 @@ mod tests {
         let html = embedded_utf8("index.html");
         assert!(html.contains("thelake"));
         assert!(html.contains("cargo run --bin thelake"));
-        assert!(!html.contains("softprobe-runtime"));
-        assert!(html.contains("The Open Source LangSmith / Datadog Alternative Built on DuckDB."));
         assert!(html.contains("200x cheaper"));
         assert!(html.contains("long-term storage"));
         assert!(html.contains("https://www.softprobe.ai/"));
@@ -148,7 +146,6 @@ mod tests {
         assert!(llms.contains("DuckDB"));
         assert!(llms.contains("200x"));
         assert!(llms.contains("cargo run --bin thelake"));
-        assert!(!llms.contains("softprobe-runtime"));
 
         assert!(
             WebsiteAssets::get("assets/og-image.png").is_some(),

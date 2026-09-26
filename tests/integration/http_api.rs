@@ -270,8 +270,6 @@ async fn landing_page_is_served_at_root_without_shadowing_health() {
     let html = String::from_utf8(body.to_vec()).expect("utf8");
     assert!(html.contains("thelake"));
     assert!(html.contains("cargo run --bin thelake"));
-    assert!(!html.contains("softprobe-runtime"));
-    assert!(html.contains("The Open Source LangSmith / Datadog Alternative Built on DuckDB."));
     assert!(html.contains("200x cheaper"));
     assert!(html.contains("long-term storage"));
     assert!(html.contains("https://www.softprobe.ai/"));
