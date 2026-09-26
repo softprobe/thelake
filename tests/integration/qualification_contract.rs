@@ -14,10 +14,26 @@ use softprobe_runtime::sql::maintenance::logical_table_row_count_sql;
 use softprobe_runtime::storage::ducklake::open_attached_from_config;
 use softprobe_runtime::workspace_scope::WorkspaceScopeMode;
 use std::sync::Arc;
+use tokio_postgres::NoTls;
 use tower::ServiceExt;
 
 use crate::util::config::file_backed_test_config;
 use crate::util::otlp::string_kv;
+
+/// Wipe Postgres schema `main` so DuckLake ATTACH can bind a fresh temp DATA_PATH.
+/// Prior e2e runs leave `main` pointing at a deleted /tmp warehouse and ATTACH 503s.
+async fn reset_postgres_schema_main(metadata_path: &str) {
+    let (client, connection) = tokio_postgres::connect(metadata_path, NoTls)
+        .await
+        .expect("connect ducklake postgres");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client
+        .batch_execute("DROP SCHEMA IF EXISTS main CASCADE; CREATE SCHEMA main;")
+        .await
+        .expect("reset postgres schema main");
+}
 
 fn span_request(
     session_id: &str,
@@ -80,7 +96,16 @@ async fn ingest_one_span(config: Arc<Config>, session_id: &str) {
         .body(Body::from(buf))
         .unwrap();
     let resp = router.oneshot(req).await.expect("ingest");
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ingest status={status} body={}",
+        String::from_utf8_lossy(&body_bytes)
+    );
     state
         .engine_for_id("")
         .await
@@ -136,6 +161,7 @@ async fn isolated_main_schema_uses_three_part_qualification() {
     config.ducklake.data_inlining_row_limit = Some(0);
     config.maintenance.enabled = true;
     config.maintenance.metadata_enabled = true;
+    reset_postgres_schema_main(&config.ducklake.metadata_path).await;
     let config = Arc::new(config);
 
     ingest_one_span(config.clone(), "sess-qualify-main").await;

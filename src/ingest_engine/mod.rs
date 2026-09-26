@@ -139,6 +139,7 @@ impl IngestEngine {
                         let manifests = resolver
                             .load_active_telemetry_columns_manifests_for_scope(w.metadata_schema())
                             .await?;
+                        let commit_started = std::time::Instant::now();
                         let r = ducklake_write_with_timeout(
                             write_timeout_seconds,
                             w.write_log_batches(&manifests, batches),
@@ -146,7 +147,11 @@ impl IngestEngine {
                         .await;
                         if r.is_ok() {
                             crate::self_monitoring::record_ingest_commit(
-                                &tenant, "logs", rows, true,
+                                &tenant,
+                                "logs",
+                                rows,
+                                true,
+                                commit_started.elapsed(),
                             );
                         }
                         r
@@ -179,6 +184,7 @@ impl IngestEngine {
                         let manifests = resolver
                             .load_active_telemetry_columns_manifests_for_scope(w.metadata_schema())
                             .await?;
+                        let commit_started = std::time::Instant::now();
                         let r = ducklake_write_with_timeout(
                             write_timeout_seconds,
                             w.write_span_batches(&manifests, batches),
@@ -189,6 +195,7 @@ impl IngestEngine {
                             &tenant,
                             rows,
                             true,
+                            commit_started.elapsed(),
                             &hints,
                             dirty.as_deref(),
                         )
@@ -361,13 +368,14 @@ pub(crate) async fn maybe_after_traces_commit(
     tenant: &str,
     rows: u64,
     coalesced: bool,
+    commit_elapsed: std::time::Duration,
     hints: &[DirtyHint],
     dirty: Option<&SessionSummaryDirty>,
 ) {
     if !write_ok {
         return;
     }
-    crate::self_monitoring::record_ingest_commit(tenant, "traces", rows, coalesced);
+    crate::self_monitoring::record_ingest_commit(tenant, "traces", rows, coalesced, commit_elapsed);
     if let Some(dirty) = dirty {
         dirty.apply_hints(hints).await;
     }
@@ -379,12 +387,21 @@ mod after_commit_tests {
 
     #[tokio::test]
     async fn maybe_after_traces_commit_skips_when_write_failed() {
-        maybe_after_traces_commit(false, "t", 1, true, &[], None).await;
+        maybe_after_traces_commit(false, "t", 1, true, std::time::Duration::ZERO, &[], None).await;
     }
 
     #[tokio::test]
     async fn maybe_after_traces_commit_ok_without_dirty() {
-        maybe_after_traces_commit(true, "t", 1, true, &[], None).await;
+        maybe_after_traces_commit(
+            true,
+            "t",
+            1,
+            true,
+            std::time::Duration::from_millis(1),
+            &[],
+            None,
+        )
+        .await;
     }
 
     #[tokio::test]

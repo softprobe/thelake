@@ -45,6 +45,7 @@ pub(crate) fn compact_table_incremental(
     };
     let mut last = ActionStatus::Skipped;
 
+    let backlog_started = std::time::Instant::now();
     if let Ok(Some(pending)) = load_inlined_fragment_stats(conn, scope, table) {
         info!(
             "TWCS backlog {}.{}: logical_rows={} live_parquet_files={} inlined_only={}",
@@ -55,7 +56,14 @@ pub(crate) fn compact_table_incremental(
             pending.is_inlined_only()
         );
     }
+    crate::self_monitoring::record_maintenance_step(
+        scope_key,
+        crate::self_monitoring::maintenance_step::BACKLOG_PROBE,
+        Some(table),
+        backlog_started.elapsed(),
+    );
 
+    let stats_started = std::time::Instant::now();
     let initial = match load_partition_stats_after(conn, scope.attach_alias(), table, watermark) {
         Ok(v) => v,
         Err(err) => {
@@ -65,12 +73,24 @@ pub(crate) fn compact_table_incremental(
                 table,
                 err
             );
+            crate::self_monitoring::record_maintenance_step(
+                scope_key,
+                crate::self_monitoring::maintenance_step::PARTITION_STATS,
+                Some(table),
+                stats_started.elapsed(),
+            );
             return Ok(MergeOutcome {
                 status: ActionStatus::Failed,
                 drained: false,
             });
         }
     };
+    crate::self_monitoring::record_maintenance_step(
+        scope_key,
+        crate::self_monitoring::maintenance_step::PARTITION_STATS,
+        Some(table),
+        stats_started.elapsed(),
+    );
     if initial.is_empty() && post_watermark_candidates_drained(&initial, today, &policy) {
         return Ok(MergeOutcome {
             status: ActionStatus::Skipped,
@@ -78,6 +98,7 @@ pub(crate) fn compact_table_incremental(
         });
     }
 
+    let closed_started = std::time::Instant::now();
     last = twcs_compact_waves(
         config,
         conn,
@@ -90,6 +111,12 @@ pub(crate) fn compact_table_incremental(
         mode,
         WaveKind::Closed,
     )?;
+    crate::self_monitoring::record_maintenance_step(
+        scope_key,
+        crate::self_monitoring::maintenance_step::TWCS_CLOSED,
+        Some(table),
+        closed_started.elapsed(),
+    );
     if last == ActionStatus::Failed || last == ActionStatus::Unsupported {
         return Ok(MergeOutcome {
             status: last,
@@ -97,6 +124,7 @@ pub(crate) fn compact_table_incremental(
         });
     }
 
+    let open_started = std::time::Instant::now();
     last = twcs_compact_waves(
         config,
         conn,
@@ -109,6 +137,12 @@ pub(crate) fn compact_table_incremental(
         mode,
         WaveKind::Open,
     )?;
+    crate::self_monitoring::record_maintenance_step(
+        scope_key,
+        crate::self_monitoring::maintenance_step::TWCS_OPEN,
+        Some(table),
+        open_started.elapsed(),
+    );
     if last == ActionStatus::Failed || last == ActionStatus::Unsupported {
         return Ok(MergeOutcome {
             status: last,

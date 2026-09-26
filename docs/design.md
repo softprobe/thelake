@@ -148,10 +148,16 @@ scopes.
 #### Cardinality rules
 
 Metric attributes only: `tenant`, `signal` (`logs|traces|none`),
-`op` (`ingest|write|query|maintenance|export|compact`), `status` (`ok|error`),
-`sql_kind` (fixed enum), `app` (OTLP `service.name`, max 64 → `_other`),
-`table` (maintenance allowlist), `day_kind` (`open|closed`),
-`size_bucket` (`lt_1mb|1_8mb|8_64mb|gte_64mb`). Resource: `service.name=thelake`.
+`op` (`ingest|write|query|maintenance|export|compact|job|session_summary`),
+`status` (`ok|error|panic`), `sql_kind` (fixed enum),
+`app` (OTLP `service.name`, max 64 → `_other`), `table` (maintenance allowlist
+or `_` when N/A), `day_kind` (`open|closed`),
+`size_bucket` (`lt_1mb|1_8mb|8_64mb|gte_64mb`), `job` / `scope` / `outcome`
+(async job leases), `step` (maintenance: `open_attach`, `backlog_probe`,
+`partition_stats`, `twcs_closed`, `twcs_open`, `expire_snapshots`,
+`orphan_cleanup`, `pass_total`; session_summary.reduce: `claim`, `aggregate`,
+`upsert`, `ack`, `total`), `path` (`coalesce|flush_through` on ingest commit).
+Resource: `service.name=thelake`.
 
 Latency instrument names use `*_duration_milliseconds_{sum,count}` style.
 
@@ -167,6 +173,8 @@ attempted failure (`ActionStatus::Failed`) → `error`.
 | `thelake_ingest_requests_total` / `thelake_ingest_errors_total` | counter | tenant, signal, status, app |
 | `thelake_ingest_duration_milliseconds_{sum,count}` | hist | tenant, signal, app |
 | `thelake_write_duration_milliseconds_{sum,count}` | hist | tenant, signal |
+| `thelake_ingest_commit_duration_milliseconds_{sum,count}` | hist | tenant, signal, path |
+| `thelake_ingest_commits_total` / `rows_committed` / `coalesce_flushes` | counter | tenant, signal, path |
 | `thelake_query_duration_milliseconds_{sum,count}` | hist | tenant, sql_kind |
 | `thelake_query_queue_wait_milliseconds_{sum,count}` | hist | tenant, sql_kind |
 | `thelake_slow_queries_total` | counter | tenant, sql_kind |
@@ -178,6 +186,11 @@ attempted failure (`ActionStatus::Failed`) → `error`.
 | `thelake_compaction_files_before` / `files_after` | gauge | tenant, table, day_kind |
 | `thelake_orphan_remove_total` | counter | tenant, status |
 | `thelake_snapshot_expire_total` | counter | tenant, status |
+| `thelake_job_duration_milliseconds_{sum,count}` | hist | job, scope, status |
+| `thelake_maintenance_step_duration_milliseconds_{sum,count}` | hist | scope, step, table |
+| `thelake_session_summary_reduce_duration_milliseconds_{sum,count}` | hist | tenant, step |
+| `thelake_session_summary_dirty_upsert_duration_milliseconds_{sum,count}` | hist | tenant |
+| `thelake_async_jobs_wake_ms` | gauge | — |
 | `thelake_self_heal_rebuilds_total` / `thelake_self_heal_consecutive_failures` | counter/gauge | — |
 | `thelake_process_*` (RSS/VSZ/CPU/threads/disk) | gauge/counter | — |
 | `thelake_query_workers` / `workers_busy` / `ingest_pending_batches` / `writer_pool_size` | gauge | — |

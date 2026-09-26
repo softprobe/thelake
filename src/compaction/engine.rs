@@ -249,6 +249,7 @@ impl MaintenanceEngine {
         physical: &PhysicalScope,
         run_compaction: bool,
     ) -> Result<Vec<TableMaintenanceResult>> {
+        let pass_started = std::time::Instant::now();
         let tables = maintenance_table_names();
         let mut results = Vec::new();
         let label = scope_key;
@@ -284,19 +285,38 @@ impl MaintenanceEngine {
             }
         }
 
+        let open_started = std::time::Instant::now();
         let conn = match self.open_ducklake_connection(physical) {
             Ok(c) => c,
             Err(err) => {
                 warn!("Maintenance open failed for scope {}: {}", label, err);
                 crate::self_monitoring::record_compaction_pass(label, false);
+                crate::self_monitoring::record_maintenance_step(
+                    scope_key,
+                    crate::self_monitoring::maintenance_step::PASS_TOTAL,
+                    None,
+                    pass_started.elapsed(),
+                );
                 return Err(anyhow!("maintenance open failed for {label}: {err}"));
             }
         };
         if let Err(err) = self.attach_ducklake(&conn, physical) {
             warn!("Maintenance attach failed for scope {}: {}", label, err);
             crate::self_monitoring::record_compaction_pass(label, false);
+            crate::self_monitoring::record_maintenance_step(
+                scope_key,
+                crate::self_monitoring::maintenance_step::PASS_TOTAL,
+                None,
+                pass_started.elapsed(),
+            );
             return Err(anyhow!("maintenance attach failed for {label}: {err}"));
         }
+        crate::self_monitoring::record_maintenance_step(
+            scope_key,
+            crate::self_monitoring::maintenance_step::OPEN_ATTACH,
+            None,
+            open_started.elapsed(),
+        );
 
         let mut advance_tables: Vec<String> = Vec::new();
         if self.config.maintenance.enabled && run_compaction {
@@ -352,7 +372,7 @@ impl MaintenanceEngine {
         }
 
         let (metadata, remove_orphan_files) =
-            self.run_scope_metadata_cleanup(&conn, physical, label);
+            self.run_scope_metadata_cleanup(&conn, physical, label, scope_key);
         drop(conn);
 
         for table in advance_tables {
@@ -410,6 +430,12 @@ impl MaintenanceEngine {
         }
         let files_after = count_parquet_files_under(physical.warehouse_uri());
         warn_if_too_many_parquet_files(label, physical.warehouse_uri(), files_before, files_after);
+        crate::self_monitoring::record_maintenance_step(
+            scope_key,
+            crate::self_monitoring::maintenance_step::PASS_TOTAL,
+            None,
+            pass_started.elapsed(),
+        );
         Ok(results)
     }
 
@@ -418,9 +444,11 @@ impl MaintenanceEngine {
         conn: &Connection,
         physical: &PhysicalScope,
         label: &str,
+        scope_key: &str,
     ) -> (MetadataMaintenanceResult, ActionResult) {
         let metadata = if self.config.maintenance.metadata_enabled {
-            match self.ducklake_expire_snapshots(conn, physical) {
+            let started = std::time::Instant::now();
+            let out = match self.ducklake_expire_snapshots(conn, physical) {
                 Ok(expired) => MetadataMaintenanceResult {
                     expired_snapshots: expired,
                     skipped: false,
@@ -432,7 +460,14 @@ impl MaintenanceEngine {
                         skipped: true,
                     }
                 }
-            }
+            };
+            crate::self_monitoring::record_maintenance_step(
+                scope_key,
+                crate::self_monitoring::maintenance_step::EXPIRE_SNAPSHOTS,
+                None,
+                started.elapsed(),
+            );
+            out
         } else {
             MetadataMaintenanceResult {
                 expired_snapshots: 0,
@@ -443,7 +478,8 @@ impl MaintenanceEngine {
         let remove_orphan_files = if self.config.maintenance.metadata_enabled
             && self.config.maintenance.remove_orphan_files_enabled
         {
-            match self.ducklake_cleanup_files(conn, physical) {
+            let started = std::time::Instant::now();
+            let out = match self.ducklake_cleanup_files(conn, physical) {
                 Ok(()) => ActionResult {
                     status: ActionStatus::Completed,
                 },
@@ -453,7 +489,14 @@ impl MaintenanceEngine {
                         status: ActionStatus::Failed,
                     }
                 }
-            }
+            };
+            crate::self_monitoring::record_maintenance_step(
+                scope_key,
+                crate::self_monitoring::maintenance_step::ORPHAN_CLEANUP,
+                None,
+                started.elapsed(),
+            );
+            out
         } else {
             ActionResult {
                 status: ActionStatus::Skipped,

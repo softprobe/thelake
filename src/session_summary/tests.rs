@@ -172,7 +172,16 @@ async fn postgres_maybe_after_traces_commit_write_err_skips_dirty() {
         .expect("ducklake-postgres required (make setup)");
     let dirty = SessionSummaryDirty::new(pool.clone(), schema, "t1");
     let hints = fold_dirty_hints(&[span_at("s1", 1)]);
-    maybe_after_traces_commit(false, "t1", 1, true, &hints, Some(&dirty)).await;
+    maybe_after_traces_commit(
+        false,
+        "t1",
+        1,
+        true,
+        std::time::Duration::ZERO,
+        &hints,
+        Some(&dirty),
+    )
+    .await;
     let client = pool.get().await.expect("client");
     let q = crate::runtime_engine::quote_pg_ident(schema);
     let n: i64 = client
@@ -185,7 +194,16 @@ async fn postgres_maybe_after_traces_commit_write_err_skips_dirty() {
         .get(0);
     assert_eq!(n, 0, "write Err must not touch dirty");
 
-    maybe_after_traces_commit(true, "t1", 1, true, &hints, Some(&dirty)).await;
+    maybe_after_traces_commit(
+        true,
+        "t1",
+        1,
+        true,
+        std::time::Duration::from_millis(1),
+        &hints,
+        Some(&dirty),
+    )
+    .await;
     let n2: i64 = client
         .query_one(
             &format!("SELECT count(*)::bigint FROM {q}.session_summary_dirty"),
