@@ -72,16 +72,15 @@ fn aggregate_sql(
 ) -> Result<String> {
     let from_table = crate::storage::ducklake::ducklake_qualified_table_name(scope, "traces");
     match session_ids {
-        Some(ids) if workspace_id.is_some() => {
+        Some(ids) if workspace_id.is_some() => Ok(
             crate::sql::session_summary::compile_session_summary_reduce_sql_for_workspace(
                 &from_table,
                 ids,
                 workspace_id.expect("checked above"),
                 from,
                 to,
-            )
-            .map_err(Into::into)
-        }
+            )?,
+        ),
         Some(ids) => Ok(
             crate::sql::session_summary::compile_session_summary_reduce_sql(
                 &from_table,
