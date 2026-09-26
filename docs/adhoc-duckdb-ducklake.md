@@ -10,7 +10,8 @@ The query worker ATTACHes using **`ducklake.catalog_alias`**, **`ducklake.metada
 
 1. **Default on the host:** `tests/config/duckdb-shell-host.yaml` (localhost Postgres + MinIO, same `metadata_schema` / `data_path` as typical e2e stacks).
 2. **Match a running container:**  
-   `CONFIG_FILE=../e2e/softprobe-runtime.yaml make duckdb-shell`  
+   `CONFIG_FILE=config.yaml make duckdb-shell`  
+
    (uses Docker hostnames — run DuckDB **inside** the network or fix hosts; usually you use the host yaml when the DB is port-forwarded to localhost.)
 3. **Another tenant / scope:** use a YAML (or generated config) where `ducklake.metadata_schema` and `ducklake.data_path` are exactly that tenant’s scope — same as the server process for that tenant.
 

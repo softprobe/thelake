@@ -32,7 +32,7 @@ wait_health() {
     fi
     sleep 1
   done
-  echo "❌ softprobe-runtime failed to start" >&2
+  echo "❌ thelake failed to start" >&2
   cat "${log}" >&2 || true
   return 1
 }
@@ -60,8 +60,8 @@ case "${BACKEND}" in
     TMP_CONFIG="/tmp/splake-stress.yaml"
     LOG="/tmp/splake-stress.log"
     sed "s/port: 8090/port: ${PORT}/" config.yaml > "${TMP_CONFIG}"
-    echo "🚀 Starting softprobe-runtime on port ${PORT} (local MinIO)..."
-    SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="${TMP_CONFIG}" cargo run --bin softprobe-runtime >"${LOG}" 2>&1 &
+    echo "🚀 Starting thelake on port ${PORT} (local MinIO)..."
+    SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="${TMP_CONFIG}" cargo run --bin thelake >"${LOG}" 2>&1 &
     PID=$!
     trap 'kill ${PID} >/dev/null 2>&1 || true; make --no-print-directory _teardown-minio >/dev/null 2>&1 || true; rm -f "${TMP_CONFIG}"' EXIT
     wait_health "${PORT}" "${LOG}" 10
@@ -83,8 +83,8 @@ case "${BACKEND}" in
     cp "${R2_CONFIG}" "${TMP_CONFIG}"
     sed -i.bak "s/port: 8090/port: ${PORT}/" "${TMP_CONFIG}" && rm -f "${TMP_CONFIG}.bak"
     sed -i.bak "s|data_path: .*|data_path: \"s3://${R2_BUCKET}/ducklake/\"|" "${TMP_CONFIG}" && rm -f "${TMP_CONFIG}.bak"
-    echo "🚀 Starting softprobe-runtime on port ${PORT} (R2 bucket ${R2_BUCKET})..."
-    SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="${TMP_CONFIG}" cargo run --bin softprobe-runtime >"${LOG}" 2>&1 &
+    echo "🚀 Starting thelake on port ${PORT} (R2 bucket ${R2_BUCKET})..."
+    SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="${TMP_CONFIG}" cargo run --bin thelake >"${LOG}" 2>&1 &
     PID=$!
     trap 'kill ${PID} >/dev/null 2>&1 || true; rm -f "${TMP_CONFIG}"' EXIT
     wait_health "${PORT}" "${LOG}" 15
@@ -123,8 +123,8 @@ case "${BACKEND}" in
     mkdir -p "${CACHE_ROOT}/cache"
     sed -i.bak "s|cache_dir: .*|cache_dir: \"${CACHE_ROOT}/cache\"|" "${TMP_CONFIG}" && rm -f "${TMP_CONFIG}.bak"
     sed -i.bak "s|data_path: .*|data_path: \"gs://${GCS_BUCKET}/ducklake/\"|" "${TMP_CONFIG}" && rm -f "${TMP_CONFIG}.bak"
-    echo "🚀 Starting softprobe-runtime on port ${PORT} (GCS bucket ${GCS_BUCKET})..."
-    SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="${TMP_CONFIG}" cargo run --bin softprobe-runtime >"${LOG}" 2>&1 &
+    echo "🚀 Starting thelake on port ${PORT} (GCS bucket ${GCS_BUCKET})..."
+    SPLAKE_RESET_DUCKLAKE=1 CONFIG_FILE="${TMP_CONFIG}" cargo run --bin thelake >"${LOG}" 2>&1 &
     PID=$!
     trap 'kill ${PID} >/dev/null 2>&1 || true; rm -f "${TMP_CONFIG}"' EXIT
     wait_health "${PORT}" "${LOG}" 15

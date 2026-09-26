@@ -258,6 +258,48 @@ async fn unit_openapi_llm_schema_contracts() {
         openapi["paths"]["/v1/llm/sessions/{session_id}"]["get"]["operationId"],
         "getSession"
     );
+    assert_eq!(
+        openapi["paths"]["/v1/llm/sessions/search"]["post"]["operationId"],
+        "searchSessions"
+    );
+    assert_eq!(
+        openapi["paths"]["/v1/llm/sessions/search"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/SessionSearchRequest"
+    );
+    assert_eq!(
+        openapi["paths"]["/v1/llm/sessions/summary/rebuild"]["post"]["operationId"],
+        "rebuildSessionSummary"
+    );
+    assert_eq!(openapi["info"]["title"], "thelake API");
+    assert_eq!(
+        openapi["info"]["version"],
+        env!("CARGO_PKG_VERSION"),
+        "served OpenAPI version must track the crate"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["SessionSearchRequest"]["required"],
+        json!(["from", "to"])
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["SessionSearchRequest"]["properties"]["order_by"]["enum"],
+        json!([
+            "start_time",
+            "error_count",
+            "duration",
+            "total_tokens",
+            "total_cost"
+        ])
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["SessionSearchResponse"]["required"],
+        json!(["items", "cursor_supported"])
+    );
+    assert!(openapi["components"]["schemas"]["SessionSummary"].is_object());
+    assert_eq!(
+        openapi["components"]["schemas"]["SessionSummaryRebuildResponse"]["required"],
+        json!(["sessions_upserted"])
+    );
     let session_params = openapi["paths"]["/v1/llm/sessions/{session_id}"]["get"]["parameters"]
         .as_array()
         .expect("session params");
@@ -296,6 +338,14 @@ async fn unit_openapi_llm_schema_contracts() {
     assert!(openapi["components"]["schemas"]["ObservationSearchRequest"].is_object());
     assert!(openapi["components"]["schemas"]["TraceDetail"].is_object());
     assert!(openapi["components"]["schemas"]["SessionDetail"].is_object());
+    assert!(openapi["components"]["schemas"]["SessionSearchRequest"].is_object());
+    assert!(openapi["components"]["schemas"]["SessionSearchResponse"].is_object());
+    assert!(openapi["paths"]["/v1/telemetry/fields"]["get"].is_object());
+    assert!(openapi["paths"]["/v1/telemetry/fields/{field}/values"]["get"].is_object());
+    assert!(openapi["paths"]["/v1/telemetry/sessions/{session_id}"]["get"].is_object());
+    assert!(openapi["paths"]["/v1/telemetry/traces/{trace_id}"]["get"].is_object());
+    assert!(openapi["paths"]["/v1/query/sql"]["post"].is_object());
+    assert!(openapi["paths"]["/health"]["get"].is_object());
 }
 
 #[tokio::test]

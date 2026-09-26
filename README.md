@@ -86,7 +86,7 @@ GitHub Actions (self-hosted Linux; Make-only; no Actions cargo/`target` cache):
 ```bash
 export CONFIG_FILE=config.yaml
 export SOFTPROBE_AUTH_URL=http://127.0.0.1:8091/validate
-cargo run --bin softprobe-runtime
+cargo run --bin thelake
 ```
 
 Defaults:
@@ -176,9 +176,11 @@ Web session recording contract:
 and the Softprobe LLM
 [web session replay guide](https://github.com/softprobe/sp-llm/blob/main/docs/web-session-replay.md).
 
-The focused ingestion and promotion HTTP contract is
-[`docs/ingestion-openapi.yaml`](docs/ingestion-openapi.yaml). Schema promotion
-semantics are in [`docs/promotion.md`](docs/promotion.md).
+The HTTP product contract is
+[`docs/ingestion-openapi.yaml`](docs/ingestion-openapi.yaml), served by a
+running process as [`GET /openapi.json`](http://localhost:8090/openapi.json)
+and browsable at [`GET /swagger`](http://localhost:8090/swagger). Schema
+promotion semantics are in [`docs/promotion.md`](docs/promotion.md).
 
 ## Query DuckLake locally
 
@@ -230,6 +232,11 @@ Make recipe in a linux/amd64 container). `publish` refuses incomplete `dist/`.
 Optional BuildKit registry cache (`…/splake:buildcache`) speeds base layers
 only — do not deploy `:buildcache` as a runtime image.
 
+## Website
+
+The open-source landing page is served at `/` by the runtime (same host as the
+API). Source: [`website/`](website/). Product URL: https://thelake.softprobe.ai/
+
 ## License
 
-Apache-2.0
+Apache-2.0 — see [`License.txt`](License.txt).

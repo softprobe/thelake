@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("Starting softprobe-runtime v{}", env!("CARGO_PKG_VERSION"));
+    info!("Starting thelake v{}", env!("CARGO_PKG_VERSION"));
 
     let config = Arc::new(Config::load()?);
     info!("Configuration loaded");

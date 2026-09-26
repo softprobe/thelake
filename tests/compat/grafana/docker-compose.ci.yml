@@ -100,7 +100,7 @@ services:
       - |
         apt-get update -qq
         apt-get install -y -qq build-essential pkg-config libssl-dev cmake clang mold >/dev/null
-        cargo run --locked --bin softprobe-runtime
+        cargo run --locked --bin thelake
     volumes:
       - ../../..:/workspace:ro
       # Shared warm cargo target: the seed binary reuses softprobe's compiled

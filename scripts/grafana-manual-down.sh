@@ -31,7 +31,7 @@ stop_softprobe_pidfile() {
   if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
     local cmd
     cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-    if [[ "$cmd" == *softprobe-runtime* ]]; then
+    if [[ "$cmd" == *thelake* ]]; then
       echo "==> stopping ${label} pid=$pid"
       kill "$pid" 2>/dev/null || true
       for _ in $(seq 1 20); do
@@ -40,7 +40,7 @@ stop_softprobe_pidfile() {
       done
       kill -9 "$pid" 2>/dev/null || true
     else
-      echo "==> pid $pid is not softprobe-runtime; leaving it alone"
+      echo "==> pid $pid is not thelake; leaving it alone"
     fi
   fi
   rm -f "$file"
@@ -50,7 +50,7 @@ stop_softprobe_pidfile "$WRITE_PID_FILE" "Softprobe-write"
 stop_softprobe_pidfile "$READ_PID_FILE" "Softprobe-read"
 stop_softprobe_pidfile "$PID_FILE" "Softprobe"
 # Also clear stray staged binaries started under the state dir.
-for pid in $(pgrep -f "$STATE_DIR/softprobe-runtime" 2>/dev/null || true); do
+for pid in $(pgrep -f "$STATE_DIR/thelake" 2>/dev/null || true); do
   echo "==> stopping stray Softprobe pid=$pid"
   kill "$pid" 2>/dev/null || true
   sleep 0.5

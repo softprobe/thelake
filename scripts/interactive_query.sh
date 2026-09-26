@@ -1,5 +1,5 @@
 #!/bin/bash
-# Interactive DuckDB against the same DuckLake scope as softprobe-runtime (from CONFIG_FILE).
+# Interactive DuckDB against the same DuckLake scope as thelake (from CONFIG_FILE).
 #
 # Usage:
 #   make duckdb-shell

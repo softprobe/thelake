@@ -5,7 +5,7 @@ The old script assumed **Lakekeeper** on `:8181`, **Grafana**, service name **`o
 **Replacement:** run automated checks that exercise ingest, flush, and SQL over `traces` / `logs`:
 
 ```bash
-cd softprobe-runtime
+cd thelake
 make test-e2e
 # or
 cargo test --features integration-e2e --test tests integration::storage_contract_validation -- --test-threads=1

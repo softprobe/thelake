@@ -93,7 +93,7 @@ our_softprobe_running() {
   kill -0 "$pid" 2>/dev/null || return 1
   local cmd
   cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-  [[ "$cmd" == *softprobe-runtime* ]] || return 1
+  [[ "$cmd" == *thelake* ]] || return 1
   return 0
 }
 
@@ -237,7 +237,7 @@ if [[ -f "$PID_FILE" ]]; then
   old="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [[ -n "${old:-}" ]] && kill -0 "$old" 2>/dev/null; then
     cmd="$(ps -p "$old" -o args= 2>/dev/null || true)"
-    if [[ "$cmd" == *softprobe-runtime* ]]; then
+    if [[ "$cmd" == *thelake* ]]; then
       kill "$old" 2>/dev/null || true
       for _ in $(seq 1 20); do
         kill -0 "$old" 2>/dev/null || break
@@ -254,7 +254,7 @@ for leftover in "$STATE_DIR/softprobe-write.pid" "$STATE_DIR/softprobe-read.pid"
     old="$(cat "$leftover" 2>/dev/null || true)"
     if [[ -n "${old:-}" ]] && kill -0 "$old" 2>/dev/null; then
       cmd="$(ps -p "$old" -o args= 2>/dev/null || true)"
-      if [[ "$cmd" == *softprobe-runtime* ]]; then
+      if [[ "$cmd" == *thelake* ]]; then
         kill "$old" 2>/dev/null || true
         sleep 0.5
         kill -9 "$old" 2>/dev/null || true
@@ -263,7 +263,7 @@ for leftover in "$STATE_DIR/softprobe-write.pid" "$STATE_DIR/softprobe-read.pid"
     rm -f "$leftover"
   fi
 done
-for old in $(pgrep -f "$STATE_DIR/softprobe-runtime" 2>/dev/null || true); do
+for old in $(pgrep -f "$STATE_DIR/thelake" 2>/dev/null || true); do
   kill "$old" 2>/dev/null || true
   sleep 0.25
   kill -9 "$old" 2>/dev/null || true
@@ -291,20 +291,20 @@ case "${GRAFANA_KEEP_DATA:-0}" in
     ;;
 esac
 
-echo "==> building softprobe-runtime (release; AC-S3)"
+echo "==> building thelake (release; AC-S3)"
 if [[ -f "$ROOT/Makefile" ]] && grep -q '^build-release:' "$ROOT/Makefile"; then
   make -C "$ROOT" build-release
 else
-  cargo build -q --release --bin softprobe-runtime
+  cargo build -q --release --bin thelake
 fi
 
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CACHE_ROOT/target}"
-RUNTIME_BIN="$ROOT/dist/softprobe-runtime"
+RUNTIME_BIN="$ROOT/dist/thelake"
 if [[ ! -x "$RUNTIME_BIN" ]]; then
-  RUNTIME_BIN="${CARGO_TARGET_DIR}/release/softprobe-runtime"
+  RUNTIME_BIN="${CARGO_TARGET_DIR}/release/thelake"
 fi
 if [[ ! -x "$RUNTIME_BIN" ]]; then
-  RUNTIME_BIN="$ROOT/target/release/softprobe-runtime"
+  RUNTIME_BIN="$ROOT/target/release/thelake"
 fi
 if [[ ! -x "$RUNTIME_BIN" ]]; then
   echo "ERROR: missing $RUNTIME_BIN (expected release binary)" >&2
@@ -451,11 +451,15 @@ case "$(uname -s)" in
     fi
     ;;
 esac
+# Stage binary next to libduckdb so stop-gate restarts and pgrep find $STATE_DIR/thelake.
+cp -f "$RUNTIME_BIN" "$STATE_DIR/thelake"
+chmod +x "$STATE_DIR/thelake"
+RUNTIME_BIN="$STATE_DIR/thelake"
 case "$(uname -s)" in
   Darwin)
     export DYLD_LIBRARY_PATH="${DUCKDB_LIB_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
     # SIP often strips DYLD_* for child processes; @executable_path next to staged dylib is reliable.
-    if [[ -f "$ROOT/dist/libduckdb.dylib" ]] && command -v install_name_tool >/dev/null 2>&1; then
+    if [[ -f "$STATE_DIR/libduckdb.dylib" ]] && command -v install_name_tool >/dev/null 2>&1; then
       install_name_tool -add_rpath @executable_path "$RUNTIME_BIN" 2>/dev/null || true
     fi
     ;;

@@ -74,7 +74,7 @@ softprobe_pids() {
     [[ -n "${pid:-}" ]] || continue
     kill -0 "$pid" 2>/dev/null || continue
     cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-    [[ "$cmd" == *softprobe-runtime* ]] || continue
+    [[ "$cmd" == *thelake* ]] || continue
     pids+=("$pid")
   done
   # Dedupe while preserving order.
@@ -92,14 +92,14 @@ stack_ready() {
 
 kill_stray_softprobe() {
   local pid cmd
-  for pid in $(pgrep -f '/tmp/thelake-grafana-manual/softprobe-runtime' 2>/dev/null || true); do
+  for pid in $(pgrep -f '/tmp/thelake-grafana-manual/thelake' 2>/dev/null || true); do
     cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-    [[ "$cmd" == *softprobe-runtime* ]] || continue
+    [[ "$cmd" == *thelake* ]] || continue
     log "==> stopping stray Softprobe pid=$pid"
     kill "$pid" 2>/dev/null || true
   done
   sleep 1
-  for pid in $(pgrep -f '/tmp/thelake-grafana-manual/softprobe-runtime' 2>/dev/null || true); do
+  for pid in $(pgrep -f '/tmp/thelake-grafana-manual/thelake' 2>/dev/null || true); do
     kill -9 "$pid" 2>/dev/null || true
   done
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Interactive DuckDB session attached to production-style DuckLake:
 #   - Metadata: Postgres (e.g. Supabase pooler + sslmode=require)
-#   - Data: GCS (gs://...) via DuckDB httpfs + HMAC keys (same as softprobe-runtime)
+#   - Data: GCS (gs://...) via DuckDB httpfs + HMAC keys (same as thelake)
 #
 # Requires: duckdb CLI on PATH (version compatible with server-side DuckLake).
 #
@@ -134,7 +134,7 @@ SET unsafe_enable_version_guessing = true;
 EOSQL
 
   if [[ "$DUCKLAKE_GCS_DATA_PATH" == gs://* && "$DUCKLAKE_SKIP_GCS_SECRET" != "1" ]]; then
-    # Match softprobe-runtime/src/storage/ducklake/object_store.rs configure_httpfs_gcs_for_data_path
+    # Match src/storage/ducklake/object_store.rs configure_httpfs_gcs_for_data_path
     printf "CREATE OR REPLACE SECRET gcs_hmac (TYPE GCS, KEY_ID '%s', SECRET '%s');\n" "$KID_ESC" "$SEC_ESC"
   fi
 
