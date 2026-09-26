@@ -152,11 +152,13 @@ Metric attributes only: `tenant`, `signal` (`logs|traces|none`),
 `status` (`ok|error|panic`), `sql_kind` (fixed enum),
 `app` (OTLP `service.name`, max 64 → `_other`), `table` (maintenance allowlist
 or `_` when N/A), `day_kind` (`open|closed`),
-`size_bucket` (`lt_1mb|1_8mb|8_64mb|gte_64mb`), `job` / `scope` / `outcome`
-(async job leases), `step` (maintenance: `open_attach`, `backlog_probe`,
-`partition_stats`, `twcs_closed`, `twcs_open`, `expire_snapshots`,
-`orphan_cleanup`, `pass_total`; session_summary.reduce: `claim`, `aggregate`,
-`upsert`, `ack`, `total`), `path` (`coalesce|flush_through` on ingest commit).
+`size_bucket` (`lt_1mb|1_8mb|8_64mb|gte_64mb`), `job_name` / `scope` /
+`outcome` / `reason` (async job leases and skips; `job_name` not `job` so
+Prometheus does not collide with resource `job` from `service.name`), `step`
+(maintenance: `open_attach`, `open_attach_warm`, `partition_stats`,
+`twcs_closed`, `twcs_open`, `expire_snapshots`, `orphan_cleanup`, `pass_total`;
+session_summary.reduce: `claim`, `aggregate`, `upsert`, `ack`, `total`),
+`path` (`coalesce|flush_through` on ingest commit).
 Resource: `service.name=thelake`.
 
 Latency instrument names use `*_duration_milliseconds_{sum,count}` style.
@@ -186,7 +188,8 @@ attempted failure (`ActionStatus::Failed`) → `error`.
 | `thelake_compaction_files_before` / `files_after` | gauge | tenant, table, day_kind |
 | `thelake_orphan_remove_total` | counter | tenant, status |
 | `thelake_snapshot_expire_total` | counter | tenant, status |
-| `thelake_job_duration_milliseconds_{sum,count}` | hist | job, scope, status |
+| `thelake_job_duration_milliseconds_{sum,count}` | hist | job_name, scope, status |
+| `thelake_job_skips_total` | counter | job_name, scope, reason |
 | `thelake_maintenance_step_duration_milliseconds_{sum,count}` | hist | scope, step, table |
 | `thelake_session_summary_reduce_duration_milliseconds_{sum,count}` | hist | tenant, step |
 | `thelake_session_summary_dirty_upsert_duration_milliseconds_{sum,count}` | hist | tenant |

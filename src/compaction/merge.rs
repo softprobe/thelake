@@ -9,12 +9,12 @@ use crate::compaction::status::ActionStatus;
 use crate::compaction::twcs::{
     closed_day_live_file_count, day_kind, open_day_files_for_merge, open_day_max_compacted_files,
     partitions_needing_merge, post_watermark_candidates_drained, should_merge_partition, DayKind,
-    InlinedFragmentStats, MergeMode, PartitionFileStats, TwcsPolicy,
+    MergeMode, PartitionFileStats, TwcsPolicy,
 };
 use crate::config::Config;
 use crate::sql::maintenance::{
     ducklake_merge_adjacent_files_sql, ducklake_set_target_file_size_sql,
-    logical_table_row_count_sql, partition_live_file_stats_after_sql,
+    partition_live_file_stats_after_sql,
 };
 use crate::storage::ducklake::PhysicalScope;
 use anyhow::{anyhow, Result};
@@ -45,24 +45,6 @@ pub(crate) fn compact_table_incremental(
     };
     let mut last = ActionStatus::Skipped;
 
-    let backlog_started = std::time::Instant::now();
-    if let Ok(Some(pending)) = load_inlined_fragment_stats(conn, scope, table) {
-        info!(
-            "TWCS backlog {}.{}: logical_rows={} live_parquet_files={} inlined_only={}",
-            scope.pg_namespace(),
-            table,
-            pending.logical_row_count,
-            pending.live_parquet_files,
-            pending.is_inlined_only()
-        );
-    }
-    crate::self_monitoring::record_maintenance_step(
-        scope_key,
-        crate::self_monitoring::maintenance_step::BACKLOG_PROBE,
-        Some(table),
-        backlog_started.elapsed(),
-    );
-
     let stats_started = std::time::Instant::now();
     let initial = match load_partition_stats_after(conn, scope.attach_alias(), table, watermark) {
         Ok(v) => v,
@@ -90,6 +72,18 @@ pub(crate) fn compact_table_incremental(
         crate::self_monitoring::maintenance_step::PARTITION_STATS,
         Some(table),
         stats_started.elapsed(),
+    );
+    let needing = partitions_needing_merge(&initial, today, &policy);
+    let post_wm_files: usize = initial.iter().map(|p| p.live_file_count).sum();
+    let post_wm_bytes: u64 = initial.iter().map(|p| p.total_bytes).sum();
+    info!(
+        "TWCS {}.{} post-watermark: days={} files={} bytes={} needing_merge={}",
+        scope.pg_namespace(),
+        table,
+        initial.len(),
+        post_wm_files,
+        post_wm_bytes,
+        needing.len()
     );
     if initial.is_empty() && post_watermark_candidates_drained(&initial, today, &policy) {
         return Ok(MergeOutcome {
@@ -486,41 +480,6 @@ fn load_partition_stats_after(
     Ok(out)
 }
 
-fn load_inlined_fragment_stats(
-    conn: &Connection,
-    scope: &PhysicalScope,
-    table: &str,
-) -> Result<Option<InlinedFragmentStats>> {
-    let qualified = crate::storage::ducklake::ducklake_qualified_table_name(scope, table);
-    let row_sql = logical_table_row_count_sql(&qualified);
-    crate::sql::ensure_fact_scan_bound(&row_sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
-    let logical_rows: i64 = match conn.query_row(&row_sql, [], |row| row.get(0)) {
-        Ok(v) => v,
-        Err(err) => {
-            warn!(
-                "TWCS logical-row probe failed for {}: {}; treating as empty",
-                qualified, err
-            );
-            return Ok(None);
-        }
-    };
-    if logical_rows <= 0 {
-        return Ok(None);
-    }
-    // Live parquet count is best-effort for logging only (not used for drain).
-    let file_sql = crate::sql::maintenance::live_file_count_sql(scope.attach_alias(), table);
-    crate::sql::ensure_fact_scan_bound(&file_sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
-    let files = conn
-        .query_row(&file_sql, [], |row| row.get::<_, i64>(0))
-        .map(|n| n.max(0) as usize)
-        .unwrap_or(0);
-    Ok(Some(InlinedFragmentStats {
-        table: table.to_string(),
-        live_parquet_files: files,
-        logical_row_count: logical_rows as u64,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -592,33 +551,22 @@ mod tests {
     }
 
     #[test]
-    fn logical_row_probe_uses_physical_scope_qualification() {
+    fn twcs_enter_has_no_inlined_fragment_probe() {
         let prod = include_str!("merge.rs")
             .split("#[cfg(test)]")
             .next()
             .expect("cfg(test) marker");
         assert!(
-            prod.contains("ducklake_qualified_table_name(scope, table)"),
-            "inlined fragment probe must qualify via PhysicalScope"
+            !prod.contains("load_inlined_fragment_stats")
+                && !prod.contains("InlinedFragmentStats")
+                && !prod.contains("BACKLOG_PROBE")
+                && !prod.contains("logical_table_row_count_sql"),
+            "misnamed inlined-fragment / backlog probe must be gone from TWCS enter"
         );
         assert!(
-            !prod.contains("logical_table_row_count_sql(catalog_alias"),
-            "must not build product-table probe from bare catalog_alias"
-        );
-        assert!(
-            !prod.contains("load_inlined_fragment_stats(conn, scope.attach_alias()"),
-            "must not pass attach_alias alone into the logical-row probe"
-        );
-        let sql = crate::sql::maintenance::logical_table_row_count_sql("softprobe.main.traces");
-        assert!(
-            sql.contains("FROM softprobe.main.traces"),
-            "product probe SQL must keep catalog.schema.table: {sql}"
-        );
-        assert!(
-            !sql.contains("FROM softprobe.traces ")
-                && !sql.contains("FROM softprobe.traces\n")
-                && !sql.ends_with("FROM softprobe.traces"),
-            "must not elide schema for main in product probes: {sql}"
+            prod.contains("partitions_needing_merge")
+                && prod.contains("post-watermark: days="),
+            "ops log must come from partition stats already loaded for merge/drain"
         );
     }
 }

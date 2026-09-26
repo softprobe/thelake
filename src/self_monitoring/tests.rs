@@ -75,7 +75,7 @@ fn bottleneck_duration_recorders_accept_bounded_labels() {
     );
     record_maintenance_step(
         "scope-a",
-        maintenance_step::BACKLOG_PROBE,
+        maintenance_step::PARTITION_STATS,
         Some("traces"),
         Duration::from_millis(900),
     );
@@ -115,11 +115,11 @@ fn maintenance_pass_records_step_durations() {
     let merge_prod = merge.split("#[cfg(test)]").next().expect("production");
     assert!(
         merge_prod.contains("record_maintenance_step")
-            && merge_prod.contains("BACKLOG_PROBE")
             && merge_prod.contains("PARTITION_STATS")
             && merge_prod.contains("TWCS_CLOSED")
-            && merge_prod.contains("TWCS_OPEN"),
-        "TWCS path must time backlog probe, stats, and wave kinds"
+            && merge_prod.contains("TWCS_OPEN")
+            && !merge_prod.contains("BACKLOG_PROBE"),
+        "TWCS path must time stats and wave kinds; backlog probe removed"
     );
 }
 

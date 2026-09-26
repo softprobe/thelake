@@ -25,7 +25,7 @@ SHELL := /bin/bash
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
 	test-grafana-static test-grafana-system test-grafana-browser test-compat \
-	stress test-deploy \
+	stress test-deploy seed-lake bench-llm-seeded test-perf-helpers \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
 	grafana-up grafana-down \
 	bench-demo-cpu-full
@@ -150,6 +150,7 @@ help:
 	@echo "Gates:    ci | release"
 	@echo "Infra:    setup | teardown | doctor"
 	@echo "Stress:   stress BACKEND=local|r2|gcs"
+	@echo "LLM bench: seed-lake | bench-llm-seeded | test-perf-helpers"
 	@echo "Extras:   duckdb-shell | demo-session | drop-tables | generate-telemetry | test-deploy | telemetrygen"
 	@echo "Grafana:  grafana-up | grafana-down | test-grafana-system | test-grafana-browser"
 	@echo "Compat:   test-compat | check-compat-reference-pins | test-loki-diff | test-tempo-diff"
@@ -699,6 +700,28 @@ _release:
 # ---- stress / deploy / extras ----
 stress:
 	BACKEND=$(BACKEND) ./scripts/stress-test.sh
+
+# Load scrubbed one-clock seed (Parquet + session_summary) into CONFIG_FILE lake.
+# SEED_DIR=$HOME/data/thelake-seed/scrubbed/northwind make seed-lake
+seed-lake:
+	@chmod +x scripts/seed-lake-from-parquet.sh
+	SEED_DIR="$(SEED_DIR)" CONFIG_FILE="$(CONFIG_FILE)" SEED_FORCE="$(SEED_FORCE)" ./scripts/seed-lake-from-parquet.sh
+
+# Seeded LLM/agent bench: ingest session trees + search/detail/observations Pxx + CPU.
+# Requires SEED_DIR (default $$HOME/data/thelake-seed/scrubbed/northwind).
+# Dump/scrub lives outside git: ~/ops/thelake-seed/
+# IDLE_SECS (default 60) = post-load CPU sample with client traffic stopped.
+bench-llm-seeded: ensure-cache
+	@chmod +x scripts/bench-llm-seeded.sh scripts/seed-lake-from-parquet.sh scripts/perf/bench_llm_load.py
+	@command -v python3 >/dev/null || (echo "python3 required" && exit 1)
+	@python3 -c "import requests" 2>/dev/null || pip3 install --user requests || pip3 install requests
+	SEED_DIR="$(SEED_DIR)" DURATION="$(DURATION)" IDLE_SECS="$(IDLE_SECS)" \
+		IDLE_COOLDOWN_SECS="$(IDLE_COOLDOWN_SECS)" SESSION_QPS="$(SESSION_QPS)" \
+		./scripts/bench-llm-seeded.sh
+
+# Unit tests for Python load helpers (no thelake server).
+test-perf-helpers:
+	@cd scripts/perf && python3 -m unittest test_perf_helpers -v
 
 test-deploy:
 	@command -v python3 >/dev/null || (echo "python3 required" && exit 1)

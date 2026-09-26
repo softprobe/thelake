@@ -44,6 +44,46 @@ impl PushMetricExporter for RefreshingOtlpExporter {
     }
 }
 
+/// OTel resource for metrics: honor `OTEL_SERVICE_NAME` / `OTEL_SERVICE_INSTANCE_ID` /
+/// `HOSTNAME`, plus any `OTEL_RESOURCE_ATTRIBUTES` (via `Resource::default()`).
+///
+/// Always sets semantic `service.name`, `service.instance.id`, and `host.name` so
+/// Prometheus series can be filtered per process (local bench vs production).
+fn metrics_resource() -> Resource {
+    let host = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "unknown".into());
+    let service_name =
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "thelake".to_string());
+    let instance_id = std::env::var("OTEL_SERVICE_INSTANCE_ID").unwrap_or_else(|_| {
+        resource_attr_from_env("service.instance.id")
+            .unwrap_or_else(|| format!("{host}-{}", std::process::id()))
+    });
+    let host = resource_attr_from_env("host.name").unwrap_or(host);
+
+    Resource::default().merge(&Resource::new(vec![
+        KeyValue::new("service.name", service_name),
+        KeyValue::new("service.instance.id", instance_id),
+        KeyValue::new("host.name", host),
+    ]))
+}
+
+fn resource_attr_from_env(key: &str) -> Option<String> {
+    let raw = std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok()?;
+    for part in raw.split(',') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once('=') {
+            if k.trim() == key {
+                let v = v.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Install SDK PeriodicReader → OTLP metrics exporter and background scrapers.
 ///
 /// Destination uses standard `OTEL_EXPORTER_OTLP_*` / `OTEL_EXPORTER_OTLP_METRICS_*`
@@ -64,10 +104,7 @@ pub fn spawn_exporter(state: AppState, config: Arc<Config>) {
         .build();
     let provider = SdkMeterProvider::builder()
         .with_reader(reader)
-        .with_resource(Resource::new(vec![KeyValue::new(
-            "service.name",
-            "thelake",
-        )]))
+        .with_resource(metrics_resource())
         .build();
     global::set_meter_provider(provider);
     install_instruments();
@@ -94,4 +131,25 @@ pub fn try_build_otlp_exporter() -> Result<(), String> {
         .build()
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::metrics_resource;
+
+    #[test]
+    fn metrics_resource_sets_service_and_instance() {
+        // Clear can be racy in parallel tests; only assert keys we always set when
+        // OTEL_RESOURCE_ATTRIBUTES does not already define them.
+        let r = metrics_resource();
+        let keys: Vec<String> = r.iter().map(|(k, _)| k.to_string()).collect();
+        assert!(
+            keys.iter().any(|k| k == "service.name"),
+            "missing service.name in {keys:?}"
+        );
+        assert!(
+            keys.iter().any(|k| k == "service.instance.id" || k == "host.name"),
+            "expected instance or host in {keys:?}"
+        );
+    }
 }

@@ -92,6 +92,9 @@ impl Job for SessionSummaryRebuildJob {
     }
 
     async fn run(&self, scope_key: &str) -> Result<()> {
+        // Periodic safety-net rebuild (rebuild_interval_ms). Due-gating alone
+        // keeps idle cost near zero; do not gate on dirty_depth — empty dirty is
+        // the healthy steady state when this job should still re-aggregate.
         let to = Utc::now();
         let from = to - ChronoDuration::seconds(self.cfg.max_reduce_span_seconds as i64);
         self.maintenance
@@ -115,6 +118,7 @@ mod tests {
             "rebuild_session_summary(&",
             ".resolve_scope(",
             ".pool()",
+            "session_summary_dirty_depth",
         ] {
             assert!(
                 !production.contains(needle),

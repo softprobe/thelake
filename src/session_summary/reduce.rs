@@ -438,6 +438,7 @@ pub(crate) async fn rebuild_tenant_window(
     metadata_schema: &str,
     config: &Config,
     scope: &PhysicalScope,
+    duck_pool: std::sync::Arc<crate::compaction::MaintenanceConnPool>,
     tenant_id: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
@@ -451,7 +452,8 @@ pub(crate) async fn rebuild_tenant_window(
     let tenant_id_for_lake = tenant_id.to_string();
     let rows = tokio::task::spawn_blocking(move || {
         let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
-        crate::compaction::session_summary_access::aggregate_sessions_from_lake(
+        crate::compaction::session_summary_access::aggregate_sessions_from_lake_pooled(
+            &duck_pool,
             &config,
             &scope,
             None,
@@ -471,12 +473,14 @@ pub(crate) async fn rebuild_tenant_window(
 }
 
 /// Full reduce pipeline for one tenant. Empty dirty → Ok no-op.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reduce_tenant(
     pool: &Pool,
     metadata_schema: &str,
     tenant_id: &str,
     config: &Config,
     scope: &PhysicalScope,
+    duck_pool: std::sync::Arc<crate::compaction::MaintenanceConnPool>,
     max_sessions: u64,
     max_reduce_span_seconds: u64,
 ) -> Result<usize> {
@@ -545,7 +549,8 @@ pub(crate) async fn reduce_tenant(
     let aggregate_started = std::time::Instant::now();
     let rows = tokio::task::spawn_blocking(move || {
         let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
-        crate::compaction::session_summary_access::aggregate_sessions_from_lake(
+        crate::compaction::session_summary_access::aggregate_sessions_from_lake_pooled(
+            &duck_pool,
             &config,
             &scope,
             Some(&ids_for_lake),

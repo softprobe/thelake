@@ -13,6 +13,8 @@ both workspace-scope modes.
 | `run-e2e-matrix.sh` | `test-e2e` |
 | `run-isolated-cargo-tests.sh` | `test-e2e-matrix.sh`, `test-perf` |
 | `stress-test.sh` | `stress BACKEND=local\|r2\|gcs` |
+| `seed-lake-from-parquet.sh` | `seed-lake` |
+| `bench-llm-seeded.sh` + `perf/bench_llm_load.py` | `bench-llm-seeded` |
 | `interactive_query.sh` + `duckdb_ducklake_*` | `duckdb-shell` |
 | `interactive_query_ducklake_production.sh` | `duckdb-shell-prod` |
 | `demo_session_queries.sh` | `demo-session` |
@@ -30,7 +32,12 @@ Test:     test | test-e2e | test-perf
 Gates:    ci | release
 Infra:    setup | teardown | doctor
 Stress:   stress BACKEND=local|r2|gcs
+LLM bench: seed-lake | bench-llm-seeded | test-perf-helpers
 ```
+
+`bench-llm-seeded` needs a scrubbed seed under `SEED_DIR` (default
+`$HOME/data/thelake-seed/scrubbed/northwind`). Production dump+scrub lives
+**outside** this repo (`~/ops/thelake-seed/`) and must not be committed.
 
 Cache: `~/.cache/thelake` (`THELAKE_CACHE_ROOT`). No host cargo-chef. Compile and
 publish live only in the Makefile (no parallel release/SLO/publish scripts).
