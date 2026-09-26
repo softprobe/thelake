@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>thelake — Open Source AI Evidence Lake on DuckDB</title>
+  <meta name="description" content="thelake is the open source LangSmith / Datadog alternative built on DuckDB — designed for long-term storage of large full payloads at 200x lower cost than traditional observability platforms." />
+  <meta property="og:title" content="thelake" />
+  <meta property="og:description" content="200x cheaper long-term storage for full AI payloads. The open source LangSmith / Datadog alternative built on DuckDB." />
+  <meta property="og:url" content="https://thelake.softprobe.ai/" />
+  <link rel="canonical" href="https://thelake.softprobe.ai/" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fragment+Mono:wght@400&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="icon" href="/assets/logos/thelake.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="top">
+    <div class="rail top-inner">
+      <a class="brand" href="/">
+        <img class="brand-mark" src="/assets/logos/thelake.svg" width="28" height="28" alt="" />
+        thelake
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a class="nav-link" href="/swagger">API</a>
+        <a class="nav-link" href="https://github.com/softprobe/thelake">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8"/>
+          </svg>
+          <span>GitHub</span>
+        </a>
+        <a class="nav-link" href="https://www.softprobe.ai/">
+          <svg class="icon" viewBox="4 4 92 92" aria-hidden="true" focusable="false">
+            <g fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="9">
+              <path d="M30 13h40a17 17 0 0 1 17 17v40a17 17 0 0 1-17 17H30a17 17 0 0 1-17-17V30a17 17 0 0 1 17-17Z"/>
+              <path d="m40.258 9.084 38.637 10.353a17 17 0 0 1 12.021 20.821L80.563 78.895a17 17 0 0 1-20.821 12.021L21.105 80.563A17 17 0 0 1 9.084 59.742l10.353-38.637A17 17 0 0 1 40.258 9.084Z"/>
+            </g>
+            <path fill="currentColor" d="m48.983 38.34 7.728 2.07a7 7 0 0 1 4.949 8.573l-2.07 7.728a7 7 0 0 1-8.573 4.949l-7.728-2.07a7 7 0 0 1-4.949-8.573l2.07-7.728a7 7 0 0 1 8.573-4.949"/>
+          </svg>
+          <span>Softprobe</span>
+        </a>
+        <a class="btn btn-primary btn-sm" href="https://github.com/softprobe/thelake">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25"/>
+          </svg>
+          <span>Star on GitHub</span>
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="brand-hero">
+      <div class="rail hero-inner">
+        <p class="eyebrow">Open source · Apache-2.0</p>
+        <div class="hero-brand">
+          <img class="hero-mark" src="/assets/logos/thelake.svg" width="96" height="96" alt="" />
+          <h1 id="brand-hero">thelake</h1>
+        </div>
+        <p class="slogan">The Open Source LangSmith / Datadog Alternative Built on DuckDB.</p>
+        <p class="lede">Built for long-term storage of large full payloads — 200x cheaper than traditional observability platforms.</p>
+        <div class="cta">
+          <a class="btn btn-primary" href="https://github.com/softprobe/thelake">Star on GitHub</a>
+          <a class="btn btn-ghost" href="/swagger">API docs</a>
+        </div>
+      </div>
+      <div class="rail hero-visual" aria-hidden="true">
+        <img src="/assets/hero.svg" width="1440" height="560" alt="" />
+      </div>
+    </section>
+
+    <section class="band" aria-labelledby="why-title">
+      <div class="rail">
+        <p class="eyebrow">Why thelake</p>
+        <h2 id="why-title">Keep the full payload. Drop the indexing tax.</h2>
+        <p class="section-lede">Traditional observability platforms charge you to index everything, then force sampling and short retention. thelake keeps large prompts, responses, tool I/O, and HTTP bodies as open Parquet in a DuckLake — designed so long-term full-fidelity storage stays economical.</p>
+
+        <div class="compare" role="group" aria-label="Traditional observability versus thelake">
+          <article class="compare-pane">
+            <header class="compare-head">
+              <span class="compare-badge compare-badge-trad">Traditional</span>
+              <h3>Index-heavy observability</h3>
+            </header>
+            <figure class="compare-viz" aria-hidden="true">
+              <svg viewBox="0 0 420 280" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <text x="16" y="22" class="viz-label">Cost mix</text>
+                <rect x="16" y="36" width="388" height="28" rx="6" fill="#E4E0DD"/>
+                <rect x="16" y="36" width="320" height="28" rx="6" fill="#898077"/>
+                <rect x="336" y="36" width="68" height="28" rx="6" fill="#C2BAB1"/>
+                <text x="28" y="55" class="viz-on-dark">Indexes ~80%</text>
+                <text x="348" y="55" class="viz-on-dark">Store</text>
+
+                <text x="16" y="96" class="viz-label">Retention</text>
+                <line x1="16" y1="122" x2="404" y2="122" stroke="#DDD8D3" stroke-width="2"/>
+                <circle cx="40" cy="122" r="5" fill="#898077"/>
+                <circle cx="90" cy="122" r="5" fill="#898077"/>
+                <circle cx="140" cy="122" r="5" fill="#898077"/>
+                <circle cx="190" cy="122" r="4" fill="#C2BAB1"/>
+                <circle cx="240" cy="122" r="3" fill="#DDD8D3"/>
+                <path d="M250 122 H404" stroke="#DDD8D3" stroke-width="2" stroke-dasharray="4 6"/>
+                <text x="16" y="148" class="viz-caption">~14 days · then gone</text>
+                <text x="300" y="148" class="viz-caption muted">months unpaid</text>
+
+                <text x="16" y="182" class="viz-label">Payloads</text>
+                <rect x="16" y="198" width="52" height="44" rx="6" fill="#C2BAB1" opacity="0.55"/>
+                <rect x="76" y="210" width="28" height="32" rx="5" fill="#C2BAB1" opacity="0.35"/>
+                <rect x="112" y="218" width="18" height="24" rx="4" fill="#DDD8D3"/>
+                <text x="150" y="226" class="viz-caption">Sampled · truncated · dropped</text>
+              </svg>
+            </figure>
+            <p>Heavy indexes, short retention windows, sampled bodies — cost climbs with every byte you want to keep forever.</p>
+          </article>
+
+          <div class="compare-vs" aria-hidden="true"><span>200x</span></div>
+
+          <article class="compare-pane compare-pane-lake">
+            <header class="compare-head">
+              <span class="compare-badge compare-badge-lake">
+                <img src="/assets/logos/thelake.svg" width="16" height="16" alt="" />
+                thelake
+              </span>
+              <h3>Storage-first evidence lake</h3>
+            </header>
+            <figure class="compare-viz" aria-hidden="true">
+              <svg viewBox="0 0 420 280" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <text x="16" y="22" class="viz-label">Cost mix</text>
+                <rect x="16" y="36" width="388" height="28" rx="6" fill="#E4E0DD"/>
+                <rect x="16" y="36" width="36" height="28" rx="6" fill="#251F19"/>
+                <rect x="52" y="36" width="352" height="28" rx="6" fill="#F48D16"/>
+                <text x="24" y="55" class="viz-on-dark">Meta</text>
+                <text x="170" y="55" class="viz-on-dark">Object-store Parquet ~99%</text>
+
+                <text x="16" y="96" class="viz-label">Retention</text>
+                <line x1="16" y1="122" x2="404" y2="122" stroke="#F48D16" stroke-opacity="0.35" stroke-width="2"/>
+                <circle cx="40" cy="122" r="5" fill="#F48D16"/>
+                <circle cx="110" cy="122" r="5" fill="#F48D16"/>
+                <circle cx="180" cy="122" r="5" fill="#F48D16"/>
+                <circle cx="250" cy="122" r="5" fill="#F48D16"/>
+                <circle cx="320" cy="122" r="5" fill="#F48D16"/>
+                <circle cx="390" cy="122" r="5" fill="#F48D16"/>
+                <text x="16" y="148" class="viz-caption">Days → months → years of full evidence</text>
+
+                <text x="16" y="182" class="viz-label">Payloads</text>
+                <rect x="16" y="198" width="88" height="48" rx="6" fill="#F48D16" opacity="0.9"/>
+                <rect x="112" y="198" width="88" height="48" rx="6" fill="#F48D16" opacity="0.75"/>
+                <rect x="208" y="198" width="88" height="48" rx="6" fill="#F48D16" opacity="0.6"/>
+                <rect x="304" y="198" width="88" height="48" rx="6" fill="#F48D16" opacity="0.45"/>
+                <text x="28" y="227" class="viz-on-dark">prompt</text>
+                <text x="128" y="227" class="viz-on-dark">tools</text>
+                <text x="228" y="227" class="viz-on-dark">HTTP</text>
+                <text x="318" y="227" class="viz-on-dark">outcome</text>
+              </svg>
+            </figure>
+            <p>Storage-first economics on object-store Parquet. Retain complete AI and application payloads for years, then query them with DuckDB SQL when you need them.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="band band-tint" aria-labelledby="pillars-title">
+      <div class="rail">
+        <p class="eyebrow">What you get</p>
+        <h2 id="pillars-title">Full payloads. Long retention. Open SQL.</h2>
+        <p class="section-lede">Architecture aimed at 200x lower long-term cost than index-heavy observability stacks — without discarding the bodies you need later.</p>
+        <ol class="steps">
+          <li>
+            <span class="step-num">01</span>
+            <h3>Full payloads, no sampling</h3>
+            <p>OTLP traces and logs into a tenant-bound runtime. Keep prompts, tool calls, HTTP bodies, and outcomes connected — not truncated for an incident window.</p>
+          </li>
+          <li>
+            <span class="step-num">02</span>
+            <h3>Long-term lake storage</h3>
+            <p>DuckLake + Parquet on your object store or disk. Built for years of large recordings you can reopen, evaluate, and regress against.</p>
+          </li>
+          <li>
+            <span class="step-num">03</span>
+            <h3>Query when it matters</h3>
+            <p>DuckDB SQL on snapshot-correct tables, plus tenant-controlled column promotion when a field becomes hot — without a second proprietary warehouse.</p>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="band" aria-labelledby="flow-title">
+      <div class="rail">
+        <p class="eyebrow">How it works</p>
+        <h2 id="flow-title">One durable write path</h2>
+        <p class="section-lede">OTLP in; open SQL and query-compatible APIs out.</p>
+        <ol class="flow-strip">
+          <li>
+            <span class="flow-icon" aria-hidden="true">
+              <img src="/assets/logos/opentelemetry.svg" alt="" width="20" height="20" />
+            </span>
+            <span>OTLP</span> HTTP / gRPC
+          </li>
+          <li>
+            <span class="flow-icon" aria-hidden="true">
+              <img src="/assets/logos/thelake.svg" alt="" width="20" height="20" />
+            </span>
+            <span>thelake</span> tenant-bound runtime
+          </li>
+          <li>
+            <span class="flow-icon" aria-hidden="true">
+              <img src="/assets/logos/ducklake.svg" alt="" width="20" height="20" />
+            </span>
+            <span>DuckLake</span> Parquet + catalog
+          </li>
+          <li>
+            <span class="flow-icon" aria-hidden="true">
+              <img src="/assets/logos/duckdb.svg" alt="" width="20" height="20" />
+            </span>
+            <span>SQL</span> DuckDB · Grafana query APIs
+          </li>
+        </ol>
+
+        <ul class="tech-row" aria-label="Supported APIs and technologies">
+          <li>
+            <span class="tech-icon" aria-hidden="true">
+              <img src="/assets/logos/opentelemetry.svg" alt="" width="24" height="24" />
+            </span>
+            <span class="tech-name">OpenTelemetry</span>
+            <span class="tech-meta">OTLP write</span>
+          </li>
+          <li>
+            <span class="tech-icon" aria-hidden="true">
+              <img src="/assets/logos/grpc.png" alt="" width="24" height="24" />
+            </span>
+            <span class="tech-name">gRPC</span>
+            <span class="tech-meta">ingest</span>
+          </li>
+          <li>
+            <span class="tech-icon" aria-hidden="true">
+              <img src="/assets/logos/duckdb.svg" alt="" width="24" height="24" />
+            </span>
+            <span class="tech-name">DuckDB</span>
+            <span class="tech-meta">SQL engine</span>
+          </li>
+          <li>
+            <span class="tech-icon" aria-hidden="true">
+              <img src="/assets/logos/ducklake.svg" alt="" width="24" height="24" />
+            </span>
+            <span class="tech-name">DuckLake</span>
+            <span class="tech-meta">catalog</span>
+          </li>
+          <li>
+            <span class="tech-icon" aria-hidden="true">
+              <img src="/assets/logos/parquet.svg" alt="" width="24" height="24" />
+            </span>
+            <span class="tech-name">Apache Parquet</span>
+            <span class="tech-meta">columnar files</span>
+          </li>
+          <li>
+            <span class="tech-icon" aria-hidden="true">
+              <img src="/assets/logos/grafana.svg" alt="" width="24" height="24" />
+            </span>
+            <span class="tech-name">Grafana</span>
+            <span class="tech-meta">datasources</span>
+          </li>
+          <li>
+            <span class="tech-icon" aria-hidden="true">
+              <img src="/assets/logos/loki.svg" alt="" width="24" height="24" />
+            </span>
+            <span class="tech-name">Loki</span>
+            <span class="tech-meta">query API</span>
+          </li>
+          <li>
+            <span class="tech-icon" aria-hidden="true">
+              <img src="/assets/logos/tempo.svg" alt="" width="24" height="24" />
+            </span>
+            <span class="tech-name">Tempo</span>
+            <span class="tech-meta">query API</span>
+          </li>
+        </ul>
+
+        <p class="fine">Loki- and Tempo-compatible <em>query</em> APIs are available so existing Grafana datasources can read the lake. Product metrics / PromQL are out of scope. OTLP remains the sole write path for traces and logs.</p>
+      </div>
+    </section>
+
+    <section class="band band-tint" aria-labelledby="dual-title">
+      <div class="rail">
+        <p class="eyebrow">Open source + commercial</p>
+        <h2 id="dual-title">Open source lake. Powers Softprobe Agent QA.</h2>
+        <p class="section-lede">thelake is the durable evidence foundation underneath Softprobe Agent QA — self-host the lake, or use it managed inside Softprobe.</p>
+        <div class="split">
+          <div>
+            <h3 class="brand-title">
+              <img class="brand-mark" src="/assets/logos/thelake.svg" width="28" height="28" alt="" />
+              thelake
+            </h3>
+            <p>Self-host the Rust runtime: OTLP ingest, DuckLake storage, DuckDB SQL, promotion, and telemetry search. Apache-2.0.</p>
+            <a class="text-link" href="https://github.com/softprobe/thelake">github.com/softprobe/thelake</a>
+          </div>
+          <div>
+            <h3 class="brand-title">
+              <img class="brand-mark" src="/assets/logos/softprobe.svg" width="28" height="28" alt="" />
+              Softprobe Agent QA
+            </h3>
+            <p>Built on thelake. Softprobe Agent QA adds Explorer, diagnosis, and collaboration on top of the same evidence lake — hosted when you want the product surface without operating thelake yourself.</p>
+            <a class="text-link" href="https://www.softprobe.ai/">softprobe.ai</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="band" aria-labelledby="start-title">
+      <div class="rail">
+        <p class="eyebrow">Quick start</p>
+        <h2 id="start-title">Run it locally</h2>
+        <p class="section-lede">Local MinIO + DuckLake Postgres, then build and run. Details live in the repository README.</p>
+        <pre class="code"><code>make setup
+make build
+export CONFIG_FILE=config.yaml
+cargo run --bin thelake</code></pre>
+        <a class="btn btn-primary" href="https://github.com/softprobe/thelake/blob/main/README.md">Open the README</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="rail foot-inner">
+      <p><strong>thelake</strong> by Softprobe · Apache-2.0 · <a href="https://github.com/softprobe/thelake/blob/main/License.txt">License.txt</a></p>
+      <p>
+        <a href="/swagger">API</a>
+        ·
+        <a href="https://github.com/softprobe/thelake">GitHub</a>
+        ·
+        <a href="https://www.softprobe.ai/">Softprobe</a>
+        ·
+        <a href="https://github.com/softprobe/thelake/tree/main/docs">Docs</a>
+      </p>
+    </div>
+  </footer>
+
+  <script src="/script.js" defer></script>
+</body>
+</html>

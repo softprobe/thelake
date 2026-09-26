@@ -243,6 +243,131 @@ async fn health_returns_ok_envelope() {
 }
 
 #[tokio::test]
+async fn landing_page_is_served_at_root_without_shadowing_health() {
+    let (router, _t) = build_router().await;
+
+    let landing = router
+        .clone()
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .expect("landing");
+    assert_eq!(landing.status(), StatusCode::OK);
+    let ctype = landing
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ctype.starts_with("text/html"),
+        "expected text/html, got {ctype}"
+    );
+    let body = landing
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
+    let html = String::from_utf8(body.to_vec()).expect("utf8");
+    assert!(html.contains("thelake"));
+    assert!(html.contains("cargo run --bin thelake"));
+    assert!(!html.contains("softprobe-runtime"));
+    assert!(html.contains("The Open Source LangSmith / Datadog Alternative Built on DuckDB."));
+    assert!(html.contains("200x cheaper"));
+    assert!(html.contains("long-term storage"));
+    assert!(html.contains("https://www.softprobe.ai/"));
+    assert!(html.contains("/styles.css"));
+    assert!(html.contains("/script.js"));
+    assert!(html.contains("/assets/hero.svg"));
+
+    let css = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/styles.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("css");
+    assert_eq!(css.status(), StatusCode::OK);
+    assert!(css
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .starts_with("text/css"));
+
+    let js = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/script.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("js");
+    assert_eq!(js.status(), StatusCode::OK);
+    assert!(js
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .starts_with("application/javascript"));
+
+    let hero = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/hero.svg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("hero");
+    assert_eq!(hero.status(), StatusCode::OK);
+    assert_eq!(
+        hero.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("image/svg+xml")
+    );
+    let hero_body = hero
+        .into_body()
+        .collect()
+        .await
+        .expect("hero body")
+        .to_bytes();
+    let hero_svg = String::from_utf8(hero_body.to_vec()).expect("hero utf8");
+    assert!(hero_svg.contains("open SQL on your lake"));
+
+    let missing = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/does-not-exist.svg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("missing asset");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let health = router
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("health");
+    assert_eq!(health.status(), StatusCode::OK);
+    let v = response_json(health).await;
+    assert_eq!(v["status"], "ok");
+}
+
+#[tokio::test]
 async fn ready_returns_ready() {
     let (router, _t) = build_router().await;
     let req = Request::builder()
@@ -287,6 +412,7 @@ async fn openapi_and_swagger_endpoints_are_served() {
     let html = String::from_utf8(body.to_vec()).expect("utf8");
     assert!(html.contains("SwaggerUIBundle"));
     assert!(html.contains("/openapi.json"));
+    assert!(html.contains("thelake API"));
 }
 
 #[tokio::test]

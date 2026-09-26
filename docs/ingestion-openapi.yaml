@@ -1,9 +1,10 @@
 openapi: 3.1.0
 info:
-  title: Softprobe Runtime Write API
+  title: thelake API
   version: 0.1.0
   description: |
-    Authenticated OTLP-compatible ingestion API exposed by softprobe-runtime.
+    Authenticated HTTP API exposed by thelake. Interactive UI: `GET /swagger`
+    (this document is also served as `GET /openapi.json`).
 
     This API accepts telemetry payloads on standard OTLP HTTP paths:
     - `POST /v1/traces`
@@ -16,11 +17,19 @@ info:
     - `POST /v1/llm/scores`
     - `GET|POST /v1/llm/score-configs`
 
-    LLM query surfaces (canonical schemas also live in softprobe/sp-llm):
+    LLM query surfaces:
     - `POST /v1/llm/observations/search`
     - `GET /v1/llm/observations/{span_id}`
     - `GET /v1/llm/traces/{trace_id}`
+    - `POST /v1/llm/sessions/search`
+    - `POST /v1/llm/sessions/summary/rebuild`
     - `GET /v1/llm/sessions/{session_id}`
+    - `GET /v1/llm/sessions/{session_id}/observations`
+    - `GET /v1/llm/sessions/{session_id}/recording`
+
+    Also inventoried here (summary-level): health/ready, `POST /v1/query/sql`,
+    and `/v1/telemetry/*`. Loki/Tempo Grafana-compat query routes are served by
+    the process but are not part of this product OpenAPI document.
 
     For JSON payloads, requests are expected to follow the OpenTelemetry collector export
     request shapes (`ExportTraceServiceRequest` and `ExportLogsServiceRequest`).
@@ -39,20 +48,42 @@ info:
     `docs/promotion.md`.
   externalDocs:
     description: Softprobe schema promotion guide
-    url: ./promotion.md
+    url: https://github.com/softprobe/thelake/blob/main/docs/promotion.md
 servers:
   - url: http://localhost:8090
     description: Local endpoint from default `config.yaml`
 tags:
+  - name: health
+    description: Process health and readiness
   - name: ingestion
     description: OTLP ingestion endpoints
   - name: promotion
     description: Tenant-scoped schema promotion
   - name: llm
     description: LLM observability records
+  - name: query
+    description: SQL and telemetry query surfaces
 security:
   - bearerAuth: []
 paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      operationId: healthCheck
+      security: []
+      responses:
+        "200":
+          description: Process is up
+  /ready:
+    get:
+      tags: [health]
+      summary: Readiness check
+      operationId: readyCheck
+      security: []
+      responses:
+        "200":
+          description: Process is ready to serve traffic
   /v1/traces:
     post:
       tags:
@@ -439,11 +470,91 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /v1/llm/sessions/search:
+    post:
+      tags:
+        - llm
+      summary: Search sessions via session_summary
+      description: |
+        Always backed by Postgres `session_summary` (empty table → empty page).
+        Requires `from` and `to`. Cursor paging is only defined for
+        `order_by=start_time`; other orderings return a single ranked page and
+        set `cursor_supported=false`.
+      operationId: searchSessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionSearchRequest"
+      responses:
+        "200":
+          description: Bounded session page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionSearchResponse"
+        "400":
+          description: Missing time range, invalid filter, or malformed cursor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+        "503":
+          description: session_summary or tenant runtime unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/llm/sessions/summary/rebuild:
+    post:
+      tags:
+        - llm
+      summary: Rebuild session_summary for an explicit time window
+      description: |
+        Ops endpoint. Rejects inverted or oversized windows, acquires a
+        per-tenant rebuild lease, then runs the shared lake aggregate → UPSERT
+        path.
+      operationId: rebuildSessionSummary
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionSummaryRebuildRequest"
+      responses:
+        "200":
+          description: Rebuild completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionSummaryRebuildResponse"
+        "400":
+          description: Invalid or oversized rebuild window
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing or invalid bearer token
+        "503":
+          description: Rebuild lease, lake aggregate, or UPSERT unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /v1/llm/sessions/{session_id}:
     get:
       tags:
         - llm
-      summary: Get a time-bounded session summary
+      summary: Get a session detail using session_summary start/end as the lake window
+      description: |
+        Does not accept query `from`/`to`. The lake window is taken from the
+        tenant's `session_summary` row for `session_id`.
       operationId: getSession
       parameters:
         - name: session_id
@@ -451,18 +562,6 @@ paths:
           required: true
           schema:
             type: string
-        - name: from
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-        - name: to
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
         - name: limit
           in: query
           required: false
@@ -484,13 +583,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/SessionDetail"
         "400":
-          description: Missing time range, invalid limit, or malformed cursor
+          description: Invalid limit or malformed cursor
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "404":
-          description: No session activity in the requested range
+          description: No session_summary row or no lake activity in the summary window
           content:
             application/json:
               schema:
@@ -498,7 +597,100 @@ paths:
         "401":
           description: Missing or invalid bearer token
         "503":
-          description: Tenant runtime or query unavailable
+          description: session_summary unavailable or tenant runtime unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/llm/sessions/{session_id}/observations:
+    get:
+      tags:
+        - llm
+      summary: List session observations using session_summary start/end as the lake window
+      operationId: getSessionObservations
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session observations page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionObservations"
+        "404":
+          description: No session_summary row for this session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing or invalid bearer token
+        "503":
+          description: session_summary unavailable or tenant runtime unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/llm/sessions/{session_id}/recording:
+    get:
+      tags:
+        - llm
+      summary: Get web session recording batches for a session
+      operationId: getSessionRecording
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: Ordered recording batches and flattened rrweb events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionRecording"
+        "400":
+          description: Invalid limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No session_summary row for this session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing or invalid bearer token
+        "503":
+          description: session_summary unavailable or tenant runtime unavailable
           content:
             application/json:
               schema:
@@ -515,7 +707,6 @@ paths:
 
         Requirements and semantics:
         - Requires a PostgreSQL DuckLake catalog with a tenant scope registry.
-          SQLite local catalogs return `503 ducklake_connection_unavailable`.
         - Telemetry-column promotions extract values on subsequent OTLP ingest
           for that tenant. Historical rows are not backfilled.
         - Invalid JSON/type conversion during telemetry extraction fails the
@@ -527,7 +718,7 @@ paths:
       operationId: applyPromotion
       externalDocs:
         description: Canonical promotion guide
-        url: ./promotion.md
+        url: https://github.com/softprobe/thelake/blob/main/docs/promotion.md
       requestBody:
         required: true
         content:
@@ -614,6 +805,88 @@ paths:
                     error:
                       code: promotion_schema_apply_failed
                       message: "DuckLake DDL failed: ..."
+  /v1/query/sql:
+    post:
+      tags: [query]
+      summary: Execute SQL query
+      operationId: executeSql
+      responses:
+        "200":
+          description: Query result
+  /v1/telemetry/search:
+    post:
+      tags: [query]
+      summary: Search telemetry evidence
+      operationId: searchTelemetry
+      responses:
+        "200":
+          description: Search page
+  /v1/telemetry/details:
+    post:
+      tags: [query]
+      summary: Fetch evidence details
+      operationId: telemetryDetails
+      responses:
+        "200":
+          description: Detail payload
+  /v1/telemetry/fields:
+    get:
+      tags: [query]
+      summary: List telemetry fields
+      operationId: listTelemetryFields
+      responses:
+        "200":
+          description: Field list
+  /v1/telemetry/fields/{field}/values:
+    get:
+      tags: [query]
+      summary: List values for a telemetry field
+      operationId: listTelemetryFieldValues
+      parameters:
+        - name: field
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Field values
+  /v1/telemetry/sessions/{session_id}:
+    get:
+      tags: [query]
+      summary: Telemetry session details
+      operationId: getTelemetrySession
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session telemetry details
+  /v1/telemetry/traces/{trace_id}:
+    get:
+      tags: [query]
+      summary: Telemetry trace details
+      operationId: getTelemetryTrace
+      parameters:
+        - name: trace_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Trace telemetry details
+  /v1/data/ducklake-connection:
+    get:
+      tags: [query]
+      summary: DuckLake setup material
+      operationId: getDucklakeConnection
+      responses:
+        "200":
+          description: Connection material for local DuckDB ATTACH
 components:
   securitySchemes:
     bearerAuth:
@@ -937,6 +1210,139 @@ components:
             $ref: "#/components/schemas/Score"
         next_cursor:
           type: string
+    SessionSearchRequest:
+      type: object
+      required: [from, to]
+      properties:
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        has_errors:
+          type: boolean
+        user_id:
+          type: string
+        model_name:
+          type: string
+        agent_name:
+          type: string
+        roots_only:
+          type: boolean
+          default: true
+        order_by:
+          type: string
+          enum: [start_time, error_count, duration, total_tokens, total_cost]
+          default: start_time
+        order:
+          type: string
+          enum: [asc, desc]
+          default: desc
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+        cursor:
+          type: string
+    SessionSummary:
+      type: object
+      required: [session_id, start_time, trace_count, observation_count, error_count, user_ids, models]
+      properties:
+        session_id: { type: string }
+        start_time: { type: string, format: date-time }
+        end_time: { type: string, format: date-time }
+        trace_count: { type: integer }
+        observation_count: { type: integer }
+        error_count: { type: integer }
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+        total_tokens: { type: integer }
+        total_cost: { type: number }
+        agent_name: { type: string }
+        user_ids:
+          type: array
+          items:
+            type: string
+        models:
+          type: array
+          items:
+            type: string
+    SessionSearchResponse:
+      type: object
+      required: [items, cursor_supported]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionSummary"
+        next_cursor:
+          type: string
+        cursor_supported:
+          type: boolean
+    SessionSummaryRebuildRequest:
+      type: object
+      required: [from, to]
+      properties:
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+    SessionSummaryRebuildResponse:
+      type: object
+      required: [sessions_upserted]
+      properties:
+        sessions_upserted:
+          type: integer
+          minimum: 0
+    SessionObservations:
+      type: object
+      required: [session_id, from, to, observations]
+      properties:
+        session_id: { type: string }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        observations:
+          type: array
+          items:
+            $ref: "#/components/schemas/ObservationDetail"
+        next_cursor:
+          type: string
+    SessionRecording:
+      type: object
+      required: [session_id, from, to, batches, events]
+      properties:
+        session_id: { type: string }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        batches:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecordingBatch"
+        events:
+          type: array
+          description: Flattened rrweb events sorted by timestamp
+          items:
+            type: object
+    RecordingBatch:
+      type: object
+      required: [span_id, trace_id, start_time, events]
+      properties:
+        span_id: { type: string }
+        trace_id: { type: string }
+        start_time: { type: string, format: date-time }
+        batch_index: { type: integer }
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+        events:
+          type: array
+          items:
+            type: object
     PromotionApplyRequest:
       type: object
       required:

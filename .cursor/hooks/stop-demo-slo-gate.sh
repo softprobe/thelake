@@ -70,7 +70,7 @@ if [[ -f "$PID_FILE" ]]; then
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
     cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-    if [[ "$cmd" == *softprobe-runtime* ]]; then
+    if [[ "$cmd" == *thelake* ]]; then
       softprobe_ok=1
     fi
   fi
@@ -151,7 +151,7 @@ restart_collector() {
 restart_softprobe_demo() {
   local pid bin cfg logf auth_url duck_lib
   pid="$(tr -d '[:space:]' <"$PID_FILE" 2>/dev/null || true)"
-  bin="$GRAFANA_STATE/softprobe-runtime"
+  bin="$GRAFANA_STATE/thelake"
   cfg="$GRAFANA_STATE/config.yaml"
   logf="$GRAFANA_STATE/softprobe.log"
   if [[ ! -x "$bin" || ! -f "$cfg" ]]; then

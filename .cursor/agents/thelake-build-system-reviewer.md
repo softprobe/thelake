@@ -57,7 +57,7 @@ You are the **thelake build-system reviewer**. Your only job is to find violatio
 ### Cleanliness
 
 - [ ] No dead PHONY targets without recipes; no unused Make vars for removed isolation prefixes
-- [ ] Clippy `-D warnings` still gates lib + `softprobe-runtime`
+- [ ] Clippy `-D warnings` still gates lib + `thelake`
 - [ ] Dead scripts that duplicate Make (`build-release.sh`, `slo.sh`, root `build.sh`) are gone
 
 ## Output format

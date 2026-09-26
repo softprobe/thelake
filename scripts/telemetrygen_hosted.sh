@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Send OTLP traces and logs to a hosted softprobe-runtime (or any OTLP/HTTP
+# Send OTLP traces and logs to a hosted thelake (or any OTLP/HTTP
 # endpoint) using opentelemetry-collector-contrib's telemetrygen.
 #
 # Requires: telemetrygen on PATH, e.g.

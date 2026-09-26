@@ -2,7 +2,7 @@
 # Build a single DuckDB -init file: ATTACH (from runtime YAML or static SQL) + CREATE VIEW only
 # for telemetry tables that exist (catalog_alias + metadata_schema from config).
 #
-# Usage (from softprobe-runtime repo root):
+# Usage (from thelake repo root):
 #   source scripts/duckdb_ducklake_combo.sh
 #   COMBO=$(softprobe_ducklake_build_combo_init "$(pwd)")
 #   trap 'rm -f "$COMBO" "$RENDERED" "$META"' EXIT

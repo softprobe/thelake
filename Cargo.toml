@@ -97,6 +97,9 @@ http = "1"
 http-body-util = "0.1"
 async-trait = "0.1"
 
+# Embedded open-source landing page (`website/`)
+rust-embed = "8"
+
 [build-dependencies]
 tonic-build = "0.12"
 
@@ -115,7 +118,7 @@ name = "softprobe_runtime"
 path = "src/lib.rs"
 
 [[bin]]
-name = "softprobe-runtime"
+name = "thelake"
 path = "src/main.rs"
 
 [[bin]]

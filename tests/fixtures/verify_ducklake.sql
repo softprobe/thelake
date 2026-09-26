@@ -1,6 +1,6 @@
 -- Renamed purpose: DuckLake reference queries (DuckLake reference kept for grep/discussion).
 -- Strict checks: tests/integration/storage_contract_validation.rs
--- Working CLI: softprobe-runtime/scripts/duckdb_ducklake_local_init.sql then query views `traces` / `logs`.
+-- Working CLI: scripts/duckdb_ducklake_local_init.sql then query views `traces` / `logs`.
 
 INSTALL httpfs;
 LOAD httpfs;

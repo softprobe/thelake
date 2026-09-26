@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit DuckDB init SQL for ad-hoc shells from the same YAML as softprobe-runtime (CONFIG_FILE).
+"""Emit DuckDB init SQL for ad-hoc shells from the same YAML as thelake (CONFIG_FILE).
 
 Parses the `ducklake` and `object_store` sections (simple two-space YAML subset).
 Credentials are never read from YAML; they come from the environment:

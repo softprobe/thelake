@@ -194,10 +194,10 @@ build-release: ensure-cache
 			bash -lc 'apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev protobuf-compiler clang mold cmake build-essential >/dev/null && make build-release'; \
 		exit 0; \
 	fi; \
-	echo "cargo build --release --locked --bin softprobe-runtime..."; \
-	cargo build --release --locked --bin softprobe-runtime; \
+	echo "cargo build --release --locked --bin thelake..."; \
+	cargo build --release --locked --bin thelake; \
 	mkdir -p "$(DIST_DIR)"; \
-	bin="$(CARGO_TARGET_DIR)/release/softprobe-runtime"; \
+	bin="$(CARGO_TARGET_DIR)/release/thelake"; \
 	test -x "$$bin"; \
 	duckdb_so=$$(find "$(CARGO_TARGET_DIR)/duckdb-download" -type f -name 'libduckdb.so*' -print -quit 2>/dev/null || true); \
 	if [ -z "$$duckdb_so" ]; then \
@@ -205,21 +205,21 @@ build-release: ensure-cache
 	fi; \
 	test -n "$$duckdb_so"; \
 	sh scripts/assert-duckdb-version.sh Cargo.lock "$$duckdb_so"; \
-	cp -f "$$bin" "$(DIST_DIR)/softprobe-runtime"; \
+	cp -f "$$bin" "$(DIST_DIR)/thelake"; \
 	rm -f "$(DIST_DIR)/libduckdb.so" "$(DIST_DIR)/libduckdb.dylib"; \
 	case "$$duckdb_so" in \
 		*.dylib*) cp -f "$$duckdb_so" "$(DIST_DIR)/libduckdb.dylib" ;; \
 		*) cp -f "$$duckdb_so" "$(DIST_DIR)/libduckdb.so" ;; \
 	esac; \
 	if [ "$$(uname -s)" = Darwin ] && [ -f "$(DIST_DIR)/libduckdb.dylib" ]; then \
-		install_name_tool -add_rpath @executable_path "$(DIST_DIR)/softprobe-runtime" 2>/dev/null || true; \
+		install_name_tool -add_rpath @executable_path "$(DIST_DIR)/thelake" 2>/dev/null || true; \
 	fi; \
 	cp -f config.yaml "$(DIST_DIR)/config.yaml"; \
 	echo "staged $(DIST_DIR)/"
 
 # Internal: ensure dist/ ready for linux image packaging.
 _ensure-dist:
-	@test -x "$(DIST_DIR)/softprobe-runtime" -a -f "$(DIST_DIR)/config.yaml" || $(MAKE) build-release
+	@test -x "$(DIST_DIR)/thelake" -a -f "$(DIST_DIR)/config.yaml" || $(MAKE) build-release
 	@if [ ! -f "$(DIST_DIR)/libduckdb.so" ]; then \
 		echo "dist/ lacks libduckdb.so — TARGET_PLATFORM=linux/amd64 build-release..."; \
 		TARGET_PLATFORM=linux/amd64 $(MAKE) build-release; \

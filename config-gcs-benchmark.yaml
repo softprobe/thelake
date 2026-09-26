@@ -2,7 +2,7 @@
 # Setup:
 #   1. Set GCS_HMAC_ACCESS_KEY_ID / GCS_HMAC_SECRET (DuckDB httpfs for gs://)
 #   2. Update ducklake.data_path and postgres metadata_path
-#   3. Run: CONFIG_FILE=config-gcs-benchmark.yaml cargo run --bin softprobe-runtime
+#   3. Run: CONFIG_FILE=config-gcs-benchmark.yaml cargo run --bin thelake
 
 server:
   port: 8090

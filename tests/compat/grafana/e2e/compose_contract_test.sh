@@ -17,7 +17,7 @@ grep -Fq 'image: ${GRAFANA_COMPOSE_IMAGE:?GRAFANA_COMPOSE_IMAGE must be supplied
 grep -Fq 'grafana-phase4-tenant-a' "$COMPOSE_FILE"
 grep -Fq 'grafana-phase4-tenant-b' "$COMPOSE_FILE"
 grep -Fq 'CARGO_TARGET_DIR: /tmp/thelake-grafana-target' "$COMPOSE_FILE"
-grep -Fq 'cargo run --locked --bin softprobe-runtime' "$COMPOSE_FILE"
+grep -Fq 'cargo run --locked --bin thelake' "$COMPOSE_FILE"
 grep -Fq 'cargo run --locked --bin grafana_seed_otlp' "$COMPOSE_FILE"
 grep -Fq 'condition: service_completed_successfully' "$COMPOSE_FILE"
 

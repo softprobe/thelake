@@ -6,7 +6,7 @@
 
 ## Overview
 
-`softprobe-runtime` is a Rust service that combines:
+`thelake` is a Rust service that combines:
 
 - OTLP trace and log ingestion over HTTP
 - OTLP trace ingestion over gRPC
@@ -343,9 +343,10 @@ Supported direct overrides in `src/config.rs` are `PORT`, `S3_REGION`, and
   provisioning which performs its own admin-token validation.
 - Auth wiring uses `SOFTPROBE_AUTH_URL` (defaults to a local auth stub URL).
 
-The implemented HTTP routes are exposed by `/openapi.json`; the standalone
-ingestion and promotion contract is in
-[`ingestion-openapi.yaml`](ingestion-openapi.yaml). Promotion semantics are in
+The implemented HTTP product contract is
+[`docs/ingestion-openapi.yaml`](ingestion-openapi.yaml), served live as
+`/openapi.json` (UI at `/swagger`). Loki/Tempo Grafana-compat routes are
+implemented outside that document. Promotion semantics are in
 [`promotion.md`](promotion.md).
 
 ## Validation

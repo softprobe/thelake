@@ -21,4 +21,5 @@ pub mod session_summary;
 pub mod softprobe_assertion;
 pub mod sql;
 pub mod storage;
+pub mod website;
 pub mod workspace_scope;
