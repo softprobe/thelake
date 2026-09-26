@@ -3,6 +3,7 @@
 use crate::compaction::cleanup::{
     cleanup_old_files_sql, count_returned_rows, expire_snapshots_sql,
 };
+use crate::compaction::maint_conn_pool::MaintenanceConnPool;
 use crate::compaction::merge::compact_table_incremental;
 use crate::compaction::status::{
     orphan_metric_status, pass_compaction_ok, snapshot_metric_status, ActionResult, ActionStatus,
@@ -11,12 +12,13 @@ use crate::compaction::status::{
 use crate::compaction::watermark::WatermarkStore;
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
-use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
+use crate::storage::ducklake::PhysicalScope;
 use crate::workspace_scope::DEFAULT_WORKSPACE_ID;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use deadpool_postgres::Pool;
 use duckdb::Connection;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 /// Full ordered maintenance table list (traces / logs / scores).
@@ -33,6 +35,7 @@ pub struct MaintenanceEngine {
     config: Config,
     default_physical: PhysicalScope,
     scope_registry: DuckLakeScopeResolver,
+    conn_pool: Arc<MaintenanceConnPool>,
 }
 
 /// Opaque physical scope selected by `MaintenanceEngine`.
@@ -49,6 +52,7 @@ impl MaintenanceEngine {
             config: config.clone(),
             default_physical: scope_registry.default_physical_scope().clone(),
             scope_registry,
+            conn_pool: Arc::new(MaintenanceConnPool::new(config)),
         }
     }
 
@@ -70,11 +74,9 @@ impl MaintenanceEngine {
     pub(crate) async fn validate_startup(&self) -> Result<()> {
         self.watermark_store().ensure_table().await?;
         for (scope_key, physical) in self.physical_scopes().await? {
-            let conn = self
-                .open_ducklake_connection(&physical)
+            self.conn_pool
+                .with_conn(&physical, |_| Ok(()))
                 .map_err(|error| anyhow!("maintenance open failed for {scope_key}: {error}"))?;
-            self.attach_ducklake(&conn, &physical)
-                .map_err(|error| anyhow!("maintenance attach failed for {scope_key}: {error}"))?;
         }
         Ok(())
     }
@@ -146,6 +148,7 @@ impl MaintenanceEngine {
             &scope.scope_key,
             &self.config,
             &scope.physical,
+            Arc::clone(&self.conn_pool),
             max_sessions,
             max_reduce_span_seconds,
         )
@@ -164,6 +167,7 @@ impl MaintenanceEngine {
             scope.physical.pg_namespace(),
             &self.config,
             &scope.physical,
+            Arc::clone(&self.conn_pool),
             &scope.scope_key,
             from,
             to,
@@ -285,9 +289,65 @@ impl MaintenanceEngine {
             }
         }
 
-        let open_started = std::time::Instant::now();
-        let conn = match self.open_ducklake_connection(physical) {
-            Ok(c) => c,
+        let mut advance_tables: Vec<String> = Vec::new();
+        let open_outcome = self.conn_pool.with_conn(physical, |conn| {
+            if self.config.maintenance.enabled && run_compaction {
+                // AC-F7: do not flush catalog-inlined rows before TWCS.
+                for table in maintenance_table_names() {
+                    if compact_status.contains_key(table) {
+                        continue;
+                    }
+                    let status = if !self
+                        .ducklake_table_exists(conn, physical, table)
+                        .unwrap_or(false)
+                    {
+                        ActionStatus::Skipped
+                    } else if let Some((watermark, inserted)) = fences.get(table).copied() {
+                        if inserted {
+                            info!(
+                                "Compaction fence inserted for {}/{} at {} (no merge this pass)",
+                                scope_key, table, watermark
+                            );
+                            ActionStatus::Skipped
+                        } else {
+                            match compact_table_incremental(
+                                &self.config,
+                                conn,
+                                physical,
+                                table,
+                                scope_key,
+                                watermark,
+                            ) {
+                                Ok(outcome) => {
+                                    if outcome.drained {
+                                        advance_tables.push(table.to_string());
+                                    }
+                                    outcome.status
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "Maintenance TWCS merge failed for {}.{} ({}): {}",
+                                        physical.pg_namespace(),
+                                        table,
+                                        label,
+                                        err
+                                    );
+                                    ActionStatus::Failed
+                                }
+                            }
+                        }
+                    } else {
+                        ActionStatus::Failed
+                    };
+                    compact_status.insert(table.to_string(), status);
+                }
+            }
+
+            Ok(self.run_scope_metadata_cleanup(conn, physical, label, scope_key))
+        });
+
+        let ((metadata, remove_orphan_files), cold, open_elapsed) = match open_outcome {
+            Ok(v) => v,
             Err(err) => {
                 warn!("Maintenance open failed for scope {}: {}", label, err);
                 crate::self_monitoring::record_compaction_pass(label, false);
@@ -300,80 +360,12 @@ impl MaintenanceEngine {
                 return Err(anyhow!("maintenance open failed for {label}: {err}"));
             }
         };
-        if let Err(err) = self.attach_ducklake(&conn, physical) {
-            warn!("Maintenance attach failed for scope {}: {}", label, err);
-            crate::self_monitoring::record_compaction_pass(label, false);
-            crate::self_monitoring::record_maintenance_step(
-                scope_key,
-                crate::self_monitoring::maintenance_step::PASS_TOTAL,
-                None,
-                pass_started.elapsed(),
-            );
-            return Err(anyhow!("maintenance attach failed for {label}: {err}"));
-        }
-        crate::self_monitoring::record_maintenance_step(
-            scope_key,
-            crate::self_monitoring::maintenance_step::OPEN_ATTACH,
-            None,
-            open_started.elapsed(),
-        );
-
-        let mut advance_tables: Vec<String> = Vec::new();
-        if self.config.maintenance.enabled && run_compaction {
-            // AC-F7: do not flush catalog-inlined rows before TWCS.
-            for table in maintenance_table_names() {
-                if compact_status.contains_key(table) {
-                    continue;
-                }
-                let status = if !self
-                    .ducklake_table_exists(&conn, physical, table)
-                    .unwrap_or(false)
-                {
-                    ActionStatus::Skipped
-                } else if let Some((watermark, inserted)) = fences.get(table).copied() {
-                    if inserted {
-                        info!(
-                            "Compaction fence inserted for {}/{} at {} (no merge this pass)",
-                            scope_key, table, watermark
-                        );
-                        ActionStatus::Skipped
-                    } else {
-                        match compact_table_incremental(
-                            &self.config,
-                            &conn,
-                            physical,
-                            table,
-                            scope_key,
-                            watermark,
-                        ) {
-                            Ok(outcome) => {
-                                if outcome.drained {
-                                    advance_tables.push(table.to_string());
-                                }
-                                outcome.status
-                            }
-                            Err(err) => {
-                                warn!(
-                                    "Maintenance TWCS merge failed for {}.{} ({}): {}",
-                                    physical.pg_namespace(),
-                                    table,
-                                    label,
-                                    err
-                                );
-                                ActionStatus::Failed
-                            }
-                        }
-                    }
-                } else {
-                    ActionStatus::Failed
-                };
-                compact_status.insert(table.to_string(), status);
-            }
-        }
-
-        let (metadata, remove_orphan_files) =
-            self.run_scope_metadata_cleanup(&conn, physical, label, scope_key);
-        drop(conn);
+        let step = if cold {
+            crate::self_monitoring::maintenance_step::OPEN_ATTACH
+        } else {
+            crate::self_monitoring::maintenance_step::OPEN_ATTACH_WARM
+        };
+        crate::self_monitoring::record_maintenance_step(scope_key, step, None, open_elapsed);
 
         for table in advance_tables {
             if let Err(err) = watermarks.advance(scope_key, &table, run_started_at).await {
@@ -503,21 +495,6 @@ impl MaintenanceEngine {
             }
         };
         (metadata, remove_orphan_files)
-    }
-
-    fn open_ducklake_connection(&self, physical: &PhysicalScope) -> Result<Connection> {
-        let access = DuckLakeAccess::Physical(physical.clone());
-        crate::storage::ducklake::DuckLakeSessionFactory::new(&self.config).open(
-            &access,
-            crate::storage::ducklake::DuckLakeSessionKind::Maintenance,
-        )
-    }
-
-    fn attach_ducklake(&self, conn: &Connection, physical: &PhysicalScope) -> Result<()> {
-        let access = DuckLakeAccess::Physical(physical.clone());
-        crate::storage::ducklake::DuckLakeSessionFactory::new(&self.config)
-            .attach(conn, &access)?;
-        Ok(())
     }
 
     fn ducklake_table_exists(
@@ -738,16 +715,20 @@ mod tests {
             !production.contains("MergeMode::Full"),
             "scheduled physical pass must not use Full merge"
         );
-        // Ensure Connection is dropped before async watermark advance.
-        let drop_idx = production
-            .find("drop(conn)")
-            .expect("must drop DuckDB Connection before await");
+        // Pooled borrow (`with_conn`) must finish before async watermark advance.
+        let borrow_end = production
+            .find("record_maintenance_step(scope_key, step, None, open_elapsed)")
+            .expect("must record open_attach after pooled borrow");
         let advance_idx = production
             .find(".advance(scope_key, &table, run_started_at)")
             .expect("must advance watermarks after merge");
         assert!(
-            drop_idx < advance_idx,
-            "Connection must be dropped before async watermark advance"
+            borrow_end < advance_idx,
+            "maintenance DuckDB borrow must end before async watermark advance"
+        );
+        assert!(
+            production.contains("conn_pool.with_conn") && !production.contains("drop(conn)"),
+            "maintenance must use pooled with_conn, not open/drop per pass"
         );
     }
 

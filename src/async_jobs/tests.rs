@@ -317,6 +317,67 @@ async fn runner_skips_run_when_lease_lost() {
 }
 
 #[tokio::test]
+async fn runner_due_gates_long_interval_job_under_fast_wake() {
+    struct NamedJob {
+        name: &'static str,
+        runs: AtomicUsize,
+        interval: Duration,
+    }
+    #[async_trait]
+    impl Job for NamedJob {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn interval(&self) -> Duration {
+            self.interval
+        }
+        async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+            Ok(vec!["t1".into()])
+        }
+        async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let fast = Arc::new(NamedJob {
+        name: "fast",
+        runs: AtomicUsize::new(0),
+        interval: Duration::from_millis(50),
+    });
+    let slow = Arc::new(NamedJob {
+        name: "slow",
+        runs: AtomicUsize::new(0),
+        interval: Duration::from_secs(3600),
+    });
+    let fast_runs = Arc::clone(&fast);
+    let slow_runs = Arc::clone(&slow);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-due".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(
+        &cfg,
+        leases,
+        vec![fast as Arc<dyn Job>, slow as Arc<dyn Job>],
+    )
+    .expect("runner");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    handle.abort();
+    assert!(
+        fast_runs.runs.load(Ordering::SeqCst) >= 3,
+        "fast job should run many times under 50ms interval"
+    );
+    assert_eq!(
+        slow_runs.runs.load(Ordering::SeqCst),
+        1,
+        "slow job must run once then due-gate despite fast wake"
+    );
+}
+
+#[tokio::test]
 async fn runner_runs_when_lease_won() {
     let leases = Arc::new(MemoryLeaseStore::new());
     let job = Arc::new(CountingJob {

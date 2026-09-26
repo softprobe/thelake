@@ -3,15 +3,21 @@
 //! Reducers are maintenance work, not a second application-facing DuckDB
 //! access mode. Only `MaintenanceEngine` reaches these helpers.
 
+use crate::compaction::MaintenanceConnPool;
 use crate::config::Config;
 use crate::session_summary::SummaryRow;
-use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
+use crate::storage::ducklake::PhysicalScope;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+
+#[cfg(test)]
+use crate::storage::ducklake::DuckLakeAccess;
+#[cfg(test)]
 use duckdb::Connection;
 
 /// Open and prepare a physical-scope maintenance connection without attaching.
-/// Kept crate-visible for the focused object-store configuration test.
+/// Used by object-store configuration tests.
+#[cfg(test)]
 pub(crate) fn prepare_session_summary_duckdb(
     config: &Config,
     scope: &PhysicalScope,
@@ -23,13 +29,6 @@ pub(crate) fn prepare_session_summary_duckdb(
             crate::storage::ducklake::DuckLakeSessionKind::Maintenance,
         )
         .context("open duckdb for session_summary reduce")
-}
-
-fn open_session_summary_connection(config: &Config, scope: &PhysicalScope) -> Result<Connection> {
-    let conn = prepare_session_summary_duckdb(config, scope)?;
-    let access = DuckLakeAccess::Physical(scope.clone());
-    crate::storage::ducklake::DuckLakeSessionFactory::new(config).attach(&conn, &access)?;
-    Ok(conn)
 }
 
 fn micros_to_utc(us: i64) -> Option<DateTime<Utc>> {
@@ -64,45 +63,60 @@ fn map_duck_row(row: &duckdb::Row<'_>) -> duckdb::Result<SummaryRow> {
     })
 }
 
-/// Execute the promoted-only session aggregate on a physical maintenance
-/// connection. Callers supply a typed window, never a connection or catalog
-/// alias.
-pub(crate) fn aggregate_sessions_from_lake(
-    config: &Config,
+fn aggregate_sql(
     scope: &PhysicalScope,
     session_ids: Option<&[String]>,
     workspace_id: Option<&str>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
-) -> Result<Vec<SummaryRow>> {
+) -> Result<String> {
     let from_table = crate::storage::ducklake::ducklake_qualified_table_name(scope, "traces");
-    let sql = match session_ids {
-        Some(ids) if workspace_id.is_some() => {
+    match session_ids {
+        Some(ids) if workspace_id.is_some() => Ok(
             crate::sql::session_summary::compile_session_summary_reduce_sql_for_workspace(
                 &from_table,
                 ids,
                 workspace_id.expect("checked above"),
                 from,
                 to,
-            )?
-        }
-        Some(ids) => crate::sql::session_summary::compile_session_summary_reduce_sql(
-            &from_table,
-            ids,
-            from,
-            to,
-        )?,
-        None => crate::sql::session_summary::compile_session_summary_rebuild_sql_for_workspace(
-            &from_table,
-            workspace_id,
-            from,
-            to,
-        )?,
-    };
-    let conn = open_session_summary_connection(config, scope)?;
-    let mut stmt = conn.prepare(&sql).context("prepare aggregate SQL")?;
-    stmt.query_map([], map_duck_row)
-        .context("query aggregate")?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("map aggregate rows")
+            )?,
+        ),
+        Some(ids) => Ok(
+            crate::sql::session_summary::compile_session_summary_reduce_sql(
+                &from_table,
+                ids,
+                from,
+                to,
+            )?,
+        ),
+        None => Ok(
+            crate::sql::session_summary::compile_session_summary_rebuild_sql_for_workspace(
+                &from_table,
+                workspace_id,
+                from,
+                to,
+            )?,
+        ),
+    }
+}
+
+/// Execute the promoted-only session aggregate via the shared maintenance pool.
+pub(crate) fn aggregate_sessions_from_lake_pooled(
+    pool: &MaintenanceConnPool,
+    _config: &Config,
+    scope: &PhysicalScope,
+    session_ids: Option<&[String]>,
+    workspace_id: Option<&str>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<SummaryRow>> {
+    let sql = aggregate_sql(scope, session_ids, workspace_id, from, to)?;
+    let (rows, _cold, _elapsed) = pool.with_conn(scope, |conn| {
+        let mut stmt = conn.prepare(&sql).context("prepare aggregate SQL")?;
+        stmt.query_map([], map_duck_row)
+            .context("query aggregate")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("map aggregate rows")
+    })?;
+    Ok(rows)
 }

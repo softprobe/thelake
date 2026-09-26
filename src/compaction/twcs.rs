@@ -96,20 +96,6 @@ pub(crate) fn post_watermark_candidates_drained(
     partitions_needing_merge(partitions, today, policy).is_empty()
 }
 
-/// Softprobe view of non-Parquet backlog for one logical table (AC-F7).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InlinedFragmentStats {
-    pub table: String,
-    pub live_parquet_files: usize,
-    pub logical_row_count: u64,
-}
-
-impl InlinedFragmentStats {
-    pub fn is_inlined_only(&self) -> bool {
-        self.logical_row_count > 0 && self.live_parquet_files == 0
-    }
-}
-
 pub const TWCS_MAX_COMPACTED_FILES_PER_WAVE: u64 = 32;
 pub const TWCS_MAX_WAVES_PER_TABLE: usize = 32;
 pub const TWCS_CLOSED_DAY_MAX_COMPACTED_FILES: u64 = 256;

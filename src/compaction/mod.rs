@@ -5,6 +5,7 @@
 
 mod cleanup;
 mod engine;
+pub(crate) mod maint_conn_pool;
 mod maintenance_job;
 mod merge;
 mod retry;
@@ -15,6 +16,7 @@ pub(crate) mod twcs;
 mod watermark;
 
 pub use engine::{maintenance_table_names, MaintenanceEngine};
+pub(crate) use maint_conn_pool::MaintenanceConnPool;
 pub use maintenance_job::{PhysicalScopeMaintenanceJob, PHYSICAL_SCOPE_MAINTENANCE_JOB};
 pub use status::{
     pass_compaction_ok, ActionResult, ActionStatus, MaintenanceSummary, MetadataMaintenanceResult,

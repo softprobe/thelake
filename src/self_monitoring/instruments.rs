@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::gauge_store;
-use super::labels::{attrs, bound_app};
+use super::labels::{self, attrs, bound_app};
 
 static EXPORT_DROPS: AtomicU64 = AtomicU64::new(0);
 
@@ -41,6 +41,7 @@ pub struct Instruments {
     pub job_lease_steal: Counter<u64>,
     pub job_lease_heartbeat_failure: Counter<u64>,
     pub job_errors: Counter<u64>,
+    pub job_skips: Counter<u64>,
     pub session_summary_dirty_upserts: Counter<u64>,
     pub session_summary_dirty_upsert_errors: Counter<u64>,
     pub session_summary_sessions_reduced: Counter<u64>,
@@ -61,7 +62,7 @@ pub struct Instruments {
 /// Bounded `step` values for [`record_maintenance_step`] (cardinality lock).
 pub mod maintenance_step {
     pub const OPEN_ATTACH: &str = "open_attach";
-    pub const BACKLOG_PROBE: &str = "backlog_probe";
+    pub const OPEN_ATTACH_WARM: &str = "open_attach_warm";
     pub const PARTITION_STATS: &str = "partition_stats";
     pub const TWCS_CLOSED: &str = "twcs_closed";
     pub const TWCS_OPEN: &str = "twcs_open";
@@ -323,6 +324,10 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .u64_counter("thelake.job.lease_heartbeat_failure")
             .build(),
         job_errors: meter.u64_counter("thelake.job.errors").build(),
+        job_skips: meter
+            .u64_counter("thelake.job.skips")
+            .with_description("Shared runner skipped Job::run (e.g. not_due)")
+            .build(),
         session_summary_dirty_upserts: meter
             .u64_counter("thelake.session_summary.dirty_upserts")
             .with_description("Successful session_summary_dirty UPSERT calls (≈ coalesce flush)")
@@ -350,7 +355,9 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .build(),
         maintenance_step_duration_ms: meter
             .f64_histogram("thelake.maintenance.step.duration")
-            .with_description("Maintenance/TWCS sub-step wall time (open_attach, backlog_probe, …)")
+            .with_description(
+                "Maintenance/TWCS sub-step wall time (open_attach, open_attach_warm, …)",
+            )
             .with_unit("ms")
             .build(),
         ingest_commit_duration_ms: meter
@@ -577,28 +584,50 @@ pub fn record_slow_query(tenant: &str, sql_kind: &str) {
 
 pub fn record_lease_acquire(job: &str, scope: &str, outcome: &str) {
     let Some(i) = instruments() else { return };
+    let scope = labels::metrics_scope_label(scope);
     i.job_lease_acquire.add(
         1,
-        &attrs(&[("job", job), ("scope", scope), ("outcome", outcome)]),
+        &attrs(&[
+            ("job_name", job),
+            ("scope", scope.as_str()),
+            ("outcome", outcome),
+        ]),
     );
 }
 
 pub fn record_lease_steal(job: &str, scope: &str) {
     let Some(i) = instruments() else { return };
+    let scope = labels::metrics_scope_label(scope);
     i.job_lease_steal
-        .add(1, &attrs(&[("job", job), ("scope", scope)]));
+        .add(1, &attrs(&[("job_name", job), ("scope", scope.as_str())]));
 }
 
 pub fn record_lease_heartbeat_failure(job: &str, scope: &str) {
     let Some(i) = instruments() else { return };
+    let scope = labels::metrics_scope_label(scope);
     i.job_lease_heartbeat_failure
-        .add(1, &attrs(&[("job", job), ("scope", scope)]));
+        .add(1, &attrs(&[("job_name", job), ("scope", scope.as_str())]));
 }
 
 pub fn record_job_error(job: &str, scope: &str) {
     let Some(i) = instruments() else { return };
+    let scope = labels::metrics_scope_label(scope);
     i.job_errors
-        .add(1, &attrs(&[("job", job), ("scope", scope)]));
+        .add(1, &attrs(&[("job_name", job), ("scope", scope.as_str())]));
+}
+
+/// Shared runner skipped `Job::run` (reason e.g. `not_due`).
+pub fn record_job_skip(job: &str, scope: &str, reason: &str) {
+    let Some(i) = instruments() else { return };
+    let scope = labels::metrics_scope_label(scope);
+    i.job_skips.add(
+        1,
+        &attrs(&[
+            ("job_name", job),
+            ("scope", scope.as_str()),
+            ("reason", reason),
+        ]),
+    );
 }
 
 /// Record configured shared-runner wake (min across jobs), for Grafana vs pass duration.
@@ -607,13 +636,17 @@ pub fn set_async_jobs_wake_ms(wake_ms: u64) {
 }
 
 /// Wall time for one leased `Job::run` (status: ok | error | panic).
+///
+/// Uses attribute `job_name` (not `job`) so Prometheus does not collide with the
+/// resource/service `job` label derived from `service.name`.
 pub fn record_job_duration(job: &str, scope: &str, status: &str, elapsed: Duration) {
     let Some(i) = instruments() else { return };
+    let scope = labels::metrics_scope_label(scope);
     i.job_duration_ms.record(
         elapsed.as_secs_f64() * 1000.0,
         &attrs(&[
-            ("job", job),
-            ("scope", scope),
+            ("job_name", job),
+            ("scope", scope.as_str()),
             ("status", status),
             ("op", "job"),
         ]),
@@ -624,10 +657,11 @@ pub fn record_job_duration(job: &str, scope: &str, status: &str, elapsed: Durati
 pub fn record_maintenance_step(scope: &str, step: &str, table: Option<&str>, elapsed: Duration) {
     let Some(i) = instruments() else { return };
     let table = table.unwrap_or("_");
+    let scope = labels::metrics_scope_label(scope);
     i.maintenance_step_duration_ms.record(
         elapsed.as_secs_f64() * 1000.0,
         &attrs(&[
-            ("scope", scope),
+            ("scope", scope.as_str()),
             ("step", step),
             ("table", table),
             ("op", "maintenance"),

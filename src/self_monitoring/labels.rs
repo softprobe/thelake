@@ -35,6 +35,27 @@ pub fn bound_app(raw: Option<&str>) -> String {
     "_other".to_string()
 }
 
+/// Scope keys used as metric labels — never emit catalog passwords.
+///
+/// Physical registry tokens embed `password=…` in the DSN. Replace that fragment
+/// with `***` so Prom/Grafana labels stay useful without leaking secrets.
+pub fn metrics_scope_label(scope: &str) -> String {
+    const NEEDLE: &str = "password=";
+    let mut out = String::with_capacity(scope.len());
+    let mut rest = scope;
+    while let Some(i) = rest.find(NEEDLE) {
+        out.push_str(&rest[..i]);
+        out.push_str("password=***");
+        rest = &rest[i + NEEDLE.len()..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ';' | ','))
+            .unwrap_or(rest.len());
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[cfg(test)]
 pub fn reset_app_cardinality_for_test() {
     APP_KEYS.clear();
@@ -73,6 +94,19 @@ mod tests {
         assert_eq!(bound_app(Some("overflow-app")), "_other");
         // Existing key still resolves.
         assert_eq!(bound_app(Some("svc-0")), "svc-0");
+    }
+
+    #[test]
+    fn metrics_scope_label_scrubs_password() {
+        let raw = "ducklake:10:host=db password=s3cret sslmode=disable:gs://b/x";
+        let got = metrics_scope_label(raw);
+        assert!(!got.contains("s3cret"), "{got}");
+        assert!(got.contains("password=***"), "{got}");
+        assert!(got.contains("host=db"), "{got}");
+        assert_eq!(
+            metrics_scope_label("ws-myworkspace-abc"),
+            "ws-myworkspace-abc"
+        );
     }
 
     #[test]

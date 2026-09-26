@@ -10,7 +10,6 @@ BACKEND="${BACKEND:-local}"
 DURATION="${DURATION:-60}"
 SPAN_QPS="${SPAN_QPS:-50}"
 LOG_QPS="${LOG_QPS:-70}"
-METRIC_QPS="${METRIC_QPS:-70}"
 QUERY_CONCURRENCY="${QUERY_CONCURRENCY:-4}"
 QUERY_INTERVAL_MS="${QUERY_INTERVAL_MS:-500}"
 
@@ -18,7 +17,6 @@ PERF_ARGS=(
   --duration "${DURATION}"
   --span-qps "${SPAN_QPS}"
   --log-qps "${LOG_QPS}"
-  --metric-qps "${METRIC_QPS}"
   --query-concurrency "${QUERY_CONCURRENCY}"
   --query-interval-ms "${QUERY_INTERVAL_MS}"
 )
@@ -90,7 +88,7 @@ case "${BACKEND}" in
     wait_health "${PORT}" "${LOG}" 15
     echo "🧪 10s smoke..."
     run_perf "${TMP_CONFIG}" "${PORT}" \
-      --duration 10 --span-qps 10 --log-qps 10 --metric-qps 10 --query-concurrency 1 --query-interval-ms 1000 \
+      --duration 10 --span-qps 10 --log-qps 10 --query-concurrency 1 --query-interval-ms 1000 \
       >"${SMOKE_LOG}" 2>&1
     if ! smoke_ok "${SMOKE_LOG}"; then
       echo "❌ R2 smoke failed"; cat "${SMOKE_LOG}"; rg -n "ERROR|Error|failed|Failed" "${LOG}" || true; exit 1
@@ -130,11 +128,11 @@ case "${BACKEND}" in
     wait_health "${PORT}" "${LOG}" 15
     echo "♨️  ingest-only warmup..."
     run_perf "${TMP_CONFIG}" "${PORT}" \
-      --duration 12 --span-qps 10 --log-qps 10 --metric-qps 10 --query-concurrency 0 --query-interval-ms 1000 \
+      --duration 12 --span-qps 10 --log-qps 10 --query-concurrency 0 --query-interval-ms 1000 \
       >"${WARMUP_LOG}" 2>&1
     echo "🧪 10s smoke..."
     run_perf "${TMP_CONFIG}" "${PORT}" \
-      --duration 10 --span-qps 10 --log-qps 10 --metric-qps 10 --query-concurrency 1 --query-interval-ms 1000 \
+      --duration 10 --span-qps 10 --log-qps 10 --query-concurrency 1 --query-interval-ms 1000 \
       >"${SMOKE_LOG}" 2>&1
     if ! smoke_ok "${SMOKE_LOG}"; then
       echo "❌ GCS smoke failed"; cat "${SMOKE_LOG}"; rg -n "ERROR|Error|failed|Failed" "${LOG}" || true; exit 1

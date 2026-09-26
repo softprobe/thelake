@@ -15,9 +15,10 @@ pub use lease::{LeaseStore, MemoryLeaseStore, PostgresLeaseStore};
 use crate::config::AsyncJobsConfig;
 use crate::self_monitoring;
 use futures::FutureExt;
+use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -33,13 +34,39 @@ impl Drop for HeartbeatStopGuard {
     }
 }
 
+/// In-process due clock: skip `Job::run` until `last_success + interval`.
+/// Wake stays `min(interval)`; long-interval jobs do not execute every wake.
+struct DueTracker {
+    last_success: HashMap<(String, String), Instant>,
+}
+
+impl DueTracker {
+    fn new() -> Self {
+        Self {
+            last_success: HashMap::new(),
+        }
+    }
+
+    fn is_due(&self, job: &str, scope: &str, interval: Duration) -> bool {
+        match self.last_success.get(&(job.to_string(), scope.to_string())) {
+            None => true,
+            Some(at) => at.elapsed() >= interval,
+        }
+    }
+
+    fn mark_success(&mut self, job: &str, scope: &str) {
+        self.last_success
+            .insert((job.to_string(), scope.to_string()), Instant::now());
+    }
+}
+
 /// Spawn the shared wake loop. Returns `None` when `jobs` is empty.
 ///
-/// Each wake: for every job/scope, `try_acquire` → if win, `run` with heartbeat →
-/// always **release**. `Job::interval` only sets the wake period (min across
-/// jobs). Configure `lease_ttl_seconds` well above `heartbeat_seconds` and
-/// typical pass latency. Heartbeat failures are logged; they do not abort
-/// `job.run`.
+/// Each wake: for every job/scope, if due → `try_acquire` → if win, `run` with
+/// heartbeat → always **release**. `Job::interval` sets both the shared wake
+/// floor (`min` across jobs) and per-job due gating. Configure
+/// `lease_ttl_seconds` well above `heartbeat_seconds` and typical pass latency.
+/// Heartbeat failures are logged; they do not abort `job.run`.
 pub fn spawn_runner(
     config: &AsyncJobsConfig,
     leases: Arc<dyn LeaseStore>,
@@ -71,6 +98,7 @@ pub fn spawn_runner(
     let handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(wake);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut due = DueTracker::new();
 
         loop {
             ticker.tick().await;
@@ -88,6 +116,10 @@ pub fn spawn_runner(
                 // TWCS/metadata pass at a time avoids compact∥expire races and unbounded
                 // task fan-out. Cross-tenant parallelism is a later stage if needed.
                 for scope in scopes {
+                    if !due.is_due(job.name(), &scope, job.interval()) {
+                        self_monitoring::record_job_skip(job.name(), &scope, "not_due");
+                        continue;
+                    }
                     match leases
                         .try_acquire(job.name(), &scope, &holder_id, lease_ttl)
                         .await
@@ -145,7 +177,7 @@ pub fn spawn_runner(
 
                     // RAII: stop HB even if `job.run` panics.
                     let _hb_guard = HeartbeatStopGuard(Some(hb_stop_tx));
-                    let run_started = std::time::Instant::now();
+                    let run_started = Instant::now();
                     let run_result = AssertUnwindSafe(job.run(&scope)).catch_unwind().await;
                     let run_elapsed = run_started.elapsed();
                     drop(_hb_guard);
@@ -159,7 +191,9 @@ pub fn spawn_runner(
                     self_monitoring::record_job_duration(job.name(), &scope, status, run_elapsed);
 
                     match &run_result {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => {
+                            due.mark_success(job.name(), &scope);
+                        }
                         Ok(Err(err)) => {
                             warn!(job = job.name(), scope = %scope, "job failed: {err}");
                             self_monitoring::record_job_error(job.name(), &scope);
