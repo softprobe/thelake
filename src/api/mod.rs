@@ -197,7 +197,7 @@ pub async fn create_router(
         .merge(tempo_routes())
         .merge(compat_stub_routes())
         .with_state(state.clone())
-        // Landing page last: explicit `/`, `/styles.css`, `/script.js`, `/assets/*`
+        // Landing page last: explicit `/`, CSS/JS, robots/sitemap/llms, `/assets/*`
         // only — must not shadow `/v1/*`, `/health`, `/ready`, OpenAPI, or swagger.
         .merge(crate::website::routes());
 
