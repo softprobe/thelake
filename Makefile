@@ -131,8 +131,8 @@ GRAFANA_SYSTEM_COMPOSE_PROJECT ?= thelake-grafana-system
 GRAFANA_URL ?= http://127.0.0.1:3000
 GRAFANA_SYSTEM_TIMEOUT_SECS ?= 900
 
-AR_IMAGE ?= us-central1-docker.pkg.dev/cs-poc-sasxbttlzroculpau4u6e2l/softprobe/thelake
-CACHE_REF ?= $(AR_IMAGE):buildcache
+IMAGE ?= softprobe/thelake
+CACHE_REF ?= $(IMAGE):buildcache
 FALLBACK_BUILDER_NAME ?= thelake-builder
 DIST_DIR ?= dist
 E2E_BACKEND ?= local
@@ -158,7 +158,7 @@ help:
 	@echo "Cache:    $(THELAKE_CACHE_ROOT)  (override THELAKE_CACHE_ROOT=...)"
 	@echo "          make clean keeps cache; make clean-cache wipes it"
 	@echo "E2E:      E2E_BACKEND=local|gcs|r2 make test-e2e"
-	@echo "Publish:  make publish TAG=vX.Y.Z [TAG_LATEST=0]"
+	@echo "Publish:  make publish TAG=vX.Y.Z [TAG_LATEST=0]  (Docker Hub $(IMAGE))"
 
 ensure-cache:
 	@mkdir -p "$(CARGO_HOME)" "$(CARGO_TARGET_DIR)"
@@ -231,16 +231,16 @@ package: _ensure-dist
 publish:
 	@set -euo pipefail; \
 	TAG="$(TAG)"; TAG_LATEST="$(TAG_LATEST)"; \
-	tags="$(AR_IMAGE):$$TAG"; \
+	tags="$(IMAGE):$$TAG"; \
 	case "$$TAG_LATEST" in 0|false|FALSE|no|NO) ;; *) \
-		if [ "$$TAG" != "latest" ]; then tags=$$(printf '%s\n%s' "$$tags" "$(AR_IMAGE):latest"); fi ;; \
+		if [ "$$TAG" != "latest" ]; then tags=$$(printf '%s\n%s' "$$tags" "$(IMAGE):latest"); fi ;; \
 	esac; \
 	if [ "$${PRINT_TAGS:-0}" = "1" ]; then printf '%s\n' "$$tags"; exit 0; fi; \
 	if [ "$${PRINT_BUILDX_ARGS:-0}" = "1" ]; then \
 		printf '%s\n' --builder "$(FALLBACK_BUILDER_NAME)" --platform linux/amd64 \
 			--cache-from "type=registry,ref=$(CACHE_REF),ignore-error=true" \
 			--cache-to "type=registry,ref=$(CACHE_REF),mode=max" \
-			--push -t "$(AR_IMAGE):$$TAG" .; \
+			--push -t "$(IMAGE):$$TAG" .; \
 		exit 0; \
 	fi; \
 	$(MAKE) --no-print-directory _ensure-dist; \
@@ -262,7 +262,7 @@ publish:
 	fi; \
 	tag_args=(); \
 	while IFS= read -r t; do [ -n "$$t" ] && tag_args+=(-t "$$t"); done <<< "$$tags"; \
-	echo "publishing (builder=$$builder)"; \
+	echo "publishing (builder=$$builder) → Docker Hub $(IMAGE)"; \
 	docker buildx build --builder "$$builder" --platform linux/amd64 \
 		--cache-from "type=registry,ref=$(CACHE_REF),ignore-error=true" \
 		--cache-to "type=registry,ref=$(CACHE_REF),mode=max" \
