@@ -241,6 +241,12 @@ layers only — do not deploy `:buildcache` as a runtime image.
 The open-source landing page is served at `/` by the runtime (same host as the
 API). Source: [`website/`](website/). Product URL: https://thelake.softprobe.ai/
 
+Crawl / LLM discovery surface (also embedded):
+
+- [`/robots.txt`](https://thelake.softprobe.ai/robots.txt)
+- [`/sitemap.xml`](https://thelake.softprobe.ai/sitemap.xml)
+- [`/llms.txt`](https://thelake.softprobe.ai/llms.txt)
+
 ## License
 
 Apache-2.0 — see [`License.txt`](License.txt).

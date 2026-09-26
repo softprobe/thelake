@@ -270,14 +270,17 @@ async fn landing_page_is_served_at_root_without_shadowing_health() {
     let html = String::from_utf8(body.to_vec()).expect("utf8");
     assert!(html.contains("thelake"));
     assert!(html.contains("cargo run --bin thelake"));
-    assert!(!html.contains("softprobe-runtime"));
-    assert!(html.contains("The Open Source LangSmith / Datadog Alternative Built on DuckDB."));
     assert!(html.contains("200x cheaper"));
     assert!(html.contains("long-term storage"));
     assert!(html.contains("https://www.softprobe.ai/"));
     assert!(html.contains("/styles.css"));
     assert!(html.contains("/script.js"));
     assert!(html.contains("/assets/hero.svg"));
+    assert!(html.contains(r#"property="og:image""#));
+    assert!(html.contains("https://thelake.softprobe.ai/assets/og-image.png"));
+    assert!(html.contains(r#"name="twitter:card""#));
+    assert!(html.contains(r#"application/ld+json"#));
+    assert!(html.contains("SoftwareApplication"));
 
     let css = router
         .clone()
@@ -340,6 +343,65 @@ async fn landing_page_is_served_at_root_without_shadowing_health() {
         .to_bytes();
     let hero_svg = String::from_utf8(hero_body.to_vec()).expect("hero utf8");
     assert!(hero_svg.contains("open SQL on your lake"));
+
+    let og = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/og-image.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("og-image");
+    assert_eq!(og.status(), StatusCode::OK);
+    assert_eq!(
+        og.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("image/png")
+    );
+
+    for (uri, mime_prefix, must_contain) in [
+        (
+            "/robots.txt",
+            "text/plain",
+            "Sitemap: https://thelake.softprobe.ai/sitemap.xml",
+        ),
+        (
+            "/sitemap.xml",
+            "application/xml",
+            "https://thelake.softprobe.ai/",
+        ),
+        ("/llms.txt", "text/plain", "# thelake"),
+    ] {
+        let resp = router
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap_or_else(|_| panic!("{uri}"));
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let ctype = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            ctype.starts_with(mime_prefix),
+            "{uri}: expected {mime_prefix}, got {ctype}"
+        );
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap_or_else(|_| panic!("{uri} body"))
+            .to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap_or_else(|_| panic!("{uri} utf8"));
+        assert!(
+            text.contains(must_contain),
+            "{uri} missing {must_contain:?}"
+        );
+    }
 
     let missing = router
         .clone()

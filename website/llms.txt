@@ -1,0 +1,17 @@
+# thelake
+
+> Open source AI evidence lake on DuckDB — the LangSmith / Datadog alternative built for long-term storage of large full payloads at ~200x lower cost than index-heavy observability platforms.
+
+thelake is an Apache-2.0 Rust runtime: OTLP traces and logs in; DuckLake + Parquet on object store or disk; DuckDB SQL and Grafana-compatible Loki/Tempo query APIs out. Softprobe Agent QA is built on thelake.
+
+## Site
+
+- [Landing](https://thelake.softprobe.ai/): Product positioning, architecture overview, quick start
+- [API docs (Swagger)](https://thelake.softprobe.ai/swagger): HTTP API reference
+- [GitHub](https://github.com/softprobe/thelake): Source, README, License.txt
+- [Softprobe](https://www.softprobe.ai/): Commercial Agent QA product powered by thelake
+
+## Optional
+
+- [Repository docs](https://github.com/softprobe/thelake/tree/main/docs): Design and DuckLake notes
+- [README](https://github.com/softprobe/thelake/blob/main/README.md): Local setup (`make setup`, `make build`, `cargo run --bin thelake`)

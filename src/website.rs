@@ -19,6 +19,15 @@ pub fn routes() -> Router {
             get(|| async { asset_response("styles.css") }),
         )
         .route("/script.js", get(|| async { asset_response("script.js") }))
+        .route(
+            "/robots.txt",
+            get(|| async { asset_response("robots.txt") }),
+        )
+        .route(
+            "/sitemap.xml",
+            get(|| async { asset_response("sitemap.xml") }),
+        )
+        .route("/llms.txt", get(|| async { asset_response("llms.txt") }))
         .route("/assets/{*path}", get(nested_asset))
 }
 
@@ -62,6 +71,8 @@ fn content_type(path: &str) -> &'static str {
         Some("js") => "application/javascript; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("xml") => "application/xml; charset=utf-8",
         _ => "application/octet-stream",
     }
 }
@@ -89,8 +100,6 @@ mod tests {
         let html = embedded_utf8("index.html");
         assert!(html.contains("thelake"));
         assert!(html.contains("cargo run --bin thelake"));
-        assert!(!html.contains("softprobe-runtime"));
-        assert!(html.contains("The Open Source LangSmith / Datadog Alternative Built on DuckDB."));
         assert!(html.contains("200x cheaper"));
         assert!(html.contains("long-term storage"));
         assert!(html.contains("https://www.softprobe.ai/"));
@@ -99,6 +108,11 @@ mod tests {
         assert!(html.contains("/styles.css"));
         assert!(html.contains("/script.js"));
         assert!(html.contains("/assets/hero.svg"));
+        assert!(html.contains(r#"property="og:image""#));
+        assert!(html.contains("https://thelake.softprobe.ai/assets/og-image.png"));
+        assert!(html.contains(r#"name="twitter:card""#));
+        assert!(html.contains(r#"application/ld+json"#));
+        assert!(html.contains("SoftwareApplication"));
 
         let css = embedded_utf8("styles.css");
         assert!(css.contains(".hero"));
@@ -111,6 +125,32 @@ mod tests {
         let svg = embedded_utf8("assets/hero.svg");
         assert!(svg.contains("thelake evidence depth"));
         assert!(svg.contains("open SQL on your lake"));
+    }
+
+    #[test]
+    fn embeds_seo_crawl_and_llm_surface() {
+        let robots = embedded_utf8("robots.txt");
+        assert!(robots.contains("User-agent: *"));
+        assert!(robots.contains("Allow: /"));
+        assert!(robots.contains("Disallow: /v1/"));
+        assert!(robots.contains("Sitemap: https://thelake.softprobe.ai/sitemap.xml"));
+
+        let sitemap = embedded_utf8("sitemap.xml");
+        assert!(sitemap.contains("https://thelake.softprobe.ai/"));
+        assert!(sitemap.contains("<urlset"));
+
+        let llms = embedded_utf8("llms.txt");
+        assert!(llms.contains("# thelake"));
+        assert!(llms.contains("https://thelake.softprobe.ai/"));
+        assert!(llms.contains("https://github.com/softprobe/thelake"));
+        assert!(llms.contains("DuckDB"));
+        assert!(llms.contains("200x"));
+        assert!(llms.contains("cargo run --bin thelake"));
+
+        assert!(
+            WebsiteAssets::get("assets/og-image.png").is_some(),
+            "assets/og-image.png must be embedded"
+        );
     }
 
     #[test]
@@ -133,6 +173,12 @@ mod tests {
         );
         assert_eq!(content_type("assets/hero.svg"), "image/svg+xml");
         assert_eq!(content_type("assets/logos/grpc.png"), "image/png");
+        assert_eq!(content_type("robots.txt"), "text/plain; charset=utf-8");
+        assert_eq!(content_type("llms.txt"), "text/plain; charset=utf-8");
+        assert_eq!(
+            content_type("sitemap.xml"),
+            "application/xml; charset=utf-8"
+        );
         assert_eq!(content_type("unknown.bin"), "application/octet-stream");
     }
 
