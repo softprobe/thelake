@@ -355,7 +355,9 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .build(),
         maintenance_step_duration_ms: meter
             .f64_histogram("thelake.maintenance.step.duration")
-            .with_description("Maintenance/TWCS sub-step wall time (open_attach, open_attach_warm, …)")
+            .with_description(
+                "Maintenance/TWCS sub-step wall time (open_attach, open_attach_warm, …)",
+            )
             .with_unit("ms")
             .build(),
         ingest_commit_duration_ms: meter

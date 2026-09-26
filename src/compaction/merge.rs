@@ -564,8 +564,7 @@ mod tests {
             "misnamed inlined-fragment / backlog probe must be gone from TWCS enter"
         );
         assert!(
-            prod.contains("partitions_needing_merge")
-                && prod.contains("post-watermark: days="),
+            prod.contains("partitions_needing_merge") && prod.contains("post-watermark: days="),
             "ops log must come from partition stats already loaded for merge/drain"
         );
     }

@@ -103,7 +103,10 @@ mod tests {
         assert!(!got.contains("s3cret"), "{got}");
         assert!(got.contains("password=***"), "{got}");
         assert!(got.contains("host=db"), "{got}");
-        assert_eq!(metrics_scope_label("ws-myworkspace-abc"), "ws-myworkspace-abc");
+        assert_eq!(
+            metrics_scope_label("ws-myworkspace-abc"),
+            "ws-myworkspace-abc"
+        );
     }
 
     #[test]

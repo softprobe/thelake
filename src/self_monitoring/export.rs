@@ -53,8 +53,7 @@ fn metrics_resource() -> Resource {
     let host = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("HOST"))
         .unwrap_or_else(|_| "unknown".into());
-    let service_name =
-        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "thelake".to_string());
+    let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "thelake".to_string());
     let instance_id = std::env::var("OTEL_SERVICE_INSTANCE_ID").unwrap_or_else(|_| {
         resource_attr_from_env("service.instance.id")
             .unwrap_or_else(|| format!("{host}-{}", std::process::id()))
@@ -148,7 +147,8 @@ mod tests {
             "missing service.name in {keys:?}"
         );
         assert!(
-            keys.iter().any(|k| k == "service.instance.id" || k == "host.name"),
+            keys.iter()
+                .any(|k| k == "service.instance.id" || k == "host.name"),
             "expected instance or host in {keys:?}"
         );
     }

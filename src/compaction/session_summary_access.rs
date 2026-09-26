@@ -82,12 +82,14 @@ fn aggregate_sql(
             )
             .map_err(Into::into)
         }
-        Some(ids) => Ok(crate::sql::session_summary::compile_session_summary_reduce_sql(
-            &from_table,
-            ids,
-            from,
-            to,
-        )?),
+        Some(ids) => Ok(
+            crate::sql::session_summary::compile_session_summary_reduce_sql(
+                &from_table,
+                ids,
+                from,
+                to,
+            )?,
+        ),
         None => Ok(
             crate::sql::session_summary::compile_session_summary_rebuild_sql_for_workspace(
                 &from_table,

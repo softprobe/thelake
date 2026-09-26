@@ -727,8 +727,7 @@ mod tests {
             "maintenance DuckDB borrow must end before async watermark advance"
         );
         assert!(
-            production.contains("conn_pool.with_conn")
-                && !production.contains("drop(conn)"),
+            production.contains("conn_pool.with_conn") && !production.contains("drop(conn)"),
             "maintenance must use pooled with_conn, not open/drop per pass"
         );
     }
