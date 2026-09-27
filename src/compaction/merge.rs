@@ -346,6 +346,7 @@ fn twcs_compact_waves(
     Ok(last)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ducklake_compact_table_wave(
     config: &Config,
     conn: &Connection,

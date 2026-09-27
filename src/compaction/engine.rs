@@ -379,9 +379,7 @@ impl MaintenanceEngine {
                                     outcome.status
                                 }
                                 Err(err) => {
-                                    if let Err(lost) = ensure_active() {
-                                        return Err(lost);
-                                    }
+                                    ensure_active()?;
                                     warn!(
                                         "Maintenance TWCS merge failed for {}.{} ({}): {}",
                                         physical.pg_namespace(),
@@ -505,9 +503,7 @@ impl MaintenanceEngine {
                     skipped: false,
                 },
                 Err(err) => {
-                    if let Err(lost) = ensure_active() {
-                        return Err(lost);
-                    }
+                    ensure_active()?;
                     warn!("Maintenance metadata failed ({}): {}", label, err);
                     MetadataMaintenanceResult {
                         expired_snapshots: 0,
@@ -538,9 +534,7 @@ impl MaintenanceEngine {
                     status: ActionStatus::Completed,
                 },
                 Err(err) => {
-                    if let Err(lost) = ensure_active() {
-                        return Err(lost);
-                    }
+                    ensure_active()?;
                     warn!("Maintenance orphan cleanup failed ({}): {}", label, err);
                     ActionResult {
                         status: ActionStatus::Failed,
