@@ -53,9 +53,9 @@ pub(crate) fn execute_batch_with_serialization_retry(
     action: &str,
     ensure_active: &mut (dyn FnMut() -> anyhow::Result<()> + Send),
 ) -> std::result::Result<(), duckdb::Error> {
-    if let Err(msg) = crate::sql::ensure_fact_scan_has_timestamp_predicate(sql) {
+    if let Err(err) = crate::sql::ensure_fact_scan_uses_timestamp_pruning(conn, sql) {
         return Err(duckdb::Error::InvalidParameterName(format!(
-            "SQL gate: {msg}"
+            "SQL gate: {err}"
         )));
     }
     execute_with_serialization_retry(max_attempts, action, ensure_active, || {

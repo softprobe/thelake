@@ -153,7 +153,12 @@ async fn map_bags_hot_paths_and_nested_filters() {
 
     let started = Instant::now();
     let result = query_engine
-        .count_traces_by_attribute(&session_id, "sp.observation.type", "generation")
+        .count_traces_by_attribute(
+            &session_id,
+            "sp.observation.type",
+            "generation",
+            crate::util::query_window(),
+        )
         .await
         .expect("filter query");
     let elapsed = started.elapsed();
@@ -164,7 +169,12 @@ async fn map_bags_hot_paths_and_nested_filters() {
     );
 
     let detail = query_engine
-        .trace_attributes_by_attribute(&session_id, "sp.observation.type", "generation")
+        .trace_attributes_by_attribute(
+            &session_id,
+            "sp.observation.type",
+            "generation",
+            crate::util::query_window(),
+        )
         .await
         .expect("detail")
         .expect("matching trace");
@@ -175,7 +185,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
     );
 
     let logs = query_engine
-        .count_logs_by_attribute("sp.session.id", &session_id)
+        .count_logs_by_attribute("sp.session.id", &session_id, crate::util::query_window())
         .await
         .expect("logs");
     assert_eq!(logs, 1);
@@ -339,7 +349,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
             {capture} AS capture_id \
          FROM traces \
          WHERE session_id = '{sess}' AND span_id = 'vk-span-1' \
-           AND timestamp >= '1970-01-01'::TIMESTAMP_NS AND timestamp <= '2100-01-01'::TIMESTAMP_NS",
+           AND {bound}",
         obs = prefer_attr_varchar(
             Some("observation_type"),
             "attributes",
@@ -371,9 +381,10 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         cost = prefer_attr_try_cast(Some("total_cost"), "attributes", "sp.cost.total", "DOUBLE"),
         capture = variant_varchar("attributes", "sp.capture.id"),
         sess = session_id.replace('\'', "''"),
+        bound = crate::util::query_window().timestamp_filter_sql(""),
     );
     let projected = query_engine
-        .trace_attributes_for_span("vk-span-1")
+        .trace_attributes_for_span("vk-span-1", crate::util::query_window())
         .await
         .expect("projected attributes")
         .expect("projected span");
@@ -389,7 +400,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 
     // 2) COALESCE default + enduser.id fallback.
     let fallback = query_engine
-        .trace_attributes_for_span("vk-span-2")
+        .trace_attributes_for_span("vk-span-2", crate::util::query_window())
         .await
         .expect("fallback")
         .expect("fallback span");
@@ -399,7 +410,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 
     // 3) Missing key is NULL (not an error).
     let missing = query_engine
-        .trace_attributes_for_span("vk-span-1")
+        .trace_attributes_for_span("vk-span-1", crate::util::query_window())
         .await
         .expect("missing")
         .expect("source span");
@@ -463,7 +474,12 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     // (anti-spoofing; see `bind_spans_to_workspace`), so the capture id (already
     // globally unique) is what disambiguates this row rather than `tenant_id`.
     let capture_result = query_engine
-        .trace_attributes_by_attribute(&session_id, "sp.capture.id", &capture_id)
+        .trace_attributes_by_attribute(
+            &session_id,
+            "sp.capture.id",
+            &capture_id,
+            crate::util::query_window(),
+        )
         .await
         .expect("capture id filter")
         .expect("capture span");

@@ -851,9 +851,10 @@ impl DuckDBCore {
         // reattach or mem::forget connections after writes.
 
         let query_run = self.ducklake_inline_sql(query);
-        // D12 runs on the final SQL after bare traces/logs/scores have been
-        // expanded to qualified DuckLake table names.
-        crate::sql::ensure_fact_scan_has_timestamp_predicate(&query_run)
+        // Validate DuckDB's physical plan after traces/logs/scores have been
+        // expanded to their final table names. Every fact scan must carry its
+        // own pushed timestamp filter before the query can execute.
+        crate::sql::ensure_fact_scan_uses_timestamp_pruning(&state.conn, &query_run)
             .map_err(|e| anyhow!("SQL gate: {e}"))?;
         if std::env::var("SOFTPROBE_LOG_SQL").ok().as_deref() == Some("1") {
             eprintln!("SOFTPROBE_LOG_SQL run={query_run}");
@@ -1408,7 +1409,7 @@ mod tests {
     #[test]
     fn public_logs_alias_cannot_bypass_timestamp_gate() {
         assert!(
-            crate::sql::ensure_fact_scan_has_timestamp_predicate("SELECT * FROM logs").is_err(),
+            crate::sql::ensure_sql_has_bare_timestamp_predicate("SELECT * FROM logs").is_err(),
             "the public logs alias must be subject to the fact-scan gate"
         );
     }

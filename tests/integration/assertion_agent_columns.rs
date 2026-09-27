@@ -239,6 +239,8 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .await
         .expect("reduce_session_summary");
 
+    let time_window = crate::util::query_window();
+
     let details_request = Request::builder()
         .method("POST")
         .uri("/v1/telemetry/details")
@@ -249,8 +251,8 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
                 "version": 1,
                 "target": { "kind": "session", "id": session_id },
                 "timeRange": {
-                    "from": "1970-01-01T00:00:00Z",
-                    "to": "2100-01-01T00:00:00Z"
+                    "from": time_window.from.to_rfc3339(),
+                    "to": time_window.to.to_rfc3339()
                 },
                 "limit": 10
             })

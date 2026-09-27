@@ -21,6 +21,8 @@ pub enum ScoreSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// A score event. Deduplication identity is `(score_id, timestamp)` and also
+/// includes the authenticated tenant in shared workspace mode.
 pub struct Score {
     pub score_id: String,
     pub timestamp: DateTime<Utc>,

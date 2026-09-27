@@ -123,13 +123,23 @@ async fn assert_warm_writes_zero_probes_contract(runtime: &RuntimeEngine, tenant
 
     // Verify all rows were committed and queryable through the query engine.
     let span_n = runtime
-        .count_traces(TraceCountFilter::default())
+        .count_traces(TraceCountFilter {
+            time_window: crate::util::query_window(),
+            session_id: None,
+            app_id: None,
+            span_id: None,
+        })
         .await
         .expect("query traces");
     assert_eq!(span_n, (N + 1) as u64, "all traces must be committed");
 
     let log_n = runtime
-        .count_logs(LogCountFilter::default())
+        .count_logs(LogCountFilter {
+            time_window: crate::util::query_window(),
+            session_id: None,
+            body: None,
+            trace_id: None,
+        })
         .await
         .expect("query logs");
     assert_eq!(log_n, (N + 1) as u64, "all logs must be committed");

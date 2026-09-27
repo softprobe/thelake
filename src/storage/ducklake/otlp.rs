@@ -109,6 +109,7 @@ impl DuckLakeWriter {
             self.physical_scope(),
             "traces",
             record_batches,
+            None,
         )
         .await
     }
@@ -136,6 +137,7 @@ impl DuckLakeWriter {
             self.physical_scope(),
             "logs",
             record_batches,
+            None,
         )
         .await
     }

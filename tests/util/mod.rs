@@ -7,6 +7,16 @@ pub mod promotion_fixtures;
 pub mod scope;
 pub mod tenant;
 
+/// Narrow time window for integration data seeded around the test run.
+pub fn query_window() -> softprobe_runtime::sql::QueryWindow {
+    let now = chrono::Utc::now();
+    softprobe_runtime::sql::QueryWindow::try_new(
+        now - chrono::Duration::days(30),
+        now + chrono::Duration::days(1),
+    )
+    .expect("valid integration query window")
+}
+
 // E2E-only helpers. `integration_perf` needs pipeline + storage_config; the rest
 // are for `integration-e2e` modules in the main `tests` binary.
 #[cfg(feature = "integration-e2e")]

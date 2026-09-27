@@ -16,15 +16,17 @@ pub struct QueryEngine {
     tenant_id: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LogCountFilter {
+    pub time_window: crate::sql::QueryWindow,
     pub session_id: Option<String>,
     pub body: Option<String>,
     pub trace_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TraceCountFilter {
+    pub time_window: crate::sql::QueryWindow,
     pub session_id: Option<String>,
     pub app_id: Option<String>,
     pub span_id: Option<String>,
@@ -83,7 +85,7 @@ impl QueryEngine {
 
     /// Count logs through the tenant-bound query contract.
     pub async fn count_logs(&self, filter: LogCountFilter) -> anyhow::Result<u64> {
-        let mut predicates = bounded_timestamp_predicates();
+        let mut predicates = timestamp_predicates(filter.time_window);
         if let Some(session_id) = filter.session_id {
             predicates.push(format!(
                 "session_id = {}",
@@ -117,7 +119,7 @@ impl QueryEngine {
 
     /// Count traces through the tenant-bound query contract.
     pub async fn count_traces(&self, filter: TraceCountFilter) -> anyhow::Result<u64> {
-        let mut predicates = bounded_timestamp_predicates();
+        let mut predicates = timestamp_predicates(filter.time_window);
         add_trace_filter_predicates(&mut predicates, filter);
         let query = crate::sql::trusted::approved_query(crate::sql::query::count_traces_sql(
             &predicates.join(" AND "),
@@ -133,8 +135,12 @@ impl QueryEngine {
     }
 
     /// Read the first HTTP-bearing span for a session.
-    pub async fn find_http_span(&self, session_id: &str) -> anyhow::Result<Option<HttpSpan>> {
-        let mut predicates = bounded_timestamp_predicates();
+    pub async fn find_http_span(
+        &self,
+        session_id: &str,
+        time_window: crate::sql::QueryWindow,
+    ) -> anyhow::Result<Option<HttpSpan>> {
+        let mut predicates = timestamp_predicates(time_window);
         predicates.push(format!(
             "session_id = {}",
             crate::sql::literal::sql_string_literal(session_id)
@@ -178,8 +184,12 @@ impl QueryEngine {
     }
 
     /// Count calendar-day partitions visible for one session.
-    pub async fn count_trace_days(&self, session_id: &str) -> anyhow::Result<u64> {
-        let mut predicates = bounded_timestamp_predicates();
+    pub async fn count_trace_days(
+        &self,
+        session_id: &str,
+        time_window: crate::sql::QueryWindow,
+    ) -> anyhow::Result<u64> {
+        let mut predicates = timestamp_predicates(time_window);
         predicates.push(format!(
             "session_id = {}",
             crate::sql::literal::sql_string_literal(session_id)
@@ -203,8 +213,9 @@ impl QueryEngine {
         session_id: &str,
         key: &str,
         value: &str,
+        time_window: crate::sql::QueryWindow,
     ) -> anyhow::Result<u64> {
-        let mut predicates = bounded_timestamp_predicates();
+        let mut predicates = timestamp_predicates(time_window);
         predicates.push(format!(
             "session_id = {}",
             crate::sql::literal::sql_string_literal(session_id)
@@ -218,8 +229,13 @@ impl QueryEngine {
     }
 
     /// Count logs whose typed attribute matches a value.
-    pub async fn count_logs_by_attribute(&self, key: &str, value: &str) -> anyhow::Result<u64> {
-        let mut predicates = bounded_timestamp_predicates();
+    pub async fn count_logs_by_attribute(
+        &self,
+        key: &str,
+        value: &str,
+        time_window: crate::sql::QueryWindow,
+    ) -> anyhow::Result<u64> {
+        let mut predicates = timestamp_predicates(time_window);
         predicates.push(format!(
             "{} = {}",
             crate::storage::schema::variant::variant_varchar("attributes", key),
@@ -234,8 +250,9 @@ impl QueryEngine {
         session_id: &str,
         key: &str,
         value: &str,
+        time_window: crate::sql::QueryWindow,
     ) -> anyhow::Result<Option<serde_json::Value>> {
-        let mut predicates = bounded_timestamp_predicates();
+        let mut predicates = timestamp_predicates(time_window);
         predicates.push(format!(
             "session_id = {}",
             crate::sql::literal::sql_string_literal(session_id)
@@ -263,8 +280,9 @@ impl QueryEngine {
     pub async fn trace_attributes_for_span(
         &self,
         span_id: &str,
+        time_window: crate::sql::QueryWindow,
     ) -> anyhow::Result<Option<serde_json::Value>> {
-        let mut predicates = bounded_timestamp_predicates();
+        let mut predicates = timestamp_predicates(time_window);
         predicates.push(format!(
             "span_id = {}",
             crate::sql::literal::sql_string_literal(span_id)
@@ -350,11 +368,12 @@ impl QueryEngine {
     }
 }
 
-fn bounded_timestamp_predicates() -> Vec<String> {
-    vec![
-        "timestamp >= '1970-01-01'::TIMESTAMP_NS".to_string(),
-        "timestamp <= '2100-01-01'::TIMESTAMP_NS".to_string(),
-    ]
+fn timestamp_predicates(window: crate::sql::QueryWindow) -> Vec<String> {
+    window
+        .timestamp_filter_sql("")
+        .split(" AND ")
+        .map(str::to_owned)
+        .collect()
 }
 
 impl QueryEngine {

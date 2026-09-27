@@ -15,7 +15,7 @@
 3. **Session locality is sort, not partition.** Never `PARTITIONED BY (session_id)`.
 4. **Every OTLP read requires `QueryWindow { from, to }`.** No `Option` time. Compilers emit bare `timestamp` predicates via `QueryWindow::scan_with_*_filter` in `src/sql/` (`scan_with_timestamp_filter` for a window; `scan_with_day_filter` only as a `timestamp` sub-window for one calendar day — never a DATE/day-column predicate). Scores use the same UTC range rendered as `TIMESTAMPTZ` literals.
 5. **All OTLP SQL lives in `src/sql/`.** Handlers call `crate::sql::…`.
-6. **All fact scans carry a bare `timestamp` predicate** for partition pruning. QueryWindow recipes construct this shape; the execute-time gate rejects common unfiltered fact SQL and forbidden `record_date` / `event_date` / `window_ts` references. The gate is a lightweight textual check, not a SQL parser, so recipe tests and EXPLAIN coverage verify the actual scan shapes.
+6. **All fact scans carry an explicit, bare, two-sided `timestamp` range** for partition pruning. Typed query APIs require a `QueryWindow` and have no all-history default. Before execution, DuckDB's JSON physical plan is checked to ensure each traces/logs/scores scan received both bounds as conjunctive bare-column filters; unsupported query forms fail closed. Raw SQL cannot scan Parquet files directly, and each execution call accepts one statement. The execute-time gate also rejects forbidden `record_date` / `event_date` / `window_ts` references.
 7. **No backwards compatibility.** New catalog → copy → flip → delete old.
 
 Violate any rule → reject the change.

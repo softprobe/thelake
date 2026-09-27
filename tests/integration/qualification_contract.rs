@@ -10,7 +10,6 @@ use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Spa
 use prost::Message;
 use softprobe_runtime::compaction::ActionStatus;
 use softprobe_runtime::config::Config;
-use softprobe_runtime::sql::maintenance::logical_table_row_count_sql;
 use softprobe_runtime::storage::ducklake::open_attached_from_config;
 use softprobe_runtime::workspace_scope::WorkspaceScopeMode;
 use std::sync::Arc;
@@ -130,7 +129,10 @@ fn assert_three_part_probe(config: &Config) {
     assert_eq!(parts[2], "traces");
 
     let conn = open_attached_from_config(&config.ducklake, config.ducklake.data_inlining_row_limit);
-    let row_sql = logical_table_row_count_sql(&qualified);
+    let row_sql = format!(
+        "SELECT count(*) FROM {qualified} WHERE {}",
+        crate::util::query_window().timestamp_filter_sql("")
+    );
     assert!(
         row_sql.contains(&format!("FROM {qualified}")),
         "probe SQL must keep three-part name: {row_sql}"

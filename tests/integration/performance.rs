@@ -27,9 +27,15 @@ use crate::util::storage_config::load_test_config;
 //   See Makefile header + .github/workflows/performance.yml
 // =============================================================================
 
-/// Wide one-clock bound so warm COUNT(*) queries satisfy D12 without day filters.
-const PERF_TS_BOUND: &str = "timestamp >= '1970-01-01'::TIMESTAMP_NS \
-     AND timestamp <= '2100-01-01'::TIMESTAMP_NS";
+/// Bounded one-clock range around test data for warm COUNT(*) queries.
+fn perf_ts_bound() -> String {
+    let window = softprobe_runtime::sql::QueryWindow::try_new(
+        Utc::now() - chrono::Duration::days(30),
+        Utc::now() + chrono::Duration::days(1),
+    )
+    .expect("valid performance query window");
+    window.timestamp_filter_sql("")
+}
 
 fn load_perf_config() -> Config {
     if let Ok(config_file) = std::env::var("PERF_CONFIG_FILE") {
@@ -298,7 +304,7 @@ async fn perf_union_read_latency() {
         "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND {}",
         staged_session.replace('\'', "''"),
-        PERF_TS_BOUND,
+        perf_ts_bound(),
     );
     for _ in 0..warmup_workers {
         let warmup = query_engine
@@ -311,7 +317,7 @@ async fn perf_union_read_latency() {
         "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND {}",
         base_session.replace('\'', "''"),
-        PERF_TS_BOUND,
+        perf_ts_bound(),
     );
     // Retry query to handle R2 eventual consistency after the base ingest flush.
     let warmup =
@@ -332,7 +338,7 @@ async fn perf_union_read_latency() {
         "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND {}",
         base_session.replace('\'', "''"),
-        PERF_TS_BOUND,
+        perf_ts_bound(),
     );
     for _ in 0..warmup_workers {
         let warmup = query_engine
@@ -345,7 +351,7 @@ async fn perf_union_read_latency() {
         "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND {}",
         buffer_session.replace('\'', "''"),
-        PERF_TS_BOUND,
+        perf_ts_bound(),
     );
     for _ in 0..warmup_workers {
         let warmup = query_engine
@@ -359,7 +365,7 @@ async fn perf_union_read_latency() {
         "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND {}",
         buffer_session.replace('\'', "''"),
-        PERF_TS_BOUND,
+        perf_ts_bound(),
     );
     for _ in 0..2 {
         let warm = query_engine.execute_query(&sql).await.expect("warmup");
@@ -384,13 +390,13 @@ async fn perf_union_read_latency() {
             "SELECT COUNT(*) AS count FROM logs \
              WHERE session_id = '{}' AND {}",
             base_session.replace('\'', "''"),
-            PERF_TS_BOUND,
+            perf_ts_bound(),
         );
         let staged_sql = format!(
             "SELECT COUNT(*) AS count FROM logs \
              WHERE session_id = '{}' AND {}",
             staged_session.replace('\'', "''"),
-            PERF_TS_BOUND,
+            perf_ts_bound(),
         );
         run_diagnostics(&query_engine, "logs", &base_sql).await;
         run_diagnostics(&query_engine, "logs_staged_session", &staged_sql).await;
@@ -398,7 +404,7 @@ async fn perf_union_read_latency() {
             "SELECT COUNT(*) AS count FROM logs \
              WHERE session_id = '{}' AND {}",
             buffer_session.replace('\'', "''"),
-            PERF_TS_BOUND,
+            perf_ts_bound(),
         );
         run_diagnostics(&query_engine, "logs_buffer_session", &buffer_sql).await;
         run_diagnostics(&query_engine, "logs", &sql).await;
@@ -515,7 +521,7 @@ async fn perf_union_read_concurrency() {
         "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND {}",
         staged_session.replace('\'', "''"),
-        PERF_TS_BOUND,
+        perf_ts_bound(),
     );
     for _ in 0..warmup_workers {
         let warmup = query_engine
@@ -529,7 +535,7 @@ async fn perf_union_read_concurrency() {
         "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND {}",
         base_session.replace('\'', "''"),
-        PERF_TS_BOUND,
+        perf_ts_bound(),
     );
     // Retry query to handle R2 eventual consistency after the base ingest flush.
     let warmup = retry_query_until_count(&query_engine, &warmup_sql, per_session as i64, 15)
@@ -550,7 +556,7 @@ async fn perf_union_read_concurrency() {
         "SELECT COUNT(*) AS count FROM logs \
          WHERE session_id = '{}' AND {}",
         buffer_session.replace('\'', "''"),
-        PERF_TS_BOUND,
+        perf_ts_bound(),
     );
     for _ in 0..warmup_workers {
         let warmup = query_engine
@@ -569,7 +575,7 @@ async fn perf_union_read_concurrency() {
     for i in 0..concurrency {
         let engine = query_engine.clone();
         let session_id = sessions[i % sessions.len()].clone();
-        let date_filter = PERF_TS_BOUND;
+        let date_filter = perf_ts_bound();
         handles.push(tokio::spawn(async move {
             let sql = format!(
                 "SELECT COUNT(*) AS count FROM logs \
@@ -601,25 +607,25 @@ async fn perf_union_read_concurrency() {
             "SELECT COUNT(*) AS count FROM logs \
              WHERE session_id = '{}' AND {}",
             base_session.replace('\'', "''"),
-            PERF_TS_BOUND,
+            perf_ts_bound(),
         );
         let staged_sql = format!(
             "SELECT COUNT(*) AS count FROM logs \
              WHERE session_id = '{}' AND {}",
             staged_session.replace('\'', "''"),
-            PERF_TS_BOUND,
+            perf_ts_bound(),
         );
         let buffer_sql = format!(
             "SELECT COUNT(*) AS count FROM logs \
              WHERE session_id = '{}' AND {}",
             buffer_session.replace('\'', "''"),
-            PERF_TS_BOUND,
+            perf_ts_bound(),
         );
         let union_sql = format!(
             "SELECT COUNT(*) AS count FROM logs \
              WHERE session_id = '{}' AND {}",
             buffer_session.replace('\'', "''"),
-            PERF_TS_BOUND,
+            perf_ts_bound(),
         );
         run_diagnostics(&query_engine, "logs", &base_sql).await;
         run_diagnostics(&query_engine, "logs_staged_session", &staged_sql).await;

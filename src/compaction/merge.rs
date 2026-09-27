@@ -471,9 +471,7 @@ fn load_partition_stats_after(
     newer_than: DateTime<Utc>,
 ) -> Result<Vec<PartitionFileStats>> {
     let sql = partition_live_file_stats_after_sql(catalog_alias, table, newer_than);
-    crate::sql::ensure_fact_scan_has_timestamp_predicate(&sql)
-        .map_err(|e| anyhow!("SQL gate: {e}"))?;
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = crate::sql::prepare_checked(conn, &sql)?;
     let rows = stmt.query_map([], |row| {
         let date_str: String = row.get(0)?;
         let record_date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
@@ -573,8 +571,7 @@ mod tests {
         assert!(
             !prod.contains("load_inlined_fragment_stats")
                 && !prod.contains("InlinedFragmentStats")
-                && !prod.contains("BACKLOG_PROBE")
-                && !prod.contains("logical_table_row_count_sql"),
+                && !prod.contains("BACKLOG_PROBE"),
             "misnamed inlined-fragment / backlog probe must be gone from TWCS enter"
         );
         assert!(

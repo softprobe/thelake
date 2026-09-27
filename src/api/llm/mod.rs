@@ -144,7 +144,7 @@ pub async fn create_score(
     }
 
     if engine
-        .score_exists(&score.score_id)
+        .score_exists(&score.score_id, score.timestamp)
         .await
         .map_err(|error| {
             warn!("score idempotency lookup failed: {}", error);

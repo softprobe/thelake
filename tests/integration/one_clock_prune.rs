@@ -287,7 +287,10 @@ async fn typed_query_gate_covers_traces_and_logs() {
         query
             .count_traces(TraceCountFilter {
                 session_id: Some("persistent-session".into()),
-                ..Default::default()
+                time_window: crate::util::query_window(),
+
+                app_id: None,
+                span_id: None,
             })
             .await
             .expect("trace count"),
@@ -297,7 +300,10 @@ async fn typed_query_gate_covers_traces_and_logs() {
         query
             .count_logs(LogCountFilter {
                 session_id: Some("persistent-session".into()),
-                ..Default::default()
+                time_window: crate::util::query_window(),
+
+                body: None,
+                trace_id: None,
             })
             .await
             .expect("log count"),

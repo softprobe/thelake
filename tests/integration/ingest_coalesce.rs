@@ -46,7 +46,10 @@ async fn coalesce_force_flush_makes_logs_queryable() {
         .query_engine()
         .count_logs(LogCountFilter {
             body: Some("coalesce force_flush body".to_string()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            session_id: None,
+            trace_id: None,
         })
         .await
         .expect("query after flush");
