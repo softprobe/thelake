@@ -79,7 +79,7 @@ pub fn compile_session_recording_sql(
     let obs_type = format!("COALESCE({}, 'span')", expr_observation_type());
     let sid = sql_string_literal(session_id);
     Ok(window
-        .bind_scan("", |bound| {
+        .scan_with_timestamp_filter("", |bound| {
             format!(
                 "SELECT {projection} FROM traces WHERE session_id = {sid} AND {obs_type} = 'recording' AND {bound} \
                  ORDER BY timestamp ASC, span_id ASC LIMIT {limit}",
@@ -203,7 +203,7 @@ pub fn compile_session_search_sql(
     let fetch = limit + 1;
 
     Ok(window
-        .bind_scan("", |bound| {
+        .scan_with_timestamp_filter("", |bound| {
             format!(
                 "SELECT * FROM ( \
            SELECT \
@@ -295,7 +295,7 @@ pub fn compile_span_search_sql(request: &SpanSearchRequest) -> Result<String, St
     };
 
     Ok(window
-        .bind_scan("", |bound| {
+        .scan_with_timestamp_filter("", |bound| {
             let mut where_sql = format!("{identity_sql}{bound}");
             if let Some(ref cursor) = cursor_sql {
                 where_sql = format!("{where_sql} AND {cursor}");
@@ -316,7 +316,7 @@ pub fn compile_span_detail_sql(
     let window = QueryWindow::try_new(from, to)?;
     let sid = sql_string_literal(span_id);
     Ok(window
-        .bind_scan("", |bound| {
+        .scan_with_timestamp_filter("", |bound| {
             format!(
                 "SELECT {projection} FROM traces WHERE span_id = {sid} AND {bound} LIMIT 1",
                 projection = observation_projection(true),
@@ -338,7 +338,7 @@ pub fn compile_trace_summary_sql(
     }
     let identity_sql = identity.join(" AND ");
     Ok(window
-        .bind_scan("", |bound| {
+        .scan_with_timestamp_filter("", |bound| {
             format!(
                 "SELECT {projection} FROM traces WHERE {identity_sql} AND {bound} GROUP BY trace_id",
                 projection = trace_summary_projection(),
@@ -367,7 +367,7 @@ pub fn compile_trace_spans_sql(
     let identity_sql = identity.join(" AND ");
     let fetch = limit + 1;
     Ok(window
-        .bind_scan("", |bound| {
+        .scan_with_timestamp_filter("", |bound| {
             let mut where_sql = format!("{identity_sql} AND {bound}");
             if let Some(ref c) = cursor_sql {
                 where_sql = format!("{where_sql} AND {c}");
@@ -395,7 +395,7 @@ pub fn compile_session_detail_sql(
     let sid = sql_string_literal(session_id);
     let exclude = exclude_recording_observation_sql();
     Ok(window
-        .bind_scan_ns_and_tz("", |bound, score_bound| {
+        .scan_with_both_timestamp_filters("", |bound, score_bound| {
             format!(
                 "WITH session_spans AS MATERIALIZED ( \
                    SELECT {projection} FROM traces \
@@ -455,7 +455,7 @@ pub fn compile_scores_for_span_sql(
     let window = QueryWindow::try_new(from, to)?;
     let sid = sql_string_literal(span_id);
     Ok(window
-        .bind_scan_timestamptz("", |bound| {
+        .scan_with_timestamptz_filter("", |bound| {
             format!(
                 "SELECT {cols} FROM scores WHERE span_id = {sid} AND {bound} ORDER BY timestamp DESC, score_id DESC",
                 cols = score_columns(),
@@ -472,7 +472,7 @@ pub fn compile_scores_for_trace_sql(
     let window = QueryWindow::try_new(from, to)?;
     let tid = sql_string_literal(trace_id);
     Ok(window
-        .bind_scan_ns_and_tz("", |ns_bound, tz_bound| {
+        .scan_with_both_timestamp_filters("", |ns_bound, tz_bound| {
             let identity = format!(
                 "(trace_id = {tid} OR span_id IN (SELECT span_id FROM traces WHERE trace_id = {tid} AND {ns_bound}))"
             );

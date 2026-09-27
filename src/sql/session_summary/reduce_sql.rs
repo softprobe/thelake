@@ -96,7 +96,7 @@ pub fn compile_session_summary_aggregate_sql_for_workspace(
 
     // Predicate order: identity → timestamp (one clock) → observation filter.
     Ok(window
-        .bind_scan("", |bound| {
+        .scan_with_timestamp_filter("", |bound| {
             let where_sql = if ownership_pred.is_empty() {
                 format!(
                     "{session_pred} AND {bound} AND COALESCE({observation_type}, '') <> 'recording'"

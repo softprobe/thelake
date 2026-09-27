@@ -853,7 +853,8 @@ impl DuckDBCore {
         let query_run = self.ducklake_inline_sql(query);
         // D12 runs on the final SQL after bare traces/logs/scores have been
         // expanded to qualified DuckLake table names.
-        crate::sql::ensure_fact_scan_bound(&query_run).map_err(|e| anyhow!("SQL gate: {e}"))?;
+        crate::sql::ensure_fact_scan_has_timestamp_predicate(&query_run)
+            .map_err(|e| anyhow!("SQL gate: {e}"))?;
         if std::env::var("SOFTPROBE_LOG_SQL").ok().as_deref() == Some("1") {
             eprintln!("SOFTPROBE_LOG_SQL run={query_run}");
         }
@@ -1407,7 +1408,7 @@ mod tests {
     #[test]
     fn public_logs_alias_cannot_bypass_timestamp_gate() {
         assert!(
-            crate::sql::ensure_fact_scan_bound("SELECT * FROM logs").is_err(),
+            crate::sql::ensure_fact_scan_has_timestamp_predicate("SELECT * FROM logs").is_err(),
             "the public logs alias must be subject to the fact-scan gate"
         );
     }

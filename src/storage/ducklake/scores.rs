@@ -121,7 +121,8 @@ impl DuckLakeWriter {
                         crate::sql::writer::score_exists_sql_for_workspace(&table, workspace_id)
                     },
                 );
-                crate::sql::ensure_fact_scan_bound(&sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
+                crate::sql::ensure_fact_scan_has_timestamp_predicate(&sql)
+                    .map_err(|e| anyhow!("SQL gate: {e}"))?;
                 match conn.query_row(&sql, [&score_id], |row| row.get::<_, bool>(0)) {
                     Ok(exists) => Ok(exists),
                     Err(error) if error.to_string().contains("does not exist") => Ok(false),

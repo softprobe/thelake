@@ -26,7 +26,7 @@ list   ← session_summary
 detail ← traces
 ```
 
-**Hard rule:** reducer/rebuild SQL always goes through [`QueryWindow`](../src/api/query_window.rs) + `push_otlp_time_predicates` (design D4 in [`design-event-time-layout.md`](./design-event-time-layout.md)): partition day derived from the same `from`/`to` as event-time bounds. Do not invent a second clock or optional time bounds.
+**Hard rule:** every DuckLake fact scan uses the same finite `QueryWindow` contract and a bare `timestamp` predicate so DuckLake can prune its calendar-day partitions. Do not invent a second clock, wrap the `timestamp` column, or make time bounds optional.
 
 **Hard rule:** reducer/rebuild DuckDB connections must configure object-store credentials the same way query workers and compaction do (`httpfs` + `configure_object_store`). A connection that only ATTACHes DuckLake can scan catalog-inlined rows but fails (or silently under-reads) once the window needs Parquet under `gs://` / `s3://`.
 
@@ -272,8 +272,8 @@ FROM traces
 WHERE session_id IN (...)
   AND session_id <> ''
   AND <exclude recording>
-  AND CAST(timestamp AS TIMESTAMP_NS) >= ...            -- REQUIRED (one clock; partition prune)
-  AND CAST(timestamp AS TIMESTAMP_NS) <= ...
+  AND timestamp >= ...                                  -- REQUIRED (bare column; partition prune)
+  AND timestamp <= ...
 GROUP BY session_id;
 ```
 
@@ -299,7 +299,7 @@ to   = max(dirty.max_ts, now())
 from = least(coalesce(session_summary.start_time, dirty.min_ts), dirty.min_ts)
 ```
 
-Plus timestamp bounds via `QueryWindow::bind_scan`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`. Stage 2 **clamps** oversized windows (does not chunk); early history outside the clamp may undercount until Stage 4 rebuild.
+Plus bare timestamp predicates via `QueryWindow::scan_with_timestamp_filter`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`. Stage 2 **clamps** oversized windows (does not chunk); early history outside the clamp may undercount until Stage 4 rebuild.
 
 ### 6.6 Late spans
 
@@ -340,7 +340,7 @@ Same aggregate as reducer; **`[from, to]` required** (ops must pass a window —
 ```text
 rebuild([from, to]):
   SELECT ... FROM traces
-  WHERE CAST(timestamp AS TIMESTAMP_NS) >= ... AND CAST(timestamp AS TIMESTAMP_NS) <= ...
+  WHERE timestamp >= ... AND timestamp <= ...
     AND timestamp >= from AND timestamp <= to
     AND session_id present AND not recording
   GROUP BY session_id
@@ -461,7 +461,7 @@ Replaced reducer with: **durable dirty + SKIP LOCKED claims + `FROM traces` aggr
 5. No DuckLake session-summary table.  
 6. No Explorer window-wide obs scan on list.  
 7. After reduce(S), summary(S) matches aggregate(S) on `traces` over the chosen `[from,to]`.  
-8. No reducer/rebuild SQL ships without `QueryWindow` day + timestamp bounds (see [`design-event-time-layout.md`](./design-event-time-layout.md)).  
+8. No reducer/rebuild SQL ships without `QueryWindow` timestamp predicates (see [`design-event-time-layout.md`](./design-event-time-layout.md)).
 9. Session-summary reduce uses durable row claims; simultaneous replicas claim disjoint batches. Physical maintenance and rebuild use fenced leases.
 10. Dirty UPSERT rate ≈ lake flush rate (coalesced batches), never ≈ span rate.
 

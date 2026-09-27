@@ -1,4 +1,4 @@
-//! D12: reject unbound fact scans and forbidden time column names.
+//! D12: require partition-prunable timestamp predicates on fact scans.
 
 const FORBIDDEN_TIME_COLUMNS: &[&str] = &["record_date", "event_date", "window_ts"];
 
@@ -143,9 +143,12 @@ fn statements(sql: &str) -> Vec<&str> {
 pub fn is_allowlisted_infra(sql: &str) -> bool {
     let trimmed = sql.trim_start();
     let upper = trimmed.to_ascii_uppercase();
-    if upper.starts_with("SELECT 1")
-        || upper.starts_with("SELECT 1;")
-        || upper == "SELECT 1"
+    let simple_select_one = code_view(sql)
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .eq_ignore_ascii_case("SELECT 1");
+    if simple_select_one
         || upper.starts_with("ATTACH ")
         || upper.starts_with("DETACH ")
         || upper.starts_with("INSTALL ")
@@ -191,11 +194,25 @@ pub fn names_fact_table(sql: &str) -> bool {
     })
 }
 
-fn has_timestamp_bound(sql: &str) -> bool {
+fn has_bare_timestamp_predicate(sql: &str) -> bool {
     let lower = code_view(sql).to_ascii_lowercase();
-    // Require a real timestamp *predicate*: column (optionally CAST) compared via
-    // >= / <= / > / < / BETWEEN. Rejects "SELECT timestamp … WHERE value > 0".
-    // Matches both `timestamp >=` and `make_timestamp_ns(epoch_ns(timestamp)) >=`.
+    // Partition pruning requires a bare timestamp column comparison. Reject
+    // projected timestamps, casts, and function-wrapped forms that scan more files.
+    let Some(where_clause_start) = lower
+        .match_indices("where")
+        .find(|(start, keyword)| {
+            let end = start + keyword.len();
+            (*start == 0
+                || !lower.as_bytes()[start - 1].is_ascii_alphanumeric()
+                    && lower.as_bytes()[start - 1] != b'_')
+                && (end == lower.len()
+                    || !lower.as_bytes()[end].is_ascii_alphanumeric()
+                        && lower.as_bytes()[end] != b'_')
+        })
+        .map(|(start, keyword)| start + keyword.len())
+    else {
+        return false;
+    };
     let bytes = lower.as_bytes();
     let needle = b"timestamp";
     let mut i = 0;
@@ -209,21 +226,11 @@ fn has_timestamp_bound(sql: &str) -> bool {
         let after = i + needle.len();
         let after_ok =
             after >= bytes.len() || !bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_';
-        if !(before_ok && after_ok) {
+        if !(before_ok && after_ok) || i < where_clause_start {
             i += 1;
             continue;
         }
-        let rest = &lower[after..];
-        let rest = rest.trim_start();
-        let rest = if let Some(r) = rest.strip_prefix("as ") {
-            // Legacy CAST(timestamp AS TIMESTAMP_NS)
-            let r = r.trim_start();
-            let r = r.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
-            r.trim_start().trim_start_matches(')').trim_start()
-        } else {
-            // make_timestamp_ns(epoch_ns(timestamp)) >= ...
-            rest.trim_start_matches(')').trim_start()
-        };
+        let rest = lower[after..].trim_start();
         if rest.starts_with(">=")
             || rest.starts_with("<=")
             || rest.starts_with('>')
@@ -237,8 +244,9 @@ fn has_timestamp_bound(sql: &str) -> bool {
     false
 }
 
-/// Reject fact SQL missing a `timestamp` bound; reject forbidden day/clock column names.
-pub fn ensure_fact_scan_bound(sql: &str) -> Result<(), String> {
+/// Reject fact SQL without a bare `timestamp` predicate needed for partition pruning.
+/// Also reject forbidden day/clock column names.
+pub fn ensure_fact_scan_has_timestamp_predicate(sql: &str) -> Result<(), String> {
     // Multi-statement batches: check each non-empty statement.
     for stmt in statements(sql) {
         let stmt = stmt.trim();
@@ -291,8 +299,8 @@ fn ensure_one(sql: &str) -> Result<(), String> {
             return Err(format!("forbidden time column name `{bad}`"));
         }
     }
-    if names_fact_table(sql) && !has_timestamp_bound(sql) && !is_external_fact_write(sql) {
-        return Err("fact-table SQL missing timestamp bound".into());
+    if names_fact_table(sql) && !has_bare_timestamp_predicate(sql) && !is_external_fact_write(sql) {
+        return Err("fact-table SQL missing bare timestamp predicate for partition pruning".into());
     }
     Ok(())
 }
@@ -304,7 +312,7 @@ fn sql_is_mutating_fact_ddl(sql: &str) -> bool {
 
 /// Shared checked `execute_batch` for paths that hold a raw `Connection`.
 pub(crate) fn execute_batch_checked(conn: &duckdb::Connection, sql: &str) -> anyhow::Result<()> {
-    ensure_fact_scan_bound(sql).map_err(anyhow::Error::msg)?;
+    ensure_fact_scan_has_timestamp_predicate(sql).map_err(anyhow::Error::msg)?;
     conn.execute_batch(sql)
         .map_err(|e| anyhow::anyhow!("execute_batch failed: {e}"))
 }
@@ -314,7 +322,7 @@ pub(crate) fn prepare_checked<'a>(
     conn: &'a duckdb::Connection,
     sql: &str,
 ) -> anyhow::Result<duckdb::Statement<'a>> {
-    ensure_fact_scan_bound(sql).map_err(anyhow::Error::msg)?;
+    ensure_fact_scan_has_timestamp_predicate(sql).map_err(anyhow::Error::msg)?;
     conn.prepare(sql)
         .map_err(|e| anyhow::anyhow!("prepare failed: {e}"))
 }
@@ -325,24 +333,43 @@ mod tests {
 
     #[test]
     fn allows_select_one_and_attach() {
-        assert!(ensure_fact_scan_bound("SELECT 1").is_ok());
-        assert!(ensure_fact_scan_bound("ATTACH 'x' AS y").is_ok());
-        assert!(ensure_fact_scan_bound("CALL ducklake_checkpoint('c')").is_ok());
+        assert!(ensure_fact_scan_has_timestamp_predicate("SELECT 1").is_ok());
+        assert!(ensure_fact_scan_has_timestamp_predicate("ATTACH 'x' AS y").is_ok());
+        assert!(ensure_fact_scan_has_timestamp_predicate("CALL ducklake_checkpoint('c')").is_ok());
     }
 
     #[test]
-    fn rejects_unbound_fact_scan() {
-        let err = ensure_fact_scan_bound("SELECT * FROM softprobe.traces WHERE session_id = 's'")
-            .unwrap_err();
-        assert!(err.contains("timestamp bound"), "{err}");
+    fn health_check_select_cannot_bypass_fact_scan_filter() {
+        let err =
+            ensure_fact_scan_has_timestamp_predicate("SELECT 1 FROM softprobe.traces").unwrap_err();
+        assert!(err.contains("timestamp predicate"), "{err}");
     }
 
     #[test]
-    fn accepts_bound_fact_scan() {
-        assert!(ensure_fact_scan_bound(
-            "SELECT * FROM softprobe.traces WHERE make_timestamp_ns(epoch_ns(timestamp)) >= '2026-09-10'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2026-09-11'::TIMESTAMP_NS"
+    fn timestamp_comparison_in_projection_does_not_filter_fact_scan() {
+        let err = ensure_fact_scan_has_timestamp_predicate(
+            "SELECT timestamp >= '2026-09-10'::TIMESTAMP_NS FROM softprobe.traces",
         )
-        .is_ok());
+        .unwrap_err();
+        assert!(err.contains("timestamp predicate"), "{err}");
+    }
+
+    #[test]
+    fn rejects_fact_scan_without_timestamp_predicate() {
+        let err = ensure_fact_scan_has_timestamp_predicate(
+            "SELECT * FROM softprobe.traces WHERE session_id = 's'",
+        )
+        .unwrap_err();
+        assert!(err.contains("timestamp predicate"), "{err}");
+    }
+
+    #[test]
+    fn rejects_wrapped_timestamp_predicate_that_blocks_partition_pruning() {
+        let err = ensure_fact_scan_has_timestamp_predicate(
+            "SELECT * FROM softprobe.traces WHERE make_timestamp_ns(epoch_ns(timestamp)) >= '2026-09-10'::TIMESTAMP_NS AND make_timestamp_ns(epoch_ns(timestamp)) <= '2026-09-11'::TIMESTAMP_NS",
+        )
+        .unwrap_err();
+        assert!(err.contains("timestamp predicate"), "{err}");
     }
 
     #[test]
@@ -351,7 +378,7 @@ mod tests {
             let sql = format!(
                 "SELECT * FROM softprobe.traces WHERE {bad} = DATE '2026-09-10' AND timestamp >= 'x'"
             );
-            let err = ensure_fact_scan_bound(&sql).unwrap_err();
+            let err = ensure_fact_scan_has_timestamp_predicate(&sql).unwrap_err();
             assert!(err.contains(bad), "{err}");
         }
     }
@@ -359,7 +386,7 @@ mod tests {
     #[test]
     fn rejects_uppercase_and_quoted_forbidden_time_columns() {
         for bad in ["RECORD_DATE", "\"Event_Date\"", "\"WINDOW_TS\""] {
-            let err = ensure_fact_scan_bound(&format!(
+            let err = ensure_fact_scan_has_timestamp_predicate(&format!(
                 "SELECT * FROM softprobe.traces WHERE {bad} = DATE '2026-09-10'"
             ))
             .unwrap_err();
@@ -372,46 +399,47 @@ mod tests {
     }
 
     #[test]
-    fn does_not_treat_end_timestamp_as_the_event_time_bound() {
-        let err = ensure_fact_scan_bound(
+    fn does_not_treat_end_timestamp_as_the_event_time_predicate() {
+        let err = ensure_fact_scan_has_timestamp_predicate(
             "SELECT * FROM softprobe.traces WHERE end_timestamp >= '2026-09-10'::TIMESTAMP_NS",
         )
         .unwrap_err();
-        assert!(err.contains("timestamp bound"), "{err}");
+        assert!(err.contains("timestamp predicate"), "{err}");
     }
 
     #[test]
     fn accepts_one_sided_event_time_windows() {
-        assert!(ensure_fact_scan_bound(
+        assert!(ensure_fact_scan_has_timestamp_predicate(
             "SELECT * FROM softprobe.logs WHERE timestamp >= '2026-09-10'::TIMESTAMP_NS"
         )
         .is_ok());
-        assert!(ensure_fact_scan_bound(
+        assert!(ensure_fact_scan_has_timestamp_predicate(
             "SELECT * FROM softprobe.logs WHERE timestamp <= TIMESTAMPTZ '2026-09-11'"
         )
         .is_ok());
     }
 
     #[test]
-    fn ignores_fake_tables_bounds_and_semicolons_inside_literals_or_comments() {
-        assert!(
-            ensure_fact_scan_bound("SELECT 'FROM softprobe.traces WHERE timestamp >= 0;';").is_ok()
-        );
-        assert!(ensure_fact_scan_bound(
+    fn ignores_fake_tables_and_predicates_inside_literals_or_comments() {
+        assert!(ensure_fact_scan_has_timestamp_predicate(
+            "SELECT 'FROM softprobe.traces WHERE timestamp >= 0;';"
+        )
+        .is_ok());
+        assert!(ensure_fact_scan_has_timestamp_predicate(
             "SELECT 1 /* FROM softprobe.traces WHERE timestamp >= 0; */;"
         )
         .is_ok());
-        let err = ensure_fact_scan_bound(
+        let err = ensure_fact_scan_has_timestamp_predicate(
             "SELECT * FROM softprobe.traces WHERE note = 'timestamp >= 0;';\
              SELECT * FROM softprobe.logs",
         )
         .unwrap_err();
-        assert!(err.contains("timestamp bound"), "{err}");
+        assert!(err.contains("timestamp predicate"), "{err}");
     }
 
     #[test]
-    fn allows_external_parquet_insert_without_timestamp_bound() {
-        assert!(ensure_fact_scan_bound(
+    fn allows_external_parquet_insert_without_timestamp_predicate() {
+        assert!(ensure_fact_scan_has_timestamp_predicate(
             "INSERT INTO softprobe.traces BY NAME SELECT * FROM read_parquet('/tmp/x.parquet');"
         )
         .is_ok());
@@ -419,12 +447,12 @@ mod tests {
 
     #[test]
     fn allows_values_insert_without_timestamp_predicate() {
-        assert!(ensure_fact_scan_bound(
+        assert!(ensure_fact_scan_has_timestamp_predicate(
             "INSERT INTO softprobe.scores (score_id, name, timestamp)\n\
              SELECT * FROM (VALUES ('s1', 'n', '2026-01-01'::TIMESTAMPTZ));"
         )
         .is_ok());
-        assert!(ensure_fact_scan_bound(
+        assert!(ensure_fact_scan_has_timestamp_predicate(
             "INSERT INTO softprobe.logs (session_id, timestamp, body)\n\
              VALUES\n('sess', TIMESTAMPTZ '2026-01-01', 'hello');"
         )
@@ -433,15 +461,16 @@ mod tests {
 
     #[test]
     fn rejects_timestamp_column_without_time_predicate() {
-        let err =
-            ensure_fact_scan_bound("SELECT timestamp FROM softprobe.logs WHERE body IS NOT NULL")
-                .unwrap_err();
-        assert!(err.contains("timestamp bound"), "{err}");
+        let err = ensure_fact_scan_has_timestamp_predicate(
+            "SELECT timestamp FROM softprobe.logs WHERE body IS NOT NULL",
+        )
+        .unwrap_err();
+        assert!(err.contains("timestamp predicate"), "{err}");
     }
 
     #[test]
     fn accepts_bare_timestamp_comparison() {
-        assert!(ensure_fact_scan_bound(
+        assert!(ensure_fact_scan_has_timestamp_predicate(
             "SELECT count(*) FROM softprobe.traces WHERE timestamp >= '2026-01-01' AND timestamp <= '2026-01-02'"
         )
         .is_ok());

@@ -1,7 +1,7 @@
 //! DuckLake maintenance SQL recipes (merge, expire, cleanup, inventory probes).
 //!
 //! All production maintenance SQL lives here. Compaction/engine code calls these
-//! builders and executes via [`crate::sql::ensure_fact_scan_bound`] /
+//! builders and executes via [`crate::sql::ensure_fact_scan_has_timestamp_predicate`] /
 //! [`crate::sql::prepare_checked`] / [`crate::sql::execute_batch_checked`].
 
 use chrono::{DateTime, Utc};
@@ -110,7 +110,7 @@ fn partition_live_file_stats_sql_inner(
     )
 }
 
-/// Logical row count probe — carries a wide timestamp bound for D12.
+/// Logical row count probe — carries a wide timestamp predicate for D12.
 ///
 /// `qualified_table` must be the full DuckLake product path
 /// (e.g. `softprobe.thelake.traces`), same contract as [`table_exists_probe_sql`].
@@ -317,7 +317,7 @@ mod tests {
         assert!(sql.contains("newer_than => TIMESTAMPTZ"));
         assert!(sql.contains("max_compacted_files => 32"));
         assert!(!sql.contains("partition_filter"));
-        assert!(crate::sql::ensure_fact_scan_bound(&sql).is_ok());
+        assert!(crate::sql::ensure_fact_scan_has_timestamp_predicate(&sql).is_ok());
     }
 
     #[test]
@@ -331,7 +331,7 @@ mod tests {
             Some(8 * 1024 * 1024),
         );
         assert!(!sql.contains("newer_than"));
-        assert!(crate::sql::ensure_fact_scan_bound(&sql).is_ok());
+        assert!(crate::sql::ensure_fact_scan_has_timestamp_predicate(&sql).is_ok());
     }
 
     #[test]
@@ -346,7 +346,7 @@ mod tests {
             sql.contains(".thelake."),
             "non-main metadata schema must appear in FROM clause: {sql}"
         );
-        assert!(crate::sql::ensure_fact_scan_bound(&sql).is_ok());
+        assert!(crate::sql::ensure_fact_scan_has_timestamp_predicate(&sql).is_ok());
     }
 
     #[test]
@@ -355,7 +355,7 @@ mod tests {
         let sql = partition_live_file_stats_after_sql("softprobe", "traces", ts);
         assert!(sql.contains("ducklake_snapshot"));
         assert!(sql.contains("snapshot_time >="));
-        assert!(crate::sql::ensure_fact_scan_bound(&sql).is_ok());
+        assert!(crate::sql::ensure_fact_scan_has_timestamp_predicate(&sql).is_ok());
     }
 
     #[test]
@@ -363,10 +363,10 @@ mod tests {
         let sql = expire_snapshots_sql("softprobe", 60, false);
         assert!(sql.contains("INTERVAL '60 seconds'"));
         assert!(!sql.contains("days"));
-        assert!(crate::sql::ensure_fact_scan_bound(&sql).is_ok());
+        assert!(crate::sql::ensure_fact_scan_has_timestamp_predicate(&sql).is_ok());
         let cleanup = cleanup_old_files_sql("softprobe", 3600);
         assert!(cleanup.contains("INTERVAL '3600 seconds'"));
-        assert!(crate::sql::ensure_fact_scan_bound(&cleanup).is_ok());
+        assert!(crate::sql::ensure_fact_scan_has_timestamp_predicate(&cleanup).is_ok());
     }
 
     #[test]
@@ -458,6 +458,6 @@ mod tests {
     #[test]
     fn table_exists_probe_is_gate_checked() {
         let sql = table_exists_probe_sql("softprobe.main.traces");
-        assert!(crate::sql::ensure_fact_scan_bound(&sql).is_ok());
+        assert!(crate::sql::ensure_fact_scan_has_timestamp_predicate(&sql).is_ok());
     }
 }

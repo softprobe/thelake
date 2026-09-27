@@ -471,7 +471,8 @@ fn load_partition_stats_after(
     newer_than: DateTime<Utc>,
 ) -> Result<Vec<PartitionFileStats>> {
     let sql = partition_live_file_stats_after_sql(catalog_alias, table, newer_than);
-    crate::sql::ensure_fact_scan_bound(&sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
+    crate::sql::ensure_fact_scan_has_timestamp_predicate(&sql)
+        .map_err(|e| anyhow!("SQL gate: {e}"))?;
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         let date_str: String = row.get(0)?;

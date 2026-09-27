@@ -10,12 +10,12 @@
 
 ## 0. Non-negotiable rules
 
-1. **One event time.** Column `timestamp` is the only temporal column. Type: `TIMESTAMP_NS` (unified).
-2. **No `record_date` / `event_date` / `window_ts` column.** Partition = calendar day of `timestamp` (DuckLake expression locked by greenfield EXPLAIN). Filtering `timestamp` **is** the prune.
+1. **One event time.** Column `timestamp` is the only temporal column and represents a UTC instant. Traces/logs store `TIMESTAMP_NS`; scores currently store `TIMESTAMPTZ`.
+2. **No `record_date` / `event_date` / `window_ts` column.** Partition = calendar day of `timestamp` (DuckLake expression locked by greenfield EXPLAIN). A bare `timestamp` predicate is required for partition pruning.
 3. **Session locality is sort, not partition.** Never `PARTITIONED BY (session_id)`.
-4. **Every OTLP read requires `QueryWindow { from, to }`.** No `Option` time. Compilers emit **only** `timestamp` bounds via `QueryWindow::bind_*` in `src/sql/` (`bind_scan` for a window; `bind_day` only as a `timestamp` sub-window for one calendar day — never a DATE/day-column predicate).
+4. **Every OTLP read requires `QueryWindow { from, to }`.** No `Option` time. Compilers emit bare `timestamp` predicates via `QueryWindow::scan_with_*_filter` in `src/sql/` (`scan_with_timestamp_filter` for a window; `scan_with_day_filter` only as a `timestamp` sub-window for one calendar day — never a DATE/day-column predicate). Scores use the same UTC range rendered as `TIMESTAMPTZ` literals.
 5. **All OTLP SQL lives in `src/sql/`.** Handlers call `crate::sql::…`.
-6. **Execute-time gate (D12)** rejects fact SQL without a `timestamp` bound and rejects `record_date` / `event_date` / `window_ts`.
+6. **All fact scans carry a bare `timestamp` predicate** for partition pruning. QueryWindow recipes construct this shape; the execute-time gate rejects common unfiltered fact SQL and forbidden `record_date` / `event_date` / `window_ts` references. The gate is a lightweight textual check, not a SQL parser, so recipe tests and EXPLAIN coverage verify the actual scan shapes.
 7. **No backwards compatibility.** New catalog → copy → flip → delete old.
 
 Violate any rule → reject the change.
@@ -36,7 +36,7 @@ We stored one fact as two columns (`timestamp` + `record_date`) and partitioned 
 | D2 | **Query shape:** only `timestamp` lower/upper from `QueryWindow`. |
 | D3 | **Cutover:** new catalog; batch copy; flip; drop old. No dual-read. |
 | D4 | **Delete** `push_optional_time_bounds` and any optional lake windows. |
-| D5 | **One type:** `TIMESTAMP_NS` on traces/logs/scores. |
+| D5 | **One logical event time.** Keep the existing storage types: `TIMESTAMP_NS` on traces/logs and `TIMESTAMPTZ` on scores. Both receive the same UTC window as bare-column predicates. |
 | D6 | **Session detail window** = summary start/end only. Pad = **0**. |
 | D7 | **Sort:** traces `(session_id, trace_id, timestamp)`; logs/scores `(session_id, timestamp)`. |
 | D8 | **No `app_id` sort lead.** Scores in same layout module. |
@@ -44,7 +44,7 @@ We stored one fact as two columns (`timestamp` + `record_date`) and partitioned 
 | D10 | **Inline** default `data_inlining_row_limit = 500`. |
 | D11 | Session `/sessions/{session_id}` returns all span `attributes`/`events` with session totals in one response. |
 
-**Pre-cutover (once):** greenfield EXPLAIN with **only** `timestamp` bounds must not read out-of-window day files. If prune fails, fix DDL/engine — do **not** reintroduce `record_date`.
+**Pre-cutover (once):** greenfield EXPLAIN with **only** bare `timestamp` predicates must not read out-of-window day files. If prune fails, fix DDL/engine — do **not** reintroduce `record_date`.
 
 ---
 
@@ -77,7 +77,7 @@ Locked by `tests/integration/one_clock_prune.rs` / [`fixtures/one-clock-prune-ex
 ## 5. Acceptance
 
 1. No `record_date` in OTLP schemas.  
-2. Every OTLP recipe: `timestamp` bounds only; no `record_date` / `event_date` / `window_ts` tokens.  
+2. Every OTLP recipe: bare `timestamp` predicates only; no `record_date` / `event_date` / `window_ts` tokens.
 3. Greenfield EXPLAIN: out-of-window days not read.  
 4. SQL only under `src/sql/`; D12 execute gate green.  
 5. Cutover done; old catalog gone.  
@@ -92,7 +92,7 @@ Locked by `tests/integration/one_clock_prune.rs` / [`fixtures/one-clock-prune-ex
 - In-place dual-read / feature flags.  
 - `(year, month, day)` **without** a greenfield prune proof — now locked by EXPLAIN fixture.  
 - Optional lake time bounds.  
-- Relying on review instead of `src/sql` + bind + gate.  
+- Relying on review instead of `src/sql` filter builders, recipe tests, and the execute gate.
 - Reintroducing `record_date` because triples feel complex.
 
 **This document and [`design-sql-and-schema.md`](./design-sql-and-schema.md) are the law.** Prior DATE-column + dual-predicate revisions are obsolete.
