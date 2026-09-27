@@ -199,7 +199,7 @@ async fn postgres_session_summary_list_every_filter() {
 
     // Field projection accuracy on the hit.
     let hit = &resp.items[0];
-    assert_eq!(hit.observation_count, 3);
+    assert_eq!(hit.span_count, 3);
     assert_eq!(hit.error_count, 1);
     assert_eq!(hit.total_tokens, Some(50));
     assert!((hit.total_cost.unwrap() - 0.05).abs() < 1e-9);

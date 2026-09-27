@@ -18,13 +18,12 @@ info:
     - `GET|POST /v1/llm/score-configs`
 
     LLM query surfaces:
-    - `POST /v1/llm/observations/search`
-    - `GET /v1/llm/observations/{span_id}`
+    - `POST /v1/llm/spans/search`
+    - `GET /v1/llm/spans/{span_id}`
     - `GET /v1/llm/traces/{trace_id}`
     - `POST /v1/llm/sessions/search`
     - `POST /v1/llm/sessions/summary/rebuild`
     - `GET /v1/llm/sessions/{session_id}`
-    - `GET /v1/llm/sessions/{session_id}/observations`
     - `GET /v1/llm/sessions/{session_id}/recording`
 
     Also inventoried here (summary-level): health/ready, `POST /v1/query/sql`,
@@ -321,30 +320,30 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/observations/search:
+  /v1/llm/spans/search:
     post:
       tags:
         - llm
-      summary: Search lightweight LLM observation projections
+      summary: Search lightweight LLM span projections
       description: |
-        Requires `from` and `to`. Returns lightweight observation rows without
+        Requires `from` and `to`. Returns lightweight span rows without
         full attributes/events. LLM fields are derived from span attributes
         (`gen_ai.*`, `sp.*`) and do not require promotion to be applied.
         Cursor ordering is `(timestamp DESC, span_id DESC)`.
-      operationId: searchObservations
+      operationId: searchSpans
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ObservationSearchRequest"
+              $ref: "#/components/schemas/SpanSearchRequest"
       responses:
         "200":
-          description: Bounded observation page
+          description: Bounded span page
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ObservationSearchResponse"
+                $ref: "#/components/schemas/SpanSearchResponse"
         "400":
           description: Missing time range, invalid filter, or malformed cursor
           content:
@@ -361,12 +360,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/observations/{span_id}:
+  /v1/llm/spans/{span_id}:
     get:
       tags:
         - llm
-      summary: Get one observation with full payload and attached scores
-      operationId: getObservation
+      summary: Get one span with full payload and attached scores
+      operationId: getSpan
       parameters:
         - name: span_id
           in: path
@@ -387,13 +386,13 @@ paths:
             format: date-time
       responses:
         "200":
-          description: Observation detail
+          description: Span detail
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ObservationDetail"
+                $ref: "#/components/schemas/SpanDetail"
         "404":
-          description: Observation not found
+          description: Span not found
           content:
             application/json:
               schema:
@@ -410,7 +409,7 @@ paths:
     get:
       tags:
         - llm
-      summary: Get a derived trace summary, observations, and scores
+      summary: Get a trace, its spans, and scores
       operationId: getTrace
       parameters:
         - name: trace_id
@@ -551,10 +550,11 @@ paths:
     get:
       tags:
         - llm
-      summary: Get a session detail using session_summary start/end as the lake window
+      summary: Get full session detail using the session summary time window
       description: |
         Does not accept query `from`/`to`. The lake window is taken from the
-        tenant's `session_summary` row for `session_id`.
+        tenant's `session_summary` row for `session_id`. Returns all session spans,
+        trace and token totals, and scores in one response.
       operationId: getSession
       parameters:
         - name: session_id
@@ -562,80 +562,21 @@ paths:
           required: true
           schema:
             type: string
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 200
-            default: 50
-        - name: cursor
-          in: query
-          required: false
-          schema:
-            type: string
       responses:
         "200":
-          description: Session summary
+          description: Complete session detail
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionDetail"
         "400":
-          description: Invalid limit or malformed cursor
+          description: Invalid session ID or query
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "404":
           description: No session_summary row or no lake activity in the summary window
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "401":
-          description: Missing or invalid bearer token
-        "503":
-          description: session_summary unavailable or tenant runtime unavailable
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-  /v1/llm/sessions/{session_id}/observations:
-    get:
-      tags:
-        - llm
-      summary: List session observations using session_summary start/end as the lake window
-      operationId: getSessionObservations
-      parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 200
-            default: 50
-        - name: cursor
-          in: query
-          required: false
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Session observations page
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SessionObservations"
-        "404":
-          description: No session_summary row for this session
           content:
             application/json:
               schema:
@@ -1074,7 +1015,7 @@ components:
       properties:
         error:
           type: string
-    ObservationSearchRequest:
+    SpanSearchRequest:
       type: object
       required: [from, to]
       properties:
@@ -1084,7 +1025,7 @@ components:
         to:
           type: string
           format: date-time
-        observation_types:
+        span_types:
           type: array
           items:
             type: string
@@ -1104,16 +1045,16 @@ components:
           default: 50
         cursor:
           type: string
-    ObservationSummary:
+    SpanSummary:
       type: object
-      required: [trace_id, span_id, name, observation_type, start_time]
+      required: [trace_id, span_id, name, span_type, start_time]
       properties:
         trace_id: { type: string }
         span_id: { type: string }
         parent_span_id: { type: string }
         session_id: { type: string }
         name: { type: string }
-        observation_type: { type: string }
+        span_type: { type: string }
         start_time: { type: string, format: date-time }
         end_time: { type: string, format: date-time }
         status_code: { type: string }
@@ -1124,20 +1065,21 @@ components:
         output_tokens: { type: integer }
         total_tokens: { type: integer }
         total_cost: { type: number }
-    ObservationSearchResponse:
+    SpanSearchResponse:
       type: object
       required: [items]
       properties:
         items:
           type: array
           items:
-            $ref: "#/components/schemas/ObservationSummary"
+            $ref: "#/components/schemas/SpanSummary"
         next_cursor:
           type: string
-    ObservationDetail:
+    SpanDetail:
       allOf:
-        - $ref: "#/components/schemas/ObservationSummary"
+        - $ref: "#/components/schemas/SpanSummary"
         - type: object
+          required: [attributes, events]
           properties:
             attributes:
               type: object
@@ -1151,16 +1093,16 @@ components:
               type: array
               items:
                 $ref: "#/components/schemas/Score"
-    TraceSummary:
+    Trace:
       type: object
-      required: [trace_id, start_time, end_time, observation_count]
+      required: [trace_id, start_time, end_time, span_count]
       properties:
         trace_id: { type: string }
         session_id: { type: string }
         name: { type: string }
         start_time: { type: string, format: date-time }
         end_time: { type: string, format: date-time }
-        observation_count: { type: integer }
+        span_count: { type: integer }
         error_count: { type: integer }
         input_tokens: { type: integer }
         output_tokens: { type: integer }
@@ -1169,29 +1111,29 @@ components:
         user_id: { type: string }
     TraceDetail:
       type: object
-      required: [trace, observations, scores]
+      required: [trace, spans, scores, next_span_cursor]
       properties:
         trace:
-          $ref: "#/components/schemas/TraceSummary"
-        observations:
+          $ref: "#/components/schemas/Trace"
+        spans:
           type: array
           items:
-            $ref: "#/components/schemas/ObservationDetail"
+            $ref: "#/components/schemas/SpanDetail"
         scores:
           type: array
           items:
             $ref: "#/components/schemas/Score"
-        next_cursor:
-          type: string
+        next_span_cursor:
+          type: [string, "null"]
     SessionDetail:
       type: object
-      required: [session_id, from, to, trace_count, observation_count, traces, scores]
+      required: [session_id, from, to, trace_count, span_count, spans, scores]
       properties:
         session_id: { type: string }
         from: { type: string, format: date-time }
         to: { type: string, format: date-time }
         trace_count: { type: integer }
-        observation_count: { type: integer }
+        span_count: { type: integer }
         user_ids:
           type: array
           items:
@@ -1200,16 +1142,15 @@ components:
         output_tokens: { type: integer }
         total_tokens: { type: integer }
         total_cost: { type: number }
-        traces:
+        spans:
           type: array
+          description: All detailed spans in the session, ordered newest first
           items:
-            $ref: "#/components/schemas/TraceSummary"
+            $ref: "#/components/schemas/SpanDetail"
         scores:
           type: array
           items:
             $ref: "#/components/schemas/Score"
-        next_cursor:
-          type: string
     SessionSearchRequest:
       type: object
       required: [from, to]
@@ -1248,13 +1189,13 @@ components:
           type: string
     SessionSummary:
       type: object
-      required: [session_id, start_time, trace_count, observation_count, error_count, user_ids, models]
+      required: [session_id, start_time, trace_count, span_count, error_count, user_ids, models]
       properties:
         session_id: { type: string }
         start_time: { type: string, format: date-time }
         end_time: { type: string, format: date-time }
         trace_count: { type: integer }
-        observation_count: { type: integer }
+        span_count: { type: integer }
         error_count: { type: integer }
         input_tokens: { type: integer }
         output_tokens: { type: integer }
@@ -1298,19 +1239,6 @@ components:
         sessions_upserted:
           type: integer
           minimum: 0
-    SessionObservations:
-      type: object
-      required: [session_id, from, to, observations]
-      properties:
-        session_id: { type: string }
-        from: { type: string, format: date-time }
-        to: { type: string, format: date-time }
-        observations:
-          type: array
-          items:
-            $ref: "#/components/schemas/ObservationDetail"
-        next_cursor:
-          type: string
     SessionRecording:
       type: object
       required: [session_id, from, to, batches, events]

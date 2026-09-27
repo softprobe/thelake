@@ -184,11 +184,11 @@ async fn map_bags_hot_paths_and_nested_filters() {
 /// Cover MAP bag key paths used by LLM / telemetry SQL compilers + prefer-promoted SQL.
 #[tokio::test]
 async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
-    use softprobe_runtime::api::llm::query::ObservationSearchRequest;
+    use softprobe_runtime::api::llm::query::SpanSearchRequest;
     use softprobe_runtime::api::telemetry::{
         compile_details_sql, TelemetryDetailsTarget, TelemetryTimeRange,
     };
-    use softprobe_runtime::sql::llm::compile_observation_search_sql;
+    use softprobe_runtime::sql::llm::compile_span_search_sql;
     use softprobe_runtime::storage::schema::variant::prefer_attr_try_cast;
 
     let temp = TempDir::new().expect("tempdir");
@@ -406,10 +406,10 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     assert!(!attributes_object(&missing).contains_key("does.not.exist"));
 
     // 4) Compiled LLM observation search SQL prefers promoted columns against live MAP data.
-    let search = ObservationSearchRequest {
+    let search = SpanSearchRequest {
         from: now - chrono::Duration::hours(1),
         to: now + chrono::Duration::hours(1),
-        observation_types: vec!["generation".into()],
+        span_types: vec!["generation".into()],
         model_name: Some("gpt-4o-mini".into()),
         user_id: Some("user-vk-1".into()),
         session_id: Some(session_id.clone()),
@@ -417,7 +417,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         limit: Some(10),
         cursor: None,
     };
-    let search_sql = compile_observation_search_sql(&search).expect("compile search");
+    let search_sql = compile_span_search_sql(&search).expect("compile search");
     let obs_pos = search_sql
         .find("observation_type")
         .expect("promoted observation_type");
@@ -432,7 +432,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     assert!(search_sql.contains("COALESCE(model_name,"));
     assert!(search_sql.contains("COALESCE(user_id,"));
     let search_result = query_engine
-        .search_observations(&search)
+        .search_spans(&search)
         .await
         .expect("run search sql");
     assert_eq!(search_result.row_count, 1);
@@ -449,15 +449,12 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     assert_eq!(search_result.rows[0][tokens_idx].as_i64(), Some(33));
 
     // Negative: wrong model filters out the generation span.
-    let miss = ObservationSearchRequest {
+    let miss = SpanSearchRequest {
         model_name: Some("no-such-model".into()),
         ..search.clone()
     };
-    let _miss_sql = compile_observation_search_sql(&miss).expect("compile miss");
-    let miss_result = query_engine
-        .search_observations(&miss)
-        .await
-        .expect("run miss");
+    let _miss_sql = compile_span_search_sql(&miss).expect("compile miss");
+    let miss_result = query_engine.search_spans(&miss).await.expect("run miss");
     assert_eq!(miss_result.row_count, 0);
 
     // 5) Nested MAP capture-id key (SoftProbe capture_export removed with Redis).

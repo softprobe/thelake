@@ -1,7 +1,7 @@
 //! LLM OTLP query SQL recipes (one clock: `timestamp` only).
 
 use crate::api::llm::query::{
-    ObservationSearchRequest, SessionOrderBy, SessionSearchRequest, SortDirection,
+    SessionOrderBy, SessionSearchRequest, SortDirection, SpanSearchRequest,
 };
 use crate::api::sql_support::cursor_predicate;
 use crate::sql::literal::sql_string_literal;
@@ -244,16 +244,14 @@ pub fn compile_session_search_sql(
         .into_sql())
 }
 
-pub fn compile_observation_search_sql(
-    request: &ObservationSearchRequest,
-) -> Result<String, String> {
+pub fn compile_span_search_sql(request: &SpanSearchRequest) -> Result<String, String> {
     let window = QueryWindow::try_new(request.from, request.to)?;
     let limit = clamp_limit(request.limit, DEFAULT_SEARCH_LIMIT);
     let mut identity = Vec::new();
 
-    if !request.observation_types.is_empty() {
+    if !request.span_types.is_empty() {
         let values = request
-            .observation_types
+            .span_types
             .iter()
             .map(|value| sql_string_literal(value))
             .collect::<Vec<_>>()
@@ -310,7 +308,7 @@ pub fn compile_observation_search_sql(
         .into_sql())
 }
 
-pub fn compile_observation_detail_sql(
+pub fn compile_span_detail_sql(
     span_id: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
@@ -349,7 +347,7 @@ pub fn compile_trace_summary_sql(
         .into_sql())
 }
 
-pub fn compile_trace_observations_sql(
+pub fn compile_trace_spans_sql(
     trace_id: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
@@ -382,97 +380,62 @@ pub fn compile_trace_observations_sql(
         .into_sql())
 }
 
-pub fn compile_session_observations_sql(
+/// Full span rows and whole-session metrics for one product session.
+///
+/// The materialized session relation is shared by the span projection and
+/// aggregate, so session detail does not issue separate lake scans for its
+/// rows and totals. This deliberately returns the complete session; the
+/// detail API is one holistic read rather than a client-drained cursor.
+pub fn compile_session_detail_sql(
     session_id: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
-    limit: usize,
-    cursor: Option<&str>,
 ) -> Result<String, String> {
     let window = QueryWindow::try_new(from, to)?;
     let sid = sql_string_literal(session_id);
     let exclude = exclude_recording_observation_sql();
-    let cursor_sql = match cursor {
-        Some(c) => Some(cursor_predicate(c, "timestamp", "span_id")?),
-        None => None,
-    };
-    let fetch = limit + 1;
     Ok(window
-        .bind_scan("", |bound| {
-            let mut where_sql = format!("session_id = {sid} AND {exclude} AND {bound}");
-            if let Some(ref c) = cursor_sql {
-                where_sql = format!("{where_sql} AND {c}");
-            }
+        .bind_scan_ns_and_tz("", |bound, score_bound| {
             format!(
-                "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
-                // Product session detail (Explorer trajectory) needs sp.input / sp.output
-                // from attributes — skinny list left the page empty. Expand-on-demand was
-                // never wired on ProductSessionDetailView.
+                "WITH session_spans AS MATERIALIZED ( \
+                   SELECT {projection} FROM traces \
+                   WHERE session_id = {sid} AND {exclude} AND {bound} \
+                 ), session_scores AS MATERIALIZED ( \
+                   SELECT {score_columns} FROM scores \
+                   WHERE {score_bound} \
+                     AND (session_id = {sid} \
+                       OR trace_id IN (SELECT DISTINCT trace_id FROM session_spans) \
+                       OR span_id IN (SELECT span_id FROM session_spans)) \
+                 ), score_aggregate AS ( \
+                   SELECT COALESCE(to_json(list(struct_pack( \
+                     score_id := score_id, \"timestamp\" := timestamp, trace_id := trace_id, \
+                     span_id := span_id, session_id := session_id, name := name, \
+                     data_type := data_type, numeric_value := numeric_value, \
+                     string_value := string_value, boolean_value := boolean_value, \
+                     source := source, comment := comment, config_id := config_id, \
+                     author_id := author_id, metadata := metadata) \
+                     ORDER BY timestamp DESC, score_id DESC)), '[]') AS session_scores \
+                   FROM session_scores \
+                 ), session_aggregate AS ( \
+                   SELECT \
+                     COUNT(DISTINCT trace_id)::BIGINT AS session_trace_count, \
+                     COUNT(*)::BIGINT AS session_span_count, \
+                     SUM(input_tokens)::BIGINT AS session_input_tokens, \
+                     SUM(output_tokens)::BIGINT AS session_output_tokens, \
+                     SUM(total_tokens)::BIGINT AS session_total_tokens, \
+                     SUM(total_cost) AS session_total_cost, \
+                     list(DISTINCT user_id) AS session_user_ids \
+                   FROM session_spans CROSS JOIN score_aggregate \
+                 ) \
+                 SELECT session_spans.*, session_aggregate.* \
+                 FROM session_spans CROSS JOIN session_aggregate \
+                 ORDER BY start_time DESC, span_id DESC",
                 projection = observation_projection(true),
-            )
-        })
-        .into_sql())
-}
-
-pub fn compile_session_aggregate_sql(
-    session_id: &str,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-) -> Result<String, String> {
-    let window = QueryWindow::try_new(from, to)?;
-    let sid = sql_string_literal(session_id);
-    let exclude = exclude_recording_observation_sql();
-    Ok(window
-        .bind_scan("", |bound| {
-            format!(
-                "SELECT \
-            COUNT(DISTINCT trace_id) AS trace_count, \
-            COUNT(*) AS observation_count, \
-            SUM({input_tokens}) AS input_tokens, \
-            SUM({output_tokens}) AS output_tokens, \
-            SUM({total_tokens}) AS total_tokens, \
-            SUM({total_cost}) AS total_cost, \
-            list(DISTINCT {user_id}) AS user_ids \
-         FROM traces \
-         WHERE session_id = {sid} AND {exclude} AND {bound}",
-                input_tokens = expr_input_tokens(),
-                output_tokens = expr_output_tokens(),
-                total_tokens = expr_total_tokens(),
-                total_cost = expr_total_cost(),
-                user_id = expr_user_id(),
-            )
-        })
-        .into_sql())
-}
-
-pub fn compile_session_traces_sql(
-    session_id: &str,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-    limit: usize,
-    cursor: Option<&str>,
-) -> Result<String, String> {
-    let window = QueryWindow::try_new(from, to)?;
-    let sid = sql_string_literal(session_id);
-    let exclude = exclude_recording_observation_sql();
-    let outer_cursor = match cursor {
-        Some(c) => Some(cursor_predicate(c, "start_time", "trace_id")?),
-        None => None,
-    };
-    let fetch = limit + 1;
-    Ok(window
-        .bind_scan("", |bound| {
-            // Cursor applies to aggregated start_time/trace_id, so filter after GROUP BY.
-            let inner = format!(
-                "SELECT {projection} FROM traces WHERE session_id = {sid} AND {exclude} AND {bound} GROUP BY trace_id",
-                projection = trace_summary_projection(),
-            );
-            let outer = match &outer_cursor {
-                Some(c) => format!(" WHERE {c}"),
-                None => String::new(),
-            };
-            format!(
-                "SELECT * FROM ({inner}) AS t{outer} ORDER BY start_time DESC, trace_id DESC LIMIT {fetch}",
+                score_columns = score_columns(),
+                sid = sid,
+                exclude = exclude,
+                bound = bound,
+                score_bound = score_bound,
             )
         })
         .into_sql())
@@ -521,28 +484,6 @@ pub fn compile_scores_for_trace_sql(
         .into_sql())
 }
 
-pub fn compile_scores_for_session_sql(
-    session_id: &str,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-) -> Result<String, String> {
-    let window = QueryWindow::try_new(from, to)?;
-    let sid = sql_string_literal(session_id);
-    Ok(window
-        .bind_scan_ns_and_tz("", |ns_bound, tz_bound| {
-            let identity = format!(
-                "(session_id = {sid} \
-         OR trace_id IN (SELECT DISTINCT trace_id FROM traces WHERE session_id = {sid} AND {ns_bound}) \
-         OR span_id IN (SELECT span_id FROM traces WHERE session_id = {sid} AND {ns_bound}))"
-            );
-            format!(
-                "SELECT {cols} FROM scores WHERE {identity} AND {tz_bound} ORDER BY timestamp DESC, score_id DESC",
-                cols = score_columns(),
-            )
-        })
-        .into_sql())
-}
-
 fn observation_projection(include_payload: bool) -> String {
     let mut cols = vec![
         "trace_id".to_string(),
@@ -550,10 +491,7 @@ fn observation_projection(include_payload: bool) -> String {
         "parent_span_id".to_string(),
         "NULLIF(session_id, '') AS session_id".to_string(),
         "message_type AS name".to_string(),
-        format!(
-            "COALESCE({}, 'span') AS observation_type",
-            expr_observation_type()
-        ),
+        format!("COALESCE({}, 'span') AS span_type", expr_observation_type()),
         "timestamp AS start_time".to_string(),
         "end_timestamp AS end_time".to_string(),
         "status_code".to_string(),
@@ -579,7 +517,7 @@ fn trace_summary_projection() -> String {
          any_value(message_type) AS name, \
          MIN(timestamp) AS start_time, \
          MAX(COALESCE(end_timestamp, timestamp)) AS end_time, \
-         COUNT(*)::BIGINT AS observation_count, \
+         COUNT(*)::BIGINT AS span_count, \
          SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END)::BIGINT AS error_count, \
          SUM({input_tokens})::BIGINT AS input_tokens, \
          SUM({output_tokens})::BIGINT AS output_tokens, \

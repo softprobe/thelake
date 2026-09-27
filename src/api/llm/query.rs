@@ -4,10 +4,9 @@ use crate::async_jobs::LeaseStore;
 use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreDataType, ScoreSource};
 use crate::sql::llm::{
-    clamp_limit, compile_observation_detail_sql, compile_observation_search_sql,
-    compile_scores_for_session_sql, compile_scores_for_span_sql, compile_scores_for_trace_sql,
-    compile_session_aggregate_sql, compile_session_observations_sql, compile_session_recording_sql,
-    compile_session_traces_sql, compile_trace_observations_sql, compile_trace_summary_sql,
+    clamp_limit, compile_scores_for_span_sql, compile_scores_for_trace_sql,
+    compile_session_detail_sql, compile_session_recording_sql, compile_span_detail_sql,
+    compile_span_search_sql, compile_trace_spans_sql, compile_trace_summary_sql,
     DEFAULT_SEARCH_LIMIT, DEFAULT_SESSION_LIMIT, DEFAULT_TRACE_LIMIT,
 };
 // Production session search is served by RuntimeEngine::search_session_summary
@@ -31,11 +30,11 @@ fn trusted_query(sql: impl Into<String>) -> Result<crate::sql::trusted::TrustedS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObservationSearchRequest {
+pub struct SpanSearchRequest {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
     #[serde(default)]
-    pub observation_types: Vec<String>,
+    pub span_types: Vec<String>,
     pub model_name: Option<String>,
     pub user_id: Option<String>,
     pub session_id: Option<String>,
@@ -45,19 +44,19 @@ pub struct ObservationSearchRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObservationSearchResponse {
-    pub items: Vec<ObservationSummary>,
+pub struct SpanSearchResponse {
+    pub items: Vec<SpanSummary>,
     pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObservationSummary {
+pub struct SpanSummary {
     pub trace_id: String,
     pub span_id: String,
     pub parent_span_id: Option<String>,
     pub session_id: Option<String>,
     pub name: String,
-    pub observation_type: String,
+    pub span_type: String,
     pub start_time: DateTime<Utc>,
     pub end_time: Option<DateTime<Utc>>,
     pub status_code: Option<String>,
@@ -71,27 +70,25 @@ pub struct ObservationSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObservationDetail {
+pub struct SpanDetail {
     #[serde(flatten)]
-    pub summary: ObservationSummary,
-    /// Omitted when empty so skinny session lists stay distinguishable from
-    /// fat detail (Explorer expand keys off missing/undefined attributes).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub summary: SpanSummary,
+    #[serde(default)]
     pub attributes: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub events: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scores: Vec<Score>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TraceSummary {
+pub struct Trace {
     pub trace_id: String,
     pub session_id: Option<String>,
     pub name: Option<String>,
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
-    pub observation_count: i64,
+    pub span_count: i64,
     pub error_count: i64,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -102,10 +99,10 @@ pub struct TraceSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceDetail {
-    pub trace: TraceSummary,
-    pub observations: Vec<ObservationDetail>,
+    pub trace: Trace,
+    pub spans: Vec<SpanDetail>,
     pub scores: Vec<Score>,
-    pub next_cursor: Option<String>,
+    pub next_span_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,16 +111,15 @@ pub struct SessionDetail {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
     pub trace_count: i64,
-    pub observation_count: i64,
+    pub span_count: i64,
     #[serde(default)]
     pub user_ids: Vec<String>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
     pub total_cost: Option<f64>,
-    pub traces: Vec<TraceSummary>,
+    pub spans: Vec<SpanDetail>,
     pub scores: Vec<Score>,
-    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -132,22 +128,16 @@ pub struct DetailQuery {
     pub to: DateTime<Utc>,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
-    /// When set, only return observations belonging to this product session.
+    /// When set, only return spans belonging to this product session.
     pub session_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SessionDetailQuery {
-    pub limit: Option<usize>,
-    pub cursor: Option<String>,
-}
-
-pub async fn search_observations(
+pub async fn search_spans(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
-    Json(request): Json<ObservationSearchRequest>,
-) -> Result<Json<ObservationSearchResponse>, ApiError> {
-    let sql = compile_observation_search_sql(&request).map_err(bad_request)?;
+    Json(request): Json<SpanSearchRequest>,
+) -> Result<Json<SpanSearchResponse>, ApiError> {
+    let sql = compile_span_search_sql(&request).map_err(bad_request)?;
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
     let result = state
         .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(sql)?)
@@ -158,33 +148,32 @@ pub async fn search_observations(
     let mut summaries = result
         .rows
         .iter()
-        .filter_map(|row| map_observation_summary(&result.columns, row))
+        .filter_map(|row| map_span_summary(&result.columns, row))
         .collect::<Vec<_>>();
-    let next_cursor = next_cursor_from_summaries(&mut summaries, limit);
-    Ok(Json(ObservationSearchResponse {
+    let next_cursor = next_cursor_from_spans(&mut summaries, limit);
+    Ok(Json(SpanSearchResponse {
         items: summaries,
         next_cursor,
     }))
 }
 
-pub async fn get_observation(
+pub async fn get_span(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
     Path(span_id): Path<String>,
     Query(params): Query<DetailQuery>,
-) -> Result<Json<ObservationDetail>, ApiError> {
+) -> Result<Json<SpanDetail>, ApiError> {
     if span_id.trim().is_empty() {
         return Err(bad_request("span_id is required".to_string()));
     }
-    let sql =
-        compile_observation_detail_sql(&span_id, params.from, params.to).map_err(bad_request)?;
+    let sql = compile_span_detail_sql(&span_id, params.from, params.to).map_err(bad_request)?;
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
     let result = state
         .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(sql)?)
         .await
         .map_err(storage_error)?;
     let row = result.rows.first().ok_or_else(not_found)?;
-    let mut detail = map_observation_detail(&result.columns, row).ok_or_else(not_found)?;
+    let mut detail = map_span_detail(&result.columns, row).ok_or_else(not_found)?;
     detail.scores = query_scores(
         &state,
         tenant_ref,
@@ -216,10 +205,10 @@ pub async fn get_trace(
         .await
         .map_err(storage_error)?;
     let summary_row = summary_result.rows.first().ok_or_else(not_found)?;
-    let trace = map_trace_summary(&summary_result.columns, summary_row).ok_or_else(not_found)?;
+    let trace = map_trace(&summary_result.columns, summary_row).ok_or_else(not_found)?;
 
     let limit = clamp_limit(params.limit, DEFAULT_TRACE_LIMIT);
-    let obs_sql = compile_trace_observations_sql(
+    let spans_sql = compile_trace_spans_sql(
         &trace_id,
         params.from,
         params.to,
@@ -228,16 +217,16 @@ pub async fn get_trace(
         params.session_id.as_deref(),
     )
     .map_err(bad_request)?;
-    let obs_result = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(obs_sql)?)
+    let spans_result = state
+        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(spans_sql)?)
         .await
         .map_err(storage_error)?;
-    let mut observations = obs_result
+    let mut spans = spans_result
         .rows
         .iter()
-        .filter_map(|row| map_observation_detail(&obs_result.columns, row))
+        .filter_map(|row| map_span_detail(&spans_result.columns, row))
         .collect::<Vec<_>>();
-    let next_cursor = next_cursor_from_details(&mut observations, limit);
+    let next_span_cursor = next_cursor_from_span_details(&mut spans, limit);
 
     let scores = query_scores(
         &state,
@@ -246,7 +235,7 @@ pub async fn get_trace(
     )
     .await?;
 
-    // Attach span-level scores onto observation details; keep full set on the response.
+    // Attach span-level scores to span details; keep the full set on the response.
     let mut by_span: HashMap<String, Vec<Score>> = HashMap::new();
     for score in &scores {
         if let Some(span_id) = &score.span_id {
@@ -256,17 +245,15 @@ pub async fn get_trace(
                 .push(score.clone());
         }
     }
-    for observation in &mut observations {
-        observation.scores = by_span
-            .remove(&observation.summary.span_id)
-            .unwrap_or_default();
+    for span in &mut spans {
+        span.scores = by_span.remove(&span.summary.span_id).unwrap_or_default();
     }
 
     Ok(Json(TraceDetail {
         trace,
-        observations,
+        spans,
         scores,
-        next_cursor,
+        next_span_cursor,
     }))
 }
 
@@ -300,110 +287,55 @@ pub async fn get_session(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
     Path(session_id): Path<String>,
-    Query(params): Query<SessionDetailQuery>,
 ) -> Result<Json<SessionDetail>, ApiError> {
     if session_id.trim().is_empty() {
         return Err(bad_request("session_id is required".to_string()));
     }
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
     let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
-    let agg_sql = compile_session_aggregate_sql(&session_id, from, to).map_err(bad_request)?;
-    let agg_result = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(agg_sql)?)
+    let detail_sql = compile_session_detail_sql(&session_id, from, to).map_err(bad_request)?;
+    let detail_result = state
+        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(detail_sql)?)
         .await
         .map_err(storage_error)?;
-    let agg_row = agg_result.rows.first().ok_or_else(not_found)?;
-    let aggregate = map_session_aggregate(&agg_result.columns, agg_row).ok_or_else(not_found)?;
-    if aggregate.observation_count == 0 {
+    let detail_row = detail_result.rows.first().ok_or_else(not_found)?;
+    let aggregate =
+        map_session_aggregate(&detail_result.columns, detail_row).ok_or_else(not_found)?;
+    if aggregate.span_count == 0 {
         return Err(not_found());
     }
-
-    let limit = clamp_limit(params.limit, DEFAULT_SESSION_LIMIT);
-    let traces_sql =
-        compile_session_traces_sql(&session_id, from, to, limit, params.cursor.as_deref())
-            .map_err(bad_request)?;
-    let traces_result = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(traces_sql)?)
-        .await
-        .map_err(storage_error)?;
-    let mut traces = traces_result
+    let spans = detail_result
         .rows
         .iter()
-        .filter_map(|row| map_trace_summary(&traces_result.columns, row))
+        .filter_map(|row| map_span_detail(&detail_result.columns, row))
         .collect::<Vec<_>>();
-    let next_cursor = next_cursor_from_traces(&mut traces, limit);
 
-    let scores = query_scores(
-        &state,
-        tenant_ref,
-        &compile_scores_for_session_sql(&session_id, from, to).map_err(bad_request)?,
-    )
-    .await?;
+    let scores = map_session_scores(&detail_result.columns, detail_row);
 
     Ok(Json(SessionDetail {
         session_id,
         from,
         to,
         trace_count: aggregate.trace_count,
-        observation_count: aggregate.observation_count,
+        span_count: aggregate.span_count,
         user_ids: aggregate.user_ids,
         input_tokens: aggregate.input_tokens,
         output_tokens: aggregate.output_tokens,
         total_tokens: aggregate.total_tokens,
         total_cost: aggregate.total_cost,
-        traces,
+        spans,
         scores,
-        next_cursor,
-    }))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionObservations {
-    pub session_id: String,
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
-    pub observations: Vec<ObservationDetail>,
-    pub next_cursor: Option<String>,
-}
-
-/// Holistic session observation page (product session id, including nested agents).
-pub async fn get_session_observations(
-    State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
-    Path(session_id): Path<String>,
-    Query(params): Query<SessionDetailQuery>,
-) -> Result<Json<SessionObservations>, ApiError> {
-    if session_id.trim().is_empty() {
-        return Err(bad_request("session_id is required".to_string()));
-    }
-    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
-    let limit = clamp_limit(params.limit, DEFAULT_SEARCH_LIMIT);
-    let sql =
-        compile_session_observations_sql(&session_id, from, to, limit, params.cursor.as_deref())
-            .map_err(bad_request)?;
-    let result = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(sql)?)
-        .await
-        .map_err(storage_error)?;
-    let mut observations = result
-        .rows
-        .iter()
-        .filter_map(|row| map_observation_detail(&result.columns, row))
-        .collect::<Vec<_>>();
-    let next_cursor = next_cursor_from_details(&mut observations, limit);
-    Ok(Json(SessionObservations {
-        session_id,
-        from,
-        to,
-        observations,
-        next_cursor,
     }))
 }
 
 const RECORDING_EVENT_NAME: &str = "sp.recording.batch";
 const RECORDING_EVENTS_ATTR: &str = "sp.recording.events";
 const DEFAULT_RECORDING_LIMIT: usize = 50;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RecordingQuery {
+    pub limit: Option<usize>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingBatch {
@@ -433,7 +365,7 @@ pub async fn get_session_recording(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
     Path(session_id): Path<String>,
-    Query(params): Query<SessionDetailQuery>,
+    Query(params): Query<RecordingQuery>,
 ) -> Result<Json<SessionRecording>, ApiError> {
     if session_id.trim().is_empty() {
         return Err(bad_request("session_id is required".to_string()));
@@ -483,7 +415,7 @@ pub async fn get_session_recording(
 }
 
 fn map_recording_batch(columns: &[String], row: &[Value]) -> Option<RecordingBatch> {
-    let detail = map_observation_detail(columns, row)?;
+    let detail = map_span_detail(columns, row)?;
     let events = extract_recording_events(&detail.events);
     let batch_index = detail
         .attributes
@@ -628,7 +560,7 @@ pub struct SessionSummary {
     pub start_time: DateTime<Utc>,
     pub end_time: Option<DateTime<Utc>>,
     pub trace_count: i64,
-    pub observation_count: i64,
+    pub span_count: i64,
     pub error_count: i64,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -655,7 +587,7 @@ pub struct SessionSearchResponse {
 /// Soft coalesce + dirty/reduce keep it current; list never falls back to a
 /// lake scan.
 ///
-/// Without this endpoint a client has to pull raw observations and group them
+/// Without this endpoint a client has to pull raw spans and group them
 /// in memory, which makes every aggregate a per-page partial sum, breaks
 /// paging (one session gets split across pages), and reduces "sessions with
 /// errors" to "sessions with errors among the rows already fetched".
@@ -815,15 +747,14 @@ async fn query_scores(
         .collect())
 }
 
-fn map_observation_summary(columns: &[String], row: &[Value]) -> Option<ObservationSummary> {
-    Some(ObservationSummary {
+fn map_span_summary(columns: &[String], row: &[Value]) -> Option<SpanSummary> {
+    Some(SpanSummary {
         trace_id: required_string(columns, row, "trace_id")?,
         span_id: required_string(columns, row, "span_id")?,
         parent_span_id: optional_string(columns, row, "parent_span_id"),
         session_id: optional_string(columns, row, "session_id"),
         name: required_string(columns, row, "name").unwrap_or_default(),
-        observation_type: required_string(columns, row, "observation_type")
-            .unwrap_or_else(|| "span".to_string()),
+        span_type: required_string(columns, row, "span_type").unwrap_or_else(|| "span".to_string()),
         start_time: required_timestamp(columns, row, "start_time")?,
         end_time: optional_timestamp(columns, row, "end_time"),
         status_code: optional_string(columns, row, "status_code"),
@@ -837,9 +768,9 @@ fn map_observation_summary(columns: &[String], row: &[Value]) -> Option<Observat
     })
 }
 
-fn map_observation_detail(columns: &[String], row: &[Value]) -> Option<ObservationDetail> {
-    let summary = map_observation_summary(columns, row)?;
-    Some(ObservationDetail {
+fn map_span_detail(columns: &[String], row: &[Value]) -> Option<SpanDetail> {
+    let summary = map_span_summary(columns, row)?;
+    Some(SpanDetail {
         summary,
         attributes: map_string_map(column_value(columns, row, "attributes")),
         events: map_events(column_value(columns, row, "events")),
@@ -847,14 +778,14 @@ fn map_observation_detail(columns: &[String], row: &[Value]) -> Option<Observati
     })
 }
 
-fn map_trace_summary(columns: &[String], row: &[Value]) -> Option<TraceSummary> {
-    Some(TraceSummary {
+fn map_trace(columns: &[String], row: &[Value]) -> Option<Trace> {
+    Some(Trace {
         trace_id: required_string(columns, row, "trace_id")?,
         session_id: optional_string(columns, row, "session_id"),
         name: optional_string(columns, row, "name"),
         start_time: required_timestamp(columns, row, "start_time")?,
         end_time: required_timestamp(columns, row, "end_time")?,
-        observation_count: optional_i64(columns, row, "observation_count").unwrap_or(0),
+        span_count: optional_i64(columns, row, "span_count").unwrap_or(0),
         error_count: optional_i64(columns, row, "error_count").unwrap_or(0),
         input_tokens: optional_i64(columns, row, "input_tokens"),
         output_tokens: optional_i64(columns, row, "output_tokens"),
@@ -866,7 +797,7 @@ fn map_trace_summary(columns: &[String], row: &[Value]) -> Option<TraceSummary> 
 
 struct SessionAggregate {
     trace_count: i64,
-    observation_count: i64,
+    span_count: i64,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     total_tokens: Option<i64>,
@@ -891,7 +822,7 @@ pub(crate) fn next_cursor_from_sessions(
 }
 
 fn map_session_aggregate(columns: &[String], row: &[Value]) -> Option<SessionAggregate> {
-    let user_ids = match column_value(columns, row, "user_ids") {
+    let user_ids = match column_value(columns, row, "session_user_ids") {
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(|item| item.as_str().map(str::to_string))
@@ -902,14 +833,27 @@ fn map_session_aggregate(columns: &[String], row: &[Value]) -> Option<SessionAgg
         _ => Vec::new(),
     };
     Some(SessionAggregate {
-        trace_count: optional_i64(columns, row, "trace_count").unwrap_or(0),
-        observation_count: optional_i64(columns, row, "observation_count").unwrap_or(0),
-        input_tokens: optional_i64(columns, row, "input_tokens"),
-        output_tokens: optional_i64(columns, row, "output_tokens"),
-        total_tokens: optional_i64(columns, row, "total_tokens"),
-        total_cost: optional_f64(columns, row, "total_cost"),
+        trace_count: optional_i64(columns, row, "session_trace_count").unwrap_or(0),
+        span_count: optional_i64(columns, row, "session_span_count").unwrap_or(0),
+        input_tokens: optional_i64(columns, row, "session_input_tokens"),
+        output_tokens: optional_i64(columns, row, "session_output_tokens"),
+        total_tokens: optional_i64(columns, row, "session_total_tokens"),
+        total_cost: optional_f64(columns, row, "session_total_cost"),
         user_ids,
     })
+}
+
+fn map_session_scores(columns: &[String], row: &[Value]) -> Vec<Score> {
+    let Some(value) = column_value(columns, row, "session_scores") else {
+        return Vec::new();
+    };
+    let decoded = match value {
+        Value::String(json) => serde_json::from_str::<Value>(json).ok(),
+        value => Some(value.clone()),
+    };
+    decoded
+        .and_then(|value| serde_json::from_value::<Vec<Score>>(value).ok())
+        .unwrap_or_default()
 }
 
 fn map_score(columns: &[String], row: &[Value]) -> Option<Score> {
@@ -954,7 +898,7 @@ fn map_score(columns: &[String], row: &[Value]) -> Option<Score> {
     })
 }
 
-fn next_cursor_from_summaries(items: &mut Vec<ObservationSummary>, limit: usize) -> Option<String> {
+fn next_cursor_from_spans(items: &mut Vec<SpanSummary>, limit: usize) -> Option<String> {
     if items.len() <= limit {
         return None;
     }
@@ -964,7 +908,7 @@ fn next_cursor_from_summaries(items: &mut Vec<ObservationSummary>, limit: usize)
         .map(|item| encode_cursor(item.start_time, &item.span_id))
 }
 
-fn next_cursor_from_details(items: &mut Vec<ObservationDetail>, limit: usize) -> Option<String> {
+fn next_cursor_from_span_details(items: &mut Vec<SpanDetail>, limit: usize) -> Option<String> {
     if items.len() <= limit {
         return None;
     }
@@ -972,16 +916,6 @@ fn next_cursor_from_details(items: &mut Vec<ObservationDetail>, limit: usize) ->
     items
         .last()
         .map(|item| encode_cursor(item.summary.start_time, &item.summary.span_id))
-}
-
-fn next_cursor_from_traces(items: &mut Vec<TraceSummary>, limit: usize) -> Option<String> {
-    if items.len() <= limit {
-        return None;
-    }
-    items.truncate(limit);
-    items
-        .last()
-        .map(|item| encode_cursor(item.start_time, &item.trace_id))
 }
 
 fn column_value<'a>(columns: &[String], row: &'a [Value], name: &str) -> Option<&'a Value> {
@@ -1599,7 +1533,7 @@ mod tests {
                 .with_timezone(&Utc),
             end_time: None,
             trace_count: 1,
-            observation_count: 1,
+            span_count: 1,
             error_count: 0,
             input_tokens: None,
             output_tokens: None,
@@ -1622,14 +1556,14 @@ mod tests {
 
     #[test]
     fn search_sql_requires_time_bounds_and_escapes_literals() {
-        let request = ObservationSearchRequest {
+        let request = SpanSearchRequest {
             from: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
             to: DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            observation_types: vec!["generation".to_string()],
+            span_types: vec!["generation".to_string()],
             model_name: Some("gpt-4o'; DROP TABLE traces; --".to_string()),
             user_id: Some("user-1".to_string()),
             session_id: Some("sess-1".to_string()),
@@ -1637,7 +1571,7 @@ mod tests {
             limit: Some(999),
             cursor: None,
         };
-        let sql = compile_observation_search_sql(&request).expect("sql");
+        let sql = compile_span_search_sql(&request).expect("sql");
         assert!(sql.contains("timestamp >="));
         assert!(sql.contains("LIMIT 201"));
         assert!(sql.contains("gpt-4o''; DROP TABLE traces; --"));
@@ -1659,14 +1593,14 @@ mod tests {
 
     #[test]
     fn search_and_session_sql_prefer_promoted_hot_attrs() {
-        let request = ObservationSearchRequest {
+        let request = SpanSearchRequest {
             from: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
             to: DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            observation_types: vec!["generation".to_string()],
+            span_types: vec!["generation".to_string()],
             model_name: Some("gpt-4o".to_string()),
             user_id: Some("user-1".to_string()),
             session_id: None,
@@ -1674,7 +1608,7 @@ mod tests {
             limit: Some(10),
             cursor: None,
         };
-        let search = compile_observation_search_sql(&request).expect("search");
+        let search = compile_span_search_sql(&request).expect("search");
         assert!(search.contains("COALESCE(observation_type,"));
         assert!(search.contains("COALESCE(model_name,"));
         assert!(search.contains("COALESCE(user_id,"));
@@ -1703,14 +1637,14 @@ mod tests {
 
     #[test]
     fn search_sql_rejects_inverted_range() {
-        let request = ObservationSearchRequest {
+        let request = SpanSearchRequest {
             from: DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
             to: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            observation_types: vec![],
+            span_types: vec![],
             model_name: None,
             user_id: None,
             session_id: None,
@@ -1718,7 +1652,7 @@ mod tests {
             limit: None,
             cursor: None,
         };
-        assert!(compile_observation_search_sql(&request).is_err());
+        assert!(compile_span_search_sql(&request).is_err());
     }
 
     #[test]
@@ -1760,33 +1694,33 @@ mod tests {
     }
 
     #[test]
-    fn session_score_sql_covers_all_attachment_points() {
+    fn session_detail_sql_includes_scores_and_both_event_time_bounds() {
         let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
         let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let sql = compile_scores_for_session_sql("sess-1", from, to).expect("session scores sql");
+        let sql = compile_session_detail_sql("sess-1", from, to).expect("session detail sql");
+        assert!(sql.contains("session_scores AS MATERIALIZED"));
         assert!(sql.contains("session_id = 'sess-1'"));
-        assert!(sql.contains("trace_id IN (SELECT"));
-        assert!(sql.contains("span_id IN (SELECT"));
-        assert!(sql.contains("TIMESTAMPTZ '"), "scores outer: {sql}");
-        assert!(sql.contains("::TIMESTAMP_NS"), "traces subquery: {sql}");
+        assert!(sql.contains("trace_id IN (SELECT DISTINCT trace_id FROM session_spans)"));
+        assert!(sql.contains("span_id IN (SELECT span_id FROM session_spans)"));
+        assert!(sql.contains("TIMESTAMPTZ '"), "scores clock: {sql}");
         assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
 
-        assert!(compile_scores_for_session_sql("sess-1", to, from).is_err());
+        assert!(compile_session_detail_sql("sess-1", to, from).is_err());
     }
 
     #[test]
-    fn maps_observation_summary_from_row() {
+    fn maps_span_summary_from_row() {
         let columns = vec![
             "trace_id".into(),
             "span_id".into(),
             "parent_span_id".into(),
             "session_id".into(),
             "name".into(),
-            "observation_type".into(),
+            "span_type".into(),
             "start_time".into(),
             "end_time".into(),
             "status_code".into(),
@@ -1816,10 +1750,43 @@ mod tests {
             json!(30),
             json!(0.01),
         ];
-        let summary = map_observation_summary(&columns, &row).expect("summary");
-        assert_eq!(summary.observation_type, "generation");
+        let summary = map_span_summary(&columns, &row).expect("summary");
+        assert_eq!(summary.span_type, "generation");
         assert_eq!(summary.input_tokens, Some(10));
         assert_eq!(summary.model_name.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn maps_scores_from_holistic_session_row() {
+        let columns = vec!["session_scores".to_string()];
+        let row = vec![Value::String(
+            json!([{
+                "score_id": "score-1",
+                "timestamp": "2026-09-01T00:00:02Z",
+                "trace_id": "trace-1",
+                "span_id": "span-1",
+                "session_id": null,
+                "name": "quality",
+                "data_type": "numeric",
+                "numeric_value": 0.8,
+                "string_value": null,
+                "boolean_value": null,
+                "source": "evaluator",
+                "comment": null,
+                "config_id": null,
+                "author_id": null,
+                "metadata": {"suite": "integration"}
+            }])
+            .to_string(),
+        )];
+        let scores = map_session_scores(&columns, &row);
+        assert_eq!(scores.len(), 1);
+        assert_eq!(scores[0].score_id, "score-1");
+        assert_eq!(scores[0].numeric_value, Some(0.8));
+        assert_eq!(
+            scores[0].metadata.get("suite").map(String::as_str),
+            Some("integration")
+        );
     }
 
     #[test]
@@ -1864,30 +1831,27 @@ mod tests {
         };
 
         assert_ns(compile_session_recording_sql("sess-1", from, to, 10).unwrap());
-        assert_ns(compile_session_aggregate_sql("sess-1", from, to).unwrap());
-        assert_ns(compile_session_traces_sql("sess-1", from, to, 10, None).unwrap());
-        assert_ns(compile_observation_detail_sql("span-1", from, to).unwrap());
+        assert_ns(compile_session_detail_sql("sess-1", from, to).unwrap());
+        assert_ns(compile_span_detail_sql("span-1", from, to).unwrap());
         assert_ns(compile_trace_summary_sql("trace-1", from, to, None).unwrap());
-        assert_ns(compile_trace_observations_sql("trace-1", from, to, 10, None, None).unwrap());
+        assert_ns(compile_trace_spans_sql("trace-1", from, to, 10, None, None).unwrap());
 
         use crate::api::query_window::assert_sql_has_otlp_time_predicates;
-        assert_sql_has_otlp_time_predicates(
-            &compile_observation_detail_sql("span-1", from, to).unwrap(),
-        );
+        assert_sql_has_otlp_time_predicates(&compile_span_detail_sql("span-1", from, to).unwrap());
         assert_sql_has_otlp_time_predicates(
             &compile_trace_summary_sql("trace-1", from, to, None).unwrap(),
         );
         assert_sql_has_otlp_time_predicates(
-            &compile_trace_observations_sql("trace-1", from, to, 10, None, None).unwrap(),
+            &compile_trace_spans_sql("trace-1", from, to, 10, None, None).unwrap(),
         );
         assert_sql_has_otlp_time_predicates(
             &compile_scores_for_trace_sql("trace-1", from, to).unwrap(),
         );
 
-        let request = ObservationSearchRequest {
+        let request = SpanSearchRequest {
             from,
             to,
-            observation_types: vec![],
+            span_types: vec![],
             model_name: None,
             user_id: None,
             session_id: Some("sess-1".to_string()),
@@ -1895,7 +1859,7 @@ mod tests {
             limit: Some(10),
             cursor: None,
         };
-        assert_ns(compile_observation_search_sql(&request).unwrap());
+        assert_ns(compile_span_search_sql(&request).unwrap());
 
         let mut session_request = session_search_request();
         session_request.from = from;
@@ -1913,8 +1877,7 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         for sql in [
-            compile_session_observations_sql("sess-1", t0, t1, 10, None).expect("obs"),
-            compile_session_aggregate_sql("sess-1", t0, t1).expect("agg"),
+            compile_session_detail_sql("sess-1", t0, t1).expect("session detail"),
             compile_session_recording_sql("sess-1", t0, t1, 10).expect("rec"),
         ] {
             assert!(sql.contains("'2026-03-01T12:00:00"), "{sql}");
@@ -1925,42 +1888,73 @@ mod tests {
     }
 
     #[test]
-    fn session_observations_include_attributes_events_for_product_detail() {
-        // Explorer ProductSessionDetailView builds trajectory from sp.input /
-        // sp.output on the /observations page — payload must be present.
+    fn holistic_session_sql_returns_full_span_payload_and_session_totals() {
         let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
         let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let list = compile_session_observations_sql("sess-1", from, to, 10, None).unwrap();
+        let sql = crate::sql::llm::compile_session_detail_sql("sess-1", from, to)
+            .expect("session detail SQL");
+
+        assert!(
+            sql.contains("AS MATERIALIZED"),
+            "shared session scan: {sql}"
+        );
+        assert!(
+            sql.contains("COUNT(DISTINCT trace_id)"),
+            "trace total: {sql}"
+        );
+        assert!(sql.contains("COUNT(*)"), "span total: {sql}");
+        assert!(
+            sql.contains("AS session_span_count"),
+            "span total name: {sql}"
+        );
+        assert!(sql.contains("attributes"), "full span payload: {sql}");
+        assert!(sql.contains("events"), "full span events: {sql}");
+        assert!(
+            !sql.contains("LIMIT "),
+            "session response is complete: {sql}"
+        );
+        assert!(!sql.contains("next_cursor"));
+    }
+
+    #[test]
+    fn session_detail_includes_span_attributes_and_events() {
+        // Explorer ProductSessionDetailView builds trajectory from sp.input /
+        // sp.output — payload must be present in the holistic session response.
+        let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let list = compile_session_detail_sql("sess-1", from, to).unwrap();
         let payload = crate::storage::schema::variant::variant_as_json("attributes");
         assert!(
             list.contains(&payload),
-            "session observations must project attributes: {list}"
+            "session detail must project span attributes: {list}"
         );
         assert!(
             list.contains(", events"),
-            "session observations must project events: {list}"
+            "session detail must project span events: {list}"
         );
-        let detail = compile_observation_detail_sql("span-1", from, to).unwrap();
+        let detail = compile_span_detail_sql("span-1", from, to).unwrap();
         assert!(detail.contains(&payload), "detail keeps payload: {detail}");
         assert!(detail.contains("events"), "detail keeps payload: {detail}");
     }
 
     #[test]
-    fn skinny_observation_detail_omits_empty_attributes_events_on_serialize() {
-        // D14 wire contract: empty bags must be absent so Explorer expand fires
-        // (`attributes != null` gate in SessionDetailView).
-        let skinny = ObservationDetail {
-            summary: ObservationSummary {
+    fn span_detail_serializes_empty_attributes_and_events() {
+        let skinny = SpanDetail {
+            summary: SpanSummary {
                 span_id: "sp-1".into(),
                 trace_id: "tr-1".into(),
                 parent_span_id: None,
                 session_id: Some("ses-1".into()),
                 name: "chat".into(),
-                observation_type: "span".into(),
+                span_type: "span".into(),
                 start_time: Utc::now(),
                 end_time: None,
                 status_code: None,
@@ -1977,15 +1971,9 @@ mod tests {
             scores: Vec::new(),
         };
         let json = serde_json::to_value(&skinny).expect("serialize");
-        assert!(
-            json.get("attributes").is_none(),
-            "empty attributes must be omitted: {json}"
-        );
-        assert!(
-            json.get("events").is_none(),
-            "empty events must be omitted: {json}"
-        );
-        let fat = ObservationDetail {
+        assert_eq!(json.get("attributes"), Some(&json!({})));
+        assert_eq!(json.get("events"), Some(&json!([])));
+        let fat = SpanDetail {
             attributes: HashMap::from([("k".into(), "v".into())]),
             events: vec![serde_json::json!({"name": "x"})],
             ..skinny.clone()
@@ -2005,7 +1993,7 @@ mod tests {
         let to = DateTime::parse_from_rfc3339("2026-09-10T16:45:48Z")
             .unwrap()
             .with_timezone(&Utc);
-        let sql = compile_session_observations_sql("sess-1", from, to, 10, None).unwrap();
+        let sql = compile_session_detail_sql("sess-1", from, to).unwrap();
         assert_sql_has_otlp_time_predicates(&sql);
         assert!(
             sql.contains("timestamp") && !sql.contains("record_date"),
@@ -2023,10 +2011,8 @@ mod tests {
         let to = DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let agg = compile_session_aggregate_sql("sess-1", from, to).expect("agg");
-        let traces = compile_session_traces_sql("sess-1", from, to, 50, None).expect("traces");
-        assert!(agg.contains("<> 'recording'"));
-        assert!(traces.contains("<> 'recording'"));
+        let detail = compile_session_detail_sql("sess-1", from, to).expect("session detail");
+        assert!(detail.contains("<> 'recording'"));
     }
 
     #[test]
@@ -2069,16 +2055,13 @@ mod tests {
         const LAKE_COMPILE_FNS: &[&str] = &[
             "compile_session_recording_sql",
             "compile_session_search_sql",
-            "compile_observation_search_sql",
-            "compile_observation_detail_sql",
+            "compile_span_search_sql",
+            "compile_span_detail_sql",
             "compile_trace_summary_sql",
-            "compile_trace_observations_sql",
-            "compile_session_observations_sql",
-            "compile_session_aggregate_sql",
-            "compile_session_traces_sql",
+            "compile_trace_spans_sql",
+            "compile_session_detail_sql",
             "compile_scores_for_span_sql",
             "compile_scores_for_trace_sql",
-            "compile_scores_for_session_sql",
         ];
         let src = include_str!("../../sql/llm/mod.rs");
         for name in LAKE_COMPILE_FNS {
@@ -2116,10 +2099,10 @@ mod tests {
         let sqls = vec![
             compile_session_recording_sql("s", from, to, 10).unwrap(),
             compile_session_search_sql(&session_search_request(), 10).unwrap(),
-            compile_observation_search_sql(&ObservationSearchRequest {
+            compile_span_search_sql(&SpanSearchRequest {
                 from,
                 to,
-                observation_types: vec![],
+                span_types: vec![],
                 model_name: None,
                 user_id: None,
                 session_id: None,
@@ -2128,15 +2111,12 @@ mod tests {
                 cursor: None,
             })
             .unwrap(),
-            compile_observation_detail_sql("span", from, to).unwrap(),
+            compile_span_detail_sql("span", from, to).unwrap(),
             compile_trace_summary_sql("tr", from, to, None).unwrap(),
-            compile_trace_observations_sql("tr", from, to, 10, None, None).unwrap(),
-            compile_session_observations_sql("s", from, to, 10, None).unwrap(),
-            compile_session_aggregate_sql("s", from, to).unwrap(),
-            compile_session_traces_sql("s", from, to, 10, None).unwrap(),
+            compile_trace_spans_sql("tr", from, to, 10, None, None).unwrap(),
+            compile_session_detail_sql("s", from, to).unwrap(),
             compile_scores_for_span_sql("span", from, to).unwrap(),
             compile_scores_for_trace_sql("tr", from, to).unwrap(),
-            compile_scores_for_session_sql("s", from, to).unwrap(),
         ];
         assert_eq!(sqls.len(), LAKE_COMPILE_FNS.len());
         for sql in &sqls {
@@ -2148,11 +2128,6 @@ mod tests {
         assert!(
             trace_scores.matches("timestamp").count() >= 2,
             "scores-for-trace needs outer + subquery day bounds: {trace_scores}"
-        );
-        let session_scores = compile_scores_for_session_sql("s", from, to).unwrap();
-        assert!(
-            session_scores.matches("timestamp").count() >= 2,
-            "scores-for-session needs outer + subquery day bounds: {session_scores}"
         );
     }
 }

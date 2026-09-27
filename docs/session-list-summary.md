@@ -44,14 +44,14 @@ detail ← traces
 
 Explorer Sessions list: triage rows (`session_id`, agent, times, steps, errors, tokens/cost). Filters: range, agent, has-errors. Cursor pagination.
 
-Detail: one session’s observations / payloads from thelake.
+Detail: one complete session response with span payloads from thelake.
 
 ### 2.2 Main today
 
 | Path | Behavior | Cost |
 |---|---|---|
 | List | `sessions/search` → `GROUP BY session_id` over all spans in window | Grows with window volume |
-| List (Stage 0) | Explorer **no longer** runs `sessionCountOverrides` / window `observations/search` | Half the previous Explorer load; list still lake-bound until Stage 3 |
+| List (Stage 0) | Explorer **no longer** runs `sessionCountOverrides` / window `spans/search` | Half the previous Explorer load; list still lake-bound until Stage 3 |
 | Detail | session-scoped reads | Correct |
 
 ### 2.3 Constraints
@@ -208,7 +208,7 @@ Optional: coalesce dirty rows in-process for a few hundred ms before Postgres UP
 
 | Field | Summary | Detail |
 |---|---|---|
-| `observation_count` | `COUNT(DISTINCT span_id)` from `traces` | Deduped observations |
+| `observation_count` | `COUNT(DISTINCT span_id)` from `traces` | Deduped spans (storage column name retained) |
 | `error_count` | `#` with `status_code = 'ERROR'` (coarse) | Primary-error / timeline |
 | tokens / cost / agent | From same lake aggregate | From spans |
 | payloads | Never | attrs / events |
@@ -317,12 +317,12 @@ No FINALIZED. Late span → dirty UPSERT → next claimed reduce replaces the su
 
 ### 7.2 Detail
 
-Unchanged: `GET …/sessions/{id}`, observations, recording — read **`traces`**.
+Session detail: `GET …/sessions/{id}` returns session totals, scores, and every full span from one materialized DuckLake query. Recording remains a separate endpoint.
 
 ### 7.3 Explorer
 
 - Keep calling `sessions/search` via Worker — **summary rows only** (no parallel observations scan).
-- **Done (Stage 0 + 3 + 3.6):** list is Postgres `session_summary`-backed. Trust server `SessionSummary` counts; Explorer must **not** window-scan `observations/search` for list counts. Detail still reads `traces`.
+- **Done (Stage 0 + 3 + 3.6):** list is Postgres `session_summary`-backed. Trust server `SessionSummary` counts; Explorer must **not** window-scan the span search endpoint for list counts. Session detail reads all spans and aggregate fields together from `traces`.
 - Findings/agents stay in Supabase UI join by `session_id`.
 - Explorer never writes `session_summary`.
 - Optional client fallback when the search endpoint is missing (404/405) remains a compatibility path only — not the product list path.

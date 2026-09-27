@@ -151,14 +151,8 @@ pub async fn create_router(
             "/v1/llm/score-configs",
             get(llm::list_score_configs).post(llm::create_score_config),
         )
-        .route(
-            "/v1/llm/observations/search",
-            post(llm::query::search_observations),
-        )
-        .route(
-            "/v1/llm/observations/{span_id}",
-            get(llm::query::get_observation),
-        )
+        .route("/v1/llm/spans/search", post(llm::query::search_spans))
+        .route("/v1/llm/spans/{span_id}", get(llm::query::get_span))
         .route("/v1/llm/traces/{trace_id}", get(llm::query::get_trace))
         .route("/v1/llm/sessions/search", post(llm::query::search_sessions))
         .route(
@@ -168,10 +162,6 @@ pub async fn create_router(
         .route(
             "/v1/llm/sessions/{session_id}",
             get(llm::query::get_session),
-        )
-        .route(
-            "/v1/llm/sessions/{session_id}/observations",
-            get(llm::query::get_session_observations),
         )
         .route(
             "/v1/llm/sessions/{session_id}/recording",

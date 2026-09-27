@@ -42,7 +42,7 @@ We stored one fact as two columns (`timestamp` + `record_date`) and partitioned 
 | D8 | **No `app_id` sort lead.** Scores in same layout module. |
 | D9 | **Execute gate + `src/sql` locality** — see sql/schema design. |
 | D10 | **Inline** default `data_inlining_row_limit = 500`. |
-| D11 | Session `/observations` include `attributes`/`events` for Explorer trajectory. |
+| D11 | Session `/sessions/{session_id}` returns all span `attributes`/`events` with session totals in one response. |
 
 **Pre-cutover (once):** greenfield EXPLAIN with **only** `timestamp` bounds must not read out-of-window day files. If prune fails, fix DDL/engine — do **not** reintroduce `record_date`.
 
@@ -68,7 +68,7 @@ Locked by `tests/integration/one_clock_prune.rs` / [`fixtures/one-clock-prune-ex
 
 | Endpoint | Window |
 |----------|--------|
-| Session detail / observations / recording | `session_summary` start/end only |
+| Session detail / spans / recording | `session_summary` start/end only |
 | Search | Request `from`/`to` required |
 | Trace / observation by id | Require window; 400 if missing |
 

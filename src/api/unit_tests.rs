@@ -235,8 +235,8 @@ async fn unit_openapi_llm_schema_contracts() {
         json!(["numeric", "categorical", "boolean", "text"])
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/observations/search"]["post"]["operationId"],
-        "searchObservations"
+        openapi["paths"]["/v1/llm/spans/search"]["post"]["operationId"],
+        "searchSpans"
     );
     assert_eq!(
         openapi["paths"]["/v1/llm/score-configs"]["get"]["operationId"],
@@ -247,8 +247,8 @@ async fn unit_openapi_llm_schema_contracts() {
         "createScoreConfig"
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/observations/{span_id}"]["get"]["operationId"],
-        "getObservation"
+        openapi["paths"]["/v1/llm/spans/{span_id}"]["get"]["operationId"],
+        "getSpan"
     );
     assert_eq!(
         openapi["paths"]["/v1/llm/traces/{trace_id}"]["get"]["operationId"],
@@ -296,6 +296,13 @@ async fn unit_openapi_llm_schema_contracts() {
         json!(["items", "cursor_supported"])
     );
     assert!(openapi["components"]["schemas"]["SessionSummary"].is_object());
+    assert!(
+        openapi["components"]["schemas"]["SessionSummary"]["properties"]["span_count"].is_object()
+    );
+    assert!(
+        openapi["components"]["schemas"]["SessionSummary"]["properties"]["observation_count"]
+            .is_null()
+    );
     assert_eq!(
         openapi["components"]["schemas"]["SessionSummaryRebuildResponse"]["required"],
         json!(["sessions_upserted"])
@@ -323,21 +330,22 @@ async fn unit_openapi_llm_schema_contracts() {
         !recording_param_names.contains(&"from") && !recording_param_names.contains(&"to"),
         "recording must not take query from/to (D7): {recording_param_names:?}"
     );
-    let obs_params = openapi["paths"]["/v1/llm/sessions/{session_id}/observations"]["get"]
-        ["parameters"]
-        .as_array()
-        .expect("observations params");
-    let obs_param_names: Vec<&str> = obs_params
-        .iter()
-        .filter_map(|p| p["name"].as_str())
-        .collect();
     assert!(
-        !obs_param_names.contains(&"from") && !obs_param_names.contains(&"to"),
-        "observations must not take query from/to (D7): {obs_param_names:?}"
+        !session_param_names.contains(&"limit") && !session_param_names.contains(&"cursor"),
+        "session detail is holistic and does not page its spans: {session_param_names:?}"
     );
-    assert!(openapi["components"]["schemas"]["ObservationSearchRequest"].is_object());
+    assert!(openapi["components"]["schemas"]["SpanSearchRequest"].is_object());
+    assert!(openapi["components"]["schemas"]["SpanDetail"].is_object());
+    assert!(openapi["components"]["schemas"]["Trace"].is_object());
+    assert!(openapi["paths"]["/v1/llm/observations/search"].is_null());
+    assert!(openapi["paths"]["/v1/llm/sessions/{session_id}/observations"].is_null());
     assert!(openapi["components"]["schemas"]["TraceDetail"].is_object());
     assert!(openapi["components"]["schemas"]["SessionDetail"].is_object());
+    assert!(
+        openapi["components"]["schemas"]["SessionDetail"]["properties"]["spans"].is_object(),
+        "session detail must include full spans in the same response"
+    );
+    assert!(openapi["components"]["schemas"]["SpanDetail"].is_object());
     assert!(openapi["components"]["schemas"]["SessionSearchRequest"].is_object());
     assert!(openapi["components"]["schemas"]["SessionSearchResponse"].is_object());
     assert!(openapi["paths"]["/v1/telemetry/fields"]["get"].is_object());

@@ -4,8 +4,7 @@
 Measures p50/p95/p99 for:
   - agent session OTLP ingest (/v1/traces)
   - POST /v1/llm/sessions/search
-  - GET  /v1/llm/sessions/{id}
-  - GET  /v1/llm/sessions/{id}/observations?limit=200
+  - GET  /v1/llm/sessions/{id} (full session detail and spans)
   - process CPU under load and after load stops (idle window)
 
 Does not replace make stress / perf_stress — complementary product-shaped bench.
@@ -196,18 +195,6 @@ def llm_loop(
                 ms = (time.perf_counter() - t0) * 1000
                 stats.record(ms, ok=ok)
                 return
-            elif name == "llm_session_observations":
-                sid = pool.pick()
-                r = session.get(
-                    f"{base_url}/v1/llm/sessions/{sid}/observations",
-                    headers=_auth_headers(token),
-                    params={"limit": 200},
-                    timeout=60,
-                )
-                ok = r.status_code in (200, 404)
-                ms = (time.perf_counter() - t0) * 1000
-                stats.record(ms, ok=ok)
-                return
             else:
                 raise ValueError(name)
             ok = r.status_code < 300
@@ -316,8 +303,8 @@ def main() -> int:
     ap.add_argument("--report-json", type=Path, default=None)
     ap.add_argument(
         "--workloads",
-        default="ingest,search,detail,observations",
-        help="comma list: ingest,search,detail,observations",
+        default="ingest,search,detail",
+        help="comma list: ingest,search,detail",
     )
     ap.add_argument("--max-error-rate", type=float, default=0.05)
     args = ap.parse_args()
@@ -369,9 +356,6 @@ def main() -> int:
         "ingest_sessions": WorkloadStats("ingest_sessions", record_after=record_after),
         "llm_session_search": WorkloadStats("llm_session_search", record_after=record_after),
         "llm_session_detail": WorkloadStats("llm_session_detail", record_after=record_after),
-        "llm_session_observations": WorkloadStats(
-            "llm_session_observations", record_after=record_after
-        ),
     }
 
     deadline = record_after + args.duration
@@ -432,25 +416,6 @@ def main() -> int:
                 daemon=True,
             )
         )
-    if "observations" in wanted:
-        threads.append(
-            threading.Thread(
-                target=llm_loop,
-                kwargs=dict(
-                    name="llm_session_observations",
-                    base_url=base,
-                    token=token,
-                    deadline=deadline,
-                    interval_ms=args.llm_interval_ms,
-                    concurrency=args.llm_concurrency,
-                    stats=stats["llm_session_observations"],
-                    pool=pool,
-                    window=(fr, to),
-                ),
-                daemon=True,
-            )
-        )
-
     load_cpu_samples: list[float] = []
     load_cpu_box: list[list[float]] = [load_cpu_samples]
 

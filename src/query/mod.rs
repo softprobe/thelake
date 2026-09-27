@@ -283,13 +283,12 @@ impl QueryEngine {
             .or_else(|| Some(value.clone())))
     }
 
-    /// Execute the approved LLM observation query built from a typed request.
-    pub async fn search_observations(
+    /// Execute the approved LLM span query built from a typed request.
+    pub async fn search_spans(
         &self,
-        request: &crate::api::llm::query::ObservationSearchRequest,
+        request: &crate::api::llm::query::SpanSearchRequest,
     ) -> anyhow::Result<QueryResult> {
-        let sql =
-            crate::sql::llm::compile_observation_search_sql(request).map_err(anyhow::Error::msg)?;
+        let sql = crate::sql::llm::compile_span_search_sql(request).map_err(anyhow::Error::msg)?;
         let query =
             crate::sql::trusted::approved_query(sql).map_err(|error| anyhow::anyhow!(error))?;
         self.execute_trusted(query).await
