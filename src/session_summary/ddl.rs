@@ -2,10 +2,23 @@
 
 use crate::runtime_engine::quote_pg_ident;
 
+fn quote_pg_literal(input: &str) -> String {
+    format!("'{}'", input.replace('\'', "''"))
+}
+
+fn dirty_generation_trigger_ddls(tenant_schema: &str) -> [String; 2] {
+    let schema = quote_pg_ident(tenant_schema);
+    let schema_literal = quote_pg_literal(tenant_schema);
+    [
+        format!("CREATE OR REPLACE FUNCTION {schema}.session_summary_dirty_bump_generation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.generation := OLD.generation + 1; RETURN NEW; END; $$;"),
+        format!("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'session_summary_dirty_bump_generation' AND tgrelid = to_regclass(format('%I.%I', {schema_literal}, 'session_summary_dirty')) AND NOT tgisinternal) THEN BEGIN CREATE TRIGGER session_summary_dirty_bump_generation BEFORE UPDATE ON {schema}.session_summary_dirty FOR EACH ROW EXECUTE FUNCTION {schema}.session_summary_dirty_bump_generation(); EXCEPTION WHEN duplicate_object THEN NULL; END; END IF; END $$;"),
+    ]
+}
+
 /// Legacy per-workspace DDL for isolated scopes.
 pub fn session_summary_table_ddls(tenant_schema: &str) -> Vec<String> {
     let schema = quote_pg_ident(tenant_schema);
-    vec![
+    let mut ddls = vec![
         format!("CREATE SCHEMA IF NOT EXISTS {schema};"),
         format!(
             r#"CREATE TABLE IF NOT EXISTS {schema}.session_summary (
@@ -45,16 +58,27 @@ pub fn session_summary_table_ddls(tenant_schema: &str) -> Vec<String> {
   min_ts       TIMESTAMPTZ NOT NULL,
   max_ts       TIMESTAMPTZ NOT NULL,
   updated_at   TIMESTAMPTZ NOT NULL,
+  generation   BIGINT      NOT NULL DEFAULT 1,
+  claim_holder TEXT,
+  claim_until  TIMESTAMPTZ,
   PRIMARY KEY (session_id)
 );"#
         ),
+        format!("ALTER TABLE {schema}.session_summary_dirty ADD COLUMN IF NOT EXISTS claim_holder TEXT;"),
+        format!("ALTER TABLE {schema}.session_summary_dirty ADD COLUMN IF NOT EXISTS claim_until TIMESTAMPTZ;"),
+        format!("ALTER TABLE {schema}.session_summary_dirty ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 1;"),
+        format!("CREATE INDEX IF NOT EXISTS session_summary_dirty_claim ON {schema}.session_summary_dirty (claim_until) WHERE claim_holder IS NOT NULL;"),
     ]
+    .into_iter()
+    .collect::<Vec<_>>();
+    ddls.splice(9..9, dirty_generation_trigger_ddls(tenant_schema));
+    ddls
 }
 
 /// Composite-key DDL for a shared physical scope.
 pub fn shared_session_summary_table_ddls(tenant_schema: &str) -> Vec<String> {
     let schema = quote_pg_ident(tenant_schema);
-    vec![
+    let mut ddls = vec![
         format!("CREATE SCHEMA IF NOT EXISTS {schema};"),
         format!(
             r#"CREATE TABLE IF NOT EXISTS {schema}.session_summary (
@@ -96,10 +120,21 @@ pub fn shared_session_summary_table_ddls(tenant_schema: &str) -> Vec<String> {
   min_ts       TIMESTAMPTZ NOT NULL,
   max_ts       TIMESTAMPTZ NOT NULL,
   updated_at   TIMESTAMPTZ NOT NULL,
+  generation   BIGINT      NOT NULL DEFAULT 1,
+  claim_holder TEXT,
+  claim_until  TIMESTAMPTZ,
   PRIMARY KEY (tenant_id, session_id)
 );"#
         ),
+        format!("ALTER TABLE {schema}.session_summary_dirty ADD COLUMN IF NOT EXISTS claim_holder TEXT;"),
+        format!("ALTER TABLE {schema}.session_summary_dirty ADD COLUMN IF NOT EXISTS claim_until TIMESTAMPTZ;"),
+        format!("ALTER TABLE {schema}.session_summary_dirty ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 1;"),
+        format!("CREATE INDEX IF NOT EXISTS session_summary_dirty_claim ON {schema}.session_summary_dirty (claim_until) WHERE claim_holder IS NOT NULL;"),
     ]
+    .into_iter()
+    .collect::<Vec<_>>();
+    ddls.splice(9..9, dirty_generation_trigger_ddls(tenant_schema));
+    ddls
 }
 
 /// Ensure session summary tables exist in the tenant metadata schema.

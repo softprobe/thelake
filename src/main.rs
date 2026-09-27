@@ -62,6 +62,10 @@ async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
     {
         info!("Maintenance scheduler started");
     }
+    let _session_summary_reducer =
+        softprobe_runtime::session_summary::start_session_summary_reducer(state.engines.clone())
+            .await?;
+    info!("Session-summary reducer started");
 
     app = app.merge(runtime_control_routes().with_state(state.clone()));
 

@@ -135,10 +135,9 @@ impl SessionSummaryDirty {
         } else {
             "session_id, min_ts, max_ts, updated_at"
         };
-        let arity = if self.workspace_scoped { 5 } else { 4 };
+        let arity = if self.workspace_scoped { 4 } else { 3 };
         let mut sql = format!("INSERT INTO {schema}.session_summary_dirty ({columns}) VALUES ");
         let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
-        let now = Utc::now();
         for (i, h) in hints.iter().enumerate() {
             if i > 0 {
                 sql.push(',');
@@ -146,27 +145,24 @@ impl SessionSummaryDirty {
             let base = i * arity;
             if self.workspace_scoped {
                 sql.push_str(&format!(
-                    "(${}, ${}, ${}, ${}, ${})",
-                    base + 1,
-                    base + 2,
-                    base + 3,
-                    base + 4,
-                    base + 5
-                ));
-                params.push(Box::new(self.tenant_id.clone()));
-            } else {
-                sql.push_str(&format!(
-                    "(${}, ${}, ${}, ${})",
+                    "(${}, ${}, ${}, ${}, clock_timestamp())",
                     base + 1,
                     base + 2,
                     base + 3,
                     base + 4
                 ));
+                params.push(Box::new(self.tenant_id.clone()));
+            } else {
+                sql.push_str(&format!(
+                    "(${}, ${}, ${}, clock_timestamp())",
+                    base + 1,
+                    base + 2,
+                    base + 3
+                ));
             }
             params.push(Box::new(h.session_id.clone()));
             params.push(Box::new(h.min_ts));
             params.push(Box::new(h.max_ts));
-            params.push(Box::new(now));
         }
         if self.workspace_scoped {
             sql.push_str(

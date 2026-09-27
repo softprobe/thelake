@@ -31,7 +31,6 @@ use crate::util::otlp::{double_kv, int_kv, string_kv};
 fn postgres_summary_config(temp: &TempDir, metadata_schema: String) -> Config {
     let mut config = Config::default();
     config.maintenance.enabled = false;
-    config.maintenance.metadata_enabled = false;
     config.shrink_pools_for_tests();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
 
@@ -407,6 +406,108 @@ async fn http_session_summary_empty_before_reduce_ignores_lake() {
     assert!(
         v["items"].as_array().unwrap().is_empty(),
         "pre-reduce must not fall back to lake: {v}"
+    );
+}
+
+#[tokio::test]
+async fn http_session_summary_writer_reducer_rebuild_and_maintenance_overlap() {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let schema = format!("thelake_ss_overlap_{suffix}");
+    let Some((router, state, _temp, schema)) = build_summary_router(schema).await else {
+        eprintln!("skip: ducklake-postgres not reachable");
+        return;
+    };
+    let mut initial = filter_fixture().into_iter().next().expect("fixture");
+    initial.session_id = "overlap-initial";
+    initial.trace = 0xb1;
+    ingest(&router, llm_span(&initial)).await;
+    flush(&state).await;
+
+    let late = SpanSpec {
+        session_id: "overlap-late",
+        trace: 0xb2,
+        start_ago_s: 20,
+        duration_s: 5,
+        error: false,
+        agent: "agent-overlap",
+        user: "u-overlap",
+        model: "gpt-4o",
+        tokens: 12,
+        cost: 0.01,
+    };
+    let maintenance = state
+        .engines
+        .maintenance_engine()
+        .await
+        .expect("maintenance engine");
+    let cfg = state.engines.config().session_summary.clone();
+    let rebuild_from = Utc::now() - ChronoDuration::hours(2);
+    let rebuild_to = Utc::now() + ChronoDuration::minutes(5);
+    let reduce_engine = maintenance.clone();
+    let rebuild_engine = maintenance.clone();
+    let writer_router = router.clone();
+    let writer_state = state.clone();
+    let writer = async move {
+        ingest(&writer_router, llm_span(&late)).await;
+        flush(&writer_state).await;
+    };
+    let (reduced, rebuilt, maintained, ()) = tokio::join!(
+        reduce_engine.reduce_session_summary_for_key(
+            softprobe_runtime::workspace_scope::DEFAULT_WORKSPACE_ID,
+            cfg.max_sessions_per_reduce,
+            cfg.max_reduce_span_seconds
+        ),
+        rebuild_engine.rebuild_session_summary_for_key(
+            softprobe_runtime::workspace_scope::DEFAULT_WORKSPACE_ID,
+            rebuild_from,
+            rebuild_to,
+            cfg.max_reduce_span_seconds
+        ),
+        maintenance.run_pass(false),
+        writer,
+    );
+    reduced.expect("overlapping reducer");
+    rebuilt.expect("overlapping rebuild");
+    let maintained = maintained.expect("overlapping maintenance");
+    assert!(
+        !maintained.tables.is_empty(),
+        "maintenance should visit the physical scope"
+    );
+    assert!(
+        maintained
+            .tables
+            .iter()
+            .all(|table| !table.metadata.skipped),
+        "metadata maintenance action must execute successfully: {:?}",
+        maintained
+            .tables
+            .iter()
+            .map(|table| (&table.table, table.metadata.skipped))
+            .collect::<Vec<_>>()
+    );
+
+    // Drain any dirty row created while the first reducer/rebuild was in
+    // flight. A write racing publication must remain visible to a later pass.
+    for _ in 0..4 {
+        run_reduce(&state).await;
+        if dirty_count(&state, &schema).await == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        dirty_count(&state, &schema).await,
+        0,
+        "dirty work must drain after overlap"
+    );
+    let results = search(&router, window()).await;
+    let ids = session_ids(&results);
+    assert!(
+        ids.contains(&"overlap-initial"),
+        "initial session missing: {results}"
+    );
+    assert!(
+        ids.contains(&"overlap-late"),
+        "concurrent write missing: {results}"
     );
 }
 

@@ -18,7 +18,7 @@ pub use ddl::{
 pub use dirty::{fold_dirty_hints, DirtyHint, SessionSummaryDirty};
 pub(crate) use hot_attrs::ensure_product_hot_attrs_for_scope;
 pub(crate) use job::WORKSPACE_SESSION_SUMMARY_REBUILD_JOB;
-pub use job::{SessionSummaryRebuildJob, SessionSummaryReduceJob};
+pub use job::{start_session_summary_reducer, SessionSummaryRebuildJob};
 pub use list::{
     lookup_session_summary_window, lookup_session_summary_window_for_workspace,
     search_session_summary, search_session_summary_for_workspace, SessionSummaryListError,

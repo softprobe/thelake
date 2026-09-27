@@ -37,6 +37,7 @@ pub(crate) fn compact_table_incremental(
     table: &str,
     scope_key: &str,
     watermark: DateTime<Utc>,
+    ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
 ) -> Result<MergeOutcome> {
     let policy = TwcsPolicy::from(&config.maintenance);
     let today = Utc::now().date_naive();
@@ -104,6 +105,7 @@ pub(crate) fn compact_table_incremental(
         scope_key,
         mode,
         WaveKind::Closed,
+        ensure_active,
     )?;
     crate::self_monitoring::record_maintenance_step(
         scope_key,
@@ -130,6 +132,7 @@ pub(crate) fn compact_table_incremental(
         scope_key,
         mode,
         WaveKind::Open,
+        ensure_active,
     )?;
     crate::self_monitoring::record_maintenance_step(
         scope_key,
@@ -214,11 +217,13 @@ fn twcs_compact_waves(
     tenant_id: &str,
     mode: MergeMode,
     kind: WaveKind,
+    ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
 ) -> Result<ActionStatus> {
     let newer_than = mode.newer_than();
     let label = kind.label();
     let max_waves = kind.max_waves(policy);
     for wave in 0..max_waves {
+        ensure_active()?;
         let partitions =
             match load_partition_stats_after(conn, scope.attach_alias(), table, newer_than) {
                 Ok(v) => v,
@@ -289,6 +294,7 @@ fn twcs_compact_waves(
             mode,
             max_compacted,
             policy.max_merge_file_size_bytes,
+            ensure_active,
         )?;
         let partitions_after =
             match load_partition_stats_after(conn, scope.attach_alias(), table, newer_than) {
@@ -348,6 +354,7 @@ fn ducklake_compact_table_wave(
     mode: MergeMode,
     max_compacted_files: u64,
     max_file_size_bytes: u64,
+    ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
 ) -> Result<ActionStatus> {
     let policy = TwcsPolicy::from(&config.maintenance);
     let qualified = crate::storage::ducklake::ducklake_qualified_table_name(scope, table);
@@ -357,11 +364,13 @@ fn ducklake_compact_table_wave(
         crate::storage::ducklake::size_literal(config.maintenance.target_file_size_bytes);
     let set_target =
         ducklake_set_target_file_size_sql(scope.attach_alias(), &target_file_size, &option_scope);
+    ensure_active()?;
     if let Err(err) = execute_batch_with_serialization_retry(
         conn,
         &set_target,
         COMPACTION_SERIALIZATION_ATTEMPTS,
         &format!("ducklake set_option target_file_size {}", qualified),
+        ensure_active,
     ) {
         if is_ducklake_serialization_conflict(&err) {
             warn!(
@@ -385,11 +394,13 @@ fn ducklake_compact_table_wave(
         Some(max_file_size_bytes),
     );
     for wave in 1..=2 {
+        ensure_active()?;
         match execute_batch_with_serialization_retry(
             conn,
             &sql,
             COMPACTION_SERIALIZATION_ATTEMPTS,
             &format!("ducklake_merge_adjacent_files {} wave{}", qualified, wave),
+            ensure_active,
         ) {
             Ok(_) => return Ok(ActionStatus::Completed),
             Err(err) if is_newer_than_unsupported(&err) => {
@@ -436,6 +447,7 @@ fn ducklake_compact_table_wave(
                     mode,
                     policy.max_compacted_files_per_wave,
                     max_file_size_bytes,
+                    ensure_active,
                 );
             }
             Err(err) => {

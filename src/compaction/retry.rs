@@ -51,16 +51,33 @@ pub(crate) fn execute_batch_with_serialization_retry(
     sql: &str,
     max_attempts: usize,
     action: &str,
+    ensure_active: &mut (dyn FnMut() -> anyhow::Result<()> + Send),
 ) -> std::result::Result<(), duckdb::Error> {
     if let Err(msg) = crate::sql::ensure_fact_scan_bound(sql) {
         return Err(duckdb::Error::InvalidParameterName(format!(
             "SQL gate: {msg}"
         )));
     }
+    execute_with_serialization_retry(max_attempts, action, ensure_active, || {
+        conn.execute_batch(sql)
+    })
+}
+
+fn execute_with_serialization_retry(
+    max_attempts: usize,
+    action: &str,
+    ensure_active: &mut (dyn FnMut() -> anyhow::Result<()> + Send),
+    mut execute: impl FnMut() -> std::result::Result<(), duckdb::Error>,
+) -> std::result::Result<(), duckdb::Error> {
     let attempts = std::cmp::max(1, max_attempts);
     let mut backoff_ms = 150u64;
     for attempt in 1..=attempts {
-        match conn.execute_batch(sql) {
+        if let Err(err) = ensure_active() {
+            return Err(duckdb::Error::InvalidParameterName(format!(
+                "maintenance lease lost: {err}"
+            )));
+        }
+        match execute() {
             Ok(()) => return Ok(()),
             Err(err) if is_ducklake_serialization_conflict(&err) && attempt < attempts => {
                 warn!(
@@ -97,5 +114,34 @@ mod tests {
         assert!(is_newer_than_unsupported(&err));
         let other = duckdb::Error::InvalidParameterName("out of memory".into());
         assert!(!is_newer_than_unsupported(&other));
+    }
+
+    #[test]
+    fn serialization_retry_stops_after_lease_loss() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let lease_active = AtomicBool::new(true);
+        let attempts = AtomicUsize::new(0);
+        let mut ensure_active = || {
+            if lease_active.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                anyhow::bail!("maintenance lease lost")
+            }
+        };
+        let result = execute_with_serialization_retry(3, "test merge", &mut ensure_active, || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            lease_active.store(false, Ordering::SeqCst);
+            Err(duckdb::Error::InvalidParameterName(
+                "serialization failure".into(),
+            ))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "no retry may start after lease loss"
+        );
     }
 }

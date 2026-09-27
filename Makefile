@@ -640,6 +640,7 @@ bench-demo-cpu-full: ensure-cache
 # same integration:: selector in fresh processes, so every scenario runs under
 # both DuckLake workspace-scope implementations.
 test-e2e: ensure-cache check-infra
+	@$(MAKE) --no-print-directory test
 	@$(MAKE) --no-print-directory test-lease-pg
 	@E2E_BACKEND="$(E2E_BACKEND)" ./scripts/run-e2e-matrix.sh
 

@@ -1,7 +1,7 @@
 //! Shared async job runner and cross-replica leases.
 //!
-//! One runner loop, one [`LeaseStore`] trait, one [`Job`] trait — used by
-//! maintenance today and session-summary later. Do not add a second timer or lock.
+//! Shared runner and lease store for jobs that require singleton execution.
+//! Dirty-row reducers use their queue claims instead of this runner.
 
 mod job;
 mod lease;
@@ -10,7 +10,7 @@ mod lease;
 mod tests;
 
 pub use job::Job;
-pub use lease::{LeaseStore, MemoryLeaseStore, PostgresLeaseStore};
+pub use lease::{LeaseStore, LeaseToken, MemoryLeaseStore, PostgresLeaseStore};
 
 use crate::config::AsyncJobsConfig;
 use crate::self_monitoring;
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -62,11 +62,12 @@ impl DueTracker {
 
 /// Spawn the shared wake loop. Returns `None` when `jobs` is empty.
 ///
-/// Each wake: for every job/scope, if due → `try_acquire` → if win, `run` with
+/// Each wake: for every job/scope, if due → fenced acquire → if win, `run` with
 /// heartbeat → always **release**. `Job::interval` sets both the shared wake
 /// floor (`min` across jobs) and per-job due gating. Configure
 /// `lease_ttl_seconds` well above `heartbeat_seconds` and typical pass latency.
-/// Heartbeat failures are logged; they do not abort `job.run`.
+/// A heartbeat failure cancels the current job future; fenced jobs should also
+/// check lease loss between major side effects.
 pub fn spawn_runner(
     config: &AsyncJobsConfig,
     leases: Arc<dyn LeaseStore>,
@@ -120,14 +121,15 @@ pub fn spawn_runner(
                         self_monitoring::record_job_skip(job.name(), &scope, "not_due");
                         continue;
                     }
-                    match leases
-                        .try_acquire(job.name(), &scope, &holder_id, lease_ttl)
+                    let token = match leases
+                        .acquire_lease(job.name(), &scope, &holder_id, lease_ttl)
                         .await
                     {
-                        Ok(true) => {
+                        Ok(Some(token)) => {
                             self_monitoring::record_lease_acquire(job.name(), &scope, "win");
+                            token
                         }
-                        Ok(false) => {
+                        Ok(None) => {
                             self_monitoring::record_lease_acquire(job.name(), &scope, "lose");
                             continue;
                         }
@@ -140,13 +142,14 @@ pub fn spawn_runner(
                             self_monitoring::record_lease_acquire(job.name(), &scope, "error");
                             continue;
                         }
-                    }
+                    };
 
                     let hb_leases = Arc::clone(&leases);
                     let hb_job = job.name().to_string();
                     let hb_scope = scope.clone();
-                    let hb_holder = holder_id.clone();
+                    let hb_token = token.clone();
                     let hb_ttl = lease_ttl;
+                    let (lost_tx, lost_rx) = watch::channel(false);
                     let (hb_stop_tx, mut hb_stop_rx) = oneshot::channel::<()>();
                     let hb_task = tokio::spawn(async move {
                         let mut hb_ticker = tokio::time::interval(heartbeat_every);
@@ -158,7 +161,7 @@ pub fn spawn_runner(
                                 _ = &mut hb_stop_rx => break,
                                 _ = hb_ticker.tick() => {
                                     if let Err(err) = hb_leases
-                                        .heartbeat(&hb_job, &hb_scope, &hb_holder, hb_ttl)
+                                        .heartbeat_lease(&hb_job, &hb_scope, &hb_token, hb_ttl)
                                         .await
                                     {
                                         warn!(
@@ -169,6 +172,8 @@ pub fn spawn_runner(
                                         self_monitoring::record_lease_heartbeat_failure(
                                             &hb_job, &hb_scope,
                                         );
+                                        let _ = lost_tx.send(true);
+                                        break;
                                     }
                                 }
                             }
@@ -178,7 +183,9 @@ pub fn spawn_runner(
                     // RAII: stop HB even if `job.run` panics.
                     let _hb_guard = HeartbeatStopGuard(Some(hb_stop_tx));
                     let run_started = Instant::now();
-                    let run_result = AssertUnwindSafe(job.run(&scope)).catch_unwind().await;
+                    let run_result = AssertUnwindSafe(job.run_fenced(&scope, &token, lost_rx))
+                        .catch_unwind()
+                        .await;
                     let run_elapsed = run_started.elapsed();
                     drop(_hb_guard);
                     let _ = hb_task.await;
@@ -204,7 +211,7 @@ pub fn spawn_runner(
                         }
                     }
 
-                    if let Err(err) = leases.release(job.name(), &scope, &holder_id).await {
+                    if let Err(err) = leases.release_lease(job.name(), &scope, &token).await {
                         warn!(
                             job = job.name(),
                             scope = %scope,
