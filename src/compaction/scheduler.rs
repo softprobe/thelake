@@ -1,7 +1,7 @@
 use crate::async_jobs::{self, Job};
 use crate::compaction::PhysicalScopeMaintenanceJob;
 use crate::runtime_engine::RuntimeEngineManager;
-use crate::session_summary::{SessionSummaryRebuildJob, SessionSummaryReduceJob};
+use crate::session_summary::SessionSummaryRebuildJob;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,10 +28,6 @@ pub async fn start_maintenance_scheduler(
         )));
     }
 
-    jobs.push(Arc::new(SessionSummaryReduceJob::new(
-        maintenance.clone(),
-        config,
-    )));
     jobs.push(Arc::new(SessionSummaryRebuildJob::new(
         maintenance.clone(),
         config,
@@ -77,8 +73,12 @@ mod tests {
         assert!(
             production.contains("maintenance_engine()")
                 && !production.contains("MaintenanceEngine::new(")
-                && !production.contains("SessionSummaryReduceJob::new(\n        scope_registry"),
-            "scheduler must build jobs from manager.maintenance_engine()"
+                && !production.contains("SessionSummaryReduceJob")
+                && !production.contains("start_session_summary_reducer")
+                && production.contains("SessionSummaryRebuildJob::new("),
+            "maintenance scheduler must register only leased maintenance/rebuild jobs"
         );
+        let main = include_str!("../main.rs");
+        assert!(main.contains("start_session_summary_reducer("));
     }
 }

@@ -24,6 +24,7 @@ use crate::workspace_scope::{
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -224,6 +225,7 @@ pub struct RuntimeEngineManager {
     engines: DashMap<String, Arc<RuntimeEngine>>,
     creation_locks: DashMap<String, Arc<Mutex<()>>>,
     scope_locks: DashMap<String, Arc<Mutex<()>>>,
+    scope_initialization_lock: Mutex<()>,
     control_plane: Option<ControlPlaneRuntime>,
     scope_registry: DuckLakeScopeResolver,
     #[cfg(test)]
@@ -242,6 +244,7 @@ impl RuntimeEngineManager {
             engines: DashMap::new(),
             creation_locks: DashMap::new(),
             scope_locks: DashMap::new(),
+            scope_initialization_lock: Mutex::new(()),
             control_plane,
             scope_registry,
             #[cfg(test)]
@@ -274,21 +277,78 @@ impl RuntimeEngineManager {
         &self,
         request: ScopeProvisioningRequest,
     ) -> Result<ScopeStorageHints> {
-        let scope = self.scope_registry.provision_scope(request).await?;
-        Ok(ScopeStorageHints::from_physical(&scope))
+        let scope = self.scope_registry.scope_for_provision(&request)?;
+        let lock = self
+            .scope_locks
+            .entry(scope.id().registry_token().to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _scope_hold = lock.lock().await;
+        self.with_scope_initialization_lock(&scope, async {
+            let scope = self
+                .scope_registry
+                .provision_scope(request, scope.clone())
+                .await?;
+            self.scope_registry.ensure_scope_tables(&scope).await?;
+            Ok(ScopeStorageHints::from_physical(&scope))
+        })
+        .await
     }
 
     /// Resolve warehouse hints for an existing workspace binding.
     ///
     /// Prefer this over digging into physical-scope codecs from handlers.
     pub async fn scope_storage_hints(&self, scope_id: &str) -> Result<ScopeStorageHints> {
-        let scope = self.scope_registry.resolve_scope(scope_id).await?;
+        let scope = self
+            .scope_registry
+            .resolve_scope_without_tables(scope_id)
+            .await?;
+        self.ensure_scope_tables_locked(&scope).await?;
         Ok(ScopeStorageHints::from_physical(&scope))
     }
 
     /// Resolve an existing workspace binding's physical scope (crate-internal).
     pub(crate) async fn resolve_scope(&self, scope_id: &str) -> Result<PhysicalScope> {
-        self.scope_registry.resolve_scope(scope_id).await
+        let scope = self
+            .scope_registry
+            .resolve_scope_without_tables(scope_id)
+            .await?;
+        self.ensure_scope_tables_locked(&scope).await?;
+        Ok(scope)
+    }
+
+    async fn ensure_scope_tables_locked(&self, scope: &PhysicalScope) -> Result<()> {
+        self.ensure_scope_tables_with_lock_token(scope, scope.id().registry_token().to_string())
+            .await
+    }
+
+    async fn ensure_scope_tables_with_lock_token(
+        &self,
+        scope: &PhysicalScope,
+        lock_token: String,
+    ) -> Result<()> {
+        let lock = self.scope_lock(lock_token);
+        let _scope_hold = lock.lock().await;
+        self.with_scope_initialization_lock(scope, self.scope_registry.ensure_scope_tables(scope))
+            .await
+    }
+
+    async fn with_scope_initialization_lock<T>(
+        &self,
+        scope: &PhysicalScope,
+        action: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let _manager_initialization = self.scope_initialization_lock.lock().await;
+        self.scope_registry
+            .with_scope_initialization_lock(scope, action)
+            .await
+    }
+
+    fn scope_lock(&self, lock_token: String) -> Arc<Mutex<()>> {
+        self.scope_locks
+            .entry(lock_token)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Build DuckLake connection material for isolated-mode tenants.
@@ -366,36 +426,37 @@ impl RuntimeEngineManager {
         let physical = DuckLakeAccess::Workspace(binding.clone())
             .physical_scope()
             .clone();
-        let scope_lock = self
-            .scope_locks
-            .entry(binding.registry_lock_token())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
+        let scope_lock = self.scope_lock(binding.registry_lock_token());
         let _scope_hold = scope_lock.lock().await;
-        let counts_toward_liveness = true;
+        self.with_scope_initialization_lock(&physical, async {
+            resolver.ensure_scope_tables(&physical).await?;
+            let counts_toward_liveness = true;
 
-        let ingest =
-            IngestEngine::bound(self.config.as_ref(), resolver.clone(), binding.clone()).await?;
-        ingest.ensure_shared_schema().await?;
-        let query = Arc::new(
-            query_mod::create_query_engine_for_scope_with_liveness(
-                self.config.as_ref(),
-                &physical,
-                counts_toward_liveness,
-                bound_tenant_id,
-            )
-            .await?,
-        );
-        let admin = Arc::new(AdminEngine::from_ingest(&ingest));
-        Ok(Arc::new(RuntimeEngine {
-            tenant_id: bound_tenant_id.to_string(),
-            binding,
-            physical,
-            catalog_pool: resolver.pool().clone(),
-            ingest,
-            admin,
-            query,
-        }))
+            let ingest =
+                IngestEngine::bound(self.config.as_ref(), resolver.clone(), binding.clone())
+                    .await?;
+            ingest.ensure_shared_schema().await?;
+            let query = Arc::new(
+                query_mod::create_query_engine_for_scope_with_liveness(
+                    self.config.as_ref(),
+                    &physical,
+                    counts_toward_liveness,
+                    bound_tenant_id,
+                )
+                .await?,
+            );
+            let admin = Arc::new(AdminEngine::from_ingest(&ingest));
+            Ok(Arc::new(RuntimeEngine {
+                tenant_id: bound_tenant_id.to_string(),
+                binding,
+                physical: physical.clone(),
+                catalog_pool: resolver.pool().clone(),
+                ingest,
+                admin,
+                query,
+            }))
+        })
+        .await
     }
 }
 
@@ -538,7 +599,10 @@ impl DuckLakeScopeResolver {
         let dl = &config.ducklake;
         let resolver = Self::build_pool(dl)?;
         resolver.ensure_registry().await?;
-        resolver.ensure_scope().await?;
+        let default_scope = resolver.default_physical_scope.clone();
+        resolver
+            .with_scope_initialization_lock(&default_scope, async { resolver.ensure_scope().await })
+            .await?;
         Ok(resolver)
     }
 
@@ -559,6 +623,25 @@ impl DuckLakeScopeResolver {
 
     async fn ensure_scope(&self) -> Result<()> {
         self.ensure_scope_tables(&self.default_physical_scope).await
+    }
+
+    async fn with_scope_initialization_lock<T>(
+        &self,
+        scope: &PhysicalScope,
+        action: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+        let scope_token = scope.id().registry_token().to_string();
+        transaction
+            .query_one(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));",
+                &[&scope_token],
+            )
+            .await?;
+        let result = action.await;
+        transaction.commit().await?;
+        result
     }
 
     async fn ensure_registry(&self) -> Result<()> {
@@ -637,10 +720,20 @@ impl DuckLakeScopeResolver {
   job_name TEXT NOT NULL,
   scope_key TEXT NOT NULL,
   holder_id TEXT NOT NULL,
+  epoch BIGINT NOT NULL DEFAULT 1,
   lease_until TIMESTAMPTZ NOT NULL,
   heartbeat_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (job_name, scope_key)
 );"#,
+                    quote_pg_ident(self.registry_schema())
+                ),
+                &[],
+            )
+            .await?;
+        client
+            .execute(
+                &format!(
+                    "ALTER TABLE {}.thelake_job_lease ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL DEFAULT 1;",
                     quote_pg_ident(self.registry_schema())
                 ),
                 &[],
@@ -681,8 +774,7 @@ ON {}.thelake_job_lease (lease_until);"#,
                 .default_physical_scope
                 .with_pg_namespace(row.get::<_, String>(1))
                 .with_warehouse_uri(row.get::<_, String>(2));
-            self.insert_physical_scope(client, &physical).await?;
-            let physical_scope_id = physical.id().registry_token().to_string();
+            let physical_scope_id = self.insert_physical_scope(client, &physical).await?;
             client
                 .execute(
                     &format!(
@@ -701,15 +793,16 @@ ON {}.thelake_job_lease (lease_until);"#,
         &self,
         client: &impl deadpool_postgres::GenericClient,
         physical: &PhysicalScope,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let physical_scope_id = physical.id().registry_token().to_string();
-        client
-            .execute(
+        let inserted = client
+            .query_opt(
                 &format!(
                     r#"INSERT INTO {}.physical_scope
   (physical_scope_id, metadata_path, ducklake_metadata_schema, data_path, catalog_alias)
 VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
+ON CONFLICT DO NOTHING
+RETURNING physical_scope_id;"#,
                     quote_pg_ident(self.registry_schema())
                 ),
                 &[
@@ -721,7 +814,39 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
                 ],
             )
             .await?;
-        Ok(())
+        if let Some(row) = inserted {
+            return Ok(row.get(0));
+        }
+        let existing = client
+            .query_opt(
+                &format!(
+                    "SELECT physical_scope_id FROM {}.physical_scope \
+                     WHERE metadata_path = $1 AND catalog_alias = $2 \
+                       AND ducklake_metadata_schema = $3 AND data_path = $4;",
+                    quote_pg_ident(self.registry_schema())
+                ),
+                &[
+                    &physical.catalog_dsn(),
+                    &physical.attach_alias(),
+                    &physical.pg_namespace(),
+                    &physical.warehouse_uri(),
+                ],
+            )
+            .await?;
+        let Some(row) = existing else {
+            bail!("physical-scope identity token conflicts with other scope data");
+        };
+        let existing_id: String = row.get(0);
+        client
+            .execute(
+                &format!(
+                    "UPDATE {}.physical_scope SET updated_at = NOW() WHERE physical_scope_id = $1;",
+                    quote_pg_ident(self.registry_schema())
+                ),
+                &[&existing_id],
+            )
+            .await?;
+        Ok(existing_id)
     }
 
     async fn ensure_scope_tables(&self, scope: &PhysicalScope) -> Result<()> {
@@ -754,7 +879,6 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
     /// Resolve a workspace binding from the durable registry.
     pub async fn resolve_or_create_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
         if workspace_id.trim().is_empty() {
-            self.ensure_scope().await?;
             return WorkspaceBinding::new(
                 DEFAULT_WORKSPACE_ID,
                 self.default_physical_scope.clone(),
@@ -763,8 +887,6 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
             .map_err(Into::into);
         }
         let binding = self.resolve_binding(workspace_id).await?;
-        self.ensure_scope_tables(DuckLakeAccess::Workspace(binding.clone()).physical_scope())
-            .await?;
         Ok(binding)
     }
 
@@ -794,7 +916,6 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
 
     async fn resolve_scope_legacy(&self, scope_id: &str) -> Result<PhysicalScope> {
         if scope_id.trim().is_empty() {
-            self.ensure_scope().await?;
             return Ok(self.default_physical_scope.clone());
         }
         Ok(
@@ -804,11 +925,12 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
         )
     }
 
+    async fn resolve_scope_without_tables(&self, scope_id: &str) -> Result<PhysicalScope> {
+        self.resolve_scope_legacy(scope_id).await
+    }
+
     /// Idempotently create or verify a scope registry entry and its metadata tables.
-    pub async fn provision_scope(
-        &self,
-        request: ScopeProvisioningRequest,
-    ) -> Result<PhysicalScope> {
+    fn scope_for_provision(&self, request: &ScopeProvisioningRequest) -> Result<PhysicalScope> {
         if request.scope_id.trim().is_empty() {
             bail!("scope_id is required");
         }
@@ -820,22 +942,28 @@ ON CONFLICT (physical_scope_id) DO UPDATE SET updated_at = NOW();"#,
             bail!("ducklake data path is required");
         }
 
+        Ok(match self.workspace_scope_mode {
+            WorkspaceScopeMode::Isolated => PhysicalScope::from_provision(
+                &self.default_physical_scope,
+                request.metadata_schema.clone(),
+                request.data_path.clone(),
+            ),
+            WorkspaceScopeMode::Shared => self.default_physical_scope.clone(),
+        })
+    }
+
+    pub async fn provision_scope(
+        &self,
+        request: ScopeProvisioningRequest,
+        scope: PhysicalScope,
+    ) -> Result<PhysicalScope> {
         // Shared workspaces are logical bindings to the one configured physical
         // scope. The request names the workspace only; it cannot select a
         // second catalog or data root.
-        let scope = match self.workspace_scope_mode {
-            WorkspaceScopeMode::Isolated => PhysicalScope::from_provision(
-                &self.default_physical_scope,
-                request.metadata_schema,
-                request.data_path,
-            ),
-            WorkspaceScopeMode::Shared => self.default_physical_scope.clone(),
-        };
         let mut client = self.pool.get().await?;
         let physical = scope.clone();
-        let physical_scope_id = physical.id().registry_token().to_string();
         let transaction = client.transaction().await?;
-        self.insert_physical_scope(&transaction, &physical).await?;
+        let physical_scope_id = self.insert_physical_scope(&transaction, &physical).await?;
         let row = transaction
             .query_opt(
                 &format!(
@@ -857,14 +985,6 @@ RETURNING workspace_id;"#,
         }
         transaction.commit().await?;
 
-        self.ensure_scope_tables(&scope).await?;
-        Ok(scope)
-    }
-
-    /// Resolve an existing scope registry entry.
-    pub async fn resolve_scope(&self, scope_id: &str) -> Result<PhysicalScope> {
-        let scope = self.resolve_scope_legacy(scope_id).await?;
-        self.ensure_scope_tables(&scope).await?;
         Ok(scope)
     }
 

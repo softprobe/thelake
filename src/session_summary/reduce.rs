@@ -9,13 +9,15 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use deadpool_postgres::Pool;
 use tracing::warn;
 
-/// One claimed dirty row (snapshot of `updated_at` for ack).
+/// One claimed dirty row with its PostgreSQL-maintained acknowledgement generation.
 #[derive(Debug, Clone)]
 pub struct DirtyClaim {
     pub session_id: String,
     pub min_ts: DateTime<Utc>,
     pub max_ts: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub generation: i64,
+    pub claim_token: String,
 }
 
 /// One absolute summary row ready for UPSERT.
@@ -85,32 +87,9 @@ pub async fn claim_dirty(
     pool: &Pool,
     metadata_schema: &str,
     limit: u64,
+    claim_ttl: std::time::Duration,
 ) -> Result<(Vec<DirtyClaim>, DateTime<Utc>)> {
-    let client = pool.get().await.context("claim_dirty pool")?;
-    let schema = quote_pg_ident(metadata_schema);
-    let snapshot = Utc::now();
-    let rows = client
-        .query(
-            &format!(
-                "SELECT session_id, min_ts, max_ts, updated_at \
-                 FROM {schema}.session_summary_dirty \
-                 ORDER BY updated_at ASC \
-                 LIMIT {limit}"
-            ),
-            &[],
-        )
-        .await
-        .context("claim dirty SELECT")?;
-    let claims = rows
-        .into_iter()
-        .map(|r| DirtyClaim {
-            session_id: r.get(0),
-            min_ts: r.get(1),
-            max_ts: r.get(2),
-            updated_at: r.get(3),
-        })
-        .collect();
-    Ok((claims, snapshot))
+    claim_dirty_scoped(pool, metadata_schema, None, limit, claim_ttl).await
 }
 
 pub async fn claim_dirty_for_workspace(
@@ -118,21 +97,65 @@ pub async fn claim_dirty_for_workspace(
     metadata_schema: &str,
     workspace_id: &str,
     limit: u64,
+    claim_ttl: std::time::Duration,
 ) -> Result<(Vec<DirtyClaim>, DateTime<Utc>)> {
-    let client = pool.get().await.context("claim workspace dirty pool")?;
+    claim_dirty_scoped(pool, metadata_schema, Some(workspace_id), limit, claim_ttl).await
+}
+
+async fn claim_dirty_scoped(
+    pool: &Pool,
+    metadata_schema: &str,
+    workspace_id: Option<&str>,
+    limit: u64,
+    claim_ttl: std::time::Duration,
+) -> Result<(Vec<DirtyClaim>, DateTime<Utc>)> {
+    let mut client = pool.get().await.context("claim_dirty pool")?;
+    let tx = client
+        .transaction()
+        .await
+        .context("claim dirty transaction")?;
     let schema = quote_pg_ident(metadata_schema);
-    let snapshot = Utc::now();
-    let rows = client
-        .query(
+    // Use the catalog clock for both dirty writes and this acknowledgement
+    // boundary. Application clocks can differ across ingest replicas.
+    let snapshot: DateTime<Utc> = tx
+        .query_one("SELECT clock_timestamp()", &[])
+        .await
+        .context("read dirty claim snapshot")?
+        .get(0);
+    let token = uuid::Uuid::new_v4().to_string();
+    let ttl_secs = claim_ttl.as_secs().max(1) as i64;
+    let limit = limit.min(i64::MAX as u64) as i64;
+    let rows = if let Some(workspace_id) = workspace_id {
+        tx.query(
             &format!(
-                "SELECT session_id, min_ts, max_ts, updated_at \
-                 FROM {schema}.session_summary_dirty \
-                 WHERE tenant_id = $1 ORDER BY updated_at ASC LIMIT {limit}"
+                "WITH picked AS (SELECT tenant_id, session_id FROM {schema}.session_summary_dirty \
+                 WHERE tenant_id = $1 AND (claim_until IS NULL OR claim_until <= now()) \
+                 ORDER BY updated_at ASC LIMIT $2 FOR UPDATE SKIP LOCKED) \
+                 UPDATE {schema}.session_summary_dirty d SET claim_holder = $3, \
+                 claim_until = now() + ($4::bigint * INTERVAL '1 second') \
+                 FROM picked WHERE d.tenant_id = picked.tenant_id AND d.session_id = picked.session_id \
+                 RETURNING d.session_id, d.min_ts, d.max_ts, d.updated_at, d.generation"
             ),
-            &[&workspace_id],
+            &[&workspace_id, &limit, &token, &ttl_secs],
         )
         .await
-        .context("claim workspace dirty SELECT")?;
+    } else {
+        tx.query(
+            &format!(
+                "WITH picked AS (SELECT session_id FROM {schema}.session_summary_dirty \
+                 WHERE claim_until IS NULL OR claim_until <= now() \
+                 ORDER BY updated_at ASC LIMIT $1 FOR UPDATE SKIP LOCKED) \
+                 UPDATE {schema}.session_summary_dirty d SET claim_holder = $2, \
+                 claim_until = now() + ($3::bigint * INTERVAL '1 second') \
+                 FROM picked WHERE d.session_id = picked.session_id \
+                 RETURNING d.session_id, d.min_ts, d.max_ts, d.updated_at, d.generation"
+            ),
+            &[&limit, &token, &ttl_secs],
+        )
+        .await
+    }
+    .context("claim dirty rows")?;
+    tx.commit().await.context("claim dirty commit")?;
     let claims = rows
         .into_iter()
         .map(|r| DirtyClaim {
@@ -140,6 +163,8 @@ pub async fn claim_dirty_for_workspace(
             min_ts: r.get(1),
             max_ts: r.get(2),
             updated_at: r.get(3),
+            generation: r.get(4),
+            claim_token: token.clone(),
         })
         .collect();
     Ok((claims, snapshot))
@@ -257,72 +282,87 @@ pub async fn load_summary_start_times_for_workspace(
 pub async fn ack_dirty(
     pool: &Pool,
     metadata_schema: &str,
-    session_ids: &[String],
-    snapshot: DateTime<Utc>,
+    claims: &[DirtyClaim],
+    claim_token: &str,
 ) -> Result<u64> {
-    if session_ids.is_empty() {
+    ack_dirty_scoped(pool, metadata_schema, None, claims, claim_token).await
+}
+
+async fn ack_dirty_scoped(
+    pool: &Pool,
+    metadata_schema: &str,
+    workspace_id: Option<&str>,
+    claims: &[DirtyClaim],
+    claim_token: &str,
+) -> Result<u64> {
+    if claims.is_empty() {
         return Ok(0);
     }
-    let client = pool.get().await.context("ack_dirty pool")?;
-    let schema = quote_pg_ident(metadata_schema);
-    let mut sql = format!(
-        "DELETE FROM {schema}.session_summary_dirty \
-         WHERE updated_at <= $1 AND session_id IN ("
-    );
-    let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
-    params.push(Box::new(snapshot));
-    for (i, id) in session_ids.iter().enumerate() {
-        if i > 0 {
-            sql.push(',');
-        }
-        sql.push_str(&format!("${}", i + 2));
-        params.push(Box::new(id.clone()));
-    }
-    sql.push(')');
-    let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
-        .iter()
-        .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-        .collect();
-    let n = client
-        .execute(&sql, &param_refs[..])
+    let mut client = pool.get().await.context("ack dirty pool")?;
+    let tx = client
+        .transaction()
         .await
-        .context("ack dirty DELETE")?;
+        .context("ack dirty transaction")?;
+    let schema = quote_pg_ident(metadata_schema);
+    let n = ack_dirty_in_transaction(&tx, &schema, workspace_id, claims, claim_token).await?;
+    tx.commit().await.context("ack dirty commit")?;
     Ok(n)
 }
 
-pub async fn ack_dirty_for_workspace(
-    pool: &Pool,
-    metadata_schema: &str,
-    workspace_id: &str,
-    session_ids: &[String],
-    snapshot: DateTime<Utc>,
+async fn ack_dirty_in_transaction(
+    tx: &deadpool_postgres::Transaction<'_>,
+    schema: &str,
+    workspace_id: Option<&str>,
+    claims: &[DirtyClaim],
+    claim_token: &str,
 ) -> Result<u64> {
-    if session_ids.is_empty() {
+    if claims.is_empty() {
         return Ok(0);
     }
-    let client = pool.get().await.context("ack workspace dirty pool")?;
-    let schema = quote_pg_ident(metadata_schema);
-    let mut sql = format!(
-        "DELETE FROM {schema}.session_summary_dirty WHERE tenant_id = $1 AND updated_at <= $2 AND session_id IN ("
-    );
-    let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
-        vec![Box::new(workspace_id.to_string()), Box::new(snapshot)];
-    for (i, id) in session_ids.iter().enumerate() {
-        if i > 0 {
-            sql.push(',');
-        }
-        sql.push_str(&format!("${}", i + 3));
-        params.push(Box::new(id.clone()));
-    }
-    sql.push(')');
-    let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
-        .iter()
-        .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-        .collect();
-    client
-        .execute(&sql, &refs[..])
+    let ids: Vec<String> = claims.iter().map(|c| c.session_id.clone()).collect();
+    let generations: Vec<i64> = claims.iter().map(|c| c.generation).collect();
+    let n = if let Some(workspace_id) = workspace_id {
+        let n = tx.execute(
+            &format!("DELETE FROM {schema}.session_summary_dirty d USING unnest($3::text[], $4::bigint[]) AS expected(session_id, generation) WHERE d.tenant_id = $1 AND d.claim_holder = $2 AND d.session_id = expected.session_id AND d.generation = expected.generation"),
+            &[&workspace_id, &claim_token, &ids, &generations],
+        ).await.context("ack workspace dirty DELETE")?;
+        clear_dirty_claims_in_transaction(tx, schema, Some(workspace_id), &ids, claim_token)
+            .await?;
+        n
+    } else {
+        let n = tx.execute(
+            &format!("DELETE FROM {schema}.session_summary_dirty d USING unnest($2::text[], $3::bigint[]) AS expected(session_id, generation) WHERE d.claim_holder = $1 AND d.session_id = expected.session_id AND d.generation = expected.generation"),
+            &[&claim_token, &ids, &generations],
+        ).await.context("ack dirty DELETE")?;
+        clear_dirty_claims_in_transaction(tx, schema, None, &ids, claim_token).await?;
+        n
+    };
+    Ok(n)
+}
+
+async fn clear_dirty_claims_in_transaction(
+    tx: &deadpool_postgres::Transaction<'_>,
+    schema: &str,
+    workspace_id: Option<&str>,
+    session_ids: &[String],
+    claim_token: &str,
+) -> Result<()> {
+    if let Some(workspace_id) = workspace_id {
+        tx.execute(
+            &format!("UPDATE {schema}.session_summary_dirty SET claim_holder = NULL, claim_until = NULL WHERE tenant_id = $1 AND claim_holder = $2 AND session_id = ANY($3)"),
+            &[&workspace_id, &claim_token, &session_ids],
+        )
         .await
-        .context("ack workspace dirty DELETE")
+        .context("clear surviving workspace dirty claims")?;
+    } else {
+        tx.execute(
+            &format!("UPDATE {schema}.session_summary_dirty SET claim_holder = NULL, claim_until = NULL WHERE claim_holder = $1 AND session_id = ANY($2)"),
+            &[&claim_token, &session_ids],
+        )
+        .await
+        .context("clear surviving dirty claims")?;
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -335,12 +375,48 @@ pub async fn upsert_summary_rows(
         return Ok(());
     }
     let client = pool.get().await.context("upsert summary pool")?;
+    upsert_summary_rows_on(&client, metadata_schema, None, rows).await
+}
+
+pub async fn upsert_summary_rows_for_workspace(
+    pool: &Pool,
+    metadata_schema: &str,
+    workspace_id: &str,
+    rows: &[SummaryRow],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let client = pool.get().await.context("upsert workspace summary pool")?;
+    upsert_summary_rows_on(&client, metadata_schema, Some(workspace_id), rows).await
+}
+
+async fn upsert_summary_rows_on<C>(
+    client: &C,
+    metadata_schema: &str,
+    workspace_id: Option<&str>,
+    rows: &[SummaryRow],
+) -> Result<()>
+where
+    C: deadpool_postgres::GenericClient + Sync,
+{
+    if rows.is_empty() {
+        return Ok(());
+    }
     let schema = quote_pg_ident(metadata_schema);
-    let sql = compile_session_summary_upsert_sql(&schema, rows.len());
+    let sql = match workspace_id {
+        Some(_) => crate::sql::session_summary::compile_session_summary_upsert_sql_for_workspace(
+            &schema,
+            rows.len(),
+        ),
+        None => compile_session_summary_upsert_sql(&schema, rows.len()),
+    };
     let now = Utc::now();
     let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
-    // Bind order must match SESSION_SUMMARY_UPSERT_COLUMNS in sql/session_summary/reduce_sql.rs.
     for r in rows {
+        if let Some(workspace_id) = workspace_id {
+            params.push(Box::new(workspace_id.to_string()));
+        }
         params.push(Box::new(r.session_id.clone()));
         params.push(Box::new(r.start_time));
         params.push(Box::new(r.end_time));
@@ -366,48 +442,56 @@ pub async fn upsert_summary_rows(
     Ok(())
 }
 
-pub async fn upsert_summary_rows_for_workspace(
+pub(crate) async fn publish_claimed_summary_rows(
     pool: &Pool,
     metadata_schema: &str,
-    workspace_id: &str,
+    workspace_id: Option<&str>,
+    claims: &[DirtyClaim],
+    claim_token: &str,
     rows: &[SummaryRow],
-) -> Result<()> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let client = pool.get().await.context("upsert workspace summary pool")?;
-    let schema = quote_pg_ident(metadata_schema);
-    let sql = crate::sql::session_summary::compile_session_summary_upsert_sql_for_workspace(
-        &schema,
-        rows.len(),
-    );
-    let now = Utc::now();
-    let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
-    for r in rows {
-        params.push(Box::new(workspace_id.to_string()));
-        params.push(Box::new(r.session_id.clone()));
-        params.push(Box::new(r.start_time));
-        params.push(Box::new(r.end_time));
-        params.push(Box::new(r.observation_count));
-        params.push(Box::new(r.error_count));
-        params.push(Box::new(r.input_tokens));
-        params.push(Box::new(r.output_tokens));
-        params.push(Box::new(r.total_tokens));
-        params.push(Box::new(r.total_cost));
-        params.push(Box::new(r.agent_name.clone()));
-        params.push(Box::new(r.user_id.clone()));
-        params.push(Box::new(r.model_name.clone()));
-        params.push(Box::new(now));
-    }
-    let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
-        .iter()
-        .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-        .collect();
-    client
-        .execute(&sql, &param_refs[..])
+) -> Result<(u64, std::time::Duration, std::time::Duration)> {
+    let mut client = pool.get().await.context("publish claimed summary pool")?;
+    let tx = client
+        .transaction()
         .await
-        .context("workspace session_summary UPSERT")?;
-    Ok(())
+        .context("publish claimed summary transaction")?;
+    let schema = quote_pg_ident(metadata_schema);
+    let ids: Vec<String> = claims.iter().map(|c| c.session_id.clone()).collect();
+    let owned = if let Some(workspace_id) = workspace_id {
+        tx.query(
+            &format!("SELECT session_id, generation FROM {schema}.session_summary_dirty WHERE tenant_id = $1 AND claim_holder = $2 AND claim_until > clock_timestamp() AND session_id = ANY($3) FOR UPDATE"),
+            &[&workspace_id, &claim_token, &ids],
+        ).await.context("lock claimed workspace rows")?
+    } else {
+        tx.query(
+            &format!("SELECT session_id, generation FROM {schema}.session_summary_dirty WHERE claim_holder = $1 AND claim_until > clock_timestamp() AND session_id = ANY($2) FOR UPDATE"),
+            &[&claim_token, &ids],
+        ).await.context("lock claimed rows")?
+    };
+    let owned_generations: std::collections::HashMap<String, i64> = owned
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    if owned_generations.len() != claims.len()
+        || claims
+            .iter()
+            .any(|claim| owned_generations.get(&claim.session_id) != Some(&claim.generation))
+    {
+        clear_dirty_claims_in_transaction(&tx, &schema, workspace_id, &ids, claim_token).await?;
+        tx.commit().await.context("release stale dirty claim")?;
+        anyhow::bail!("dirty-row claim expired or was reclaimed before summary publication");
+    }
+
+    let upsert_started = std::time::Instant::now();
+    upsert_summary_rows_on(&tx, metadata_schema, workspace_id, rows).await?;
+    let upsert_elapsed = upsert_started.elapsed();
+    let ack_started = std::time::Instant::now();
+    let acked = ack_dirty_in_transaction(&tx, &schema, workspace_id, claims, claim_token).await?;
+    let ack_elapsed = ack_started.elapsed();
+    tx.commit()
+        .await
+        .context("publish claimed summary commit")?;
+    Ok((acked, upsert_elapsed, ack_elapsed))
 }
 
 /// Reject inverted or oversized rebuild windows (ops + periodic share this).
@@ -505,10 +589,12 @@ pub(crate) async fn reduce_tenant(
     crate::self_monitoring::set_session_summary_dirty_depth(tenant_id, depth.max(0) as u64);
 
     let claim_started = std::time::Instant::now();
-    let (claims, snapshot) = if workspace_scoped {
-        claim_dirty_for_workspace(pool, metadata_schema, tenant_id, max_sessions).await?
+    let claim_ttl =
+        std::time::Duration::from_secs(config.session_summary.dirty_claim_ttl_seconds.max(1));
+    let (claims, _snapshot) = if workspace_scoped {
+        claim_dirty_for_workspace(pool, metadata_schema, tenant_id, max_sessions, claim_ttl).await?
     } else {
-        claim_dirty(pool, metadata_schema, max_sessions).await?
+        claim_dirty(pool, metadata_schema, max_sessions, claim_ttl).await?
     };
     crate::self_monitoring::record_session_summary_reduce_step(
         tenant_id,
@@ -567,28 +653,25 @@ pub(crate) async fn reduce_tenant(
         aggregate_started.elapsed(),
     );
 
-    let upsert_started = std::time::Instant::now();
-    if workspace_scoped {
-        upsert_summary_rows_for_workspace(pool, metadata_schema, tenant_id, &rows).await?;
-    } else {
-        upsert_summary_rows(pool, metadata_schema, &rows).await?;
-    }
+    let claim_token = &claims[0].claim_token;
+    let (acked, upsert_elapsed, ack_elapsed) = publish_claimed_summary_rows(
+        pool,
+        metadata_schema,
+        workspace_scoped.then_some(tenant_id),
+        &claims,
+        claim_token,
+        &rows,
+    )
+    .await?;
     crate::self_monitoring::record_session_summary_reduce_step(
         tenant_id,
         crate::self_monitoring::reduce_step::UPSERT,
-        upsert_started.elapsed(),
+        upsert_elapsed,
     );
-
-    let ack_started = std::time::Instant::now();
-    let acked = if workspace_scoped {
-        ack_dirty_for_workspace(pool, metadata_schema, tenant_id, &ids, snapshot).await?
-    } else {
-        ack_dirty(pool, metadata_schema, &ids, snapshot).await?
-    };
     crate::self_monitoring::record_session_summary_reduce_step(
         tenant_id,
         crate::self_monitoring::reduce_step::ACK,
-        ack_started.elapsed(),
+        ack_elapsed,
     );
     if acked < ids.len() as u64 {
         warn!(
@@ -646,12 +729,16 @@ mod tests {
                 min_ts: Utc.with_ymd_and_hms(2024, 1, 5, 0, 0, 0).unwrap(),
                 max_ts: Utc.with_ymd_and_hms(2024, 1, 5, 1, 0, 0).unwrap(),
                 updated_at: Utc::now(),
+                generation: 1,
+                claim_token: "test".into(),
             },
             DirtyClaim {
                 session_id: "b".into(),
                 min_ts: Utc.with_ymd_and_hms(2024, 1, 8, 0, 0, 0).unwrap(),
                 max_ts: Utc.with_ymd_and_hms(2024, 1, 8, 2, 0, 0).unwrap(),
                 updated_at: Utc::now(),
+                generation: 1,
+                claim_token: "test".into(),
             },
         ];
         let now = Utc.with_ymd_and_hms(2024, 1, 8, 3, 0, 0).unwrap();

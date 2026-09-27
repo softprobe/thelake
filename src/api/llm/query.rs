@@ -700,6 +700,10 @@ pub struct SessionSummaryRebuildResponse {
     pub sessions_upserted: usize,
 }
 
+fn session_summary_rebuild_holder_id(instance_id: &str) -> String {
+    format!("ops-rebuild-{instance_id}-{}", uuid::Uuid::new_v4())
+}
+
 pub async fn rebuild_session_summary(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
@@ -721,14 +725,18 @@ pub async fn rebuild_session_summary(
     // Lease key matches SessionSummaryRebuildJob: empty tenant → default workspace.
     let scope_key = crate::workspace_scope::effective_workspace_id(tenant_id);
     let leases = crate::async_jobs::PostgresLeaseStore::from_engines(&state.engines);
-    let holder = format!(
-        "ops-rebuild-{}",
-        state.engines.config().async_jobs.resolved_instance_id()
+    let holder = session_summary_rebuild_holder_id(
+        &state.engines.config().async_jobs.resolved_instance_id(),
     );
     let ttl =
         std::time::Duration::from_secs(state.engines.config().async_jobs.lease_ttl_seconds.max(1));
-    let won = leases
-        .try_acquire(
+    let maintenance = state
+        .engines
+        .maintenance_engine()
+        .await
+        .map_err(storage_error)?;
+    let token = leases
+        .acquire_lease(
             crate::session_summary::WORKSPACE_SESSION_SUMMARY_REBUILD_JOB,
             scope_key,
             &holder,
@@ -736,31 +744,55 @@ pub async fn rebuild_session_summary(
         )
         .await
         .map_err(storage_error)?;
-    if !won {
+    let Some(token) = token else {
         return Err((
             StatusCode::CONFLICT,
             Json(json!({ "error": "workspace_session_summary_rebuild lease held" })),
         ));
-    }
+    };
 
-    let maintenance = state
-        .engines
-        .maintenance_engine()
-        .await
-        .map_err(storage_error)?;
-    let result = maintenance
-        .rebuild_session_summary_for_key(
+    let (lost_tx, mut lost_rx) = tokio::sync::watch::channel(false);
+    let hb_leases = leases.clone();
+    let hb_job = crate::session_summary::WORKSPACE_SESSION_SUMMARY_REBUILD_JOB;
+    let hb_scope = scope_key.to_string();
+    let hb_token = token.clone();
+    let heartbeat_every =
+        std::time::Duration::from_secs(state.engines.config().async_jobs.heartbeat_seconds.max(1));
+    let heartbeat = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(heartbeat_every);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if let Err(err) = hb_leases
+                .heartbeat_lease(hb_job, &hb_scope, &hb_token, ttl)
+                .await
+            {
+                warn!(scope = %hb_scope, error = %err, "session-summary rebuild lease heartbeat failed");
+                crate::self_monitoring::record_lease_heartbeat_failure(hb_job, &hb_scope);
+                let _ = lost_tx.send(true);
+                break;
+            }
+        }
+    });
+    let result = tokio::select! {
+        result = maintenance.rebuild_session_summary_for_key(
             scope_key,
             request.from,
             request.to,
             cfg.max_reduce_span_seconds,
-        )
-        .await;
+        ) => result,
+        changed = lost_rx.changed() => {
+            let _ = changed;
+            Err(anyhow::anyhow!("lease lost during session-summary rebuild"))
+        }
+    };
+    heartbeat.abort();
+    let _ = heartbeat.await;
     let _ = leases
-        .release(
+        .release_lease(
             crate::session_summary::WORKSPACE_SESSION_SUMMARY_REBUILD_JOB,
             scope_key,
-            &holder,
+            &token,
         )
         .await;
     let sessions_upserted = result.map_err(storage_error)?;
@@ -1233,6 +1265,14 @@ fn classify_storage_error(raw: &str) -> StorageErrorKind {
 mod tests {
     use super::*;
     use crate::api::sql_support::{cursor_predicate, decode_cursor};
+
+    #[test]
+    fn rebuild_holder_id_is_unique_per_request() {
+        let first = session_summary_rebuild_holder_id("replica-a");
+        let second = session_summary_rebuild_holder_id("replica-a");
+        assert_ne!(first, second);
+        assert!(first.starts_with("ops-rebuild-replica-a-"));
+    }
 
     #[test]
     fn storage_error_never_echoes_the_underlying_message() {

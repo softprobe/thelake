@@ -4,7 +4,8 @@
 use super::*;
 use crate::ingest_engine::maybe_after_traces_commit;
 use crate::session_summary::reduce::{
-    ack_dirty, claim_dirty, dirty_depth, upsert_summary_rows, SummaryRow,
+    ack_dirty, claim_dirty, dirty_depth, publish_claimed_summary_rows, upsert_summary_rows,
+    SummaryRow,
 };
 use crate::session_summary::test_span::span_at;
 use chrono::{TimeZone, Utc};
@@ -54,6 +55,20 @@ async fn postgres_session_summary_ensure_idempotent() {
     ensure_session_summary_tables(&client, schema)
         .await
         .expect("second ensure");
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    client.execute(&format!("ALTER TABLE {q}.session_summary_dirty DROP COLUMN IF EXISTS claim_holder, DROP COLUMN IF EXISTS claim_until"), &[])
+        .await.expect("simulate pre-claims table");
+    ensure_session_summary_tables(&client, schema)
+        .await
+        .expect("upgrade existing dirty table");
+    let claim_columns: i64 = client.query_one(
+        "SELECT count(*)::bigint FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'session_summary_dirty' AND column_name IN ('claim_holder', 'claim_until', 'generation')",
+        &[&schema],
+    ).await.expect("claim columns").get(0);
+    assert_eq!(
+        claim_columns, 3,
+        "existing table gets claim and generation columns"
+    );
     let n: i64 = client
         .query_one(
             "SELECT count(*)::bigint FROM information_schema.tables \
@@ -64,6 +79,67 @@ async fn postgres_session_summary_ensure_idempotent() {
         .expect("count")
         .get(0);
     assert_eq!(n, 2, "both tables present");
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_session_summary_ddl_supports_apostrophe_schema() {
+    let schema = "thelake_ss_o'quote";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let client = pool.get().await.expect("client");
+    let table_count: i64 = client
+        .query_one(
+            "SELECT count(*)::bigint FROM information_schema.tables WHERE table_schema = $1 AND table_name IN ('session_summary', 'session_summary_dirty')",
+            &[&schema],
+        )
+        .await
+        .expect("quoted schema tables")
+        .get(0);
+    assert_eq!(table_count, 2);
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_session_summary_concurrent_trigger_ensure_is_idempotent() {
+    let schema = "thelake_ss_concurrent_trigger";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    pool.get()
+        .await
+        .expect("client")
+        .execute(
+            &format!("DROP TRIGGER IF EXISTS session_summary_dirty_bump_generation ON {q}.session_summary_dirty"),
+            &[],
+        )
+        .await
+        .expect("drop trigger for race test");
+    let trigger_ddl = crate::session_summary::ddl::session_summary_table_ddls(schema)
+        .into_iter()
+        .find(|ddl| ddl.starts_with("DO $$"))
+        .expect("trigger DDL");
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let ensure_trigger =
+        |pool: Pool, barrier: std::sync::Arc<tokio::sync::Barrier>, ddl: String| {
+            tokio::spawn(async move {
+                let client = pool.get().await.expect("client");
+                barrier.wait().await;
+                client.execute(&ddl, &[]).await
+            })
+        };
+    let first = ensure_trigger(pool.clone(), barrier.clone(), trigger_ddl.clone());
+    let second = ensure_trigger(pool, barrier, trigger_ddl);
+    first
+        .await
+        .expect("first ensure task")
+        .expect("first trigger ensure");
+    second
+        .await
+        .expect("second ensure task")
+        .expect("second trigger ensure");
 }
 
 #[tokio::test]
@@ -239,7 +315,9 @@ async fn postgres_claim_ack_snapshot_preserves_newer_dirty() {
         .upsert_dirty(&fold_dirty_hints(&[span_at("s1", 10)]))
         .await
         .expect("dirty");
-    let (claims, snapshot) = claim_dirty(&pool, schema, 10).await.expect("claim");
+    let (claims, snapshot) = claim_dirty(&pool, schema, 10, Duration::from_secs(30))
+        .await
+        .expect("claim");
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].session_id, "s1");
 
@@ -250,12 +328,51 @@ async fn postgres_claim_ack_snapshot_preserves_newer_dirty() {
         .await
         .expect("concurrent dirty");
 
-    let acked = ack_dirty(&pool, schema, &["s1".into()], snapshot)
+    // Simulate a backwards database clock correction or an older app-clock
+    // writer. The trigger still advances the row generation.
+    let client = pool.get().await.expect("client");
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    client
+        .execute(
+            &format!("UPDATE {q}.session_summary_dirty SET updated_at = '2000-01-01T00:00:00Z' WHERE session_id = 's1'"),
+            &[],
+        )
+        .await
+        .expect("simulate backward timestamp");
+    let touched_at: chrono::DateTime<Utc> = client
+        .query_one(
+            &format!("SELECT updated_at FROM {q}.session_summary_dirty WHERE session_id = 's1'"),
+            &[],
+        )
+        .await
+        .expect("read touched timestamp")
+        .get(0);
+    assert!(
+        touched_at < snapshot,
+        "test update has a timestamp older than the claim snapshot"
+    );
+
+    let acked = ack_dirty(&pool, schema, &claims, &claims[0].claim_token)
         .await
         .expect("ack");
-    assert_eq!(acked, 0, "newer updated_at must survive ack");
+    assert_eq!(
+        acked, 0,
+        "new generation must survive ack despite old timestamp"
+    );
     let depth = dirty_depth(&pool, schema).await.expect("depth");
     assert_eq!(depth, 1);
+    let claim_holder: Option<String> = client
+        .query_one(
+            &format!("SELECT claim_holder FROM {q}.session_summary_dirty WHERE session_id = 's1'"),
+            &[],
+        )
+        .await
+        .expect("claim state")
+        .get(0);
+    assert!(
+        claim_holder.is_none(),
+        "newer dirty row must be released for another claim"
+    );
 }
 
 #[tokio::test]
@@ -333,9 +450,344 @@ async fn postgres_claim_empty_dirty_ok() {
     let pool = try_pg_pool(schema)
         .await
         .expect("ducklake-postgres required (make setup)");
-    let (claims, _) = claim_dirty(&pool, schema, 10).await.expect("claim");
+    let (claims, _) = claim_dirty(&pool, schema, 10, Duration::from_secs(30))
+        .await
+        .expect("claim");
     assert!(claims.is_empty());
     assert_eq!(dirty_depth(&pool, schema).await.expect("depth"), 0);
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_dirty_claimers_get_disjoint_rows_and_expired_claims_recover() {
+    let schema = "thelake_ss_claim_race";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let dirty = SessionSummaryDirty::new(pool.clone(), schema, "t1");
+    dirty
+        .upsert_dirty(&fold_dirty_hints(&[span_at("a", 1), span_at("b", 2)]))
+        .await
+        .expect("seed");
+
+    let (left_result, right_result) = tokio::join!(
+        claim_dirty(&pool, schema, 1, Duration::from_secs(30)),
+        claim_dirty(&pool, schema, 1, Duration::from_secs(30)),
+    );
+    let (left, _) = left_result.expect("first claim");
+    let (right, _) = right_result.expect("second claim");
+    assert_eq!(left.len(), 1);
+    assert_eq!(right.len(), 1);
+    assert_ne!(left[0].session_id, right[0].session_id);
+
+    let (none, _) = claim_dirty(&pool, schema, 10, Duration::from_secs(1))
+        .await
+        .expect("no active claims");
+    assert!(none.is_empty());
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    pool.get()
+        .await
+        .expect("client")
+        .execute(
+            &format!(
+                "UPDATE {q}.session_summary_dirty SET claim_until = now() - INTERVAL '1 second'"
+            ),
+            &[],
+        )
+        .await
+        .expect("expire claims");
+    let (reclaimed, _) = claim_dirty(&pool, schema, 10, Duration::from_secs(30))
+        .await
+        .expect("reclaim");
+    assert_eq!(reclaimed.len(), 2);
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_dirty_ack_requires_current_claim_token() {
+    let schema = "thelake_ss_claim_token";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let dirty = SessionSummaryDirty::new(pool.clone(), schema, "t1");
+    dirty
+        .upsert_dirty(&fold_dirty_hints(&[span_at("a", 1)]))
+        .await
+        .expect("seed");
+    let (old, _snapshot) = claim_dirty(&pool, schema, 1, Duration::from_secs(30))
+        .await
+        .expect("claim");
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    pool.get().await.expect("client").execute(
+        &format!("UPDATE {q}.session_summary_dirty SET claim_holder = 'new-token', claim_until = now() + INTERVAL '30 seconds'"), &[]
+    ).await.expect("steal token");
+    let acked = ack_dirty(&pool, schema, &old, &old[0].claim_token)
+        .await
+        .expect("stale ack");
+    assert_eq!(acked, 0);
+    assert_eq!(dirty_depth(&pool, schema).await.expect("row remains"), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_expired_claim_cannot_publish_summary() {
+    let schema = "thelake_ss_claim_publish";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let dirty = SessionSummaryDirty::new(pool.clone(), schema, "t1");
+    dirty
+        .upsert_dirty(&fold_dirty_hints(&[span_at("s1", 1)]))
+        .await
+        .expect("seed");
+    let (claims, _snapshot) = claim_dirty(&pool, schema, 1, Duration::from_secs(30))
+        .await
+        .expect("claim");
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    pool.get()
+        .await
+        .expect("client")
+        .execute(
+            &format!("UPDATE {q}.session_summary_dirty SET claim_holder = 'new-owner', claim_until = now() + INTERVAL '30 seconds'"),
+            &[],
+        )
+        .await
+        .expect("reclaim");
+    let summary = SummaryRow {
+        session_id: "s1".into(),
+        start_time: Utc.timestamp_opt(1, 0).unwrap(),
+        end_time: None,
+        observation_count: 1,
+        error_count: 0,
+        input_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        total_cost: None,
+        agent_name: None,
+        user_id: None,
+        model_name: None,
+    };
+    let result = publish_claimed_summary_rows(
+        &pool,
+        schema,
+        None,
+        &claims,
+        &claims[0].claim_token,
+        &[summary],
+    )
+    .await;
+    assert!(result.is_err(), "stale claim cannot publish");
+    let count: i64 = pool
+        .get()
+        .await
+        .expect("client")
+        .query_one(
+            &format!("SELECT count(*)::bigint FROM {q}.session_summary"),
+            &[],
+        )
+        .await
+        .expect("summary count")
+        .get(0);
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_dirty_generation_fences_stale_publication() {
+    let schema = "thelake_ss_generation_fence";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let dirty = SessionSummaryDirty::new(pool.clone(), schema, "t1");
+    dirty
+        .upsert_dirty(&fold_dirty_hints(&[span_at("s1", 1)]))
+        .await
+        .expect("seed dirty row");
+    let (claims, _) = claim_dirty(&pool, schema, 1, Duration::from_secs(30))
+        .await
+        .expect("claim dirty row");
+    dirty
+        .upsert_dirty(&fold_dirty_hints(&[span_at("s1", 2)]))
+        .await
+        .expect("touch claimed row");
+    let summary = SummaryRow {
+        session_id: "s1".into(),
+        start_time: Utc.timestamp_opt(1, 0).unwrap(),
+        end_time: None,
+        observation_count: 1,
+        error_count: 0,
+        input_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        total_cost: None,
+        agent_name: None,
+        user_id: None,
+        model_name: None,
+    };
+
+    let result = publish_claimed_summary_rows(
+        &pool,
+        schema,
+        None,
+        &claims,
+        &claims[0].claim_token,
+        &[summary],
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "changed generation must reject stale publication"
+    );
+    assert_eq!(dirty_depth(&pool, schema).await.expect("dirty depth"), 1);
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let summaries: i64 = pool
+        .get()
+        .await
+        .expect("client")
+        .query_one(
+            &format!("SELECT count(*)::bigint FROM {q}.session_summary"),
+            &[],
+        )
+        .await
+        .expect("summary count")
+        .get(0);
+    assert_eq!(summaries, 0, "stale summary must not be published");
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_legacy_dirty_update_without_generation_advances_fence() {
+    let schema = "thelake_ss_legacy_generation";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let client = pool.get().await.expect("client");
+    // Simulate a mixed-version writer that knows the old schema and omits the
+    // newly introduced generation column from its conflict update.
+    client.execute(
+        &format!("INSERT INTO {q}.session_summary_dirty (session_id, min_ts, max_ts, updated_at) VALUES ('legacy', to_timestamp(10), to_timestamp(10), now())"),
+        &[],
+    ).await.expect("legacy insert");
+    let initial: i64 = client
+        .query_one(
+            &format!(
+                "SELECT generation FROM {q}.session_summary_dirty WHERE session_id = 'legacy'"
+            ),
+            &[],
+        )
+        .await
+        .expect("initial generation")
+        .get(0);
+    client.execute(
+        &format!("INSERT INTO {q}.session_summary_dirty (session_id, min_ts, max_ts, updated_at) VALUES ('legacy', to_timestamp(20), to_timestamp(20), now()) ON CONFLICT (session_id) DO UPDATE SET min_ts = LEAST({q}.session_summary_dirty.min_ts, EXCLUDED.min_ts), max_ts = GREATEST({q}.session_summary_dirty.max_ts, EXCLUDED.max_ts), updated_at = EXCLUDED.updated_at"),
+        &[],
+    ).await.expect("legacy conflict update");
+    let after: i64 = client
+        .query_one(
+            &format!(
+                "SELECT generation FROM {q}.session_summary_dirty WHERE session_id = 'legacy'"
+            ),
+            &[],
+        )
+        .await
+        .expect("updated generation")
+        .get(0);
+    assert_eq!(
+        after,
+        initial + 1,
+        "legacy writes must advance the publication fence"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_shared_dirty_claims_are_workspace_scoped() {
+    let schema = "thelake_ss_shared_claim";
+    let mut pg = tokio_postgres::Config::new();
+    pg.host("localhost");
+    pg.port(5432);
+    pg.dbname("ducklake");
+    pg.user("ducklake");
+    pg.password("ducklake");
+    let mgr = Manager::from_config(
+        pg,
+        NoTls,
+        ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        },
+    );
+    let pool = Pool::builder(mgr).max_size(4).build().expect("pool");
+    let client = pool.get().await.expect("client");
+    crate::session_summary::ensure_shared_session_summary_tables(&client, schema)
+        .await
+        .expect("shared DDL");
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    client
+        .execute(
+            &format!("TRUNCATE {q}.session_summary, {q}.session_summary_dirty"),
+            &[],
+        )
+        .await
+        .expect("truncate");
+    drop(client);
+
+    for tenant in ["a", "b"] {
+        let dirty = SessionSummaryDirty::new_for_workspace(pool.clone(), schema, tenant);
+        dirty
+            .upsert_dirty(&fold_dirty_hints(&[span_at("same", 1)]))
+            .await
+            .expect("seed tenant");
+    }
+    let (claims_a, _snapshot_a) = crate::session_summary::reduce::claim_dirty_for_workspace(
+        &pool,
+        schema,
+        "a",
+        10,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("claim a");
+    let (claims_b, _snapshot_b) = crate::session_summary::reduce::claim_dirty_for_workspace(
+        &pool,
+        schema,
+        "b",
+        10,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("claim b");
+    assert_eq!(claims_a.len(), 1);
+    assert_eq!(claims_b.len(), 1);
+    assert_ne!(claims_a[0].claim_token, claims_b[0].claim_token);
+    assert_eq!(
+        publish_claimed_summary_rows(
+            &pool,
+            schema,
+            Some("a"),
+            &claims_a,
+            &claims_a[0].claim_token,
+            &[],
+        )
+        .await
+        .expect("ack a")
+        .0,
+        1
+    );
+    assert_eq!(
+        publish_claimed_summary_rows(
+            &pool,
+            schema,
+            Some("b"),
+            &claims_b,
+            &claims_b[0].claim_token,
+            &[],
+        )
+        .await
+        .expect("ack b")
+        .0,
+        1
+    );
 }
 
 #[tokio::test]

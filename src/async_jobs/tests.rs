@@ -1,4 +1,6 @@
-use crate::async_jobs::{spawn_runner, Job, LeaseStore, MemoryLeaseStore, PostgresLeaseStore};
+use crate::async_jobs::{
+    spawn_runner, Job, LeaseStore, LeaseToken, MemoryLeaseStore, PostgresLeaseStore,
+};
 use crate::config::AsyncJobsConfig;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,13 +12,12 @@ async fn lease_contract(store: &dyn LeaseStore, prefix: &str) {
     let job = format!("{prefix}-j");
     let scope = format!("{prefix}-s");
 
-    assert!(
-        store
-            .try_acquire(&job, &scope, "a", Duration::from_secs(60))
-            .await
-            .unwrap(),
-        "empty acquire wins"
-    );
+    let first = store
+        .acquire_lease(&job, &scope, "a", Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("empty acquire wins");
+    assert_eq!(first.epoch, 1);
     assert!(
         !store
             .try_acquire(&job, &scope, "b", Duration::from_secs(60))
@@ -24,17 +25,48 @@ async fn lease_contract(store: &dyn LeaseStore, prefix: &str) {
             .unwrap(),
         "second holder loses while valid"
     );
+    let fenced_scope = format!("{prefix}-fenced");
+    let old = store
+        .acquire_lease(&job, &fenced_scope, "a", Duration::from_secs(1))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let current = store
+        .acquire_lease(&job, &fenced_scope, "b", Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        current.epoch > old.epoch,
+        "steal must advance fencing epoch"
+    );
+    assert!(store
+        .heartbeat_lease(&job, &fenced_scope, &old, Duration::from_secs(60))
+        .await
+        .is_err());
+    store
+        .release_lease(&job, &fenced_scope, &old)
+        .await
+        .unwrap();
+    assert!(store
+        .heartbeat_lease(&job, &fenced_scope, &current, Duration::from_secs(60))
+        .await
+        .is_ok());
 
     // Same holder renew must extend TTL (survive past original short lease).
     let renew_scope = format!("{prefix}-renew");
-    assert!(store
-        .try_acquire(&job, &renew_scope, "a", Duration::from_secs(1))
+    let initial_renew = store
+        .acquire_lease(&job, &renew_scope, "a", Duration::from_secs(1))
         .await
-        .unwrap());
-    assert!(store
-        .try_acquire(&job, &renew_scope, "a", Duration::from_secs(60))
+        .unwrap()
+        .expect("initial acquire");
+    let renewed = store
+        .acquire_lease(&job, &renew_scope, "a", Duration::from_secs(60))
         .await
-        .unwrap());
+        .unwrap()
+        .expect("same-holder renewal");
+    assert_eq!(renewed.epoch, initial_renew.epoch);
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert!(
         !store
@@ -46,14 +78,15 @@ async fn lease_contract(store: &dyn LeaseStore, prefix: &str) {
 
     // Heartbeat extends.
     let hb_scope = format!("{prefix}-hb");
-    assert!(store
-        .try_acquire(&job, &hb_scope, "a", Duration::from_secs(1))
+    let hb_token = store
+        .acquire_lease(&job, &hb_scope, "a", Duration::from_secs(1))
         .await
-        .unwrap());
+        .unwrap()
+        .unwrap();
     for _ in 0..3 {
         tokio::time::sleep(Duration::from_millis(400)).await;
         store
-            .heartbeat(&job, &hb_scope, "a", Duration::from_secs(1))
+            .heartbeat_lease(&job, &hb_scope, &hb_token, Duration::from_secs(1))
             .await
             .unwrap();
     }
@@ -62,26 +95,53 @@ async fn lease_contract(store: &dyn LeaseStore, prefix: &str) {
         .await
         .unwrap());
     assert!(store
-        .heartbeat(&job, &hb_scope, "b", Duration::from_secs(60))
+        .heartbeat_lease(
+            &job,
+            &hb_scope,
+            &LeaseToken {
+                holder_id: "b".into(),
+                epoch: 0
+            },
+            Duration::from_secs(60)
+        )
         .await
         .is_err());
 
     // Release then other acquires; non-holder release is a no-op.
     let rel_scope = format!("{prefix}-rel");
-    assert!(store
-        .try_acquire(&job, &rel_scope, "a", Duration::from_secs(60))
+    let before_release = store
+        .acquire_lease(&job, &rel_scope, "a", Duration::from_secs(60))
         .await
-        .unwrap());
-    store.release(&job, &rel_scope, "b").await.unwrap();
+        .unwrap()
+        .expect("acquire before release");
+    store
+        .release_lease(
+            &job,
+            &rel_scope,
+            &LeaseToken {
+                holder_id: "b".into(),
+                epoch: 0,
+            },
+        )
+        .await
+        .unwrap();
     assert!(!store
         .try_acquire(&job, &rel_scope, "b", Duration::from_secs(60))
         .await
         .unwrap());
-    store.release(&job, &rel_scope, "a").await.unwrap();
-    assert!(store
-        .try_acquire(&job, &rel_scope, "b", Duration::from_secs(60))
+    store
+        .release_lease(&job, &rel_scope, &before_release)
         .await
-        .unwrap());
+        .unwrap();
+    let next = store
+        .acquire_lease(&job, &rel_scope, "b", Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("acquire after release");
+    assert!(
+        next.epoch > before_release.epoch,
+        "release must preserve the fence counter"
+    );
 
     // Steal after TTL expiry (ttl floor is 1s on Postgres).
     let steal_scope = format!("{prefix}-steal");
@@ -142,51 +202,73 @@ async fn lease_contract(store: &dyn LeaseStore, prefix: &str) {
 
     // Heartbeat fails for missing / released / stolen keys.
     assert!(store
-        .heartbeat(
+        .heartbeat_lease(
             &job,
             &format!("{prefix}-missing"),
-            "a",
+            &LeaseToken {
+                holder_id: "a".into(),
+                epoch: 1
+            },
             Duration::from_secs(60)
         )
         .await
         .is_err());
     let hb_gone = format!("{prefix}-hb-gone");
-    assert!(store
-        .try_acquire(&job, &hb_gone, "a", Duration::from_secs(60))
+    let gone_token = store
+        .acquire_lease(&job, &hb_gone, "a", Duration::from_secs(60))
         .await
-        .unwrap());
-    store.release(&job, &hb_gone, "a").await.unwrap();
+        .unwrap()
+        .unwrap();
+    store
+        .release_lease(&job, &hb_gone, &gone_token)
+        .await
+        .unwrap();
     assert!(store
-        .heartbeat(&job, &hb_gone, "a", Duration::from_secs(60))
+        .heartbeat_lease(&job, &hb_gone, &gone_token, Duration::from_secs(60))
         .await
         .is_err());
     let hb_stolen = format!("{prefix}-hb-stolen");
-    assert!(store
-        .try_acquire(&job, &hb_stolen, "a", Duration::from_secs(1))
+    let stolen_old = store
+        .acquire_lease(&job, &hb_stolen, "a", Duration::from_secs(1))
         .await
-        .unwrap());
+        .unwrap()
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(1200)).await;
-    assert!(store
-        .try_acquire(&job, &hb_stolen, "b", Duration::from_secs(60))
+    let stolen_new = store
+        .acquire_lease(&job, &hb_stolen, "b", Duration::from_secs(60))
         .await
-        .unwrap());
+        .unwrap()
+        .unwrap();
     assert!(store
-        .heartbeat(&job, &hb_stolen, "a", Duration::from_secs(60))
+        .heartbeat_lease(&job, &hb_stolen, &stolen_old, Duration::from_secs(60))
         .await
         .is_err());
+    assert!(store
+        .heartbeat_lease(&job, &hb_stolen, &stolen_new, Duration::from_secs(60))
+        .await
+        .is_ok());
 
     // Former holder release after steal must not drop the new holder's lease.
     let post_loss = format!("{prefix}-post-loss");
-    assert!(store
-        .try_acquire(&job, &post_loss, "a", Duration::from_secs(1))
+    let post_loss_old = store
+        .acquire_lease(&job, &post_loss, "a", Duration::from_secs(1))
         .await
-        .unwrap());
+        .unwrap()
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(1200)).await;
-    assert!(store
-        .try_acquire(&job, &post_loss, "b", Duration::from_secs(60))
+    let post_loss_new = store
+        .acquire_lease(&job, &post_loss, "b", Duration::from_secs(60))
         .await
-        .unwrap());
-    store.release(&job, &post_loss, "a").await.unwrap();
+        .unwrap()
+        .unwrap();
+    store
+        .release_lease(&job, &post_loss, &post_loss_old)
+        .await
+        .unwrap();
+    assert!(store
+        .heartbeat_lease(&job, &post_loss, &post_loss_new, Duration::from_secs(60))
+        .await
+        .is_ok());
     assert!(
         !store
             .try_acquire(&job, &post_loss, "c", Duration::from_secs(60))
@@ -400,7 +482,7 @@ async fn runner_runs_when_lease_won() {
     );
 }
 
-/// Heartbeat errors are logged/counted but must not abort `job.run`.
+/// Heartbeat errors are logged/counted and cancel the current run.
 struct HeartbeatFailStore {
     inner: MemoryLeaseStore,
     heartbeat_calls: AtomicUsize,
@@ -408,36 +490,36 @@ struct HeartbeatFailStore {
 
 #[async_trait]
 impl LeaseStore for HeartbeatFailStore {
-    async fn try_acquire(
+    async fn acquire_lease(
         &self,
         job_name: &str,
         scope_key: &str,
         holder_id: &str,
         ttl: Duration,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<LeaseToken>> {
         self.inner
-            .try_acquire(job_name, scope_key, holder_id, ttl)
+            .acquire_lease(job_name, scope_key, holder_id, ttl)
             .await
     }
 
-    async fn heartbeat(
+    async fn heartbeat_lease(
         &self,
         _job_name: &str,
         _scope_key: &str,
-        _holder_id: &str,
+        _token: &LeaseToken,
         _ttl: Duration,
     ) -> anyhow::Result<()> {
         self.heartbeat_calls.fetch_add(1, Ordering::SeqCst);
         Err(anyhow::anyhow!("injected heartbeat failure"))
     }
 
-    async fn release(
+    async fn release_lease(
         &self,
         job_name: &str,
         scope_key: &str,
-        holder_id: &str,
+        token: &LeaseToken,
     ) -> anyhow::Result<()> {
-        self.inner.release(job_name, scope_key, holder_id).await
+        self.inner.release_lease(job_name, scope_key, token).await
     }
 }
 
@@ -465,7 +547,7 @@ impl Job for SlowJob {
 }
 
 #[tokio::test]
-async fn runner_completes_run_despite_heartbeat_failures() {
+async fn runner_aborts_run_after_heartbeat_failure() {
     let leases = Arc::new(HeartbeatFailStore {
         inner: MemoryLeaseStore::new(),
         heartbeat_calls: AtomicUsize::new(0),
@@ -485,8 +567,8 @@ async fn runner_completes_run_despite_heartbeat_failures() {
     tokio::time::sleep(Duration::from_millis(1600)).await;
     handle.abort();
     assert!(
-        runs.runs.load(Ordering::SeqCst) >= 1,
-        "job must finish even when heartbeat fails"
+        runs.runs.load(Ordering::SeqCst) == 0,
+        "job future must be cancelled when heartbeat fails"
     );
     assert!(
         hb.heartbeat_calls.load(Ordering::SeqCst) >= 1,
@@ -502,40 +584,40 @@ struct AcquireFailStore {
 
 #[async_trait]
 impl LeaseStore for AcquireFailStore {
-    async fn try_acquire(
+    async fn acquire_lease(
         &self,
         job_name: &str,
         scope_key: &str,
         holder_id: &str,
         ttl: Duration,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<LeaseToken>> {
         if self.fail_scopes.lock().unwrap().contains(scope_key) {
             return Err(anyhow::anyhow!("injected acquire failure"));
         }
         self.inner
-            .try_acquire(job_name, scope_key, holder_id, ttl)
+            .acquire_lease(job_name, scope_key, holder_id, ttl)
             .await
     }
 
-    async fn heartbeat(
+    async fn heartbeat_lease(
         &self,
         job_name: &str,
         scope_key: &str,
-        holder_id: &str,
+        token: &LeaseToken,
         ttl: Duration,
     ) -> anyhow::Result<()> {
         self.inner
-            .heartbeat(job_name, scope_key, holder_id, ttl)
+            .heartbeat_lease(job_name, scope_key, token, ttl)
             .await
     }
 
-    async fn release(
+    async fn release_lease(
         &self,
         job_name: &str,
         scope_key: &str,
-        holder_id: &str,
+        token: &LeaseToken,
     ) -> anyhow::Result<()> {
-        self.inner.release(job_name, scope_key, holder_id).await
+        self.inner.release_lease(job_name, scope_key, token).await
     }
 }
 
@@ -772,11 +854,19 @@ async fn try_postgres_store(schema: &str) -> Option<PostgresLeaseStore> {
   job_name TEXT NOT NULL,
   scope_key TEXT NOT NULL,
   holder_id TEXT NOT NULL,
+  epoch BIGINT NOT NULL DEFAULT 1,
   lease_until TIMESTAMPTZ NOT NULL,
   heartbeat_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (job_name, scope_key)
 )"#
             ),
+            &[],
+        )
+        .await
+        .ok()?;
+    client
+        .execute(
+            &format!("ALTER TABLE {q}.thelake_job_lease ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL DEFAULT 1"),
             &[],
         )
         .await
@@ -851,6 +941,120 @@ async fn postgres_expired_lease_concurrent_reclaim_exactly_one_winner() {
         .map(|r| r.unwrap() as usize)
         .sum();
     assert_eq!(wins, 1, "exactly one winner after PG expiry race");
+}
+
+struct PostgresLeaseLossJob {
+    started: tokio::sync::Notify,
+    after_loss_boundary: AtomicUsize,
+}
+
+#[async_trait]
+impl Job for PostgresLeaseLossJob {
+    fn name(&self) -> &'static str {
+        "pg_lease_loss_fence"
+    }
+    fn interval(&self) -> Duration {
+        Duration::from_millis(10)
+    }
+    async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+        Ok(vec!["maintenance".into()])
+    }
+    async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn run_fenced(
+        &self,
+        _scope_key: &str,
+        _token: &LeaseToken,
+        mut lease_lost: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<()> {
+        self.started.notify_one();
+        // Represents an in-flight maintenance action. The next destructive
+        // boundary must never execute after the runner observes lease loss.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {},
+            changed = lease_lost.changed() => { let _ = changed; anyhow::bail!("lease lost") },
+        }
+        if *lease_lost.borrow() {
+            anyhow::bail!("lease lost before next boundary");
+        }
+        self.after_loss_boundary.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_runner_cancels_maintenance_after_lease_is_stolen() {
+    let store = try_postgres_store("thelake_lease_loss")
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let mut pg = tokio_postgres::Config::new();
+    pg.host("localhost");
+    pg.port(5432);
+    pg.dbname("ducklake");
+    pg.user("ducklake");
+    pg.password("ducklake");
+    let (client, connection) = pg
+        .connect(tokio_postgres::NoTls)
+        .await
+        .expect("control connection");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let job = Arc::new(PostgresLeaseLossJob {
+        started: tokio::sync::Notify::new(),
+        after_loss_boundary: AtomicUsize::new(0),
+    });
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("pg-maintenance-old-holder".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 10,
+    };
+    let runner = spawn_runner(
+        &cfg,
+        Arc::new(store.clone()),
+        vec![job.clone() as Arc<dyn Job>],
+    )
+    .expect("runner");
+    tokio::time::timeout(Duration::from_secs(3), job.started.notified())
+        .await
+        .expect("maintenance started");
+
+    let q = crate::runtime_engine::quote_pg_ident("thelake_lease_loss");
+    client.execute(
+        &format!("UPDATE {q}.thelake_job_lease SET lease_until = now() - interval '1 second' WHERE job_name = 'pg_lease_loss_fence' AND scope_key = 'maintenance'"),
+        &[],
+    ).await.expect("expire old lease");
+    let peer = store
+        .acquire_lease(
+            "pg_lease_loss_fence",
+            "maintenance",
+            "pg-maintenance-new-holder",
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("peer acquire query")
+        .expect("peer steals expired lease");
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    runner.abort();
+    assert_eq!(
+        job.after_loss_boundary.load(Ordering::SeqCst),
+        0,
+        "no later maintenance boundary may run under a stale fencing token"
+    );
+    assert!(
+        store
+            .heartbeat_lease(
+                "pg_lease_loss_fence",
+                "maintenance",
+                &peer,
+                Duration::from_secs(10)
+            )
+            .await
+            .is_ok(),
+        "stale runner cleanup must not release the peer's lease"
+    );
 }
 
 #[test]

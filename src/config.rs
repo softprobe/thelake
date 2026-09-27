@@ -37,9 +37,12 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummaryConfig {
-    /// Wake interval for `session_summary.reduce` on the shared async job runner.
+    /// Wake interval for the unleased dirty-row reduce loop.
     #[serde(default = "default_reducer_interval_ms")]
     pub reducer_interval_ms: u64,
+    /// Claim recovery window; set above normal p99 reduce batch duration.
+    #[serde(default = "default_dirty_claim_ttl_seconds")]
+    pub dirty_claim_ttl_seconds: u64,
     /// Wake interval for `session_summary.rebuild` (periodic heal lookback).
     #[serde(default = "default_rebuild_interval_ms")]
     pub rebuild_interval_ms: u64,
@@ -55,6 +58,7 @@ impl Default for SessionSummaryConfig {
     fn default() -> Self {
         Self {
             reducer_interval_ms: default_reducer_interval_ms(),
+            dirty_claim_ttl_seconds: default_dirty_claim_ttl_seconds(),
             rebuild_interval_ms: default_rebuild_interval_ms(),
             max_sessions_per_reduce: default_max_sessions_per_reduce(),
             max_reduce_span_seconds: default_max_reduce_span_seconds(),
@@ -64,6 +68,10 @@ impl Default for SessionSummaryConfig {
 
 fn default_reducer_interval_ms() -> u64 {
     10_000
+}
+
+fn default_dirty_claim_ttl_seconds() -> u64 {
+    300
 }
 
 fn default_rebuild_interval_ms() -> u64 {
@@ -85,6 +93,9 @@ impl SessionSummaryConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.reducer_interval_ms == 0 {
             anyhow::bail!("session_summary.reducer_interval_ms must be > 0");
+        }
+        if self.dirty_claim_ttl_seconds == 0 {
+            anyhow::bail!("session_summary.dirty_claim_ttl_seconds must be > 0");
         }
         if self.rebuild_interval_ms == 0 {
             anyhow::bail!("session_summary.rebuild_interval_ms must be > 0");
@@ -929,6 +940,7 @@ ducklake:
     fn session_summary_defaults_reducer_knobs() {
         let c = Config::default();
         assert_eq!(c.session_summary.reducer_interval_ms, 10_000);
+        assert_eq!(c.session_summary.dirty_claim_ttl_seconds, 300);
         assert_eq!(c.session_summary.rebuild_interval_ms, 86_400_000);
         assert_eq!(c.session_summary.max_sessions_per_reduce, 1000);
         assert_eq!(c.session_summary.max_reduce_span_seconds, 604_800);
@@ -942,6 +954,14 @@ ducklake:
         c.session_summary.reducer_interval_ms = 0;
         let err = c.session_summary.validate().expect_err("interval 0");
         assert!(err.to_string().contains("reducer_interval_ms"));
+    }
+
+    #[test]
+    fn session_summary_rejects_zero_dirty_claim_ttl() {
+        let mut c = Config::default();
+        c.session_summary.dirty_claim_ttl_seconds = 0;
+        let err = c.session_summary.validate().expect_err("claim TTL 0");
+        assert!(err.to_string().contains("dirty_claim_ttl_seconds"));
     }
 
     #[test]

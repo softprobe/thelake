@@ -19,7 +19,23 @@ use chrono::Utc;
 use deadpool_postgres::Pool;
 use duckdb::Connection;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tracing::{info, warn};
+
+fn ensure_maintenance_lease_active(lease_lost: &watch::Receiver<bool>) -> Result<()> {
+    if *lease_lost.borrow() {
+        anyhow::bail!("maintenance lease lost")
+    }
+    Ok(())
+}
+
+pub(super) fn run_fenced_action<T>(
+    ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    ensure_active()?;
+    action()
+}
 
 /// Full ordered maintenance table list (traces / logs / scores).
 pub fn maintenance_table_names() -> Vec<&'static str> {
@@ -89,9 +105,15 @@ impl MaintenanceEngine {
     pub async fn run_pass(&self, run_compaction: bool) -> Result<MaintenanceSummary> {
         crate::self_monitoring::record_maintenance();
         let mut results = Vec::new();
+        let mut ensure_active = || Ok(());
         for (scope_key, physical) in self.physical_scopes().await? {
             let mut part = self
-                .run_physical_scope_pass(&scope_key, &physical, run_compaction)
+                .run_physical_scope_pass_with_fence(
+                    &scope_key,
+                    &physical,
+                    run_compaction,
+                    &mut ensure_active,
+                )
                 .await?;
             results.append(&mut part);
         }
@@ -242,16 +264,44 @@ impl MaintenanceEngine {
     ) -> Result<Vec<TableMaintenanceResult>> {
         let physical = self.lookup_physical_scope(scope_key).await?;
         self.ensure_physical_scope_bootstrap(&physical).await?;
-        self.run_physical_scope_pass(scope_key, &physical, run_compaction)
-            .await
+        let mut ensure_active = || Ok(());
+        self.run_physical_scope_pass_with_fence(
+            scope_key,
+            &physical,
+            run_compaction,
+            &mut ensure_active,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_pass_for_key_fenced(
+        &self,
+        scope_key: &str,
+        run_compaction: bool,
+        lease_lost: watch::Receiver<bool>,
+    ) -> Result<Vec<TableMaintenanceResult>> {
+        let mut ensure_active = || ensure_maintenance_lease_active(&lease_lost);
+        ensure_active()?;
+        let physical = self.lookup_physical_scope(scope_key).await?;
+        ensure_active()?;
+        self.ensure_physical_scope_bootstrap(&physical).await?;
+        ensure_active()?;
+        self.run_physical_scope_pass_with_fence(
+            scope_key,
+            &physical,
+            run_compaction,
+            &mut ensure_active,
+        )
+        .await
     }
 
     /// One physical scope: TWCS (optional, newer_than-scoped) + metadata expire/orphan.
-    pub(crate) async fn run_physical_scope_pass(
+    async fn run_physical_scope_pass_with_fence(
         &self,
         scope_key: &str,
         physical: &PhysicalScope,
         run_compaction: bool,
+        ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
     ) -> Result<Vec<TableMaintenanceResult>> {
         let pass_started = std::time::Instant::now();
         let tables = maintenance_table_names();
@@ -268,6 +318,7 @@ impl MaintenanceEngine {
             std::collections::HashMap::new();
         if self.config.maintenance.enabled && run_compaction {
             for table in maintenance_table_names() {
+                ensure_active()?;
                 match watermarks
                     .ensure_fence(scope_key, table, run_started_at)
                     .await
@@ -294,6 +345,7 @@ impl MaintenanceEngine {
             if self.config.maintenance.enabled && run_compaction {
                 // AC-F7: do not flush catalog-inlined rows before TWCS.
                 for table in maintenance_table_names() {
+                    ensure_active()?;
                     if compact_status.contains_key(table) {
                         continue;
                     }
@@ -310,6 +362,7 @@ impl MaintenanceEngine {
                             );
                             ActionStatus::Skipped
                         } else {
+                            ensure_active()?;
                             match compact_table_incremental(
                                 &self.config,
                                 conn,
@@ -317,6 +370,7 @@ impl MaintenanceEngine {
                                 table,
                                 scope_key,
                                 watermark,
+                                ensure_active,
                             ) {
                                 Ok(outcome) => {
                                     if outcome.drained {
@@ -325,6 +379,7 @@ impl MaintenanceEngine {
                                     outcome.status
                                 }
                                 Err(err) => {
+                                    ensure_active()?;
                                     warn!(
                                         "Maintenance TWCS merge failed for {}.{} ({}): {}",
                                         physical.pg_namespace(),
@@ -343,7 +398,7 @@ impl MaintenanceEngine {
                 }
             }
 
-            Ok(self.run_scope_metadata_cleanup(conn, physical, label, scope_key))
+            self.run_scope_metadata_cleanup(conn, physical, label, scope_key, ensure_active)
         });
 
         let ((metadata, remove_orphan_files), cold, open_elapsed) = match open_outcome {
@@ -368,6 +423,7 @@ impl MaintenanceEngine {
         crate::self_monitoring::record_maintenance_step(scope_key, step, None, open_elapsed);
 
         for table in advance_tables {
+            ensure_active()?;
             if let Err(err) = watermarks.advance(scope_key, &table, run_started_at).await {
                 warn!(
                     "Compaction watermark advance failed for {}/{}: {}",
@@ -437,15 +493,17 @@ impl MaintenanceEngine {
         physical: &PhysicalScope,
         label: &str,
         scope_key: &str,
-    ) -> (MetadataMaintenanceResult, ActionResult) {
+        ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
+    ) -> Result<(MetadataMaintenanceResult, ActionResult)> {
         let metadata = if self.config.maintenance.metadata_enabled {
             let started = std::time::Instant::now();
-            let out = match self.ducklake_expire_snapshots(conn, physical) {
+            let out = match self.ducklake_expire_snapshots(conn, physical, ensure_active) {
                 Ok(expired) => MetadataMaintenanceResult {
                     expired_snapshots: expired,
                     skipped: false,
                 },
                 Err(err) => {
+                    ensure_active()?;
                     warn!("Maintenance metadata failed ({}): {}", label, err);
                     MetadataMaintenanceResult {
                         expired_snapshots: 0,
@@ -471,11 +529,12 @@ impl MaintenanceEngine {
             && self.config.maintenance.remove_orphan_files_enabled
         {
             let started = std::time::Instant::now();
-            let out = match self.ducklake_cleanup_files(conn, physical) {
+            let out = match self.ducklake_cleanup_files(conn, physical, ensure_active) {
                 Ok(()) => ActionResult {
                     status: ActionStatus::Completed,
                 },
                 Err(err) => {
+                    ensure_active()?;
                     warn!("Maintenance orphan cleanup failed ({}): {}", label, err);
                     ActionResult {
                         status: ActionStatus::Failed,
@@ -494,7 +553,7 @@ impl MaintenanceEngine {
                 status: ActionStatus::Skipped,
             }
         };
-        (metadata, remove_orphan_files)
+        Ok((metadata, remove_orphan_files))
     }
 
     fn ducklake_table_exists(
@@ -512,22 +571,30 @@ impl MaintenanceEngine {
         &self,
         conn: &Connection,
         physical: &PhysicalScope,
+        ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
     ) -> Result<usize> {
         let age_seconds = self.config.maintenance.max_snapshot_age_seconds;
         let dry_run_sql = expire_snapshots_sql(physical.attach_alias(), age_seconds, true);
         let planned = count_returned_rows(conn, &dry_run_sql)?;
         let sql = expire_snapshots_sql(physical.attach_alias(), age_seconds, false);
-        crate::sql::execute_batch_checked(conn, &sql)?;
+        run_fenced_action(ensure_active, || {
+            crate::sql::execute_batch_checked(conn, &sql)
+        })?;
         Ok(planned)
     }
 
-    fn ducklake_cleanup_files(&self, conn: &Connection, physical: &PhysicalScope) -> Result<()> {
+    fn ducklake_cleanup_files(
+        &self,
+        conn: &Connection,
+        physical: &PhysicalScope,
+        ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
+    ) -> Result<()> {
         let age = self.config.maintenance.remove_orphan_older_than_seconds;
         // Only drain ducklake_files_scheduled_for_deletion — never delete_orphaned_files.
-        crate::sql::execute_batch_checked(
-            conn,
-            &cleanup_old_files_sql(physical.attach_alias(), age),
-        )?;
+        let sql = cleanup_old_files_sql(physical.attach_alias(), age);
+        run_fenced_action(ensure_active, || {
+            crate::sql::execute_batch_checked(conn, &sql)
+        })?;
         Ok(())
     }
 }
@@ -595,6 +662,25 @@ fn warn_if_too_many_parquet_files(
 }
 
 #[cfg(test)]
+impl MaintenanceEngine {
+    pub(crate) async fn run_physical_scope_pass(
+        &self,
+        scope_key: &str,
+        physical: &PhysicalScope,
+        run_compaction: bool,
+    ) -> Result<Vec<TableMaintenanceResult>> {
+        let mut ensure_active = || Ok(());
+        self.run_physical_scope_pass_with_fence(
+            scope_key,
+            physical,
+            run_compaction,
+            &mut ensure_active,
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
@@ -658,6 +744,36 @@ mod tests {
         fs::write(nested.join("ignore.txt"), b"z").unwrap();
         assert_eq!(count_parquet_files_under(tmp.path().to_str().unwrap()), 2);
         assert_eq!(count_parquet_files_under("/no/such/path"), 0);
+    }
+
+    #[test]
+    fn lease_loss_during_one_action_blocks_the_next_action() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let (lost_tx, lost_rx) = watch::channel(false);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_during_first = Arc::clone(&calls);
+        let mut ensure_active = || ensure_maintenance_lease_active(&lost_rx);
+
+        run_fenced_action(&mut ensure_active, || {
+            calls_during_first.fetch_add(1, Ordering::SeqCst);
+            lost_tx.send(true).expect("signal lease loss");
+            Ok(())
+        })
+        .expect("first action started while lease valid");
+
+        let calls_during_second = Arc::clone(&calls);
+        let second = run_fenced_action(&mut ensure_active, || {
+            calls_during_second.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(
+            second.is_err(),
+            "lease loss blocks later maintenance action"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

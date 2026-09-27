@@ -8,8 +8,26 @@ use crate::compaction::MaintenanceEngine;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::time::Duration;
+use tokio::sync::watch;
 
 pub const PHYSICAL_SCOPE_MAINTENANCE_JOB: &str = "physical_scope_maintenance";
+
+fn validate_pass_results(
+    scope_key: &str,
+    compaction_enabled: bool,
+    results: &[crate::compaction::TableMaintenanceResult],
+) -> Result<()> {
+    if compaction_enabled {
+        let statuses: Vec<_> = results.iter().map(|r| r.compaction.status).collect();
+        if !crate::compaction::pass_compaction_ok(&statuses) {
+            return Err(anyhow!(
+                "compaction failed for scope {scope_key}: {statuses:?}"
+            ));
+        }
+    }
+    crate::self_monitoring::record_maintenance();
+    Ok(())
+}
 
 pub struct PhysicalScopeMaintenanceJob {
     executor: MaintenanceEngine,
@@ -46,16 +64,20 @@ impl Job for PhysicalScopeMaintenanceJob {
             .executor
             .run_pass_for_key(scope_key, self.compaction_enabled)
             .await?;
-        if self.compaction_enabled {
-            let statuses: Vec<_> = results.iter().map(|r| r.compaction.status).collect();
-            if !crate::compaction::pass_compaction_ok(&statuses) {
-                return Err(anyhow!(
-                    "compaction failed for scope {scope_key}: {statuses:?}"
-                ));
-            }
-        }
-        crate::self_monitoring::record_maintenance();
-        Ok(())
+        validate_pass_results(scope_key, self.compaction_enabled, &results)
+    }
+
+    async fn run_fenced(
+        &self,
+        scope_key: &str,
+        _token: &crate::async_jobs::LeaseToken,
+        lease_lost: watch::Receiver<bool>,
+    ) -> Result<()> {
+        let results = self
+            .executor
+            .run_pass_for_key_fenced(scope_key, self.compaction_enabled, lease_lost)
+            .await?;
+        validate_pass_results(scope_key, self.compaction_enabled, &results)
     }
 }
 
@@ -70,24 +92,19 @@ mod tests {
             ActionStatus::Skipped,
             ActionStatus::Completed
         ]));
-        // PhysicalScopeMaintenanceJob::run maps !pass_compaction_ok → Err.
+        // Both leased entry points validate Failed/Unsupported compaction outcomes.
         let src = include_str!("maintenance_job.rs");
-        let run_impl = src
-            .split("async fn run(")
-            .nth(1)
-            .expect("Job::run")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("end of run");
+        let production = src.split("#[cfg(test)]").next().expect("production");
         assert!(
-            run_impl.contains("pass_compaction_ok")
-                && run_impl.contains("compaction failed for scope"),
+            production.contains("validate_pass_results")
+                && production.contains("compaction failed for scope")
+                && production.contains("run_pass_for_key_fenced"),
             "leased job must Err when compaction Failed/Unsupported"
         );
         assert!(
-            !run_impl.contains("PhysicalScope::")
-                && !run_impl.contains("&PhysicalScope")
-                && !run_impl.contains("lookup_cached_scope"),
+            !production.contains("PhysicalScope::")
+                && !production.contains("&PhysicalScope")
+                && !production.contains("lookup_cached_scope"),
             "maintenance job must not hold or resolve PhysicalScope"
         );
     }

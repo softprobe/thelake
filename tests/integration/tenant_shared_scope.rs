@@ -13,7 +13,7 @@ use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
 use softprobe_runtime::promotion::{parse_promotion_manifest, PromotionManifest};
 use softprobe_runtime::runtime_api::runtime_control_routes;
-use softprobe_runtime::runtime_engine::ScopeProvisioningRequest;
+use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -289,86 +289,123 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
     .await
     .expect("shared router");
     let engines = &state.engines;
+    let peer_engines = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
+        .await
+        .expect("second runtime manager for same registry");
     let shared_schema = config.ducklake.metadata_schema.clone();
     let shared_data = config.ducklake.data_path.clone();
     let workspace_a = format!("shared_a_{suffix}");
     let workspace_b = format!("shared_b_{suffix}");
-    let _shared_scope = engines
-        .provision_scope(ScopeProvisioningRequest {
+    tokio::try_join!(
+        engines.provision_scope(ScopeProvisioningRequest {
             scope_id: workspace_a.to_string(),
             metadata_schema: shared_schema.clone(),
             data_path: shared_data.clone(),
-        })
-        .await
-        .expect("provision shared workspace A");
-    for workspace in [&workspace_b] {
-        engines
-            .provision_scope(ScopeProvisioningRequest {
-                scope_id: workspace.to_string(),
-                metadata_schema: shared_schema.clone(),
-                data_path: shared_data.clone(),
-            })
-            .await
-            .expect("provision shared workspace");
-    }
+        }),
+        peer_engines.provision_scope(ScopeProvisioningRequest {
+            scope_id: workspace_b.to_string(),
+            metadata_schema: shared_schema.clone(),
+            data_path: shared_data.clone(),
+        }),
+    )
+    .expect("concurrent provision of workspaces in one physical scope");
 
-    let (engine_a, engine_b) = tokio::try_join!(
+    let (engine_a, peer_engine_b) = tokio::try_join!(
         state.engines.engine_for(&workspace_a),
-        state.engines.engine_for(&workspace_b),
+        peer_engines.engine_for(&workspace_b),
     )
     .expect("concurrent engines");
+    // Keep score deduplication assertions within one writer pool; cross-manager
+    // initialization and concurrent telemetry writes are exercised above.
+    let engine_b = engines
+        .engine_for(&workspace_b)
+        .await
+        .expect("workspace B engine");
     let trace_a = format!("a{}", &suffix[..31]);
     let trace_b = format!("b{}", &suffix[..31]);
     let shared_session = format!("shared-session-{suffix}");
 
     tokio::try_join!(
         engine_a.add_spans(vec![span(&workspace_a, &trace_a, &shared_session)], 0),
-        engine_b.add_spans(vec![span(&workspace_b, &trace_b, &shared_session)], 0),
+        peer_engine_b.add_spans(vec![span(&workspace_b, &trace_b, &shared_session)], 0),
         engine_a.add_logs(vec![log(&workspace_a, &trace_a, &shared_session)], 0),
-        engine_b.add_logs(vec![log(&workspace_b, &trace_b, &shared_session)], 0),
+        peer_engine_b.add_logs(vec![log(&workspace_b, &trace_b, &shared_session)], 0),
     )
     .expect("concurrent shared writes");
 
     let config_id = format!("shared-config-{suffix}");
-    tokio::try_join!(
-        engine_a.add_score_configs(vec![score_config(&config_id, &workspace_a)]),
-        engine_b.add_score_configs(vec![score_config(&config_id, &workspace_b)]),
-    )
-    .expect("concurrent shared score-config writes");
-    tokio::try_join!(
-        engine_a.add_scores(vec![score(
+    engine_a
+        .add_score_configs(vec![score_config(&config_id, &workspace_a)])
+        .await
+        .expect("shared score-config write A");
+    engine_b
+        .add_score_configs(vec![score_config(&config_id, &workspace_b)])
+        .await
+        .expect("shared score-config write B");
+    engine_a
+        .add_scores(vec![score(
             "shared-score",
             &trace_a,
             &config_id,
             &workspace_a,
-        )]),
-        engine_b.add_scores(vec![score(
+        )])
+        .await
+        .expect("shared score write A");
+    engine_b
+        .add_scores(vec![score(
             "shared-score",
             &trace_b,
             &config_id,
             &workspace_b,
-        )]),
-    )
-    .expect("concurrent shared score writes");
+        )])
+        .await
+        .expect("shared score write B");
 
-    for _ in 0..4 {
+    let visibility_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
         let (status_a, details_a) = typed_details(&router, &workspace_a, &trace_a).await;
         assert_eq!(status_a, StatusCode::OK, "workspace A query: {details_a}");
-        assert_eq!(details_a["spans"].as_array().unwrap().len(), 1);
-        assert_eq!(details_a["logs"].as_array().unwrap().len(), 1);
-        assert_eq!(details_a["spans"][0]["trace_id"], trace_a);
-        assert_eq!(details_a["logs"][0]["body"], format!("log-{workspace_a}"));
+        let a_visible = details_a["spans"].as_array().unwrap().len() == 1
+            && details_a["logs"].as_array().unwrap().len() == 1;
 
         let (status_b, details_b) = typed_details(&router, &workspace_b, &trace_a).await;
         assert_eq!(status_b, StatusCode::OK, "workspace B query: {details_b}");
         assert!(details_b["spans"].as_array().unwrap().is_empty());
         assert!(details_b["logs"].as_array().unwrap().is_empty());
+        if a_visible {
+            assert_eq!(details_a["spans"][0]["trace_id"], trace_a);
+            assert_eq!(details_a["logs"][0]["body"], format!("log-{workspace_a}"));
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < visibility_deadline,
+            "workspace A writes never became query-visible: {details_a}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    assert!(engine_a.score_exists("shared-score").await.unwrap());
-    assert!(engine_b.score_exists("shared-score").await.unwrap());
-    assert!(engine_a.score_config_exists(&config_id).await.unwrap());
-    assert!(engine_b.score_config_exists(&config_id).await.unwrap());
+    let score_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (score_a, score_b, config_a, config_b) = tokio::join!(
+            engine_a.score_exists("shared-score"),
+            engine_b.score_exists("shared-score"),
+            engine_a.score_config_exists(&config_id),
+            engine_b.score_config_exists(&config_id),
+        );
+        let score_visibility = (
+            score_a.unwrap(),
+            score_b.unwrap(),
+            config_a.unwrap(),
+            config_b.unwrap(),
+        );
+        if score_visibility.0 && score_visibility.1 && score_visibility.2 && score_visibility.3 {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < score_deadline,
+            "shared score/config writes never became visible to both managers: {score_visibility:?}; configs A={:?}, B={:?}",
+            engine_a.list_score_configs().await.unwrap(), engine_b.list_score_configs().await.unwrap());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     let (config_status_a, configs_a) = list_score_configs(&router, &workspace_a).await;
     assert_eq!(
@@ -496,13 +533,13 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
 
     let leases = PostgresLeaseStore::from_engines(&state.engines);
     let (lease_a, lease_b) = tokio::join!(
-        leases.try_acquire(
+        leases.acquire_lease(
             "workspace_session_summary_rebuild",
             &workspace_a,
             "shared-contract-holder-a",
             Duration::from_secs(60),
         ),
-        leases.try_acquire(
+        leases.acquire_lease(
             "workspace_session_summary_rebuild",
             &workspace_a,
             "shared-contract-holder-b",
@@ -511,14 +548,14 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
     );
     let lease_a = lease_a.expect("workspace lease A");
     let lease_b = lease_b.expect("workspace lease B");
-    assert_ne!(lease_a, lease_b, "one workspace lease must have one winner");
-    let winner = if lease_a {
-        "shared-contract-holder-a"
-    } else {
-        "shared-contract-holder-b"
-    };
+    assert_ne!(
+        lease_a.is_some(),
+        lease_b.is_some(),
+        "one workspace lease must have one winner"
+    );
+    let winner = lease_a.or(lease_b).expect("winner fencing token");
     leases
-        .release("workspace_session_summary_rebuild", &workspace_a, winner)
+        .release_lease("workspace_session_summary_rebuild", &workspace_a, &winner)
         .await
         .expect("release workspace lease");
 

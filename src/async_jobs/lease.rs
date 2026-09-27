@@ -13,34 +13,61 @@ pub(crate) fn lease_ttl_secs(ttl: Duration) -> i64 {
     ttl.as_secs().max(1) as i64
 }
 
+/// Fencing identity for one successful lease acquisition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseToken {
+    pub holder_id: String,
+    pub epoch: i64,
+}
+
 /// Coordination store for `(job_name, scope_key)` single-winner leases.
 #[async_trait]
 pub trait LeaseStore: Send + Sync {
-    /// Race-safe acquire. Returns `true` iff this `holder_id` holds the lease.
+    /// Acquire or renew a lease and return its fencing token.
+    async fn acquire_lease(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        holder_id: &str,
+        ttl: Duration,
+    ) -> Result<Option<LeaseToken>>;
+
+    /// Extend a lease only while the exact fencing token remains current.
+    async fn heartbeat_lease(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        token: &LeaseToken,
+        ttl: Duration,
+    ) -> Result<()>;
+
+    /// Expire (but retain) the row only while the exact token remains current.
+    async fn release_lease(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        token: &LeaseToken,
+    ) -> Result<()>;
+
+    /// Race-safe compatibility helper. Production jobs should use `acquire_lease`.
     async fn try_acquire(
         &self,
         job_name: &str,
         scope_key: &str,
         holder_id: &str,
         ttl: Duration,
-    ) -> Result<bool>;
-
-    /// Extend `lease_until` while still the holder.
-    async fn heartbeat(
-        &self,
-        job_name: &str,
-        scope_key: &str,
-        holder_id: &str,
-        ttl: Duration,
-    ) -> Result<()>;
-
-    /// Drop the lease if still held by `holder_id`.
-    async fn release(&self, job_name: &str, scope_key: &str, holder_id: &str) -> Result<()>;
+    ) -> Result<bool> {
+        Ok(self
+            .acquire_lease(job_name, scope_key, holder_id, ttl)
+            .await?
+            .is_some())
+    }
 }
 
 #[derive(Clone)]
 struct MemoryEntry {
     holder_id: String,
+    epoch: i64,
     lease_until: Instant,
 }
 
@@ -58,6 +85,79 @@ impl MemoryLeaseStore {
 
 #[async_trait]
 impl LeaseStore for MemoryLeaseStore {
+    async fn acquire_lease(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        holder_id: &str,
+        ttl: Duration,
+    ) -> Result<Option<LeaseToken>> {
+        let mut map = self.inner.lock().await;
+        let key = (job_name.to_string(), scope_key.to_string());
+        let now = Instant::now();
+        let until = now + ttl;
+        let epoch = match map.get(&key) {
+            None => 1,
+            Some(e) if e.lease_until < now => e.epoch + 1,
+            Some(e) if e.holder_id == holder_id => e.epoch,
+            Some(_) => return Ok(None),
+        };
+        let stole = map.get(&key).is_some_and(|e| e.lease_until < now);
+        map.insert(
+            key,
+            MemoryEntry {
+                holder_id: holder_id.to_string(),
+                epoch,
+                lease_until: until,
+            },
+        );
+        if stole {
+            crate::self_monitoring::record_lease_steal(job_name, scope_key);
+        }
+        Ok(Some(LeaseToken {
+            holder_id: holder_id.to_string(),
+            epoch,
+        }))
+    }
+
+    async fn heartbeat_lease(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        token: &LeaseToken,
+        ttl: Duration,
+    ) -> Result<()> {
+        let mut map = self.inner.lock().await;
+        let key = (job_name.to_string(), scope_key.to_string());
+        match map.get_mut(&key) {
+            Some(e)
+                if e.holder_id == token.holder_id
+                    && e.epoch == token.epoch
+                    && e.lease_until > Instant::now() =>
+            {
+                e.lease_until = Instant::now() + ttl;
+                Ok(())
+            }
+            _ => Err(anyhow!("heartbeat: lease token lost or expired")),
+        }
+    }
+
+    async fn release_lease(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        token: &LeaseToken,
+    ) -> Result<()> {
+        let mut map = self.inner.lock().await;
+        let key = (job_name.to_string(), scope_key.to_string());
+        if let Some(e) = map.get_mut(&key) {
+            if e.holder_id == token.holder_id && e.epoch == token.epoch {
+                e.lease_until = Instant::now();
+            }
+        }
+        Ok(())
+    }
+
     async fn try_acquire(
         &self,
         job_name: &str,
@@ -65,68 +165,10 @@ impl LeaseStore for MemoryLeaseStore {
         holder_id: &str,
         ttl: Duration,
     ) -> Result<bool> {
-        let mut map = self.inner.lock().await;
-        let key = (job_name.to_string(), scope_key.to_string());
-        let now = Instant::now();
-        let until = now + ttl;
-        match map.get(&key) {
-            None => {
-                map.insert(
-                    key,
-                    MemoryEntry {
-                        holder_id: holder_id.to_string(),
-                        lease_until: until,
-                    },
-                );
-                Ok(true)
-            }
-            Some(e) if e.lease_until < now || e.holder_id == holder_id => {
-                let stole = e.lease_until < now && e.holder_id != holder_id;
-                map.insert(
-                    key,
-                    MemoryEntry {
-                        holder_id: holder_id.to_string(),
-                        lease_until: until,
-                    },
-                );
-                if stole {
-                    crate::self_monitoring::record_lease_steal(job_name, scope_key);
-                }
-                Ok(true)
-            }
-            Some(_) => Ok(false),
-        }
-    }
-
-    async fn heartbeat(
-        &self,
-        job_name: &str,
-        scope_key: &str,
-        holder_id: &str,
-        ttl: Duration,
-    ) -> Result<()> {
-        let mut map = self.inner.lock().await;
-        let key = (job_name.to_string(), scope_key.to_string());
-        match map.get_mut(&key) {
-            Some(e) if e.holder_id == holder_id => {
-                e.lease_until = Instant::now() + ttl;
-                Ok(())
-            }
-            Some(_) => Err(anyhow!("heartbeat: not holder")),
-            None => Err(anyhow!("heartbeat: lease missing")),
-        }
-    }
-
-    async fn release(&self, job_name: &str, scope_key: &str, holder_id: &str) -> Result<()> {
-        let mut map = self.inner.lock().await;
-        let key = (job_name.to_string(), scope_key.to_string());
-        match map.get(&key) {
-            Some(e) if e.holder_id == holder_id => {
-                map.remove(&key);
-                Ok(())
-            }
-            _ => Ok(()),
-        }
+        Ok(self
+            .acquire_lease(job_name, scope_key, holder_id, ttl)
+            .await?
+            .is_some())
     }
 }
 
@@ -138,6 +180,7 @@ impl LeaseStore for MemoryLeaseStore {
 /// Delayed heartbeat/renewal after `lease_until` is a fair race: another
 /// holder may win the UPSERT; configure `lease_ttl_seconds` ≫ typical pass
 /// latency so heartbeats land while the row is still valid.
+#[derive(Clone)]
 pub struct PostgresLeaseStore {
     pool: Pool,
     /// Qualified `"schema".thelake_job_lease`
@@ -165,6 +208,91 @@ impl PostgresLeaseStore {
 
 #[async_trait]
 impl LeaseStore for PostgresLeaseStore {
+    async fn acquire_lease(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        holder_id: &str,
+        ttl: Duration,
+    ) -> Result<Option<LeaseToken>> {
+        let client = self.pool.get().await?;
+        let ttl_secs = lease_ttl_secs(ttl);
+        let sql = format!(
+            r#"
+INSERT INTO {table} AS current_lease (job_name, scope_key, holder_id, epoch, lease_until, heartbeat_at)
+VALUES ($1, $2, $3, 1, now() + ($4::bigint * INTERVAL '1 second'), now())
+ON CONFLICT (job_name, scope_key) DO UPDATE SET
+  holder_id = EXCLUDED.holder_id,
+  epoch = CASE WHEN current_lease.lease_until <= now() THEN current_lease.epoch + 1 ELSE current_lease.epoch END,
+  lease_until = EXCLUDED.lease_until,
+  heartbeat_at = EXCLUDED.heartbeat_at
+WHERE current_lease.lease_until <= now() OR current_lease.holder_id = EXCLUDED.holder_id
+RETURNING holder_id, epoch
+"#,
+            table = self.table
+        );
+        let row = client
+            .query_opt(&sql, &[&job_name, &scope_key, &holder_id, &ttl_secs])
+            .await?;
+        Ok(row.map(|r| LeaseToken {
+            holder_id: r.get(0),
+            epoch: r.get(1),
+        }))
+    }
+
+    async fn heartbeat_lease(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        token: &LeaseToken,
+        ttl: Duration,
+    ) -> Result<()> {
+        let client = self.pool.get().await?;
+        let ttl_secs = lease_ttl_secs(ttl);
+        let sql = format!(
+            r#"UPDATE {table}
+SET lease_until = now() + ($4::bigint * INTERVAL '1 second'), heartbeat_at = now()
+WHERE job_name = $1 AND scope_key = $2 AND holder_id = $3 AND epoch = $5 AND lease_until > now()"#,
+            table = self.table
+        );
+        let n = client
+            .execute(
+                &sql,
+                &[
+                    &job_name,
+                    &scope_key,
+                    &token.holder_id,
+                    &ttl_secs,
+                    &token.epoch,
+                ],
+            )
+            .await?;
+        if n == 0 {
+            return Err(anyhow!("heartbeat: lease token lost or expired"));
+        }
+        Ok(())
+    }
+
+    async fn release_lease(
+        &self,
+        job_name: &str,
+        scope_key: &str,
+        token: &LeaseToken,
+    ) -> Result<()> {
+        let client = self.pool.get().await?;
+        let sql = format!(
+            "UPDATE {table} SET lease_until = now() WHERE job_name = $1 AND scope_key = $2 AND holder_id = $3 AND epoch = $4",
+            table = self.table
+        );
+        client
+            .execute(
+                &sql,
+                &[&job_name, &scope_key, &token.holder_id, &token.epoch],
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn try_acquire(
         &self,
         job_name: &str,
@@ -172,66 +300,9 @@ impl LeaseStore for PostgresLeaseStore {
         holder_id: &str,
         ttl: Duration,
     ) -> Result<bool> {
-        let client = self.pool.get().await?;
-        let ttl_secs = lease_ttl_secs(ttl);
-        // Single race-safe UPSERT (design §4). Steal metrics are Memory-only —
-        // peek+FOR UPDATE was dropped to avoid a second SQL for a counter.
-        let sql = format!(
-            r#"
-INSERT INTO {table} (job_name, scope_key, holder_id, lease_until, heartbeat_at)
-VALUES ($1, $2, $3, now() + ($4::bigint * INTERVAL '1 second'), now())
-ON CONFLICT (job_name, scope_key) DO UPDATE SET
-  holder_id = EXCLUDED.holder_id,
-  lease_until = EXCLUDED.lease_until,
-  heartbeat_at = EXCLUDED.heartbeat_at
-WHERE thelake_job_lease.lease_until < now()
-   OR thelake_job_lease.holder_id = EXCLUDED.holder_id
-RETURNING holder_id
-"#,
-            table = self.table
-        );
-        let row = client
-            .query_opt(&sql, &[&job_name, &scope_key, &holder_id, &ttl_secs])
-            .await?;
-        Ok(matches!(row, Some(r) if r.get::<_, String>(0) == holder_id))
-    }
-
-    async fn heartbeat(
-        &self,
-        job_name: &str,
-        scope_key: &str,
-        holder_id: &str,
-        ttl: Duration,
-    ) -> Result<()> {
-        let client = self.pool.get().await?;
-        let ttl_secs = lease_ttl_secs(ttl);
-        let sql = format!(
-            r#"
-UPDATE {table}
-SET lease_until = now() + ($4::bigint * INTERVAL '1 second'),
-    heartbeat_at = now()
-WHERE job_name = $1 AND scope_key = $2 AND holder_id = $3
-"#,
-            table = self.table
-        );
-        let n = client
-            .execute(&sql, &[&job_name, &scope_key, &holder_id, &ttl_secs])
-            .await?;
-        if n == 0 {
-            return Err(anyhow!("heartbeat: not holder or missing"));
-        }
-        Ok(())
-    }
-
-    async fn release(&self, job_name: &str, scope_key: &str, holder_id: &str) -> Result<()> {
-        let client = self.pool.get().await?;
-        let sql = format!(
-            r#"DELETE FROM {table} WHERE job_name = $1 AND scope_key = $2 AND holder_id = $3"#,
-            table = self.table
-        );
-        let _ = client
-            .execute(&sql, &[&job_name, &scope_key, &holder_id])
-            .await?;
-        Ok(())
+        Ok(self
+            .acquire_lease(job_name, scope_key, holder_id, ttl)
+            .await?
+            .is_some())
     }
 }
