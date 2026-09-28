@@ -1830,12 +1830,12 @@ mod tests {
                 score_id VARCHAR, timestamp TIMESTAMP_NS, trace_id VARCHAR, span_id VARCHAR, \
                 session_id VARCHAR, name VARCHAR, data_type VARCHAR, numeric_value DOUBLE, \
                 string_value VARCHAR, boolean_value BOOLEAN, source VARCHAR, comment VARCHAR, \
-                config_id VARCHAR, author_id VARCHAR, metadata JSON\
+                config_id VARCHAR, author_id VARCHAR, metadata MAP(VARCHAR, VARCHAR)\
             );\
             INSERT INTO scores VALUES (\
                 'score-1', TIMESTAMP_NS '2026-09-28 01:02:03.123456789', \
                 'trace-1', 'span-1', 'sess-1', 'quality', 'numeric', 0.91, \
-                NULL, NULL, 'evaluator', NULL, NULL, NULL, '{\"suite\":\"integration\"}'\
+                NULL, NULL, 'evaluator', NULL, NULL, NULL, MAP(['suite'], ['integration'])\
             );",
         )
         .expect("create detail fixture tables");
@@ -1846,6 +1846,10 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let detail_sql = compile_session_detail_sql("sess-1", from, to).unwrap();
+        assert!(
+            detail_sql.contains("CAST(metadata AS JSON) AS metadata"),
+            "session detail must serialize score metadata before aggregation: {detail_sql}"
+        );
         let encoded: String = conn
             .query_row(
                 &format!("SELECT session_scores FROM ({detail_sql}) AS detail LIMIT 1"),

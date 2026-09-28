@@ -432,7 +432,7 @@ pub fn compile_session_detail_sql(
                  FROM session_spans CROSS JOIN session_aggregate \
                  ORDER BY start_time DESC, span_id DESC",
                 projection = observation_projection(true),
-                score_columns = score_columns(),
+                score_columns = score_columns("CAST(metadata AS JSON)"),
                 sid = sid,
                 exclude = exclude,
                 bound = bound,
@@ -458,7 +458,7 @@ pub fn compile_scores_for_span_sql(
         .scan_with_timestamp_filter("", |bound| {
             format!(
                 "SELECT {cols} FROM scores WHERE span_id = {sid} AND {bound} ORDER BY timestamp DESC, score_id DESC",
-                cols = score_columns(),
+                cols = score_columns("metadata"),
             )
         })
         .into_sql())
@@ -478,7 +478,7 @@ pub fn compile_scores_for_trace_sql(
             );
             format!(
                 "SELECT {cols} FROM scores WHERE {identity} AND {bound} ORDER BY timestamp DESC, score_id DESC",
-                cols = score_columns(),
+                cols = score_columns("metadata"),
             )
         })
         .into_sql())
@@ -614,8 +614,11 @@ fn expr_total_cost() -> String {
     )
 }
 
-fn score_columns() -> &'static str {
-    "score_id, timestamp, trace_id, span_id, session_id, name, data_type, numeric_value, string_value, boolean_value, source, comment, config_id, author_id, metadata"
+fn score_columns(metadata: &str) -> String {
+    format!(
+        "score_id, timestamp, trace_id, span_id, session_id, name, data_type, numeric_value, \
+         string_value, boolean_value, source, comment, config_id, author_id, {metadata} AS metadata"
+    )
 }
 
 pub fn clamp_limit(limit: Option<usize>, default: usize) -> usize {

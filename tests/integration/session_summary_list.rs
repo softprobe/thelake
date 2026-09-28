@@ -75,11 +75,20 @@ async fn catalog_client(state: &AppState) -> tokio_postgres::Client {
 async fn build_summary_router(
     metadata_schema: String,
 ) -> Option<(Router, AppState, TempDir, String)> {
+    build_summary_router_with_inlining(metadata_schema, 0).await
+}
+
+async fn build_summary_router_with_inlining(
+    metadata_schema: String,
+    data_inlining_row_limit: u64,
+) -> Option<(Router, AppState, TempDir, String)> {
     if !pg_reachable().await {
         return None;
     }
     let temp = TempDir::new().expect("tempdir");
-    let config = Arc::new(postgres_summary_config(&temp, metadata_schema.clone()));
+    let mut config = postgres_summary_config(&temp, metadata_schema.clone());
+    config.ducklake.data_inlining_row_limit = Some(data_inlining_row_limit);
+    let config = Arc::new(config);
     let (router, state) = softprobe_runtime::api::create_router(
         config,
         axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
@@ -626,7 +635,9 @@ async fn http_ingest_reduce_list_every_filter() {
 async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
     let schema = format!("thelake_ss_http_detail_{suffix}");
-    let Some((router, state, _temp, schema)) = build_summary_router(schema).await else {
+    // Reproduce production's catalog-inlined MAP score metadata path.
+    let Some((router, state, temp, schema)) = build_summary_router_with_inlining(schema, 500).await
+    else {
         eprintln!("skip: ducklake-postgres not reachable");
         return;
     };
@@ -714,6 +725,30 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
         .unwrap();
     let score_resp = router.clone().oneshot(score_req).await.expect("score");
     assert_eq!(score_resp.status(), StatusCode::CREATED);
+    let score_data = temp.path().join("data").join(&schema).join("scores");
+    fn parquet_files(path: &std::path::Path) -> usize {
+        std::fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .map(|path| {
+                if path.is_dir() {
+                    parquet_files(&path)
+                } else {
+                    usize::from(
+                        path.extension()
+                            .is_some_and(|extension| extension == "parquet"),
+                    )
+                }
+            })
+            .sum()
+    }
+    assert_eq!(
+        parquet_files(&score_data),
+        0,
+        "score MAP row must be catalog-inlined for this regression"
+    );
 
     let trace_uri = format!(
         "/v1/llm/traces/{}?from={}&to={}",
@@ -765,6 +800,10 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     assert_eq!(body["scores"].as_array().unwrap().len(), 1);
     assert_eq!(body["scores"][0]["score_id"], score_id);
     assert_eq!(body["scores"][0]["numeric_value"], 0.91);
+    assert_eq!(
+        body["scores"][0]["metadata"]["suite"], "holistic-session",
+        "inlined MAP metadata must survive session detail serialization"
+    );
 
     let missing = Request::builder()
         .method("GET")
