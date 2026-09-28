@@ -554,9 +554,7 @@ paths:
       description: |
         Does not accept query `from`/`to`. The lake window is taken from the
         tenant's `session_summary` row for `session_id`. Returns all session spans,
-        trace and token totals, and scores in one response. If DuckLake cannot
-        read catalog-inlined nested events, span events are omitted and
-        `events_complete` is false.
+        trace and token totals, and scores in one response.
       operationId: getSession
       parameters:
         - name: session_id
@@ -566,7 +564,7 @@ paths:
             type: string
       responses:
         "200":
-          description: Session detail; `events_complete` reports event availability
+          description: Complete session detail
           content:
             application/json:
               schema:
@@ -1129,7 +1127,7 @@ components:
           type: [string, "null"]
     SessionDetail:
       type: object
-      required: [session_id, from, to, trace_count, span_count, events_complete, spans, scores]
+      required: [session_id, from, to, trace_count, span_count, spans, scores]
       properties:
         session_id: { type: string }
         from: { type: string, format: date-time }
@@ -1144,9 +1142,6 @@ components:
         output_tokens: { type: integer }
         total_tokens: { type: integer }
         total_cost: { type: number }
-        events_complete:
-          type: boolean
-          description: False when the response omits events after a DuckLake nested-event read failure
         spans:
           type: array
           description: All detailed spans in the session, ordered newest first
