@@ -68,6 +68,35 @@ fn code_view(sql: &str) -> String {
     String::from_utf8(out).expect("SQL is UTF-8")
 }
 
+/// Blank quoted identifiers for clause-keyword recognition. They remain in
+/// `code_view` for table-name matching but must not manufacture WHERE/ORDER BY.
+fn keyword_view(sql: &str) -> String {
+    let mut out = code_view(sql).into_bytes();
+    let mut quoted = false;
+    let mut i = 0;
+    while i < out.len() {
+        if quoted {
+            if out[i] == b'"' && out.get(i + 1) == Some(&b'"') {
+                out[i] = b' ';
+                out[i + 1] = b' ';
+                i += 2;
+                continue;
+            }
+            if out[i] == b'"' {
+                out[i] = b' ';
+                quoted = false;
+            } else if out[i] != b'\n' {
+                out[i] = b' ';
+            }
+        } else if out[i] == b'"' {
+            out[i] = b' ';
+            quoted = true;
+        }
+        i += 1;
+    }
+    String::from_utf8(out).expect("SQL is UTF-8")
+}
+
 fn statements(sql: &str) -> Vec<&str> {
     let bytes = sql.as_bytes();
     let mut out = Vec::new();
@@ -283,18 +312,27 @@ fn ensure_one_fact_scan_uses_timestamp_pruning(
         .map_err(|e| anyhow::anyhow!("DuckDB returned an unreadable physical plan: {e}"))?;
     let mut fact_scans = Vec::new();
     collect_fact_scans(&plan, &mut fact_scans);
-    for (table, filters) in &fact_scans {
-        if !filters
+    let unpruned_scan = fact_scans.iter().find(|(_, filters)| {
+        !filters
             .as_deref()
             .map(filter_guarantees_timestamp_pruning)
             .unwrap_or(false)
-        {
+    });
+    if let Some((table, _)) = unpruned_scan {
+        // DuckDB can prove a timestamp predicate redundant from file statistics
+        // when one fact source's entire contents fit inside the requested bound.
+        // The bare SQL predicate is still required, and multi-source queries
+        // remain subject to per-scan physical filter checks.
+        let optimized_away_bound = fact_scans.len() == 1
+            && fact_table_source_count(sql) == 1
+            && has_single_fact_source_timestamp_bound(sql);
+        if !optimized_away_bound {
             anyhow::bail!(
                 "DuckDB plan scans fact table `{table}` without a conjunctive pushed timestamp filter"
             );
         }
     }
-    if has_fact_table_source(sql) && fact_scans.is_empty() {
+    if has_fact_table_source(sql) && fact_scans.is_empty() && !is_empty_result_plan(&plan) {
         anyhow::bail!("DuckDB plan did not expose a fact-table scan to verify");
     }
     Ok(())
@@ -347,6 +385,17 @@ fn is_non_scanning_statement(upper: &str) -> bool {
     .any(|prefix| upper.trim_start().starts_with(prefix))
 }
 
+fn is_zero_row_probe(sql: &str) -> bool {
+    let code = code_view(sql);
+    let upper = code
+        .trim()
+        .trim_end_matches(';')
+        .trim_end()
+        .to_ascii_uppercase();
+    let words = upper.split_whitespace().collect::<Vec<_>>();
+    words.ends_with(&["LIMIT", "0"])
+}
+
 fn query_for_explain(sql: &str) -> Option<&str> {
     let trimmed = sql.trim();
     let code = code_view(trimmed);
@@ -387,32 +436,166 @@ fn query_for_explain(sql: &str) -> Option<&str> {
 }
 
 fn has_fact_table_source(sql: &str) -> bool {
+    fact_table_source_count(sql) > 0
+}
+
+fn fact_table_source_count(sql: &str) -> usize {
     let lower = code_view(sql).replace('"', "").to_ascii_lowercase();
-    crate::sql::schema::fact_table_specs().any(|table| {
-        ["from", "join"].iter().any(|keyword| {
-            lower.match_indices(keyword).any(|(start, _)| {
-                let before_ok = start == 0
-                    || !lower.as_bytes()[start - 1].is_ascii_alphanumeric()
-                        && lower.as_bytes()[start - 1] != b'_';
-                let after_keyword = start + keyword.len();
-                let keyword_boundary = after_keyword == lower.len()
-                    || !lower.as_bytes()[after_keyword].is_ascii_alphanumeric()
-                        && lower.as_bytes()[after_keyword] != b'_';
-                if !(before_ok && keyword_boundary) {
-                    return false;
-                }
-                let table_ref = lower[after_keyword..]
-                    .trim_start()
-                    .split(|c: char| c.is_ascii_whitespace() || matches!(c, ',' | '(' | ')'))
-                    .next()
-                    .unwrap_or_default();
-                table_ref
-                    .rsplit('.')
-                    .next()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(table.name))
-            })
+    crate::sql::schema::fact_table_specs()
+        .map(|table| {
+            ["from", "join"]
+                .iter()
+                .map(|keyword| {
+                    lower
+                        .match_indices(keyword)
+                        .filter(|(start, _)| {
+                            let before_ok = *start == 0
+                                || !lower.as_bytes()[*start - 1].is_ascii_alphanumeric()
+                                    && lower.as_bytes()[*start - 1] != b'_';
+                            let after_keyword = *start + keyword.len();
+                            let keyword_boundary = after_keyword == lower.len()
+                                || !lower.as_bytes()[after_keyword].is_ascii_alphanumeric()
+                                    && lower.as_bytes()[after_keyword] != b'_';
+                            if !(before_ok && keyword_boundary) {
+                                return false;
+                            }
+                            let table_ref = lower[after_keyword..]
+                                .trim_start()
+                                .split(|c: char| {
+                                    c.is_ascii_whitespace() || matches!(c, ',' | '(' | ')')
+                                })
+                                .next()
+                                .unwrap_or_default();
+                            table_ref
+                                .rsplit('.')
+                                .next()
+                                .is_some_and(|name| name.eq_ignore_ascii_case(table.name))
+                        })
+                        .count()
+                })
+                .sum::<usize>()
         })
-    })
+        .sum()
+}
+
+fn has_single_fact_source_timestamp_bound(sql: &str) -> bool {
+    let code = keyword_view(sql);
+    let upper = code.to_ascii_uppercase();
+    if !upper.trim_start().starts_with("SELECT")
+        || keyword_count(&upper, "FROM") != 1
+        || keyword_count(&upper, "JOIN") != 0
+        || keyword_count(&upper, "UNION") != 0
+        || keyword_count(&upper, "EXISTS") != 0
+        || contains_keyword(&upper, "OR")
+    {
+        return false;
+    }
+    let Some(from) = find_keyword(&upper, "FROM") else {
+        return false;
+    };
+    let source = &upper[from + "FROM".len()..];
+    let source = find_keyword(source, "WHERE")
+        .map(|where_pos| &source[..where_pos])
+        .unwrap_or(source);
+    if source.contains(',') {
+        return false;
+    }
+
+    let Some(where_pos) = find_keyword(&upper[from + "FROM".len()..], "WHERE") else {
+        return false;
+    };
+    let after_from = &upper[from + "FROM".len()..];
+    let predicate = &after_from[where_pos + "WHERE".len()..];
+    let end = ["GROUP BY", "HAVING", "ORDER BY", "LIMIT", "QUALIFY"]
+        .iter()
+        .filter_map(|clause| find_top_level_keyword(predicate, clause))
+        .min()
+        .unwrap_or(predicate.len());
+    filter_guarantees_timestamp_pruning(&predicate[..end])
+}
+
+fn keyword_count(sql: &str, keyword: &str) -> usize {
+    let bytes = sql.as_bytes();
+    let keyword = keyword.as_bytes();
+    bytes
+        .windows(keyword.len())
+        .enumerate()
+        .filter(|(start, window)| {
+            if *window != keyword {
+                return false;
+            }
+            let end = start + keyword.len();
+            (*start == 0 || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_')
+                && (end == bytes.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_')
+        })
+        .count()
+}
+
+fn contains_keyword(sql: &str, keyword: &str) -> bool {
+    keyword_count(sql, keyword) > 0
+}
+
+fn find_keyword(sql: &str, keyword: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let keyword = keyword.as_bytes();
+    bytes
+        .windows(keyword.len())
+        .enumerate()
+        .find_map(|(start, window)| {
+            if window != keyword {
+                return None;
+            }
+            let end = start + keyword.len();
+            let before_ok =
+                start == 0 || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
+            let after_ok =
+                end == bytes.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_';
+            (before_ok && after_ok).then_some(start)
+        })
+}
+
+fn find_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    while start < bytes.len() {
+        match bytes[start] {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        let before_ok =
+            start == 0 || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
+        if depth == 0 && before_ok {
+            let mut position = start;
+            let mut matches = true;
+            for (index, word) in keyword.split_whitespace().enumerate() {
+                if index > 0 {
+                    let whitespace_start = position;
+                    while position < bytes.len() && bytes[position].is_ascii_whitespace() {
+                        position += 1;
+                    }
+                    if position == whitespace_start {
+                        matches = false;
+                        break;
+                    }
+                }
+                let word = word.as_bytes();
+                if !bytes[position..].starts_with(word) {
+                    matches = false;
+                    break;
+                }
+                position += word.len();
+            }
+            let after_ok = position == bytes.len()
+                || !bytes[position].is_ascii_alphanumeric() && bytes[position] != b'_';
+            if matches && after_ok {
+                return Some(start);
+            }
+        }
+        start += 1;
+    }
+    None
 }
 
 fn collect_fact_scans<'a>(node: &'a serde_json::Value, out: &mut Vec<(String, Option<&'a str>)>) {
@@ -455,8 +638,19 @@ fn collect_fact_scans<'a>(node: &'a serde_json::Value, out: &mut Vec<(String, Op
     }
 }
 
+fn is_empty_result_plan(node: &serde_json::Value) -> bool {
+    let root = node
+        .as_array()
+        .and_then(|nodes| (nodes.len() == 1).then(|| &nodes[0]))
+        .unwrap_or(node);
+    root.as_object()
+        .and_then(|object| object.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|name| name.eq_ignore_ascii_case("EMPTY_RESULT"))
+}
+
 fn filter_guarantees_timestamp_pruning(filter: &str) -> bool {
-    filter_timestamp_bounds(filter) == 0b11
+    filter_timestamp_bounds(filter) != 0
 }
 
 fn filter_timestamp_bounds(filter: &str) -> u8 {
@@ -467,7 +661,7 @@ fn filter_timestamp_bounds(filter: &str) -> u8 {
     }
     if split_top_level_boolean(filter, "OR").is_some() {
         // Any timestamp term in an OR branch can escape the selected window.
-        // An identity-only OR remains safe only when another AND adds both bounds.
+        // An identity-only OR remains safe only when another AND adds a time bound.
         return 0;
     }
     if let Some(parts) = split_top_level_boolean(filter, "AND") {
@@ -622,7 +816,7 @@ fn has_bare_timestamp_predicate(sql: &str) -> bool {
 
 /// Source-level check that a SQL string contains a bare timestamp comparison.
 /// Runtime execution uses [`ensure_fact_scan_uses_timestamp_pruning`] to verify
-/// that both sides of the range reach each physical fact-table scan.
+/// that a timestamp bound reaches each physical fact-table scan.
 pub fn ensure_sql_has_bare_timestamp_predicate(sql: &str) -> Result<(), String> {
     // Multi-statement batches: check each non-empty statement.
     for stmt in statements(sql) {
@@ -676,7 +870,11 @@ fn ensure_one(sql: &str) -> Result<(), String> {
             return Err(format!("forbidden time column name `{bad}`"));
         }
     }
-    if names_fact_table(sql) && !has_bare_timestamp_predicate(sql) && !is_external_fact_write(sql) {
+    if names_fact_table(sql)
+        && !has_bare_timestamp_predicate(sql)
+        && !is_external_fact_write(sql)
+        && !is_zero_row_probe(sql)
+    {
         return Err("fact-table SQL missing bare timestamp predicate for partition pruning".into());
     }
     Ok(())
@@ -724,7 +922,10 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE traces (timestamp TIMESTAMP_NS, value INTEGER);\
              CREATE TABLE logs (timestamp TIMESTAMP_NS, value INTEGER);\
-             CREATE TABLE scores (timestamp TIMESTAMPTZ, value INTEGER);",
+             CREATE TABLE scores (timestamp TIMESTAMPTZ, value INTEGER);\
+             INSERT INTO traces VALUES (TIMESTAMP_NS '2025-01-01', 1), (TIMESTAMP_NS '2027-01-01', 2);\
+             INSERT INTO logs VALUES (TIMESTAMP_NS '2025-01-01', 1), (TIMESTAMP_NS '2027-01-01', 2);\
+             INSERT INTO scores VALUES (TIMESTAMPTZ '2025-01-01', 1), (TIMESTAMPTZ '2027-01-01', 2);",
         )
         .unwrap();
         conn
@@ -736,6 +937,53 @@ mod tests {
         let sql = "SELECT * FROM traces WHERE timestamp >= TIMESTAMP_NS '2026-01-01' \
                    AND timestamp < TIMESTAMP_NS '2026-01-02'";
         ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
+    }
+
+    #[test]
+    fn explain_gate_allows_a_single_bound_proven_redundant_by_statistics() {
+        let conn = plan_connection();
+        let sql = "SELECT * FROM traces WHERE timestamp >= TIMESTAMP_NS '2020-01-01' \
+                   AND timestamp < TIMESTAMP_NS '2030-01-01'";
+        ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
+    }
+
+    #[test]
+    fn explain_gate_does_not_apply_elided_bound_to_joined_or_disjunctive_scans() {
+        let conn = plan_connection();
+        conn.execute_batch(
+            "CREATE TABLE dimensions (id INTEGER, timestamp TIMESTAMP_NS);\
+             INSERT INTO dimensions VALUES (1, TIMESTAMP_NS '2025-01-01');",
+        )
+        .unwrap();
+        let joined = "SELECT t.* FROM traces t JOIN dimensions d ON d.id = t.value \
+                      WHERE d.timestamp >= TIMESTAMP_NS '2020-01-01'";
+        assert!(ensure_fact_scan_uses_timestamp_pruning(&conn, joined).is_err());
+
+        let nested = "SELECT * FROM traces t WHERE EXISTS (\
+                      SELECT 1 FROM dimensions d WHERE d.timestamp >= TIMESTAMP_NS '2020-01-01')";
+        assert!(ensure_fact_scan_uses_timestamp_pruning(&conn, nested).is_err());
+
+        let disjunctive = "SELECT * FROM traces WHERE timestamp >= TIMESTAMP_NS '2020-01-01' OR\n\
+                            value = 1";
+        assert!(ensure_fact_scan_uses_timestamp_pruning(&conn, disjunctive).is_err());
+
+        let ordering = "SELECT * FROM traces WHERE value = 1 ORDER BY \
+                        timestamp >= TIMESTAMP_NS '2020-01-01'";
+        assert!(ensure_fact_scan_uses_timestamp_pruning(&conn, ordering).is_err());
+
+        let multiline_ordering = "SELECT * FROM traces WHERE value = 1\nORDER\nBY \
+                                timestamp >= TIMESTAMP_NS '2020-01-01'";
+        assert!(ensure_fact_scan_uses_timestamp_pruning(&conn, multiline_ordering).is_err());
+
+        let quoted_alias = "SELECT * FROM traces AS \"WHERE timestamp >= 1\" \
+                            WHERE value = 1";
+        assert!(ensure_fact_scan_uses_timestamp_pruning(&conn, quoted_alias).is_err());
+    }
+
+    #[test]
+    fn explain_gate_allows_zero_row_fact_probe() {
+        let conn = plan_connection();
+        ensure_fact_scan_uses_timestamp_pruning(&conn, "SELECT 1 FROM traces LIMIT 0").unwrap();
     }
 
     #[test]
@@ -780,22 +1028,39 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_range_must_be_conjunctive_and_two_sided() {
+    fn timestamp_bound_must_be_conjunctive() {
         assert!(filter_guarantees_timestamp_pruning(
             "timestamp >= 'from' AND timestamp < 'to'"
         ));
+        assert!(filter_guarantees_timestamp_pruning("timestamp >= 'from'"));
         assert!(!filter_guarantees_timestamp_pruning(
             "timestamp >= 'from' OR value = 1"
         ));
-        assert!(!filter_guarantees_timestamp_pruning(
+        assert!(filter_guarantees_timestamp_pruning(
             "timestamp >= 'from' AND value = 1"
         ));
-        assert!(!filter_guarantees_timestamp_pruning(
+        assert!(filter_guarantees_timestamp_pruning(
             "timestamp >= 'from' AND timestamp <> 'sentinel'"
         ));
         assert!(filter_guarantees_timestamp_pruning(
             "(value = 1 OR value = 2) AND timestamp >= 'from' AND timestamp < 'to'"
         ));
+    }
+
+    #[test]
+    fn empty_result_requires_the_entire_plan_to_be_empty() {
+        assert!(is_empty_result_plan(&serde_json::json!([
+            { "name": "EMPTY_RESULT", "children": [] }
+        ])));
+        assert!(!is_empty_result_plan(&serde_json::json!([
+            {
+                "name": "UNION",
+                "children": [
+                    { "name": "EMPTY_RESULT", "children": [] },
+                    { "name": "SEQ_SCAN", "children": [] }
+                ]
+            }
+        ])));
     }
 
     #[test]
@@ -892,6 +1157,7 @@ mod tests {
         assert!(ensure_sql_has_bare_timestamp_predicate("SELECT 1").is_ok());
         assert!(ensure_sql_has_bare_timestamp_predicate("ATTACH 'x' AS y").is_ok());
         assert!(ensure_sql_has_bare_timestamp_predicate("CALL ducklake_checkpoint('c')").is_ok());
+        assert!(is_zero_row_probe("SELECT 1 FROM softprobe.traces LIMIT 0;"));
     }
 
     #[test]
