@@ -30,6 +30,10 @@ fn score_config_from_sql_row(row: &duckdb::Row<'_>) -> Result<Option<ScoreConfig
     let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_raw)
         .or_else(|_| chrono::DateTime::parse_from_str(&timestamp_raw, "%Y-%m-%dT%H:%M:%S%.fZ"))
         .map(|dt| dt.with_timezone(&chrono::Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(&timestamp_raw, "%Y-%m-%d %H:%M:%S%.f")
+                .map(|value| chrono::DateTime::from_naive_utc_and_offset(value, chrono::Utc))
+        })
         .unwrap_or_else(|_| chrono::Utc::now());
     let categories = categories_raw
         .as_deref()
@@ -99,21 +103,18 @@ impl DuckLakeWriter {
                 .map_err(|message| anyhow!("invalid score: {message}"))?;
         }
 
-        let min_micros = scores
+        let min_timestamp = scores
             .iter()
-            .map(|score| score.timestamp.timestamp_micros())
+            .map(|score| score.timestamp)
             .min()
             .expect("non-empty scores");
-        let max_micros = scores
+        let max_timestamp = scores
             .iter()
-            .map(|score| score.timestamp.timestamp_micros())
+            .map(|score| score.timestamp)
             .max()
             .expect("non-empty scores");
-        let dedupe_window = crate::sql::QueryWindow::try_new(
-            DateTime::<Utc>::from_timestamp_micros(min_micros).expect("valid score timestamp"),
-            DateTime::<Utc>::from_timestamp_micros(max_micros).expect("valid score timestamp"),
-        )
-        .expect("min <= max");
+        let dedupe_window =
+            crate::sql::QueryWindow::try_new(min_timestamp, max_timestamp).expect("min <= max");
         let schema = ScoreTable::schema();
         let record_batch = arrow::scores_to_record_batch(&scores, &schema)?;
         self.write_record_batches_internal_with_ducklake(
@@ -130,8 +131,6 @@ impl DuckLakeWriter {
         let pool = self.get_or_create_pool(self.physical_scope())?;
         let score_id = score_id.to_string();
         let workspace_id = self.shared_workspace_id()?.map(str::to_owned);
-        let timestamp = DateTime::<Utc>::from_timestamp_micros(timestamp.timestamp_micros())
-            .expect("valid score timestamp");
         let window = crate::sql::QueryWindow::try_new(timestamp, timestamp)
             .map_err(|error| anyhow!(error))?;
         tokio::task::spawn_blocking(move || {

@@ -395,21 +395,20 @@ pub fn compile_session_detail_sql(
     let sid = sql_string_literal(session_id);
     let exclude = exclude_recording_observation_sql();
     Ok(window
-        .scan_with_both_timestamp_filters("", |bound, score_bound| {
+        .scan_with_timestamp_filter("", |bound| {
             format!(
                 "WITH session_spans AS MATERIALIZED ( \
                    SELECT {projection} FROM traces \
                    WHERE session_id = {sid} AND {exclude} AND {bound} \
                  ), session_scores AS MATERIALIZED ( \
                    SELECT {score_columns} FROM scores \
-                   WHERE {score_bound} \
+                   WHERE {bound} \
                      AND (session_id = {sid} \
                        OR trace_id IN (SELECT DISTINCT trace_id FROM session_spans) \
                        OR span_id IN (SELECT span_id FROM session_spans)) \
                  ), score_aggregate AS ( \
                    SELECT COALESCE(to_json(list(struct_pack( \
-                     score_id := score_id, \"timestamp\" := strftime( \
-                       timestamp AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%S.%fZ'), trace_id := trace_id, \
+                     score_id := score_id, \"timestamp\" := timestamp, trace_id := trace_id, \
                      span_id := span_id, session_id := session_id, name := name, \
                      data_type := data_type, numeric_value := numeric_value, \
                      string_value := string_value, boolean_value := boolean_value, \
@@ -437,7 +436,6 @@ pub fn compile_session_detail_sql(
                 sid = sid,
                 exclude = exclude,
                 bound = bound,
-                score_bound = score_bound,
             )
         })
         .into_sql())
@@ -457,7 +455,7 @@ pub fn compile_scores_for_span_sql(
     let window = QueryWindow::try_new(from, to)?;
     let sid = sql_string_literal(span_id);
     Ok(window
-        .scan_with_timestamptz_filter("", |bound| {
+        .scan_with_timestamp_filter("", |bound| {
             format!(
                 "SELECT {cols} FROM scores WHERE span_id = {sid} AND {bound} ORDER BY timestamp DESC, score_id DESC",
                 cols = score_columns(),
@@ -474,12 +472,12 @@ pub fn compile_scores_for_trace_sql(
     let window = QueryWindow::try_new(from, to)?;
     let tid = sql_string_literal(trace_id);
     Ok(window
-        .scan_with_both_timestamp_filters("", |ns_bound, tz_bound| {
+        .scan_with_timestamp_filter("", |bound| {
             let identity = format!(
-                "(trace_id = {tid} OR span_id IN (SELECT span_id FROM traces WHERE trace_id = {tid} AND {ns_bound}))"
+                "(trace_id = {tid} OR span_id IN (SELECT span_id FROM traces WHERE trace_id = {tid} AND {bound}))"
             );
             format!(
-                "SELECT {cols} FROM scores WHERE {identity} AND {tz_bound} ORDER BY timestamp DESC, score_id DESC",
+                "SELECT {cols} FROM scores WHERE {identity} AND {bound} ORDER BY timestamp DESC, score_id DESC",
                 cols = score_columns(),
             )
         })

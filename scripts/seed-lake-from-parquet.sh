@@ -3,7 +3,7 @@
 # Invoked by: make seed-lake SEED_DIR=...
 #
 # Env:
-#   SEED_DIR   (required) scrubbed seed root with traces|logs|scores/data.parquet
+#   SEED_DIR   (required) scrubbed seed root with traces/logs data.parquet
 #   CONFIG_FILE  thelake YAML (default config.yaml)
 #   SEED_FORCE=1 allow load into non-empty warehouse
 #   DUCKDB_BIN   DuckDB CLI
@@ -136,7 +136,7 @@ PY
   echo "${table}: lake_rows=${rows} parquet_rows=${pq_rows}"
 }
 
-for t in traces logs scores; do
+for t in traces logs; do
   load_table "$t"
 done
 

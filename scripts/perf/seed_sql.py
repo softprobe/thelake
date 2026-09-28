@@ -11,7 +11,6 @@ ONE_CLOCK_PARTITION_BY = "year(timestamp), month(timestamp), day(timestamp)"
 SORTED_BY = {
     "traces": "session_id, trace_id, timestamp",
     "logs": "session_id, timestamp",
-    "scores": "session_id, timestamp",
 }
 
 

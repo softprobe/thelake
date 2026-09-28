@@ -186,7 +186,7 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     let conn = attach(&config.ducklake);
     assert_eq!(timestamp_type(&conn, "traces"), "TIMESTAMP_NS");
     assert_eq!(timestamp_type(&conn, "logs"), "TIMESTAMP_NS");
-    assert_eq!(timestamp_type(&conn, "scores"), "TIMESTAMP WITH TIME ZONE");
+    assert_eq!(timestamp_type(&conn, "scores"), "TIMESTAMP_NS");
 
     let narrow = "SELECT trace_id FROM traces \
                   WHERE timestamp >= '2026-09-10'::TIMESTAMP_NS \
@@ -212,13 +212,13 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     );
 
     let narrow_scores = "SELECT score_id FROM scores \
-                         WHERE timestamp >= TIMESTAMPTZ '2026-09-10 00:00:00+00' \
-                           AND timestamp < TIMESTAMPTZ '2026-09-11 00:00:00+00'";
+                         WHERE timestamp >= TIMESTAMP_NS '2026-09-10 00:00:00' \
+                           AND timestamp < TIMESTAMP_NS '2026-09-11 00:00:00'";
     let score_plan = explain_plan(&conn, narrow_scores);
     assert_eq!(
         files_read_count(&score_plan),
         Some(1),
-        "bare TIMESTAMPTZ predicate must prune score day partitions:\n{score_plan}"
+        "bare TIMESTAMP_NS predicate must prune score day partitions:\n{score_plan}"
     );
     assert!(
         !flatten_plan(&score_plan).contains("day=11"),

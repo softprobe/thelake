@@ -8,15 +8,8 @@ fn utf8() -> DataType {
     DataType::Utf8
 }
 
-fn ts_utc() -> DataType {
-    // OTLP scores are the microsecond/TIMESTAMPTZ family. Trace/log event
-    // clocks below intentionally use `ts_utc_nanos` for their nanosecond API.
-    DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()))
-}
-
-fn ts_utc_nanos() -> DataType {
-    // DuckDB's timezone-bearing TIMESTAMP is microsecond precision. Loki and Tempo
-    // expose Unix nanoseconds, so those tables use timezone-free TIMESTAMP_NS.
+fn timestamp_ns() -> DataType {
+    // DuckLake event timestamps are UTC instants stored as timezone-free nanoseconds.
     DataType::Timestamp(TimeUnit::Nanosecond, None)
 }
 
@@ -55,7 +48,7 @@ fn promoted_fields(base: &[Field], columns: &[PromotionColumn]) -> Vec<Field> {
                 PromotionDataType::Bool => DataType::Boolean,
                 PromotionDataType::Int64 => DataType::Int64,
                 PromotionDataType::Double | PromotionDataType::Decimal => DataType::Float64,
-                PromotionDataType::Timestamp => ts_utc(),
+                PromotionDataType::Timestamp => timestamp_ns(),
             };
             Field::new(&column.name, data_type, true)
         })
@@ -85,7 +78,7 @@ impl TraceTable {
     pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> Schema {
         let events_element = DataType::Struct(Fields::from(vec![
             req("name", utf8()),
-            req("timestamp", ts_utc_nanos()),
+            req("timestamp", timestamp_ns()),
             opt("attributes", string_map()),
         ]));
         let mut fields = vec![
@@ -98,8 +91,8 @@ impl TraceTable {
             opt("tenant_id", utf8()),
             req("message_type", utf8()),
             opt("span_kind", utf8()),
-            req("timestamp", ts_utc_nanos()),
-            opt("end_timestamp", ts_utc_nanos()),
+            req("timestamp", timestamp_ns()),
+            opt("end_timestamp", timestamp_ns()),
             opt_hot_map("traces", "attributes"),
             opt_hot_map("traces", "resource_attributes"),
             opt_hot_map("traces", "instrumentation_scope"),
@@ -150,7 +143,7 @@ impl ScoreTable {
     pub fn schema() -> Schema {
         Schema::new(vec![
             req("score_id", utf8()),
-            req("timestamp", ts_utc()),
+            req("timestamp", timestamp_ns()),
             opt("trace_id", utf8()),
             opt("span_id", utf8()),
             opt("session_id", utf8()),
@@ -180,7 +173,7 @@ impl ScoreConfigTable {
     pub fn schema() -> Schema {
         Schema::new(vec![
             req("config_id", utf8()),
-            req("timestamp", ts_utc()),
+            req("timestamp", timestamp_ns()),
             req("name", utf8()),
             req("data_type", utf8()),
             opt("description", utf8()),
@@ -211,8 +204,8 @@ impl OtlpLogsTable {
         let mut fields = vec![
             opt("session_id", utf8()),
             // Loki's public log contract is nanoseconds since Unix epoch.
-            req("timestamp", ts_utc_nanos()),
-            opt("observed_timestamp", ts_utc_nanos()),
+            req("timestamp", timestamp_ns()),
+            opt("observed_timestamp", timestamp_ns()),
             req("severity_number", DataType::Int32),
             req("severity_text", utf8()),
             req("body", utf8()),
@@ -320,6 +313,30 @@ mod tests {
                 .unwrap()
                 .data_type(),
             &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+    }
+
+    #[test]
+    fn all_ducklake_timestamps_use_nanoseconds() {
+        let timestamp_ns = DataType::Timestamp(TimeUnit::Nanosecond, None);
+        for (table, schema) in [
+            ("traces", TraceTable::schema()),
+            ("logs", OtlpLogsTable::schema()),
+            ("scores", ScoreTable::schema()),
+            ("score_configs", ScoreConfigTable::schema()),
+        ] {
+            assert_eq!(
+                schema.field_with_name("timestamp").unwrap().data_type(),
+                &timestamp_ns,
+                "{table}.timestamp"
+            );
+        }
+        assert_eq!(
+            TraceTable::schema()
+                .field_with_name("end_timestamp")
+                .unwrap()
+                .data_type(),
+            &timestamp_ns
         );
     }
 }

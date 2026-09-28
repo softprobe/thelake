@@ -948,7 +948,6 @@ mod tests {
             "details identity before timestamp: {}",
             details.spans
         );
-        // Metrics keep TIMESTAMPTZ (carve-out); not OTLP day+timestamp inventory.
     }
 
     #[test]

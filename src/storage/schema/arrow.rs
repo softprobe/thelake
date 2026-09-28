@@ -5,7 +5,7 @@ use crate::storage::schema::variant::variant_json_to_string_map;
 use anyhow::Result;
 use arrow::array::{
     ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, MapArray, StringArray,
-    StructArray, TimestampMicrosecondArray, TimestampNanosecondArray,
+    StructArray, TimestampNanosecondArray,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::Schema;
@@ -31,15 +31,17 @@ pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<Recor
             .map(|score| score.score_id.as_str())
             .collect::<Vec<_>>(),
     ));
-    let timestamps: ArrayRef = Arc::new(
-        TimestampMicrosecondArray::from(
-            scores
-                .iter()
-                .map(|score| score.timestamp.timestamp_micros())
-                .collect::<Vec<_>>(),
-        )
-        .with_timezone_utc(),
-    );
+    let timestamps: ArrayRef = Arc::new(TimestampNanosecondArray::from(
+        scores
+            .iter()
+            .map(|score| {
+                score
+                    .timestamp
+                    .timestamp_nanos_opt()
+                    .ok_or_else(|| anyhow::anyhow!("score timestamp is outside TIMESTAMP_NS range"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    ));
     let trace_ids: ArrayRef = Arc::new(StringArray::from(
         scores
             .iter()
@@ -171,15 +173,16 @@ pub fn score_configs_to_record_batch(
             .map(|c| c.config_id.as_str())
             .collect::<Vec<_>>(),
     ));
-    let timestamps: ArrayRef = Arc::new(
-        TimestampMicrosecondArray::from(
-            configs
-                .iter()
-                .map(|c| c.timestamp.timestamp_micros())
-                .collect::<Vec<_>>(),
-        )
-        .with_timezone_utc(),
-    );
+    let timestamps: ArrayRef = Arc::new(TimestampNanosecondArray::from(
+        configs
+            .iter()
+            .map(|config| {
+                config.timestamp.timestamp_nanos_opt().ok_or_else(|| {
+                    anyhow::anyhow!("score config timestamp is outside TIMESTAMP_NS range")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    ));
     let names: ArrayRef = Arc::new(StringArray::from(
         configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
     ));
@@ -386,21 +389,18 @@ fn promoted_array_from_values(
                 .map(|v| v.as_ref().and_then(|s| s.parse::<bool>().ok()))
                 .collect::<Vec<_>>(),
         )),
-        arrow::datatypes::DataType::Timestamp(_, _) => Arc::new(
-            TimestampMicrosecondArray::from(
-                values
-                    .iter()
-                    .map(|v| {
-                        v.as_ref().and_then(|s| {
-                            chrono::DateTime::parse_from_rfc3339(s)
-                                .ok()
-                                .map(|t| t.timestamp_micros())
-                        })
+        arrow::datatypes::DataType::Timestamp(_, _) => Arc::new(TimestampNanosecondArray::from(
+            values
+                .iter()
+                .map(|value| {
+                    value.as_ref().and_then(|raw| {
+                        chrono::DateTime::parse_from_rfc3339(raw)
+                            .ok()
+                            .and_then(|timestamp| timestamp.timestamp_nanos_opt())
                     })
-                    .collect::<Vec<_>>(),
-            )
-            .with_timezone_utc(),
-        ),
+                })
+                .collect::<Vec<_>>(),
+        )),
         _ => Arc::new(StringArray::from(values)),
     }
 }
@@ -1082,7 +1082,7 @@ fn build_reserved_metadata_array(
 mod tests {
     use super::*;
     use crate::models::{Span, SpanEvent};
-    use crate::storage::schema::tables::OtlpLogsTable;
+    use crate::storage::schema::tables::{OtlpLogsTable, ScoreTable};
     use arrow::array::TimestampNanosecondArray;
     use std::collections::HashMap;
 
@@ -1253,5 +1253,38 @@ mod tests {
             .expect("log timestamp column must use nanoseconds");
 
         assert_eq!(timestamps.values(), &[first_ns, second_ns]);
+    }
+
+    #[test]
+    fn score_arrow_timestamp_keeps_nanoseconds() {
+        let timestamp = chrono::DateTime::from_timestamp_nanos(1_800_000_000_123_456_789);
+        let score = Score {
+            score_id: "score-1".into(),
+            timestamp,
+            trace_id: Some("trace-1".into()),
+            span_id: None,
+            session_id: None,
+            name: "quality".into(),
+            data_type: ScoreDataType::Numeric,
+            numeric_value: Some(0.9),
+            string_value: None,
+            boolean_value: None,
+            source: ScoreSource::Evaluator,
+            comment: None,
+            config_id: None,
+            author_id: None,
+            metadata: HashMap::new(),
+            tenant_id: None,
+        };
+        let batch = scores_to_record_batch(&[score], &ScoreTable::schema()).unwrap();
+        let timestamps = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .expect("score timestamp column must use nanoseconds");
+        assert_eq!(
+            timestamps.value(0),
+            timestamp.timestamp_nanos_opt().unwrap()
+        );
     }
 }

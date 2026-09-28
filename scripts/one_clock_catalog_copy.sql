@@ -12,7 +12,7 @@ SELECT * EXCLUDE (record_date) FROM old.traces;
 INSERT INTO new.logs BY NAME
 SELECT * EXCLUDE (record_date) FROM old.logs;
 
-INSERT INTO new.scores BY NAME
-SELECT * EXCLUDE (record_date) FROM old.scores;
+-- Scores and score_configs are test data. They are intentionally not copied;
+-- normal schema initialization creates fresh empty tables after cutover.
 
 -- After verify + EXPLAIN prune: flip config to `new`, DETACH/drop `old`.

@@ -1066,10 +1066,10 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE traces (timestamp TIMESTAMP_NS, value INTEGER);\
              CREATE TABLE logs (timestamp TIMESTAMP_NS, value INTEGER);\
-             CREATE TABLE scores (timestamp TIMESTAMPTZ, value INTEGER);\
+             CREATE TABLE scores (timestamp TIMESTAMP_NS, value INTEGER);\
              INSERT INTO traces VALUES (TIMESTAMP_NS '2025-01-01', 1), (TIMESTAMP_NS '2027-01-01', 2);\
              INSERT INTO logs VALUES (TIMESTAMP_NS '2025-01-01', 1), (TIMESTAMP_NS '2027-01-01', 2);\
-             INSERT INTO scores VALUES (TIMESTAMPTZ '2025-01-01', 1), (TIMESTAMPTZ '2027-01-01', 2);",
+             INSERT INTO scores VALUES (TIMESTAMP_NS '2025-01-01', 1), (TIMESTAMP_NS '2027-01-01', 2);",
         )
         .unwrap();
         conn
@@ -1186,8 +1186,8 @@ mod tests {
         ensure_fact_scan_uses_timestamp_pruning(&conn, &generated_scores).unwrap();
 
         let sql = "SELECT s.value FROM scores AS s WHERE \
-                   s.timestamp >= TIMESTAMPTZ '2020-01-01' AND \
-                   s.timestamp < TIMESTAMPTZ '2030-01-01' AND \
+                   s.timestamp >= TIMESTAMP_NS '2020-01-01' AND \
+                   s.timestamp < TIMESTAMP_NS '2030-01-01' AND \
                    s.value IN (SELECT t.value FROM traces AS t WHERE \
                      t.timestamp >= TIMESTAMP_NS '2020-01-01' AND \
                      t.timestamp < TIMESTAMP_NS '2030-01-01')";
@@ -1198,9 +1198,9 @@ mod tests {
     fn explain_gate_rejects_a_multi_source_query_with_an_unbounded_fact_source() {
         let conn = plan_connection();
         let sql = "SELECT s.value FROM scores AS s WHERE \
-                   s.timestamp >= TIMESTAMPTZ '2020-01-01' AND EXISTS (\
+                   s.timestamp >= TIMESTAMP_NS '2020-01-01' AND EXISTS (\
                      SELECT 1 FROM traces AS t WHERE t.value = s.value AND \
-                       s.timestamp < TIMESTAMPTZ '2030-01-01')";
+                       s.timestamp < TIMESTAMP_NS '2030-01-01')";
         let error = ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap_err();
         assert!(error
             .to_string()
@@ -1323,11 +1323,11 @@ mod tests {
         let dedupe_insert = "INSERT INTO scores SELECT incoming.* FROM \
                              (VALUES (1)) incoming(value) WHERE NOT EXISTS (\
                              SELECT 1 FROM scores existing WHERE existing.value = incoming.value \
-                             AND existing.timestamp >= TIMESTAMPTZ '2020-01-01')";
+                             AND existing.timestamp >= TIMESTAMP_NS '2020-01-01')";
         let outer_only = "SELECT * FROM scores WHERE EXISTS (\
-                          SELECT timestamp >= TIMESTAMPTZ '2020-01-01')";
+                          SELECT timestamp >= TIMESTAMP_NS '2020-01-01')";
         let order_only = "SELECT * FROM scores WHERE value = 1 ORDER BY \
-                          timestamp >= TIMESTAMPTZ '2020-01-01'";
+                          timestamp >= TIMESTAMP_NS '2020-01-01'";
         let delimiter_text = "WITH base AS (SELECT timestamp, ')' AS marker FROM traces WHERE \
                               timestamp >= '2020-01-01') SELECT * FROM base";
         let delimiter_comment = "WITH base AS (SELECT timestamp /* ) FROM fake */ FROM traces \
@@ -1346,7 +1346,7 @@ mod tests {
         let bounded = "INSERT INTO scores SELECT incoming.* FROM (VALUES (1)) incoming(value) \
                        WHERE NOT EXISTS (SELECT 1 FROM scores existing \
                        WHERE existing.value = incoming.value AND \
-                       existing.timestamp >= TIMESTAMPTZ '2020-01-01')";
+                       existing.timestamp >= TIMESTAMP_NS '2020-01-01')";
         let unbounded = "INSERT INTO scores SELECT incoming.* FROM (VALUES (1)) incoming(value) \
                          WHERE NOT EXISTS (SELECT 1 FROM scores existing \
                          WHERE existing.value = incoming.value)";
@@ -1369,13 +1369,13 @@ mod tests {
         let conn = plan_connection();
         conn.execute_batch("DELETE FROM scores").unwrap();
         let bounded = "INSERT INTO scores BY NAME SELECT incoming.* FROM \
-                       (VALUES (TIMESTAMPTZ '2025-01-01', 1)) incoming(timestamp, value) \
+                       (VALUES (TIMESTAMP_NS '2025-01-01', 1)) incoming(timestamp, value) \
                        WHERE NOT EXISTS (SELECT 1 FROM scores existing \
                        WHERE existing.value = incoming.value AND \
-                       existing.timestamp >= TIMESTAMPTZ '2020-01-01' AND \
-                       existing.timestamp < TIMESTAMPTZ '2030-01-01')";
+                       existing.timestamp >= TIMESTAMP_NS '2020-01-01' AND \
+                       existing.timestamp < TIMESTAMP_NS '2030-01-01')";
         let unbounded = "INSERT INTO scores BY NAME SELECT incoming.* FROM \
-                         (VALUES (TIMESTAMPTZ '2025-01-01', 1)) incoming(timestamp, value) \
+                         (VALUES (TIMESTAMP_NS '2025-01-01', 1)) incoming(timestamp, value) \
                          WHERE NOT EXISTS (SELECT 1 FROM scores existing \
                          WHERE existing.value = incoming.value)";
 
@@ -1447,7 +1447,7 @@ mod tests {
         let conn = plan_connection();
         conn.execute_batch("DELETE FROM scores").unwrap();
         let sql = "INSERT INTO scores SELECT * FROM scores WHERE \
-                   timestamp >= TIMESTAMPTZ '2020-01-01'";
+                   timestamp >= TIMESTAMP_NS '2020-01-01'";
         ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
     }
 
@@ -1712,7 +1712,7 @@ mod tests {
         )
         .is_ok());
         assert!(ensure_sql_has_bare_timestamp_predicate(
-            "SELECT * FROM softprobe.logs WHERE timestamp <= TIMESTAMPTZ '2026-09-11'"
+            "SELECT * FROM softprobe.logs WHERE timestamp <= TIMESTAMP_NS '2026-09-11'"
         )
         .is_ok());
     }
@@ -1747,12 +1747,12 @@ mod tests {
     fn allows_values_insert_without_timestamp_predicate() {
         assert!(ensure_sql_has_bare_timestamp_predicate(
             "INSERT INTO softprobe.scores (score_id, name, timestamp)\n\
-             SELECT * FROM (VALUES ('s1', 'n', '2026-01-01'::TIMESTAMPTZ));"
+             SELECT * FROM (VALUES ('s1', 'n', '2026-01-01'::TIMESTAMP_NS));"
         )
         .is_ok());
         assert!(ensure_sql_has_bare_timestamp_predicate(
             "INSERT INTO softprobe.logs (session_id, timestamp, body)\n\
-             VALUES\n('sess', TIMESTAMPTZ '2026-01-01', 'hello');"
+             VALUES\n('sess', TIMESTAMP_NS '2026-01-01', 'hello');"
         )
         .is_ok());
     }

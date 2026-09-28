@@ -27,21 +27,6 @@ pub(crate) use bounds::{execute_batch_checked, execute_batch_for_parquet_ingest,
 pub use bounds::{query_window_from_exclusive_ns, QueryWindow, TimestampFilteredSql};
 pub use literal::{sql_string_literal, timestamp_ns_literal, timestamptz_literal};
 
-/// UTC calendar-day expression for a `TIMESTAMPTZ` index timestamp.
-/// DuckDB otherwise applies `date_trunc` in the session timezone.
-pub fn utc_calendar_day_expr(column: &str) -> String {
-    format!("date_trunc('day', {column} AT TIME ZONE 'UTC')")
-}
-
-/// Equality predicate for two rows that belong to the same UTC day.
-pub fn same_utc_calendar_day(left: &str, right: &str) -> String {
-    format!(
-        "{} = {}",
-        utc_calendar_day_expr(left),
-        utc_calendar_day_expr(right)
-    )
-}
-
 pub use schema::{
     fact_table_specs, insert_order_by, is_otlp_table, qualified_table_name, table_spec, TableSpec,
     LOGS, ONE_CLOCK_PARTITION_BY, OTLP_TABLES, SCORES, SCORE_CONFIGS, TRACES,
