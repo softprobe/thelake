@@ -39,14 +39,17 @@ fn span_request(
     trace_id: [u8; 16],
     span_id: [u8; 8],
 ) -> ExportTraceServiceRequest {
+    let start_time_unix_nano = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .expect("current timestamp fits nanoseconds") as u64;
     let generation = Span {
         trace_id: trace_id.to_vec(),
         span_id: span_id.to_vec(),
         parent_span_id: vec![],
         name: "chat.completions".to_string(),
         kind: span::SpanKind::Internal as i32,
-        start_time_unix_nano: 1_720_000_000_000_000_000,
-        end_time_unix_nano: 1_720_000_001_000_000_000,
+        start_time_unix_nano,
+        end_time_unix_nano: start_time_unix_nano + 1_000_000_000,
         attributes: vec![
             string_kv("sp.session.id", session_id),
             string_kv("gen_ai.operation.name", "chat"),

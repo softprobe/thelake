@@ -664,7 +664,7 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     let score_id = "detail-session-score";
     let score = json!({
         "score_id": score_id,
-        "timestamp": (Utc::now() - ChronoDuration::seconds(80)).to_rfc3339(),
+        "timestamp": (Utc::now() - ChronoDuration::seconds(50)).to_rfc3339(),
         "trace_id": hex::encode([spec.trace; 16]),
         "span_id": hex::encode([spec.trace.wrapping_add(0x40); 8]),
         "session_id": "detail-sess",
