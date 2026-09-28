@@ -320,12 +320,11 @@ fn ensure_one_fact_scan_uses_timestamp_pruning(
     });
     if let Some((table, _)) = unpruned_scan {
         // DuckDB can prove a timestamp predicate redundant from file statistics
-        // when one fact source's entire contents fit inside the requested bound.
-        // The bare SQL predicate is still required, and multi-source queries
-        // remain subject to per-scan physical filter checks.
-        let optimized_away_bound = fact_scans.len() == 1
-            && fact_table_source_count(sql) == 1
-            && has_single_fact_source_timestamp_bound(sql);
+        // after inlining one bounded fact source into multiple physical scans.
+        // The source-local SQL predicate remains required; queries with multiple
+        // logical fact sources stay subject to per-scan physical filter checks.
+        let optimized_away_bound =
+            fact_table_source_count(sql) == 1 && has_single_fact_source_timestamp_bound(sql);
         if !optimized_away_bound {
             anyhow::bail!(
                 "DuckDB plan scans fact table `{table}` without a conjunctive pushed timestamp filter"
@@ -1070,6 +1069,21 @@ mod tests {
                    qualified AS (SELECT value FROM base) \
                    SELECT base.value FROM base \
                    JOIN matching USING (value) JOIN qualified USING (value)";
+        let mut statement = conn
+            .prepare(&format!("EXPLAIN (FORMAT JSON) {sql}"))
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap();
+        let plan: serde_json::Value =
+            serde_json::from_str(&rows.collect::<Result<Vec<_>, _>>().unwrap().join("\n")).unwrap();
+        let mut fact_scans = Vec::new();
+        collect_fact_scans(&plan, &mut fact_scans);
+        assert!(!fact_scans.is_empty());
+        assert!(fact_scans.iter().all(|(_, filters)| !filters
+            .as_deref()
+            .map(filter_guarantees_timestamp_pruning)
+            .unwrap_or(false)));
         ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
 
         let lower_bound = "WITH base AS (SELECT timestamp FROM traces WHERE \
@@ -1078,6 +1092,80 @@ mod tests {
                            timestamp < TIMESTAMP_NS '2030-01-01') SELECT * FROM base";
         assert!(has_single_fact_source_timestamp_bound(lower_bound));
         assert!(has_single_fact_source_timestamp_bound(upper_bound));
+    }
+
+    #[test]
+    fn tempo_trace_scan_keeps_its_fact_timestamp_filter_when_cte_stats_elide_it() {
+        let conn = plan_connection();
+        conn.execute_batch(
+            "ALTER TABLE traces ADD COLUMN trace_id VARCHAR;\
+             ALTER TABLE traces ADD COLUMN span_id VARCHAR;\
+             ALTER TABLE traces ADD COLUMN parent_span_id VARCHAR;\
+             ALTER TABLE traces ADD COLUMN message_type VARCHAR;\
+             ALTER TABLE traces ADD COLUMN span_kind VARCHAR;\
+             ALTER TABLE traces ADD COLUMN app_id VARCHAR;\
+             ALTER TABLE traces ADD COLUMN end_timestamp TIMESTAMP_NS;\
+             ALTER TABLE traces ADD COLUMN attributes JSON;\
+             ALTER TABLE traces ADD COLUMN resource_attributes JSON;\
+             ALTER TABLE traces ADD COLUMN instrumentation_scope JSON;\
+             ALTER TABLE traces ADD COLUMN links JSON;\
+             ALTER TABLE traces ADD COLUMN status_code VARCHAR;\
+             ALTER TABLE traces ADD COLUMN status_message VARCHAR;\
+             ALTER TABLE traces ADD COLUMN events JSON;\
+             ALTER TABLE traces ADD COLUMN observation_type VARCHAR;\
+             ALTER TABLE traces ADD COLUMN model_name VARCHAR;\
+             ALTER TABLE traces ADD COLUMN model_provider VARCHAR;\
+             ALTER TABLE traces ADD COLUMN user_id VARCHAR;\
+             ALTER TABLE traces ADD COLUMN session_attr_id VARCHAR;\
+             ALTER TABLE traces ADD COLUMN service_name VARCHAR;",
+        )
+        .unwrap();
+        conn.execute_batch("UPDATE traces SET trace_id = 'trace-id'")
+            .unwrap();
+        let tags = std::collections::BTreeMap::new();
+        let start = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let end = chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let sql = crate::sql::tempo::trace_scan_sql(
+            crate::sql::tempo::TraceScanParams {
+                tags: &tags,
+                selector: None,
+                min_duration_ns: None,
+                max_duration_ns: None,
+                start_ns: Some(start),
+                end_ns: Some(end),
+                limit: 100,
+            },
+            Some("trace-id"),
+        )
+        .unwrap();
+
+        assert!(has_single_fact_source_timestamp_bound(&sql));
+        let mut statement = conn
+            .prepare(&format!("EXPLAIN (FORMAT JSON) {sql}"))
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap();
+        let plan: serde_json::Value =
+            serde_json::from_str(&rows.collect::<Result<Vec<_>, _>>().unwrap().join("\n")).unwrap();
+        let mut fact_scans = Vec::new();
+        collect_fact_scans(&plan, &mut fact_scans);
+        assert!(!fact_scans.is_empty());
+        assert!(fact_scans.iter().all(|(_, filters)| !filters
+            .as_deref()
+            .map(filter_guarantees_timestamp_pruning)
+            .unwrap_or(false)));
+        assert!(
+            fact_scans.len() > 1,
+            "expected CTE inlining: {fact_scans:?}"
+        );
+        ensure_fact_scan_uses_timestamp_pruning(&conn, &sql).unwrap();
     }
 
     #[test]
