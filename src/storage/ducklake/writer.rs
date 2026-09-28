@@ -446,6 +446,13 @@ impl DuckLakeWriter {
             scope.attach_alias(),
             scope_opt
         );
+        if let Some(opt_inlining) =
+            traces_data_inlining_option_sql(scope.attach_alias(), &qualified_table, table_name)
+        {
+            conn.execute_batch(&opt_inlining).map_err(|err| {
+                anyhow!("failed to disable DuckLake data inlining for {qualified_table}: {err}")
+            })?;
+        }
         if let Err(err) = conn.execute_batch(&opt_size) {
             warn!(
                 "DuckLake target_file_size set_option skipped on ensure: {}",
@@ -746,6 +753,20 @@ impl DuckLakeWriter {
     }
 }
 
+fn traces_data_inlining_option_sql(
+    catalog_alias: &str,
+    qualified_table: &str,
+    table_name: &str,
+) -> Option<String> {
+    if table_name != "traces" {
+        return None;
+    }
+    let scope = ducklake_set_option_scope_for_qualified(qualified_table);
+    Some(format!(
+        "CALL {catalog_alias}.set_option('data_inlining_row_limit', 0, {scope});"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,6 +774,22 @@ mod tests {
     use crate::models::Log;
     use crate::storage::schema::{arrow, OtlpLogsTable};
     use std::collections::HashMap;
+
+    #[test]
+    fn only_traces_disable_catalog_data_inlining() {
+        assert_eq!(
+            traces_data_inlining_option_sql(
+                "softprobe",
+                "softprobe.thelake.traces",
+                "traces"
+            ),
+            Some("CALL softprobe.set_option('data_inlining_row_limit', 0, schema => 'thelake', table_name => 'traces');".to_string())
+        );
+        assert_eq!(
+            traces_data_inlining_option_sql("softprobe", "softprobe.thelake.scores", "scores"),
+            None
+        );
+    }
 
     #[test]
     fn arrow_field_to_duck_add_type_maps_bags_and_dates() {

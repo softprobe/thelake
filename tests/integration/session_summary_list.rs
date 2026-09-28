@@ -666,7 +666,18 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
         tokens: 40,
         cost: 0.02,
     };
-    ingest(&router, llm_span(&spec)).await;
+    let mut first_span = llm_span(&spec);
+    let span = &mut first_span.resource_spans[0].scope_spans[0].spans[0];
+    span.events.push(span::Event {
+        time_unix_nano: span.start_time_unix_nano + 123,
+        name: "gen_ai.content.prompt".to_string(),
+        attributes: vec![string_kv("content", "inline-safe-event")],
+        dropped_attributes_count: 0,
+    });
+    let expected_event_timestamp =
+        chrono::DateTime::<Utc>::from_timestamp_nanos(span.start_time_unix_nano as i64 + 123)
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    ingest(&router, first_span).await;
     ingest(&router, llm_span(&second_spec)).await;
     flush(&state).await;
     assert!(dirty_count(&state, &schema).await >= 1);
@@ -784,6 +795,7 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
     assert_eq!(body["session_id"], "detail-sess");
+    assert_eq!(body["events_complete"], true);
     assert_eq!(body["from"], summary_from);
     assert_eq!(body["to"], summary_to);
     assert_eq!(
@@ -797,6 +809,26 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     assert!((body["total_cost"].as_f64().unwrap() - 0.12).abs() < 1e-9);
     assert!(body["spans"][0]["attributes"].is_object());
     assert!(body["spans"][0]["events"].is_array());
+    let event_span = body["spans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|span| !span["events"].as_array().unwrap().is_empty())
+        .expect("event-bearing span survives trace detail");
+    assert_eq!(event_span["events"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        event_span["events"][0]["attributes"]["content"], "inline-safe-event",
+        "event payload survives trace detail"
+    );
+    assert_eq!(
+        event_span["events"][0]["timestamp"], expected_event_timestamp,
+        "event timestamps retain nanosecond precision"
+    );
+    let traces_data = temp.path().join("data").join(&schema).join("traces");
+    assert!(
+        parquet_files(&traces_data) > 0,
+        "trace rows must be stored in Parquet, not inlined into the catalog"
+    );
     assert_eq!(body["scores"].as_array().unwrap().len(), 1);
     assert_eq!(body["scores"][0]["score_id"], score_id);
     assert_eq!(body["scores"][0]["numeric_value"], 0.91);

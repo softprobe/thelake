@@ -83,7 +83,7 @@ pub fn compile_session_recording_sql(
             format!(
                 "SELECT {projection} FROM traces WHERE session_id = {sid} AND {obs_type} = 'recording' AND {bound} \
                  ORDER BY timestamp ASC, span_id ASC LIMIT {limit}",
-                projection = observation_projection(true),
+                projection = observation_projection(true, true),
             )
         })
         .into_sql())
@@ -302,7 +302,7 @@ pub fn compile_span_search_sql(request: &SpanSearchRequest) -> Result<String, St
             }
             format!(
                 "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
-                projection = observation_projection(false),
+                projection = observation_projection(false, false),
             )
         })
         .into_sql())
@@ -319,7 +319,7 @@ pub fn compile_span_detail_sql(
         .scan_with_timestamp_filter("", |bound| {
             format!(
                 "SELECT {projection} FROM traces WHERE span_id = {sid} AND {bound} LIMIT 1",
-                projection = observation_projection(true),
+                projection = observation_projection(true, true),
             )
         })
         .into_sql())
@@ -374,7 +374,7 @@ pub fn compile_trace_spans_sql(
             }
             format!(
                 "SELECT {projection} FROM traces WHERE {where_sql} ORDER BY timestamp DESC, span_id DESC LIMIT {fetch}",
-                projection = observation_projection(true),
+                projection = observation_projection(true, true),
             )
         })
         .into_sql())
@@ -390,6 +390,26 @@ pub fn compile_session_detail_sql(
     session_id: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+) -> Result<String, String> {
+    compile_session_detail_sql_with_events(session_id, from, to, true)
+}
+
+/// Session detail fallback for rows whose nested events cannot be read from
+/// DuckLake's catalog-inlined representation. Keeps all scalar span fields,
+/// attributes, scores, and aggregates available while omitting only events.
+pub fn compile_session_detail_sql_without_events(
+    session_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<String, String> {
+    compile_session_detail_sql_with_events(session_id, from, to, false)
+}
+
+fn compile_session_detail_sql_with_events(
+    session_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    include_events: bool,
 ) -> Result<String, String> {
     let window = QueryWindow::try_new(from, to)?;
     let sid = sql_string_literal(session_id);
@@ -431,7 +451,7 @@ pub fn compile_session_detail_sql(
                  SELECT session_spans.*, session_aggregate.* \
                  FROM session_spans CROSS JOIN session_aggregate \
                  ORDER BY start_time DESC, span_id DESC",
-                projection = observation_projection(true),
+                projection = observation_projection(true, include_events),
                 score_columns = score_columns("CAST(metadata AS JSON)"),
                 sid = sid,
                 exclude = exclude,
@@ -484,7 +504,7 @@ pub fn compile_scores_for_trace_sql(
         .into_sql())
 }
 
-fn observation_projection(include_payload: bool) -> String {
+fn observation_projection(include_payload: bool, include_events: bool) -> String {
     let mut cols = vec![
         "trace_id".to_string(),
         "span_id".to_string(),
@@ -505,7 +525,14 @@ fn observation_projection(include_payload: bool) -> String {
     ];
     if include_payload {
         cols.push(variant_as_json("attributes"));
-        cols.push("events".to_string());
+        // DuckLake returns inlined LIST<STRUCT> rows through Arrow incorrectly
+        // when `events` is projected directly. Keep the nested value on the
+        // JSON result path, matching the storage API's previous workaround.
+        if include_events {
+            cols.push(variant_as_json("events"));
+        } else {
+            cols.push("'[]' AS events".to_string());
+        }
     }
     cols.join(", ")
 }

@@ -5,15 +5,16 @@ use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreDataType, ScoreSource};
 use crate::sql::llm::{
     clamp_limit, compile_scores_for_span_sql, compile_scores_for_trace_sql,
-    compile_session_detail_sql, compile_session_recording_sql, compile_span_detail_sql,
-    compile_span_search_sql, compile_trace_spans_sql, compile_trace_summary_sql,
-    DEFAULT_SEARCH_LIMIT, DEFAULT_SESSION_LIMIT, DEFAULT_TRACE_LIMIT,
+    compile_session_detail_sql, compile_session_detail_sql_without_events,
+    compile_session_recording_sql, compile_span_detail_sql, compile_span_search_sql,
+    compile_trace_spans_sql, compile_trace_summary_sql, DEFAULT_SEARCH_LIMIT,
+    DEFAULT_SESSION_LIMIT, DEFAULT_TRACE_LIMIT,
 };
 // Production session search is served by RuntimeEngine::search_session_summary
 // (Postgres session_summary). compile_session_search_sql remains unit-test only.
 #[cfg(test)]
 use crate::sql::llm::compile_session_search_sql;
-use crate::storage::schema::variant::variant_json_to_string_map;
+use crate::storage::schema::variant::{parse_projected_json_value, variant_json_to_string_map};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -118,6 +119,9 @@ pub struct SessionDetail {
     pub output_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
     pub total_cost: Option<f64>,
+    /// False only when DuckLake cannot read a catalog-inlined nested event
+    /// row and the handler serves scalar session data without events.
+    pub events_complete: bool,
     pub spans: Vec<SpanDetail>,
     pub scores: Vec<Score>,
 }
@@ -294,10 +298,36 @@ pub async fn get_session(
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
     let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
     let detail_sql = compile_session_detail_sql(&session_id, from, to).map_err(bad_request)?;
-    let detail_result = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(detail_sql)?)
+    let fallback_sql =
+        compile_session_detail_sql_without_events(&session_id, from, to).map_err(bad_request)?;
+    let query_state = state.clone();
+    let query_tenant = tenant_ref.cloned();
+    let (detail_result, events_complete) =
+        execute_session_detail_with_event_fallback(move |include_events| {
+            let state = query_state.clone();
+            let tenant = query_tenant.clone();
+            let sql = if include_events {
+                detail_sql.clone()
+            } else {
+                fallback_sql.clone()
+            };
+            async move {
+                let query = crate::sql::trusted::approved_query(sql)
+                    .map_err(|error| anyhow::anyhow!(error))?;
+                let tenant_ref = tenant.as_ref();
+                state
+                    .execute_tenant_scoped_trusted_sql(tenant_ref, query)
+                    .await
+            }
+        })
         .await
         .map_err(storage_error)?;
+    if !events_complete {
+        warn!(
+            session_id = %session_id,
+            "DuckLake nested event read failed; session detail is missing events"
+        );
+    }
     let detail_row = detail_result.rows.first().ok_or_else(not_found)?;
     let aggregate =
         map_session_aggregate(&detail_result.columns, detail_row).ok_or_else(not_found)?;
@@ -323,9 +353,38 @@ pub async fn get_session(
         output_tokens: aggregate.output_tokens,
         total_tokens: aggregate.total_tokens,
         total_cost: aggregate.total_cost,
+        events_complete,
         spans,
         scores,
     }))
+}
+
+async fn execute_session_detail_with_event_fallback<T, F, Fut>(
+    mut execute: F,
+) -> Result<(T, bool), anyhow::Error>
+where
+    F: FnMut(bool) -> Fut,
+    Fut: std::future::Future<Output = Result<T, anyhow::Error>>,
+{
+    match execute(true).await {
+        Ok(result) => Ok((result, true)),
+        Err(error) if is_inlined_nested_event_failure(&error) => {
+            execute(false).await.map(|result| (result, false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_inlined_nested_event_failure(error: &anyhow::Error) -> bool {
+    error
+        .root_cause()
+        .to_string()
+        .trim_start()
+        .lines()
+        .next()
+        .is_some_and(|line| {
+            line.starts_with("INTERNAL Error: Attempted to access index 0 within vector of size 0")
+        })
 }
 
 const RECORDING_EVENT_NAME: &str = "sp.recording.batch";
@@ -1024,7 +1083,8 @@ fn map_string_map(value: Option<&Value>) -> HashMap<String, String> {
 }
 
 fn map_events(value: Option<&Value>) -> Vec<Value> {
-    match value {
+    let parsed = value.cloned().map(parse_projected_json_value);
+    match parsed.as_ref() {
         Some(Value::Array(items)) => items
             .iter()
             .map(|item| match item {
@@ -1048,7 +1108,7 @@ fn map_events(value: Option<&Value>) -> Vec<Value> {
                                 parse_timestamp_value(value)
                                     .map(|dt| {
                                         Value::String(
-                                            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                                            dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
                                         )
                                     })
                                     .unwrap_or_else(|| value.clone()),
@@ -1731,6 +1791,105 @@ mod tests {
     }
 
     #[test]
+    fn session_detail_event_fallback_does_not_read_nested_events() {
+        let from = Utc::now() - chrono::Duration::hours(1);
+        let to = Utc::now();
+        let sql =
+            crate::sql::llm::compile_session_detail_sql_without_events("sess-1", from, to).unwrap();
+        let events_column = crate::storage::schema::variant::variant_as_json("events");
+        assert!(
+            !sql.contains(&events_column),
+            "fallback must not touch the unreadable nested events column: {sql}"
+        );
+        assert!(sql.contains("'[]' AS events"));
+        assert!(
+            sql.contains(&crate::storage::schema::variant::variant_as_json(
+                "attributes"
+            )),
+            "fallback preserves span attributes"
+        );
+    }
+
+    #[test]
+    fn session_detail_fallback_only_matches_known_nested_event_failure() {
+        assert!(is_inlined_nested_event_failure(&anyhow::anyhow!(
+            "INTERNAL Error: Attempted to access index 0 within vector of size 0\nLINE 1: SELECT events"
+        )));
+        assert!(!is_inlined_nested_event_failure(&anyhow::anyhow!(
+            "IO Error: object store unavailable"
+        )));
+        assert!(!is_inlined_nested_event_failure(&anyhow::anyhow!(
+            "Binder Error: missing column"
+        )));
+        assert!(!is_inlined_nested_event_failure(&anyhow::anyhow!(
+            "FATAL Error: database has been invalidated"
+        )));
+    }
+
+    #[tokio::test]
+    async fn session_detail_fallback_retries_only_the_known_error_and_marks_partial() {
+        let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_attempts = attempts.clone();
+        let (result, events_complete) = execute_session_detail_with_event_fallback(move |events| {
+            let attempts = observed_attempts.clone();
+            async move {
+                attempts.lock().unwrap().push(events);
+                if events {
+                    Err(anyhow::anyhow!(
+                        "INTERNAL Error: Attempted to access index 0 within vector of size 0"
+                    ))
+                } else {
+                    Ok("scalar detail")
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, "scalar detail");
+        assert!(!events_complete);
+        assert_eq!(*attempts.lock().unwrap(), [true, false]);
+
+        let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_attempts = attempts.clone();
+        let error = execute_session_detail_with_event_fallback(move |events| {
+            let attempts = observed_attempts.clone();
+            async move {
+                attempts.lock().unwrap().push(events);
+                Err::<&str, anyhow::Error>(anyhow::anyhow!("IO Error: object store unavailable"))
+            }
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().starts_with("IO Error"));
+        assert_eq!(*attempts.lock().unwrap(), [true]);
+    }
+
+    #[test]
+    fn session_detail_serializes_incomplete_event_status() {
+        let now = Utc::now();
+        let detail = SessionDetail {
+            session_id: "session-1".to_string(),
+            from: now,
+            to: now,
+            trace_count: 1,
+            span_count: 1,
+            user_ids: Vec::new(),
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            total_cost: None,
+            events_complete: false,
+            spans: Vec::new(),
+            scores: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(detail).unwrap()["events_complete"],
+            false,
+            "partial session responses must explicitly report omitted events"
+        );
+    }
+
+    #[test]
     fn maps_span_summary_from_row() {
         let columns = vec![
             "trace_id".into(),
@@ -2025,17 +2184,25 @@ mod tests {
             .with_timezone(&Utc);
         let list = compile_session_detail_sql("sess-1", from, to).unwrap();
         let payload = crate::storage::schema::variant::variant_as_json("attributes");
+        let events = crate::storage::schema::variant::variant_as_json("events");
         assert!(
             list.contains(&payload),
             "session detail must project span attributes: {list}"
         );
         assert!(
-            list.contains(", events"),
-            "session detail must project span events: {list}"
+            list.contains(&events),
+            "session detail must project events as JSON: {list}"
+        );
+        assert!(
+            !list.contains(", events"),
+            "session detail must not return nested events through Arrow: {list}"
         );
         let detail = compile_span_detail_sql("span-1", from, to).unwrap();
         assert!(detail.contains(&payload), "detail keeps payload: {detail}");
-        assert!(detail.contains("events"), "detail keeps payload: {detail}");
+        assert!(
+            detail.contains(&events),
+            "detail keeps payload as JSON: {detail}"
+        );
     }
 
     #[test]
@@ -2126,6 +2293,16 @@ mod tests {
     }
 
     #[test]
+    fn map_events_parses_json_projection_text() {
+        let projected = serde_json::json!(
+            "[{\"name\":\"sp.recording.batch\",\"timestamp\":\"2026-07-18T00:00:01Z\",\"attributes\":{\"sp.recording.events\":\"[]\"}}]"
+        );
+        let events = map_events(Some(&projected));
+        assert_eq!(events.len(), 1, "projected event JSON was dropped");
+        assert_eq!(events[0]["name"], "sp.recording.batch");
+    }
+
+    #[test]
     fn extract_recording_events_ignores_other_event_names() {
         let span_events = vec![serde_json::json!({
             "name": "gen_ai.content.prompt",
@@ -2153,6 +2330,7 @@ mod tests {
             "compile_trace_summary_sql",
             "compile_trace_spans_sql",
             "compile_session_detail_sql",
+            "compile_session_detail_sql_without_events",
             "compile_scores_for_span_sql",
             "compile_scores_for_trace_sql",
         ];
@@ -2208,6 +2386,7 @@ mod tests {
             compile_trace_summary_sql("tr", from, to, None).unwrap(),
             compile_trace_spans_sql("tr", from, to, 10, None, None).unwrap(),
             compile_session_detail_sql("s", from, to).unwrap(),
+            crate::sql::llm::compile_session_detail_sql_without_events("s", from, to).unwrap(),
             compile_scores_for_span_sql("span", from, to).unwrap(),
             compile_scores_for_trace_sql("tr", from, to).unwrap(),
         ];
