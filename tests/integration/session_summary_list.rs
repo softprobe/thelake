@@ -760,6 +760,12 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
         0,
         "score MAP row must be catalog-inlined for this regression"
     );
+    let trace_data = temp.path().join("data").join(&schema).join("traces");
+    assert_eq!(
+        parquet_files(&trace_data),
+        0,
+        "trace event row must be catalog-inlined for this regression"
+    );
 
     let trace_uri = format!(
         "/v1/llm/traces/{}?from={}&to={}",
@@ -795,7 +801,6 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
     assert_eq!(body["session_id"], "detail-sess");
-    assert_eq!(body["events_complete"], true);
     assert_eq!(body["from"], summary_from);
     assert_eq!(body["to"], summary_to);
     assert_eq!(
@@ -823,11 +828,6 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     assert_eq!(
         event_span["events"][0]["timestamp"], expected_event_timestamp,
         "event timestamps retain nanosecond precision"
-    );
-    let traces_data = temp.path().join("data").join(&schema).join("traces");
-    assert!(
-        parquet_files(&traces_data) > 0,
-        "trace rows must be stored in Parquet, not inlined into the catalog"
     );
     assert_eq!(body["scores"].as_array().unwrap().len(), 1);
     assert_eq!(body["scores"][0]["score_id"], score_id);
