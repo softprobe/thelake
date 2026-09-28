@@ -485,14 +485,21 @@ fn has_single_fact_source_timestamp_bound(sql: &str) -> bool {
         || keyword_count(&upper, "FROM") != 1
         || keyword_count(&upper, "JOIN") != 0
         || keyword_count(&upper, "UNION") != 0
-        || keyword_count(&upper, "EXISTS") != 0
-        || contains_keyword(&upper, "OR")
     {
         return false;
     }
     let Some(from) = find_keyword(&upper, "FROM") else {
         return false;
     };
+    let exists = find_keyword(&upper, "EXISTS");
+    let wrapped_exists = exists.is_some_and(|position| position < from)
+        && keyword_count(&upper, "EXISTS") == 1
+        && keyword_count(&upper, "SELECT") == 2;
+    if exists.is_some_and(|position| position > from)
+        || (keyword_count(&upper, "SELECT") != 1 && !wrapped_exists)
+    {
+        return false;
+    }
     let source = &upper[from + "FROM".len()..];
     let source = find_keyword(source, "WHERE")
         .map(|where_pos| &source[..where_pos])
@@ -529,10 +536,6 @@ fn keyword_count(sql: &str, keyword: &str) -> usize {
                 && (end == bytes.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_')
         })
         .count()
-}
-
-fn contains_keyword(sql: &str, keyword: &str) -> bool {
-    keyword_count(sql, keyword) > 0
 }
 
 fn find_keyword(sql: &str, keyword: &str) -> Option<usize> {
@@ -945,6 +948,11 @@ mod tests {
         let sql = "SELECT * FROM traces WHERE timestamp >= TIMESTAMP_NS '2020-01-01' \
                    AND timestamp < TIMESTAMP_NS '2030-01-01'";
         ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
+
+        let exists = "SELECT EXISTS(SELECT 1 FROM traces WHERE \
+                      timestamp >= TIMESTAMP_NS '2020-01-01' AND \
+                      timestamp < TIMESTAMP_NS '2030-01-01')";
+        ensure_fact_scan_uses_timestamp_pruning(&conn, exists).unwrap();
     }
 
     #[test]
@@ -978,6 +986,10 @@ mod tests {
         let quoted_alias = "SELECT * FROM traces AS \"WHERE timestamp >= 1\" \
                             WHERE value = 1";
         assert!(ensure_fact_scan_uses_timestamp_pruning(&conn, quoted_alias).is_err());
+
+        let unrelated_exists = "SELECT * FROM traces WHERE value = 1 AND \
+                                EXISTS (SELECT timestamp >= TIMESTAMP_NS '2020-01-01')";
+        assert!(ensure_fact_scan_uses_timestamp_pruning(&conn, unrelated_exists).is_err());
     }
 
     #[test]
