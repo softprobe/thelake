@@ -332,7 +332,7 @@ fn ensure_one_fact_scan_uses_timestamp_pruning(
             );
         }
     }
-    if has_fact_table_source(sql) && fact_scans.is_empty() && !is_empty_result_plan(&plan) {
+    if missing_fact_scan_is_unproven(sql, fact_scans.is_empty(), &plan) {
         anyhow::bail!("DuckDB plan did not expose a fact-table scan to verify");
     }
     Ok(())
@@ -479,24 +479,44 @@ fn fact_table_source_count(sql: &str) -> usize {
 }
 
 fn has_single_fact_source_timestamp_bound(sql: &str) -> bool {
-    let code = keyword_view(sql);
-    let upper = code.to_ascii_uppercase();
+    let upper = keyword_view(sql).to_ascii_uppercase();
+    if upper.trim_start().starts_with("WITH RECURSIVE") {
+        return false;
+    }
+    if fact_table_source_count(&upper) != 1 {
+        return false;
+    }
+    let Some(from) = fact_table_from_position(&upper) else {
+        return false;
+    };
+
+    // If the fact source is inside a CTE/subquery, inspect only that SELECT.
+    // This proves the predicate is attached to the actual fact scan and keeps
+    // outer filters or unrelated nested queries from satisfying the check.
+    let query = match enclosing_query_body(&upper, from) {
+        Some(query) => query,
+        None => &upper,
+    };
+    has_direct_fact_source_timestamp_bound(query)
+}
+
+fn has_direct_fact_source_timestamp_bound(upper: &str) -> bool {
     if !upper.trim_start().starts_with("SELECT")
-        || keyword_count(&upper, "FROM") != 1
-        || keyword_count(&upper, "JOIN") != 0
-        || keyword_count(&upper, "UNION") != 0
+        || keyword_count(upper, "FROM") != 1
+        || keyword_count(upper, "JOIN") != 0
+        || keyword_count(upper, "UNION") != 0
     {
         return false;
     }
-    let Some(from) = find_keyword(&upper, "FROM") else {
+    let Some(from) = find_keyword(upper, "FROM") else {
         return false;
     };
-    let exists = find_keyword(&upper, "EXISTS");
+    let exists = find_keyword(upper, "EXISTS");
     let wrapped_exists = exists.is_some_and(|position| position < from)
-        && keyword_count(&upper, "EXISTS") == 1
-        && keyword_count(&upper, "SELECT") == 2;
+        && keyword_count(upper, "EXISTS") == 1
+        && keyword_count(upper, "SELECT") == 2;
     if exists.is_some_and(|position| position > from)
-        || (keyword_count(&upper, "SELECT") != 1 && !wrapped_exists)
+        || (keyword_count(upper, "SELECT") != 1 && !wrapped_exists)
     {
         return false;
     }
@@ -519,6 +539,80 @@ fn has_single_fact_source_timestamp_bound(sql: &str) -> bool {
         .min()
         .unwrap_or(predicate.len());
     filter_guarantees_timestamp_pruning(&predicate[..end])
+}
+
+fn fact_table_from_position(sql: &str) -> Option<usize> {
+    sql.match_indices("FROM").find_map(|(start, _)| {
+        let before_ok = start == 0
+            || !sql.as_bytes()[start - 1].is_ascii_alphanumeric()
+                && sql.as_bytes()[start - 1] != b'_';
+        let after = start + "FROM".len();
+        let after_ok = after == sql.len()
+            || !sql.as_bytes()[after].is_ascii_alphanumeric() && sql.as_bytes()[after] != b'_';
+        if !(before_ok && after_ok) {
+            return None;
+        }
+        let source = sql[after..].trim_start();
+        let name = source
+            .split(|character: char| {
+                character.is_ascii_whitespace() || matches!(character, ',' | '(' | ')')
+            })
+            .next()
+            .unwrap_or_default()
+            .rsplit('.')
+            .next()
+            .unwrap_or_default();
+        crate::sql::schema::fact_table_specs()
+            .any(|spec| spec.name.eq_ignore_ascii_case(name))
+            .then_some(start)
+    })
+}
+
+fn enclosing_query_body(sql: &str, from: usize) -> Option<&str> {
+    let mut stack = Vec::new();
+    for (position, byte) in sql.as_bytes().iter().copied().enumerate().take(from) {
+        match byte {
+            b'(' => stack.push(position),
+            b')' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    let Some(open) = stack.last().copied() else {
+        let select = sql[..from]
+            .match_indices("SELECT")
+            .filter(|(start, _)| {
+                (*start == 0
+                    || !sql.as_bytes()[start - 1].is_ascii_alphanumeric()
+                        && sql.as_bytes()[start - 1] != b'_')
+                    && (*start + "SELECT".len() == sql.len()
+                        || !sql.as_bytes()[*start + "SELECT".len()].is_ascii_alphanumeric()
+                            && sql.as_bytes()[*start + "SELECT".len()] != b'_')
+            })
+            .map(|(start, _)| start)
+            .last()?;
+        return Some(&sql[select..]);
+    };
+    let close = matching_close_paren(sql, open)?;
+    Some(sql[open + 1..close].trim())
+}
+
+fn matching_close_paren(sql: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, byte) in sql.as_bytes().iter().copied().enumerate().skip(open) {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn keyword_count(sql: &str, keyword: &str) -> usize {
@@ -650,6 +744,17 @@ fn is_empty_result_plan(node: &serde_json::Value) -> bool {
         .and_then(|object| object.get("name"))
         .and_then(serde_json::Value::as_str)
         .is_some_and(|name| name.eq_ignore_ascii_case("EMPTY_RESULT"))
+}
+
+fn missing_fact_scan_is_unproven(
+    sql: &str,
+    scans_are_empty: bool,
+    plan: &serde_json::Value,
+) -> bool {
+    has_fact_table_source(sql)
+        && scans_are_empty
+        && !is_empty_result_plan(plan)
+        && !has_single_fact_source_timestamp_bound(sql)
 }
 
 fn filter_guarantees_timestamp_pruning(filter: &str) -> bool {
@@ -956,6 +1061,144 @@ mod tests {
     }
 
     #[test]
+    fn explain_gate_allows_one_filtered_fact_source_reused_through_ctes() {
+        let conn = plan_connection();
+        let sql = "WITH base AS (SELECT value, timestamp FROM traces WHERE \
+                   timestamp >= TIMESTAMP_NS '2020-01-01' AND \
+                   timestamp < TIMESTAMP_NS '2030-01-01'), \
+                   matching AS (SELECT value FROM base), \
+                   qualified AS (SELECT value FROM base) \
+                   SELECT base.value FROM base \
+                   JOIN matching USING (value) JOIN qualified USING (value)";
+        ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
+
+        let lower_bound = "WITH base AS (SELECT timestamp FROM traces WHERE \
+                           timestamp >= TIMESTAMP_NS '2020-01-01') SELECT * FROM base";
+        let upper_bound = "WITH base AS (SELECT timestamp FROM traces WHERE \
+                           timestamp < TIMESTAMP_NS '2030-01-01') SELECT * FROM base";
+        assert!(has_single_fact_source_timestamp_bound(lower_bound));
+        assert!(has_single_fact_source_timestamp_bound(upper_bound));
+    }
+
+    #[test]
+    fn cte_timestamp_fallback_requires_the_fact_source_where_clause() {
+        let unfiltered_fact = "WITH base AS (SELECT timestamp FROM traces), \
+                               other AS (SELECT timestamp >= '2020-01-01' AS bounded) \
+                               SELECT * FROM base, other";
+        let outer_filter = "WITH base AS (SELECT timestamp FROM traces) \
+                            SELECT * FROM base WHERE timestamp >= '2020-01-01'";
+        let comma_join = "WITH base AS (SELECT traces.timestamp FROM traces, dimensions \
+                          WHERE traces.timestamp >= '2020-01-01') SELECT * FROM base";
+        let disjunction = "WITH base AS (SELECT timestamp FROM traces WHERE \
+                           timestamp >= '2020-01-01' OR value = 1) SELECT * FROM base";
+        let comment_only = "WITH base AS (SELECT timestamp FROM traces \
+                            /* WHERE timestamp >= '2020-01-01' */) SELECT * FROM base";
+        let recursive = "WITH RECURSIVE base AS (SELECT timestamp FROM traces WHERE \
+                          timestamp >= '2020-01-01') SELECT * FROM base";
+        let nested_fact = "WITH base AS (SELECT timestamp FROM traces WHERE \
+                           timestamp >= '2020-01-01' AND EXISTS (SELECT 1 FROM traces)) \
+                           SELECT * FROM base";
+
+        for sql in [
+            unfiltered_fact,
+            outer_filter,
+            comma_join,
+            disjunction,
+            comment_only,
+            recursive,
+            nested_fact,
+        ] {
+            assert!(
+                !has_single_fact_source_timestamp_bound(sql),
+                "unsafe CTE fallback accepted: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_extracts_the_query_that_owns_the_fact_source() {
+        let derived_table = "SELECT * FROM (SELECT timestamp FROM traces WHERE \
+                             timestamp >= '2020-01-01') bounded";
+        let dedupe_insert = "INSERT INTO scores SELECT incoming.* FROM \
+                             (VALUES (1)) incoming(value) WHERE NOT EXISTS (\
+                             SELECT 1 FROM scores existing WHERE existing.value = incoming.value \
+                             AND existing.timestamp >= TIMESTAMPTZ '2020-01-01')";
+        let outer_only = "SELECT * FROM scores WHERE EXISTS (\
+                          SELECT timestamp >= TIMESTAMPTZ '2020-01-01')";
+        let order_only = "SELECT * FROM scores WHERE value = 1 ORDER BY \
+                          timestamp >= TIMESTAMPTZ '2020-01-01'";
+        let delimiter_text = "WITH base AS (SELECT timestamp, ')' AS marker FROM traces WHERE \
+                              timestamp >= '2020-01-01') SELECT * FROM base";
+        let delimiter_comment = "WITH base AS (SELECT timestamp /* ) FROM fake */ FROM traces \
+                                WHERE timestamp >= '2020-01-01') SELECT * FROM base";
+
+        assert!(has_single_fact_source_timestamp_bound(derived_table));
+        assert!(has_single_fact_source_timestamp_bound(dedupe_insert));
+        assert!(!has_single_fact_source_timestamp_bound(outer_only));
+        assert!(!has_single_fact_source_timestamp_bound(order_only));
+        assert!(has_single_fact_source_timestamp_bound(delimiter_text));
+        assert!(has_single_fact_source_timestamp_bound(delimiter_comment));
+    }
+
+    #[test]
+    fn missing_fact_scan_requires_a_source_timestamp_proof() {
+        let bounded = "INSERT INTO scores SELECT incoming.* FROM (VALUES (1)) incoming(value) \
+                       WHERE NOT EXISTS (SELECT 1 FROM scores existing \
+                       WHERE existing.value = incoming.value AND \
+                       existing.timestamp >= TIMESTAMPTZ '2020-01-01')";
+        let unbounded = "INSERT INTO scores SELECT incoming.* FROM (VALUES (1)) incoming(value) \
+                         WHERE NOT EXISTS (SELECT 1 FROM scores existing \
+                         WHERE existing.value = incoming.value)";
+        let nonempty_plan = serde_json::json!([{ "name": "INSERT", "children": [] }]);
+
+        assert!(!missing_fact_scan_is_unproven(
+            bounded,
+            true,
+            &nonempty_plan
+        ));
+        assert!(missing_fact_scan_is_unproven(
+            unbounded,
+            true,
+            &nonempty_plan
+        ));
+    }
+
+    #[test]
+    fn dropped_score_fact_filter_still_requires_a_bounded_source() {
+        let conn = plan_connection();
+        conn.execute_batch("DELETE FROM scores").unwrap();
+        let bounded = "INSERT INTO scores BY NAME SELECT incoming.* FROM \
+                       (VALUES (TIMESTAMPTZ '2025-01-01', 1)) incoming(timestamp, value) \
+                       WHERE NOT EXISTS (SELECT 1 FROM scores existing \
+                       WHERE existing.value = incoming.value AND \
+                       existing.timestamp >= TIMESTAMPTZ '2020-01-01' AND \
+                       existing.timestamp < TIMESTAMPTZ '2030-01-01')";
+        let unbounded = "INSERT INTO scores BY NAME SELECT incoming.* FROM \
+                         (VALUES (TIMESTAMPTZ '2025-01-01', 1)) incoming(timestamp, value) \
+                         WHERE NOT EXISTS (SELECT 1 FROM scores existing \
+                         WHERE existing.value = incoming.value)";
+
+        let mut statement = conn
+            .prepare(&format!("EXPLAIN (FORMAT JSON) {bounded}"))
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap();
+        let plan: serde_json::Value =
+            serde_json::from_str(&rows.collect::<Result<Vec<_>, _>>().unwrap().join("\n")).unwrap();
+        let mut fact_scans = Vec::new();
+        collect_fact_scans(&plan, &mut fact_scans);
+        assert!(!fact_scans.is_empty());
+        assert!(fact_scans.iter().all(|(_, filters)| !filters
+            .as_deref()
+            .map(filter_guarantees_timestamp_pruning)
+            .unwrap_or(false)));
+
+        ensure_fact_scan_uses_timestamp_pruning(&conn, bounded).unwrap();
+        assert!(ensure_fact_scan_uses_timestamp_pruning(&conn, unbounded).is_err());
+    }
+
+    #[test]
     fn explain_gate_does_not_apply_elided_bound_to_joined_or_disjunctive_scans() {
         let conn = plan_connection();
         conn.execute_batch(
@@ -996,6 +1239,15 @@ mod tests {
     fn explain_gate_allows_zero_row_fact_probe() {
         let conn = plan_connection();
         ensure_fact_scan_uses_timestamp_pruning(&conn, "SELECT 1 FROM traces LIMIT 0").unwrap();
+    }
+
+    #[test]
+    fn explain_gate_accepts_empty_fact_source_with_its_own_timestamp_filter() {
+        let conn = plan_connection();
+        conn.execute_batch("DELETE FROM scores").unwrap();
+        let sql = "INSERT INTO scores SELECT * FROM scores WHERE \
+                   timestamp >= TIMESTAMPTZ '2020-01-01'";
+        ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
     }
 
     #[test]
