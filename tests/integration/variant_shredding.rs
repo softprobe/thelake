@@ -447,12 +447,15 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         .await
         .expect("run search sql");
     assert_eq!(search_result.row_count, 1);
-    // columns include observation_type / model_name / tokens from projection
+    // Columns include span_type / model_name / tokens from projection.
     let cols = &search_result.columns;
-    let obs_idx = cols.iter().position(|c| c == "observation_type").unwrap();
+    let span_type_idx = cols.iter().position(|c| c == "span_type").unwrap();
     let model_idx = cols.iter().position(|c| c == "model_name").unwrap();
     let tokens_idx = cols.iter().position(|c| c == "total_tokens").unwrap();
-    assert_eq!(search_result.rows[0][obs_idx].as_str(), Some("generation"));
+    assert_eq!(
+        search_result.rows[0][span_type_idx].as_str(),
+        Some("generation")
+    );
     assert_eq!(
         search_result.rows[0][model_idx].as_str(),
         Some("gpt-4o-mini")
