@@ -14,9 +14,10 @@ Product metrics / Prometheus recipes are **out of scope** (removed). Orphaned
 1. **One event-time column named `timestamp` on every DuckLake fact table.**
    A bare predicate on that column enables partition pruning. Physical layout = calendar day of `timestamp`.
    **No `record_date` / `event_date` / `window_ts`.**
-   The logical clock is UTC event time. `traces` and `logs` store
-   `TIMESTAMP_NS`; `scores` currently store `TIMESTAMPTZ`. Every recipe filters
-   the bare `timestamp` column using the matching literal type.
+   The logical clock is UTC event time. Every DuckLake timestamp column uses
+   `TIMESTAMP_NS`. APIs accept readable timestamps and convert them to UTC
+   nanosecond literals before querying. Every recipe filters the bare
+   `timestamp` column with the same literal type.
 2. **One window type: `QueryWindow { from, to }`.** Recipes call a `scan_with_*_filter` method on it.
    Loki/Tempo clocks convert at the protocol edge only — not a second lake
    window type.
@@ -46,12 +47,16 @@ Every DuckLake fact table has **`timestamp`** as its only time column. Partition
 |-------|---------------|------|
 | `traces` | `TIMESTAMP_NS` | `session_id, trace_id, timestamp` |
 | `logs` | `TIMESTAMP_NS` | `session_id, timestamp` |
-| `scores` | `TIMESTAMPTZ` | `session_id, timestamp` |
+| `scores` | `TIMESTAMP_NS` | `session_id, timestamp` |
 
 Score deduplication identity is `(score_id, timestamp)` in isolated scope and
 `(tenant_id, score_id, timestamp)` in shared scope. A repeated `score_id` at a
 different timestamp is a distinct score; every idempotency lookup carries the
 score timestamp so it can prune to that day.
+
+The one-clock catalog copy deliberately migrates only traces and logs. Existing
+score and score-config rows are test data; score APIs and storage remain active,
+and normal schema initialization creates fresh empty tables after cutover.
 
 **Locked partition expression** (greenfield EXPLAIN in `tests/integration/one_clock_prune.rs`):
 

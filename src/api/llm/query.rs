@@ -851,9 +851,24 @@ fn map_session_scores(columns: &[String], row: &[Value]) -> Vec<Score> {
         Value::String(json) => serde_json::from_str::<Value>(json).ok(),
         value => Some(value.clone()),
     };
-    decoded
-        .and_then(|value| serde_json::from_value::<Vec<Score>>(value).ok())
-        .unwrap_or_default()
+    let Some(Value::Array(mut items)) = decoded else {
+        return Vec::new();
+    };
+    for item in &mut items {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        let Some(timestamp) = object.get("timestamp").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(timestamp) = parse_timestamp_text(timestamp) {
+            object.insert(
+                "timestamp".into(),
+                Value::String(timestamp.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+            );
+        }
+    }
+    serde_json::from_value::<Vec<Score>>(Value::Array(items)).unwrap_or_default()
 }
 
 fn map_score(columns: &[String], row: &[Value]) -> Option<Score> {
@@ -980,16 +995,17 @@ fn parse_timestamp_text(text: &str) -> Option<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
         return Some(dt.with_timezone(&Utc));
     }
-    // DuckDB JSON bridge emits "Microsecond:<epoch>" for TIMESTAMPTZ values.
+    // DuckDB JSON bridge can encode TIMESTAMP_NS as "Nanosecond:<epoch>".
     if let Some((unit, raw)) = text.split_once(':') {
         if let Ok(epoch) = raw.parse::<i64>() {
             return match unit {
                 "Microsecond" | "\"Microsecond\"" => DateTime::from_timestamp_micros(epoch),
                 "Millisecond" | "\"Millisecond\"" => DateTime::from_timestamp_millis(epoch),
                 "Second" | "\"Second\"" => DateTime::from_timestamp(epoch, 0),
-                "Nanosecond" | "\"Nanosecond\"" => {
-                    DateTime::from_timestamp(epoch / 1_000_000_000, (epoch % 1_000_000_000) as u32)
-                }
+                "Nanosecond" | "\"Nanosecond\"" => DateTime::from_timestamp(
+                    epoch.div_euclid(1_000_000_000),
+                    epoch.rem_euclid(1_000_000_000) as u32,
+                ),
                 _ => None,
             };
         }
@@ -1681,7 +1697,7 @@ mod tests {
         let sql = compile_scores_for_trace_sql("trace-1", from, to).expect("trace scores sql");
         assert!(sql.contains("trace_id = 'trace-1'"));
         assert!(sql.contains("span_id IN (SELECT"));
-        assert!(sql.contains("TIMESTAMPTZ '"), "scores outer clock: {sql}");
+        assert!(sql.contains("::TIMESTAMP_NS"), "scores outer clock: {sql}");
         assert!(
             sql.contains("::TIMESTAMP_NS"),
             "traces subquery clock: {sql}"
@@ -1706,9 +1722,9 @@ mod tests {
         assert!(sql.contains("session_id = 'sess-1'"));
         assert!(sql.contains("trace_id IN (SELECT DISTINCT trace_id FROM session_spans)"));
         assert!(sql.contains("span_id IN (SELECT span_id FROM session_spans)"));
-        assert!(sql.contains("strftime( timestamp AT TIME ZONE 'UTC'"));
+        assert!(sql.contains("\"timestamp\" := timestamp"));
         assert!(sql.contains("first(score_aggregate.session_scores) AS session_scores"));
-        assert!(sql.contains("TIMESTAMPTZ '"), "scores clock: {sql}");
+        assert!(sql.contains("::TIMESTAMP_NS"), "scores clock: {sql}");
         assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
 
         assert!(compile_session_detail_sql("sess-1", to, from).is_err());
@@ -1811,13 +1827,13 @@ mod tests {
                 'OK', 'model', 'provider', 'user', 10, 20, 30, 0.01, '{}', '[]'\
             );\
             CREATE TABLE scores (\
-                score_id VARCHAR, timestamp TIMESTAMPTZ, trace_id VARCHAR, span_id VARCHAR, \
+                score_id VARCHAR, timestamp TIMESTAMP_NS, trace_id VARCHAR, span_id VARCHAR, \
                 session_id VARCHAR, name VARCHAR, data_type VARCHAR, numeric_value DOUBLE, \
                 string_value VARCHAR, boolean_value BOOLEAN, source VARCHAR, comment VARCHAR, \
                 config_id VARCHAR, author_id VARCHAR, metadata JSON\
             );\
             INSERT INTO scores VALUES (\
-                'score-1', TIMESTAMPTZ '2026-09-28 01:02:03.123456+00', \
+                'score-1', TIMESTAMP_NS '2026-09-28 01:02:03.123456789', \
                 'trace-1', 'span-1', 'sess-1', 'quality', 'numeric', 0.91, \
                 NULL, NULL, 'evaluator', NULL, NULL, NULL, '{\"suite\":\"integration\"}'\
             );",
@@ -1837,14 +1853,28 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("execute holistic session detail SQL");
-        let scores = map_session_scores(&["session_scores".to_string()], &[Value::String(encoded)]);
-        assert_eq!(scores.len(), 1);
+        let scores = map_session_scores(
+            &["session_scores".to_string()],
+            &[Value::String(encoded.clone())],
+        );
+        assert_eq!(scores.len(), 1, "score JSON returned by DuckDB: {encoded}");
         assert_eq!(scores[0].score_id, "score-1");
         assert_eq!(
             scores[0].timestamp,
-            DateTime::parse_from_rfc3339("2026-09-28T01:02:03.123456Z")
+            DateTime::parse_from_rfc3339("2026-09-28T01:02:03.123456789Z")
                 .unwrap()
                 .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn maps_negative_duckdb_nanosecond_timestamp() {
+        let timestamp = parse_timestamp_text("Nanosecond:-1").expect("valid pre-epoch instant");
+        assert_eq!(timestamp.timestamp(), -1);
+        assert_eq!(timestamp.timestamp_subsec_nanos(), 999_999_999);
+        assert_eq!(
+            timestamp.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            "1969-12-31T23:59:59.999999999Z"
         );
     }
 

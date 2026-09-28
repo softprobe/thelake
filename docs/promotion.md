@@ -250,7 +250,7 @@ to missing/`NULL` at extract time — they do not raise a type error.
 | `int64` | `BIGINT` | `BIGINT` |
 | `double` | `DOUBLE` | `DOUBLE` |
 | `decimal` | `DOUBLE` | `DECIMAL(38, 9)` |
-| `timestamp` | `TIMESTAMPTZ` | `TIMESTAMPTZ` |
+| `timestamp` | `TIMESTAMP_NS` | `TIMESTAMP_NS` |
 | `json` | `VARCHAR` | `VARCHAR` |
 
 Timestamp values must parse as RFC 3339.

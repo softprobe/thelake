@@ -17,7 +17,7 @@ Delivery follows [design-sql-and-schema.md](./design-sql-and-schema.md) §3.
 | D2 Query = bare `timestamp` predicates only | Recipes and execute gate reject wrapped columns and forbidden time-column tokens |
 | D3 Clean cutover | No dual-read cfg; rollout notes say reset/copy |
 | D4 No optional bounds | `push_optional_time_bounds` absent; no `Option` on lake windows |
-| D5 One logical UTC event time | Traces/logs use `TIMESTAMP_NS`; scores use `TIMESTAMPTZ`; each recipe emits a bare `timestamp` predicate with matching literals |
+| D5 One logical UTC event time | All DuckLake timestamp columns use `TIMESTAMP_NS`; each recipe emits a bare `timestamp` predicate with nanosecond literals |
 | D6 Session detail = summary window | Handler ignores list range |
 | D7–D8 Sort / scores | `SORTED BY` + ORDER BY match; scores in layout |
 | D9 / D12 Gate + locality | `ensure_sql_has_bare_timestamp_predicate` (D12) unit tests; SQL only under `src/sql/` |

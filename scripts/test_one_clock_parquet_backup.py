@@ -13,8 +13,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "one_clock_parquet_backup.py"
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts" / "perf"))
 
 import one_clock_parquet_backup as backup  # noqa: E402
+import seed_sql  # noqa: E402
 
 
 class OneClockParquetBackupTest(unittest.TestCase):
@@ -28,11 +30,24 @@ class OneClockParquetBackupTest(unittest.TestCase):
     def test_export_selects_match_copy_script_intent(self) -> None:
         self.assertIn("EXCLUDE (record_date)", backup.EXPORT_SELECTS["traces"])
         self.assertIn("EXCLUDE (record_date)", backup.EXPORT_SELECTS["logs"])
-        self.assertIn("EXCLUDE (record_date)", backup.EXPORT_SELECTS["scores"])
         copy_sql = (ROOT / "scripts" / "one_clock_catalog_copy.sql").read_text()
-        for table in ("traces", "logs", "scores"):
+        for table in ("traces", "logs"):
             self.assertIn(table, copy_sql)
             self.assertIn(table, backup.EXPORT_SELECTS)
+        self.assertNotIn("old.scores", copy_sql)
+        self.assertNotIn("old.score_configs", copy_sql)
+        self.assertNotIn("scores", backup.EXPORT_SELECTS)
+        seed_script = (ROOT / "scripts" / "seed-lake-from-parquet.sh").read_text()
+        self.assertIn("for t in traces logs; do", seed_script)
+        self.assertNotIn("for t in traces logs scores", seed_script)
+        for table in ("scores", "score_configs"):
+            with self.assertRaisesRegex(ValueError, "unsupported OTLP table"):
+                seed_sql.load_table_sql(
+                    alias="seedlake",
+                    table=table,
+                    parquet_path="/tmp/data.parquet",
+                    force_drop=False,
+                )
         self.assertNotIn("metric_samples", copy_sql)
         self.assertNotIn("metric_samples", backup.EXPORT_SELECTS)
 

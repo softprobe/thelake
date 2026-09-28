@@ -568,7 +568,7 @@ fn promotion_data_type_sql(t: &PromotionDataType) -> &'static str {
         PromotionDataType::Int64 => "BIGINT",
         PromotionDataType::Double => "DOUBLE",
         PromotionDataType::Decimal => "DOUBLE",
-        PromotionDataType::Timestamp => "TIMESTAMPTZ",
+        PromotionDataType::Timestamp => "TIMESTAMP_NS",
         PromotionDataType::Json => "VARCHAR",
     }
 }
@@ -580,7 +580,7 @@ fn business_promotion_data_type_sql(t: &PromotionDataType) -> &'static str {
         PromotionDataType::Int64 => "BIGINT",
         PromotionDataType::Double => "DOUBLE",
         PromotionDataType::Decimal => "DECIMAL(38, 9)",
-        PromotionDataType::Timestamp => "TIMESTAMPTZ",
+        PromotionDataType::Timestamp => "TIMESTAMP_NS",
         PromotionDataType::Json => "VARCHAR",
     }
 }
@@ -591,10 +591,10 @@ fn business_anchor_columns() -> &'static [(&'static str, &'static str, bool)] {
         ("trace_id", "VARCHAR", false),
         ("span_id", "VARCHAR", false),
         ("event_name", "VARCHAR", true),
-        ("event_timestamp", "TIMESTAMPTZ", true),
+        ("event_timestamp", "TIMESTAMP_NS", true),
         ("service_name", "VARCHAR", true),
         ("source_signal", "VARCHAR", false),
-        ("source_timestamp", "TIMESTAMPTZ", false),
+        ("source_timestamp", "TIMESTAMP_NS", false),
         ("promotion_spec_version", "VARCHAR", false),
     ]
 }
@@ -1197,7 +1197,10 @@ fn validate_promoted_value_type(
         PromotionDataType::Bool => value.parse::<bool>().is_ok(),
         PromotionDataType::Int64 => value.parse::<i64>().is_ok(),
         PromotionDataType::Double | PromotionDataType::Decimal => value.parse::<f64>().is_ok(),
-        PromotionDataType::Timestamp => chrono::DateTime::parse_from_rfc3339(value).is_ok(),
+        PromotionDataType::Timestamp => chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .and_then(|timestamp| timestamp.timestamp_nanos_opt())
+            .is_some(),
     };
     if ok {
         Ok(())
@@ -2061,6 +2064,30 @@ columns:
 
         assert_eq!(err.code(), "promotion_value_type_mismatch");
         assert_eq!(err.path(), "columns.checkout_latency_ms");
+    }
+
+    #[test]
+    fn timestamp_promotion_rejects_values_outside_timestamp_ns_range() {
+        let timestamp_type = super::PromotionDataType::Timestamp;
+        for valid in [
+            "1677-09-21T00:12:43.145224192Z",
+            "2262-04-11T23:47:16.854775807Z",
+        ] {
+            assert!(
+                super::validate_promoted_value_type("event_time", &timestamp_type, valid).is_ok(),
+                "TIMESTAMP_NS boundary should be accepted: {valid}"
+            );
+        }
+        for invalid in [
+            "1677-09-21T00:12:43.145224191Z",
+            "2262-04-11T23:47:16.854775808Z",
+        ] {
+            assert!(
+                super::validate_promoted_value_type("event_time", &timestamp_type, invalid)
+                    .is_err(),
+                "out-of-range value must be rejected: {invalid}"
+            );
+        }
     }
 
     #[test]

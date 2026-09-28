@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 
-use crate::sql::literal::{timestamp_ns_literal, timestamptz_literal};
+use crate::sql::literal::timestamp_ns_literal;
 
 /// Finite event-time range. Sole lake time window type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,7 @@ impl QueryWindow {
         Ok(Self { from, to })
     }
 
-    /// Event-time predicate for **TIMESTAMP_NS** tables (`traces` / `logs`).
+    /// Bare event-time predicate for every DuckLake fact table.
     ///
     /// `alias` is a column prefix such as `"c."` or `""`.
     ///
@@ -53,20 +53,7 @@ impl QueryWindow {
         )
     }
 
-    /// Event-time predicate for **TIMESTAMPTZ** tables (`scores`).
-    ///
-    /// Same bare-column rule as [`Self::timestamp_filter_sql`] — do not wrap.
-    /// Scores use the microsecond/TIMESTAMPTZ family (`storage::schema::tables`).
-    pub fn timestamptz_filter_sql(&self, alias: &str) -> String {
-        let col = format!("{alias}timestamp");
-        format!(
-            "{col} >= {} AND {col} <= {}",
-            timestamptz_literal(&self.from),
-            timestamptz_literal(&self.to)
-        )
-    }
-
-    /// Assemble SQL with the bare TIMESTAMP_NS predicate (traces/logs).
+    /// Assemble SQL with the bare TIMESTAMP_NS predicate.
     pub fn scan_with_timestamp_filter(
         self,
         alias: &str,
@@ -75,33 +62,6 @@ impl QueryWindow {
         let filter = self.timestamp_filter_sql(alias);
         let sql = assemble(&filter);
         assert_filter_kept(&sql, &filter);
-        TimestampFilteredSql { sql }
-    }
-
-    /// Assemble SQL over **scores** only (TIMESTAMPTZ clock).
-    pub fn scan_with_timestamptz_filter(
-        self,
-        alias: &str,
-        assemble: impl FnOnce(&str) -> String,
-    ) -> TimestampFilteredSql {
-        let filter = self.timestamptz_filter_sql(alias);
-        let sql = assemble(&filter);
-        assert_filter_kept(&sql, &filter);
-        TimestampFilteredSql { sql }
-    }
-
-    /// Assemble SQL that touches both TIMESTAMP_NS (`traces`/`logs`) and
-    /// TIMESTAMPTZ (`scores`) storage — each scan gets its matching bare predicate.
-    pub fn scan_with_both_timestamp_filters(
-        self,
-        alias: &str,
-        assemble: impl FnOnce(/* timestamp_ns */ &str, /* timestamptz */ &str) -> String,
-    ) -> TimestampFilteredSql {
-        let ns = self.timestamp_filter_sql(alias);
-        let tz = self.timestamptz_filter_sql(alias);
-        let sql = assemble(&ns, &tz);
-        assert_filter_kept(&sql, &ns);
-        assert_filter_kept(&sql, &tz);
         TimestampFilteredSql { sql }
     }
 
@@ -202,28 +162,12 @@ mod tests {
     }
 
     #[test]
-    fn scan_with_timestamptz_filter_uses_tz_literals() {
+    fn scores_use_the_same_timestamp_ns_literal() {
         let sql = sample()
-            .scan_with_timestamptz_filter("", |filter| {
-                format!("SELECT 1 FROM scores WHERE {filter}")
-            })
-            .into_sql();
-        assert!(sql.contains("TIMESTAMPTZ '"));
-        assert!(!sql.contains("::TIMESTAMP_NS"));
-        assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
-    }
-
-    #[test]
-    fn scan_with_both_timestamp_filters_embeds_both_clocks() {
-        let sql = sample()
-            .scan_with_both_timestamp_filters("", |ns, tz| {
-                format!(
-                    "SELECT 1 FROM scores WHERE {tz} AND EXISTS (SELECT 1 FROM traces WHERE {ns})"
-                )
-            })
+            .scan_with_timestamp_filter("", |filter| format!("SELECT 1 FROM scores WHERE {filter}"))
             .into_sql();
         assert!(sql.contains("::TIMESTAMP_NS"));
-        assert!(sql.contains("TIMESTAMPTZ '"));
+        assert!(!sql.contains("TIMESTAMPTZ"));
         assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
     }
 

@@ -252,6 +252,10 @@ categorical values). `config_id` is the tenant-local idempotency key. There is
 no PATCH; replace a config by inserting a new `config_id`. Human annotation
 (Annotate panel → scores) is documented in Softprobe LLM `docs/annotation.md`.
 
+The one-clock catalog copy intentionally omits rows from `scores` and
+`score_configs`; existing data is test-only. The APIs and writer stay enabled,
+and normal schema initialization creates fresh empty tables in the new catalog.
+
 ## Schema promotion
 
 Promotion is applied through authenticated `POST /v1/promotions/apply`, not

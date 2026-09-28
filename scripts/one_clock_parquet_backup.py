@@ -42,7 +42,6 @@ from typing import Iterable
 EXPORT_SELECTS: dict[str, str] = {
     "traces": "SELECT * EXCLUDE (record_date) FROM {src}.traces",
     "logs": "SELECT * EXCLUDE (record_date) FROM {src}.logs",
-    "scores": "SELECT * EXCLUDE (record_date) FROM {src}.scores",
 }
 
 FORBIDDEN_COLUMNS = frozenset({"record_date", "event_date", "window_ts"})
@@ -117,13 +116,6 @@ CREATE TABLE {a}.logs (
 );
 INSERT INTO {a}.logs VALUES
   ('ses_a', '2026-09-20 08:00:00'::TIMESTAMP_NS, 'hello', DATE '2026-09-20');
-
-CREATE TABLE {a}.scores (
-  score_id VARCHAR, timestamp TIMESTAMPTZ, name VARCHAR, data_type VARCHAR,
-  source VARCHAR, record_date DATE
-);
-INSERT INTO {a}.scores VALUES
-  ('sc1', TIMESTAMPTZ '2026-09-20 08:00:00+00', 'quality', 'numeric', 'api', DATE '2026-09-20');
 
 """
 

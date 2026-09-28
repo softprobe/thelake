@@ -70,7 +70,7 @@ fn insert_deduped_parquet_sql_inner(
         ""
     };
     let timestamp_filter = timestamp_window.map_or_else(String::new, |window| {
-        format!(" AND {}", window.timestamptz_filter_sql("existing."))
+        format!(" AND {}", window.timestamp_filter_sql("existing."))
     });
     format!(
         "INSERT INTO {table} BY NAME\n\
@@ -85,13 +85,10 @@ fn insert_deduped_parquet_sql_inner(
     )
 }
 
-// Scores use the microsecond/TIMESTAMPTZ family (see `ts_utc` in
-// `storage::schema::tables`), not the timezone-free TIMESTAMP_NS trace/log
-// clocks, so the bound compares against TIMESTAMPTZ directly.
 pub fn score_exists_sql(table: &str, window: &crate::sql::QueryWindow) -> String {
     format!(
         "SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? AND {} LIMIT 1)",
-        window.timestamptz_filter_sql("")
+        window.timestamp_filter_sql("")
     )
 }
 
@@ -103,7 +100,7 @@ pub fn score_exists_sql_for_workspace(
     format!(
         "SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? AND tenant_id = {} AND {} LIMIT 1)",
         crate::sql::sql_string_literal(workspace_id),
-        window.timestamptz_filter_sql("")
+        window.timestamp_filter_sql("")
     )
 }
 
@@ -120,7 +117,7 @@ pub fn score_config_exists_sql_for_workspace(table: &str, workspace_id: &str) ->
 
 pub fn score_config_select_sql(table: &str) -> String {
     format!(
-        "SELECT config_id::VARCHAR, strftime(timestamp, '%Y-%m-%dT%H:%M:%S.%fZ'), name::VARCHAR, data_type::VARCHAR, \
+        "SELECT config_id::VARCHAR, timestamp::VARCHAR, name::VARCHAR, data_type::VARCHAR, \
          description::VARCHAR, min_value, max_value, categories::VARCHAR, author_id::VARCHAR, \
          CAST(to_json(metadata) AS VARCHAR), tenant_id::VARCHAR FROM {table} ORDER BY timestamp DESC, config_id DESC"
     )
@@ -128,7 +125,7 @@ pub fn score_config_select_sql(table: &str) -> String {
 
 pub fn score_config_select_sql_for_workspace(table: &str, workspace_id: &str) -> String {
     format!(
-        "SELECT config_id::VARCHAR, strftime(timestamp, '%Y-%m-%dT%H:%M:%S.%fZ'), name::VARCHAR, data_type::VARCHAR, \
+        "SELECT config_id::VARCHAR, timestamp::VARCHAR, name::VARCHAR, data_type::VARCHAR, \
          description::VARCHAR, min_value, max_value, categories::VARCHAR, author_id::VARCHAR, \
          CAST(to_json(metadata) AS VARCHAR), tenant_id::VARCHAR FROM {table} \
          WHERE tenant_id = {} ORDER BY timestamp DESC, config_id DESC",
@@ -169,8 +166,8 @@ mod tests {
         let score = score_exists_sql_for_workspace("scores", "workspace'42", &score_window());
         let config = score_config_by_id_sql_for_workspace("score_configs", "workspace'42");
         assert!(score.contains("tenant_id = 'workspace''42'"));
-        assert!(score.contains("timestamp >= TIMESTAMPTZ '2026-09-10 12:00:00.000000+00'"));
-        assert!(score.contains("timestamp <= TIMESTAMPTZ '2026-09-10 12:00:00.000000+00'"));
+        assert!(score.contains("timestamp >= '2026-09-10T12:00:00.000000000Z'::TIMESTAMP_NS"));
+        assert!(score.contains("timestamp <= '2026-09-10T12:00:00.000000000Z'::TIMESTAMP_NS"));
         assert!(config.contains("WHERE config_id = ? AND tenant_id = 'workspace''42'"));
     }
 
@@ -192,7 +189,11 @@ mod tests {
         );
         assert!(sql.contains("existing.score_id = incoming.score_id"));
         assert!(sql.contains("existing.tenant_id = incoming.tenant_id"));
-        assert!(sql.contains("existing.timestamp >= TIMESTAMPTZ"));
-        assert!(sql.contains("existing.timestamp <= TIMESTAMPTZ"));
+        assert!(
+            sql.contains("existing.timestamp >= '2026-09-10T12:00:00.000000000Z'::TIMESTAMP_NS")
+        );
+        assert!(
+            sql.contains("existing.timestamp <= '2026-09-10T12:00:00.000000000Z'::TIMESTAMP_NS")
+        );
     }
 }

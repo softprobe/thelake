@@ -17,8 +17,7 @@ pub fn timestamp_ns_literal_from_str(value: &str) -> String {
     format!("{}::TIMESTAMP_NS", sql_string_literal(value))
 }
 
-/// Timezone-bearing metric literal. Metrics tables intentionally use
-/// `TIMESTAMPTZ`; trace/log tables use [`timestamp_ns_literal`] instead.
+/// Timezone-bearing literal for DuckDB maintenance options.
 pub fn timestamptz_literal(value: &DateTime<Utc>) -> String {
     format!("TIMESTAMPTZ '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f+00"))
 }

@@ -313,7 +313,7 @@ impl DuckLakeWriter {
     /// MAP bags must not fall through to `VARCHAR`. LIST columns (e.g. events)
     /// are owned by fidelity helpers — refuse here rather than invent a wrong type.
     fn arrow_field_to_duck_add_type(field: &::arrow::datatypes::Field) -> Result<&'static str> {
-        use ::arrow::datatypes::{DataType, TimeUnit};
+        use ::arrow::datatypes::DataType;
         match field.data_type() {
             DataType::Utf8 => Ok("VARCHAR"),
             DataType::Boolean => Ok("BOOLEAN"),
@@ -321,8 +321,7 @@ impl DuckLakeWriter {
             DataType::Int32 => Ok("INTEGER"),
             DataType::Float64 => Ok("DOUBLE"),
             DataType::Date32 => Ok("DATE"),
-            DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok("TIMESTAMP_NS"),
-            DataType::Timestamp(_, _) => Ok("TIMESTAMPTZ"),
+            DataType::Timestamp(_, _) => Ok("TIMESTAMP_NS"),
             DataType::Map(_, _) => Ok("MAP(VARCHAR, VARCHAR)"),
             DataType::List(_) => Err(anyhow!(
                 "skip LIST field '{}' in generic ADD COLUMN — fidelity helpers own it",
