@@ -321,10 +321,9 @@ fn ensure_one_fact_scan_uses_timestamp_pruning(
     if let Some((table, _)) = unpruned_scan {
         // DuckDB can prove a timestamp predicate redundant from file statistics
         // after inlining one bounded fact source into multiple physical scans.
-        // The source-local SQL predicate remains required; queries with multiple
-        // logical fact sources stay subject to per-scan physical filter checks.
-        let optimized_away_bound =
-            fact_table_source_count(sql) == 1 && has_single_fact_source_timestamp_bound(sql);
+        // The source-local SQL predicate remains required for every fact
+        // source whose filter the optimizer removes.
+        let optimized_away_bound = has_timestamp_bound_for_each_fact_source(sql);
         if !optimized_away_bound {
             anyhow::bail!(
                 "DuckDB plan scans fact table `{table}` without a conjunctive pushed timestamp filter"
@@ -477,71 +476,29 @@ fn fact_table_source_count(sql: &str) -> usize {
         .sum()
 }
 
-fn has_single_fact_source_timestamp_bound(sql: &str) -> bool {
+/// DuckDB may remove a safe timestamp filter after proving it redundant from
+/// file statistics. In that case, require a source-local bound for every fact
+/// table reference, including nested lookups (for example scores by trace).
+fn has_timestamp_bound_for_each_fact_source(sql: &str) -> bool {
     let upper = keyword_view(sql).to_ascii_uppercase();
     if upper.trim_start().starts_with("WITH RECURSIVE") {
         return false;
     }
-    if fact_table_source_count(&upper) != 1 {
+    let sources = fact_table_from_positions(&upper);
+    if sources.is_empty() || sources.len() != fact_table_source_count(&upper) {
+        // JOIN-based fact sources are deliberately left to physical-plan
+        // verification; this source parser only proves isolated FROM scopes.
         return false;
     }
-    let Some(from) = fact_table_from_position(&upper) else {
-        return false;
-    };
-
-    // If the fact source is inside a CTE/subquery, inspect only that SELECT.
-    // This proves the predicate is attached to the actual fact scan and keeps
-    // outer filters or unrelated nested queries from satisfying the check.
-    let query = match enclosing_query_body(&upper, from) {
-        Some(query) => query,
-        None => &upper,
-    };
-    has_direct_fact_source_timestamp_bound(query)
+    sources.into_iter().all(|(from, table)| {
+        enclosing_query_body(&upper, from)
+            .is_some_and(|query| has_isolated_fact_scope_timestamp_bound(query, &table))
+    })
 }
 
-fn has_direct_fact_source_timestamp_bound(upper: &str) -> bool {
-    if !upper.trim_start().starts_with("SELECT")
-        || keyword_count(upper, "FROM") != 1
-        || keyword_count(upper, "JOIN") != 0
-        || keyword_count(upper, "UNION") != 0
-    {
-        return false;
-    }
-    let Some(from) = find_keyword(upper, "FROM") else {
-        return false;
-    };
-    let exists = find_keyword(upper, "EXISTS");
-    let wrapped_exists = exists.is_some_and(|position| position < from)
-        && keyword_count(upper, "EXISTS") == 1
-        && keyword_count(upper, "SELECT") == 2;
-    if exists.is_some_and(|position| position > from)
-        || (keyword_count(upper, "SELECT") != 1 && !wrapped_exists)
-    {
-        return false;
-    }
-    let source = &upper[from + "FROM".len()..];
-    let source = find_keyword(source, "WHERE")
-        .map(|where_pos| &source[..where_pos])
-        .unwrap_or(source);
-    if source.contains(',') {
-        return false;
-    }
-
-    let Some(where_pos) = find_keyword(&upper[from + "FROM".len()..], "WHERE") else {
-        return false;
-    };
-    let after_from = &upper[from + "FROM".len()..];
-    let predicate = &after_from[where_pos + "WHERE".len()..];
-    let end = ["GROUP BY", "HAVING", "ORDER BY", "LIMIT", "QUALIFY"]
-        .iter()
-        .filter_map(|clause| find_top_level_keyword(predicate, clause))
-        .min()
-        .unwrap_or(predicate.len());
-    filter_guarantees_timestamp_pruning(&predicate[..end])
-}
-
-fn fact_table_from_position(sql: &str) -> Option<usize> {
-    sql.match_indices("FROM").find_map(|(start, _)| {
+fn fact_table_from_positions(sql: &str) -> Vec<(usize, String)> {
+    let mut sources = Vec::new();
+    for (start, _) in sql.match_indices("FROM") {
         let before_ok = start == 0
             || !sql.as_bytes()[start - 1].is_ascii_alphanumeric()
                 && sql.as_bytes()[start - 1] != b'_';
@@ -549,10 +506,10 @@ fn fact_table_from_position(sql: &str) -> Option<usize> {
         let after_ok = after == sql.len()
             || !sql.as_bytes()[after].is_ascii_alphanumeric() && sql.as_bytes()[after] != b'_';
         if !(before_ok && after_ok) {
-            return None;
+            continue;
         }
-        let source = sql[after..].trim_start();
-        let name = source
+        let name = sql[after..]
+            .trim_start()
             .split(|character: char| {
                 character.is_ascii_whitespace() || matches!(character, ',' | '(' | ')')
             })
@@ -561,10 +518,119 @@ fn fact_table_from_position(sql: &str) -> Option<usize> {
             .rsplit('.')
             .next()
             .unwrap_or_default();
-        crate::sql::schema::fact_table_specs()
-            .any(|spec| spec.name.eq_ignore_ascii_case(name))
-            .then_some(start)
-    })
+        if crate::sql::schema::fact_table_specs().any(|spec| spec.name.eq_ignore_ascii_case(name)) {
+            sources.push((start, name.to_ascii_lowercase()));
+        }
+    }
+    sources
+}
+
+fn has_isolated_fact_scope_timestamp_bound(query: &str, table: &str) -> bool {
+    if !query.trim_start().starts_with("SELECT")
+        || top_level_keyword_count(query, "FROM") != 1
+        || top_level_keyword_count(query, "JOIN") != 0
+        || top_level_keyword_count(query, "UNION") != 0
+    {
+        return false;
+    }
+    let Some(from) = find_top_level_keyword(query, "FROM") else {
+        return false;
+    };
+    let source = &query[from + "FROM".len()..];
+    let source_end = find_top_level_keyword(source, "WHERE").unwrap_or(source.len());
+    let source_ref = source[..source_end].trim();
+    if source_ref.contains(',') || source_ref.contains('"') {
+        return false;
+    }
+    let mut source_words = source_ref.split_whitespace();
+    let source_name = source_words
+        .next()
+        .unwrap_or_default()
+        .rsplit('.')
+        .next()
+        .unwrap_or_default();
+    if !source_name.eq_ignore_ascii_case(table) {
+        return false;
+    }
+    let source_alias = match source_words.next() {
+        Some("AS") => source_words.next().unwrap_or_default(),
+        Some(alias) => alias,
+        None => table,
+    };
+    if source_alias.is_empty() || source_words.next().is_some() {
+        return false;
+    }
+    let Some(where_pos) = find_top_level_keyword(source, "WHERE") else {
+        return false;
+    };
+    let predicate = &source[where_pos + "WHERE".len()..];
+    let end = ["GROUP BY", "HAVING", "ORDER BY", "LIMIT", "QUALIFY"]
+        .iter()
+        .filter_map(|clause| find_top_level_keyword(predicate, clause))
+        .min()
+        .unwrap_or(predicate.len());
+    let predicate = &predicate[..end];
+    filter_guarantees_timestamp_pruning(predicate)
+        && timestamp_references_match_source(predicate, source_alias, table)
+}
+
+fn timestamp_references_match_source(predicate: &str, alias: &str, table: &str) -> bool {
+    let code = code_view(predicate).to_ascii_lowercase();
+    let bytes = code.as_bytes();
+    let needle = b"timestamp";
+    let mut depth = 0usize;
+    let mut index = 0;
+    while index + needle.len() <= bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        let end = index + needle.len();
+        let before_ok =
+            index == 0 || !bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_';
+        let after_ok =
+            end == bytes.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_';
+        if depth == 0 && before_ok && after_ok && bytes[index..end] == *needle {
+            let mut qualifier_end = index;
+            while qualifier_end > 0 && bytes[qualifier_end - 1].is_ascii_whitespace() {
+                qualifier_end -= 1;
+            }
+            if qualifier_end > 0 && bytes[qualifier_end - 1] == b'.' {
+                let mut qualifier_start = qualifier_end - 1;
+                while qualifier_start > 0
+                    && (bytes[qualifier_start - 1].is_ascii_alphanumeric()
+                        || matches!(bytes[qualifier_start - 1], b'_' | b'.'))
+                {
+                    qualifier_start -= 1;
+                }
+                let qualifier = code[qualifier_start..qualifier_end - 1]
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
+                if !qualifier.eq_ignore_ascii_case(alias) && !qualifier.eq_ignore_ascii_case(table)
+                {
+                    return false;
+                }
+            }
+        }
+        index += 1;
+    }
+    true
+}
+
+fn top_level_keyword_count(sql: &str, keyword: &str) -> usize {
+    let mut count = 0;
+    let mut offset = 0;
+    while offset < sql.len() {
+        let Some(position) = find_top_level_keyword(&sql[offset..], keyword) else {
+            break;
+        };
+        count += 1;
+        offset += position + keyword.len();
+    }
+    count
 }
 
 fn enclosing_query_body(sql: &str, from: usize) -> Option<&str> {
@@ -612,42 +678,6 @@ fn matching_close_paren(sql: &str, open: usize) -> Option<usize> {
         }
     }
     None
-}
-
-fn keyword_count(sql: &str, keyword: &str) -> usize {
-    let bytes = sql.as_bytes();
-    let keyword = keyword.as_bytes();
-    bytes
-        .windows(keyword.len())
-        .enumerate()
-        .filter(|(start, window)| {
-            if *window != keyword {
-                return false;
-            }
-            let end = start + keyword.len();
-            (*start == 0 || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_')
-                && (end == bytes.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_')
-        })
-        .count()
-}
-
-fn find_keyword(sql: &str, keyword: &str) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let keyword = keyword.as_bytes();
-    bytes
-        .windows(keyword.len())
-        .enumerate()
-        .find_map(|(start, window)| {
-            if window != keyword {
-                return None;
-            }
-            let end = start + keyword.len();
-            let before_ok =
-                start == 0 || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
-            let after_ok =
-                end == bytes.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_';
-            (before_ok && after_ok).then_some(start)
-        })
 }
 
 fn find_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> {
@@ -753,7 +783,7 @@ fn missing_fact_scan_is_unproven(
     has_fact_table_source(sql)
         && scans_are_empty
         && !is_empty_result_plan(plan)
-        && !has_single_fact_source_timestamp_bound(sql)
+        && !has_timestamp_bound_for_each_fact_source(sql)
 }
 
 fn filter_guarantees_timestamp_pruning(filter: &str) -> bool {
@@ -781,31 +811,38 @@ fn filter_timestamp_bounds(filter: &str) -> u8 {
 
 fn expression_timestamp_bounds(expression: &str) -> u8 {
     let lower = code_view(expression).to_ascii_lowercase();
-    lower
-        .match_indices("timestamp")
-        .fold(0, |bounds, (start, _)| {
-            let before_ok = start == 0
-                || !lower.as_bytes()[start - 1].is_ascii_alphanumeric()
-                    && lower.as_bytes()[start - 1] != b'_';
-            let end = start + "timestamp".len();
-            let after_ok = end == lower.len()
-                || !lower.as_bytes()[end].is_ascii_alphanumeric() && lower.as_bytes()[end] != b'_';
-            let comparison = lower[end..].trim_start();
-            if !(before_ok && after_ok) {
-                return bounds;
+    let bytes = lower.as_bytes();
+    let needle = b"timestamp";
+    let mut bounds = 0;
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && bytes[i..].starts_with(needle) {
+            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+            let end = i + needle.len();
+            let after_ok =
+                end == bytes.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_';
+            if before_ok && after_ok {
+                let comparison = lower[end..].trim_start();
+                if comparison.starts_with("<>") {
+                    // Not a partition bound.
+                } else if comparison.starts_with(">=") || comparison.starts_with('>') {
+                    bounds |= 0b01;
+                } else if comparison.starts_with("<=") || comparison.starts_with('<') {
+                    bounds |= 0b10;
+                } else if comparison.starts_with("between ") {
+                    bounds |= 0b11;
+                }
             }
-            if comparison.starts_with("<>") {
-                bounds
-            } else if comparison.starts_with(">=") || comparison.starts_with('>') {
-                bounds | 0b01
-            } else if comparison.starts_with("<=") || comparison.starts_with('<') {
-                bounds | 0b10
-            } else if comparison.starts_with("between ") {
-                bounds | 0b11
-            } else {
-                bounds
-            }
-        })
+        }
+        i += 1;
+    }
+    bounds
 }
 
 fn split_top_level_boolean<'a>(expression: &'a str, operator: &str) -> Option<Vec<&'a str>> {
@@ -1090,8 +1127,84 @@ mod tests {
                            timestamp >= TIMESTAMP_NS '2020-01-01') SELECT * FROM base";
         let upper_bound = "WITH base AS (SELECT timestamp FROM traces WHERE \
                            timestamp < TIMESTAMP_NS '2030-01-01') SELECT * FROM base";
-        assert!(has_single_fact_source_timestamp_bound(lower_bound));
-        assert!(has_single_fact_source_timestamp_bound(upper_bound));
+        assert!(has_timestamp_bound_for_each_fact_source(lower_bound));
+        assert!(has_timestamp_bound_for_each_fact_source(upper_bound));
+    }
+
+    #[test]
+    fn explain_gate_allows_each_bounded_fact_source_when_statistics_elide_filters() {
+        let conn = plan_connection();
+        let from = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let to = chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let generated_scores =
+            crate::sql::llm::compile_scores_for_trace_sql("trace", from, to).unwrap();
+        assert!(has_timestamp_bound_for_each_fact_source(&generated_scores));
+        let generated_session =
+            crate::sql::llm::compile_session_detail_sql("session", from, to).unwrap();
+        assert!(has_timestamp_bound_for_each_fact_source(&generated_session));
+
+        conn.execute_batch(
+            "ALTER TABLE traces ADD COLUMN trace_id VARCHAR;\
+             ALTER TABLE traces ADD COLUMN span_id VARCHAR;\
+             ALTER TABLE scores ADD COLUMN score_id VARCHAR;\
+             ALTER TABLE scores ADD COLUMN trace_id VARCHAR;\
+             ALTER TABLE scores ADD COLUMN span_id VARCHAR;\
+             ALTER TABLE scores ADD COLUMN session_id VARCHAR;\
+             ALTER TABLE scores ADD COLUMN name VARCHAR;\
+             ALTER TABLE scores ADD COLUMN data_type VARCHAR;\
+             ALTER TABLE scores ADD COLUMN numeric_value DOUBLE;\
+             ALTER TABLE scores ADD COLUMN string_value VARCHAR;\
+             ALTER TABLE scores ADD COLUMN boolean_value BOOLEAN;\
+             ALTER TABLE scores ADD COLUMN source VARCHAR;\
+             ALTER TABLE scores ADD COLUMN comment VARCHAR;\
+             ALTER TABLE scores ADD COLUMN config_id VARCHAR;\
+             ALTER TABLE scores ADD COLUMN author_id VARCHAR;\
+             ALTER TABLE scores ADD COLUMN metadata JSON;\
+             UPDATE traces SET trace_id = 'trace', span_id = 'span';\
+             UPDATE scores SET trace_id = 'trace', span_id = 'span';",
+        )
+        .unwrap();
+        let mut statement = conn
+            .prepare(&format!("EXPLAIN (FORMAT JSON) {generated_scores}"))
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap();
+        let plan: serde_json::Value =
+            serde_json::from_str(&rows.collect::<Result<Vec<_>, _>>().unwrap().join("\n")).unwrap();
+        let mut fact_scans = Vec::new();
+        collect_fact_scans(&plan, &mut fact_scans);
+        assert!(fact_scans.len() >= 2);
+        assert!(fact_scans.iter().all(|(_, filters)| !filters
+            .as_deref()
+            .map(filter_guarantees_timestamp_pruning)
+            .unwrap_or(false)));
+        ensure_fact_scan_uses_timestamp_pruning(&conn, &generated_scores).unwrap();
+
+        let sql = "SELECT s.value FROM scores AS s WHERE \
+                   s.timestamp >= TIMESTAMPTZ '2020-01-01' AND \
+                   s.timestamp < TIMESTAMPTZ '2030-01-01' AND \
+                   s.value IN (SELECT t.value FROM traces AS t WHERE \
+                     t.timestamp >= TIMESTAMP_NS '2020-01-01' AND \
+                     t.timestamp < TIMESTAMP_NS '2030-01-01')";
+        ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
+    }
+
+    #[test]
+    fn explain_gate_rejects_a_multi_source_query_with_an_unbounded_fact_source() {
+        let conn = plan_connection();
+        let sql = "SELECT s.value FROM scores AS s WHERE \
+                   s.timestamp >= TIMESTAMPTZ '2020-01-01' AND EXISTS (\
+                     SELECT 1 FROM traces AS t WHERE t.value = s.value AND \
+                       s.timestamp < TIMESTAMPTZ '2030-01-01')";
+        let error = ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("without a conjunctive pushed timestamp filter"));
     }
 
     #[test]
@@ -1145,7 +1258,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(has_single_fact_source_timestamp_bound(&sql));
+        assert!(has_timestamp_bound_for_each_fact_source(&sql));
         let mut statement = conn
             .prepare(&format!("EXPLAIN (FORMAT JSON) {sql}"))
             .unwrap();
@@ -1197,7 +1310,7 @@ mod tests {
             nested_fact,
         ] {
             assert!(
-                !has_single_fact_source_timestamp_bound(sql),
+                !has_timestamp_bound_for_each_fact_source(sql),
                 "unsafe CTE fallback accepted: {sql}"
             );
         }
@@ -1220,12 +1333,12 @@ mod tests {
         let delimiter_comment = "WITH base AS (SELECT timestamp /* ) FROM fake */ FROM traces \
                                 WHERE timestamp >= '2020-01-01') SELECT * FROM base";
 
-        assert!(has_single_fact_source_timestamp_bound(derived_table));
-        assert!(has_single_fact_source_timestamp_bound(dedupe_insert));
-        assert!(!has_single_fact_source_timestamp_bound(outer_only));
-        assert!(!has_single_fact_source_timestamp_bound(order_only));
-        assert!(has_single_fact_source_timestamp_bound(delimiter_text));
-        assert!(has_single_fact_source_timestamp_bound(delimiter_comment));
+        assert!(has_timestamp_bound_for_each_fact_source(derived_table));
+        assert!(has_timestamp_bound_for_each_fact_source(dedupe_insert));
+        assert!(!has_timestamp_bound_for_each_fact_source(outer_only));
+        assert!(!has_timestamp_bound_for_each_fact_source(order_only));
+        assert!(has_timestamp_bound_for_each_fact_source(delimiter_text));
+        assert!(has_timestamp_bound_for_each_fact_source(delimiter_comment));
     }
 
     #[test]
@@ -1344,6 +1457,17 @@ mod tests {
         let sql = "SELECT * FROM traces t WHERE EXISTS (\
                    SELECT 1 FROM logs l WHERE l.timestamp >= TIMESTAMP_NS '2026-01-01')";
         let err = ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap_err();
+        assert!(err.to_string().contains("traces"), "{err}");
+
+        conn.execute_batch(
+            "CREATE TABLE dimensions (value INTEGER, timestamp TIMESTAMP_NS);\
+             INSERT INTO dimensions VALUES (1, TIMESTAMP_NS '2025-01-01');",
+        )
+        .unwrap();
+        let correlated = "SELECT 1 FROM dimensions d WHERE EXISTS (\
+                          SELECT 1 FROM traces t WHERE t.value = d.value AND \
+                            d.timestamp >= TIMESTAMP_NS '2020-01-01')";
+        let err = ensure_fact_scan_uses_timestamp_pruning(&conn, correlated).unwrap_err();
         assert!(err.to_string().contains("traces"), "{err}");
     }
 
