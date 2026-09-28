@@ -419,6 +419,7 @@ pub fn compile_session_detail_sql(
                    FROM session_scores \
                  ), session_aggregate AS ( \
                    SELECT \
+                     first(score_aggregate.session_scores) AS session_scores, \
                      COUNT(DISTINCT trace_id)::BIGINT AS session_trace_count, \
                      COUNT(*)::BIGINT AS session_span_count, \
                      SUM(input_tokens)::BIGINT AS session_input_tokens, \

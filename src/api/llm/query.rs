@@ -1707,6 +1707,7 @@ mod tests {
         assert!(sql.contains("trace_id IN (SELECT DISTINCT trace_id FROM session_spans)"));
         assert!(sql.contains("span_id IN (SELECT span_id FROM session_spans)"));
         assert!(sql.contains("strftime( timestamp AT TIME ZONE 'UTC'"));
+        assert!(sql.contains("first(score_aggregate.session_scores) AS session_scores"));
         assert!(sql.contains("TIMESTAMPTZ '"), "scores clock: {sql}");
         assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
 
@@ -1795,25 +1796,47 @@ mod tests {
         let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
         conn.execute_batch("SET TimeZone = 'America/Los_Angeles'")
             .expect("set non-UTC session timezone");
+        conn.execute_batch(
+            "CREATE TABLE traces (\
+                trace_id VARCHAR, span_id VARCHAR, parent_span_id VARCHAR, session_id VARCHAR, \
+                message_type VARCHAR, observation_type VARCHAR, timestamp TIMESTAMP_NS, \
+                end_timestamp TIMESTAMP_NS, status_code VARCHAR, model_name VARCHAR, \
+                model_provider VARCHAR, user_id VARCHAR, input_tokens BIGINT, \
+                output_tokens BIGINT, total_tokens BIGINT, total_cost DOUBLE, \
+                attributes JSON, events JSON\
+            );\
+            INSERT INTO traces VALUES (\
+                'trace-1', 'span-1', NULL, 'sess-1', 'chat', 'generation', \
+                TIMESTAMP_NS '2026-09-28 01:00:00', TIMESTAMP_NS '2026-09-28 01:01:00', \
+                'OK', 'model', 'provider', 'user', 10, 20, 30, 0.01, '{}', '[]'\
+            );\
+            CREATE TABLE scores (\
+                score_id VARCHAR, timestamp TIMESTAMPTZ, trace_id VARCHAR, span_id VARCHAR, \
+                session_id VARCHAR, name VARCHAR, data_type VARCHAR, numeric_value DOUBLE, \
+                string_value VARCHAR, boolean_value BOOLEAN, source VARCHAR, comment VARCHAR, \
+                config_id VARCHAR, author_id VARCHAR, metadata JSON\
+            );\
+            INSERT INTO scores VALUES (\
+                'score-1', TIMESTAMPTZ '2026-09-28 01:02:03.123456+00', \
+                'trace-1', 'span-1', 'sess-1', 'quality', 'numeric', 0.91, \
+                NULL, NULL, 'evaluator', NULL, NULL, NULL, '{\"suite\":\"integration\"}'\
+            );",
+        )
+        .expect("create detail fixture tables");
+        let from = DateTime::parse_from_rfc3339("2026-09-28T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-09-28T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let detail_sql = compile_session_detail_sql("sess-1", from, to).unwrap();
         let encoded: String = conn
             .query_row(
-                "SELECT to_json(list(struct_pack(\
-                    score_id := 'score-1', \
-                    \"timestamp\" := strftime(\
-                        TIMESTAMPTZ '2026-09-28 01:02:03.123456+00' AT TIME ZONE 'UTC', \
-                        '%Y-%m-%dT%H:%M:%S.%fZ'\
-                    ), \
-                    trace_id := NULL::VARCHAR, span_id := NULL::VARCHAR, \
-                    session_id := 'sess-1', name := 'quality', data_type := 'numeric', \
-                    numeric_value := 0.91, string_value := NULL::VARCHAR, \
-                    boolean_value := NULL::BOOLEAN, source := 'evaluator', \
-                    comment := NULL::VARCHAR, config_id := NULL::VARCHAR, \
-                    author_id := NULL::VARCHAR, metadata := MAP(['suite'], ['integration'])\
-                )))",
+                &format!("SELECT session_scores FROM ({detail_sql}) AS detail LIMIT 1"),
                 [],
                 |row| row.get(0),
             )
-            .expect("serialize score as JSON");
+            .expect("execute holistic session detail SQL");
         let scores = map_session_scores(&["session_scores".to_string()], &[Value::String(encoded)]);
         assert_eq!(scores.len(), 1);
         assert_eq!(scores[0].score_id, "score-1");
