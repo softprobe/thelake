@@ -10,25 +10,8 @@ use uuid::Uuid;
 
 use crate::util::config::apply_workspace_scope_mode;
 
-#[tokio::test]
-async fn creates_versioned_business_table_and_current_view_from_manifest() {
-    let (client, connection) = tokio_postgres::connect(
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
-        NoTls,
-    )
-    .await
-    .expect("connect ducklake postgres");
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    let suffix = Uuid::new_v4().to_string().replace('-', "_");
-    let schema = format!("tenant_business_ddl_{suffix}");
-    client
-        .execute(&format!(r#"CREATE SCHEMA "{}";"#, schema), &[])
-        .await
-        .expect("create tenant schema");
-
+#[test]
+fn business_table_ddl_uses_timestamp_ns_for_time_fields() {
     let manifest = parse_promotion_manifest(
         r#"
 specVersion: softprobe.promotion.v1
@@ -53,6 +36,12 @@ columns:
     source:
       from: http_response_body
       json_path: $.order.total_cents
+  - name: placed_at
+    type: timestamp
+    nullable: true
+    source:
+      from: attribute
+      key: order.placed_at
 "#,
     )
     .expect("valid manifest");
@@ -60,15 +49,13 @@ columns:
         panic!("expected business table manifest");
     };
 
-    for ddl in business_table_create_ddls(&format!(r#""{}""#, schema), &spec).expect("ddl") {
-        client.execute(&ddl, &[]).await.expect("apply business ddl");
-    }
-
-    assert!(relation_exists(&client, &schema, "checkout_orders_v1", "BASE TABLE").await);
-    assert!(relation_exists(&client, &schema, "checkout_orders_current", "VIEW").await);
-    assert!(column_exists(&client, &schema, "checkout_orders_v1", "session_id").await);
-    assert!(column_exists(&client, &schema, "checkout_orders_v1", "order_id").await);
-    assert!(column_exists(&client, &schema, "checkout_orders_v1", "total_cents").await);
+    let ddls = business_table_create_ddls(r#""softprobe"."tenant_business""#, &spec)
+        .expect("DuckLake business table DDL");
+    let create_table = &ddls[0];
+    assert!(create_table.contains(r#""event_timestamp" TIMESTAMP_NS"#));
+    assert!(create_table.contains(r#""source_timestamp" TIMESTAMP_NS"#));
+    assert!(create_table.contains(r#""placed_at" TIMESTAMP_NS"#));
+    assert!(ddls.last().unwrap().contains("checkout_orders_current"));
 }
 
 #[tokio::test]
@@ -121,44 +108,6 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     assert!(!spec_id.is_empty());
     assert_ducklake_table_exists(&business_metadata_schema, "checkout_orders_v1").await;
     assert_ducklake_view_exists(&business_metadata_schema, "checkout_orders_current").await;
-}
-
-async fn relation_exists(
-    client: &tokio_postgres::Client,
-    schema: &str,
-    relation: &str,
-    relation_type: &str,
-) -> bool {
-    client
-        .query_one(
-            r#"SELECT count(*)
-FROM information_schema.tables
-WHERE table_schema = $1 AND table_name = $2 AND table_type = $3;"#,
-            &[&schema, &relation, &relation_type],
-        )
-        .await
-        .expect("relation exists query")
-        .get::<_, i64>(0)
-        == 1
-}
-
-async fn column_exists(
-    client: &tokio_postgres::Client,
-    schema: &str,
-    table: &str,
-    column: &str,
-) -> bool {
-    client
-        .query_one(
-            r#"SELECT count(*)
-FROM information_schema.columns
-WHERE table_schema = $1 AND table_name = $2 AND column_name = $3;"#,
-            &[&schema, &table, &column],
-        )
-        .await
-        .expect("column exists query")
-        .get::<_, i64>(0)
-        == 1
 }
 
 async fn assert_ducklake_table_exists(schema: &str, table: &str) {
