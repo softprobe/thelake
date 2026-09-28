@@ -715,6 +715,30 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     let score_resp = router.clone().oneshot(score_req).await.expect("score");
     assert_eq!(score_resp.status(), StatusCode::CREATED);
 
+    let trace_uri = format!(
+        "/v1/llm/traces/{}?from={}&to={}",
+        hex::encode([spec.trace; 16]),
+        from.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        to.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+    );
+    let trace_req = Request::builder()
+        .method("GET")
+        .uri(trace_uri)
+        .body(Body::empty())
+        .unwrap();
+    let trace_resp = router
+        .clone()
+        .oneshot(trace_req)
+        .await
+        .expect("trace detail");
+    assert_eq!(trace_resp.status(), StatusCode::OK);
+    let trace_body = response_json(trace_resp).await;
+    assert_eq!(
+        trace_body["scores"].as_array().unwrap().len(),
+        1,
+        "trace detail should find the session's bounded score: {trace_body}"
+    );
+
     // D7: lake window comes from session_summary only — no query from/to.
     let detail = Request::builder()
         .method("GET")
