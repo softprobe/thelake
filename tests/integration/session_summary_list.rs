@@ -661,28 +661,6 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     assert!(dirty_count(&state, &schema).await >= 1);
     assert!(run_reduce(&state).await >= 1);
 
-    let score_id = "detail-session-score";
-    let score = json!({
-        "score_id": score_id,
-        "timestamp": (Utc::now() - ChronoDuration::seconds(50)).to_rfc3339(),
-        "trace_id": hex::encode([spec.trace; 16]),
-        "span_id": hex::encode([spec.trace.wrapping_add(0x40); 8]),
-        "session_id": "detail-sess",
-        "name": "quality",
-        "data_type": "numeric",
-        "numeric_value": 0.91,
-        "source": "evaluator",
-        "metadata": {"suite": "holistic-session"}
-    });
-    let score_req = Request::builder()
-        .method("POST")
-        .uri("/v1/llm/scores")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(score.to_string()))
-        .unwrap();
-    let score_resp = router.clone().oneshot(score_req).await.expect("score");
-    assert_eq!(score_resp.status(), StatusCode::CREATED);
-
     let list = search(&router, window()).await;
     assert!(
         session_ids(&list).contains(&"detail-sess"),
@@ -708,6 +686,34 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
         .as_str()
         .unwrap()
         .to_string();
+
+    let from = chrono::DateTime::parse_from_rfc3339(&summary_from)
+        .unwrap()
+        .with_timezone(&Utc);
+    let to = chrono::DateTime::parse_from_rfc3339(&summary_to)
+        .unwrap()
+        .with_timezone(&Utc);
+    let score_id = "detail-session-score";
+    let score = json!({
+        "score_id": score_id,
+        "timestamp": (from + (to - from) / 2).to_rfc3339(),
+        "trace_id": hex::encode([spec.trace; 16]),
+        "span_id": hex::encode([spec.trace.wrapping_add(0x40); 8]),
+        "session_id": "detail-sess",
+        "name": "quality",
+        "data_type": "numeric",
+        "numeric_value": 0.91,
+        "source": "evaluator",
+        "metadata": {"suite": "holistic-session"}
+    });
+    let score_req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/scores")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(score.to_string()))
+        .unwrap();
+    let score_resp = router.clone().oneshot(score_req).await.expect("score");
+    assert_eq!(score_resp.status(), StatusCode::CREATED);
 
     // D7: lake window comes from session_summary only — no query from/to.
     let detail = Request::builder()
