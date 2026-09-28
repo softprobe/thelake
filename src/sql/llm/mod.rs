@@ -408,7 +408,8 @@ pub fn compile_session_detail_sql(
                        OR span_id IN (SELECT span_id FROM session_spans)) \
                  ), score_aggregate AS ( \
                    SELECT COALESCE(to_json(list(struct_pack( \
-                     score_id := score_id, \"timestamp\" := timestamp, trace_id := trace_id, \
+                     score_id := score_id, \"timestamp\" := strftime( \
+                       timestamp AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%S.%fZ'), trace_id := trace_id, \
                      span_id := span_id, session_id := session_id, name := name, \
                      data_type := data_type, numeric_value := numeric_value, \
                      string_value := string_value, boolean_value := boolean_value, \

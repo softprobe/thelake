@@ -1706,6 +1706,7 @@ mod tests {
         assert!(sql.contains("session_id = 'sess-1'"));
         assert!(sql.contains("trace_id IN (SELECT DISTINCT trace_id FROM session_spans)"));
         assert!(sql.contains("span_id IN (SELECT span_id FROM session_spans)"));
+        assert!(sql.contains("strftime( timestamp AT TIME ZONE 'UTC'"));
         assert!(sql.contains("TIMESTAMPTZ '"), "scores clock: {sql}");
         assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
 
@@ -1786,6 +1787,41 @@ mod tests {
         assert_eq!(
             scores[0].metadata.get("suite").map(String::as_str),
             Some("integration")
+        );
+    }
+
+    #[test]
+    fn maps_duckdb_timestamp_in_holistic_score_json() {
+        let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
+        conn.execute_batch("SET TimeZone = 'America/Los_Angeles'")
+            .expect("set non-UTC session timezone");
+        let encoded: String = conn
+            .query_row(
+                "SELECT to_json(list(struct_pack(\
+                    score_id := 'score-1', \
+                    \"timestamp\" := strftime(\
+                        TIMESTAMPTZ '2026-09-28 01:02:03.123456+00' AT TIME ZONE 'UTC', \
+                        '%Y-%m-%dT%H:%M:%S.%fZ'\
+                    ), \
+                    trace_id := NULL::VARCHAR, span_id := NULL::VARCHAR, \
+                    session_id := 'sess-1', name := 'quality', data_type := 'numeric', \
+                    numeric_value := 0.91, string_value := NULL::VARCHAR, \
+                    boolean_value := NULL::BOOLEAN, source := 'evaluator', \
+                    comment := NULL::VARCHAR, config_id := NULL::VARCHAR, \
+                    author_id := NULL::VARCHAR, metadata := MAP(['suite'], ['integration'])\
+                )))",
+                [],
+                |row| row.get(0),
+            )
+            .expect("serialize score as JSON");
+        let scores = map_session_scores(&["session_scores".to_string()], &[Value::String(encoded)]);
+        assert_eq!(scores.len(), 1);
+        assert_eq!(scores[0].score_id, "score-1");
+        assert_eq!(
+            scores[0].timestamp,
+            DateTime::parse_from_rfc3339("2026-09-28T01:02:03.123456Z")
+                .unwrap()
+                .with_timezone(&Utc)
         );
     }
 
