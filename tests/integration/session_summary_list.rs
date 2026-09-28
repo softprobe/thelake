@@ -198,7 +198,7 @@ fn session_ids(v: &Value) -> Vec<&str> {
 
 fn assert_summary_only_item(item: &Value) {
     assert!(item.get("session_id").is_some());
-    assert!(item.get("observation_count").is_some());
+    assert!(item.get("span_count").is_some());
     assert!(item.get("error_count").is_some());
     assert!(item.get("traces").is_none(), "list must not return traces");
     assert!(item.get("scores").is_none(), "list must not return scores");
@@ -556,7 +556,7 @@ async fn http_ingest_reduce_list_every_filter() {
     assert_eq!(ok["models"], json!(["gpt-4o"]));
     assert_eq!(ok["total_tokens"], 100);
     assert!((ok["total_cost"].as_f64().unwrap() - 0.1).abs() < 1e-9);
-    assert!(ok["observation_count"].as_i64().unwrap() >= 1);
+    assert!(ok["span_count"].as_i64().unwrap() >= 1);
 
     let mut body = window();
     body["has_errors"] = json!(true);
@@ -643,7 +643,20 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
         tokens: 100,
         cost: 0.1,
     };
+    let second_spec = SpanSpec {
+        session_id: "detail-sess",
+        trace: 0xd2,
+        start_ago_s: 35,
+        duration_s: 15,
+        error: false,
+        agent: "agent-a",
+        user: "u1",
+        model: "gpt-4o",
+        tokens: 40,
+        cost: 0.02,
+    };
     ingest(&router, llm_span(&spec)).await;
+    ingest(&router, llm_span(&second_spec)).await;
     flush(&state).await;
     assert!(dirty_count(&state, &schema).await >= 1);
     assert!(run_reduce(&state).await >= 1);
@@ -674,6 +687,58 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
         .unwrap()
         .to_string();
 
+    let from = chrono::DateTime::parse_from_rfc3339(&summary_from)
+        .unwrap()
+        .with_timezone(&Utc);
+    let to = chrono::DateTime::parse_from_rfc3339(&summary_to)
+        .unwrap()
+        .with_timezone(&Utc);
+    let score_id = "detail-session-score";
+    let score = json!({
+        "score_id": score_id,
+        "timestamp": (from + (to - from) / 2).to_rfc3339(),
+        "trace_id": hex::encode([spec.trace; 16]),
+        "span_id": hex::encode([spec.trace.wrapping_add(0x40); 8]),
+        "session_id": "detail-sess",
+        "name": "quality",
+        "data_type": "numeric",
+        "numeric_value": 0.91,
+        "source": "evaluator",
+        "metadata": {"suite": "holistic-session"}
+    });
+    let score_req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/scores")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(score.to_string()))
+        .unwrap();
+    let score_resp = router.clone().oneshot(score_req).await.expect("score");
+    assert_eq!(score_resp.status(), StatusCode::CREATED);
+
+    let trace_uri = format!(
+        "/v1/llm/traces/{}?from={}&to={}",
+        hex::encode([spec.trace; 16]),
+        from.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        to.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+    );
+    let trace_req = Request::builder()
+        .method("GET")
+        .uri(trace_uri)
+        .body(Body::empty())
+        .unwrap();
+    let trace_resp = router
+        .clone()
+        .oneshot(trace_req)
+        .await
+        .expect("trace detail");
+    assert_eq!(trace_resp.status(), StatusCode::OK);
+    let trace_body = response_json(trace_resp).await;
+    assert_eq!(
+        trace_body["scores"].as_array().unwrap().len(),
+        1,
+        "trace detail should find the session's bounded score: {trace_body}"
+    );
+
     // D7: lake window comes from session_summary only — no query from/to.
     let detail = Request::builder()
         .method("GET")
@@ -686,25 +751,20 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     assert_eq!(body["session_id"], "detail-sess");
     assert_eq!(body["from"], summary_from);
     assert_eq!(body["to"], summary_to);
-    assert!(
-        body["traces"].as_array().unwrap().len() >= 1,
-        "detail must still return traces from lake: {body}"
+    assert_eq!(
+        body["spans"].as_array().unwrap().len(),
+        2,
+        "holistic detail must include full spans: {body}"
     );
-
-    let obs_req = Request::builder()
-        .method("GET")
-        .uri("/v1/llm/sessions/detail-sess/observations")
-        .body(Body::empty())
-        .unwrap();
-    let obs_resp = router.clone().oneshot(obs_req).await.expect("observations");
-    assert_eq!(obs_resp.status(), StatusCode::OK);
-    let obs_body = response_json(obs_resp).await;
-    assert_eq!(obs_body["from"], summary_from);
-    assert_eq!(obs_body["to"], summary_to);
-    assert!(
-        obs_body["observations"].as_array().unwrap().len() >= 1,
-        "observations must read lake under summary window: {obs_body}"
-    );
+    assert_eq!(body["span_count"], 2);
+    assert_eq!(body["trace_count"], 2);
+    assert_eq!(body["total_tokens"], 140);
+    assert!((body["total_cost"].as_f64().unwrap() - 0.12).abs() < 1e-9);
+    assert!(body["spans"][0]["attributes"].is_object());
+    assert!(body["spans"][0]["events"].is_array());
+    assert_eq!(body["scores"].as_array().unwrap().len(), 1);
+    assert_eq!(body["scores"][0]["score_id"], score_id);
+    assert_eq!(body["scores"][0]["numeric_value"], 0.91);
 
     let missing = Request::builder()
         .method("GET")
@@ -714,13 +774,16 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     let missing_resp = router.clone().oneshot(missing).await.expect("missing");
     assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
 
-    let missing_obs = Request::builder()
+    let removed_observations_route = Request::builder()
         .method("GET")
         .uri("/v1/llm/sessions/no-such-session/observations")
         .body(Body::empty())
         .unwrap();
-    let missing_obs_resp = router.oneshot(missing_obs).await.expect("missing obs");
-    assert_eq!(missing_obs_resp.status(), StatusCode::NOT_FOUND);
+    let removed_route_resp = router
+        .oneshot(removed_observations_route)
+        .await
+        .expect("removed route");
+    assert_eq!(removed_route_resp.status(), StatusCode::NOT_FOUND);
 }
 
 fn recording_batch_span(
@@ -987,9 +1050,9 @@ async fn http_session_summary_rereduce_refreshes_counts() {
         .iter()
         .find(|i| i["session_id"] == "rr-sess")
         .expect("rr-sess after first reduce");
-    let obs1 = item["observation_count"].as_i64().unwrap();
+    let spans1 = item["span_count"].as_i64().unwrap();
     let tokens1 = item["total_tokens"].as_i64().unwrap();
-    assert!(obs1 >= 2, "gen+agent: {item}");
+    assert!(spans1 >= 2, "gen+agent: {item}");
     assert_eq!(tokens1, 100);
 
     // Late span: another generation → dirty → re-reduce must refresh.
@@ -1019,11 +1082,11 @@ async fn http_session_summary_rereduce_refreshes_counts() {
         .iter()
         .find(|i| i["session_id"] == "rr-sess")
         .expect("rr-sess after re-reduce");
-    let obs2 = item["observation_count"].as_i64().unwrap();
+    let spans2 = item["span_count"].as_i64().unwrap();
     let tokens2 = item["total_tokens"].as_i64().unwrap();
     assert!(
-        obs2 > obs1,
-        "re-reduce must raise observation_count ({obs1} → {obs2}): {item}"
+        spans2 > spans1,
+        "re-reduce must raise span_count ({spans1} → {spans2}): {item}"
     );
     assert_eq!(tokens2, 200, "two generations × 100 tokens: {item}");
 }
@@ -1100,7 +1163,7 @@ async fn http_session_summary_list_independent_of_span_volume() {
         .find(|i| i["session_id"] == "vol-fat")
         .unwrap();
     assert!(
-        fat_item["observation_count"].as_i64().unwrap() >= FAT_SPANS as i64,
+        fat_item["span_count"].as_i64().unwrap() >= FAT_SPANS as i64,
         "fat summary must count lake spans: {fat_item}"
     );
     assert_summary_only_item(fat_item);
@@ -1258,7 +1321,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     };
     assert_eq!(detail_after["session_id"], "sess-ok");
     assert!(
-        detail_after["observation_count"].as_i64().unwrap_or(0) > 0,
+        detail_after["span_count"].as_i64().unwrap_or(0) > 0,
         "lake detail still populated: {detail_after}"
     );
 }

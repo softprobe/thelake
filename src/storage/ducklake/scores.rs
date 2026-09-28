@@ -2,6 +2,7 @@ use crate::models::{Score, ScoreConfig};
 use crate::storage::schema::arrow;
 use crate::storage::schema::tables::{ScoreConfigTable, ScoreTable};
 use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use super::attach::ducklake_qualified_table_name;
@@ -98,30 +99,59 @@ impl DuckLakeWriter {
                 .map_err(|message| anyhow!("invalid score: {message}"))?;
         }
 
+        let min_micros = scores
+            .iter()
+            .map(|score| score.timestamp.timestamp_micros())
+            .min()
+            .expect("non-empty scores");
+        let max_micros = scores
+            .iter()
+            .map(|score| score.timestamp.timestamp_micros())
+            .max()
+            .expect("non-empty scores");
+        let dedupe_window = crate::sql::QueryWindow::try_new(
+            DateTime::<Utc>::from_timestamp_micros(min_micros).expect("valid score timestamp"),
+            DateTime::<Utc>::from_timestamp_micros(max_micros).expect("valid score timestamp"),
+        )
+        .expect("min <= max");
         let schema = ScoreTable::schema();
         let record_batch = arrow::scores_to_record_batch(&scores, &schema)?;
         self.write_record_batches_internal_with_ducklake(
             self.physical_scope(),
             ScoreTable::table_name(),
             vec![record_batch],
+            Some(dedupe_window),
         )
         .await
     }
 
-    pub async fn score_exists(&self, score_id: &str) -> Result<bool> {
+    pub async fn score_exists(&self, score_id: &str, timestamp: DateTime<Utc>) -> Result<bool> {
         let table = ducklake_qualified_table_name(self.physical_scope(), ScoreTable::table_name());
         let pool = self.get_or_create_pool(self.physical_scope())?;
         let score_id = score_id.to_string();
         let workspace_id = self.shared_workspace_id()?.map(str::to_owned);
+        let timestamp = DateTime::<Utc>::from_timestamp_micros(timestamp.timestamp_micros())
+            .expect("valid score timestamp");
+        let window = crate::sql::QueryWindow::try_new(timestamp, timestamp)
+            .map_err(|error| anyhow!(error))?;
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
                 let sql = workspace_id.as_deref().map_or_else(
-                    || crate::sql::writer::score_exists_sql(&table),
+                    || crate::sql::writer::score_exists_sql(&table, &window),
                     |workspace_id| {
-                        crate::sql::writer::score_exists_sql_for_workspace(&table, workspace_id)
+                        crate::sql::writer::score_exists_sql_for_workspace(
+                            &table,
+                            workspace_id,
+                            &window,
+                        )
                     },
                 );
-                crate::sql::ensure_fact_scan_bound(&sql).map_err(|e| anyhow!("SQL gate: {e}"))?;
+                // The only bind is score_id (VARCHAR). Plan the identical
+                // scan shape with a harmless literal because DuckDB EXPLAIN
+                // cannot accept unresolved prepared-statement parameters.
+                let plan_sql = sql.replace('?', "'__score_id__'");
+                crate::sql::ensure_fact_scan_uses_timestamp_pruning(conn, &plan_sql)
+                    .map_err(|e| anyhow!("SQL gate: {e}"))?;
                 match conn.query_row(&sql, [&score_id], |row| row.get::<_, bool>(0)) {
                     Ok(exists) => Ok(exists),
                     Err(error) if error.to_string().contains("does not exist") => Ok(false),
@@ -154,6 +184,7 @@ impl DuckLakeWriter {
             self.physical_scope(),
             ScoreConfigTable::table_name(),
             vec![record_batch],
+            None,
         )
         .await
     }

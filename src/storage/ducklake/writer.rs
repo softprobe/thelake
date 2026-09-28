@@ -554,6 +554,7 @@ impl DuckLakeWriter {
         scope: &PhysicalScope,
         table_name: &str,
         record_batches: Vec<RecordBatch>,
+        dedupe_timestamp_window: Option<crate::sql::QueryWindow>,
     ) -> Result<()> {
         if record_batches.is_empty() {
             return Ok(());
@@ -611,6 +612,7 @@ impl DuckLakeWriter {
                     &escaped_path,
                     id_column,
                     order_clause,
+                    dedupe_timestamp_window.as_ref(),
                 )
             } else {
                 crate::sql::writer::insert_deduped_parquet_sql(
@@ -619,6 +621,7 @@ impl DuckLakeWriter {
                     &escaped_path,
                     id_column,
                     order_clause,
+                    dedupe_timestamp_window.as_ref(),
                 )
             }
         } else {
@@ -633,7 +636,7 @@ impl DuckLakeWriter {
         let write_result = tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
                 crate::sql::execute_batch_checked(conn, "BEGIN TRANSACTION;")?;
-                match crate::sql::execute_batch_checked(conn, &insert) {
+                match crate::sql::execute_batch_for_parquet_ingest(conn, &insert) {
                     Ok(()) => {
                         crate::sql::execute_batch_checked(conn, "COMMIT;")?;
                         Ok(())

@@ -264,8 +264,12 @@ impl IngestEngine {
         self.writer.write_score_batches(vec![items]).await
     }
 
-    pub async fn score_exists(&self, score_id: &str) -> Result<bool> {
-        self.writer.score_exists(score_id).await
+    pub async fn score_exists(
+        &self,
+        score_id: &str,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.writer.score_exists(score_id, timestamp).await
     }
 
     /// Add score configurations through the authenticated workspace write path.
@@ -411,7 +415,7 @@ mod after_commit_tests {
             .expect("sample ingest");
 
         assert!(!engine
-            .score_exists("missing-score")
+            .score_exists("missing-score", chrono::Utc::now())
             .await
             .expect("score lookup"));
         assert!(engine

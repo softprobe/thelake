@@ -23,17 +23,16 @@ pub fn insert_deduped_parquet_sql(
     path: &str,
     id_column: &str,
     order: &str,
+    timestamp_window: Option<&crate::sql::QueryWindow>,
 ) -> String {
-    format!(
-        "INSERT INTO {table} BY NAME\n\
-         SELECT incoming.* FROM (\n\
-           {select} FROM read_parquet('{path}')\n\
-         ) incoming\n\
-         WHERE NOT EXISTS (\n\
-           SELECT 1 FROM {table} existing\n\
-           WHERE existing.{id_column} = incoming.{id_column}\n\
-         )\n\
-         {order};"
+    insert_deduped_parquet_sql_inner(
+        table,
+        select,
+        path,
+        id_column,
+        order,
+        false,
+        timestamp_window,
     )
 }
 
@@ -43,7 +42,36 @@ pub fn insert_deduped_parquet_sql_for_workspace(
     path: &str,
     id_column: &str,
     order: &str,
+    timestamp_window: Option<&crate::sql::QueryWindow>,
 ) -> String {
+    insert_deduped_parquet_sql_inner(
+        table,
+        select,
+        path,
+        id_column,
+        order,
+        true,
+        timestamp_window,
+    )
+}
+
+fn insert_deduped_parquet_sql_inner(
+    table: &str,
+    select: &str,
+    path: &str,
+    id_column: &str,
+    order: &str,
+    shared_scope: bool,
+    timestamp_window: Option<&crate::sql::QueryWindow>,
+) -> String {
+    let tenant_predicate = if shared_scope {
+        " AND existing.tenant_id = incoming.tenant_id"
+    } else {
+        ""
+    };
+    let timestamp_filter = timestamp_window.map_or_else(String::new, |window| {
+        format!(" AND {}", window.timestamptz_filter_sql("existing."))
+    });
     format!(
         "INSERT INTO {table} BY NAME\n\
          SELECT incoming.* FROM (\n\
@@ -51,8 +79,7 @@ pub fn insert_deduped_parquet_sql_for_workspace(
          ) incoming\n\
          WHERE NOT EXISTS (\n\
            SELECT 1 FROM {table} existing\n\
-           WHERE existing.{id_column} = incoming.{id_column}\n\
-             AND existing.tenant_id = incoming.tenant_id\n\
+           WHERE existing.{id_column} = incoming.{id_column}{tenant_predicate}{timestamp_filter}\n\
          )\n\
          {order};"
     )
@@ -61,20 +88,22 @@ pub fn insert_deduped_parquet_sql_for_workspace(
 // Scores use the microsecond/TIMESTAMPTZ family (see `ts_utc` in
 // `storage::schema::tables`), not the timezone-free TIMESTAMP_NS trace/log
 // clocks, so the bound compares against TIMESTAMPTZ directly.
-pub fn score_exists_sql(table: &str) -> String {
+pub fn score_exists_sql(table: &str, window: &crate::sql::QueryWindow) -> String {
     format!(
-        "SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? \
-         AND timestamp >= '1970-01-01'::TIMESTAMPTZ \
-         AND timestamp <= '2100-01-01'::TIMESTAMPTZ LIMIT 1)"
+        "SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? AND {} LIMIT 1)",
+        window.timestamptz_filter_sql("")
     )
 }
 
-pub fn score_exists_sql_for_workspace(table: &str, workspace_id: &str) -> String {
+pub fn score_exists_sql_for_workspace(
+    table: &str,
+    workspace_id: &str,
+    window: &crate::sql::QueryWindow,
+) -> String {
     format!(
-        "SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? AND tenant_id = {} \
-         AND timestamp >= '1970-01-01'::TIMESTAMPTZ \
-         AND timestamp <= '2100-01-01'::TIMESTAMPTZ LIMIT 1)",
-        crate::sql::sql_string_literal(workspace_id)
+        "SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? AND tenant_id = {} AND {} LIMIT 1)",
+        crate::sql::sql_string_literal(workspace_id),
+        window.timestamptz_filter_sql("")
     )
 }
 
@@ -128,12 +157,20 @@ pub fn score_config_by_id_sql_for_workspace(table: &str, workspace_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn score_window() -> crate::sql::QueryWindow {
+        let timestamp = Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0).unwrap();
+        crate::sql::QueryWindow::try_new(timestamp, timestamp).unwrap()
+    }
 
     #[test]
     fn workspace_score_queries_filter_and_escape_ownership() {
-        let score = score_exists_sql_for_workspace("scores", "workspace'42");
+        let score = score_exists_sql_for_workspace("scores", "workspace'42", &score_window());
         let config = score_config_by_id_sql_for_workspace("score_configs", "workspace'42");
         assert!(score.contains("tenant_id = 'workspace''42'"));
+        assert!(score.contains("timestamp >= TIMESTAMPTZ '2026-09-10 12:00:00.000000+00'"));
+        assert!(score.contains("timestamp <= TIMESTAMPTZ '2026-09-10 12:00:00.000000+00'"));
         assert!(config.contains("WHERE config_id = ? AND tenant_id = 'workspace''42'"));
     }
 
@@ -151,8 +188,11 @@ mod tests {
             "/tmp/scores.parquet",
             "score_id",
             "ORDER BY timestamp",
+            Some(&score_window()),
         );
         assert!(sql.contains("existing.score_id = incoming.score_id"));
         assert!(sql.contains("existing.tenant_id = incoming.tenant_id"));
+        assert!(sql.contains("existing.timestamp >= TIMESTAMPTZ"));
+        assert!(sql.contains("existing.timestamp <= TIMESTAMPTZ"));
     }
 }

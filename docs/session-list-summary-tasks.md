@@ -1,5 +1,8 @@
 # Session list summary — implementation tasks
 
+> Historical checklist. Its completed `record_date` + timestamp steps predate
+> the one-clock cutover and are superseded by the current [event-time rule](./design-event-time-layout.md): every fact scan uses a bare `timestamp` predicate.
+
 **Design:** [`session-list-summary.md`](./session-list-summary.md) · [`async-jobs.md`](./async-jobs.md)  
 **Rule:** Do not ship a private session-summary timer before Stage A (shared leases).  
 **Legend:** sequential within a stage unless marked **[P]** (safe to parallelize with sibling **[P]** tasks in that stage).

@@ -125,7 +125,7 @@ pub fn trace_scan_sql(
     let trace_id = trace_id.map(str::to_owned);
 
     Ok(window
-        .bind_scan("", |bound| {
+        .scan_with_timestamp_filter("", |bound| {
             let where_base = match trace_id.as_deref() {
                 Some(id) => format!("trace_id = {} AND {bound}", sql_string_literal(id)),
                 None => bound.to_string(),

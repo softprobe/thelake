@@ -1,7 +1,7 @@
 # Design: SQL compilation + one-clock schema
 
-**Status:** Implementation in progress — one-clock foundation + schema DDL; recipe migration continuing  
-**Constraints:** (1) simplicity (2) clean cutover — one-time copy OK, no compat (3) no room for mistake  
+**Status:** Implementation in progress — one-clock foundation + schema DDL; recipe migration continuing
+**Constraints:** (1) simplicity (2) clean cutover — one-time copy OK, no compat (3) no room for mistake
 **Related:** [`design-event-time-layout.md`](./design-event-time-layout.md)
 
 Product metrics / Prometheus recipes are **out of scope** (removed). Orphaned
@@ -11,13 +11,13 @@ Product metrics / Prometheus recipes are **out of scope** (removed). Orphaned
 
 ## 0. Non-negotiable rules
 
-1. **One event-time column named `timestamp` on every DuckLake fact table.**  
-   That filter is the prune. Physical layout = calendar day of `timestamp`.  
-   **No `record_date` / `event_date` / `window_ts`.**  
-   OTLP `traces` and `logs` (and `scores`) use `TIMESTAMP_NS` because their
-   public contracts preserve Unix nanoseconds. Every recipe binds the column
-   named `timestamp`.
-2. **One window type: `QueryWindow { from, to }`.** Recipes call `bind_scan` on it.
+1. **One event-time column named `timestamp` on every DuckLake fact table.**
+   A bare predicate on that column enables partition pruning. Physical layout = calendar day of `timestamp`.
+   **No `record_date` / `event_date` / `window_ts`.**
+   The logical clock is UTC event time. `traces` and `logs` store
+   `TIMESTAMP_NS`; `scores` currently store `TIMESTAMPTZ`. Every recipe filters
+   the bare `timestamp` column using the matching literal type.
+2. **One window type: `QueryWindow { from, to }`.** Recipes call a `scan_with_*_filter` method on it.
    Loki/Tempo clocks convert at the protocol edge only — not a second lake
    window type.
 3. **All production SQL under `src/sql/` only.** Tests are the only exception. Locality unit test is hard-fail.
@@ -25,7 +25,7 @@ Product metrics / Prometheus recipes are **out of scope** (removed). Orphaned
 5. **One escaping / quoting API** under `src/sql/`.
 6. **Schema registry in `src/sql/schema` (types + DDL).**
 7. **Clean cutover.** New catalog, copy once, flip, drop old. No dual-read / feature flags.
-8. **Execute-time gate (D12):** fact-table SQL missing a `timestamp` bound → reject; any `record_date` / `event_date` / `window_ts` token → reject.
+8. **Global scan rule:** every fact scan has an explicit, bare `timestamp` bound for partition pruning. One lower or upper bound can prune partitions on one side. Typed query APIs require a `QueryWindow`; there is no all-history default. A DuckDB JSON physical-plan check runs before execution and requires a conjunctive bare-column timestamp filter on every traces/logs/scores scan, including nested queries, DML, CTAS, COPY, and relation commands. When statistics prove the timestamp bound redundant, the gate accepts that only for a direct query with one fact source; when the optimizer proves the entire result empty, there is no fact scan to gate. Raw SQL cannot read Parquet files directly; the writer has a separate checked ingest path for temporary Parquet inputs. One SQL statement is accepted per call so planning sees the same catalog state as execution. Unsupported query forms fail closed. The gate also rejects forbidden `record_date` / `event_date` / `window_ts` references.
 9. **Simplicity.** No ORM, no SQL AST framework, no `(year,month,day)` triples, no signal-specific clock aliases.
 
 Violate any rule → reject the change.
@@ -42,10 +42,16 @@ Violate any rule → reject the change.
 
 Every DuckLake fact table has **`timestamp`** as its only time column. Partition = day(`timestamp`).
 
-| Table family | Sort (lead) |
-|--------------|-------------|
-| `traces` | `session_id, trace_id, timestamp` |
-| `logs`, `scores` | `session_id, timestamp` |
+| Table | Timestamp type | Sort |
+|-------|---------------|------|
+| `traces` | `TIMESTAMP_NS` | `session_id, trace_id, timestamp` |
+| `logs` | `TIMESTAMP_NS` | `session_id, timestamp` |
+| `scores` | `TIMESTAMPTZ` | `session_id, timestamp` |
+
+Score deduplication identity is `(score_id, timestamp)` in isolated scope and
+`(tenant_id, score_id, timestamp)` in shared scope. A repeated `score_id` at a
+different timestamp is a distinct score; every idempotency lookup carries the
+score timestamp so it can prune to that day.
 
 **Locked partition expression** (greenfield EXPLAIN in `tests/integration/one_clock_prune.rs`):
 
@@ -61,7 +67,10 @@ ALTER TABLE … SET PARTITIONED BY (year(timestamp), month(timestamp), day(times
 WHERE timestamp >= … AND timestamp <= … AND <identity>
 ```
 
-Loki/Tempo: protocol clocks → `QueryWindow` at the edge, then the same shape.
+Keep `timestamp` bare on the left side of each comparison. Do not cast or wrap
+it: QueryWindow recipes and their tests construct both range bounds, EXPLAIN
+verifies partition pruning, and the execute gate checks the pushed scan filters.
+Loki/Tempo protocol times convert to the same UTC `QueryWindow` at the edge.
 
 ### 1.4 Cutover
 
@@ -74,9 +83,9 @@ New catalog → EXPLAIN → copy (drop `record_date`) → flip → delete old.
 ### 2.1 Layers
 
 ```text
-handler / planner  →  crate::sql::… recipe  →  BoundLakeSql  →  execute (+ D12 gate)
+handler / planner  →  crate::sql::… recipe  →  TimestampFilteredSql  →  execute (+ D12 gate)
                          │
-                    window.bind_scan(|bound| …)
+                    window.scan_with_timestamp_filter(|filter| …)
 ```
 
 ### 2.2 Module layout
@@ -96,42 +105,48 @@ src/api/llm/query.rs         # HTTP only → sql::llm
 ```rust
 /// Sole lake time window. Protocol clocks → DateTime only at the edge.
 pub struct QueryWindow { pub from: DateTime<Utc>, pub to: DateTime<Utc> }
-pub struct BoundLakeSql { /* private */ sql: String }
+pub struct TimestampFilteredSql { /* private */ sql: String }
 
 impl QueryWindow {
-    pub fn bind_scan(self, alias: &str, assemble: impl FnOnce(&str) -> String) -> BoundLakeSql;
+    pub fn scan_with_timestamp_filter(self, alias: &str, assemble: impl FnOnce(&str) -> String) -> TimestampFilteredSql;
     /// Narrow to one calendar day as a *timestamp* sub-window (never emit DATE/day columns).
-    pub fn bind_day(self, day: NaiveDate, alias: &str, assemble: impl FnOnce(&str) -> String) -> BoundLakeSql;
+    pub fn scan_with_day_filter(self, day: NaiveDate, alias: &str, assemble: impl FnOnce(&str) -> String) -> TimestampFilteredSql;
 }
 ```
 
-`bind_scan` / `bind_day` emit `timestamp` lower/upper only and assert the assemble closure kept them. Never emit day/DATE predicates.
+`scan_with_timestamp_filter` / `scan_with_day_filter` emit bare `timestamp` lower/upper predicates and assert the assemble closure kept them. Never emit day/DATE predicates.
 
 ### 2.4 Enforcement
 
 | Layer | Role |
 |-------|------|
-| `BoundLakeSql` + `bind_*` | Cannot omit event-time fragment |
+| `TimestampFilteredSql` + `scan_with_*_filter` | Injects the required filter and checks the assembled SQL retains that fragment; it does not parse SQL |
 | `src/sql/` locality test | No SQL outside the package (tests excepted) |
-| D12 execute gate | Reject missing event-time bound; reject `record_date` |
+| D12 execute gate + physical plan check | Reject fact scans without a pushed bare timestamp filter; reject forbidden time-column names |
 | Greenfield EXPLAIN | Prove day prune from event-time filter |
 
-### 2.5 D12 gate (sketch)
+### 2.5 Source-level timestamp lint (sketch)
+
+This textual check gives an early error. Runtime enforcement uses DuckDB's
+structured physical plan to check each scan and is wired to query, batch, and
+prepared-statement execution paths.
 
 ```rust
-pub fn ensure_fact_scan_bound(sql: &str) -> Result<(), String> {
+pub fn ensure_sql_has_bare_timestamp_predicate(sql: &str) -> Result<(), String> {
     if is_allowlisted_infra(sql) { return Ok(()); }
     if sql.contains("record_date") || sql.contains("event_date") || sql.contains("window_ts") {
         return Err("forbidden time column name".into());
     }
-    if names_fact_table(sql) && !has_timestamp_bound(sql) {
-        return Err("fact-table SQL missing timestamp bound".into());
+    if names_fact_table(sql) && !has_bare_timestamp_predicate(sql) {
+        return Err("fact-table SQL missing bare timestamp predicate".into());
     }
     Ok(())
 }
 ```
 
-Wire into `DuckDBCore::execute_query_on_state` and shared `execute_batch_checked` for compaction/writer.
+Run the DuckDB physical-plan check in `DuckDBCore::execute_query_on_state`,
+`execute_batch_checked`, and `prepare_checked`, plus direct fact reads such as
+score existence checks.
 
 ---
 
@@ -142,18 +157,18 @@ Wire into `DuckDBCore::execute_query_on_state` and shared `execute_batch_checked
 | 1 | Greenfield catalog: §1 schema; lock partition DDL; EXPLAIN fixture |
 | 2 | Create `src/sql/` (literal, bounds, gate, schema) |
 | 3 | Move recipes into `src/sql/{…}`; callers SQL-free; locality test |
-| 4 | `BoundLakeSql` + `bind_*`; D12 gate |
+| 4 | `TimestampFilteredSql` + `scan_with_*_filter`; D12 gate |
 | 5 | Copy → flip → delete old |
 
 ---
 
 ## 4. Success criteria
 
-- [x] No `record_date` in OTLP fact schemas (DDL)  
-- [x] EXPLAIN greenfield: day-of-`timestamp` prune (`tests/integration/one_clock_prune.rs`)  
-- [x] `src/sql/` foundation (`QueryWindow::bind_*`, gate, literals, llm/tempo/session_summary recipes)  
-- [x] D12 gate on `execute_query_on_state` + `execute_batch_checked` on compaction + writer insert path  
-- [x] Cutover script: [`scripts/one_clock_catalog_copy.sql`](../scripts/one_clock_catalog_copy.sql)  
+- [x] No `record_date` in OTLP fact schemas (DDL)
+- [x] EXPLAIN greenfield: day-of-`timestamp` prune (`tests/integration/one_clock_prune.rs`)
+- [x] `src/sql/` foundation (`QueryWindow::scan_with_*_filter`, gate, literals, llm/tempo/session_summary recipes)
+- [x] D12 source gate on checked write paths; physical-plan scan gate on `execute_query_on_state` and direct fact reads
+- [x] Cutover script: [`scripts/one_clock_catalog_copy.sql`](../scripts/one_clock_catalog_copy.sql)
 
 Ops flip of catalogs remains an operator step after verify. Residual infra SQL still outside `src/sql/` (attach/DDL, TWCS metadata probes, Postgres dirty claim, OTLP telemetry compilers) — locality allowlist tracks the backlog; D12 gate covers execute paths.
 
@@ -161,7 +176,7 @@ Ops flip of catalogs remains an operator step after verify. Residual infra SQL s
 
 ## 5. Open questions
 
-1. ~~Exact DuckLake day expression~~ — locked: `(year(timestamp), month(timestamp), day(timestamp))` on `TIMESTAMP_NS`.  
+1. ~~Exact DuckLake day expression~~ — locked: `(year(timestamp), month(timestamp), day(timestamp))` on `TIMESTAMP_NS`.
 2. Postgres `session_summary` keeps `start_time` (not DuckLake) — confirm out of one-clock lake law.
 
 ---

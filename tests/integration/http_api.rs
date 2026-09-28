@@ -704,7 +704,7 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
 
     let search = Request::builder()
         .method("POST")
-        .uri("/v1/llm/observations/search")
+        .uri("/v1/llm/spans/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -722,9 +722,7 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
     );
 
     for uri in [
-        format!(
-            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
-        ),
+        format!("/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"),
         format!(
             "/v1/llm/traces/{}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z",
             hex::encode(trace_id)
@@ -830,7 +828,7 @@ async fn telemetry_session_details_returns_spans_and_logs() {
 }
 
 #[tokio::test]
-async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
+async fn llm_query_endpoints_return_spans_traces_sessions_and_scores() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (router, state, _t) = build_router_and_state().await;
     let session_id = "sess-llm-query-e2e";
@@ -880,13 +878,13 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
 
     let search_req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/observations/search")
+        .uri("/v1/llm/spans/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
                 "from": "2024-07-18T00:00:00Z",
                 "to": "2024-07-20T00:00:00Z",
-                "observation_types": ["generation"],
+                "span_types": ["generation"],
                 "model_name": "gpt-4o",
                 "user_id": "user-llm-1",
                 "session_id": session_id,
@@ -900,7 +898,7 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     let search = response_json(search_resp).await;
     assert_eq!(search["items"].as_array().unwrap().len(), 1);
     assert_eq!(search["items"][0]["span_id"], span_hex);
-    assert_eq!(search["items"][0]["observation_type"], "generation");
+    assert_eq!(search["items"][0]["span_type"], "generation");
     assert_eq!(search["items"][0]["model_name"], "gpt-4o");
     assert_eq!(search["items"][0]["model_provider"], "openai");
     assert_eq!(search["items"][0]["user_id"], "user-llm-1");
@@ -917,13 +915,13 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     // Variant key negative filter: wrong user_id must not match.
     let miss_req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/observations/search")
+        .uri("/v1/llm/spans/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
                 "from": "2024-07-18T00:00:00Z",
                 "to": "2024-07-20T00:00:00Z",
-                "observation_types": ["generation"],
+                "span_types": ["generation"],
                 "user_id": "no-such-user",
                 "session_id": session_id,
                 "limit": 50
@@ -938,14 +936,14 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
 
     let obs_req = Request::builder()
         .uri(format!(
-            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();
     let obs_resp = router.clone().oneshot(obs_req).await.expect("observation");
     if obs_resp.status() != StatusCode::OK {
         let body = response_json(obs_resp).await;
-        panic!("DEBUG observation failed: {body}");
+        panic!("DEBUG span failed: {body}");
     }
     let obs = response_json(obs_resp).await;
     assert_eq!(obs["span_id"], span_hex);
@@ -963,8 +961,8 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     assert_eq!(trace_resp.status(), StatusCode::OK);
     let trace = response_json(trace_resp).await;
     assert_eq!(trace["trace"]["trace_id"], trace_hex);
-    assert_eq!(trace["trace"]["observation_count"], 1);
-    assert_eq!(trace["observations"].as_array().unwrap().len(), 1);
+    assert_eq!(trace["trace"]["span_count"], 1);
+    assert_eq!(trace["spans"].as_array().unwrap().len(), 1);
     assert_eq!(trace["scores"].as_array().unwrap().len(), 1);
 
     let session_req = Request::builder()
@@ -976,9 +974,7 @@ async fn llm_query_endpoints_return_observations_traces_sessions_and_scores() {
     assert_eq!(session_resp.status(), StatusCode::NOT_FOUND);
 
     let missing = Request::builder()
-        .uri(
-            "/v1/llm/observations/does-not-exist?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z",
-        )
+        .uri("/v1/llm/spans/does-not-exist?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z")
         .body(Body::empty())
         .unwrap();
     let missing_resp = router.oneshot(missing).await.expect("missing");
@@ -1126,7 +1122,7 @@ async fn spans_without_events_are_readable() {
     // The detail endpoint projects events; on 1.5.2 this is where it died.
     let req = Request::builder()
         .uri(format!(
-            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();
@@ -1152,7 +1148,7 @@ async fn spans_without_events_are_readable() {
     // And again through search, which projects a different column set.
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/observations/search")
+        .uri("/v1/llm/spans/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -1300,7 +1296,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
     //    engine's ducklake attachment.
     let req = Request::builder()
         .uri(format!(
-            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();
@@ -1337,7 +1333,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
     // 5. Inlined read #2, after maintenance -- the production crash site.
     let req = Request::builder()
         .uri(format!(
-            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();
@@ -1391,7 +1387,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
 
     let req = Request::builder()
         .uri(format!(
-            "/v1/llm/observations/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();

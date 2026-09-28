@@ -69,7 +69,10 @@ async fn strict_trace_union_shape_ducklake_contract() {
                 .query_engine()
                 .count_traces(TraceCountFilter {
                     session_id: Some(session_id.clone()),
-                    ..Default::default()
+                    time_window: crate::util::query_window(),
+
+                    app_id: None,
+                    span_id: None,
                 })
                 .await?;
             Ok(c >= 1)
@@ -80,7 +83,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
 
     let row = test_pipeline
         .query_engine()
-        .find_http_span(&session_id)
+        .find_http_span(&session_id, crate::util::query_window())
         .await
         .expect("detail query");
     let row = row.expect("expected one row for session");
@@ -90,7 +93,7 @@ async fn strict_trace_union_shape_ducklake_contract() {
 
     let partitions = test_pipeline
         .query_engine()
-        .count_trace_days(&session_id)
+        .count_trace_days(&session_id, crate::util::query_window())
         .await
         .expect("partition query");
     assert!(
@@ -172,7 +175,10 @@ async fn strict_session_correlates_traces_and_logs() {
                 .query_engine()
                 .count_traces(TraceCountFilter {
                     session_id: Some(session_id.clone()),
-                    ..Default::default()
+                    time_window: crate::util::query_window(),
+
+                    app_id: None,
+                    span_id: None,
                 })
                 .await?
                 >= 1)
@@ -189,7 +195,10 @@ async fn strict_session_correlates_traces_and_logs() {
                 .query_engine()
                 .count_logs(LogCountFilter {
                     session_id: Some(session_id.clone()),
-                    ..Default::default()
+                    time_window: crate::util::query_window(),
+
+                    body: None,
+                    trace_id: None,
                 })
                 .await?
                 >= 1)
@@ -203,7 +212,9 @@ async fn strict_session_correlates_traces_and_logs() {
         .count_logs(LogCountFilter {
             session_id: Some(session_id),
             trace_id: Some(trace_id),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            body: None,
         })
         .await
         .expect("correlate");

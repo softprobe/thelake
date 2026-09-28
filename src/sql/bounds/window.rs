@@ -1,4 +1,4 @@
-//! Required event-time window + BoundLakeSql (one clock: `timestamp` only).
+//! Required event-time window that injects bare predicates for partition pruning.
 
 use chrono::{DateTime, NaiveDate, Utc};
 
@@ -11,13 +11,13 @@ pub struct QueryWindow {
     pub to: DateTime<Utc>,
 }
 
-/// SQL that was assembled under a bound `timestamp` fragment (cannot omit the bound).
+/// SQL assembled with the required bare timestamp predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundLakeSql {
+pub struct TimestampFilteredSql {
     sql: String,
 }
 
-impl BoundLakeSql {
+impl TimestampFilteredSql {
     pub fn as_str(&self) -> &str {
         &self.sql
     }
@@ -44,7 +44,7 @@ impl QueryWindow {
     /// partition prune (greenfield EXPLAIN in `one_clock_prune`: bare → 1 file,
     /// wrap → more than one day file).
     /// See `docs/fixtures/one-clock-prune-explain.md`.
-    pub fn timestamp_bound_sql(&self, alias: &str) -> String {
+    pub fn timestamp_filter_sql(&self, alias: &str) -> String {
         let col = format!("{alias}timestamp");
         format!(
             "{col} >= {} AND {col} <= {}",
@@ -55,9 +55,9 @@ impl QueryWindow {
 
     /// Event-time predicate for **TIMESTAMPTZ** tables (`scores`).
     ///
-    /// Same bare-column rule as [`Self::timestamp_bound_sql`] — do not wrap.
+    /// Same bare-column rule as [`Self::timestamp_filter_sql`] — do not wrap.
     /// Scores use the microsecond/TIMESTAMPTZ family (`storage::schema::tables`).
-    pub fn timestamptz_bound_sql(&self, alias: &str) -> String {
+    pub fn timestamptz_filter_sql(&self, alias: &str) -> String {
         let col = format!("{alias}timestamp");
         format!(
             "{col} >= {} AND {col} <= {}",
@@ -66,48 +66,52 @@ impl QueryWindow {
         )
     }
 
-    /// Assemble SQL that must embed the TIMESTAMP_NS window bound (traces/logs).
-    pub fn bind_scan(self, alias: &str, assemble: impl FnOnce(&str) -> String) -> BoundLakeSql {
-        let bound = self.timestamp_bound_sql(alias);
-        let sql = assemble(&bound);
-        assert_bound_kept(&sql, &bound);
-        BoundLakeSql { sql }
-    }
-
-    /// Assemble SQL over **scores** only (TIMESTAMPTZ clock).
-    pub fn bind_scan_timestamptz(
+    /// Assemble SQL with the bare TIMESTAMP_NS predicate (traces/logs).
+    pub fn scan_with_timestamp_filter(
         self,
         alias: &str,
         assemble: impl FnOnce(&str) -> String,
-    ) -> BoundLakeSql {
-        let bound = self.timestamptz_bound_sql(alias);
-        let sql = assemble(&bound);
-        assert_bound_kept(&sql, &bound);
-        BoundLakeSql { sql }
+    ) -> TimestampFilteredSql {
+        let filter = self.timestamp_filter_sql(alias);
+        let sql = assemble(&filter);
+        assert_filter_kept(&sql, &filter);
+        TimestampFilteredSql { sql }
+    }
+
+    /// Assemble SQL over **scores** only (TIMESTAMPTZ clock).
+    pub fn scan_with_timestamptz_filter(
+        self,
+        alias: &str,
+        assemble: impl FnOnce(&str) -> String,
+    ) -> TimestampFilteredSql {
+        let filter = self.timestamptz_filter_sql(alias);
+        let sql = assemble(&filter);
+        assert_filter_kept(&sql, &filter);
+        TimestampFilteredSql { sql }
     }
 
     /// Assemble SQL that touches both TIMESTAMP_NS (`traces`/`logs`) and
-    /// TIMESTAMPTZ (`scores`) fact clocks — each gets a matching bare bound.
-    pub fn bind_scan_ns_and_tz(
+    /// TIMESTAMPTZ (`scores`) storage — each scan gets its matching bare predicate.
+    pub fn scan_with_both_timestamp_filters(
         self,
         alias: &str,
-        assemble: impl FnOnce(/* ns */ &str, /* tz */ &str) -> String,
-    ) -> BoundLakeSql {
-        let ns = self.timestamp_bound_sql(alias);
-        let tz = self.timestamptz_bound_sql(alias);
+        assemble: impl FnOnce(/* timestamp_ns */ &str, /* timestamptz */ &str) -> String,
+    ) -> TimestampFilteredSql {
+        let ns = self.timestamp_filter_sql(alias);
+        let tz = self.timestamptz_filter_sql(alias);
         let sql = assemble(&ns, &tz);
-        assert_bound_kept(&sql, &ns);
-        assert_bound_kept(&sql, &tz);
-        BoundLakeSql { sql }
+        assert_filter_kept(&sql, &ns);
+        assert_filter_kept(&sql, &tz);
+        TimestampFilteredSql { sql }
     }
 
     /// Narrow to one calendar day as a *timestamp* sub-window (never emit DATE columns).
-    pub fn bind_day(
+    pub fn scan_with_day_filter(
         self,
         day: NaiveDate,
         alias: &str,
         assemble: impl FnOnce(&str) -> String,
-    ) -> BoundLakeSql {
+    ) -> TimestampFilteredSql {
         let day_start = day.and_hms_opt(0, 0, 0).expect("midnight").and_utc();
         let next_midnight = (day + chrono::Duration::days(1))
             .and_hms_opt(0, 0, 0)
@@ -119,25 +123,25 @@ impl QueryWindow {
         let window = if from <= to {
             QueryWindow { from, to }
         } else {
-            // Non-overlapping: emit an empty-point bound so the scan stays time-gated.
+            // Non-overlapping: emit an empty-point predicate so the scan stays time-gated.
             QueryWindow {
                 from: day_start,
                 to: day_start,
             }
         };
-        window.bind_scan(alias, assemble)
+        window.scan_with_timestamp_filter(alias, assemble)
     }
 }
 
-fn assert_bound_kept(sql: &str, bound: &str) {
+fn assert_filter_kept(sql: &str, filter: &str) {
     assert!(
-        sql.contains(bound),
-        "assemble closure dropped timestamp bound fragment"
+        sql.contains(filter),
+        "assemble closure dropped timestamp filter fragment"
     );
     for forbidden in ["record_date", "event_date", "window_ts"] {
         assert!(
             !sql.contains(forbidden),
-            "forbidden time column `{forbidden}` in bound SQL"
+            "forbidden time column `{forbidden}` in timestamp-filtered SQL"
         );
     }
 }
@@ -176,31 +180,33 @@ mod tests {
     }
 
     #[test]
-    fn bind_scan_embeds_timestamp_only() {
+    fn scan_with_timestamp_filter_embeds_bare_predicate() {
         let sql = sample()
-            .bind_scan("c.", |bound| {
-                format!("SELECT 1 FROM t c WHERE c.id = 1 AND {bound}")
+            .scan_with_timestamp_filter("c.", |filter| {
+                format!("SELECT 1 FROM t c WHERE c.id = 1 AND {filter}")
             })
             .into_sql();
         assert!(sql.contains("c.timestamp >="));
         assert!(
             !sql.contains("make_timestamp_ns(epoch_ns("),
-            "wrapped timestamp bounds break day prune"
+            "wrapped timestamp predicates break day prune"
         );
         assert!(!sql.contains("record_date"));
         assert!(!sql.contains("window_ts"));
     }
 
     #[test]
-    #[should_panic(expected = "dropped timestamp bound")]
-    fn bind_scan_panics_if_bound_dropped() {
-        let _ = sample().bind_scan("", |_bound| "SELECT 1 FROM traces".into());
+    #[should_panic(expected = "dropped timestamp filter")]
+    fn scan_with_timestamp_filter_panics_if_filter_dropped() {
+        let _ = sample().scan_with_timestamp_filter("", |_bound| "SELECT 1 FROM traces".into());
     }
 
     #[test]
-    fn bind_scan_timestamptz_uses_tz_literals() {
+    fn scan_with_timestamptz_filter_uses_tz_literals() {
         let sql = sample()
-            .bind_scan_timestamptz("", |bound| format!("SELECT 1 FROM scores WHERE {bound}"))
+            .scan_with_timestamptz_filter("", |filter| {
+                format!("SELECT 1 FROM scores WHERE {filter}")
+            })
             .into_sql();
         assert!(sql.contains("TIMESTAMPTZ '"));
         assert!(!sql.contains("::TIMESTAMP_NS"));
@@ -208,9 +214,9 @@ mod tests {
     }
 
     #[test]
-    fn bind_scan_ns_and_tz_embeds_both_clocks() {
+    fn scan_with_both_timestamp_filters_embeds_both_clocks() {
         let sql = sample()
-            .bind_scan_ns_and_tz("", |ns, tz| {
+            .scan_with_both_timestamp_filters("", |ns, tz| {
                 format!(
                     "SELECT 1 FROM scores WHERE {tz} AND EXISTS (SELECT 1 FROM traces WHERE {ns})"
                 )
@@ -222,16 +228,18 @@ mod tests {
     }
 
     #[test]
-    fn bind_day_narrows_to_calendar_day_as_timestamp() {
+    fn scan_with_day_filter_narrows_to_calendar_day_as_timestamp() {
         let w = QueryWindow::try_new(
             Utc.with_ymd_and_hms(2026, 9, 10, 0, 0, 0).unwrap(),
             Utc.with_ymd_and_hms(2026, 9, 12, 0, 0, 0).unwrap(),
         )
         .unwrap();
         let sql = w
-            .bind_day(NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(), "", |bound| {
-                format!("SELECT * FROM t WHERE {bound}")
-            })
+            .scan_with_day_filter(
+                NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+                "",
+                |filter| format!("SELECT * FROM t WHERE {filter}"),
+            )
             .into_sql();
         assert!(sql.contains("2026-09-11"));
         assert!(!sql.contains("record_date"));

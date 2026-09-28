@@ -1,9 +1,9 @@
 //! One-clock production contract: real writers create calendar-day files and
-//! timestamp-bounded recipes prune them without legacy date columns.
+//! bare timestamp predicates prune them without legacy date columns.
 
 use chrono::{TimeZone, Utc};
 use softprobe_runtime::ingest_engine::IngestEngine;
-use softprobe_runtime::models::{Log, Span, SpanEvent};
+use softprobe_runtime::models::{Log, Score, ScoreDataType, ScoreSource, Span, SpanEvent};
 use softprobe_runtime::query::{LogCountFilter, TraceCountFilter};
 use std::collections::HashMap;
 use std::path::Path;
@@ -118,6 +118,27 @@ fn log(day: u32, id: &str) -> Log {
     }
 }
 
+fn score(day: u32, id: &str) -> Score {
+    Score {
+        score_id: format!("score-{id}"),
+        timestamp: Utc.with_ymd_and_hms(2026, 9, day, 12, 0, 0).unwrap(),
+        trace_id: Some(format!("trace-{id}")),
+        span_id: Some(format!("span-{id}")),
+        session_id: Some("persistent-session".into()),
+        name: "quality".into(),
+        data_type: ScoreDataType::Numeric,
+        numeric_value: Some(0.9),
+        string_value: None,
+        boolean_value: None,
+        source: ScoreSource::Evaluator,
+        comment: None,
+        config_id: None,
+        author_id: None,
+        metadata: HashMap::new(),
+        tenant_id: None,
+    }
+}
+
 #[tokio::test]
 async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     let temp = TempDir::new().expect("tempdir");
@@ -139,11 +160,15 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
         .add_logs(vec![log(10, "a"), log(11, "b")], 0)
         .await
         .expect("logs ingest");
+    pipeline
+        .add_scores(vec![score(10, "a"), score(11, "b")])
+        .await
+        .expect("scores ingest");
 
     let mut paths = Vec::new();
     walk_paths(Path::new(&data_path), &mut paths);
     let joined = paths.join("\n");
-    for table in ["traces", "logs"] {
+    for table in ["traces", "logs", "scores"] {
         assert!(
             joined.contains(&format!("{table}/year=2026/month=9/day=10")),
             "{table} day A:\n{joined}"
@@ -161,6 +186,7 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     let conn = attach(&config.ducklake);
     assert_eq!(timestamp_type(&conn, "traces"), "TIMESTAMP_NS");
     assert_eq!(timestamp_type(&conn, "logs"), "TIMESTAMP_NS");
+    assert_eq!(timestamp_type(&conn, "scores"), "TIMESTAMP WITH TIME ZONE");
 
     let narrow = "SELECT trace_id FROM traces \
                   WHERE timestamp >= '2026-09-10'::TIMESTAMP_NS \
@@ -185,13 +211,27 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
         "narrow plan opened day B:\n{narrow_plan}"
     );
 
+    let narrow_scores = "SELECT score_id FROM scores \
+                         WHERE timestamp >= TIMESTAMPTZ '2026-09-10 00:00:00+00' \
+                           AND timestamp < TIMESTAMPTZ '2026-09-11 00:00:00+00'";
+    let score_plan = explain_plan(&conn, narrow_scores);
+    assert_eq!(
+        files_read_count(&score_plan),
+        Some(1),
+        "bare TIMESTAMPTZ predicate must prune score day partitions:\n{score_plan}"
+    );
+    assert!(
+        !flatten_plan(&score_plan).contains("day=11"),
+        "score plan opened day B:\n{score_plan}"
+    );
+
     // Product QueryWindow shape must prune identically to bare (design law).
     let product = softprobe_runtime::sql::QueryWindow::try_new(
         Utc.with_ymd_and_hms(2026, 9, 10, 0, 0, 0).unwrap(),
         Utc.with_ymd_and_hms(2026, 9, 10, 23, 59, 59).unwrap(),
     )
     .unwrap()
-    .bind_scan("", |bound| {
+    .scan_with_timestamp_filter("", |bound| {
         format!("SELECT trace_id FROM traces WHERE {bound}")
     })
     .into_sql();
@@ -247,7 +287,10 @@ async fn typed_query_gate_covers_traces_and_logs() {
         query
             .count_traces(TraceCountFilter {
                 session_id: Some("persistent-session".into()),
-                ..Default::default()
+                time_window: crate::util::query_window(),
+
+                app_id: None,
+                span_id: None,
             })
             .await
             .expect("trace count"),
@@ -257,7 +300,10 @@ async fn typed_query_gate_covers_traces_and_logs() {
         query
             .count_logs(LogCountFilter {
                 session_id: Some("persistent-session".into()),
-                ..Default::default()
+                time_window: crate::util::query_window(),
+
+                body: None,
+                trace_id: None,
             })
             .await
             .expect("log count"),

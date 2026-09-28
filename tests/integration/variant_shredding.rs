@@ -153,7 +153,12 @@ async fn map_bags_hot_paths_and_nested_filters() {
 
     let started = Instant::now();
     let result = query_engine
-        .count_traces_by_attribute(&session_id, "sp.observation.type", "generation")
+        .count_traces_by_attribute(
+            &session_id,
+            "sp.observation.type",
+            "generation",
+            crate::util::query_window(),
+        )
         .await
         .expect("filter query");
     let elapsed = started.elapsed();
@@ -164,7 +169,12 @@ async fn map_bags_hot_paths_and_nested_filters() {
     );
 
     let detail = query_engine
-        .trace_attributes_by_attribute(&session_id, "sp.observation.type", "generation")
+        .trace_attributes_by_attribute(
+            &session_id,
+            "sp.observation.type",
+            "generation",
+            crate::util::query_window(),
+        )
         .await
         .expect("detail")
         .expect("matching trace");
@@ -175,7 +185,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
     );
 
     let logs = query_engine
-        .count_logs_by_attribute("sp.session.id", &session_id)
+        .count_logs_by_attribute("sp.session.id", &session_id, crate::util::query_window())
         .await
         .expect("logs");
     assert_eq!(logs, 1);
@@ -184,11 +194,11 @@ async fn map_bags_hot_paths_and_nested_filters() {
 /// Cover MAP bag key paths used by LLM / telemetry SQL compilers + prefer-promoted SQL.
 #[tokio::test]
 async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
-    use softprobe_runtime::api::llm::query::ObservationSearchRequest;
+    use softprobe_runtime::api::llm::query::SpanSearchRequest;
     use softprobe_runtime::api::telemetry::{
         compile_details_sql, TelemetryDetailsTarget, TelemetryTimeRange,
     };
-    use softprobe_runtime::sql::llm::compile_observation_search_sql;
+    use softprobe_runtime::sql::llm::compile_span_search_sql;
     use softprobe_runtime::storage::schema::variant::prefer_attr_try_cast;
 
     let temp = TempDir::new().expect("tempdir");
@@ -339,7 +349,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
             {capture} AS capture_id \
          FROM traces \
          WHERE session_id = '{sess}' AND span_id = 'vk-span-1' \
-           AND timestamp >= '1970-01-01'::TIMESTAMP_NS AND timestamp <= '2100-01-01'::TIMESTAMP_NS",
+           AND {bound}",
         obs = prefer_attr_varchar(
             Some("observation_type"),
             "attributes",
@@ -371,9 +381,10 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         cost = prefer_attr_try_cast(Some("total_cost"), "attributes", "sp.cost.total", "DOUBLE"),
         capture = variant_varchar("attributes", "sp.capture.id"),
         sess = session_id.replace('\'', "''"),
+        bound = crate::util::query_window().timestamp_filter_sql(""),
     );
     let projected = query_engine
-        .trace_attributes_for_span("vk-span-1")
+        .trace_attributes_for_span("vk-span-1", crate::util::query_window())
         .await
         .expect("projected attributes")
         .expect("projected span");
@@ -389,7 +400,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 
     // 2) COALESCE default + enduser.id fallback.
     let fallback = query_engine
-        .trace_attributes_for_span("vk-span-2")
+        .trace_attributes_for_span("vk-span-2", crate::util::query_window())
         .await
         .expect("fallback")
         .expect("fallback span");
@@ -399,17 +410,17 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 
     // 3) Missing key is NULL (not an error).
     let missing = query_engine
-        .trace_attributes_for_span("vk-span-1")
+        .trace_attributes_for_span("vk-span-1", crate::util::query_window())
         .await
         .expect("missing")
         .expect("source span");
     assert!(!attributes_object(&missing).contains_key("does.not.exist"));
 
     // 4) Compiled LLM observation search SQL prefers promoted columns against live MAP data.
-    let search = ObservationSearchRequest {
+    let search = SpanSearchRequest {
         from: now - chrono::Duration::hours(1),
         to: now + chrono::Duration::hours(1),
-        observation_types: vec!["generation".into()],
+        span_types: vec!["generation".into()],
         model_name: Some("gpt-4o-mini".into()),
         user_id: Some("user-vk-1".into()),
         session_id: Some(session_id.clone()),
@@ -417,7 +428,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         limit: Some(10),
         cursor: None,
     };
-    let search_sql = compile_observation_search_sql(&search).expect("compile search");
+    let search_sql = compile_span_search_sql(&search).expect("compile search");
     let obs_pos = search_sql
         .find("observation_type")
         .expect("promoted observation_type");
@@ -432,16 +443,19 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     assert!(search_sql.contains("COALESCE(model_name,"));
     assert!(search_sql.contains("COALESCE(user_id,"));
     let search_result = query_engine
-        .search_observations(&search)
+        .search_spans(&search)
         .await
         .expect("run search sql");
     assert_eq!(search_result.row_count, 1);
-    // columns include observation_type / model_name / tokens from projection
+    // Columns include span_type / model_name / tokens from projection.
     let cols = &search_result.columns;
-    let obs_idx = cols.iter().position(|c| c == "observation_type").unwrap();
+    let span_type_idx = cols.iter().position(|c| c == "span_type").unwrap();
     let model_idx = cols.iter().position(|c| c == "model_name").unwrap();
     let tokens_idx = cols.iter().position(|c| c == "total_tokens").unwrap();
-    assert_eq!(search_result.rows[0][obs_idx].as_str(), Some("generation"));
+    assert_eq!(
+        search_result.rows[0][span_type_idx].as_str(),
+        Some("generation")
+    );
     assert_eq!(
         search_result.rows[0][model_idx].as_str(),
         Some("gpt-4o-mini")
@@ -449,15 +463,12 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     assert_eq!(search_result.rows[0][tokens_idx].as_i64(), Some(33));
 
     // Negative: wrong model filters out the generation span.
-    let miss = ObservationSearchRequest {
+    let miss = SpanSearchRequest {
         model_name: Some("no-such-model".into()),
         ..search.clone()
     };
-    let _miss_sql = compile_observation_search_sql(&miss).expect("compile miss");
-    let miss_result = query_engine
-        .search_observations(&miss)
-        .await
-        .expect("run miss");
+    let _miss_sql = compile_span_search_sql(&miss).expect("compile miss");
+    let miss_result = query_engine.search_spans(&miss).await.expect("run miss");
     assert_eq!(miss_result.row_count, 0);
 
     // 5) Nested MAP capture-id key (SoftProbe capture_export removed with Redis).
@@ -466,7 +477,12 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     // (anti-spoofing; see `bind_spans_to_workspace`), so the capture id (already
     // globally unique) is what disambiguates this row rather than `tenant_id`.
     let capture_result = query_engine
-        .trace_attributes_by_attribute(&session_id, "sp.capture.id", &capture_id)
+        .trace_attributes_by_attribute(
+            &session_id,
+            "sp.capture.id",
+            &capture_id,
+            crate::util::query_window(),
+        )
         .await
         .expect("capture id filter")
         .expect("capture span");

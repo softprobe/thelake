@@ -220,7 +220,10 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
             .query_engine()
             .count_traces(TraceCountFilter {
                 session_id: Some(session_id.clone()),
-                ..Default::default()
+                time_window: crate::util::query_window(),
+
+                app_id: None,
+                span_id: None,
             })
             .await
             .expect("query") as usize;
@@ -238,7 +241,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
         let http_result = test_pipeline
             .query_engine()
-            .find_http_span(session_id)
+            .find_http_span(session_id, crate::util::query_window())
             .await
             .expect("http query");
         let http_result = http_result.expect("HTTP fields row");
@@ -454,7 +457,10 @@ async fn test_duckdb_union_read_realtime_performance() {
     let base_count = query_engine
         .count_traces(TraceCountFilter {
             session_id: Some(base_session.clone()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            app_id: None,
+            span_id: None,
         })
         .await
         .expect("base query") as i64;
@@ -463,7 +469,10 @@ async fn test_duckdb_union_read_realtime_performance() {
     let staged_count = query_engine
         .count_traces(TraceCountFilter {
             session_id: Some(staged_session.clone()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            app_id: None,
+            span_id: None,
         })
         .await
         .expect("staged query") as i64;
@@ -472,7 +481,10 @@ async fn test_duckdb_union_read_realtime_performance() {
     let buffer_count = query_engine
         .count_traces(TraceCountFilter {
             session_id: Some(buffer_session.clone()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            app_id: None,
+            span_id: None,
         })
         .await
         .expect("buffer query") as i64;
@@ -731,7 +743,10 @@ async fn test_pinned_metadata_updates_on_commit() {
         .query_engine()
         .count_traces(TraceCountFilter {
             app_id: Some("app-pin".to_string()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            session_id: None,
+            span_id: None,
         })
         .await
         .expect("query after first flush");
@@ -747,7 +762,10 @@ async fn test_pinned_metadata_updates_on_commit() {
         .query_engine()
         .count_traces(TraceCountFilter {
             app_id: Some("app-pin".to_string()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            session_id: None,
+            span_id: None,
         })
         .await
         .expect("query after second flush");
@@ -805,7 +823,10 @@ async fn test_duckdb_union_read_realtime_concurrency() {
             let c = query_engine
                 .count_logs(LogCountFilter {
                     session_id: Some(staged_session.clone()),
-                    ..Default::default()
+                    time_window: crate::util::query_window(),
+
+                    body: None,
+                    trace_id: None,
                 })
                 .await?;
             Ok(c >= per_session as u64)
@@ -818,7 +839,10 @@ async fn test_duckdb_union_read_realtime_concurrency() {
     let staged_count = query_engine
         .count_logs(LogCountFilter {
             session_id: Some(staged_session.clone()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            body: None,
+            trace_id: None,
         })
         .await
         .expect("staged query");
@@ -842,7 +866,10 @@ async fn test_duckdb_union_read_realtime_concurrency() {
         handles.push(tokio::spawn(async move {
             let filter = LogCountFilter {
                 session_id: Some(session_id),
-                ..Default::default()
+                time_window: crate::util::query_window(),
+
+                body: None,
+                trace_id: None,
             };
             let _ = engine.count_logs(filter.clone()).await.expect("warmup");
             let start = Instant::now();
@@ -908,7 +935,10 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
                 .query_engine()
                 .count_traces(TraceCountFilter {
                     session_id: Some(session_id.clone()),
-                    ..Default::default()
+                    time_window: crate::util::query_window(),
+
+                    app_id: None,
+                    span_id: None,
                 })
                 .await?;
             Ok(count == 1)
@@ -1023,7 +1053,10 @@ async fn test_wal_cleanup_after_flush() {
         .query_engine()
         .count_traces(TraceCountFilter {
             session_id: Some("wal-cleanup-test-1".to_string()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            app_id: None,
+            span_id: None,
         })
         .await
         .expect("q1");
@@ -1031,7 +1064,10 @@ async fn test_wal_cleanup_after_flush() {
         .query_engine()
         .count_traces(TraceCountFilter {
             session_id: Some("wal-cleanup-test-2".to_string()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            app_id: None,
+            span_id: None,
         })
         .await
         .expect("q2");
@@ -1111,7 +1147,10 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         .query_engine()
         .count_traces(TraceCountFilter {
             session_id: Some(session_id.clone()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            app_id: None,
+            span_id: None,
         })
         .await
         .expect("query union view");
@@ -1146,7 +1185,10 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         .query_engine()
         .count_traces(TraceCountFilter {
             session_id: Some(session_id.clone()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            app_id: None,
+            span_id: None,
         })
         .await
         .expect("query union view after commit");
@@ -1174,7 +1216,10 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         .query_engine()
         .count_traces(TraceCountFilter {
             session_id: Some(session_id.clone()),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            app_id: None,
+            span_id: None,
         })
         .await
         .expect("query union view");
@@ -1192,7 +1237,10 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         .query_engine()
         .count_traces(TraceCountFilter {
             session_id: Some(session_id),
-            ..Default::default()
+            time_window: crate::util::query_window(),
+
+            app_id: None,
+            span_id: None,
         })
         .await
         .expect("final union view query");

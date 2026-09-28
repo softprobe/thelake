@@ -1,19 +1,19 @@
 //! Required event-time window for OTLP DuckLake reads.
 //!
 //! Re-exports [`crate::sql::QueryWindow`]. Prefer `crate::sql` for new code.
-//! Emit time SQL via [`QueryWindow::bind_scan`] / [`crate::sql::BoundLakeSql`].
+//! Emit time SQL via [`QueryWindow::scan_with_timestamp_filter`] / [`crate::sql::TimestampFilteredSql`].
 
 pub use crate::sql::{query_window_from_exclusive_ns, QueryWindow};
 
-/// Push identity predicates plus a required `timestamp` bound (one clock).
-/// Prefer [`QueryWindow::bind_scan`] for new recipes.
+/// Push identity predicates plus the required bare `timestamp` predicate.
+/// Prefer [`QueryWindow::scan_with_timestamp_filter`] for new recipes.
 pub fn push_otlp_time_predicates(
     conditions: &mut Vec<String>,
     window: &QueryWindow,
     identity: impl IntoIterator<Item = String>,
 ) {
     conditions.extend(identity);
-    conditions.push(window.timestamp_bound_sql(""));
+    conditions.push(window.timestamp_filter_sql(""));
 }
 
 /// Map exclusive-end ns window → predicates via [`push_otlp_time_predicates`].
@@ -28,7 +28,7 @@ pub(crate) fn push_otlp_ns_window_predicates(
     Ok(())
 }
 
-/// Assert SQL embeds required OTLP timestamp bounds (no day columns).
+/// Assert SQL embeds both required OTLP timestamp predicates (no day columns).
 ///
 /// Product bounds must be **bare** `timestamp >=` / `<=`. The
 /// `make_timestamp_ns(epoch_ns(timestamp))` wrap disables DuckLake day prune
@@ -45,7 +45,7 @@ pub(crate) fn assert_sql_has_otlp_time_predicates(sql: &str) {
     );
     assert!(
         !sql.contains("make_timestamp_ns(epoch_ns(timestamp))"),
-        "wrapped timestamp bound breaks day prune: {sql}"
+        "wrapped timestamp predicate breaks day prune: {sql}"
     );
     for bad in ["record_date", "event_date", "window_ts"] {
         assert!(!sql.contains(bad), "forbidden time column {bad}: {sql}");

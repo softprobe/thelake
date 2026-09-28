@@ -342,22 +342,16 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
         .add_score_configs(vec![score_config(&config_id, &workspace_b)])
         .await
         .expect("shared score-config write B");
+    let score_a = score("shared-score", &trace_a, &config_id, &workspace_a);
+    let score_a_timestamp = score_a.timestamp;
     engine_a
-        .add_scores(vec![score(
-            "shared-score",
-            &trace_a,
-            &config_id,
-            &workspace_a,
-        )])
+        .add_scores(vec![score_a])
         .await
         .expect("shared score write A");
+    let score_b = score("shared-score", &trace_b, &config_id, &workspace_b);
+    let score_b_timestamp = score_b.timestamp;
     engine_b
-        .add_scores(vec![score(
-            "shared-score",
-            &trace_b,
-            &config_id,
-            &workspace_b,
-        )])
+        .add_scores(vec![score_b])
         .await
         .expect("shared score write B");
 
@@ -387,8 +381,8 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
     let score_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let (score_a, score_b, config_a, config_b) = tokio::join!(
-            engine_a.score_exists("shared-score"),
-            engine_b.score_exists("shared-score"),
+            engine_a.score_exists("shared-score", score_a_timestamp),
+            engine_b.score_exists("shared-score", score_b_timestamp),
             engine_a.score_config_exists(&config_id),
             engine_b.score_config_exists(&config_id),
         );

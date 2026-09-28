@@ -167,14 +167,20 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         let n_b = engine_b
             .count_traces(TraceCountFilter {
                 session_id: Some(session_id.clone()),
-                ..Default::default()
+                time_window: crate::util::query_window(),
+
+                app_id: None,
+                span_id: None,
             })
             .await
             .expect("workspace B filtered query");
         let n_a = engine_a
             .count_traces(TraceCountFilter {
                 session_id: Some(session_id.clone()),
-                ..Default::default()
+                time_window: crate::util::query_window(),
+
+                app_id: None,
+                span_id: None,
             })
             .await
             .expect("workspace A filtered query");

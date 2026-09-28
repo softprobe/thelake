@@ -26,7 +26,7 @@ list   ← session_summary
 detail ← traces
 ```
 
-**Hard rule:** reducer/rebuild SQL always goes through [`QueryWindow`](../src/api/query_window.rs) + `push_otlp_time_predicates` (design D4 in [`design-event-time-layout.md`](./design-event-time-layout.md)): partition day derived from the same `from`/`to` as event-time bounds. Do not invent a second clock or optional time bounds.
+**Hard rule:** every DuckLake fact scan uses the same finite `QueryWindow` contract and a bare `timestamp` predicate so DuckLake can prune its calendar-day partitions. Do not invent a second clock, wrap the `timestamp` column, or make time bounds optional.
 
 **Hard rule:** reducer/rebuild DuckDB connections must configure object-store credentials the same way query workers and compaction do (`httpfs` + `configure_object_store`). A connection that only ATTACHes DuckLake can scan catalog-inlined rows but fails (or silently under-reads) once the window needs Parquet under `gs://` / `s3://`.
 
@@ -44,14 +44,14 @@ detail ← traces
 
 Explorer Sessions list: triage rows (`session_id`, agent, times, steps, errors, tokens/cost). Filters: range, agent, has-errors. Cursor pagination.
 
-Detail: one session’s observations / payloads from thelake.
+Detail: one complete session response with span payloads from thelake.
 
 ### 2.2 Main today
 
 | Path | Behavior | Cost |
 |---|---|---|
 | List | `sessions/search` → `GROUP BY session_id` over all spans in window | Grows with window volume |
-| List (Stage 0) | Explorer **no longer** runs `sessionCountOverrides` / window `observations/search` | Half the previous Explorer load; list still lake-bound until Stage 3 |
+| List (Stage 0) | Explorer **no longer** runs `sessionCountOverrides` / window `spans/search` | Half the previous Explorer load; list still lake-bound until Stage 3 |
 | Detail | session-scoped reads | Correct |
 
 ### 2.3 Constraints
@@ -208,7 +208,7 @@ Optional: coalesce dirty rows in-process for a few hundred ms before Postgres UP
 
 | Field | Summary | Detail |
 |---|---|---|
-| `observation_count` | `COUNT(DISTINCT span_id)` from `traces` | Deduped observations |
+| `observation_count` | `COUNT(DISTINCT span_id)` from `traces` | Deduped spans (storage column name retained) |
 | `error_count` | `#` with `status_code = 'ERROR'` (coarse) | Primary-error / timeline |
 | tokens / cost / agent | From same lake aggregate | From spans |
 | payloads | Never | attrs / events |
@@ -272,8 +272,8 @@ FROM traces
 WHERE session_id IN (...)
   AND session_id <> ''
   AND <exclude recording>
-  AND CAST(timestamp AS TIMESTAMP_NS) >= ...            -- REQUIRED (one clock; partition prune)
-  AND CAST(timestamp AS TIMESTAMP_NS) <= ...
+  AND timestamp >= ...                                  -- REQUIRED (bare column; partition prune)
+  AND timestamp <= ...
 GROUP BY session_id;
 ```
 
@@ -299,7 +299,7 @@ to   = max(dirty.max_ts, now())
 from = least(coalesce(session_summary.start_time, dirty.min_ts), dirty.min_ts)
 ```
 
-Plus timestamp bounds via `QueryWindow::bind_scan`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`. Stage 2 **clamps** oversized windows (does not chunk); early history outside the clamp may undercount until Stage 4 rebuild.
+Plus bare timestamp predicates via `QueryWindow::scan_with_timestamp_filter`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`. Stage 2 **clamps** oversized windows (does not chunk); early history outside the clamp may undercount until Stage 4 rebuild.
 
 ### 6.6 Late spans
 
@@ -317,12 +317,12 @@ No FINALIZED. Late span → dirty UPSERT → next claimed reduce replaces the su
 
 ### 7.2 Detail
 
-Unchanged: `GET …/sessions/{id}`, observations, recording — read **`traces`**.
+Session detail: `GET …/sessions/{id}` returns session totals, scores, and every full span from one materialized DuckLake query. Recording remains a separate endpoint.
 
 ### 7.3 Explorer
 
 - Keep calling `sessions/search` via Worker — **summary rows only** (no parallel observations scan).
-- **Done (Stage 0 + 3 + 3.6):** list is Postgres `session_summary`-backed. Trust server `SessionSummary` counts; Explorer must **not** window-scan `observations/search` for list counts. Detail still reads `traces`.
+- **Done (Stage 0 + 3 + 3.6):** list is Postgres `session_summary`-backed. Trust server `SessionSummary` counts; Explorer must **not** window-scan the span search endpoint for list counts. Session detail reads all spans and aggregate fields together from `traces`.
 - Findings/agents stay in Supabase UI join by `session_id`.
 - Explorer never writes `session_summary`.
 - Optional client fallback when the search endpoint is missing (404/405) remains a compatibility path only — not the product list path.
@@ -340,7 +340,7 @@ Same aggregate as reducer; **`[from, to]` required** (ops must pass a window —
 ```text
 rebuild([from, to]):
   SELECT ... FROM traces
-  WHERE CAST(timestamp AS TIMESTAMP_NS) >= ... AND CAST(timestamp AS TIMESTAMP_NS) <= ...
+  WHERE timestamp >= ... AND timestamp <= ...
     AND timestamp >= from AND timestamp <= to
     AND session_id present AND not recording
   GROUP BY session_id
@@ -461,7 +461,7 @@ Replaced reducer with: **durable dirty + SKIP LOCKED claims + `FROM traces` aggr
 5. No DuckLake session-summary table.  
 6. No Explorer window-wide obs scan on list.  
 7. After reduce(S), summary(S) matches aggregate(S) on `traces` over the chosen `[from,to]`.  
-8. No reducer/rebuild SQL ships without `QueryWindow` day + timestamp bounds (see [`design-event-time-layout.md`](./design-event-time-layout.md)).  
+8. No reducer/rebuild SQL ships without `QueryWindow` timestamp predicates (see [`design-event-time-layout.md`](./design-event-time-layout.md)).
 9. Session-summary reduce uses durable row claims; simultaneous replicas claim disjoint batches. Physical maintenance and rebuild use fenced leases.
 10. Dirty UPSERT rate ≈ lake flush rate (coalesced batches), never ≈ span rate.
 

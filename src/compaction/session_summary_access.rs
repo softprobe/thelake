@@ -112,7 +112,7 @@ pub(crate) fn aggregate_sessions_from_lake_pooled(
 ) -> Result<Vec<SummaryRow>> {
     let sql = aggregate_sql(scope, session_ids, workspace_id, from, to)?;
     let (rows, _cold, _elapsed) = pool.with_conn(scope, |conn| {
-        let mut stmt = conn.prepare(&sql).context("prepare aggregate SQL")?;
+        let mut stmt = crate::sql::prepare_checked(conn, &sql).context("prepare aggregate SQL")?;
         stmt.query_map([], map_duck_row)
             .context("query aggregate")?
             .collect::<std::result::Result<Vec<_>, _>>()

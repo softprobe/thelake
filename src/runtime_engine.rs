@@ -121,8 +121,12 @@ impl RuntimeEngine {
         self.ingest.add_scores(items).await
     }
 
-    pub async fn score_exists(&self, score_id: &str) -> Result<bool> {
-        self.ingest.score_exists(score_id).await
+    pub async fn score_exists(
+        &self,
+        score_id: &str,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.ingest.score_exists(score_id, timestamp).await
     }
 
     pub async fn list_score_configs(&self) -> Result<Vec<crate::models::ScoreConfig>> {

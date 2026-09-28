@@ -121,7 +121,7 @@ That gives us:
 - No second “session-summary microservice”
 - One ops mental model: *jobs + leases*
 
-And the SQL always carries a **mandatory time window** (`record_date` + timestamp bounds) so DuckLake can prune Parquet files. A reducer that scans “all time for these session_ids” would recreate the original problem in the background.
+And the SQL always carries a **mandatory bare timestamp window** so DuckLake can prune calendar-day partitions. A reducer that scans “all time for these session_ids” would recreate the original problem in the background.
 
 After a successful UPSERT, dirty rows are deleted with a snapshot guard (`updated_at <= batch_snapshot`) so a newer touch that arrived mid-reduce is not lost.
 

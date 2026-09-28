@@ -20,8 +20,11 @@ pub mod tempo;
 pub(crate) mod trusted;
 pub mod writer;
 
-pub(crate) use bounds::{ensure_fact_scan_bound, execute_batch_checked, prepare_checked};
-pub use bounds::{query_window_from_exclusive_ns, BoundLakeSql, QueryWindow};
+pub(crate) use bounds::ensure_fact_scan_uses_timestamp_pruning;
+#[cfg(test)]
+pub(crate) use bounds::ensure_sql_has_bare_timestamp_predicate;
+pub(crate) use bounds::{execute_batch_checked, execute_batch_for_parquet_ingest, prepare_checked};
+pub use bounds::{query_window_from_exclusive_ns, QueryWindow, TimestampFilteredSql};
 pub use literal::{sql_string_literal, timestamp_ns_literal, timestamptz_literal};
 
 /// UTC calendar-day expression for a `TIMESTAMPTZ` index timestamp.
@@ -210,18 +213,14 @@ mod locality_tests {
         );
         for sql in [bounded_trace, bounded_log] {
             assert!(
-                crate::sql::ensure_fact_scan_bound(&sql).is_ok(),
-                "recipe must carry its timestamp bound:\n{sql}"
+                crate::sql::ensure_sql_has_bare_timestamp_predicate(&sql).is_ok(),
+                "recipe must carry its timestamp predicate:\n{sql}"
             );
         }
-        assert!(
-            crate::sql::ensure_fact_scan_bound(&crate::sql::telemetry::details_spans_sql(
-                "*",
-                "trace_id = 'x'",
-                10
-            ))
-            .is_err()
-        );
+        assert!(crate::sql::ensure_sql_has_bare_timestamp_predicate(
+            &crate::sql::telemetry::details_spans_sql("*", "trace_id = 'x'", 10)
+        )
+        .is_err());
     }
 
     #[test]

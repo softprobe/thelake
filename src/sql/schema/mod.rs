@@ -56,7 +56,7 @@ pub const SCORE_CONFIGS: TableSpec = TableSpec {
 
 pub const OTLP_TABLES: &[TableSpec] = &[TRACES, LOGS, SCORES];
 
-/// Every table whose production scan must carry a one-clock timestamp bound.
+/// Every fact table whose production scan requires a timestamp predicate.
 pub fn fact_table_specs() -> impl Iterator<Item = &'static TableSpec> {
     OTLP_TABLES.iter().filter(|table| table.is_fact)
 }
