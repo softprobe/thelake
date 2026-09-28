@@ -505,6 +505,8 @@ fn observation_projection(include_payload: bool) -> String {
     ];
     if include_payload {
         cols.push(variant_as_json("attributes"));
+        // Keep the stored LIST<STRUCT> payload intact. The query result bridge
+        // materializes the nested value for the API mapper.
         cols.push("events".to_string());
     }
     cols.join(", ")

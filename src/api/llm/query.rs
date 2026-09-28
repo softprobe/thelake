@@ -13,7 +13,7 @@ use crate::sql::llm::{
 // (Postgres session_summary). compile_session_search_sql remains unit-test only.
 #[cfg(test)]
 use crate::sql::llm::compile_session_search_sql;
-use crate::storage::schema::variant::variant_json_to_string_map;
+use crate::storage::schema::variant::{parse_projected_json_value, variant_json_to_string_map};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -1024,7 +1024,8 @@ fn map_string_map(value: Option<&Value>) -> HashMap<String, String> {
 }
 
 fn map_events(value: Option<&Value>) -> Vec<Value> {
-    match value {
+    let parsed = value.cloned().map(parse_projected_json_value);
+    match parsed.as_ref() {
         Some(Value::Array(items)) => items
             .iter()
             .map(|item| match item {
@@ -1048,7 +1049,7 @@ fn map_events(value: Option<&Value>) -> Vec<Value> {
                                 parse_timestamp_value(value)
                                     .map(|dt| {
                                         Value::String(
-                                            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                                            dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
                                         )
                                     })
                                     .unwrap_or_else(|| value.clone()),
@@ -1819,12 +1820,15 @@ mod tests {
                 end_timestamp TIMESTAMP_NS, status_code VARCHAR, model_name VARCHAR, \
                 model_provider VARCHAR, user_id VARCHAR, input_tokens BIGINT, \
                 output_tokens BIGINT, total_tokens BIGINT, total_cost DOUBLE, \
-                attributes JSON, events JSON\
+                attributes MAP(VARCHAR, VARCHAR), \
+                events STRUCT(name VARCHAR, timestamp TIMESTAMP_NS, attributes MAP(VARCHAR, VARCHAR))[]\
             );\
             INSERT INTO traces VALUES (\
                 'trace-1', 'span-1', NULL, 'sess-1', 'chat', 'generation', \
                 TIMESTAMP_NS '2026-09-28 01:00:00', TIMESTAMP_NS '2026-09-28 01:01:00', \
-                'OK', 'model', 'provider', 'user', 10, 20, 30, 0.01, '{}', '[]'\
+                'OK', 'model', 'provider', 'user', 10, 20, 30, 0.01, MAP([], []), \
+                [{'name':'prompt','timestamp':TIMESTAMP_NS '2026-09-28 01:00:00.123456789', \
+                  'attributes':MAP(['content'],['hello'])}]\
             );\
             CREATE TABLE scores (\
                 score_id VARCHAR, timestamp TIMESTAMP_NS, trace_id VARCHAR, span_id VARCHAR, \
@@ -1850,6 +1854,17 @@ mod tests {
             detail_sql.contains("CAST(metadata AS JSON) AS metadata"),
             "session detail must serialize score metadata before aggregation: {detail_sql}"
         );
+        let event_json: String = conn
+            .query_row(
+                &format!("SELECT to_json(events) FROM ({detail_sql}) AS detail LIMIT 1"),
+                [],
+                |row| row.get(0),
+            )
+            .expect("read the nested event payload from the session detail query");
+        let events = map_events(Some(&Value::String(event_json)));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["attributes"]["content"], "hello");
+        assert_eq!(events[0]["timestamp"], "2026-09-28T01:00:00.123456789Z");
         let encoded: String = conn
             .query_row(
                 &format!("SELECT session_scores FROM ({detail_sql}) AS detail LIMIT 1"),
@@ -2031,11 +2046,14 @@ mod tests {
         );
         assert!(
             list.contains(", events"),
-            "session detail must project span events: {list}"
+            "session detail must select the persisted nested event column: {list}"
         );
         let detail = compile_span_detail_sql("span-1", from, to).unwrap();
         assert!(detail.contains(&payload), "detail keeps payload: {detail}");
-        assert!(detail.contains("events"), "detail keeps payload: {detail}");
+        assert!(
+            detail.contains(", events"),
+            "span detail keeps the nested event column: {detail}"
+        );
     }
 
     #[test]
@@ -2123,6 +2141,16 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["type"], 4);
         assert_eq!(events[1]["isCompressed"], true);
+    }
+
+    #[test]
+    fn map_events_parses_json_projection_text() {
+        let projected = serde_json::json!(
+            "[{\"name\":\"sp.recording.batch\",\"timestamp\":\"2026-07-18T00:00:01Z\",\"attributes\":{\"sp.recording.events\":\"[]\"}}]"
+        );
+        let events = map_events(Some(&projected));
+        assert_eq!(events.len(), 1, "projected event JSON was dropped");
+        assert_eq!(events[0]["name"], "sp.recording.batch");
     }
 
     #[test]
