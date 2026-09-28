@@ -345,6 +345,11 @@ async fn unit_openapi_llm_schema_contracts() {
         openapi["components"]["schemas"]["SessionDetail"]["properties"]["spans"].is_object(),
         "session detail must include full spans in the same response"
     );
+    assert!(
+        openapi["components"]["schemas"]["SessionDetail"]["properties"]["events_complete"]
+            .is_null(),
+        "session detail must not advertise partial event responses"
+    );
     assert!(openapi["components"]["schemas"]["SpanDetail"].is_object());
     assert!(openapi["components"]["schemas"]["SessionSearchRequest"].is_object());
     assert!(openapi["components"]["schemas"]["SessionSearchResponse"].is_object());
