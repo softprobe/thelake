@@ -227,7 +227,7 @@ fn verify_event_source_identity(conn: &Connection) -> Result<EventSourceStats> {
 fn verify_event_payloads(conn: &Connection, table: &str, expected: i64) -> Result<()> {
     let (actual, mismatches): (i64, i64) = conn.query_row(
         &format!(
-            "SELECT count(*), count(*) FILTER (WHERE source.events::VARCHAR IS DISTINCT FROM target.events::VARCHAR) FROM trace_events_json source JOIN {table} target ON CAST(target.session_id AS VARCHAR) = source._session_id AND CAST(target.trace_id AS VARCHAR) = source._trace_id AND CAST(target.span_id AS VARCHAR) = source._span_id"
+            "WITH expected AS (SELECT _session_id, _trace_id, _span_id, list_sort(list(events::VARCHAR)) AS payloads, count(*) AS n FROM trace_events_json GROUP BY ALL), actual AS (SELECT CAST(session_id AS VARCHAR) AS _session_id, CAST(trace_id AS VARCHAR) AS _trace_id, CAST(span_id AS VARCHAR) AS _span_id, list_sort(list(events::VARCHAR)) AS payloads, count(*) AS n FROM {table} WHERE events IS NOT NULL GROUP BY ALL), comparison AS (SELECT expected.payloads AS expected_payloads, actual.payloads AS actual_payloads, coalesce(actual.n, 0) AS actual_count FROM expected FULL OUTER JOIN actual ON expected._session_id IS NOT DISTINCT FROM actual._session_id AND expected._trace_id IS NOT DISTINCT FROM actual._trace_id AND expected._span_id IS NOT DISTINCT FROM actual._span_id) SELECT coalesce(sum(actual_count), 0), count(*) FILTER (WHERE expected_payloads IS DISTINCT FROM actual_payloads) FROM comparison"
         ),
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -236,7 +236,7 @@ fn verify_event_payloads(conn: &Connection, table: &str, expected: i64) -> Resul
         bail!("rebuilt traces table matched {actual} event payloads; expected {expected}");
     }
     if mismatches != 0 {
-        bail!("rebuilt traces table changed {mismatches} event payloads");
+        bail!("rebuilt traces table changed payloads for {mismatches} trace identities");
     }
     Ok(())
 }
@@ -480,6 +480,17 @@ mod tests {
     }
 
     #[test]
+    fn validates_event_payloads_when_trace_span_identity_is_reused() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TEMP TABLE trace_events_json (_session_id VARCHAR, _trace_id VARCHAR, _span_id VARCHAR, events JSON); CREATE TEMP TABLE rebuilt (session_id VARCHAR, trace_id VARCHAR, span_id VARCHAR, events JSON); INSERT INTO trace_events_json VALUES ('s1', 't1', 'p1', '[{\"name\":\"first\"}]'), ('s1', 't1', 'p1', '[{\"name\":\"second\"}]'); INSERT INTO rebuilt VALUES ('s1', 't1', 'p1', '[{\"name\":\"first\"}]'), ('s1', 't1', 'p1', '[{\"name\":\"second\"}]');",
+        )
+        .unwrap();
+
+        verify_event_payloads(&conn, "rebuilt", 2).unwrap();
+    }
+
+    #[test]
     fn classifies_only_unmatched_inactive_sources_as_orphans() {
         let conn = source_connection(
             "(1, 's1', 't1', 'p1', '[{\"name\":\"active\"}]'), (3, 'stale', 'old', 'p3', '[{\"name\":\"stale\"}]')",
@@ -532,7 +543,7 @@ mod tests {
         assert!(verify_event_payloads(&conn, "rebuilt", 1)
             .unwrap_err()
             .to_string()
-            .contains("changed 1 event payloads"));
+            .contains("changed payloads for 1 trace identities"));
     }
 
     #[test]
