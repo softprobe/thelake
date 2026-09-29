@@ -15,8 +15,8 @@ use chrono::{DateTime, Utc};
 /// `session_id` is the conflict key (not updated); every other column is replaced from `EXCLUDED`.
 const SESSION_SUMMARY_UPSERT_COLUMNS: &[&str] = &[
     "session_id",
-    "start_time",
-    "end_time",
+    "start_time_ns",
+    "end_time_ns",
     "observation_count",
     "error_count",
     "input_tokens",
@@ -109,8 +109,8 @@ pub fn compile_session_summary_aggregate_sql_for_workspace(
             format!(
                 "SELECT \
                    session_id, \
-                   CAST(epoch_us(MIN(timestamp)) AS BIGINT) AS start_time_us, \
-                   CAST(epoch_us(MAX(COALESCE(end_timestamp, timestamp))) AS BIGINT) AS end_time_us, \
+                   epoch_ns(MIN(timestamp))::BIGINT AS start_time_ns, \
+                   epoch_ns(MAX(COALESCE(end_timestamp, timestamp)))::BIGINT AS end_time_ns, \
                    COUNT(DISTINCT span_id)::BIGINT AS observation_count, \
                    SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END)::BIGINT AS error_count, \
                    SUM({input_tokens})::BIGINT AS input_tokens, \
@@ -221,8 +221,8 @@ pub fn compile_session_summary_upsert_sql_for_workspace(
     let cols = [
         "tenant_id",
         "session_id",
-        "start_time",
-        "end_time",
+        "start_time_ns",
+        "end_time_ns",
         "observation_count",
         "error_count",
         "input_tokens",

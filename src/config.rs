@@ -49,7 +49,7 @@ pub struct SessionSummaryConfig {
     /// Max dirty sessions claimed per reduce pass.
     #[serde(default = "default_max_sessions_per_reduce")]
     pub max_sessions_per_reduce: u64,
-    /// Clamp reduce `[from,to]` / rebuild lookback + ops max window (seconds).
+    /// Maximum explicit/periodic summary rebuild window (seconds).
     #[serde(default = "default_max_reduce_span_seconds")]
     pub max_reduce_span_seconds: u64,
 }

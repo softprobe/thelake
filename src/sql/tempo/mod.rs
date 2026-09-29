@@ -137,7 +137,7 @@ pub fn trace_scan_sql(
                  CAST(attributes AS JSON) AS attributes, CAST(resource_attributes AS JSON) AS resource_attributes, \
                  CAST(instrumentation_scope AS JSON) AS instrumentation_scope, CAST(links AS JSON) AS links, \
                  status_code, status_message, \
-                 CAST(events AS JSON) AS events, \
+                 events, \
                  observation_type, model_name, model_provider, user_id, session_attr_id, service_name \
                  FROM traces WHERE {where_base}), \
                  matching_traces AS (SELECT DISTINCT trace_id FROM base WHERE {row_predicate}), \

@@ -505,10 +505,7 @@ fn observation_projection(include_payload: bool) -> String {
     ];
     if include_payload {
         cols.push(variant_as_json("attributes"));
-        // Materializing LIST<STRUCT<..., MAP<...>>> through DuckDB's Arrow
-        // result path crashes on catalog-inlined DuckLake rows. Serialize the
-        // complete nested payload in DuckDB, then parse it in the API mapper.
-        cols.push(variant_as_json("events"));
+        cols.push("events".to_string());
     }
     cols.join(", ")
 }
@@ -633,11 +630,11 @@ mod tests {
     use super::observation_projection;
 
     #[test]
-    fn payload_projection_serializes_nested_events_as_json() {
+    fn payload_projection_reads_json_events_without_recasting() {
         let sql = observation_projection(true);
         assert!(
-            sql.contains("CAST(events AS JSON) AS events"),
-            "nested events must avoid DuckDB's failing inlined-row result path: {sql}"
+            sql.contains("events") && !sql.contains("CAST(events AS JSON)"),
+            "events already use the JSON table type: {sql}"
         );
     }
 }

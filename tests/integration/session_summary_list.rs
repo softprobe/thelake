@@ -159,7 +159,6 @@ async fn run_reduce(state: &AppState) -> usize {
         .reduce_session_summary_for_key(
             softprobe_runtime::workspace_scope::DEFAULT_WORKSPACE_ID,
             cfg.max_sessions_per_reduce,
-            cfg.max_reduce_span_seconds,
         )
         .await
         .expect("reduce_session_summary")
@@ -464,7 +463,6 @@ async fn http_session_summary_writer_reducer_rebuild_and_maintenance_overlap() {
         reduce_engine.reduce_session_summary_for_key(
             softprobe_runtime::workspace_scope::DEFAULT_WORKSPACE_ID,
             cfg.max_sessions_per_reduce,
-            cfg.max_reduce_span_seconds
         ),
         rebuild_engine.rebuild_session_summary_for_key(
             softprobe_runtime::workspace_scope::DEFAULT_WORKSPACE_ID,
@@ -764,7 +762,7 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     assert_eq!(
         parquet_files(&trace_data),
         0,
-        "trace event row must be catalog-inlined for this regression"
+        "trace events are JSON payloads and should remain eligible for catalog inlining"
     );
 
     let trace_uri = format!(
@@ -835,6 +833,50 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     assert_eq!(
         body["scores"][0]["metadata"]["suite"], "holistic-session",
         "inlined MAP metadata must survive session detail serialization"
+    );
+
+    // Session-summary bounds must preserve the lake timestamp at nanosecond
+    // precision so a point session remains within its own lookup window.
+    let point_spec = SpanSpec {
+        session_id: "single-point-session",
+        trace: 0xd7,
+        start_ago_s: 60,
+        duration_s: 0,
+        error: false,
+        agent: "agent-a",
+        user: "u1",
+        model: "gpt-4o",
+        tokens: 1,
+        cost: 0.0,
+    };
+    let mut point_request = llm_span(&point_spec);
+    let point = &mut point_request.resource_spans[0].scope_spans[0].spans[0];
+    let timestamp_ns = (point.start_time_unix_nano / 1_000) * 1_000 + 123;
+    point.start_time_unix_nano = timestamp_ns;
+    point.end_time_unix_nano = timestamp_ns;
+    ingest(&router, point_request).await;
+    flush(&state).await;
+    assert!(run_reduce(&state).await >= 1);
+
+    let point_detail = Request::builder()
+        .method("GET")
+        .uri("/v1/llm/sessions/single-point-session")
+        .body(Body::empty())
+        .unwrap();
+    let point_response = router.clone().oneshot(point_detail).await.unwrap();
+    let point_status = point_response.status();
+    let point_body = response_json(point_response).await;
+    assert_eq!(
+        point_status,
+        StatusCode::OK,
+        "single-point session detail failed: {point_body}"
+    );
+    assert_eq!(point_body["span_count"], 1);
+    assert_eq!(point_body["spans"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        point_body["spans"][0]["start_time"],
+        chrono::DateTime::<Utc>::from_timestamp_nanos(timestamp_ns as i64)
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
     );
 
     let missing = Request::builder()

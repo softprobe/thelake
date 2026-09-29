@@ -12,8 +12,8 @@ use tracing::warn;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirtyHint {
     pub session_id: String,
-    pub min_ts: DateTime<Utc>,
-    pub max_ts: DateTime<Utc>,
+    pub min_ts_ns: i64,
+    pub max_ts_ns: i64,
 }
 
 /// Fold distinct `session_id → {min_ts,max_ts}` from this batch only. No retained state.
@@ -44,8 +44,8 @@ where
         .into_iter()
         .map(|(session_id, (min_ts, max_ts))| DirtyHint {
             session_id,
-            min_ts,
-            max_ts,
+            min_ts_ns: crate::session_summary::time::to_ns(min_ts),
+            max_ts_ns: crate::session_summary::time::to_ns(max_ts),
         })
         .collect();
     out.sort_by(|a, b| a.session_id.cmp(&b.session_id));
@@ -131,9 +131,9 @@ impl SessionSummaryDirty {
             .map_err(|e| anyhow!("session_summary dirty pool get: {e}"))?;
         let schema = quote_pg_ident(&self.metadata_schema);
         let columns = if self.workspace_scoped {
-            "tenant_id, session_id, min_ts, max_ts, updated_at"
+            "tenant_id, session_id, min_ts_ns, max_ts_ns, updated_at"
         } else {
-            "session_id, min_ts, max_ts, updated_at"
+            "session_id, min_ts_ns, max_ts_ns, updated_at"
         };
         let arity = if self.workspace_scoped { 4 } else { 3 };
         let mut sql = format!("INSERT INTO {schema}.session_summary_dirty ({columns}) VALUES ");
@@ -161,21 +161,21 @@ impl SessionSummaryDirty {
                 ));
             }
             params.push(Box::new(h.session_id.clone()));
-            params.push(Box::new(h.min_ts));
-            params.push(Box::new(h.max_ts));
+            params.push(Box::new(h.min_ts_ns));
+            params.push(Box::new(h.max_ts_ns));
         }
         if self.workspace_scoped {
             sql.push_str(
                 " ON CONFLICT (tenant_id, session_id) DO UPDATE SET \
-                 min_ts = LEAST(session_summary_dirty.min_ts, EXCLUDED.min_ts), \
-                 max_ts = GREATEST(session_summary_dirty.max_ts, EXCLUDED.max_ts), \
+                 min_ts_ns = LEAST(session_summary_dirty.min_ts_ns, EXCLUDED.min_ts_ns), \
+                 max_ts_ns = GREATEST(session_summary_dirty.max_ts_ns, EXCLUDED.max_ts_ns), \
                  updated_at = EXCLUDED.updated_at",
             );
         } else {
             sql.push_str(
                 " ON CONFLICT (session_id) DO UPDATE SET \
-                 min_ts = LEAST(session_summary_dirty.min_ts, EXCLUDED.min_ts), \
-                 max_ts = GREATEST(session_summary_dirty.max_ts, EXCLUDED.max_ts), \
+                 min_ts_ns = LEAST(session_summary_dirty.min_ts_ns, EXCLUDED.min_ts_ns), \
+                 max_ts_ns = GREATEST(session_summary_dirty.max_ts_ns, EXCLUDED.max_ts_ns), \
                  updated_at = EXCLUDED.updated_at",
             );
         }
@@ -208,11 +208,11 @@ mod fold_tests {
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].session_id, "a");
         assert_eq!(
-            hints[0].min_ts,
+            crate::session_summary::time::from_ns(hints[0].min_ts_ns),
             chrono::TimeZone::timestamp_opt(&Utc, 5, 0).unwrap()
         );
         assert_eq!(
-            hints[0].max_ts,
+            crate::session_summary::time::from_ns(hints[0].max_ts_ns),
             chrono::TimeZone::timestamp_opt(&Utc, 20, 0).unwrap()
         );
     }
@@ -225,11 +225,11 @@ mod fold_tests {
         assert_eq!(hints[0].session_id, "a");
         assert_eq!(hints[1].session_id, "b");
         assert_eq!(
-            hints[1].min_ts,
+            crate::session_summary::time::from_ns(hints[1].min_ts_ns),
             chrono::TimeZone::timestamp_opt(&Utc, 2, 0).unwrap()
         );
         assert_eq!(
-            hints[1].max_ts,
+            crate::session_summary::time::from_ns(hints[1].max_ts_ns),
             chrono::TimeZone::timestamp_opt(&Utc, 9, 0).unwrap()
         );
     }

@@ -60,8 +60,8 @@ fn row(
 ) -> SummaryRow {
     SummaryRow {
         session_id: id.into(),
-        start_time: ts(start),
-        end_time: Some(ts(end)),
+        start_time_ns: crate::session_summary::time::to_ns(ts(start)),
+        end_time_ns: Some(crate::session_summary::time::to_ns(ts(end))),
         observation_count: 3,
         error_count: errors,
         input_tokens: Some(tokens / 2),
@@ -329,6 +329,62 @@ async fn postgres_session_summary_list_cursor_and_orders() {
 
 #[tokio::test]
 #[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_session_summary_cursor_distinguishes_submicrosecond_timestamps() {
+    let schema = "thelake_ss_submicro_cursor";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let earlier = chrono::DateTime::from_timestamp(1_700_000_000, 123).unwrap();
+    let later = chrono::DateTime::from_timestamp(1_700_000_000, 456).unwrap();
+    let make_row = |id: &str, at| SummaryRow {
+        session_id: id.into(),
+        start_time_ns: crate::session_summary::time::to_ns(at),
+        end_time_ns: Some(crate::session_summary::time::to_ns(at)),
+        observation_count: 1,
+        error_count: 0,
+        input_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        total_cost: None,
+        agent_name: None,
+        user_id: None,
+        model_name: None,
+    };
+    upsert_summary_rows(
+        &pool,
+        schema,
+        &[make_row("earlier-ns", earlier), make_row("later-ns", later)],
+    )
+    .await
+    .expect("seed nanosecond rows");
+
+    let mut request = SessionSearchRequest {
+        from: earlier,
+        to: later,
+        has_errors: None,
+        user_id: None,
+        model_name: None,
+        agent_name: None,
+        roots_only: false,
+        order_by: SessionOrderBy::StartTime,
+        order: SortDirection::Desc,
+        limit: Some(1),
+        cursor: None,
+    };
+    let first = search_session_summary(&pool, schema, &request, 1)
+        .await
+        .expect("first page");
+    assert_eq!(ids(&first), vec!["later-ns"]);
+    request.cursor = first.next_cursor;
+    let second = search_session_summary(&pool, schema, &request, 1)
+        .await
+        .expect("second page");
+    assert_eq!(ids(&second), vec!["earlier-ns"]);
+    assert!(second.next_cursor.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
 async fn postgres_session_summary_list_corner_cases() {
     let schema = "thelake_ss_list_corners";
     let pool = try_pg_pool(schema)
@@ -409,8 +465,8 @@ async fn postgres_session_summary_list_corner_cases() {
         &[
             SummaryRow {
                 session_id: "null-tokens".into(),
-                start_time: ts(1700),
-                end_time: None,
+                start_time_ns: crate::session_summary::time::to_ns(ts(1700)),
+                end_time_ns: None,
                 observation_count: 1,
                 error_count: 0,
                 input_tokens: None,

@@ -31,26 +31,11 @@ pub(crate) fn prepare_session_summary_duckdb(
         .context("open duckdb for session_summary reduce")
 }
 
-fn micros_to_utc(us: i64) -> Option<DateTime<Utc>> {
-    DateTime::from_timestamp_micros(us)
-}
-
 fn map_duck_row(row: &duckdb::Row<'_>) -> duckdb::Result<SummaryRow> {
-    let start_us: i64 = row.get(1)?;
-    let end_us: Option<i64> = row.get(2)?;
-    let start_time = micros_to_utc(start_us)
-        .ok_or_else(|| duckdb::Error::InvalidParameterName(format!("start_time_us={start_us}")))?;
-    let end_time = match end_us {
-        Some(us) => Some(
-            micros_to_utc(us)
-                .ok_or_else(|| duckdb::Error::InvalidParameterName(format!("end_time_us={us}")))?,
-        ),
-        None => None,
-    };
     Ok(SummaryRow {
         session_id: row.get(0)?,
-        start_time,
-        end_time,
+        start_time_ns: row.get(1)?,
+        end_time_ns: row.get(2)?,
         observation_count: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
         error_count: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
         input_tokens: row.get(5)?,

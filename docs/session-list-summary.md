@@ -132,15 +132,15 @@ traces MUST NOT depend on session_summary.
 
 ## 5. Data model
 
-### 5.1 `session_summary` (catalog Postgres / SQLite metadata)
+### 5.1 `session_summary` (catalog Postgres)
 
 Per tenant metadata schema (not a DuckLake Parquet table):
 
 ```sql
 CREATE TABLE session_summary (
   session_id          TEXT        NOT NULL,
-  start_time          TIMESTAMPTZ NOT NULL,
-  end_time            TIMESTAMPTZ,
+  start_time_ns       BIGINT NOT NULL,
+  end_time_ns         BIGINT,
   observation_count   BIGINT      NOT NULL DEFAULT 0,
   error_count         BIGINT      NOT NULL DEFAULT 0,
   input_tokens        BIGINT,
@@ -155,12 +155,12 @@ CREATE TABLE session_summary (
 );
 
 CREATE INDEX session_summary_recent
-  ON session_summary (start_time DESC, session_id);
+  ON session_summary (start_time_ns DESC, session_id);
 CREATE INDEX session_summary_agent
-  ON session_summary (agent_name, start_time DESC, session_id)
+  ON session_summary (agent_name, start_time_ns DESC, session_id)
   WHERE agent_name IS NOT NULL;
 CREATE INDEX session_summary_errors
-  ON session_summary (start_time DESC, session_id)
+  ON session_summary (start_time_ns DESC, session_id)
   WHERE error_count > 0;
 ```
 
@@ -171,8 +171,8 @@ Durable touch queue so **any** ingest replica can mark work for any reducer repl
 ```sql
 CREATE TABLE session_summary_dirty (
   session_id   TEXT        NOT NULL,
-  min_ts       TIMESTAMPTZ NOT NULL,
-  max_ts       TIMESTAMPTZ NOT NULL,
+  min_ts_ns    BIGINT      NOT NULL,
+  max_ts_ns    BIGINT      NOT NULL,
   updated_at   TIMESTAMPTZ NOT NULL,
   claim_holder TEXT,
   claim_until  TIMESTAMPTZ,
@@ -185,7 +185,7 @@ Reducers claim eligible rows in a short transaction with `FOR UPDATE SKIP LOCKED
 **Write amplification rule:** never UPSERT dirty **per span**. Dirty writes are tied to the **DuckLake commit batch** only:
 
 1. While building/flushing an ingest batch, accumulate in memory  
-   `Map<session_id, {min_ts, max_ts}>` over spans in that batch.  
+   `Map<session_id, {min_ts_ns, max_ts_ns}>` over spans in that batch.
 2. After the `traces` commit succeeds, issue **one** batched dirty UPSERT  
    (multi-row `INSERT … ON CONFLICT` for the distinct session_ids in the batch).  
 3. If the lake commit fails, do not write dirty.
@@ -247,7 +247,7 @@ ingest batch (soft coalesce flush or single OTLP commit)
   ├─1─► commit all spans in batch to DuckLake `traces`
   └─2─► ONE batched UPSERT session_summary_dirty
           for distinct session_ids in that batch
-          (min_ts/max_ts folded in memory first — never per span)
+          (min_ts_ns/max_ts_ns folded in memory first — never per span)
 
 Session-summary reducer loop (all replicas; SKIP LOCKED claim)
   ├─1─► claim dirty rows LIMIT N (capture generation)
@@ -262,8 +262,8 @@ Config gate: postgres catalog ⇒ session_summary always on (sqlite inactive / l
 
 ```sql
 SELECT session_id,
-       MIN(timestamp) AS start_time,
-       MAX(COALESCE(end_timestamp, timestamp)) AS end_time,
+       epoch_ns(MIN(timestamp))::BIGINT AS start_time_ns,
+       epoch_ns(MAX(COALESCE(end_timestamp, timestamp)))::BIGINT AS end_time_ns,
        COUNT(DISTINCT span_id) AS observation_count,
        SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
        SUM(total_tokens) AS total_tokens,
@@ -281,8 +281,8 @@ GROUP BY session_id;
 INSERT INTO session_summary AS s (...)
 VALUES (...)
 ON CONFLICT (session_id) DO UPDATE SET
-  start_time        = EXCLUDED.start_time,
-  end_time          = EXCLUDED.end_time,
+  start_time_ns     = EXCLUDED.start_time_ns,
+  end_time_ns       = EXCLUDED.end_time_ns,
   observation_count = EXCLUDED.observation_count,
   error_count       = EXCLUDED.error_count,
   total_tokens      = EXCLUDED.total_tokens,
@@ -295,11 +295,11 @@ ON CONFLICT (session_id) DO UPDATE SET
 ### 6.5 Mandatory `[from, to]`
 
 ```text
-to   = max(dirty.max_ts, now())
-from = least(coalesce(session_summary.start_time, dirty.min_ts), dirty.min_ts)
+from = least(coalesce(session_summary.start_time_ns, dirty.min_ts_ns), dirty.min_ts_ns)
+to   = greatest(coalesce(session_summary.end_time_ns, dirty.max_ts_ns), dirty.max_ts_ns)
 ```
 
-Plus bare timestamp predicates via `QueryWindow::scan_with_timestamp_filter`. Clamps: `max_reduce_span`, `max_sessions_per_reduce`. Stage 2 **clamps** oversized windows (does not chunk); early history outside the clamp may undercount until Stage 4 rebuild.
+The reducer uses bare timestamp predicates via `QueryWindow::scan_with_timestamp_filter`; no recent-window clamp is applied to dirty sessions. The time predicate prunes partitions, while session IDs limit aggregation to claimed sessions. `max_sessions_per_reduce` bounds batch size. The configured maximum span remains on explicit and periodic rebuild windows.
 
 ### 6.6 Late spans
 
@@ -311,7 +311,7 @@ No FINALIZED. Late span → dirty UPSERT → next claimed reduce replaces the su
 
 ### 7.1 List
 
-`POST /v1/llm/sessions/search` → select from `session_summary` (cursor on `(start_time, session_id)` desc). Steady-state path does **not** scan `traces`.
+`POST /v1/llm/sessions/search` → select from `session_summary` (cursor on `(start_time_ns, session_id)` desc). Steady-state path does **not** scan `traces`.
 
 **No lake fallback** on Postgres catalogs: empty summary → empty list. Lake `GROUP BY` remains only for non-postgres catalogs (sqlite) where there is no summary table.
 
@@ -470,7 +470,7 @@ Replaced reducer with: **durable dirty + SKIP LOCKED claims + `FROM traces` aggr
 ## 16. Open questions
 
 1. Exact timestamp literal / `TIMESTAMP_NS` helpers shared with existing query SQL.  
-2. Behavior when `to - from > max_reduce_span` — **decided Stage 2: clamp** (no chunk); early history may undercount until Stage 4 rebuild.  
+2. Dirty reduction spans the full stored/dirty event-time bounds; explicit and periodic rebuilds retain their configured maximum range.
 3. `user_id` / `model_name` in v1 vs later.  
 4. Rebuild cadence — **decided Stage 4:** `rebuild_interval_ms` default 24h; lookback = `max_reduce_span_seconds` (default 7d).  
 5. DDL bootstrap vs existing `promotion_specs` ensure path.  

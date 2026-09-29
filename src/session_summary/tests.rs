@@ -83,6 +83,76 @@ async fn postgres_session_summary_ensure_idempotent() {
 
 #[tokio::test]
 #[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_session_summary_timestamp_cutover_preserves_and_requeues_rows() {
+    let schema = "thelake_ss_timestamp_cutover";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let client = pool.get().await.expect("client");
+    let q = crate::runtime_engine::quote_pg_ident(schema);
+    client
+        .batch_execute(&format!(
+            "DROP TABLE {q}.session_summary_dirty, {q}.session_summary;\
+             CREATE TABLE {q}.session_summary (\
+               session_id TEXT PRIMARY KEY, start_time TIMESTAMPTZ NOT NULL, end_time TIMESTAMPTZ,\
+               observation_count BIGINT NOT NULL DEFAULT 0, error_count BIGINT NOT NULL DEFAULT 0,\
+               input_tokens BIGINT, output_tokens BIGINT, total_tokens BIGINT, total_cost DOUBLE PRECISION,\
+               agent_name TEXT, user_id TEXT, model_name TEXT, updated_at TIMESTAMPTZ NOT NULL);\
+             CREATE TABLE {q}.session_summary_dirty (\
+               session_id TEXT PRIMARY KEY, min_ts TIMESTAMPTZ NOT NULL, max_ts TIMESTAMPTZ NOT NULL,\
+               updated_at TIMESTAMPTZ NOT NULL, generation BIGINT NOT NULL DEFAULT 1,\
+               claim_holder TEXT, claim_until TIMESTAMPTZ);\
+             INSERT INTO {q}.session_summary (session_id, start_time, end_time, updated_at)\
+               VALUES ('legacy-ns', '2024-01-01T00:00:00.123456Z', '2024-01-01T00:00:00.654321Z', now());\
+             INSERT INTO {q}.session_summary_dirty (session_id, min_ts, max_ts, updated_at)\
+               VALUES ('pending-only', '2024-01-02T00:00:00.123456Z', '2024-01-02T00:00:00.654321Z', now());"
+        ))
+        .await
+        .expect("create legacy schema fixture");
+
+    ensure_session_summary_tables(&client, schema)
+        .await
+        .expect("run timestamp cutover");
+
+    let row = client
+        .query_one(
+            &format!(
+                "SELECT start_time_ns, end_time_ns FROM {q}.session_summary WHERE session_id = 'legacy-ns'"
+            ),
+            &[],
+        )
+        .await
+        .expect("read migrated summary");
+    assert_eq!(row.get::<_, i64>(0), 1_704_067_200_123_456_000);
+    assert_eq!(row.get::<_, i64>(1), 1_704_067_200_654_321_000);
+
+    let dirty = client
+        .query_one(
+            &format!(
+                "SELECT min_ts_ns, max_ts_ns FROM {q}.session_summary_dirty WHERE session_id = 'legacy-ns'"
+            ),
+            &[],
+        )
+        .await
+        .expect("legacy summary queued for precise recompute");
+    assert_eq!(dirty.get::<_, i64>(0), 1_704_067_200_123_455_000);
+    assert_eq!(dirty.get::<_, i64>(1), 1_704_067_200_654_322_000);
+
+    let pending = client
+        .query_one(
+            &format!(
+                "SELECT min_ts_ns, max_ts_ns FROM {q}.session_summary_dirty WHERE session_id = 'pending-only'"
+            ),
+            &[],
+        )
+        .await
+        .expect("read migrated pending claim");
+    assert_eq!(pending.get::<_, i64>(0), 1_704_153_600_123_455_000);
+    assert_eq!(pending.get::<_, i64>(1), 1_704_153_600_654_322_000);
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
 async fn postgres_session_summary_ddl_supports_apostrophe_schema() {
     let schema = "thelake_ss_o'quote";
     let pool = try_pg_pool(schema)
@@ -176,7 +246,7 @@ async fn postgres_session_summary_dirty_upsert_merge() {
     let rows = client
         .query(
             &format!(
-                "SELECT session_id, min_ts, max_ts FROM {q}.session_summary_dirty ORDER BY session_id"
+                "SELECT session_id, min_ts_ns, max_ts_ns FROM {q}.session_summary_dirty ORDER BY session_id"
             ),
             &[],
         )
@@ -185,12 +255,12 @@ async fn postgres_session_summary_dirty_upsert_merge() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get::<_, String>(0), "s1");
     assert_eq!(
-        rows[0].get::<_, chrono::DateTime<Utc>>(1),
-        Utc.timestamp_opt(1, 0).unwrap()
+        rows[0].get::<_, i64>(1),
+        crate::session_summary::time::to_ns(Utc.timestamp_opt(1, 0).unwrap())
     );
     assert_eq!(
-        rows[0].get::<_, chrono::DateTime<Utc>>(2),
-        Utc.timestamp_opt(50, 0).unwrap()
+        rows[0].get::<_, i64>(2),
+        crate::session_summary::time::to_ns(Utc.timestamp_opt(50, 0).unwrap())
     );
     assert_eq!(rows[1].get::<_, String>(0), "s2");
 
@@ -221,7 +291,7 @@ async fn postgres_session_summary_mark_after_commit_writes_dirty() {
     let rows = client
         .query(
             &format!(
-                "SELECT session_id, min_ts, max_ts FROM {q}.session_summary_dirty ORDER BY session_id"
+                "SELECT session_id, min_ts_ns, max_ts_ns FROM {q}.session_summary_dirty ORDER BY session_id"
             ),
             &[],
         )
@@ -230,12 +300,12 @@ async fn postgres_session_summary_mark_after_commit_writes_dirty() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get::<_, String>(0), "a");
     assert_eq!(
-        rows[0].get::<_, chrono::DateTime<Utc>>(1),
-        Utc.timestamp_opt(5, 0).unwrap()
+        rows[0].get::<_, i64>(1),
+        crate::session_summary::time::to_ns(Utc.timestamp_opt(5, 0).unwrap())
     );
     assert_eq!(
-        rows[0].get::<_, chrono::DateTime<Utc>>(2),
-        Utc.timestamp_opt(10, 0).unwrap()
+        rows[0].get::<_, i64>(2),
+        crate::session_summary::time::to_ns(Utc.timestamp_opt(10, 0).unwrap())
     );
 }
 
@@ -384,8 +454,10 @@ async fn postgres_upsert_summary_absolute_replace_all_fields() {
         .expect("ducklake-postgres required (make setup)");
     let row = SummaryRow {
         session_id: "s1".into(),
-        start_time: Utc.timestamp_opt(100, 0).unwrap(),
-        end_time: Some(Utc.timestamp_opt(200, 0).unwrap()),
+        start_time_ns: crate::session_summary::time::to_ns(Utc.timestamp_opt(100, 0).unwrap()),
+        end_time_ns: Some(crate::session_summary::time::to_ns(
+            Utc.timestamp_opt(200, 0).unwrap(),
+        )),
         observation_count: 2,
         error_count: 1,
         input_tokens: Some(11),
@@ -417,7 +489,7 @@ async fn postgres_upsert_summary_absolute_replace_all_fields() {
             &format!(
                 "SELECT observation_count, error_count, total_tokens, total_cost, \
                         agent_name, user_id, model_name, input_tokens, output_tokens, \
-                        start_time, end_time \
+                        start_time_ns, end_time_ns \
                  FROM {q}.session_summary WHERE session_id = 's1'"
             ),
             &[],
@@ -433,14 +505,8 @@ async fn postgres_upsert_summary_absolute_replace_all_fields() {
     assert_eq!(r.get::<_, Option<String>>(6).as_deref(), Some("gpt"));
     assert_eq!(r.get::<_, Option<i64>>(7), Some(11));
     assert_eq!(r.get::<_, Option<i64>>(8), Some(22));
-    assert_eq!(
-        r.get::<_, chrono::DateTime<Utc>>(9),
-        Utc.timestamp_opt(100, 0).unwrap()
-    );
-    assert_eq!(
-        r.get::<_, Option<chrono::DateTime<Utc>>>(10),
-        Some(Utc.timestamp_opt(200, 0).unwrap())
-    );
+    assert_eq!(r.get::<_, i64>(9), 100_000_000_000);
+    assert_eq!(r.get::<_, Option<i64>>(10), Some(200_000_000_000));
 }
 
 #[tokio::test]
@@ -555,8 +621,8 @@ async fn postgres_expired_claim_cannot_publish_summary() {
         .expect("reclaim");
     let summary = SummaryRow {
         session_id: "s1".into(),
-        start_time: Utc.timestamp_opt(1, 0).unwrap(),
-        end_time: None,
+        start_time_ns: crate::session_summary::time::to_ns(Utc.timestamp_opt(1, 0).unwrap()),
+        end_time_ns: None,
         observation_count: 1,
         error_count: 0,
         input_tokens: None,
@@ -612,8 +678,8 @@ async fn postgres_dirty_generation_fences_stale_publication() {
         .expect("touch claimed row");
     let summary = SummaryRow {
         session_id: "s1".into(),
-        start_time: Utc.timestamp_opt(1, 0).unwrap(),
-        end_time: None,
+        start_time_ns: crate::session_summary::time::to_ns(Utc.timestamp_opt(1, 0).unwrap()),
+        end_time_ns: None,
         observation_count: 1,
         error_count: 0,
         input_tokens: None,
@@ -666,7 +732,7 @@ async fn postgres_legacy_dirty_update_without_generation_advances_fence() {
     // Simulate a mixed-version writer that knows the old schema and omits the
     // newly introduced generation column from its conflict update.
     client.execute(
-        &format!("INSERT INTO {q}.session_summary_dirty (session_id, min_ts, max_ts, updated_at) VALUES ('legacy', to_timestamp(10), to_timestamp(10), now())"),
+        &format!("INSERT INTO {q}.session_summary_dirty (session_id, min_ts_ns, max_ts_ns, updated_at) VALUES ('legacy', 10000000000, 10000000000, now())"),
         &[],
     ).await.expect("legacy insert");
     let initial: i64 = client
@@ -680,7 +746,7 @@ async fn postgres_legacy_dirty_update_without_generation_advances_fence() {
         .expect("initial generation")
         .get(0);
     client.execute(
-        &format!("INSERT INTO {q}.session_summary_dirty (session_id, min_ts, max_ts, updated_at) VALUES ('legacy', to_timestamp(20), to_timestamp(20), now()) ON CONFLICT (session_id) DO UPDATE SET min_ts = LEAST({q}.session_summary_dirty.min_ts, EXCLUDED.min_ts), max_ts = GREATEST({q}.session_summary_dirty.max_ts, EXCLUDED.max_ts), updated_at = EXCLUDED.updated_at"),
+        &format!("INSERT INTO {q}.session_summary_dirty (session_id, min_ts_ns, max_ts_ns, updated_at) VALUES ('legacy', 20000000000, 20000000000, now()) ON CONFLICT (session_id) DO UPDATE SET min_ts_ns = LEAST({q}.session_summary_dirty.min_ts_ns, EXCLUDED.min_ts_ns), max_ts_ns = GREATEST({q}.session_summary_dirty.max_ts_ns, EXCLUDED.max_ts_ns), updated_at = EXCLUDED.updated_at"),
         &[],
     ).await.expect("legacy conflict update");
     let after: i64 = client

@@ -38,11 +38,7 @@ fn spawn_reduce_loop(maintenance: MaintenanceEngine, config: &Config) -> JoinHan
             let mut failed = false;
             for scope in scopes {
                 match maintenance
-                    .reduce_session_summary_for_key(
-                        &scope,
-                        cfg.max_sessions_per_reduce,
-                        cfg.max_reduce_span_seconds,
-                    )
+                    .reduce_session_summary_for_key(&scope, cfg.max_sessions_per_reduce)
                     .await
                 {
                     Ok(n) => worked |= n > 0,
