@@ -139,11 +139,9 @@ impl MaintenanceEngine {
         &self,
         scope_key: &str,
         max_sessions: u64,
-        max_reduce_span_seconds: u64,
     ) -> Result<usize> {
         let scope = self.resolve_scope(scope_key).await?;
-        self.reduce_session_summary(&scope, max_sessions, max_reduce_span_seconds)
-            .await
+        self.reduce_session_summary(&scope, max_sessions).await
     }
 
     pub async fn rebuild_session_summary_for_key(
@@ -162,7 +160,6 @@ impl MaintenanceEngine {
         &self,
         scope: &MaintenanceScope,
         max_sessions: u64,
-        max_reduce_span_seconds: u64,
     ) -> Result<usize> {
         crate::session_summary::reduce_tenant(
             &scope.pool,
@@ -172,7 +169,6 @@ impl MaintenanceEngine {
             &scope.physical,
             Arc::clone(&self.conn_pool),
             max_sessions,
-            max_reduce_span_seconds,
         )
         .await
     }

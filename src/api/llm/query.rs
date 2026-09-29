@@ -257,9 +257,7 @@ pub async fn get_trace(
     }))
 }
 
-/// Resolve lake `QueryWindow` from Postgres `session_summary` only (D7, pad 0).
-///
-/// No query `from`/`to`. Missing row → 404.
+/// Resolve the lake window from the Postgres session summary. Missing row → 404.
 async fn resolve_session_lake_window(
     state: &AppState,
     tenant_ref: Option<&TenantInfo>,
@@ -272,7 +270,7 @@ async fn resolve_session_lake_window(
         .await
         .map_err(storage_error)?;
     match engine.lookup_session_summary_window(session_id).await {
-        Ok(Some((from, to))) => Ok((from, to)),
+        Ok(Some(window)) => Ok(window),
         Ok(None) => Err(not_found()),
         Err(crate::session_summary::SessionSummaryListError::BadRequest(msg)) => {
             Err(bad_request(msg))
@@ -1302,24 +1300,20 @@ mod tests {
     }
 
     #[test]
-    fn cursor_literal_keeps_microsecond_precision() {
-        // start_time is a microsecond-precision TIMESTAMPTZ and the cursor
-        // round-trips a real column value. Rendering it at millisecond
-        // precision truncated the literal below the true value, so the
-        // keyset predicate `start_time < cursor` silently dropped every row
-        // sharing that millisecond: the last page came back empty with a null
-        // next_cursor and no error. Verified on DuckDB 1.5.5 -- paging 8
-        // sessions at limit=2 lost the final two.
+    fn cursor_literal_keeps_nanosecond_precision() {
+        // Trace timestamps use TIMESTAMP_NS and the cursor round-trips the
+        // exact column value. Rendering below nanosecond precision truncates
+        // the keyset predicate and can silently drop rows sharing a millisecond.
         let mut request = session_search_request();
         request.cursor = Some(encode_cursor(
-            DateTime::parse_from_rfc3339("2026-07-20T00:00:00.123456Z")
+            DateTime::parse_from_rfc3339("2026-07-20T00:00:00.123456789Z")
                 .unwrap()
                 .with_timezone(&Utc),
             "s1",
         ));
         let sql = compile_session_search_sql(&request, 50).expect("sql");
         assert!(
-            sql.contains("00.123456"),
+            sql.contains("00.123456789"),
             "cursor literal truncated below the true value, pages will drop rows: {sql}"
         );
     }
@@ -2045,14 +2039,14 @@ mod tests {
             "session detail must project span attributes: {list}"
         );
         assert!(
-            list.contains("CAST(events AS JSON) AS events"),
-            "session detail must project the complete nested events as JSON: {list}"
+            list.contains(", events FROM traces"),
+            "events are already JSON: {list}"
         );
         let detail = compile_span_detail_sql("span-1", from, to).unwrap();
         assert!(detail.contains(&payload), "detail keeps payload: {detail}");
         assert!(
-            detail.contains("CAST(events AS JSON) AS events"),
-            "span detail projects the complete nested events as JSON: {detail}"
+            detail.contains(", events FROM traces"),
+            "events are already JSON: {detail}"
         );
     }
 

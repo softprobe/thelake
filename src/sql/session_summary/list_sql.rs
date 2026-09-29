@@ -1,7 +1,7 @@
 //! Postgres `session_summary` list SQL for Stage 3 `sessions/search`.
 //!
 //! Steady-state list path: no DuckLake scan. Filters use typed summary columns.
-//! Postgres side store keeps `start_time` (not lake one-clock `timestamp`).
+//! Postgres stores event-time bounds as signed epoch nanoseconds.
 
 use crate::api::llm::query::{SessionOrderBy, SessionSearchRequest, SortDirection};
 use crate::api::sql_support::decode_cursor;
@@ -10,12 +10,12 @@ use crate::sql::literal::sql_string_literal;
 /// Compile a Postgres SELECT against `{schema}.session_summary`.
 ///
 /// Filters covered (must stay in sync with tests):
-/// - time range on `start_time`
+/// - time range on `start_time_ns`
 /// - `has_errors`
 /// - `agent_name`
 /// - `user_id`
 /// - `model_name`
-/// - keyset `cursor` on `(start_time, session_id)` desc
+/// - keyset `cursor` on `(start_time_ns, session_id)` desc
 ///
 /// `roots_only` is a lake-only MAP filter; ignored on the summary path (no parent id column).
 pub fn compile_session_summary_list_sql(
@@ -37,8 +37,8 @@ pub fn compile_session_summary_list_sql_for_workspace(
     }
 
     let mut predicates = vec![
-        format!("start_time >= {}", pg_timestamptz_literal(&request.from)),
-        format!("start_time <= {}", pg_timestamptz_literal(&request.to)),
+        format!("start_time_ns >= {}", timestamp_ns(&request.from)?),
+        format!("start_time_ns <= {}", timestamp_ns(&request.to)?),
     ];
     if let Some(workspace_id) = workspace_id {
         predicates.insert(
@@ -78,29 +78,29 @@ pub fn compile_session_summary_list_sql_for_workspace(
         if request.order != SortDirection::Desc {
             return Err("`cursor` is only supported with order=desc".to_string());
         }
-        predicates.push(pg_cursor_predicate(cursor, "start_time", "session_id")?);
+        predicates.push(pg_cursor_predicate(cursor, "start_time_ns", "session_id")?);
     }
 
     let direction = request.order.as_sql();
     let order_sql = match request.order_by {
         SessionOrderBy::StartTime => {
-            format!("start_time {direction}, session_id {direction}")
+            format!("start_time_ns {direction}, session_id {direction}")
         }
         SessionOrderBy::ErrorCount => {
-            format!("error_count {direction}, start_time DESC, session_id DESC")
+            format!("error_count {direction}, start_time_ns DESC, session_id DESC")
         }
         SessionOrderBy::Duration => {
-            // end_time may be NULL → treat as start_time (zero duration).
+            // end_time_ns may be NULL → treat as start_time_ns (zero duration).
             format!(
-                "EXTRACT(EPOCH FROM (COALESCE(end_time, start_time) - start_time)) {direction}, \
-                 start_time DESC, session_id DESC"
+                "(COALESCE(end_time_ns, start_time_ns) - start_time_ns) {direction}, \
+                 start_time_ns DESC, session_id DESC"
             )
         }
         SessionOrderBy::TotalTokens => {
-            format!("total_tokens {direction} NULLS LAST, start_time DESC, session_id DESC")
+            format!("total_tokens {direction} NULLS LAST, start_time_ns DESC, session_id DESC")
         }
         SessionOrderBy::TotalCost => {
-            format!("total_cost {direction} NULLS LAST, start_time DESC, session_id DESC")
+            format!("total_cost {direction} NULLS LAST, start_time_ns DESC, session_id DESC")
         }
     };
 
@@ -109,8 +109,8 @@ pub fn compile_session_summary_list_sql_for_workspace(
     Ok(format!(
         "SELECT \
            session_id, \
-           start_time, \
-           end_time, \
+           start_time_ns, \
+           end_time_ns, \
            0::bigint AS trace_count, \
            observation_count, \
            error_count, \
@@ -131,17 +131,16 @@ pub fn compile_session_summary_list_sql_for_workspace(
     ))
 }
 
-fn pg_timestamptz_literal(value: &chrono::DateTime<chrono::Utc>) -> String {
-    format!(
-        "{}::timestamptz",
-        sql_string_literal(&value.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
-    )
+fn timestamp_ns(value: &chrono::DateTime<chrono::Utc>) -> Result<i64, String> {
+    value
+        .timestamp_nanos_opt()
+        .ok_or_else(|| "timestamp is outside signed nanosecond range".to_string())
 }
 
-/// Keyset cursor for Postgres TIMESTAMPTZ (not DuckDB TIMESTAMP_NS).
+/// Keyset cursor uses the same exact epoch-ns representation as the summary.
 fn pg_cursor_predicate(cursor: &str, timestamp_col: &str, id_col: &str) -> Result<String, String> {
     let decoded = decode_cursor(cursor)?;
-    let ts = pg_timestamptz_literal(&decoded.t);
+    let ts = timestamp_ns(&decoded.t)?;
     Ok(format!(
         "({timestamp_col} < {ts} OR ({timestamp_col} = {ts} AND {id_col} < {id}))",
         id = sql_string_literal(&decoded.id),
@@ -173,8 +172,8 @@ mod tests {
     fn list_sql_time_range_and_limit() {
         let sql = compile_session_summary_list_sql("\"meta\"", &base_request(), 50).unwrap();
         assert!(sql.contains("FROM \"meta\".session_summary"));
-        assert!(sql.contains("start_time >="));
-        assert!(sql.contains("start_time <="));
+        assert!(sql.contains("start_time_ns >="));
+        assert!(sql.contains("start_time_ns <="));
         assert!(sql.contains("LIMIT 51"));
         assert!(!sql.to_lowercase().contains("attributes"));
         assert!(!sql.contains("FROM traces"));
@@ -211,7 +210,7 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
         req.cursor = Some(encode_cursor(ts, "sess-1"));
         let sql = compile_session_summary_list_sql("\"meta\"", &req, 10).unwrap();
-        assert!(sql.contains("start_time <"));
+        assert!(sql.contains("start_time_ns <"));
         assert!(sql.contains("session_id < 'sess-1'"));
         // Must not use DuckDB TIMESTAMP_NS on the Postgres path.
         assert!(!sql.contains("TIMESTAMP_NS"));
@@ -293,7 +292,10 @@ mod tests {
         let mut req = base_request();
         for (order_by, needle) in [
             (SessionOrderBy::ErrorCount, "error_count"),
-            (SessionOrderBy::Duration, "EXTRACT(EPOCH"),
+            (
+                SessionOrderBy::Duration,
+                "COALESCE(end_time_ns, start_time_ns)",
+            ),
             (SessionOrderBy::TotalTokens, "total_tokens"),
             (SessionOrderBy::TotalCost, "total_cost"),
         ] {
@@ -308,5 +310,22 @@ mod tests {
         // Sanity: lake cursor helpers remain TIMESTAMP_NS for DuckDB.
         use crate::sql::timestamp_ns_literal;
         let _ = timestamp_ns_literal(&Utc::now());
+    }
+
+    #[test]
+    fn list_sql_keeps_submicrosecond_bounds_as_integer_nanoseconds() {
+        let mut req = base_request();
+        req.from = chrono::DateTime::from_timestamp(1_700_000_000, 123).unwrap();
+        req.to = req.from;
+        let sql = compile_session_summary_list_sql("\"meta\"", &req, 10).unwrap();
+        assert!(
+            sql.contains("start_time_ns >= 1700000000000000123"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("start_time_ns <= 1700000000000000123"),
+            "{sql}"
+        );
+        assert!(!sql.contains("timestamptz"), "{sql}");
     }
 }

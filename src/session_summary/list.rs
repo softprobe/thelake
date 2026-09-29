@@ -84,7 +84,7 @@ pub async fn search_session_summary_for_workspace(
     })
 }
 
-/// Load `start_time`/`end_time` for one session from Postgres `session_summary`.
+/// Load exact nanosecond bounds for one session from Postgres `session_summary`.
 ///
 /// Used by session detail / spans / recording so lake scans use the
 /// summary window (D7) — not the Explorer list range.
@@ -107,7 +107,7 @@ pub async fn lookup_session_summary_window_for_workspace(
         .map(|id| format!("tenant_id = {} AND ", crate::sql::sql_string_literal(id)))
         .unwrap_or_default();
     let sql = format!(
-        "SELECT start_time, end_time FROM {schema}.session_summary WHERE {ownership}session_id = $1 LIMIT 1"
+        "SELECT start_time_ns, COALESCE(end_time_ns, start_time_ns) AS end_time_ns FROM {schema}.session_summary WHERE {ownership}session_id = $1 LIMIT 1"
     );
     let client = pool
         .get()
@@ -122,12 +122,14 @@ pub async fn lookup_session_summary_window_for_workspace(
     let Some(row) = rows.first() else {
         return Ok(None);
     };
-    let start_time: DateTime<Utc> = row
-        .try_get("start_time")
-        .map_err(|e| SessionSummaryListError::Storage(e.into()))?;
-    let end_time: DateTime<Utc> = row
-        .try_get("end_time")
-        .map_err(|e| SessionSummaryListError::Storage(e.into()))?;
+    let start_time = crate::session_summary::time::from_ns(
+        row.try_get("start_time_ns")
+            .map_err(|e| SessionSummaryListError::Storage(e.into()))?,
+    );
+    let end_time = crate::session_summary::time::from_ns(
+        row.try_get("end_time_ns")
+            .map_err(|e| SessionSummaryListError::Storage(e.into()))?,
+    );
     Ok(Some((start_time, end_time)))
 }
 
@@ -136,8 +138,10 @@ fn map_pg_summary_row(row: &tokio_postgres::Row) -> Result<SessionSummary, tokio
     let models: Vec<String> = row.try_get("models").unwrap_or_default();
     Ok(SessionSummary {
         session_id: row.try_get("session_id")?,
-        start_time: row.try_get::<_, DateTime<Utc>>("start_time")?,
-        end_time: row.try_get("end_time")?,
+        start_time: crate::session_summary::time::from_ns(row.try_get("start_time_ns")?),
+        end_time: row
+            .try_get::<_, Option<i64>>("end_time_ns")?
+            .map(crate::session_summary::time::from_ns),
         trace_count: row.try_get::<_, i64>("trace_count").unwrap_or(0),
         span_count: row.try_get::<_, i64>("observation_count").unwrap_or(0),
         error_count: row.try_get::<_, i64>("error_count").unwrap_or(0),

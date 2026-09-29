@@ -168,6 +168,9 @@ mod locality_tests {
             "/storage/schema/ducklake_partition.rs",
             "/storage/schema/variant.rs",
             "/storage/ducklake/attach.rs",
+            // One-time DuckLake table rebuild; its full rewrite is validated
+            // against a production catalog snapshot before release.
+            "/storage/ducklake/trace_event_migration.rs",
             "/storage/ducklake/promotion.rs",
             "/storage/duckdb/cache.rs",
             "/storage/duckdb/engine.rs",

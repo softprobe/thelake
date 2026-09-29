@@ -11,6 +11,7 @@ mod otlp;
 pub(crate) mod physical_scope;
 mod promotion;
 mod scores;
+mod trace_event_migration;
 mod util;
 pub(crate) mod workspace_views;
 mod writer;
@@ -26,5 +27,6 @@ pub(crate) use attach::{
     DuckLakeSessionKind,
 };
 pub use attach::{open_attached_from_config, open_attached_from_warehouse, AttachedSession};
+pub use trace_event_migration::migrate_trace_events;
 pub(crate) use util::{cache_httpfs_disabled_by_env, size_literal};
 pub(crate) use workspace_views::validate_shared_workspace_schema;

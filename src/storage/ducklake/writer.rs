@@ -26,8 +26,9 @@ static RESET_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>
 
 use super::attach::{ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified};
 use super::util::{
-    ensure_hot_map_column_types, ensure_log_timestamp_precision, ensure_trace_fidelity_columns,
-    ensure_trace_timestamp_precision, escape_sql_literal, size_literal,
+    ensure_hot_map_column_types, ensure_log_timestamp_precision, ensure_score_timestamp_precision,
+    ensure_trace_events_json, ensure_trace_fidelity_columns, ensure_trace_timestamp_precision,
+    escape_sql_literal, size_literal,
 };
 
 pub(super) struct TableReadinessRegistry {
@@ -398,8 +399,10 @@ impl DuckLakeWriter {
         let found = crate::storage::schema::describe_table_columns(conn, &qualified_table)?;
         for field in arrow_schema.fields() {
             if !found.contains_key(&field.name().to_ascii_lowercase()) {
-                // LIST columns (events) are owned by ensure_trace_fidelity_columns.
-                if matches!(field.data_type(), ::arrow::datatypes::DataType::List(_)) {
+                // The trace events column is owned by its JSON schema helper.
+                if (table_name == "traces" && field.name() == "events")
+                    || matches!(field.data_type(), ::arrow::datatypes::DataType::List(_))
+                {
                     continue;
                 }
                 let duck_type = Self::arrow_field_to_duck_add_type(field)?;
@@ -421,6 +424,7 @@ impl DuckLakeWriter {
 
         if table_name == "traces" {
             ensure_trace_fidelity_columns(conn, &qualified_table)?;
+            ensure_trace_events_json(conn, &qualified_table)?;
         }
         ensure_hot_map_column_types(conn, &qualified_table, table_name)?;
         if table_name == "traces" {
@@ -428,6 +432,9 @@ impl DuckLakeWriter {
         }
         if table_name == "logs" {
             ensure_log_timestamp_precision(conn, &qualified_table)?;
+        }
+        if matches!(table_name, "scores" | "score_configs") {
+            ensure_score_timestamp_precision(conn, &qualified_table)?;
         }
         // traces / logs / scores — any OTLP layout table (D10).
         if is_otlp_table(table_name) {
@@ -895,6 +902,45 @@ mod tests {
                 1_700_000_000_654_321_000,
             )
         );
+    }
+
+    #[test]
+    fn refuses_legacy_trace_events_until_the_table_rebuild_runs() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE legacy_events (
+                events STRUCT(name VARCHAR, timestamp TIMESTAMP_NS, attributes MAP(VARCHAR, VARCHAR))[]
+             );",
+        )
+        .unwrap();
+
+        let error = ensure_trace_events_json(&conn, "legacy_events").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("requires the trace events rebuild"));
+    }
+
+    #[test]
+    fn migrates_score_and_score_config_timestamps_to_nanoseconds() {
+        for table in ["upgrade_scores", "upgrade_score_configs"] {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(&format!(
+                "CREATE TABLE {table} (timestamp TIMESTAMPTZ NOT NULL);\
+                 INSERT INTO {table} VALUES ('2023-11-14 22:13:20.123456+00');"
+            ))
+            .unwrap();
+
+            ensure_score_timestamp_precision(&conn, table).unwrap();
+            let observed: (String, i64) = conn
+                .query_row(
+                    &format!("SELECT typeof(timestamp), epoch_ns(timestamp) FROM {table}"),
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(observed, ("TIMESTAMP_NS".into(), 1_700_000_000_123_456_000));
+        }
     }
 
     #[test]

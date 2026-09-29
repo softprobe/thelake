@@ -12,8 +12,8 @@ fn setup_traces(conn: &Connection) {
         "CREATE TABLE traces (
            session_id VARCHAR,
            span_id VARCHAR,
-           timestamp TIMESTAMP,
-           end_timestamp TIMESTAMP,
+           timestamp TIMESTAMP_NS,
+           end_timestamp TIMESTAMP_NS,
            status_code VARCHAR,
            message_type VARCHAR,
            agent_name VARCHAR,
@@ -89,8 +89,8 @@ fn insert(
 #[derive(Debug)]
 struct Agg {
     session_id: String,
-    start_us: i64,
-    end_us: i64,
+    start_ns: i64,
+    end_ns: i64,
     observation_count: i64,
     error_count: i64,
     input_tokens: Option<i64>,
@@ -115,8 +115,8 @@ fn run_reduce(conn: &Connection, session_ids: &[&str], from_secs: i64, to_secs: 
     stmt.query_map([], |row| {
         Ok(Agg {
             session_id: row.get(0)?,
-            start_us: row.get(1)?,
-            end_us: row.get(2)?,
+            start_ns: row.get(1)?,
+            end_ns: row.get(2)?,
             observation_count: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
             error_count: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
             input_tokens: row.get(5)?,
@@ -135,8 +135,8 @@ fn run_reduce(conn: &Connection, session_ids: &[&str], from_secs: i64, to_secs: 
 
 fn assert_full_fields(a: &Agg, expect: &Agg) {
     assert_eq!(a.session_id, expect.session_id, "session_id");
-    assert_eq!(a.start_us, expect.start_us, "start_time");
-    assert_eq!(a.end_us, expect.end_us, "end_time");
+    assert_eq!(a.start_ns, expect.start_ns, "start_time");
+    assert_eq!(a.end_ns, expect.end_ns, "end_time");
     assert_eq!(
         a.observation_count, expect.observation_count,
         "observation_count"
@@ -201,8 +201,8 @@ fn happy_multi_span_session_all_fields() {
         &rows[0],
         &Agg {
             session_id: "s1".into(),
-            start_us: 100_000_000,
-            end_us: 250_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 250_000_000_000,
             observation_count: 2,
             error_count: 0,
             input_tokens: Some(11),
@@ -276,8 +276,8 @@ fn error_count_and_zero_errors() {
         by_id(&rows, "err"),
         &Agg {
             session_id: "err".into(),
-            start_us: 100_000_000,
-            end_us: 101_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 101_000_000_000,
             observation_count: 2,
             error_count: 1,
             input_tokens: Some(2),
@@ -293,8 +293,8 @@ fn error_count_and_zero_errors() {
         by_id(&rows, "ok"),
         &Agg {
             session_id: "ok".into(),
-            start_us: 100_000_000,
-            end_us: 100_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 100_000_000_000,
             observation_count: 1,
             error_count: 0,
             input_tokens: Some(1),
@@ -351,8 +351,8 @@ fn recording_excluded_from_counts_and_tokens() {
         &rows[0],
         &Agg {
             session_id: "s1".into(),
-            start_us: 100_000_000,
-            end_us: 100_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 100_000_000_000,
             observation_count: 1,
             error_count: 0,
             input_tokens: Some(5),
@@ -410,8 +410,8 @@ fn duplicate_span_id_uses_count_distinct() {
         &rows[0],
         &Agg {
             session_id: "s1".into(),
-            start_us: 100_000_000,
-            end_us: 101_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 101_000_000_000,
             observation_count: 1,
             error_count: 0,
             input_tokens: Some(2),
@@ -468,8 +468,8 @@ fn null_typed_tokens_sum_null() {
         &rows[0],
         &Agg {
             session_id: "s1".into(),
-            start_us: 100_000_000,
-            end_us: 101_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 101_000_000_000,
             observation_count: 2,
             error_count: 0,
             input_tokens: None,
@@ -513,8 +513,8 @@ fn agent_from_typed_column_and_message_type_fallback() {
         by_id(&rows, "stamped"),
         &Agg {
             session_id: "stamped".into(),
-            start_us: 100_000_000,
-            end_us: 100_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 100_000_000_000,
             observation_count: 1,
             error_count: 0,
             input_tokens: None,
@@ -530,8 +530,8 @@ fn agent_from_typed_column_and_message_type_fallback() {
         by_id(&rows, "fallback"),
         &Agg {
             session_id: "fallback".into(),
-            start_us: 100_000_000,
-            end_us: 100_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 100_000_000_000,
             observation_count: 1,
             error_count: 0,
             input_tokens: None,
@@ -589,8 +589,8 @@ fn multi_session_batch_independent() {
         by_id(&rows, "a"),
         &Agg {
             session_id: "a".into(),
-            start_us: 100_000_000,
-            end_us: 100_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 100_000_000_000,
             observation_count: 1,
             error_count: 0,
             input_tokens: Some(1),
@@ -606,8 +606,8 @@ fn multi_session_batch_independent() {
         by_id(&rows, "b"),
         &Agg {
             session_id: "b".into(),
-            start_us: 100_000_000,
-            end_us: 100_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 100_000_000_000,
             observation_count: 1,
             error_count: 1,
             input_tokens: Some(9),
@@ -646,8 +646,8 @@ fn absolute_replace_semantics_via_reaggregate() {
         &run_reduce(&conn, &["s1"], 0, 1000)[0],
         &Agg {
             session_id: "s1".into(),
-            start_us: 100_000_000,
-            end_us: 100_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 100_000_000_000,
             observation_count: 1,
             error_count: 0,
             input_tokens: Some(50),
@@ -680,8 +680,8 @@ fn absolute_replace_semantics_via_reaggregate() {
         &run_reduce(&conn, &["s1"], 0, 1000)[0],
         &Agg {
             session_id: "s1".into(),
-            start_us: 100_000_000,
-            end_us: 200_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 200_000_000_000,
             observation_count: 2,
             error_count: 0,
             input_tokens: Some(55),
@@ -696,7 +696,7 @@ fn absolute_replace_semantics_via_reaggregate() {
 }
 
 #[test]
-fn clamp_window_excludes_early_history() {
+fn aggregate_respects_explicit_timestamp_window() {
     let conn = Connection::open_in_memory().unwrap();
     setup_traces(&conn);
     insert(
@@ -738,8 +738,8 @@ fn clamp_window_excludes_early_history() {
         &rows[0],
         &Agg {
             session_id: "s1".into(),
-            start_us: 950_000_000,
-            end_us: 950_000_000,
+            start_ns: 950_000_000_000,
+            end_ns: 950_000_000_000,
             observation_count: 1,
             error_count: 0,
             input_tokens: Some(5),
@@ -764,8 +764,8 @@ fn map_only_attrs_do_not_fill_typed_aggregates() {
         "CREATE TABLE traces (
            session_id VARCHAR,
            span_id VARCHAR,
-           timestamp TIMESTAMP,
-           end_timestamp TIMESTAMP,
+           timestamp TIMESTAMP_NS,
+           end_timestamp TIMESTAMP_NS,
            status_code VARCHAR,
            message_type VARCHAR,
            agent_name VARCHAR,
@@ -811,8 +811,8 @@ fn map_only_attrs_do_not_fill_typed_aggregates() {
         &rows[0],
         &Agg {
             session_id: "bag-only".into(),
-            start_us: 100_000_000,
-            end_us: 100_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 100_000_000_000,
             observation_count: 1,
             error_count: 0,
             input_tokens: None,
@@ -853,8 +853,8 @@ fn generation_message_type_without_auth_agent_stays_null() {
         &rows[0],
         &Agg {
             session_id: "no-agent".into(),
-            start_us: 100_000_000,
-            end_us: 100_000_000,
+            start_ns: 100_000_000_000,
+            end_ns: 100_000_000_000,
             observation_count: 1,
             error_count: 0,
             input_tokens: Some(1),

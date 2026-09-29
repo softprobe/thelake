@@ -91,6 +91,13 @@ pub(super) fn ensure_trace_timestamp_precision(
     )
 }
 
+pub(super) fn ensure_score_timestamp_precision(
+    conn: &Connection,
+    qualified_table: &str,
+) -> Result<()> {
+    ensure_timestamp_precision(conn, qualified_table, &["timestamp"], "score")
+}
+
 fn ensure_timestamp_precision(
     conn: &Connection,
     qualified_table: &str,
@@ -168,6 +175,28 @@ pub(super) fn ensure_trace_fidelity_columns(
             "failed to add Tempo trace fidelity columns on {qualified_table}; refusing write: {e}"
         )
     })
+}
+
+/// Require trace events to use JSON so DuckLake can inline complete event
+/// payloads without converting nested timestamp/MAP vectors.
+pub(super) fn ensure_trace_events_json(conn: &Connection, qualified_table: &str) -> Result<()> {
+    let found = describe_table_columns(conn, qualified_table)?;
+    let Some(dtype) = found.get("events") else {
+        conn.execute_batch(&crate::sql::schema::add_column_sql(
+            qualified_table,
+            "events",
+            "JSON",
+        ))
+        .map_err(|e| anyhow!("failed to add JSON events column to {qualified_table}: {e}"))?;
+        return Ok(());
+    };
+
+    if !dtype.eq_ignore_ascii_case("JSON") {
+        return Err(anyhow!(
+            "{qualified_table}.events has type {dtype}; it requires the trace events rebuild before trace writes"
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn quote_duckdb_ident(input: &str) -> String {

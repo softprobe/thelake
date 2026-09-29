@@ -157,13 +157,19 @@ pub fn variant_json_to_string_map(value: &Value) -> HashMap<String, String> {
         .collect()
 }
 
-/// DuckLake SELECT list for Parquet ingest (MAP columns need no cast bridge).
-pub fn parquet_select_for_table(_table_name: &str) -> String {
-    "SELECT *".to_string()
+/// DuckLake projection for Parquet ingest.
+pub fn parquet_select_for_table(table_name: &str) -> String {
+    if table_name == "traces" {
+        // Arrow stages nested events as JSON text; store them as one DuckDB
+        // JSON value so inline scans do not materialize nested temporal/MAP vectors.
+        "SELECT * REPLACE (CAST(events AS JSON) AS events)".to_string()
+    } else {
+        "SELECT *".to_string()
+    }
 }
 
 /// Deprecated alias for [`parquet_select_for_table`].
-#[deprecated(note = "renamed to parquet_select_for_table (#55); always SELECT *")]
+#[deprecated(note = "renamed to parquet_select_for_table (#55)")]
 pub fn parquet_select_with_variant_casts(table_name: &str) -> String {
     parquet_select_for_table(table_name)
 }
@@ -231,7 +237,10 @@ mod tests {
             variant_try_cast("attributes", "gen_ai.usage.input_tokens", "BIGINT"),
             "try_cast(attributes['gen_ai.usage.input_tokens'] AS BIGINT)"
         );
-        assert_eq!(parquet_select_for_table("traces"), "SELECT *");
+        assert_eq!(
+            parquet_select_for_table("traces"),
+            "SELECT * REPLACE (CAST(events AS JSON) AS events)"
+        );
         assert_eq!(parquet_select_for_table("logs"), "SELECT *");
         assert_eq!(parquet_select_for_table("scores"), "SELECT *");
     }

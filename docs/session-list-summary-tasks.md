@@ -84,19 +84,19 @@ Depends on **A** + **1**.
 - [x] **2.3** Compute `[from,to]` per §6.5; always attach `record_date` + timestamp bounds
 - [x] **2.4** Time-scoped `GROUP BY` from `traces` → absolute UPSERT `session_summary`
 - [x] **2.5** Ack: `DELETE … WHERE session_id IN (…) AND updated_at <= snapshot`
-- [x] **2.6** Clamp when `to - from > max_reduce_span` (Q #2: **clamp**, no chunk; Stage 4 rebuild for early history)
+- [x] **2.6** Dirty reduction covers complete stored/dirty event-time bounds; partition pruning bounds lake reads.
 - [x] **2.7** Heartbeat during long reduces; release on completion (shared `spawn_runner`)
 - [x] **2.8** Tests: field-accuracy DuckDB matrix + postgres claim/ack/upsert; concurrent dirty mid-reduce not lost
 - [x] **2.9** **[P]** Metrics: reducer lag, sessions/reduce; dirty depth gauge (Postgres `count(*)` on claim)
 
-**Stage 2 notes (2026-09-18):** Implemented on `feat/session-summary-reduce`. Promoted-only reduce SQL (zero `attributes` MAP). Canonical `traces-query-hot-attrs.yaml` ensured on postgres scope ensure. Clamp (not chunk) for oversized windows.
+**Stage 2 notes (2026-09-18):** Implemented on `feat/session-summary-reduce`. Promoted-only reduce SQL (zero `attributes` MAP). Canonical `traces-query-hot-attrs.yaml` ensured on postgres scope ensure. Dirty reductions now use the full stored and dirty session bounds; rebuild endpoints retain the configured maximum window.
 
 | Task | Evidence |
 |---|---|
 | 2.1 / 2.7 | `SessionSummaryReduceJob` on same `spawn_runner` as maintenance (`compaction/scheduler.rs`) |
 | 2.2–2.5 | `session_summary/reduce.rs` claim → lake aggregate → UPSERT → ack |
 | 2.3–2.4 | `reduce_sql.rs` — `record_date` + ts + `session_id IN`; typed SUMs; unit asserts no `attributes` |
-| 2.6 | `compute_reduce_bounds` clamp; accuracy test `clamp_window_excludes_early_history` |
+| 2.6 | `compute_reduce_bounds` covers full stored/dirty bounds; regression test covers historical sessions |
 | 2.8 | `reduce_accuracy_tests.rs` (all fields/cases) + postgres claim/ack/upsert tests |
 | 2.9 | `session_summary_dirty_depth`, `sessions_reduced`, `reducer_lag_seconds` instruments |
 
@@ -106,7 +106,7 @@ Depends on **A** + **1**.
 
 Depends on **2** (summary must be populated). Stage **0** should already be done so Explorer does not double-scan.
 
-- [x] **3.1** `POST /v1/llm/sessions/search` reads `session_summary` (cursor `(start_time, session_id)` desc)
+- [x] **3.1** `POST /v1/llm/sessions/search` reads `session_summary` (cursor `(start_time_ns, session_id)` desc)
 - [x] **3.2** Filters: time range, agent, has-errors (match current list contract)
 - [x] **3.3** No lake fallback on Postgres: list always `session_summary` (empty → empty). Postgres ⇒ summary always on; sqlite keeps lake as sole store
 - [x] **3.4** Detail paths unchanged (still `traces` / lake)

@@ -76,11 +76,6 @@ impl TraceTable {
     }
 
     pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> Schema {
-        let events_element = DataType::Struct(Fields::from(vec![
-            req("name", utf8()),
-            req("timestamp", timestamp_ns()),
-            opt("attributes", string_map()),
-        ]));
         let mut fields = vec![
             req("session_id", utf8()),
             req("trace_id", utf8()),
@@ -97,10 +92,10 @@ impl TraceTable {
             opt_hot_map("traces", "resource_attributes"),
             opt_hot_map("traces", "instrumentation_scope"),
             opt_hot_map("traces", "links"),
-            opt(
-                "events",
-                DataType::List(Arc::new(Field::new("item", events_element, true))),
-            ),
+            // Keep nested event values in one JSON column. Nested timestamps
+            // are payload data, not partition keys, and DuckLake's inlined
+            // reader cannot safely materialize the former LIST<STRUCT/MAP>.
+            opt("events", utf8()),
             opt("status_code", utf8()),
             opt("status_message", utf8()),
             opt("http_request_method", utf8()),
@@ -243,16 +238,10 @@ mod tests {
             traces.field_with_name("attributes").unwrap().data_type(),
             DataType::Map(_, _)
         ));
-        // Nested event attributes remain MAP.
-        let events = traces.field_with_name("events").unwrap().data_type();
-        let DataType::List(item) = events else {
-            panic!("expected list");
-        };
-        let DataType::Struct(fields) = item.data_type() else {
-            panic!("expected struct");
-        };
-        let attrs = fields.iter().find(|f| f.name() == "attributes").unwrap();
-        assert!(matches!(attrs.data_type(), DataType::Map(_, _)));
+        assert!(matches!(
+            traces.field_with_name("events").unwrap().data_type(),
+            DataType::Utf8
+        ));
 
         let logs = OtlpLogsTable::schema();
         assert!(matches!(

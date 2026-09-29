@@ -4,7 +4,7 @@ use crate::models::{
 use crate::storage::schema::variant::variant_json_to_string_map;
 use anyhow::Result;
 use arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, MapArray, StringArray,
+    ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, MapArray, StringArray,
     StructArray, TimestampNanosecondArray,
 };
 use arrow::buffer::OffsetBuffer;
@@ -522,13 +522,6 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
             .clone(),
     );
 
-    let events_field = Arc::new(
-        arrow_schema
-            .field_with_name("events")
-            .map_err(|e| anyhow::anyhow!("events field not found in schema: {}", e))?
-            .clone(),
-    );
-
     // Build arrays for each column
     // Use explicit session_id field (already populated in Span model)
     let session_ids: ArrayRef = Arc::new(StringArray::from(
@@ -637,8 +630,15 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
     );
     let links_array = build_reserved_metadata_array(spans, "__softprobe.links", &links_field)?;
 
-    // Build events LIST<STRUCT> for each span
-    let events_array = build_events_array(spans, &events_field)?;
+    // Events are nested payload values. Serialize once to JSON text for the
+    // Parquet staging file; the traces ingest projection casts this field to
+    // DuckDB JSON before it enters DuckLake.
+    let events_array: ArrayRef = Arc::new(StringArray::from(
+        spans
+            .iter()
+            .map(|span| serde_json::to_string(&span.events))
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+    ));
 
     // HTTP body fields (extracted from span events by extract_http_data_from_events())
     let http_request_methods: ArrayRef = Arc::new(StringArray::from(
@@ -781,110 +781,6 @@ fn build_span_attributes_array(
         })
         .collect();
     build_string_metadata_array(filtered.iter(), attributes_field)
-}
-
-/// Build events LIST<STRUCT> array for spans
-fn build_events_array(
-    spans: &[Span],
-    events_field: &arrow::datatypes::FieldRef,
-) -> Result<ArrayRef> {
-    use arrow::datatypes::DataType;
-
-    let element_field = if let DataType::List(f) = events_field.data_type() {
-        f.clone()
-    } else {
-        return Err(anyhow::anyhow!("Expected List type for events field"));
-    };
-
-    let struct_fields = if let DataType::Struct(fields) = element_field.data_type() {
-        fields.clone()
-    } else {
-        return Err(anyhow::anyhow!("Expected Struct type in List element"));
-    };
-
-    let event_attr_field = struct_fields
-        .iter()
-        .find(|f| f.name() == "attributes")
-        .ok_or_else(|| anyhow::anyhow!("attributes field not found in event struct"))?;
-
-    let event_attr_entries_field = if let DataType::Map(f, _) = event_attr_field.data_type() {
-        f.clone()
-    } else {
-        return Err(anyhow::anyhow!(
-            "Expected Map type for event attributes field"
-        ));
-    };
-
-    let event_attr_struct_fields =
-        if let DataType::Struct(fields) = event_attr_entries_field.data_type() {
-            fields.clone()
-        } else {
-            return Err(anyhow::anyhow!("Expected Struct type in Map entries"));
-        };
-
-    let mut all_event_names = Vec::new();
-    let mut all_event_timestamps = Vec::new();
-    let mut all_event_attr_keys = Vec::new();
-    let mut all_event_attr_values = Vec::new();
-    let mut event_attr_offsets = vec![0i32];
-    let mut list_offsets = vec![0i32];
-
-    let mut current_event_offset = 0i32;
-    let mut current_attr_offset = 0i32;
-
-    for span in spans {
-        for event in &span.events {
-            all_event_names.push(event.name.as_str());
-            all_event_timestamps.push(event.timestamp.timestamp_nanos_opt().unwrap_or(0));
-
-            for (key, value) in &event.attributes {
-                all_event_attr_keys.push(key.as_str());
-                all_event_attr_values.push(value.as_str());
-                current_attr_offset += 1;
-            }
-            event_attr_offsets.push(current_attr_offset);
-            current_event_offset += 1;
-        }
-        list_offsets.push(current_event_offset);
-    }
-
-    let names_array: ArrayRef = Arc::new(StringArray::from(all_event_names));
-    let timestamps_array: ArrayRef = Arc::new(TimestampNanosecondArray::from(all_event_timestamps));
-
-    let event_attr_keys_array: ArrayRef = Arc::new(StringArray::from(all_event_attr_keys));
-    let event_attr_values_array: ArrayRef = Arc::new(StringArray::from(all_event_attr_values));
-
-    let event_attr_entries = StructArray::new(
-        event_attr_struct_fields,
-        vec![event_attr_keys_array, event_attr_values_array],
-        None,
-    );
-
-    let event_attr_offsets_buffer = OffsetBuffer::new(event_attr_offsets.into());
-
-    let event_attr_map = MapArray::try_new(
-        event_attr_entries_field,
-        event_attr_offsets_buffer,
-        event_attr_entries,
-        None,
-        false,
-    )?;
-
-    let struct_arrays: Vec<ArrayRef> =
-        vec![names_array, timestamps_array, Arc::new(event_attr_map)];
-
-    let struct_array = StructArray::new(struct_fields, struct_arrays, None);
-
-    let list_offsets_buffer = OffsetBuffer::new(list_offsets.into());
-
-    let list_array = ListArray::try_new(
-        element_field,
-        list_offsets_buffer,
-        Arc::new(struct_array),
-        None,
-    )?;
-
-    Ok(Arc::new(list_array))
 }
 
 /// Convert Log batch to Arrow RecordBatch using telemetry Arrow schema
@@ -1141,22 +1037,18 @@ mod tests {
             .downcast_ref::<TimestampNanosecondArray>()
             .expect("trace timestamp must use nanoseconds");
         assert_eq!(start.value(0), start_ns);
-        let events = batch.column(15);
-        let list = events
+        let events = batch
+            .column(15)
             .as_any()
-            .downcast_ref::<ListArray>()
-            .expect("events must be a list");
-        let values = list.values();
-        let event_struct = values
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .expect("event values must be structs");
-        let event_timestamp = event_struct
-            .column(1)
-            .as_any()
-            .downcast_ref::<TimestampNanosecondArray>()
-            .expect("event timestamp must use nanoseconds");
-        assert_eq!(event_timestamp.value(0), event_ns);
+            .downcast_ref::<StringArray>()
+            .expect("events must be staged as JSON text");
+        let events: serde_json::Value = serde_json::from_str(events.value(0)).unwrap();
+        assert_eq!(events[0]["name"], "exception");
+        assert_eq!(
+            events[0]["timestamp"],
+            chrono::DateTime::from_timestamp_nanos(event_ns)
+                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+        );
         assert_eq!(batch.schema().field(12).name(), "resource_attributes");
         assert_eq!(batch.schema().field(13).name(), "instrumentation_scope");
         assert_eq!(batch.schema().field(14).name(), "links");

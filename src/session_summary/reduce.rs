@@ -1,11 +1,11 @@
-//! Claim dirty → bounds+clamp → lake aggregate → UPSERT → ack.
+//! Claim dirty → full session bounds → lake aggregate → UPSERT → ack.
 
 use crate::config::Config;
 use crate::runtime_engine::quote_pg_ident;
 use crate::sql::session_summary::compile_session_summary_upsert_sql;
 use crate::storage::ducklake::PhysicalScope;
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use tracing::warn;
 
@@ -13,8 +13,8 @@ use tracing::warn;
 #[derive(Debug, Clone)]
 pub struct DirtyClaim {
     pub session_id: String,
-    pub min_ts: DateTime<Utc>,
-    pub max_ts: DateTime<Utc>,
+    pub min_ts_ns: i64,
+    pub max_ts_ns: i64,
     pub updated_at: DateTime<Utc>,
     pub generation: i64,
     pub claim_token: String,
@@ -24,8 +24,8 @@ pub struct DirtyClaim {
 #[derive(Debug, Clone)]
 pub struct SummaryRow {
     pub session_id: String,
-    pub start_time: DateTime<Utc>,
-    pub end_time: Option<DateTime<Utc>>,
+    pub start_time_ns: i64,
+    pub end_time_ns: Option<i64>,
     pub observation_count: i64,
     pub error_count: i64,
     pub input_tokens: Option<i64>,
@@ -37,30 +37,22 @@ pub struct SummaryRow {
     pub model_name: Option<String>,
 }
 
-/// §6.5 window + Stage 2 clamp (no chunking).
+/// Full event-time range for replacing a session summary after dirty writes.
 pub fn compute_reduce_bounds(
     dirty_min: DateTime<Utc>,
     dirty_max: DateTime<Utc>,
     summary_start: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-    max_reduce_span: ChronoDuration,
+    summary_end: Option<DateTime<Utc>>,
 ) -> (DateTime<Utc>, DateTime<Utc>) {
-    let to = dirty_max.max(now);
-    // least(coalesce(summary.start_time, dirty.min_ts), dirty.min_ts)
-    let mut from = summary_start.map(|s| s.min(dirty_min)).unwrap_or(dirty_min);
-    let earliest = to - max_reduce_span;
-    if from < earliest {
-        from = earliest;
-    }
+    let from = summary_start.map(|s| s.min(dirty_min)).unwrap_or(dirty_min);
+    let to = summary_end.map(|s| s.max(dirty_max)).unwrap_or(dirty_max);
     (from, to)
 }
 
 /// Union of per-session windows for one DuckLake GROUP BY.
 pub fn batch_reduce_window(
     claims: &[DirtyClaim],
-    summary_starts: &std::collections::HashMap<String, DateTime<Utc>>,
-    now: DateTime<Utc>,
-    max_reduce_span: ChronoDuration,
+    summary_bounds: &std::collections::HashMap<String, (i64, Option<i64>)>,
 ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     if claims.is_empty() {
         return None;
@@ -68,8 +60,21 @@ pub fn batch_reduce_window(
     let mut batch_from = None;
     let mut batch_to = None;
     for c in claims {
-        let start = summary_starts.get(&c.session_id).copied();
-        let (from, to) = compute_reduce_bounds(c.min_ts, c.max_ts, start, now, max_reduce_span);
+        let bounds = summary_bounds
+            .get(&c.session_id)
+            .copied()
+            .map(|(start, end)| {
+                (
+                    crate::session_summary::time::from_ns(start),
+                    end.map(crate::session_summary::time::from_ns),
+                )
+            });
+        let (from, to) = compute_reduce_bounds(
+            crate::session_summary::time::from_ns(c.min_ts_ns),
+            crate::session_summary::time::from_ns(c.max_ts_ns),
+            bounds.map(|(start, _)| start),
+            bounds.and_then(|(_, end)| end),
+        );
         batch_from = Some(match batch_from {
             Some(f) if f < from => f,
             _ => from,
@@ -130,11 +135,11 @@ async fn claim_dirty_scoped(
             &format!(
                 "WITH picked AS (SELECT tenant_id, session_id FROM {schema}.session_summary_dirty \
                  WHERE tenant_id = $1 AND (claim_until IS NULL OR claim_until <= now()) \
-                 ORDER BY updated_at ASC LIMIT $2 FOR UPDATE SKIP LOCKED) \
+                 ORDER BY min_ts_ns ASC, updated_at ASC LIMIT $2 FOR UPDATE SKIP LOCKED) \
                  UPDATE {schema}.session_summary_dirty d SET claim_holder = $3, \
                  claim_until = now() + ($4::bigint * INTERVAL '1 second') \
                  FROM picked WHERE d.tenant_id = picked.tenant_id AND d.session_id = picked.session_id \
-                 RETURNING d.session_id, d.min_ts, d.max_ts, d.updated_at, d.generation"
+                 RETURNING d.session_id, d.min_ts_ns, d.max_ts_ns, d.updated_at, d.generation"
             ),
             &[&workspace_id, &limit, &token, &ttl_secs],
         )
@@ -144,11 +149,11 @@ async fn claim_dirty_scoped(
             &format!(
                 "WITH picked AS (SELECT session_id FROM {schema}.session_summary_dirty \
                  WHERE claim_until IS NULL OR claim_until <= now() \
-                 ORDER BY updated_at ASC LIMIT $1 FOR UPDATE SKIP LOCKED) \
+                 ORDER BY min_ts_ns ASC, updated_at ASC LIMIT $1 FOR UPDATE SKIP LOCKED) \
                  UPDATE {schema}.session_summary_dirty d SET claim_holder = $2, \
                  claim_until = now() + ($3::bigint * INTERVAL '1 second') \
                  FROM picked WHERE d.session_id = picked.session_id \
-                 RETURNING d.session_id, d.min_ts, d.max_ts, d.updated_at, d.generation"
+                 RETURNING d.session_id, d.min_ts_ns, d.max_ts_ns, d.updated_at, d.generation"
             ),
             &[&limit, &token, &ttl_secs],
         )
@@ -160,8 +165,8 @@ async fn claim_dirty_scoped(
         .into_iter()
         .map(|r| DirtyClaim {
             session_id: r.get(0),
-            min_ts: r.get(1),
-            max_ts: r.get(2),
+            min_ts_ns: r.get(1),
+            max_ts_ns: r.get(2),
             updated_at: r.get(3),
             generation: r.get(4),
             claim_token: token.clone(),
@@ -205,20 +210,20 @@ pub async fn dirty_depth_for_workspace(
 }
 
 #[allow(dead_code)]
-pub async fn load_summary_start_times(
+pub async fn load_summary_bounds(
     pool: &Pool,
     metadata_schema: &str,
     session_ids: &[String],
-) -> Result<std::collections::HashMap<String, DateTime<Utc>>> {
+) -> Result<std::collections::HashMap<String, (i64, Option<i64>)>> {
     let mut out = std::collections::HashMap::new();
     if session_ids.is_empty() {
         return Ok(out);
     }
-    let client = pool.get().await.context("load summary starts")?;
+    let client = pool.get().await.context("load summary bounds")?;
     let schema = quote_pg_ident(metadata_schema);
     // Build IN list with params.
     let mut sql = format!(
-        "SELECT session_id, start_time FROM {schema}.session_summary WHERE session_id IN ("
+        "SELECT session_id, start_time_ns, end_time_ns FROM {schema}.session_summary WHERE session_id IN ("
     );
     let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
     for (i, id) in session_ids.iter().enumerate() {
@@ -232,27 +237,27 @@ pub async fn load_summary_start_times(
     let rows = client
         .query(&sql, &params[..])
         .await
-        .context("load summary start_time")?;
+        .context("load summary bounds")?;
     for r in rows {
-        out.insert(r.get(0), r.get(1));
+        out.insert(r.get(0), (r.get(1), r.get(2)));
     }
     Ok(out)
 }
 
-pub async fn load_summary_start_times_for_workspace(
+pub async fn load_summary_bounds_for_workspace(
     pool: &Pool,
     metadata_schema: &str,
     workspace_id: &str,
     session_ids: &[String],
-) -> Result<std::collections::HashMap<String, DateTime<Utc>>> {
+) -> Result<std::collections::HashMap<String, (i64, Option<i64>)>> {
     let mut out = std::collections::HashMap::new();
     if session_ids.is_empty() {
         return Ok(out);
     }
-    let client = pool.get().await.context("load workspace summary starts")?;
+    let client = pool.get().await.context("load workspace summary bounds")?;
     let schema = quote_pg_ident(metadata_schema);
     let mut sql = format!(
-        "SELECT session_id, start_time FROM {schema}.session_summary WHERE tenant_id = $1 AND session_id IN ("
+        "SELECT session_id, start_time_ns, end_time_ns FROM {schema}.session_summary WHERE tenant_id = $1 AND session_id IN ("
     );
     let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
         vec![Box::new(workspace_id.to_string())];
@@ -271,9 +276,9 @@ pub async fn load_summary_start_times_for_workspace(
     for row in client
         .query(&sql, &refs[..])
         .await
-        .context("load workspace summary start_time")?
+        .context("load workspace summary bounds")?
     {
-        out.insert(row.get(0), row.get(1));
+        out.insert(row.get(0), (row.get(1), row.get(2)));
     }
     Ok(out)
 }
@@ -418,8 +423,8 @@ where
             params.push(Box::new(workspace_id.to_string()));
         }
         params.push(Box::new(r.session_id.clone()));
-        params.push(Box::new(r.start_time));
-        params.push(Box::new(r.end_time));
+        params.push(Box::new(r.start_time_ns));
+        params.push(Box::new(r.end_time_ns));
         params.push(Box::new(r.observation_count));
         params.push(Box::new(r.error_count));
         params.push(Box::new(r.input_tokens));
@@ -566,7 +571,6 @@ pub(crate) async fn reduce_tenant(
     scope: &PhysicalScope,
     duck_pool: std::sync::Arc<crate::compaction::MaintenanceConnPool>,
     max_sessions: u64,
-    max_reduce_span_seconds: u64,
 ) -> Result<usize> {
     let reduce_started = std::time::Instant::now();
     let workspace_scoped =
@@ -611,15 +615,14 @@ pub(crate) async fn reduce_tenant(
     }
 
     let ids: Vec<String> = claims.iter().map(|c| c.session_id.clone()).collect();
-    let starts = if workspace_scoped {
-        load_summary_start_times_for_workspace(pool, metadata_schema, tenant_id, &ids).await?
+    let bounds: std::collections::HashMap<String, (i64, Option<i64>)> = if workspace_scoped {
+        load_summary_bounds_for_workspace(pool, metadata_schema, tenant_id, &ids).await?
     } else {
-        load_summary_start_times(pool, metadata_schema, &ids).await?
+        load_summary_bounds(pool, metadata_schema, &ids).await?
     };
-    let span = ChronoDuration::seconds(max_reduce_span_seconds as i64);
     let now = Utc::now();
-    let (from, to) = batch_reduce_window(&claims, &starts, now, span)
-        .ok_or_else(|| anyhow!("empty claims after claim"))?;
+    let (from, to) =
+        batch_reduce_window(&claims, &bounds).ok_or_else(|| anyhow!("empty claims after claim"))?;
 
     let lag_secs = claims
         .iter()
@@ -696,29 +699,20 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
-    fn bounds_use_summary_start_and_clamp() {
+    fn dirty_reduction_uses_the_full_historical_session_window() {
         let dirty_min = Utc.with_ymd_and_hms(2024, 1, 10, 0, 0, 0).unwrap();
         let dirty_max = Utc.with_ymd_and_hms(2024, 1, 10, 12, 0, 0).unwrap();
         let summary_start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        let now = Utc.with_ymd_and_hms(2024, 1, 10, 12, 0, 0).unwrap();
-        let (from, to) = compute_reduce_bounds(
-            dirty_min,
-            dirty_max,
-            Some(summary_start),
-            now,
-            ChronoDuration::days(30),
-        );
-        assert_eq!(to, now);
+        let summary_end = Utc.with_ymd_and_hms(2024, 1, 20, 0, 0, 0).unwrap();
+        let (from, to) =
+            compute_reduce_bounds(dirty_min, dirty_max, Some(summary_start), Some(summary_end));
         assert_eq!(from, summary_start);
+        assert_eq!(to, summary_end);
 
-        let (from_clamped, _) = compute_reduce_bounds(
-            summary_start,
-            dirty_max,
-            Some(summary_start),
-            now,
-            ChronoDuration::days(2),
-        );
-        assert_eq!(from_clamped, now - ChronoDuration::days(2));
+        let old_claim = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let (from_old, to_old) = compute_reduce_bounds(old_claim, dirty_max, None, None);
+        assert_eq!(from_old, old_claim);
+        assert_eq!(to_old, dirty_max);
     }
 
     #[test]
@@ -726,27 +720,38 @@ mod tests {
         let claims = vec![
             DirtyClaim {
                 session_id: "a".into(),
-                min_ts: Utc.with_ymd_and_hms(2024, 1, 5, 0, 0, 0).unwrap(),
-                max_ts: Utc.with_ymd_and_hms(2024, 1, 5, 1, 0, 0).unwrap(),
+                min_ts_ns: crate::session_summary::time::to_ns(
+                    Utc.with_ymd_and_hms(2024, 1, 5, 0, 0, 0).unwrap(),
+                ),
+                max_ts_ns: crate::session_summary::time::to_ns(
+                    Utc.with_ymd_and_hms(2024, 1, 5, 1, 0, 0).unwrap(),
+                ),
                 updated_at: Utc::now(),
                 generation: 1,
                 claim_token: "test".into(),
             },
             DirtyClaim {
                 session_id: "b".into(),
-                min_ts: Utc.with_ymd_and_hms(2024, 1, 8, 0, 0, 0).unwrap(),
-                max_ts: Utc.with_ymd_and_hms(2024, 1, 8, 2, 0, 0).unwrap(),
+                min_ts_ns: crate::session_summary::time::to_ns(
+                    Utc.with_ymd_and_hms(2024, 1, 8, 0, 0, 0).unwrap(),
+                ),
+                max_ts_ns: crate::session_summary::time::to_ns(
+                    Utc.with_ymd_and_hms(2024, 1, 8, 2, 0, 0).unwrap(),
+                ),
                 updated_at: Utc::now(),
                 generation: 1,
                 claim_token: "test".into(),
             },
         ];
-        let now = Utc.with_ymd_and_hms(2024, 1, 8, 3, 0, 0).unwrap();
-        let (from, to) =
-            batch_reduce_window(&claims, &Default::default(), now, ChronoDuration::days(30))
-                .unwrap();
-        assert_eq!(from, claims[0].min_ts);
-        assert_eq!(to, now);
+        let (from, to) = batch_reduce_window(&claims, &Default::default()).unwrap();
+        assert_eq!(
+            from,
+            crate::session_summary::time::from_ns(claims[0].min_ts_ns)
+        );
+        assert_eq!(
+            to,
+            crate::session_summary::time::from_ns(claims[1].max_ts_ns)
+        );
     }
 
     #[test]

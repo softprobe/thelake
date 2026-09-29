@@ -9,6 +9,7 @@ mod hot_attrs;
 mod job;
 mod list;
 mod reduce;
+mod time;
 
 pub use ddl::{
     ensure_session_summary_tables, ensure_shared_session_summary_tables,

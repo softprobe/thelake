@@ -182,7 +182,7 @@ Ops flip of catalogs remains an operator step after verify. Residual infra SQL s
 ## 5. Open questions
 
 1. ~~Exact DuckLake day expression~~ — locked: `(year(timestamp), month(timestamp), day(timestamp))` on `TIMESTAMP_NS`.
-2. Postgres `session_summary` keeps `start_time` (not DuckLake) — confirm out of one-clock lake law.
+2. Postgres `session_summary` stores event-time bounds as signed epoch nanoseconds (`start_time_ns` / `end_time_ns`). Convert to human-readable timestamps at the API boundary; do not round through Postgres `TIMESTAMPTZ`.
 
 ---
 
