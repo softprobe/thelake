@@ -505,14 +505,8 @@ async fn postgres_upsert_summary_absolute_replace_all_fields() {
     assert_eq!(r.get::<_, Option<String>>(6).as_deref(), Some("gpt"));
     assert_eq!(r.get::<_, Option<i64>>(7), Some(11));
     assert_eq!(r.get::<_, Option<i64>>(8), Some(22));
-    assert_eq!(
-        r.get::<_, chrono::DateTime<Utc>>(9),
-        Utc.timestamp_opt(100, 0).unwrap()
-    );
-    assert_eq!(
-        r.get::<_, Option<chrono::DateTime<Utc>>>(10),
-        Some(Utc.timestamp_opt(200, 0).unwrap())
-    );
+    assert_eq!(r.get::<_, i64>(9), 100_000_000_000);
+    assert_eq!(r.get::<_, Option<i64>>(10), Some(200_000_000_000));
 }
 
 #[tokio::test]

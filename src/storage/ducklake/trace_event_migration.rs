@@ -361,12 +361,11 @@ fn data_file_path(root: &str, schema: &str, table_path: &str, path: &str) -> Str
         return path.to_string();
     }
     format!(
-        "{}{}{}{}{}",
+        "{}/{}/{}/{}",
         root.trim_end_matches('/'),
-        "/",
         schema,
-        format!("/{}", table_path.trim_matches('/')),
-        format!("/{}", path.trim_start_matches('/'))
+        table_path.trim_matches('/'),
+        path.trim_start_matches('/')
     )
 }
 
@@ -418,7 +417,7 @@ fn size_literal(bytes: usize) -> String {
         (1usize << 20, "MB"),
         (1usize << 10, "KB"),
     ] {
-        if bytes >= unit && bytes % unit == 0 {
+        if bytes >= unit && bytes.is_multiple_of(unit) {
             return format!("{}{suffix}", bytes / unit);
         }
     }
