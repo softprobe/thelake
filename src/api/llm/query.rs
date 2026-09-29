@@ -2045,14 +2045,14 @@ mod tests {
             "session detail must project span attributes: {list}"
         );
         assert!(
-            list.contains(", events"),
-            "session detail must select the persisted nested event column: {list}"
+            list.contains("CAST(events AS JSON) AS events"),
+            "session detail must project the complete nested events as JSON: {list}"
         );
         let detail = compile_span_detail_sql("span-1", from, to).unwrap();
         assert!(detail.contains(&payload), "detail keeps payload: {detail}");
         assert!(
-            detail.contains(", events"),
-            "span detail keeps the nested event column: {detail}"
+            detail.contains("CAST(events AS JSON) AS events"),
+            "span detail projects the complete nested events as JSON: {detail}"
         );
     }
 
