@@ -290,12 +290,32 @@ pub async fn get_session(
         return Err(bad_request("session_id is required".to_string()));
     }
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
+    let tenant_label = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
+    let total_start = std::time::Instant::now();
+
+    let pg_start = std::time::Instant::now();
+    let window = resolve_session_lake_window(&state, tenant_ref, &session_id).await;
+    let pg_elapsed = pg_start.elapsed();
+    crate::self_monitoring::record_session_detail_stage(
+        tenant_label,
+        crate::self_monitoring::session_detail_stage::PG_WINDOW,
+        pg_elapsed,
+    );
+    let (from, to) = window?;
+
     let detail_sql = compile_session_detail_sql(&session_id, from, to).map_err(bad_request)?;
-    let detail_result = state
+    let lake_start = std::time::Instant::now();
+    let lake = state
         .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(detail_sql)?)
-        .await
-        .map_err(storage_error)?;
+        .await;
+    let lake_elapsed = lake_start.elapsed();
+    crate::self_monitoring::record_session_detail_stage(
+        tenant_label,
+        crate::self_monitoring::session_detail_stage::LAKE_SQL,
+        lake_elapsed,
+    );
+    let detail_result = lake.map_err(storage_error)?;
+
     let detail_row = detail_result.rows.first().ok_or_else(not_found)?;
     let aggregate =
         map_session_aggregate(&detail_result.columns, detail_row).ok_or_else(not_found)?;
@@ -309,6 +329,24 @@ pub async fn get_session(
         .collect::<Vec<_>>();
 
     let scores = map_session_scores(&detail_result.columns, detail_row);
+
+    let total_elapsed = total_start.elapsed();
+    crate::self_monitoring::record_session_detail_stage(
+        tenant_label,
+        crate::self_monitoring::session_detail_stage::TOTAL,
+        total_elapsed,
+    );
+    if total_elapsed >= std::time::Duration::from_millis(500) {
+        tracing::warn!(
+            session_id = %session_id,
+            pg_window_ms = pg_elapsed.as_millis() as u64,
+            lake_sql_ms = lake_elapsed.as_millis() as u64,
+            total_ms = total_elapsed.as_millis() as u64,
+            span_rows = detail_result.rows.len(),
+            span_count = aggregate.span_count,
+            "slow session detail"
+        );
+    }
 
     Ok(Json(SessionDetail {
         session_id,
@@ -1721,6 +1759,11 @@ mod tests {
         assert!(sql.contains("first(score_aggregate.session_scores) AS session_scores"));
         assert!(sql.contains("::TIMESTAMP_NS"), "scores clock: {sql}");
         assert!(!sql.contains("make_timestamp_ns(epoch_ns("));
+        assert_eq!(
+            crate::self_monitoring::classify_sql_kind(&sql),
+            "session_detail",
+            "session detail must not be lumped as scores"
+        );
 
         assert!(compile_session_detail_sql("sess-1", to, from).is_err());
     }

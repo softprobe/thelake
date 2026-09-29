@@ -63,12 +63,20 @@ pub fn reset_app_cardinality_for_test() {
 }
 
 /// Fixed sql_kind enum for query instrumentation.
+///
+/// Order matters: session detail SQL joins `scores` + `traces`, so distinctive
+/// CTE markers must win before the generic `scores` / `traces` branches.
 pub fn classify_sql_kind(sql: &str) -> &'static str {
     let s = sql.to_ascii_lowercase();
     if s.contains("promotion_specs") {
         "promotion_specs"
     } else if s.contains("variant") {
         "variant_stats"
+    } else if s.contains("session_spans as materialized") {
+        // compile_session_detail_sql — must precede `scores` (same statement).
+        "session_detail"
+    } else if s.contains("= 'recording'") && s.contains("from traces") {
+        "session_recording"
     } else if s.contains("scores") {
         "scores"
     } else if s.contains("logs") {
@@ -131,5 +139,21 @@ mod tests {
             classify_sql_kind("SELECT count(*) FROM ducklake_table_info"),
             "other"
         );
+    }
+
+    #[test]
+    fn session_detail_sql_kind_beats_scores() {
+        let sql = "WITH session_spans AS MATERIALIZED ( \
+             SELECT * FROM traces WHERE session_id = 's' \
+           ), session_scores AS MATERIALIZED ( \
+             SELECT * FROM scores WHERE session_id = 's' \
+           ) SELECT * FROM session_spans";
+        assert_eq!(classify_sql_kind(sql), "session_detail");
+    }
+
+    #[test]
+    fn session_recording_sql_kind() {
+        let sql = "SELECT * FROM traces WHERE session_id = 's' AND COALESCE(x, 'span') = 'recording'";
+        assert_eq!(classify_sql_kind(sql), "session_recording");
     }
 }
