@@ -871,11 +871,7 @@ impl DuckDBCore {
         self.init_connection_state_with_options(conn, false)
     }
 
-    fn execute_query_on_state(
-        &self,
-        state: &mut ConnectionState,
-        query: &str,
-    ) -> TimedExecute {
+    fn execute_query_on_state(&self, state: &mut ConnectionState, query: &str) -> TimedExecute {
         // Catalog visibility: Postgres metadata is visible without reconnect.
         // is handled by DuckLake (WAL + busy timeout / ATTACH behavior). Softprobe does not
         // reattach or mem::forget connections after writes.
@@ -885,8 +881,7 @@ impl DuckDBCore {
         // expanded to their final table names. Every fact scan must carry its
         // own pushed timestamp filter before the query can execute.
         let gate_start = std::time::Instant::now();
-        if let Err(e) =
-            crate::sql::ensure_fact_scan_uses_timestamp_pruning(&state.conn, &query_run)
+        if let Err(e) = crate::sql::ensure_fact_scan_uses_timestamp_pruning(&state.conn, &query_run)
         {
             return TimedExecute {
                 result: Err(anyhow!("SQL gate: {e}")),

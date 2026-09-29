@@ -153,7 +153,8 @@ mod tests {
 
     #[test]
     fn session_recording_sql_kind() {
-        let sql = "SELECT * FROM traces WHERE session_id = 's' AND COALESCE(x, 'span') = 'recording'";
+        let sql =
+            "SELECT * FROM traces WHERE session_id = 's' AND COALESCE(x, 'span') = 'recording'";
         assert_eq!(classify_sql_kind(sql), "session_recording");
     }
 }

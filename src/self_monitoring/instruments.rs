@@ -403,9 +403,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .build(),
         query_stage_duration_ms: meter
             .f64_histogram("thelake.query.stage.duration")
-            .with_description(
-                "DuckDB worker sub-step wall time (sql_gate EXPLAIN, sql_exec)",
-            )
+            .with_description("DuckDB worker sub-step wall time (sql_gate EXPLAIN, sql_exec)")
             .with_unit("ms")
             .build(),
     }
