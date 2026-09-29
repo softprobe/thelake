@@ -79,6 +79,23 @@ fn bottleneck_duration_recorders_accept_bounded_labels() {
         Some("traces"),
         Duration::from_millis(900),
     );
+    crate::self_monitoring::record_session_detail_stage(
+        "tenant-a",
+        crate::self_monitoring::session_detail_stage::LAKE_SQL,
+        Duration::from_millis(1700),
+    );
+    crate::self_monitoring::record_query_stage(
+        "tenant-a",
+        "session_detail",
+        crate::self_monitoring::query_stage::SQL_GATE,
+        Duration::from_millis(200),
+    );
+    crate::self_monitoring::record_query_stage(
+        "tenant-a",
+        "session_detail",
+        crate::self_monitoring::query_stage::SQL_EXEC,
+        Duration::from_millis(1500),
+    );
     record_maintenance_step(
         "scope-a",
         maintenance_step::PASS_TOTAL,
@@ -145,5 +162,50 @@ fn ingest_and_session_summary_record_commit_and_reduce_durations() {
         dirty.contains("record_session_summary_dirty_upsert")
             && dirty.contains("started.elapsed()"),
         "dirty UPSERT must record duration"
+    );
+}
+
+#[test]
+fn query_worker_splits_sql_gate_from_sql_exec() {
+    let engine = include_str!("../storage/duckdb/engine.rs");
+    assert!(
+        engine.contains("struct TimedExecute")
+            && engine.contains("gate_elapsed")
+            && engine.contains("run_elapsed")
+            && engine.contains("query_stage::SQL_GATE")
+            && engine.contains("query_stage::SQL_EXEC")
+            && engine.contains("sql_gate_ms")
+            && engine.contains("sql_exec_ms"),
+        "worker must time EXPLAIN gate vs run and log both on slow queries"
+    );
+}
+
+#[test]
+fn session_detail_records_stages_before_question_mark() {
+    let query = include_str!("../api/llm/query.rs");
+    let get_session = query
+        .split("pub async fn get_session(")
+        .nth(1)
+        .expect("get_session")
+        .split("pub async fn")
+        .next()
+        .expect("get_session body");
+    let pg_rec = get_session
+        .find("session_detail_stage::PG_WINDOW")
+        .expect("pg_window record");
+    let pg_q = get_session.find("window?").expect("window?");
+    assert!(
+        pg_rec < pg_q,
+        "pg_window stage must record before window? so failures still emit"
+    );
+    let lake_rec = get_session
+        .find("session_detail_stage::LAKE_SQL")
+        .expect("lake_sql record");
+    let lake_map = get_session
+        .find("lake.map_err(storage_error)")
+        .expect("lake.map_err");
+    assert!(
+        lake_rec < lake_map,
+        "lake_sql stage must record before map_err so failures still emit"
     );
 }

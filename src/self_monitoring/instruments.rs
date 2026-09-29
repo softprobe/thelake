@@ -57,6 +57,10 @@ pub struct Instruments {
     pub session_summary_reduce_duration_ms: Histogram<f64>,
     /// session_summary_dirty UPSERT wall time (best-effort after traces commit).
     pub session_summary_dirty_upsert_duration_ms: Histogram<f64>,
+    /// GET /v1/llm/sessions/{id} stage wall time (pg_window / lake_sql / total).
+    pub session_detail_stage_duration_ms: Histogram<f64>,
+    /// DuckDB worker sub-step wall time (sql_gate EXPLAIN / sql_exec).
+    pub query_stage_duration_ms: Histogram<f64>,
 }
 
 /// Bounded `step` values for [`record_maintenance_step`] (cardinality lock).
@@ -78,6 +82,21 @@ pub mod reduce_step {
     pub const UPSERT: &str = "upsert";
     pub const ACK: &str = "ack";
     pub const TOTAL: &str = "total";
+}
+
+/// Bounded `stage` values for [`record_session_detail_stage`].
+pub mod session_detail_stage {
+    pub const PG_WINDOW: &str = "pg_window";
+    pub const LAKE_SQL: &str = "lake_sql";
+    pub const TOTAL: &str = "total";
+}
+
+/// Bounded `stage` values for [`record_query_stage`].
+pub mod query_stage {
+    /// `ensure_fact_scan_uses_timestamp_pruning` (EXPLAIN FORMAT JSON).
+    pub const SQL_GATE: &str = "sql_gate";
+    /// Prepare + scan + row materialization after the gate.
+    pub const SQL_EXEC: &str = "sql_exec";
 }
 
 fn register_observables(meter: &Meter) {
@@ -373,6 +392,18 @@ fn build_instruments(meter: &Meter) -> Instruments {
         session_summary_dirty_upsert_duration_ms: meter
             .f64_histogram("thelake.session_summary.dirty_upsert.duration")
             .with_description("session_summary_dirty UPSERT wall time after traces commit")
+            .with_unit("ms")
+            .build(),
+        session_detail_stage_duration_ms: meter
+            .f64_histogram("thelake.api.session_detail.stage.duration")
+            .with_description(
+                "GET /v1/llm/sessions/{id} stage wall time (pg_window, lake_sql, total)",
+            )
+            .with_unit("ms")
+            .build(),
+        query_stage_duration_ms: meter
+            .f64_histogram("thelake.query.stage.duration")
+            .with_description("DuckDB worker sub-step wall time (sql_gate EXPLAIN, sql_exec)")
             .with_unit("ms")
             .build(),
     }
@@ -710,6 +741,33 @@ pub fn record_session_summary_reduce_step(tenant: &str, step: &str, elapsed: Dur
             ("tenant", tenant),
             ("step", step),
             ("op", "session_summary"),
+        ]),
+    );
+}
+
+/// Wall time for one GET session-detail stage. `stage` must be a [`session_detail_stage`] const.
+pub fn record_session_detail_stage(tenant: &str, stage: &str, elapsed: Duration) {
+    let Some(i) = instruments() else { return };
+    i.session_detail_stage_duration_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &attrs(&[
+            ("tenant", tenant),
+            ("stage", stage),
+            ("op", "session_detail"),
+        ]),
+    );
+}
+
+/// Wall time for one DuckDB worker sub-step. `stage` must be a [`query_stage`] const.
+pub fn record_query_stage(tenant: &str, sql_kind: &str, stage: &str, elapsed: Duration) {
+    let Some(i) = instruments() else { return };
+    i.query_stage_duration_ms.record(
+        elapsed.as_secs_f64() * 1000.0,
+        &attrs(&[
+            ("tenant", tenant),
+            ("sql_kind", sql_kind),
+            ("stage", stage),
+            ("op", "query"),
         ]),
     );
 }

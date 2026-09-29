@@ -356,6 +356,8 @@ struct QueryWorkerResponse {
     result: Result<QueryResult>,
     queue_wait: std::time::Duration,
     exec_elapsed: std::time::Duration,
+    gate_elapsed: std::time::Duration,
+    run_elapsed: std::time::Duration,
 }
 
 struct ConnectionState {
@@ -374,6 +376,12 @@ struct DuckDBCore {
     /// counters used by `/health` liveness (ops engines).
     counts_toward_liveness: bool,
     tenant_id: String,
+}
+
+struct TimedExecute {
+    result: Result<QueryResult>,
+    gate_elapsed: std::time::Duration,
+    run_elapsed: std::time::Duration,
 }
 
 fn sql_coalesce_key(sql: &str) -> u64 {
@@ -503,7 +511,10 @@ impl DuckDBQueryEngine {
                         crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY
                             .fetch_add(1, Ordering::Relaxed);
                         let exec_start = std::time::Instant::now();
-                        let mut result = core.execute_query_on_state(&mut state, &request.sql);
+                        let mut timed = core.execute_query_on_state(&mut state, &request.sql);
+                        let mut result = timed.result;
+                        let mut gate_elapsed = timed.gate_elapsed;
+                        let mut run_elapsed = timed.run_elapsed;
                         if let Err(err) = &result {
                             let kind = poison_kind(&err.to_string());
                             if kind != Poison::None {
@@ -513,8 +524,11 @@ impl DuckDBQueryEngine {
                                 if let Some(fresh) = rebuild_worker_state(&core, index) {
                                     state = fresh;
                                     if kind == Poison::Collateral {
-                                        result =
+                                        timed =
                                             core.execute_query_on_state(&mut state, &request.sql);
+                                        result = timed.result;
+                                        gate_elapsed = timed.gate_elapsed;
+                                        run_elapsed = timed.run_elapsed;
                                         if let Err(retry_err) = &result {
                                             if poison_kind(&retry_err.to_string()) != Poison::None {
                                                 // The retry poisoned the fresh connection
@@ -540,6 +554,18 @@ impl DuckDBQueryEngine {
                                 sql_kind,
                                 exec_elapsed,
                             );
+                            crate::self_monitoring::record_query_stage(
+                                &core.tenant_id,
+                                sql_kind,
+                                crate::self_monitoring::query_stage::SQL_GATE,
+                                gate_elapsed,
+                            );
+                            crate::self_monitoring::record_query_stage(
+                                &core.tenant_id,
+                                sql_kind,
+                                crate::self_monitoring::query_stage::SQL_EXEC,
+                                run_elapsed,
+                            );
                         }
                         if result.is_ok() {
                             // Any *customer* success clears the global streak --
@@ -554,6 +580,8 @@ impl DuckDBQueryEngine {
                             result,
                             queue_wait,
                             exec_elapsed,
+                            gate_elapsed,
+                            run_elapsed,
                         });
                     }
                 })
@@ -740,6 +768,8 @@ impl DuckDBQueryEngine {
             warn!(
                 elapsed_ms = elapsed.as_millis() as u64,
                 queue_wait_ms = response.queue_wait.as_millis() as u64,
+                sql_gate_ms = response.gate_elapsed.as_millis() as u64,
+                sql_exec_ms = response.run_elapsed.as_millis() as u64,
                 sql = %preview,
                 "slow DuckDB query (queue + execute)"
             );
@@ -776,7 +806,7 @@ impl DuckDBQueryEngine {
             let mut state = core.init_connection_state_with(conn)?;
             let mut out = Vec::with_capacity(sqls.len());
             for sql in sqls {
-                out.push(core.execute_query_on_state(&mut state, &sql));
+                out.push(core.execute_query_on_state(&mut state, &sql).result);
             }
             Ok(out)
         })
@@ -841,11 +871,7 @@ impl DuckDBCore {
         self.init_connection_state_with_options(conn, false)
     }
 
-    fn execute_query_on_state(
-        &self,
-        state: &mut ConnectionState,
-        query: &str,
-    ) -> Result<QueryResult> {
+    fn execute_query_on_state(&self, state: &mut ConnectionState, query: &str) -> TimedExecute {
         // Catalog visibility: Postgres metadata is visible without reconnect.
         // is handled by DuckLake (WAL + busy timeout / ATTACH behavior). Softprobe does not
         // reattach or mem::forget connections after writes.
@@ -854,8 +880,16 @@ impl DuckDBCore {
         // Validate DuckDB's physical plan after traces/logs/scores have been
         // expanded to their final table names. Every fact scan must carry its
         // own pushed timestamp filter before the query can execute.
-        crate::sql::ensure_fact_scan_uses_timestamp_pruning(&state.conn, &query_run)
-            .map_err(|e| anyhow!("SQL gate: {e}"))?;
+        let gate_start = std::time::Instant::now();
+        if let Err(e) = crate::sql::ensure_fact_scan_uses_timestamp_pruning(&state.conn, &query_run)
+        {
+            return TimedExecute {
+                result: Err(anyhow!("SQL gate: {e}")),
+                gate_elapsed: gate_start.elapsed(),
+                run_elapsed: std::time::Duration::ZERO,
+            };
+        }
+        let gate_elapsed = gate_start.elapsed();
         if std::env::var("SOFTPROBE_LOG_SQL").ok().as_deref() == Some("1") {
             eprintln!("SOFTPROBE_LOG_SQL run={query_run}");
         }
@@ -869,36 +903,46 @@ impl DuckDBCore {
             let batch = format!("BEGIN TRANSACTION;\n{trimmed};\nCOMMIT;");
             let query_start = std::time::Instant::now();
             self.try_wrap_cache_httpfs_filesystems(state);
-            state
+            let result = state
                 .conn
                 .execute_batch(&batch)
-                .map_err(|e| anyhow!("DuckLake mutating SQL failed: {e}"))?;
+                .map_err(|e| anyhow!("DuckLake mutating SQL failed: {e}"))
+                .map(|_| QueryResult {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    row_count: 0,
+                });
             if diag {
                 println!("DIAG execute_query(dml): {:?}", query_start.elapsed());
             }
-            return Ok(QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                row_count: 0,
-            });
+            return TimedExecute {
+                result,
+                gate_elapsed,
+                run_elapsed: query_start.elapsed(),
+            };
         }
         if sql_is_ducklake_mutating(&query_run) {
             // CALL / other mutating non-wrap path (expire, merge, cleanup, set_option).
             let trimmed = query_run.trim().trim_end_matches(';');
             let query_start = std::time::Instant::now();
             self.try_wrap_cache_httpfs_filesystems(state);
-            state
+            let result = state
                 .conn
                 .execute_batch(trimmed)
-                .map_err(|e| anyhow!("DuckLake CALL/mutating SQL failed: {e}"))?;
+                .map_err(|e| anyhow!("DuckLake CALL/mutating SQL failed: {e}"))
+                .map(|_| QueryResult {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    row_count: 0,
+                });
             if diag {
                 println!("DIAG execute_query(call): {:?}", query_start.elapsed());
             }
-            return Ok(QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                row_count: 0,
-            });
+            return TimedExecute {
+                result,
+                gate_elapsed,
+                run_elapsed: query_start.elapsed(),
+            };
         }
 
         let run_once = |state: &mut ConnectionState| -> Result<QueryResult> {
@@ -938,7 +982,8 @@ impl DuckDBCore {
             Ok(result)
         };
 
-        match run_once(state) {
+        let run_start = std::time::Instant::now();
+        let result = match run_once(state) {
             Ok(result) => Ok(result),
             Err(err) => {
                 let message = err.to_string();
@@ -948,10 +993,16 @@ impl DuckDBCore {
                         message
                     );
                     std::thread::sleep(std::time::Duration::from_millis(50));
-                    return run_once(state);
+                    run_once(state)
+                } else {
+                    Err(err)
                 }
-                Err(err)
             }
+        };
+        TimedExecute {
+            result,
+            gate_elapsed,
+            run_elapsed: run_start.elapsed(),
         }
     }
 
