@@ -649,147 +649,15 @@ impl DuckLakeScopeResolver {
     }
 
     async fn ensure_registry(&self) -> Result<()> {
-        let mut client = self.pool.get().await?;
-        client
-            .execute(
-                &format!(
-                    "CREATE SCHEMA IF NOT EXISTS {};",
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[],
+        let client = self.pool.get().await?;
+        let registry_ddl = include_str!("sql/schema/runtime_control.sql")
+            .replace("{{schema}}", &quote_pg_ident(self.registry_schema()));
+        client.batch_execute(&registry_ddl).await.map_err(|error| {
+            anyhow!(
+                "failed to initialize registry schema {}: {error}",
+                self.registry_schema()
             )
-            .await?;
-        client
-            .execute(
-                &format!(
-                    r#"CREATE TABLE IF NOT EXISTS {}.scope_registry (
-  scope_id TEXT PRIMARY KEY,
-  ducklake_metadata_schema TEXT NOT NULL UNIQUE,
-  data_path TEXT NOT NULL,
-  provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);"#,
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[],
-            )
-            .await?;
-        client
-            .execute(
-                &format!(
-                    r#"CREATE TABLE IF NOT EXISTS {}.physical_scope (
-  physical_scope_id TEXT PRIMARY KEY,
-  metadata_path TEXT NOT NULL,
-  ducklake_metadata_schema TEXT NOT NULL,
-  data_path TEXT NOT NULL,
-  catalog_alias TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (metadata_path, catalog_alias,
-          ducklake_metadata_schema, data_path)
-);"#,
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[],
-            )
-            .await?;
-        client
-            .execute(
-                &format!(
-                    "ALTER TABLE {}.physical_scope DROP COLUMN IF EXISTS catalog_type;",
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[],
-            )
-            .await?;
-        client
-            .execute(
-                &format!(
-                    r#"CREATE TABLE IF NOT EXISTS {}.workspace_scope_binding (
-  workspace_id TEXT PRIMARY KEY,
-  physical_scope_id TEXT NOT NULL REFERENCES {}.physical_scope(physical_scope_id),
-  provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);"#,
-                    quote_pg_ident(self.registry_schema()),
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[],
-            )
-            .await?;
-        client
-            .execute(
-                &format!(
-                    r#"CREATE TABLE IF NOT EXISTS {}.thelake_job_lease (
-  job_name TEXT NOT NULL,
-  scope_key TEXT NOT NULL,
-  holder_id TEXT NOT NULL,
-  epoch BIGINT NOT NULL DEFAULT 1,
-  lease_until TIMESTAMPTZ NOT NULL,
-  heartbeat_at TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (job_name, scope_key)
-);"#,
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[],
-            )
-            .await?;
-        client
-            .execute(
-                &format!(
-                    "ALTER TABLE {}.thelake_job_lease ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL DEFAULT 1;",
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[],
-            )
-            .await?;
-        client
-            .execute(
-                &format!(
-                    r#"CREATE INDEX IF NOT EXISTS thelake_job_lease_until
-ON {}.thelake_job_lease (lease_until);"#,
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[],
-            )
-            .await?;
-        let transaction = client.transaction().await?;
-        self.migrate_legacy_scope_registry(&transaction).await?;
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    async fn migrate_legacy_scope_registry<C>(&self, client: &C) -> Result<()>
-    where
-        C: deadpool_postgres::GenericClient + Sync,
-    {
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT scope_id, ducklake_metadata_schema, data_path FROM {}.scope_registry;",
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[],
-            )
-            .await?;
-        for row in rows {
-            let workspace_id: String = row.get(0);
-            let physical = self
-                .default_physical_scope
-                .with_pg_namespace(row.get::<_, String>(1))
-                .with_warehouse_uri(row.get::<_, String>(2));
-            let physical_scope_id = self.insert_physical_scope(client, &physical).await?;
-            client
-                .execute(
-                    &format!(
-                        "INSERT INTO {}.workspace_scope_binding (workspace_id, physical_scope_id) \
-                         VALUES ($1, $2) ON CONFLICT (workspace_id) DO NOTHING;",
-                        quote_pg_ident(self.registry_schema())
-                    ),
-                    &[&workspace_id, &physical_scope_id],
-                )
-                .await?;
-        }
+        })?;
         Ok(())
     }
 
@@ -855,7 +723,9 @@ RETURNING physical_scope_id;"#,
 
     async fn ensure_scope_tables(&self, scope: &PhysicalScope) -> Result<()> {
         let client = self.pool.get().await?;
-        ensure_promotion_metadata_tables(&client, scope.pg_namespace()).await?;
+        ensure_promotion_metadata_tables(&client, scope.pg_namespace())
+            .await
+            .context("failed to initialize promotion metadata tables")?;
         if self.workspace_scope_mode == WorkspaceScopeMode::Shared {
             crate::session_summary::ensure_shared_session_summary_tables(
                 &client,
@@ -869,13 +739,12 @@ RETURNING physical_scope_id;"#,
             .await?;
         } else {
             crate::session_summary::ensure_session_summary_tables(&client, scope.pg_namespace())
-                .await?;
+                .await
+                .context("failed to initialize session summary tables")?;
         }
         drop(client);
-        // Product-hot activation is physical-scope-scoped and idempotent. Run
-        // it at scope initialization so summary jobs remain correct even when
-        // the periodic maintenance job is disabled; maintenance repeats the
-        // same guarded operation for recovery after restarts.
+        // Product-hot activation belongs to scope initialization so summary
+        // jobs remain correct even when periodic maintenance is disabled.
         crate::session_summary::ensure_product_hot_attrs_for_scope(self, scope).await?;
         Ok(())
     }

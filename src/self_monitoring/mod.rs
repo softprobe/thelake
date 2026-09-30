@@ -13,14 +13,13 @@ mod tests;
 
 pub use ids::{instrument_customer_tenant, is_reserved_tenant_id, OPS_TENANT_ID};
 pub use instruments::{
-    maintenance_step, query_stage, record_compaction_pass, record_compaction_wave,
-    record_export_drop, record_ingest, record_ingest_commit, record_job_duration, record_job_error,
-    record_job_skip, record_lease_acquire, record_lease_heartbeat_failure, record_lease_steal,
-    record_maintenance, record_maintenance_step, record_orphan_remove, record_query,
-    record_query_queue_wait, record_query_stage, record_sample_scan, record_session_detail_stage,
-    record_session_summary_dirty_upsert, record_session_summary_dirty_upsert_error,
-    record_session_summary_reduce_step, record_session_summary_reducer_lag,
-    record_session_summary_sessions_reduced, record_slow_query, record_snapshot_expire,
+    maintenance_step, query_stage, record_export_drop, record_ingest, record_ingest_commit,
+    record_job_duration, record_job_error, record_job_skip, record_lease_acquire,
+    record_lease_heartbeat_failure, record_lease_steal, record_maintenance,
+    record_maintenance_step, record_query, record_query_queue_wait, record_query_stage,
+    record_sample_scan, record_session_detail_stage, record_session_summary_dirty_upsert,
+    record_session_summary_dirty_upsert_error, record_session_summary_reduce_step,
+    record_session_summary_reducer_lag, record_session_summary_sessions_reduced, record_slow_query,
     record_write, reduce_step, self_monitoring_export_drops, session_detail_stage,
     set_async_jobs_wake_ms, set_session_summary_dirty_depth,
 };

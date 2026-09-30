@@ -19,18 +19,8 @@ async fn main() {
             .maintenance_engine()
             .await
             .expect("failed to create maintenance executor");
-        let summary = executor.run_once().await.expect("maintenance run failed");
-        println!("maintenance_tables={}", summary.tables.len());
-        for table in summary.tables {
-            println!(
-                "table={} expired_snapshots={} compaction={:?} rewrite_manifests={:?} remove_orphans={:?}",
-                table.table,
-                table.metadata.expired_snapshots,
-                table.compaction.status,
-                table.rewrite_manifests.status,
-                table.remove_orphan_files.status
-            );
-        }
+        executor.run_once().await.expect("maintenance run failed");
+        println!("maintenance pass completed; outcomes are in maintenance_outcome");
         return;
     }
 

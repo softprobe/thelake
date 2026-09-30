@@ -69,11 +69,11 @@ pub(super) fn catalog_is_attached(conn: &Connection, alias: &str) -> bool {
 /// connection made Grafana refresh occupy hundreds of OS threads and 15s timeouts.
 pub(crate) const QUERY_DUCKDB_THREADS: i64 = 1;
 pub(crate) const QUERY_DUCKDB_MEMORY: &str = "512MB";
-/// Writers / TWCS: classic Prom dual-write + live OTEL need more than 512MB.
+/// Writers / maintenance: classic Prom dual-write + live OTEL need more than 512MB.
 pub(crate) const WRITER_DUCKDB_THREADS: i64 = 1;
 pub(crate) const WRITER_DUCKDB_MEMORY: &str = "1GB";
-/// Compaction merges hundreds of VARIANT/postings files; 512MB OOMs (TWCS skip
-/// → Grafana scans 200–500 Parquet files per PromQL). One compact connection.
+/// Compaction merges hundreds of VARIANT/postings files; 512MB OOMs and leaves
+/// Grafana scans with 200–500 Parquet files per PromQL. One compact connection.
 pub(crate) const COMPACTION_DUCKDB_THREADS: i64 = 2;
 pub(crate) const COMPACTION_DUCKDB_MEMORY: &str = "2GB";
 
@@ -149,7 +149,7 @@ impl<'a> DuckLakeSessionFactory<'a> {
         cache_directory: Option<&Path>,
     ) -> Result<Connection> {
         let conn = open_in_memory_capped(threads, memory_limit).context("DuckDB open failed")?;
-        let params = match kind {
+        let mut params = match kind {
             DuckLakeSessionKind::Query => {
                 DuckDbInitParams::query(threads, memory_limit, cache_directory)
             }
@@ -157,6 +157,7 @@ impl<'a> DuckLakeSessionFactory<'a> {
                 DuckDbInitParams::session(threads, memory_limit)
             }
         };
+        params.ducklake_extension_path = Some(Path::new(&self.config.ducklake.extension_path));
         apply_duckdb_init(&conn, &params).context("DuckDB init")?;
         configure_object_store(&conn, self.config, scope.warehouse_uri())
             .context("configure object store")?;
@@ -275,7 +276,8 @@ fn ducklake_catalog_is_missing(message: &str) -> bool {
 pub(crate) fn open_in_memory_capped(threads: i64, memory_limit: &str) -> Result<Connection> {
     let config = duckdb::Config::default()
         .threads(threads)?
-        .max_memory(memory_limit)?;
+        .max_memory(memory_limit)?
+        .allow_unsigned_extensions()?;
     Connection::open_in_memory_with_flags(config)
         .map_err(|e| anyhow::anyhow!("DuckDB open failed: {e}"))
 }
@@ -505,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_memory_cap_exceeds_writer_so_twcs_can_merge() {
+    fn maintenance_memory_cap_exceeds_writer_for_compaction() {
         const {
             assert!(
                 COMPACTION_DUCKDB_THREADS >= WRITER_DUCKDB_THREADS,
@@ -515,7 +517,7 @@ mod tests {
         assert_ne!(COMPACTION_DUCKDB_MEMORY, WRITER_DUCKDB_MEMORY);
         assert!(
             COMPACTION_DUCKDB_MEMORY.ends_with("GB"),
-            "TWCS merge of closed-day metric_series OOM'd at writer 512MB"
+            "merge of metric_series OOM'd at writer 512MB"
         );
     }
 

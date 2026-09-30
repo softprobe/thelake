@@ -24,6 +24,7 @@ SHELL := /bin/bash
 	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
+	ducklake-extension \
 	test-grafana-static test-grafana-system test-grafana-browser test-compat \
 	stress test-deploy seed-lake bench-llm-seeded test-perf-helpers \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
@@ -195,6 +196,7 @@ build-release: ensure-cache
 			bash -lc 'apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev protobuf-compiler clang mold cmake build-essential >/dev/null && make build-release'; \
 		exit 0; \
 	fi; \
+	bash scripts/download-ducklake-extension.sh; \
 	echo "cargo build --release --locked --bin thelake..."; \
 	cargo build --release --locked --bin thelake; \
 	mkdir -p "$(DIST_DIR)"; \
@@ -216,11 +218,12 @@ build-release: ensure-cache
 		install_name_tool -add_rpath @executable_path "$(DIST_DIR)/thelake" 2>/dev/null || true; \
 	fi; \
 	cp -f config.yaml "$(DIST_DIR)/config.yaml"; \
+	cp -f target/ducklake-extension/ducklake.duckdb_extension "$(DIST_DIR)/ducklake.duckdb_extension"; \
 	echo "staged $(DIST_DIR)/"
 
 # Internal: ensure dist/ ready for linux image packaging.
 _ensure-dist:
-	@test -x "$(DIST_DIR)/thelake" -a -f "$(DIST_DIR)/config.yaml" || $(MAKE) build-release
+	@test -x "$(DIST_DIR)/thelake" -a -f "$(DIST_DIR)/config.yaml" -a -f "$(DIST_DIR)/ducklake.duckdb_extension" || $(MAKE) build-release
 	@if [ ! -f "$(DIST_DIR)/libduckdb.so" ]; then \
 		echo "dist/ lacks libduckdb.so — TARGET_PLATFORM=linux/amd64 build-release..."; \
 		TARGET_PLATFORM=linux/amd64 $(MAKE) build-release; \
@@ -352,7 +355,11 @@ _export-minio-aws = \
 	export AWS_REGION=$${AWS_REGION:-us-east-1}
 
 # ---- tests ----
-test: ensure-cache
+ducklake-extension:
+	bash scripts/download-ducklake-extension.sh
+
+test: ensure-cache ducklake-extension
+	bash tests/scripts/ducklake_extension_download_test.sh
 	@echo "unit + lightweight tests (no e2e infra)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compat_phase0 -- --test-threads=1
 
@@ -513,7 +520,7 @@ test-grafana-static: check-compat-reference-pins
 # Phase 4 deterministic compose system lane. The shell harness owns G1-G3 and
 # writes structured outcome evidence; compose lifecycle evidence is collected
 # here so cleanup runs for both harness failures and successful runs.
-test-grafana-system: ensure-cache check-compat-reference-pins
+test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
 	@set -euo pipefail; \
 	artifact_dir="$(GRAFANA_SYSTEM_ARTIFACT_DIR)"; compose_file="$(GRAFANA_SYSTEM_COMPOSE_FILE)"; \
 	compose_project="$(GRAFANA_SYSTEM_COMPOSE_PROJECT)"; grafana_url="$(GRAFANA_URL)"; \

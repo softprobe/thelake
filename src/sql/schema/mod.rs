@@ -1,8 +1,43 @@
 //! Authoritative production table registry and one-clock DDL.
 
-/// Locked DuckLake partition expression (calendar day of `timestamp`).
-/// Proven by `tests/integration/one_clock_prune.rs`.
-pub const ONE_CLOCK_PARTITION_BY: &str = "year(timestamp), month(timestamp), day(timestamp)";
+pub const TRACES_DDL: &str = include_str!("traces.sql");
+pub const LOGS_DDL: &str = include_str!("logs.sql");
+pub const SCORES_DDL: &str = include_str!("scores.sql");
+pub const SCORE_CONFIGS_DDL: &str = include_str!("score_configs.sql");
+pub const OTLP_LAYOUT_SQL: &str = include_str!("otlp_layout.sql");
+
+fn layout_profile_values() -> &'static std::collections::HashMap<&'static str, String> {
+    static VALUES: std::sync::OnceLock<std::collections::HashMap<&'static str, String>> =
+        std::sync::OnceLock::new();
+    VALUES.get_or_init(|| {
+        OTLP_LAYOUT_SQL
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("SET VARIABLE ")?;
+                let (name, value) = rest.split_once(" = ")?;
+                let value = value.trim().trim_end_matches(';').trim();
+                let value = value.strip_prefix('\'')?.strip_suffix('\'')?;
+                Some((name, value.to_string()))
+            })
+            .collect()
+    })
+}
+
+fn layout_profile_value(name: &'static str) -> &'static str {
+    layout_profile_values()
+        .get(name)
+        .unwrap_or_else(|| panic!("missing OTLP setting {name} in otlp_layout.sql"))
+}
+
+pub fn base_table_ddl(table: &str) -> Option<&'static str> {
+    match table {
+        "traces" => Some(TRACES_DDL),
+        "logs" => Some(LOGS_DDL),
+        "scores" => Some(SCORES_DDL),
+        "score_configs" => Some(SCORE_CONFIGS_DDL),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableFamily {
@@ -14,42 +49,31 @@ pub enum TableFamily {
 #[derive(Debug, Clone, Copy)]
 pub struct TableSpec {
     pub name: &'static str,
-    /// Column definitions for registry-owned SQL DDL. OTLP tables are created
-    /// from Arrow schemas, so their registry entry intentionally has none.
-    pub columns_sql: &'static str,
-    pub sorted_by: &'static str,
+    /// Base table DDL is maintained in `src/sql/schema/*.sql`.
     pub family: TableFamily,
     pub is_fact: bool,
 }
 
 pub const TRACES: TableSpec = TableSpec {
     name: "traces",
-    columns_sql: "",
-    sorted_by: "session_id, trace_id, timestamp",
     family: TableFamily::Otlp,
     is_fact: true,
 };
 
 pub const LOGS: TableSpec = TableSpec {
     name: "logs",
-    columns_sql: "",
-    sorted_by: "session_id, timestamp",
     family: TableFamily::Otlp,
     is_fact: true,
 };
 
 pub const SCORES: TableSpec = TableSpec {
     name: "scores",
-    columns_sql: "",
-    sorted_by: "session_id, timestamp",
     family: TableFamily::Otlp,
     is_fact: true,
 };
 
 pub const SCORE_CONFIGS: TableSpec = TableSpec {
     name: "score_configs",
-    columns_sql: "",
-    sorted_by: "",
     family: TableFamily::Auxiliary,
     is_fact: false,
 };
@@ -72,14 +96,20 @@ pub fn is_otlp_table(name: &str) -> bool {
 }
 
 pub fn insert_order_by(name: &str) -> &'static str {
-    table_spec(name)
-        .filter(|table| is_otlp_table(table.name))
-        .map(|table| match table.name {
-            "traces" => "ORDER BY session_id, trace_id, timestamp",
-            "logs" | "scores" => "ORDER BY session_id, timestamp",
-            _ => "",
-        })
-        .unwrap_or("")
+    if table_spec(name).is_some_and(|table| is_otlp_table(table.name)) {
+        // The SQL profile is also consumed by the Python exporter.
+        static ORDER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        ORDER
+            .get_or_init(|| {
+                format!(
+                    "ORDER BY {}",
+                    layout_profile_value("thelake_otlp_sorted_by")
+                )
+            })
+            .as_str()
+    } else {
+        ""
+    }
 }
 
 pub fn qualified_table_name(catalog: &str, table: &TableSpec) -> String {
@@ -87,24 +117,22 @@ pub fn qualified_table_name(catalog: &str, table: &TableSpec) -> String {
 }
 
 pub fn create_table_sql(catalog: &str, table: &TableSpec) -> String {
-    assert!(
-        !table.columns_sql.is_empty(),
-        "{} is created from its Arrow schema, not registry SQL DDL",
-        table.name
-    );
+    let source = base_table_ddl(table.name).expect("persisted table must have SQL DDL");
     let qualified = qualified_table_name(catalog, table);
-    format!(
-        "CREATE TABLE IF NOT EXISTS {qualified} (\n  {}\n);",
-        table.columns_sql.replace(", ", ",\n  ")
+    source.replacen(
+        &format!("CREATE TABLE IF NOT EXISTS {}", table.name),
+        &format!("CREATE TABLE IF NOT EXISTS {qualified}"),
+        1,
     )
 }
 
 pub fn partition_sort_sql(catalog: &str, table: &TableSpec) -> String {
     let qualified = qualified_table_name(catalog, table);
+    let partition = layout_profile_value("thelake_otlp_partition_by");
+    let sorted_by = layout_profile_value("thelake_otlp_sorted_by");
     format!(
-        "ALTER TABLE {qualified} SET PARTITIONED BY ({ONE_CLOCK_PARTITION_BY});\n\
-         ALTER TABLE {qualified} SET SORTED BY ({});",
-        table.sorted_by
+        "ALTER TABLE {qualified} SET PARTITIONED BY ({partition});\n\
+         ALTER TABLE {qualified} SET SORTED BY ({sorted_by});"
     )
 }
 
@@ -118,14 +146,6 @@ pub fn ensure_table_sql(catalog: &str, table: &TableSpec) -> String {
 
 pub fn add_column_sql(table: &str, column: &str, sql_type: &str) -> String {
     format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {sql_type};")
-}
-
-pub fn alter_column_type_sql(table: &str, column: &str, sql_type: &str) -> String {
-    format!("ALTER TABLE {table} ALTER COLUMN {column} SET DATA TYPE {sql_type};")
-}
-
-pub fn alter_column_using_sql(table: &str, column: &str, sql_type: &str, using: &str) -> String {
-    format!("ALTER TABLE {table} ALTER COLUMN {column} SET DATA TYPE {sql_type} USING {using};")
 }
 
 impl TableSpec {
@@ -145,7 +165,7 @@ mod tests {
     #[test]
     fn partition_uses_year_month_day_of_timestamp() {
         let sql = TRACES.partition_sort_sql("softprobe");
-        assert!(sql.contains(ONE_CLOCK_PARTITION_BY));
+        assert!(sql.contains(layout_profile_value("thelake_otlp_partition_by")));
         assert!(!sql.contains("record_date"));
     }
 
@@ -162,13 +182,11 @@ mod tests {
     fn every_registry_fact_has_timestamp_ddl_or_otlp_schema() {
         for table in fact_table_specs() {
             assert!(
-                !table.sorted_by.is_empty(),
-                "{} has no sort key",
+                insert_order_by(table.name).starts_with("ORDER BY "),
+                "{} has no sort key from profile",
                 table.name
             );
-            if !is_otlp_table(table.name) {
-                assert!(table.columns_sql.contains("timestamp"), "{}", table.name);
-            }
+            assert!(base_table_ddl(table.name).is_some(), "{}", table.name);
         }
     }
 
@@ -191,7 +209,11 @@ mod tests {
             crate::storage::schema::ScoreConfigTable::table_name()
         );
         for table in OTLP_TABLES {
-            assert!(!table.sorted_by.is_empty(), "{}", table.name);
+            assert!(
+                insert_order_by(table.name).starts_with("ORDER BY "),
+                "{}",
+                table.name
+            );
         }
     }
 
@@ -204,6 +226,22 @@ mod tests {
                 table.name
             );
             assert_ne!(table.name, "metrics");
+        }
+    }
+
+    #[test]
+    fn persisted_tables_have_canonical_sql_ddl_sources() {
+        for (table, ddl) in [
+            ("traces", TRACES_DDL),
+            ("logs", LOGS_DDL),
+            ("scores", SCORES_DDL),
+            ("score_configs", SCORE_CONFIGS_DDL),
+        ] {
+            assert!(
+                ddl.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")),
+                "{table}"
+            );
+            assert!(ddl.contains("timestamp"), "{table}");
         }
     }
 }

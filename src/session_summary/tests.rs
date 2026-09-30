@@ -55,19 +55,16 @@ async fn postgres_session_summary_ensure_idempotent() {
     ensure_session_summary_tables(&client, schema)
         .await
         .expect("second ensure");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
-    client.execute(&format!("ALTER TABLE {q}.session_summary_dirty DROP COLUMN IF EXISTS claim_holder, DROP COLUMN IF EXISTS claim_until"), &[])
-        .await.expect("simulate pre-claims table");
     ensure_session_summary_tables(&client, schema)
         .await
-        .expect("upgrade existing dirty table");
+        .expect("reapply canonical DDL");
     let claim_columns: i64 = client.query_one(
         "SELECT count(*)::bigint FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'session_summary_dirty' AND column_name IN ('claim_holder', 'claim_until', 'generation')",
         &[&schema],
     ).await.expect("claim columns").get(0);
     assert_eq!(
         claim_columns, 3,
-        "existing table gets claim and generation columns"
+        "canonical table has claim and generation columns after idempotent ensure"
     );
     let n: i64 = client
         .query_one(
@@ -79,76 +76,6 @@ async fn postgres_session_summary_ensure_idempotent() {
         .expect("count")
         .get(0);
     assert_eq!(n, 2, "both tables present");
-}
-
-#[tokio::test]
-#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
-async fn postgres_session_summary_timestamp_cutover_preserves_and_requeues_rows() {
-    let schema = "thelake_ss_timestamp_cutover";
-    let pool = try_pg_pool(schema)
-        .await
-        .expect("ducklake-postgres required (make setup)");
-    let client = pool.get().await.expect("client");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
-    client
-        .batch_execute(&format!(
-            "DROP TABLE {q}.session_summary_dirty, {q}.session_summary;\
-             CREATE TABLE {q}.session_summary (\
-               session_id TEXT PRIMARY KEY, start_time TIMESTAMPTZ NOT NULL, end_time TIMESTAMPTZ,\
-               observation_count BIGINT NOT NULL DEFAULT 0, error_count BIGINT NOT NULL DEFAULT 0,\
-               input_tokens BIGINT, output_tokens BIGINT, total_tokens BIGINT, total_cost DOUBLE PRECISION,\
-               agent_name TEXT, user_id TEXT, model_name TEXT, updated_at TIMESTAMPTZ NOT NULL);\
-             CREATE TABLE {q}.session_summary_dirty (\
-               session_id TEXT PRIMARY KEY, min_ts TIMESTAMPTZ NOT NULL, max_ts TIMESTAMPTZ NOT NULL,\
-               updated_at TIMESTAMPTZ NOT NULL, generation BIGINT NOT NULL DEFAULT 1,\
-               claim_holder TEXT, claim_until TIMESTAMPTZ);\
-             INSERT INTO {q}.session_summary (session_id, start_time, end_time, updated_at)\
-               VALUES ('legacy-ns', '2024-01-01T00:00:00.123456Z', '2024-01-01T00:00:00.654321Z', now());\
-             INSERT INTO {q}.session_summary_dirty (session_id, min_ts, max_ts, updated_at)\
-               VALUES ('pending-only', '2024-01-02T00:00:00.123456Z', '2024-01-02T00:00:00.654321Z', now());"
-        ))
-        .await
-        .expect("create legacy schema fixture");
-
-    ensure_session_summary_tables(&client, schema)
-        .await
-        .expect("run timestamp cutover");
-
-    let row = client
-        .query_one(
-            &format!(
-                "SELECT start_time_ns, end_time_ns FROM {q}.session_summary WHERE session_id = 'legacy-ns'"
-            ),
-            &[],
-        )
-        .await
-        .expect("read migrated summary");
-    assert_eq!(row.get::<_, i64>(0), 1_704_067_200_123_456_000);
-    assert_eq!(row.get::<_, i64>(1), 1_704_067_200_654_321_000);
-
-    let dirty = client
-        .query_one(
-            &format!(
-                "SELECT min_ts_ns, max_ts_ns FROM {q}.session_summary_dirty WHERE session_id = 'legacy-ns'"
-            ),
-            &[],
-        )
-        .await
-        .expect("legacy summary queued for precise recompute");
-    assert_eq!(dirty.get::<_, i64>(0), 1_704_067_200_123_455_000);
-    assert_eq!(dirty.get::<_, i64>(1), 1_704_067_200_654_322_000);
-
-    let pending = client
-        .query_one(
-            &format!(
-                "SELECT min_ts_ns, max_ts_ns FROM {q}.session_summary_dirty WHERE session_id = 'pending-only'"
-            ),
-            &[],
-        )
-        .await
-        .expect("read migrated pending claim");
-    assert_eq!(pending.get::<_, i64>(0), 1_704_153_600_123_455_000);
-    assert_eq!(pending.get::<_, i64>(1), 1_704_153_600_654_322_000);
 }
 
 #[tokio::test]

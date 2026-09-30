@@ -332,109 +332,41 @@ fn default_query_cache_dir() -> Option<String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceConfig {
-    /// Run `ducklake_merge_adjacent_files` compaction (TWCS) in each maintenance pass.
+    /// Enable the SQL-owned compaction step in each maintenance pass.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_target_file_size_bytes")]
-    pub target_file_size_bytes: usize,
     /// How often the maintenance job tries to run (acquire → pass → release).
     #[serde(default = "default_interval_seconds")]
     pub interval_seconds: u64,
-    /// Run snapshot expire / orphan cleanup in each maintenance pass.
+    /// Run snapshot expiration and scheduled-file cleanup in each maintenance pass.
     #[serde(default = "default_true")]
     pub metadata_enabled: bool,
-    #[serde(default = "default_max_snapshot_age_seconds")]
-    pub max_snapshot_age_seconds: u64,
-    /// When true (and metadata maintenance runs), call `ducklake_cleanup_old_files`.
-    #[serde(default = "default_true")]
-    pub remove_orphan_files_enabled: bool,
-    #[serde(default = "default_remove_orphan_older_than_seconds")]
-    pub remove_orphan_older_than_seconds: u64,
-    /// Open-day live Parquet file soft cap before TWCS merges (AC-F4).
-    #[serde(default = "default_open_day_file_cap")]
-    pub open_day_file_cap: usize,
-    /// Max TWCS merge waves per table per maintenance pass (open day).
-    #[serde(default = "default_max_waves_per_table")]
-    pub max_waves_per_table: usize,
-    /// `max_compacted_files` for a single open-day merge CALL when near the cap.
-    #[serde(default = "default_max_compacted_files_per_wave")]
-    pub max_compacted_files_per_wave: u64,
-    /// `max_compacted_files` for closed-day merge CALLs.
-    #[serde(default = "default_closed_day_max_compacted_files")]
-    pub closed_day_max_compacted_files: u64,
-    /// Max closed-day TWCS waves per table per pass.
-    #[serde(default = "default_closed_day_max_waves")]
-    pub closed_day_max_waves: usize,
-    /// Only merge live files smaller than this (`max_file_size` on DuckLake merge).
-    #[serde(default = "default_max_merge_file_size_bytes")]
-    pub max_merge_file_size_bytes: u64,
+    /// Retain expired snapshots and scheduled deletions while existing readers finish.
+    #[serde(default = "default_reader_safety_grace_seconds")]
+    pub reader_safety_grace_seconds: u64,
 }
 
 impl Default for MaintenanceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            target_file_size_bytes: default_target_file_size_bytes(),
             interval_seconds: default_interval_seconds(),
             metadata_enabled: true,
-            max_snapshot_age_seconds: default_max_snapshot_age_seconds(),
-            remove_orphan_files_enabled: true,
-            remove_orphan_older_than_seconds: default_remove_orphan_older_than_seconds(),
-            open_day_file_cap: default_open_day_file_cap(),
-            max_waves_per_table: default_max_waves_per_table(),
-            max_compacted_files_per_wave: default_max_compacted_files_per_wave(),
-            closed_day_max_compacted_files: default_closed_day_max_compacted_files(),
-            closed_day_max_waves: default_closed_day_max_waves(),
-            max_merge_file_size_bytes: default_max_merge_file_size_bytes(),
+            reader_safety_grace_seconds: default_reader_safety_grace_seconds(),
         }
     }
+}
+
+fn default_interval_seconds() -> u64 {
+    60
 }
 
 fn default_true() -> bool {
     true
 }
 
-fn default_target_file_size_bytes() -> usize {
-    64 * 1024 * 1024
-}
-
-fn default_interval_seconds() -> u64 {
-    // Combined pass (expire + TWCS). Keep near the old metadata cadence so
-    // snapshot age bars stay tight; TWCS no-ops when nothing to merge.
-    60
-}
-
-fn default_max_snapshot_age_seconds() -> u64 {
-    // Prom does not use DuckLake time-travel; keep a short overlap for in-flight readers.
-    60
-}
-
-fn default_remove_orphan_older_than_seconds() -> u64 {
-    60
-}
-
-fn default_open_day_file_cap() -> usize {
-    2
-}
-
-fn default_max_waves_per_table() -> usize {
-    32
-}
-
-fn default_max_compacted_files_per_wave() -> u64 {
-    32
-}
-
-fn default_closed_day_max_compacted_files() -> u64 {
-    256
-}
-
-fn default_closed_day_max_waves() -> usize {
-    64
-}
-
-fn default_max_merge_file_size_bytes() -> u64 {
-    8 * 1024 * 1024
+fn default_reader_safety_grace_seconds() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,12 +383,15 @@ pub struct DuckLakeConfig {
     pub catalog_alias: String,
     #[serde(default = "default_ducklake_metadata_schema")]
     pub metadata_schema: String,
+    /// Pinned DuckLake extension built against the embedded DuckDB ABI.
+    #[serde(default = "default_ducklake_extension_path")]
+    pub extension_path: String,
     /// Workspace storage mode. Isolated preserves the current default behavior.
     #[serde(default)]
     pub workspace_scope_mode: crate::workspace_scope::WorkspaceScopeMode,
     /// Rows per INSERT at or below this limit may stay catalog-inlined.
-    /// Default `Some(500)` (DuckLake-aligned). TWCS wait-for-next-run (AC-F7):
-    /// maintenance does not flush inlined rows before merge. Set `Some(0)` only
+    /// Default `Some(500)` (DuckLake-aligned). Maintenance does not flush
+    /// inlined rows before merge. Set `Some(0)` only
     /// when a fixture needs Parquet-per-batch (shredding / F-files stress).
     #[serde(default = "default_data_inlining_row_limit")]
     pub data_inlining_row_limit: Option<u64>,
@@ -472,6 +407,7 @@ impl Default for DuckLakeConfig {
             data_path: default_ducklake_data_path(),
             catalog_alias: default_ducklake_catalog_alias(),
             metadata_schema: default_ducklake_metadata_schema(),
+            extension_path: default_ducklake_extension_path(),
             workspace_scope_mode: crate::workspace_scope::WorkspaceScopeMode::default(),
             data_inlining_row_limit: default_data_inlining_row_limit(),
             writer_pool_size: default_writer_pool_size(),
@@ -495,10 +431,14 @@ pub(crate) fn default_ducklake_metadata_schema() -> String {
     "softprobe".to_string()
 }
 
+fn default_ducklake_extension_path() -> String {
+    "./target/ducklake-extension/ducklake.duckdb_extension".to_string()
+}
+
 fn default_data_inlining_row_limit() -> Option<u64> {
     // DuckLake-aligned default. Softprobe briefly used 10_000; that left too
     // many live spans in Postgres inlined chunks (slow session detail scans).
-    // AC-F7 wait-for-next-run: TWCS only merges live Parquet (no flush-before-TWCS).
+    // Maintenance does not force a flush before merge.
     // Override to Some(0) only when a fixture needs Parquet-per-batch.
     Some(500)
 }
@@ -661,7 +601,6 @@ fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredential
 #[cfg(test)]
 mod tests {
     use super::{resolve_write_timeout_seconds, Config, ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS};
-    use crate::compaction::TwcsPolicy;
     use std::sync::Mutex;
 
     static CONFIG_TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -677,27 +616,19 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_defaults_favor_frequent_compaction() {
+    fn maintenance_defaults_use_sql_pass_and_reader_grace() {
         let c = Config::default();
         assert_eq!(c.maintenance.interval_seconds, 60);
         assert!(c.maintenance.enabled);
-        assert_eq!(c.maintenance.target_file_size_bytes, 64 * 1024 * 1024);
-        assert_eq!(c.maintenance.open_day_file_cap, 2);
-        assert_eq!(c.maintenance.max_waves_per_table, 32);
-        assert_eq!(c.maintenance.max_compacted_files_per_wave, 32);
-        assert_eq!(c.maintenance.closed_day_max_compacted_files, 256);
-        assert_eq!(c.maintenance.closed_day_max_waves, 64);
-        assert_eq!(c.maintenance.max_merge_file_size_bytes, 8 * 1024 * 1024);
-        assert_eq!(TwcsPolicy::from(&c.maintenance), TwcsPolicy::default());
+        assert!(c.maintenance.metadata_enabled);
+        assert_eq!(c.maintenance.reader_safety_grace_seconds, 300);
     }
 
-    /// AC-N1 / T-N1: default snapshot retention is 60s, not 7d (or 1h).
+    /// Cleanup uses one configured safety grace for both DuckLake operations.
     #[test]
-    fn default_max_snapshot_age_seconds_is_one_minute() {
+    fn default_reader_safety_grace_is_five_minutes() {
         let c = Config::default();
-        assert_eq!(c.maintenance.max_snapshot_age_seconds, 60);
-        assert_ne!(c.maintenance.max_snapshot_age_seconds, 604800);
-        assert_ne!(c.maintenance.max_snapshot_age_seconds, 3600);
+        assert_eq!(c.maintenance.reader_safety_grace_seconds, 300);
         assert_eq!(c.ducklake.data_inlining_row_limit, Some(500));
     }
 

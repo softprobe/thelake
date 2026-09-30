@@ -1,6 +1,6 @@
 use crate::promotion::{PromotionColumn, PromotionDataType};
-use crate::sql::schema::{LOGS, SCORES, SCORE_CONFIGS, TRACES};
-use crate::storage::schema::variant::hot_map_columns;
+use crate::sql::schema::{base_table_ddl, LOGS, SCORES, SCORE_CONFIGS, TRACES};
+use arrow::datatypes::TimeUnit::Nanosecond;
 use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
 use std::sync::Arc;
 
@@ -13,27 +13,67 @@ fn timestamp_ns() -> DataType {
     DataType::Timestamp(TimeUnit::Nanosecond, None)
 }
 
-fn string_map() -> DataType {
-    DataType::Map(
-        Arc::new(Field::new(
-            "entries",
-            DataType::Struct(Fields::from(vec![
-                Field::new("key", utf8(), false),
-                Field::new("value", utf8(), true),
-            ])),
-            false,
-        )),
-        false,
-    )
+pub(crate) fn base_schema(table: &str) -> Schema {
+    let ddl = base_table_ddl(table).unwrap_or_else(|| panic!("missing SQL schema for {table}"));
+    let conn = duckdb::Connection::open_in_memory().expect("open DuckDB for SQL schema");
+    conn.execute_batch(ddl)
+        .expect("execute canonical table DDL");
+    let mut stmt = conn
+        .prepare(&format!("DESCRIBE {table}"))
+        .expect("prepare canonical schema description");
+    let mut rows = stmt.query([]).expect("describe canonical schema");
+    let mut fields = Vec::new();
+    while let Some(row) = rows.next().expect("read canonical column") {
+        let name: String = row.get(0).expect("column name");
+        let duck_type: String = row.get(1).expect("column type");
+        let nullable: String = row.get(2).expect("column nullability");
+        let data_type = match duck_type.to_ascii_uppercase().as_str() {
+            "VARCHAR" | "TEXT" => DataType::Utf8,
+            "BOOLEAN" => DataType::Boolean,
+            "TINYINT" | "SMALLINT" | "INTEGER" | "INT" => DataType::Int32,
+            "BIGINT" => DataType::Int64,
+            "FLOAT" | "REAL" | "DOUBLE" => DataType::Float64,
+            "TIMESTAMP_NS" | "TIMESTAMP_NANOSECONDS" => DataType::Timestamp(Nanosecond, None),
+            "MAP(VARCHAR, VARCHAR)" => DataType::Map(
+                Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::from(vec![
+                        Field::new("key", DataType::Utf8, false),
+                        Field::new("value", DataType::Utf8, true),
+                    ])),
+                    false,
+                )),
+                false,
+            ),
+            other => panic!("unsupported canonical SQL DuckDB type {other} in {table}"),
+        };
+        fields.push(Field::new(
+            &name,
+            data_type,
+            nullable.eq_ignore_ascii_case("YES"),
+        ));
+    }
+    Schema::new(fields)
 }
 
-/// Nullable hot MAP field; must be registered in [`hot_map_columns`].
-fn opt_hot_map(table: &str, name: &'static str) -> Field {
-    assert!(
-        hot_map_columns(table).contains(&name),
-        "column '{name}' must be listed in hot_map_columns(\"{table}\")"
-    );
-    opt(name, string_map())
+fn trace_base_schema() -> &'static Schema {
+    static SCHEMA: std::sync::OnceLock<Schema> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(|| base_schema(TRACES.name))
+}
+
+fn logs_base_schema() -> &'static Schema {
+    static SCHEMA: std::sync::OnceLock<Schema> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(|| base_schema(LOGS.name))
+}
+
+fn scores_base_schema() -> &'static Schema {
+    static SCHEMA: std::sync::OnceLock<Schema> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(|| base_schema(SCORES.name))
+}
+
+fn score_configs_base_schema() -> &'static Schema {
+    static SCHEMA: std::sync::OnceLock<Schema> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(|| base_schema(SCORE_CONFIGS.name))
 }
 
 fn promoted_fields(base: &[Field], columns: &[PromotionColumn]) -> Vec<Field> {
@@ -55,14 +95,6 @@ fn promoted_fields(base: &[Field], columns: &[PromotionColumn]) -> Vec<Field> {
         .collect()
 }
 
-fn req(name: &str, dt: DataType) -> Field {
-    Field::new(name, dt, false)
-}
-
-fn opt(name: &str, dt: DataType) -> Field {
-    Field::new(name, dt, true)
-}
-
 /// Raw sessions table - stores OTLP spans
 pub struct TraceTable;
 
@@ -76,52 +108,11 @@ impl TraceTable {
     }
 
     pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> Schema {
-        let mut fields = vec![
-            req("session_id", utf8()),
-            req("trace_id", utf8()),
-            req("span_id", utf8()),
-            opt("parent_span_id", utf8()),
-            req("app_id", utf8()),
-            opt("organization_id", utf8()),
-            opt("tenant_id", utf8()),
-            req("message_type", utf8()),
-            opt("span_kind", utf8()),
-            req("timestamp", timestamp_ns()),
-            opt("end_timestamp", timestamp_ns()),
-            opt_hot_map("traces", "attributes"),
-            opt_hot_map("traces", "resource_attributes"),
-            opt_hot_map("traces", "instrumentation_scope"),
-            opt_hot_map("traces", "links"),
-            // Keep nested event values in one JSON column. Nested timestamps
-            // are payload data, not partition keys, and DuckLake's inlined
-            // reader cannot safely materialize the former LIST<STRUCT/MAP>.
-            opt("events", utf8()),
-            opt("status_code", utf8()),
-            opt("status_message", utf8()),
-            opt("http_request_method", utf8()),
-            opt("http_request_path", utf8()),
-            opt("http_request_headers", utf8()),
-            opt("http_request_body", utf8()),
-            opt("http_response_status_code", DataType::Int32),
-            opt("http_response_headers", utf8()),
-            opt("http_response_body", utf8()),
-            // Product-hot nullable columns (#55). Append after core fields so
-            // Arrow builders that fill by legacy position stay aligned.
-            // Present before promotion apply so prefer-promoted COALESCE is safe.
-            opt("observation_type", utf8()),
-            opt("model_name", utf8()),
-            opt("model_provider", utf8()),
-            opt("user_id", utf8()),
-            opt("input_tokens", DataType::Int64),
-            opt("output_tokens", DataType::Int64),
-            opt("total_tokens", DataType::Int64),
-            opt("total_cost", DataType::Float64),
-            opt("session_attr_id", utf8()),
-            opt("service_name", utf8()),
-            // Softprobe assertion agent identity (auth-stamped; not client OTLP).
-            opt("agent_id", utf8()),
-            opt("agent_name", utf8()),
-        ];
+        let mut fields = trace_base_schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
         fields.extend(promoted_fields(&fields, columns));
         Schema::new(fields)
     }
@@ -136,24 +127,7 @@ impl ScoreTable {
     }
 
     pub fn schema() -> Schema {
-        Schema::new(vec![
-            req("score_id", utf8()),
-            req("timestamp", timestamp_ns()),
-            opt("trace_id", utf8()),
-            opt("span_id", utf8()),
-            opt("session_id", utf8()),
-            req("name", utf8()),
-            req("data_type", utf8()),
-            opt("numeric_value", DataType::Float64),
-            opt("string_value", utf8()),
-            opt("boolean_value", DataType::Boolean),
-            req("source", utf8()),
-            opt("comment", utf8()),
-            opt("config_id", utf8()),
-            opt("author_id", utf8()),
-            opt("metadata", string_map()),
-            opt("tenant_id", utf8()),
-        ])
+        scores_base_schema().clone()
     }
 }
 
@@ -166,20 +140,7 @@ impl ScoreConfigTable {
     }
 
     pub fn schema() -> Schema {
-        Schema::new(vec![
-            req("config_id", utf8()),
-            req("timestamp", timestamp_ns()),
-            req("name", utf8()),
-            req("data_type", utf8()),
-            opt("description", utf8()),
-            opt("min_value", DataType::Float64),
-            opt("max_value", DataType::Float64),
-            // JSON array string for categorical allowed values (simple DuckLake round-trip).
-            opt("categories", utf8()),
-            opt("author_id", utf8()),
-            opt("metadata", string_map()),
-            opt("tenant_id", utf8()),
-        ])
+        score_configs_base_schema().clone()
     }
 }
 
@@ -196,31 +157,11 @@ impl OtlpLogsTable {
     }
 
     pub fn schema_with_promoted_columns(columns: &[PromotionColumn]) -> Schema {
-        let mut fields = vec![
-            opt("session_id", utf8()),
-            // Loki's public log contract is nanoseconds since Unix epoch.
-            req("timestamp", timestamp_ns()),
-            opt("observed_timestamp", timestamp_ns()),
-            req("severity_number", DataType::Int32),
-            req("severity_text", utf8()),
-            req("body", utf8()),
-            opt_hot_map("logs", "attributes"),
-            opt_hot_map("logs", "resource_attributes"),
-            opt("trace_id", utf8()),
-            opt("span_id", utf8()),
-            // Authenticated workspace ownership is part of the stable base
-            // layout; product-hot columns remain append-only after it.
-            opt("tenant_id", utf8()),
-            // Product-hot nullable columns (#55). Append after core fields.
-            opt("logger_name", utf8()),
-            opt("service_name", utf8()),
-            opt("deployment_environment", utf8()),
-            opt("session_attr_id", utf8()),
-            opt("user_id", utf8()),
-            // Softprobe assertion agent identity (auth-stamped; not client OTLP).
-            opt("agent_id", utf8()),
-            opt("agent_name", utf8()),
-        ];
+        let mut fields = logs_base_schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
         fields.extend(promoted_fields(&fields, columns));
         Schema::new(fields)
     }

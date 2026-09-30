@@ -1308,27 +1308,14 @@ async fn inlined_data_stays_readable_across_maintenance() {
 
     // 4. A maintenance pass over the same catalog (production runs this
     //    hourly; the outage query came 23 minutes after one).
-    //    Compaction hard failures surface as ActionStatus::Failed in the
-    //    summary (run_once still returns Ok); the leased MaintenanceJob
-    //    treats Failed/Unsupported as job Err. Assert summary fields so a
-    //    no-op pass cannot look like success.
+    //    Merge and cleanup outcomes are persisted by the SQL script. A SQL
+    //    failure returns Err from run_once and fails this integration pass.
     let maintenance = state
         .engines
         .maintenance_engine()
         .await
         .expect("maintenance executor");
-    let summary = maintenance.run_once().await.expect("maintenance run");
-    // `table` is the bare lake table name (executor uses the inventory label).
-    let scores_result = summary
-        .tables
-        .iter()
-        .find(|t| t.table == "scores" || t.table.ends_with(".scores"))
-        .unwrap_or_else(|| panic!("no scores entry in maintenance summary: {summary:?}"));
-    assert!(
-        !scores_result.metadata.skipped,
-        "maintenance skipped metadata for scores -- the pass did nothing, so \
-         the assertions below prove nothing: {summary:?}"
-    );
+    maintenance.run_once().await.expect("maintenance run");
 
     // 5. Inlined read #2, after maintenance -- the production crash site.
     let req = Request::builder()

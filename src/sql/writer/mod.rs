@@ -1,9 +1,5 @@
 //! Writer-side SQL helpers (checked execute).
 
-pub fn create_from_parquet_sql(table: &str, select: &str, path: &str) -> String {
-    format!("CREATE TABLE IF NOT EXISTS {table} AS {select} FROM read_parquet('{path}') LIMIT 0;")
-}
-
 pub fn add_column_sql(table: &str, column: &str, duck_type: &str) -> String {
     format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {duck_type};")
 }

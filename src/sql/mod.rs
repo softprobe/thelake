@@ -23,13 +23,16 @@ pub mod writer;
 pub(crate) use bounds::ensure_fact_scan_uses_timestamp_pruning;
 #[cfg(test)]
 pub(crate) use bounds::ensure_sql_has_bare_timestamp_predicate;
-pub(crate) use bounds::{execute_batch_checked, execute_batch_for_parquet_ingest, prepare_checked};
+pub(crate) use bounds::{
+    execute_batch_checked, execute_batch_for_parquet_ingest, execute_maintenance_script,
+    prepare_checked,
+};
 pub use bounds::{query_window_from_exclusive_ns, QueryWindow, TimestampFilteredSql};
 pub use literal::{sql_string_literal, timestamp_ns_literal, timestamptz_literal};
 
 pub use schema::{
     fact_table_specs, insert_order_by, is_otlp_table, qualified_table_name, table_spec, TableSpec,
-    LOGS, ONE_CLOCK_PARTITION_BY, OTLP_TABLES, SCORES, SCORE_CONFIGS, TRACES,
+    LOGS, OTLP_TABLES, SCORES, SCORE_CONFIGS, TRACES,
 };
 
 #[cfg(test)]
@@ -166,12 +169,12 @@ mod locality_tests {
             "/session_summary/tests.rs",
             "/api/health.rs",
             "/storage/schema/ducklake_partition.rs",
+            "/storage/schema/otlp_layout.rs",
             "/storage/schema/variant.rs",
             "/storage/ducklake/attach.rs",
-            // One-time DuckLake table rebuild; its full rewrite is validated
-            // against a production catalog snapshot before release.
-            "/storage/ducklake/trace_event_migration.rs",
+            "/storage/ducklake/layout.rs",
             "/storage/ducklake/promotion.rs",
+            "/storage/ducklake/writer.rs",
             "/storage/duckdb/cache.rs",
             "/storage/duckdb/engine.rs",
             "/storage/ducklake/workspace_views.rs",

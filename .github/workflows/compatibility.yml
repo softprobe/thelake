@@ -115,7 +115,7 @@ jobs:
     if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     services:
       ducklake-postgres:
         image: postgres:17
@@ -157,6 +157,9 @@ jobs:
           docker info
           make check-compat-reference-pins
           docker pull "$(make --no-print-directory compat-reference-image SIGNAL=loki)"
+
+      - name: Download pinned DuckLake extension
+        run: make ducklake-extension
 
       - name: Run Loki differential gate
         run: make test-loki-diff
@@ -244,7 +247,7 @@ jobs:
     if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     services:
       ducklake-postgres:
         image: postgres:17
@@ -286,6 +289,9 @@ jobs:
           docker info
           make check-compat-reference-pins
           docker pull "$(make --no-print-directory compat-reference-image SIGNAL=tempo)"
+
+      - name: Download pinned DuckLake extension
+        run: make ducklake-extension
 
       - name: Run Tempo differential gate
         run: make test-tempo-diff
@@ -375,7 +381,7 @@ jobs:
     if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight, loki-diff, tempo-diff]
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
@@ -527,7 +533,7 @@ jobs:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight]
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
@@ -618,6 +624,9 @@ jobs:
         uses: actions/checkout@v5
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
+
+      - name: Download pinned DuckLake extension
+        run: make ducklake-extension
 
       - name: Initialize conformance evidence directory
         run: |
@@ -1226,7 +1235,7 @@ jobs:
     name: Fast PR compatibility lane
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
@@ -1258,6 +1267,9 @@ jobs:
           done
           docker compose logs ducklake-postgres
           exit 1
+
+      - name: Download pinned DuckLake extension
+        run: make ducklake-extension
 
       - name: Add cargo to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"

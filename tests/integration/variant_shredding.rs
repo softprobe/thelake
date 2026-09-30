@@ -541,14 +541,16 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
     let mut config = file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
 
-    // Fresh catalog: create leftover VARIANT table first (no DROP). Writer CREATE IF NOT EXISTS
-    // leaves it alone; ensure_hot_map_column_types must then fail fast (#55).
+    // Fresh catalog: create the complete canonical schema with legacy VARIANT
+    // attributes first (no DROP). Writer CREATE IF NOT EXISTS leaves it alone;
+    // the clean-cutover check must identify the incompatible hot-column type.
     {
         let conn = attach(&config.ducklake);
-        conn.execute_batch(
-            "CREATE TABLE traces AS SELECT NULL::VARCHAR AS tenant_id, '{}'::JSON::VARIANT AS attributes, '{}'::JSON::VARIANT AS resource_attributes;",
-        )
-            .expect("create leftover variant table");
+        let legacy_ddl = include_str!("../../src/sql/schema/traces.sql")
+            .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE")
+            .replace("MAP(VARCHAR, VARCHAR)", "VARIANT");
+        conn.execute_batch(&legacy_ddl)
+            .expect("create canonical table with leftover variant columns");
         let dtype: String = conn
             .query_row(
                 "SELECT column_type FROM (DESCRIBE traces) WHERE column_name = 'attributes';",
@@ -578,11 +580,7 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
         "error must mention leftover VARIANT: {message}"
     );
     assert!(
-        message.contains("Temporary MAP rollback") || message.contains("#55"),
-        "error must mention MAP rollback #55: {message}"
-    );
-    assert!(
-        message.contains("rebuild") || message.contains("migrate"),
-        "error should tell operators migration is required, got: {message}"
+        message.contains("clean cutover is required"),
+        "error should tell operators a clean cutover is required, got: {message}"
     );
 }

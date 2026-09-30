@@ -74,7 +74,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.ingest;
 
-    // Create multiple sessions with spans to test multi-session row groups
+    // Create multiple sessions with spans and verify session-filtered reads.
     let num_sessions = 5;
     let spans_per_session = 1000;
     let now = Utc::now();
@@ -202,9 +202,9 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
 
     // Local staged/WAL paths are not always listed via `IngestEngine` (flush goes to DuckLake writer).
     println!("✅ Flush completed (DuckLake flush-through)");
-    println!("✅ Querying back each session to verify row group isolation...");
+    println!("✅ Querying back each session to verify filtered results...");
 
-    // Query each session individually to verify row group isolation
+    // Query each session individually to verify the query predicates and results.
     let mut total_query_duration = std::time::Duration::ZERO;
 
     for (session_idx, session_id) in session_ids.iter().enumerate() {
@@ -497,7 +497,7 @@ async fn test_iceberg_writer_bulk_log_roundtrip() {
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.ingest;
 
-    // Create multiple sessions with logs to test multi-session row groups
+    // Create multiple sessions with logs and verify session-filtered reads.
     let test_type = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
     let (num_sessions, logs_per_session) = if test_type == "r2" {
         (2, 200)

@@ -8,8 +8,13 @@
 
 INSTALL httpfs;
 LOAD httpfs;
+{{#custom_ducklake}}
+LOAD '{{ducklake_extension_path}}';
+{{/custom_ducklake}}
+{{#repository_ducklake}}
 INSTALL ducklake;
 LOAD ducklake;
+{{/repository_ducklake}}
 INSTALL postgres;
 LOAD postgres;
 

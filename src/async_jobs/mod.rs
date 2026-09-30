@@ -113,8 +113,8 @@ pub fn spawn_runner(
                         continue;
                     }
                 };
-                // Sequential per scope by design (matches pre-lease maintenance): one
-                // TWCS/metadata pass at a time avoids compact∥expire races and unbounded
+                // Sequential per scope by design: one SQL maintenance pass at a time
+                // avoids merge/expire races and unbounded
                 // task fan-out. Cross-tenant parallelism is a later stage if needed.
                 for scope in scopes {
                     if !due.is_due(job.name(), &scope, job.interval()) {

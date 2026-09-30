@@ -178,26 +178,6 @@ impl PhysicalScope {
         ScopeId::from_encoded(encoded)
     }
 
-    /// Immutable rebuilder: same identity with a different Postgres metadata schema.
-    pub(crate) fn with_pg_namespace(&self, metadata_schema: impl Into<String>) -> Self {
-        Self::new(
-            self.metadata_path.clone(),
-            self.data_path.clone(),
-            self.catalog_alias.clone(),
-            metadata_schema,
-        )
-    }
-
-    /// Immutable rebuilder: same identity with a different warehouse URI/path.
-    pub(crate) fn with_warehouse_uri(&self, data_path: impl Into<String>) -> Self {
-        Self::new(
-            self.metadata_path.clone(),
-            data_path,
-            self.catalog_alias.clone(),
-            self.metadata_schema.clone(),
-        )
-    }
-
     /// Immutable rebuilder: same identity with a different catalog DSN.
     #[cfg(test)]
     pub(crate) fn with_catalog_dsn(&self, metadata_path: impl Into<String>) -> Self {

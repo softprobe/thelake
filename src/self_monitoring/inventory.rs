@@ -5,9 +5,7 @@
 
 use crate::api::AppState;
 use crate::compaction::maintenance_table_names;
-use crate::compaction::twcs::{open_day_files_for_merge, PartitionFileStats};
-use crate::sql::maintenance::{live_file_sizes_sql, partition_live_file_stats_sql};
-use chrono::{NaiveDate, Utc};
+use crate::sql::maintenance::live_file_sizes_sql;
 use serde_json::Value;
 use tracing::warn;
 
@@ -25,16 +23,6 @@ fn json_u64(v: &Value) -> u64 {
         Value::String(s) => s.parse().unwrap_or(0),
         _ => 0,
     }
-}
-
-fn json_date(v: &Value, fallback: NaiveDate) -> NaiveDate {
-    let s = match v {
-        Value::String(s) => s.as_str(),
-        _ => return fallback,
-    };
-    NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .or_else(|_| NaiveDate::parse_from_str(&s[..10.min(s.len())], "%Y-%m-%d"))
-        .unwrap_or(fallback)
 }
 
 /// Periodically refresh inventory + process gauges for cached engines.
@@ -84,11 +72,10 @@ async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
     let query = engine.query_engine();
     let catalog = query.catalog_alias().to_string();
     let tenant = engine.tenant_id().to_string();
-    let mut sqls: Vec<String> = Vec::with_capacity(tables.len() * 2);
-    for table in &tables {
-        sqls.push(partition_live_file_stats_sql(&catalog, table));
-        sqls.push(live_file_sizes_sql(&catalog, table));
-    }
+    let sqls: Vec<String> = tables
+        .iter()
+        .map(|table| live_file_sizes_sql(&catalog, table))
+        .collect();
     let sql_refs: Vec<&str> = sqls.iter().map(|s| s.as_str()).collect();
     let results = match query.execute_queries_uninstrumented(sql_refs).await {
         Ok(r) => r,
@@ -97,47 +84,10 @@ async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
             return;
         }
     };
-    let today = Utc::now().date_naive();
-    let mut idx = 0usize;
-    for table in tables {
-        let part_res = results.get(idx);
-        let size_res = results.get(idx + 1);
-        idx += 2;
+    for (idx, table) in tables.into_iter().enumerate() {
+        let size_res = results.get(idx);
         let mut live_files = 0usize;
         let mut live_bytes = 0u64;
-        let mut partitions: Vec<PartitionFileStats> = Vec::new();
-        match part_res {
-            Some(Ok(res)) => {
-                for row in &res.rows {
-                    if row.len() < 3 {
-                        continue;
-                    }
-                    let count = json_u64(&row[1]) as usize;
-                    let bytes = json_u64(&row[2]);
-                    live_files += count;
-                    live_bytes += bytes;
-                    partitions.push(PartitionFileStats {
-                        record_date: json_date(&row[0], today),
-                        live_file_count: count,
-                        total_bytes: bytes,
-                    });
-                }
-            }
-            Some(Err(err)) => {
-                warn!(tenant = %tenant, table, "inventory partition stats failed: {err}");
-            }
-            None => {}
-        }
-        let open_day = open_day_files_for_merge(&partitions, today, Some(live_files));
-        gauge_store::set_table_inventory(
-            &tenant,
-            table,
-            TableInventory {
-                live_files: live_files as u64,
-                live_bytes,
-                open_day_live_files: open_day as u64,
-            },
-        );
         let mut counts = [
             (BUCKET_LT_1MB, 0u64),
             (BUCKET_1_8MB, 0u64),
@@ -148,7 +98,10 @@ async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
             Some(Ok(res)) => {
                 for row in &res.rows {
                     if let Some(v) = row.first() {
-                        let b = size_bucket(json_u64(v));
+                        let bytes = json_u64(v);
+                        live_files += 1;
+                        live_bytes += bytes;
+                        let b = size_bucket(bytes);
                         for (name, c) in counts.iter_mut() {
                             if *name == b {
                                 *c += 1;
@@ -165,5 +118,13 @@ async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
         for (bucket, c) in counts {
             gauge_store::set_size_bucket(&tenant, table, bucket, c);
         }
+        gauge_store::set_table_inventory(
+            &tenant,
+            table,
+            TableInventory {
+                live_files: live_files as u64,
+                live_bytes,
+            },
+        );
     }
 }

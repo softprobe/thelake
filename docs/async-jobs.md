@@ -6,7 +6,7 @@ Every replica ingests. Ingest does not acquire a job lease. After trace commit, 
 
 | Work | Coordination | Why |
 |---|---|---|
-| Physical-scope maintenance (TWCS, expire, orphan cleanup) | Registry PostgreSQL lease with epoch fencing | Concurrent physical maintenance is unsafe |
+| Physical-scope SQL maintenance (compaction, snapshot expiration, scheduled-file cleanup) | Registry PostgreSQL lease with epoch fencing | Concurrent physical maintenance is unsafe |
 | Workspace session-summary rebuild | Registry PostgreSQL lease with epoch fencing | Periodic heavy scan should run once per workspace |
 | Session-summary reduce | Dirty-row claims with `FOR UPDATE SKIP LOCKED` and a claim TTL | UPSERT is repeatable; independent replicas can drain disjoint batches |
 | Ingest and dirty UPSERT | No lease | Ingest must not wait for job coordination |

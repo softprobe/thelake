@@ -115,7 +115,7 @@ bring_up_full_otlp() {
   export THELAKE_INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-60}"
   # External /proc sampling is the gate — keep self-mon off so it does not compete.
   export THELAKE_SELF_MONITORING_ENABLED="${THELAKE_SELF_MONITORING_ENABLED:-false}"
-  # TWCS/metadata compete for the same core under Astronomy Shop; off for the gate.
+  # Compaction competes for the same core under Astronomy Shop; off for the gate.
   export THELAKE_MAINTENANCE_ENABLED="${THELAKE_MAINTENANCE_ENABLED:-false}"
   # VARIANT→MAP is a breaking physical type; wipe catalog unless caller keeps data.
   export GRAFANA_KEEP_DATA="${GRAFANA_KEEP_DATA:-0}"

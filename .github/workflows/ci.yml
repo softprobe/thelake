@@ -94,6 +94,9 @@ jobs:
       - name: Start local test infra
         run: make setup
 
+      - name: Download pinned DuckLake extension
+        run: make ducklake-extension
+
       - name: Run isolated DuckLake E2E suite
         run: |
           make ensure-cache
@@ -139,6 +142,9 @@ jobs:
 
       - name: Start local test infra
         run: make setup
+
+      - name: Download pinned DuckLake extension
+        run: make ducklake-extension
 
       - name: Run shared DuckLake E2E suite
         run: |
