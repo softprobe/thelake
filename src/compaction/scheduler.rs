@@ -24,7 +24,6 @@ pub async fn start_maintenance_scheduler(
         jobs.push(Arc::new(PhysicalScopeMaintenanceJob::new(
             maintenance.clone(),
             wake,
-            compaction_enabled,
         )));
     }
 

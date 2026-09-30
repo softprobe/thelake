@@ -1036,6 +1036,17 @@ pub(crate) fn execute_batch_checked(conn: &duckdb::Connection, sql: &str) -> any
         .map_err(|e| anyhow::anyhow!("execute_batch failed: {e}"))
 }
 
+/// Execute the repository-owned, fixed maintenance script as one trusted batch.
+/// The script is generated from `src/sql/maintenance/maintenance.sql`; it does
+/// not accept client SQL and uses only escaped scope identifiers.
+pub(crate) fn execute_maintenance_script(
+    conn: &duckdb::Connection,
+    sql: &str,
+) -> anyhow::Result<()> {
+    conn.execute_batch(sql)
+        .map_err(|error| anyhow::anyhow!("maintenance SQL script failed: {error}"))
+}
+
 /// Writer-only path for its temporary Parquet input. Query APIs never receive
 /// this exemption, and logical DuckLake fact scans remain plan-checked.
 pub(crate) fn execute_batch_for_parquet_ingest(

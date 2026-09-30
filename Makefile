@@ -192,9 +192,10 @@ build-release: ensure-cache
 			-e THELAKE_CACHE_ROOT=/app/.cache-linux \
 			-e CI="$(CI)" \
 			"$(LINUX_BUILDER_IMAGE)" \
-			bash -lc 'apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev protobuf-compiler clang mold cmake build-essential >/dev/null && make build-release'; \
+			bash -lc 'apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev protobuf-compiler clang mold cmake ninja-build build-essential >/dev/null && make build-release'; \
 		exit 0; \
 	fi; \
+	bash scripts/build-ducklake-extension.sh; \
 	echo "cargo build --release --locked --bin thelake..."; \
 	cargo build --release --locked --bin thelake; \
 	mkdir -p "$(DIST_DIR)"; \
@@ -216,11 +217,12 @@ build-release: ensure-cache
 		install_name_tool -add_rpath @executable_path "$(DIST_DIR)/thelake" 2>/dev/null || true; \
 	fi; \
 	cp -f config.yaml "$(DIST_DIR)/config.yaml"; \
+	cp -f target/ducklake-extension/ducklake.duckdb_extension "$(DIST_DIR)/ducklake.duckdb_extension"; \
 	echo "staged $(DIST_DIR)/"
 
 # Internal: ensure dist/ ready for linux image packaging.
 _ensure-dist:
-	@test -x "$(DIST_DIR)/thelake" -a -f "$(DIST_DIR)/config.yaml" || $(MAKE) build-release
+	@test -x "$(DIST_DIR)/thelake" -a -f "$(DIST_DIR)/config.yaml" -a -f "$(DIST_DIR)/ducklake.duckdb_extension" || $(MAKE) build-release
 	@if [ ! -f "$(DIST_DIR)/libduckdb.so" ]; then \
 		echo "dist/ lacks libduckdb.so — TARGET_PLATFORM=linux/amd64 build-release..."; \
 		TARGET_PLATFORM=linux/amd64 $(MAKE) build-release; \
@@ -352,7 +354,10 @@ _export-minio-aws = \
 	export AWS_REGION=$${AWS_REGION:-us-east-1}
 
 # ---- tests ----
-test: ensure-cache
+ducklake-extension:
+	bash scripts/build-ducklake-extension.sh
+
+test: ensure-cache ducklake-extension
 	@echo "unit + lightweight tests (no e2e infra)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compat_phase0 -- --test-threads=1
 

@@ -17,28 +17,18 @@ query:
 
 maintenance:
   enabled: true
-  target_file_size_bytes: 67108864  # 64MB
-  interval_seconds: 60  # one job cadence (metadata + TWCS each pass)
+  interval_seconds: 60  # one SQL maintenance script per physical scope
   metadata_enabled: true
-  max_snapshot_age_seconds: 60
-  remove_orphan_files_enabled: true
-  remove_orphan_older_than_seconds: 60
-  open_day_file_cap: 2
-  max_waves_per_table: 32
-  max_compacted_files_per_wave: 32
-  closed_day_max_compacted_files: 256
-  closed_day_max_waves: 64
-  max_merge_file_size_bytes: 8388608  # 8MB — skip already-compacted files
+  reader_safety_grace_seconds: 300
 
 ducklake:
   metadata_path: "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake"
   data_path: "./warehouse/ducklake/data/"
   catalog_alias: "softprobe"
   metadata_schema: "softprobe"
-  # Default 500 (DuckLake-aligned). Softprobe briefly used 10000; that left too
-  # many live spans catalog-resident and slowed session detail scans.
-  # TWCS wait-for-next-run (AC-F7) merges live Parquet only — no flush every pass.
-  # Set 0 only for fixtures that need Parquet-per-batch.
+  extension_path: "./dist/ducklake.duckdb_extension"
+  # Default 500 (DuckLake-aligned). Set 0 only for fixtures that need
+  # Parquet-per-batch.
   data_inlining_row_limit: 500
   # Per-scope DuckDB writer connections (1..=16). Default 4.
   writer_pool_size: 4

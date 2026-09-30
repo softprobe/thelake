@@ -14,6 +14,7 @@ WORKDIR /app
 COPY dist/thelake /app/thelake
 COPY dist/libduckdb.so /usr/local/lib/libduckdb.so
 COPY dist/config.yaml /app/config.yaml
+COPY dist/ducklake.duckdb_extension /app/dist/ducklake.duckdb_extension
 
 RUN useradd -m -u 1000 softprobe && \
     chown -R softprobe:softprobe /app

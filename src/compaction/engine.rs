@@ -1,15 +1,6 @@
 //! Physical-scope maintenance facade.
 
-use crate::compaction::cleanup::{
-    cleanup_old_files_sql, count_returned_rows, expire_snapshots_sql,
-};
 use crate::compaction::maint_conn_pool::MaintenanceConnPool;
-use crate::compaction::merge::compact_table_incremental;
-use crate::compaction::status::{
-    orphan_metric_status, pass_compaction_ok, snapshot_metric_status, ActionResult, ActionStatus,
-    MaintenanceSummary, MetadataMaintenanceResult, TableMaintenanceResult,
-};
-use crate::compaction::watermark::WatermarkStore;
 use crate::config::Config;
 use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::storage::ducklake::PhysicalScope;
@@ -20,21 +11,12 @@ use deadpool_postgres::Pool;
 use duckdb::Connection;
 use std::sync::Arc;
 use tokio::sync::watch;
-use tracing::{info, warn};
 
 fn ensure_maintenance_lease_active(lease_lost: &watch::Receiver<bool>) -> Result<()> {
     if *lease_lost.borrow() {
         anyhow::bail!("maintenance lease lost")
     }
     Ok(())
-}
-
-pub(super) fn run_fenced_action<T>(
-    ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
-    action: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    ensure_active()?;
-    action()
 }
 
 /// Full ordered maintenance table list (traces / logs / scores).
@@ -79,45 +61,35 @@ impl MaintenanceEngine {
         Ok(Self::from_config(config, scope_registry))
     }
 
-    fn watermark_store(&self) -> WatermarkStore {
-        WatermarkStore::new(
-            self.scope_registry.pool().clone(),
-            self.scope_registry.registry_schema().to_string(),
-        )
-    }
-
     /// Validate every physical scope before the service reports readiness.
     pub(crate) async fn validate_startup(&self) -> Result<()> {
-        self.watermark_store().ensure_table().await?;
         for (scope_key, physical) in self.physical_scopes().await? {
             self.conn_pool
-                .with_conn(&physical, |_| Ok(()))
+                .with_conn(&physical, |conn| validate_newer_than_extension(conn))
                 .map_err(|error| anyhow!("maintenance open failed for {scope_key}: {error}"))?;
         }
         Ok(())
     }
 
-    pub async fn run_once(&self) -> Result<MaintenanceSummary> {
-        self.run_pass(true).await
+    pub async fn run_once(&self) -> Result<()> {
+        self.run_pass().await
     }
 
-    /// Metadata always; TWCS only when `run_compaction` is true.
-    pub async fn run_pass(&self, run_compaction: bool) -> Result<MaintenanceSummary> {
+    /// Run the SQL maintenance script for each physical scope.
+    pub async fn run_pass(&self) -> Result<()> {
         crate::self_monitoring::record_maintenance();
-        let mut results = Vec::new();
         let mut ensure_active = || Ok(());
         for (scope_key, physical) in self.physical_scopes().await? {
-            let mut part = self
-                .run_physical_scope_pass_with_fence(
-                    &scope_key,
-                    &physical,
-                    run_compaction,
-                    &mut ensure_active,
-                )
-                .await?;
-            results.append(&mut part);
+            self.run_physical_scope_pass_with_fence(
+                &scope_key,
+                &physical,
+                None,
+                None,
+                &mut ensure_active,
+            )
+            .await?;
         }
-        Ok(MaintenanceSummary { tables: results })
+        Ok(())
     }
 
     pub(crate) async fn resolve_scope(&self, scope_key: &str) -> Result<MaintenanceScope> {
@@ -243,28 +215,15 @@ impl MaintenanceEngine {
             .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))
     }
 
-    pub(crate) async fn ensure_physical_scope_bootstrap(
-        &self,
-        physical: &PhysicalScope,
-    ) -> Result<()> {
-        crate::session_summary::ensure_product_hot_attrs_for_scope(&self.scope_registry, physical)
-            .await?;
-        Ok(())
-    }
-
-    /// Resolve by maintenance key, bootstrap, then run one TWCS/metadata pass.
-    pub async fn run_pass_for_key(
-        &self,
-        scope_key: &str,
-        run_compaction: bool,
-    ) -> Result<Vec<TableMaintenanceResult>> {
+    /// Resolve by maintenance key, then run one SQL maintenance pass.
+    pub async fn run_pass_for_key(&self, scope_key: &str) -> Result<()> {
         let physical = self.lookup_physical_scope(scope_key).await?;
-        self.ensure_physical_scope_bootstrap(&physical).await?;
         let mut ensure_active = || Ok(());
         self.run_physical_scope_pass_with_fence(
             scope_key,
             &physical,
-            run_compaction,
+            None,
+            None,
             &mut ensure_active,
         )
         .await
@@ -273,326 +232,129 @@ impl MaintenanceEngine {
     pub(crate) async fn run_pass_for_key_fenced(
         &self,
         scope_key: &str,
-        run_compaction: bool,
+        lease_token: &crate::async_jobs::LeaseToken,
         lease_lost: watch::Receiver<bool>,
-    ) -> Result<Vec<TableMaintenanceResult>> {
+    ) -> Result<()> {
         let mut ensure_active = || ensure_maintenance_lease_active(&lease_lost);
+        let script_lease_lost = lease_lost.clone();
         ensure_active()?;
         let physical = self.lookup_physical_scope(scope_key).await?;
-        ensure_active()?;
-        self.ensure_physical_scope_bootstrap(&physical).await?;
         ensure_active()?;
         self.run_physical_scope_pass_with_fence(
             scope_key,
             &physical,
-            run_compaction,
+            Some(lease_token),
+            Some(script_lease_lost),
             &mut ensure_active,
         )
         .await
     }
 
-    /// One physical scope: TWCS (optional, newer_than-scoped) + metadata expire/orphan.
+    /// One SQL maintenance script for a physical scope.
     async fn run_physical_scope_pass_with_fence(
         &self,
         scope_key: &str,
         physical: &PhysicalScope,
-        run_compaction: bool,
+        lease_token: Option<&crate::async_jobs::LeaseToken>,
+        lease_lost: Option<watch::Receiver<bool>>,
         ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
-    ) -> Result<Vec<TableMaintenanceResult>> {
-        let pass_started = std::time::Instant::now();
-        let tables = maintenance_table_names();
-        let mut results = Vec::new();
-        let label = scope_key;
-        let run_started_at = Utc::now();
-        let files_before = count_parquet_files_under(physical.warehouse_uri());
-        let watermarks = self.watermark_store();
-        let mut compact_status: std::collections::HashMap<String, ActionStatus> =
-            std::collections::HashMap::new();
-
-        // Resolve watermarks before opening DuckDB so Connection is never held across await.
-        let mut fences: std::collections::HashMap<String, (chrono::DateTime<Utc>, bool)> =
-            std::collections::HashMap::new();
-        if self.config.maintenance.enabled && run_compaction {
-            for table in maintenance_table_names() {
-                ensure_active()?;
-                match watermarks
-                    .ensure_fence(scope_key, table, run_started_at)
-                    .await
-                {
-                    Ok(v) => {
-                        fences.insert(table.to_string(), v);
-                    }
-                    Err(err) => {
-                        warn!(
-                            "Compaction watermark failed for {}.{} ({}): {}",
-                            physical.pg_namespace(),
-                            table,
-                            label,
-                            err
-                        );
-                        compact_status.insert(table.to_string(), ActionStatus::Failed);
-                    }
-                }
-            }
-        }
-
-        let mut advance_tables: Vec<String> = Vec::new();
-        let open_outcome = self.conn_pool.with_conn(physical, |conn| {
-            if self.config.maintenance.enabled && run_compaction {
-                // AC-F7: do not flush catalog-inlined rows before TWCS.
-                for table in maintenance_table_names() {
-                    ensure_active()?;
-                    if compact_status.contains_key(table) {
-                        continue;
-                    }
-                    let status = if !self
-                        .ducklake_table_exists(conn, physical, table)
-                        .unwrap_or(false)
-                    {
-                        ActionStatus::Skipped
-                    } else if let Some((watermark, inserted)) = fences.get(table).copied() {
-                        if inserted {
-                            info!(
-                                "Compaction fence inserted for {}/{} at {} (no merge this pass)",
-                                scope_key, table, watermark
-                            );
-                            ActionStatus::Skipped
-                        } else {
-                            ensure_active()?;
-                            match compact_table_incremental(
-                                &self.config,
-                                conn,
-                                physical,
-                                table,
-                                scope_key,
-                                watermark,
-                                ensure_active,
-                            ) {
-                                Ok(outcome) => {
-                                    if outcome.drained {
-                                        advance_tables.push(table.to_string());
-                                    }
-                                    outcome.status
-                                }
-                                Err(err) => {
-                                    ensure_active()?;
-                                    warn!(
-                                        "Maintenance TWCS merge failed for {}.{} ({}): {}",
-                                        physical.pg_namespace(),
-                                        table,
-                                        label,
-                                        err
-                                    );
-                                    ActionStatus::Failed
-                                }
-                            }
-                        }
-                    } else {
-                        ActionStatus::Failed
-                    };
-                    compact_status.insert(table.to_string(), status);
-                }
-            }
-
-            self.run_scope_metadata_cleanup(conn, physical, label, scope_key, ensure_active)
-        });
-
-        let ((metadata, remove_orphan_files), cold, open_elapsed) = match open_outcome {
-            Ok(v) => v,
-            Err(err) => {
-                warn!("Maintenance open failed for scope {}: {}", label, err);
-                crate::self_monitoring::record_compaction_pass(label, false);
-                crate::self_monitoring::record_maintenance_step(
+    ) -> Result<()> {
+        let started = std::time::Instant::now();
+        ensure_active()?;
+        let lease_epoch = lease_token.map(|token| token.epoch).unwrap_or(0);
+        let sql = crate::sql::maintenance::render_maintenance_sql(
+            &crate::sql::maintenance::MaintenanceSqlParams {
+                registry_schema: self.scope_registry.registry_schema(),
+                scope_key,
+                lease_epoch,
+            },
+        );
+        let ((), cold, open_elapsed) = self.conn_pool.with_conn(physical, |conn| {
+            let lease_job = lease_token.map(|_| crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB);
+            let lease_holder = lease_token.map(|token| token.holder_id.as_str());
+            conn.execute(
+                &crate::sql::maintenance::scope_config_upsert_sql(
+                    self.scope_registry.registry_schema(),
+                ),
+                duckdb::params![
                     scope_key,
-                    crate::self_monitoring::maintenance_step::PASS_TOTAL,
-                    None,
-                    pass_started.elapsed(),
-                );
-                return Err(anyhow!("maintenance open failed for {label}: {err}"));
-            }
-        };
-        let step = if cold {
-            crate::self_monitoring::maintenance_step::OPEN_ATTACH
-        } else {
-            crate::self_monitoring::maintenance_step::OPEN_ATTACH_WARM
-        };
-        crate::self_monitoring::record_maintenance_step(scope_key, step, None, open_elapsed);
-
-        for table in advance_tables {
-            ensure_active()?;
-            if let Err(err) = watermarks.advance(scope_key, &table, run_started_at).await {
-                warn!(
-                    "Compaction watermark advance failed for {}/{}: {}",
-                    scope_key, table, err
-                );
-                compact_status.insert(table, ActionStatus::Failed);
-            }
-        }
-
-        let orphan_enabled = self.config.maintenance.metadata_enabled
-            && self.config.maintenance.remove_orphan_files_enabled;
-        if let Some(orphan_status) =
-            orphan_metric_status(orphan_enabled, remove_orphan_files.status)
-        {
-            crate::self_monitoring::record_orphan_remove(scope_key, orphan_status);
-        }
-        if let Some(snap_status) =
-            snapshot_metric_status(self.config.maintenance.metadata_enabled, metadata.skipped)
-        {
-            crate::self_monitoring::record_snapshot_expire(scope_key, snap_status);
-        }
-
-        let statuses: Vec<ActionStatus> = compact_status.values().copied().collect();
-        let pass_ok = if self.config.maintenance.enabled && run_compaction {
-            pass_compaction_ok(&statuses)
-        } else {
-            true
-        };
-        crate::self_monitoring::record_compaction_pass(scope_key, pass_ok);
-
-        for table in &tables {
-            let table_ident = format!("{}.{}", physical.pg_namespace(), table);
-            let compaction = ActionResult {
-                status: if self.config.maintenance.enabled && run_compaction {
-                    compact_status
-                        .get(*table)
-                        .copied()
-                        .unwrap_or(ActionStatus::Skipped)
-                } else {
-                    ActionStatus::Skipped
-                },
-            };
-            results.push(TableMaintenanceResult {
-                table: table_ident,
-                metadata: metadata.clone(),
-                compaction,
-                rewrite_manifests: ActionResult {
-                    status: ActionStatus::Unsupported,
-                },
-                remove_orphan_files: remove_orphan_files.clone(),
-            });
-        }
-        let files_after = count_parquet_files_under(physical.warehouse_uri());
-        warn_if_too_many_parquet_files(label, physical.warehouse_uri(), files_before, files_after);
+                    physical.attach_alias(),
+                    physical.pg_namespace(),
+                    self.config.maintenance.enabled,
+                    self.config.maintenance.metadata_enabled,
+                    self.config.maintenance.reader_safety_grace_seconds as i64,
+                    lease_job,
+                    lease_holder,
+                    lease_epoch,
+                ],
+            )?;
+            execute_maintenance_script(conn, &sql, lease_lost.as_ref())?;
+            Ok(())
+        })?;
+        crate::self_monitoring::record_maintenance_step(
+            scope_key,
+            if cold {
+                crate::self_monitoring::maintenance_step::OPEN_ATTACH
+            } else {
+                crate::self_monitoring::maintenance_step::OPEN_ATTACH_WARM
+            },
+            None,
+            open_elapsed,
+        );
+        ensure_active()?;
         crate::self_monitoring::record_maintenance_step(
             scope_key,
             crate::self_monitoring::maintenance_step::PASS_TOTAL,
             None,
-            pass_started.elapsed(),
+            started.elapsed(),
         );
-        Ok(results)
-    }
-
-    fn run_scope_metadata_cleanup(
-        &self,
-        conn: &Connection,
-        physical: &PhysicalScope,
-        label: &str,
-        scope_key: &str,
-        ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
-    ) -> Result<(MetadataMaintenanceResult, ActionResult)> {
-        let metadata = if self.config.maintenance.metadata_enabled {
-            let started = std::time::Instant::now();
-            let out = match self.ducklake_expire_snapshots(conn, physical, ensure_active) {
-                Ok(expired) => MetadataMaintenanceResult {
-                    expired_snapshots: expired,
-                    skipped: false,
-                },
-                Err(err) => {
-                    ensure_active()?;
-                    warn!("Maintenance metadata failed ({}): {}", label, err);
-                    MetadataMaintenanceResult {
-                        expired_snapshots: 0,
-                        skipped: true,
-                    }
-                }
-            };
-            crate::self_monitoring::record_maintenance_step(
-                scope_key,
-                crate::self_monitoring::maintenance_step::EXPIRE_SNAPSHOTS,
-                None,
-                started.elapsed(),
-            );
-            out
-        } else {
-            MetadataMaintenanceResult {
-                expired_snapshots: 0,
-                skipped: true,
-            }
-        };
-
-        let remove_orphan_files = if self.config.maintenance.metadata_enabled
-            && self.config.maintenance.remove_orphan_files_enabled
-        {
-            let started = std::time::Instant::now();
-            let out = match self.ducklake_cleanup_files(conn, physical, ensure_active) {
-                Ok(()) => ActionResult {
-                    status: ActionStatus::Completed,
-                },
-                Err(err) => {
-                    ensure_active()?;
-                    warn!("Maintenance orphan cleanup failed ({}): {}", label, err);
-                    ActionResult {
-                        status: ActionStatus::Failed,
-                    }
-                }
-            };
-            crate::self_monitoring::record_maintenance_step(
-                scope_key,
-                crate::self_monitoring::maintenance_step::ORPHAN_CLEANUP,
-                None,
-                started.elapsed(),
-            );
-            out
-        } else {
-            ActionResult {
-                status: ActionStatus::Skipped,
-            }
-        };
-        Ok((metadata, remove_orphan_files))
-    }
-
-    fn ducklake_table_exists(
-        &self,
-        conn: &Connection,
-        physical: &PhysicalScope,
-        table: &str,
-    ) -> Result<bool> {
-        let qualified = crate::storage::ducklake::ducklake_qualified_table_name(physical, table);
-        let sql = crate::sql::maintenance::table_exists_probe_sql(&qualified);
-        Ok(conn.execute_batch(&sql).is_ok())
-    }
-
-    fn ducklake_expire_snapshots(
-        &self,
-        conn: &Connection,
-        physical: &PhysicalScope,
-        ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
-    ) -> Result<usize> {
-        let age_seconds = self.config.maintenance.max_snapshot_age_seconds;
-        let dry_run_sql = expire_snapshots_sql(physical.attach_alias(), age_seconds, true);
-        let planned = count_returned_rows(conn, &dry_run_sql)?;
-        let sql = expire_snapshots_sql(physical.attach_alias(), age_seconds, false);
-        run_fenced_action(ensure_active, || {
-            crate::sql::execute_batch_checked(conn, &sql)
-        })?;
-        Ok(planned)
-    }
-
-    fn ducklake_cleanup_files(
-        &self,
-        conn: &Connection,
-        physical: &PhysicalScope,
-        ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
-    ) -> Result<()> {
-        let age = self.config.maintenance.remove_orphan_older_than_seconds;
-        // Only drain ducklake_files_scheduled_for_deletion — never delete_orphaned_files.
-        let sql = cleanup_old_files_sql(physical.attach_alias(), age);
-        run_fenced_action(ensure_active, || {
-            crate::sql::execute_batch_checked(conn, &sql)
-        })?;
         Ok(())
     }
+}
+
+fn execute_maintenance_script(
+    conn: &Connection,
+    sql: &str,
+    lease_lost: Option<&watch::Receiver<bool>>,
+) -> Result<()> {
+    let Some(lease_lost) = lease_lost else {
+        return crate::sql::execute_maintenance_script(conn, sql);
+    };
+
+    let interrupt = conn.interrupt_handle();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let lease_lost = lease_lost.clone();
+    let watcher_lease_lost = lease_lost.clone();
+    let watcher = std::thread::spawn(move || loop {
+        if *watcher_lease_lost.borrow() {
+            interrupt.interrupt();
+            break;
+        }
+        match finished_rx.recv_timeout(std::time::Duration::from_millis(25)) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    });
+
+    let result = crate::sql::execute_maintenance_script(conn, sql);
+    let _ = finished_tx.send(());
+    let _ = watcher.join();
+    if *lease_lost.borrow() {
+        anyhow::bail!("maintenance lease lost");
+    }
+    result
+}
+
+fn validate_newer_than_extension(conn: &Connection) -> Result<()> {
+    let supports_newer_than: bool = conn.query_row(
+        crate::sql::maintenance::newer_than_capability_sql(),
+        [],
+        |row| row.get(0),
+    )?;
+    if !supports_newer_than {
+        anyhow::bail!("loaded DuckLake extension lacks ducklake_merge_adjacent_files(newer_than)");
+    }
+    Ok(())
 }
 
 pub(crate) fn deduplicate_physical_scopes(
@@ -607,253 +369,4 @@ pub(crate) fn deduplicate_physical_scopes(
         }
     }
     physical
-}
-
-const PARQUET_FILE_WARN_THRESHOLD: usize = 200;
-
-fn count_parquet_files_under(data_path: &str) -> usize {
-    let root = std::path::Path::new(data_path);
-    if !root.exists() {
-        return 0;
-    }
-    let mut count = 0usize;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-                e.eq_ignore_ascii_case("parquet") || e.eq_ignore_ascii_case("parq")
-            }) {
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
-fn warn_if_too_many_parquet_files(
-    scope_label: &str,
-    data_path: &str,
-    files_before: usize,
-    files_after: usize,
-) {
-    if files_after >= PARQUET_FILE_WARN_THRESHOLD {
-        warn!(
-            "DuckLake scope {} still has {} parquet files under {} after maintenance (was {}); \
-             query scans may stay expensive — check ingest batching / compaction conflicts",
-            scope_label, files_after, data_path, files_before
-        );
-    } else if files_before > files_after {
-        info!(
-            "DuckLake scope {} parquet files {} → {} under {}",
-            scope_label, files_before, files_after, data_path
-        );
-    }
-}
-
-#[cfg(test)]
-impl MaintenanceEngine {
-    pub(crate) async fn run_physical_scope_pass(
-        &self,
-        scope_key: &str,
-        physical: &PhysicalScope,
-        run_compaction: bool,
-    ) -> Result<Vec<TableMaintenanceResult>> {
-        let mut ensure_active = || Ok(());
-        self.run_physical_scope_pass_with_fence(
-            scope_key,
-            physical,
-            run_compaction,
-            &mut ensure_active,
-        )
-        .await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    #[test]
-    fn maintenance_table_order_is_traces_logs_scores() {
-        assert_eq!(maintenance_table_names(), &["traces", "logs", "scores"]);
-    }
-
-    #[test]
-    fn physical_scope_maintenance_deduplicates_shared_bindings() {
-        let shared = PhysicalScope::new(
-            "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
-            "s3://warehouse/shared",
-            "softprobe",
-            "shared_scope",
-        );
-        let isolated = shared
-            .with_pg_namespace("isolated_scope")
-            .with_warehouse_uri("s3://warehouse/isolated");
-        let scopes = deduplicate_physical_scopes(vec![
-            ("workspace-a".into(), shared.clone()),
-            ("workspace-b".into(), shared),
-            ("workspace-c".into(), isolated),
-        ]);
-        assert_eq!(scopes.len(), 2);
-        assert!(scopes[0].0.starts_with("ducklake:"));
-        assert!(scopes[1].0.starts_with("ducklake:"));
-    }
-
-    #[tokio::test]
-    async fn maintenance_scope_keys_are_warehouse_deduped() {
-        let config = Config::default();
-        let resolver = crate::runtime_engine::DuckLakeScopeResolver::connect(&config)
-            .await
-            .expect("connect resolver");
-        let engine = MaintenanceEngine::new(&config, resolver)
-            .await
-            .expect("engine");
-        let keys = engine
-            .maintenance_scope_keys()
-            .await
-            .expect("maintenance keys");
-        assert!(!keys.is_empty());
-        assert!(
-            keys.iter().all(|k| k.starts_with("ducklake:")),
-            "maintenance keys must be physical tokens, got {keys:?}"
-        );
-        let workspace_keys = engine.workspace_scope_keys().await.expect("workspace keys");
-        assert!(!workspace_keys.is_empty());
-    }
-
-    #[test]
-    fn count_parquet_files_under_walks_nested_dirs() {
-        let tmp = TempDir::new().expect("temp");
-        let nested = tmp.path().join("metrics").join("record_date=2026-08-14");
-        fs::create_dir_all(&nested).unwrap();
-        fs::write(nested.join("a.parquet"), b"x").unwrap();
-        fs::write(nested.join("b.parq"), b"y").unwrap();
-        fs::write(nested.join("ignore.txt"), b"z").unwrap();
-        assert_eq!(count_parquet_files_under(tmp.path().to_str().unwrap()), 2);
-        assert_eq!(count_parquet_files_under("/no/such/path"), 0);
-    }
-
-    #[test]
-    fn lease_loss_during_one_action_blocks_the_next_action() {
-        use std::sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        };
-        let (lost_tx, lost_rx) = watch::channel(false);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let calls_during_first = Arc::clone(&calls);
-        let mut ensure_active = || ensure_maintenance_lease_active(&lost_rx);
-
-        run_fenced_action(&mut ensure_active, || {
-            calls_during_first.fetch_add(1, Ordering::SeqCst);
-            lost_tx.send(true).expect("signal lease loss");
-            Ok(())
-        })
-        .expect("first action started while lease valid");
-
-        let calls_during_second = Arc::clone(&calls);
-        let second = run_fenced_action(&mut ensure_active, || {
-            calls_during_second.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        });
-        assert!(
-            second.is_err(),
-            "lease loss blocks later maintenance action"
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn run_tenant_pass_attach_failure_is_err() {
-        let mut cfg = Config::default();
-        cfg.maintenance.enabled = false;
-        cfg.maintenance.metadata_enabled = false;
-        let resolver = crate::runtime_engine::DuckLakeScopeResolver::connect(&cfg)
-            .await
-            .expect("connect resolver");
-        let executor = MaintenanceEngine::new(&cfg, resolver)
-            .await
-            .expect("executor");
-        let blocker = tempfile::NamedTempFile::new().expect("blocker file");
-        let physical = PhysicalScope::from_ducklake(&cfg.ducklake)
-            .with_warehouse_uri(format!("{}/data/", blocker.path().display()));
-        let err = executor
-            .run_physical_scope_pass("t-attach-fail", &physical, false)
-            .await
-            .expect_err("attach must Err");
-        assert!(
-            err.to_string().contains("attach failed") || err.to_string().contains("open failed"),
-            "unexpected: {err}"
-        );
-    }
-
-    #[test]
-    fn null_watermark_path_never_emits_unscoped_merge_sql() {
-        use chrono::TimeZone;
-        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let sql = crate::sql::maintenance::ducklake_merge_adjacent_files_sql(
-            "softprobe",
-            "traces",
-            "main",
-            Some(ts),
-            Some(32),
-            Some(8 * 1024 * 1024),
-        );
-        assert!(sql.contains("newer_than"));
-    }
-
-    #[test]
-    fn scheduled_pass_advances_watermark_only_when_drained() {
-        let src = include_str!("engine.rs");
-        let production = src.split("#[cfg(test)]").next().unwrap();
-        assert!(
-            production.contains("if outcome.drained") && production.contains("advance_tables.push"),
-            "watermark advance must be gated on MergeOutcome.drained"
-        );
-        assert!(
-            production.contains("if inserted") && production.contains("no merge this pass"),
-            "fence insert must skip merge (no CALL) on bootstrap pass"
-        );
-        assert!(
-            !production.contains("MergeMode::Full"),
-            "scheduled physical pass must not use Full merge"
-        );
-        // Pooled borrow (`with_conn`) must finish before async watermark advance.
-        let borrow_end = production
-            .find("record_maintenance_step(scope_key, step, None, open_elapsed)")
-            .expect("must record open_attach after pooled borrow");
-        let advance_idx = production
-            .find(".advance(scope_key, &table, run_started_at)")
-            .expect("must advance watermarks after merge");
-        assert!(
-            borrow_end < advance_idx,
-            "maintenance DuckDB borrow must end before async watermark advance"
-        );
-        assert!(
-            production.contains("conn_pool.with_conn") && !production.contains("drop(conn)"),
-            "maintenance must use pooled with_conn, not open/drop per pass"
-        );
-    }
-
-    #[test]
-    fn missing_fence_maps_to_failed_not_unscoped_call() {
-        let src = include_str!("engine.rs");
-        let production = src.split("#[cfg(test)]").next().unwrap();
-        assert!(
-            production.contains("fences.get(table)") && production.contains("ActionStatus::Failed"),
-            "missing fence must fail closed"
-        );
-        // Only compact_table_incremental performs merges; no unscoped CALL helper.
-        assert!(production.contains("compact_table_incremental"));
-        assert!(!production.contains("MergeMode::Full"));
-    }
 }

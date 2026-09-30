@@ -470,28 +470,53 @@ async fn http_session_summary_writer_reducer_rebuild_and_maintenance_overlap() {
             rebuild_to,
             cfg.max_reduce_span_seconds
         ),
-        maintenance.run_pass(false),
+        maintenance.run_pass(),
         writer,
     );
     reduced.expect("overlapping reducer");
     rebuilt.expect("overlapping rebuild");
-    let maintained = maintained.expect("overlapping maintenance");
-    assert!(
-        !maintained.tables.is_empty(),
-        "maintenance should visit the physical scope"
+    maintained.expect("overlapping maintenance");
+
+    let registry = catalog_client(&state).await;
+    let maintenance_scope = registry
+        .query_one(
+            &format!(
+                "SELECT scope_key, compaction_enabled, metadata_enabled, reader_safety_grace_seconds \
+                 FROM {schema}.maintenance_scope_config WHERE lease_epoch = 0"
+            ),
+            &[],
+        )
+        .await
+        .expect("read maintenance configuration");
+    let scope_key: String = maintenance_scope.get(0);
+    assert!(!maintenance_scope.get::<_, bool>(1));
+    assert!(maintenance_scope.get::<_, bool>(2));
+    assert_eq!(
+        maintenance_scope.get::<_, i64>(3),
+        state
+            .engines
+            .config()
+            .maintenance
+            .reader_safety_grace_seconds as i64
     );
-    assert!(
-        maintained
-            .tables
-            .iter()
-            .all(|table| !table.metadata.skipped),
-        "metadata maintenance action must execute successfully: {:?}",
-        maintained
-            .tables
-            .iter()
-            .map(|table| (&table.table, table.metadata.skipped))
-            .collect::<Vec<_>>()
-    );
+    for (table_name, action, expected_status) in [
+        ("traces", "merge", "skipped"),
+        ("*", "expire_snapshots", "completed"),
+        ("*", "cleanup_scheduled_files", "completed"),
+    ] {
+        let status: String = registry
+            .query_one(
+                &format!(
+                    "SELECT status FROM {schema}.maintenance_outcome \
+                     WHERE scope_key = $1 AND table_name = $2 AND action = $3"
+                ),
+                &[&scope_key, &table_name, &action],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("read maintenance outcome {action}: {error}"))
+            .get(0);
+        assert_eq!(status, expected_status, "unexpected {action} outcome");
+    }
 
     // Drain any dirty row created while the first reducer/rebuild was in
     // flight. A write racing publication must remain visible to a later pass.

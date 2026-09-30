@@ -743,10 +743,8 @@ RETURNING physical_scope_id;"#,
                 .context("failed to initialize session summary tables")?;
         }
         drop(client);
-        // Product-hot activation is physical-scope-scoped and idempotent. Run
-        // it at scope initialization so summary jobs remain correct even when
-        // the periodic maintenance job is disabled; maintenance repeats the
-        // same guarded operation for recovery after restarts.
+        // Product-hot activation belongs to scope initialization so summary
+        // jobs remain correct even when periodic maintenance is disabled.
         crate::session_summary::ensure_product_hot_attrs_for_scope(self, scope).await?;
         Ok(())
     }

@@ -558,18 +558,18 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
         .maintenance_engine()
         .await
         .expect("shared maintenance engine");
-    let maintenance_summary = maintenance
-        .run_pass(false)
+    maintenance
+        .run_pass()
         .await
         .expect("shared physical maintenance pass");
-    let trace_maintenance_entries = maintenance_summary
-        .tables
-        .iter()
-        .filter(|table| table.table.ends_with(".traces"))
-        .count();
     assert_eq!(
-        trace_maintenance_entries, 1,
-        "one physical maintenance result for shared traces: {maintenance_summary:?}"
+        maintenance
+            .maintenance_scope_keys()
+            .await
+            .expect("scope keys")
+            .len(),
+        1,
+        "shared tenants must schedule one SQL pass per physical warehouse"
     );
 
     let mut raw_request = Request::builder()

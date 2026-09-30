@@ -75,7 +75,7 @@ fn bottleneck_duration_recorders_accept_bounded_labels() {
     );
     record_maintenance_step(
         "scope-a",
-        maintenance_step::PARTITION_STATS,
+        maintenance_step::PASS_TOTAL,
         Some("traces"),
         Duration::from_millis(900),
     );
@@ -123,20 +123,15 @@ fn maintenance_pass_records_step_durations() {
     assert!(
         engine_prod.contains("record_maintenance_step")
             && engine_prod.contains("OPEN_ATTACH")
-            && engine_prod.contains("EXPIRE_SNAPSHOTS")
-            && engine_prod.contains("ORPHAN_CLEANUP")
             && engine_prod.contains("PASS_TOTAL"),
-        "physical-scope pass must time open/attach, metadata, and total"
+        "physical-scope pass must time script invocation"
     );
-    let merge = include_str!("../compaction/merge.rs");
-    let merge_prod = merge.split("#[cfg(test)]").next().expect("production");
+    let maintenance_sql = include_str!("../sql/maintenance/maintenance.sql");
     assert!(
-        merge_prod.contains("record_maintenance_step")
-            && merge_prod.contains("PARTITION_STATS")
-            && merge_prod.contains("TWCS_CLOSED")
-            && merge_prod.contains("TWCS_OPEN")
-            && !merge_prod.contains("BACKLOG_PROBE"),
-        "TWCS path must time stats and wave kinds; backlog probe removed"
+        maintenance_sql.contains("ducklake_expire_snapshots")
+            && maintenance_sql.contains("ducklake_cleanup_old_files")
+            && !maintenance_sql.contains("ducklake_delete_orphaned_files"),
+        "snapshot and scheduled-file cleanup must be SQL-owned"
     );
 }
 

@@ -14,7 +14,6 @@ pub struct TableKey {
 pub struct TableInventory {
     pub live_files: u64,
     pub live_bytes: u64,
-    pub open_day_live_files: u64,
 }
 
 /// size_bucket → count
@@ -22,10 +21,6 @@ pub type SizeBuckets = DashMap<(String, String, String), u64>;
 
 pub static TABLE_INV: Lazy<DashMap<TableKey, TableInventory>> = Lazy::new(DashMap::new);
 pub static SIZE_BUCKETS: Lazy<SizeBuckets> = Lazy::new(DashMap::new);
-pub static COMPACTION_FILES_BEFORE: Lazy<DashMap<(String, String, String), u64>> =
-    Lazy::new(DashMap::new);
-pub static COMPACTION_FILES_AFTER: Lazy<DashMap<(String, String, String), u64>> =
-    Lazy::new(DashMap::new);
 
 pub static QUERY_WORKERS: AtomicUsize = AtomicUsize::new(0);
 pub static QUERY_WORKERS_BUSY: AtomicUsize = AtomicUsize::new(0);
@@ -74,10 +69,4 @@ pub fn set_size_bucket(tenant: &str, table: &str, bucket: &str, count: u64) {
         (tenant.to_string(), table.to_string(), bucket.to_string()),
         count,
     );
-}
-
-pub fn set_compaction_files(tenant: &str, table: &str, day_kind: &str, before: u64, after: u64) {
-    let k = (tenant.to_string(), table.to_string(), day_kind.to_string());
-    COMPACTION_FILES_BEFORE.insert(k.clone(), before);
-    COMPACTION_FILES_AFTER.insert(k, after);
 }

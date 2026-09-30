@@ -27,3 +27,59 @@ CREATE TABLE IF NOT EXISTS {{schema}}.thelake_job_lease (
 );
 CREATE INDEX IF NOT EXISTS thelake_job_lease_until
   ON {{schema}}.thelake_job_lease (lease_until);
+CREATE TABLE IF NOT EXISTS {{schema}}.maintenance_scope_config (
+  scope_key TEXT NOT NULL,
+  catalog_alias TEXT NOT NULL,
+  metadata_schema TEXT NOT NULL,
+  compaction_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  metadata_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  reader_safety_grace_seconds BIGINT NOT NULL DEFAULT 300 CHECK (reader_safety_grace_seconds >= 0),
+  lease_job TEXT,
+  lease_holder TEXT,
+  lease_epoch BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope_key, lease_epoch),
+  CHECK ((lease_epoch = 0 AND lease_job IS NULL AND lease_holder IS NULL)
+      OR (lease_epoch > 0 AND lease_job IS NOT NULL AND lease_holder IS NOT NULL))
+);
+ALTER TABLE {{schema}}.maintenance_scope_config
+  ADD COLUMN IF NOT EXISTS lease_epoch BIGINT;
+UPDATE {{schema}}.maintenance_scope_config SET lease_epoch = 0 WHERE lease_epoch IS NULL;
+ALTER TABLE {{schema}}.maintenance_scope_config ALTER COLUMN lease_epoch SET NOT NULL;
+DO $maintenance_config$
+DECLARE
+  primary_key_definition TEXT;
+BEGIN
+  SELECT pg_get_constraintdef(oid) INTO primary_key_definition
+  FROM pg_constraint
+  WHERE conrelid = '{{schema}}.maintenance_scope_config'::regclass
+    AND conname = 'maintenance_scope_config_pkey';
+  IF primary_key_definition = 'PRIMARY KEY (scope_key)' THEN
+    ALTER TABLE {{schema}}.maintenance_scope_config
+      DROP CONSTRAINT maintenance_scope_config_pkey;
+    primary_key_definition := NULL;
+  END IF;
+  IF primary_key_definition IS NULL THEN
+    ALTER TABLE {{schema}}.maintenance_scope_config
+      ADD CONSTRAINT maintenance_scope_config_pkey PRIMARY KEY (scope_key, lease_epoch);
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = '{{schema}}.maintenance_scope_config'::regclass
+      AND conname = 'maintenance_scope_config_check'
+  ) THEN
+    ALTER TABLE {{schema}}.maintenance_scope_config
+      DROP CONSTRAINT maintenance_scope_config_check;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = '{{schema}}.maintenance_scope_config'::regclass
+      AND conname = 'maintenance_scope_config_lease_check'
+  ) THEN
+    ALTER TABLE {{schema}}.maintenance_scope_config
+      ADD CONSTRAINT maintenance_scope_config_lease_check
+      CHECK ((lease_epoch = 0 AND lease_job IS NULL AND lease_holder IS NULL)
+          OR (lease_epoch > 0 AND lease_job IS NOT NULL AND lease_holder IS NOT NULL));
+  END IF;
+END
+$maintenance_config$;

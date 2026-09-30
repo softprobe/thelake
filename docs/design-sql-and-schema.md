@@ -175,7 +175,7 @@ score existence checks.
 - [x] D12 source gate on checked write paths; physical-plan scan gate on `execute_query_on_state` and direct fact reads
 - [ ] Production export validated across every physical scope before the coordinated cutover
 
-Ops flip of catalogs remains an operator step after verify. Residual infra SQL still outside `src/sql/` (attach/DDL, TWCS metadata probes, Postgres dirty claim, OTLP telemetry compilers) — locality allowlist tracks the backlog; D12 gate covers execute paths.
+Ops flip of catalogs remains an operator step after verify. Residual infra SQL still outside `src/sql/` (attach/DDL, Postgres dirty claim, OTLP telemetry compilers) — locality allowlist tracks the backlog; D12 gate covers execute paths.
 
 ---
 

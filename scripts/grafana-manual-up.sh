@@ -343,19 +343,16 @@ if [[ "$pg_ok" != 1 ]]; then
   exit 1
 fi
 
-# TWCS + metadata default on. Browser CI sets
-# THELAKE_MAINTENANCE_ENABLED=false — matching main's Grafana SLO profile
-# (no TWCS / snapshot expire / orphan cleanup under Astronomy Shop load).
+# SQL maintenance defaults on. Browser CI sets
+# THELAKE_MAINTENANCE_ENABLED=false to skip compaction while retaining cleanup.
 case "${THELAKE_MAINTENANCE_ENABLED:-true}" in
   0|false|FALSE|no|NO|off|OFF)
     MAINTENANCE_ENABLED=false
-    METADATA_ENABLED=false
-    ORPHAN_ENABLED=false
+    METADATA_ENABLED=true
     ;;
   *)
     MAINTENANCE_ENABLED=true
     METADATA_ENABLED=true
-    ORPHAN_ENABLED=true
     ;;
 esac
 # Default off: OTLP process-instrument export competes with demo OTLP + Grafana
@@ -387,23 +384,12 @@ query:
 ingest:
   flush_interval_seconds: $INGEST_FLUSH_INTERVAL_SECONDS
 
-# Demo: TWCS/metadata on by default. Override with THELAKE_MAINTENANCE_ENABLED.
+# Demo: SQL maintenance on by default. Override with THELAKE_MAINTENANCE_ENABLED.
 maintenance:
   enabled: ${MAINTENANCE_ENABLED}
-  target_file_size_bytes: 67108864
   interval_seconds: 300
   metadata_enabled: ${METADATA_ENABLED}
-  max_snapshot_age_seconds: 60
-  remove_orphan_files_enabled: ${ORPHAN_ENABLED}
-  remove_orphan_older_than_seconds: 60
-  open_day_file_cap: ${THELAKE_OPEN_DAY_FILE_CAP:-64}
-  max_waves_per_table: ${THELAKE_MAX_WAVES_PER_TABLE:-1}
-  max_compacted_files_per_wave: ${THELAKE_MAX_COMPACTED_FILES_PER_WAVE:-16}
-  # Defaults match MaintenanceConfig (256×64) so closed-day catch-up can finish;
-  # demo SLO may override lower via env.
-  closed_day_max_compacted_files: ${THELAKE_CLOSED_DAY_MAX_COMPACTED_FILES:-256}
-  closed_day_max_waves: ${THELAKE_CLOSED_DAY_MAX_WAVES:-64}
-  max_merge_file_size_bytes: 8388608
+  reader_safety_grace_seconds: 300
 
 ducklake:
   metadata_path: "host=$PG_HOST port=$PG_PORT dbname=ducklake user=ducklake password=ducklake"
@@ -411,8 +397,7 @@ ducklake:
   catalog_alias: "softprobe"
   metadata_schema: "$PG_SCHEMA"
   data_inlining_row_limit: 500
-  # Serialize DuckLake commits under demo load (parallel writers × layout txn
-  # multi-core scans of open-day small files pegged Softprobe CPU).
+  # Serialize DuckLake commits under demo load.
   writer_pool_size: ${THELAKE_WRITER_POOL_SIZE:-1}
 
 # Self-monitoring OTLP export. Browser CI may set

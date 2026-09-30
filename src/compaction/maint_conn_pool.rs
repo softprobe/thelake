@@ -36,6 +36,16 @@ impl MaintenanceConnPool {
         factory
             .attach(&conn, &access)
             .map_err(|e| anyhow!("maintenance DuckDB attach: {e}"))?;
+        let registry_dsn = config
+            .ducklake
+            .metadata_path
+            .strip_prefix("postgres:")
+            .unwrap_or(&config.ducklake.metadata_path);
+        let registry_target = crate::sql::literal::sql_string_literal(registry_dsn);
+        conn.execute_batch(&format!(
+            "ATTACH {registry_target} AS __thelake_registry (TYPE postgres);"
+        ))
+        .map_err(|e| anyhow!("maintenance registry attach: {e}"))?;
         Ok(conn)
     }
 

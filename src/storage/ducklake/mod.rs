@@ -27,5 +27,5 @@ pub(crate) use attach::{
     DuckLakeSessionKind,
 };
 pub use attach::{open_attached_from_config, open_attached_from_warehouse, AttachedSession};
-pub(crate) use util::{cache_httpfs_disabled_by_env, size_literal};
+pub(crate) use util::cache_httpfs_disabled_by_env;
 pub(crate) use workspace_views::validate_shared_workspace_schema;

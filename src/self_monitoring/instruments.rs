@@ -28,11 +28,6 @@ pub struct Instruments {
     pub query_duration_ms: Histogram<f64>,
     pub query_queue_wait_ms: Histogram<f64>,
     pub maintenance_passes: Counter<u64>,
-    pub compaction_passes: Counter<u64>,
-    pub compaction_waves: Counter<u64>,
-    pub compaction_duration_ms: Histogram<f64>,
-    pub orphan_remove: Counter<u64>,
-    pub snapshot_expire: Counter<u64>,
     pub slow_queries: Counter<u64>,
     /// Prom sample-scan plan: grain table + raw vs downsample vs live UNION.
     pub sample_scans: Counter<u64>,
@@ -49,7 +44,7 @@ pub struct Instruments {
     pub session_summary_dirty_depth: Gauge<u64>,
     /// Wall time of one leased `Job::run` (maintenance, session_summary, …).
     pub job_duration_ms: Histogram<f64>,
-    /// Wall time of one maintenance/TWCS sub-step (bounded `step` label).
+    /// Wall time of one SQL maintenance sub-step (bounded `step` label).
     pub maintenance_step_duration_ms: Histogram<f64>,
     /// DuckLake ingest commit (coalesce flush or flush-through write) wall time.
     pub ingest_commit_duration_ms: Histogram<f64>,
@@ -67,11 +62,8 @@ pub struct Instruments {
 pub mod maintenance_step {
     pub const OPEN_ATTACH: &str = "open_attach";
     pub const OPEN_ATTACH_WARM: &str = "open_attach_warm";
-    pub const PARTITION_STATS: &str = "partition_stats";
-    pub const TWCS_CLOSED: &str = "twcs_closed";
-    pub const TWCS_OPEN: &str = "twcs_open";
     pub const EXPIRE_SNAPSHOTS: &str = "expire_snapshots";
-    pub const ORPHAN_CLEANUP: &str = "orphan_cleanup";
+    pub const CLEANUP_SCHEDULED_FILES: &str = "cleanup_scheduled_files";
     pub const PASS_TOTAL: &str = "pass_total";
 }
 
@@ -126,18 +118,6 @@ fn register_observables(meter: &Meter) {
         })
         .build();
     let _ = meter
-        .u64_observable_gauge("thelake.table.open_day_live_files")
-        .with_callback(|observer| {
-            for entry in gauge_store::TABLE_INV.iter() {
-                let k = entry.key();
-                observer.observe(
-                    entry.value().open_day_live_files,
-                    &attrs(&[("tenant", &k.tenant), ("table", &k.table)]),
-                );
-            }
-        })
-        .build();
-    let _ = meter
         .u64_observable_gauge("thelake.table.files_by_size_bucket")
         .with_callback(|observer| {
             for entry in gauge_store::SIZE_BUCKETS.iter() {
@@ -153,31 +133,6 @@ fn register_observables(meter: &Meter) {
             }
         })
         .build();
-    let _ = meter
-        .u64_observable_gauge("thelake.compaction.files_before")
-        .with_callback(|observer| {
-            for entry in gauge_store::COMPACTION_FILES_BEFORE.iter() {
-                let (tenant, table, day_kind) = entry.key();
-                observer.observe(
-                    *entry.value(),
-                    &attrs(&[("tenant", tenant), ("table", table), ("day_kind", day_kind)]),
-                );
-            }
-        })
-        .build();
-    let _ = meter
-        .u64_observable_gauge("thelake.compaction.files_after")
-        .with_callback(|observer| {
-            for entry in gauge_store::COMPACTION_FILES_AFTER.iter() {
-                let (tenant, table, day_kind) = entry.key();
-                observer.observe(
-                    *entry.value(),
-                    &attrs(&[("tenant", tenant), ("table", table), ("day_kind", day_kind)]),
-                );
-            }
-        })
-        .build();
-
     let _ = meter
         .u64_observable_gauge("thelake.process.resident_memory_bytes")
         .with_callback(|observer| {
@@ -318,14 +273,6 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .with_unit("ms")
             .build(),
         maintenance_passes: meter.u64_counter("thelake.maintenance.passes").build(),
-        compaction_passes: meter.u64_counter("thelake.compaction.passes").build(),
-        compaction_waves: meter.u64_counter("thelake.compaction.waves").build(),
-        compaction_duration_ms: meter
-            .f64_histogram("thelake.compaction.duration")
-            .with_unit("ms")
-            .build(),
-        orphan_remove: meter.u64_counter("thelake.orphan.remove").build(),
-        snapshot_expire: meter.u64_counter("thelake.snapshot.expire").build(),
         slow_queries: meter.u64_counter("thelake.slow_queries").build(),
         sample_scans: meter
             .u64_counter("thelake.query.sample_scans")
@@ -375,7 +322,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
         maintenance_step_duration_ms: meter
             .f64_histogram("thelake.maintenance.step.duration")
             .with_description(
-                "Maintenance/TWCS sub-step wall time (open_attach, open_attach_warm, …)",
+                "SQL maintenance sub-step wall time (open_attach, open_attach_warm, …)",
             )
             .with_unit("ms")
             .build(),
@@ -563,48 +510,6 @@ pub fn record_maintenance() {
         .add(1, &attrs(&[("op", "maintenance"), ("status", "ok")]));
 }
 
-pub fn record_compaction_pass(tenant: &str, ok: bool) {
-    let Some(i) = instruments() else { return };
-    let status = if ok { "ok" } else { "error" };
-    i.compaction_passes.add(
-        1,
-        &attrs(&[("tenant", tenant), ("status", status), ("op", "compact")]),
-    );
-}
-
-pub fn record_compaction_wave(
-    tenant: &str,
-    table: &str,
-    day_kind: &str,
-    elapsed: Duration,
-    files_before: u64,
-    files_after: u64,
-) {
-    let Some(i) = instruments() else { return };
-    let a = attrs(&[
-        ("tenant", tenant),
-        ("table", table),
-        ("day_kind", day_kind),
-        ("op", "compact"),
-    ]);
-    i.compaction_waves.add(1, &a);
-    i.compaction_duration_ms
-        .record(elapsed.as_secs_f64() * 1000.0, &a);
-    gauge_store::set_compaction_files(tenant, table, day_kind, files_before, files_after);
-}
-
-pub fn record_orphan_remove(tenant: &str, status: &str) {
-    let Some(i) = instruments() else { return };
-    i.orphan_remove
-        .add(1, &attrs(&[("tenant", tenant), ("status", status)]));
-}
-
-pub fn record_snapshot_expire(tenant: &str, status: &str) {
-    let Some(i) = instruments() else { return };
-    i.snapshot_expire
-        .add(1, &attrs(&[("tenant", tenant), ("status", status)]));
-}
-
 pub fn record_slow_query(tenant: &str, sql_kind: &str) {
     let Some(i) = instruments() else { return };
     i.slow_queries.add(
@@ -684,7 +589,7 @@ pub fn record_job_duration(job: &str, scope: &str, status: &str, elapsed: Durati
     );
 }
 
-/// Wall time for one maintenance/TWCS sub-step. `step` must be a [`maintenance_step`] const.
+/// Wall time for one SQL maintenance sub-step. `step` must be a [`maintenance_step`] const.
 pub fn record_maintenance_step(scope: &str, step: &str, table: Option<&str>, elapsed: Duration) {
     let Some(i) = instruments() else { return };
     let table = table.unwrap_or("_");

@@ -18,6 +18,8 @@ const DUCKDB_INIT_SQL: &str = include_str!("sql/duckdb_init.sql");
 pub struct DuckDbInitParams<'a> {
     pub threads: i64,
     pub memory_limit: &'a str,
+    /// Pinned DuckLake build. `None` is reserved for isolated SQL/unit tests.
+    pub ducklake_extension_path: Option<&'a Path>,
     /// Query-worker native cache SETs (`enable_object_cache`, …).
     pub enable_query_tuning: bool,
     /// When set, INSTALL/LOAD `cache_httpfs` and point it at this directory.
@@ -29,6 +31,7 @@ impl<'a> DuckDbInitParams<'a> {
         Self {
             threads,
             memory_limit,
+            ducklake_extension_path: None,
             enable_query_tuning: false,
             cache_directory: None,
         }
@@ -38,6 +41,7 @@ impl<'a> DuckDbInitParams<'a> {
         Self {
             threads,
             memory_limit,
+            ducklake_extension_path: None,
             enable_query_tuning: true,
             cache_directory,
         }
@@ -50,10 +54,23 @@ pub fn render_duckdb_init(params: &DuckDbInitParams<'_>) -> String {
     let mut sql = DUCKDB_INIT_SQL.to_string();
     sql = render_section(&sql, "enable_query_tuning", params.enable_query_tuning);
     sql = render_section(&sql, "cache_directory", cache_dir_sql.is_some());
+    sql = render_section(
+        &sql,
+        "custom_ducklake",
+        params.ducklake_extension_path.is_some(),
+    );
+    sql = render_section(
+        &sql,
+        "repository_ducklake",
+        params.ducklake_extension_path.is_none(),
+    );
     sql = sql.replace("{{threads}}", &params.threads.to_string());
     sql = sql.replace("{{memory_limit}}", params.memory_limit);
     if let Some(dir) = &cache_dir_sql {
         sql = sql.replace("{{cache_directory}}", dir);
+    }
+    if let Some(path) = params.ducklake_extension_path {
+        sql = sql.replace("{{ducklake_extension_path}}", &escape_sql_path(path));
     }
     sql
 }

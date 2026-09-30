@@ -73,12 +73,9 @@ self_monitoring:
   export_interval_seconds: 60
 maintenance:
   enabled: true
-  target_file_size_bytes: 67108864
   interval_seconds: 3600
   metadata_enabled: true
-  max_snapshot_age_seconds: 604800
-  remove_orphan_files_enabled: true
-  remove_orphan_older_than_seconds: 3600
+  reader_safety_grace_seconds: 300
 ducklake:
   metadata_path: "host=127.0.0.1 port=5432 dbname=ducklake user=ducklake password=ducklake"
   data_path: "${WAREHOUSE}/"

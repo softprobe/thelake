@@ -11,6 +11,14 @@ Baseline: branch `v0.2`, commit `5e01c34`
 > The **VARIANT inlining (#42)** and **TWCS / incremental compaction** portions
 > remain the restore path for traces/logs bags and file maintenance.
 
+> **Compaction superseded (2026-09-30):** The TWCS planner, per-day rules,
+> native TWCS fork proposal, wave behavior, and orphan cleanup described below
+> are replaced by the SQL-owned maintenance script in
+> [`design.md`](design.md#maintenance) and
+> [`src/sql/maintenance/maintenance.sql`](../src/sql/maintenance/maintenance.sql).
+> The application scheduler only leases a physical scope and invokes that
+> script; SQL owns merge eligibility, watermarks, cleanup, and outcomes.
+
 **Application interim (2026-09-10 / [#55](https://github.com/softprobe/thelake/issues/55)):** Softprobe temporarily stores hot bags as `MAP(VARCHAR, VARCHAR)` and defaults `data_inlining_row_limit=500` (wait-for-next-run TWCS). This design remains the **restore path** for VARIANT shredding once external-catalog VARIANT inlining works. Stale baseline notes below that assume live VARIANT hot columns describe the pre-#55 / restore target state.
 
 ## Decision summary

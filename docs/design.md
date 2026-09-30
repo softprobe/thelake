@@ -148,25 +148,25 @@ scopes.
 #### Cardinality rules
 
 Metric attributes only: `tenant`, `signal` (`logs|traces|none`),
-`op` (`ingest|write|query|maintenance|export|compact|job|session_summary`),
+`op` (`ingest|write|query|maintenance|job|session_summary`),
 `status` (`ok|error|panic`), `sql_kind` (fixed enum),
 `app` (OTLP `service.name`, max 64 → `_other`), `table` (maintenance allowlist
-or `_` when N/A), `day_kind` (`open|closed`),
+or `_` when N/A),
 `size_bucket` (`lt_1mb|1_8mb|8_64mb|gte_64mb`), `job_name` / `scope` /
 `outcome` / `reason` (async job leases and skips; `job_name` not `job` so
 Prometheus does not collide with resource `job` from `service.name`), `step`
-(maintenance: `open_attach`, `open_attach_warm`, `partition_stats`,
-`twcs_closed`, `twcs_open`, `expire_snapshots`, `orphan_cleanup`, `pass_total`;
-session_summary.reduce: `claim`, `aggregate`, `upsert`, `ack`, `total`),
+(maintenance: `open_attach`, `open_attach_warm`, `expire_snapshots`,
+`cleanup_scheduled_files`, `pass_total`; session_summary.reduce: `claim`,
+`aggregate`, `upsert`, `ack`, `total`),
 `path` (`coalesce|flush_through` on ingest commit).
 Resource: `service.name=thelake`.
 
 Latency instrument names use `*_duration_milliseconds_{sum,count}` style.
 
-Orphan remove and snapshot expire counters are emitted **only when the action is
-enabled/attempted** (`maintenance.metadata_enabled` / `remove_orphan_files_enabled`).
-Disabled passes mint nothing (never `status=ok`). Attempted success → `ok`;
-attempted failure (`ActionStatus::Failed`) → `error`.
+Snapshot expiration and scheduled-file cleanup outcomes are returned by the SQL
+maintenance script and persisted per physical scope. Cleanup runs when
+`maintenance.metadata_enabled` is enabled; disabling compaction does not skip
+cleanup. Routine maintenance does not delete unscheduled orphan files.
 
 #### Instrument catalog (locked)
 
@@ -180,14 +180,8 @@ attempted failure (`ActionStatus::Failed`) → `error`.
 | `thelake_query_duration_milliseconds_{sum,count}` | hist | tenant, sql_kind |
 | `thelake_query_queue_wait_milliseconds_{sum,count}` | hist | tenant, sql_kind |
 | `thelake_slow_queries_total` | counter | tenant, sql_kind |
-| `thelake_table_live_files` / `live_bytes` / `open_day_live_files` | gauge | tenant, table |
+| `thelake_table_live_files` / `live_bytes` | gauge | tenant, table |
 | `thelake_table_files_by_size_bucket` | gauge | tenant, table, size_bucket |
-| `thelake_compaction_passes_total` | counter | tenant, status |
-| `thelake_compaction_waves_total` | counter | tenant, table, day_kind |
-| `thelake_compaction_duration_milliseconds_{sum,count}` | hist | tenant, table, day_kind |
-| `thelake_compaction_files_before` / `files_after` | gauge | tenant, table, day_kind |
-| `thelake_orphan_remove_total` | counter | tenant, status |
-| `thelake_snapshot_expire_total` | counter | tenant, status |
 | `thelake_job_duration_milliseconds_{sum,count}` | hist | job_name, scope, status |
 | `thelake_job_skips_total` | counter | job_name, scope, reason |
 | `thelake_maintenance_step_duration_milliseconds_{sum,count}` | hist | scope, step, table |
@@ -303,18 +297,24 @@ interactive workflow.
 
 ## Maintenance
 
-The scheduler runs when compaction or metadata maintenance is enabled
-(default interval **300s**). It walks the default DuckLake scope and all
-registered tenant scopes. Merge calls retry through serialization conflicts (8
-attempts × 2 waves). After each scope pass, Softprobe logs when Parquet
-file counts remain high (≥200).
+The leased async scheduler invokes one SQL maintenance script per physical
+DuckLake scope when compaction or metadata maintenance is enabled (default
+interval **300s**). The script reads its configuration and per-table watermarks
+from the PostgreSQL registry. It advances a watermark only after its merge
+succeeds, then expires snapshots and cleans files scheduled for deletion after
+all eligible table merges succeed. `reader_safety_grace_seconds` protects
+queries that still read expired snapshots.
 
-For `traces`, `logs`, and `scores`, it can:
+For existing `traces`, `logs`, and `scores` tables, it can:
 
-- set the configured target file size;
-- call `ducklake_merge_adjacent_files`;
+- call `ducklake_merge_adjacent_files` for files created since that table's
+  last successful watermark (or all existing files during its bootstrap pass);
 - expire old DuckLake snapshots;
-- clean old DuckLake files.
+- clean files already scheduled for deletion.
+
+DuckLake applies each table's persisted day partition, sort order, output size,
+compression, and row-group layout while merging. Routine maintenance does not
+delete orphan files.
 
 Operators should still batch OTLP upstream (collector `batch` processor) so
 flush-through ingest does not create one tiny file per export.
