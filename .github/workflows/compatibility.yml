@@ -158,6 +158,9 @@ jobs:
           make check-compat-reference-pins
           docker pull "$(make --no-print-directory compat-reference-image SIGNAL=loki)"
 
+      - name: Build pinned DuckLake extension
+        run: make ducklake-extension
+
       - name: Run Loki differential gate
         run: make test-loki-diff
 
@@ -286,6 +289,9 @@ jobs:
           docker info
           make check-compat-reference-pins
           docker pull "$(make --no-print-directory compat-reference-image SIGNAL=tempo)"
+
+      - name: Build pinned DuckLake extension
+        run: make ducklake-extension
 
       - name: Run Tempo differential gate
         run: make test-tempo-diff
@@ -1258,6 +1264,9 @@ jobs:
           done
           docker compose logs ducklake-postgres
           exit 1
+
+      - name: Build pinned DuckLake extension
+        run: make ducklake-extension
 
       - name: Add cargo to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
