@@ -30,7 +30,6 @@ runs:
           mold \
           pkg-config \
           libssl-dev \
-          ninja-build \
           protobuf-compiler \
           python3 \
           ripgrep \

@@ -24,7 +24,7 @@ SHELL := /bin/bash
 	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
-	ducklake-extension test-ducklake-extension \
+	ducklake-extension \
 	test-grafana-static test-grafana-system test-grafana-browser test-compat \
 	stress test-deploy seed-lake bench-llm-seeded test-perf-helpers \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
@@ -193,7 +193,7 @@ build-release: ensure-cache
 			-e THELAKE_CACHE_ROOT=/app/.cache-linux \
 			-e CI="$(CI)" \
 			"$(LINUX_BUILDER_IMAGE)" \
-			bash -lc 'apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev protobuf-compiler clang mold cmake ninja-build build-essential >/dev/null && make build-release'; \
+			bash -lc 'apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev protobuf-compiler clang mold cmake build-essential >/dev/null && make build-release'; \
 		exit 0; \
 	fi; \
 	bash scripts/download-ducklake-extension.sh; \
@@ -358,10 +358,8 @@ _export-minio-aws = \
 ducklake-extension:
 	bash scripts/download-ducklake-extension.sh
 
-test-ducklake-extension:
+test: ensure-cache ducklake-extension
 	bash tests/scripts/ducklake_extension_download_test.sh
-
-test: ensure-cache ducklake-extension test-ducklake-extension
 	@echo "unit + lightweight tests (no e2e infra)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compat_phase0 -- --test-threads=1
 
