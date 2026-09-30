@@ -6,9 +6,13 @@ use super::{
 };
 use crate::config::Config;
 use crate::promotion::{BusinessTableManifest, TelemetryColumnsManifest, TelemetryTable};
-use crate::sql::schema::{insert_order_by, is_otlp_table, LOGS, SCORES, SCORE_CONFIGS, TRACES};
+use crate::sql::schema::{
+    base_table_ddl, insert_order_by, is_otlp_table, LOGS, SCORES, SCORE_CONFIGS, TRACES,
+};
 use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
-use crate::storage::schema::tables::{OtlpLogsTable, ScoreConfigTable, ScoreTable, TraceTable};
+#[cfg(test)]
+use crate::storage::schema::tables::TraceTable;
+use crate::storage::schema::tables::{ScoreConfigTable, ScoreTable};
 use crate::storage::schema::variant::parquet_select_for_table;
 use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
@@ -20,16 +24,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use tracing::{info, warn};
+use tracing::info;
 
 static RESET_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
 
-use super::attach::{ducklake_qualified_table_name, ducklake_set_option_scope_for_qualified};
-use super::util::{
-    ensure_hot_map_column_types, ensure_log_timestamp_precision, ensure_score_timestamp_precision,
-    ensure_trace_events_json, ensure_trace_fidelity_columns, ensure_trace_timestamp_precision,
-    escape_sql_literal, size_literal,
-};
+use super::attach::ducklake_qualified_table_name;
+use super::util::escape_sql_literal;
 
 pub(super) struct TableReadinessRegistry {
     ready_tables: RwLock<HashSet<String>>,
@@ -309,7 +309,7 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    /// DuckDB type for `ALTER TABLE … ADD COLUMN` evolution.
+    /// DuckDB type for promotion columns added from the active manifests.
     ///
     /// MAP bags must not fall through to `VARCHAR`. LIST columns (e.g. events)
     /// are owned by fidelity helpers — refuse here rather than invent a wrong type.
@@ -341,131 +341,96 @@ impl DuckLakeWriter {
         scope: &PhysicalScope,
         table_name: &str,
         custom_schema: Option<&Arc<Schema>>,
-        target_file_size_bytes: usize,
     ) -> Result<()> {
         let qualified_table = ducklake_qualified_table_name(scope, table_name);
+        let ddl = base_table_ddl(table_name)
+            .ok_or_else(|| anyhow!("unsupported table for DuckLake ensure: {table_name}"))?
+            .replacen(
+                &format!("CREATE TABLE IF NOT EXISTS {table_name}"),
+                &format!("CREATE TABLE IF NOT EXISTS {qualified_table}"),
+                1,
+            );
+        conn.execute_batch(&ddl)
+            .map_err(|error| anyhow!("DuckLake base DDL failed for {qualified_table}: {error}"))?;
 
-        let (arrow_schema, select_prefix) = match table_name {
-            "traces" => (
-                custom_schema
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(TraceTable::schema())),
-                parquet_select_for_table(table_name),
-            ),
-            "logs" => (
-                custom_schema
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(OtlpLogsTable::schema())),
-                parquet_select_for_table(table_name),
-            ),
-            "scores" => (
-                custom_schema
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(ScoreTable::schema())),
-                parquet_select_for_table(table_name),
-            ),
-            name if name == ScoreConfigTable::table_name() => (
-                custom_schema
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(ScoreConfigTable::schema())),
-                parquet_select_for_table(table_name),
-            ),
-            _ => {
-                if let Some(schema) = custom_schema {
-                    (Arc::clone(schema), parquet_select_for_table(table_name))
-                } else {
+        // IF NOT EXISTS preserves a live table. Verify the live base types so
+        // an old physical schema cannot silently survive the clean cutover.
+        let found = crate::storage::schema::describe_table_columns(conn, &qualified_table)?;
+        let base = crate::storage::schema::tables::base_schema(table_name);
+        let base_names = base
+            .fields()
+            .iter()
+            .map(|field| field.name().to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        for field in base.fields() {
+            let actual = found
+                .get(&field.name().to_ascii_lowercase())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "base column {} is missing from {qualified_table}; clean cutover is required",
+                        field.name()
+                    )
+                })?;
+            let expected = Self::arrow_field_to_duck_add_type(field)?;
+            if normalize_duck_type(actual) != normalize_duck_type(expected) {
+                return Err(anyhow!(
+                    "base column {} on {qualified_table} has type {actual}, expected {expected}; clean cutover is required",
+                    field.name()
+                ));
+            }
+        }
+
+        // Only active promotion manifests may extend the SQL-owned base.
+        if let Some(schema) = custom_schema {
+            let promoted_names = schema
+                .fields()
+                .iter()
+                .map(|field| field.name().to_ascii_lowercase())
+                .filter(|name| !base_names.contains(name))
+                .collect::<HashSet<_>>();
+            for name in found.keys() {
+                if !base_names.contains(name) && !promoted_names.contains(name) {
                     return Err(anyhow!(
-                        "unsupported table for DuckLake ensure: {table_name}"
+                        "runtime column {name} on {qualified_table} is absent from the active promotion schema"
                     ));
                 }
             }
-        };
-
-        let batch = RecordBatch::new_empty(arrow_schema.clone());
-        let temp_path = Self::write_temp_parquet(table_name, &[batch])?;
-        let escaped_path = escape_sql_literal(temp_path.to_string_lossy().as_ref());
-        let ddl = crate::sql::writer::create_from_parquet_sql(
-            &qualified_table,
-            &select_prefix,
-            &escaped_path,
-        );
-        let ddl_res = conn.execute_batch(&ddl);
-        let _ = std::fs::remove_file(&temp_path);
-        ddl_res
-            .map_err(|e| anyhow!("DuckLake table creation failed for {qualified_table}: {e}"))?;
-
-        // Evolve existing tables: ADD any columns present in the Arrow schema
-        // (base + product-hot + promotion custom) that the live table lacks.
-        let found = crate::storage::schema::describe_table_columns(conn, &qualified_table)?;
-        for field in arrow_schema.fields() {
-            if !found.contains_key(&field.name().to_ascii_lowercase()) {
-                // The trace events column is owned by its JSON schema helper.
-                if (table_name == "traces" && field.name() == "events")
-                    || matches!(field.data_type(), ::arrow::datatypes::DataType::List(_))
-                {
+            for field in schema.fields() {
+                if let Some(actual) = found.get(&field.name().to_ascii_lowercase()) {
+                    if !base_names.contains(&field.name().to_ascii_lowercase()) {
+                        let expected = Self::arrow_field_to_duck_add_type(field)?;
+                        if normalize_duck_type(actual) != normalize_duck_type(expected) {
+                            return Err(anyhow!(
+                                "promoted column {} on {qualified_table} has type {actual}, expected {expected}",
+                                field.name()
+                            ));
+                        }
+                    }
                     continue;
                 }
+                if base_names.contains(&field.name().to_ascii_lowercase()) {
+                    return Err(anyhow!(
+                        "base column {} is missing from {qualified_table}; clean cutover is required",
+                        field.name()
+                    ));
+                }
+                // Custom schemas arrive only from active promotion manifests.
                 let duck_type = Self::arrow_field_to_duck_add_type(field)?;
-                let alter_sql = crate::sql::writer::add_column_sql(
+                conn.execute_batch(&crate::sql::writer::add_column_sql(
                     &qualified_table,
                     &super::util::quote_duckdb_ident(field.name()),
                     duck_type,
-                );
-                conn.execute_batch(&alter_sql).map_err(|e| {
-                    anyhow!(
-                        "failed to add column {} to {}: {}",
-                        field.name(),
-                        qualified_table,
-                        e
-                    )
+                ))
+                .map_err(|error| {
+                    anyhow!("failed to apply promoted column {}: {error}", field.name())
                 })?;
             }
         }
 
-        if table_name == "traces" {
-            ensure_trace_fidelity_columns(conn, &qualified_table)?;
-            ensure_trace_events_json(conn, &qualified_table)?;
-        }
-        ensure_hot_map_column_types(conn, &qualified_table, table_name)?;
-        if table_name == "traces" {
-            ensure_trace_timestamp_precision(conn, &qualified_table)?;
-        }
-        if table_name == "logs" {
-            ensure_log_timestamp_precision(conn, &qualified_table)?;
-        }
-        if matches!(table_name, "scores" | "score_configs") {
-            ensure_score_timestamp_precision(conn, &qualified_table)?;
-        }
-        // traces / logs / scores — any OTLP layout table (D10).
         if is_otlp_table(table_name) {
             ensure_otlp_table_partition_sort(conn, &qualified_table)?;
+            super::layout::apply_otlp_layout_profile(conn, scope, table_name)?;
         }
-
-        let scope_opt = ducklake_set_option_scope_for_qualified(&qualified_table);
-        let opt_size = format!(
-            "CALL {}.set_option('target_file_size', '{}', {});",
-            scope.attach_alias(),
-            size_literal(target_file_size_bytes),
-            scope_opt
-        );
-        let opt_hive = format!(
-            "CALL {}.set_option('hive_file_pattern', true, {});",
-            scope.attach_alias(),
-            scope_opt
-        );
-        if let Err(err) = conn.execute_batch(&opt_size) {
-            warn!(
-                "DuckLake target_file_size set_option skipped on ensure: {}",
-                err
-            );
-        }
-        if let Err(err) = conn.execute_batch(&opt_hive) {
-            warn!(
-                "DuckLake hive_file_pattern set_option skipped on ensure: {}",
-                err
-            );
-        }
-
         Ok(())
     }
 
@@ -486,18 +451,11 @@ impl DuckLakeWriter {
         };
         let scope = self.physical_scope().clone();
         let table_name_owned = table_name.to_string();
-        let target_file_size_bytes = self.config.maintenance.target_file_size_bytes;
         tokio::task::spawn_blocking({
             let pool = pool.clone();
             move || {
                 pool.with_conn(|conn| {
-                    Self::ensure_table_with_conn(
-                        conn,
-                        &scope,
-                        &table_name_owned,
-                        None,
-                        target_file_size_bytes,
-                    )
+                    Self::ensure_table_with_conn(conn, &scope, &table_name_owned, None)
                 })?;
                 pool.mark_table_ready(&table_name_owned);
                 Ok::<(), anyhow::Error>(())
@@ -508,14 +466,12 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    /// Create/evolve the complete shared physical schema before shared workers
-    /// install workspace-filtered views. This is intentionally idempotent,
-    /// validates legacy schemas in every mode, and does not depend on any
-    /// workspace's promotion manifest.
+    /// Create the complete shared physical schema before shared workers install
+    /// workspace-filtered views. Base columns come from SQL DDL; active manifests
+    /// add only their declared promotion columns.
     pub(crate) async fn ensure_shared_schema(&self) -> Result<()> {
         let pool = self.get_or_create_pool(self.physical_scope())?;
         let scope = self.physical_scope().clone();
-        let target_file_size_bytes = self.config.maintenance.target_file_size_bytes;
         tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
                 for table_name in ["traces", "logs", "scores", "score_configs"] {
@@ -523,7 +479,7 @@ impl DuckLakeWriter {
                     match crate::storage::schema::describe_table_columns(conn, &qualified_table) {
                         Ok(columns) if !columns.contains_key("tenant_id") => {
                             return Err(anyhow::anyhow!(
-                                "{}: table {table_name} is missing tenant_id; migrate it before shared startup",
+                                "{}: table {table_name} is missing tenant_id; recreate it during clean cutover",
                                 SharedScopeError::new(
                                     SharedScopeErrorCode::SchemaIncompatible,
                                     format!("shared workspace table {table_name} has no ownership column"),
@@ -539,7 +495,6 @@ impl DuckLakeWriter {
                         &scope,
                         table_name,
                         None,
-                        target_file_size_bytes,
                     )?;
                 }
                 crate::storage::ducklake::validate_shared_workspace_schema(conn, &scope)
@@ -577,7 +532,6 @@ impl DuckLakeWriter {
                 let scope = scope.clone();
                 let table_name_owned = table_name.to_string();
                 let schema_ref = record_batches[0].schema();
-                let target_file_size_bytes = self.config.maintenance.target_file_size_bytes;
                 let pool_clone = pool.clone();
                 tokio::task::spawn_blocking(move || {
                     pool_clone.with_conn(|conn| {
@@ -586,7 +540,6 @@ impl DuckLakeWriter {
                             &scope,
                             &table_name_owned,
                             Some(&schema_ref),
-                            target_file_size_bytes,
                         )
                     })
                 })
@@ -610,39 +563,49 @@ impl DuckLakeWriter {
             Some("score_id")
         };
 
-        let insert = if let Some(id_column) = dedupe_id_column {
-            if self.workspace_scope_mode() == WorkspaceScopeMode::Shared {
-                crate::sql::writer::insert_deduped_parquet_sql_for_workspace(
-                    &qualified_table,
-                    &select_prefix,
-                    &escaped_path,
-                    id_column,
-                    order_clause,
-                    dedupe_timestamp_window.as_ref(),
-                )
-            } else {
-                crate::sql::writer::insert_deduped_parquet_sql(
-                    &qualified_table,
-                    &select_prefix,
-                    &escaped_path,
-                    id_column,
-                    order_clause,
-                    dedupe_timestamp_window.as_ref(),
-                )
-            }
-        } else {
-            crate::sql::writer::insert_batch_sql(
-                &qualified_table,
-                &select_prefix,
-                Some(&escaped_path),
-                order_clause,
-            )
-        };
+        let shared_scope = self.workspace_scope_mode() == WorkspaceScopeMode::Shared;
+        let table_name_owned = table_name.to_string();
+        let qualified_table_owned = qualified_table.clone();
+        let select_prefix_owned = select_prefix.clone();
+        let order_clause_owned = order_clause.to_string();
 
         let write_result = tokio::task::spawn_blocking(move || {
             pool.with_conn(|conn| {
+                super::layout::apply_otlp_writer_session(conn, &table_name_owned)?;
                 crate::sql::execute_batch_checked(conn, "BEGIN TRANSACTION;")?;
-                match crate::sql::execute_batch_for_parquet_ingest(conn, &insert) {
+                let insert_result = (|| {
+                    let insert = if let Some(id_column) = dedupe_id_column {
+                        if shared_scope {
+                            crate::sql::writer::insert_deduped_parquet_sql_for_workspace(
+                                &qualified_table_owned,
+                                &select_prefix_owned,
+                                &escaped_path,
+                                id_column,
+                                &order_clause_owned,
+                                dedupe_timestamp_window.as_ref(),
+                            )
+                        } else {
+                            crate::sql::writer::insert_deduped_parquet_sql(
+                                &qualified_table_owned,
+                                &select_prefix_owned,
+                                &escaped_path,
+                                id_column,
+                                &order_clause_owned,
+                                dedupe_timestamp_window.as_ref(),
+                            )
+                        }
+                    } else {
+                        crate::sql::writer::insert_batch_sql(
+                            &qualified_table_owned,
+                            &select_prefix_owned,
+                            Some(&escaped_path),
+                            &order_clause_owned,
+                        )
+                    };
+                    crate::sql::execute_batch_for_parquet_ingest(conn, &insert)?;
+                    Ok::<(), anyhow::Error>(())
+                })();
+                match insert_result {
                     Ok(()) => {
                         crate::sql::execute_batch_checked(conn, "COMMIT;")?;
                         Ok(())
@@ -753,12 +716,21 @@ impl DuckLakeWriter {
     }
 }
 
+fn normalize_duck_type(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Config, DuckLakeConfig};
     use crate::models::Log;
-    use crate::storage::schema::{arrow, OtlpLogsTable};
+    use crate::storage::schema::arrow;
+    use crate::storage::schema::OtlpLogsTable;
     use std::collections::HashMap;
 
     #[test]
@@ -832,139 +804,6 @@ mod tests {
             schema.field_with_name("division_name").is_err(),
             "promoted telemetry columns come from runtime-scoped promotion apply, not process config"
         );
-    }
-
-    #[test]
-    fn migrates_existing_microsecond_log_columns_without_truncating_history() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE upgrade_logs (
-                timestamp TIMESTAMPTZ NOT NULL,
-                observed_timestamp TIMESTAMPTZ
-             );
-             INSERT INTO upgrade_logs VALUES
-                ('2023-11-14 22:13:20.123456+00', '2023-11-14 22:13:20.654321+00');",
-        )
-        .unwrap();
-
-        ensure_log_timestamp_precision(&conn, "upgrade_logs").unwrap();
-
-        let observed: (String, i64, String, i64) = conn
-            .query_row(
-                "SELECT typeof(timestamp), epoch_ns(timestamp),
-                        typeof(observed_timestamp), epoch_ns(observed_timestamp)
-                 FROM upgrade_logs",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            observed,
-            (
-                "TIMESTAMP_NS".into(),
-                1_700_000_000_123_456_000,
-                "TIMESTAMP_NS".into(),
-                1_700_000_000_654_321_000,
-            )
-        );
-    }
-
-    #[test]
-    fn migrates_existing_microsecond_trace_columns_without_losing_epoch_values() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE upgrade_traces (
-                timestamp TIMESTAMPTZ NOT NULL,
-                end_timestamp TIMESTAMPTZ
-             );
-             INSERT INTO upgrade_traces VALUES
-                ('2023-11-14 22:13:20.123456+00', '2023-11-14 22:13:20.654321+00');",
-        )
-        .unwrap();
-
-        ensure_trace_timestamp_precision(&conn, "upgrade_traces").unwrap();
-
-        let observed: (String, i64, String, i64) = conn
-            .query_row(
-                "SELECT typeof(timestamp), epoch_ns(timestamp),
-                        typeof(end_timestamp), epoch_ns(end_timestamp)
-                 FROM upgrade_traces",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            observed,
-            (
-                "TIMESTAMP_NS".into(),
-                1_700_000_000_123_456_000,
-                "TIMESTAMP_NS".into(),
-                1_700_000_000_654_321_000,
-            )
-        );
-    }
-
-    #[test]
-    fn refuses_legacy_trace_events_until_the_table_rebuild_runs() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE legacy_events (
-                events STRUCT(name VARCHAR, timestamp TIMESTAMP_NS, attributes MAP(VARCHAR, VARCHAR))[]
-             );",
-        )
-        .unwrap();
-
-        let error = ensure_trace_events_json(&conn, "legacy_events").unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("requires the trace events rebuild"));
-    }
-
-    #[test]
-    fn migrates_score_and_score_config_timestamps_to_nanoseconds() {
-        for table in ["upgrade_scores", "upgrade_score_configs"] {
-            let conn = Connection::open_in_memory().unwrap();
-            conn.execute_batch(&format!(
-                "CREATE TABLE {table} (timestamp TIMESTAMPTZ NOT NULL);\
-                 INSERT INTO {table} VALUES ('2023-11-14 22:13:20.123456+00');"
-            ))
-            .unwrap();
-
-            ensure_score_timestamp_precision(&conn, table).unwrap();
-            let observed: (String, i64) = conn
-                .query_row(
-                    &format!("SELECT typeof(timestamp), epoch_ns(timestamp) FROM {table}"),
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .unwrap();
-            assert_eq!(observed, ("TIMESTAMP_NS".into(), 1_700_000_000_123_456_000));
-        }
-    }
-
-    #[test]
-    fn refuses_unsupported_log_timestamp_schema_before_ddl() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE upgrade_logs_refusal (
-                timestamp VARCHAR NOT NULL,
-                observed_timestamp TIMESTAMPTZ
-             );",
-        )
-        .unwrap();
-
-        let error = ensure_log_timestamp_precision(&conn, "upgrade_logs_refusal").unwrap_err();
-        assert!(error.to_string().contains("cannot safely migrate"));
-        let timestamp_type: String = conn
-            .query_row(
-                "SELECT column_type FROM (DESCRIBE upgrade_logs_refusal)
-                 WHERE column_name = 'timestamp'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(timestamp_type, "VARCHAR");
     }
 
     #[test]

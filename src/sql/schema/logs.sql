@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS logs (
+    session_id VARCHAR,
+    timestamp TIMESTAMP_NS NOT NULL,
+    observed_timestamp TIMESTAMP_NS,
+    severity_number INTEGER NOT NULL,
+    severity_text VARCHAR NOT NULL,
+    body VARCHAR NOT NULL,
+    attributes MAP(VARCHAR, VARCHAR),
+    resource_attributes MAP(VARCHAR, VARCHAR),
+    trace_id VARCHAR,
+    span_id VARCHAR,
+    tenant_id VARCHAR,
+    logger_name VARCHAR,
+    service_name VARCHAR,
+    deployment_environment VARCHAR,
+    session_attr_id VARCHAR,
+    user_id VARCHAR,
+    agent_id VARCHAR,
+    agent_name VARCHAR
+);

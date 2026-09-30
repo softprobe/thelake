@@ -178,7 +178,7 @@ impl PhysicalScope {
         ScopeId::from_encoded(encoded)
     }
 
-    /// Immutable rebuilder: same identity with a different Postgres metadata schema.
+    #[cfg(test)]
     pub(crate) fn with_pg_namespace(&self, metadata_schema: impl Into<String>) -> Self {
         Self::new(
             self.metadata_path.clone(),
@@ -188,7 +188,7 @@ impl PhysicalScope {
         )
     }
 
-    /// Immutable rebuilder: same identity with a different warehouse URI/path.
+    #[cfg(test)]
     pub(crate) fn with_warehouse_uri(&self, data_path: impl Into<String>) -> Self {
         Self::new(
             self.metadata_path.clone(),

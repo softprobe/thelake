@@ -376,21 +376,9 @@ pub fn local_promotion_specs_table_ddl(catalog_alias: &str) -> String {
     let catalog = quote_sql_ident(catalog_alias);
     // DuckLake tables do not support PRIMARY KEY / UNIQUE constraints. Uniqueness of
     // `spec_id` is enforced by the activate path (UPDATE-then-INSERT, no ON CONFLICT).
-    format!(
-        r#"CREATE TABLE IF NOT EXISTS {catalog}.promotion_specs (
-  spec_id TEXT NOT NULL,
-  spec_version TEXT NOT NULL,
-  target_kind TEXT NOT NULL,
-  target_table TEXT,
-  target_tables TEXT,
-  business_version BIGINT,
-  manifest_json TEXT NOT NULL,
-  manifest_hash TEXT NOT NULL,
-  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  applied_by TEXT,
-  status TEXT NOT NULL
-);"#
-    )
+    include_str!("sql/schema/promotion_specs.sql")
+        .replace("{{qualified_table}}", &format!("{catalog}.promotion_specs"))
+        .replace("{{spec_id_constraint}}", "")
 }
 
 /// Load every **active** telemetry column manifest for one tenant DuckLake metadata schema.
@@ -472,39 +460,11 @@ pub fn promotion_metadata_table_ddls(tenant_schema: &str) -> Vec<String> {
     let schema = quote_sql_ident(tenant_schema);
     vec![
         format!("CREATE SCHEMA IF NOT EXISTS {schema};"),
-        format!(
-            r#"CREATE TABLE IF NOT EXISTS {schema}.promotion_specs (
-  spec_id TEXT PRIMARY KEY,
-  spec_version TEXT NOT NULL,
-  target_kind TEXT NOT NULL,
-  target_table TEXT,
-  target_tables TEXT,
-  business_version BIGINT,
-  manifest_json TEXT NOT NULL,
-  manifest_hash TEXT NOT NULL,
-  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  applied_by TEXT,
-  status TEXT NOT NULL
-);"#
-        ),
-        format!(
-            r#"CREATE TABLE IF NOT EXISTS {schema}.promotion_errors (
-  timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  spec_id TEXT NOT NULL,
-  target_kind TEXT NOT NULL,
-  target_table TEXT,
-  target_column TEXT NOT NULL,
-  session_id TEXT,
-  trace_id TEXT,
-  span_id TEXT,
-  event_name TEXT,
-  source_signal TEXT NOT NULL,
-  source_path TEXT NOT NULL,
-  error_code TEXT NOT NULL,
-  error_message TEXT NOT NULL,
-  raw_value_preview TEXT
-);"#
-        ),
+        include_str!("sql/schema/promotion_specs.sql")
+            .replace("{{qualified_table}}", &format!("{schema}.promotion_specs"))
+            .replace("{{spec_id_constraint}}", " PRIMARY KEY"),
+        include_str!("sql/schema/promotion_errors.sql")
+            .replace("{{qualified_table}}", &format!("{schema}.promotion_errors")),
     ]
 }
 
@@ -721,10 +681,11 @@ pub fn business_table_create_ddls(
         ));
     }
     let mut ddls = Vec::with_capacity(2 + alter_ddls.len());
-    ddls.push(format!(
-        "CREATE TABLE IF NOT EXISTS {qualified_table} (\n  {}\n);",
-        create_columns.join(",\n  ")
-    ));
+    ddls.push(
+        include_str!("sql/schema/business_table.sql")
+            .replace("{{qualified_table}}", &qualified_table)
+            .replace("{{columns}}", &create_columns.join(",\n  ")),
+    );
     ddls.extend(alter_ddls);
     ddls.push(format!(
         "CREATE OR REPLACE VIEW {qualified_view} AS SELECT * FROM {qualified_table};"
@@ -939,7 +900,7 @@ pub fn validate_telemetry_column_additive(
 }
 
 /// Fail loud when an already-active promotion collides with canonical columns
-/// (e.g. a prior metric promotion named `count` after schema evolution).
+/// (e.g. a promoted field colliding with an existing metric anchor named `count`).
 pub fn ensure_promoted_columns_not_reserved(
     table: TelemetryTable,
     columns: &[PromotionColumn],

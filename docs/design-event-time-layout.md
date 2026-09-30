@@ -12,11 +12,11 @@
 
 1. **One event time.** DuckLake timestamp columns use `TIMESTAMP_NS` and represent UTC instants. APIs accept readable UTC timestamps and convert them before querying.
 2. **No `record_date` / `event_date` / `window_ts` column.** Partition = calendar day of `timestamp` (DuckLake expression locked by greenfield EXPLAIN). A bare `timestamp` predicate is required for partition pruning.
-3. **Session locality is sort, not partition.** Never `PARTITIONED BY (session_id)`.
+3. **Partition and sort; size row groups independently.** Partition all fact tables by calendar day of `timestamp`; never `PARTITIONED BY (session_id)`. Sort traces, logs, and scores by `(session_id, trace_id, timestamp)`. Use the shared 8 MiB row-group byte-size target. Row groups may contain multiple sessions; session boundaries do not control row-group boundaries. Sorting keeps session values ordered and can tighten row-group statistics without creating a one-session-per-row-group invariant.
 4. **Every OTLP read requires `QueryWindow { from, to }`.** No `Option` time. Compilers emit bare `timestamp` predicates via `QueryWindow::scan_with_timestamp_filter` in `src/sql/` (`scan_with_day_filter` only narrows a timestamp sub-window for one calendar day — never a DATE/day-column predicate). Every fact table uses `TIMESTAMP_NS` literals.
 5. **All OTLP SQL lives in `src/sql/`.** Handlers call `crate::sql::…`.
 6. **Every fact scan carries an explicit, bare `timestamp` bound** for partition pruning. A single lower or upper bound can prune partitions on one side; typed query APIs require a `QueryWindow` and have no all-history default. Before execution, DuckDB's JSON physical plan is checked to ensure each traces/logs/scores scan receives a conjunctive bare-column timestamp filter. If DuckDB proves a bound redundant from file statistics, the gate accepts it only for a direct query with one fact source; unsupported or ambiguous query forms fail closed. Plans with no fact scan because DuckDB proves the whole result empty are safe. Raw SQL cannot scan Parquet files directly, and each execution call accepts one statement. The execute-time gate also rejects forbidden `record_date` / `event_date` / `window_ts` references.
-7. **No backwards compatibility.** New catalog → copy traces/logs → flip → delete old. Score and score-config rows are not copied; their APIs and storage remain active, and normal schema initialization creates fresh empty tables after cutover.
+7. **No backwards compatibility.** Stop writers, export traces from every physical scope into the new schema, validate, then cut over once. Existing logs and scores files remain where they are; their schemas and all subsequent writes/compaction use the shared layout.
 
 Violate any rule → reject the change.
 
@@ -34,11 +34,11 @@ We stored one fact as two columns (`timestamp` + `record_date`) and partitioned 
 |---|----------|
 | D1 | **One clock.** No `record_date` column. Partition expression = day of `timestamp`. |
 | D2 | **Query shape:** only `timestamp` lower/upper from `QueryWindow`. |
-| D3 | **Cutover:** new catalog; batch copy; flip; drop old. No dual-read. |
+| D3 | **Cutover:** export traces to the clean schema; validate; flip once. No dual-read. |
 | D4 | **Delete** `push_optional_time_bounds` and any optional lake windows. |
 | D5 | **One logical event time.** All DuckLake timestamp columns use `TIMESTAMP_NS` and receive the same UTC window as bare-column predicates. |
 | D6 | **Session detail window** = summary start/end only. Pad = **0**. |
-| D7 | **Sort:** traces `(session_id, trace_id, timestamp)`; logs/scores `(session_id, timestamp)`. |
+| D7 | Sort traces/logs/scores by `(session_id, trace_id, timestamp)`. This orders rows; it does not define Parquet row-group boundaries. |
 | D8 | **No `app_id` sort lead.** Scores in same layout module. |
 | D9 | **Execute gate + `src/sql` locality** — see sql/schema design. |
 | D10 | **Inline** default `data_inlining_row_limit = 500`. |
@@ -56,6 +56,8 @@ We stored one fact as two columns (`timestamp` + `record_date`) and partitioned 
 ALTER TABLE traces SET PARTITIONED BY (year(timestamp), month(timestamp), day(timestamp));
 ALTER TABLE traces SET SORTED BY (session_id, trace_id, timestamp);
 ```
+
+The shared physical profile sets an 8 MiB row-group byte-size target and a 128 MiB file-size target. Both are size targets. Row groups can contain multiple session IDs; the sort order does not add session-specific row-group boundaries. A session that crosses a UTC day boundary necessarily spans day partitions.
 
 ```sql
 WHERE timestamp >= … AND timestamp <= … AND <identity>
@@ -96,3 +98,29 @@ Locked by `tests/integration/one_clock_prune.rs` / [`fixtures/one-clock-prune-ex
 - Reintroducing `record_date` because triples feel complex.
 
 **This document and [`design-sql-and-schema.md`](./design-sql-and-schema.md) are the law.** Prior DATE-column + dual-predicate revisions are obsolete.
+
+---
+
+## 7. Shared Parquet layout profile
+
+### Required physical contract
+
+Traces, logs, and scores partition by `year(timestamp), month(timestamp), day(timestamp)`, sort by `(session_id, trace_id, timestamp)`, and use an 8 MiB row-group byte target and a 128 MiB file target. The targets govern physical sizes; no session-to-row-group mapping is required. Row groups may contain several adjacent session IDs because data is sorted by session.
+
+### One profile across all writers
+
+`src/sql/schema/otlp_layout.sql` is the only source for OTLP physical settings: day partition expression, sort tuple, 8 MiB row-group byte target, 128 MiB target file size, Zstandard compression at level 3, and the 500-row inline threshold. Rust initialization/ingest, inline-data materialization, compaction, and the one-time exporter must load this profile. DuckLake table-scoped options persist it; compaction reapplies it through the same helper and fails if that fails. No writer path may carry its own defaults.
+
+Keep Parquet statistics enabled and inspect them in the acceptance tests. DuckDB can write Bloom filters for supported primitive/string columns when it selects dictionary encoding; there is no separate DuckLake column allowlist setting to maintain, so do not invent one. Verify Bloom-filter presence and probe `trace_id`/promoted scalar lookups on production-shaped output before claiming a benefit. Bloom filters complement sorted row-group statistics.
+
+Base table schemas are defined in `src/sql/schema/*.sql`. Runtime Arrow schemas are derived from those DDLs; the only runtime columns added after initialization come from active promotion manifests. There is no historical schema-migration or old-schema read path.
+
+Inlining remains at 500 rows to avoid a Parquet file for every small write. DuckLake applies the persisted table profile when inline rows are flushed. Include inline data in query and flush measurements.
+
+### Compaction and export
+
+Compaction applies the same table-scoped profile as ingest and inline flush, then uses DuckLake's sorted merge. The untracked `tmp/export_production_traces.py` exporter reads every physical scope once, sorts by the shared profile, writes day-partitioned Parquet using the same byte/file targets and compression, applies the SQL base schema plus active promotions, validates each output, and registers the files in the new DuckLake tables. The inventory must include the default physical scope and each distinct shared/isolated physical scope exactly once. Keep writers stopped through inventory, export, validation, and the catalog/config cutover.
+
+### Acceptance
+
+Inspect active files after ingest, inline flush, compaction, and export. Assert row-group byte target behavior, compression, timestamp/session statistics, and schema parity across all paths. For production-shaped datasets above 500 MiB, measure session detail latency and bytes read, broad-scan latency, file counts, and inline backlog before and after cutover. A day-partition EXPLAIN test alone does not establish session-query performance.

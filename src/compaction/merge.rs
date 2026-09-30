@@ -359,32 +359,40 @@ fn ducklake_compact_table_wave(
 ) -> Result<ActionStatus> {
     let policy = TwcsPolicy::from(&config.maintenance);
     let qualified = crate::storage::ducklake::ducklake_qualified_table_name(scope, table);
-    let option_scope =
-        crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
-    let target_file_size =
-        crate::storage::ducklake::size_literal(config.maintenance.target_file_size_bytes);
-    let set_target =
-        ducklake_set_target_file_size_sql(scope.attach_alias(), &target_file_size, &option_scope);
     ensure_active()?;
-    if let Err(err) = execute_batch_with_serialization_retry(
-        conn,
-        &set_target,
-        COMPACTION_SERIALIZATION_ATTEMPTS,
-        &format!("ducklake set_option target_file_size {}", qualified),
-        ensure_active,
-    ) {
-        if is_ducklake_serialization_conflict(&err) {
-            warn!(
-                "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
-                qualified, err
-            );
-            return Ok(ActionStatus::Skipped);
+    if crate::sql::is_otlp_table(table) {
+        crate::storage::ducklake::layout::apply_otlp_layout_profile(conn, scope, table)
+            .map_err(|err| anyhow!("DuckLake shared layout apply failed for {qualified}: {err}"))?;
+    } else {
+        let option_scope =
+            crate::storage::ducklake::ducklake_set_option_scope_for_qualified(&qualified);
+        let target_file_size =
+            crate::storage::ducklake::size_literal(config.maintenance.target_file_size_bytes);
+        let set_target = ducklake_set_target_file_size_sql(
+            scope.attach_alias(),
+            &target_file_size,
+            &option_scope,
+        );
+        if let Err(err) = execute_batch_with_serialization_retry(
+            conn,
+            &set_target,
+            COMPACTION_SERIALIZATION_ATTEMPTS,
+            &format!("ducklake set_option target_file_size {}", qualified),
+            ensure_active,
+        ) {
+            if is_ducklake_serialization_conflict(&err) {
+                warn!(
+                    "DuckLake compaction skipped for {} due to transient metadata conflict: {}",
+                    qualified, err
+                );
+                return Ok(ActionStatus::Skipped);
+            }
+            return Err(anyhow!(
+                "DuckLake set_option failed for {}: {}",
+                qualified,
+                err
+            ));
         }
-        return Err(anyhow!(
-            "DuckLake set_option failed for {}: {}",
-            qualified,
-            err
-        ));
     }
     let sql = ducklake_merge_adjacent_files_sql(
         scope.attach_alias(),
@@ -494,6 +502,164 @@ fn load_partition_stats_after(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[test]
+    fn otlp_compaction_uses_the_shared_profile_and_runs_merge() {
+        let source = include_str!("merge.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        assert!(source.contains("apply_otlp_layout_profile(conn, scope, table)"));
+        assert!(source.contains("ducklake_merge_adjacent_files_sql"));
+    }
+
+    #[tokio::test]
+    async fn otlp_compaction_merge_writer_uses_shared_byte_row_group_profile() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let config = crate::test_support::file_backed_test_config(&temp);
+        let scope = crate::storage::ducklake::PhysicalScope::from_ducklake(&config.ducklake);
+        let conn = crate::storage::ducklake::open_attached_from_config(&config.ducklake, Some(0));
+        let qualified = crate::storage::ducklake::ducklake_qualified_table_name(&scope, "traces");
+        let namespace = format!("\"{}\"", scope.pg_namespace().replace('"', "\"\""));
+        conn.execute_batch(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {}.{};\
+             CREATE TABLE {} (session_id VARCHAR NOT NULL, trace_id VARCHAR NOT NULL, \
+                             timestamp TIMESTAMP_NS NOT NULL, payload VARCHAR);",
+            scope.attach_alias(),
+            namespace,
+            qualified
+        ))
+        .expect("create compaction fixture table");
+        crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort(&conn, &qualified)
+            .expect("partition and sort fixture table");
+        crate::storage::ducklake::layout::apply_otlp_layout_profile(&conn, &scope, "traces")
+            .expect("set initial shared profile");
+
+        for offset in [0, 2501] {
+            conn.execute_batch(&format!(
+                "INSERT INTO {qualified} \
+                 SELECT 'session-' || lpad((i % 31)::VARCHAR, 3, '0'), \
+                        'trace-' || (i + {offset})::VARCHAR, \
+                        TIMESTAMP_NS '2026-09-12 12:00:00', \
+                        repeat(md5(i::VARCHAR), 128) \
+                 FROM range(2501) t(i) ORDER BY 1, 2, 3;"
+            ))
+            .expect("write compaction fixture file");
+        }
+
+        let files_before = parquet_files(temp.path().join("ducklake/data").as_path());
+        assert!(
+            files_before >= 2,
+            "expected multiple files before compaction"
+        );
+        conn.execute_batch(&format!(
+            "CALL {}.set_option('parquet_row_group_size_bytes', '64MiB', \
+             schema => '{}', table_name => 'traces');",
+            scope.attach_alias(),
+            scope.pg_namespace()
+        ))
+        .expect("set deliberately divergent compaction fixture option");
+
+        let mut ensure_active = || Ok(());
+        let status = ducklake_compact_table_wave(
+            &config,
+            &conn,
+            &scope,
+            "traces",
+            MergeMode {
+                newer_than: Utc::now() - Duration::days(1),
+            },
+            100,
+            128 * 1024 * 1024,
+            &mut ensure_active,
+        )
+        .expect("compact traces");
+        assert_eq!(
+            status,
+            ActionStatus::Completed,
+            "scheduled compaction must complete with its required newer_than watermark"
+        );
+
+        let live_paths = live_parquet_paths(&conn, &scope, "traces");
+        assert_eq!(live_paths.len(), 1, "compaction should merge the two files");
+        let mut physical_paths = Vec::new();
+        collect_parquet_files(
+            temp.path().join("ducklake/data").as_path(),
+            &mut physical_paths,
+        );
+        let metadata = live_paths
+            .iter()
+            .map(|path| {
+                let file_name = std::path::Path::new(path)
+                    .file_name()
+                    .expect("DuckLake file name");
+                let path = physical_paths
+                    .iter()
+                    .find(|candidate| candidate.file_name() == Some(file_name))
+                    .unwrap_or_else(|| panic!("active DuckLake file {path} is not on disk"));
+                conn.query_row(
+                    "SELECT count(*), max(uncompressed_bytes) FROM ( \
+                       SELECT row_group_id, sum(total_uncompressed_size) AS uncompressed_bytes \
+                       FROM parquet_metadata(?) GROUP BY row_group_id)",
+                    [path.to_string_lossy().as_ref()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .expect("read compacted Parquet metadata")
+            })
+            .collect::<Vec<_>>();
+        let groups = metadata.iter().map(|item| item.0).sum::<i64>();
+        let largest_group_bytes = metadata.iter().map(|item| item.1).max().unwrap_or(0);
+        assert!(
+            groups > 1,
+            "compaction retained the divergent 64 MiB setting: {groups} row group(s)"
+        );
+        assert!(
+            largest_group_bytes <= 9 * 1024 * 1024,
+            "merge writer wrote a {largest_group_bytes}-byte uncompressed row group; expected the 8 MiB target plus a small row-boundary overshoot"
+        );
+    }
+
+    fn parquet_files(root: &std::path::Path) -> usize {
+        let mut files = Vec::new();
+        collect_parquet_files(root, &mut files);
+        files.len()
+    }
+
+    fn live_parquet_paths(conn: &Connection, scope: &PhysicalScope, table: &str) -> Vec<String> {
+        let metadata = format!("__ducklake_metadata_{}", scope.attach_alias());
+        let sql = format!(
+            "SELECT df.path FROM \"{metadata}\".ducklake_data_file df \
+             JOIN \"{metadata}\".ducklake_table t ON t.table_id = df.table_id \
+             WHERE t.table_name = '{table}' AND t.end_snapshot IS NULL \
+               AND df.end_snapshot IS NULL"
+        );
+        let mut statement = conn.prepare(&sql).expect("prepare live Parquet paths");
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query live Parquet paths")
+            .map(|row| row.expect("read live Parquet path"))
+            .collect()
+    }
+
+    fn collect_parquet_files(root: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_parquet_files(&path, files);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+            {
+                files.push(path);
+            }
+        }
+    }
+
     #[test]
     fn maintenance_does_not_flush_inlined_before_twcs() {
         let prod = include_str!("merge.rs")

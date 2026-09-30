@@ -29,7 +29,7 @@ pub use literal::{sql_string_literal, timestamp_ns_literal, timestamptz_literal}
 
 pub use schema::{
     fact_table_specs, insert_order_by, is_otlp_table, qualified_table_name, table_spec, TableSpec,
-    LOGS, ONE_CLOCK_PARTITION_BY, OTLP_TABLES, SCORES, SCORE_CONFIGS, TRACES,
+    LOGS, OTLP_TABLES, SCORES, SCORE_CONFIGS, TRACES,
 };
 
 #[cfg(test)]
@@ -168,9 +168,6 @@ mod locality_tests {
             "/storage/schema/ducklake_partition.rs",
             "/storage/schema/variant.rs",
             "/storage/ducklake/attach.rs",
-            // One-time DuckLake table rebuild; its full rewrite is validated
-            // against a production catalog snapshot before release.
-            "/storage/ducklake/trace_event_migration.rs",
             "/storage/ducklake/promotion.rs",
             "/storage/duckdb/cache.rs",
             "/storage/duckdb/engine.rs",

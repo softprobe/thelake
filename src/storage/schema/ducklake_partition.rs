@@ -46,33 +46,66 @@ pub(crate) fn describe_table_columns(
     Ok(found)
 }
 
-/// True when a live DuckLake table already has partition + sort metadata.
-pub(crate) fn table_partition_sort_ready(
+/// Whether the table's active partition and sort definitions match the shared
+/// OTLP profile. A merely-present definition is insufficient for existing logs
+/// and scores whose historical sort tuple may differ.
+pub(crate) fn table_partition_sort_matches(
     conn: &Connection,
     catalog_or_qualified: &str,
     table_name: &str,
+    partition_by: &str,
+    sorted_by: &str,
 ) -> Result<bool> {
     PARTITION_SORT_PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
-    // catalog may be `softprobe`, `softprobe.tenant_schema`, or `softprobe.traces` —
-    // metadata is always `__ducklake_metadata_<attach_alias>` (first path segment).
     let attach = catalog_or_qualified
         .split('.')
         .next()
         .unwrap_or(catalog_or_qualified);
+    let qualified_parts = catalog_or_qualified.split('.').collect::<Vec<_>>();
+    let schema_name = if qualified_parts.len() >= 3 {
+        qualified_parts[qualified_parts.len() - 2]
+    } else {
+        "main"
+    };
     let meta = format!("__ducklake_metadata_{attach}");
     let sql = format!(
         "SELECT \
-            (SELECT count(*) FROM {meta}.ducklake_partition_info info \
-             JOIN {meta}.ducklake_table t ON info.table_id = t.table_id \
-             WHERE t.table_name = ? AND t.end_snapshot IS NULL) AS parts, \
-            (SELECT count(*) FROM {meta}.ducklake_sort_info info \
-             JOIN {meta}.ducklake_table t ON info.table_id = t.table_id \
-             WHERE t.table_name = ? AND t.end_snapshot IS NULL) AS sorts"
+           COALESCE((SELECT string_agg( \
+             CASE WHEN pc.transform = 'identity' THEN c.column_name \
+                  ELSE pc.transform || '(' || c.column_name || ')' END, \
+             ', ' ORDER BY pc.partition_key_index) \
+             FROM {meta}.ducklake_partition_info pi \
+             JOIN {meta}.ducklake_table t ON t.table_id = pi.table_id \
+             JOIN {meta}.ducklake_schema s ON s.schema_id = t.schema_id \
+             JOIN {meta}.ducklake_partition_column pc \
+               ON pc.partition_id = pi.partition_id AND pc.table_id = pi.table_id \
+             JOIN {meta}.ducklake_column c \
+               ON c.column_id = pc.column_id AND c.table_id = pc.table_id \
+             WHERE t.table_name = ? AND s.schema_name = ? AND t.end_snapshot IS NULL \
+               AND pi.end_snapshot IS NULL AND c.end_snapshot IS NULL), ''), \
+           COALESCE((SELECT string_agg(se.expression, ', ' ORDER BY se.sort_key_index) \
+             FROM {meta}.ducklake_sort_info si \
+             JOIN {meta}.ducklake_table t ON t.table_id = si.table_id \
+             JOIN {meta}.ducklake_schema s ON s.schema_id = t.schema_id \
+             JOIN {meta}.ducklake_sort_expression se \
+               ON se.sort_id = si.sort_id AND se.table_id = si.table_id \
+             WHERE t.table_name = ? AND s.schema_name = ? AND t.end_snapshot IS NULL \
+               AND si.end_snapshot IS NULL), '')"
     );
-    let (parts, sorts): (i64, i64) = conn
-        .query_row(&sql, [table_name, table_name], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .unwrap_or((0, 0));
-    Ok(parts > 0 && sorts > 0)
+    let (actual_partition, actual_sort): (String, String) = conn
+        .query_row(
+            &sql,
+            [table_name, schema_name, table_name, schema_name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| anyhow!("read active layout metadata for {table_name}: {error}"))?;
+    let normalize = |value: &str| {
+        value
+            .chars()
+            .filter(|character| !character.is_whitespace() && *character != '"')
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    Ok(normalize(&actual_partition) == normalize(partition_by)
+        && normalize(&actual_sort) == normalize(sorted_by))
 }

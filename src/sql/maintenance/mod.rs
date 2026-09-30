@@ -242,16 +242,8 @@ fn ducklake_file_cleanup_sql(
 // --- Postgres compaction watermark (app-owned) ---
 
 pub fn compaction_watermark_create_table_sql(registry_schema: &str) -> String {
-    format!(
-        r#"CREATE TABLE IF NOT EXISTS {}.compaction_watermark (
-  scope_key TEXT NOT NULL,
-  table_name TEXT NOT NULL,
-  watermark TIMESTAMPTZ NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (scope_key, table_name)
-);"#,
-        quote_pg_ident(registry_schema)
-    )
+    include_str!("../schema/compaction_watermark.sql")
+        .replace("{{schema}}", &quote_pg_ident(registry_schema))
 }
 
 pub fn compaction_watermark_get_sql(registry_schema: &str) -> String {

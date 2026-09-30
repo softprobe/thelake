@@ -1,15 +1,13 @@
 //! DuckLake partition + sort for OTLP `traces` / `logs` / `scores`.
 //!
-//! Partition = calendar day of `timestamp` via [`crate::sql::ONE_CLOCK_PARTITION_BY`].
+//! Partition and sort values come from the shared SQL profile.
 //! No `record_date` column. Session locality is sort, not partition.
 
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
 
-use super::ducklake_partition::table_partition_sort_ready;
-use crate::sql::schema::{
-    insert_order_by as registry_insert_order_by, is_otlp_table, partition_sort_sql, OTLP_TABLES,
-};
+use super::ducklake_partition::table_partition_sort_matches;
+use crate::sql::schema::{is_otlp_table, OTLP_TABLES};
 
 pub use crate::models::partition_day_from_event_time;
 
@@ -22,17 +20,24 @@ pub(crate) fn ensure_otlp_table_partition_sort(
         .rsplit('.')
         .next()
         .unwrap_or(qualified_table);
-    let Some(table) = OTLP_TABLES.iter().find(|table| table.name == table_name) else {
+    let Some(_table) = OTLP_TABLES.iter().find(|table| table.name == table_name) else {
         return Ok(());
     };
-    if table_partition_sort_ready(conn, qualified_table, table_name)? {
+    let profile = crate::storage::ducklake::layout::load_otlp_layout_profile(conn)?;
+    if table_partition_sort_matches(
+        conn,
+        qualified_table,
+        table_name,
+        &profile.partition_by,
+        &profile.sorted_by,
+    )? {
         return Ok(());
     }
-    let catalog = qualified_table
-        .rsplit_once('.')
-        .map(|(catalog, _)| catalog)
-        .unwrap_or("main");
-    let sql = partition_sort_sql(catalog, table);
+    let sql = format!(
+        "ALTER TABLE {qualified_table} SET PARTITIONED BY ({});\n\
+         ALTER TABLE {qualified_table} SET SORTED BY ({});",
+        profile.partition_by, profile.sorted_by
+    );
     conn.execute_batch(&sql)
         .map_err(|e| anyhow!("failed to apply OTLP partition/sort on {qualified_table}: {e}"))?;
     Ok(())
@@ -45,12 +50,13 @@ pub fn is_otlp_layout_table(table_name: &str) -> bool {
 
 /// Writer `ORDER BY` clause aligned with `SET SORTED BY` (no partition-column lead).
 pub fn insert_order_by(table_name: &str) -> &'static str {
-    registry_insert_order_by(table_name)
+    crate::sql::schema::insert_order_by(table_name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::schema::partition_sort_sql;
 
     #[test]
     fn scores_is_otlp_layout_table() {
@@ -73,8 +79,9 @@ mod tests {
         for layout in OTLP_TABLES {
             let sql = partition_sort_sql("softprobe", layout);
             assert!(!sql.contains("record_date"), "{sql}");
+            let sorted_by = insert_order_by(layout.name).trim_start_matches("ORDER BY ");
             assert!(
-                sql.contains(&format!("SET SORTED BY ({})", layout.sorted_by)),
+                sql.contains(&format!("SET SORTED BY ({sorted_by})")),
                 "{sql}"
             );
         }
@@ -86,8 +93,7 @@ mod tests {
             let order = insert_order_by(layout.name);
             assert!(order.starts_with("ORDER BY "), "{}: {order}", layout.name);
             assert!(!order.contains("record_date"), "{}: {order}", layout.name);
-            let sorted_tail = order.trim_start_matches("ORDER BY ");
-            assert_eq!(sorted_tail, layout.sorted_by, "{}", layout.name);
+            assert!(order.contains("session_id, trace_id, timestamp"), "{order}");
         }
     }
 

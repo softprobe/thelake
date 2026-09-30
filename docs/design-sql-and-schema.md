@@ -1,6 +1,6 @@
 # Design: SQL compilation + one-clock schema
 
-**Status:** Implementation in progress — one-clock foundation + schema DDL; recipe migration continuing
+**Status:** Canonical SQL DDL and shared OTLP Parquet profile
 **Constraints:** (1) simplicity (2) clean cutover — one-time copy OK, no compat (3) no room for mistake
 **Related:** [`design-event-time-layout.md`](./design-event-time-layout.md)
 
@@ -25,7 +25,7 @@ Product metrics / Prometheus recipes are **out of scope** (removed). Orphaned
 4. **Handlers / planners / writers never embed SQL verbs.** They call `crate::sql::…`.
 5. **One escaping / quoting API** under `src/sql/`.
 6. **Schema registry in `src/sql/schema` (types + DDL).**
-7. **Clean cutover.** New catalog, copy once, flip, drop old. No dual-read / feature flags.
+7. **Clean cutover.** Stop writers, export traces into the clean schema from every physical scope, validate, then flip once. Existing logs and scores files remain in place. No dual-read / feature flags.
 8. **Global scan rule:** every fact scan has an explicit, bare `timestamp` bound for partition pruning. One lower or upper bound can prune partitions on one side. Typed query APIs require a `QueryWindow`; there is no all-history default. A DuckDB JSON physical-plan check runs before execution and requires a conjunctive bare-column timestamp filter on every traces/logs/scores scan, including nested queries, DML, CTAS, COPY, and relation commands. When statistics prove the timestamp bound redundant, the gate accepts that only for a direct query with one fact source; when the optimizer proves the entire result empty, there is no fact scan to gate. Raw SQL cannot read Parquet files directly; the writer has a separate checked ingest path for temporary Parquet inputs. One SQL statement is accepted per call so planning sees the same catalog state as execution. Unsupported query forms fail closed. The gate also rejects forbidden `record_date` / `event_date` / `window_ts` references.
 9. **Simplicity.** No ORM, no SQL AST framework, no `(year,month,day)` triples, no signal-specific clock aliases.
 
@@ -46,17 +46,17 @@ Every DuckLake fact table has **`timestamp`** as its only time column. Partition
 | Table | Timestamp type | Sort |
 |-------|---------------|------|
 | `traces` | `TIMESTAMP_NS` | `session_id, trace_id, timestamp` |
-| `logs` | `TIMESTAMP_NS` | `session_id, timestamp` |
-| `scores` | `TIMESTAMP_NS` | `session_id, timestamp` |
+| `logs` | `TIMESTAMP_NS` | `session_id, trace_id, timestamp` |
+| `scores` | `TIMESTAMP_NS` | `session_id, trace_id, timestamp` |
 
 Score deduplication identity is `(score_id, timestamp)` in isolated scope and
 `(tenant_id, score_id, timestamp)` in shared scope. A repeated `score_id` at a
 different timestamp is a distinct score; every idempotency lookup carries the
 score timestamp so it can prune to that day.
 
-The one-clock catalog copy deliberately migrates only traces and logs. Existing
-score and score-config rows are test data; score APIs and storage remain active,
-and normal schema initialization creates fresh empty tables after cutover.
+The one-time exporter rebuilds traces only. Existing logs and scores files stay
+in place; their schemas and all subsequent writes/compaction follow the shared
+profile. `score_configs` remains an auxiliary unpartitioned table.
 
 **Locked partition expression** (greenfield EXPLAIN in `tests/integration/one_clock_prune.rs`):
 
@@ -79,7 +79,7 @@ Loki/Tempo protocol times convert to the same UTC `QueryWindow` at the edge.
 
 ### 1.4 Cutover
 
-New catalog → EXPLAIN → copy (drop `record_date`) → flip → delete old.
+Stop writers → export every physical scope → validate rows and Parquet metadata → flip once.
 
 ---
 
@@ -163,7 +163,7 @@ score existence checks.
 | 2 | Create `src/sql/` (literal, bounds, gate, schema) |
 | 3 | Move recipes into `src/sql/{…}`; callers SQL-free; locality test |
 | 4 | `TimestampFilteredSql` + `scan_with_*_filter`; D12 gate |
-| 5 | Copy → flip → delete old |
+| 5 | Export traces with the untracked `tmp/export_production_traces.py`; validate every scope before the coordinated flip |
 
 ---
 
@@ -173,7 +173,7 @@ score existence checks.
 - [x] EXPLAIN greenfield: day-of-`timestamp` prune (`tests/integration/one_clock_prune.rs`)
 - [x] `src/sql/` foundation (`QueryWindow::scan_with_*_filter`, gate, literals, llm/tempo/session_summary recipes)
 - [x] D12 source gate on checked write paths; physical-plan scan gate on `execute_query_on_state` and direct fact reads
-- [x] Cutover script: [`scripts/one_clock_catalog_copy.sql`](../scripts/one_clock_catalog_copy.sql)
+- [ ] Production export validated across every physical scope before the coordinated cutover
 
 Ops flip of catalogs remains an operator step after verify. Residual infra SQL still outside `src/sql/` (attach/DDL, TWCS metadata probes, Postgres dirty claim, OTLP telemetry compilers) — locality allowlist tracks the backlog; D12 gate covers execute paths.
 
