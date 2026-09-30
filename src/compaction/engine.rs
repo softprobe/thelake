@@ -65,7 +65,7 @@ impl MaintenanceEngine {
     pub(crate) async fn validate_startup(&self) -> Result<()> {
         for (scope_key, physical) in self.physical_scopes().await? {
             self.conn_pool
-                .with_conn(&physical, |conn| validate_newer_than_extension(conn))
+                .with_conn(&physical, validate_newer_than_extension)
                 .map_err(|error| anyhow!("maintenance open failed for {scope_key}: {error}"))?;
         }
         Ok(())

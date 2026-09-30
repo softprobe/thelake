@@ -84,10 +84,8 @@ async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
             return;
         }
     };
-    let mut idx = 0usize;
-    for table in tables {
+    for (idx, table) in tables.into_iter().enumerate() {
         let size_res = results.get(idx);
-        idx += 1;
         let mut live_files = 0usize;
         let mut live_bytes = 0u64;
         let mut counts = [
