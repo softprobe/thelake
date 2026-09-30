@@ -18,7 +18,6 @@ query:
 
 maintenance:
   enabled: false
-  target_file_size_bytes: 67108864
   interval_seconds: 3600
 
 ducklake:
