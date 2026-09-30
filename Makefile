@@ -518,7 +518,7 @@ test-grafana-static: check-compat-reference-pins
 # Phase 4 deterministic compose system lane. The shell harness owns G1-G3 and
 # writes structured outcome evidence; compose lifecycle evidence is collected
 # here so cleanup runs for both harness failures and successful runs.
-test-grafana-system: ensure-cache check-compat-reference-pins
+test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
 	@set -euo pipefail; \
 	artifact_dir="$(GRAFANA_SYSTEM_ARTIFACT_DIR)"; compose_file="$(GRAFANA_SYSTEM_COMPOSE_FILE)"; \
 	compose_project="$(GRAFANA_SYSTEM_COMPOSE_PROJECT)"; grafana_url="$(GRAFANA_URL)"; \
