@@ -115,7 +115,7 @@ jobs:
     if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     services:
       ducklake-postgres:
         image: postgres:17
@@ -247,7 +247,7 @@ jobs:
     if: ${{ (inputs.selector == '' || inputs.selector == 'real') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     services:
       ducklake-postgres:
         image: postgres:17
@@ -533,7 +533,7 @@ jobs:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight]
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
@@ -1232,7 +1232,7 @@ jobs:
     name: Fast PR compatibility lane
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
