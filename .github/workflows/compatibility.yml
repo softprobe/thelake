@@ -381,7 +381,7 @@ jobs:
     if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.selector == 'drift') && !(github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') }}
     needs: [real-preflight, loki-diff, tempo-diff]
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
