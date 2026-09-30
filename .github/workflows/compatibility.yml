@@ -625,6 +625,9 @@ jobs:
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
 
+      - name: Download pinned DuckLake extension
+        run: make ducklake-extension
+
       - name: Initialize conformance evidence directory
         run: |
           set -euo pipefail

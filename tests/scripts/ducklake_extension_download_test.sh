@@ -23,6 +23,13 @@ awk '
   END { exit !(repository && release && version && platforms == 2) }
 ' "$repo_root/scripts/ducklake-extension.lock" || fail "release lock does not pin both tested platforms and digests"
 
+awk '
+  /^  manifest-conformance:/ { in_job = 1; next }
+  in_job && /^  [[:alnum:]_-]+:/ { exit }
+  in_job && /- name: Download pinned DuckLake extension/ { found = 1 }
+  END { exit !found }
+' "$repo_root/.github/workflows/compatibility.yml" || fail "manifest conformance job does not download the pinned DuckLake extension"
+
 mkdir -p "$tmp/assets/linux_amd64" "$tmp/bin" "$tmp/target"
 printf 'pinned extension bytes\n' > "$tmp/assets/linux_amd64/ducklake.duckdb_extension"
 printf 'duckdb_version=1.5.6\nducklake_source=test\nplatform=linux_amd64\n' > "$tmp/assets/linux_amd64/BUILD.txt"
