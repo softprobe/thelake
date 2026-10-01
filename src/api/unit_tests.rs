@@ -381,9 +381,7 @@ async fn unit_query_sql_invalid_returns_500() {
 async fn unit_provision_rejects_non_uuid_workspace_id() {
     std::env::set_var("SOFTPROBE_ADMIN_API_KEY", "unit-admin-key");
     let (router, state, _t) = local_router_and_state().await.expect("router");
-    let router = router.merge(
-        crate::runtime_api::runtime_control_routes().with_state(state),
-    );
+    let router = router.merge(crate::runtime_api::runtime_control_routes().with_state(state));
     let req = Request::builder()
         .method("POST")
         .uri("/v1/workspaces")
