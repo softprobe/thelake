@@ -949,16 +949,10 @@ impl DuckDBCore {
         let run_once = |state: &mut ConnectionState| -> Result<QueryResult> {
             let query_start = std::time::Instant::now();
             self.try_wrap_cache_httpfs_filesystems(state);
-            // One-shot exec of the customer SQL (plan+run together). duckdb-rs has
-            // no multi-row API that skips Statement for the fetch; materialize then
-            // SELECT * so we do not `prepare` the heavy statement every request.
-            //
-            // TODO(#114): parameterized SQL + per-worker Statement cache — drop the
-            // temp materialize and bind/execute a cached prepared statement instead.
-            let materialize =
-                format!("CREATE OR REPLACE TEMP TABLE __sp_query_result AS {query_run}");
-            state.conn.execute_batch(&materialize)?;
-            let mut stmt = state.conn.prepare("SELECT * FROM __sp_query_result")?;
+            // duckdb-rs requires Statement for multi-row fetch. Preparing the
+            // full SQL every request with inlined literals gets no reuse.
+            // TODO(#114): parameterized SQL + per-worker Statement cache.
+            let mut stmt = state.conn.prepare(query_run.as_str())?;
             let mut query_rows = stmt.query([])?;
             let column_names = query_rows
                 .as_ref()
@@ -1494,10 +1488,29 @@ mod tests {
             .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
             .unwrap();
         let timed = core.execute_query_on_state(&mut state, "SELECT id FROM traces LIMIT 1");
+        let result = timed
+            .result
+            .expect("sql_gate false must skip gate and run unbounded SQL");
+        assert_eq!(result.columns, vec!["id".to_string()]);
+        assert_eq!(result.row_count, result.rows.len());
+    }
+
+    #[test]
+    fn sql_gate_false_still_runs_explain_result_sets() {
+        // Shared path must support non-SELECT result statements (not CTAS-only).
+        let core = test_core(false);
+        let mut state = core
+            .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
+            .unwrap();
+        let timed =
+            core.execute_query_on_state(&mut state, "EXPLAIN SELECT id FROM traces LIMIT 1");
+        let result = timed
+            .result
+            .expect("EXPLAIN must work on query worker path");
         assert!(
-            timed.result.is_ok(),
-            "sql_gate false must skip gate and run unbounded SQL: {:?}",
-            timed.result.err()
+            result.row_count > 0,
+            "EXPLAIN should return plan rows, got row_count={}",
+            result.row_count
         );
     }
 
