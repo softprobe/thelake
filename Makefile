@@ -651,7 +651,7 @@ test-e2e: ensure-cache check-infra
 	@$(MAKE) --no-print-directory test-lease-pg
 	@E2E_BACKEND="$(E2E_BACKEND)" ./scripts/run-e2e-matrix.sh
 
-test-perf: ensure-cache
+test-perf: ensure-cache ducklake-extension
 	@set -e; \
 	t0=$$(date +%s); \
 	case "$(PERF_SUITE)" in \
