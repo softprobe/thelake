@@ -309,9 +309,12 @@ pub struct QueryConfig {
     /// Directory for DuckDB `cache_httpfs` on-disk cache (query path).
     #[serde(default = "default_query_cache_dir")]
     pub cache_dir: Option<String>,
-    /// When true, the query worker runs the full fact-scan gate (`EXPLAIN` +
-    /// source checks) before executing.
-    #[serde(default = "default_false")]
+    /// When true (default), the query worker runs the full fact-scan gate
+    /// (`EXPLAIN` + source checks) before executing. Writer/score lookup paths
+    /// stay gated regardless. Set false to skip that gate on query workers
+    /// (latency); this is unsafe if any query-worker SQL lacks a bare
+    /// `timestamp` bound — do not treat typed APIs as a substitute check.
+    #[serde(default = "default_true")]
     pub sql_gate: bool,
 }
 
@@ -320,7 +323,7 @@ impl Default for QueryConfig {
         Self {
             max_connections: default_query_max_connections(),
             cache_dir: default_query_cache_dir(),
-            sql_gate: false,
+            sql_gate: true,
         }
     }
 }
@@ -368,10 +371,6 @@ fn default_interval_seconds() -> u64 {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_false() -> bool {
-    false
 }
 
 fn default_reader_safety_grace_seconds() -> u64 {
@@ -677,7 +676,7 @@ ducklake:
         let c: Config = serde_yaml::from_str(yaml).expect("minimal ok");
         assert_eq!(c.server.port, 8090);
         assert_eq!(c.query.max_connections, 10);
-        assert!(!c.query.sql_gate, "sql_gate defaults off");
+        assert!(c.query.sql_gate, "sql_gate defaults on");
         assert_eq!(c.ducklake.metadata_path, "/tmp/meta.sqlite");
         assert_eq!(c.ingest.flush_interval_seconds, 0);
         assert_eq!(c.ingest.buffer_size_mb, 256);
@@ -685,16 +684,16 @@ ducklake:
     }
 
     #[test]
-    fn query_sql_gate_can_be_enabled() {
+    fn query_sql_gate_can_be_disabled() {
         let yaml = r#"
 ducklake:
   metadata_path: /tmp/meta.sqlite
   data_path: /tmp/data/
 query:
-  sql_gate: true
+  sql_gate: false
 "#;
-        let c: Config = serde_yaml::from_str(yaml).expect("sql_gate on");
-        assert!(c.query.sql_gate);
+        let c: Config = serde_yaml::from_str(yaml).expect("sql_gate off");
+        assert!(!c.query.sql_gate);
     }
 
     #[test]

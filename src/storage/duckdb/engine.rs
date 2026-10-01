@@ -877,7 +877,7 @@ impl DuckDBCore {
         // reattach or mem::forget connections after writes.
 
         let query_run = self.ducklake_inline_sql(query);
-        // Optional query-worker EXPLAIN gate (`query.sql_gate`, default off).
+        // Optional query-worker EXPLAIN gate (`query.sql_gate`, default on).
         let gate_start = std::time::Instant::now();
         if self.config.query.sql_gate {
             if let Err(e) =
@@ -949,16 +949,7 @@ impl DuckDBCore {
         let run_once = |state: &mut ConnectionState| -> Result<QueryResult> {
             let query_start = std::time::Instant::now();
             self.try_wrap_cache_httpfs_filesystems(state);
-            // One-shot exec of the customer SQL (plan+run together). duckdb-rs has
-            // no multi-row API that skips Statement for the fetch; materialize then
-            // SELECT * so we do not `prepare` the heavy statement every request.
-            //
-            // TODO(#114): parameterized SQL + per-worker Statement cache — drop the
-            // temp materialize and bind/execute a cached prepared statement instead.
-            let materialize =
-                format!("CREATE OR REPLACE TEMP TABLE __sp_query_result AS {query_run}");
-            state.conn.execute_batch(&materialize)?;
-            let mut stmt = state.conn.prepare("SELECT * FROM __sp_query_result")?;
+            let mut stmt = state.conn.prepare(query_run.as_str())?;
             let mut query_rows = stmt.query([])?;
             let column_names = query_rows
                 .as_ref()
