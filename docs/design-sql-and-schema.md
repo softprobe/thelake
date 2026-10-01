@@ -26,7 +26,7 @@ Product metrics / Prometheus recipes are **out of scope** (removed). Orphaned
 5. **One escaping / quoting API** under `src/sql/`.
 6. **Schema registry in `src/sql/schema` (types + DDL).**
 7. **Clean cutover.** Stop writers, export traces into the clean schema from every physical scope, validate, then flip once. Existing logs and scores files remain in place. No dual-read / feature flags.
-8. **Global scan rule:** every fact scan has an explicit, bare `timestamp` bound for partition pruning. One lower or upper bound can prune partitions on one side. Typed query APIs require a `QueryWindow`; there is no all-history default. A DuckDB JSON physical-plan check runs before query-worker execution when `query.sql_gate` is true (**default false**); set `query.sql_gate: true` to enable the full query-worker fact-scan gate (EXPLAIN and source checks). Writer/score-lookup paths remain gated. Off is an unsafe latency tradeoff — typed `QueryWindow` builders are not an execute-time substitute. The check requires a conjunctive bare-column timestamp filter on every traces/logs/scores scan, including nested queries, DML, CTAS, COPY, and relation commands. When statistics prove the timestamp bound redundant, the gate accepts that only for a direct query with one fact source; when the optimizer proves the entire result empty, there is no fact scan to gate. Raw SQL cannot read Parquet files directly; the writer has a separate checked ingest path for temporary Parquet inputs. One SQL statement is accepted per call so planning sees the same catalog state as execution. Unsupported query forms fail closed. The gate also rejects forbidden `record_date` / `event_date` / `window_ts` references.
+8. **Global scan rule:** every fact scan has an explicit, bare `timestamp` bound for partition pruning. One lower or upper bound can prune partitions on one side. Typed query APIs require a `QueryWindow`; there is no all-history default. A DuckDB JSON physical-plan check runs before execution and requires a conjunctive bare-column timestamp filter on every traces/logs/scores scan, including nested queries, DML, CTAS, COPY, and relation commands. When statistics prove the timestamp bound redundant, the gate accepts that only for a direct query with one fact source; when the optimizer proves the entire result empty, there is no fact scan to gate. Raw SQL cannot read Parquet files directly; the writer has a separate checked ingest path for temporary Parquet inputs. One SQL statement is accepted per call so planning sees the same catalog state as execution. Unsupported query forms fail closed. The gate also rejects forbidden `record_date` / `event_date` / `window_ts` references.
 9. **Simplicity.** No ORM, no SQL AST framework, no `(year,month,day)` triples, no signal-specific clock aliases.
 
 Violate any rule → reject the change.
@@ -149,9 +149,9 @@ pub fn ensure_sql_has_bare_timestamp_predicate(sql: &str) -> Result<(), String> 
 }
 ```
 
-Run the DuckDB physical-plan check in `DuckDBCore::execute_query_on_state`
-when `query.sql_gate` is true (default false), and always in `execute_batch_checked`,
-`prepare_checked`, plus direct fact reads such as score existence checks.
+Run the DuckDB physical-plan check in `DuckDBCore::execute_query_on_state`,
+`execute_batch_checked`, and `prepare_checked`, plus direct fact reads such as
+score existence checks.
 
 ---
 
@@ -172,7 +172,7 @@ when `query.sql_gate` is true (default false), and always in `execute_batch_chec
 - [x] No `record_date` in OTLP fact schemas (DDL)
 - [x] EXPLAIN greenfield: day-of-`timestamp` prune (`tests/integration/one_clock_prune.rs`)
 - [x] `src/sql/` foundation (`QueryWindow::scan_with_*_filter`, gate, literals, llm/tempo/session_summary recipes)
-- [x] D12 source gate on checked write paths; physical-plan scan gate on `execute_query_on_state` when `query.sql_gate` is true (default false), and on direct fact reads / writer paths always
+- [x] D12 source gate on checked write paths; physical-plan scan gate on `execute_query_on_state` and direct fact reads
 - [ ] Production export validated across every physical scope before the coordinated cutover
 
 Ops flip of catalogs remains an operator step after verify. Residual infra SQL still outside `src/sql/` (attach/DDL, Postgres dirty claim, OTLP telemetry compilers) — locality allowlist tracks the backlog; D12 gate covers execute paths.
