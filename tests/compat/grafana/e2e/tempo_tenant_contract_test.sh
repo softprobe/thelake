@@ -102,6 +102,17 @@ if bash -c 'source "$1"; validate_explore_response "$2" "$3" "$4" softprobe-loki
   exit 1
 fi
 
+# Tempo explore must key seeded aaaa/bbbb traces off datasource uid / tenant
+# letter — never workspace UUID suffix (*-a fails for cccccccc-… UUIDs).
+if grep -E '\$expected.*"\*-a"|\[\[ "\$expected" == \*-a \]\]' "$HARNESS"; then
+  echo 'grafana-system-smoke still derives Tempo trace suffix from tenant UUID' >&2
+  exit 1
+fi
+grep -Eq '\[\[ "\$uid" == \*-a \]\] && suffix="a"' "$HARNESS" || {
+  echo 'grafana-system-smoke missing datasource-uid Tempo explore suffix derivation' >&2
+  exit 1
+}
+
 mock_tempo="$TMP_DIR/mock-tempo.json"
 bash -c 'source "$1"; mock_signal_response tempo softprobe-tempo-a "$2"' _ "$HARNESS" "$TENANT_A" >"$mock_tempo"
 python3 - "$mock_tempo" "$SOURCE_TRACE_ID" "$WIRE_TRACE_ID" <<'PY'
