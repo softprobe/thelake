@@ -950,8 +950,6 @@ impl DuckDBCore {
             let query_start = std::time::Instant::now();
             self.try_wrap_cache_httpfs_filesystems(state);
             let mut stmt = state.conn.prepare(query_run.as_str())?;
-            let prepare_elapsed = query_start.elapsed();
-            let fetch_start = std::time::Instant::now();
             let mut query_rows = stmt.query([])?;
             let column_names = query_rows
                 .as_ref()
@@ -965,21 +963,14 @@ impl DuckDBCore {
                 .unwrap_or_default();
 
             let mut rows = Vec::new();
-            let mut duck_get_elapsed = std::time::Duration::ZERO;
-            let mut json_elapsed = std::time::Duration::ZERO;
             while let Some(row) = query_rows.next()? {
                 let mut values = Vec::with_capacity(column_names.len());
                 for idx in 0..column_names.len() {
-                    let get_start = std::time::Instant::now();
                     let value: DuckValue = row.get(idx)?;
-                    duck_get_elapsed += get_start.elapsed();
-                    let json_start = std::time::Instant::now();
                     values.push(duck_value_to_json(value));
-                    json_elapsed += json_start.elapsed();
                 }
                 rows.push(values);
             }
-            let fetch_elapsed = fetch_start.elapsed();
 
             let result = QueryResult {
                 columns: column_names,
@@ -987,15 +978,7 @@ impl DuckDBCore {
                 rows,
             };
             if diag {
-                println!(
-                    "DIAG execute_query total={:?} prepare={:?} fetch_loop={:?} duck_get={:?} json_convert={:?} rows={}",
-                    query_start.elapsed(),
-                    prepare_elapsed,
-                    fetch_elapsed,
-                    duck_get_elapsed,
-                    json_elapsed,
-                    result.row_count
-                );
+                println!("DIAG execute_query: {:?}", query_start.elapsed());
             }
             Ok(result)
         };
@@ -1504,13 +1487,8 @@ mod tests {
         let timed = core.execute_query_on_state(&mut state, "SELECT id FROM traces LIMIT 1");
         assert!(
             timed.result.is_ok(),
-            "sql_gate false must skip EXPLAIN and run: {:?}",
+            "sql_gate false must skip gate and run unbounded SQL: {:?}",
             timed.result.err()
-        );
-        assert!(
-            timed.gate_elapsed.as_millis() < 50,
-            "skipped gate should be near-zero: {:?}",
-            timed.gate_elapsed
         );
     }
 

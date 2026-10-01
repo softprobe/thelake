@@ -309,11 +309,11 @@ pub struct QueryConfig {
     /// Directory for DuckDB `cache_httpfs` on-disk cache (query path).
     #[serde(default = "default_query_cache_dir")]
     pub cache_dir: Option<String>,
-    /// When true (default), the query worker runs
-    /// `EXPLAIN (FORMAT JSON)` and requires a pushed timestamp filter on each
-    /// fact scan before executing. Writer/score lookup paths stay gated
-    /// regardless. Set false to skip the query-worker EXPLAIN (staging/prod
-    /// latency); typed APIs still supply QueryWindow bounds.
+    /// When true (default), the query worker runs the full fact-scan gate
+    /// (`EXPLAIN` + source checks) before executing. Writer/score lookup paths
+    /// stay gated regardless. Set false to skip that gate on query workers
+    /// (latency); this is unsafe if any query-worker SQL lacks a bare
+    /// `timestamp` bound — do not treat typed APIs as a substitute check.
     #[serde(default = "default_true")]
     pub sql_gate: bool,
 }
