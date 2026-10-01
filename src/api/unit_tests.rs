@@ -28,7 +28,7 @@ fn test_tenant() -> TenantInfo {
 }
 
 /// Register `workspace_id` in the durable scope registry, reusing this
-/// process's default physical scope (dedicated mode allows a workspace to
+/// process's default physical scope (isolated mode allows a workspace to
 /// share the configured metadata schema/data path).
 async fn provision_test_scope(state: &crate::api::AppState, workspace_id: &str) {
     let ducklake = state.engines.config().ducklake.clone();

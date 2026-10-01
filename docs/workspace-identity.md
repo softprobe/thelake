@@ -10,7 +10,7 @@
 | `workspace_id` | UUID; only logical tenancy key (assertion, engine cache, row column) |
 | `physical_scope` | catalog DSN + `metadata_schema` + `catalog_alias` + `data_path` |
 | `shared` | many workspaces → one physical scope; isolate with `workspace_id` on rows |
-| `dedicated` | one workspace → its own physical scope (former `isolated`) |
+| `isolated` | one workspace → its own physical scope |
 
 A user belongs to one or more workspaces. Each workspace binds to exactly one
 physical scope (a `RuntimeEngine`). There is no `lake_scope_id`, `tenant_key`,
@@ -24,7 +24,7 @@ temp views use `workspace_id = <uuid>`.
 
 `workspace_scope_binding` is not on the shared request path (`engine_for`).
 Admin `provision_scope` still records workspace UUID → default physical so
-maintenance can list provisioned workspace keys. Dedicated mode uses the
+maintenance can list provisioned workspace keys. Isolated mode uses the
 registry for workspace UUID → physical scope on every resolve.
 
 ## Assertion

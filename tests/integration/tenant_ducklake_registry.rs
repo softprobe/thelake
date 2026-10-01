@@ -48,10 +48,10 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
     let metadata_schema = format!("tenant_registry_scope_{suffix}");
     let data_path = format!("./target/registry-test-data/{workspace_id}/");
 
-    // Dedicated mode is fail-closed on the registry. Shared mode weakly binds
+    // Isolated mode is fail-closed on the registry. Shared mode weakly binds
     // to the process default physical scope without a binding lookup.
     if manager.config().ducklake.workspace_scope_mode
-        == softprobe_runtime::workspace_scope::WorkspaceScopeMode::Dedicated
+        == softprobe_runtime::workspace_scope::WorkspaceScopeMode::Isolated
     {
         let unknown = manager
             .engine_for(&workspace_id)
@@ -152,7 +152,7 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
             let shared = manager.config().ducklake.metadata_schema.clone();
             (shared.clone(), shared)
         }
-        WorkspaceScopeMode::Dedicated => (schema_a.clone(), schema_b.clone()),
+        WorkspaceScopeMode::Isolated => (schema_a.clone(), schema_b.clone()),
     };
     let client = postgres_client().await;
     let manifests_a = load_active_telemetry_columns_manifests(&client, &load_schema_a)

@@ -785,11 +785,11 @@ mod tests {
                 catalog_alias: "softprobe".to_string(),
                 metadata_schema: "main".to_string(),
                 extension_path: config.ducklake.extension_path.clone(),
-                workspace_scope_mode: WorkspaceScopeMode::Dedicated,
+                workspace_scope_mode: WorkspaceScopeMode::Isolated,
                 data_inlining_row_limit: None,
                 writer_pool_size: 1,
             }),
-            WorkspaceScopeMode::Dedicated,
+            WorkspaceScopeMode::Isolated,
         )
         .expect("binding");
         let access = DuckLakeAccess::Workspace(binding.clone());

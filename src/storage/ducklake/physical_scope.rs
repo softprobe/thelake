@@ -33,7 +33,7 @@ pub fn effective_workspace_id(workspace_id: &str) -> &str {
 pub enum WorkspaceScopeMode {
     /// One workspace → its own physical DuckLake scope.
     #[default]
-    Dedicated,
+    Isolated,
     /// Allow multiple workspaces to use one physical DuckLake scope.
     Shared,
 }
@@ -41,7 +41,7 @@ pub enum WorkspaceScopeMode {
 impl fmt::Display for WorkspaceScopeMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Dedicated => "dedicated",
+            Self::Isolated => "isolated",
             Self::Shared => "shared",
         })
     }
@@ -419,17 +419,17 @@ mod tests {
     }
 
     #[test]
-    fn scope_mode_defaults_to_dedicated_and_round_trips() {
-        assert_eq!(WorkspaceScopeMode::default(), WorkspaceScopeMode::Dedicated);
+    fn scope_mode_defaults_to_isolated_and_round_trips() {
+        assert_eq!(WorkspaceScopeMode::default(), WorkspaceScopeMode::Isolated);
         let encoded = serde_yaml::to_string(&WorkspaceScopeMode::Shared).expect("serialize");
         assert_eq!(encoded.trim(), "shared");
         let decoded: WorkspaceScopeMode = serde_yaml::from_str("shared").expect("deserialize");
         assert_eq!(decoded, WorkspaceScopeMode::Shared);
-        let dedicated = serde_yaml::to_string(&WorkspaceScopeMode::Dedicated).expect("serialize");
-        assert_eq!(dedicated.trim(), "dedicated");
-        let decoded_dedicated: WorkspaceScopeMode =
-            serde_yaml::from_str("dedicated").expect("deserialize");
-        assert_eq!(decoded_dedicated, WorkspaceScopeMode::Dedicated);
+        let isolated = serde_yaml::to_string(&WorkspaceScopeMode::Isolated).expect("serialize");
+        assert_eq!(isolated.trim(), "isolated");
+        let decoded_isolated: WorkspaceScopeMode =
+            serde_yaml::from_str("isolated").expect("deserialize");
+        assert_eq!(decoded_isolated, WorkspaceScopeMode::Isolated);
     }
 
     #[test]
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn workspace_binding_requires_a_workspace_id() {
         let scope = PhysicalScope::from_ducklake(&DuckLakeConfig::default());
-        let error = WorkspaceBinding::new(" ", scope, WorkspaceScopeMode::Dedicated)
+        let error = WorkspaceBinding::new(" ", scope, WorkspaceScopeMode::Isolated)
             .expect_err("blank workspace id must be rejected");
         assert_eq!(error.to_string(), "workspace_id must not be empty");
     }

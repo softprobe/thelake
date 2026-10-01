@@ -386,7 +386,7 @@ pub struct DuckLakeConfig {
     /// Pinned DuckLake extension built against the embedded DuckDB ABI.
     #[serde(default = "default_ducklake_extension_path")]
     pub extension_path: String,
-    /// Workspace storage mode (`shared` | `dedicated`). Default: dedicated.
+    /// Workspace storage mode (`shared` | `isolated`). Default: isolated.
     #[serde(default)]
     pub workspace_scope_mode: crate::workspace_scope::WorkspaceScopeMode,
     /// Rows per INSERT at or below this limit may stay catalog-inlined.
@@ -812,11 +812,11 @@ ducklake:
     }
 
     #[test]
-    fn shared_workspace_scope_defaults_to_dedicated() {
+    fn shared_workspace_scope_defaults_to_isolated() {
         let c = Config::default();
         assert_eq!(
             c.ducklake.workspace_scope_mode,
-            crate::workspace_scope::WorkspaceScopeMode::Dedicated
+            crate::workspace_scope::WorkspaceScopeMode::Isolated
         );
     }
 

@@ -456,7 +456,7 @@ mod tests {
         config.query.cache_dir = None;
         let scope = PhysicalScope::from_ducklake(&config.ducklake);
         let access = DuckLakeAccess::Workspace(
-            WorkspaceBinding::new("query-test", scope, WorkspaceScopeMode::Dedicated)
+            WorkspaceBinding::new("query-test", scope, WorkspaceScopeMode::Isolated)
                 .expect("binding"),
         );
         let conn = DuckLakeSessionFactory::new(&config)

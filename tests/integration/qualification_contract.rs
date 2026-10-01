@@ -172,7 +172,7 @@ async fn isolated_main_schema_uses_three_part_qualification() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut config = file_backed_test_config(&temp);
     config.ducklake.metadata_schema = "main".to_string();
-    config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Dedicated;
+    config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Isolated;
     config.ducklake.data_inlining_row_limit = Some(0);
     config.maintenance.enabled = true;
     config.maintenance.metadata_enabled = true;
@@ -320,7 +320,7 @@ async fn sql_maintenance_merge_preserves_ducklake_layout() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut config = file_backed_test_config(&temp);
     config.ducklake.metadata_schema = format!("maintenance_layout_{}", Uuid::new_v4().simple());
-    config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Dedicated;
+    config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Isolated;
     config.ducklake.data_inlining_row_limit = Some(0);
     config.maintenance.enabled = true;
     config.maintenance.interval_seconds = 3600;

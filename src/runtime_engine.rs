@@ -753,7 +753,7 @@ RETURNING physical_scope_id;"#,
     /// Resolve a workspace binding.
     ///
     /// Shared mode weakly binds every workspace to the process default physical
-    /// scope (no `workspace_scope_binding` lookup). Dedicated mode is
+    /// scope (no `workspace_scope_binding` lookup). Isolated mode is
     /// fail-closed on the durable registry.
     pub async fn resolve_or_create_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
         if workspace_id.trim().is_empty() {
@@ -832,7 +832,7 @@ RETURNING physical_scope_id;"#,
         }
 
         Ok(match self.workspace_scope_mode {
-            WorkspaceScopeMode::Dedicated => PhysicalScope::from_provision(
+            WorkspaceScopeMode::Isolated => PhysicalScope::from_provision(
                 &self.default_physical_scope,
                 request.metadata_schema.clone(),
                 request.data_path.clone(),

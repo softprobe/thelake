@@ -293,7 +293,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     // Shared mode ignores request warehouse overrides (logical binding only).
     // Isolated mode must bind the requested schema/path.
     if config.ducklake.workspace_scope_mode
-        == softprobe_runtime::workspace_scope::WorkspaceScopeMode::Dedicated
+        == softprobe_runtime::workspace_scope::WorkspaceScopeMode::Isolated
     {
         assert!(
             hints.matches_warehouse_hints(&tenant_schema, &tenant_data_path),

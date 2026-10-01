@@ -108,7 +108,7 @@ must not accept an arbitrary workspace or DuckLake scope after binding.
 Canonical terms and kill list: [`workspace-identity.md`](workspace-identity.md).
 Shared mode uses a weak bind on the request path (process physical scope;
 `engine_for` does not look up `workspace_scope_binding`). Admin provision still
-records workspace UUID → default physical for maintenance listing. Dedicated
+records workspace UUID → default physical for maintenance listing. Isolated
 mode stores workspace UUID → physical scope in the durable registry for every
 resolve. Provision and auth both require UUID `workspace_id`; Grafana compat
 fixtures therefore provision `COMPAT_WORKSPACE_*` UUIDs (not API-key slug labels).
@@ -122,7 +122,7 @@ fixtures therefore provision `COMPAT_WORKSPACE_*` UUIDs (not API-key slug labels
 
 - No `lake_scope_id` / `tenant_key` / product `tenant` id.
 - Row column is `workspace_id` (CREATE-only greenfield DDL; never ALTER for cutover).
-- Mode names: `shared` | `dedicated` (replaces `isolated`).
+- Mode names: `shared` | `isolated`.
 - Clean-break deployments; copy traces only when migrating data.
 
 ## Current invariant: explicit business attributes and tenant promotion
