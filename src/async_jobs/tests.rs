@@ -630,7 +630,10 @@ async fn runner_ok_then_err_overrun_does_not_rerun_ok_scope_on_catchup() {
     let ok = ok_runs.ok_runs.load(Ordering::SeqCst);
     let bad = bad_runs.bad_runs.load(Ordering::SeqCst);
     handle.abort();
-    assert_eq!(ok, 1, "Ok scope must not re-run after overrun restamp; got {ok}");
+    assert_eq!(
+        ok, 1,
+        "Ok scope must not re-run after overrun restamp; got {ok}"
+    );
     assert!(
         bad >= 2,
         "cleared Err scope should retry on catch-up; got {bad}"
@@ -673,7 +676,10 @@ async fn runner_cross_job_overrun_does_not_rerun_earlier_job_on_catchup() {
     let a = first_runs.runs.load(Ordering::SeqCst);
     let b = second_runs.runs.load(Ordering::SeqCst);
     handle.abort();
-    assert_eq!(a, 1, "earlier job must not re-run on Delay catch-up; got {a}");
+    assert_eq!(
+        a, 1,
+        "earlier job must not re-run on Delay catch-up; got {a}"
+    );
     assert_eq!(b, 1, "later job must run once; got {b}");
 }
 

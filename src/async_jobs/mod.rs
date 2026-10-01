@@ -63,7 +63,9 @@ impl DueTracker {
     }
 
     fn due_skew(interval: Duration) -> Duration {
-        Duration::from_millis(5).min(interval / 10).max(Duration::from_millis(1))
+        Duration::from_millis(5)
+            .min(interval / 10)
+            .max(Duration::from_millis(1))
     }
 
     fn mark_attempt(&mut self, job: &str, scope: &str, at: Instant) {
