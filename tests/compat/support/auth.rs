@@ -17,15 +17,15 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// Build the same auth/lifecycle router used by the production compatibility path.
 pub async fn authenticated_router(
     config: Arc<Config>,
-    tenant_id: &str,
+    workspace_id: &str,
     auth_success: bool,
 ) -> (Router, AppState, MockServer) {
-    authenticated_router_with_expected_token(config, tenant_id, auth_success, None).await
+    authenticated_router_with_expected_token(config, workspace_id, auth_success, None).await
 }
 
 async fn authenticated_router_with_expected_token(
     config: Arc<Config>,
-    tenant_id: &str,
+    workspace_id: &str,
     auth_success: bool,
     expected_token: Option<&str>,
 ) -> (Router, AppState, MockServer) {
@@ -33,7 +33,7 @@ async fn authenticated_router_with_expected_token(
     let body = if auth_success {
         serde_json::json!({
             "success": true,
-            "data": {"tenantId": tenant_id, "resources": []}
+            "data": {"workspaceId": workspace_id, "resources": []}
         })
     } else {
         serde_json::json!({"success": false})
@@ -54,7 +54,7 @@ async fn authenticated_router_with_expected_token(
     let (router, state) = create_router(config, post(ingest_traces), Some(control))
         .await
         .expect("authenticated test router");
-    // Production requires an explicit `POST /v1/tenants` admin provisioning step
+    // Production requires an explicit `POST /v1/workspaces` admin provisioning step
     // before a tenant can resolve a DuckLake scope. Register the fixture tenant
     // directly against the registry so compat contract tests can skip that HTTP
     // round trip and still exercise a real resolved scope.
@@ -62,7 +62,7 @@ async fn authenticated_router_with_expected_token(
     state
         .engines
         .provision_scope(ScopeProvisioningRequest {
-            scope_id: tenant_id.to_string(),
+            scope_id: workspace_id.to_string(),
             metadata_schema: ducklake.metadata_schema,
             data_path: ducklake.data_path,
         })

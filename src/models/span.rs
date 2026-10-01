@@ -73,7 +73,7 @@ pub struct Span {
     // Field 5-7: Application context
     pub app_id: String,
     pub organization_id: Option<String>,
-    pub tenant_id: Option<String>,
+    pub workspace_id: Option<String>,
     /// Softprobe agent id from assertion auth (not client OTLP).
     pub agent_id: Option<String>,
     /// Softprobe agent display name from assertion auth (not client OTLP).
@@ -261,7 +261,7 @@ impl Span {
             },
             app_id,
             organization_id: resource_attributes.get("sp.organization.id").cloned(),
-            tenant_id: resource_attributes.get("sp.tenant.id").cloned(),
+            workspace_id: resource_attributes.get("sp.tenant.id").cloned(),
             agent_id: None,
             agent_name: None,
             message_type: otlp_span.name.clone(),
@@ -394,7 +394,7 @@ mod tests {
             parent_span_id: None,
             app_id: "app".to_string(),
             organization_id: None,
-            tenant_id: None,
+            workspace_id: None,
             agent_id: None,
             agent_name: None,
             message_type: "msg".to_string(),

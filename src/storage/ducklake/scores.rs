@@ -19,7 +19,7 @@ fn score_config_from_sql_row(row: &duckdb::Row<'_>) -> Result<Option<ScoreConfig
     let categories_raw: Option<String> = row.get(7)?;
     let author_id: Option<String> = row.get(8)?;
     let metadata_raw: Option<String> = row.get(9)?;
-    let tenant_id: Option<String> = row.get(10)?;
+    let workspace_id: Option<String> = row.get(10)?;
     let data_type = match data_type_raw.as_str() {
         "numeric" => crate::models::ScoreDataType::Numeric,
         "categorical" => crate::models::ScoreDataType::Categorical,
@@ -56,37 +56,21 @@ fn score_config_from_sql_row(row: &duckdb::Row<'_>) -> Result<Option<ScoreConfig
         categories,
         author_id,
         metadata,
-        tenant_id,
+        workspace_id,
     }))
 }
 
 impl DuckLakeWriter {
     fn validate_shared_score_ownership(&self, scores: &[Score]) -> Result<()> {
-        let Some(workspace_id) = self.shared_workspace_id()? else {
-            return Ok(());
-        };
-        if scores
-            .iter()
-            .any(|score| score.tenant_id.as_deref() != Some(workspace_id))
-        {
-            return Err(anyhow!(
-                "shared score writes require tenant_id to match the authenticated workspace"
-            ));
+        for score in scores {
+            self.validate_shared_ownership(score.workspace_id.as_deref(), "score")?;
         }
         Ok(())
     }
 
     fn validate_shared_score_config_ownership(&self, configs: &[ScoreConfig]) -> Result<()> {
-        let Some(workspace_id) = self.shared_workspace_id()? else {
-            return Ok(());
-        };
-        if configs
-            .iter()
-            .any(|config| config.tenant_id.as_deref() != Some(workspace_id))
-        {
-            return Err(anyhow!(
-                "shared score config writes require tenant_id to match the authenticated workspace"
-            ));
+        for config in configs {
+            self.validate_shared_ownership(config.workspace_id.as_deref(), "score config")?;
         }
         Ok(())
     }

@@ -1,7 +1,7 @@
 // ============================================================================
 // TENANT BINDING CONSTITUTION (HARD RULE)
 // Tenant identity appears only at auth -> RuntimeEngine mapping.
-// Operational APIs MUST NOT accept tenant_id or scope parameters.
+// Operational APIs MUST NOT accept workspace_id or scope parameters.
 // ============================================================================
 
 //! Per-tenant [`RuntimeEngine`] cache.
@@ -47,7 +47,7 @@ fn validate_metadata_schema_name(schema: &str) -> Result<()> {
 
 /// One tenant's canonical bound ingest and query surfaces.
 pub struct RuntimeEngine {
-    tenant_id: String,
+    workspace_id: String,
     binding: WorkspaceBinding,
     /// Stashed at build — never re-derived via a binding getter.
     physical: PhysicalScope,
@@ -68,8 +68,8 @@ struct TenantSummaryScope {
 
 impl RuntimeEngine {
     /// Stable logical identity of this tenant-bound runtime.
-    pub fn tenant_id(&self) -> &str {
-        &self.tenant_id
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
     }
 
     /// Tenant-scoped write API. Storage scope and buffering are fixed when the
@@ -368,24 +368,24 @@ impl RuntimeEngineManager {
             );
         }
         let scope = self
-            .resolve_scope(&tenant.tenant_id)
+            .resolve_scope(&tenant.workspace_id)
             .await
             .map_err(|err| err.to_string())?;
         DuckLakeConnectionMaterial::from_tenant_scope(tenant, &scope, self.config.as_ref())
     }
 
-    pub fn list_cached_tenant_ids(&self) -> Vec<String> {
+    pub fn list_cached_workspace_ids(&self) -> Vec<String> {
         self.engines.iter().map(|e| e.key().clone()).collect()
     }
 
     /// Return a cached engine without building (for opportunistic gauges).
-    pub fn cached_engine(&self, tenant_id: &str) -> Option<Arc<RuntimeEngine>> {
-        self.engines.get(tenant_id).map(|e| e.clone())
+    pub fn cached_engine(&self, workspace_id: &str) -> Option<Arc<RuntimeEngine>> {
+        self.engines.get(workspace_id).map(|e| e.clone())
     }
 
     /// Drop cached engine (e.g. after provisioning changes scope).
-    pub fn invalidate(&self, tenant_id: &str) {
-        self.engines.remove(tenant_id);
+    pub fn invalidate(&self, workspace_id: &str) {
+        self.engines.remove(workspace_id);
     }
 
     #[cfg(test)]
@@ -394,39 +394,40 @@ impl RuntimeEngineManager {
     }
 
     /// Resolve registry scope (when configured) and return or construct a cached [`RuntimeEngine`].
-    pub async fn engine_for(&self, tenant_id: &str) -> Result<Arc<RuntimeEngine>> {
-        if let Some(r) = self.engines.get(tenant_id) {
+    pub async fn engine_for(&self, workspace_id: &str) -> Result<Arc<RuntimeEngine>> {
+        if let Some(r) = self.engines.get(workspace_id) {
             return Ok(r.clone());
         }
         let lock = self
             .creation_locks
-            .entry(tenant_id.to_string())
+            .entry(workspace_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _hold = lock.lock().await;
-        if let Some(r) = self.engines.get(tenant_id) {
+        if let Some(r) = self.engines.get(workspace_id) {
             return Ok(r.clone());
         }
-        let engine = self.build_engine(tenant_id).await?;
-        self.engines.insert(tenant_id.to_string(), engine.clone());
+        let engine = self.build_engine(workspace_id).await?;
+        self.engines
+            .insert(workspace_id.to_string(), engine.clone());
         Ok(engine)
     }
 
     pub async fn engine_for_tenant(&self, tenant: &TenantInfo) -> Result<Arc<RuntimeEngine>> {
-        self.engine_for(&tenant.tenant_id).await
+        self.engine_for(&tenant.workspace_id).await
     }
 
-    async fn build_engine(&self, tenant_id: &str) -> Result<Arc<RuntimeEngine>> {
+    async fn build_engine(&self, workspace_id: &str) -> Result<Arc<RuntimeEngine>> {
         #[cfg(test)]
         self.build_counter.fetch_add(1, Ordering::Relaxed);
 
-        // The unauthenticated local/default runtime has no external tenant ID, but
+        // The unauthenticated local/default runtime has no external workspace ID, but
         // workspace-bound engines still need a non-empty identity for their access
         // contract. Keep the empty ID only for resolving the configured default scope.
-        let bound_tenant_id = effective_workspace_id(tenant_id);
+        let bound_workspace_id = effective_workspace_id(workspace_id);
 
         let resolver = &self.scope_registry;
-        let binding = resolver.resolve_or_create_binding(tenant_id).await?;
+        let binding = resolver.resolve_or_create_binding(workspace_id).await?;
         let physical = DuckLakeAccess::Workspace(binding.clone())
             .physical_scope()
             .clone();
@@ -445,13 +446,13 @@ impl RuntimeEngineManager {
                     self.config.as_ref(),
                     &physical,
                     counts_toward_liveness,
-                    bound_tenant_id,
+                    bound_workspace_id,
                 )
                 .await?,
             );
             let admin = Arc::new(AdminEngine::from_ingest(&ingest));
             Ok(Arc::new(RuntimeEngine {
-                tenant_id: bound_tenant_id.to_string(),
+                workspace_id: bound_workspace_id.to_string(),
                 binding,
                 physical: physical.clone(),
                 catalog_pool: resolver.pool().clone(),
@@ -496,7 +497,7 @@ impl ScopeStorageHints {
 #[serde(rename_all = "camelCase")]
 pub struct DuckLakeConnectionMaterial {
     pub version: u8,
-    pub tenant_id: String,
+    pub workspace_id: String,
     pub ducklake_pg_uri: String,
     pub ducklake_metadata_schema: String,
     pub ducklake_data_path: String,
@@ -544,7 +545,7 @@ impl DuckLakeConnectionMaterial {
 
         Ok(Self {
             version: 1,
-            tenant_id: tenant.tenant_id.clone(),
+            workspace_id: tenant.workspace_id.clone(),
             ducklake_pg_uri,
             ducklake_metadata_schema,
             ducklake_data_path,
@@ -749,13 +750,25 @@ RETURNING physical_scope_id;"#,
         Ok(())
     }
 
-    /// Resolve a workspace binding from the durable registry.
+    /// Resolve a workspace binding.
+    ///
+    /// Shared mode weakly binds every workspace to the process default physical
+    /// scope (no `workspace_scope_binding` lookup). Isolated mode is
+    /// fail-closed on the durable registry.
     pub async fn resolve_or_create_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
         if workspace_id.trim().is_empty() {
             return WorkspaceBinding::new(
                 DEFAULT_WORKSPACE_ID,
                 self.default_physical_scope.clone(),
                 self.workspace_scope_mode,
+            )
+            .map_err(Into::into);
+        }
+        if self.workspace_scope_mode == WorkspaceScopeMode::Shared {
+            return WorkspaceBinding::new(
+                workspace_id,
+                self.default_physical_scope.clone(),
+                WorkspaceScopeMode::Shared,
             )
             .map_err(Into::into);
         }
@@ -788,7 +801,7 @@ RETURNING physical_scope_id;"#,
     }
 
     async fn resolve_scope_legacy(&self, scope_id: &str) -> Result<PhysicalScope> {
-        if scope_id.trim().is_empty() {
+        if scope_id.trim().is_empty() || self.workspace_scope_mode == WorkspaceScopeMode::Shared {
             return Ok(self.default_physical_scope.clone());
         }
         Ok(
@@ -798,7 +811,10 @@ RETURNING physical_scope_id;"#,
         )
     }
 
-    async fn resolve_scope_without_tables(&self, scope_id: &str) -> Result<PhysicalScope> {
+    pub(crate) async fn resolve_scope_without_tables(
+        &self,
+        scope_id: &str,
+    ) -> Result<PhysicalScope> {
         self.resolve_scope_legacy(scope_id).await
     }
 
@@ -830,9 +846,9 @@ RETURNING physical_scope_id;"#,
         request: ScopeProvisioningRequest,
         scope: PhysicalScope,
     ) -> Result<PhysicalScope> {
-        // Shared workspaces are logical bindings to the one configured physical
-        // scope. The request names the workspace only; it cannot select a
-        // second catalog or data root.
+        // Shared mode still records workspace_scope_binding → default physical so
+        // maintenance can list provisioned workspace keys. engine_for keeps the
+        // weak bind (no binding lookup) on the request path.
         let mut client = self.pool.get().await?;
         let physical = scope.clone();
         let transaction = client.transaction().await?;
@@ -1166,7 +1182,7 @@ mod tests {
 
     #[test]
     fn tenant_runtime_exposes_logical_accessors() {
-        let _tenant_id: fn(&RuntimeEngine) -> &str = RuntimeEngine::tenant_id;
+        let _tenant_id: fn(&RuntimeEngine) -> &str = RuntimeEngine::workspace_id;
         let _query: fn(&RuntimeEngine) -> Arc<QueryEngine> = RuntimeEngine::query_engine;
     }
 

@@ -37,7 +37,13 @@ pub(crate) fn record_ingest_decode_failure(
     let Some(t) = tenant else {
         return;
     };
-    if crate::self_monitoring::instrument_customer_tenant(&t.tenant_id) {
-        crate::self_monitoring::record_ingest(&t.tenant_id, signal, false, None, start.elapsed());
+    if crate::self_monitoring::instrument_customer_tenant(&t.workspace_id) {
+        crate::self_monitoring::record_ingest(
+            &t.workspace_id,
+            signal,
+            false,
+            None,
+            start.elapsed(),
+        );
     }
 }

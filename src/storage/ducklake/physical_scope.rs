@@ -31,7 +31,7 @@ pub fn effective_workspace_id(workspace_id: &str) -> &str {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceScopeMode {
-    /// Preserve the current one-workspace-per-scope behavior.
+    /// One workspace → its own physical DuckLake scope.
     #[default]
     Isolated,
     /// Allow multiple workspaces to use one physical DuckLake scope.
@@ -425,6 +425,11 @@ mod tests {
         assert_eq!(encoded.trim(), "shared");
         let decoded: WorkspaceScopeMode = serde_yaml::from_str("shared").expect("deserialize");
         assert_eq!(decoded, WorkspaceScopeMode::Shared);
+        let isolated = serde_yaml::to_string(&WorkspaceScopeMode::Isolated).expect("serialize");
+        assert_eq!(isolated.trim(), "isolated");
+        let decoded_isolated: WorkspaceScopeMode =
+            serde_yaml::from_str("isolated").expect("deserialize");
+        assert_eq!(decoded_isolated, WorkspaceScopeMode::Isolated);
     }
 
     #[test]

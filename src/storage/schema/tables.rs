@@ -202,11 +202,11 @@ mod tests {
             scores.field_with_name("metadata").unwrap().data_type(),
             DataType::Map(_, _)
         ));
-        assert!(scores.field_with_name("tenant_id").is_ok());
+        assert!(scores.field_with_name("workspace_id").is_ok());
         assert!(ScoreConfigTable::schema()
-            .field_with_name("tenant_id")
+            .field_with_name("workspace_id")
             .is_ok());
-        assert!(logs.field_with_name("tenant_id").is_ok());
+        assert!(logs.field_with_name("workspace_id").is_ok());
     }
 
     #[test]

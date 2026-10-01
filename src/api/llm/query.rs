@@ -263,10 +263,10 @@ async fn resolve_session_lake_window(
     tenant_ref: Option<&TenantInfo>,
     session_id: &str,
 ) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
-    let tenant_id = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
+    let workspace_id = tenant_ref.map(|t| t.workspace_id.as_str()).unwrap_or("");
     let engine = state
         .engines
-        .engine_for(tenant_id)
+        .engine_for(workspace_id)
         .await
         .map_err(storage_error)?;
     match engine.lookup_session_summary_window(session_id).await {
@@ -290,7 +290,7 @@ pub async fn get_session(
         return Err(bad_request("session_id is required".to_string()));
     }
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let tenant_label = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
+    let tenant_label = tenant_ref.map(|t| t.workspace_id.as_str()).unwrap_or("");
     let total_start = std::time::Instant::now();
 
     let pg_start = std::time::Instant::now();
@@ -635,10 +635,10 @@ pub async fn search_sessions(
     let limit = clamp_limit(request.limit, DEFAULT_SESSION_LIMIT);
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
 
-    let tenant_id = tenant_ref.map(|t| t.tenant_id.as_str()).unwrap_or("");
+    let workspace_id = tenant_ref.map(|t| t.workspace_id.as_str()).unwrap_or("");
     let engine = state
         .engines
-        .engine_for(tenant_id)
+        .engine_for(workspace_id)
         .await
         .map_err(storage_error)?;
     match engine.search_session_summary(&request, limit).await {
@@ -686,12 +686,12 @@ pub async fn rebuild_session_summary(
     )
     .map_err(bad_request)?;
 
-    let tenant_id = tenant
+    let workspace_id = tenant
         .as_ref()
-        .map(|extension| extension.0.tenant_id.as_str())
+        .map(|extension| extension.0.workspace_id.as_str())
         .unwrap_or("");
     // Lease key matches SessionSummaryRebuildJob: empty tenant → default workspace.
-    let scope_key = crate::workspace_scope::effective_workspace_id(tenant_id);
+    let scope_key = crate::workspace_scope::effective_workspace_id(workspace_id);
     let leases = crate::async_jobs::PostgresLeaseStore::from_engines(&state.engines);
     let holder = session_summary_rebuild_holder_id(
         &state.engines.config().async_jobs.resolved_instance_id(),
@@ -945,7 +945,7 @@ fn map_score(columns: &[String], row: &[Value]) -> Option<Score> {
         config_id: optional_string(columns, row, "config_id"),
         author_id: optional_string(columns, row, "author_id"),
         metadata: map_string_map(column_value(columns, row, "metadata")),
-        tenant_id: optional_string(columns, row, "tenant_id"),
+        workspace_id: optional_string(columns, row, "workspace_id"),
     })
 }
 

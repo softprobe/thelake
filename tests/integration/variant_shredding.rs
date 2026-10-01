@@ -80,7 +80,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
             parent_span_id: None,
             app_id: "variant-app".to_string(),
             organization_id: None,
-            tenant_id: None,
+            workspace_id: None,
             agent_id: None,
             agent_name: None,
             message_type: "chat".to_string(),
@@ -117,7 +117,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
         resource_attributes: log_resource,
         trace_id: Some("tr-0".to_string()),
         span_id: Some("sp-0".to_string()),
-        tenant_id: None,
+        workspace_id: None,
         agent_id: None,
         agent_name: None,
     };
@@ -215,7 +215,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     let now = Utc::now();
     let session_id = format!("vk-sess-{}", uuid::Uuid::new_v4());
     let capture_id = format!("cap-{}", uuid::Uuid::new_v4());
-    let tenant_id = "tenant-variant-keys";
+    let workspace_id = "tenant-variant-keys";
     let trace_id = "vk-trace-1";
 
     // Span with full LLM hot-key set + capture id.
@@ -236,7 +236,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         parent_span_id: None,
         app_id: "vk-app".into(),
         organization_id: None,
-        tenant_id: Some(tenant_id.into()),
+        workspace_id: Some(workspace_id.into()),
         agent_id: None,
         agent_name: None,
         message_type: "chat".into(),
@@ -268,7 +268,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         parent_span_id: None,
         app_id: "vk-app".into(),
         organization_id: None,
-        tenant_id: Some(tenant_id.into()),
+        workspace_id: Some(workspace_id.into()),
         agent_id: None,
         agent_name: None,
         message_type: "tool".into(),
@@ -304,7 +304,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         resource_attributes: log_resource,
         trace_id: Some(trace_id.into()),
         span_id: Some("vk-span-1".into()),
-        tenant_id: None,
+        workspace_id: None,
         agent_id: None,
         agent_name: None,
     };
@@ -475,7 +475,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     //
     // `IngestEngine::bound_default` always stamps writes with its own bound workspace id
     // (anti-spoofing; see `bind_spans_to_workspace`), so the capture id (already
-    // globally unique) is what disambiguates this row rather than `tenant_id`.
+    // globally unique) is what disambiguates this row rather than `workspace_id`.
     let capture_result = query_engine
         .trace_attributes_by_attribute(
             &session_id,

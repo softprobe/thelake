@@ -49,7 +49,7 @@ struct Receipt {
 
 #[derive(Debug, Serialize)]
 struct TenantReceipt {
-    tenant_id: String,
+    workspace_id: String,
     scope_provisioned: bool,
     logs_sent: bool,
     traces_sent: bool,
@@ -67,10 +67,12 @@ fn main() {
     let receipt_path = env::var("GRAFANA_SEED_RECEIPT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("target/compat/grafana/seed-receipt.json"));
-    let tenant_a =
-        env::var("SOFTPROBE_TENANT_A_ID").unwrap_or_else(|_| "grafana-phase4-tenant-a".into());
-    let tenant_b =
-        env::var("SOFTPROBE_TENANT_B_ID").unwrap_or_else(|_| "grafana-phase4-tenant-b".into());
+    // Defaults must match tests/util/workspace_ids.env (COMPAT_WORKSPACE_A/B).
+    // API keys stay as human-readable fixture credentials.
+    let tenant_a = env::var("SOFTPROBE_TENANT_A_ID")
+        .unwrap_or_else(|_| "cccccccc-cccc-cccc-cccc-cccccccccccc".into());
+    let tenant_b = env::var("SOFTPROBE_TENANT_B_ID")
+        .unwrap_or_else(|_| "dddddddd-dddd-dddd-dddd-dddddddddddd".into());
     let key_a =
         env::var("SOFTPROBE_TENANT_A_API_KEY").unwrap_or_else(|_| "grafana-phase4-tenant-a".into());
     let key_b =
@@ -113,9 +115,9 @@ fn main() {
 }
 
 impl TenantReceipt {
-    fn new(tenant_id: String, suffix: &str) -> Self {
+    fn new(workspace_id: String, suffix: &str) -> Self {
         Self {
-            tenant_id,
+            workspace_id,
             scope_provisioned: false,
             logs_sent: false,
             traces_sent: false,
@@ -139,9 +141,9 @@ fn seed(
         .context("build seed HTTP client")?;
 
     wait_ready(&client, base_url)?;
-    for (index, (tenant_id, api_key, _suffix)) in tenants.iter().enumerate() {
-        let payloads = tenant_payloads(tenant_id);
-        provision_tenant(&client, base_url, admin_key, tenant_id, index)?;
+    for (index, (workspace_id, api_key, suffix)) in tenants.iter().enumerate() {
+        let payloads = tenant_payloads(workspace_id, suffix);
+        provision_tenant(&client, base_url, admin_key, workspace_id, index)?;
         receipt.tenants[index].scope_provisioned = true;
         if let Err(error) = send_payloads(
             &client,
@@ -152,7 +154,7 @@ fn seed(
         ) {
             return Err(anyhow!(
                 "tenant {} partial ingest (logs={}, traces={}): {}",
-                tenant_id,
+                workspace_id,
                 receipt.tenants[index].logs_sent,
                 receipt.tenants[index].traces_sent,
                 error
@@ -167,15 +169,17 @@ fn seed(
     let last_attempt = 299;
     for attempt in 0..=last_attempt {
         let mut all_queryable = true;
-        for (index, (tenant_id, api_key, suffix)) in tenants.iter().enumerate() {
-            let result = query_tenant(&client, base_url, api_key, tenant_id, suffix, receipt);
+        for (index, (workspace_id, api_key, suffix)) in tenants.iter().enumerate() {
+            let result = query_tenant(&client, base_url, api_key, workspace_id, suffix, receipt);
             match result {
                 Ok(()) => {
                     receipt.tenants[index].logs_queryable = true;
                     receipt.tenants[index].traces_queryable = true;
                 }
                 Err(error) if attempt == last_attempt => {
-                    return Err(anyhow!("tenant {tenant_id} queryability timeout: {error}"));
+                    return Err(anyhow!(
+                        "tenant {workspace_id} queryability timeout: {error}"
+                    ));
                 }
                 Err(_) => {
                     all_queryable = false;
@@ -194,11 +198,11 @@ fn provision_tenant(
     client: &Client,
     base_url: &str,
     admin_key: &str,
-    tenant_id: &str,
+    workspace_id: &str,
     index: usize,
 ) -> Result<()> {
     let body = serde_json::json!({
-        "tenantId": tenant_id,
+        "workspaceId": workspace_id,
         "storageHints": {
             "ducklakeMetadataSchema": format!("grafana_phase4_{index}"),
             "ducklakeDataPath": format!("s3://warehouse/grafana_phase4_{index}/"),
@@ -206,12 +210,12 @@ fn provision_tenant(
         }
     });
     let response = client
-        .post(format!("{base_url}/v1/tenants"))
+        .post(format!("{base_url}/v1/workspaces"))
         .header("authorization", format!("Bearer {admin_key}"))
         .json(&body)
         .send()
         .context("provision Grafana test tenant")?;
-    ensure_success(response, "/v1/tenants")
+    ensure_success(response, "/v1/workspaces")
 }
 
 fn wait_ready(client: &Client, base_url: &str) -> Result<()> {
@@ -285,20 +289,20 @@ fn query_tenant(
     client: &Client,
     base_url: &str,
     api_key: &str,
-    tenant_id: &str,
+    workspace_id: &str,
     suffix: &str,
     receipt: &Receipt,
 ) -> Result<()> {
     let other = receipt
         .tenants
         .iter()
-        .find(|tenant| tenant.tenant_id != tenant_id)
-        .map(|tenant| tenant.tenant_id.as_str())
+        .find(|tenant| tenant.workspace_id != workspace_id)
+        .map(|tenant| tenant.workspace_id.as_str())
         .unwrap_or_default();
     let headers = |request: reqwest::blocking::RequestBuilder| {
         request
             .header("authorization", format!("Bearer {api_key}"))
-            .header("x-scope-orgid", tenant_id)
+            .header("x-scope-orgid", workspace_id)
     };
 
     let logs = headers(client.get(format!("{base_url}/loki/api/v1/query_range")))
@@ -314,11 +318,11 @@ fn query_tenant(
     let logs = read_json_success(logs, "/loki/api/v1/query_range")?;
     if std::env::var("SEED_DEBUG").ok().as_deref() == Some("1") {
         eprintln!(
-            "SEED_DEBUG tenant={tenant_id} logs body={}",
+            "SEED_DEBUG tenant={workspace_id} logs body={}",
             &logs.to_string()[..logs.to_string().len().min(240)]
         );
     }
-    assert_tenant_scope(&logs, tenant_id, other)?;
+    assert_tenant_scope(&logs, workspace_id, other)?;
 
     let traces = headers(client.get(format!("{base_url}/api/search")))
         .query(&[
@@ -339,7 +343,7 @@ fn query_tenant(
     let other_trace_id = trace_id_for(if suffix == "a" { "b" } else { "a" });
     if traces_text.contains(&other_trace_id) {
         return Err(anyhow!(
-            "cross-tenant leakage detected for {tenant_id}: found trace {other_trace_id}"
+            "cross-tenant leakage detected for {workspace_id}: found trace {other_trace_id}"
         ));
     }
     if !traces_text.contains(&own_trace_id) {
@@ -390,8 +394,7 @@ fn write_receipt(path: &Path, receipt: &Receipt) -> Result<()> {
     Ok(())
 }
 
-fn tenant_payloads(tenant: &str) -> TenantPayloads {
-    let suffix = if tenant.ends_with("-b") { "b" } else { "a" };
+fn tenant_payloads(tenant: &str, suffix: &str) -> TenantPayloads {
     let trace_id = trace_id_for(suffix);
     let span_id = if suffix == "a" {
         vec![0x11; 8]
@@ -564,15 +567,17 @@ mod tests {
 
     #[test]
     fn payloads_are_deterministic_and_tenant_bound() {
-        let tenant_a = tenant_payloads("grafana-phase4-tenant-a");
-        let tenant_b = tenant_payloads("grafana-phase4-tenant-b");
+        let workspace_a = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let workspace_b = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        let tenant_a = tenant_payloads(workspace_a, "a");
+        let tenant_b = tenant_payloads(workspace_b, "b");
 
         assert_eq!(trace_id_for("a"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(trace_id_for("b"), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert_ne!(tenant_a.logs, tenant_b.logs);
         assert_ne!(tenant_a.traces, tenant_b.traces);
 
-        let resource_a = resource("grafana-phase4-tenant-a");
+        let resource_a = resource(workspace_a);
         let marker = resource_a
             .attributes
             .iter()
@@ -587,6 +592,6 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_default();
-        assert_eq!(marker_value, "grafana-phase4-tenant-a");
+        assert_eq!(marker_value, workspace_a);
     }
 }

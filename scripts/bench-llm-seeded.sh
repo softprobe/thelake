@@ -18,7 +18,7 @@ REPORT_JSON="${REPORT_JSON:-/tmp/thelake-bench-llm-seeded.json}"
 TMP_CONFIG="/tmp/thelake-bench-llm-seeded.yaml"
 LOG="/tmp/thelake-bench-llm-seeded.log"
 # Local Bearer → default lake (docs/compat/auth.md); required for /v1/* without assertion JWT.
-export SOFTPROBE_DEFAULT_TENANT_KEY="${SOFTPROBE_DEFAULT_TENANT_KEY:-llm-bench}"
+export SOFTPROBE_DEFAULT_WORKSPACE_ID="${SOFTPROBE_DEFAULT_WORKSPACE_ID:-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}"
 export SOFTPROBE_ADMIN_API_KEY="${SOFTPROBE_ADMIN_API_KEY:-llm-bench-admin}"
 
 if [[ ! -d "${SEED_DIR}" ]]; then
@@ -94,7 +94,7 @@ docker exec ducklake-postgres psql -U ducklake -d ducklake -c \
 
 echo "Loading seed from ${SEED_DIR}…"
 SEED_FORCE=1 CONFIG_FILE="${TMP_CONFIG}" SEED_DIR="${SEED_DIR}" \
-  SEED_TENANT_ID="${SOFTPROBE_DEFAULT_TENANT_KEY}" \
+  SEED_WORKSPACE_ID="${SOFTPROBE_DEFAULT_WORKSPACE_ID}" \
   ./scripts/seed-lake-from-parquet.sh
 
 echo "Starting thelake on :${PORT}…"
@@ -104,7 +104,7 @@ if [[ ! -x "${BIN}" ]]; then
   echo "release thelake missing at ${BIN}; building…" >&2
   make build-release
 fi
-SOFTPROBE_DEFAULT_TENANT_KEY="${SOFTPROBE_DEFAULT_TENANT_KEY}" \
+SOFTPROBE_DEFAULT_WORKSPACE_ID="${SOFTPROBE_DEFAULT_WORKSPACE_ID}" \
 SOFTPROBE_ADMIN_API_KEY="${SOFTPROBE_ADMIN_API_KEY}" \
   CONFIG_FILE="${TMP_CONFIG}" \
   nohup "${BIN}" >"${LOG}" 2>&1 &
@@ -140,14 +140,14 @@ if [[ -z "${THELAKE_PID}" ]]; then
 fi
 echo "thelake pid=${THELAKE_PID}"
 
-echo "Provisioning scope ${SOFTPROBE_DEFAULT_TENANT_KEY}…"
+echo "Provisioning scope ${SOFTPROBE_DEFAULT_WORKSPACE_ID}…"
 # Hints must match the bench CONFIG_FILE warehouse (isolated or shared).
 PROVISION_SCHEMA="${SCHEMA}"
 PROVISION_DATA_PATH="${WAREHOUSE}/"
-curl -sf -X POST "http://127.0.0.1:${PORT}/v1/tenants" \
+curl -sf -X POST "http://127.0.0.1:${PORT}/v1/workspaces" \
   -H "Authorization: Bearer ${SOFTPROBE_ADMIN_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d "{\"tenantId\":\"${SOFTPROBE_DEFAULT_TENANT_KEY}\",\"storageHints\":{\"ducklakeMetadataSchema\":\"${PROVISION_SCHEMA}\",\"ducklakeDataPath\":\"${PROVISION_DATA_PATH}\"}}" \
+  -d "{\"workspaceId\":\"${SOFTPROBE_DEFAULT_WORKSPACE_ID}\",\"storageHints\":{\"ducklakeMetadataSchema\":\"${PROVISION_SCHEMA}\",\"ducklakeDataPath\":\"${PROVISION_DATA_PATH}\"}}" \
   >/tmp/thelake-bench-provision.json \
   || { echo "provision failed"; cat /tmp/thelake-bench-provision.json 2>/dev/null; tail -40 "${LOG}"; exit 1; }
 cat /tmp/thelake-bench-provision.json

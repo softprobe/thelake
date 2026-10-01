@@ -134,7 +134,8 @@ implicitly supported.
 | `query` / `query_range` | `limit` / `time` / `start` / `end` / `since` / `direction` | query | `supported` | `query_range` requires `start`+`end` or `since`; `time` is for instant query |
 | `query_range` | `interval` / `step` | query | `unsupported_feature` | Stream results are not sampled |
 | `query` / `query_range` | `timeout` | query | `ignored` | Uses capability timeout |
-| all | `tenant_id` | query/body | `ignored` | Never selects tenant |
+| all | `workspace_id` | query/body | `ignored` | Never selects workspace; auth context wins |
+| all | `tenant_id` | query/body | `ignored` | Legacy; Loki ignores unknown keys |
 | `labels` / `label/{name}/values` / `series` | `start` / `end` / `match[]` | query | `supported` | `match[]` is a stream selector |
 | all | response `status`/`data` | out | `supported` | Native Loki success envelope |
 | all | response `error` | out | `supported` | Includes `unsupported_feature:` prefix when applicable |
@@ -201,7 +202,8 @@ The Phase 3 subset parses the path and the declared search parameters below.
 | `/api/search` | `tags` / `minDuration` / `maxDuration` / `limit` / `start` / `end` / `q` | query | `supported_subset` | Declared subset only |
 | `/api/search/tags` | (none required) | query | `supported_subset` | Query filters are unsupported |
 | `/api/search/tag/{tag}/values` | `tag` | path | `supported_subset` | Query filters are unsupported |
-| all | `tenant_id` | query/body | `ignored` | |
+| all | `workspace_id` | query/body | `ignored` | Discarded; never selects workspace |
+| all | `tenant_id` | query/body | `unsupported_feature` | Legacy slug param rejected |
 | all | response body | out | `supported_subset` success / `supported` error | |
 
 ## Grafana

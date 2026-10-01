@@ -15,6 +15,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# shellcheck disable=SC1091
+source "$ROOT/tests/util/workspace_ids.env"
 
 COMPOSE="${COMPOSE:-docker compose}"
 STATE_DIR="${THELAKE_GRAFANA_STATE_DIR:-/tmp/thelake-grafana-manual}"
@@ -48,7 +50,8 @@ PG_HOST="${GRAFANA_PG_HOST:-127.0.0.1}"
 PG_PORT="${GRAFANA_PG_HOST_PORT:-5434}"
 PG_SCHEMA="${GRAFANA_PG_SCHEMA:-grafana_manual}"
 ADMIN_API_KEY="${SOFTPROBE_ADMIN_API_KEY:-local-dev-admin-key}"
-TENANT_ID="${GRAFANA_TENANT_ID:-local-dev-tenant}"
+# Must match tests/mocks/auth workspaceId (COMPAT_WORKSPACE_ID).
+TENANT_ID="${GRAFANA_TENANT_ID:-$COMPAT_WORKSPACE_ID}"
 TENANT_SCHEMA="${GRAFANA_TENANT_SCHEMA:-${PG_SCHEMA}_local_dev_tenant}"
 
 # Official Astronomy Shop pin (https://github.com/open-telemetry/opentelemetry-demo).
@@ -527,7 +530,7 @@ echo "==> provisioning tenant $TENANT_ID (Postgres catalog)"
 tenant_payload="$(TENANT_ID="$TENANT_ID" TENANT_SCHEMA="$TENANT_SCHEMA" TENANT_DATA_PATH="$STATE_DIR/data/$TENANT_ID/" python3 - <<'PY'
 import json, os
 print(json.dumps({
-    "tenantId": os.environ["TENANT_ID"],
+    "workspaceId": os.environ["TENANT_ID"],
     "storageHints": {
         "ducklakeMetadataSchema": os.environ["TENANT_SCHEMA"],
         "ducklakeDataPath": os.environ["TENANT_DATA_PATH"],
@@ -537,7 +540,7 @@ print(json.dumps({
 PY
 )"
 tenant_http="$(curl -sS -o /tmp/thelake-grafana-tenant-provision.json -w '%{http_code}' \
-  -X POST "$SOFTPROBE_URL_HOST/v1/tenants" \
+  -X POST "$SOFTPROBE_URL_HOST/v1/workspaces" \
   -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$tenant_payload" || true)"

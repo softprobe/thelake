@@ -13,7 +13,7 @@ pub struct QueryEngine {
     /// When false (ops/self-monitoring engine), skip process self-monitoring
     /// query instruments (anti-recursion).
     record_self_monitoring: bool,
-    tenant_id: String,
+    workspace_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -53,23 +53,23 @@ pub(crate) async fn create_query_engine_for_scope_with_liveness(
     config: &Config,
     scope: &PhysicalScope,
     counts_toward_liveness: bool,
-    tenant_id: &str,
+    workspace_id: &str,
 ) -> anyhow::Result<QueryEngine> {
     let binding = WorkspaceBinding::new(
-        tenant_id,
+        workspace_id,
         scope.clone(),
         config.ducklake.workspace_scope_mode,
     )
     .map_err(|error| anyhow::anyhow!(error))?;
     let access = DuckLakeAccess::Workspace(binding);
     let duckdb = Arc::new(
-        DuckDBQueryEngine::new_with_liveness(config, access, counts_toward_liveness, tenant_id)
+        DuckDBQueryEngine::new_with_liveness(config, access, counts_toward_liveness, workspace_id)
             .await?,
     );
     Ok(QueryEngine {
         duckdb,
         record_self_monitoring: counts_toward_liveness,
-        tenant_id: tenant_id.to_string(),
+        workspace_id: workspace_id.to_string(),
     })
 }
 
@@ -79,8 +79,8 @@ impl QueryEngine {
         self.duckdb.catalog_alias()
     }
 
-    pub fn tenant_id(&self) -> &str {
-        &self.tenant_id
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
     }
 
     /// Count logs through the tenant-bound query contract.

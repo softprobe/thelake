@@ -23,7 +23,7 @@ use std::time::Duration;
 pub struct IngestEngine {
     writer: Arc<DuckLakeWriter>,
     resolver: DuckLakeScopeResolver,
-    tenant_id: String,
+    workspace_id: String,
     flush_interval_seconds: u64,
     logs: Arc<CoalesceBuf<Log>>,
     spans: Arc<CoalesceBuf<Span>>,
@@ -65,7 +65,7 @@ impl IngestEngine {
         resolver: DuckLakeScopeResolver,
         binding: WorkspaceBinding,
     ) -> Result<Arc<Self>> {
-        let tenant_id = binding.workspace_id.clone();
+        let workspace_id = binding.workspace_id.clone();
         let writer = Arc::new(DuckLakeWriter::new(config, binding).await?);
 
         if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
@@ -82,11 +82,11 @@ impl IngestEngine {
         }
 
         let dirty =
-            session_summary_dirty_for(config, &resolver, &tenant_id, writer.metadata_schema());
+            session_summary_dirty_for(config, &resolver, &workspace_id, writer.metadata_schema());
         Ok(Arc::new(Self::from_writer(
             writer,
             resolver,
-            tenant_id,
+            workspace_id,
             config.ingest.flush_interval_seconds,
             config.ingest.buffer_size_mb,
             config.ingest.write_timeout_seconds,
@@ -113,19 +113,19 @@ impl IngestEngine {
     fn from_writer(
         writer: Arc<DuckLakeWriter>,
         resolver: DuckLakeScopeResolver,
-        tenant_id: impl Into<String>,
+        workspace_id: impl Into<String>,
         flush_interval_seconds: u64,
         buffer_size_mb: u64,
         write_timeout_seconds: u64,
         session_summary_dirty: Option<Arc<SessionSummaryDirty>>,
     ) -> Self {
-        let tenant_id = tenant_id.into();
+        let workspace_id = workspace_id.into();
         let (max_pending, eager_pending) = coalesce::resolve_byte_limits(buffer_size_mb);
         let write_timeout_seconds = resolve_write_timeout_seconds(write_timeout_seconds);
         let logs = {
             let writer = writer.clone();
             let resolver = resolver.clone();
-            let tenant = tenant_id.clone();
+            let tenant = workspace_id.clone();
             CoalesceBuf::with_limits(
                 flush_interval_seconds,
                 max_pending,
@@ -162,7 +162,7 @@ impl IngestEngine {
         let spans = {
             let writer = writer.clone();
             let resolver = resolver.clone();
-            let tenant = tenant_id.clone();
+            let tenant = workspace_id.clone();
             let dirty = session_summary_dirty;
             CoalesceBuf::with_limits(
                 flush_interval_seconds,
@@ -208,7 +208,7 @@ impl IngestEngine {
         Self {
             writer,
             resolver,
-            tenant_id,
+            workspace_id,
             flush_interval_seconds,
             logs,
             spans,
@@ -293,25 +293,25 @@ impl IngestEngine {
 
     fn bind_spans_to_workspace(&self, spans: &mut [Span]) {
         for span in spans {
-            span.tenant_id = Some(self.tenant_id.clone());
+            span.workspace_id = Some(self.workspace_id.clone());
         }
     }
 
     fn bind_logs_to_workspace(&self, logs: &mut [Log]) {
         for log in logs {
-            log.tenant_id = Some(self.tenant_id.clone());
+            log.workspace_id = Some(self.workspace_id.clone());
         }
     }
 
     fn bind_scores_to_workspace(&self, scores: &mut [Score]) {
         for score in scores {
-            score.tenant_id = Some(self.tenant_id.clone());
+            score.workspace_id = Some(self.workspace_id.clone());
         }
     }
 
     fn bind_score_configs_to_workspace(&self, configs: &mut [ScoreConfig]) {
         for config in configs {
-            config.tenant_id = Some(self.tenant_id.clone());
+            config.workspace_id = Some(self.workspace_id.clone());
         }
     }
 }
@@ -431,11 +431,11 @@ mod after_commit_tests {
             .await
             .expect("sample ingest");
         let mut spans = vec![crate::session_summary::test_span::span_at("s", 1)];
-        spans[0].tenant_id = Some("spoofed-tenant".to_string());
+        spans[0].workspace_id = Some("spoofed-tenant".to_string());
 
         engine.bind_spans_to_workspace(&mut spans);
 
-        assert_eq!(spans[0].tenant_id.as_deref(), Some(DEFAULT_WORKSPACE_ID));
+        assert_eq!(spans[0].workspace_id.as_deref(), Some(DEFAULT_WORKSPACE_ID));
     }
 }
 
@@ -443,13 +443,17 @@ mod after_commit_tests {
 pub(crate) fn session_summary_dirty_for(
     config: &Config,
     resolver: &DuckLakeScopeResolver,
-    tenant_id: &str,
+    workspace_id: &str,
     metadata_schema: &str,
 ) -> Option<Arc<SessionSummaryDirty>> {
     let dirty = if config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
-        SessionSummaryDirty::new_for_workspace(resolver.pool().clone(), metadata_schema, tenant_id)
+        SessionSummaryDirty::new_for_workspace(
+            resolver.pool().clone(),
+            metadata_schema,
+            workspace_id,
+        )
     } else {
-        SessionSummaryDirty::new(resolver.pool().clone(), metadata_schema, tenant_id)
+        SessionSummaryDirty::new(resolver.pool().clone(), metadata_schema, workspace_id)
     };
     Some(Arc::new(dirty))
 }

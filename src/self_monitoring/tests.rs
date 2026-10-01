@@ -1,14 +1,14 @@
 //! Unit tests for self-monitoring helpers.
 
 use crate::config::Config;
-use crate::self_monitoring::{is_reserved_tenant_id, OPS_TENANT_ID};
+use crate::self_monitoring::{is_reserved_workspace_id, OPS_TENANT_ID};
 
 #[test]
-fn reserved_tenant_id_is_thelake_ops() {
+fn reserved_workspace_id_is_thelake_ops() {
     assert_eq!(OPS_TENANT_ID, "thelake-ops");
-    assert!(is_reserved_tenant_id("thelake-ops"));
-    assert!(is_reserved_tenant_id(" thelake-ops "));
-    assert!(!is_reserved_tenant_id("softprobe-local"));
+    assert!(is_reserved_workspace_id("thelake-ops"));
+    assert!(is_reserved_workspace_id(" thelake-ops "));
+    assert!(!is_reserved_workspace_id("softprobe-local"));
 }
 
 #[test]

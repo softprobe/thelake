@@ -94,7 +94,7 @@ impl DuckLakeWriter {
         }
         for batch in &batches {
             for span in batch {
-                self.validate_shared_ownership(span.tenant_id.as_deref(), "span")?;
+                self.validate_shared_ownership(span.workspace_id.as_deref(), "span")?;
             }
         }
         let mut spans = Self::flatten_spans(batches);
@@ -127,7 +127,7 @@ impl DuckLakeWriter {
             return Ok(());
         }
         for log in &logs {
-            self.validate_shared_ownership(log.tenant_id.as_deref(), "log")?;
+            self.validate_shared_ownership(log.workspace_id.as_deref(), "log")?;
         }
         let columns = Self::telemetry_columns_for_table(manifests, TelemetryTable::Logs);
         Self::apply_log_promotions(&mut logs, &columns)?;

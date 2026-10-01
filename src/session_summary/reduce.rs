@@ -133,12 +133,12 @@ async fn claim_dirty_scoped(
     let rows = if let Some(workspace_id) = workspace_id {
         tx.query(
             &format!(
-                "WITH picked AS (SELECT tenant_id, session_id FROM {schema}.session_summary_dirty \
-                 WHERE tenant_id = $1 AND (claim_until IS NULL OR claim_until <= now()) \
+                "WITH picked AS (SELECT workspace_id, session_id FROM {schema}.session_summary_dirty \
+                 WHERE workspace_id = $1 AND (claim_until IS NULL OR claim_until <= now()) \
                  ORDER BY min_ts_ns ASC, updated_at ASC LIMIT $2 FOR UPDATE SKIP LOCKED) \
                  UPDATE {schema}.session_summary_dirty d SET claim_holder = $3, \
                  claim_until = now() + ($4::bigint * INTERVAL '1 second') \
-                 FROM picked WHERE d.tenant_id = picked.tenant_id AND d.session_id = picked.session_id \
+                 FROM picked WHERE d.workspace_id = picked.workspace_id AND d.session_id = picked.session_id \
                  RETURNING d.session_id, d.min_ts_ns, d.max_ts_ns, d.updated_at, d.generation"
             ),
             &[&workspace_id, &limit, &token, &ttl_secs],
@@ -200,7 +200,7 @@ pub async fn dirty_depth_for_workspace(
     Ok(client
         .query_one(
             &format!(
-                "SELECT count(*)::bigint FROM {schema}.session_summary_dirty WHERE tenant_id = $1"
+                "SELECT count(*)::bigint FROM {schema}.session_summary_dirty WHERE workspace_id = $1"
             ),
             &[&workspace_id],
         )
@@ -257,7 +257,7 @@ pub async fn load_summary_bounds_for_workspace(
     let client = pool.get().await.context("load workspace summary bounds")?;
     let schema = quote_pg_ident(metadata_schema);
     let mut sql = format!(
-        "SELECT session_id, start_time_ns, end_time_ns FROM {schema}.session_summary WHERE tenant_id = $1 AND session_id IN ("
+        "SELECT session_id, start_time_ns, end_time_ns FROM {schema}.session_summary WHERE workspace_id = $1 AND session_id IN ("
     );
     let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
         vec![Box::new(workspace_id.to_string())];
@@ -328,7 +328,7 @@ async fn ack_dirty_in_transaction(
     let generations: Vec<i64> = claims.iter().map(|c| c.generation).collect();
     let n = if let Some(workspace_id) = workspace_id {
         let n = tx.execute(
-            &format!("DELETE FROM {schema}.session_summary_dirty d USING unnest($3::text[], $4::bigint[]) AS expected(session_id, generation) WHERE d.tenant_id = $1 AND d.claim_holder = $2 AND d.session_id = expected.session_id AND d.generation = expected.generation"),
+            &format!("DELETE FROM {schema}.session_summary_dirty d USING unnest($3::text[], $4::bigint[]) AS expected(session_id, generation) WHERE d.workspace_id = $1 AND d.claim_holder = $2 AND d.session_id = expected.session_id AND d.generation = expected.generation"),
             &[&workspace_id, &claim_token, &ids, &generations],
         ).await.context("ack workspace dirty DELETE")?;
         clear_dirty_claims_in_transaction(tx, schema, Some(workspace_id), &ids, claim_token)
@@ -354,7 +354,7 @@ async fn clear_dirty_claims_in_transaction(
 ) -> Result<()> {
     if let Some(workspace_id) = workspace_id {
         tx.execute(
-            &format!("UPDATE {schema}.session_summary_dirty SET claim_holder = NULL, claim_until = NULL WHERE tenant_id = $1 AND claim_holder = $2 AND session_id = ANY($3)"),
+            &format!("UPDATE {schema}.session_summary_dirty SET claim_holder = NULL, claim_until = NULL WHERE workspace_id = $1 AND claim_holder = $2 AND session_id = ANY($3)"),
             &[&workspace_id, &claim_token, &session_ids],
         )
         .await
@@ -464,7 +464,7 @@ pub(crate) async fn publish_claimed_summary_rows(
     let ids: Vec<String> = claims.iter().map(|c| c.session_id.clone()).collect();
     let owned = if let Some(workspace_id) = workspace_id {
         tx.query(
-            &format!("SELECT session_id, generation FROM {schema}.session_summary_dirty WHERE tenant_id = $1 AND claim_holder = $2 AND claim_until > clock_timestamp() AND session_id = ANY($3) FOR UPDATE"),
+            &format!("SELECT session_id, generation FROM {schema}.session_summary_dirty WHERE workspace_id = $1 AND claim_holder = $2 AND claim_until > clock_timestamp() AND session_id = ANY($3) FOR UPDATE"),
             &[&workspace_id, &claim_token, &ids],
         ).await.context("lock claimed workspace rows")?
     } else {
@@ -528,7 +528,7 @@ pub(crate) async fn rebuild_tenant_window(
     config: &Config,
     scope: &PhysicalScope,
     duck_pool: std::sync::Arc<crate::compaction::MaintenanceConnPool>,
-    tenant_id: &str,
+    workspace_id: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     max_reduce_span_seconds: u64,
@@ -538,7 +538,7 @@ pub(crate) async fn rebuild_tenant_window(
         config.ducklake.workspace_scope_mode == crate::workspace_scope::WorkspaceScopeMode::Shared;
     let config = config.clone();
     let scope = scope.clone();
-    let tenant_id_for_lake = tenant_id.to_string();
+    let tenant_id_for_lake = workspace_id.to_string();
     let rows = tokio::task::spawn_blocking(move || {
         let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
         crate::compaction::session_summary_access::aggregate_sessions_from_lake_pooled(
@@ -554,7 +554,7 @@ pub(crate) async fn rebuild_tenant_window(
     .await
     .map_err(|e| anyhow!("rebuild join: {e}"))??;
     if workspace_scoped {
-        upsert_summary_rows_for_workspace(pool, metadata_schema, tenant_id, &rows).await?;
+        upsert_summary_rows_for_workspace(pool, metadata_schema, workspace_id, &rows).await?;
     } else {
         upsert_summary_rows(pool, metadata_schema, &rows).await?;
     }
@@ -566,7 +566,7 @@ pub(crate) async fn rebuild_tenant_window(
 pub(crate) async fn reduce_tenant(
     pool: &Pool,
     metadata_schema: &str,
-    tenant_id: &str,
+    workspace_id: &str,
     config: &Config,
     scope: &PhysicalScope,
     duck_pool: std::sync::Arc<crate::compaction::MaintenanceConnPool>,
@@ -576,38 +576,39 @@ pub(crate) async fn reduce_tenant(
     let workspace_scoped =
         config.ducklake.workspace_scope_mode == crate::workspace_scope::WorkspaceScopeMode::Shared;
     let depth = match if workspace_scoped {
-        dirty_depth_for_workspace(pool, metadata_schema, tenant_id).await
+        dirty_depth_for_workspace(pool, metadata_schema, workspace_id).await
     } else {
         dirty_depth(pool, metadata_schema).await
     } {
         Ok(n) => n,
         Err(err) => {
             warn!(
-                tenant = %tenant_id,
+                tenant = %workspace_id,
                 error = %err,
                 "session_summary dirty_depth query failed"
             );
             0
         }
     };
-    crate::self_monitoring::set_session_summary_dirty_depth(tenant_id, depth.max(0) as u64);
+    crate::self_monitoring::set_session_summary_dirty_depth(workspace_id, depth.max(0) as u64);
 
     let claim_started = std::time::Instant::now();
     let claim_ttl =
         std::time::Duration::from_secs(config.session_summary.dirty_claim_ttl_seconds.max(1));
     let (claims, _snapshot) = if workspace_scoped {
-        claim_dirty_for_workspace(pool, metadata_schema, tenant_id, max_sessions, claim_ttl).await?
+        claim_dirty_for_workspace(pool, metadata_schema, workspace_id, max_sessions, claim_ttl)
+            .await?
     } else {
         claim_dirty(pool, metadata_schema, max_sessions, claim_ttl).await?
     };
     crate::self_monitoring::record_session_summary_reduce_step(
-        tenant_id,
+        workspace_id,
         crate::self_monitoring::reduce_step::CLAIM,
         claim_started.elapsed(),
     );
     if claims.is_empty() {
         crate::self_monitoring::record_session_summary_reduce_step(
-            tenant_id,
+            workspace_id,
             crate::self_monitoring::reduce_step::TOTAL,
             reduce_started.elapsed(),
         );
@@ -616,7 +617,7 @@ pub(crate) async fn reduce_tenant(
 
     let ids: Vec<String> = claims.iter().map(|c| c.session_id.clone()).collect();
     let bounds: std::collections::HashMap<String, (i64, Option<i64>)> = if workspace_scoped {
-        load_summary_bounds_for_workspace(pool, metadata_schema, tenant_id, &ids).await?
+        load_summary_bounds_for_workspace(pool, metadata_schema, workspace_id, &ids).await?
     } else {
         load_summary_bounds(pool, metadata_schema, &ids).await?
     };
@@ -629,12 +630,12 @@ pub(crate) async fn reduce_tenant(
         .map(|c| (now - c.updated_at).num_seconds().max(0) as u64)
         .max()
         .unwrap_or(0);
-    crate::self_monitoring::record_session_summary_reducer_lag(tenant_id, lag_secs);
+    crate::self_monitoring::record_session_summary_reducer_lag(workspace_id, lag_secs);
 
     let config = config.clone();
     let scope = scope.clone();
     let ids_for_lake = ids.clone();
-    let tenant_id_for_lake = tenant_id.to_string();
+    let tenant_id_for_lake = workspace_id.to_string();
     let aggregate_started = std::time::Instant::now();
     let rows = tokio::task::spawn_blocking(move || {
         let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
@@ -651,7 +652,7 @@ pub(crate) async fn reduce_tenant(
     .await
     .map_err(|e| anyhow!("reduce join: {e}"))??;
     crate::self_monitoring::record_session_summary_reduce_step(
-        tenant_id,
+        workspace_id,
         crate::self_monitoring::reduce_step::AGGREGATE,
         aggregate_started.elapsed(),
     );
@@ -660,33 +661,36 @@ pub(crate) async fn reduce_tenant(
     let (acked, upsert_elapsed, ack_elapsed) = publish_claimed_summary_rows(
         pool,
         metadata_schema,
-        workspace_scoped.then_some(tenant_id),
+        workspace_scoped.then_some(workspace_id),
         &claims,
         claim_token,
         &rows,
     )
     .await?;
     crate::self_monitoring::record_session_summary_reduce_step(
-        tenant_id,
+        workspace_id,
         crate::self_monitoring::reduce_step::UPSERT,
         upsert_elapsed,
     );
     crate::self_monitoring::record_session_summary_reduce_step(
-        tenant_id,
+        workspace_id,
         crate::self_monitoring::reduce_step::ACK,
         ack_elapsed,
     );
     if acked < ids.len() as u64 {
         warn!(
-            tenant = %tenant_id,
+            tenant = %workspace_id,
             claimed = ids.len(),
             acked,
             "session_summary ack deleted fewer rows than claimed (concurrent dirty likely)"
         );
     }
-    crate::self_monitoring::record_session_summary_sessions_reduced(tenant_id, rows.len() as u64);
+    crate::self_monitoring::record_session_summary_sessions_reduced(
+        workspace_id,
+        rows.len() as u64,
+    );
     crate::self_monitoring::record_session_summary_reduce_step(
-        tenant_id,
+        workspace_id,
         crate::self_monitoring::reduce_step::TOTAL,
         reduce_started.elapsed(),
     );

@@ -9,5 +9,5 @@ CREATE TABLE IF NOT EXISTS score_configs (
     categories VARCHAR,
     author_id VARCHAR,
     metadata MAP(VARCHAR, VARCHAR),
-    tenant_id VARCHAR
+    workspace_id VARCHAR
 );

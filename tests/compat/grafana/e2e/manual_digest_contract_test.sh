@@ -43,7 +43,7 @@ if "GRAFANA_COMPOSE_IMAGE" not in launcher_text:
 if immutable_image not in (compose_text + launcher_text) and "GRAFANA_COMPOSE_IMAGE:?" not in compose_text:
     raise SystemExit(f"manual Grafana path does not require canonical image {immutable_image}")
 
-# Manual stack is single-tenant (auth-mock → local-dev-tenant). Loki/Tempo/
+# Manual stack is single-tenant (auth-mock → COMPAT_WORKSPACE_ID). Loki/Tempo/
 # tenant-Prom datasources expand SOFTPROBE_TENANT_* at provision time; empty
 # values regress Explore to "Authentication to data source failed".
 # A≡B is intentional — dual-tenant lives in docker-compose.ci.yml only.
@@ -51,8 +51,8 @@ required_env = {
     "SOFTPROBE_API_KEY": "local-dev-key",
     "SOFTPROBE_TENANT_A_API_KEY": "local-dev-key",
     "SOFTPROBE_TENANT_B_API_KEY": "local-dev-key",
-    "SOFTPROBE_TENANT_A_ID": "local-dev-tenant",
-    "SOFTPROBE_TENANT_B_ID": "local-dev-tenant",
+    "SOFTPROBE_TENANT_A_ID": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "SOFTPROBE_TENANT_B_ID": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
 }
 for key, value in required_env.items():
     if not re.search(rf"(?m)^\s*{re.escape(key)}:\s*{re.escape(value)}\s*$", compose_text):

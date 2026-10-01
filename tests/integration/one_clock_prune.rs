@@ -73,7 +73,7 @@ fn span(day: u32, id: &str) -> Span {
         parent_span_id: None,
         app_id: "one-clock".into(),
         organization_id: None,
-        tenant_id: None,
+        workspace_id: None,
         agent_id: None,
         agent_name: None,
         message_type: "INTERNAL".into(),
@@ -112,7 +112,7 @@ fn log(day: u32, id: &str) -> Log {
         resource_attributes: HashMap::new(),
         trace_id: Some(format!("trace-{id}")),
         span_id: Some(format!("span-{id}")),
-        tenant_id: None,
+        workspace_id: None,
         agent_id: None,
         agent_name: None,
     }
@@ -135,7 +135,7 @@ fn score(day: u32, id: &str) -> Score {
         config_id: None,
         author_id: None,
         metadata: HashMap::new(),
-        tenant_id: None,
+        workspace_id: None,
     }
 }
 

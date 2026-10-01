@@ -643,11 +643,11 @@ fn span_to_otlp(span: &Span) -> ExportTraceServiceRequest {
             }),
         });
     }
-    if let Some(ref tenant_id) = span.tenant_id {
+    if let Some(ref workspace_id) = span.workspace_id {
         resource_attributes.push(KeyValue {
             key: "sp.tenant.id".to_string(),
             value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(tenant_id.clone())),
+                value: Some(any_value::Value::StringValue(workspace_id.clone())),
             }),
         });
     }
@@ -1027,7 +1027,7 @@ fn sample_span(counter: u64) -> Span {
         parent_span_id: None,
         app_id,
         organization_id: Some("stress-org".to_string()),
-        tenant_id: Some("stress-tenant".to_string()),
+        workspace_id: Some("stress-tenant".to_string()),
         agent_id: None,
         agent_name: None,
         message_type: "http.server".to_string(),
@@ -1090,7 +1090,7 @@ fn sample_log(counter: u64) -> Log {
         resource_attributes,
         trace_id: Some(uuid::Uuid::new_v4().to_string()),
         span_id: Some(uuid::Uuid::new_v4().to_string()),
-        tenant_id: None,
+        workspace_id: None,
         agent_id: None,
         agent_name: None,
     }

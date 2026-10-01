@@ -40,9 +40,9 @@ pub async fn get_json(router: &Router, path: &str) -> (StatusCode, serde_json::V
 pub async fn get_json_as(
     router: &Router,
     path: &str,
-    tenant_id: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> (StatusCode, serde_json::Value) {
-    request_json(router, "GET", path, Body::empty(), tenant_id, None, None).await
+    request_json(router, "GET", path, Body::empty(), workspace_id, None, None).await
 }
 
 /// GET with `Authorization: Bearer …` (Grafana datasource style).
@@ -59,7 +59,7 @@ async fn request_json(
     method: &str,
     path: &str,
     body: Body,
-    tenant_id: Option<&str>,
+    workspace_id: Option<&str>,
     bearer: Option<&str>,
     content_type: Option<&str>,
 ) -> (StatusCode, serde_json::Value) {
@@ -67,7 +67,7 @@ async fn request_json(
     if let Some(ct) = content_type {
         builder = builder.header("content-type", ct);
     }
-    if let Some(tid) = tenant_id {
+    if let Some(tid) = workspace_id {
         builder = builder.header("x-test-tenant-id", tid);
     }
     if let Some(token) = bearer {

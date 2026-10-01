@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 fn test_tenant() -> TenantInfo {
     TenantInfo {
-        tenant_id: "unit-test-tenant".to_string(),
+        workspace_id: "11111111-1111-1111-1111-111111111111".to_string(),
         bucket_name: "unit-bucket".to_string(),
         dataset_id: "unit-dataset".to_string(),
         agent_id: None,
@@ -47,7 +47,7 @@ async fn provision_test_scope(state: &crate::api::AppState, workspace_id: &str) 
 async fn unit_runtime_engine_manager_cache_hit_same_arc() {
     let (_router, state, _t) = local_router_and_state().await.expect("router");
     let t = test_tenant();
-    provision_test_scope(&state, &t.tenant_id).await;
+    provision_test_scope(&state, &t.workspace_id).await;
     let e1 = state.engine_for_tenant(&t).await.expect("engine");
     let e2 = state.engine_for_tenant(&t).await.expect("engine");
     assert!(Arc::ptr_eq(&e1, &e2));
@@ -56,13 +56,13 @@ async fn unit_runtime_engine_manager_cache_hit_same_arc() {
 #[tokio::test]
 async fn unit_runtime_engine_manager_single_flight_build_once() {
     let (_router, state, _t) = local_router_and_state().await.expect("router");
-    let tenant_id = "unit-test-single-flight".to_string();
-    provision_test_scope(&state, &tenant_id).await;
+    let workspace_id = "22222222-2222-2222-2222-222222222222".to_string();
+    provision_test_scope(&state, &workspace_id).await;
     let (a, b, c, d) = tokio::join!(
-        state.engine_for_id(&tenant_id),
-        state.engine_for_id(&tenant_id),
-        state.engine_for_id(&tenant_id),
-        state.engine_for_id(&tenant_id),
+        state.engine_for_id(&workspace_id),
+        state.engine_for_id(&workspace_id),
+        state.engine_for_id(&workspace_id),
+        state.engine_for_id(&workspace_id),
     );
     let e1 = a.expect("engine");
     let e2 = b.expect("engine");
@@ -375,6 +375,44 @@ async fn unit_query_sql_invalid_returns_500() {
         .unwrap();
     let resp = router.oneshot(req).await.expect("oneshot");
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn unit_provision_rejects_non_uuid_workspace_id() {
+    std::env::set_var("SOFTPROBE_ADMIN_API_KEY", "unit-admin-key");
+    let (router, state, _t) = local_router_and_state().await.expect("router");
+    let router = router.merge(crate::runtime_api::runtime_control_routes().with_state(state));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/workspaces")
+        .header(header::AUTHORIZATION, "Bearer unit-admin-key")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "workspaceId": "local-dev-tenant",
+                "storageHints": {
+                    "ducklakeMetadataSchema": "unit_schema",
+                    "ducklakeDataPath": "/tmp/unit-data/"
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(value["error"]["code"], "invalid_request");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("UUID"),
+        "message={}",
+        value["error"]["message"]
+    );
 }
 
 #[test]

@@ -137,6 +137,9 @@ protocols:
       tenant_id:
         status: ignored
         notes: Tenant selection never comes from query parameters or request bodies.
+      workspace_id:
+        status: ignored
+        notes: Workspace selection never comes from query parameters or request bodies; authenticated context wins.
   tempo:
     write_apis: false
     endpoints:
@@ -232,9 +235,11 @@ protocols:
         status: unsupported_feature
         applies_to: ["/api/search/tags", "/api/search/tag/{tag}/values"]
       tenant_id:
+        status: unsupported_feature
+        notes: Legacy tenant_id query param is rejected; use authenticated workspace context. workspace_id query values are discarded.
+      workspace_id:
         status: ignored
-        notes: Tenant selection never comes from query parameters or request bodies.
-  grafana:
+        notes: Workspace selection never comes from query parameters or request bodies; authenticated context wins.
     native_datasources: loki_tempo
     repository_harness: mock_validation_only
     service_backed_acceptance: external_evidence_required

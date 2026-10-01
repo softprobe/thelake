@@ -1293,7 +1293,7 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/compat/conformance_artifacts_test.sh
-          cargo test --test tests compat_phase0:: -- --test-threads=1
+          cargo test --test compat_phase0 -- --test-threads=1
           cargo test --test tests compat_loki::loki_phase2_contract_cases -- --test-threads=1
           cargo test --test tests compat_tempo::tempo_phase3_contract_cases -- --test-threads=1
 
@@ -1306,7 +1306,7 @@ jobs:
       - name: Run tenant-isolation checks
         run: |
           set -euo pipefail
-          cargo test --test tests compat_phase0::compat_query_tenant_id -- --test-threads=1
+          cargo test --test compat_phase0 workspace_id_param_does_not_override_auth -- --test-threads=1
           cargo test --test tests compat_loki::loki_phase2_tenant_isolation -- --test-threads=1
           cargo test --test tests compat_tempo::tempo_phase3_same_trace_id_isolated -- --test-threads=1
 

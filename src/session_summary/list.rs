@@ -104,7 +104,7 @@ pub async fn lookup_session_summary_window_for_workspace(
 ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, SessionSummaryListError> {
     let schema = quote_pg_ident(metadata_schema);
     let ownership = workspace_id
-        .map(|id| format!("tenant_id = {} AND ", crate::sql::sql_string_literal(id)))
+        .map(|id| format!("workspace_id = {} AND ", crate::sql::sql_string_literal(id)))
         .unwrap_or_default();
     let sql = format!(
         "SELECT start_time_ns, COALESCE(end_time_ns, start_time_ns) AS end_time_ns FROM {schema}.session_summary WHERE {ownership}session_id = $1 LIMIT 1"

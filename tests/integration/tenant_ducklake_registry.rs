@@ -43,36 +43,47 @@ columns:
 #[tokio::test]
 async fn resolve_scope_is_registry_strict_and_idempotent() {
     let manager = postgres_manager().await;
+    let workspace_id = Uuid::new_v4().to_string();
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
-    let tenant_id = format!("tenant_registry_{suffix}");
     let metadata_schema = format!("tenant_registry_scope_{suffix}");
-    let data_path = format!("./target/registry-test-data/{tenant_id}/");
+    let data_path = format!("./target/registry-test-data/{workspace_id}/");
 
-    let unknown = manager
-        .engine_for(&tenant_id)
-        .await
-        .err()
-        .expect("unknown scopes must not be lazily provisioned");
-    assert!(
-        unknown.to_string().contains("unknown scope"),
-        "unexpected unknown scope error: {unknown}"
-    );
+    // Isolated mode is fail-closed on the registry. Shared mode weakly binds
+    // to the process default physical scope without a binding lookup.
+    if manager.config().ducklake.workspace_scope_mode
+        == softprobe_runtime::workspace_scope::WorkspaceScopeMode::Isolated
+    {
+        let unknown = manager
+            .engine_for(&workspace_id)
+            .await
+            .err()
+            .expect("unknown scopes must not be lazily provisioned");
+        assert!(
+            unknown.to_string().contains("unknown scope"),
+            "unexpected unknown scope error: {unknown}"
+        );
+    } else {
+        manager
+            .engine_for(&workspace_id)
+            .await
+            .expect("shared mode resolves without registry binding");
+    }
 
     let request = ScopeProvisioningRequest {
-        scope_id: tenant_id.clone(),
+        scope_id: workspace_id.clone(),
         metadata_schema: metadata_schema.clone(),
         data_path: data_path.clone(),
     };
     let created = manager
         .provision_scope(request.clone())
         .await
-        .expect("provision tenant");
+        .expect("provision workspace");
     manager
-        .engine_for(&tenant_id)
+        .engine_for(&workspace_id)
         .await
         .expect("first engine resolve");
     manager
-        .engine_for(&tenant_id)
+        .engine_for(&workspace_id)
         .await
         .expect("second engine resolve");
     let repeated = manager
@@ -86,8 +97,8 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
 async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_schema() {
     let manager = postgres_manager().await;
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
-    let tenant_a = format!("tenant_promo_registry_a_{suffix}");
-    let tenant_b = format!("tenant_promo_registry_b_{suffix}");
+    let tenant_a = Uuid::new_v4().to_string();
+    let tenant_b = Uuid::new_v4().to_string();
 
     let schema_a = format!("promo_a_{suffix}");
     let schema_b = format!("promo_b_{suffix}");

@@ -16,7 +16,7 @@ use crate::util::config::file_backed_test_config;
 
 static HOTPATH_CONTRACT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn sample_span(i: usize, tenant_id: Option<&str>) -> SpanData {
+fn sample_span(i: usize, workspace_id: Option<&str>) -> SpanData {
     let now = Utc::now();
     let mut attributes = HashMap::new();
     attributes.insert("test.iteration".to_string(), i.to_string());
@@ -27,7 +27,7 @@ fn sample_span(i: usize, tenant_id: Option<&str>) -> SpanData {
         parent_span_id: None,
         app_id: "hotpath-app".to_string(),
         organization_id: None,
-        tenant_id: tenant_id.map(|s| s.to_string()),
+        workspace_id: workspace_id.map(|s| s.to_string()),
         agent_id: None,
         agent_name: None,
         message_type: "chat".to_string(),
@@ -64,18 +64,21 @@ fn sample_log(i: usize) -> LogData {
         resource_attributes: HashMap::new(),
         trace_id: Some(format!("trace-{i:016x}")),
         span_id: Some(format!("span-{i:016x}")),
-        tenant_id: None,
+        workspace_id: None,
         agent_id: None,
         agent_name: None,
     }
 }
 
-async fn assert_warm_writes_zero_probes_contract(runtime: &RuntimeEngine, tenant_id: Option<&str>) {
+async fn assert_warm_writes_zero_probes_contract(
+    runtime: &RuntimeEngine,
+    workspace_id: Option<&str>,
+) {
     let _guard = HOTPATH_CONTRACT_LOCK.lock().await;
 
     // Perform one initial write across signals to ensure cold paths / pool creation are complete.
     runtime
-        .add_spans(vec![sample_span(0, tenant_id)], 0)
+        .add_spans(vec![sample_span(0, workspace_id)], 0)
         .await
         .expect("warm span write");
     runtime
@@ -91,7 +94,7 @@ async fn assert_warm_writes_zero_probes_contract(runtime: &RuntimeEngine, tenant
     const N: usize = 5;
     for i in 1..=N {
         runtime
-            .add_spans(vec![sample_span(i, tenant_id)], 0)
+            .add_spans(vec![sample_span(i, workspace_id)], 0)
             .await
             .unwrap_or_else(|e| panic!("span write {i} failed: {e}"));
         runtime
@@ -173,14 +176,14 @@ async fn warm_writes_perform_zero_schema_probes_postgres() {
         .await
         .expect("connect runtime engines");
 
-    let tenant_id = format!("tenant-hotpath-{suffix}");
+    let workspace_id = uuid::Uuid::new_v4().to_string();
     let tenant_schema = format!("hotpath_tenant_{suffix}");
     let tenant_data = temp.path().join("data").to_string_lossy().to_string();
 
     manager
         .provision_scope(
             softprobe_runtime::runtime_engine::ScopeProvisioningRequest {
-                scope_id: tenant_id.clone(),
+                scope_id: workspace_id.clone(),
                 metadata_schema: tenant_schema.clone(),
                 data_path: tenant_data.clone(),
             },
@@ -188,7 +191,10 @@ async fn warm_writes_perform_zero_schema_probes_postgres() {
         .await
         .expect("provision scope");
 
-    let runtime = manager.engine_for(&tenant_id).await.expect("tenant engine");
+    let runtime = manager
+        .engine_for(&workspace_id)
+        .await
+        .expect("tenant engine");
 
-    assert_warm_writes_zero_probes_contract(runtime.as_ref(), Some(&tenant_id)).await;
+    assert_warm_writes_zero_probes_contract(runtime.as_ref(), Some(&workspace_id)).await;
 }

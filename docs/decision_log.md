@@ -98,15 +98,32 @@ The writer may create a temporary local Parquet file to bridge Arrow into
 DuckLake. That file is deleted after commit or failure and is not durable,
 queryable, or recoverable storage.
 
-## Current invariant: tenant-bound runtime engines
+## Current invariant: workspace-bound runtime engines
 
-Resolve tenant identity at authentication/instantiation boundaries and create a
-tenant-bound runtime engine containing storage, ingest, query, and optional
-session/catalog services. Operational APIs must not accept an arbitrary tenant
-or DuckLake scope after binding.
+Resolve **workspace** identity (`workspace_id` UUID) at authentication /
+instantiation boundaries and create a workspace-bound runtime engine containing
+storage, ingest, query, and optional session/catalog services. Operational APIs
+must not accept an arbitrary workspace or DuckLake scope after binding.
 
-For PostgreSQL catalogs, store each tenant's metadata schema and data path in
-the durable scope registry.
+Canonical terms and kill list: [`workspace-identity.md`](workspace-identity.md).
+Shared mode uses a weak bind on the request path (process physical scope;
+`engine_for` does not look up `workspace_scope_binding`). Admin provision still
+records workspace UUID → default physical for maintenance listing. Isolated
+mode stores workspace UUID → physical scope in the durable registry for every
+resolve. Provision and auth both require UUID `workspace_id`; Grafana compat
+fixtures therefore provision `COMPAT_WORKSPACE_*` UUIDs (not API-key slug labels).
+
+## ADR-017: Workspace UUID is the only logical identity
+
+**Date:** 2026-09-30
+**Status:** Accepted
+
+### Decision
+
+- No `lake_scope_id` / `tenant_key` / product `tenant` id.
+- Row column is `workspace_id` (CREATE-only greenfield DDL; never ALTER for cutover).
+- Mode names: `shared` | `isolated`.
+- Clean-break deployments; copy traces only when migrating data.
 
 ## Current invariant: explicit business attributes and tenant promotion
 

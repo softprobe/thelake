@@ -49,7 +49,7 @@ impl From<CreateScoreRequest> for Score {
             config_id: request.config_id,
             author_id: request.author_id,
             metadata: request.metadata,
-            tenant_id: None,
+            workspace_id: None,
         }
     }
 }
@@ -83,7 +83,7 @@ impl From<CreateScoreConfigRequest> for ScoreConfig {
             categories: request.categories,
             author_id: request.author_id,
             metadata: request.metadata,
-            tenant_id: None,
+            workspace_id: None,
         }
     }
 }

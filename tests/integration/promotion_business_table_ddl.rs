@@ -80,19 +80,19 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
-    let business_tenant_id = format!("tenant-biz-{short}");
+    let business_workspace_id = Uuid::new_v4().to_string();
     let _hints = manager
         .provision_scope(ScopeProvisioningRequest {
-            scope_id: business_tenant_id.clone(),
+            scope_id: business_workspace_id.clone(),
             metadata_schema: business_metadata_schema.clone(),
             data_path: business_data_path,
         })
         .await
-        .expect("provision tenant");
+        .expect("provision workspace");
     let engine = manager
-        .engine_for(&business_tenant_id)
+        .engine_for(&business_workspace_id)
         .await
-        .expect("tenant engine");
+        .expect("workspace engine");
     let manifest = parse_promotion_manifest(BUSINESS_MANIFEST).expect("valid manifest");
     let PromotionManifest::BusinessTable(spec) = manifest else {
         panic!("expected business table manifest");

@@ -13,7 +13,7 @@
     "jsonBody": {
       "success": true,
       "data": {
-        "tenantId": "local-dev-tenant",
+        "workspaceId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         "resources": [
           {
             "resourceType": "BIGQUERY_STORAGE",

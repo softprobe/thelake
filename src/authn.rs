@@ -1,4 +1,4 @@
-//! Resolve API keys to tenant identity via the configured auth HTTP service.
+//! Resolve API keys to workspace identity via the configured auth HTTP service.
 
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct TenantInfo {
-    pub tenant_id: String,
+    pub workspace_id: String,
     pub bucket_name: String,
     pub dataset_id: String,
     /// Softprobe agent id from assertion JWT (agent API key path).
@@ -79,8 +79,8 @@ async fn call_auth_service(
     }
     #[derive(Deserialize)]
     struct Data {
-        #[serde(rename = "tenantId")]
-        tenant_id: String,
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
         resources: Option<Vec<Resource>>,
     }
     #[derive(Deserialize)]
@@ -110,8 +110,11 @@ async fn call_auth_service(
         .data
         .ok_or_else(|| anyhow!("authn: invalid API key"))?;
 
+    let workspace_id = crate::softprobe_assertion::parse_workspace_id(&data.workspace_id)
+        .map_err(|err| anyhow!("authn: {err}"))?;
+
     let mut info = TenantInfo {
-        tenant_id: data.tenant_id.clone(),
+        workspace_id,
         bucket_name: String::new(),
         dataset_id: String::new(),
         agent_id: None,
@@ -131,9 +134,6 @@ async fn call_auth_service(
         }
     }
 
-    if info.tenant_id.is_empty() {
-        return Err(anyhow!("authn: auth response missing tenantId"));
-    }
     Ok(info)
 }
 
@@ -160,7 +160,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "success": true,
                 "data": {
-                    "tenantId": "t-u",
+                    "workspaceId": "550e8400-e29b-41d4-a716-446655440000",
                     "resources": [{
                         "resourceType": "BIGQUERY_STORAGE",
                         "configJson": "{\"dataset_id\":\"d\",\"bucket_name\":\"bk\"}"
@@ -172,7 +172,7 @@ mod tests {
 
         let r = Resolver::new(format!("{}/", srv.uri()), Duration::from_secs(60));
         let info = r.resolve("key").await.expect("ok");
-        assert_eq!(info.tenant_id, "t-u");
+        assert_eq!(info.workspace_id, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(info.dataset_id, "d");
         assert_eq!(info.bucket_name, "bk");
     }
@@ -189,5 +189,68 @@ mod tests {
         let r = Resolver::new(format!("{}/", srv.uri()), Duration::from_secs(60));
         let err = r.resolve("k").await.expect_err("auth");
         assert!(err.to_string().contains("invalid API key"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn wiremock_rejects_non_uuid_workspace_id() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "workspaceId": "ws-not-a-uuid",
+                    "resources": []
+                }
+            })))
+            .mount(&srv)
+            .await;
+
+        let r = Resolver::new(format!("{}/", srv.uri()), Duration::from_secs(60));
+        let err = r.resolve("key").await.expect_err("non-uuid");
+        assert!(
+            err.to_string().contains("workspace_id must be a UUID"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wiremock_rejects_empty_workspace_id() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "workspaceId": "   ",
+                    "resources": []
+                }
+            })))
+            .mount(&srv)
+            .await;
+
+        let r = Resolver::new(format!("{}/", srv.uri()), Duration::from_secs(60));
+        let err = r.resolve("key").await.expect_err("empty workspace");
+        assert!(err.to_string().contains("workspace_id required"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn wiremock_normalizes_workspace_id_uuid_case() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "workspaceId": "550E8400-E29B-41D4-A716-446655440000",
+                    "resources": []
+                }
+            })))
+            .mount(&srv)
+            .await;
+
+        let r = Resolver::new(format!("{}/", srv.uri()), Duration::from_secs(60));
+        let info = r.resolve("key").await.expect("ok");
+        assert_eq!(info.workspace_id, "550e8400-e29b-41d4-a716-446655440000");
     }
 }

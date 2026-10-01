@@ -216,7 +216,7 @@ def run_psql(sql: str) -> None:
 run_psql(ddl)
 run_psql(f"TRUNCATE {schema}.session_summary;")
 # Remap prod tenant_id → bench tenant so /v1/llm/sessions/search hits seeded rows.
-remap_tenant = os.environ.get("SEED_TENANT_ID") or os.environ.get("SOFTPROBE_DEFAULT_TENANT_KEY") or ""
+remap_tenant = os.environ.get("SEED_WORKSPACE_ID") or os.environ.get("SOFTPROBE_DEFAULT_WORKSPACE_ID") or ""
 load_csv = csv_path
 tmp_csv = None
 if remap_tenant and "tenant_id" in cols:

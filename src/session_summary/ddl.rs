@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 /// Fresh isolated-schema DDL. The SQL file is the source of truth.
 pub fn session_summary_table_ddls(tenant_schema: &str) -> Vec<String> {
     summary_ddls(
-        include_str!("../sql/schema/session_summary_isolated.sql"),
+        include_str!("../sql/schema/session_summary_dedicated.sql"),
         tenant_schema,
     )
 }
@@ -84,14 +84,14 @@ pub async fn validate_shared_session_summary_tables(
         let column_count: i64 = client
             .query_one(
                 "SELECT count(*) FROM information_schema.columns \
-                 WHERE table_schema = $1 AND table_name = $2 AND column_name = 'tenant_id';",
+                 WHERE table_schema = $1 AND table_name = $2 AND column_name = 'workspace_id';",
                 &[&tenant_schema, &table_name],
             )
             .await?
             .get(0);
         if column_count != 1 {
             return Err(anyhow::anyhow!(
-                "{}: {table_name} is missing tenant_id",
+                "{}: {table_name} is missing workspace_id",
                 crate::workspace_scope::SharedScopeError::new(
                     crate::workspace_scope::SharedScopeErrorCode::SchemaIncompatible,
                     format!("shared session-summary table {table_name} has no ownership column"),
@@ -108,14 +108,14 @@ pub async fn validate_shared_session_summary_tables(
                   AND c.table_name = k.table_name \
                  WHERE k.table_schema = $1 AND k.table_name = $2 \
                    AND c.constraint_type = 'PRIMARY KEY' \
-                   AND k.column_name IN ('tenant_id', 'session_id');",
+                   AND k.column_name IN ('workspace_id', 'session_id');",
                 &[&tenant_schema, &table_name],
             )
             .await?
             .get(0);
         if primary_key_columns != 2 {
             return Err(anyhow::anyhow!(
-                "{}: {table_name} must use (tenant_id, session_id) as its logical key",
+                "{}: {table_name} must use (workspace_id, session_id) as its logical key",
                 crate::workspace_scope::SharedScopeError::new(
                     crate::workspace_scope::SharedScopeErrorCode::SchemaIncompatible,
                     format!(

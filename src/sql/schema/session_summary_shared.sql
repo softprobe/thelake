@@ -1,6 +1,6 @@
 CREATE SCHEMA IF NOT EXISTS {{schema}};
 CREATE TABLE IF NOT EXISTS {{schema}}.session_summary (
-  tenant_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   start_time_ns BIGINT NOT NULL,
   end_time_ns BIGINT,
@@ -14,18 +14,18 @@ CREATE TABLE IF NOT EXISTS {{schema}}.session_summary (
   user_id TEXT,
   model_name TEXT,
   updated_at TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (tenant_id, session_id)
+  PRIMARY KEY (workspace_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS session_summary_recent
-  ON {{schema}}.session_summary (tenant_id, start_time_ns DESC, session_id);
+  ON {{schema}}.session_summary (workspace_id, start_time_ns DESC, session_id);
 CREATE INDEX IF NOT EXISTS session_summary_agent
-  ON {{schema}}.session_summary (tenant_id, agent_name, start_time_ns DESC, session_id)
+  ON {{schema}}.session_summary (workspace_id, agent_name, start_time_ns DESC, session_id)
   WHERE agent_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS session_summary_errors
-  ON {{schema}}.session_summary (tenant_id, start_time_ns DESC, session_id)
+  ON {{schema}}.session_summary (workspace_id, start_time_ns DESC, session_id)
   WHERE error_count > 0;
 CREATE TABLE IF NOT EXISTS {{schema}}.session_summary_dirty (
-  tenant_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   min_ts_ns BIGINT NOT NULL,
   max_ts_ns BIGINT NOT NULL,
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS {{schema}}.session_summary_dirty (
   generation BIGINT NOT NULL DEFAULT 1,
   claim_holder TEXT,
   claim_until TIMESTAMPTZ,
-  PRIMARY KEY (tenant_id, session_id)
+  PRIMARY KEY (workspace_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS session_summary_dirty_claim
   ON {{schema}}.session_summary_dirty (claim_until)

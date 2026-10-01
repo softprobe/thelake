@@ -16,6 +16,45 @@ grep -Fq 'GRAFANA_SOFTPROBE_URL' "$COMPOSE_FILE"
 grep -Fq 'image: ${GRAFANA_COMPOSE_IMAGE:?GRAFANA_COMPOSE_IMAGE must be supplied from docs/compat/references.v0.yaml}' "$COMPOSE_FILE"
 grep -Fq 'grafana-phase4-tenant-a' "$COMPOSE_FILE"
 grep -Fq 'grafana-phase4-tenant-b' "$COMPOSE_FILE"
+grep -Fq 'cccccccc-cccc-cccc-cccc-cccccccccccc' "$COMPOSE_FILE"
+grep -Fq 'dddddddd-dddd-dddd-dddd-dddddddddddd' "$COMPOSE_FILE"
+# Softprobe-config / seed / smoke must stay aligned with tests/util/workspace_ids.*
+python3 - "$ROOT_DIR/tests/util/workspace_ids.env" "$ROOT_DIR/tests/util/workspace_ids.rs" "$COMPOSE_FILE" \
+  "$ROOT_DIR/scripts/grafana-system-smoke.sh" "$ROOT_DIR/src/bin/grafana_seed_otlp.rs" <<'PY'
+import pathlib
+import re
+import sys
+
+env_path, rs_path, compose_path, smoke_path, seed_path = map(pathlib.Path, sys.argv[1:])
+env = {}
+for line in env_path.read_text().splitlines():
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    env[key] = value
+for key in ("COMPAT_WORKSPACE_ID", "COMPAT_WORKSPACE_A", "COMPAT_WORKSPACE_B"):
+    if key not in env:
+        raise SystemExit(f"missing {key} in workspace_ids.env")
+rs = rs_path.read_text()
+for key, value in env.items():
+    if key.startswith("COMPAT_") and f'"{value}"' not in rs:
+        raise SystemExit(f"{rs_path} missing {key}={value}")
+compose = compose_path.read_text()
+for key in ("COMPAT_WORKSPACE_A", "COMPAT_WORKSPACE_B"):
+    if env[key] not in compose:
+        raise SystemExit(f"compose missing {key}={env[key]}")
+smoke = smoke_path.read_text()
+if "item.get(\"workspace_id\")" not in smoke and "item.get('workspace_id')" not in smoke:
+    raise SystemExit("smoke compose seed receipt must key on workspace_id")
+if "metrics_sent" in smoke.split("run_deterministic_seed", 1)[1].split("curl_get_artifact", 1)[0]:
+    raise SystemExit("smoke compose seed receipt still requires metrics_* fields")
+seed = seed_path.read_text()
+for key in ("COMPAT_WORKSPACE_A", "COMPAT_WORKSPACE_B"):
+    if env[key] not in seed:
+        raise SystemExit(f"grafana_seed_otlp missing default {key}={env[key]}")
+print("workspace UUID fixture alignment: PASS")
+PY
 grep -Fq 'CARGO_TARGET_DIR: /tmp/thelake-grafana-target' "$COMPOSE_FILE"
 grep -Fq 'cargo run --locked --bin thelake' "$COMPOSE_FILE"
 grep -Fq 'cargo run --locked --bin grafana_seed_otlp' "$COMPOSE_FILE"

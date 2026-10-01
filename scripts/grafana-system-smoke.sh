@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+_SMOKE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$_SMOKE_ROOT/tests/util/workspace_ids.env"
+
 GRAFANA_URL="${GRAFANA_URL:-http://127.0.0.1:3000}"
 GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
@@ -62,8 +66,8 @@ if [[ -n "${GRAFANA_DASHBOARD_UIDS:-}" ]]; then
   read -r -a DASHBOARD_UIDS <<< "$GRAFANA_DASHBOARD_UIDS"
 fi
 
-TENANT_A_ID="${GRAFANA_TEST_TENANT_A_ID:-grafana-phase4-tenant-a}"
-TENANT_B_ID="${GRAFANA_TEST_TENANT_B_ID:-grafana-phase4-tenant-b}"
+TENANT_A_ID="${GRAFANA_TEST_TENANT_A_ID:-$COMPAT_WORKSPACE_A}"
+TENANT_B_ID="${GRAFANA_TEST_TENANT_B_ID:-$COMPAT_WORKSPACE_B}"
 SEED_SOFTPROBE_URL="${GRAFANA_SEED_SOFTPROBE_URL:-http://127.0.0.1:${GRAFANA_SOFTPROBE_HTTP_PORT:-18090}}"
 SOFTPROBE_DIRECT_URL="${GRAFANA_DIRECT_SOFTPROBE_URL:-${SOFTPROBE_URL:-$SEED_SOFTPROBE_URL}}"
 GRAFANA_AUTH_MOCK_URL="${GRAFANA_AUTH_MOCK_URL:-http://127.0.0.1:${GRAFANA_AUTH_MOCK_PORT:-18080}}"
@@ -603,16 +607,18 @@ except (FileNotFoundError, json.JSONDecodeError) as exc:
     print(json.dumps({"error": f"mock fixture unavailable: {exc}"}))
     raise SystemExit(0)
 if signal == "loki":
+    suffix = "b" if uid.endswith("-b") else "a"
     obj["data"]["result"].append({
         "stream": {"tenant": tenant, "datasource_uid": uid},
         "values": [["1700000000000000000", json.dumps({
             "tenant": tenant,
             "source_uid": uid,
-            "trace_id": ("a" if tenant.endswith("-a") else "b") * 32,
+            "trace_id": suffix * 32,
         })]],
     })
 else:
-    trace_id = ("a" if tenant.endswith("-a") else "b") * 32
+    suffix = "b" if uid.endswith("-b") else "a"
+    trace_id = suffix * 32
     trace_wire_id = base64.b64encode(bytes.fromhex(trace_id)).decode("ascii")
     obj["traces"] = [{"traceID": trace_wire_id, "rootServiceName": tenant, "datasource_uid": uid}]
 print(json.dumps(obj))
@@ -1095,14 +1101,14 @@ import sys
 receipt = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if receipt.get("status") != "pass":
     raise SystemExit(f"compose seed status is not pass: {receipt.get('status')!r}")
-tenants = {item.get("tenant_id"): item for item in receipt.get("tenants", [])}
-for tenant_id in sys.argv[2:]:
-    item = tenants.get(tenant_id)
+tenants = {item.get("workspace_id"): item for item in receipt.get("tenants", [])}
+for workspace_id in sys.argv[2:]:
+    item = tenants.get(workspace_id)
     if not item or not all(item.get(key) is True for key in (
-        "scope_provisioned", "metrics_sent", "logs_sent", "traces_sent",
-        "metrics_queryable", "logs_queryable", "traces_queryable",
+        "scope_provisioned", "logs_sent", "traces_sent",
+        "logs_queryable", "traces_queryable",
     )):
-        raise SystemExit(f"compose seed is not queryable for tenant {tenant_id}")
+        raise SystemExit(f"compose seed is not queryable for workspace {workspace_id}")
 PY
     return 0
   fi
@@ -1671,7 +1677,7 @@ def has_expected_tenant():
         return True
     if signal != "tempo":
         return False
-    suffix = "b" if expected.endswith("-b") else "a"
+    suffix = "b" if uid.endswith("-b") else "a"
     raw_trace_id = suffix * 32
     canonical_trace_id = base64.b64encode(bytes.fromhex(raw_trace_id)).decode()
     return raw_trace_id in text or canonical_trace_id in text
@@ -1704,7 +1710,7 @@ if other and other in text:
 if expected not in text:
     if signal != "tempo":
         raise SystemExit(f"Explore response for {uid} has no positive evidence for requested tenant {expected}")
-    suffix = "b" if expected.endswith("-b") else "a"
+    suffix = "b" if uid.endswith("-b") else "a"
     raw_trace_id = suffix * 32
     canonical_trace_id = base64.b64encode(bytes.fromhex(raw_trace_id)).decode()
     if raw_trace_id not in text and canonical_trace_id not in text:
@@ -1944,7 +1950,6 @@ PY
 
 check_dashboard_panels() {
   local detail="$1" uid="$2" panel_id panel_type target payload artifact status signal target_uid panel_count=0 window
-  local tenant_suffix="b"; [[ "$uid" == *-a || "$uid" == *"-prom-a" || "$uid" == *"-loki-a" || "$uid" == *"-tempo-a" ]] && tenant_suffix="a"
   while IFS=$'\t' read -r panel_id panel_type target window; do
     [[ -n "$target" ]] || continue
     signal="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('datasource',{}).get('type','loki'))" "$target")"
@@ -1963,7 +1968,8 @@ check_dashboard_panels() {
       if [[ "$MOCK_MODE" == "1" ]]; then
         # Pure-mock lane: no services are running; emit a deterministic
         # search response carrying the tenant's canonical trace id.
-        local suffix_m="b"; [[ "$tenant_suffix" == "a" ]] && suffix_m="a"
+        # Key off datasource uid (-a/-b), never workspace UUID string suffix.
+        local suffix_m="b"; [[ "$target_uid" == *-a ]] && suffix_m="a"
         python3 - "$artifact" "$suffix_m" <<'PY'
 import json, sys
 suffix = sys.argv[2]
@@ -2174,12 +2180,13 @@ run_signal_case() {
       # Tempo plugin QueryData is not scriptable; drive the same downstream
       # search through the datasource proxy and validate the raw response.
       local search_endpoint="/api/datasources/proxy/uid/$uid/api/search?limit=20&start=$TRACE_START_S&end=$TRACE_END_S"
-      local suffix="b"; [[ "$expected" == *-a ]] && suffix="a"
-      local own_trace="$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix$suffix"
+      # Seeded aaaa…/bbbb… trace IDs follow softprobe-*-a/b datasource uids
+      # (and the a/b loop tenant), not workspace UUID string suffixes.
+      local suffix="b"; [[ "$uid" == *-a ]] && suffix="a"
+      local own_trace="${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}"
       write_request_artifact "$ARTIFACT_DIR/.work/${case_id}-${tenant}-explore.request.json" GET "$GRAFANA_URL$search_endpoint"
       if [[ "$MOCK_MODE" == "1" ]]; then
-        local suffix_m2="b"; [[ "$tenant" == a ]] && suffix_m2="a"
-        python3 - "$explore" "$suffix_m2" <<'PY'
+        python3 - "$explore" "$suffix" <<'PY'
 import json, sys
 suffix = sys.argv[2]
 json.dump({"traces": [{

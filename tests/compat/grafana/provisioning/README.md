@@ -10,7 +10,9 @@ Required when applying the full tenant-A/tenant-B fixture:
 
 - `SOFTPROBE_URL` — Softprobe HTTP base (e.g. `http://127.0.0.1:8090`)
 - `SOFTPROBE_TENANT_A_API_KEY` / `SOFTPROBE_TENANT_B_API_KEY` — bearer keys
-- `SOFTPROBE_TENANT_A_ID` / `SOFTPROBE_TENANT_B_ID` — exact `X-Scope-OrgID` values
+- `SOFTPROBE_TENANT_A_ID` / `SOFTPROBE_TENANT_B_ID` — exact `X-Scope-OrgID`
+  values (workspace UUIDs matching auth resolve; see
+  `tests/util/workspace_ids.rs`)
 
 The provisioned UIDs are `softprobe-loki-a|b` and `softprobe-tempo-a|b`. Loki
 derived fields link `trace_id` log content to the matching Tempo datasource;

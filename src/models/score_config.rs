@@ -20,7 +20,7 @@ pub struct ScoreConfig {
     pub metadata: HashMap<String, String>,
     /// Authenticated workspace ownership, stamped by `IngestEngine`.
     #[serde(default, skip_serializing)]
-    pub tenant_id: Option<String>,
+    pub workspace_id: Option<String>,
 }
 
 impl ScoreConfig {
@@ -86,7 +86,7 @@ impl ScoreConfig {
                 categories: vec![],
                 author_id: Some("system".to_string()),
                 metadata: HashMap::from([("seed".to_string(), "default".to_string())]),
-                tenant_id: None,
+                workspace_id: None,
             },
             Self {
                 config_id: "cfg-quality".to_string(),
@@ -99,7 +99,7 @@ impl ScoreConfig {
                 categories: vec!["good".to_string(), "ok".to_string(), "bad".to_string()],
                 author_id: Some("system".to_string()),
                 metadata: HashMap::from([("seed".to_string(), "default".to_string())]),
-                tenant_id: None,
+                workspace_id: None,
             },
             Self {
                 config_id: "cfg-expected-output".to_string(),
@@ -112,7 +112,7 @@ impl ScoreConfig {
                 categories: vec![],
                 author_id: Some("system".to_string()),
                 metadata: HashMap::from([("seed".to_string(), "default".to_string())]),
-                tenant_id: None,
+                workspace_id: None,
             },
         ]
     }
@@ -136,7 +136,7 @@ mod tests {
             categories: vec![],
             author_id: None,
             metadata: HashMap::new(),
-            tenant_id: None,
+            workspace_id: None,
         }
     }
 
@@ -170,7 +170,7 @@ mod tests {
             config_id: Some("cfg-1".to_string()),
             author_id: None,
             metadata: HashMap::new(),
-            tenant_id: None,
+            workspace_id: None,
         };
         assert_eq!(config.validate_score(&score), Ok(()));
     }

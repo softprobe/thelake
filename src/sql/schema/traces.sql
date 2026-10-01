@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS traces (
     parent_span_id VARCHAR,
     app_id VARCHAR NOT NULL,
     organization_id VARCHAR,
-    tenant_id VARCHAR,
+    workspace_id VARCHAR,
     message_type VARCHAR NOT NULL,
     span_kind VARCHAR,
     timestamp TIMESTAMP_NS NOT NULL,

@@ -12,7 +12,7 @@ pub fn span_at(session_id: &str, secs: i64) -> Span {
         parent_span_id: None,
         app_id: "app".into(),
         organization_id: None,
-        tenant_id: None,
+        workspace_id: None,
         agent_id: None,
         agent_name: None,
         message_type: "msg".into(),
