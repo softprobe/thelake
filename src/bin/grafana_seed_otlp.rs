@@ -67,10 +67,12 @@ fn main() {
     let receipt_path = env::var("GRAFANA_SEED_RECEIPT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("target/compat/grafana/seed-receipt.json"));
-    let tenant_a =
-        env::var("SOFTPROBE_TENANT_A_ID").unwrap_or_else(|_| "grafana-phase4-tenant-a".into());
-    let tenant_b =
-        env::var("SOFTPROBE_TENANT_B_ID").unwrap_or_else(|_| "grafana-phase4-tenant-b".into());
+    // Defaults must match tests/util/workspace_ids.env (COMPAT_WORKSPACE_A/B).
+    // API keys stay as human-readable fixture credentials.
+    let tenant_a = env::var("SOFTPROBE_TENANT_A_ID")
+        .unwrap_or_else(|_| "cccccccc-cccc-cccc-cccc-cccccccccccc".into());
+    let tenant_b = env::var("SOFTPROBE_TENANT_B_ID")
+        .unwrap_or_else(|_| "dddddddd-dddd-dddd-dddd-dddddddddddd".into());
     let key_a =
         env::var("SOFTPROBE_TENANT_A_API_KEY").unwrap_or_else(|_| "grafana-phase4-tenant-a".into());
     let key_b =
@@ -139,8 +141,8 @@ fn seed(
         .context("build seed HTTP client")?;
 
     wait_ready(&client, base_url)?;
-    for (index, (workspace_id, api_key, _suffix)) in tenants.iter().enumerate() {
-        let payloads = tenant_payloads(workspace_id);
+    for (index, (workspace_id, api_key, suffix)) in tenants.iter().enumerate() {
+        let payloads = tenant_payloads(workspace_id, suffix);
         provision_tenant(&client, base_url, admin_key, workspace_id, index)?;
         receipt.tenants[index].scope_provisioned = true;
         if let Err(error) = send_payloads(
@@ -392,8 +394,7 @@ fn write_receipt(path: &Path, receipt: &Receipt) -> Result<()> {
     Ok(())
 }
 
-fn tenant_payloads(tenant: &str) -> TenantPayloads {
-    let suffix = if tenant.ends_with("-b") { "b" } else { "a" };
+fn tenant_payloads(tenant: &str, suffix: &str) -> TenantPayloads {
     let trace_id = trace_id_for(suffix);
     let span_id = if suffix == "a" {
         vec![0x11; 8]
@@ -566,15 +567,17 @@ mod tests {
 
     #[test]
     fn payloads_are_deterministic_and_tenant_bound() {
-        let tenant_a = tenant_payloads("grafana-phase4-tenant-a");
-        let tenant_b = tenant_payloads("grafana-phase4-tenant-b");
+        let workspace_a = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let workspace_b = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        let tenant_a = tenant_payloads(workspace_a, "a");
+        let tenant_b = tenant_payloads(workspace_b, "b");
 
         assert_eq!(trace_id_for("a"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(trace_id_for("b"), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert_ne!(tenant_a.logs, tenant_b.logs);
         assert_ne!(tenant_a.traces, tenant_b.traces);
 
-        let resource_a = resource("grafana-phase4-tenant-a");
+        let resource_a = resource(workspace_a);
         let marker = resource_a
             .attributes
             .iter()
@@ -589,6 +592,6 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_default();
-        assert_eq!(marker_value, "grafana-phase4-tenant-a");
+        assert_eq!(marker_value, workspace_a);
     }
 }

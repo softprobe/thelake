@@ -41,6 +41,11 @@ registry for workspace UUID → physical scope on every resolve.
 
 thelake binds from `workspace_id` only. No `tenant_key`.
 
+`POST /v1/workspaces` rejects non-UUID `workspaceId` (same
+`parse_workspace_id` contract as auth). Dedicated Grafana / seed harnesses
+must provision the fixture UUIDs returned by auth mocks
+(`tests/util/workspace_ids.rs`), not legacy slug labels used as API keys.
+
 ## Kill list
 
 - `lake_scope_id` / `ws-…` slug generator

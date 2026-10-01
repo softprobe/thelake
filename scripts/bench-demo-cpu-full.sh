@@ -32,7 +32,9 @@ LEAVE_UP="${LEAVE_UP:-0}"
 LABEL="${BENCH_LABEL:-demo-cpu-full}"
 SOFTPROBE_URL="${SOFTPROBE_LISTEN:-http://127.0.0.1:8090}"
 API_KEY="${SOFTPROBE_API_KEY:-local-dev-key}"
-TENANT_ID="${GRAFANA_TENANT_ID:-local-dev-tenant}"
+# shellcheck disable=SC1091
+source "$ROOT/tests/util/workspace_ids.env"
+TENANT_ID="${GRAFANA_TENANT_ID:-$COMPAT_WORKSPACE_ID}"
 FORCE_BRINGUP="${BENCH_CPU_FORCE_BRINGUP:-0}"
 
 mkdir -p "$RESULTS_DIR" "$STATE_DIR"

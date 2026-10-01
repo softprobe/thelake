@@ -357,15 +357,20 @@ async fn v1_provision_scope(
         ));
     }
 
-    let workspace_id = body.workspace_id.trim().to_string();
-    if workspace_id.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(
-                json!({"error": {"code": "invalid_request", "message": "workspaceId is required"}}),
-            ),
-        ));
-    }
+    let workspace_id = match crate::softprobe_assertion::parse_workspace_id(&body.workspace_id) {
+        Ok(id) => id,
+        Err(err) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "code": "invalid_request",
+                        "message": err.to_string()
+                    }
+                })),
+            ));
+        }
+    };
     if crate::self_monitoring::is_reserved_workspace_id(&workspace_id) {
         return Err((
             StatusCode::BAD_REQUEST,

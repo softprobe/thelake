@@ -15,6 +15,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# shellcheck disable=SC1091
+source "$ROOT/tests/util/workspace_ids.env"
 
 COMPOSE="${COMPOSE:-docker compose}"
 STATE_DIR="${THELAKE_GRAFANA_STATE_DIR:-/tmp/thelake-grafana-manual}"
@@ -48,7 +50,8 @@ PG_HOST="${GRAFANA_PG_HOST:-127.0.0.1}"
 PG_PORT="${GRAFANA_PG_HOST_PORT:-5434}"
 PG_SCHEMA="${GRAFANA_PG_SCHEMA:-grafana_manual}"
 ADMIN_API_KEY="${SOFTPROBE_ADMIN_API_KEY:-local-dev-admin-key}"
-TENANT_ID="${GRAFANA_TENANT_ID:-local-dev-tenant}"
+# Must match tests/mocks/auth workspaceId (COMPAT_WORKSPACE_ID).
+TENANT_ID="${GRAFANA_TENANT_ID:-$COMPAT_WORKSPACE_ID}"
 TENANT_SCHEMA="${GRAFANA_TENANT_SCHEMA:-${PG_SCHEMA}_local_dev_tenant}"
 
 # Official Astronomy Shop pin (https://github.com/open-telemetry/opentelemetry-demo).

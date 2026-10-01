@@ -6,6 +6,12 @@ HARNESS="$ROOT_DIR/scripts/grafana-system-smoke.sh"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grafana-tempo-tenant-contract.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# Match COMPAT_WORKSPACE_A/B from tests/util/workspace_ids.env.
+# shellcheck disable=SC1091
+source "$ROOT_DIR/tests/util/workspace_ids.env"
+TENANT_A="$COMPAT_WORKSPACE_A"
+TENANT_B="$COMPAT_WORKSPACE_B"
+
 SOURCE_TRACE_ID="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 WIRE_TRACE_ID="$(bash -c 'source "$1"; normalize_tempo_trace_id "$2"' _ "$HARNESS" "$SOURCE_TRACE_ID")"
 
@@ -19,7 +25,7 @@ cat >"$tempo_response" <<JSON
 {
   "traceID": "$WIRE_TRACE_ID",
   "batches": [{
-    "resource": {"attributes": [{"key": "tenant.marker", "value": {"stringValue": "grafana-phase4-tenant-a"}}]},
+    "resource": {"attributes": [{"key": "tenant.marker", "value": {"stringValue": "$TENANT_A"}}]},
     "scopeSpans": [{
       "scope": {"name": "grafana-seeder"},
       "spans": [{
@@ -34,7 +40,7 @@ cat >"$tempo_response" <<JSON
       }]
     }]
   }, {
-      "resource": {"attributes": [{"key": "tenant.marker", "value": {"stringValue": "grafana-phase4-tenant-a"}}]},
+      "resource": {"attributes": [{"key": "tenant.marker", "value": {"stringValue": "$TENANT_A"}}]},
       "scopeSpans": [{
         "scope": {"name": "grafana-secondary", "version": "1.0.0"},
         "spans": [{
@@ -50,7 +56,7 @@ cat >"$tempo_response" <<JSON
 }
 JSON
 
-if ! bash -c 'source "$1"; validate_tempo_trace_response "$2" "$3" "$4" "$5" "$6"' _ "$HARNESS" "$tempo_response" "$SOURCE_TRACE_ID" grafana-phase4-tenant-a grafana-phase4-tenant-b "$WIRE_TRACE_ID"; then
+if ! bash -c 'source "$1"; validate_tempo_trace_response "$2" "$3" "$4" "$5" "$6"' _ "$HARNESS" "$tempo_response" "$SOURCE_TRACE_ID" "$TENANT_A" "$TENANT_B" "$WIRE_TRACE_ID"; then
   echo 'Tempo validator did not normalize the raw search trace ID to canonical wire Base64' >&2
   exit 1
 fi
@@ -62,7 +68,7 @@ cat >"$one_span_response" <<JSON
 {
   "traceID": "$WIRE_TRACE_ID",
   "batches": [{
-    "resource": {"attributes": [{"key": "tenant.marker", "value": {"stringValue": "grafana-phase4-tenant-a"}}]},
+    "resource": {"attributes": [{"key": "tenant.marker", "value": {"stringValue": "$TENANT_A"}}]},
     "scopeSpans": [{
       "scope": {"name": "grafana-seeder", "version": "1.0.0"},
       "spans": [{
@@ -77,27 +83,27 @@ cat >"$one_span_response" <<JSON
   }]
 }
 JSON
-if ! GRAFANA_RICH_TEMPO_ASSERTIONS=0 bash -c 'source "$1"; validate_tempo_trace_response "$2" "$3" "$4" "$5" "$6"' _ "$HARNESS" "$one_span_response" "$SOURCE_TRACE_ID" grafana-phase4-tenant-a grafana-phase4-tenant-b "$WIRE_TRACE_ID"; then
+if ! GRAFANA_RICH_TEMPO_ASSERTIONS=0 bash -c 'source "$1"; validate_tempo_trace_response "$2" "$3" "$4" "$5" "$6"' _ "$HARNESS" "$one_span_response" "$SOURCE_TRACE_ID" "$TENANT_A" "$TENANT_B" "$WIRE_TRACE_ID"; then
   echo 'Tempo validator accepted a one-span response without rich topology' >&2
   exit 1
 fi
 
 loki_response="$TMP_DIR/loki.json"
 printf '%s\n' '{"status":"success","data":{"resultType":"streams","result":[{"stream":{"service_name":"checkout"},"values":[["1700000030000000000","ok"]]}]}}' >"$loki_response"
-if bash -c 'source "$1"; validate_signal_response "$2" loki grafana-phase4-tenant-a grafana-phase4-tenant-b softprobe-loki-a' _ "$HARNESS" "$loki_response"; then
+if bash -c 'source "$1"; validate_signal_response "$2" loki "$3" "$4" softprobe-loki-a' _ "$HARNESS" "$loki_response" "$TENANT_A" "$TENANT_B"; then
   echo 'Loki validator accepted an ambiguous tenant response' >&2
   exit 1
 fi
 
 explore_response="$TMP_DIR/explore.json"
 printf '%s\n' '{"results":{"A":{"refId":"A","frames":[{"schema":{"name":"data","fields":[{"name":"value"}]},"data":{"values":[[1]]}}]}}}' >"$explore_response"
-if bash -c 'source "$1"; validate_explore_response "$2" grafana-phase4-tenant-a grafana-phase4-tenant-b softprobe-loki-a loki' _ "$HARNESS" "$explore_response"; then
+if bash -c 'source "$1"; validate_explore_response "$2" "$3" "$4" softprobe-loki-a loki' _ "$HARNESS" "$explore_response" "$TENANT_A" "$TENANT_B"; then
   echo 'Explore validator accepted an ambiguous tenant response' >&2
   exit 1
 fi
 
 mock_tempo="$TMP_DIR/mock-tempo.json"
-bash -c 'source "$1"; mock_signal_response tempo softprobe-tempo-a grafana-phase4-tenant-a' _ "$HARNESS" >"$mock_tempo"
+bash -c 'source "$1"; mock_signal_response tempo softprobe-tempo-a "$2"' _ "$HARNESS" "$TENANT_A" >"$mock_tempo"
 python3 - "$mock_tempo" "$SOURCE_TRACE_ID" "$WIRE_TRACE_ID" <<'PY'
 import base64
 import json

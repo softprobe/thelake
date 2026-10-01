@@ -1,5 +1,6 @@
 //! Canonical workspace UUID fixtures for auth and isolation contracts.
 //!
+//! Keep string values identical to `tests/util/workspace_ids.env` (shell/compose).
 //! Each test binary may use a subset of these IDs; unused constants are expected.
 #![allow(dead_code)]
 

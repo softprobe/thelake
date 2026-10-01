@@ -377,6 +377,46 @@ async fn unit_query_sql_invalid_returns_500() {
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+#[tokio::test]
+async fn unit_provision_rejects_non_uuid_workspace_id() {
+    std::env::set_var("SOFTPROBE_ADMIN_API_KEY", "unit-admin-key");
+    let (router, state, _t) = local_router_and_state().await.expect("router");
+    let router = router.merge(
+        crate::runtime_api::runtime_control_routes().with_state(state),
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/workspaces")
+        .header(header::AUTHORIZATION, "Bearer unit-admin-key")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "workspaceId": "local-dev-tenant",
+                "storageHints": {
+                    "ducklakeMetadataSchema": "unit_schema",
+                    "ducklakeDataPath": "/tmp/unit-data/"
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(value["error"]["code"], "invalid_request");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("UUID"),
+        "message={}",
+        value["error"]["message"]
+    );
+}
+
 #[test]
 fn unit_telemetry_search_compiles_session_summary_with_safe_filters() {
     let request = TelemetrySearchRequest {

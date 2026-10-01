@@ -57,15 +57,15 @@ services:
       GF_USERS_DEFAULT_THEME: light
       GF_LOG_LEVEL: info
       # Reach Softprobe on the host (Linux docker).
-      # Auth-mock always returns tenant local-dev-tenant (single-tenant manual path).
+      # Auth-mock returns COMPAT_WORKSPACE_ID (aaaaaaaa-…); single-tenant manual path.
       # A≡B on purpose: Loki/Tempo expand TENANT_* at provision time;
       # dual-tenant isolation is CI-only (docker-compose.ci.yml).
       SOFTPROBE_URL: http://host.docker.internal:8090
       SOFTPROBE_API_KEY: local-dev-key
       SOFTPROBE_TENANT_A_API_KEY: local-dev-key
       SOFTPROBE_TENANT_B_API_KEY: local-dev-key
-      SOFTPROBE_TENANT_A_ID: local-dev-tenant
-      SOFTPROBE_TENANT_B_ID: local-dev-tenant
+      SOFTPROBE_TENANT_A_ID: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+      SOFTPROBE_TENANT_B_ID: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

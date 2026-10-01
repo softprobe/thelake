@@ -2,7 +2,9 @@ import { test, expect } from '@playwright/test';
 
 const SOFTPROBE_URL = process.env.SOFTPROBE_URL || 'http://127.0.0.1:8090';
 const API_KEY = process.env.SOFTPROBE_API_KEY || 'local-dev-key';
-const TENANT_ID = process.env.SOFTPROBE_TENANT_ID || 'local-dev-tenant';
+const TENANT_ID =
+  process.env.SOFTPROBE_TENANT_ID || 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
 
 test.describe('OpenTelemetry Demo Ingestion Pipeline (E2E)', () => {
   test('I-01: Softprobe runtime reports ready', async ({ request }) => {

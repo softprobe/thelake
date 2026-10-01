@@ -110,7 +110,8 @@ Shared mode uses a weak bind on the request path (process physical scope;
 `engine_for` does not look up `workspace_scope_binding`). Admin provision still
 records workspace UUID → default physical for maintenance listing. Dedicated
 mode stores workspace UUID → physical scope in the durable registry for every
-resolve.
+resolve. Provision and auth both require UUID `workspace_id`; Grafana compat
+fixtures therefore provision `COMPAT_WORKSPACE_*` UUIDs (not API-key slug labels).
 
 ## ADR-017: Workspace UUID is the only logical identity
 
