@@ -505,7 +505,7 @@ mod tests {
         assert!(sql.contains("FROM traces"));
         assert!(sql.contains("trace_id = 'trace-1'"));
         assert!(sql.contains("LIMIT 10000"));
-        assert!(!sql.contains("tenant_id ="));
+        assert!(!sql.contains("workspace_id ="));
     }
 
     #[test]

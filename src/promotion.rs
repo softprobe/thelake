@@ -489,7 +489,7 @@ fn reserved_telemetry_column_names(table: &TelemetryTable) -> &'static [&'static
             "parent_span_id",
             "app_id",
             "organization_id",
-            "tenant_id",
+            "workspace_id",
             "message_type",
             "span_kind",
             "timestamp",

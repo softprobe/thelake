@@ -5,6 +5,17 @@ thin helpers invoked by Make. The E2E matrix helper is the single deliberate
 parallel runner, and it always runs the same complete integration selector in
 both workspace-scope modes.
 
+## One-shot ops (not Make-wired)
+
+| Script | Purpose |
+|--------|---------|
+| `copy_traces_workspace_uuid.py` | Clean-break cutover: copy **traces only** from an old DuckLake (`tenant_id` / lake_scope_id slug) into a new shared physical scope (`workspace_id` UUID). Does not copy logs/scores/session_summary. See the script docstring for env vars and mapping formats. |
+
+```bash
+python3 scripts/copy_traces_workspace_uuid.py --mapping workspace_map.json
+python3 scripts/copy_traces_workspace_uuid.py --mapping workspace_map.csv --dry-run
+```
+
 ## Surviving scripts → Make owner
 
 | Script | Make target |

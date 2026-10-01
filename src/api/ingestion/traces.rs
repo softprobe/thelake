@@ -167,7 +167,7 @@ pub async fn process_traces(
     let start = std::time::Instant::now();
     let tid_hint = auth_tenant
         .as_ref()
-        .map(|t| t.tenant_id.clone())
+        .map(|t| t.workspace_id.clone())
         .unwrap_or_default();
     let result = process_traces_inner(state, request, body_size, auth_tenant).await;
     if crate::self_monitoring::instrument_customer_tenant(&tid_hint) {
@@ -235,13 +235,13 @@ async fn process_traces_inner(
 
     let tid = auth_tenant
         .as_ref()
-        .map(|t| t.tenant_id.clone())
+        .map(|t| t.workspace_id.clone())
         .unwrap_or_default();
     let agent_id = auth_tenant.as_ref().and_then(|t| t.agent_id.clone());
     let agent_name = auth_tenant.as_ref().and_then(|t| t.agent_name.clone());
 
     for span in &mut spans {
-        span.tenant_id = Some(tid.clone());
+        span.workspace_id = Some(tid.clone());
         span.agent_id = agent_id.clone();
         span.agent_name = agent_name.clone();
     }

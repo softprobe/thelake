@@ -18,12 +18,12 @@ use wiremock::MockServer;
 
 async fn authenticated_router(
     auth_success: bool,
-    tenant_id: &str,
+    workspace_id: &str,
 ) -> (Router, MockServer, TempDir) {
     let temp = TempDir::new().expect("temp");
     let (router, _state, mock) = auth_support::authenticated_router(
         Arc::new(config::file_backed_test_config(&temp)),
-        tenant_id,
+        workspace_id,
         auth_success,
     )
     .await;

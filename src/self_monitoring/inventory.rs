@@ -47,13 +47,13 @@ pub fn spawn_inventory_loop(state: AppState, interval_secs: u64) {
             if SKIP_FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 continue;
             }
-            let tenants = state.engines.list_cached_tenant_ids();
+            let tenants = state.engines.list_cached_workspace_ids();
             for tenant in tenants {
                 if tenant.trim().is_empty() {
                     continue;
                 }
                 // Ops scope inventory feeds the same writer; skip the feedback loop.
-                if crate::self_monitoring::is_reserved_tenant_id(&tenant) {
+                if crate::self_monitoring::is_reserved_workspace_id(&tenant) {
                     continue;
                 }
                 let Ok(engine) = state.engines.engine_for(&tenant).await else {
@@ -71,7 +71,7 @@ async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
     let tables = maintenance_table_names();
     let query = engine.query_engine();
     let catalog = query.catalog_alias().to_string();
-    let tenant = engine.tenant_id().to_string();
+    let tenant = engine.workspace_id().to_string();
     let sqls: Vec<String> = tables
         .iter()
         .map(|table| live_file_sizes_sql(&catalog, table))

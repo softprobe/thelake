@@ -31,9 +31,9 @@ pub fn effective_workspace_id(workspace_id: &str) -> &str {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceScopeMode {
-    /// Preserve the current one-workspace-per-scope behavior.
+    /// One workspace → its own physical DuckLake scope.
     #[default]
-    Isolated,
+    Dedicated,
     /// Allow multiple workspaces to use one physical DuckLake scope.
     Shared,
 }
@@ -41,7 +41,7 @@ pub enum WorkspaceScopeMode {
 impl fmt::Display for WorkspaceScopeMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Isolated => "isolated",
+            Self::Dedicated => "dedicated",
             Self::Shared => "shared",
         })
     }
@@ -419,12 +419,17 @@ mod tests {
     }
 
     #[test]
-    fn scope_mode_defaults_to_isolated_and_round_trips() {
-        assert_eq!(WorkspaceScopeMode::default(), WorkspaceScopeMode::Isolated);
+    fn scope_mode_defaults_to_dedicated_and_round_trips() {
+        assert_eq!(WorkspaceScopeMode::default(), WorkspaceScopeMode::Dedicated);
         let encoded = serde_yaml::to_string(&WorkspaceScopeMode::Shared).expect("serialize");
         assert_eq!(encoded.trim(), "shared");
         let decoded: WorkspaceScopeMode = serde_yaml::from_str("shared").expect("deserialize");
         assert_eq!(decoded, WorkspaceScopeMode::Shared);
+        let dedicated = serde_yaml::to_string(&WorkspaceScopeMode::Dedicated).expect("serialize");
+        assert_eq!(dedicated.trim(), "dedicated");
+        let decoded_dedicated: WorkspaceScopeMode =
+            serde_yaml::from_str("dedicated").expect("deserialize");
+        assert_eq!(decoded_dedicated, WorkspaceScopeMode::Dedicated);
     }
 
     #[test]
@@ -459,7 +464,7 @@ mod tests {
     #[test]
     fn workspace_binding_requires_a_workspace_id() {
         let scope = PhysicalScope::from_ducklake(&DuckLakeConfig::default());
-        let error = WorkspaceBinding::new(" ", scope, WorkspaceScopeMode::Isolated)
+        let error = WorkspaceBinding::new(" ", scope, WorkspaceScopeMode::Dedicated)
             .expect_err("blank workspace id must be rejected");
         assert_eq!(error.to_string(), "workspace_id must not be empty");
     }

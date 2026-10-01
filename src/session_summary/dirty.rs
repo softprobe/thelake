@@ -57,7 +57,7 @@ where
 pub struct SessionSummaryDirty {
     pool: Pool,
     metadata_schema: String,
-    tenant_id: String,
+    workspace_id: String,
     workspace_scoped: bool,
 }
 
@@ -65,12 +65,12 @@ impl SessionSummaryDirty {
     pub fn new(
         pool: Pool,
         metadata_schema: impl Into<String>,
-        tenant_id: impl Into<String>,
+        workspace_id: impl Into<String>,
     ) -> Self {
         Self {
             pool,
             metadata_schema: metadata_schema.into(),
-            tenant_id: tenant_id.into(),
+            workspace_id: workspace_id.into(),
             workspace_scoped: false,
         }
     }
@@ -83,7 +83,7 @@ impl SessionSummaryDirty {
         Self {
             pool,
             metadata_schema: metadata_schema.into(),
-            tenant_id: workspace_id.into(),
+            workspace_id: workspace_id.into(),
             workspace_scoped: true,
         }
     }
@@ -102,19 +102,19 @@ impl SessionSummaryDirty {
         match self.upsert_dirty(hints).await {
             Ok(()) => {
                 crate::self_monitoring::record_session_summary_dirty_upsert(
-                    &self.tenant_id,
+                    &self.workspace_id,
                     started.elapsed(),
                 );
             }
             Err(err) => {
                 warn!(
-                    tenant = %self.tenant_id,
+                    tenant = %self.workspace_id,
                     schema = %self.metadata_schema,
                     sessions = hints.len(),
                     error = %err,
                     "session_summary dirty UPSERT failed (ingest still ok)"
                 );
-                crate::self_monitoring::record_session_summary_dirty_upsert_error(&self.tenant_id);
+                crate::self_monitoring::record_session_summary_dirty_upsert_error(&self.workspace_id);
             }
         }
     }
@@ -131,7 +131,7 @@ impl SessionSummaryDirty {
             .map_err(|e| anyhow!("session_summary dirty pool get: {e}"))?;
         let schema = quote_pg_ident(&self.metadata_schema);
         let columns = if self.workspace_scoped {
-            "tenant_id, session_id, min_ts_ns, max_ts_ns, updated_at"
+            "workspace_id, session_id, min_ts_ns, max_ts_ns, updated_at"
         } else {
             "session_id, min_ts_ns, max_ts_ns, updated_at"
         };
@@ -151,7 +151,7 @@ impl SessionSummaryDirty {
                     base + 3,
                     base + 4
                 ));
-                params.push(Box::new(self.tenant_id.clone()));
+                params.push(Box::new(self.workspace_id.clone()));
             } else {
                 sql.push_str(&format!(
                     "(${}, ${}, ${}, clock_timestamp())",
@@ -166,7 +166,7 @@ impl SessionSummaryDirty {
         }
         if self.workspace_scoped {
             sql.push_str(
-                " ON CONFLICT (tenant_id, session_id) DO UPDATE SET \
+                " ON CONFLICT (workspace_id, session_id) DO UPDATE SET \
                  min_ts_ns = LEAST(session_summary_dirty.min_ts_ns, EXCLUDED.min_ts_ns), \
                  max_ts_ns = GREATEST(session_summary_dirty.max_ts_ns, EXCLUDED.max_ts_ns), \
                  updated_at = EXCLUDED.updated_at",

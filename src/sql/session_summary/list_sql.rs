@@ -43,7 +43,7 @@ pub fn compile_session_summary_list_sql_for_workspace(
     if let Some(workspace_id) = workspace_id {
         predicates.insert(
             0,
-            format!("tenant_id = {}", sql_string_literal(workspace_id)),
+            format!("workspace_id = {}", sql_string_literal(workspace_id)),
         );
     }
 
@@ -273,7 +273,7 @@ mod tests {
             10,
         )
         .unwrap();
-        assert!(sql.contains("tenant_id = 'workspace''42'"));
+        assert!(sql.contains("workspace_id = 'workspace''42'"));
     }
 
     #[test]

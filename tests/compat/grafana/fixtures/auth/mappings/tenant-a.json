@@ -16,7 +16,7 @@
     "jsonBody": {
       "success": true,
       "data": {
-        "tenantId": "grafana-phase4-tenant-a",
+        "workspaceId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
         "resources": [
           {
             "resourceType": "BIGQUERY_STORAGE",

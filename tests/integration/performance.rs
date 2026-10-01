@@ -241,7 +241,7 @@ async fn perf_union_read_latency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
-            tenant_id: None,
+            workspace_id: None,
             agent_id: None,
             agent_name: None,
         });
@@ -265,7 +265,7 @@ async fn perf_union_read_latency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
-            tenant_id: None,
+            workspace_id: None,
             agent_id: None,
             agent_name: None,
         });
@@ -288,7 +288,7 @@ async fn perf_union_read_latency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
-            tenant_id: None,
+            workspace_id: None,
             agent_id: None,
             agent_name: None,
         });
@@ -458,7 +458,7 @@ async fn perf_union_read_concurrency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
-            tenant_id: None,
+            workspace_id: None,
             agent_id: None,
             agent_name: None,
         });
@@ -482,7 +482,7 @@ async fn perf_union_read_concurrency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
-            tenant_id: None,
+            workspace_id: None,
             agent_id: None,
             agent_name: None,
         });
@@ -505,7 +505,7 @@ async fn perf_union_read_concurrency() {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
-            tenant_id: None,
+            workspace_id: None,
             agent_id: None,
             agent_name: None,
         });

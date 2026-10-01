@@ -155,15 +155,15 @@ impl DuckLakeWriter {
 
     pub(super) fn validate_shared_ownership(
         &self,
-        tenant_id: Option<&str>,
+        record_workspace_id: Option<&str>,
         record_kind: &str,
     ) -> Result<()> {
-        let Some(workspace_id) = self.shared_workspace_id()? else {
+        let Some(expected) = self.shared_workspace_id()? else {
             return Ok(());
         };
-        if tenant_id != Some(workspace_id) {
+        if record_workspace_id != Some(expected) {
             return Err(anyhow!(
-                "shared {record_kind} writes require tenant_id to match the authenticated workspace"
+                "shared {record_kind} writes require workspace_id to match the authenticated workspace"
             ));
         }
         Ok(())
@@ -477,9 +477,9 @@ impl DuckLakeWriter {
                 for table_name in ["traces", "logs", "scores", "score_configs"] {
                     let qualified_table = ducklake_qualified_table_name(&scope, table_name);
                     match crate::storage::schema::describe_table_columns(conn, &qualified_table) {
-                        Ok(columns) if !columns.contains_key("tenant_id") => {
+                        Ok(columns) if !columns.contains_key("workspace_id") => {
                             return Err(anyhow::anyhow!(
-                                "{}: table {table_name} is missing tenant_id; recreate it during clean cutover",
+                                "{}: table {table_name} is missing workspace_id; recreate it during clean cutover",
                                 SharedScopeError::new(
                                     SharedScopeErrorCode::SchemaIncompatible,
                                     format!("shared workspace table {table_name} has no ownership column"),
@@ -785,11 +785,11 @@ mod tests {
                 catalog_alias: "softprobe".to_string(),
                 metadata_schema: "main".to_string(),
                 extension_path: config.ducklake.extension_path.clone(),
-                workspace_scope_mode: WorkspaceScopeMode::Isolated,
+                workspace_scope_mode: WorkspaceScopeMode::Dedicated,
                 data_inlining_row_limit: None,
                 writer_pool_size: 1,
             }),
-            WorkspaceScopeMode::Isolated,
+            WorkspaceScopeMode::Dedicated,
         )
         .expect("binding");
         let access = DuckLakeAccess::Workspace(binding.clone());
@@ -821,7 +821,7 @@ mod tests {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
-            tenant_id: None,
+            workspace_id: None,
             agent_id: None,
             agent_name: None,
         };

@@ -74,7 +74,7 @@ pub fn compile_session_summary_aggregate_sql_for_workspace(
         None => "session_id <> ''".to_string(),
     };
     let ownership_pred = workspace_id
-        .map(|id| format!("tenant_id = {}", sql_string_literal(id)))
+        .map(|id| format!("workspace_id = {}", sql_string_literal(id)))
         .unwrap_or_default();
 
     // Typed agent resolve (no attributes['sp.agent.name']).
@@ -219,7 +219,7 @@ pub fn compile_session_summary_upsert_sql_for_workspace(
     row_count: usize,
 ) -> String {
     let cols = [
-        "tenant_id",
+        "workspace_id",
         "session_id",
         "start_time_ns",
         "end_time_ns",
@@ -237,13 +237,13 @@ pub fn compile_session_summary_upsert_sql_for_workspace(
     let values = multi_row_values_placeholders(row_count, cols.len());
     let set_list = cols
         .iter()
-        .filter(|column| **column != "tenant_id" && **column != "session_id")
+        .filter(|column| **column != "workspace_id" && **column != "session_id")
         .map(|column| format!("{column} = EXCLUDED.{column}"))
         .collect::<Vec<_>>()
         .join(",\n           ");
     format!(
         "INSERT INTO {schema_quoted}.session_summary ({}) VALUES {values} \
-         ON CONFLICT (tenant_id, session_id) DO UPDATE SET \
+         ON CONFLICT (workspace_id, session_id) DO UPDATE SET \
            {set_list}",
         cols.join(", ")
     )
@@ -341,10 +341,10 @@ mod tests {
             to,
         )
         .expect("workspace reduce SQL");
-        assert!(reduce.contains("tenant_id = 'workspace''42'"));
+        assert!(reduce.contains("workspace_id = 'workspace''42'"));
 
         let upsert = compile_session_summary_upsert_sql_for_workspace("\"meta\"", 1);
-        assert!(upsert.contains("(tenant_id, session_id) DO UPDATE"));
-        assert!(upsert.contains("INSERT INTO \"meta\".session_summary (tenant_id, session_id"));
+        assert!(upsert.contains("(workspace_id, session_id) DO UPDATE"));
+        assert!(upsert.contains("INSERT INTO \"meta\".session_summary (workspace_id, session_id"));
     }
 }

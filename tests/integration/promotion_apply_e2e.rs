@@ -42,7 +42,7 @@ async fn setup() -> PostgresBackend {
     let temp = TempDir::new().expect("tempdir");
     let suffix = Uuid::new_v4().simple().to_string();
     let short = &suffix[..8];
-    let tenant_id = format!("tenant-promo-{short}");
+    let workspace_id = format!("tenant-promo-{short}");
     // One catalog schema for registry + data. Shared mode binds workspaces to the
     // process-default physical scope (config schema); isolated mode provisions the
     // same schema via request overrides. Verification must not invent a second
@@ -70,7 +70,7 @@ async fn setup() -> PostgresBackend {
         .expect("connect runtime engines");
     let _physical = manager
         .provision_scope(ScopeProvisioningRequest {
-            scope_id: tenant_id.clone(),
+            scope_id: workspace_id.clone(),
             metadata_schema: metadata_schema.clone(),
             data_path: data_path.clone(),
         })
@@ -81,7 +81,7 @@ async fn setup() -> PostgresBackend {
         .and(path("/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "success": true,
-            "data": { "tenantId": tenant_id, "resources": [] }
+            "data": { "workspaceId": workspace_id, "resources": [] }
         })))
         .mount(&mock)
         .await;

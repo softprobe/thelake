@@ -21,7 +21,7 @@ async fn resolve_calls_auth_json_contract() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "success": true,
             "data": {
-                "tenantId": "tenant-a",
+                "workspaceId": "11111111-1111-4111-8111-111111111111",
                 "resources": [{
                     "resourceType": "BIGQUERY_STORAGE",
                     "configJson": "{\"dataset_id\":\"ds1\",\"bucket_name\":\"bucket-x\"}"
@@ -33,13 +33,13 @@ async fn resolve_calls_auth_json_contract() {
 
     let r = Resolver::new(format!("{}/", server.uri()), Duration::from_secs(60));
     let info = r.resolve("secret-key").await.expect("resolve");
-    assert_eq!(info.tenant_id, "tenant-a");
+    assert_eq!(info.workspace_id, "11111111-1111-4111-8111-111111111111");
     assert_eq!(info.dataset_id, "ds1");
     assert_eq!(info.bucket_name, "bucket-x");
 
     // Cache hit — no extra HTTP request if second resolve fast enough
     let info2 = r.resolve("secret-key").await.expect("cached");
-    assert_eq!(info2.tenant_id, "tenant-a");
+    assert_eq!(info2.workspace_id, "11111111-1111-4111-8111-111111111111");
 }
 
 #[tokio::test]
@@ -55,4 +55,27 @@ async fn resolve_invalid_success_payload_fails() {
     let r = Resolver::new(format!("{}/", server.uri()), Duration::from_secs(60));
     let err = r.resolve("k").await.expect_err("invalid key");
     assert!(err.to_string().contains("invalid API key"), "{err}");
+}
+
+#[tokio::test]
+async fn resolve_rejects_non_uuid_workspace_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "data": {
+                "workspaceId": "legacy-tenant-slug",
+                "resources": []
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let r = Resolver::new(format!("{}/", server.uri()), Duration::from_secs(60));
+    let err = r.resolve("secret-key").await.expect_err("non-uuid");
+    assert!(
+        err.to_string().contains("workspace_id must be a UUID"),
+        "{err}"
+    );
 }

@@ -8,7 +8,7 @@ const WORKSPACE_SCOPE_MODE_ENV: &str = "WORKSPACE_SCOPE_MODE";
 
 pub fn parse_workspace_scope_mode(value: &str) -> Option<WorkspaceScopeMode> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "isolated" => Some(WorkspaceScopeMode::Isolated),
+        "dedicated" => Some(WorkspaceScopeMode::Dedicated),
         "shared" => Some(WorkspaceScopeMode::Shared),
         _ => None,
     }
@@ -20,7 +20,7 @@ pub fn apply_workspace_scope_mode(config: &mut Config) {
     };
     let value = value.to_string_lossy();
     config.ducklake.workspace_scope_mode = parse_workspace_scope_mode(&value)
-        .unwrap_or_else(|| panic!("{WORKSPACE_SCOPE_MODE_ENV} must be isolated or shared"));
+        .unwrap_or_else(|| panic!("{WORKSPACE_SCOPE_MODE_ENV} must be dedicated or shared"));
 }
 
 /// Minimal file-backed DuckLake config under `temp`, maintenance/compaction off for quiet tests.
@@ -57,8 +57,8 @@ mod tests {
             Some(softprobe_runtime::workspace_scope::WorkspaceScopeMode::Shared)
         );
         assert_eq!(
-            parse_workspace_scope_mode("isolated"),
-            Some(softprobe_runtime::workspace_scope::WorkspaceScopeMode::Isolated)
+            parse_workspace_scope_mode("dedicated"),
+            Some(softprobe_runtime::workspace_scope::WorkspaceScopeMode::Dedicated)
         );
         assert_eq!(parse_workspace_scope_mode("unknown"), None);
     }

@@ -1,7 +1,7 @@
 // ============================================================================
 // TENANT BINDING CONSTITUTION (HARD RULE)
 // Tenant identity is allowed only at auth/configuration/instantiation boundaries.
-// Operational APIs MUST NOT accept tenant_id parameters.
+// Operational APIs MUST NOT accept workspace_id parameters.
 // After binding tenant context, use tenant-scoped instances/contexts only.
 // ============================================================================
 
@@ -68,8 +68,8 @@ impl AppState {
         self.engines.engine_for_tenant(tenant).await
     }
 
-    pub async fn engine_for_id(&self, tenant_id: &str) -> anyhow::Result<Arc<RuntimeEngine>> {
-        self.engines.engine_for(tenant_id).await
+    pub async fn engine_for_id(&self, workspace_id: &str) -> anyhow::Result<Arc<RuntimeEngine>> {
+        self.engines.engine_for(workspace_id).await
     }
 
     /// Execute SQL on the tenant-bound query engine (scope fixed at engine construction).
@@ -78,8 +78,8 @@ impl AppState {
         tenant: Option<&TenantInfo>,
         sql: &str,
     ) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
-        let tenant_id = tenant.map(|t| t.tenant_id.as_str()).unwrap_or("");
-        let engine = self.engines.engine_for(tenant_id).await?;
+        let workspace_id = tenant.map(|t| t.workspace_id.as_str()).unwrap_or("");
+        let engine = self.engines.engine_for(workspace_id).await?;
         match engine.execute_query(sql).await {
             Ok(result) => Ok(result),
             Err(err) => map_missing_optional_table(err),
@@ -96,8 +96,8 @@ impl AppState {
         tenant: Option<&TenantInfo>,
         query: crate::sql::trusted::TrustedSql,
     ) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
-        let tenant_id = tenant.map(|t| t.tenant_id.as_str()).unwrap_or("");
-        let engine = self.engines.engine_for(tenant_id).await?;
+        let workspace_id = tenant.map(|t| t.workspace_id.as_str()).unwrap_or("");
+        let engine = self.engines.engine_for(workspace_id).await?;
         match engine.execute_trusted(query).await {
             Ok(result) => Ok(result),
             Err(err) => map_missing_optional_table(err),

@@ -39,7 +39,7 @@ pub struct DuckDBQueryEngine {
     access: DuckLakeAccess,
     /// In-flight identical SQL shares one worker (Grafana panel stampede), not a result TTL.
     inflight: Arc<Mutex<InflightMap>>,
-    tenant_id: String,
+    workspace_id: String,
     counts_toward_liveness: bool,
 }
 
@@ -375,7 +375,7 @@ struct DuckDBCore {
     /// When false, rebuild failures do not increment process-global SelfHeal
     /// counters used by `/health` liveness (ops engines).
     counts_toward_liveness: bool,
-    tenant_id: String,
+    workspace_id: String,
 }
 
 struct TimedExecute {
@@ -447,14 +447,14 @@ impl DuckDBQueryEngine {
         config: &Config,
         access: DuckLakeAccess,
         counts_toward_liveness: bool,
-        tenant_id: &str,
+        workspace_id: &str,
     ) -> Result<Self> {
         let core = DuckDBCore {
             config: config.clone(),
             access: access.clone(),
             cache: CacheSettings::new(config),
             counts_toward_liveness,
-            tenant_id: tenant_id.to_string(),
+            workspace_id: workspace_id.to_string(),
         };
         crate::self_monitoring::gauge_store::QUERY_WORKERS.store(
             std::cmp::max(1, config.query.max_connections),
@@ -503,7 +503,7 @@ impl DuckDBQueryEngine {
                         let sql_kind = crate::self_monitoring::classify_sql_kind(&request.sql);
                         if core.counts_toward_liveness {
                             crate::self_monitoring::record_query_queue_wait(
-                                &core.tenant_id,
+                                &core.workspace_id,
                                 sql_kind,
                                 queue_wait,
                             );
@@ -550,18 +550,18 @@ impl DuckDBQueryEngine {
                             .fetch_sub(1, Ordering::Relaxed);
                         if core.counts_toward_liveness {
                             crate::self_monitoring::record_query(
-                                &core.tenant_id,
+                                &core.workspace_id,
                                 sql_kind,
                                 exec_elapsed,
                             );
                             crate::self_monitoring::record_query_stage(
-                                &core.tenant_id,
+                                &core.workspace_id,
                                 sql_kind,
                                 crate::self_monitoring::query_stage::SQL_GATE,
                                 gate_elapsed,
                             );
                             crate::self_monitoring::record_query_stage(
-                                &core.tenant_id,
+                                &core.workspace_id,
                                 sql_kind,
                                 crate::self_monitoring::query_stage::SQL_EXEC,
                                 run_elapsed,
@@ -685,7 +685,7 @@ impl DuckDBQueryEngine {
             config: config.clone(),
             access,
             inflight: Arc::new(Mutex::new(HashMap::new())),
-            tenant_id: core.tenant_id.clone(),
+            workspace_id: core.workspace_id.clone(),
             counts_toward_liveness: core.counts_toward_liveness,
         })
     }
@@ -774,7 +774,7 @@ impl DuckDBQueryEngine {
                 "slow DuckDB query (queue + execute)"
             );
             if self.counts_toward_liveness {
-                crate::self_monitoring::record_slow_query(&self.tenant_id, sql_kind);
+                crate::self_monitoring::record_slow_query(&self.workspace_id, sql_kind);
             }
         }
         response.result
@@ -798,7 +798,7 @@ impl DuckDBQueryEngine {
             access: self.access.clone(),
             cache: CacheSettings::new(&self.config),
             counts_toward_liveness: false,
-            tenant_id: self.tenant_id.clone(),
+            workspace_id: self.workspace_id.clone(),
         };
         let sqls: Vec<String> = queries.iter().map(|s| (*s).to_string()).collect();
         tokio::task::spawn_blocking(move || {
@@ -853,7 +853,7 @@ impl DuckDBCore {
             self.attach_catalog_if_needed(&conn)?;
         }
         if self.config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
-            workspace_views::install(&conn, self.access.physical_scope(), &self.tenant_id)?;
+            workspace_views::install(&conn, self.access.physical_scope(), &self.workspace_id)?;
         }
         Ok(ConnectionState {
             conn,
@@ -1392,7 +1392,7 @@ mod tests {
             config,
             access,
             counts_toward_liveness: true,
-            tenant_id: "workspace-a".to_string(),
+            workspace_id: "workspace-a".to_string(),
         };
 
         let sql =
@@ -1406,14 +1406,14 @@ mod tests {
 
     #[test]
     fn shared_connection_initializer_recreates_filtered_views_for_each_connection() {
-        for tenant_id in ["workspace-a", "workspace-b"] {
+        for workspace_id in ["workspace-a", "workspace-b"] {
             let mut config = Config::default();
             config.ducklake.catalog_alias = "softprobe".to_string();
             config.ducklake.metadata_schema = "main".to_string();
             config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Shared;
             let scope = PhysicalScope::from_ducklake(&config.ducklake);
             let access = DuckLakeAccess::Workspace(
-                WorkspaceBinding::new(tenant_id, scope, config.ducklake.workspace_scope_mode)
+                WorkspaceBinding::new(workspace_id, scope, config.ducklake.workspace_scope_mode)
                     .expect("binding"),
             );
             let core = DuckDBCore {
@@ -1421,7 +1421,7 @@ mod tests {
                 config,
                 access,
                 counts_toward_liveness: false,
-                tenant_id: tenant_id.to_string(),
+                workspace_id: workspace_id.to_string(),
             };
             let state = core
                 .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
@@ -1431,7 +1431,7 @@ mod tests {
                 .conn
                 .query_row("SELECT id FROM traces", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(visible_id, format!("{tenant_id}-row"));
+            assert_eq!(visible_id, format!("{workspace_id}-row"));
         }
     }
 
@@ -1440,10 +1440,10 @@ mod tests {
         conn.execute_batch(
             "ATTACH ':memory:' AS softprobe;
              CREATE SCHEMA IF NOT EXISTS softprobe.main;
-             CREATE TABLE softprobe.main.traces (tenant_id VARCHAR, id VARCHAR);
-             CREATE TABLE softprobe.main.logs (tenant_id VARCHAR, id VARCHAR);
-             CREATE TABLE softprobe.main.scores (tenant_id VARCHAR, id VARCHAR);
-             CREATE TABLE softprobe.main.score_configs (tenant_id VARCHAR, id VARCHAR);
+             CREATE TABLE softprobe.main.traces (workspace_id VARCHAR, id VARCHAR);
+             CREATE TABLE softprobe.main.logs (workspace_id VARCHAR, id VARCHAR);
+             CREATE TABLE softprobe.main.scores (workspace_id VARCHAR, id VARCHAR);
+             CREATE TABLE softprobe.main.score_configs (workspace_id VARCHAR, id VARCHAR);
              INSERT INTO softprobe.main.traces VALUES
                ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
              INSERT INTO softprobe.main.logs VALUES

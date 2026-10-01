@@ -1,7 +1,7 @@
 //! Softprobe edge identity assertion (`X-Softprobe-Assertion`, sp-llm#39).
 //!
 //! Explorer / Cloudflare gateways mint a short-lived HS256 JWT. thelake verifies
-//! the signature and binds DuckLake scope from claim `tenant_key`.
+//! the signature and binds DuckLake scope from claim `workspace_id`.
 
 use crate::authn::TenantInfo;
 use anyhow::{anyhow, bail, Result};
@@ -21,11 +21,8 @@ pub struct SoftprobeAssertionClaims {
     pub iss: String,
     pub aud: Aud,
     pub sub: String,
-    #[serde(default)]
-    pub tenant_id: Option<i64>,
-    /// Softprobe `tenants.tenant_id` string = DuckLake `scope_id`.
-    #[serde(default)]
-    pub tenant_key: Option<String>,
+    /// Softprobe `workspaces.id` UUID string = DuckLake logical workspace.
+    pub workspace_id: String,
     #[serde(default)]
     pub roles: Option<Vec<String>>,
     #[serde(default)]
@@ -125,14 +122,23 @@ pub fn verify_softprobe_assertion(
     Ok(claims)
 }
 
+/// Parse and normalize a Softprobe `workspace_id` (must be a UUID).
+///
+/// Shared by assertion claims, default-workspace env binding, and Bearer
+/// auth-service responses so all identity paths enforce the same contract.
+pub fn parse_workspace_id(raw: &str) -> Result<String> {
+    let workspace_id = raw.trim();
+    if workspace_id.is_empty() {
+        bail!("workspace_id required");
+    }
+    let parsed = uuid::Uuid::parse_str(workspace_id)
+        .map_err(|_| anyhow!("workspace_id must be a UUID"))?;
+    Ok(parsed.to_string())
+}
+
 pub fn tenant_info_from_assertion(claims: &SoftprobeAssertionClaims) -> Result<TenantInfo> {
-    let tenant_key = claims
-        .tenant_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("assertion: tenant_key required"))?
-        .to_string();
+    let workspace_id = parse_workspace_id(&claims.workspace_id)
+        .map_err(|err| anyhow!("assertion: {err}"))?;
     let agent_id = claims
         .agent_id
         .as_deref()
@@ -146,7 +152,7 @@ pub fn tenant_info_from_assertion(claims: &SoftprobeAssertionClaims) -> Result<T
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     Ok(TenantInfo {
-        tenant_id: tenant_key,
+        workspace_id,
         // Bucket/dataset historically came from Softprobe auth resources.
         // DuckLake scope registry is authoritative for storage paths; these
         // fields are only required by ducklake-connection material.
@@ -157,39 +163,46 @@ pub fn tenant_info_from_assertion(claims: &SoftprobeAssertionClaims) -> Result<T
     })
 }
 
-/// Optional DuckLake `scope_id` / `tenant_key` for legacy clients that send
-/// Bearer auth but no `X-Softprobe-Assertion` (see docs/compat/auth.md).
+/// Optional DuckLake workspace id for clients that send Bearer auth but no
+/// `X-Softprobe-Assertion` (see docs/compat/auth.md).
 ///
-/// Env: `SOFTPROBE_DEFAULT_TENANT_KEY` or alias `THELAKE_DEFAULT_TENANT_KEY`.
+/// Env: `SOFTPROBE_DEFAULT_WORKSPACE_ID` or alias `THELAKE_DEFAULT_WORKSPACE_ID`.
 /// Reserved ops id `thelake-ops` is rejected.
-pub fn default_tenant_key_from_env() -> Option<String> {
-    for key in ["SOFTPROBE_DEFAULT_TENANT_KEY", "THELAKE_DEFAULT_TENANT_KEY"] {
+pub fn default_workspace_id_from_env() -> Option<String> {
+    for key in [
+        "SOFTPROBE_DEFAULT_WORKSPACE_ID",
+        "THELAKE_DEFAULT_WORKSPACE_ID",
+    ] {
         if let Ok(v) = std::env::var(key) {
             let t = v.trim();
             if t.is_empty() {
                 continue;
             }
-            if crate::self_monitoring::is_reserved_tenant_id(t) {
-                tracing::warn!("{key}={t} is reserved; ignoring default-tenant fallback");
+            if crate::self_monitoring::is_reserved_workspace_id(t) {
+                tracing::warn!("{key}={t} is reserved; ignoring default-workspace fallback");
                 return None;
             }
-            return Some(t.to_string());
+            match parse_workspace_id(t) {
+                Ok(id) => return Some(id),
+                Err(_) => {
+                    tracing::warn!("{key}={t} is not a UUID; ignoring default-workspace fallback");
+                    return None;
+                }
+            }
         }
     }
     None
 }
 
-/// Bind legacy Bearer-only traffic to a configured default lake scope.
-pub fn tenant_info_for_default_lake(tenant_key: &str) -> Result<TenantInfo> {
-    let tenant_key = tenant_key.trim();
-    if tenant_key.is_empty() {
-        bail!("default tenant_key is empty");
-    }
-    if crate::self_monitoring::is_reserved_tenant_id(tenant_key) {
-        bail!("default tenant_key must not be reserved ops scope");
+/// Bind Bearer-only traffic to a configured default workspace.
+pub fn tenant_info_for_default_lake(workspace_id: &str) -> Result<TenantInfo> {
+    let workspace_id = parse_workspace_id(workspace_id)
+        .map_err(|err| anyhow!("default workspace_id: {err}"))?;
+    if crate::self_monitoring::is_reserved_workspace_id(&workspace_id) {
+        bail!("default workspace_id must not be reserved ops scope");
     }
     Ok(TenantInfo {
-        tenant_id: tenant_key.to_string(),
+        workspace_id,
         bucket_name: std::env::var("DATALAKE_BUCKET").unwrap_or_default(),
         dataset_id: String::new(),
         agent_id: None,
@@ -202,6 +215,8 @@ mod tests {
     use super::*;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
+
+    const WS: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     fn mint(payload: serde_json::Value, secret: &str) -> String {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
@@ -221,8 +236,7 @@ mod tests {
                 "iss": "softprobe-edge",
                 "aud": "sp-backend",
                 "sub": "user-1",
-                "tenant_id": 105,
-                "tenant_key": "sp-llm-gke-smoke",
+                "workspace_id": WS,
                 "roles": ["member"],
                 "exp": now + 300
             }),
@@ -230,9 +244,9 @@ mod tests {
         );
         let claims = verify_softprobe_assertion(&token, "test-secret", now).expect("ok");
         assert_eq!(claims.sub, "user-1");
-        assert_eq!(claims.tenant_key.as_deref(), Some("sp-llm-gke-smoke"));
+        assert_eq!(claims.workspace_id, WS);
         let info = tenant_info_from_assertion(&claims).unwrap();
-        assert_eq!(info.tenant_id, "sp-llm-gke-smoke");
+        assert_eq!(info.workspace_id, WS);
         assert_eq!(info.agent_id, None);
         assert_eq!(info.agent_name, None);
     }
@@ -245,7 +259,7 @@ mod tests {
                 "iss": "softprobe-edge",
                 "aud": "sp-backend",
                 "sub": "agent-key",
-                "tenant_key": "ws-a",
+                "workspace_id": WS,
                 "agent_id": "support-refund-agent",
                 "agent_name": "Support Refund Agent",
                 "exp": now + 300
@@ -261,14 +275,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_tenant_key_for_tenant_info() {
+    fn rejects_missing_workspace_id_for_tenant_info() {
         let now = 1_700_000_000_i64;
         let token = mint(
             serde_json::json!({
                 "iss": "softprobe-edge",
                 "aud": "sp-backend",
                 "sub": "user-1",
-                "tenant_id": 105,
+                "exp": now + 300
+            }),
+            "test-secret",
+        );
+        assert!(verify_softprobe_assertion(&token, "test-secret", now).is_err());
+    }
+
+    #[test]
+    fn rejects_non_uuid_workspace_id() {
+        let now = 1_700_000_000_i64;
+        let token = mint(
+            serde_json::json!({
+                "iss": "softprobe-edge",
+                "aud": "sp-backend",
+                "sub": "user-1",
+                "workspace_id": "ws-not-a-uuid",
                 "exp": now + 300
             }),
             "test-secret",
@@ -285,7 +314,7 @@ mod tests {
                 "iss": "softprobe-edge",
                 "aud": "sp-backend",
                 "sub": "user-1",
-                "tenant_key": "ws-a",
+                "workspace_id": WS,
                 "exp": now + 300
             }),
             "test-secret",
@@ -294,44 +323,43 @@ mod tests {
     }
 
     #[test]
-    fn default_tenant_key_from_env_reads_primary_and_alias() {
-        let prev_primary = std::env::var("SOFTPROBE_DEFAULT_TENANT_KEY").ok();
-        let prev_alias = std::env::var("THELAKE_DEFAULT_TENANT_KEY").ok();
-        std::env::remove_var("SOFTPROBE_DEFAULT_TENANT_KEY");
-        std::env::remove_var("THELAKE_DEFAULT_TENANT_KEY");
-        assert_eq!(default_tenant_key_from_env(), None);
+    fn default_workspace_id_from_env_reads_primary_and_alias() {
+        let prev_primary = std::env::var("SOFTPROBE_DEFAULT_WORKSPACE_ID").ok();
+        let prev_alias = std::env::var("THELAKE_DEFAULT_WORKSPACE_ID").ok();
+        std::env::remove_var("SOFTPROBE_DEFAULT_WORKSPACE_ID");
+        std::env::remove_var("THELAKE_DEFAULT_WORKSPACE_ID");
+        assert_eq!(default_workspace_id_from_env(), None);
 
-        std::env::set_var(
-            "THELAKE_DEFAULT_TENANT_KEY",
-            "ws-myworkspace-mtyxusmz-2t77yn",
-        );
-        assert_eq!(
-            default_tenant_key_from_env().as_deref(),
-            Some("ws-myworkspace-mtyxusmz-2t77yn")
-        );
+        std::env::set_var("THELAKE_DEFAULT_WORKSPACE_ID", WS);
+        assert_eq!(default_workspace_id_from_env().as_deref(), Some(WS));
 
-        std::env::set_var("SOFTPROBE_DEFAULT_TENANT_KEY", "ws-primary");
-        assert_eq!(default_tenant_key_from_env().as_deref(), Some("ws-primary"));
+        let primary = "11111111-1111-1111-1111-111111111111";
+        std::env::set_var("SOFTPROBE_DEFAULT_WORKSPACE_ID", primary);
+        assert_eq!(default_workspace_id_from_env().as_deref(), Some(primary));
 
-        std::env::set_var("SOFTPROBE_DEFAULT_TENANT_KEY", "thelake-ops");
-        assert_eq!(default_tenant_key_from_env(), None);
+        std::env::set_var("SOFTPROBE_DEFAULT_WORKSPACE_ID", "thelake-ops");
+        assert_eq!(default_workspace_id_from_env(), None);
+
+        std::env::set_var("SOFTPROBE_DEFAULT_WORKSPACE_ID", "not-a-uuid");
+        assert_eq!(default_workspace_id_from_env(), None);
 
         match prev_primary {
-            Some(v) => std::env::set_var("SOFTPROBE_DEFAULT_TENANT_KEY", v),
-            None => std::env::remove_var("SOFTPROBE_DEFAULT_TENANT_KEY"),
+            Some(v) => std::env::set_var("SOFTPROBE_DEFAULT_WORKSPACE_ID", v),
+            None => std::env::remove_var("SOFTPROBE_DEFAULT_WORKSPACE_ID"),
         }
         match prev_alias {
-            Some(v) => std::env::set_var("THELAKE_DEFAULT_TENANT_KEY", v),
-            None => std::env::remove_var("THELAKE_DEFAULT_TENANT_KEY"),
+            Some(v) => std::env::set_var("THELAKE_DEFAULT_WORKSPACE_ID", v),
+            None => std::env::remove_var("THELAKE_DEFAULT_WORKSPACE_ID"),
         }
     }
 
     #[test]
     fn tenant_info_for_default_lake_binds_scope() {
-        let info = tenant_info_for_default_lake("ws-myworkspace-mtyxusmz-2t77yn").unwrap();
-        assert_eq!(info.tenant_id, "ws-myworkspace-mtyxusmz-2t77yn");
+        let info = tenant_info_for_default_lake(WS).unwrap();
+        assert_eq!(info.workspace_id, WS);
         assert!(info.agent_id.is_none());
         assert!(tenant_info_for_default_lake("thelake-ops").is_err());
         assert!(tenant_info_for_default_lake("  ").is_err());
+        assert!(tenant_info_for_default_lake("ws-slug").is_err());
     }
 }

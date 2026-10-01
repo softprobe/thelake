@@ -69,7 +69,7 @@ jobs:
       CI: "true"
       CARGO_INCREMENTAL: "0"
       ENFORCE_SLO: "1"
-      WORKSPACE_SCOPE_MODE: isolated
+      WORKSPACE_SCOPE_MODE: dedicated
       SPLAKE_RESET_DUCKLAKE: "1"
 
     steps:

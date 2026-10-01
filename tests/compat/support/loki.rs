@@ -238,14 +238,14 @@ pub async fn build_loki_router() -> (Router, softprobe_runtime::api::AppState, T
     build_tenant_router_with_state().await
 }
 
-pub async fn ingest_records(router: &Router, records: &[LokiRecord], tenant_id: Option<&str>) {
-    ingest_records_with_bearer(router, records, tenant_id, None).await;
+pub async fn ingest_records(router: &Router, records: &[LokiRecord], workspace_id: Option<&str>) {
+    ingest_records_with_bearer(router, records, workspace_id, None).await;
 }
 
 pub async fn ingest_records_with_bearer(
     router: &Router,
     records: &[LokiRecord],
-    tenant_id: Option<&str>,
+    workspace_id: Option<&str>,
     bearer: Option<&str>,
 ) {
     let request = ExportLogsServiceRequest {
@@ -284,8 +284,8 @@ pub async fn ingest_records_with_bearer(
         .method("POST")
         .uri("/v1/logs")
         .header("content-type", "application/x-protobuf");
-    if let Some(tenant_id) = tenant_id {
-        builder = builder.header("x-test-tenant-id", tenant_id);
+    if let Some(workspace_id) = workspace_id {
+        builder = builder.header("x-test-tenant-id", workspace_id);
     }
     if let Some(bearer) = bearer {
         builder = builder.header("Authorization", format!("Bearer {bearer}"));
@@ -311,9 +311,9 @@ pub async fn ingest_records_with_bearer(
     }
 }
 
-pub async fn flush_logs(state: &softprobe_runtime::api::AppState, tenant_id: &str) {
+pub async fn flush_logs(state: &softprobe_runtime::api::AppState, workspace_id: &str) {
     state
-        .engine_for_id(tenant_id)
+        .engine_for_id(workspace_id)
         .await
         .expect("tenant engine")
         .force_flush_logs()
@@ -324,7 +324,7 @@ pub async fn flush_logs(state: &softprobe_runtime::api::AppState, tenant_id: &st
 pub async fn query_case(
     router: &Router,
     case: &LokiCase,
-    tenant_id: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> (StatusCode, Value) {
     let params = case
         .params
@@ -334,7 +334,7 @@ pub async fn query_case(
     get_json_as(
         router,
         &format!("{}?{}", case.path, encode_query_owned(&params)),
-        tenant_id,
+        workspace_id,
     )
     .await
 }

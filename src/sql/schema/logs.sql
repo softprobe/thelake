@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS logs (
     resource_attributes MAP(VARCHAR, VARCHAR),
     trace_id VARCHAR,
     span_id VARCHAR,
-    tenant_id VARCHAR,
+    workspace_id VARCHAR,
     logger_name VARCHAR,
     service_name VARCHAR,
     deployment_environment VARCHAR,

@@ -30,7 +30,7 @@ pub fn parse_tempo_trace_lookup_params(
         match key.as_str() {
             "start" => start_ns = Some(parse_tempo_time_ns(value)?),
             "end" => end_ns = Some(parse_tempo_time_ns(value)?),
-            "tenant_id" => {}
+            "workspace_id" => {}
             _ => {
                 return Err(unsupported(format!(
                     "Tempo trace lookup parameter '{key}' is unsupported"
@@ -45,7 +45,7 @@ pub fn parse_tempo_trace_lookup_params(
 pub fn parse_tempo_tag_params(pairs: &[(String, String)]) -> Result<(), CompatError> {
     for (key, _) in pairs {
         match key.as_str() {
-            "tenant_id" => {}
+            "workspace_id" => {}
             _ => {
                 return Err(unsupported(format!(
                     "Tempo tag query parameter '{key}' is unsupported"
@@ -77,7 +77,7 @@ pub fn parse_tempo_search_params(
             "start" => start_ns = Some(parse_tempo_time_ns(value)?),
             "end" => end_ns = Some(parse_tempo_time_ns(value)?),
             "limit" => limit = value.parse().map_err(|_| bad("invalid limit"))?,
-            "tenant_id" => {}
+            "workspace_id" => {}
             _ => {
                 return Err(unsupported(format!(
                     "Tempo search parameter '{key}' is unsupported"
@@ -312,11 +312,11 @@ mod tests {
     #[test]
     fn accepts_and_discards_tenant_id_on_lookup_and_tag_queries() {
         parse_tempo_trace_lookup_params(
-            &[("tenant_id".into(), "spoofed".into())],
+            &[("workspace_id".into(), "spoofed".into())],
             &QueryLimits::default(),
         )
         .expect("tenant_id is a compatibility parameter");
-        parse_tempo_tag_params(&[("tenant_id".into(), "spoofed".into())])
+        parse_tempo_tag_params(&[("workspace_id".into(), "spoofed".into())])
             .expect("tenant_id is a compatibility parameter");
     }
 

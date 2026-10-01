@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 /// Prefer `X-Softprobe-Assertion` (sp-llm#39). Fall back to Bearer assertion JWT,
-/// then optional `SOFTPROBE_DEFAULT_TENANT_KEY`, then Softprobe auth service.
+/// then optional `SOFTPROBE_DEFAULT_WORKSPACE_ID`, then Softprobe auth service.
 pub async fn runtime_auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
@@ -77,7 +77,7 @@ pub async fn runtime_auth_middleware(
 
     // Legacy direct-to-thelake clients: no assertion header. Optional default
     // lake routes them onto a configured MAP-ready scope (Bearer still required).
-    if let Some(default_key) = crate::softprobe_assertion::default_tenant_key_from_env() {
+    if let Some(default_key) = crate::softprobe_assertion::default_workspace_id_from_env() {
         let info = crate::softprobe_assertion::tenant_info_for_default_lake(&default_key)
             .map_err(|_| StatusCode::FORBIDDEN)?;
         req.extensions_mut().insert(info);
@@ -105,7 +105,7 @@ fn requires_runtime_auth(method: &Method, path: &str) -> bool {
     if *method == Method::OPTIONS && is_authenticated_api_prefix(path) {
         return false;
     }
-    if path == "/v1/tenants" && *method == Method::POST {
+    if path == "/v1/workspaces" && *method == Method::POST {
         return false;
     }
     is_authenticated_api_prefix(path)
@@ -154,7 +154,7 @@ mod data_connection_tests {
         config.ducklake.metadata_schema = "tenant_meta".to_string();
 
         let tenant = TenantInfo {
-            tenant_id: "tenant-123".to_string(),
+            workspace_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
             agent_id: None,
@@ -170,7 +170,7 @@ mod data_connection_tests {
         let material = DuckLakeConnectionMaterial::from_tenant_scope(&tenant, &scope, &config)
             .expect("connection material");
         assert_eq!(material.version, 1);
-        assert_eq!(material.tenant_id, "tenant-123");
+        assert_eq!(material.workspace_id, "tenant-123");
         assert_eq!(
             material.ducklake_pg_uri,
             "host=pg port=5432 dbname=ducklake user=reader password=secret"
@@ -195,7 +195,7 @@ mod data_connection_tests {
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
 
         let tenant = TenantInfo {
-            tenant_id: "tenant-123".to_string(),
+            workspace_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
             agent_id: None,
@@ -235,7 +235,7 @@ mod data_connection_tests {
         config.object_store.region = "us-west-2".to_string();
 
         let tenant = TenantInfo {
-            tenant_id: "tenant-123".to_string(),
+            workspace_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
             agent_id: None,
@@ -274,7 +274,7 @@ mod data_connection_tests {
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
 
         let tenant = TenantInfo {
-            tenant_id: "tenant-123".to_string(),
+            workspace_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
             agent_id: None,
@@ -317,25 +317,25 @@ pub(crate) fn parse_bearer(h: &str) -> Option<String> {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TenantProvisionHttpRequest {
-    tenant_id: String,
+struct WorkspaceProvisionHttpRequest {
+    workspace_id: String,
     #[serde(default)]
-    storage_hints: Option<TenantStorageHintsBody>,
+    storage_hints: Option<WorkspaceStorageHintsBody>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TenantStorageHintsBody {
+struct WorkspaceStorageHintsBody {
     ducklake_metadata_schema: Option<String>,
     ducklake_data_path: Option<String>,
     gcs_bucket: Option<String>,
 }
 
-/// `POST /v1/tenants` — admin-only tenant provisioning ([`spec/protocol/http-control-api.md`]).
+/// `POST /v1/workspaces` — admin-only tenant provisioning ([`spec/protocol/http-control-api.md`]).
 async fn v1_provision_scope(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<TenantProvisionHttpRequest>,
+    Json(body): Json<WorkspaceProvisionHttpRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let auth = headers
         .get(header::AUTHORIZATION)
@@ -357,20 +357,20 @@ async fn v1_provision_scope(
         ));
     }
 
-    let tenant_id = body.tenant_id.trim().to_string();
-    if tenant_id.is_empty() {
+    let workspace_id = body.workspace_id.trim().to_string();
+    if workspace_id.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": {"code": "invalid_request", "message": "tenantId is required"}})),
+            Json(json!({"error": {"code": "invalid_request", "message": "workspaceId is required"}})),
         ));
     }
-    if crate::self_monitoring::is_reserved_tenant_id(&tenant_id) {
+    if crate::self_monitoring::is_reserved_workspace_id(&workspace_id) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": {
-                    "code": "reserved_tenant_id",
-                    "message": "tenantId is reserved for self-monitoring and cannot be provisioned via POST /v1/tenants"
+                    "code": "reserved_workspace_id",
+                    "message": "workspaceId is reserved for self-monitoring and cannot be provisioned via POST /v1/workspaces"
                 }
             })),
         ));
@@ -395,7 +395,7 @@ async fn v1_provision_scope(
         ));
     }
 
-    if let Ok(existing) = engines.scope_storage_hints(&tenant_id).await {
+    if let Ok(existing) = engines.scope_storage_hints(&workspace_id).await {
         if existing.matches_warehouse_hints(&metadata_schema, &data_path) {
             let mut scope = json!({
                 "ducklakeMetadataSchema": existing.metadata_schema,
@@ -406,7 +406,7 @@ async fn v1_provision_scope(
             }
             return Ok(Json(json!({
                 "version": 1,
-                "tenantId": tenant_id,
+                "workspaceId": workspace_id,
                 "status": "exists",
                 "scope": scope
             })));
@@ -414,14 +414,14 @@ async fn v1_provision_scope(
         return Err((
             StatusCode::CONFLICT,
             Json(
-                json!({"error": {"code": "tenant_scope_conflict", "message": "tenant exists with different storage scope"}}),
+                json!({"error": {"code": "workspace_scope_conflict", "message": "workspace exists with different storage scope"}}),
             ),
         ));
     }
 
     let scope = engines
         .provision_scope(ScopeProvisioningRequest {
-            scope_id: tenant_id.clone(),
+            scope_id: workspace_id.clone(),
             metadata_schema: metadata_schema.clone(),
             data_path: data_path.clone(),
         })
@@ -441,11 +441,11 @@ async fn v1_provision_scope(
         scope_json["gcsBucket"] = json!(b);
     }
 
-    state.engines.invalidate(&tenant_id);
+    state.engines.invalidate(&workspace_id);
 
     Ok(Json(json!({
         "version": 1,
-        "tenantId": tenant_id,
+        "workspaceId": workspace_id,
         "status": "created",
         "scope": scope_json
     })))
@@ -462,7 +462,7 @@ async fn v1_meta() -> impl IntoResponse {
 pub fn runtime_control_routes() -> axum::Router<AppState> {
     use axum::routing::{get, post};
     axum::Router::new()
-        .route("/v1/tenants", post(v1_provision_scope))
+        .route("/v1/workspaces", post(v1_provision_scope))
         .route("/v1/meta", get(v1_meta))
         .route("/v1/data/ducklake-connection", get(v1_ducklake_connection))
         .route("/v1/promotions/apply", post(v1_promotions_apply))
@@ -749,15 +749,15 @@ mod bearer_tests {
         }
 
         assert!(
-            !requires_runtime_auth(&Method::POST, "/v1/tenants"),
-            "POST /v1/tenants uses admin Bearer validated in-handler, not tenant middleware"
+            !requires_runtime_auth(&Method::POST, "/v1/workspaces"),
+            "POST /v1/workspaces uses admin Bearer validated in-handler, not tenant middleware"
         );
     }
 
     #[test]
     fn reserved_ops_tenant_id_is_recognized() {
-        assert!(crate::self_monitoring::is_reserved_tenant_id("thelake-ops"));
-        assert!(!crate::self_monitoring::is_reserved_tenant_id(
+        assert!(crate::self_monitoring::is_reserved_workspace_id("thelake-ops"));
+        assert!(!crate::self_monitoring::is_reserved_workspace_id(
             "softprobe-local"
         ));
     }

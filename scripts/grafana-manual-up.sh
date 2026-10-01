@@ -527,7 +527,7 @@ echo "==> provisioning tenant $TENANT_ID (Postgres catalog)"
 tenant_payload="$(TENANT_ID="$TENANT_ID" TENANT_SCHEMA="$TENANT_SCHEMA" TENANT_DATA_PATH="$STATE_DIR/data/$TENANT_ID/" python3 - <<'PY'
 import json, os
 print(json.dumps({
-    "tenantId": os.environ["TENANT_ID"],
+    "workspaceId": os.environ["TENANT_ID"],
     "storageHints": {
         "ducklakeMetadataSchema": os.environ["TENANT_SCHEMA"],
         "ducklakeDataPath": os.environ["TENANT_DATA_PATH"],
@@ -537,7 +537,7 @@ print(json.dumps({
 PY
 )"
 tenant_http="$(curl -sS -o /tmp/thelake-grafana-tenant-provision.json -w '%{http_code}' \
-  -X POST "$SOFTPROBE_URL_HOST/v1/tenants" \
+  -X POST "$SOFTPROBE_URL_HOST/v1/workspaces" \
   -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$tenant_payload" || true)"

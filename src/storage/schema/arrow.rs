@@ -128,7 +128,7 @@ pub fn scores_to_record_batch(scores: &[Score], schema: &Schema) -> Result<Recor
     let tenant_ids: ArrayRef = Arc::new(StringArray::from(
         scores
             .iter()
-            .map(|score| score.tenant_id.as_deref())
+            .map(|score| score.workspace_id.as_deref())
             .collect::<Vec<_>>(),
     ));
 
@@ -236,7 +236,7 @@ pub fn score_configs_to_record_batch(
     let tenant_ids: ArrayRef = Arc::new(StringArray::from(
         configs
             .iter()
-            .map(|config| config.tenant_id.as_deref())
+            .map(|config| config.workspace_id.as_deref())
             .collect::<Vec<_>>(),
     ));
 
@@ -324,7 +324,7 @@ const TRACES_BASE_FIELDS: &[&str] = &[
     "parent_span_id",
     "app_id",
     "organization_id",
-    "tenant_id",
+    "workspace_id",
     "message_type",
     "span_kind",
     "timestamp",
@@ -356,7 +356,7 @@ const LOGS_BASE_FIELDS: &[&str] = &[
     "resource_attributes",
     "trace_id",
     "span_id",
-    "tenant_id",
+    "workspace_id",
 ];
 
 fn promoted_array_from_values(
@@ -563,7 +563,7 @@ pub fn spans_to_record_batch(spans: &[Span], schema: &Schema) -> Result<RecordBa
     let tenant_ids: ArrayRef = Arc::new(StringArray::from(
         spans
             .iter()
-            .map(|s| s.tenant_id.as_deref())
+            .map(|s| s.workspace_id.as_deref())
             .collect::<Vec<_>>(),
     ));
 
@@ -873,7 +873,7 @@ pub fn logs_to_record_batch(logs: &[Log], schema: &Schema) -> Result<RecordBatch
 
     let tenant_ids: ArrayRef = Arc::new(StringArray::from(
         logs.iter()
-            .map(|l| l.tenant_id.as_deref())
+            .map(|l| l.workspace_id.as_deref())
             .collect::<Vec<_>>(),
     ));
 
@@ -990,7 +990,7 @@ mod tests {
             parent_span_id: None,
             app_id: "api".into(),
             organization_id: None,
-            tenant_id: Some("tenant".into()),
+            workspace_id: Some("tenant".into()),
             agent_id: None,
             agent_name: None,
             message_type: "GET /".into(),
@@ -1087,7 +1087,7 @@ mod tests {
             resource_attributes: HashMap::new(),
             trace_id: None,
             span_id: None,
-            tenant_id: Some("workspace-a".into()),
+            workspace_id: Some("workspace-a".into()),
             agent_id: None,
             agent_name: None,
         }
@@ -1117,11 +1117,11 @@ mod tests {
         assert_eq!(timestamps.value(0), timestamp_ns);
         assert_eq!(observed_timestamps.value(0), observed_timestamp_ns);
         let tenant_ids = batch
-            .column_by_name("tenant_id")
-            .expect("logs must carry tenant_id")
+            .column_by_name("workspace_id")
+            .expect("logs must carry workspace_id")
             .as_any()
             .downcast_ref::<StringArray>()
-            .expect("tenant_id must be a string column");
+            .expect("workspace_id must be a string column");
         assert_eq!(tenant_ids.value(0), "workspace-a");
     }
 
@@ -1166,7 +1166,7 @@ mod tests {
             config_id: None,
             author_id: None,
             metadata: HashMap::new(),
-            tenant_id: None,
+            workspace_id: None,
         };
         let batch = scores_to_record_batch(&[score], &ScoreTable::schema()).unwrap();
         let timestamps = batch

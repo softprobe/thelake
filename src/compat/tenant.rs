@@ -107,7 +107,7 @@ impl TenantContext {
         scope_header: Option<&str>,
         limits: QueryLimits,
     ) -> Result<Self, CompatError> {
-        if tenant.tenant_id.trim().is_empty() {
+        if tenant.workspace_id.trim().is_empty() {
             return Err(CompatError::new(
                 CompatErrorCode::Forbidden,
                 "authenticated tenant id is empty",
@@ -115,12 +115,12 @@ impl TenantContext {
         }
 
         let scope_header = match scope_header.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(raw) if raw != tenant.tenant_id => {
+            Some(raw) if raw != tenant.workspace_id => {
                 return Err(CompatError::new(
                     CompatErrorCode::Forbidden,
                     format!(
                         "scope header '{raw}' does not match authenticated tenant '{}'",
-                        tenant.tenant_id
+                        tenant.workspace_id
                     ),
                 ));
             }
@@ -138,8 +138,8 @@ impl TenantContext {
         })
     }
 
-    pub fn tenant_id(&self) -> &str {
-        &self.tenant.tenant_id
+    pub fn workspace_id(&self) -> &str {
+        &self.tenant.workspace_id
     }
 
     pub fn remaining(&self) -> Duration {
@@ -161,7 +161,7 @@ mod tests {
 
     fn tenant(id: &str) -> TenantInfo {
         TenantInfo {
-            tenant_id: id.to_string(),
+            workspace_id: id.to_string(),
             bucket_name: "bucket".to_string(),
             dataset_id: "dataset".to_string(),
             agent_id: None,
@@ -178,7 +178,7 @@ mod tests {
             QueryLimits::default(),
         )
         .expect("context");
-        assert_eq!(ctx.tenant_id(), "t1");
+        assert_eq!(ctx.workspace_id(), "t1");
         assert!(ctx.scope_header.is_none());
     }
 

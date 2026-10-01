@@ -42,7 +42,7 @@ fn shared_config(temp: &TempDir, registry_schema: String) -> Config {
 
 fn tenant(id: &str) -> TenantInfo {
     TenantInfo {
-        tenant_id: id.to_string(),
+        workspace_id: id.to_string(),
         bucket_name: "shared-scope-test".to_string(),
         dataset_id: "shared-scope-test".to_string(),
         agent_id: None,
@@ -50,7 +50,7 @@ fn tenant(id: &str) -> TenantInfo {
     }
 }
 
-fn span(tenant_id: &str, trace_id: &str, session_id: &str) -> Span {
+fn span(workspace_id: &str, trace_id: &str, session_id: &str) -> Span {
     Span {
         session_id: session_id.to_string(),
         trace_id: trace_id.to_string(),
@@ -58,9 +58,9 @@ fn span(tenant_id: &str, trace_id: &str, session_id: &str) -> Span {
         parent_span_id: None,
         app_id: "shared-scope-test".to_string(),
         organization_id: None,
-        tenant_id: Some(tenant_id.to_string()),
+        workspace_id: Some(workspace_id.to_string()),
         agent_id: None,
-        agent_name: Some(format!("agent-{tenant_id}")),
+        agent_name: Some(format!("agent-{workspace_id}")),
         message_type: "op".to_string(),
         span_kind: Some("SPAN_KIND_INTERNAL".to_string()),
         timestamp: Utc::now(),
@@ -80,19 +80,19 @@ fn span(tenant_id: &str, trace_id: &str, session_id: &str) -> Span {
     }
 }
 
-fn log(tenant_id: &str, trace_id: &str, session_id: &str) -> Log {
+fn log(workspace_id: &str, trace_id: &str, session_id: &str) -> Log {
     Log {
         session_id: Some(session_id.to_string()),
         timestamp: Utc::now(),
         observed_timestamp: None,
         severity_number: 9,
         severity_text: "INFO".to_string(),
-        body: format!("log-{tenant_id}"),
+        body: format!("log-{workspace_id}"),
         attributes: HashMap::new(),
         resource_attributes: HashMap::new(),
         trace_id: Some(trace_id.to_string()),
         span_id: Some(format!("span-{trace_id}")),
-        tenant_id: Some(tenant_id.to_string()),
+        workspace_id: Some(workspace_id.to_string()),
         agent_id: None,
         agent_name: None,
     }
@@ -110,7 +110,7 @@ fn score_config(config_id: &str, workspace_id: &str) -> ScoreConfig {
         categories: Vec::new(),
         author_id: None,
         metadata: HashMap::new(),
-        tenant_id: None,
+        workspace_id: Some(workspace_id.to_string()),
     }
 }
 
@@ -131,7 +131,7 @@ fn score(score_id: &str, trace_id: &str, config_id: &str, workspace_id: &str) ->
         config_id: Some(config_id.to_string()),
         author_id: None,
         metadata: HashMap::new(),
-        tenant_id: None,
+        workspace_id: Some(workspace_id.to_string()),
     }
 }
 
@@ -294,8 +294,8 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
         .expect("second runtime manager for same registry");
     let shared_schema = config.ducklake.metadata_schema.clone();
     let shared_data = config.ducklake.data_path.clone();
-    let workspace_a = format!("shared_a_{suffix}");
-    let workspace_b = format!("shared_b_{suffix}");
+    let workspace_a = Uuid::new_v4().to_string();
+    let workspace_b = Uuid::new_v4().to_string();
     tokio::try_join!(
         engines.provision_scope(ScopeProvisioningRequest {
             scope_id: workspace_a.to_string(),

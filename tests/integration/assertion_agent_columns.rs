@@ -149,14 +149,14 @@ async fn assertion_router(secret: &str) -> (Router, AppState, TempDir) {
 async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
     let secret = "assert-agent-columns-secret";
     let (router, state, _temp) = assertion_router(secret).await;
-    let tenant_key = "ws-assert-agent-cols";
-    // Production requires an explicit `POST /v1/tenants` admin provisioning step
+    let workspace_id = "550e8400-e29b-41d4-a716-4466554400aa";
+    // Production requires an explicit `POST /v1/workspaces` admin provisioning step
     // before a tenant can resolve a DuckLake scope; register it directly here.
     let ducklake = state.engines.config().ducklake.clone();
     state
         .engines
         .provision_scope(ScopeProvisioningRequest {
-            scope_id: tenant_key.to_string(),
+            scope_id: workspace_id.to_string(),
             metadata_schema: ducklake.metadata_schema,
             data_path: ducklake.data_path,
         })
@@ -171,7 +171,7 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
             "iss": "softprobe-edge",
             "aud": "sp-backend",
             "sub": "agent-key",
-            "tenant_key": tenant_key,
+            "workspace_id": workspace_id,
             "agent_id": agent_id,
             "agent_name": agent_name,
             "exp": now + 600
@@ -218,7 +218,7 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .expect("logs");
     assert_eq!(log_resp.status(), StatusCode::OK);
 
-    let engine = state.engine_for_id(tenant_key).await.expect("engine");
+    let engine = state.engine_for_id(workspace_id).await.expect("engine");
     engine.force_flush_spans().await.expect("flush spans");
     engine.force_flush_logs().await.expect("flush logs");
 
@@ -231,7 +231,7 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .expect("maintenance engine");
     let session_cfg = &state.engines.config().session_summary;
     maintenance
-        .reduce_session_summary_for_key(tenant_key, session_cfg.max_sessions_per_reduce)
+        .reduce_session_summary_for_key(workspace_id, session_cfg.max_sessions_per_reduce)
         .await
         .expect("reduce_session_summary");
 

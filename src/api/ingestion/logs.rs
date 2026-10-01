@@ -1,7 +1,7 @@
 // ============================================================================
 // TENANT BINDING CONSTITUTION (HARD RULE)
 // Tenant identity is allowed only at auth/configuration/instantiation boundaries.
-// Operational APIs MUST NOT accept tenant_id parameters.
+// Operational APIs MUST NOT accept workspace_id parameters.
 // After binding tenant context, use tenant-scoped instances/contexts only.
 // ============================================================================
 
@@ -93,7 +93,7 @@ async fn process_logs(
     let start = std::time::Instant::now();
     let tid = tenant
         .as_ref()
-        .map(|t| t.tenant_id.clone())
+        .map(|t| t.workspace_id.clone())
         .unwrap_or_default();
     let result = process_logs_inner(state, request, body_size, tenant).await;
     if crate::self_monitoring::instrument_customer_tenant(&tid) {
@@ -141,9 +141,9 @@ async fn process_logs_inner(
 
     let log_count = logs.len();
 
-    let tenant_id = tenant
+    let workspace_id = tenant
         .as_ref()
-        .map(|t| t.tenant_id.clone())
+        .map(|t| t.workspace_id.clone())
         .unwrap_or_default();
     let agent_id = tenant.as_ref().and_then(|t| t.agent_id.clone());
     let agent_name = tenant.as_ref().and_then(|t| t.agent_name.clone());
@@ -151,12 +151,12 @@ async fn process_logs_inner(
         log.agent_id = agent_id.clone();
         log.agent_name = agent_name.clone();
     }
-    let engine = state.engine_for_id(&tenant_id).await?;
+    let engine = state.engine_for_id(&workspace_id).await?;
     let write_start = std::time::Instant::now();
     engine.add_logs(logs, body_size).await?;
-    if crate::self_monitoring::instrument_customer_tenant(&tenant_id) {
+    if crate::self_monitoring::instrument_customer_tenant(&workspace_id) {
         crate::self_monitoring::record_write(
-            &tenant_id,
+            &workspace_id,
             "logs",
             app.as_deref(),
             write_start.elapsed(),

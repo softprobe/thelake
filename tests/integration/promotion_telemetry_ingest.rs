@@ -34,13 +34,13 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     let metadata_path = config.ducklake.metadata_path.clone();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
 
-    let tenant_id = format!("tenant-promoted-{suffix}");
+    let workspace_id = format!("tenant-promoted-{suffix}");
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
     let _hints = manager
         .provision_scope(ScopeProvisioningRequest {
-            scope_id: tenant_id.clone(),
+            scope_id: workspace_id.clone(),
             metadata_schema: tenant_schema.clone(),
             data_path: tenant_data_path.clone(),
         })
@@ -49,9 +49,9 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     insert_active_trace_promotion_spec(&tenant_schema).await;
 
     // Bind writer to the provisioned tenant scope (not the registry schema on config).
-    let engine = manager.engine_for(&tenant_id).await.expect("tenant engine");
+    let engine = manager.engine_for(&workspace_id).await.expect("tenant engine");
     engine
-        .add_spans(vec![promoted_span(&tenant_id)], 0)
+        .add_spans(vec![promoted_span(&workspace_id)], 0)
         .await
         .expect("ingest promoted span");
 
@@ -118,7 +118,7 @@ VALUES ('trace-promoted-columns', 'softprobe.promotion.v1', 'telemetry_columns',
         .expect("insert promotion spec");
 }
 
-fn promoted_span(tenant_id: &str) -> Span {
+fn promoted_span(workspace_id: &str) -> Span {
     let mut attributes = HashMap::new();
     attributes.insert("division.name".to_string(), "payments".to_string());
     let mut resource_attributes = HashMap::new();
@@ -131,7 +131,7 @@ fn promoted_span(tenant_id: &str) -> Span {
         parent_span_id: None,
         app_id: "checkout-api".to_string(),
         organization_id: None,
-        tenant_id: Some(tenant_id.to_string()),
+        workspace_id: Some(workspace_id.to_string()),
         agent_id: None,
         agent_name: None,
         message_type: "checkout".to_string(),

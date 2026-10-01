@@ -19,7 +19,7 @@ pub(crate) fn create_view_sql(
 ) -> String {
     let physical_table = ducklake_qualified_table_name(scope, physical_name);
     format!(
-        "CREATE OR REPLACE TEMP VIEW {logical_name} AS SELECT * FROM {physical_table} WHERE tenant_id = '{workspace_id}';",
+        "CREATE OR REPLACE TEMP VIEW {logical_name} AS SELECT * FROM {physical_table} WHERE workspace_id = '{workspace_id}';",
         workspace_id = escape_sql_literal(workspace_id),
     )
 }
@@ -35,7 +35,7 @@ fn create_fail_closed_view_sql(
     )
 }
 
-fn has_tenant_id_column(
+fn has_workspace_id_column(
     conn: &Connection,
     scope: &PhysicalScope,
     physical_name: &str,
@@ -47,7 +47,7 @@ fn has_tenant_id_column(
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         let name: String = row.get(0)?;
-        if name == "tenant_id" {
+        if name == "workspace_id" {
             return Ok(true);
         }
     }
@@ -61,9 +61,9 @@ pub(crate) fn validate_shared_workspace_schema(
     scope: &PhysicalScope,
 ) -> Result<()> {
     for (_, physical_name) in WORKSPACE_TABLES {
-        if !has_tenant_id_column(conn, scope, physical_name)? {
+        if !has_workspace_id_column(conn, scope, physical_name)? {
             return Err(anyhow::anyhow!(
-                "{}: table {physical_name} is missing tenant_id",
+                "{}: table {physical_name} is missing workspace_id",
                 super::SharedScopeError::new(
                     super::SharedScopeErrorCode::SchemaIncompatible,
                     format!("shared workspace table {physical_name} has no ownership column"),
@@ -78,7 +78,7 @@ pub(crate) fn install(conn: &Connection, scope: &PhysicalScope, workspace_id: &s
     for (logical_name, physical_name) in WORKSPACE_TABLES {
         // Until the shared schema migration adds ownership columns, expose an
         // empty view rather than risking an unfiltered physical-table read.
-        let sql = if has_tenant_id_column(conn, scope, physical_name)? {
+        let sql = if has_workspace_id_column(conn, scope, physical_name)? {
             create_view_sql(scope, logical_name, physical_name, workspace_id)
         } else {
             create_fail_closed_view_sql(scope, logical_name, physical_name)
@@ -107,7 +107,7 @@ mod tests {
 
         assert_eq!(
             sql,
-            "CREATE OR REPLACE TEMP VIEW traces AS SELECT * FROM softprobe.shared_scope.traces WHERE tenant_id = 'workspace''42';"
+            "CREATE OR REPLACE TEMP VIEW traces AS SELECT * FROM softprobe.shared_scope.traces WHERE workspace_id = 'workspace''42';"
         );
     }
 
@@ -125,7 +125,7 @@ mod tests {
         let scope = PhysicalScope::default();
         let sql = create_fail_closed_view_sql(&scope, "logs", "logs");
         assert!(sql.contains("WHERE 1 = 0"));
-        assert!(!sql.contains("tenant_id"));
+        assert!(!sql.contains("workspace_id"));
     }
 
     #[test]
@@ -135,7 +135,7 @@ mod tests {
         validate_shared_workspace_schema(&connection, &scope).expect("ownership columns");
 
         connection
-            .execute_batch("ALTER TABLE softprobe.main.logs DROP COLUMN tenant_id;")
+            .execute_batch("ALTER TABLE softprobe.main.logs DROP COLUMN workspace_id;")
             .expect("drop ownership column");
         let error = validate_shared_workspace_schema(&connection, &scope)
             .expect_err("missing ownership column must fail closed");
@@ -191,10 +191,10 @@ mod tests {
             .execute_batch(
                 "ATTACH ':memory:' AS softprobe;
                  CREATE SCHEMA IF NOT EXISTS softprobe.main;
-                 CREATE TABLE softprobe.main.traces (tenant_id VARCHAR, id VARCHAR);
-                 CREATE TABLE softprobe.main.logs (tenant_id VARCHAR, id VARCHAR);
-                 CREATE TABLE softprobe.main.scores (tenant_id VARCHAR, id VARCHAR);
-                 CREATE TABLE softprobe.main.score_configs (tenant_id VARCHAR, id VARCHAR);
+                 CREATE TABLE softprobe.main.traces (workspace_id VARCHAR, id VARCHAR);
+                 CREATE TABLE softprobe.main.logs (workspace_id VARCHAR, id VARCHAR);
+                 CREATE TABLE softprobe.main.scores (workspace_id VARCHAR, id VARCHAR);
+                 CREATE TABLE softprobe.main.score_configs (workspace_id VARCHAR, id VARCHAR);
                  INSERT INTO softprobe.main.traces VALUES
                    ('workspace-a', 'workspace-a-row'), ('workspace-b', 'workspace-b-row');
                  INSERT INTO softprobe.main.logs VALUES

@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 fn test_tenant() -> TenantInfo {
     TenantInfo {
-        tenant_id: "unit-test-tenant".to_string(),
+        workspace_id: "11111111-1111-1111-1111-111111111111".to_string(),
         bucket_name: "unit-bucket".to_string(),
         dataset_id: "unit-dataset".to_string(),
         agent_id: None,
@@ -28,7 +28,7 @@ fn test_tenant() -> TenantInfo {
 }
 
 /// Register `workspace_id` in the durable scope registry, reusing this
-/// process's default physical scope (isolated mode allows a workspace to
+/// process's default physical scope (dedicated mode allows a workspace to
 /// share the configured metadata schema/data path).
 async fn provision_test_scope(state: &crate::api::AppState, workspace_id: &str) {
     let ducklake = state.engines.config().ducklake.clone();
@@ -47,7 +47,7 @@ async fn provision_test_scope(state: &crate::api::AppState, workspace_id: &str) 
 async fn unit_runtime_engine_manager_cache_hit_same_arc() {
     let (_router, state, _t) = local_router_and_state().await.expect("router");
     let t = test_tenant();
-    provision_test_scope(&state, &t.tenant_id).await;
+    provision_test_scope(&state, &t.workspace_id).await;
     let e1 = state.engine_for_tenant(&t).await.expect("engine");
     let e2 = state.engine_for_tenant(&t).await.expect("engine");
     assert!(Arc::ptr_eq(&e1, &e2));
@@ -56,13 +56,13 @@ async fn unit_runtime_engine_manager_cache_hit_same_arc() {
 #[tokio::test]
 async fn unit_runtime_engine_manager_single_flight_build_once() {
     let (_router, state, _t) = local_router_and_state().await.expect("router");
-    let tenant_id = "unit-test-single-flight".to_string();
-    provision_test_scope(&state, &tenant_id).await;
+    let workspace_id = "22222222-2222-2222-2222-222222222222".to_string();
+    provision_test_scope(&state, &workspace_id).await;
     let (a, b, c, d) = tokio::join!(
-        state.engine_for_id(&tenant_id),
-        state.engine_for_id(&tenant_id),
-        state.engine_for_id(&tenant_id),
-        state.engine_for_id(&tenant_id),
+        state.engine_for_id(&workspace_id),
+        state.engine_for_id(&workspace_id),
+        state.engine_for_id(&workspace_id),
+        state.engine_for_id(&workspace_id),
     );
     let e1 = a.expect("engine");
     let e2 = b.expect("engine");
