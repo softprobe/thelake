@@ -70,7 +70,10 @@ fn sample_log(i: usize) -> LogData {
     }
 }
 
-async fn assert_warm_writes_zero_probes_contract(runtime: &RuntimeEngine, workspace_id: Option<&str>) {
+async fn assert_warm_writes_zero_probes_contract(
+    runtime: &RuntimeEngine,
+    workspace_id: Option<&str>,
+) {
     let _guard = HOTPATH_CONTRACT_LOCK.lock().await;
 
     // Perform one initial write across signals to ensure cold paths / pool creation are complete.
@@ -188,7 +191,10 @@ async fn warm_writes_perform_zero_schema_probes_postgres() {
         .await
         .expect("provision scope");
 
-    let runtime = manager.engine_for(&workspace_id).await.expect("tenant engine");
+    let runtime = manager
+        .engine_for(&workspace_id)
+        .await
+        .expect("tenant engine");
 
     assert_warm_writes_zero_probes_contract(runtime.as_ref(), Some(&workspace_id)).await;
 }

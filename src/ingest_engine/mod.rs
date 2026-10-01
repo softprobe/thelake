@@ -447,7 +447,11 @@ pub(crate) fn session_summary_dirty_for(
     metadata_schema: &str,
 ) -> Option<Arc<SessionSummaryDirty>> {
     let dirty = if config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
-        SessionSummaryDirty::new_for_workspace(resolver.pool().clone(), metadata_schema, workspace_id)
+        SessionSummaryDirty::new_for_workspace(
+            resolver.pool().clone(),
+            metadata_schema,
+            workspace_id,
+        )
     } else {
         SessionSummaryDirty::new(resolver.pool().clone(), metadata_schema, workspace_id)
     };

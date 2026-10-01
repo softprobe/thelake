@@ -175,7 +175,9 @@ fn seed(
                     receipt.tenants[index].traces_queryable = true;
                 }
                 Err(error) if attempt == last_attempt => {
-                    return Err(anyhow!("tenant {workspace_id} queryability timeout: {error}"));
+                    return Err(anyhow!(
+                        "tenant {workspace_id} queryability timeout: {error}"
+                    ));
                 }
                 Err(_) => {
                     all_queryable = false;

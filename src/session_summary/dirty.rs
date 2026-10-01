@@ -114,7 +114,9 @@ impl SessionSummaryDirty {
                     error = %err,
                     "session_summary dirty UPSERT failed (ingest still ok)"
                 );
-                crate::self_monitoring::record_session_summary_dirty_upsert_error(&self.workspace_id);
+                crate::self_monitoring::record_session_summary_dirty_upsert_error(
+                    &self.workspace_id,
+                );
             }
         }
     }

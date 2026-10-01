@@ -49,7 +49,10 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     insert_active_trace_promotion_spec(&tenant_schema).await;
 
     // Bind writer to the provisioned tenant scope (not the registry schema on config).
-    let engine = manager.engine_for(&workspace_id).await.expect("tenant engine");
+    let engine = manager
+        .engine_for(&workspace_id)
+        .await
+        .expect("tenant engine");
     engine
         .add_spans(vec![promoted_span(&workspace_id)], 0)
         .await

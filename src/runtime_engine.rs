@@ -408,7 +408,8 @@ impl RuntimeEngineManager {
             return Ok(r.clone());
         }
         let engine = self.build_engine(workspace_id).await?;
-        self.engines.insert(workspace_id.to_string(), engine.clone());
+        self.engines
+            .insert(workspace_id.to_string(), engine.clone());
         Ok(engine)
     }
 
@@ -800,9 +801,7 @@ RETURNING physical_scope_id;"#,
     }
 
     async fn resolve_scope_legacy(&self, scope_id: &str) -> Result<PhysicalScope> {
-        if scope_id.trim().is_empty()
-            || self.workspace_scope_mode == WorkspaceScopeMode::Shared
-        {
+        if scope_id.trim().is_empty() || self.workspace_scope_mode == WorkspaceScopeMode::Shared {
             return Ok(self.default_physical_scope.clone());
         }
         Ok(

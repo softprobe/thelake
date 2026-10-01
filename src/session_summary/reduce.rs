@@ -596,7 +596,8 @@ pub(crate) async fn reduce_tenant(
     let claim_ttl =
         std::time::Duration::from_secs(config.session_summary.dirty_claim_ttl_seconds.max(1));
     let (claims, _snapshot) = if workspace_scoped {
-        claim_dirty_for_workspace(pool, metadata_schema, workspace_id, max_sessions, claim_ttl).await?
+        claim_dirty_for_workspace(pool, metadata_schema, workspace_id, max_sessions, claim_ttl)
+            .await?
     } else {
         claim_dirty(pool, metadata_schema, max_sessions, claim_ttl).await?
     };
@@ -684,7 +685,10 @@ pub(crate) async fn reduce_tenant(
             "session_summary ack deleted fewer rows than claimed (concurrent dirty likely)"
         );
     }
-    crate::self_monitoring::record_session_summary_sessions_reduced(workspace_id, rows.len() as u64);
+    crate::self_monitoring::record_session_summary_sessions_reduced(
+        workspace_id,
+        rows.len() as u64,
+    );
     crate::self_monitoring::record_session_summary_reduce_step(
         workspace_id,
         crate::self_monitoring::reduce_step::TOTAL,

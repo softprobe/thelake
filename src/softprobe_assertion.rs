@@ -131,14 +131,14 @@ pub fn parse_workspace_id(raw: &str) -> Result<String> {
     if workspace_id.is_empty() {
         bail!("workspace_id required");
     }
-    let parsed = uuid::Uuid::parse_str(workspace_id)
-        .map_err(|_| anyhow!("workspace_id must be a UUID"))?;
+    let parsed =
+        uuid::Uuid::parse_str(workspace_id).map_err(|_| anyhow!("workspace_id must be a UUID"))?;
     Ok(parsed.to_string())
 }
 
 pub fn tenant_info_from_assertion(claims: &SoftprobeAssertionClaims) -> Result<TenantInfo> {
-    let workspace_id = parse_workspace_id(&claims.workspace_id)
-        .map_err(|err| anyhow!("assertion: {err}"))?;
+    let workspace_id =
+        parse_workspace_id(&claims.workspace_id).map_err(|err| anyhow!("assertion: {err}"))?;
     let agent_id = claims
         .agent_id
         .as_deref()
@@ -196,8 +196,8 @@ pub fn default_workspace_id_from_env() -> Option<String> {
 
 /// Bind Bearer-only traffic to a configured default workspace.
 pub fn tenant_info_for_default_lake(workspace_id: &str) -> Result<TenantInfo> {
-    let workspace_id = parse_workspace_id(workspace_id)
-        .map_err(|err| anyhow!("default workspace_id: {err}"))?;
+    let workspace_id =
+        parse_workspace_id(workspace_id).map_err(|err| anyhow!("default workspace_id: {err}"))?;
     if crate::self_monitoring::is_reserved_workspace_id(&workspace_id) {
         bail!("default workspace_id must not be reserved ops scope");
     }

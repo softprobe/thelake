@@ -361,7 +361,9 @@ async fn v1_provision_scope(
     if workspace_id.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": {"code": "invalid_request", "message": "workspaceId is required"}})),
+            Json(
+                json!({"error": {"code": "invalid_request", "message": "workspaceId is required"}}),
+            ),
         ));
     }
     if crate::self_monitoring::is_reserved_workspace_id(&workspace_id) {
@@ -756,7 +758,9 @@ mod bearer_tests {
 
     #[test]
     fn reserved_ops_tenant_id_is_recognized() {
-        assert!(crate::self_monitoring::is_reserved_workspace_id("thelake-ops"));
+        assert!(crate::self_monitoring::is_reserved_workspace_id(
+            "thelake-ops"
+        ));
         assert!(!crate::self_monitoring::is_reserved_workspace_id(
             "softprobe-local"
         ));
