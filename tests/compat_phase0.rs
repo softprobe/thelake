@@ -4,6 +4,8 @@
 mod auth_support;
 #[path = "util/config.rs"]
 mod config;
+#[path = "util/workspace_ids.rs"]
+mod workspace_ids;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -55,7 +57,8 @@ fn every_declared_compat_route_has_isolation_probe() {
 
 #[tokio::test]
 async fn compat_routes_deny_missing_and_invalid_bearer() {
-    let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
+    let (router, _mock, _temp) =
+        authenticated_router(true, workspace_ids::COMPAT_WORKSPACE_ID).await;
 
     let missing = router
         .clone()
@@ -70,7 +73,8 @@ async fn compat_routes_deny_missing_and_invalid_bearer() {
         .unwrap();
     assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
 
-    let (fail_router, _mock2, _temp2) = authenticated_router(false, "tenant-compat").await;
+    let (fail_router, _mock2, _temp2) =
+        authenticated_router(false, workspace_ids::COMPAT_WORKSPACE_ID).await;
     let invalid = fail_router
         .oneshot(
             Request::builder()
@@ -87,7 +91,8 @@ async fn compat_routes_deny_missing_and_invalid_bearer() {
 
 #[tokio::test]
 async fn compat_routes_authenticated_return_expected_status() {
-    let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
+    let (router, _mock, _temp) =
+        authenticated_router(true, workspace_ids::COMPAT_WORKSPACE_ID).await;
 
     for (method, path) in declared_compat_probe_paths() {
         let req = Request::builder()
@@ -158,14 +163,15 @@ async fn compat_routes_authenticated_return_expected_status() {
 
 #[tokio::test]
 async fn loki_mismatched_scope_header_is_forbidden() {
-    let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
+    let (router, _mock, _temp) =
+        authenticated_router(true, workspace_ids::COMPAT_WORKSPACE_ID).await;
     let resp = router
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/loki/api/v1/query")
                 .header("Authorization", "Bearer good-key")
-                .header("X-Scope-OrgID", "other-tenant")
+                .header("X-Scope-OrgID", workspace_ids::COMPAT_OTHER_WORKSPACE_ID)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -188,14 +194,15 @@ async fn loki_mismatched_scope_header_is_forbidden() {
 
 #[tokio::test]
 async fn tempo_mismatched_scope_header_is_forbidden() {
-    let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
+    let (router, _mock, _temp) =
+        authenticated_router(true, workspace_ids::COMPAT_WORKSPACE_ID).await;
     let resp = router
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/api/traces/abc")
                 .header("Authorization", "Bearer good-key")
-                .header("X-Scope-OrgID", "spoof")
+                .header("X-Scope-OrgID", workspace_ids::COMPAT_OTHER_WORKSPACE_ID)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -217,21 +224,26 @@ async fn tempo_mismatched_scope_header_is_forbidden() {
 }
 
 #[tokio::test]
-async fn loki_query_tenant_id_param_does_not_override_auth() {
-    // Negative isolation: query-string tenant_id must not change authenticated scope.
-    let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
+async fn loki_query_workspace_id_param_does_not_override_auth() {
+    // Negative isolation: query-string workspace_id must not change authenticated scope.
+    let (router, _mock, _temp) =
+        authenticated_router(true, workspace_ids::COMPAT_WORKSPACE_ID).await;
+    let uri = format!(
+        "/loki/api/v1/labels?start=1700000000000000000&end=1700000001000000000&workspace_id={}",
+        workspace_ids::COMPAT_OTHER_WORKSPACE_ID
+    );
     let resp = router
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/loki/api/v1/labels?start=1700000000000000000&end=1700000001000000000&tenant_id=attacker")
+                .uri(uri)
                 .header("Authorization", "Bearer good-key")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    // Authenticated for tenant-compat; empty lake → success with empty labels.
+    // Authenticated workspace UUID; empty lake → success with empty labels.
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -242,14 +254,19 @@ async fn loki_query_tenant_id_param_does_not_override_auth() {
 }
 
 #[tokio::test]
-async fn tempo_query_tenant_id_param_does_not_override_auth() {
-    // Negative isolation: Tempo query-string tenant_id must not change authenticated scope.
-    let (router, _mock, _temp) = authenticated_router(true, "tenant-compat").await;
+async fn tempo_query_workspace_id_param_does_not_override_auth() {
+    // Negative isolation: Tempo query-string workspace_id must not change authenticated scope.
+    let (router, _mock, _temp) =
+        authenticated_router(true, workspace_ids::COMPAT_WORKSPACE_ID).await;
+    let uri = format!(
+        "/api/search?workspace_id={}&start=1700000000&end=1700000100",
+        workspace_ids::COMPAT_OTHER_WORKSPACE_ID
+    );
     let resp = router
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/search?tenant_id=attacker&start=1700000000&end=1700000100")
+                .uri(uri)
                 .header("Authorization", "Bearer good-key")
                 .body(Body::empty())
                 .unwrap(),

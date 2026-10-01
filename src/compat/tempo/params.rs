@@ -310,14 +310,29 @@ mod tests {
     }
 
     #[test]
-    fn accepts_and_discards_tenant_id_on_lookup_and_tag_queries() {
+    fn accepts_and_discards_workspace_id_on_lookup_and_tag_queries() {
         parse_tempo_trace_lookup_params(
             &[("workspace_id".into(), "spoofed".into())],
             &QueryLimits::default(),
         )
-        .expect("tenant_id is a compatibility parameter");
+        .expect("workspace_id is discarded and does not bind scope");
         parse_tempo_tag_params(&[("workspace_id".into(), "spoofed".into())])
-            .expect("tenant_id is a compatibility parameter");
+            .expect("workspace_id is discarded and does not bind scope");
+        parse_tempo_search_params(
+            &[("workspace_id".into(), "spoofed".into())],
+            &QueryLimits::default(),
+        )
+        .expect("workspace_id is discarded and does not bind scope");
+    }
+
+    #[test]
+    fn rejects_legacy_tenant_id_query_param() {
+        let err = parse_tempo_search_params(
+            &[("tenant_id".into(), "attacker".into())],
+            &QueryLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, CompatErrorCode::UnsupportedFeature);
     }
 
     #[test]

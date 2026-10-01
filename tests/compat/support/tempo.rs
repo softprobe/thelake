@@ -184,7 +184,7 @@ pub async fn build_seeded_tempo_router(
 ) -> (Router, softprobe_runtime::api::AppState, TempDir) {
     let (router, state, temp) = build_tempo_router().await;
     ingest_records(&router, records, None).await;
-    flush_traces(&state, "local-sqlite-tenant").await;
+    flush_traces(&state, crate::util::tenant::LOCAL_WORKSPACE_ID).await;
     (router, state, temp)
 }
 
