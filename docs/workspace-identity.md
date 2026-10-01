@@ -22,8 +22,10 @@ Process config owns the single physical scope. `engine_for(workspace_id)` uses
 that default without requiring `workspace_scope_binding`. Row filters and
 temp views use `workspace_id = <uuid>`.
 
-`workspace_scope_binding` is not on the shared request path. Dedicated mode
-still uses the registry for workspace UUID → physical scope.
+`workspace_scope_binding` is not on the shared request path (`engine_for`).
+Admin `provision_scope` still records workspace UUID → default physical so
+maintenance can list provisioned workspace keys. Dedicated mode uses the
+registry for workspace UUID → physical scope on every resolve.
 
 ## Assertion
 

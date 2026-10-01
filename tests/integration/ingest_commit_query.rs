@@ -134,7 +134,7 @@ async fn test_iceberg_writer_bulk_session_roundtrip() {
                 parent_span_id: None,
                 app_id: format!("app-{}", session_idx % 2), // Alternate between 2 apps
                 organization_id: Some("org-test".to_string()),
-                workspace_id: Some("tenant-test".to_string()),
+                workspace_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
                 agent_id: None,
                 agent_name: None,
                 message_type: "HTTP_REQUEST".to_string(),
@@ -617,7 +617,7 @@ async fn test_http_fields_in_span_model() {
         parent_span_id: None,
         app_id: "test-app".to_string(),
         organization_id: Some("org-test".to_string()),
-        workspace_id: Some("tenant-test".to_string()),
+        workspace_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
         agent_id: None,
         agent_name: None,
         message_type: "HTTP_REQUEST".to_string(),

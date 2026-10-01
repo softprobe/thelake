@@ -34,7 +34,7 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     let metadata_path = config.ducklake.metadata_path.clone();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
 
-    let workspace_id = format!("tenant-promoted-{suffix}");
+    let workspace_id = Uuid::new_v4().to_string();
     let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");

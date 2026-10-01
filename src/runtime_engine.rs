@@ -811,7 +811,10 @@ RETURNING physical_scope_id;"#,
         )
     }
 
-    async fn resolve_scope_without_tables(&self, scope_id: &str) -> Result<PhysicalScope> {
+    pub(crate) async fn resolve_scope_without_tables(
+        &self,
+        scope_id: &str,
+    ) -> Result<PhysicalScope> {
         self.resolve_scope_legacy(scope_id).await
     }
 
@@ -843,18 +846,9 @@ RETURNING physical_scope_id;"#,
         request: ScopeProvisioningRequest,
         scope: PhysicalScope,
     ) -> Result<PhysicalScope> {
-        // Shared workspaces are logical names only. They always use the process
-        // default physical scope and never write workspace_scope_binding.
-        if self.workspace_scope_mode == WorkspaceScopeMode::Shared {
-            let mut client = self.pool.get().await?;
-            let transaction = client.transaction().await?;
-            let _ = self
-                .insert_physical_scope(&transaction, &self.default_physical_scope)
-                .await?;
-            transaction.commit().await?;
-            return Ok(self.default_physical_scope.clone());
-        }
-
+        // Shared mode still records workspace_scope_binding → default physical so
+        // maintenance can list provisioned workspace keys. engine_for keeps the
+        // weak bind (no binding lookup) on the request path.
         let mut client = self.pool.get().await?;
         let physical = scope.clone();
         let transaction = client.transaction().await?;

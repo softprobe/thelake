@@ -176,7 +176,7 @@ async fn warm_writes_perform_zero_schema_probes_postgres() {
         .await
         .expect("connect runtime engines");
 
-    let workspace_id = format!("tenant-hotpath-{suffix}");
+    let workspace_id = uuid::Uuid::new_v4().to_string();
     let tenant_schema = format!("hotpath_tenant_{suffix}");
     let tenant_data = temp.path().join("data").to_string_lossy().to_string();
 

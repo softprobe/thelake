@@ -43,14 +43,14 @@ fn load_fixture(name: &str) -> serde_json::Value {
 fn loki_scope_header_must_match_tenant() {
     let err = TenantContext::from_authenticated(
         TenantInfo {
-            workspace_id: "tenant-a".into(),
+            workspace_id: crate::util::tenant::COMPAT_WORKSPACE_A.into(),
             bucket_name: "b".into(),
             dataset_id: "d".into(),
             agent_id: None,
             agent_name: None,
         },
         ProtocolScope::Loki,
-        Some("tenant-b"),
+        Some(crate::util::tenant::COMPAT_WORKSPACE_B),
         QueryLimits::default(),
     )
     .unwrap_err();
@@ -61,14 +61,14 @@ fn loki_scope_header_must_match_tenant() {
 fn loki_matching_scope_header_ok() {
     TenantContext::from_authenticated(
         TenantInfo {
-            workspace_id: "tenant-a".into(),
+            workspace_id: crate::util::tenant::COMPAT_WORKSPACE_A.into(),
             bucket_name: "b".into(),
             dataset_id: "d".into(),
             agent_id: None,
             agent_name: None,
         },
         ProtocolScope::Loki,
-        Some("tenant-a"),
+        Some(crate::util::tenant::COMPAT_WORKSPACE_A),
         QueryLimits::default(),
     )
     .expect("match");

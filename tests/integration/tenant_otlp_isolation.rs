@@ -103,8 +103,8 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
     let registry_schema = format!("softprobe_ingest_iso_{suffix}");
     let config = postgres_registry_config(&temp, registry_schema.clone());
 
-    let tenant_a = format!("tenant_ingest_a_{suffix}");
-    let tenant_b = format!("tenant_ingest_b_{suffix}");
+    let tenant_a = Uuid::new_v4().to_string();
+    let tenant_b = Uuid::new_v4().to_string();
     let meta_a = format!("softprobe_ingest_a_data_{suffix}");
     let meta_b = format!("softprobe_ingest_b_data_{suffix}");
     let path_a = temp.path().join("data_a").to_string_lossy().to_string();
@@ -275,7 +275,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     config.object_store.endpoint = Some("http://localhost:9000".to_string());
     config.object_store.region = "us-east-1".to_string();
 
-    let workspace_id = format!("tenant_grpc_it_{suffix}");
+    let workspace_id = Uuid::new_v4().to_string();
     let tenant_schema = format!("softprobe_grpc_it_data_{suffix}");
     let tenant_data_path = format!("s3://warehouse/grpc_it/{}/", suffix);
 

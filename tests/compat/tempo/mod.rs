@@ -82,14 +82,14 @@ fn skip_if_sandbox_cannot_bind_test_port(test_id: &str) -> bool {
 fn tempo_scope_header_must_match_tenant() {
     let err = TenantContext::from_authenticated(
         TenantInfo {
-            workspace_id: "tenant-a".into(),
+            workspace_id: crate::util::tenant::COMPAT_WORKSPACE_A.into(),
             bucket_name: "b".into(),
             dataset_id: "d".into(),
             agent_id: None,
             agent_name: None,
         },
         ProtocolScope::Tempo,
-        Some("other"),
+        Some(crate::util::tenant::COMPAT_OTHER_WORKSPACE_ID),
         QueryLimits::default(),
     )
     .unwrap_err();

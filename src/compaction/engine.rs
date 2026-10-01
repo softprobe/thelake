@@ -93,15 +93,20 @@ impl MaintenanceEngine {
     }
 
     pub(crate) async fn resolve_scope(&self, scope_key: &str) -> Result<MaintenanceScope> {
-        let physical = self
-            .workspace_scopes()
-            .await?
-            .into_iter()
-            .find(|(key, _)| key == scope_key)
-            .map(|(_, physical)| physical)
-            .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))?;
+        let scope_key = crate::workspace_scope::effective_workspace_id(scope_key).to_string();
+        // Shared mode weakly binds any workspace to the process default physical
+        // scope. Dedicated mode is fail-closed on the durable registry. The
+        // synthetic `_default` key always maps to the process default warehouse.
+        let physical = if scope_key == DEFAULT_WORKSPACE_ID {
+            self.default_physical.clone()
+        } else {
+            self.scope_registry
+                .resolve_scope_without_tables(&scope_key)
+                .await
+                .map_err(|_| anyhow!("unknown maintenance scope {scope_key}"))?
+        };
         Ok(MaintenanceScope {
-            scope_key: scope_key.to_string(),
+            scope_key,
             physical,
             pool: self.scope_registry.pool().clone(),
         })
@@ -207,12 +212,7 @@ impl MaintenanceEngine {
     }
 
     async fn lookup_physical_scope(&self, scope_key: &str) -> Result<PhysicalScope> {
-        self.physical_scopes()
-            .await?
-            .into_iter()
-            .find(|(id, _)| id == scope_key)
-            .map(|(_, physical)| physical)
-            .ok_or_else(|| anyhow!("unknown maintenance scope {scope_key}"))
+        Ok(self.resolve_scope(scope_key).await?.physical)
     }
 
     /// Resolve by maintenance key, then run one SQL maintenance pass.

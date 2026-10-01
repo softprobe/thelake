@@ -42,7 +42,7 @@ async fn setup() -> PostgresBackend {
     let temp = TempDir::new().expect("tempdir");
     let suffix = Uuid::new_v4().simple().to_string();
     let short = &suffix[..8];
-    let workspace_id = format!("tenant-promo-{short}");
+    let workspace_id = Uuid::new_v4().to_string();
     // One catalog schema for registry + data. Shared mode binds workspaces to the
     // process-default physical scope (config schema); isolated mode provisions the
     // same schema via request overrides. Verification must not invent a second

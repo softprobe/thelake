@@ -106,8 +106,11 @@ storage, ingest, query, and optional session/catalog services. Operational APIs
 must not accept an arbitrary workspace or DuckLake scope after binding.
 
 Canonical terms and kill list: [`workspace-identity.md`](workspace-identity.md).
-Shared mode uses a weak bind (process physical scope). Dedicated mode stores
-workspace UUID → physical scope in the durable registry.
+Shared mode uses a weak bind on the request path (process physical scope;
+`engine_for` does not look up `workspace_scope_binding`). Admin provision still
+records workspace UUID → default physical for maintenance listing. Dedicated
+mode stores workspace UUID → physical scope in the durable registry for every
+resolve.
 
 ## ADR-017: Workspace UUID is the only logical identity
 

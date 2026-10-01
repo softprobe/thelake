@@ -97,8 +97,8 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
 async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_schema() {
     let manager = postgres_manager().await;
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
-    let tenant_a = format!("tenant_promo_registry_a_{suffix}");
-    let tenant_b = format!("tenant_promo_registry_b_{suffix}");
+    let tenant_a = Uuid::new_v4().to_string();
+    let tenant_b = Uuid::new_v4().to_string();
 
     let schema_a = format!("promo_a_{suffix}");
     let schema_b = format!("promo_b_{suffix}");
