@@ -34,29 +34,59 @@ impl Drop for HeartbeatStopGuard {
     }
 }
 
-/// In-process due clock: skip `Job::run` until `last_success + interval`.
+/// In-process due clock: skip `Job::run` until `last_attempt + interval`.
 /// Wake stays `min(interval)`; long-interval jobs do not execute every wake.
+///
+/// Stamped with the wake-start `Instant` (right after `ticker.tick()`), not run
+/// completion — so wake==interval does not skip from multi-second passes.
+/// When a pass **overruns** `interval`, success re-stamps to `now` so Tokio
+/// `MissedTickBehavior::Delay` catch-up ticks do not busy-loop. Failures
+/// [`Self::clear`] so the next wake retries.
 struct DueTracker {
-    last_success: HashMap<(String, String), Instant>,
+    last_attempt: HashMap<(String, String), Instant>,
 }
 
 impl DueTracker {
     fn new() -> Self {
         Self {
-            last_success: HashMap::new(),
+            last_attempt: HashMap::new(),
         }
     }
 
     fn is_due(&self, job: &str, scope: &str, interval: Duration) -> bool {
-        match self.last_success.get(&(job.to_string(), scope.to_string())) {
+        match self.last_attempt.get(&(job.to_string(), scope.to_string())) {
             None => true,
-            Some(at) => at.elapsed() >= interval,
+            // Small skew: wake-start Instant::now() is slightly after the ticker
+            // deadline, so the next aligned wake can be a hair under `interval`.
+            Some(at) => at.elapsed() + Self::due_skew(interval) >= interval,
         }
     }
 
-    fn mark_success(&mut self, job: &str, scope: &str) {
-        self.last_success
-            .insert((job.to_string(), scope.to_string()), Instant::now());
+    fn due_skew(interval: Duration) -> Duration {
+        Duration::from_millis(5)
+            .min(interval / 10)
+            .max(Duration::from_millis(1))
+    }
+
+    fn mark_attempt(&mut self, job: &str, scope: &str, at: Instant) {
+        self.last_attempt
+            .insert((job.to_string(), scope.to_string()), at);
+    }
+
+    /// When a wake overruns the shared ticker period, bump every scope still
+    /// stamped with `wake_started` so a Tokio Delay catch-up tick does not
+    /// re-run earlier work (any job/scope, Ok or after a later Err/panic).
+    fn restamp_wake(&mut self, wake_started: Instant, now: Instant) {
+        for at in self.last_attempt.values_mut() {
+            if *at == wake_started {
+                *at = now;
+            }
+        }
+    }
+
+    fn clear(&mut self, job: &str, scope: &str) {
+        self.last_attempt
+            .remove(&(job.to_string(), scope.to_string()));
     }
 }
 
@@ -103,6 +133,7 @@ pub fn spawn_runner(
 
         loop {
             ticker.tick().await;
+            let wake_started = Instant::now();
             for job in &jobs {
                 let scopes = match job.scope_keys().await {
                     Ok(s) => s,
@@ -182,6 +213,15 @@ pub fn spawn_runner(
 
                     // RAII: stop HB even if `job.run` panics.
                     let _hb_guard = HeartbeatStopGuard(Some(hb_stop_tx));
+                    // Wake-start stamp when under the shared wake period; if this
+                    // wake already overran `wake`, stamp `now` so later work is
+                    // not due on a Delay catch-up tick.
+                    let stamp = if wake_started.elapsed() >= wake {
+                        Instant::now()
+                    } else {
+                        wake_started
+                    };
+                    due.mark_attempt(job.name(), &scope, stamp);
                     let run_started = Instant::now();
                     let run_result = AssertUnwindSafe(job.run_fenced(&scope, &token, lost_rx))
                         .catch_unwind()
@@ -198,17 +238,22 @@ pub fn spawn_runner(
                     self_monitoring::record_job_duration(job.name(), &scope, status, run_elapsed);
 
                     match &run_result {
-                        Ok(Ok(())) => {
-                            due.mark_success(job.name(), &scope);
-                        }
+                        Ok(Ok(())) => {}
                         Ok(Err(err)) => {
+                            due.clear(job.name(), &scope);
                             warn!(job = job.name(), scope = %scope, "job failed: {err}");
                             self_monitoring::record_job_error(job.name(), &scope);
                         }
                         Err(_) => {
+                            due.clear(job.name(), &scope);
                             warn!(job = job.name(), scope = %scope, "job panicked");
                             self_monitoring::record_job_error(job.name(), &scope);
                         }
+                    }
+                    // After any outcome: if the wake overran the ticker period,
+                    // restamp every scope still on wake_started (cross-job).
+                    if wake_started.elapsed() >= wake {
+                        due.restamp_wake(wake_started, Instant::now());
                     }
 
                     if let Err(err) = leases.release_lease(job.name(), &scope, &token).await {
@@ -224,4 +269,62 @@ pub fn spawn_runner(
     });
 
     Some(handle)
+}
+
+#[cfg(test)]
+mod due_tracker_tests {
+    use super::DueTracker;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn never_ran_is_due() {
+        let due = DueTracker::new();
+        assert!(due.is_due("j", "s", Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn wake_aligned_stamp_due_after_interval_minus_skew() {
+        let mut due = DueTracker::new();
+        let interval = Duration::from_millis(200);
+        // Simulate wake-start stamp slightly "late" vs the next wake's elapsed.
+        let stamped = Instant::now() - (interval - Duration::from_millis(3));
+        due.mark_attempt("j", "s", stamped);
+        assert!(
+            due.is_due("j", "s", interval),
+            "skew must keep wake==interval due on the next aligned wake"
+        );
+    }
+
+    #[test]
+    fn not_due_shortly_after_stamp() {
+        let mut due = DueTracker::new();
+        let interval = Duration::from_millis(200);
+        due.mark_attempt("j", "s", Instant::now());
+        assert!(!due.is_due("j", "s", interval));
+    }
+
+    #[test]
+    fn restamp_wake_updates_all_jobs_with_same_stamp() {
+        let mut due = DueTracker::new();
+        let wake = Instant::now() - Duration::from_secs(10);
+        due.mark_attempt("j", "a", wake);
+        due.mark_attempt("j", "b", wake);
+        due.mark_attempt("other", "a", wake);
+        let fresh = Instant::now();
+        due.mark_attempt("fresh", "x", fresh);
+        let now = Instant::now();
+        due.restamp_wake(wake, now);
+        assert!(!due.is_due("j", "a", Duration::from_secs(3600)));
+        assert!(!due.is_due("j", "b", Duration::from_secs(3600)));
+        assert!(!due.is_due("other", "a", Duration::from_secs(3600)));
+        assert!(!due.is_due("fresh", "x", Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn clear_makes_due_again() {
+        let mut due = DueTracker::new();
+        due.mark_attempt("j", "s", Instant::now());
+        due.clear("j", "s");
+        assert!(due.is_due("j", "s", Duration::from_secs(3600)));
+    }
 }
