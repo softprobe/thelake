@@ -877,18 +877,17 @@ impl DuckDBCore {
         // reattach or mem::forget connections after writes.
 
         let query_run = self.ducklake_inline_sql(query);
-        // Optional query-worker EXPLAIN gate (`query.sql_gate`, default on).
+        // Validate DuckDB's physical plan after traces/logs/scores have been
+        // expanded to their final table names. Every fact scan must carry its
+        // own pushed timestamp filter before the query can execute.
         let gate_start = std::time::Instant::now();
-        if self.config.query.sql_gate {
-            if let Err(e) =
-                crate::sql::ensure_fact_scan_uses_timestamp_pruning(&state.conn, &query_run)
-            {
-                return TimedExecute {
-                    result: Err(anyhow!("SQL gate: {e}")),
-                    gate_elapsed: gate_start.elapsed(),
-                    run_elapsed: std::time::Duration::ZERO,
-                };
-            }
+        if let Err(e) = crate::sql::ensure_fact_scan_uses_timestamp_pruning(&state.conn, &query_run)
+        {
+            return TimedExecute {
+                result: Err(anyhow!("SQL gate: {e}")),
+                gate_elapsed: gate_start.elapsed(),
+                run_elapsed: std::time::Duration::ZERO,
+            };
         }
         let gate_elapsed = gate_start.elapsed();
         if std::env::var("SOFTPROBE_LOG_SQL").ok().as_deref() == Some("1") {
@@ -950,8 +949,6 @@ impl DuckDBCore {
             let query_start = std::time::Instant::now();
             self.try_wrap_cache_httpfs_filesystems(state);
             let mut stmt = state.conn.prepare(query_run.as_str())?;
-            let prepare_elapsed = query_start.elapsed();
-            let fetch_start = std::time::Instant::now();
             let mut query_rows = stmt.query([])?;
             let column_names = query_rows
                 .as_ref()
@@ -965,21 +962,14 @@ impl DuckDBCore {
                 .unwrap_or_default();
 
             let mut rows = Vec::new();
-            let mut duck_get_elapsed = std::time::Duration::ZERO;
-            let mut json_elapsed = std::time::Duration::ZERO;
             while let Some(row) = query_rows.next()? {
                 let mut values = Vec::with_capacity(column_names.len());
                 for idx in 0..column_names.len() {
-                    let get_start = std::time::Instant::now();
                     let value: DuckValue = row.get(idx)?;
-                    duck_get_elapsed += get_start.elapsed();
-                    let json_start = std::time::Instant::now();
                     values.push(duck_value_to_json(value));
-                    json_elapsed += json_start.elapsed();
                 }
                 rows.push(values);
             }
-            let fetch_elapsed = fetch_start.elapsed();
 
             let result = QueryResult {
                 columns: column_names,
@@ -987,15 +977,7 @@ impl DuckDBCore {
                 rows,
             };
             if diag {
-                println!(
-                    "DIAG execute_query total={:?} prepare={:?} fetch_loop={:?} duck_get={:?} json_convert={:?} rows={}",
-                    query_start.elapsed(),
-                    prepare_elapsed,
-                    fetch_elapsed,
-                    duck_get_elapsed,
-                    json_elapsed,
-                    result.row_count
-                );
+                println!("DIAG execute_query: {:?}", query_start.elapsed());
             }
             Ok(result)
         };
@@ -1473,64 +1455,6 @@ mod tests {
         )
         .expect("seed prepared catalog");
         conn
-    }
-
-    fn test_core(sql_gate: bool) -> DuckDBCore {
-        let mut config = Config::default();
-        config.query.sql_gate = sql_gate;
-        config.ducklake.catalog_alias = "softprobe".to_string();
-        config.ducklake.metadata_schema = "main".to_string();
-        config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Shared;
-        let scope = PhysicalScope::from_ducklake(&config.ducklake);
-        let access = DuckLakeAccess::Workspace(
-            WorkspaceBinding::new("workspace-a", scope, config.ducklake.workspace_scope_mode)
-                .expect("binding"),
-        );
-        DuckDBCore {
-            cache: CacheSettings::new(&config),
-            config,
-            access,
-            counts_toward_liveness: false,
-            workspace_id: "workspace-a".to_string(),
-        }
-    }
-
-    #[test]
-    fn sql_gate_false_skips_explain_and_runs() {
-        let core = test_core(false);
-        let mut state = core
-            .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
-            .unwrap();
-        let timed = core.execute_query_on_state(&mut state, "SELECT id FROM traces LIMIT 1");
-        assert!(
-            timed.result.is_ok(),
-            "sql_gate false must skip EXPLAIN and run: {:?}",
-            timed.result.err()
-        );
-        assert!(
-            timed.gate_elapsed.as_millis() < 50,
-            "skipped gate should be near-zero: {:?}",
-            timed.gate_elapsed
-        );
-    }
-
-    #[test]
-    fn sql_gate_true_rejects_unbounded_fact_scan() {
-        let core = test_core(true);
-        let mut state = core
-            .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
-            .unwrap();
-        let timed = core.execute_query_on_state(&mut state, "SELECT id FROM traces LIMIT 1");
-        let err = timed
-            .result
-            .err()
-            .expect("sql_gate true must reject unbounded fact scan")
-            .to_string();
-        assert!(
-            err.contains("SQL gate"),
-            "expected SQL gate prefix, got {err}"
-        );
-        assert!(timed.run_elapsed.is_zero());
     }
 
     #[test]
