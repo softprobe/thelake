@@ -877,17 +877,18 @@ impl DuckDBCore {
         // reattach or mem::forget connections after writes.
 
         let query_run = self.ducklake_inline_sql(query);
-        // Validate DuckDB's physical plan after traces/logs/scores have been
-        // expanded to their final table names. Every fact scan must carry its
-        // own pushed timestamp filter before the query can execute.
+        // Optional query-worker fact-scan gate (`query.sql_gate`, default off).
         let gate_start = std::time::Instant::now();
-        if let Err(e) = crate::sql::ensure_fact_scan_uses_timestamp_pruning(&state.conn, &query_run)
-        {
-            return TimedExecute {
-                result: Err(anyhow!("SQL gate: {e}")),
-                gate_elapsed: gate_start.elapsed(),
-                run_elapsed: std::time::Duration::ZERO,
-            };
+        if self.config.query.sql_gate {
+            if let Err(e) =
+                crate::sql::ensure_fact_scan_uses_timestamp_pruning(&state.conn, &query_run)
+            {
+                return TimedExecute {
+                    result: Err(anyhow!("SQL gate: {e}")),
+                    gate_elapsed: gate_start.elapsed(),
+                    run_elapsed: std::time::Duration::ZERO,
+                };
+            }
         }
         let gate_elapsed = gate_start.elapsed();
         if std::env::var("SOFTPROBE_LOG_SQL").ok().as_deref() == Some("1") {
@@ -948,6 +949,9 @@ impl DuckDBCore {
         let run_once = |state: &mut ConnectionState| -> Result<QueryResult> {
             let query_start = std::time::Instant::now();
             self.try_wrap_cache_httpfs_filesystems(state);
+            // duckdb-rs requires Statement for multi-row fetch. Preparing the
+            // full SQL every request with inlined literals gets no reuse.
+            // TODO(#114): parameterized SQL + per-worker Statement cache.
             let mut stmt = state.conn.prepare(query_run.as_str())?;
             let mut query_rows = stmt.query([])?;
             let column_names = query_rows
@@ -1455,6 +1459,69 @@ mod tests {
         )
         .expect("seed prepared catalog");
         conn
+    }
+
+    fn test_core(sql_gate: bool) -> DuckDBCore {
+        let mut config = Config::default();
+        config.query.sql_gate = sql_gate;
+        config.ducklake.catalog_alias = "softprobe".to_string();
+        config.ducklake.metadata_schema = "main".to_string();
+        config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Shared;
+        let scope = PhysicalScope::from_ducklake(&config.ducklake);
+        let access = DuckLakeAccess::Workspace(
+            WorkspaceBinding::new("workspace-a", scope, config.ducklake.workspace_scope_mode)
+                .expect("binding"),
+        );
+        DuckDBCore {
+            cache: CacheSettings::new(&config),
+            config,
+            access,
+            counts_toward_liveness: false,
+            workspace_id: "workspace-a".to_string(),
+        }
+    }
+
+    #[test]
+    fn sql_gate_false_skips_gate_and_runs() {
+        let core = test_core(false);
+        let mut state = core
+            .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
+            .unwrap();
+        let timed = core.execute_query_on_state(&mut state, "SELECT id FROM traces LIMIT 1");
+        let result = timed
+            .result
+            .expect("sql_gate false must skip gate and run");
+        assert_eq!(result.columns, vec!["id".to_string()]);
+    }
+
+    #[test]
+    fn sql_gate_false_still_runs_explain_result_sets() {
+        let core = test_core(false);
+        let mut state = core
+            .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
+            .unwrap();
+        let timed =
+            core.execute_query_on_state(&mut state, "EXPLAIN SELECT id FROM traces LIMIT 1");
+        let result = timed
+            .result
+            .expect("EXPLAIN must work on query worker path");
+        assert!(result.row_count > 0);
+    }
+
+    #[test]
+    fn sql_gate_true_rejects_unbounded_fact_scan() {
+        let core = test_core(true);
+        let mut state = core
+            .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
+            .unwrap();
+        let timed = core.execute_query_on_state(&mut state, "SELECT id FROM traces LIMIT 1");
+        let err = timed
+            .result
+            .err()
+            .expect("sql_gate true must reject unbounded fact scan")
+            .to_string();
+        assert!(err.contains("SQL gate"), "expected SQL gate prefix, got {err}");
+        assert!(timed.run_elapsed.is_zero());
     }
 
     #[test]
