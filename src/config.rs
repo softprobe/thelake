@@ -566,13 +566,24 @@ impl Config {
     }
 }
 
+/// AWS EC2 Instance Metadata Service (IMDS) IAM credentials endpoint.
+///
+/// `169.254.169.254` is AWS's fixed link-local address for IMDS — not
+/// region-specific and only reachable from an EC2 instance (or an IMDS
+/// emulator). Listing this URL returns the instance-profile role name;
+/// appending the role name returns temporary credentials.
+///
+/// Reference:
+/// <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/iam-roles-for-amazon-ec2.html#instance-metadata-security-credentials>
+const AWS_EC2_IMDS_IAM_CREDENTIALS_URL: &str =
+    "http://169.254.169.254/latest/meta-data/iam/security-credentials/";
+
 fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredentials> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()?;
 
-    let role_url = "http://169.254.169.254/latest/meta-data/iam/security-credentials/";
-    let role_response = match client.get(role_url).send() {
+    let role_response = match client.get(AWS_EC2_IMDS_IAM_CREDENTIALS_URL).send() {
         Ok(resp) => resp,
         Err(_) => return Ok(ObjectStoreCredentials::default()),
     };
@@ -582,10 +593,7 @@ fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredential
         return Ok(ObjectStoreCredentials::default());
     }
 
-    let creds_url = format!(
-        "http://169.254.169.254/latest/meta-data/iam/security-credentials/{}",
-        role_name
-    );
+    let creds_url = format!("{AWS_EC2_IMDS_IAM_CREDENTIALS_URL}{role_name}");
     let creds_response = client.get(&creds_url).send()?;
     let creds_json: serde_json::Value = creds_response.json()?;
 
@@ -600,10 +608,21 @@ fn fetch_instance_metadata_credentials() -> anyhow::Result<ObjectStoreCredential
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_write_timeout_seconds, Config, ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS};
+    use super::{
+        resolve_write_timeout_seconds, Config, ABSOLUTE_MAX_WRITE_TIMEOUT_SECONDS,
+        AWS_EC2_IMDS_IAM_CREDENTIALS_URL,
+    };
     use std::sync::Mutex;
 
     static CONFIG_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn aws_ec2_imds_iam_credentials_url_is_the_documented_link_local_endpoint() {
+        assert_eq!(
+            AWS_EC2_IMDS_IAM_CREDENTIALS_URL,
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+        );
+    }
 
     #[test]
     fn default_roundtrip_yaml() {
