@@ -459,6 +459,274 @@ async fn runner_due_gates_long_interval_job_under_fast_wake() {
     );
 }
 
+struct TimedIntervalJob {
+    name: &'static str,
+    runs: AtomicUsize,
+    sleep_ms: u64,
+    interval: Duration,
+    scopes: Vec<String>,
+}
+
+#[async_trait]
+impl Job for TimedIntervalJob {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn interval(&self) -> Duration {
+        self.interval
+    }
+    async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self.scopes.clone())
+    }
+    async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
+        tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn runner_wake_equals_interval_does_not_double_cadence() {
+    // Staging used maintenance.interval_seconds == async wake. Completion stamps
+    // (and Instant::now() after lease setup) saw elapsed < interval → ~2× cadence.
+    // Wake-start stamp + skew must run every wake when work ≪ interval.
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let interval = Duration::from_millis(200);
+    let job = Arc::new(TimedIntervalJob {
+        name: "timed",
+        runs: AtomicUsize::new(0),
+        sleep_ms: 80,
+        interval,
+        scopes: vec!["t1".into()],
+    });
+    let runs = Arc::clone(&job);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-wake-eq-interval".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    handle.abort();
+    let n = runs.runs.load(Ordering::SeqCst);
+    assert!(
+        n >= 3,
+        "wake==interval must run every wake after wake-start stamp; got {n} (2× cadence would be ~2)"
+    );
+}
+
+#[tokio::test]
+async fn runner_overrun_pass_does_not_busy_loop_on_delay_catchup() {
+    // When run > interval, Tokio Delay returns an immediate catch-up tick.
+    // Overrun success must re-stamp so that tick is not_due (no back-to-back).
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let interval = Duration::from_millis(100);
+    let job = Arc::new(TimedIntervalJob {
+        name: "overrun",
+        runs: AtomicUsize::new(0),
+        sleep_ms: 250,
+        interval,
+        scopes: vec!["t1".into()],
+    });
+    let runs = Arc::clone(&job);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-overrun".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
+    tokio::time::sleep(Duration::from_millis(320)).await;
+    let mid = runs.runs.load(Ordering::SeqCst);
+    handle.abort();
+    assert_eq!(
+        mid, 1,
+        "Delay catch-up after overrun must not start a second pass immediately; got {mid}"
+    );
+}
+
+#[tokio::test]
+async fn runner_multi_scope_overrun_does_not_rerun_early_scopes_on_catchup() {
+    // Cumulative scope work crosses wake; earlier scopes must be restamped.
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let interval = Duration::from_millis(100);
+    let job = Arc::new(TimedIntervalJob {
+        name: "multi_overrun",
+        runs: AtomicUsize::new(0),
+        sleep_ms: 60, // 60+60 > 100
+        interval,
+        scopes: vec!["a".into(), "b".into()],
+    });
+    let runs = Arc::clone(&job);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-multi-overrun".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
+    tokio::time::sleep(Duration::from_millis(180)).await;
+    let mid = runs.runs.load(Ordering::SeqCst);
+    handle.abort();
+    assert_eq!(
+        mid, 2,
+        "catch-up must not re-run early scopes after multi-scope overrun; got {mid}"
+    );
+}
+
+#[tokio::test]
+async fn runner_ok_then_err_overrun_does_not_rerun_ok_scope_on_catchup() {
+    struct MixedJob {
+        ok_runs: AtomicUsize,
+        bad_runs: AtomicUsize,
+        interval: Duration,
+    }
+    #[async_trait]
+    impl Job for MixedJob {
+        fn name(&self) -> &'static str {
+            "mixed"
+        }
+        fn interval(&self) -> Duration {
+            self.interval
+        }
+        async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+            Ok(vec!["ok".into(), "bad".into()])
+        }
+        async fn run(&self, scope_key: &str) -> anyhow::Result<()> {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            if scope_key == "bad" {
+                self.bad_runs.fetch_add(1, Ordering::SeqCst);
+                return Err(anyhow::anyhow!("injected"));
+            }
+            self.ok_runs.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let job = Arc::new(MixedJob {
+        ok_runs: AtomicUsize::new(0),
+        bad_runs: AtomicUsize::new(0),
+        interval: Duration::from_millis(100),
+    });
+    let ok_runs = Arc::clone(&job);
+    let bad_runs = Arc::clone(&job);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-ok-err-overrun".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(&cfg, leases, vec![job as Arc<dyn Job>]).expect("runner");
+    // Wait until cleared `bad` has retried on Delay catch-up, but before the
+    // next full interval can legitimately re-run `ok`.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        if bad_runs.bad_runs.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let ok = ok_runs.ok_runs.load(Ordering::SeqCst);
+    let bad = bad_runs.bad_runs.load(Ordering::SeqCst);
+    handle.abort();
+    assert_eq!(ok, 1, "Ok scope must not re-run after overrun restamp; got {ok}");
+    assert!(
+        bad >= 2,
+        "cleared Err scope should retry on catch-up; got {bad}"
+    );
+}
+
+#[tokio::test]
+async fn runner_cross_job_overrun_does_not_rerun_earlier_job_on_catchup() {
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let interval = Duration::from_millis(100);
+    let first = Arc::new(TimedIntervalJob {
+        name: "first",
+        runs: AtomicUsize::new(0),
+        sleep_ms: 40,
+        interval,
+        scopes: vec!["t1".into()],
+    });
+    let second = Arc::new(TimedIntervalJob {
+        name: "second",
+        runs: AtomicUsize::new(0),
+        sleep_ms: 80,
+        interval,
+        scopes: vec!["t1".into()],
+    });
+    let first_runs = Arc::clone(&first);
+    let second_runs = Arc::clone(&second);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-cross-job-overrun".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(
+        &cfg,
+        leases,
+        vec![first as Arc<dyn Job>, second as Arc<dyn Job>],
+    )
+    .expect("runner");
+    // first 40ms + second 80ms = 120ms > wake 100ms → catch-up must not re-run first.
+    tokio::time::sleep(Duration::from_millis(180)).await;
+    let a = first_runs.runs.load(Ordering::SeqCst);
+    let b = second_runs.runs.load(Ordering::SeqCst);
+    handle.abort();
+    assert_eq!(a, 1, "earlier job must not re-run on Delay catch-up; got {a}");
+    assert_eq!(b, 1, "later job must run once; got {b}");
+}
+
+#[tokio::test]
+async fn runner_retries_after_panic() {
+    struct AlwaysPanicJob {
+        runs: AtomicUsize,
+        interval: Duration,
+    }
+    #[async_trait]
+    impl Job for AlwaysPanicJob {
+        fn name(&self) -> &'static str {
+            "always_panic"
+        }
+        fn interval(&self) -> Duration {
+            self.interval
+        }
+        async fn scope_keys(&self) -> anyhow::Result<Vec<String>> {
+            Ok(vec!["panic-scope".into()])
+        }
+        async fn run(&self, _scope_key: &str) -> anyhow::Result<()> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            panic!("injected panic");
+        }
+    }
+
+    let leases = Arc::new(MemoryLeaseStore::new());
+    let panic_job = Arc::new(AlwaysPanicJob {
+        runs: AtomicUsize::new(0),
+        interval: Duration::from_millis(40),
+    });
+    let runs = Arc::clone(&panic_job);
+    let cfg = AsyncJobsConfig {
+        instance_id: Some("runner-retry-panic".into()),
+        heartbeat_seconds: 1,
+        lease_ttl_seconds: 60,
+    };
+    let handle = spawn_runner(&cfg, leases, vec![panic_job as Arc<dyn Job>]).expect("runner");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while runs.runs.load(Ordering::SeqCst) < 2 {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    handle.abort();
+    assert!(
+        runs.runs.load(Ordering::SeqCst) >= 2,
+        "panic must clear due stamp so next wake retries; got {}",
+        runs.runs.load(Ordering::SeqCst)
+    );
+}
+
 #[tokio::test]
 async fn runner_runs_when_lease_won() {
     let leases = Arc::new(MemoryLeaseStore::new());
