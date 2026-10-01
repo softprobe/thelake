@@ -8,6 +8,8 @@ use softprobe_runtime::runtime_engine::ScopeProvisioningRequest;
 /// Default test workspace UUID when no `x-test-tenant-id` header is set.
 pub const LOCAL_WORKSPACE_ID: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 
+// Re-export for compat routers; unused when only `integration_perf` is compiled.
+#[allow(unused_imports)]
 pub use super::workspace_ids::*;
 
 /// Register [`LOCAL_WORKSPACE_ID`] in the durable scope registry, reusing
