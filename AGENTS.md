@@ -22,6 +22,17 @@ These requirements always apply to design, implementation, refactoring, and revi
 Prefer shared abstractions that remove duplication over parallel implementations.
 Especially enforce rules 1, 2, and 4.
 
+# SQL safety invariants
+
+These are hard repository contracts, not review preferences:
+
+1. **No query SQL in code string literals.** Put query statements in `.sql` files and load/render them from code. Small non-query fragments (identifiers, predicates, projection fragments) may be composed by typed/query-builder helpers, but must not contain complete SQL statements.
+2. **Every `traces` or `logs` read is finitely time-bounded.** It must carry both a lower and an upper bare-`timestamp` predicate so DuckLake can partition-prune. Never add an unbounded historical scan, including lookup/detail queries that already have trace/session IDs.
+3. **Do not bypass the execution gate.** Fact-table SQL must execute through the checked query/engine paths. Do not add raw DuckDB execution sites to work around a rejected query.
+4. **Fix the harness instead of adding exceptions.** If a legitimate query is rejected, preserve the invariant and improve the template/builder/gate. Do not add a file, directory, or call-site exemption merely to make CI green.
+
+`scripts/check_sql_guardrails.py` blocks newly introduced inline SQL and checks changed `.sql` templates that read traces/logs. Runtime DuckDB plan checks remain the final enforcement layer for time bounds.
+
 # DuckLake catalog
 
 Production uses a **Postgres** DuckLake catalog only. Do not reintroduce
