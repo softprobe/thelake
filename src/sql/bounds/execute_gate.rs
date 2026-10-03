@@ -222,7 +222,7 @@ pub fn names_fact_table(sql: &str) -> bool {
 }
 
 /// Check DuckDB's planned physical scans before running a fact-table read.
-/// A timestamp filter must reach every traces/logs/scores scan, which catches
+/// A finite lower+upper timestamp window must reach every traces/logs/scores scan, which catches
 /// nested scans, disjunctions, joins, and quoted table names without trying to
 /// parse SQL ourselves.
 pub(crate) fn ensure_fact_scan_uses_timestamp_pruning(
@@ -787,7 +787,9 @@ fn missing_fact_scan_is_unproven(
 }
 
 fn filter_guarantees_timestamp_pruning(filter: &str) -> bool {
-    filter_timestamp_bounds(filter) != 0
+    // A fact scan is finitely time-bounded only when both sides are present.
+    // A lone lower or upper bound can still expand without limit as history grows.
+    filter_timestamp_bounds(filter) == 0b11
 }
 
 fn filter_timestamp_bounds(filter: &str) -> u8 {
@@ -1138,8 +1140,8 @@ mod tests {
                            timestamp >= TIMESTAMP_NS '2020-01-01') SELECT * FROM base";
         let upper_bound = "WITH base AS (SELECT timestamp FROM traces WHERE \
                            timestamp < TIMESTAMP_NS '2030-01-01') SELECT * FROM base";
-        assert!(has_timestamp_bound_for_each_fact_source(lower_bound));
-        assert!(has_timestamp_bound_for_each_fact_source(upper_bound));
+        assert!(!has_timestamp_bound_for_each_fact_source(lower_bound));
+        assert!(!has_timestamp_bound_for_each_fact_source(upper_bound));
     }
 
     #[test]
