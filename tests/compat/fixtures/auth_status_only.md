@@ -1,4 +1,4 @@
-# Auth contract notes (Phase 0)
+# Auth contract notes (Compatibility)
 
 Runtime auth middleware (`runtime_auth_middleware`) returns **status-only**
 bodies for Bearer failures:
@@ -12,4 +12,4 @@ bodies for Bearer failures:
 Scope-header mismatch (`X-Scope-OrgID` ≠ authenticated tenant) is checked in
 compat stubs and returns the **protocol-native** error envelope with HTTP 403.
 
-See `docs/compat/auth.md` and `tests/compat_phase0.rs`.
+See `docs/compat/auth.md` and `tests/compatibility.rs`.

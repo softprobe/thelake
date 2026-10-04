@@ -370,7 +370,7 @@ printf '\000\001\002\003' >"$BINARY/suite/case-logs-001/payload.bin"
 mutate_json "$BINARY/artifact-index.json" index-binary
 expect_result "unexpected binary artifacts are rejected before upload" 1 "$BINARY" --release-gate
 
-# Every externally pulled image in the Phase 4 CI compose stack must resolve
+# Every externally pulled image in the Grafana integration CI compose stack must resolve
 # immutably.  The Grafana image is supplied by the canonical reference-pin
 # check; the Rust builder may be overridden only with an immutable digest.
 COMPOSE_PIN_FILE="$ROOT_DIR/tests/compat/grafana/docker-compose.ci.yml"

@@ -1,22 +1,21 @@
 # DuckLake access inventory
 
-This is the source-of-truth inventory for production code that opens, owns, or
-receives a DuckDB connection, or reaches the DuckLake writer directly. It is
-kept with the code so access-boundary changes can update the inventory in the
-same review.
+This inventory records the production DuckDB and DuckLake access boundaries.
+Workspace engines are obtained through `RuntimeEngineManager::engine_for` via
+`AppState`.
 
 ## Connection-owning and connection-consuming code
 
-| Area | Production locations | Current responsibility | Target engine boundary |
+| Area | Production locations | Responsibility | Engine boundary |
 | --- | --- | --- | --- |
-| Session infrastructure | `src/storage/ducklake/attach.rs`, `src/storage/ducklake/object_store.rs` | Open in-memory DuckDB connections, configure extensions/object storage, and attach DuckLake catalogs | `IngestEngine`, `QueryEngine`, and `MaintenanceEngine` connection factories; shared attach policy remains internal |
-| Ingest | `src/storage/ducklake/writer.rs` | Writer pool, catalog initialization, schema setup, and durable OTLP writes | `IngestEngine` |
-| Ingest schema support | `src/storage/schema/otlp_layout.rs`, `src/storage/schema/ducklake_partition.rs`, `src/storage/ducklake/util.rs` | Partition/sort probes and ingest-time schema compatibility checks on a supplied connection | `IngestEngine` or an internal storage-schema component owned by it |
-| Query | `src/storage/duckdb/engine.rs`, `src/storage/duckdb/cache.rs`, `src/storage/ducklake/workspace_views.rs` | Query connection pool, DuckLake attach, cache setup, isolated table qualification, and shared-mode logical view policy | `QueryEngine` |
-| Maintenance | `src/compaction/engine.rs`, `src/compaction/merge.rs`, `src/compaction/session_summary_access.rs`, `src/sql/maintenance/mod.rs` | `MaintenanceEngine` owns physical-scope DuckDB sessions, compaction, metadata cleanup, and the reducer/rebuild facade; SQL recipes in `sql::maintenance` | `MaintenanceEngine` |
+| Session infrastructure | `src/storage/ducklake/attach.rs`, `src/storage/ducklake/object_store.rs` | Configure DuckDB extensions, object storage, and PostgreSQL DuckLake catalog attachments | Storage engine setup |
+| Ingest | `src/storage/ducklake/writer.rs` | Writer pool, catalog initialization, schema setup, and durable OTLP writes | Owned by `IngestEngine` |
+| Ingest schema support | `src/storage/schema/otlp_layout.rs`, `src/storage/schema/ducklake_partition.rs`, `src/storage/ducklake/util.rs` | Partition and sort probes and ingest-time schema checks on an engine-owned connection | Internal ingest support |
+| Query | `src/storage/duckdb/engine.rs`, `src/storage/duckdb/cache.rs`, `src/storage/ducklake/workspace_views.rs` | Query pool, DuckLake attachments, cache setup, and workspace table qualification | Owned by `QueryEngine` |
+| Maintenance | `src/compaction/engine.rs`, `src/compaction/merge.rs`, `src/compaction/session_summary_access.rs`, `src/sql/maintenance/mod.rs` | Physical-scope maintenance sessions, file merge, snapshot cleanup, and session-summary jobs | Owned by `MaintenanceEngine` |
 | Maintenance implementation | `src/session_summary/reduce.rs` | Claim/ack and summary-domain logic; invokes the internal maintenance access adapter | `MaintenanceEngine` |
 | Control plane | `src/storage/ducklake/promotion.rs`, `src/ingest_engine/mod.rs` | Promotion-spec reads and local promotion application using a writer connection | `AdminEngine`; never ordinary workspace query SQL |
-| Shared SQL utility | `src/sql/bounds/execute_gate.rs` | Checked execution and preparation on a caller-owned connection | Remains a narrow internal primitive; callers must be engine-owned |
+| Shared SQL utility | `src/sql/bounds/execute_gate.rs` | Checked execution and preparation on a caller-owned connection | Narrow internal primitive; callers must be engine-owned |
 
 Test-only direct connections are intentionally excluded from this production
 inventory. They remain valuable regression coverage and are listed by search
@@ -68,19 +67,10 @@ classify it in this document before the change is considered complete. Test
 fixtures may remain direct-connection users when that preserves shared
 regression coverage.
 
-## Shared-mode startup gates
+## Workspace scope
 
-The first shared-mode release is PostgreSQL-only. Configuration validation
-returns `shared_scope_unsupported_backend` for SQLite or any other backend
-when `workspace_scope_mode` is `shared`.
-
-Runtime startup must additionally prove that the selected physical scope is
-fresh or has completed the explicit scope migration and passes schema
-compatibility checks. A deployment must refuse shared-mode startup when that
-proof is absent; it must not silently create a second physical scope or infer a
-partial migration.
-
-Until the engine migration and those startup checks are implemented, the
-configuration validator returns `shared_scope_not_enabled` even for a
-PostgreSQL shared-mode configuration. This keeps the option fail-closed while
-the contract and inventory work lands.
+`RuntimeEngineManager` owns engine creation and caching by workspace scope.
+Application handlers receive engines through `AppState`; they do not open
+DuckDB connections or construct catalog attachments themselves. Catalog
+metadata uses PostgreSQL in production. See [workspace identity](workspace-identity.md)
+for isolated and shared physical scopes.

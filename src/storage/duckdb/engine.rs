@@ -305,7 +305,7 @@ fn poison_kind(message: &str) -> Poison {
     }
     // Stale ATTACH after inlined catalog table rename (e.g. optional external
     // flush). Rebuild + retry picks up the new name — required now that default
-    // inlining is 500 (was 10_000 under #55).
+    // inlining is 500.
     if head.starts_with("Catalog Error: Failed to read inlined data from DuckLake") {
         return Poison::Collateral;
     }
@@ -1027,7 +1027,9 @@ impl DuckDBCore {
                 Ok(WrapAttempt::NotReady) => {}
                 Ok(WrapAttempt::Unsupported) => {
                     state.cache_httpfs_wrap_supported = false;
-                    warn!("cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused");
+                    warn!(
+                        "cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused"
+                    );
                 }
                 Err(err) => {
                     if !CACHE_HTTPFS_CONFIG_WARNED.swap(true, Ordering::Relaxed) {
@@ -1046,7 +1048,9 @@ impl DuckDBCore {
                 Ok(WrapAttempt::NotReady) => {}
                 Ok(WrapAttempt::Unsupported) => {
                     state.cache_httpfs_wrap_supported = false;
-                    warn!("cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused");
+                    warn!(
+                        "cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused"
+                    );
                 }
                 Err(err) => {
                     if !CACHE_HTTPFS_CONFIG_WARNED.swap(true, Ordering::Relaxed) {
@@ -1141,7 +1145,7 @@ fn duck_value_to_json(value: DuckValue) -> Value {
         DuckValue::Decimal(v) => Value::String(v.to_string()),
         DuckValue::Timestamp(unit, value) => Value::String(format!("{:?}:{}", unit, value)),
         // Keep VARCHAR/JSON-as-text as strings. Call sites that need objects
-        // (VARIANT `CAST(... AS JSON)` attributes) parse in map_string_map.
+        // (attribute-map `CAST(... AS JSON)` projections) parse in map_string_map.
         DuckValue::Text(v) => Value::String(v),
         DuckValue::Blob(v) => Value::String(base64::engine::general_purpose::STANDARD.encode(v)),
         DuckValue::Date32(v) => Value::String(v.to_string()),
@@ -1488,9 +1492,7 @@ mod tests {
             .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
             .unwrap();
         let timed = core.execute_query_on_state(&mut state, "SELECT id FROM traces LIMIT 1");
-        let result = timed
-            .result
-            .expect("sql_gate false must skip gate and run");
+        let result = timed.result.expect("sql_gate false must skip gate and run");
         assert_eq!(result.columns, vec!["id".to_string()]);
     }
 
@@ -1520,7 +1522,10 @@ mod tests {
             .err()
             .expect("sql_gate true must reject unbounded fact scan")
             .to_string();
-        assert!(err.contains("SQL gate"), "expected SQL gate prefix, got {err}");
+        assert!(
+            err.contains("SQL gate"),
+            "expected SQL gate prefix, got {err}"
+        );
         assert!(timed.run_elapsed.is_zero());
     }
 

@@ -1,4 +1,4 @@
-//! Shared Loki Phase 2 fixture/client/oracle helpers.
+//! Shared Loki fixture, client, and oracle helpers.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -26,7 +26,7 @@ use crate::compat_support::http::{
 #[cfg(feature = "integration-e2e")]
 use crate::compat_support::lifecycle;
 
-pub const PHASE2_EPOCH_NS: i64 = 1_786_827_600_000_000_000;
+pub const LOKI_FIXTURE_EPOCH_NS: i64 = 1_786_827_600_000_000_000;
 pub const FIXTURE_LAG_NS: i64 = 1_000_000_000;
 
 /// Current UNIX epoch nanoseconds (test-clock helper for time-shift math).
@@ -68,8 +68,6 @@ impl LokiFixture {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EvidenceMetadata {
-    pub issue: String,
-    pub phase: String,
     pub reference_manifest: String,
     pub reference_image: String,
     pub normalization: String,
@@ -78,8 +76,7 @@ pub struct EvidenceMetadata {
 #[derive(Debug, Clone, Deserialize)]
 pub struct LokiCapability {
     pub protocol: String,
-    pub phase: String,
-    pub supported_endpoints: Vec<String>,
+    pub covered_endpoints: Vec<String>,
     pub supported_features: Vec<String>,
     pub unsupported_features: Vec<String>,
     pub ordering_policy: String,
@@ -129,7 +126,7 @@ pub struct LokiExpectation {
 }
 
 pub fn fixture() -> LokiFixture {
-    let path = fixture_dir().join("phase2.json");
+    let path = fixture_dir().join("loki-query.json");
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {path:?}: {e}"))
 }
@@ -144,8 +141,8 @@ pub fn fixture_for_now() -> LokiFixture {
         .checked_sub(FIXTURE_LAG_NS)
         .expect("current UNIX epoch nanoseconds must be after the fixture lag");
     let delta_ns = target_ns
-        .checked_sub(PHASE2_EPOCH_NS)
-        .expect("current UNIX epoch nanoseconds must be after the Phase 2 epoch");
+        .checked_sub(LOKI_FIXTURE_EPOCH_NS)
+        .expect("current UNIX epoch nanoseconds must be after the Loki query epoch");
     fixture().shifted_by(delta_ns)
 }
 
@@ -849,11 +846,11 @@ mod tests {
         let delta_ns = shifted.records[0].timestamp() - original_timestamp;
         let min_delta_ns = before_ns
             .checked_sub(FIXTURE_LAG_NS)
-            .and_then(|value| value.checked_sub(PHASE2_EPOCH_NS))
+            .and_then(|value| value.checked_sub(LOKI_FIXTURE_EPOCH_NS))
             .expect("minimum fixture delta fits in i64");
         let max_delta_ns = after_ns
             .checked_sub(FIXTURE_LAG_NS)
-            .and_then(|value| value.checked_sub(PHASE2_EPOCH_NS))
+            .and_then(|value| value.checked_sub(LOKI_FIXTURE_EPOCH_NS))
             .expect("maximum fixture delta fits in i64");
 
         assert!(

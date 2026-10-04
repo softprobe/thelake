@@ -170,7 +170,7 @@ mod locality_tests {
             "/api/health.rs",
             "/storage/schema/ducklake_partition.rs",
             "/storage/schema/otlp_layout.rs",
-            "/storage/schema/variant.rs",
+            "/storage/schema/attribute_map.rs",
             "/storage/ducklake/attach.rs",
             "/storage/ducklake/layout.rs",
             "/storage/ducklake/promotion.rs",

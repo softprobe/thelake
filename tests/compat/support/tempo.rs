@@ -1,4 +1,4 @@
-//! Shared Tempo Phase 3 fixture, OTLP, router, normalization, and oracle helpers.
+//! Shared Tempo fixture, OTLP, router, normalization, and oracle helpers.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -30,8 +30,6 @@ pub struct TempoFixture {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TempoEvidence {
-    pub issue: String,
-    pub phase: String,
     pub reference_manifest: String,
     pub reference_image: String,
     pub normalization: String,
@@ -40,7 +38,6 @@ pub struct TempoEvidence {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TempoCapability {
     pub protocol: String,
-    pub phase: String,
     pub supported_endpoints: Vec<String>,
     pub supported_features: Vec<String>,
     pub unsupported_features: Vec<String>,
@@ -154,7 +151,7 @@ pub struct TempoExpectation {
 }
 
 pub fn fixture() -> TempoFixture {
-    let path = fixture_dir().join("phase3.json");
+    let path = fixture_dir().join("tempo-search.json");
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {path:?}: {e}"))
 }

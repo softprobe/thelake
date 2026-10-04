@@ -2,7 +2,6 @@
 
 **Status:** Current
 **Storage backend:** DuckLake
-**Last verified against:** `src/` on 2026-09-21
 
 ## Overview
 
@@ -15,15 +14,13 @@
 - schema promotion
 - optional process self-monitoring (Meter instruments → standard OTLP metrics export)
 
-DuckLake is the only durable telemetry backend. Apache Iceberg, the staged
-Parquet tier, and application WAL have been removed. Optional soft coalesce
-(`ingest.flush_interval_seconds` > 0) may hold rows in memory briefly before a
-DuckLake write; default `0` is flush-through. Historical documents for removed
-designs are under [`legacy/`](legacy/README.md).
+DuckLake is the only durable telemetry backend. Optional soft coalesce
+(`ingest.flush_interval_seconds` > 0) holds rows in memory briefly before a
+DuckLake write; default `0` is flush-through.
 
-Product metrics (customer OTLP `/v1/metrics`, `metric_*` live path, Prometheus /
-PromQL) have been removed. Existing `metric_*` tables in a catalog, if any, are
-orphaned and are not part of the product surface.
+Customer data signals are traces and logs. Process self-monitoring can export
+OTLP metrics to an external collector when enabled; it does not add customer
+metric tables or a Prometheus query API.
 
 ## Runtime data flow
 
@@ -53,7 +50,7 @@ DuckDB transaction (warm path):
         |
         v
 DuckLake
-  metadata: PostgreSQL (production) or SQLite (local)
+  metadata: PostgreSQL catalog
   rows: catalog-inlined or Parquet under data_path
         |
         v
@@ -97,15 +94,6 @@ The writer in `src/storage/ducklake/` (`writer.rs` plus domain modules
 6. creates the target table if necessary and inserts the rows in one
    transaction;
 7. removes the temporary file.
-
-Supported catalog backends:
-
-- `postgres`: production and tenant-scoped deployments;
-- `sqlite`: local multi-client development;
-- `duckdb`: rejected because DuckLake documents it as single-client only.
-
-SQLite uses `META_JOURNAL_MODE 'WAL'` and a busy timeout. This is SQLite's
-catalog journal mode, not the removed Softprobe application WAL.
 
 DuckLake's own conflict retry settings are pinned on writer connections.
 The runtime sets `ducklake_max_retry_count=10`,
@@ -225,13 +213,6 @@ Core columns include `session_id`, timestamps, severity, body, attributes,
 resource attributes, trace/span correlation, and event-time `timestamp`
 (one-clock; no `record_date`).
 
-### Orphaned `metric_*` tables (not product)
-
-Customer metrics ingest and the Prometheus/PromQL surface are removed. Catalogs
-that previously wrote `metric_samples` / related tables may still contain those
-objects; Softprobe does not DROP them and does not treat them as a live product
-path. New installs should not create them.
-
 ### `scores`
 
 Immutable LLM evaluation records are stored separately from spans because an
@@ -246,18 +227,13 @@ categorical values). `config_id` is the tenant-local idempotency key. There is
 no PATCH; replace a config by inserting a new `config_id`. Human annotation
 (Annotate panel → scores) is documented in Softprobe LLM `docs/annotation.md`.
 
-The one-clock catalog copy intentionally omits rows from `scores` and
-`score_configs`; existing data is test-only. The APIs and writer stay enabled,
-and normal schema initialization creates fresh empty tables in the new catalog.
-
 ## Schema promotion
 
 Promotion is applied through authenticated `POST /v1/promotions/apply`, not
 process-global YAML. In isolated scope, active manifests live in the workspace
 PostgreSQL metadata schema (`promotion_specs`). In shared scope, they live in
 the one physical-scope schema and the resulting DDL and ingest extraction are
-global to every workspace using that scope. SQLite supports promotion in its
-configured local single-scope DuckLake catalog.
+global to every workspace using that scope.
 
 - **Telemetry columns:** additive nullable columns on `traces` / `logs`.
   Future ingest extracts declared sources into those columns; historical rows
@@ -276,10 +252,9 @@ auto-promote them. Canonical contract:
 Every worker loads `httpfs` and DuckLake, configures object-store access, and
 ATTACHes the same DuckLake scope used by its tenant-bound writer.
 
-Public query names: `traces`, `logs`, and `scores`. Bare names are expanded to
-the tenant's qualified DuckLake catalog table before execution. Historical
-Iceberg/buffer aliases (`union_*`, `committed_*`, `buffer_*`, `staged_*`,
-`iceberg_*`) are not rewritten.
+Public query names are `traces`, `logs`, and `scores`. Bare names are expanded
+to the tenant's qualified DuckLake catalog table before execution. Internal
+catalog and storage names are not part of the query interface.
 
 First-party compilers emit preferred names only. Ingest defaults to
 flush-through (optional soft coalesce does not add a queryable buffer tier).

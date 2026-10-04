@@ -753,7 +753,7 @@ fn aggregate_respects_explicit_timestamp_window() {
     );
 }
 
-/// Stage 5: MAP bag values must not leak into reduce when typed cols are NULL.
+/// MAP bag values do not contribute to reduction when typed columns are NULL.
 #[test]
 fn map_only_attrs_do_not_fill_typed_aggregates() {
     use crate::models::attr_keys::{gen_ai, sp};
@@ -826,7 +826,8 @@ fn map_only_attrs_do_not_fill_typed_aggregates() {
     );
 }
 
-/// Stage 5: without auth agent_name or agent observation, generation message_type is ignored.
+/// Generation message_type is ignored without authenticated agent identity or
+/// an agent observation.
 #[test]
 fn generation_message_type_without_auth_agent_stays_null() {
     let conn = Connection::open_in_memory().unwrap();

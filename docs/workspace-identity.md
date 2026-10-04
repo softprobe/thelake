@@ -1,6 +1,6 @@
 # Workspace identity
 
-**Status:** Accepted (clean break, 2026-09-30)  
+**Status:** Current contract
 **Rule:** No backward compatibility. New deployments only. DDL is `CREATE` only — never `ALTER TABLE` for this cutover.
 
 ## Canonical concepts

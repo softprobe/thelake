@@ -3,7 +3,7 @@
 use crate::compat::tempo::traceql::{is_duration_field, parse_duration_ns, TraceSelector};
 use crate::sql::literal::sql_string_literal;
 use crate::sql::query_window_from_exclusive_ns;
-use crate::storage::schema::variant::prefer_attr_varchar;
+use crate::storage::schema::attribute_map::prefer_attr_varchar;
 use std::collections::BTreeMap;
 
 /// Status-code name → numeric mappings embedded in Tempo predicate SQL.
@@ -23,7 +23,7 @@ pub(crate) const PERSISTED_OTLP_STATUS_CODES: [(&str, i64); 12] = [
 ];
 
 /// Default lookback when Tempo clients omit one or both of start/end.
-/// Long enough to cover Phase 3 fixture timestamps (~2023) under CI "now".
+/// Long enough to cover Tempo query fixture timestamps (~2023) under CI "now".
 /// Still a finite [`QueryWindow`] — never an unbounded lake scan.
 const TEMPO_DEFAULT_LOOKBACK_NS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000_000;
 

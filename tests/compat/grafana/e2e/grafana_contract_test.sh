@@ -7,10 +7,10 @@ PROVISIONING="$ROOT_DIR/tests/compat/grafana/provisioning/datasources"
 DASHBOARDS="$ROOT_DIR/tests/compat/grafana/dashboards"
 
 grep -Fq 'run_static_contracts' "$HARNESS" || {
-  echo 'Grafana CI smoke entrypoint does not enforce the static Phase 4 contracts' >&2
+  echo 'Grafana CI smoke entrypoint does not enforce the static Grafana integration contracts' >&2
   exit 1
 }
-for contract in compose_contract_test.sh phase4_contract_test.sh tempo_tenant_contract_test.sh; do
+for contract in compose_contract_test.sh grafana_contract_test.sh tempo_tenant_contract_test.sh; do
   grep -Fq "$contract" "$HARNESS" || {
     echo "Grafana CI smoke entrypoint does not enforce $contract" >&2
     exit 1
@@ -37,7 +37,7 @@ done
 for contract_file in "$ROOT_DIR/tests/compat/grafana/e2e"/*.sh; do
   # This file contains the stale-path pattern as the assertion itself; inspect
   # the other static contracts so the regression check cannot self-match.
-  [[ "$contract_file" == "$ROOT_DIR/tests/compat/grafana/e2e/phase4_contract_test.sh" ]] && continue
+  [[ "$contract_file" == "$ROOT_DIR/tests/compat/grafana/e2e/grafana_contract_test.sh" ]] && continue
   if grep -Eq 'provisioning/(loki|tempo)\.yaml' "$contract_file"; then
     echo "Grafana contract uses the stale datasource provisioning path: $contract_file" >&2
     exit 1
@@ -200,4 +200,4 @@ if validate_dashboard_round_trip "$round_trip_tmp/bad.json" softprobe-cross-sign
   exit 1
 fi
 
-echo 'Grafana Phase 4 static contract: PASS'
+echo 'Grafana static contract: PASS'

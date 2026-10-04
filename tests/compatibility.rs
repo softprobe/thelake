@@ -1,4 +1,4 @@
-//! Compatibility Phase 0 contract suite (auth, manifests, isolation fixtures).
+//! Compatibility authentication, manifest, and isolation contracts.
 
 #[path = "compat/support/auth.rs"]
 mod auth_support;
@@ -110,7 +110,7 @@ async fn compat_routes_authenticated_return_expected_status() {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         if path.starts_with("/loki/") {
-            // Phase 2: Loki routes are live. Query endpoints validate their
+            // Loki query: Loki routes are live. Query endpoints validate their
             // required query parameter; discovery endpoints return empty
             // success data against an empty lake (probes include start/end).
             let path_only = path.split('?').next().unwrap_or(path);

@@ -1,4 +1,4 @@
-//! Stage 3: list sessions from catalog Postgres `session_summary`.
+//! Read the session list from catalog PostgreSQL `session_summary`.
 
 use crate::api::llm::query::{
     next_cursor_from_sessions, SessionOrderBy, SessionSearchRequest, SessionSearchResponse,

@@ -13,7 +13,9 @@ use crate::sql::llm::{
 // (Postgres session_summary). compile_session_search_sql remains unit-test only.
 #[cfg(test)]
 use crate::sql::llm::compile_session_search_sql;
-use crate::storage::schema::variant::{parse_projected_json_value, variant_json_to_string_map};
+use crate::storage::schema::attribute_map::{
+    attribute_map_json_to_string_map, parse_projected_json_value,
+};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -1056,7 +1058,9 @@ fn parse_timestamp_text(text: &str) -> Option<DateTime<Utc>> {
 }
 
 fn map_string_map(value: Option<&Value>) -> HashMap<String, String> {
-    value.map(variant_json_to_string_map).unwrap_or_default()
+    value
+        .map(attribute_map_json_to_string_map)
+        .unwrap_or_default()
 }
 
 fn map_events(value: Option<&Value>) -> Vec<Value> {
@@ -2076,7 +2080,7 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let list = compile_session_detail_sql("sess-1", from, to).unwrap();
-        let payload = crate::storage::schema::variant::variant_as_json("attributes");
+        let payload = crate::storage::schema::attribute_map::attribute_map_as_json("attributes");
         assert!(
             list.contains(&payload),
             "session detail must project span attributes: {list}"

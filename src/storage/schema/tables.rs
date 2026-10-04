@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn hot_map_registry_covers_schema_columns() {
-        use crate::storage::schema::variant::hot_map_columns;
+        use crate::storage::schema::attribute_map::hot_map_columns;
 
         for (table, schema) in [
             ("traces", TraceTable::schema()),

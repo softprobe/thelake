@@ -1,7 +1,6 @@
 # Softprobe Runtime Goals
 
 **Status:** Current
-**Last updated:** 2026-09-21
 
 ## Product goal
 
@@ -21,8 +20,7 @@ operational telemetry.
 
 2. **Simple durable storage**
    - Use one DuckLake write and query path.
-   - Use PostgreSQL metadata for production and SQLite metadata for local
-     development.
+   - Use the PostgreSQL DuckLake catalog in every runtime environment.
    - Keep non-inlined data in Parquet under a configurable local or
      object-store data path.
 
@@ -54,7 +52,8 @@ operational telemetry.
    - Expose Loki- and Tempo-compatible **query** APIs so existing Grafana
      datasources can read lake evidence without a second write pipeline. See
      [compat/matrix.md](compat/matrix.md).
-   - Product metrics / Prometheus / PromQL are **out of scope** (removed).
+   - Product signals are traces and logs. Process self-monitoring metrics are
+     exported through OTLP and are not stored as customer telemetry.
 
 8. **Process self-monitoring (operators)**
    - When `self_monitoring.enabled` is true, thelake records process Meter
@@ -66,7 +65,7 @@ operational telemetry.
 
 - Customer OTLP metrics ingest, `metric_*` product tables as a live path,
   Prometheus HTTP API, or PromQL.
-- Reintroducing Apache Iceberg or a second durable table format.
+- A second durable table format.
 - Maintaining a staged Parquet tier or application WAL. Optional soft coalesce
   (`ingest.flush_interval_seconds` > 0; default 0 = flush-through) is allowed;
   it is not a durable buffer.
@@ -77,9 +76,9 @@ operational telemetry.
 ## References
 
 - [Current architecture](design.md)
-- [Current architecture decisions](decision_log.md)
+- [Workspace identity](workspace-identity.md)
 - [Instrumentation guide](instrumentation_guide.md)
 - [Schema promotion](promotion.md)
 - [Ad hoc DuckDB/DuckLake queries](adhoc-duckdb-ducklake.md)
 - [Compatibility matrix (Loki/Tempo)](compat/matrix.md)
-- [Legacy documentation](legacy/README.md)
+- [Performance documentation](perf/README.md)

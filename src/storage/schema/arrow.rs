@@ -1,7 +1,7 @@
 use crate::models::{
     partition_day_from_event_time, Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span,
 };
-use crate::storage::schema::variant::variant_json_to_string_map;
+use crate::storage::schema::attribute_map::attribute_map_json_to_string_map;
 use anyhow::Result;
 use arrow::array::{
     ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, MapArray, StringArray,
@@ -952,7 +952,7 @@ fn reserved_json_to_string_map(raw: Option<&str>) -> HashMap<String, String> {
             return m;
         }
     };
-    let map = variant_json_to_string_map(&parsed);
+    let map = attribute_map_json_to_string_map(&parsed);
     if map.is_empty() && !text.is_empty() {
         let mut m = HashMap::new();
         m.insert("_raw".to_string(), text.to_string());

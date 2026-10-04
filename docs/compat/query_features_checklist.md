@@ -2,7 +2,7 @@
 
 Canonical checklist of query features verified for Softprobe/thelake product
 signals (**traces + logs**) via Loki/Tempo compatibility and Grafana Explore.
-Customer metrics / Prometheus / PromQL are **out of scope** (removed).
+Customer telemetry query coverage is limited to traces and logs.
 
 ---
 

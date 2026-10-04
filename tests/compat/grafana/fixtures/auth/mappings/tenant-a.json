@@ -4,7 +4,7 @@
     "urlPath": "/validate",
     "bodyPatterns": [
       {
-        "equalToJson": "{\"apiKey\":\"grafana-phase4-tenant-a\"}"
+        "equalToJson": "{\"apiKey\":\"grafana-test-tenant-a\"}"
       }
     ]
   },
@@ -20,7 +20,7 @@
         "resources": [
           {
             "resourceType": "BIGQUERY_STORAGE",
-            "configJson": "{\"dataset_id\":\"grafana-phase4\",\"bucket_name\":\"warehouse\"}"
+            "configJson": "{\"dataset_id\":\"grafana-test\",\"bucket_name\":\"warehouse\"}"
           }
         ]
       }

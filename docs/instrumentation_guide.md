@@ -9,9 +9,9 @@ This guide shows how to instrument your application to capture HTTP bodies and b
   use: **end-user session**, checkout flow, or any stable id you want to query
   by.
 
-If documentation mentions “session”, it means **`sp.session.id` / `session_id`
-column** (telemetry correlation), not SoftProbe capture/replay control sessions
-(removed from this runtime).
+If documentation mentions “session”, it means **`sp.session.id` /
+`session_id`** (telemetry correlation). Capture and replay controls belong to
+the application instrumentation layer.
 
 ## Design Philosophy
 
@@ -26,7 +26,6 @@ This separation provides:
 - **Semantic clarity**: Events represent "notable moments", attributes represent "searchable metadata"
 
 The original rationale is preserved in the
-[legacy decision log](legacy/decision-log-iceberg-era.md#adr-006-http-bodies-via-span-events-not-span-attributes).
 
 ## HTTP Body Instrumentation Pattern
 
@@ -214,7 +213,7 @@ span.setAttribute('sp.project.id', 'proj-456');
 ### Why `sp.*`?
 
 - Avoids collisions with OpenTelemetry semantic conventions (`http.*`, `db.*`, …)
-- Makes Softprobe business keys easy to spot in the `attributes` VARIANT
+- Makes Softprobe business keys easy to spot in the `attributes` map
 - Gives promotion manifests a stable key to extract into typed columns
 
 `sp.*` is only a naming convention. Softprobe stores these keys in
@@ -258,7 +257,7 @@ structure:
 | `http_request_method` | Span attribute `http.request.method` | `POST` |
 | `http_request_path` | Span attribute `http.request.path` or `http.target` | `/api/orders` |
 | `http_response_status_code` | Span attribute `http.response.status_code` or `http.status_code` | `201` |
-| `attributes` | All span attributes (VARIANT, shredded) | `{"sp.user.id":"user-123","sp.order.id":"ORD-456"}` |
+| `attributes` | All span attributes (`MAP(VARCHAR, VARCHAR)`) | `{"sp.user.id":"user-123","sp.order.id":"ORD-456"}` |
 
 ### HTTP payload fallback
 
@@ -294,7 +293,7 @@ Summary:
 
 ### Find Sessions by User ID
 
-**Using VARIANT lookup** (works with or without promotion):
+**Using an attribute-map lookup** (works with or without promotion):
 ```sql
 SELECT session_id, trace_id, span_id, timestamp, http_request_path
 FROM traces
@@ -342,12 +341,10 @@ ORDER BY timestamp ASC;
 
 ### Column selection
 
-When data is in Parquet, a query by business attributes can read shredded
-VARIANT subfields without selecting body columns:
+Attribute-map keys can be queried without selecting body columns:
 
 ```sql
--- This query can prune to shredded attribute paths
--- Body columns (http_request_body, http_response_body) are NOT read
+-- Body columns (http_request_body, http_response_body) are not read
 SELECT session_id, trace_id
 FROM traces
 WHERE CAST(attributes['sp.user.id'] AS VARCHAR) = 'user-123';
@@ -355,8 +352,8 @@ WHERE CAST(attributes['sp.user.id'] AS VARCHAR) = 'user-123';
 
 This reduces object-store I/O when bodies are large. DuckLake may instead keep
 small committed batches inline in its metadata catalog, depending on
-`ducklake.data_inlining_row_limit`. For file-level VARIANT shredding stats,
-set `DATA_INLINING_ROW_LIMIT 0` so data lands in Parquet files.
+`ducklake.data_inlining_row_limit`. For Parquet-level attribute storage
+measurements, set `DATA_INLINING_ROW_LIMIT 0` so data lands in Parquet files.
 
 ## Best Practices
 
@@ -455,4 +452,3 @@ For questions or issues:
 - Check the [current design](design.md) for the runtime architecture.
 - See [schema promotion](promotion.md) for `sp.*`, manifests, and apply API.
 - See [ad hoc DuckDB/DuckLake queries](adhoc-duckdb-ducklake.md) for local SQL access.
-- Review the [legacy ADR-006](legacy/decision-log-iceberg-era.md#adr-006-http-bodies-via-span-events-not-span-attributes) for the original event-versus-attribute rationale.

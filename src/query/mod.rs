@@ -222,7 +222,7 @@ impl QueryEngine {
         ));
         predicates.push(format!(
             "{} = {}",
-            crate::storage::schema::variant::variant_varchar("attributes", key),
+            crate::storage::schema::attribute_map::attribute_map_varchar("attributes", key),
             crate::sql::literal::sql_string_literal(value)
         ));
         self.count_rows("traces", predicates).await
@@ -238,7 +238,7 @@ impl QueryEngine {
         let mut predicates = timestamp_predicates(time_window);
         predicates.push(format!(
             "{} = {}",
-            crate::storage::schema::variant::variant_varchar("attributes", key),
+            crate::storage::schema::attribute_map::attribute_map_varchar("attributes", key),
             crate::sql::literal::sql_string_literal(value)
         ));
         self.count_rows("logs", predicates).await
@@ -259,7 +259,7 @@ impl QueryEngine {
         ));
         predicates.push(format!(
             "{} = {}",
-            crate::storage::schema::variant::variant_varchar("attributes", key),
+            crate::storage::schema::attribute_map::attribute_map_varchar("attributes", key),
             crate::sql::literal::sql_string_literal(value)
         ));
         let query = crate::sql::trusted::approved_query(crate::sql::query::trace_attributes_sql(

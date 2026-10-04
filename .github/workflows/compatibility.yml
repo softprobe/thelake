@@ -420,7 +420,7 @@ jobs:
               > target/compat/grafana/NOTICE.txt
           fi
 
-      - name: Run static Grafana Phase 4 contracts
+      - name: Run static Grafana integration contracts
         run: make test-grafana-static
 
       - name: Require successful protocol prerequisites for real validation
@@ -1020,7 +1020,7 @@ jobs:
             values.each { |key, (image, tag, digest)| refs.fetch(key).merge!("image" => image, "tag" => tag, "digest" => digest) }
             File.write("target/compat/drift/references.yaml", YAML.dump(document))
           '
-      - name: Run static Grafana Phase 4 contracts
+      - name: Run static Grafana integration contracts
         run: make test-grafana-static
       - name: Run Grafana drift system lane
         run: |
@@ -1293,9 +1293,9 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/compat/conformance_artifacts_test.sh
-          cargo test --test compat_phase0 -- --test-threads=1
-          cargo test --test tests compat_loki::loki_phase2_contract_cases -- --test-threads=1
-          cargo test --test tests compat_tempo::tempo_phase3_contract_cases -- --test-threads=1
+          cargo test --test compatibility -- --test-threads=1
+          cargo test --test tests compat_loki::loki_query_contract_cases -- --test-threads=1
+          cargo test --test tests compat_tempo::tempo_query_contract_cases -- --test-threads=1
 
       - name: Run parser and serializer checks
         run: |
@@ -1306,9 +1306,9 @@ jobs:
       - name: Run tenant-isolation checks
         run: |
           set -euo pipefail
-          cargo test --test compat_phase0 workspace_id_param_does_not_override_auth -- --test-threads=1
-          cargo test --test tests compat_loki::loki_phase2_tenant_isolation -- --test-threads=1
-          cargo test --test tests compat_tempo::tempo_phase3_same_trace_id_isolated -- --test-threads=1
+          cargo test --test compatibility workspace_id_param_does_not_override_auth -- --test-threads=1
+          cargo test --test tests compat_loki::loki_query_tenant_isolation -- --test-threads=1
+          cargo test --test tests compat_tempo::tempo_query_same_trace_id_isolated -- --test-threads=1
 
       - name: Write fast-lane report
         if: always()

@@ -1,4 +1,4 @@
-# Softprobe Loki datasources (Grafana native) — Phase 4.
+# Softprobe Loki datasources (Grafana native) — Grafana integration.
 # The URL is the Softprobe HTTP base; Grafana appends /loki/api/v1/*.
 # Grafana env expansion supports ${VAR} only (not shell ${VAR:-default}).
 

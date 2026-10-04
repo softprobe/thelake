@@ -277,7 +277,7 @@ errors << "manifest version must be compat.v0" unless document.is_a?(Hash) && do
 required = %w[id protocol endpoint request fixture capability expected normalization reference evidence]
 allowed_protocols = %w[loki tempo]
 allowed_methods = %w[GET POST]
-allowed_capability_statuses = %w[phase_1 supported supported_subset ignored unsupported_feature]
+allowed_capability_statuses = %w[supported supported_subset ignored unsupported_feature]
 capability_ids = canonical_capability_ids
 declared_features = canonical_unsupported_features
 normalization_policies = {
