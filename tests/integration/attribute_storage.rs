@@ -4,7 +4,9 @@ use chrono::Utc;
 use softprobe_runtime::ingest_engine::IngestEngine;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::query;
-use softprobe_runtime::storage::schema::attribute_map::{prefer_attr_varchar, attribute_map_varchar};
+use softprobe_runtime::storage::schema::attribute_map::{
+    attribute_map_varchar, prefer_attr_varchar,
+};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
