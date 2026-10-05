@@ -10,7 +10,7 @@
       "/loki/api/v1/query",
       "/loki/api/v1/query_range",
       "/loki/api/v1/labels",
-      "/loki/api/v1/label/{name}/values",
+      "/loki/api/v1/label/service_name/values",
       "/loki/api/v1/series"
     ],
     "supported_features": [
