@@ -1333,19 +1333,22 @@ mod tests {
     #[test]
     fn fallback_extracts_the_query_that_owns_the_fact_source() {
         let derived_table = "SELECT * FROM (SELECT timestamp FROM traces WHERE \
-                             timestamp >= '2020-01-01') bounded";
+                             timestamp >= '2020-01-01' AND timestamp < '2030-01-01') bounded";
         let dedupe_insert = "INSERT INTO scores SELECT incoming.* FROM \
                              (VALUES (1)) incoming(value) WHERE NOT EXISTS (\
                              SELECT 1 FROM scores existing WHERE existing.value = incoming.value \
-                             AND existing.timestamp >= TIMESTAMP_NS '2020-01-01')";
+                             AND existing.timestamp >= TIMESTAMP_NS '2020-01-01' \
+                             AND existing.timestamp < TIMESTAMP_NS '2030-01-01')";
         let outer_only = "SELECT * FROM scores WHERE EXISTS (\
                           SELECT timestamp >= TIMESTAMP_NS '2020-01-01')";
         let order_only = "SELECT * FROM scores WHERE value = 1 ORDER BY \
                           timestamp >= TIMESTAMP_NS '2020-01-01'";
         let delimiter_text = "WITH base AS (SELECT timestamp, ')' AS marker FROM traces WHERE \
-                              timestamp >= '2020-01-01') SELECT * FROM base";
+                              timestamp >= '2020-01-01' AND timestamp < '2030-01-01') \
+                              SELECT * FROM base";
         let delimiter_comment = "WITH base AS (SELECT timestamp /* ) FROM fake */ FROM traces \
-                                WHERE timestamp >= '2020-01-01') SELECT * FROM base";
+                                WHERE timestamp >= '2020-01-01' AND timestamp < '2030-01-01') \
+                                SELECT * FROM base";
 
         assert!(has_timestamp_bound_for_each_fact_source(derived_table));
         assert!(has_timestamp_bound_for_each_fact_source(dedupe_insert));
@@ -1360,7 +1363,8 @@ mod tests {
         let bounded = "INSERT INTO scores SELECT incoming.* FROM (VALUES (1)) incoming(value) \
                        WHERE NOT EXISTS (SELECT 1 FROM scores existing \
                        WHERE existing.value = incoming.value AND \
-                       existing.timestamp >= TIMESTAMP_NS '2020-01-01')";
+                       existing.timestamp >= TIMESTAMP_NS '2020-01-01' AND \
+                       existing.timestamp < TIMESTAMP_NS '2030-01-01')";
         let unbounded = "INSERT INTO scores SELECT incoming.* FROM (VALUES (1)) incoming(value) \
                          WHERE NOT EXISTS (SELECT 1 FROM scores existing \
                          WHERE existing.value = incoming.value)";
@@ -1461,7 +1465,8 @@ mod tests {
         let conn = plan_connection();
         conn.execute_batch("DELETE FROM scores").unwrap();
         let sql = "INSERT INTO scores SELECT * FROM scores WHERE \
-                   timestamp >= TIMESTAMP_NS '2020-01-01'";
+                   timestamp >= TIMESTAMP_NS '2020-01-01' AND \
+                   timestamp < TIMESTAMP_NS '2030-01-01'";
         ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
     }
 
@@ -1519,17 +1524,19 @@ mod tests {
 
     #[test]
     fn timestamp_bound_must_be_conjunctive() {
+        // Two-sided bounds are required (#117): a lone lower/upper bound is not finite.
         assert!(filter_guarantees_timestamp_pruning(
             "timestamp >= 'from' AND timestamp < 'to'"
         ));
-        assert!(filter_guarantees_timestamp_pruning("timestamp >= 'from'"));
+        assert!(!filter_guarantees_timestamp_pruning("timestamp >= 'from'"));
+        assert!(!filter_guarantees_timestamp_pruning("timestamp < 'to'"));
         assert!(!filter_guarantees_timestamp_pruning(
             "timestamp >= 'from' OR value = 1"
         ));
-        assert!(filter_guarantees_timestamp_pruning(
+        assert!(!filter_guarantees_timestamp_pruning(
             "timestamp >= 'from' AND value = 1"
         ));
-        assert!(filter_guarantees_timestamp_pruning(
+        assert!(!filter_guarantees_timestamp_pruning(
             "timestamp >= 'from' AND timestamp <> 'sentinel'"
         ));
         assert!(filter_guarantees_timestamp_pruning(
