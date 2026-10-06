@@ -5,6 +5,9 @@ Existing inline SQL is tolerated only while it remains byte-for-byte equivalent
 to the selected base revision. Any new or modified SQL-like string literal must
 move into a .sql template.
 
+Literals *moved* between changed paths in the same diff are credited: a literal
+removed from one changed file may appear in another without counting as new.
+
 Usage:
   python3 scripts/check_sql_guardrails.py [BASE_SHA]
 
@@ -79,9 +82,10 @@ def choose_base() -> str:
 
 
 def changed_paths(base: str) -> list[str]:
+    # Include deletes so moved SQL can be credited from the old path.
     paths = {
         line.strip()
-        for line in git("diff", "--name-only", "--diff-filter=ACMR", base, "--").splitlines()
+        for line in git("diff", "--name-only", "--diff-filter=ACMRD", base, "--").splitlines()
         if line.strip()
     }
     if base == "HEAD":
@@ -139,6 +143,29 @@ def read_standard_string(text: str, i: int, quote: str) -> tuple[str, int]:
     return text[start:], len(text)
 
 
+def skip_rust_lifetime_or_char(text: str, i: int) -> int:
+    """Advance past a Rust lifetime (`'a`, `'_`) or char literal (`'x'`, `'\\''`)."""
+    if i >= len(text) or text[i] != "'":
+        return i + 1
+    j = i + 1
+    if j >= len(text):
+        return len(text)
+    # Lifetime / label: 'ident or '_
+    if text[j] == "_" or text[j].isalpha():
+        j += 1
+        while j < len(text) and (text[j].isalnum() or text[j] == "_"):
+            j += 1
+        return j
+    # Char literal
+    if text[j] == "\\":
+        j += 2 if j + 1 < len(text) else 1
+    else:
+        j += 1
+    if j < len(text) and text[j] == "'":
+        j += 1
+    return j
+
+
 def read_rust_raw_string(text: str, i: int) -> tuple[str, int] | None:
     if text[i] != "r":
         return None
@@ -157,7 +184,44 @@ def read_rust_raw_string(text: str, i: int) -> tuple[str, int] | None:
     return text[start:end], end + len(delimiter)
 
 
+def without_cfg_test_modules(text: str) -> str:
+    """Drop `#[cfg(test)] mod … { … }` bodies so unit-test SQL is not ratcheted.
+
+    Mirrors `src/sql/mod.rs` ownership arch tests: production inline SQL is the
+    ratchet target; embedded test fixtures may still assert on SQL text.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        trimmed = lines[i].lstrip()
+        if trimmed.startswith("#[cfg(test)]"):
+            i += 1
+            while i < len(lines) and lines[i].lstrip().startswith("#["):
+                i += 1
+            if i < len(lines) and lines[i].lstrip().startswith("mod "):
+                depth = 0
+                started = False
+                while i < len(lines):
+                    for ch in lines[i]:
+                        if ch == "{":
+                            depth += 1
+                            started = True
+                        elif ch == "}":
+                            depth -= 1
+                    i += 1
+                    if started and depth <= 0:
+                        break
+                continue
+            continue
+        out.append(lines[i])
+        i += 1
+    return "".join(out)
+
+
 def sql_literals(text: str, suffix: str) -> list[tuple[str, int]]:
+    if suffix == ".rs":
+        text = without_cfg_test_modules(text)
     out: list[tuple[str, int]] = []
     i = 0
     line = 1
@@ -177,7 +241,20 @@ def sql_literals(text: str, suffix: str) -> list[tuple[str, int]]:
             i = comment_end
             continue
 
-        if text[i] in {'"', "'"}:
+        # Rust strings are double-quoted only. Single quotes are lifetimes/chars
+        # (`<'_>`, `'a', '\\'`) and must not be treated as string delimiters.
+        if suffix == ".rs":
+            if text[i] == '"':
+                body, end = read_standard_string(text, i, '"')
+                if is_sql_like(body):
+                    out.append((normalize(body), line))
+                line += text[i:end].count("\n")
+                i = end
+                continue
+            if text[i] == "'":
+                i = skip_rust_lifetime_or_char(text, i)
+                continue
+        elif text[i] in {'"', "'"}:
             body, end = read_standard_string(text, i, text[i])
             if is_sql_like(body):
                 out.append((normalize(body), line))
@@ -202,30 +279,58 @@ def is_sql_like(value: str) -> bool:
     return any(pattern.search(candidate) for pattern in SQL_PATTERNS)
 
 
-def check_inline_sql(base: str, path: str) -> list[str]:
+def path_sql_delta(base: str, path: str) -> tuple[Counter[str], list[tuple[str, int]]] | None:
+    """Return (removed_counts, new_literals_with_lines) for a changed code path."""
     if path == SELF:
-        return []
+        return None
     suffix = Path(path).suffix.lower()
     if suffix not in CODE_SUFFIXES:
-        return []
+        return None
     current_path = Path(path)
-    if not current_path.is_file():
-        return []
     old = sql_literals(base_text(base, path), suffix)
-    new = sql_literals(current_path.read_text(encoding="utf-8"), suffix)
+    new = (
+        sql_literals(current_path.read_text(encoding="utf-8"), suffix)
+        if current_path.is_file()
+        else []
+    )
     old_counts = Counter(value for value, _ in old)
     new_counts = Counter(value for value, _ in new)
-    violations: list[str] = []
+    removed: Counter[str] = Counter()
+    for value, count in old_counts.items():
+        drop = count - new_counts[value]
+        if drop > 0:
+            removed[value] = drop
+    extras: list[tuple[str, int]] = []
     for value, count in new_counts.items():
         extra = count - old_counts[value]
         if extra <= 0:
             continue
         lines = [line for literal, line in new if literal == value][:extra]
+        extras.extend((value, line) for line in lines)
+    return removed, extras
+
+
+def check_inline_sql_moves(base: str, paths: list[str]) -> list[str]:
+    """Forbid new SQL literals, crediting literals removed from other changed paths."""
+    removed_pool: Counter[str] = Counter()
+    all_extras: list[tuple[str, str, int]] = []  # path, value, line
+    for path in paths:
+        delta = path_sql_delta(base, path)
+        if delta is None:
+            continue
+        removed, extras = delta
+        removed_pool.update(removed)
+        all_extras.extend((path, value, line) for value, line in extras)
+
+    violations: list[str] = []
+    for path, value, line in all_extras:
+        if removed_pool[value] > 0:
+            removed_pool[value] -= 1
+            continue
         preview = value[:140] + ("..." if len(value) > 140 else "")
-        for line in lines:
-            violations.append(
-                f"{path}:{line}: new inline SQL is forbidden; move it to a .sql template: {preview}"
-            )
+        violations.append(
+            f"{path}:{line}: new inline SQL is forbidden; move it to a .sql template: {preview}"
+        )
     return violations
 
 
@@ -255,10 +360,10 @@ def main() -> int:
         print(f"SQL guardrail error: base commit {base!r} is not available", file=sys.stderr)
         return 2
 
-    violations: list[str] = []
     paths = changed_paths(base)
+    violations: list[str] = []
+    violations.extend(check_inline_sql_moves(base, paths))
     for path in paths:
-        violations.extend(check_inline_sql(base, path))
         violations.extend(check_sql_template(path))
 
     if violations:

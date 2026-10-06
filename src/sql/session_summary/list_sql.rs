@@ -7,6 +7,8 @@ use crate::session_summary::list_query::{SessionOrderBy, SessionSearchRequest, S
 use crate::sql::literal::sql_string_literal;
 use crate::sql::paging::decode_cursor;
 
+const WINDOW_LOOKUP_SQL: &str = include_str!("window_lookup.sql");
+
 /// Compile a single-session window lookup against `{schema}.session_summary`.
 ///
 /// Uses a bind parameter `$1` for `session_id` (caller supplies the value).
@@ -17,11 +19,9 @@ pub fn compile_session_summary_window_lookup_sql(
     let ownership = workspace_id
         .map(|id| format!("workspace_id = {} AND ", sql_string_literal(id)))
         .unwrap_or_default();
-    format!(
-        "SELECT start_time_ns, COALESCE(end_time_ns, start_time_ns) AS end_time_ns \
-         FROM {schema_quoted}.session_summary \
-         WHERE {ownership}session_id = $1 LIMIT 1"
-    )
+    WINDOW_LOOKUP_SQL
+        .replace("{{schema_quoted}}", schema_quoted)
+        .replace("{{ownership}}", &ownership)
 }
 
 /// Compile a Postgres SELECT against `{schema}.session_summary`.
