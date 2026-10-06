@@ -4,12 +4,14 @@
 //! Callers outside this package must not embed SQL verbs.
 
 pub mod bounds;
+pub mod health;
+pub mod lake_reads;
 pub mod literal;
 pub mod llm;
 pub mod logs;
 pub mod maintenance;
+pub(crate) mod paging;
 pub mod promotion;
-pub mod query;
 pub mod schema;
 pub mod session_summary;
 pub mod telemetry;
@@ -20,14 +22,19 @@ pub mod tempo;
 pub(crate) mod trusted;
 pub mod writer;
 
+#[cfg(test)]
+pub(crate) use bounds::assert_sql_has_otlp_time_predicates;
 pub(crate) use bounds::ensure_fact_scan_uses_timestamp_pruning;
 #[cfg(test)]
 pub(crate) use bounds::ensure_sql_has_bare_timestamp_predicate;
+pub(crate) use bounds::push_otlp_ns_window_predicates;
 pub(crate) use bounds::{
     execute_batch_checked, execute_batch_for_parquet_ingest, execute_maintenance_script,
     prepare_checked,
 };
-pub use bounds::{query_window_from_exclusive_ns, QueryWindow, TimestampFilteredSql};
+pub use bounds::{
+    push_otlp_time_predicates, query_window_from_exclusive_ns, QueryWindow, TimestampFilteredSql,
+};
 pub use literal::{sql_string_literal, timestamp_ns_literal, timestamptz_literal};
 
 pub use schema::{
@@ -164,7 +171,6 @@ mod locality_tests {
             "/async_jobs/tests.rs",
             "/session_summary/ddl.rs",
             "/session_summary/dirty.rs",
-            "/session_summary/list.rs",
             "/session_summary/reduce.rs",
             "/session_summary/tests.rs",
             "/api/health.rs",
@@ -212,6 +218,163 @@ mod locality_tests {
             &crate::sql::telemetry::details_spans_sql("*", "trace_id = 'x'", 10)
         )
         .is_err());
+    }
+
+    #[test]
+    fn lower_layers_must_not_depend_on_api() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut violations = Vec::new();
+        for subtree in ["sql", "session_summary", "query"] {
+            let dir = root.join(subtree);
+            walk_api_refs(&dir, &mut violations);
+        }
+        assert!(
+            violations.is_empty(),
+            "sql/session_summary/query must not reference crate::api:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    fn walk_api_refs(path: &Path, violations: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk_api_refs(&path, violations);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if name.ends_with("_tests.rs") || name == "tests.rs" || name == "unit_tests.rs" {
+                continue;
+            }
+            let text = without_cfg_test_modules(&fs::read_to_string(&path).unwrap_or_default());
+            for (i, line) in text.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                if trimmed.contains("crate::api::") || trimmed.contains("use crate::api") {
+                    violations.push(format!("{}:{}:{}", path.display(), i + 1, trimmed));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn query_engine_must_not_embed_sql_verb_literals() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/query");
+        let mut hits = Vec::new();
+        walk_rs(&root, &mut hits);
+        assert!(
+            hits.is_empty(),
+            "QueryEngine is execute-only; SQL verbs belong in sql/:\n{}",
+            hits.join("\n")
+        );
+    }
+
+    #[test]
+    fn appstate_trusted_sql_helper_must_not_exist() {
+        let api_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api");
+        let mut violations = Vec::new();
+        walk_forbidden_token(
+            &api_root,
+            "execute_tenant_scoped_trusted_sql",
+            &mut violations,
+        );
+        assert!(
+            violations.is_empty(),
+            "AppState::execute_tenant_scoped_trusted_sql must be removed; product handlers use RuntimeEngine::execute_trusted / QueryEngine typed methods:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    fn walk_forbidden_token(path: &Path, token: &str, violations: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk_forbidden_token(&path, token, violations);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if name.ends_with("_tests.rs") || name == "tests.rs" || name == "unit_tests.rs" {
+                continue;
+            }
+            let text = without_cfg_test_modules(&fs::read_to_string(&path).unwrap_or_default());
+            for (i, line) in text.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                if trimmed.contains(token) {
+                    violations.push(format!("{}:{}:{}", path.display(), i + 1, trimmed));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn approved_query_minting_stays_inside_sql() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut violations = Vec::new();
+        walk_approved_query(&root, &mut violations);
+        assert!(
+            violations.is_empty(),
+            "approved_query may only appear under src/sql/:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    fn walk_approved_query(path: &Path, violations: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().and_then(|n| n.to_str()) == Some("sql") {
+                    continue;
+                }
+                walk_approved_query(&path, violations);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if name.ends_with("_tests.rs") || name == "tests.rs" || name == "unit_tests.rs" {
+                continue;
+            }
+            let text = without_cfg_test_modules(&fs::read_to_string(&path).unwrap_or_default());
+            for (i, line) in text.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                if trimmed.contains("approved_query") {
+                    violations.push(format!("{}:{}:{}", path.display(), i + 1, trimmed));
+                }
+            }
+        }
     }
 
     #[test]

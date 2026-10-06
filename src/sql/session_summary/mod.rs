@@ -5,6 +5,7 @@ pub mod reduce_sql;
 
 pub use list_sql::{
     compile_session_summary_list_sql, compile_session_summary_list_sql_for_workspace,
+    compile_session_summary_window_lookup_sql,
 };
 pub use reduce_sql::{
     compile_session_summary_aggregate_sql, compile_session_summary_aggregate_sql_for_workspace,

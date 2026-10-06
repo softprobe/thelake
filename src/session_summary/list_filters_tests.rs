@@ -1,11 +1,11 @@
 //! Postgres integration: every `sessions/search` filter against `session_summary`.
 //! Run via `make test-lease-pg` / `make test-e2e` (`cargo test --lib postgres_ -- --ignored`).
 
-use crate::api::llm::query::{SessionOrderBy, SessionSearchRequest, SortDirection};
-use crate::api::sql_support::encode_cursor;
 use crate::session_summary::ensure_session_summary_tables;
 use crate::session_summary::list::search_session_summary;
+use crate::session_summary::list_query::{SessionOrderBy, SessionSearchRequest, SortDirection};
 use crate::session_summary::reduce::{upsert_summary_rows, SummaryRow};
+use crate::sql::paging::encode_cursor;
 use chrono::{TimeZone, Utc};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use std::time::Duration;
@@ -112,7 +112,7 @@ async fn seed_filter_fixture(pool: &Pool, schema: &str) {
     .expect("seed");
 }
 
-fn ids(resp: &crate::api::llm::query::SessionSearchResponse) -> Vec<&str> {
+fn ids(resp: &crate::session_summary::list_query::SessionSearchResponse) -> Vec<&str> {
     resp.items.iter().map(|s| s.session_id.as_str()).collect()
 }
 

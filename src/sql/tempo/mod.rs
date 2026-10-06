@@ -3,6 +3,7 @@
 use crate::compat::tempo::traceql::{is_duration_field, parse_duration_ns, TraceSelector};
 use crate::sql::literal::sql_string_literal;
 use crate::sql::query_window_from_exclusive_ns;
+use crate::sql::trusted::{approved_query, TrustedSql};
 use crate::storage::schema::attribute_map::prefer_attr_varchar;
 use std::collections::BTreeMap;
 
@@ -78,12 +79,20 @@ fn resolve_tempo_scan_window(
     }
 }
 
-/// Build the bounded raw trace scan. Protocol adapters never construct SQL.
+/// Build and approve the bounded raw trace scan. Protocol adapters never construct SQL.
 ///
-/// Emits `timestamp` lower/upper via [`QueryWindow`]
+/// Emits `timestamp` lower/upper via [`crate::sql::QueryWindow`]
 /// (exclusive end → inclusive). Omitted bounds get a finite default lookback
 /// so every lake scan still has a QueryWindow; never an open-ended scan.
-pub fn trace_scan_sql(
+pub(crate) fn trace_scan_sql(
+    params: TraceScanParams<'_>,
+    trace_id: Option<&str>,
+) -> Result<TrustedSql, String> {
+    let sql = compile_trace_scan_sql(params, trace_id)?;
+    approved_query(sql).map_err(|error| error.to_string())
+}
+
+fn compile_trace_scan_sql(
     params: TraceScanParams<'_>,
     trace_id: Option<&str>,
 ) -> Result<String, String> {
@@ -409,6 +418,7 @@ mod tests {
             (String::from("service.name"), String::from("api")),
         ]);
         let sql = trace_scan_sql(windowed(&tags, None, None, None, 5), None).expect("sql");
+        let sql = sql.as_str();
         assert!(sql.contains("COALESCE(observation_type,"));
         let obs = sql.find("observation_type").expect("observation_type");
         let bag = sql
@@ -416,13 +426,13 @@ mod tests {
             .expect("bag fallback");
         assert!(obs < bag, "promoted observation_type must lead bag access");
         assert!(sql.contains("COALESCE(service_name,"));
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
-        assert_sql_has_otlp_time_predicates(&sql);
+        use crate::sql::assert_sql_has_otlp_time_predicates;
+        assert_sql_has_otlp_time_predicates(sql);
     }
 
     #[test]
     fn trace_scan_defaults_lookback_when_bounds_omitted_or_partial() {
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        use crate::sql::assert_sql_has_otlp_time_predicates;
         let empty = BTreeMap::new();
         let omitted = trace_scan_sql(
             TraceScanParams {
@@ -437,7 +447,7 @@ mod tests {
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         )
         .expect("default lookback");
-        assert_sql_has_otlp_time_predicates(&omitted);
+        assert_sql_has_otlp_time_predicates(omitted.as_str());
 
         let end_only = trace_scan_sql(
             TraceScanParams {
@@ -452,7 +462,7 @@ mod tests {
             None,
         )
         .expect("end-only lookback");
-        assert_sql_has_otlp_time_predicates(&end_only);
+        assert_sql_has_otlp_time_predicates(end_only.as_str());
 
         let start_only = trace_scan_sql(
             TraceScanParams {
@@ -467,15 +477,16 @@ mod tests {
             None,
         )
         .expect("start-only lookback");
-        assert_sql_has_otlp_time_predicates(&start_only);
+        assert_sql_has_otlp_time_predicates(start_only.as_str());
     }
 
     #[test]
     fn tempo_trace_scan_inventory_emits_timestamp_bound() {
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        use crate::sql::assert_sql_has_otlp_time_predicates;
         let empty = BTreeMap::new();
         let sql = trace_scan_sql(windowed(&empty, None, None, None, 5), Some("abc")).expect("sql");
-        assert_sql_has_otlp_time_predicates(&sql);
+        let sql = sql.as_str();
+        assert_sql_has_otlp_time_predicates(sql);
         assert!(!sql.contains("record_date"));
         let id = sql.find("trace_id = 'abc'").unwrap();
         let ts = sql.find("timestamp >=").unwrap();
@@ -502,6 +513,7 @@ mod tests {
             Some("trace-1"),
         )
         .expect("sql");
+        let sql = sql.as_str();
         assert!(sql.contains("FROM traces"));
         assert!(sql.contains("trace_id = 'trace-1'"));
         assert!(sql.contains("LIMIT 10000"));
@@ -520,6 +532,7 @@ mod tests {
             None,
         )
         .expect("sql");
+        let sql = sql.as_str();
         assert!(sql.contains("matching_traces AS"));
         assert!(sql.contains("qualified_traces AS"));
         assert!(sql.contains("instrumentation_scope"));
@@ -577,6 +590,7 @@ mod tests {
         let empty = BTreeMap::new();
         let sql =
             trace_scan_sql(windowed(&empty, Some(&selector), None, None, 1), None).expect("sql");
+        let sql = sql.as_str();
         assert!(sql.contains("CAST((COALESCE(end_time_unix_nano, start_time_unix_nano) - start_time_unix_nano) AS BIGINT) >= 1000000"));
         assert!(!sql.contains("CAST(COALESCE(end_time_unix_nano, start_time_unix_nano) - start_time_unix_nano AS VARCHAR)"));
     }
@@ -589,6 +603,7 @@ mod tests {
         let empty = BTreeMap::new();
         let sql =
             trace_scan_sql(windowed(&empty, Some(&selector), None, None, 1), None).expect("sql");
+        let sql = sql.as_str();
         assert!(
             sql.contains("TRY_CAST(COALESCE(json_extract_string")
                 || sql.contains("TRY_CAST(json_extract_string"),
@@ -605,6 +620,7 @@ mod tests {
         let empty = BTreeMap::new();
         let sql =
             trace_scan_sql(windowed(&empty, Some(&selector), None, None, 1), None).expect("sql");
+        let sql = sql.as_str();
 
         assert!(sql.contains("WHEN 'STATUS_CODE_ERROR' THEN 2"));
         assert!(sql.contains("WHEN 'error' THEN 2"));

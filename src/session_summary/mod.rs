@@ -8,6 +8,7 @@ mod dirty;
 mod hot_attrs;
 mod job;
 mod list;
+pub mod list_query;
 mod reduce;
 mod time;
 
@@ -23,6 +24,9 @@ pub use job::{start_session_summary_reducer, SessionSummaryRebuildJob};
 pub use list::{
     lookup_session_summary_window, lookup_session_summary_window_for_workspace,
     search_session_summary, search_session_summary_for_workspace, SessionSummaryListError,
+};
+pub use list_query::{
+    SessionOrderBy, SessionSearchRequest, SessionSearchResponse, SessionSummary, SortDirection,
 };
 pub use reduce::validate_rebuild_window;
 pub(crate) use reduce::SummaryRow;

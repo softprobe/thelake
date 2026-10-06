@@ -9,8 +9,6 @@ pub mod health;
 pub mod ingestion;
 pub mod llm;
 pub mod query;
-pub(crate) mod query_window;
-pub(crate) mod sql_support;
 pub mod telemetry;
 
 use crate::authn::TenantInfo;
@@ -44,13 +42,23 @@ fn empty_query_result() -> crate::storage::duckdb::QueryResult {
     }
 }
 
-fn map_missing_optional_table(
+pub(crate) fn map_missing_optional_table(
     err: anyhow::Error,
 ) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
     if MISSING_OPTIONAL_TABLE.is_match(&err.to_string()) {
         Ok(empty_query_result())
     } else {
         Err(err)
+    }
+}
+
+/// Apply [`map_missing_optional_table`] after a typed/`execute_trusted` lake read.
+pub(crate) fn map_execute_result(
+    result: anyhow::Result<crate::storage::duckdb::QueryResult>,
+) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
+    match result {
+        Ok(rows) => Ok(rows),
+        Err(err) => map_missing_optional_table(err),
     }
 }
 
@@ -72,7 +80,10 @@ impl AppState {
         self.engines.engine_for(workspace_id).await
     }
 
-    /// Execute SQL on the tenant-bound query engine (scope fixed at engine construction).
+    /// Execute raw SQL on the tenant-bound query engine (debug `/v1/query/sql` only).
+    ///
+    /// Product handlers must resolve an engine and call `execute_trusted` (or a
+    /// typed `QueryEngine` method) instead of this path.
     pub(crate) async fn execute_tenant_scoped_sql(
         &self,
         tenant: Option<&TenantInfo>,
@@ -80,28 +91,7 @@ impl AppState {
     ) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
         let workspace_id = tenant.map(|t| t.workspace_id.as_str()).unwrap_or("");
         let engine = self.engines.engine_for(workspace_id).await?;
-        match engine.execute_query(sql).await {
-            Ok(result) => Ok(result),
-            Err(err) => map_missing_optional_table(err),
-        }
-    }
-
-    /// Execute SQL emitted by an internal typed query builder.
-    ///
-    /// Shared mode exposes only tenant-filtered logical views to query workers;
-    /// callers must therefore use the opaque trusted boundary instead of the
-    /// arbitrary-SQL compatibility path.
-    pub(crate) async fn execute_tenant_scoped_trusted_sql(
-        &self,
-        tenant: Option<&TenantInfo>,
-        query: crate::sql::trusted::TrustedSql,
-    ) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
-        let workspace_id = tenant.map(|t| t.workspace_id.as_str()).unwrap_or("");
-        let engine = self.engines.engine_for(workspace_id).await?;
-        match engine.execute_trusted(query).await {
-            Ok(result) => Ok(result),
-            Err(err) => map_missing_optional_table(err),
-        }
+        map_execute_result(engine.execute_query(sql).await)
     }
 }
 

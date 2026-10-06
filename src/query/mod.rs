@@ -7,6 +7,8 @@ use crate::workspace_scope::{
 };
 use std::sync::Arc;
 
+pub use crate::sql::lake_reads::{LogCountFilter, TraceCountFilter};
+
 #[derive(Clone)]
 pub struct QueryEngine {
     duckdb: Arc<DuckDBQueryEngine>,
@@ -14,22 +16,6 @@ pub struct QueryEngine {
     /// query instruments (anti-recursion).
     record_self_monitoring: bool,
     workspace_id: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct LogCountFilter {
-    pub time_window: crate::sql::QueryWindow,
-    pub session_id: Option<String>,
-    pub body: Option<String>,
-    pub trace_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TraceCountFilter {
-    pub time_window: crate::sql::QueryWindow,
-    pub session_id: Option<String>,
-    pub app_id: Option<String>,
-    pub span_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,53 +71,18 @@ impl QueryEngine {
 
     /// Count logs through the tenant-bound query contract.
     pub async fn count_logs(&self, filter: LogCountFilter) -> anyhow::Result<u64> {
-        let mut predicates = timestamp_predicates(filter.time_window);
-        if let Some(session_id) = filter.session_id {
-            predicates.push(format!(
-                "session_id = {}",
-                crate::sql::literal::sql_string_literal(&session_id)
-            ));
-        }
-        if let Some(body) = filter.body {
-            predicates.push(format!(
-                "body = {}",
-                crate::sql::literal::sql_string_literal(&body)
-            ));
-        }
-        if let Some(trace_id) = filter.trace_id {
-            predicates.push(format!(
-                "trace_id = {}",
-                crate::sql::literal::sql_string_literal(&trace_id)
-            ));
-        }
-        let query = crate::sql::trusted::approved_query(crate::sql::query::count_logs_sql(
-            &predicates.join(" AND "),
-        ))
-        .map_err(|error| anyhow::anyhow!(error))?;
+        let query =
+            crate::sql::lake_reads::count_logs(&filter).map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
-        Ok(result
-            .rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|value| value.as_i64())
-            .unwrap_or_default() as u64)
+        Ok(first_count(&result))
     }
 
     /// Count traces through the tenant-bound query contract.
     pub async fn count_traces(&self, filter: TraceCountFilter) -> anyhow::Result<u64> {
-        let mut predicates = timestamp_predicates(filter.time_window);
-        add_trace_filter_predicates(&mut predicates, filter);
-        let query = crate::sql::trusted::approved_query(crate::sql::query::count_traces_sql(
-            &predicates.join(" AND "),
-        ))
-        .map_err(|error| anyhow::anyhow!(error))?;
+        let query = crate::sql::lake_reads::count_traces(&filter)
+            .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
-        Ok(result
-            .rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|value| value.as_i64())
-            .unwrap_or_default() as u64)
+        Ok(first_count(&result))
     }
 
     /// Read the first HTTP-bearing span for a session.
@@ -140,16 +91,8 @@ impl QueryEngine {
         session_id: &str,
         time_window: crate::sql::QueryWindow,
     ) -> anyhow::Result<Option<HttpSpan>> {
-        let mut predicates = timestamp_predicates(time_window);
-        predicates.push(format!(
-            "session_id = {}",
-            crate::sql::literal::sql_string_literal(session_id)
-        ));
-        predicates.push("http_request_method IS NOT NULL".to_string());
-        let query = crate::sql::trusted::approved_query(crate::sql::query::find_http_span_sql(
-            &predicates.join(" AND "),
-        ))
-        .map_err(|error| anyhow::anyhow!(error))?;
+        let query = crate::sql::lake_reads::find_http_span(session_id, time_window)
+            .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
         let Some(row) = result.rows.first() else {
             return Ok(None);
@@ -189,22 +132,10 @@ impl QueryEngine {
         session_id: &str,
         time_window: crate::sql::QueryWindow,
     ) -> anyhow::Result<u64> {
-        let mut predicates = timestamp_predicates(time_window);
-        predicates.push(format!(
-            "session_id = {}",
-            crate::sql::literal::sql_string_literal(session_id)
-        ));
-        let query = crate::sql::trusted::approved_query(crate::sql::query::count_trace_days_sql(
-            &predicates.join(" AND "),
-        ))
-        .map_err(|error| anyhow::anyhow!(error))?;
+        let query = crate::sql::lake_reads::count_trace_days(session_id, time_window)
+            .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
-        Ok(result
-            .rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|value| value.as_i64())
-            .unwrap_or_default() as u64)
+        Ok(first_count(&result))
     }
 
     /// Count traces whose typed attribute matches a value.
@@ -215,17 +146,11 @@ impl QueryEngine {
         value: &str,
         time_window: crate::sql::QueryWindow,
     ) -> anyhow::Result<u64> {
-        let mut predicates = timestamp_predicates(time_window);
-        predicates.push(format!(
-            "session_id = {}",
-            crate::sql::literal::sql_string_literal(session_id)
-        ));
-        predicates.push(format!(
-            "{} = {}",
-            crate::storage::schema::attribute_map::attribute_map_varchar("attributes", key),
-            crate::sql::literal::sql_string_literal(value)
-        ));
-        self.count_rows("traces", predicates).await
+        let query =
+            crate::sql::lake_reads::count_traces_by_attribute(session_id, key, value, time_window)
+                .map_err(|error| anyhow::anyhow!(error))?;
+        let result = self.execute_trusted(query).await?;
+        Ok(first_count(&result))
     }
 
     /// Count logs whose typed attribute matches a value.
@@ -235,13 +160,10 @@ impl QueryEngine {
         value: &str,
         time_window: crate::sql::QueryWindow,
     ) -> anyhow::Result<u64> {
-        let mut predicates = timestamp_predicates(time_window);
-        predicates.push(format!(
-            "{} = {}",
-            crate::storage::schema::attribute_map::attribute_map_varchar("attributes", key),
-            crate::sql::literal::sql_string_literal(value)
-        ));
-        self.count_rows("logs", predicates).await
+        let query = crate::sql::lake_reads::count_logs_by_attribute(key, value, time_window)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let result = self.execute_trusted(query).await?;
+        Ok(first_count(&result))
     }
 
     /// Read the attribute bag for the first matching trace.
@@ -252,28 +174,15 @@ impl QueryEngine {
         value: &str,
         time_window: crate::sql::QueryWindow,
     ) -> anyhow::Result<Option<serde_json::Value>> {
-        let mut predicates = timestamp_predicates(time_window);
-        predicates.push(format!(
-            "session_id = {}",
-            crate::sql::literal::sql_string_literal(session_id)
-        ));
-        predicates.push(format!(
-            "{} = {}",
-            crate::storage::schema::attribute_map::attribute_map_varchar("attributes", key),
-            crate::sql::literal::sql_string_literal(value)
-        ));
-        let query = crate::sql::trusted::approved_query(crate::sql::query::trace_attributes_sql(
-            &predicates.join(" AND "),
-        ))
+        let query = crate::sql::lake_reads::trace_attributes_by_attribute(
+            session_id,
+            key,
+            value,
+            time_window,
+        )
         .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
-        let Some(value) = result.rows.first().and_then(|row| row.first()) else {
-            return Ok(None);
-        };
-        Ok(value
-            .as_str()
-            .and_then(|text| serde_json::from_str(text).ok())
-            .or_else(|| Some(value.clone())))
+        Ok(map_attributes_row(&result))
     }
 
     /// Read the attribute bag for a span selected by its stable identifier.
@@ -282,48 +191,30 @@ impl QueryEngine {
         span_id: &str,
         time_window: crate::sql::QueryWindow,
     ) -> anyhow::Result<Option<serde_json::Value>> {
-        let mut predicates = timestamp_predicates(time_window);
-        predicates.push(format!(
-            "span_id = {}",
-            crate::sql::literal::sql_string_literal(span_id)
-        ));
-        let query = crate::sql::trusted::approved_query(crate::sql::query::trace_attributes_sql(
-            &predicates.join(" AND "),
-        ))
-        .map_err(|error| anyhow::anyhow!(error))?;
+        let query = crate::sql::lake_reads::trace_attributes_for_span(span_id, time_window)
+            .map_err(|error| anyhow::anyhow!(error))?;
         let result = self.execute_trusted(query).await?;
-        let Some(value) = result.rows.first().and_then(|row| row.first()) else {
-            return Ok(None);
-        };
-        Ok(value
-            .as_str()
-            .and_then(|text| serde_json::from_str(text).ok())
-            .or_else(|| Some(value.clone())))
+        Ok(map_attributes_row(&result))
     }
 
     /// Execute the approved LLM span query built from a typed request.
     pub async fn search_spans(
         &self,
-        request: &crate::api::llm::query::SpanSearchRequest,
+        request: &crate::sql::llm::search::SpanSearchRequest,
     ) -> anyhow::Result<QueryResult> {
-        let sql = crate::sql::llm::compile_span_search_sql(request).map_err(anyhow::Error::msg)?;
-        let query =
-            crate::sql::trusted::approved_query(sql).map_err(|error| anyhow::anyhow!(error))?;
+        let query = crate::sql::llm::search_spans(request).map_err(anyhow::Error::msg)?;
         self.execute_trusted(query).await
     }
 
     /// Execute the approved telemetry-details query for a typed target.
     pub async fn telemetry_details_logs(
         &self,
-        target: &crate::api::telemetry::TelemetryDetailsTarget,
-        time_range: &crate::api::telemetry::TelemetryTimeRange,
+        target: &crate::sql::telemetry::TelemetryDetailsTarget,
+        time_range: &crate::sql::telemetry::TelemetryTimeRange,
         limit: usize,
     ) -> anyhow::Result<QueryResult> {
-        let sql = crate::api::telemetry::compile_details_sql(target, time_range, limit)
-            .map_err(anyhow::Error::msg)?
-            .logs;
-        let query =
-            crate::sql::trusted::approved_query(sql).map_err(|error| anyhow::anyhow!(error))?;
+        let query = crate::sql::telemetry::details_logs(target, time_range, limit)
+            .map_err(anyhow::Error::msg)?;
         self.execute_trusted(query).await
     }
 
@@ -339,7 +230,6 @@ impl QueryEngine {
         self.duckdb.execute_query_uninstrumented(query).await
     }
 
-    /// Execute SQL produced by an approved internal query builder.
     /// Execute the opaque result of an approved internal query builder.
     pub(crate) async fn execute_trusted(
         &self,
@@ -368,42 +258,19 @@ impl QueryEngine {
     }
 }
 
-fn timestamp_predicates(window: crate::sql::QueryWindow) -> Vec<String> {
-    window
-        .timestamp_filter_sql("")
-        .split(" AND ")
-        .map(str::to_owned)
-        .collect()
+fn first_count(result: &QueryResult) -> u64 {
+    result
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|value| value.as_i64())
+        .unwrap_or_default() as u64
 }
 
-impl QueryEngine {
-    async fn count_rows(&self, table: &str, predicates: Vec<String>) -> anyhow::Result<u64> {
-        let query = crate::sql::trusted::approved_query(crate::sql::query::count_rows_sql(
-            table,
-            &predicates.join(" AND "),
-        ))
-        .map_err(|error| anyhow::anyhow!(error))?;
-        let result = self.execute_trusted(query).await?;
-        Ok(result
-            .rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|value| value.as_i64())
-            .unwrap_or_default() as u64)
-    }
-}
-
-fn add_trace_filter_predicates(predicates: &mut Vec<String>, filter: TraceCountFilter) {
-    for (column, value) in [
-        ("session_id", filter.session_id),
-        ("app_id", filter.app_id),
-        ("span_id", filter.span_id),
-    ] {
-        if let Some(value) = value {
-            predicates.push(format!(
-                "{column} = {}",
-                crate::sql::literal::sql_string_literal(&value)
-            ));
-        }
-    }
+fn map_attributes_row(result: &QueryResult) -> Option<serde_json::Value> {
+    let value = result.rows.first().and_then(|row| row.first())?;
+    value
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .or_else(|| Some(value.clone()))
 }

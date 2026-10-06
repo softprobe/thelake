@@ -1,30 +1,15 @@
-//! Shared DuckDB SQL-compilation helpers for query modules (e.g. `api/llm/query.rs`).
-//!
-//! Extracted from `api/llm/query.rs` so literal-escaping, cursors, and time-bound clauses
-//! are not copy-pasted across query recipes.
+//! Keyset-pagination cursors for lake and session-summary SQL recipes.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::sql::literal::{sql_string_literal, timestamp_ns_literal};
 
 /// Opaque keyset-pagination cursor: `(timestamp, tiebreaker id)`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct PageCursor {
     pub t: DateTime<Utc>,
     pub id: String,
-}
-
-pub(crate) fn sql_string_literal(value: &str) -> String {
-    crate::sql::literal::sql_string_literal(value)
-}
-
-/// Render a nanosecond-precision literal for trace/span timestamp columns.
-pub(crate) fn timestamp_ns_literal(value: &DateTime<Utc>) -> String {
-    crate::sql::literal::timestamp_ns_literal(value)
-}
-
-/// Render a nanosecond-precision literal from an RFC3339 API value.
-pub(crate) fn timestamp_ns_literal_from_str(value: &str) -> String {
-    crate::sql::literal::timestamp_ns_literal_from_str(value)
 }
 
 pub(crate) fn encode_cursor(timestamp: DateTime<Utc>, id: &str) -> String {
@@ -63,11 +48,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escapes_single_quotes_in_string_literal() {
-        assert_eq!(sql_string_literal("it's"), "'it''s'");
-    }
-
-    #[test]
     fn cursor_round_trips() {
         let ts = DateTime::parse_from_rfc3339("2026-07-18T23:22:00.123Z")
             .unwrap()
@@ -80,14 +60,16 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_ns_literal_preserves_nanoseconds() {
-        let timestamp = DateTime::parse_from_rfc3339("2026-07-18T23:22:00.123456789Z")
+    fn cursor_predicate_uses_bare_timestamp_column() {
+        let ts = DateTime::parse_from_rfc3339("2026-07-18T23:22:00.123456789Z")
             .unwrap()
             .with_timezone(&Utc);
-
-        assert_eq!(
-            timestamp_ns_literal(&timestamp),
-            "'2026-07-18T23:22:00.123456789Z'::TIMESTAMP_NS"
-        );
+        let cursor = encode_cursor(ts, "span-1");
+        let pred = cursor_predicate(&cursor, "timestamp", "id").expect("predicate");
+        assert!(pred.contains("timestamp < "));
+        assert!(pred.contains("timestamp = "));
+        assert!(!pred.contains("make_timestamp_ns(epoch_ns(timestamp))"));
+        assert!(pred.contains("'2026-07-18T23:22:00.123456789Z'::TIMESTAMP_NS"));
+        assert!(pred.contains("'span-1'"));
     }
 }

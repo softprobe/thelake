@@ -205,10 +205,10 @@ impl RuntimeEngine {
     /// List sessions from Postgres `session_summary` for this tenant binding.
     pub(crate) async fn search_session_summary(
         &self,
-        request: &crate::api::llm::query::SessionSearchRequest,
+        request: &crate::session_summary::list_query::SessionSearchRequest,
         limit: usize,
     ) -> Result<
-        crate::api::llm::query::SessionSearchResponse,
+        crate::session_summary::list_query::SessionSearchResponse,
         crate::session_summary::SessionSummaryListError,
     > {
         let scope = self.session_summary_scope();
