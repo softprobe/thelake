@@ -84,9 +84,17 @@ GitHub Actions (self-hosted Linux; Make-only; no Actions cargo/`target` cache):
 
 ```bash
 export CONFIG_FILE=config.yaml
-export SOFTPROBE_AUTH_URL=http://127.0.0.1:8091/validate
-cargo run --bin thelake
+export SOFTPROBE_LOCAL_ANONYMOUS=1
+export THELAKE_DEFAULT_WORKSPACE_ID=550e8400-e29b-41d4-a716-446655440000
+make run
 ```
+
+Open the session and trace UI at `http://127.0.0.1:8090/explorer/`. Local
+anonymous mode binds allowed ingest/query/score requests to this one workspace
+and ignores caller-provided tenant selectors. Anyone who can reach the listener
+can read and write that workspace. Leave this mode disabled when the listener
+is reachable by untrusted users; external assertion/Bearer auth remains the
+default.
 
 Defaults:
 
@@ -217,9 +225,10 @@ Settings are under `maintenance` (and `async_jobs` for lease TTL/heartbeat) in
 
 ## Publish Docker image
 
-Product bits are built **once on the host** (`make build-release` →
-`cargo build --release --locked` → `dist/`). The Dockerfile is packaging-only
-(`COPY dist/…`); it never runs cargo. Cache lives at `~/.cache/thelake`.
+`make build-release` builds the Explorer assets, embeds them in the release
+binary, and stages the binary and runtime dependencies in `dist/`. The
+Dockerfile is packaging-only (`COPY dist/…`); it never runs Node or Cargo.
+Cache lives at `~/.cache/thelake`.
 
 Official path: GitHub Release → `.github/workflows/release.yml` → `make release`
 (`test-perf` + unconditional `build-release` + `publish` under `--release`).

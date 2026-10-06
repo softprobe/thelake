@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softprobe.ai/contracts/score-config.json",
+  "title": "SoftprobeScoreConfig",
+  "type": "object",
+  "required": ["config_id", "timestamp", "name", "data_type"],
+  "additionalProperties": false,
+  "properties": {
+    "config_id": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "name": { "type": "string", "minLength": 1 },
+    "data_type": {
+      "type": "string",
+      "enum": ["numeric", "categorical", "boolean", "text"]
+    },
+    "description": { "type": ["string", "null"] },
+    "min_value": { "type": ["number", "null"] },
+    "max_value": { "type": ["number", "null"] },
+    "categories": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "author_id": { "type": ["string", "null"] },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "default": {}
+    },
+    "record_date": { "type": "string", "format": "date" }
+  }
+}

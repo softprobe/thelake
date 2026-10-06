@@ -14,4 +14,4 @@ thelake is an Apache-2.0 Rust runtime: OTLP traces and logs in; DuckLake + Parqu
 ## Optional
 
 - [Repository docs](https://github.com/softprobe/thelake/tree/main/docs): Design and DuckLake notes
-- [README](https://github.com/softprobe/thelake/blob/main/README.md): Local setup (`make setup`, `make build`, `cargo run --bin thelake`)
+- [README](https://github.com/softprobe/thelake/blob/main/README.md): Local setup (`make setup`, `make build`, `make run`)

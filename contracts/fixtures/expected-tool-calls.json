@@ -1,0 +1,46 @@
+{
+  "topology": "agent → generation → tool*",
+  "correlation": "gen_ai.tool.call.id matches sp.tool.call_ids on the parent generation",
+  "parallelCalls": [
+    {
+      "name": "tool.search",
+      "observation_type": "tool",
+      "parent_name": "generation.plan",
+      "attributes": {
+        "sp.observation.type": "tool",
+        "gen_ai.tool.name": "search",
+        "gen_ai.tool.call.id": "call_search_0",
+        "sp.tool.kind": "function",
+        "sp.tool.status": "ok",
+        "sp.tool.index": 0
+      }
+    },
+    {
+      "name": "tool.write",
+      "observation_type": "tool",
+      "parent_name": "generation.plan",
+      "attributes": {
+        "sp.observation.type": "tool",
+        "gen_ai.tool.name": "write",
+        "gen_ai.tool.call.id": "call_write_1",
+        "sp.tool.kind": "function",
+        "sp.tool.status": "error",
+        "sp.tool.index": 1
+      },
+      "status_code": "ERROR"
+    }
+  ],
+  "generationSummary": {
+    "sp.tool.available_names": ["search", "write"],
+    "sp.tool.available_count": 2,
+    "sp.tool.call_names": ["search", "write"],
+    "sp.tool.call_count": 2,
+    "sp.tool.call_ids": ["call_search_0", "call_write_1"]
+  },
+  "toolMessageShape": {
+    "role": "tool",
+    "name": "search",
+    "tool_call_id": "call_search_0",
+    "content": "ok"
+  }
+}

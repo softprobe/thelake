@@ -6,7 +6,9 @@ use softprobe_runtime::api::{self, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp;
-use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
+use softprobe_runtime::runtime_api::{
+    local_anonymous_workspace_id, runtime_auth_middleware, runtime_control_routes,
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +49,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
+    local_anonymous_workspace_id().map_err(|status| {
+        anyhow::anyhow!("invalid SOFTPROBE_LOCAL_ANONYMOUS configuration: {status}")
+    })?;
     let control_plane = control_plane_runtime_from_env()?;
     let traces = post(ingest_traces);
 

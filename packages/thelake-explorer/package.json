@@ -1,0 +1,27 @@
+{
+  "name": "@softprobe/thelake-explorer",
+  "version": "0.1.0",
+  "description": "Shared trace and session Explorer for thelake",
+  "license": "Apache-2.0",
+  "publishConfig": { "access": "public" },
+  "type": "module",
+  "sideEffects": ["**/*.css"],
+  "files": ["dist", "README.md"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./style.css": "./dist/index.css"
+  },
+  "scripts": {
+    "build": "vite build && vite build --config vite.spa.config.ts && tsc -p tsconfig.lib.json",
+    "build:embedded": "vite build --config vite.spa.config.ts --mode embedded",
+    "test": "vitest run"
+  },
+  "peerDependencies": { "react": ">=18", "react-dom": ">=18" },
+  "devDependencies": {
+    "@types/react": "^18.3.18", "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4", "typescript": "^5.8.2", "vite": "^6.2.0",
+    "vitest": "^2.1.9", "react": "^18.3.1", "react-dom": "^18.3.1"
+  }
+}

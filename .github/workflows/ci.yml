@@ -41,6 +41,13 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Set up Node.js for the embedded Explorer
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/thelake-explorer/package-lock.json
+
       - name: Restore build cache
         uses: ./.github/actions/thelake-cache
 

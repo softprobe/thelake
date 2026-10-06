@@ -18,9 +18,9 @@
 
 SHELL := /bin/bash
 
-.PHONY: help ensure-cache doctor setup teardown check-infra \
+.PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run \
 	clean clean-cache build build-release package publish test-publish-tags \
-	lint check-sql-guardrails fmt check-fmt \
+	contracts-test lint check-sql-guardrails fmt check-fmt \
 	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
@@ -177,11 +177,35 @@ doctor: ensure-cache
 	echo "doctor ok (CARGO_TARGET_DIR=$(CARGO_TARGET_DIR))"
 
 # ---- build ----
-build: ensure-cache
+EXPLORER_DIR := $(CURDIR)/packages/thelake-explorer
+EXPLORER_EMBEDDED := $(EXPLORER_DIR)/embedded
+
+explorer-deps:
+	@if [ "$${IN_LINUX_BUILDER:-0}" = "1" ]; then \
+		test -d "$(EXPLORER_DIR)/node_modules" || test -f "$(EXPLORER_EMBEDDED)/index.html"; \
+	else \
+		test -d "$(EXPLORER_DIR)/node_modules" || npm ci --prefix "$(EXPLORER_DIR)"; \
+	fi
+
+explorer-assets: explorer-deps
+	@if [ "$${IN_LINUX_BUILDER:-0}" = "1" ]; then \
+		test -f "$(EXPLORER_EMBEDDED)/index.html" || { echo "Explorer assets must be built on the host before entering the Linux builder" >&2; exit 1; }; \
+	else \
+		npm --prefix "$(EXPLORER_DIR)" run build:embedded; \
+	fi
+
+build: ensure-cache explorer-assets
 	cargo build --locked
 
+contracts-test:
+	python3 scripts/validate_contracts.py
+	python3 scripts/test_cross_language_contract.py
+
+run: build
+	cargo run --locked --bin thelake
+
 # Host release → dist/. On non-linux/amd64, TARGET_PLATFORM=linux/amd64 re-enters via docker.
-build-release: ensure-cache
+build-release: ensure-cache explorer-assets
 	@set -euo pipefail; \
 	if [ "$${IN_LINUX_BUILDER:-0}" != "1" ] && { [ "$${TARGET_PLATFORM:-}" = "linux/amd64" ] || [ "$${FORCE_LINUX_BUILDER:-0}" = "1" ]; }; then \
 		echo "linux/amd64 via $(LINUX_BUILDER_IMAGE) (same Make recipe)..."; \
@@ -361,10 +385,11 @@ _export-minio-aws = \
 ducklake-extension:
 	bash scripts/download-ducklake-extension.sh
 
-test: ensure-cache ducklake-extension
+test: ensure-cache ducklake-extension explorer-assets
 	bash tests/scripts/ducklake_extension_download_test.sh
 	@echo "unit + lightweight tests (no e2e infra)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compatibility -- --test-threads=1
+	npm --prefix "$(EXPLORER_DIR)" test
 
 # Postgres lease contract (ignored in `make test`; needs ducklake-postgres).
 test-lease-pg: ensure-cache check-infra

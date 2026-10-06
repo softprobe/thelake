@@ -1,0 +1,48 @@
+{
+  "observationTypes": [
+    "span",
+    "event",
+    "generation",
+    "agent",
+    "tool",
+    "chain",
+    "retriever",
+    "evaluator",
+    "embedding",
+    "guardrail"
+  ],
+  "resourceAttributes": {
+    "service.name": "softprobe-sdk-contract",
+    "service.version": "0.1.0",
+    "deployment.environment.name": "test",
+    "telemetry.sdk.name": "softprobe"
+  },
+  "contentEvents": {
+    "allowedEventNames": [
+      "gen_ai.client.inference.operation.details",
+      "gen_ai.content.prompt",
+      "gen_ai.content.completion",
+      "gen_ai.tool.message"
+    ],
+    "contentAttributeKey": "content",
+    "contentEncoding": "json-string"
+  },
+  "toolAttributes": {
+    "generation": [
+      "sp.tool.available_names",
+      "sp.tool.available_count",
+      "sp.tool.call_names",
+      "sp.tool.call_count",
+      "sp.tool.call_ids"
+    ],
+    "tool": [
+      "gen_ai.tool.name",
+      "gen_ai.tool.call.id",
+      "sp.tool.kind",
+      "sp.tool.status",
+      "sp.tool.index",
+      "sp.mcp.server",
+      "sp.mcp.tool"
+    ]
+  }
+}

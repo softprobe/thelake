@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softprobe.ai/contracts/score-request.json",
+  "title": "SoftprobeScoreRequest",
+  "type": "object",
+  "required": ["score_id", "timestamp", "name", "data_type", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "score_id": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "trace_id": { "type": ["string", "null"] },
+    "span_id": { "type": ["string", "null"] },
+    "session_id": { "type": ["string", "null"] },
+    "name": { "type": "string", "minLength": 1 },
+    "data_type": {
+      "type": "string",
+      "enum": ["numeric", "categorical", "boolean", "text"]
+    },
+    "numeric_value": { "type": ["number", "null"] },
+    "string_value": { "type": ["string", "null"] },
+    "boolean_value": { "type": ["boolean", "null"] },
+    "source": {
+      "type": "string",
+      "enum": ["api", "user", "evaluator", "annotation"]
+    },
+    "comment": { "type": ["string", "null"] },
+    "config_id": { "type": ["string", "null"] },
+    "author_id": { "type": ["string", "null"] },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "default": {}
+    }
+  }
+}
