@@ -3,9 +3,26 @@
 //! Steady-state list path: no DuckLake scan. Filters use typed summary columns.
 //! Postgres stores event-time bounds as signed epoch nanoseconds.
 
-use crate::api::llm::query::{SessionOrderBy, SessionSearchRequest, SortDirection};
-use crate::api::sql_support::decode_cursor;
+use crate::session_summary::list_query::{SessionOrderBy, SessionSearchRequest, SortDirection};
 use crate::sql::literal::sql_string_literal;
+use crate::sql::paging::decode_cursor;
+
+/// Compile a single-session window lookup against `{schema}.session_summary`.
+///
+/// Uses a bind parameter `$1` for `session_id` (caller supplies the value).
+pub fn compile_session_summary_window_lookup_sql(
+    schema_quoted: &str,
+    workspace_id: Option<&str>,
+) -> String {
+    let ownership = workspace_id
+        .map(|id| format!("workspace_id = {} AND ", sql_string_literal(id)))
+        .unwrap_or_default();
+    format!(
+        "SELECT start_time_ns, COALESCE(end_time_ns, start_time_ns) AS end_time_ns \
+         FROM {schema_quoted}.session_summary \
+         WHERE {ownership}session_id = $1 LIMIT 1"
+    )
+}
 
 /// Compile a Postgres SELECT against `{schema}.session_summary`.
 ///
@@ -205,7 +222,7 @@ mod tests {
 
     #[test]
     fn list_sql_cursor_desc_start_time() {
-        use crate::api::sql_support::encode_cursor;
+        use crate::sql::paging::encode_cursor;
         let mut req = base_request();
         let ts = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
         req.cursor = Some(encode_cursor(ts, "sess-1"));
@@ -218,7 +235,7 @@ mod tests {
 
     #[test]
     fn list_sql_rejects_cursor_with_bad_order() {
-        use crate::api::sql_support::encode_cursor;
+        use crate::sql::paging::encode_cursor;
         let mut req = base_request();
         req.cursor = Some(encode_cursor(req.from, "x"));
         req.order_by = SessionOrderBy::ErrorCount;

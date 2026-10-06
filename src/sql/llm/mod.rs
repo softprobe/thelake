@@ -1,10 +1,15 @@
 //! LLM OTLP query SQL recipes (one clock: `timestamp` only).
 
-use crate::api::llm::query::{
-    SessionOrderBy, SessionSearchRequest, SortDirection, SpanSearchRequest,
+pub mod search;
+
+pub use search::{
+    SessionDetail, SpanDetail, SpanSearchRequest, SpanSearchResponse, SpanSummary, Trace,
+    TraceDetail,
 };
-use crate::api::sql_support::cursor_predicate;
+
+use crate::session_summary::list_query::{SessionOrderBy, SessionSearchRequest, SortDirection};
 use crate::sql::literal::sql_string_literal;
+use crate::sql::paging::cursor_predicate;
 use crate::sql::QueryWindow;
 use crate::storage::schema::variant::{
     prefer_attr_try_cast, prefer_attr_varchar, variant_as_json, variant_varchar,
@@ -242,6 +247,87 @@ pub fn compile_session_search_sql(
             )
         })
         .into_sql())
+}
+
+fn approve(sql: String) -> Result<crate::sql::trusted::TrustedSql, String> {
+    crate::sql::trusted::approved_query(sql).map_err(|error| error.to_string())
+}
+
+/// Compile and approve the LLM span-search recipe for trusted execution.
+pub(crate) fn search_spans(
+    request: &SpanSearchRequest,
+) -> Result<crate::sql::trusted::TrustedSql, String> {
+    approve(compile_span_search_sql(request)?)
+}
+
+/// Compile and approve span detail for trusted execution.
+pub(crate) fn span_detail(
+    span_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<crate::sql::trusted::TrustedSql, String> {
+    approve(compile_span_detail_sql(span_id, from, to)?)
+}
+
+/// Compile and approve trace summary for trusted execution.
+pub(crate) fn trace_summary(
+    trace_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    session_id: Option<&str>,
+) -> Result<crate::sql::trusted::TrustedSql, String> {
+    approve(compile_trace_summary_sql(trace_id, from, to, session_id)?)
+}
+
+/// Compile and approve trace spans list for trusted execution.
+pub(crate) fn trace_spans(
+    trace_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    limit: usize,
+    cursor: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<crate::sql::trusted::TrustedSql, String> {
+    approve(compile_trace_spans_sql(
+        trace_id, from, to, limit, cursor, session_id,
+    )?)
+}
+
+/// Compile and approve session detail for trusted execution.
+pub(crate) fn session_detail(
+    session_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<crate::sql::trusted::TrustedSql, String> {
+    approve(compile_session_detail_sql(session_id, from, to)?)
+}
+
+/// Compile and approve session recording for trusted execution.
+pub(crate) fn session_recording(
+    session_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    limit: usize,
+) -> Result<crate::sql::trusted::TrustedSql, String> {
+    approve(compile_session_recording_sql(session_id, from, to, limit)?)
+}
+
+/// Compile and approve scores-for-span for trusted execution.
+pub(crate) fn scores_for_span(
+    span_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<crate::sql::trusted::TrustedSql, String> {
+    approve(compile_scores_for_span_sql(span_id, from, to)?)
+}
+
+/// Compile and approve scores-for-trace for trusted execution.
+pub(crate) fn scores_for_trace(
+    trace_id: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<crate::sql::trusted::TrustedSql, String> {
+    approve(compile_scores_for_trace_sql(trace_id, from, to)?)
 }
 
 pub fn compile_span_search_sql(request: &SpanSearchRequest) -> Result<String, String> {
@@ -627,7 +713,8 @@ pub fn clamp_limit(limit: Option<usize>, default: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::observation_projection;
+    use super::*;
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn payload_projection_reads_json_events_without_recasting() {
@@ -636,5 +723,25 @@ mod tests {
             sql.contains("events") && !sql.contains("CAST(events AS JSON)"),
             "events already use the JSON table type: {sql}"
         );
+    }
+
+    #[test]
+    fn search_spans_trusted_wrapper_matches_compile() {
+        let request = SpanSearchRequest {
+            from: Utc.with_ymd_and_hms(2026, 7, 18, 0, 0, 0).unwrap(),
+            to: Utc.with_ymd_and_hms(2026, 7, 19, 0, 0, 0).unwrap(),
+            span_types: vec!["generation".into()],
+            model_name: None,
+            user_id: None,
+            session_id: None,
+            trace_id: None,
+            limit: Some(10),
+            cursor: None,
+        };
+        let compiled = compile_span_search_sql(&request).expect("compile");
+        let trusted = search_spans(&request).expect("approve");
+        assert_eq!(trusted.as_str(), compiled);
+        assert!(trusted.as_str().contains("timestamp >="));
+        assert!(trusted.as_str().contains("timestamp <="));
     }
 }

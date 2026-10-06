@@ -1,18 +1,22 @@
-use crate::api::sql_support::encode_cursor;
-use crate::api::AppState;
+use crate::api::{map_execute_result, AppState};
 use crate::async_jobs::LeaseStore;
 use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreDataType, ScoreSource};
+use crate::runtime_engine::RuntimeEngine;
 use crate::sql::llm::{
-    clamp_limit, compile_scores_for_span_sql, compile_scores_for_trace_sql,
-    compile_session_detail_sql, compile_session_recording_sql, compile_span_detail_sql,
-    compile_span_search_sql, compile_trace_spans_sql, compile_trace_summary_sql,
+    clamp_limit, scores_for_span, scores_for_trace, search_spans as compile_search_spans,
+    session_detail, session_recording, span_detail, trace_spans, trace_summary,
     DEFAULT_SEARCH_LIMIT, DEFAULT_SESSION_LIMIT, DEFAULT_TRACE_LIMIT,
 };
+use crate::sql::paging::encode_cursor;
 // Production session search is served by RuntimeEngine::search_session_summary
-// (Postgres session_summary). compile_session_search_sql remains unit-test only.
+// (Postgres session_summary). compile_* String recipes remain unit-test only.
 #[cfg(test)]
-use crate::sql::llm::compile_session_search_sql;
+use crate::sql::llm::{
+    compile_scores_for_span_sql, compile_scores_for_trace_sql, compile_session_detail_sql,
+    compile_session_recording_sql, compile_session_search_sql, compile_span_detail_sql,
+    compile_span_search_sql, compile_trace_spans_sql, compile_trace_summary_sql,
+};
 use crate::storage::schema::variant::{parse_projected_json_value, variant_json_to_string_map};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
@@ -21,106 +25,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 use tracing::warn;
 
+// Wire types owned outside HTTP; re-exported for OpenAPI / existing call sites.
+pub use crate::session_summary::list_query::{
+    SessionOrderBy, SessionSearchRequest, SessionSearchResponse, SessionSummary, SortDirection,
+};
+pub use crate::sql::llm::search::{
+    SessionDetail, SpanDetail, SpanSearchRequest, SpanSearchResponse, SpanSummary, Trace,
+    TraceDetail,
+};
+
 type ApiError = (StatusCode, Json<Value>);
-
-fn trusted_query(sql: impl Into<String>) -> Result<crate::sql::trusted::TrustedSql, ApiError> {
-    crate::sql::trusted::approved_query(sql).map_err(|error| storage_error(anyhow::anyhow!(error)))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpanSearchRequest {
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
-    #[serde(default)]
-    pub span_types: Vec<String>,
-    pub model_name: Option<String>,
-    pub user_id: Option<String>,
-    pub session_id: Option<String>,
-    pub trace_id: Option<String>,
-    pub limit: Option<usize>,
-    pub cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpanSearchResponse {
-    pub items: Vec<SpanSummary>,
-    pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpanSummary {
-    pub trace_id: String,
-    pub span_id: String,
-    pub parent_span_id: Option<String>,
-    pub session_id: Option<String>,
-    pub name: String,
-    pub span_type: String,
-    pub start_time: DateTime<Utc>,
-    pub end_time: Option<DateTime<Utc>>,
-    pub status_code: Option<String>,
-    pub model_name: Option<String>,
-    pub model_provider: Option<String>,
-    pub user_id: Option<String>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub total_tokens: Option<i64>,
-    pub total_cost: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpanDetail {
-    #[serde(flatten)]
-    pub summary: SpanSummary,
-    #[serde(default)]
-    pub attributes: HashMap<String, String>,
-    #[serde(default)]
-    pub events: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub scores: Vec<Score>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Trace {
-    pub trace_id: String,
-    pub session_id: Option<String>,
-    pub name: Option<String>,
-    pub start_time: DateTime<Utc>,
-    pub end_time: DateTime<Utc>,
-    pub span_count: i64,
-    pub error_count: i64,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub total_tokens: Option<i64>,
-    pub total_cost: Option<f64>,
-    pub user_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TraceDetail {
-    pub trace: Trace,
-    pub spans: Vec<SpanDetail>,
-    pub scores: Vec<Score>,
-    pub next_span_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionDetail {
-    pub session_id: String,
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
-    pub trace_count: i64,
-    pub span_count: i64,
-    #[serde(default)]
-    pub user_ids: Vec<String>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub total_tokens: Option<i64>,
-    pub total_cost: Option<f64>,
-    pub spans: Vec<SpanDetail>,
-    pub scores: Vec<Score>,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetailQuery {
@@ -137,12 +54,10 @@ pub async fn search_spans(
     tenant: Option<Extension<TenantInfo>>,
     Json(request): Json<SpanSearchRequest>,
 ) -> Result<Json<SpanSearchResponse>, ApiError> {
-    let sql = compile_span_search_sql(&request).map_err(bad_request)?;
+    let sql = compile_search_spans(&request).map_err(bad_request)?;
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let result = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(sql)?)
-        .await
-        .map_err(storage_error)?;
+    let engine = resolve_engine(&state, tenant_ref).await?;
+    let result = map_execute_result(engine.execute_trusted(sql).await).map_err(storage_error)?;
 
     let limit = clamp_limit(request.limit, DEFAULT_SEARCH_LIMIT);
     let mut summaries = result
@@ -166,18 +81,15 @@ pub async fn get_span(
     if span_id.trim().is_empty() {
         return Err(bad_request("span_id is required".to_string()));
     }
-    let sql = compile_span_detail_sql(&span_id, params.from, params.to).map_err(bad_request)?;
+    let sql = span_detail(&span_id, params.from, params.to).map_err(bad_request)?;
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let result = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(sql)?)
-        .await
-        .map_err(storage_error)?;
+    let engine = resolve_engine(&state, tenant_ref).await?;
+    let result = map_execute_result(engine.execute_trusted(sql).await).map_err(storage_error)?;
     let row = result.rows.first().ok_or_else(not_found)?;
     let mut detail = map_span_detail(&result.columns, row).ok_or_else(not_found)?;
     detail.scores = query_scores(
-        &state,
-        tenant_ref,
-        &compile_scores_for_span_sql(&span_id, params.from, params.to).map_err(bad_request)?,
+        &engine,
+        scores_for_span(&span_id, params.from, params.to).map_err(bad_request)?,
     )
     .await?;
     Ok(Json(detail))
@@ -193,22 +105,21 @@ pub async fn get_trace(
         return Err(bad_request("trace_id is required".to_string()));
     }
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let summary_sql = compile_trace_summary_sql(
+    let engine = resolve_engine(&state, tenant_ref).await?;
+    let summary_sql = trace_summary(
         &trace_id,
         params.from,
         params.to,
         params.session_id.as_deref(),
     )
     .map_err(bad_request)?;
-    let summary_result = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(summary_sql)?)
-        .await
-        .map_err(storage_error)?;
+    let summary_result =
+        map_execute_result(engine.execute_trusted(summary_sql).await).map_err(storage_error)?;
     let summary_row = summary_result.rows.first().ok_or_else(not_found)?;
     let trace = map_trace(&summary_result.columns, summary_row).ok_or_else(not_found)?;
 
     let limit = clamp_limit(params.limit, DEFAULT_TRACE_LIMIT);
-    let spans_sql = compile_trace_spans_sql(
+    let spans_sql = trace_spans(
         &trace_id,
         params.from,
         params.to,
@@ -217,10 +128,8 @@ pub async fn get_trace(
         params.session_id.as_deref(),
     )
     .map_err(bad_request)?;
-    let spans_result = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(spans_sql)?)
-        .await
-        .map_err(storage_error)?;
+    let spans_result =
+        map_execute_result(engine.execute_trusted(spans_sql).await).map_err(storage_error)?;
     let mut spans = spans_result
         .rows
         .iter()
@@ -229,9 +138,8 @@ pub async fn get_trace(
     let next_span_cursor = next_cursor_from_span_details(&mut spans, limit);
 
     let scores = query_scores(
-        &state,
-        tenant_ref,
-        &compile_scores_for_trace_sql(&trace_id, params.from, params.to).map_err(bad_request)?,
+        &engine,
+        scores_for_trace(&trace_id, params.from, params.to).map_err(bad_request)?,
     )
     .await?;
 
@@ -303,11 +211,10 @@ pub async fn get_session(
     );
     let (from, to) = window?;
 
-    let detail_sql = compile_session_detail_sql(&session_id, from, to).map_err(bad_request)?;
+    let detail_sql = session_detail(&session_id, from, to).map_err(bad_request)?;
     let lake_start = std::time::Instant::now();
-    let lake = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(detail_sql)?)
-        .await;
+    let engine = resolve_engine(&state, tenant_ref).await?;
+    let lake = map_execute_result(engine.execute_trusted(detail_sql).await);
     let lake_elapsed = lake_start.elapsed();
     crate::self_monitoring::record_session_detail_stage(
         tenant_label,
@@ -409,11 +316,9 @@ pub async fn get_session_recording(
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
     let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
     let limit = clamp_limit(params.limit, DEFAULT_RECORDING_LIMIT);
-    let sql = compile_session_recording_sql(&session_id, from, to, limit).map_err(bad_request)?;
-    let result = state
-        .execute_tenant_scoped_trusted_sql(tenant_ref, trusted_query(sql)?)
-        .await
-        .map_err(storage_error)?;
+    let sql = session_recording(&session_id, from, to, limit).map_err(bad_request)?;
+    let engine = resolve_engine(&state, tenant_ref).await?;
+    let result = map_execute_result(engine.execute_trusted(sql).await).map_err(storage_error)?;
 
     let mut batches = result
         .rows
@@ -529,92 +434,6 @@ fn event_index(event: &Value) -> i64 {
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         })
         .unwrap_or(0)
-}
-
-/// How a session list should be ordered.
-///
-/// Ordering happens in DuckDB over the whole time window. Doing it client-side
-/// only ever sorts whatever page happened to be loaded, which is the wrong
-/// answer to "show me the worst sessions today".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionOrderBy {
-    #[default]
-    StartTime,
-    ErrorCount,
-    Duration,
-    TotalTokens,
-    TotalCost,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SortDirection {
-    Asc,
-    #[default]
-    Desc,
-}
-
-impl SortDirection {
-    pub(crate) fn as_sql(self) -> &'static str {
-        match self {
-            Self::Asc => "ASC",
-            Self::Desc => "DESC",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SessionSearchRequest {
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
-    /// Keep only sessions containing at least one ERROR span.
-    #[serde(default)]
-    pub has_errors: Option<bool>,
-    pub user_id: Option<String>,
-    pub model_name: Option<String>,
-    /// Match session-level `agent_name` (persisted column, `sp.agent.name`, else agent span name).
-    pub agent_name: Option<String>,
-    /// When true (default), hide legacy nested-only OpenCode child sessions.
-    #[serde(default = "default_true")]
-    pub roots_only: bool,
-    #[serde(default)]
-    pub order_by: SessionOrderBy,
-    #[serde(default)]
-    pub order: SortDirection,
-    pub limit: Option<usize>,
-    pub cursor: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionSummary {
-    pub session_id: String,
-    pub start_time: DateTime<Utc>,
-    pub end_time: Option<DateTime<Utc>>,
-    pub trace_count: i64,
-    pub span_count: i64,
-    pub error_count: i64,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub total_tokens: Option<i64>,
-    pub total_cost: Option<f64>,
-    pub agent_name: Option<String>,
-    pub user_ids: Vec<String>,
-    pub models: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionSearchResponse {
-    pub items: Vec<SessionSummary>,
-    pub next_cursor: Option<String>,
-    /// Cursor paging is only defined for `start_time` ordering; any other
-    /// ordering returns a single ranked page. Stated explicitly so a client
-    /// cannot mistake "no cursor" for "no more data".
-    pub cursor_supported: bool,
 }
 
 /// Session list.
@@ -767,15 +586,22 @@ pub async fn rebuild_session_summary(
     Ok(Json(SessionSummaryRebuildResponse { sessions_upserted }))
 }
 
-async fn query_scores(
+async fn resolve_engine(
     state: &AppState,
     tenant: Option<&TenantInfo>,
-    sql: &str,
+) -> Result<Arc<RuntimeEngine>, ApiError> {
+    match tenant {
+        Some(info) => state.engine_for_tenant(info).await,
+        None => state.engine_for_id("").await,
+    }
+    .map_err(storage_error)
+}
+
+async fn query_scores(
+    engine: &RuntimeEngine,
+    sql: crate::sql::trusted::TrustedSql,
 ) -> Result<Vec<Score>, ApiError> {
-    let result = state
-        .execute_tenant_scoped_trusted_sql(tenant, trusted_query(sql.to_string())?)
-        .await
-        .map_err(storage_error)?;
+    let result = map_execute_result(engine.execute_trusted(sql).await).map_err(storage_error)?;
     Ok(result
         .rows
         .iter()
@@ -839,22 +665,6 @@ struct SessionAggregate {
     total_tokens: Option<i64>,
     total_cost: Option<f64>,
     user_ids: Vec<String>,
-}
-
-/// Truncate `items` to `limit` and return an opaque cursor when the page was
-/// actually cut short. Shared by the live search path ([`crate::session_summary::list`])
-/// and covered here by unit tests against plain [`SessionSummary`] fixtures.
-pub(crate) fn next_cursor_from_sessions(
-    items: &mut Vec<SessionSummary>,
-    limit: usize,
-) -> Option<String> {
-    if items.len() <= limit {
-        return None;
-    }
-    items.truncate(limit);
-    items
-        .last()
-        .map(|item| encode_cursor(item.start_time, &item.session_id))
 }
 
 fn map_session_aggregate(columns: &[String], row: &[Value]) -> Option<SessionAggregate> {
@@ -1251,7 +1061,8 @@ fn classify_storage_error(raw: &str) -> StorageErrorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::sql_support::{cursor_predicate, decode_cursor};
+    use crate::session_summary::list_query::next_cursor_from_sessions;
+    use crate::sql::paging::{cursor_predicate, decode_cursor};
 
     #[test]
     fn rebuild_holder_id_is_unique_per_request() {
@@ -1473,7 +1284,7 @@ mod tests {
     #[test]
     fn session_search_aggregates_in_sql_and_bounds_time() {
         let sql = compile_session_search_sql(&session_search_request(), 50).expect("sql");
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        use crate::sql::assert_sql_has_otlp_time_predicates;
         assert_sql_has_otlp_time_predicates(&sql);
         assert!(sql.contains("GROUP BY session_id"));
         // spans with no session id must not become a session row
@@ -1981,7 +1792,7 @@ mod tests {
         assert_ns(compile_trace_summary_sql("trace-1", from, to, None).unwrap());
         assert_ns(compile_trace_spans_sql("trace-1", from, to, 10, None, None).unwrap());
 
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        use crate::sql::assert_sql_has_otlp_time_predicates;
         assert_sql_has_otlp_time_predicates(&compile_span_detail_sql("span-1", from, to).unwrap());
         assert_sql_has_otlp_time_predicates(
             &compile_trace_summary_sql("trace-1", from, to, None).unwrap(),
@@ -2134,7 +1945,7 @@ mod tests {
     #[test]
     fn one_day_session_fetch_predicates_do_not_name_unrelated_days() {
         // One-day window → timestamp bound only (no day/DATE column predicates).
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        use crate::sql::assert_sql_has_otlp_time_predicates;
         let from = DateTime::parse_from_rfc3339("2026-09-10T16:05:15Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -2201,7 +2012,7 @@ mod tests {
 
     #[test]
     fn all_llm_lake_compilers_emit_otlp_day_and_timestamp() {
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
+        use crate::sql::assert_sql_has_otlp_time_predicates;
         let from = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);

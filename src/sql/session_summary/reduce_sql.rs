@@ -262,8 +262,8 @@ mod tests {
     }
 
     fn assert_aggregate_invariants(sql: &str) {
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
         use crate::models::attr_keys::{enduser, sp};
+        use crate::sql::assert_sql_has_otlp_time_predicates;
         assert_sql_has_otlp_time_predicates(sql);
         assert!(sql.contains("COUNT(DISTINCT span_id)"));
         assert!(sql.contains("COALESCE(observation_type, '') <> 'recording'"));

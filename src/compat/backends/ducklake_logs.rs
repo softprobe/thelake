@@ -1,8 +1,6 @@
 //! Typed DuckLake log query backend for the Loki adapter.
 
-use crate::compat::backends::label_match::{
-    labels_match, labels_match_any, LabelMatcher, MatcherOp,
-};
+use crate::compat::backends::label_match::{labels_match, labels_match_any, LabelMatcher};
 use crate::compat::backends::logs::{
     LogDirection, LogHit, LogLineFilter, LogParser, LogsDiscoveryRequest, LogsQueryBackend,
     LogsQueryRequest,
@@ -11,74 +9,14 @@ use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::loki::{project_loki, DEFAULT_STREAM_LABEL_ALLOWLIST};
 use crate::compat::tenant::TenantContext;
 use crate::query::QueryEngine;
+use crate::sql::logs::{resolve_loki_scan_window, LOG_HOT_PROMOTIONS};
+use crate::sql::trusted::TrustedSql;
 use crate::storage::duckdb::QueryResult;
-use crate::storage::schema::variant::{prefer_attr_varchar, variant_json_to_string_map};
+use crate::storage::schema::variant::variant_json_to_string_map;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-
-/// Default lookback when Loki clients omit one or both of start/end.
-/// Matches Tempo: long enough for Phase 3 fixture timestamps (~2023) under CI
-/// "now", while keeping every lake scan inside a finite [`QueryWindow`].
-const LOKI_DEFAULT_LOOKBACK_NS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000_000;
-
-/// Resolve exclusive Loki `[start, end)` for lake scans.
-///
-/// Grafana label/values discovery often omits bounds; default a finite lookback
-/// so AC2 still holds. Explicit zero-width windows stay empty at `scan`.
-fn resolve_loki_scan_window(
-    start_ns: Option<i64>,
-    end_ns: Option<i64>,
-) -> Result<(i64, i64), String> {
-    match (start_ns, end_ns) {
-        (Some(start), Some(end)) => Ok((start, end)),
-        (None, None) => {
-            let end = chrono::Utc::now()
-                .timestamp_nanos_opt()
-                .ok_or_else(|| "current time out of range".to_string())?;
-            let start = end.saturating_sub(LOKI_DEFAULT_LOOKBACK_NS);
-            Ok((start, end))
-        }
-        (None, Some(end)) => {
-            let start = end.saturating_sub(LOKI_DEFAULT_LOOKBACK_NS);
-            Ok((start, end))
-        }
-        (Some(start), None) => {
-            let end = start.saturating_add(LOKI_DEFAULT_LOOKBACK_NS);
-            Ok((start, end))
-        }
-    }
-}
-
-/// Product log hot columns from `docs/promotion/logs-query-hot-attrs.yaml`.
-/// `(stream_or_matcher_label, sql_column, bag_column, otel_key)`.
-const LOG_HOT_PROMOTIONS: &[(&str, &str, &str, &str)] = &[
-    (
-        "service_name",
-        "service_name",
-        "resource_attributes",
-        "service.name",
-    ),
-    (
-        "deployment_environment",
-        "deployment_environment",
-        "resource_attributes",
-        "deployment.environment",
-    ),
-    ("logger_name", "logger_name", "attributes", "logger_name"),
-    (
-        "session_attr_id",
-        "session_attr_id",
-        "attributes",
-        "sp.session.id",
-    ),
-    ("user_id", "user_id", "attributes", "sp.user.id"),
-];
-
-fn escape_sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
-}
 
 pub struct DuckLakeLogsBackend {
     query: Arc<QueryEngine>,
@@ -89,15 +27,17 @@ impl DuckLakeLogsBackend {
         Self { query }
     }
 
-    async fn execute(&self, ctx: &TenantContext, sql: &str) -> Result<QueryResult, CompatError> {
+    async fn execute(
+        &self,
+        ctx: &TenantContext,
+        trusted: TrustedSql,
+    ) -> Result<QueryResult, CompatError> {
         if ctx.remaining().is_zero() {
             return Err(CompatError::new(
                 CompatErrorCode::LimitExceeded,
                 "query deadline exceeded",
             ));
         }
-        let trusted = crate::sql::trusted::approved_query(sql.to_string())
-            .map_err(|err| CompatError::new(CompatErrorCode::BadRequest, err.to_string()))?;
         match tokio::time::timeout(ctx.remaining(), self.query.execute_trusted(trusted)).await {
             Err(_) => Err(CompatError::new(
                 CompatErrorCode::LimitExceeded,
@@ -122,52 +62,6 @@ impl DuckLakeLogsBackend {
         }
     }
 
-    fn sql_window(
-        start_ns: i64,
-        end_ns: i64,
-        identity: impl IntoIterator<Item = String>,
-    ) -> Result<String, String> {
-        let mut clauses = Vec::new();
-        crate::api::query_window::push_otlp_ns_window_predicates(
-            &mut clauses,
-            start_ns,
-            end_ns,
-            identity,
-        )?;
-        Ok(format!(" AND {}", clauses.join(" AND ")))
-    }
-
-    /// Equality matchers that map to product-hot promotions → column-prefer predicates.
-    fn matcher_pushdown_clauses(matchers: &[LabelMatcher]) -> Vec<String> {
-        let mut parts = Vec::new();
-        for m in matchers {
-            if m.op != MatcherOp::Eq {
-                continue;
-            }
-            let Some(&(label, col, bag, key)) = LOG_HOT_PROMOTIONS
-                .iter()
-                .find(|(matcher, _, _, _)| *matcher == m.name)
-            else {
-                continue;
-            };
-            let _ = label;
-            let lit = format!("'{}'", escape_sql_literal(&m.value));
-            parts.push(format!(
-                "({}) = {lit}",
-                prefer_attr_varchar(Some(col), bag, key)
-            ));
-        }
-        parts
-    }
-
-    fn promoted_select_sql() -> String {
-        LOG_HOT_PROMOTIONS
-            .iter()
-            .map(|(_, col, _, _)| (*col).to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
     async fn scan(
         &self,
         ctx: &TenantContext,
@@ -189,11 +83,10 @@ impl DuckLakeLogsBackend {
                 "`start` must be < `end`",
             ));
         }
-        let window_sql = Self::sql_window(start, end, Self::matcher_pushdown_clauses(matchers))
-            .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
         let cap = ctx.limits.max_series.saturating_mul(100).max(10_000);
-        let sql = crate::sql::logs::scan_sql(&window_sql, &Self::promoted_select_sql(), cap);
-        let result = self.execute(ctx, &sql).await?;
+        let trusted = crate::sql::logs::scan(start, end, matchers, cap)
+            .map_err(|msg| CompatError::new(CompatErrorCode::BadRequest, msg))?;
+        let result = self.execute(ctx, trusted).await?;
         enforce_scan_cap(&result, cap)?;
         Ok(parse_rows(&result))
     }
@@ -686,10 +579,13 @@ fn enforce_scan_cap(result: &QueryResult, cap: usize) -> Result<(), CompatError>
 mod tests {
     use super::*;
     use crate::compat::backends::label_match::{LabelMatcher, MatcherOp};
+    use crate::sql::logs::{
+        matcher_pushdown_clauses, promoted_select_sql, sql_window, LOKI_DEFAULT_LOOKBACK_NS,
+    };
 
     #[test]
     fn matcher_pushdown_prefers_promoted_columns() {
-        let clauses = DuckLakeLogsBackend::matcher_pushdown_clauses(&[
+        let clauses = matcher_pushdown_clauses(&[
             LabelMatcher {
                 name: "service_name".into(),
                 op: MatcherOp::Eq,
@@ -713,7 +609,7 @@ mod tests {
 
     #[test]
     fn promoted_select_lists_product_hot_columns() {
-        let select = DuckLakeLogsBackend::promoted_select_sql();
+        let select = promoted_select_sql();
         for col in [
             "service_name",
             "deployment_environment",
@@ -998,8 +894,8 @@ mod tests {
 
     #[test]
     fn query_bounds_are_nanoseconds_with_exclusive_end() {
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
-        let sql = DuckLakeLogsBackend::sql_window(
+        use crate::sql::assert_sql_has_otlp_time_predicates;
+        let sql = sql_window(
             1_700_000_000_000_000_001,
             1_700_000_000_000_000_002,
             std::iter::empty(),
@@ -1034,7 +930,7 @@ mod tests {
 
     #[test]
     fn inverted_window_is_rejected_at_sql_window() {
-        let err = DuckLakeLogsBackend::sql_window(20, 10, std::iter::empty()).unwrap_err();
+        let err = sql_window(20, 10, std::iter::empty()).unwrap_err();
         assert!(err.contains("start") || err.contains("`start`"));
     }
 
@@ -1042,19 +938,19 @@ mod tests {
     fn zero_width_window_is_rejected_at_sql_window() {
         // scan() short-circuits start == end to empty hits; sql_window still
         // refuses to build an inverted exclusive→inclusive mapping.
-        let err = DuckLakeLogsBackend::sql_window(10, 10, std::iter::empty()).unwrap_err();
+        let err = sql_window(10, 10, std::iter::empty()).unwrap_err();
         assert!(err.contains("start") || err.contains("`start`"));
     }
 
     #[test]
     fn loki_sql_window_inventory_emits_day_and_timestamp() {
-        use crate::api::query_window::assert_sql_has_otlp_time_predicates;
-        let matchers = DuckLakeLogsBackend::matcher_pushdown_clauses(&[LabelMatcher {
+        use crate::sql::assert_sql_has_otlp_time_predicates;
+        let matchers = matcher_pushdown_clauses(&[LabelMatcher {
             name: "service_name".into(),
             op: MatcherOp::Eq,
             value: "api".into(),
         }]);
-        let sql = DuckLakeLogsBackend::sql_window(
+        let sql = sql_window(
             1_700_000_000_000_000_000,
             1_700_000_100_000_000_000,
             matchers,

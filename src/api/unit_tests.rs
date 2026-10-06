@@ -7,13 +7,13 @@ use axum::http::{header, Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
 
-use crate::api::telemetry::{
+use crate::authn::TenantInfo;
+use crate::runtime_engine::ScopeProvisioningRequest;
+use crate::sql::telemetry::{
     compile_details_sql, compile_search_sql, TelemetryDetailsTarget, TelemetryFilter,
     TelemetryFilterExpr, TelemetrySearchRequest, TelemetrySearchScope, TelemetrySort,
     TelemetrySortDirection, TelemetryTimeRange,
 };
-use crate::authn::TenantInfo;
-use crate::runtime_engine::ScopeProvisioningRequest;
 use crate::test_support::local_router_and_state;
 use std::sync::Arc;
 
@@ -535,4 +535,54 @@ fn map_missing_optional_table_preserves_other_errors() {
             .to_string()
             .contains("Table with name spans does not exist")),
     }
+}
+
+#[test]
+fn map_execute_result_maps_missing_optional_table() {
+    let err = anyhow::anyhow!("Catalog Error: Table with name traces does not exist!");
+    let result = super::map_execute_result(Err(err)).expect("mapped");
+    assert_eq!(result.row_count, 0);
+}
+
+#[test]
+fn map_execute_result_preserves_non_optional_errors() {
+    let err = anyhow::anyhow!("Catalog Error: Table with name spans does not exist!");
+    assert!(super::map_execute_result(Err(err)).is_err());
+}
+
+#[test]
+fn openapi_session_search_request_matches_rust_dto_and_reexport() {
+    // Wire contract lives in session_summary; api re-exports for OpenAPI/handlers.
+    let _: crate::api::llm::query::SessionSearchRequest =
+        crate::session_summary::list_query::SessionSearchRequest {
+            from: chrono::Utc::now(),
+            to: chrono::Utc::now(),
+            has_errors: None,
+            user_id: None,
+            model_name: None,
+            agent_name: None,
+            roots_only: true,
+            order_by: crate::session_summary::list_query::SessionOrderBy::StartTime,
+            order: crate::session_summary::list_query::SortDirection::Desc,
+            limit: None,
+            cursor: None,
+        };
+    let yaml = include_str!("../../docs/ingestion-openapi.yaml");
+    assert!(
+        yaml.contains("SessionSearchRequest:"),
+        "OpenAPI must keep SessionSearchRequest schema"
+    );
+    assert!(
+        yaml.contains("start_time"),
+        "order_by enum must stay in YAML"
+    );
+    assert!(yaml.contains("error_count"));
+    let json = r#"{"from":"2026-07-18T00:00:00Z","to":"2026-07-19T00:00:00Z"}"#;
+    let req: crate::session_summary::list_query::SessionSearchRequest =
+        serde_json::from_str(json).expect("rust dto deserialize");
+    assert!(req.roots_only);
+    assert_eq!(
+        req.order_by,
+        crate::session_summary::list_query::SessionOrderBy::StartTime
+    );
 }

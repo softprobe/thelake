@@ -1,5 +1,16 @@
 //! OTLP telemetry explorer SQL recipes (search / details / field_values).
 
+mod compile;
+
+pub use compile::{
+    compile_compound, compile_details_sql, compile_field_values_sql, compile_filter,
+    compile_filter_expr, compile_order, compile_search_sql, field_spec,
+    query_window_from_time_range, CompiledDetailsSql, FieldSpec, TelemetryDetailsTarget,
+    TelemetryFilter, TelemetryFilterExpr, TelemetrySearchRequest, TelemetrySearchScope,
+    TelemetrySort, TelemetrySortDirection, TelemetryTimeRange, SEARCH_FIELDS,
+};
+pub(crate) use compile::{details_logs, details_spans, field_values, search};
+
 /// Sessions-scoped search aggregate over `traces`.
 pub fn search_sessions_sql(where_sql: &str, order_sql: &str, limit: usize) -> String {
     format!(

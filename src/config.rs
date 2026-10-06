@@ -310,7 +310,7 @@ pub struct QueryConfig {
     #[serde(default = "default_query_cache_dir")]
     pub cache_dir: Option<String>,
     /// When true, the query worker runs the full fact-scan gate (`EXPLAIN` +
-    /// source checks) before executing. 
+    /// source checks) before executing.
     #[serde(default = "default_false")]
     pub sql_gate: bool,
 }

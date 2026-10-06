@@ -1268,8 +1268,9 @@ mod tests {
             Some("trace-id"),
         )
         .unwrap();
+        let sql = sql.as_str();
 
-        assert!(has_timestamp_bound_for_each_fact_source(&sql));
+        assert!(has_timestamp_bound_for_each_fact_source(sql));
         let mut statement = conn
             .prepare(&format!("EXPLAIN (FORMAT JSON) {sql}"))
             .unwrap();
@@ -1289,7 +1290,7 @@ mod tests {
             fact_scans.len() > 1,
             "expected CTE inlining: {fact_scans:?}"
         );
-        ensure_fact_scan_uses_timestamp_pruning(&conn, &sql).unwrap();
+        ensure_fact_scan_uses_timestamp_pruning(&conn, sql).unwrap();
     }
 
     #[test]

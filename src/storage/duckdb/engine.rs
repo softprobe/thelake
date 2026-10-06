@@ -1488,9 +1488,7 @@ mod tests {
             .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
             .unwrap();
         let timed = core.execute_query_on_state(&mut state, "SELECT id FROM traces LIMIT 1");
-        let result = timed
-            .result
-            .expect("sql_gate false must skip gate and run");
+        let result = timed.result.expect("sql_gate false must skip gate and run");
         assert_eq!(result.columns, vec!["id".to_string()]);
     }
 
@@ -1520,7 +1518,10 @@ mod tests {
             .err()
             .expect("sql_gate true must reject unbounded fact scan")
             .to_string();
-        assert!(err.contains("SQL gate"), "expected SQL gate prefix, got {err}");
+        assert!(
+            err.contains("SQL gate"),
+            "expected SQL gate prefix, got {err}"
+        );
         assert!(timed.run_elapsed.is_zero());
     }
 

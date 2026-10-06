@@ -1,10 +1,10 @@
 //! Stage 3: list sessions from catalog Postgres `session_summary`.
 
-use crate::api::llm::query::{
+use crate::runtime_engine::quote_pg_ident;
+use crate::session_summary::list_query::{
     next_cursor_from_sessions, SessionOrderBy, SessionSearchRequest, SessionSearchResponse,
     SessionSummary, SortDirection,
 };
-use crate::runtime_engine::quote_pg_ident;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
@@ -103,11 +103,9 @@ pub async fn lookup_session_summary_window_for_workspace(
     session_id: &str,
 ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, SessionSummaryListError> {
     let schema = quote_pg_ident(metadata_schema);
-    let ownership = workspace_id
-        .map(|id| format!("workspace_id = {} AND ", crate::sql::sql_string_literal(id)))
-        .unwrap_or_default();
-    let sql = format!(
-        "SELECT start_time_ns, COALESCE(end_time_ns, start_time_ns) AS end_time_ns FROM {schema}.session_summary WHERE {ownership}session_id = $1 LIMIT 1"
+    let sql = crate::sql::session_summary::compile_session_summary_window_lookup_sql(
+        &schema,
+        workspace_id,
     );
     let client = pool
         .get()

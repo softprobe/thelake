@@ -71,11 +71,9 @@ pub async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
 /// `timeoutSeconds` bounds each attempt.
 pub async fn ready_check(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let probe = tokio::spawn(async move {
-        state
-            .execute_tenant_scoped_trusted_sql(
-                None,
-                crate::sql::trusted::approved_query("SELECT 1").expect("static readiness query"),
-            )
+        let engine = state.engine_for_id("").await?;
+        engine
+            .execute_trusted(crate::sql::health::readiness_sql())
             .await
     });
     let reason = match tokio::time::timeout(std::time::Duration::from_secs(30), probe).await {
