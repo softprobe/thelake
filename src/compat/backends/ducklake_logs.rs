@@ -12,7 +12,7 @@ use crate::query::QueryEngine;
 use crate::sql::logs::{resolve_loki_scan_window, LOG_HOT_PROMOTIONS};
 use crate::sql::trusted::TrustedSql;
 use crate::storage::duckdb::QueryResult;
-use crate::storage::schema::variant::variant_json_to_string_map;
+use crate::storage::schema::attribute_map::attribute_map_json_to_string_map;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -522,7 +522,7 @@ fn json_scalar(value: Value) -> Option<String> {
 }
 
 fn json_map(value: &Value) -> HashMap<String, String> {
-    variant_json_to_string_map(value)
+    attribute_map_json_to_string_map(value)
 }
 
 fn enforce_stream_cap(hits: &[LogHit], max_series: usize) -> Result<(), CompatError> {

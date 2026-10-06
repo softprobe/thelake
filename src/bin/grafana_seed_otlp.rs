@@ -74,11 +74,11 @@ fn main() {
     let tenant_b = env::var("SOFTPROBE_TENANT_B_ID")
         .unwrap_or_else(|_| "dddddddd-dddd-dddd-dddd-dddddddddddd".into());
     let key_a =
-        env::var("SOFTPROBE_TENANT_A_API_KEY").unwrap_or_else(|_| "grafana-phase4-tenant-a".into());
+        env::var("SOFTPROBE_TENANT_A_API_KEY").unwrap_or_else(|_| "grafana-test-tenant-a".into());
     let key_b =
-        env::var("SOFTPROBE_TENANT_B_API_KEY").unwrap_or_else(|_| "grafana-phase4-tenant-b".into());
+        env::var("SOFTPROBE_TENANT_B_API_KEY").unwrap_or_else(|_| "grafana-test-tenant-b".into());
     let admin_key =
-        env::var("SOFTPROBE_ADMIN_API_KEY").unwrap_or_else(|_| "grafana-phase4-admin".into());
+        env::var("SOFTPROBE_ADMIN_API_KEY").unwrap_or_else(|_| "grafana-test-admin".into());
 
     let mut receipt = Receipt {
         schema_version: 1,
@@ -204,8 +204,8 @@ fn provision_tenant(
     let body = serde_json::json!({
         "workspaceId": workspace_id,
         "storageHints": {
-            "ducklakeMetadataSchema": format!("grafana_phase4_{index}"),
-            "ducklakeDataPath": format!("s3://warehouse/grafana_phase4_{index}/"),
+            "ducklakeMetadataSchema": format!("grafana_test_{index}"),
+            "ducklakeDataPath": format!("s3://warehouse/grafana_test_{index}/"),
             "gcsBucket": "warehouse"
         }
     });
@@ -413,7 +413,7 @@ fn tenant_payloads(tenant: &str, suffix: &str) -> TenantPayloads {
                     severity_number: 17,
                     severity_text: "ERROR".into(),
                     body: Some(string_any(&format!(
-                        r#"{{"level":"error","message":"grafana phase4","tenant_marker":"{tenant}","trace_id":"{trace_id}"}}"#
+                        r#"{{"level":"error","message":"grafana test","tenant_marker":"{tenant}","trace_id":"{trace_id}"}}"#
                     ))),
                     attributes: vec![kv("tenant.marker", tenant), kv("trace_id", &trace_id)],
                     trace_id: hex::decode(&trace_id).unwrap(),

@@ -1,12 +1,11 @@
 # Compatibility authentication and workspace isolation
 
-**Status:** Canonical contract (workspace_id UUID clean break)  
-**Last updated:** 2026-09-30
+**Status:** Current contract
 
 ## Canonical identity
 
 Preferred Softprobe identity for Explorer and edge-proxied traffic is the
-dedicated assertion header ([sp-llm#39](https://github.com/softprobe/sp-llm/issues/39)):
+dedicated assertion header:
 
 ```http
 X-Softprobe-Assertion: <jwt>

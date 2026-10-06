@@ -29,7 +29,6 @@ metadata:
 # Validator-consumed declarations. These are the same documented features
 # referenced by the per-case diff-approval entries below.
 unsupported_feature_allowlist:
-  loki.query_range: [interval_sampling]
   tempo.search: [tag_query_filters]
 
 cases:
@@ -58,8 +57,6 @@ cases:
     normalization: {policy: "tests/compat/support/loki.rs::normalize_loki_response"}
     reference: {service: loki, version: "3.1.1"}
     evidence: {retain: true}
-    unsupported_feature_allowlist:
-      - {capability: loki.query_range, feature: interval_sampling, path: "$.data"}
 
   - id: loki-label-names-discovery
     protocol: loki
@@ -185,6 +182,5 @@ cases:
     reference: {service: tempo, version: "2.6.1"}
     evidence: {retain: true}
     conformance_exclusion:
-      reason: "tag-value discovery via peer.service requires the v2 tags endpoint; lake-side contract coverage exists and differential parity is Phase 3 follow-up work"
+      reason: "tag-value discovery via peer.service requires the v2 tags endpoint; lake-side contract coverage exists and differential parity is Tempo query follow-up work"
       release_evidence: false
-

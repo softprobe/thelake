@@ -1,11 +1,10 @@
 # Design: SQL compilation + one-clock schema
 
 **Status:** Canonical SQL DDL and shared OTLP Parquet profile
-**Constraints:** (1) simplicity (2) clean cutover — one-time copy OK, no compat (3) no room for mistake
+**Constraints:** simple shared schemas, finite query windows, and explicit SQL contracts
 **Related:** [`design-event-time-layout.md`](./design-event-time-layout.md)
 
-Product metrics / Prometheus recipes are **out of scope** (removed). Orphaned
-`metric_*` tables, if present in an old catalog, are not a live SQL product path.
+The fact tables covered here are `traces`, `logs`, and `scores`.
 
 ---
 

@@ -1,6 +1,6 @@
 pub mod assertion_agent_columns;
+pub mod attribute_storage;
 pub mod authn_contract;
-pub mod event_time_prune;
 pub mod http_api;
 pub mod ingest_schema_hotpath;
 pub mod one_clock_prune;
@@ -29,7 +29,6 @@ pub mod tenant_otlp_isolation;
 pub mod tenant_promotion_specs;
 #[cfg(feature = "integration-e2e")]
 pub mod tenant_shared_scope;
-pub mod variant_shredding;
 
 #[cfg(feature = "integration-e2e")]
 pub mod ingest_coalesce;

@@ -11,8 +11,8 @@ use crate::session_summary::list_query::{SessionOrderBy, SessionSearchRequest, S
 use crate::sql::literal::sql_string_literal;
 use crate::sql::paging::cursor_predicate;
 use crate::sql::QueryWindow;
-use crate::storage::schema::variant::{
-    prefer_attr_try_cast, prefer_attr_varchar, variant_as_json, variant_varchar,
+use crate::storage::schema::attribute_map::{
+    attribute_map_as_json, attribute_map_varchar, prefer_attr_try_cast, prefer_attr_varchar,
 };
 use chrono::{DateTime, Utc};
 
@@ -358,7 +358,7 @@ pub fn compile_span_search_sql(request: &SpanSearchRequest) -> Result<String, St
         identity.push(format!(
             "({sp} = {id} OR {enduser} = {id})",
             sp = prefer_attr_varchar(Some(llm_promo().user_id), "attributes", "sp.user.id"),
-            enduser = variant_varchar("attributes", "enduser.id"),
+            enduser = attribute_map_varchar("attributes", "enduser.id"),
             id = sql_string_literal(user_id)
         ));
     }
@@ -590,7 +590,7 @@ fn observation_projection(include_payload: bool) -> String {
         format!("{} AS total_cost", expr_total_cost()),
     ];
     if include_payload {
-        cols.push(variant_as_json("attributes"));
+        cols.push(attribute_map_as_json("attributes"));
         cols.push("events".to_string());
     }
     cols.join(", ")
@@ -651,7 +651,7 @@ fn expr_user_id() -> String {
             "attributes",
             crate::models::attr_keys::sp::USER_ID,
         ),
-        variant_varchar("attributes", "enduser.id")
+        attribute_map_varchar("attributes", "enduser.id")
     )
 }
 

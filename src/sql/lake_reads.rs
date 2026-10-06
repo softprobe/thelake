@@ -6,7 +6,7 @@
 use crate::sql::literal::sql_string_literal;
 use crate::sql::trusted::{approved_query, TrustedSql, TrustedSqlError};
 use crate::sql::QueryWindow;
-use crate::storage::schema::variant::variant_varchar;
+use crate::storage::schema::attribute_map::attribute_map_varchar;
 
 #[derive(Debug, Clone)]
 pub struct LogCountFilter {
@@ -73,7 +73,7 @@ pub(crate) fn count_traces_by_attribute(
     predicates.push(format!("session_id = {}", sql_string_literal(session_id)));
     predicates.push(format!(
         "{} = {}",
-        variant_varchar("attributes", key),
+        attribute_map_varchar("attributes", key),
         sql_string_literal(value)
     ));
     count_rows("traces", &predicates)
@@ -87,7 +87,7 @@ pub(crate) fn count_logs_by_attribute(
     let mut predicates = timestamp_predicates(time_window);
     predicates.push(format!(
         "{} = {}",
-        variant_varchar("attributes", key),
+        attribute_map_varchar("attributes", key),
         sql_string_literal(value)
     ));
     count_rows("logs", &predicates)
@@ -103,7 +103,7 @@ pub(crate) fn trace_attributes_by_attribute(
     predicates.push(format!("session_id = {}", sql_string_literal(session_id)));
     predicates.push(format!(
         "{} = {}",
-        variant_varchar("attributes", key),
+        attribute_map_varchar("attributes", key),
         sql_string_literal(value)
     ));
     approved_query(trace_attributes_sql(&predicates.join(" AND ")))
@@ -237,14 +237,14 @@ mod tests {
     }
 
     #[test]
-    fn attribute_count_recipes_use_variant_varchar() {
+    fn attribute_count_recipes_use_attribute_map_varchar() {
         let sql = count_traces_by_attribute("s1", "sp.user.id", "u'1", sample_window())
             .expect("trusted")
             .as_str()
             .to_string();
         assert!(sql.contains("FROM traces"));
         assert_bare_timestamp_bounds(&sql);
-        assert!(sql.contains(&variant_varchar("attributes", "sp.user.id")));
+        assert!(sql.contains(&attribute_map_varchar("attributes", "sp.user.id")));
         assert!(sql.contains("'u''1'"));
     }
 }

@@ -18,7 +18,7 @@ pub fn parse_logs_volume_query(query: &str) -> Result<Option<LogsVolumeQuery>, C
         return Ok(None);
     }
     let (group_by, rest) = parse_optional_sum_by(query)?;
-    // Bare `count_over_time` on query_range stays phase-2 unsupported (501).
+    // `count_over_time` is outside the supported query_range subset (501).
     if rest == query {
         return Ok(None);
     }

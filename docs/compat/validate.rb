@@ -27,7 +27,7 @@ tempo = capability.fetch("protocols").fetch("tempo")
 contract = tempo.fetch("fixture_contract")
 fixture_capability = fixture.fetch("capability")
 
-%w[protocol phase supported_endpoints supported_features unsupported_features fidelity_gaps].each do |key|
+%w[protocol supported_endpoints supported_features unsupported_features fidelity_gaps].each do |key|
   expected = contract.fetch(key)
   actual = fixture_capability.fetch(key)
   abort "Tempo fixture drift for #{key}: expected #{expected.inspect}, got #{actual.inspect}" unless actual == expected
@@ -43,7 +43,7 @@ scope_fields = contract.fetch("instrumentation_scope_query_fields")
 scope_cases = fixture.fetch("cases").select { |item| item.fetch("id").start_with?("tempo-search-instrumentation-") }
 scope_queries = scope_cases.map { |item| item.fetch("params").fetch("q") }
 scope_fields.each do |field|
-  expected_value = field == "name" ? "tempo.phase3.fixture" : "1.0.0"
+  expected_value = field == "name" ? "tempo.trace.fixture" : "1.0.0"
   expected_query = "{ instrumentation.#{field} = \"#{expected_value}\" }"
   abort "Tempo fixture missing instrumentation.#{field} selector case" unless scope_queries.include?(expected_query)
 end

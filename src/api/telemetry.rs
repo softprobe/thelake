@@ -13,7 +13,7 @@ use crate::sql::telemetry::{
     query_window_from_time_range, search as search_sql, SEARCH_FIELDS,
 };
 use crate::sql::QueryWindow;
-use crate::storage::schema::variant::parse_projected_json_value;
+use crate::storage::schema::attribute_map::parse_projected_json_value;
 use axum::extract::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -247,8 +247,8 @@ fn rows_to_objects(columns: &[String], rows: &[Vec<Value>]) -> Vec<Value> {
             let mut object = Map::new();
             for (idx, column) in columns.iter().enumerate() {
                 let raw = row.get(idx).cloned().unwrap_or(Value::Null);
-                // VARIANT projections use CAST(... AS JSON); DuckDB returns text — parse so
-                // clients keep object-valued attributes/resource_attributes.
+                // Attribute-map projections use CAST(... AS JSON); DuckDB returns text —
+                // parse it so clients keep object-valued attributes/resource_attributes.
                 let value = match column.as_str() {
                     "attributes" | "resource_attributes" => parse_projected_json_value(raw),
                     _ => raw,

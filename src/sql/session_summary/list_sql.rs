@@ -1,4 +1,4 @@
-//! Postgres `session_summary` list SQL for Stage 3 `sessions/search`.
+//! PostgreSQL `session_summary` list SQL for `sessions/search`.
 //!
 //! Steady-state list path: no DuckLake scan. Filters use typed summary columns.
 //! Postgres stores event-time bounds as signed epoch nanoseconds.

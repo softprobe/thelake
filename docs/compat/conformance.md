@@ -5,7 +5,7 @@ Loki and Tempo compatibility lanes. The manifest remains the source of case
 selection; protocol implementations and upstream code are not copied into this
 corpus.
 
-Product metrics / Prometheus cases are out of scope (removed).
+The corpus covers the supported Loki and Tempo query APIs.
 
 ## Fixture provenance
 

@@ -72,8 +72,8 @@ pub(crate) const QUERY_DUCKDB_MEMORY: &str = "512MB";
 /// Writers / maintenance: classic Prom dual-write + live OTEL need more than 512MB.
 pub(crate) const WRITER_DUCKDB_THREADS: i64 = 1;
 pub(crate) const WRITER_DUCKDB_MEMORY: &str = "1GB";
-/// Compaction merges hundreds of VARIANT/postings files; 512MB OOMs and leaves
-/// Grafana scans with 200–500 Parquet files per PromQL. One compact connection.
+/// Compaction merges hundreds of Parquet and postings files; 512MB OOMs and
+/// leaves Grafana scans with 200–500 files per PromQL. One compact connection.
 pub(crate) const COMPACTION_DUCKDB_THREADS: i64 = 2;
 pub(crate) const COMPACTION_DUCKDB_MEMORY: &str = "2GB";
 

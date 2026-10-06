@@ -949,28 +949,17 @@ async fn test_union_read_flushes_spans_to_staged_and_updates_wal_watermark() {
 }
 
 #[tokio::test]
-async fn test_wal_replay_recovers_spans() {
-    // Flush-through DuckLake ingest has no WAL tier. Kept as a skipped placeholder so historical
-    // test names do not reappear as regressions if someone reintroduces buffer/WAL paths.
-    let _config = load_test_config();
-}
-
-// Snapshot expire + TWCS under the leased PhysicalScopeMaintenanceJob path are covered by
-// `compaction::maintenance_leased_tests` (compact file counts, expire, multi-tenant,
-// aborted-holder recover). Do not restore a no-assert `run_once` smoke here.
-
-#[tokio::test]
-async fn test_wal_cleanup_after_flush() {
+async fn test_separate_ducklake_flushes_persist_data() {
     let config = load_test_config();
 
     let test_pipeline = TestPipeline::new(config).await;
     let pipeline = &test_pipeline.ingest;
 
-    // First flush: create WAL files
+    // First flush writes a batch through the DuckLake writer.
     let mut first_batch = Vec::new();
     for i in 0..50 {
         first_batch.push(SpanData {
-            session_id: "wal-cleanup-test-1".to_string(),
+            session_id: "separate-flush-test-1".to_string(),
             trace_id: format!("trace-{}", i),
             span_id: format!("span-{}", i),
             parent_span_id: None,
@@ -1004,16 +993,16 @@ async fn test_wal_cleanup_after_flush() {
         .expect("first add");
     pipeline.force_flush_spans().await.expect("first flush");
 
-    println!("✅ First flush completed (DuckLake flush-through)");
+    println!("✅ First DuckLake flush completed");
 
-    // Wait a bit to ensure timestamps are different
+    // Keep the two batches on distinct timestamps.
     tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
 
-    // Second flush: should clean up first WAL files
+    // The second flush must not replace or hide the first batch.
     let mut second_batch = Vec::new();
     for i in 50..100 {
         second_batch.push(SpanData {
-            session_id: "wal-cleanup-test-2".to_string(),
+            session_id: "separate-flush-test-2".to_string(),
             trace_id: format!("trace-{}", i),
             span_id: format!("span-{}", i),
             parent_span_id: None,
@@ -1047,12 +1036,12 @@ async fn test_wal_cleanup_after_flush() {
         .expect("second add");
     pipeline.force_flush_spans().await.expect("second flush");
 
-    println!("✅ Second flush completed (DuckLake flush-through)");
+    println!("✅ Second DuckLake flush completed");
 
     let c1 = test_pipeline
         .query_engine()
         .count_traces(TraceCountFilter {
-            session_id: Some("wal-cleanup-test-1".to_string()),
+            session_id: Some("separate-flush-test-1".to_string()),
             time_window: crate::util::query_window(),
 
             app_id: None,
@@ -1063,7 +1052,7 @@ async fn test_wal_cleanup_after_flush() {
     let c2 = test_pipeline
         .query_engine()
         .count_traces(TraceCountFilter {
-            session_id: Some("wal-cleanup-test-2".to_string()),
+            session_id: Some("separate-flush-test-2".to_string()),
             time_window: crate::util::query_window(),
 
             app_id: None,

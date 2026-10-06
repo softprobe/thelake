@@ -13,7 +13,7 @@ use crate::query::QueryEngine;
 use crate::sql::tempo::{scan_reached_cap, trace_scan_cap, trace_scan_sql};
 use crate::sql::trusted::TrustedSql;
 use crate::storage::duckdb::QueryResult;
-use crate::storage::schema::variant::variant_json_to_string_map;
+use crate::storage::schema::attribute_map::attribute_map_json_to_string_map;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -546,7 +546,7 @@ fn parse_attributes(
     field: &str,
 ) -> Result<Vec<TraceAttribute>, CompatError> {
     let value = parse_json_object(value, row_index, field)?;
-    let mut values = variant_json_to_string_map(&value)
+    let mut values = attribute_map_json_to_string_map(&value)
         .into_iter()
         .filter(|(key, _)| {
             key != crate::models::span::INSTRUMENTATION_SCOPE_ATTRIBUTE
@@ -729,7 +729,7 @@ fn parse_timestamp_value(value: &Value, _fallback: i64) -> Option<i64> {
 
 fn parse_links(value: &Value, row_index: usize) -> Result<Vec<Value>, CompatError> {
     let value = strict_json_value(value, row_index, "links")?;
-    // MAP(VARCHAR,VARCHAR) storage (#55): empty maps CAST to `{}`; JSON arrays that
+    // MAP(VARCHAR,VARCHAR) storage: empty maps CAST to `{}`; JSON arrays that
     // cannot flatten are stored under `_raw` by `reserved_json_to_string_map`.
     let value = unwrap_map_encoded_json_array(value);
     match value {
@@ -1299,7 +1299,7 @@ mod tests {
                 "instrumentation_scope",
                 Value::String("not-json".into()),
             ),
-            // Empty MAP `{}` is a valid no-links encoding under MAP bags (#55).
+            // Empty MAP `{}` is a valid no-links encoding for attribute maps.
             ("links", "links", Value::String("[1]".into())),
             ("events", "events", Value::String("{}".into())),
         ];

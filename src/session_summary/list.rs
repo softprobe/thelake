@@ -1,4 +1,4 @@
-//! Stage 3: list sessions from catalog Postgres `session_summary`.
+//! Read the session list from catalog PostgreSQL `session_summary`.
 
 use crate::runtime_engine::quote_pg_ident;
 use crate::session_summary::list_query::{

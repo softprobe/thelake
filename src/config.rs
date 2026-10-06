@@ -401,7 +401,7 @@ pub struct DuckLakeConfig {
     /// Rows per INSERT at or below this limit may stay catalog-inlined.
     /// Default `Some(500)` (DuckLake-aligned). Maintenance does not flush
     /// inlined rows before merge. Set `Some(0)` only
-    /// when a fixture needs Parquet-per-batch (shredding / F-files stress).
+    /// when a fixture needs Parquet-per-batch (small-file stress).
     #[serde(default = "default_data_inlining_row_limit")]
     pub data_inlining_row_limit: Option<u64>,
     /// Number of reused ATTACH'd DuckDB writer connections per catalog scope key.

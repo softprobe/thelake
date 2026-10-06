@@ -20,7 +20,7 @@ SHELL := /bin/bash
 
 .PHONY: help ensure-cache doctor setup teardown check-infra \
 	clean clean-cache build build-release package publish test-publish-tags \
-	lint fmt check-fmt \
+	lint check-sql-guardrails fmt check-fmt \
 	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
@@ -97,7 +97,7 @@ COMPAT_REFERENCE_TEMPO_MANIFEST := $(COMPAT_REFERENCE_TEMPO_IMAGE)@$(COMPAT_REFE
 COMPAT_REFERENCE_GRAFANA_MANIFEST := $(COMPAT_REFERENCE_GRAFANA_IMAGE)@$(COMPAT_REFERENCE_GRAFANA_DIGEST)
 COMPAT_REFERENCE_GRAFANA_TAG_IMAGE := $(COMPAT_REFERENCE_GRAFANA_IMAGE):$(COMPAT_REFERENCE_GRAFANA_TAG)
 
-# Loki Phase 2 differential evidence. The test helper writes failure evidence
+# Loki differential evidence. The test helper writes failure evidence
 # below SOFTPROBE_COMPAT_ARTIFACT_DIR/loki/<case>/.
 LOKI_REFERENCE_IMAGE := $(COMPAT_REFERENCE_LOKI_MANIFEST)
 LOKI_REFERENCE_DIGEST ?= $(COMPAT_REFERENCE_LOKI_DIGEST)
@@ -108,7 +108,7 @@ LOKI_DIFF_RAW_ARTIFACT ?= $(LOKI_RAW_ARTIFACT)
 LOKI_DIFF_NORMALIZED_ARTIFACT ?= $(LOKI_NORMALIZED_ARTIFACT)
 LOKI_DIFF_TIMEOUT_SECS ?= 900
 
-# Tempo Phase 3 differential evidence. The test helper writes failure evidence
+# Tempo differential evidence. The test helper writes failure evidence
 # below SOFTPROBE_COMPAT_ARTIFACT_DIR/tempo/<case>/.
 TEMPO_REFERENCE_IMAGE := $(COMPAT_REFERENCE_TEMPO_MANIFEST)
 TEMPO_REFERENCE_DIGEST ?= $(COMPAT_REFERENCE_TEMPO_DIGEST)
@@ -119,7 +119,7 @@ TEMPO_DIFF_RAW_ARTIFACT ?= $(TEMPO_RAW_ARTIFACT)
 TEMPO_DIFF_NORMALIZED_ARTIFACT ?= $(TEMPO_NORMALIZED_ARTIFACT)
 TEMPO_DIFF_TIMEOUT_SECS ?= 900
 
-# Grafana Phase 4 system evidence. The immutable digest is part of the same
+# Grafana system evidence. The immutable digest is part of the same
 # manifest as the image/tag and is derived for every run.
 GRAFANA_REFERENCE_IMAGE := $(COMPAT_REFERENCE_GRAFANA_TAG_IMAGE)
 GRAFANA_REFERENCE_VERSION := $(COMPAT_REFERENCE_GRAFANA_TAG)
@@ -289,7 +289,10 @@ test-publish-tags:
 	echo "$$args" | grep -Fq -- 'linux/amd64'; \
 	echo "publish tag plan ok"
 
-lint: ensure-cache
+check-sql-guardrails:
+	@python3 scripts/check_sql_guardrails.py ${SQL_GUARDRAIL_BASE:-}
+
+lint: ensure-cache check-sql-guardrails
 	cargo clippy $(CARGO_PROFILE_FLAG) --all-targets -- -D warnings
 
 fmt:
@@ -361,7 +364,7 @@ ducklake-extension:
 test: ensure-cache ducklake-extension
 	bash tests/scripts/ducklake_extension_download_test.sh
 	@echo "unit + lightweight tests (no e2e infra)..."
-	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compat_phase0 -- --test-threads=1
+	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compatibility -- --test-threads=1
 
 # Postgres lease contract (ignored in `make test`; needs ducklake-postgres).
 test-lease-pg: ensure-cache check-infra
@@ -369,7 +372,7 @@ test-lease-pg: ensure-cache check-infra
 	cargo test $(CARGO_PROFILE_FLAG) --lib postgres_ -- --ignored --test-threads=1
 
 
-# Aggregate Phase 5 conformance target. Real mode is the default and retains
+# Aggregate conformance target. Real mode is the default and retains
 # each protocol runner's Docker/reference-service gates. Mock mode is opt-in
 # only and is explicitly marked non-evidence by conformance.sh.
 COMPAT_CONFORMANCE_MODE ?= real
@@ -440,7 +443,7 @@ check-compat-reference-pins:
 	echo "  grafana: $$grafana_manifest"; \
 	ruby "$(CURDIR)/docs/compat/validate.rb" \
 		"$(CURDIR)/docs/compat/capability.v0.yaml" \
-		"$(CURDIR)/tests/compat/tempo/phase3.json" \
+		"$(CURDIR)/tests/compat/tempo/tempo-search.json" \
 		"$(COMPAT_REFERENCE_MANIFEST)"
 
 compat-reference-image:
@@ -496,7 +499,7 @@ check-grafana-reference-pin:
 	echo "$$repo_digests" | grep -Fq -- "$$expected_repo_digest" || { echo "Grafana digest mismatch: $$image does not resolve to $$digest" >&2; exit 1; }; \
 	echo "Grafana reference validated: $$image@$$digest"
 
-# Phase 4 static contracts. Keep these independent of Docker so path,
+# Grafana integration static contracts. Keep these independent of Docker so path,
 # provisioning, dashboard, and artifact-redaction regressions fail before the
 # service-backed Grafana lane starts.
 test-grafana-static: check-compat-reference-pins
@@ -506,7 +509,7 @@ test-grafana-static: check-compat-reference-pins
 	"$(CURDIR)/scripts/compat/check-compose-image-pins.sh" "$(CURDIR)/tests/compat/grafana/docker-compose.ci.yml"; \
 	for contract in \
 		compose_contract_test.sh \
-		phase4_contract_test.sh \
+		grafana_contract_test.sh \
 		tempo_tenant_contract_test.sh \
 		cross_signal_link_contract_test.sh \
 		datasource_auth_contract_test.sh \
@@ -517,7 +520,7 @@ test-grafana-static: check-compat-reference-pins
 		GRAFANA_SKIP_STATIC_CONTRACTS=1 bash "$$path"; \
 	done
 
-# Phase 4 deterministic compose system lane. The shell harness owns G1-G3 and
+# Grafana integration deterministic compose system lane. The shell harness owns G1-G3 and
 # writes structured outcome evidence; compose lifecycle evidence is collected
 # here so cleanup runs for both harness failures and successful runs.
 test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
@@ -581,7 +584,7 @@ test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
 	collect; \
 	echo "Grafana system evidence: $$artifact_dir"
 
-# Phase 2 differential vs the pinned Loki reference (explicit Docker gate).
+# Loki query differential vs the pinned Loki reference (explicit Docker gate).
 # This target is intentionally not a prerequisite of `test`, `ci`, or release.
 # The exported paths are the contract used by evidence-producing harnesses.
 test-loki-diff: ensure-cache
@@ -597,9 +600,9 @@ test-loki-diff: ensure-cache
 	LOKI_DIFF_RAW_ARTIFACT="$(LOKI_DIFF_RAW_ARTIFACT)" \
 	LOKI_DIFF_NORMALIZED_ARTIFACT="$(LOKI_DIFF_NORMALIZED_ARTIFACT)" \
 	SOFTPROBE_COMPAT_ARTIFACT_DIR="$${SOFTPROBE_COMPAT_ARTIFACT_DIR:-$(LOKI_DIFF_ARTIFACT_DIR)}" \
-	"$(CURDIR)/scripts/compat/run-with-timeout" "$(LOKI_DIFF_TIMEOUT_SECS)" cargo test $(CARGO_PROFILE_FLAG) --features integration-e2e --test tests compat_loki::loki_phase2_differential_vs_pinned_loki -- --ignored --test-threads=1 --nocapture
+	"$(CURDIR)/scripts/compat/run-with-timeout" "$(LOKI_DIFF_TIMEOUT_SECS)" cargo test $(CARGO_PROFILE_FLAG) --features integration-e2e --test tests compat_loki::loki_query_differential_vs_pinned_loki -- --ignored --test-threads=1 --nocapture
 
-# Phase 3 differential vs the pinned Tempo reference (explicit Docker gate).
+# Tempo query differential vs the pinned Tempo reference (explicit Docker gate).
 # This target is intentionally not a prerequisite of `test`, `ci`, or release.
 # The exported paths are the contract used by evidence-producing harnesses.
 test-tempo-diff: ensure-cache
@@ -615,7 +618,7 @@ test-tempo-diff: ensure-cache
 	TEMPO_DIFF_RAW_ARTIFACT="$(TEMPO_DIFF_RAW_ARTIFACT)" \
 	TEMPO_DIFF_NORMALIZED_ARTIFACT="$(TEMPO_DIFF_NORMALIZED_ARTIFACT)" \
 	SOFTPROBE_COMPAT_ARTIFACT_DIR="$${SOFTPROBE_COMPAT_ARTIFACT_DIR:-$(TEMPO_DIFF_ARTIFACT_DIR)}" \
-	"$(CURDIR)/scripts/compat/run-with-timeout" "$(TEMPO_DIFF_TIMEOUT_SECS)" cargo test $(CARGO_PROFILE_FLAG) --features integration-e2e --test tests compat_tempo::tempo_phase3_differential_vs_pinned_tempo -- --ignored --test-threads=1 --nocapture
+	"$(CURDIR)/scripts/compat/run-with-timeout" "$(TEMPO_DIFF_TIMEOUT_SECS)" cargo test $(CARGO_PROFILE_FLAG) --features integration-e2e --test tests compat_tempo::tempo_query_differential_vs_pinned_tempo -- --ignored --test-threads=1 --nocapture
 
 # End-to-end browser automation + Grafana + OTel demo ingestion tests.
 test-grafana-browser: ensure-cache
@@ -634,9 +637,9 @@ grafana-down:
 	@chmod +x scripts/grafana-manual-down.sh
 	./scripts/grafana-manual-down.sh
 
-# Full-OTLP + Grafana 10s Softprobe process CPU budget (#55).
+# Full-OTLP + Grafana 10s Softprobe process CPU budget.
 # Mean Softprobe CPU ratio must stay < 0.85 (one core; durable headroom).
-# Artifacts: docs/perf/results/*-demo-cpu-full.*
+# Artifacts: target/perf/*-demo-cpu-full.* (override with BENCH_RESULTS_DIR)
 # Short smoke: BENCH_CPU_WARMUP_SECS=20 BENCH_CPU_MEASURE_SECS=60 make bench-demo-cpu-full
 # Force rebuild/wipe: BENCH_CPU_FORCE_BRINGUP=1 make bench-demo-cpu-full
 bench-demo-cpu-full: ensure-cache

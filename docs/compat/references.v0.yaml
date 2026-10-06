@@ -6,7 +6,7 @@ references:
     image: grafana/loki
     tag: "3.1.1"
     digest: "sha256:e689cc634841c937de4d7ea6157f17e29cf257d6a320f1c293ab18d46cfea986"
-    notes: Phase 2 query API oracle for the supported LogQL subset
+    notes: Query API oracle for the supported LogQL subset
     source: https://github.com/grafana/loki/tree/v3.1.1
     license: AGPL-3.0-only
     attribution: Grafana Loki contributors; upstream source and license notices apply.
@@ -22,7 +22,7 @@ references:
     image: grafana/grafana
     tag: "11.2.0"
     digest: "sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f"
-    notes: Datasource + Explore smoke (Phase 4)
+    notes: Datasource and Explore smoke
   otel_collector:
     runtime: false
     image: otel/opentelemetry-collector-contrib

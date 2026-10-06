@@ -14,8 +14,8 @@ done
 grep -Fq 'SOFTPROBE_AUTH_URL: http://auth-mock:8080/validate' "$COMPOSE_FILE"
 grep -Fq 'GRAFANA_SOFTPROBE_URL' "$COMPOSE_FILE"
 grep -Fq 'image: ${GRAFANA_COMPOSE_IMAGE:?GRAFANA_COMPOSE_IMAGE must be supplied from docs/compat/references.v0.yaml}' "$COMPOSE_FILE"
-grep -Fq 'grafana-phase4-tenant-a' "$COMPOSE_FILE"
-grep -Fq 'grafana-phase4-tenant-b' "$COMPOSE_FILE"
+grep -Fq 'grafana-test-tenant-a' "$COMPOSE_FILE"
+grep -Fq 'grafana-test-tenant-b' "$COMPOSE_FILE"
 grep -Fq 'cccccccc-cccc-cccc-cccc-cccccccccccc' "$COMPOSE_FILE"
 grep -Fq 'dddddddd-dddd-dddd-dddd-dddddddddddd' "$COMPOSE_FILE"
 # Softprobe-config / seed / smoke must stay aligned with tests/util/workspace_ids.*

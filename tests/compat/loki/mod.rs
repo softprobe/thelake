@@ -1,4 +1,4 @@
-//! Loki Phase 0/2 compatibility contracts and evidence-backed cases.
+//! Loki compatibility contracts and evidence-backed cases.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -19,7 +19,7 @@ use crate::compat_support::conformance::{parse_case_selection, select_differenti
 use crate::compat_support::loki::{
     assert_case_contract, build_loki_router, fixture, flush_logs, ingest_records,
     ingest_records_with_bearer, query_case, query_case_bearer, reference_image_from_manifest,
-    LokiCase, LokiExpectation, PHASE2_EPOCH_NS,
+    LokiCase, LokiExpectation, LOKI_FIXTURE_EPOCH_NS,
 };
 use crate::util::config::file_backed_test_config;
 
@@ -88,7 +88,7 @@ fn loki_success_minimal_fixture_matches_helper() {
 }
 
 #[test]
-fn loki_phase2_fixture_reference_image_tracks_immutable_manifest_pin() {
+fn loki_query_fixture_reference_image_tracks_immutable_manifest_pin() {
     let fixture = fixture();
     assert_eq!(
         fixture.evidence.reference_image,
@@ -101,10 +101,8 @@ fn loki_phase2_fixture_reference_image_tracks_immutable_manifest_pin() {
 }
 
 #[test]
-fn loki_phase2_fixture_has_issue_evidence_and_full_get_matrix() {
+fn loki_query_fixture_declares_capabilities_and_full_get_matrix() {
     let fixture = fixture();
-    assert_eq!(fixture.evidence.issue, "#29");
-    assert_eq!(fixture.evidence.phase, "Phase 2");
     assert_eq!(
         fixture.evidence.reference_manifest,
         "docs/compat/references.v0.yaml"
@@ -114,15 +112,9 @@ fn loki_phase2_fixture_has_issue_evidence_and_full_get_matrix() {
         .normalization
         .contains("normalize_loki_response"));
     assert_eq!(fixture.capability.protocol, "loki");
-    assert_eq!(fixture.capability.phase, "phase_2");
     assert_eq!(
         fixture.capability.ordering_policy,
         "timestamp_asc,stream_labels_asc,line_asc,structured_metadata_asc; direction reverses the complete order"
-    );
-    assert_eq!(
-        fixture.capability.supported_endpoints.len(),
-        5,
-        "all five GET endpoints must be capability-declared"
     );
     for feature in [
         "stream_selectors",
@@ -140,12 +132,7 @@ fn loki_phase2_fixture_has_issue_evidence_and_full_get_matrix() {
             "missing supported capability {feature}"
         );
     }
-    for feature in [
-        "interval_sampling",
-        "step_sampling",
-        "unwrap",
-        "metric_aggregations",
-    ] {
+    for feature in ["unwrap", "metric_aggregations"] {
         assert!(
             fixture
                 .capability
@@ -161,6 +148,16 @@ fn loki_phase2_fixture_has_issue_evidence_and_full_get_matrix() {
         .iter()
         .map(|case| case.path.as_str())
         .collect::<BTreeSet<_>>();
+    let covered_endpoints = fixture
+        .capability
+        .covered_endpoints
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        endpoints, covered_endpoints,
+        "declared differential endpoint coverage must match fixture cases"
+    );
     assert_eq!(
         endpoints,
         BTreeSet::from([
@@ -185,13 +182,13 @@ fn loki_phase2_fixture_has_issue_evidence_and_full_get_matrix() {
 }
 
 #[test]
-fn loki_phase2_fixture_timestamps_are_after_schema_start() {
+fn loki_query_fixture_timestamps_are_after_schema_start() {
     let fixture = fixture();
 
     for record in &fixture.records {
         let timestamp = record.timestamp();
         assert!(
-            timestamp >= PHASE2_EPOCH_NS,
+            timestamp >= LOKI_FIXTURE_EPOCH_NS,
             "fixture record timestamp predates the deterministic epoch: {timestamp}"
         );
     }
@@ -202,7 +199,7 @@ fn loki_phase2_fixture_timestamps_are_after_schema_start() {
                     .parse::<i64>()
                     .unwrap_or_else(|_| panic!("case {} has invalid {bound}: {value}", case.id));
                 assert!(
-                    timestamp >= PHASE2_EPOCH_NS,
+                    timestamp >= LOKI_FIXTURE_EPOCH_NS,
                     "case {} {bound} predates the deterministic epoch: {timestamp}",
                     case.id
                 );
@@ -291,7 +288,7 @@ mod selector_tests {
 }
 
 #[tokio::test]
-async fn loki_phase2_contract_cases_cover_envelopes_results_and_boundaries() {
+async fn loki_query_contract_cases_cover_envelopes_results_and_boundaries() {
     let fixture = fixture();
     let (router, state, _temp) = build_loki_router().await;
     ingest_records(&router, &fixture.records, None).await;
@@ -313,7 +310,7 @@ async fn loki_phase2_contract_cases_cover_envelopes_results_and_boundaries() {
     // and keeps insertion order for equal timestamps; mirror that exactly.
     let streams = body["data"]["result"].as_array().expect("streams");
     assert_eq!(streams.len(), 2);
-    let expected_timestamp = (PHASE2_EPOCH_NS + 1).to_string();
+    let expected_timestamp = (LOKI_FIXTURE_EPOCH_NS + 1).to_string();
     assert_eq!(streams[0]["stream"]["request_id"], "r1");
     assert_eq!(streams[1]["stream"]["request_id"], "r2");
     for stream in streams {
@@ -328,7 +325,7 @@ async fn loki_phase2_contract_cases_cover_envelopes_results_and_boundaries() {
 }
 
 #[tokio::test]
-async fn loki_phase2_tenant_isolation_keeps_streams_and_metadata_scoped() {
+async fn loki_query_tenant_isolation_keeps_streams_and_metadata_scoped() {
     let fixture = fixture();
     let temp_a = TempDir::new().expect("tenant A temp");
     let temp_b = TempDir::new().expect("tenant B temp");
@@ -412,7 +409,7 @@ async fn loki_phase2_tenant_isolation_keeps_streams_and_metadata_scoped() {
 }
 
 #[tokio::test]
-async fn loki_phase2_missing_and_invalid_auth_are_denied_on_all_get_endpoints() {
+async fn loki_query_missing_and_invalid_auth_are_denied_on_all_get_endpoints() {
     let paths = [
         "/loki/api/v1/query",
         "/loki/api/v1/query_range",
@@ -473,7 +470,7 @@ async fn loki_phase2_missing_and_invalid_auth_are_denied_on_all_get_endpoints() 
 #[cfg(feature = "integration-e2e")]
 #[tokio::test]
 #[ignore = "requires the pinned Loki oracle; run the compatibility lane with --ignored"]
-async fn loki_phase2_pinned_fixture_first_query_is_nonempty_and_schema_compatible() {
+async fn loki_query_pinned_fixture_first_query_is_nonempty_and_schema_compatible() {
     require_docker();
     // Under the conformance harness the manifest carries static timestamps;
     // using them keeps receipt canonical requests comparable byte-for-byte.
@@ -528,7 +525,7 @@ async fn loki_phase2_pinned_fixture_first_query_is_nonempty_and_schema_compatibl
 #[cfg(feature = "integration-e2e")]
 #[tokio::test]
 #[ignore = "requires the pinned Loki oracle; run the compatibility lane with --ignored"]
-async fn loki_phase2_differential_vs_pinned_loki() {
+async fn loki_query_differential_vs_pinned_loki() {
     require_docker();
     // Under the conformance harness the manifest carries static timestamps;
     // using them keeps receipt canonical requests comparable byte-for-byte.
@@ -618,7 +615,7 @@ async fn loki_phase2_differential_vs_pinned_loki() {
     let exec_fixture = if std::env::var_os("COMPAT_CASE_JSON").is_some() {
         let delta = crate::compat_support::loki::system_time_now_ns()
             - crate::compat_support::loki::FIXTURE_LAG_NS
-            - PHASE2_EPOCH_NS;
+            - LOKI_FIXTURE_EPOCH_NS;
         Some(fixture.shifted_by(delta))
     } else {
         None

@@ -1,8 +1,8 @@
 //! Shared OTLP `AnyValue` → stored-string encoding for attribute maps.
 //!
 //! Scalars use stable string forms. Arrays and kvlists become tagged compact
-//! JSON (`sp.json:…`) so DuckLake VARIANT staging can rehydrate nested structure
-//! without confusing OTLP StringValues that happen to look like JSON. Bytes are
+//! JSON (`sp.json:…`) so MAP-backed attribute storage can rehydrate nested
+//! structure without confusing OTLP StringValues that happen to look like JSON. Bytes are
 //! stored as standard base64.
 //!
 //! Nested children that cannot be encoded are stored as JSON `null` (never

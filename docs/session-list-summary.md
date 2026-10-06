@@ -1,492 +1,73 @@
-# Session list summary
+# Session summaries
 
-**Status:** Postgres `sessions/search` with dirty-row claimed reduce and leased rebuild; no lake list fallback
-**Baseline:** `thelake` / `sp-llm` `main`  
-**Supersedes:** ChatGPT “Design Session Summaries” share; earlier drafts that put the directory in Explorer Supabase, dual-wrote DuckLake `session_facts`, or used a long-lived in-memory span counter
-
----
-
-## 1. Summary
-
-Session **list** must not scan DuckLake for every UI load. Session **detail** must keep reading DuckLake.
-
-**Single derived store:** skinny `session_summary` in **thelake catalog Postgres** (per tenant metadata schema).  
-**Not written:** any DuckLake session-summary table.  
-**Not written by:** Explorer (read-only for this path).
+The session list reads a compact summary table in catalog PostgreSQL. Session
+details and all retained evidence continue to come from DuckLake `traces`.
 
 ```text
-ingest (every replica, coalesced batches) → DuckLake `traces`
-    then ONE batched dirty UPSERT (distinct session_ids in batch)
-
-dirty-row reducer loop → SKIP LOCKED claim per workspace
-                       → time-scoped aggregate FROM traces
-                       → UPSERT session_summary; token-checked ack
-
-list   ← session_summary
-detail ← traces
+successful trace commit -> batched dirty-session upsert
+dirty-row reducer       -> claim rows -> aggregate traces -> upsert summary
+session list            <- session_summary
+session detail          <- traces
 ```
 
-**Hard rule:** every DuckLake fact scan uses the same finite `QueryWindow` contract and a bare `timestamp` predicate so DuckLake can prune its calendar-day partitions. Do not invent a second clock, wrap the `timestamp` column, or make time bounds optional.
+The summary is derived data. It can be rebuilt from traces, and a summary
+failure does not fail an ingest request. Every DuckLake fact scan uses a finite
+time window with a bare `timestamp` predicate so partitions can be pruned.
 
-**Hard rule:** reducer/rebuild DuckDB connections must configure object-store credentials the same way query workers and compaction do (`httpfs` + `configure_object_store`). A connection that only ATTACHes DuckLake can scan catalog-inlined rows but fails (or silently under-reads) once the window needs Parquet under `gs://` / `s3://`.
+## PostgreSQL tables
 
-**Inlining:** default `data_inlining_row_limit` is **500** (DuckLake-aligned; D13). Larger limits (e.g. former Softprobe 10_000) keep too many live spans in Postgres inlined chunks and make session detail TABLE_SCAN expensive.
+`session_summary` is stored in the tenant metadata schema and contains the
+list fields: session ID, start and end timestamps, observation and error
+counts, token totals, cost, and promoted filter fields such as agent and user.
+It does not store span payloads, prompts, attributes, or events.
 
-**Dirty write rule:** never per span — once per successful lake flush batch (coalesce drain; `flush_interval_seconds` 0 or >0 share that path).
+`session_summary_dirty` stores one row per session needing reduction, including
+the dirty time bounds and claim ownership. A generation value protects a newer
+dirty update from being deleted by an older reducer attempt. Reducers claim
+batches with `FOR UPDATE SKIP LOCKED`; expired claims can be retried by another
+replica.
 
-**Where/when the reducer runs:** not inline on ingest. Each replica runs a reducer loop; PostgreSQL dirty-row claims (`FOR UPDATE SKIP LOCKED` plus a TTL) distribute batches. The periodic rebuild remains on the shared leased runner. See [`async-jobs.md`](./async-jobs.md).
+## Updates and rebuilds
 
----
+After a successful DuckLake trace commit, ingest writes one batched dirty
+upsert for the distinct session IDs in that commit. It does not write dirty
+state per span. Failed lake commits do not mark sessions dirty.
 
-## 2. Problem
+The reducer aggregates claimed sessions from `traces` within the dirty time
+bounds, updates `session_summary`, then acknowledges the matching dirty-row
+generations. Late spans mark the session dirty again and are included in a
+later reduction.
 
-### 2.1 Product need
+The leased rebuild job uses the same aggregate and an explicit `{from,to}`
+window. The operator endpoint is `POST /v1/llm/sessions/summary/rebuild`.
+Periodic rebuilds use `rebuild_interval_ms` and
+`max_reduce_span_seconds` from `session_summary` configuration. Rebuilds do
+not scan the full lake.
 
-Explorer Sessions list: triage rows (`session_id`, agent, times, steps, errors, tokens/cost). Filters: range, agent, has-errors. Cursor pagination.
+## Read behavior
 
-Detail: one complete session response with span payloads from thelake.
+- `POST /v1/llm/sessions/search` reads summary rows with cursor pagination. It
+  does not scan `traces` or fall back to a lake aggregation.
+- Session detail reads full span data and aggregates from DuckLake `traces`.
+- Session recording uses its separate recording endpoint.
+- Explorer reads summaries and never writes the summary tables.
 
-### 2.2 Main today
-
-| Path | Behavior | Cost |
-|---|---|---|
-| List | `sessions/search` → `GROUP BY session_id` over all spans in window | Grows with window volume |
-| List (Stage 0) | Explorer **no longer** runs `sessionCountOverrides` / window `spans/search` | Half the previous Explorer load; list still lake-bound until Stage 3 |
-| Detail | session-scoped reads | Correct |
-
-### 2.3 Constraints
-
-1. Explorer does not ingest → thelake owns summary refresh.  
-2. No dual derived table in DuckLake + Postgres.  
-3. Evidence only in DuckLake; Postgres holds summary + dirty queue + job leases.  
-4. Catalog Postgres already exists per tenant `metadata_schema`.  
-5. Multiple thelake replicas → async work needs **one** Postgres lease system (shared with maintenance).
-
----
-
-## 3. Goals and non-goals
-
-### Goals
-
-- List cost ~ page size / filter selectivity, not spans-in-window.  
-- Detail unchanged (`traces` by `session_id`).  
-- Summary **reconstructible from `traces`**; summary loss ≠ evidence loss.  
-- Summary numbers come from **re-aggregating DuckLake**, not a second long-lived counter.  
-- Reducer is an async dirty-row claim loop; rebuild and physical maintenance use the fenced lease runner — see [`async-jobs.md`](./async-jobs.md).
-- Simple ops: no Kafka / Redis / CH / Elastic / separate summary service.  
-- Keep forever-cheap evidence retention.
-
-### Non-goals
-
-- List error counts == detail primary-error tree.  
-- Subsecond multi-tenant dashboards.  
-- Lake-native forever session analytics rollups.  
-- Full-text over prompts on list.  
-- OPEN/FINALIZED session state machine in v1.
-
----
-
-## 4. Architecture
-
-```text
-┌──────────────────────────────────────────────────────────────┐
-│ Clients                                                      │
-│   list  → POST /v1/llm/sessions/search  (session_summary)      │
-│   detail→ GET  /v1/llm/sessions/{id}…   (traces)             │
-└────────────────────────────▲─────────────────────────────────┘
-                             │
-┌────────────────────────────┴─────────────────────────────────┐
-│ thelake replicas (N)                                         │
-│   ingest (all): traces commit → UPSERT session_summary_dirty   │
-│   async_jobs runner (leases for unsafe/heavy jobs)            │
-│     per job_name + scope_key):                               │
-│       maintenance                                            │
-│       physical maintenance / session_summary.rebuild          │
-│   dirty-row reducer loop (all replicas claim disjoint batches)│
-│   query: list → session_summary; detail → traces               │
-└───────────────┬────────────────────────────▲─────────────────┘
-                ▼                            │
-┌───────────────────────────┐   ┌────────────┴─────────────────┐
-│ DuckLake                  │   │ Catalog Postgres             │
-│   traces, logs, scores    │   │   thelake_job_lease (shared) │
-│   evidence only           │   │   session_summary + _dirty     │
-│                           │   │   (per tenant meta schema)   │
-└───────────────────────────┘   └──────────────────────────────┘
-```
-
-| Data | Store | Authority |
-|---|---|---|
-| Span bodies / attrs / events | DuckLake `traces` | **SoT** |
-| List triage fields | `session_summary` | Derived, rebuildable |
-| Dirty session hints | `session_summary_dirty` | Ephemeral work queue |
-| Lease coordination | `thelake_job_lease` | Maintenance and rebuild only |
-
-```text
-session_summary MUST be reconstructible from traces.
-traces MUST NOT depend on session_summary.
-```
-
-**Multi-instance / DRY:** do not give session-summary its own timer or lock. It is a job on the shared runner. Today’s maintenance scheduler has **no** cross-replica lease — that gap is fixed by the same design. Details: [`async-jobs.md`](./async-jobs.md).
-
----
-
-## 5. Data model
-
-### 5.1 `session_summary` (catalog Postgres)
-
-Per tenant metadata schema (not a DuckLake Parquet table):
-
-```sql
-CREATE TABLE session_summary (
-  session_id          TEXT        NOT NULL,
-  start_time_ns       BIGINT NOT NULL,
-  end_time_ns         BIGINT,
-  observation_count   BIGINT      NOT NULL DEFAULT 0,
-  error_count         BIGINT      NOT NULL DEFAULT 0,
-  input_tokens        BIGINT,
-  output_tokens       BIGINT,
-  total_tokens        BIGINT,
-  total_cost          DOUBLE PRECISION,
-  agent_name          TEXT,
-  user_id             TEXT,          -- optional v1.1
-  model_name          TEXT,          -- optional v1.1
-  updated_at          TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (session_id)
-);
-
-CREATE INDEX session_summary_recent
-  ON session_summary (start_time_ns DESC, session_id);
-CREATE INDEX session_summary_agent
-  ON session_summary (agent_name, start_time_ns DESC, session_id)
-  WHERE agent_name IS NOT NULL;
-CREATE INDEX session_summary_errors
-  ON session_summary (start_time_ns DESC, session_id)
-  WHERE error_count > 0;
-```
-
-### 5.2 `session_summary_dirty` (same tenant schema)
-
-Durable touch queue so **any** ingest replica can mark work for any reducer replica:
-
-```sql
-CREATE TABLE session_summary_dirty (
-  session_id   TEXT        NOT NULL,
-  min_ts_ns    BIGINT      NOT NULL,
-  max_ts_ns    BIGINT      NOT NULL,
-  updated_at   TIMESTAMPTZ NOT NULL,
-  claim_holder TEXT,
-  claim_until  TIMESTAMPTZ,
-  PRIMARY KEY (session_id)
-);
-```
-
-Reducers claim eligible rows in a short transaction with `FOR UPDATE SKIP LOCKED`. `claim_holder` is a unique attempt token and `claim_until` makes abandoned claims recoverable. Each dirty row has a PostgreSQL-maintained `generation`, incremented by a trigger on every update so mixed-version writers and wall-clock changes cannot weaken acknowledgements. Before publishing, a short transaction locks and verifies that the claimed rows still have the captured generations, UPSERTs the summary, and deletes only those exact generations; changed rows have their claim cleared for retry. An expired or reclaimed attempt cannot publish stale results.
-
-**Write amplification rule:** never UPSERT dirty **per span**. Dirty writes are tied to the **DuckLake commit batch** only:
-
-1. While building/flushing an ingest batch, accumulate in memory  
-   `Map<session_id, {min_ts_ns, max_ts_ns}>` over spans in that batch.
-2. After the `traces` commit succeeds, issue **one** batched dirty UPSERT  
-   (multi-row `INSERT … ON CONFLICT` for the distinct session_ids in the batch).  
-3. If the lake commit fails, do not write dirty.
-
-That is already “batched” whenever the OTLP path commits many spans together. Commit (and thus dirty) frequency follows coalesce drains:
+## Configuration
 
 ```yaml
 ingest:
-  flush_interval_seconds: 0   # drain before OTLP ack (same coalesce path)
-  # or > 0 to timer-batch posts into fewer DuckLake writes / dirty UPSERTs
+  flush_interval_seconds: 0
 session_summary:
   reducer_interval_ms: 10000
+  rebuild_interval_ms: 86400000
+  max_sessions_per_reduce: 1000
+  max_reduce_span_seconds: 604800
   dirty_claim_ttl_seconds: 300
 ```
 
-`0` and `N>0` both go through `CoalesceBuf` (capped drain + dirty mark). Prefer `N>0` in multi-replica production so dirty UPSERTs stay coarse; upstream collector batching still matters.
-
-Optional: coalesce dirty rows in-process for a few hundred ms before Postgres UPSERT **only if** still within the same post-commit hook. Prefer one dirty write per successful lake flush.
-### 5.3 Semantics
-
-| Field | Summary | Detail |
-|---|---|---|
-| `observation_count` | `COUNT(DISTINCT span_id)` from `traces` | Deduped spans (storage column name retained) |
-| `error_count` | `#` with `status_code = 'ERROR'` (coarse) | Primary-error / timeline |
-| tokens / cost / agent | From same lake aggregate | From spans |
-| payloads | Never | attrs / events |
-
-After a successful reduce for session S, summary(S) matches the lake aggregate for S over the chosen `[from,to]`.
-
-### 5.4 Not stored
-
-attrs/events/prompts, JSONB labels GIN (defer), version/hash/OPEN state, any DuckLake summary mirror.
-
----
-
-## 6. Reducer: async job + lake micro-batch
-
-### 6.1 Where and when
-
-| | |
-|---|---|
-| **Where** | `SessionSummaryReduceJob` on the shared `async_jobs` runner (same process binary as maintenance) |
-| **When** | On `session_summary.reducer_interval_ms` (default 10s); claim dirty rows with `FOR UPDATE SKIP LOCKED` and `dirty_claim_ttl_seconds` |
-| **Not** | Inside the ingest HTTP/gRPC handler beyond the cheap dirty UPSERT |
-| **Coordination** | Dirty-row claim token and expiry in `session_summary_dirty`; no job lease |
-
-`session_summary.rebuild` is on the shared runner, on a longer interval or ops-triggered, and uses a workspace lease.
-
-### 6.2 Why not RAM-only TouchSet
-
-With multiple thelake instances, replica A’s in-memory dirty set is invisible to replica B. Dirty state **must** live in Postgres (`session_summary_dirty`); row claims let any replica reduce it. Optional process-local coalesce before dirty UPSERT is an optimization only.
-
-Pure in-memory absolute/delta counters are also rejected as SoT (crash / double-add). Arithmetic always comes from `traces`.
-
-### 6.3 Flow
-
-```text
-ingest batch (soft coalesce flush or single OTLP commit)
-  ├─1─► commit all spans in batch to DuckLake `traces`
-  └─2─► ONE batched UPSERT session_summary_dirty
-          for distinct session_ids in that batch
-          (min_ts_ns/max_ts_ns folded in memory first — never per span)
-
-Session-summary reducer loop (all replicas; SKIP LOCKED claim)
-  ├─1─► claim dirty rows LIMIT N (capture generation)
-  ├─2─► for each id: [from,to] per §6.5
-  ├─3─► time-scoped GROUP BY FROM traces
-  ├─4─► UPSERT session_summary (absolute replace of aggregates)
-  └─5─► DELETE dirty rows with matching generation
-```
-
-Config gate: postgres catalog ⇒ session_summary always on (sqlite inactive / lake list). `flush_interval_seconds` may be 0 or >0 — same coalesce + dirty path.
-### 6.4 Reducer SQL (time scope required)
-
-```sql
-SELECT session_id,
-       epoch_ns(MIN(timestamp))::BIGINT AS start_time_ns,
-       epoch_ns(MAX(COALESCE(end_timestamp, timestamp)))::BIGINT AS end_time_ns,
-       COUNT(DISTINCT span_id) AS observation_count,
-       SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
-       SUM(total_tokens) AS total_tokens,
-       ...
-FROM traces
-WHERE session_id IN (...)
-  AND session_id <> ''
-  AND <exclude recording>
-  AND timestamp >= ...                                  -- REQUIRED (bare column; partition prune)
-  AND timestamp <= ...
-GROUP BY session_id;
-```
-
-```sql
-INSERT INTO session_summary AS s (...)
-VALUES (...)
-ON CONFLICT (session_id) DO UPDATE SET
-  start_time_ns     = EXCLUDED.start_time_ns,
-  end_time_ns       = EXCLUDED.end_time_ns,
-  observation_count = EXCLUDED.observation_count,
-  error_count       = EXCLUDED.error_count,
-  total_tokens      = EXCLUDED.total_tokens,
-  agent_name        = EXCLUDED.agent_name,
-  updated_at        = EXCLUDED.updated_at;
-```
-
-**50 then +5 → 55** when `[from,to]` covers the session so far. Lease prevents two replicas from double-scanning the same tenant; UPSERT remains idempotent if a steal retries.
-
-### 6.5 Mandatory `[from, to]`
-
-```text
-from = least(coalesce(session_summary.start_time_ns, dirty.min_ts_ns), dirty.min_ts_ns)
-to   = greatest(coalesce(session_summary.end_time_ns, dirty.max_ts_ns), dirty.max_ts_ns)
-```
-
-The reducer uses bare timestamp predicates via `QueryWindow::scan_with_timestamp_filter`; no recent-window clamp is applied to dirty sessions. The time predicate prunes partitions, while session IDs limit aggregation to claimed sessions. `max_sessions_per_reduce` bounds batch size. The configured maximum span remains on explicit and periodic rebuild windows.
-
-### 6.6 Late spans
-
-No FINALIZED. Late span → dirty UPSERT → next claimed reduce replaces the summary row from `traces`.
-
----
-
-## 7. Read path
-
-### 7.1 List
-
-`POST /v1/llm/sessions/search` → select from `session_summary` (cursor on `(start_time_ns, session_id)` desc). Steady-state path does **not** scan `traces`.
-
-**No lake fallback** on Postgres catalogs: empty summary → empty list. Lake `GROUP BY` remains only for non-postgres catalogs (sqlite) where there is no summary table.
-
-### 7.2 Detail
-
-Session detail: `GET …/sessions/{id}` returns session totals, scores, and every full span from one materialized DuckLake query. Recording remains a separate endpoint.
-
-### 7.3 Explorer
-
-- Keep calling `sessions/search` via Worker — **summary rows only** (no parallel observations scan).
-- **Done (Stage 0 + 3 + 3.6):** list is Postgres `session_summary`-backed. Trust server `SessionSummary` counts; Explorer must **not** window-scan the span search endpoint for list counts. Session detail reads all spans and aggregate fields together from `traces`.
-- Findings/agents stay in Supabase UI join by `session_id`.
-- Explorer never writes `session_summary`.
-- Optional client fallback when the search endpoint is missing (404/405) remains a compatibility path only — not the product list path.
-
-### 7.4 Pagination
-
-Cursor only; no per-page `COUNT(*)`; non-time sorts may stay `cursor_supported=false`.
-
----
-
-## 8. Rebuild
-
-Same aggregate as reducer; **`[from, to]` required** (ops must pass a window — never whole-lake):
-
-```text
-rebuild([from, to]):
-  SELECT ... FROM traces
-  WHERE timestamp >= ... AND timestamp <= ...
-    AND timestamp >= from AND timestamp <= to
-    AND session_id present AND not recording
-  GROUP BY session_id
-  → absolute UPSERT session_summary
-```
-
-Triggers: ops `POST /v1/llm/sessions/summary/rebuild` with explicit `{from,to}`; periodic workspace-leased job every `rebuild_interval_ms` (default 24h) over lookback `max_reduce_span_seconds` (default 7d). Never whole-lake. Ops rejects windows larger than `max_reduce_span_seconds` (no chunking).
-
-DuckDB setup for reduce/rebuild (must match compaction): shared
-`open_object_store_ducklake_connection` → `INSTALL/LOAD httpfs` → object-store
-secret from env/config → `INSTALL/LOAD ducklake` (+ postgres/sqlite) → `ATTACH`.
-Skipping object-store setup is a defect: recent inlined / **local-disk** windows
-may succeed while older Parquet under `gs://` / `s3://` returns opaque
-`query_failed`.
-
-**Why CI missed this:** Stage 3 HTTP tests (`session_summary_list`) use a
-postgres catalog with `data_path` on a **local temp directory**. Even with
-`data_inlining_row_limit=0` (Parquet on disk), DuckDB needs no httpfs/HMAC, so
-rebuild looked green. Production Softprobe stores Parquet on GCS; that path was
-uncovered until `rebuild_reads_parquet_from_minio_object_store` + unit tests on
-`open_object_store_ducklake_connection`.
-
----
-
-## 9. Consistency
-
-| Event | `traces` | Summary |
-|---|---|---|
-| Commit OK, reduce pending | OK for detail | List lags seconds |
-| Reduce fails | Durable | Stale until retry/rebuild |
-| Process crash / claim expiry | Durable | Another replica reclaims dirty rows after `claim_until` |
-| Truncate `session_summary` | Untouched | Rebuild restores list |
-
-Forbidden: fail ingest on summary errors; store payloads in Postgres; DuckLake summary table; RAM counter as SoT for list numbers.
-
----
-
-## 10. API / config sketch
-
-Keep `SessionSearchRequest` / `SessionSummary` shapes.
-
-```yaml
-# Shared runner: see async-jobs.md
-# postgres catalog ⇒ session_summary always on
-ingest:
-  flush_interval_seconds: 2   # 0 = immediate coalesce drain; >0 = timer batch
-session_summary:
-  reducer_interval_ms: 10000
-  rebuild_interval_ms: 86400000   # 24h; lookback = max_reduce_span_seconds
-  max_sessions_per_reduce: 1000
-  max_reduce_span_seconds: 604800 # 7d
-```
-
-Dirty UPSERT count should track **lake flush count**, not span count (`0` and `N>0` share the coalesce write path).
-
-Ops: `POST /v1/llm/sessions/summary/rebuild` `{from,to}` triggers leased `session_summary.rebuild`; metrics for dirty depth, reducer lag, lease steals, dirty upserts vs span writes.
-
----
-
-## 11. Evidence layout / naming
-
-- `traces` partitioned by calendar day of `timestamp` (`year`/`month`/`day`), sorted with `session_id`.  
-- New SQL uses **`traces` / `logs`** only. Stage **0b** removed `union_*` emitters and deleted the rewrite shim (`remove-legacy-telemetry-sql-aliases`).  
-- Promote list filter columns so reducer prefers typed columns over MAP bags — **done in Stage 2** (promoted-only reduce; Stage 5 is close-out evidence + non-goals).
-
-**Stage 5 non-goals:** no ingest bag→column copy for `sp.agent.name`; no `enduser.id` promotion into `user_id`; agent identity remains auth stamp or agent-observation `message_type`.
-
----
-
-## 12. Staged delivery
-
-Checkbox task list (sequential order + **[P]** parallel marks): [`session-list-summary-tasks.md`](./session-list-summary-tasks.md).
-
-| Stage | Work |
-|---|---|
-| **0** | Explorer: drop list count-scan |
-| **0b** | Emit `traces`/`logs` in compilers; delete `union_*` rewrite shim |
-| **A** | ✅ Shared `async_jobs` + fenced `thelake_job_lease`; maintenance scheduler uses it |
-| **1** | `session_summary` + `session_summary_dirty` DDL; ingest dirty UPSERT |
-| **2** | ✅ `session_summary.reduce` dirty-row claim loop |
-| **3** | `sessions/search` reads summary |
-| **4** | ✅ Leased `session_summary.rebuild` (periodic + ops) |
-| **5** | Promotion invariant close-out (evidence locks; done-in-Stage-2) |
-
-The reducer loop is a separate worker using dirty-row claims. Maintenance and rebuild remain on the shared leased runner; the reducer does not use a lease.
-
----
-
-## 13. Rejected
-
-| Idea | Why |
-|---|---|
-| DuckLake `session_facts` + Postgres copy | Dual derived truth |
-| Explorer Supabase writer | No ingest there |
-| Long-lived RAM absolute/delta counter | Crash / retry hazards; multi-instance blind |
-| Per-replica in-memory TouchSet as sole dirty channel | Other replicas never see dirty sessions |
-| Session-summary reducer using a registry lease | Dirty-row claims distribute idempotent reduce work directly |
-| Dual maintenance lock + session-summary lock | Two coordination systems |
-| Per-span Postgres UPDATE | Amplification |
-| Ingest bag→typed `agent_name` / `enduser.id` promote | Unrequested Stage 5 fallbacks; agent is auth/`message_type`; `enduser.id` stays bag-only |
-
----
-
-## 14. vs ChatGPT share
-
-Kept: disposable summary, cursor paging, batched updates, evidence ≠ summary.  
-Dropped: DuckLake summary table, dual publish, OPEN/FINALIZED, RAM SessionReducer as arithmetic SoT.  
-Replaced reducer with: **durable dirty + SKIP LOCKED claims + `FROM traces` aggregate** ([`async-jobs.md`](./async-jobs.md)).
-
----
-
-## 15. Success criteria
-
-1. List p95 ≠ f(spans-in-window).  
-2. Detail still lake-only for payloads.  
-3. Truncating summary leaves Parquet intact; rebuild restores list.  
-4. Ingest ≠ blocked on summary.  
-5. No DuckLake session-summary table.  
-6. No Explorer window-wide obs scan on list.  
-7. After reduce(S), summary(S) matches aggregate(S) on `traces` over the chosen `[from,to]`.  
-8. No reducer/rebuild SQL ships without `QueryWindow` timestamp predicates (see [`design-event-time-layout.md`](./design-event-time-layout.md)).
-9. Session-summary reduce uses durable row claims; simultaneous replicas claim disjoint batches. Physical maintenance and rebuild use fenced leases.
-10. Dirty UPSERT rate ≈ lake flush rate (coalesced batches), never ≈ span rate.
-
----
-
-## 16. Open questions
-
-1. Exact timestamp literal / `TIMESTAMP_NS` helpers shared with existing query SQL.  
-2. Dirty reduction spans the full stored/dirty event-time bounds; explicit and periodic rebuilds retain their configured maximum range.
-3. `user_id` / `model_name` in v1 vs later.  
-4. Rebuild cadence — **decided Stage 4:** `rebuild_interval_ms` default 24h; lookback = `max_reduce_span_seconds` (default 7d).  
-5. DDL bootstrap vs existing `promotion_specs` ensure path.  
-6. ~~Timeline to delete `union_*` rewrite shim entirely.~~ **Done** (`remove-legacy-telemetry-sql-aliases`).  
-7. Registry schema for `thelake_job_lease` — decided: use `DuckLakeScopeResolver.registry_schema`.
-8. Claim TTL sizing — configure above p99 reduce batch duration; current default is 300 seconds.
-
----
-
-## 17. References
-
-- Async jobs / leases: [`async-jobs.md`](./async-jobs.md)  
-- [`positioning.md`](./positioning.md)  
-- [`design.md`](./design.md)  
-- [`adhoc-duckdb-ducklake.md`](./adhoc-duckdb-ducklake.md)  
-- Current unleased maintenance: `src/compaction/scheduler.rs`  
-- `sp-llm/apps/explorer/design/data-facts.md`  
-- `src/api/llm/query.rs`  
-- https://chatgpt.com/share/6aacaf0f-3a90-83e8-9371-55563225cebb
+An ingest flush interval of `0` commits each request through the normal batch
+path. A positive value coalesces requests in memory before commit; dirty writes
+still follow successful lake flushes. Physical maintenance and summary rebuild
+share the fenced PostgreSQL lease runner. Dirty-row reduction uses row claims
+to distribute work among replicas. See [async jobs](async-jobs.md) and
+[event-time layout](design-event-time-layout.md).
