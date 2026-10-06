@@ -11,9 +11,9 @@ DuckDB queries, and telemetry search.
 Traditional software telemetry is often retained only for a short incident
 window. AI traces have lasting value: today's production recording can become
 tomorrow's evaluation case, regression test, audit evidence, or improvement
-dataset. Softprobe keeps that evidence open and durable, while Parquet VARIANT
-shredding and tenant-controlled column promotion provide workload-specific
-query paths without discarding the original context.
+dataset. Softprobe keeps that evidence open and durable, while MAP attributes
+and tenant-controlled column promotion provide workload-specific query paths
+without discarding the original context.
 
 See the
 [product and competitive positioning](docs/positioning.md) for the strategy
@@ -28,18 +28,17 @@ OTLP HTTP/gRPC
   -> tenant-bound runtime
   -> Arrow + temporary Parquet
   -> DuckLake transaction
-  -> PostgreSQL/SQLite metadata
+  -> PostgreSQL DuckLake catalog
   -> inlined rows or Parquet under data_path
 ```
 
 Ingest defaults to flush-through (`ingest.flush_interval_seconds: 0`): one OTLP
 request becomes one DuckLake commit. Set `flush_interval_seconds` > 0 for optional
 soft coalesce: OTLP acks as soon as rows are buffered; a background timer flushes
-to DuckLake (unflushed / post-ack write failures may be lost — no WAL). Keep N below
-exporter timeouts when enabling. There is no staged storage tier or application WAL.
+to DuckLake. Acknowledged but unflushed rows are held in memory until commit.
 
-See [`docs/design.md`](docs/design.md) for the current architecture and
-[`docs/legacy/`](docs/legacy/README.md) for superseded designs.
+Start with the [documentation index](docs/README.md) for architecture,
+operations, instrumentation, compatibility, and performance guidance.
 
 ## Local development
 

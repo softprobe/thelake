@@ -1,54 +1,48 @@
-# thelake/scripts — Make-owned helpers only
+# Scripts
 
-Product compile, gates, and stress remain Makefile targets; these scripts are
-thin helpers invoked by Make. The E2E matrix helper is the single deliberate
-parallel runner, and it always runs the same complete integration selector in
-both workspace-scope modes.
+`make` is the public command interface. Scripts implement Make targets or
+provide explicit operator utilities.
 
-## One-shot ops (not Make-wired)
+## Make helpers
 
-| Script | Purpose |
-|--------|---------|
-| `copy_traces_workspace_uuid.py` | Clean-break cutover: copy **traces only** from an old DuckLake (`tenant_id` / lake_scope_id slug) into a new shared physical scope (`workspace_id` UUID). Does not copy logs/scores/session_summary. See the script docstring for env vars and mapping formats. |
+| Area | Scripts | Make targets |
+|---|---|---|
+| Build | `download-ducklake-extension.sh`, `assert-duckdb-version.sh` | `build-release`, `test`, `test-e2e`, `test-perf` |
+| Test orchestration | `run-e2e-matrix.sh`, `run-isolated-cargo-tests.sh` | `test-e2e`, `test-perf` |
+| Compatibility | `compat/*.sh`, `compat/run-with-timeout` | `test-compat`, `test-grafana-static`, `test-grafana-system`, `test-loki-diff`, `test-tempo-diff` |
+| Grafana | `grafana-system-smoke.sh`, `grafana-manual-up.sh`, `grafana-manual-down.sh`, `test-grafana-browser.sh` | `test-grafana-system`, `grafana-up`, `grafana-down`, `test-grafana-browser` |
+| Performance | `bench-demo-cpu-full.sh`, `bench-llm-seeded.sh`, `perf/*.py` | `bench-demo-cpu-full`, `bench-llm-seeded`, `test-perf-helpers` |
+| Local operations | `stress-test.sh`, `seed-lake-from-parquet.sh`, `interactive_query*.sh`, `duckdb_ducklake_*`, `demo_session_queries.sh`, `drop_all_tables.sh`, `generate_telemetry.py`, `telemetrygen_hosted.sh` | `stress`, `seed-lake`, `duckdb-shell*`, `demo-session`, `drop-tables`, `generate-telemetry`, `telemetrygen` |
+
+Shared shell helpers live under `lib/`. Compatibility validation and image
+pinning helpers live under `compat/`; performance utilities live under
+`perf/`.
+
+## Operator utilities
+
+These scripts are run directly and do not have Make targets:
+
+- `check_session_details.py` — inspect session details from a configured
+  DuckLake.
+- `copy_traces_workspace_uuid.py` — copy traces into a workspace-scoped lake;
+  see its usage and environment-variable documentation in the script header.
+- `reingest_traces_otlp.py` — replay stored traces through the OTLP ingest API;
+  see its usage and environment-variable documentation in the script header.
 
 ```bash
-python3 scripts/copy_traces_workspace_uuid.py --mapping workspace_map.json
-python3 scripts/copy_traces_workspace_uuid.py --mapping workspace_map.csv --dry-run
+python3 scripts/copy_traces_workspace_uuid.py --help
+python3 scripts/reingest_traces_otlp.py --help
 ```
 
-## Surviving scripts → Make owner
-
-| Script | Make target |
-|--------|-------------|
-| `assert-duckdb-version.sh` | `build-release` (stages `dist/`) |
-| `run-e2e-matrix.sh` | `test-e2e` |
-| `run-isolated-cargo-tests.sh` | `test-e2e-matrix.sh`, `test-perf` |
-| `stress-test.sh` | `stress BACKEND=local\|r2\|gcs` |
-| `seed-lake-from-parquet.sh` | `seed-lake` |
-| `bench-llm-seeded.sh` + `perf/bench_llm_load.py` | `bench-llm-seeded` |
-| `interactive_query.sh` + `duckdb_ducklake_*` | `duckdb-shell` |
-| `interactive_query_ducklake_production.sh` | `duckdb-shell-prod` |
-| `demo_session_queries.sh` | `demo-session` |
-| `drop_all_tables.sh` | `drop-tables` |
-| `generate_telemetry.py` | `generate-telemetry` |
-| `grafana-manual-up.sh` / `grafana-manual-down.sh` | `grafana-up` / `grafana-down` |
-| `bench-prom-baseline.sh` / `bench-prom-down.sh` | `bench-prom-baseline` / `bench-prom-down` |
-| `bench-demo-cpu-full.sh` | `bench-demo-cpu-full` |
-
-## Public Make surface
+## Common targets
 
 ```text
-Build:    build | build-release | package | publish
-Test:     test | test-e2e | test-perf
-Gates:    ci | release
-Infra:    setup | teardown | doctor
-Stress:   stress BACKEND=local|r2|gcs
-LLM bench: seed-lake | bench-llm-seeded | test-perf-helpers
+Build:     build | build-release | package | publish
+Checks:    test | test-e2e | test-perf | test-compat | ci | release
+Local:     setup | teardown | doctor | duckdb-shell | duckdb-shell-prod
+Ops:       stress BACKEND=local|r2|gcs | seed-lake | demo-session
+Grafana:   grafana-up | grafana-down | test-grafana-system | test-grafana-browser
 ```
 
-`bench-llm-seeded` needs a scrubbed seed under `SEED_DIR` (default
-`$HOME/data/thelake-seed/scrubbed/northwind`). Production dump+scrub lives
-**outside** this repo (`~/ops/thelake-seed/`) and must not be committed.
-
-Cache: `~/.cache/thelake` (`THELAKE_CACHE_ROOT`). No host cargo-chef. Compile and
-publish live only in the Makefile (no parallel release/SLO/publish scripts).
+Cargo registry and build caches live under `~/.cache/thelake` by default and
+can be moved with `THELAKE_CACHE_ROOT`.

@@ -1,4 +1,4 @@
-//! Tempo Phase 0/3 compatibility contracts and evidence-backed cases.
+//! Tempo compatibility contracts and evidence-backed cases.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -110,7 +110,7 @@ fn tempo_success_minimal_fixture_matches_helper() {
 }
 
 #[test]
-fn tempo_phase3_fixture_reference_image_tracks_immutable_manifest_pin() {
+fn tempo_query_fixture_reference_image_tracks_immutable_manifest_pin() {
     let fixture = fixture();
     assert_eq!(
         fixture.evidence.reference_image,
@@ -123,10 +123,8 @@ fn tempo_phase3_fixture_reference_image_tracks_immutable_manifest_pin() {
 }
 
 #[test]
-fn tempo_phase3_fixture_has_issue_evidence_capabilities_and_full_get_matrix() {
+fn tempo_query_fixture_declares_capabilities_and_full_get_matrix() {
     let fixture = fixture();
-    assert_eq!(fixture.evidence.issue, "#31");
-    assert_eq!(fixture.evidence.phase, "Phase 3");
     assert_eq!(
         fixture.evidence.reference_manifest,
         "docs/compat/references.v0.yaml"
@@ -136,7 +134,6 @@ fn tempo_phase3_fixture_has_issue_evidence_capabilities_and_full_get_matrix() {
         .normalization
         .contains("normalize_tempo_response"));
     assert_eq!(fixture.capability.protocol, "tempo");
-    assert_eq!(fixture.capability.phase, "phase_3");
     assert_eq!(
         fixture.capability.ordering_policy,
         "trace_start_time_asc,trace_id_asc; spans_start_time_asc,span_id_asc; tag_names_asc; tag_values_asc"
@@ -372,7 +369,7 @@ mod selector_tests {
 }
 
 #[tokio::test]
-async fn tempo_phase3_contract_cases_cover_routes_envelopes_errors_and_empty_results() {
+async fn tempo_query_contract_cases_cover_routes_envelopes_errors_and_empty_results() {
     let fixture = fixture();
     let (router, _state, _temp) = build_seeded_tempo_router(&fixture.records).await;
 
@@ -383,7 +380,7 @@ async fn tempo_phase3_contract_cases_cover_routes_envelopes_errors_and_empty_res
 }
 
 #[tokio::test]
-async fn tempo_phase3_trace_responses_preserve_otlp_fidelity_and_ordering() {
+async fn tempo_query_trace_responses_preserve_otlp_fidelity_and_ordering() {
     let fixture = fixture();
     let (router, _state, _temp) = build_seeded_tempo_router(&fixture.records).await;
 
@@ -433,7 +430,7 @@ async fn tempo_phase3_trace_responses_preserve_otlp_fidelity_and_ordering() {
     assert_eq!(
         body["batches"][0]["scopeSpans"][0]["scope"],
         serde_json::json!({
-            "name": "tempo.phase3.fixture",
+            "name": "tempo.trace.fixture",
             "version": "1.0.0",
             "attributes": []
         })
@@ -473,7 +470,7 @@ async fn tempo_phase3_trace_responses_preserve_otlp_fidelity_and_ordering() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_trace_topology_and_search_order_are_deterministic() {
+async fn tempo_query_trace_topology_and_search_order_are_deterministic() {
     let fixture = fixture();
     let (router, _state, _temp) = build_seeded_tempo_router(&fixture.records).await;
 
@@ -513,7 +510,7 @@ async fn tempo_phase3_trace_topology_and_search_order_are_deterministic() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_tag_projection_matches_tempo_event_and_link_tags() {
+async fn tempo_query_tag_projection_matches_tempo_event_and_link_tags() {
     let fixture = fixture();
     let (router, _state, _temp) = build_seeded_tempo_router(&fixture.records).await;
 
@@ -544,7 +541,7 @@ async fn tempo_phase3_tag_projection_matches_tempo_event_and_link_tags() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_traceql_filters_cover_resource_span_intrinsic_and_unsupported_syntax() {
+async fn tempo_query_traceql_filters_cover_resource_span_intrinsic_and_unsupported_syntax() {
     let fixture = fixture();
     let (router, _state, _temp) = build_seeded_tempo_router(&fixture.records).await;
 
@@ -578,7 +575,7 @@ async fn tempo_phase3_traceql_filters_cover_resource_span_intrinsic_and_unsuppor
 }
 
 #[tokio::test]
-async fn tempo_phase3_traceql_rejects_mixed_numeric_string_values() {
+async fn tempo_query_traceql_rejects_mixed_numeric_string_values() {
     let fixture = fixture();
     let (router, _state, _temp) = build_seeded_tempo_router(&fixture.records).await;
     let (status, body) = query_path_with_scope(
@@ -593,9 +590,9 @@ async fn tempo_phase3_traceql_rejects_mixed_numeric_string_values() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_malformed_trace_ids_use_tempo_bad_request_envelope() {
+async fn tempo_query_malformed_trace_ids_use_tempo_bad_request_envelope() {
     if skip_if_sandbox_cannot_bind_test_port(
-        "tempo_phase3_malformed_trace_ids_use_tempo_bad_request_envelope",
+        "tempo_query_malformed_trace_ids_use_tempo_bad_request_envelope",
     ) {
         return;
     }
@@ -626,9 +623,9 @@ async fn tempo_phase3_malformed_trace_ids_use_tempo_bad_request_envelope() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_unknown_trace_lookup_params_are_explicitly_unsupported() {
+async fn tempo_query_unknown_trace_lookup_params_are_explicitly_unsupported() {
     if skip_if_sandbox_cannot_bind_test_port(
-        "tempo_phase3_unknown_trace_lookup_params_are_explicitly_unsupported",
+        "tempo_query_unknown_trace_lookup_params_are_explicitly_unsupported",
     ) {
         return;
     }
@@ -660,9 +657,9 @@ async fn tempo_phase3_unknown_trace_lookup_params_are_explicitly_unsupported() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_trace_lookup_bounds_apply_to_v1_and_v2_routes() {
+async fn tempo_query_trace_lookup_bounds_apply_to_v1_and_v2_routes() {
     if skip_if_sandbox_cannot_bind_test_port(
-        "tempo_phase3_trace_lookup_bounds_apply_to_v1_and_v2_routes",
+        "tempo_query_trace_lookup_bounds_apply_to_v1_and_v2_routes",
     ) {
         return;
     }
@@ -682,7 +679,7 @@ async fn tempo_phase3_trace_lookup_bounds_apply_to_v1_and_v2_routes() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_typed_search_params_preserve_nanoseconds_duration_and_limit() {
+async fn tempo_query_typed_search_params_preserve_nanoseconds_duration_and_limit() {
     let fixture = fixture();
     let (router, _state, _temp) = build_seeded_tempo_router(&fixture.records).await;
     let (status, body) = query_path_with_scope(
@@ -707,7 +704,7 @@ async fn tempo_phase3_typed_search_params_preserve_nanoseconds_duration_and_limi
 }
 
 #[tokio::test]
-async fn tempo_phase3_malformed_stored_ids_use_public_error_response() {
+async fn tempo_query_malformed_stored_ids_use_public_error_response() {
     fn data(trace_id: &str, span_id: &str, links: Vec<serde_json::Value>) -> TraceData {
         TraceData {
             spans: vec![TraceSpan {
@@ -761,9 +758,9 @@ async fn tempo_phase3_malformed_stored_ids_use_public_error_response() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_auth_middleware_is_required_on_all_get_routes() {
+async fn tempo_query_auth_middleware_is_required_on_all_get_routes() {
     if skip_if_sandbox_cannot_bind_test_port(
-        "tempo_phase3_auth_middleware_is_required_on_all_get_routes",
+        "tempo_query_auth_middleware_is_required_on_all_get_routes",
     ) {
         return;
     }
@@ -825,10 +822,9 @@ async fn tempo_phase3_auth_middleware_is_required_on_all_get_routes() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_same_trace_id_isolated_across_all_routes() {
-    if skip_if_sandbox_cannot_bind_test_port(
-        "tempo_phase3_same_trace_id_isolated_across_all_routes",
-    ) {
+async fn tempo_query_same_trace_id_isolated_across_all_routes() {
+    if skip_if_sandbox_cannot_bind_test_port("tempo_query_same_trace_id_isolated_across_all_routes")
+    {
         return;
     }
     let fixture = fixture();
@@ -1010,9 +1006,9 @@ async fn tempo_phase3_same_trace_id_isolated_across_all_routes() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_spoofed_scope_header_is_forbidden_on_all_routes() {
+async fn tempo_query_spoofed_scope_header_is_forbidden_on_all_routes() {
     if skip_if_sandbox_cannot_bind_test_port(
-        "tempo_phase3_spoofed_scope_header_is_forbidden_on_all_routes",
+        "tempo_query_spoofed_scope_header_is_forbidden_on_all_routes",
     ) {
         return;
     }
@@ -1043,9 +1039,9 @@ async fn tempo_phase3_spoofed_scope_header_is_forbidden_on_all_routes() {
 }
 
 #[tokio::test]
-async fn tempo_phase3_parameter_matrix_preserves_authenticated_tenant_and_rejects_unknowns() {
+async fn tempo_query_parameter_matrix_preserves_authenticated_tenant_and_rejects_unknowns() {
     if skip_if_sandbox_cannot_bind_test_port(
-        "tempo_phase3_parameter_matrix_preserves_authenticated_tenant_and_rejects_unknowns",
+        "tempo_query_parameter_matrix_preserves_authenticated_tenant_and_rejects_unknowns",
     ) {
         return;
     }
@@ -1243,7 +1239,7 @@ fn tempo_normalization_keeps_trace_fidelity_but_ignores_search_summary_details()
 #[cfg(feature = "integration-e2e")]
 #[tokio::test]
 #[ignore = "requires the pinned Tempo 2.6.1 oracle; run the compatibility lane with --ignored"]
-async fn tempo_phase3_oracle_readiness_includes_resource_selector_search() {
+async fn tempo_query_oracle_readiness_includes_resource_selector_search() {
     require_docker();
     let fixture = fixture();
     let resource_selector = fixture
@@ -1264,7 +1260,7 @@ async fn tempo_phase3_oracle_readiness_includes_resource_selector_search() {
 #[cfg(feature = "integration-e2e")]
 #[tokio::test]
 #[ignore = "requires the pinned Tempo 2.6.1 oracle; run the compatibility lane with --ignored"]
-async fn tempo_phase3_differential_vs_pinned_tempo() {
+async fn tempo_query_differential_vs_pinned_tempo() {
     require_docker();
     let fixture = fixture();
     let selection = parse_case_selection(

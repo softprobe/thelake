@@ -72,14 +72,15 @@ fn require_reduce_hot_coverage(schema: &str, manifests: &[TelemetryColumnsManife
 
 /// Idempotently activate canonical traces product-hot specs for this tenant schema.
 ///
-/// Columns already exist on the TraceTable Arrow schema; activating the spec makes
-/// ingest fill them. Does not invent arbitrary keys (ADR-015).
+/// Columns already exist on the TraceTable Arrow schema; activating the spec
+/// makes ingest fill them. The manifest contains only the required reduce
+/// filter columns.
 ///
 /// Panics if a traces promotion is already active but omits reduce-required cols
 /// (does not clobber operator specs; does not soft-fail).
 ///
-/// **Non-goals (Stage 5):** does not promote `sp.agent.name` into `agent_name` (auth /
-/// agent observation only), and does not promote `enduser.id` into `user_id`.
+/// Agent identity comes from authenticated workspace context or the agent
+/// observation. `enduser.id` remains in the attribute map.
 pub(crate) async fn ensure_product_hot_attrs_for_scope(
     resolver: &DuckLakeScopeResolver,
     scope: &PhysicalScope,
@@ -131,7 +132,7 @@ mod tests {
         for req in reduce_required_hot_cols() {
             assert!(names.contains(req), "missing reduce-required col {req}");
         }
-        // Stage 5 non-goal: agent_name is not a yaml promote target.
+        // agent_name is not a promotion target.
         assert!(
             !names.contains("agent_name"),
             "agent_name must stay auth/message_type — not in hot-attrs yaml"

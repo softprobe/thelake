@@ -9,11 +9,11 @@ use crate::promotion::{BusinessTableManifest, TelemetryColumnsManifest, Telemetr
 use crate::sql::schema::{
     base_table_ddl, insert_order_by, is_otlp_table, LOGS, SCORES, SCORE_CONFIGS, TRACES,
 };
+use crate::storage::schema::attribute_map::parquet_select_for_table;
 use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
 #[cfg(test)]
 use crate::storage::schema::tables::TraceTable;
 use crate::storage::schema::tables::{ScoreConfigTable, ScoreTable};
-use crate::storage::schema::variant::parquet_select_for_table;
 use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
 use anyhow::{anyhow, Result};

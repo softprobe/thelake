@@ -1,4 +1,4 @@
-# Softprobe Tempo datasources (Grafana native) — Phase 4.
+# Softprobe Tempo datasources (Grafana native) — Grafana integration.
 # The URL is the Softprobe HTTP base; Grafana appends /api/*.
 # Grafana env expansion supports ${VAR} only (not shell ${VAR:-default}).
 

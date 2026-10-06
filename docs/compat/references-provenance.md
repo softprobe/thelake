@@ -6,8 +6,6 @@ by digest. A tag documents the human-readable release; the `digest` field in
 Changing a tag or digest requires updating this manifest and the compatibility
 matrix in the same review.
 
-Product metrics / Prometheus references are out of scope (removed).
-
 | Component | Source | License / attribution |
 | --- | --- | --- |
 | Loki `3.1.1` | [grafana/loki](https://github.com/grafana/loki/tree/v3.1.1) | AGPL-3.0-only; Grafana Loki contributors |
@@ -22,9 +20,9 @@ Product metrics / Prometheus references are out of scope (removed).
 The supported compatibility corpus is the checked-in manifest
 [`tests/compat/manifests/cases.v0.yaml`](../../tests/compat/manifests/cases.v0.yaml).
 Each case names its fixture, normalization policy, expected outcome, and
-reference service. The Loki and Tempo fixtures are repository-owned phase
-fixtures documented in [`phase2-loki.md`](phase2-loki.md) and
-[`phase3-tempo.md`](phase3-tempo.md).
+reference service. The Loki and Tempo fixtures are repository-owned protocol
+fixtures documented in [`loki.md`](loki.md) and
+[`tempo.md`](tempo.md).
 Generated evidence must retain the case ID, fixture ID, request fingerprint,
 reference version/image, normalization policy, classification, review status,
 and `release_evidence` marker so every result is traceable to this corpus.

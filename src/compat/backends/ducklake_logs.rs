@@ -12,14 +12,16 @@ use crate::compat::projection::loki::{project_loki, DEFAULT_STREAM_LABEL_ALLOWLI
 use crate::compat::tenant::TenantContext;
 use crate::query::QueryEngine;
 use crate::storage::duckdb::QueryResult;
-use crate::storage::schema::variant::{prefer_attr_varchar, variant_json_to_string_map};
+use crate::storage::schema::attribute_map::{
+    attribute_map_json_to_string_map, prefer_attr_varchar,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Default lookback when Loki clients omit one or both of start/end.
-/// Matches Tempo: long enough for Phase 3 fixture timestamps (~2023) under CI
+/// Matches Tempo: long enough for Tempo query fixture timestamps (~2023) under CI
 /// "now", while keeping every lake scan inside a finite [`QueryWindow`].
 const LOKI_DEFAULT_LOOKBACK_NS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000_000;
 
@@ -629,7 +631,7 @@ fn json_scalar(value: Value) -> Option<String> {
 }
 
 fn json_map(value: &Value) -> HashMap<String, String> {
-    variant_json_to_string_map(value)
+    attribute_map_json_to_string_map(value)
 }
 
 fn enforce_stream_cap(hits: &[LogHit], max_series: usize) -> Result<(), CompatError> {

@@ -1,6 +1,6 @@
 # Ad hoc DuckDB queries against DuckLake (optional)
 
-Committed telemetry lives in **DuckLake** (PostgreSQL/SQLite metadata plus the
+Committed telemetry lives in **DuckLake** (PostgreSQL catalog plus the
 configured `data_path`). End-to-end verification is automated by repository
 root **`make test`**.
 

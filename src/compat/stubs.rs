@@ -1,4 +1,4 @@
-//! Phase 0 stub HTTP handlers for declared Loki/Tempo compatibility routes.
+//! Compatibility stub HTTP handlers for declared Loki/Tempo compatibility routes.
 //!
 //! Auth is enforced by [`crate::runtime_api::runtime_auth_middleware`].
 //! Scope-header mismatch is checked here after `TenantInfo` is available.

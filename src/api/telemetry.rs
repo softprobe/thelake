@@ -9,7 +9,7 @@ use crate::api::query_window::{push_otlp_time_predicates, QueryWindow};
 use crate::api::sql_support::{sql_string_literal, timestamp_ns_literal_from_str};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
-use crate::storage::schema::variant::{parse_projected_json_value, variant_as_json};
+use crate::storage::schema::attribute_map::{attribute_map_as_json, parse_projected_json_value};
 use axum::extract::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -284,12 +284,12 @@ pub fn compile_details_sql(
     push_otlp_time_predicates(&mut log_conds, &window, [log_filter]);
     let span_cols = format!(
         "session_id, trace_id, span_id, parent_span_id, app_id, message_type, span_kind, timestamp, end_timestamp, status_code, status_message, http_request_method, http_request_path, http_request_headers, http_request_body, http_response_status_code, http_response_headers, http_response_body, agent_id, agent_name, {}",
-        variant_as_json("attributes")
+        attribute_map_as_json("attributes")
     );
     let log_cols = format!(
         "session_id, timestamp, severity_number, severity_text, body, trace_id, span_id, agent_id, agent_name, {}, {}",
-        variant_as_json("attributes"),
-        variant_as_json("resource_attributes")
+        attribute_map_as_json("attributes"),
+        attribute_map_as_json("resource_attributes")
     );
 
     Ok(CompiledDetailsSql {
@@ -656,8 +656,8 @@ fn rows_to_objects(columns: &[String], rows: &[Vec<Value>]) -> Vec<Value> {
             let mut object = Map::new();
             for (idx, column) in columns.iter().enumerate() {
                 let raw = row.get(idx).cloned().unwrap_or(Value::Null);
-                // VARIANT projections use CAST(... AS JSON); DuckDB returns text — parse so
-                // clients keep object-valued attributes/resource_attributes.
+                // Attribute-map projections use CAST(... AS JSON); DuckDB returns text —
+                // parse it so clients keep object-valued attributes/resource_attributes.
                 let value = match column.as_str() {
                     "attributes" | "resource_attributes" => parse_projected_json_value(raw),
                     _ => raw,

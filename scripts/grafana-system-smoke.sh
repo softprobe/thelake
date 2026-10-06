@@ -16,7 +16,7 @@ MOCK_MODE="${MOCK:-0}"
 if [[ -n "${CI:-}" ]]; then
   # The CI harness contract always exercises dashboard variables and panel
   # data frames.  Do not allow a caller-provided environment value to weaken
-  # the Phase 4 acceptance gate.
+  # the Grafana integration acceptance gate.
   GRAFANA_CHECK_DASHBOARD_QUERIES=1
 elif [[ -z "${GRAFANA_CHECK_DASHBOARD_QUERIES+x}" ]]; then
   GRAFANA_CHECK_DASHBOARD_QUERIES=0
@@ -138,7 +138,7 @@ capability_id = "grafana"
 capability_status = "implemented_validation_only"
 try:
     text = pathlib.Path(capability_manifest).read_text()
-    match = re.search(r"(?ms)^\s+phase_4_grafana:\s*\n.*?^\s+repository_harness:\s*([^\s#]+)", text)
+    match = re.search(r"(?ms)^\s+grafana_integration:\s*\n.*?^\s+repository_harness:\s*([^\s#]+)", text)
     if match:
         capability_status = match.group(1)
     match = re.search(r"(?ms)^\s+grafana:\s*\n\s+native_datasources:\s*([^\s#]+)", text)
@@ -1121,9 +1121,9 @@ PY
     GRAFANA_SEED_RECEIPT="$ARTIFACT_DIR/seed-receipt.json" \
     SOFTPROBE_TENANT_A_ID="$TENANT_A_ID" \
     SOFTPROBE_TENANT_B_ID="$TENANT_B_ID" \
-    SOFTPROBE_ADMIN_API_KEY="${SOFTPROBE_ADMIN_API_KEY:-grafana-phase4-admin}" \
-    SOFTPROBE_TENANT_A_API_KEY="${GRAFANA_TEST_TENANT_A_API_KEY:-grafana-phase4-tenant-a}" \
-    SOFTPROBE_TENANT_B_API_KEY="${GRAFANA_TEST_TENANT_B_API_KEY:-grafana-phase4-tenant-b}" \
+    SOFTPROBE_ADMIN_API_KEY="${SOFTPROBE_ADMIN_API_KEY:-grafana-test-admin}" \
+    SOFTPROBE_TENANT_A_API_KEY="${GRAFANA_TEST_TENANT_A_API_KEY:-grafana-test-tenant-a}" \
+    SOFTPROBE_TENANT_B_API_KEY="${GRAFANA_TEST_TENANT_B_API_KEY:-grafana-test-tenant-b}" \
     "$seed_bin"
 }
 
@@ -1989,7 +1989,7 @@ PY
       local tempo_base="${SOFTPROBE_DIRECT_URL:-http://127.0.0.1:${GRAFANA_SOFTPROBE_HTTP_PORT:-18090}}"
       for attempt in 1 2 3 4 5 6 7 8; do
         if curl_get_artifact "$tempo_base$tempo_endpoint" "$artifact" \
-            "${GRAFANA_TEST_TENANT_A_API_KEY:-grafana-phase4-tenant-a}" "${TENANT_A_ID}" \
+            "${GRAFANA_TEST_TENANT_A_API_KEY:-grafana-test-tenant-a}" "${TENANT_A_ID}" \
             && grep -aq '"traceID"' "$artifact"; then
           tempo_ok=1
           break
@@ -2455,12 +2455,12 @@ check_errors() {
         uid="softprobe-$prefix-a"
         other="$TENANT_B_ID"
         expected_scope="$TENANT_A_ID"
-        valid_credential="${GRAFANA_TEST_TENANT_A_API_KEY:-grafana-phase4-tenant-a}"
+        valid_credential="${GRAFANA_TEST_TENANT_A_API_KEY:-grafana-test-tenant-a}"
       else
         uid="softprobe-$prefix-b"
         other="$TENANT_A_ID"
         expected_scope="$TENANT_B_ID"
-        valid_credential="${GRAFANA_TEST_TENANT_B_API_KEY:-grafana-phase4-tenant-b}"
+        valid_credential="${GRAFANA_TEST_TENANT_B_API_KEY:-grafana-test-tenant-b}"
       fi
       for probe in missing_credentials invalid_credentials mismatched_tenant; do
         case "$probe" in
@@ -2545,7 +2545,7 @@ run_static_contracts() {
   local contract
   for contract in \
     compose_contract_test.sh \
-    phase4_contract_test.sh \
+    grafana_contract_test.sh \
     tempo_tenant_contract_test.sh \
     cross_signal_link_contract_test.sh \
     datasource_auth_contract_test.sh \
@@ -2565,7 +2565,7 @@ main() {
   local status
   prepare_artifact_staging
   if ! run_static_contracts; then
-    finish_failure "Grafana static Phase 4 contract validation failed"
+    finish_failure "Grafana static Grafana integration contract validation failed"
   fi
   if ! validate_grafana_reference_pin; then
     finish_failure "Grafana reference image/digest validation failed"

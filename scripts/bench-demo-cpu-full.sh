@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full-OTLP + Grafana 10s Softprobe process CPU budget (#55).
+# Full-OTLP + Grafana 10s Softprobe process CPU budget.
 #
 # Pass: mean Softprobe process CPU ratio < BENCH_CPU_MEAN_MAX (default 0.85)
 # of one core over the measure window, sampled externally from /proc/<pid>/stat
@@ -13,7 +13,7 @@
 #
 # Make: make bench-demo-cpu-full
 #
-# Artifacts: docs/perf/results/<stamp>-demo-cpu-full.{json,md}
+# Artifacts: target/perf/<stamp>-demo-cpu-full.{json,md}
 
 set -euo pipefail
 
@@ -24,7 +24,7 @@ STATE_DIR="${THELAKE_GRAFANA_STATE_DIR:-/tmp/thelake-grafana-manual}"
 PID_FILE="$STATE_DIR/softprobe.pid"
 WRITE_PID_FILE="$STATE_DIR/softprobe-write.pid"
 READ_PID_FILE="$STATE_DIR/softprobe-read.pid"
-RESULTS_DIR="${BENCH_RESULTS_DIR:-$ROOT/docs/perf/results}"
+RESULTS_DIR="${BENCH_RESULTS_DIR:-$ROOT/target/perf}"
 WARMUP_SECS="${BENCH_CPU_WARMUP_SECS:-60}"
 MEASURE_SECS="${BENCH_CPU_MEASURE_SECS:-300}"
 SAMPLE_INTERVAL_SECS="${BENCH_CPU_SAMPLE_INTERVAL_SECS:-1}"

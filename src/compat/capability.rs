@@ -81,7 +81,7 @@ pub fn parse_capability_yaml(text: &str) -> Result<CapabilityManifest, CompatErr
     Ok(manifest)
 }
 
-/// Embedded Phase 0 manifest text (keeps unit tests independent of CWD).
+/// Embedded Compatibility manifest text (keeps unit tests independent of CWD).
 pub const EMBEDDED_CAPABILITY_V0: &str = include_str!("../../docs/compat/capability.v0.yaml");
 
 #[cfg(test)]

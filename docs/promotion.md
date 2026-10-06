@@ -3,9 +3,6 @@
 **Status:** Current
 **Spec version:** `softprobe.promotion.v1`
 **Apply API:** authenticated `POST /v1/promotions/apply`
-**Last verified against:** `src/promotion.rs`, `src/runtime_api.rs`,
-`src/storage/ducklake/` (`writer.rs`, `promotion.rs`), and promotion
-integration tests on 2026-07-18
 
 This is the canonical contract for Softprobe business attributes and schema
 promotion. Other docs link here; do not duplicate the full contract elsewhere.
@@ -13,8 +10,9 @@ promotion. Other docs link here; do not duplicate the full contract elsewhere.
 ## What problem promotion solves
 
 OTLP spans store arbitrary attributes in an `attributes` MAP column
-(`MAP(VARCHAR, VARCHAR)`; VARIANT shredding is temporarily deferred — see
-[`variant_shredding.md`](variant_shredding.md)). Nested field filters work:
+(`MAP(VARCHAR, VARCHAR)`). Nested field filters work; selected fields can be
+promoted to typed columns. See [attribute storage](attribute-storage.md) for
+the current physical model:
 
 ```sql
 WHERE CAST(attributes['sp.user.id'] AS VARCHAR) = 'user-123'
@@ -166,27 +164,20 @@ Example validation error:
 }
 ```
 
-### Catalog backends
-
-Promotion apply and ingest-time telemetry extraction work on both backends:
+### Catalog and scope model
 
 | Backend | Scope model | Spec storage | Apply serialization |
 |---------|-------------|--------------|---------------------|
 | **PostgreSQL / isolated scope** | One physical scope per workspace | `{tenant_schema}.promotion_specs` | `pg_advisory_xact_lock` across DDL + activate |
 | **PostgreSQL / shared scope** | Many workspaces share one physical scope | `{shared_schema}.promotion_specs` | `pg_advisory_xact_lock` across DDL + activate |
-| **SQLite** (local/dev) | Single configured catalog scope | `{catalog_alias}.promotion_specs` in the DuckLake catalog | Process-global mutex across DDL + activate |
 
-Both backends serialize the full apply critical section (physical DDL +
+Both scope models serialize the full apply critical section (physical DDL +
 activate/deactivate). Physical DDL still runs on DuckLake (outside the Postgres
 metadata transaction); the lock/mutex only prevents concurrent applies from
 interleaving. In shared PostgreSQL scope, promotion is physical-scope-wide:
 one workspace applies the manifest, and every workspace bound to that scope
 uses the resulting columns and active manifests.
 
-SQLite promotion is intentionally **single-scope**: every tenant id in a local
-process shares the configured DuckLake catalog. Multi-tenant isolation still
-requires PostgreSQL. Cross-process concurrent apply against the same SQLite
-file is out of scope for local/dev (WAL/busy-timeout still protect storage).
 DuckLake tables cannot declare `PRIMARY KEY`; uniqueness of `spec_id` is
 enforced by the activate path.
 
@@ -313,8 +304,8 @@ query either CAST(attributes['sp.user.id'] AS VARCHAR) or user_id
   the existing `promotion_specs` row is upserted back to `active`.
 - Applying an **updated** YAML for the **same** `target_tables` activates the
   new content-hash `spec_id` and marks prior active specs for that table set
-  `inactive` in the same metadata transaction (Postgres `BEGIN` / DuckDB
-  `BEGIN TRANSACTION` on SQLite). Specs for other table sets stay active.
+  `inactive` in the same PostgreSQL metadata transaction. Specs for other
+  table sets stay active.
 - Ingest unions promoted columns from every active telemetry document that
   lists the signal's table. Prefer disjoint `target.tables`; overlapping sets
   are not conflict-checked across documents.
@@ -353,9 +344,7 @@ domain modules inside thelake.
 1. Active manifests are loaded from the tenant metadata schema
    (`promotion_specs` where `status = 'active'` and
    `target_kind = 'telemetry_columns'`). Under normal apply that set has size
-   0 or 1. On PostgreSQL this loads from the tenant metadata schema; on SQLite
-   it loads from `{catalog_alias}.promotion_specs` in the local DuckLake
-   catalog. Other catalog types skip extraction.
+   0 or 1.
 2. For each target table, columns from matching manifests are applied.
 3. Missing source values become SQL `NULL` in the promoted column.
 4. Invalid JSON bodies or type mismatches raise
@@ -483,20 +472,17 @@ that ingest path is wired.
 |---------|----------|--------|
 | PostgreSQL / isolated scope | Each workspace metadata schema | `promotion_specs`, `promotion_errors` |
 | PostgreSQL / shared scope | The shared physical-scope metadata schema | `promotion_specs`, `promotion_errors` |
-| SQLite (local) | DuckLake catalog (`softprobe.promotion_specs`) | `promotion_specs` (control table; errors table remains Postgres-oriented for now) |
 
 These are control/diagnostic tables for the promotion system, not telemetry
 payload storage.
 
 ## Operator checklist
 
-1. For **production multi-tenant** promotion, use a **PostgreSQL** DuckLake
-   catalog. Isolated scope keeps promotion metadata per workspace; shared
-   scope makes promotion metadata and resulting columns global to that physical
-   lake scope. For **local/dev**, SQLite single-scope promotion (apply + ingest
-   extraction + query) is supported.
+1. Use the PostgreSQL DuckLake catalog. Isolated scope keeps promotion
+   metadata per workspace; shared scope makes promotion metadata and resulting
+   columns global to that physical lake scope.
 2. Instrument consistent business attributes (`sp.user.id`, …).
-3. Verify MAP nested-field queries work before promoting anything.
+3. Verify attribute-map field queries work before promoting anything.
 4. Promote only high-value filters you query often.
 5. Keep telemetry promoted columns nullable.
 6. Prefer `attribute` / `resource_attribute` sources for identifiers. Use
@@ -513,8 +499,7 @@ payload storage.
 
 - [`instrumentation_guide.md`](instrumentation_guide.md) — how to emit bodies and `sp.*`
 - [`design.md`](design.md) — runtime architecture
-- [`decision_log.md`](decision_log.md) — current architecture decisions
-- [`variant_shredding.md`](variant_shredding.md) — temporary MAP bags; VARIANT restore criteria
+- [`attribute-storage.md`](attribute-storage.md) — MAP columns and promoted fields
 - [`docs/promotion/`](promotion/) — product-hot manifests (traces/logs)
 
 - [`ingestion-openapi.yaml`](ingestion-openapi.yaml) — HTTP contract including apply

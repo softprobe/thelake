@@ -1,4 +1,4 @@
-//! Stage 3 HTTP e2e: ingest → dirty → `reduce_tenant` → `sessions/search`.
+//! HTTP contract: ingest → dirty → `reduce_tenant` → `sessions/search`.
 //!
 //! Covers every list filter against rows the reducer wrote (not hand-seeded
 //! SQL). Summary path must not return spans/details; detail still reads lake.
@@ -1231,7 +1231,7 @@ async fn http_session_summary_rereduce_refreshes_counts() {
 
 #[tokio::test]
 async fn http_session_summary_list_independent_of_span_volume() {
-    // Stage 3.5: list reads session_summary only — latency must not track lake
+    // The list reads session_summary only; latency must not track lake
     // span volume in the window.
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
     let schema = format!("thelake_ss_http_vol_{suffix}");

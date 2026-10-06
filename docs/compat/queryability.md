@@ -1,7 +1,6 @@
 # Read-after-write and queryability guarantees
 
-**Status:** Phase 0 contract  
-**Last updated:** 2026-09-21
+**Status:** Current contract
 
 ## Ingest commit boundary
 

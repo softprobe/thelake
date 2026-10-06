@@ -912,7 +912,7 @@ async fn llm_query_endpoints_return_spans_traces_sessions_and_scores() {
     );
     assert!(search["items"][0].get("attributes").is_none());
 
-    // Variant key negative filter: wrong user_id must not match.
+    // Attribute-map key negative filter: wrong user_id must not match.
     let miss_req = Request::builder()
         .method("POST")
         .uri("/v1/llm/spans/search")
@@ -1179,7 +1179,7 @@ async fn spans_without_events_are_readable() {
 /// DuckDB invalidated the whole database. Until this test existed no CI path
 /// ever read inlined data back, let alone after maintenance ran over it.
 ///
-/// Temporary MAP era (#55): hot bags are MAP again, so Postgres-backed DuckLake
+/// Attribute bags use MAP columns, so PostgreSQL-backed DuckLake
 /// can inline traces/logs under the catalog limit. This test raises
 /// `data_inlining_row_limit=10_000` to force the inlined reader on collector-sized
 /// batches (production default is 500). Scores (MAP

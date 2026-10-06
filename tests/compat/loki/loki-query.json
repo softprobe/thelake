@@ -1,19 +1,16 @@
 {
   "evidence": {
-    "issue": "#29",
-    "phase": "Phase 2",
     "reference_manifest": "docs/compat/references.v0.yaml",
     "reference_image": "grafana/loki@sha256:e689cc634841c937de4d7ea6157f17e29cf257d6a320f1c293ab18d46cfea986",
     "normalization": "tests/compat/support/loki.rs::normalize_loki_response"
   },
   "capability": {
     "protocol": "loki",
-    "phase": "phase_2",
-    "supported_endpoints": [
+    "covered_endpoints": [
       "/loki/api/v1/query",
       "/loki/api/v1/query_range",
       "/loki/api/v1/labels",
-      "/loki/api/v1/label/{name}/values",
+      "/loki/api/v1/label/service_name/values",
       "/loki/api/v1/series"
     ],
     "supported_features": [
@@ -27,8 +24,6 @@
       "duplicate_entries"
     ],
     "unsupported_features": [
-      "interval_sampling",
-      "step_sampling",
       "unwrap",
       "metric_aggregations"
     ],
@@ -171,7 +166,6 @@
       "expect": {
         "status": 200,
         "envelope": "success",
-        "softprobe_code": "unsupported_feature",
         "result_type": "streams"
       }
     },

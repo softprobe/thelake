@@ -1,7 +1,6 @@
 # OTel attribute projection policies
 
-**Status:** Phase 0 contract  
-**Last updated:** 2026-09-21
+**Status:** Current contract
 
 Projection is implemented in shared `compat::projection` code, not in HTTP
 handlers. Handlers call typed backends that already apply these policies.
@@ -23,7 +22,7 @@ handlers. Handlers call typed backends that already apply these policies.
    dropped in lexicographic key order after reserved keys are kept; adapters
    must not silently invent values.
 5. **Promoted columns:** tenant promotion adds SQL columns; projection still
-   reads canonical attribute maps unless a phase explicitly maps a promoted
+   reads canonical attribute maps unless a promotion manifest maps a promoted
    column into a protocol label.
 
 ## Loki labels and structured metadata
@@ -55,4 +54,4 @@ explicit TraceQL unsupported features.
 - Trusting Grafana datasource UIDs as tenancy
 - Expanding every OTel attribute into protocol labels without sanitization
   or cardinality caps
-- Prometheus label projection (product Prometheus removed)
+- Prometheus label projection

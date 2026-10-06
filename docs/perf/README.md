@@ -2,15 +2,15 @@
 
 | Doc / area | Purpose |
 |------------|---------|
-| [`results/`](results/) | Captured demo CPU / ingest wall-clock artifacts |
 | `make test-perf` | Manual / release performance suites (latency, concurrency, stability) |
 | `make bench-demo-cpu-full` | Full OTEL demo + Grafana refresh CPU gate |
 
-Product metrics / Prometheus query benchmarks have been removed along with the
-Prometheus product surface. Prefer Loki/Tempo and evidence-SQL workloads for
-compatibility performance work.
+Compatibility performance work uses Loki and Tempo query workloads together
+with the evidence SQL paths.
 
-## Captured results
+## Benchmark ownership
 
-JSON/Markdown under [`results/`](results/) named
-`<stamp>-<label>.{json,md}`. See [`results/README.md`](results/README.md).
+The full-system benchmark writes JSON and Markdown artifacts to `target/perf/`.
+Set `BENCH_RESULTS_DIR` to choose another output directory. The repository
+keeps benchmark definitions and commands; generated run output stays outside
+the documentation tree.

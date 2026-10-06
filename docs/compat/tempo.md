@@ -1,13 +1,11 @@
-# Tempo compatibility Phase 3
+# Tempo compatibility
 
-**Status:** implemented query-only subset with nanosecond rich-trace fidelity for
-the canonical OTLP fields required by issue [#31](https://github.com/softprobe/thelake/issues/31)  
 **Reference:** `grafana/tempo:2.6.1` from
 [`references.v0.yaml`](references.v0.yaml)  
 **Differential command:** `make test-tempo-diff` (explicit Docker/reference gate)
 
-OpenTelemetry remains the canonical trace write path. This phase adds five
-tenant-scoped GET routes; Tempo write/push APIs, full TraceQL, structural
+OpenTelemetry is the canonical trace write path. Five tenant-scoped GET routes
+are supported; Tempo write/push APIs, full TraceQL, structural
 operators, metrics, and exemplars remain out of scope.
 
 ## Implemented route subset
@@ -40,7 +38,7 @@ name/version fields from trace responses.
 
 ## Differential evidence
 
-The shared fixture is `tests/compat/tempo/phase3.json`. The pinned oracle is
+The shared fixture is `tests/compat/tempo/tempo-search.json`. The pinned oracle is
 `grafana/tempo:2.6.1`; the response normalizer is
 `tests/compat/support/tempo.rs::normalize_tempo_response`. The differential
 target enables `integration-e2e` and ignored tests, reads the image pin from

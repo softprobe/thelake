@@ -1,4 +1,4 @@
-# Self-contained Phase 4 Grafana system lane.
+# Self-contained Grafana integration Grafana system lane.
 #
 # The runtime is built from this checkout inside a local Rust builder/runtime
 # container. The only external service credentials are fixed test-only values
@@ -87,7 +87,7 @@ services:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       DUCKLAKE_METADATA_SCHEMA: softprobe
-      SOFTPROBE_ADMIN_API_KEY: grafana-phase4-admin
+      SOFTPROBE_ADMIN_API_KEY: grafana-test-admin
       SOFTPROBE_AUTH_URL: http://auth-mock:8080/validate
       SOFTPROBE_LISTEN_ADDR: 0.0.0.0:8090
       OTEL_GRPC_PORT: "4317"
@@ -127,9 +127,9 @@ services:
       SOFTPROBE_AUTH_URL: http://auth-mock:8080/validate
       GRAFANA_SEED_SOFTPROBE_URL: http://softprobe:8090
       GRAFANA_SEED_RECEIPT: /artifacts/seed-receipt.json
-      SOFTPROBE_ADMIN_API_KEY: grafana-phase4-admin
-      SOFTPROBE_TENANT_A_API_KEY: grafana-phase4-tenant-a
-      SOFTPROBE_TENANT_B_API_KEY: grafana-phase4-tenant-b
+      SOFTPROBE_ADMIN_API_KEY: grafana-test-admin
+      SOFTPROBE_TENANT_A_API_KEY: grafana-test-tenant-a
+      SOFTPROBE_TENANT_B_API_KEY: grafana-test-tenant-b
       # Must match fixtures/auth workspaceId UUIDs (COMPAT_WORKSPACE_A/B).
       SOFTPROBE_TENANT_A_ID: cccccccc-cccc-cccc-cccc-cccccccccccc
       SOFTPROBE_TENANT_B_ID: dddddddd-dddd-dddd-dddd-dddddddddddd
@@ -165,9 +165,9 @@ services:
       GF_USERS_DEFAULT_THEME: light
       GF_LOG_LEVEL: warn
       SOFTPROBE_URL: ${GRAFANA_SOFTPROBE_URL:-http://softprobe:8090}
-      SOFTPROBE_API_KEY: grafana-phase4-tenant-a
-      SOFTPROBE_TENANT_A_API_KEY: grafana-phase4-tenant-a
-      SOFTPROBE_TENANT_B_API_KEY: grafana-phase4-tenant-b
+      SOFTPROBE_API_KEY: grafana-test-tenant-a
+      SOFTPROBE_TENANT_A_API_KEY: grafana-test-tenant-a
+      SOFTPROBE_TENANT_B_API_KEY: grafana-test-tenant-b
       SOFTPROBE_TENANT_A_ID: cccccccc-cccc-cccc-cccc-cccccccccccc
       SOFTPROBE_TENANT_B_ID: dddddddd-dddd-dddd-dddd-dddddddddddd
     volumes:

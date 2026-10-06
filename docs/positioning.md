@@ -1,7 +1,6 @@
 # Softprobe Runtime: AI Evidence Lake Positioning
 
 **Status:** Product and technical positioning
-**Last researched:** 2026-07-28
 
 ## Primary positioning
 
@@ -11,8 +10,7 @@
 > evaluation, regression, governance, and continuous-improvement workflows.**
 
 The product should lead with the durable value of AI evidence. Open storage,
-DuckLake, Parquet (temporary MAP bags; VARIANT shredding deferred — see
-[`variant_shredding.md`](variant_shredding.md)), and tenant-controlled column
+DuckLake, Parquet-backed MAP attributes, and tenant-controlled column
 promotion are the mechanisms that preserve and keep that evidence useful; they
 are not the category definition.
 
@@ -70,10 +68,9 @@ proprietary query surface the only path to the data.
 
 ### Make retained evidence progressively useful
 
-Flexible storage alone can become expensive to query. VARIANT shredding keeps
-stable paths columnar inside Parquet, while tenant-controlled promotion gives
-important fields governed names and SQL types. The system can optimize what
-becomes important without discarding the full original recording.
+Flexible storage alone can become expensive to query. Tenant-controlled
+promotion gives important fields governed names and SQL types while keeping
+the original values in attribute maps.
 
 ### Serve humans and AI agents from the same evidence
 
@@ -103,7 +100,7 @@ OTLP HTTP/gRPC
   -> authenticated tenant-bound runtime
   -> Arrow and temporary Parquet
   -> DuckLake transaction
-  -> PostgreSQL/SQLite metadata
+  -> PostgreSQL metadata
   -> inlined rows or object-store Parquet
   -> DuckDB SQL
 ```
@@ -113,18 +110,15 @@ The implementation provides:
 - tenant-bound DuckLake catalogs, data paths, writers, and query engines;
 - OTLP trace and log ingestion without runtime sampling, with HTTP payload
   fields preserved when instrumentation supplies them;
-- DuckLake `MAP(VARCHAR, VARCHAR)` columns for hot telemetry attribute maps
-  (VARIANT shredding temporarily deferred pending Postgres inlining — #42);
+- DuckLake `MAP(VARCHAR, VARCHAR)` columns for telemetry attribute maps;
 - tenant-controlled promotion as the governed fast path for query-hot keys
   (compilers prefer promoted columns when active);
 - promotion manifests that add typed nullable columns and extract their values
-  on subsequent ingest, using tenant-scoped PostgreSQL metadata in production
-  or a local single-scope SQLite catalog;
+  on subsequent ingest, using tenant-scoped PostgreSQL metadata;
 - open SQL access through DuckDB and DuckLake.
 - Loki- and Tempo-compatible **query-only** APIs so customers can point
   existing Grafana datasources at the lake while keeping OTLP as the sole
   write path for traces and logs — see [compat/matrix.md](compat/matrix.md).
-  Product metrics / Prometheus / PromQL are out of scope.
 
 These are real implementation properties. They are not, by themselves,
 evidence of lower total cost or faster queries than another platform.
@@ -140,8 +134,7 @@ evidence into rigid schemas chosen before its value is understood.
 Softprobe uses two complementary optimization layers:
 
 1. **Flexible MAP bags** retain semi-structured attributes as
-   `MAP(VARCHAR, VARCHAR)`. VARIANT shredding is planned to return when
-   DuckLake+Postgres can inline VARIANT (#42).
+   `MAP(VARCHAR, VARCHAR)`.
 2. **Tenant-controlled promotion** gives a field a stable name and SQL type
    when that tenant wants an explicit, governed fast path. Softprobe SQL
    compilers prefer promoted columns whenever a matching promotion is active.
@@ -183,8 +176,6 @@ large prompts, responses, tool payloads, or other bodies.
   indexes.
 - Observe markets an Iceberg-based open observability lake with accelerated
   datasets, token indexes, and a semantic context graph.
-- DuckLake VARIANT shredding is an upstream capability available to every
-  DuckLake adopter.
 - Adding a typed column from an attribute is reproducible in other databases.
 
 The defensible system must therefore be the policy and feedback loop around
@@ -268,11 +259,11 @@ It should not initially compete for workloads dominated by:
 - DuckLake is the sole durable telemetry backend.
 - Non-inlined data is retained as Parquet in configurable local or object
   storage.
-- Selected telemetry attribute containers are stored as DuckLake
-  `MAP(VARCHAR, VARCHAR)` (VARIANT temporarily deferred; see
-  [`variant_shredding.md`](variant_shredding.md)).
+- Telemetry attribute containers are stored as DuckLake
+  `MAP(VARCHAR, VARCHAR)`; [schema promotion](promotion.md) adds typed columns
+  for selected query fields.
 - Promotion creates typed columns for future ingest, using tenant-scoped
-  PostgreSQL metadata in production or a local single-scope SQLite catalog.
+  PostgreSQL metadata.
   Generated product/compat SQL prefers promoted columns when active.
 - Customers can query tenant-bound evidence through DuckDB SQL.
 - Durable records can be revisited and queried after their original incident
@@ -296,19 +287,18 @@ Until comparative results exist, use **designed to**, **can**, or
 
 - Promotion affects future ingest; historical rows are not automatically
   backfilled.
-- PostgreSQL is the multi-tenant promotion path; SQLite promotion is limited
-  to a local single-scope catalog.
-- Default `data_inlining_row_limit` is `500` (MAP bags inline). TWCS
-  wait-for-next-run: no flush-before-merge every pass.
-- Existing VARIANT hot columns require an operator-owned rebuild to MAP.
+- Default `data_inlining_row_limit` is `500`; DuckLake manages inlining and
+  file maintenance.
+- Catalogs with VARIANT attribute columns require an operator-owned rebuild to
+  the current MAP schema.
 - Flush-through ingestion makes one DuckLake commit per collector request, so
   collector batch sizing and catalog contention matter.
 - Per-tenant promotion still needs quotas and lifecycle policy to prevent
   excessively wide schemas.
 - Business-table promotion provisions schemas, but automatic OTLP row
   materialization is not yet complete.
-- Current integration tests prove correctness and the presence of shredded
-  statistics; they do not establish competitive performance or cost.
+- Current integration tests cover attribute-map queries and promoted-column
+  behavior; they do not establish competitive performance or cost.
 
 ## Required proof
 

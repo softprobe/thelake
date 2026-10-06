@@ -97,7 +97,7 @@ pub fn parse_loki_params_with_limits(
     }
     // interval/step are accepted for wire compatibility (Grafana always sends
     // a step for range queries). Stream results are currently returned
-    // unsampled; true downsampling is tracked as Phase 2 follow-up work.
+    // unsampled; true downsampling is tracked as Loki query follow-up work.
     Ok(LokiParams {
         query,
         start_ns,

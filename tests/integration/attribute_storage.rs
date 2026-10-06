@@ -1,12 +1,12 @@
-//! Verify temporary MAP attribute bags (#55) and prefer-promoted SQL compilers.
-//!
-//! VARIANT shredding is deferred until DuckLake+Postgres VARIANT inlining is reliable.
+//! Verify MAP attribute storage and prefer-promoted SQL compilers.
 
 use chrono::Utc;
 use softprobe_runtime::ingest_engine::IngestEngine;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::query;
-use softprobe_runtime::storage::schema::variant::{prefer_attr_varchar, variant_varchar};
+use softprobe_runtime::storage::schema::attribute_map::{
+    attribute_map_varchar, prefer_attr_varchar,
+};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -51,7 +51,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
         .expect("query engine");
 
     let now = Utc::now();
-    let session_id = format!("variant-sess-{}", uuid::Uuid::new_v4());
+    let session_id = format!("attribute-map-sess-{}", uuid::Uuid::new_v4());
     let mut spans = Vec::new();
     for i in 0..80 {
         let mut attributes = HashMap::new();
@@ -78,7 +78,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
             trace_id: format!("tr-{i}"),
             span_id: format!("sp-{i}"),
             parent_span_id: None,
-            app_id: "variant-app".to_string(),
+            app_id: "attribute-map-app".to_string(),
             organization_id: None,
             workspace_id: None,
             agent_id: None,
@@ -105,7 +105,7 @@ async fn map_bags_hot_paths_and_nested_filters() {
     let mut log_attrs = HashMap::new();
     log_attrs.insert("sp.session.id".to_string(), session_id.clone());
     let mut log_resource = HashMap::new();
-    log_resource.insert("service.name".to_string(), "variant-svc".to_string());
+    log_resource.insert("service.name".to_string(), "attribute-map-svc".to_string());
     let log = LogData {
         session_id: Some(session_id.clone()),
         timestamp: now,
@@ -199,7 +199,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         compile_details_sql, TelemetryDetailsTarget, TelemetryTimeRange,
     };
     use softprobe_runtime::sql::llm::compile_span_search_sql;
-    use softprobe_runtime::storage::schema::variant::prefer_attr_try_cast;
+    use softprobe_runtime::storage::schema::attribute_map::prefer_attr_try_cast;
 
     let temp = TempDir::new().expect("tempdir");
     let mut config = file_backed_test_config(&temp);
@@ -215,7 +215,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     let now = Utc::now();
     let session_id = format!("vk-sess-{}", uuid::Uuid::new_v4());
     let capture_id = format!("cap-{}", uuid::Uuid::new_v4());
-    let workspace_id = "tenant-variant-keys";
+    let workspace_id = "tenant-attribute-map-keys";
     let trace_id = "vk-trace-1";
 
     // Span with full LLM hot-key set + capture id.
@@ -359,7 +359,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         provider =
             prefer_attr_varchar(Some("model_provider"), "attributes", "gen_ai.provider.name"),
         user = prefer_attr_varchar(Some("user_id"), "attributes", "sp.user.id"),
-        enduser = variant_varchar("attributes", "enduser.id"),
+        enduser = attribute_map_varchar("attributes", "enduser.id"),
         input = prefer_attr_try_cast(
             Some("input_tokens"),
             "attributes",
@@ -379,7 +379,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
             "BIGINT"
         ),
         cost = prefer_attr_try_cast(Some("total_cost"), "attributes", "sp.cost.total", "DOUBLE"),
-        capture = variant_varchar("attributes", "sp.capture.id"),
+        capture = attribute_map_varchar("attributes", "sp.capture.id"),
         sess = session_id.replace('\'', "''"),
         bound = crate::util::query_window().timestamp_filter_sql(""),
     );
