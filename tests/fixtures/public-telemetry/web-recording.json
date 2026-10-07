@@ -1,0 +1,49 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"stringValue": "softprobe-web"}},
+          {"key": "deployment.environment.name", "value": {"stringValue": "e2e"}}
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {"name": "softprobe.web.record", "version": "0.1.0"},
+          "spans": [
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "eeeeeeeeeeeeeeee",
+              "name": "softprobe.web.recording",
+              "kind": 1,
+              "startTimeUnixNano": "1721390400000000000",
+              "endTimeUnixNano": "1721390401000000000",
+              "attributes": [
+                {"key": "sp.session.id", "value": {"stringValue": "sess-sp-llm-e2e-stable"}},
+                {"key": "sp.observation.type", "value": {"stringValue": "recording"}},
+                {"key": "sp.recording.batch_index", "value": {"intValue": "0"}},
+                {"key": "_sp_browser", "value": {"stringValue": "Chrome"}},
+                {"key": "_sp_url", "value": {"stringValue": "localhost/sp/chat"}}
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1721390400500000000",
+                  "name": "sp.recording.batch",
+                  "attributes": [
+                    {
+                      "key": "sp.recording.events",
+                      "value": {
+                        "stringValue": "[{\"type\":4,\"data\":{\"href\":\"http://localhost/sp/chat\",\"width\":1280,\"height\":720},\"timestamp\":1721390400000,\"eventIndex\":1},{\"type\":2,\"data\":\"e2e-packed-snapshot\",\"timestamp\":1721390400100,\"isCompressed\":true,\"eventIndex\":2}]"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {"code": 1}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

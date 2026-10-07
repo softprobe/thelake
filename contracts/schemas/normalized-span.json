@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softprobe.ai/contracts/normalized-span.json",
+  "title": "SoftprobeNormalizedSpan",
+  "type": "object",
+  "required": [
+    "name",
+    "observation_type",
+    "attributes",
+    "events",
+    "status_code"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "observation_type": { "$ref": "observation-types.json" },
+    "parent_name": { "type": ["string", "null"] },
+    "attributes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "number", "boolean", "array", "null"]
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "attributes"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "attributes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": ["string", "number", "boolean", "null"]
+            }
+          }
+        }
+      }
+    },
+    "status_code": {
+      "type": "string",
+      "enum": ["UNSET", "OK", "ERROR"]
+    },
+    "status_message": { "type": ["string", "null"] }
+  }
+}

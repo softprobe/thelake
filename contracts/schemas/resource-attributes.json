@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softprobe.ai/contracts/resource-attributes.json",
+  "title": "SoftprobeResourceAttributes",
+  "type": "object",
+  "required": ["service.name"],
+  "additionalProperties": {
+    "type": ["string", "number", "boolean", "array"]
+  },
+  "properties": {
+    "service.name": { "type": "string", "minLength": 1 },
+    "service.version": { "type": "string" },
+    "deployment.environment.name": { "type": "string" },
+    "service.instance.id": { "type": "string" },
+    "telemetry.sdk.name": { "type": "string" },
+    "telemetry.sdk.version": { "type": "string" }
+  }
+}

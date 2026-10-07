@@ -1,0 +1,13 @@
+{
+  "score_id": "score-span-stable-1",
+  "timestamp": "2024-07-19T12:00:04Z",
+  "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "span_id": "cccccccccccccccc",
+  "session_id": "sess-sp-llm-e2e-stable",
+  "name": "correctness",
+  "data_type": "numeric",
+  "numeric_value": 0.95,
+  "source": "evaluator",
+  "comment": "Stable span score",
+  "metadata": {"fixture": "phase1"}
+}

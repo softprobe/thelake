@@ -1,0 +1,113 @@
+specVersion: softprobe.promotion.v1
+target:
+  kind: telemetry_columns
+  tables: [traces]
+columns:
+  - name: observation_type
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.observation.type
+  - name: environment
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: deployment.environment.name
+  - name: user_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.user.id
+  - name: model_provider
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.provider.name
+  - name: model_name
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.request.model
+  - name: response_model
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.response.model
+  - name: operation_name
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.operation.name
+  - name: input_tokens
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.usage.input_tokens
+  - name: output_tokens
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.usage.output_tokens
+  - name: total_tokens
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: gen_ai.usage.total_tokens
+  - name: input_cost
+    type: double
+    nullable: true
+    source:
+      from: attribute
+      key: sp.cost.input
+  - name: output_cost
+    type: double
+    nullable: true
+    source:
+      from: attribute
+      key: sp.cost.output
+  - name: total_cost
+    type: double
+    nullable: true
+    source:
+      from: attribute
+      key: sp.cost.total
+  - name: completion_start_time
+    type: timestamp
+    nullable: true
+    source:
+      from: attribute
+      key: sp.generation.completion_start_time
+  - name: prompt_id
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.prompt.id
+  - name: prompt_name
+    type: string
+    nullable: true
+    source:
+      from: attribute
+      key: sp.prompt.name
+  - name: prompt_version
+    type: int64
+    nullable: true
+    source:
+      from: attribute
+      key: sp.prompt.version
+  - name: release
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: service.version

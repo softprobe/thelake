@@ -269,7 +269,7 @@ async fn landing_page_is_served_at_root_without_shadowing_health() {
         .to_bytes();
     let html = String::from_utf8(body.to_vec()).expect("utf8");
     assert!(html.contains("thelake"));
-    assert!(html.contains("cargo run --bin thelake"));
+    assert!(html.contains("make run"));
     assert!(html.contains("200x cheaper"));
     assert!(html.contains("long-term storage"));
     assert!(html.contains("https://www.softprobe.ai/"));

@@ -71,6 +71,7 @@ mooncake/
 .cursor/hooks/.state/
 .tmp/
 playwright-report/
+explorer-playwright-report/
 test-results/
 
 .tools/

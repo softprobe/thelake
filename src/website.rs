@@ -31,6 +31,50 @@ pub fn routes() -> Router {
         .route("/assets/{*path}", get(nested_asset))
 }
 
+/// Shared trace/session SPA embedded into the thelake release binary. The
+/// package build writes these files before Cargo runs (see `make build`).
+#[derive(Embed)]
+#[folder = "packages/thelake-explorer/embedded/"]
+struct ExplorerAssets;
+
+pub fn explorer_routes() -> Router {
+    Router::new()
+        .route(
+            "/explorer",
+            get(|| async { axum::response::Redirect::permanent("/explorer/") }),
+        )
+        .route("/explorer/", get(|| async { explorer_index() }))
+        .route("/explorer/{*path}", get(explorer_asset))
+}
+
+async fn explorer_asset(Path(path): Path<String>) -> Response {
+    if !is_safe_asset_path(&path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match ExplorerAssets::get(&path) {
+        Some(_) => explorer_asset_response(&path),
+        None => explorer_index(),
+    }
+}
+
+fn explorer_index() -> Response {
+    explorer_asset_response("index.html")
+}
+
+fn explorer_asset_response(path: &str) -> Response {
+    match ExplorerAssets::get(path) {
+        Some(file) => (
+            [
+                (header::CONTENT_TYPE, content_type(path)),
+                (header::CACHE_CONTROL, cache_control(path)),
+            ],
+            file.data,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn nested_asset(Path(path): Path<String>) -> Response {
     if !is_safe_asset_path(&path) {
         return StatusCode::NOT_FOUND.into_response();
@@ -71,6 +115,12 @@ fn content_type(path: &str) -> &'static str {
         Some("js") => "application/javascript; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("map") => "application/json",
         Some("txt") => "text/plain; charset=utf-8",
         Some("xml") => "application/xml; charset=utf-8",
         _ => "application/octet-stream",
@@ -88,6 +138,7 @@ fn cache_control(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt;
 
     fn embedded_utf8(path: &str) -> String {
         let file = WebsiteAssets::get(path).unwrap_or_else(|| panic!("{path} must be embedded"));
@@ -99,7 +150,7 @@ mod tests {
     fn embeds_landing_assets_as_utf8() {
         let html = embedded_utf8("index.html");
         assert!(html.contains("thelake"));
-        assert!(html.contains("cargo run --bin thelake"));
+        assert!(html.contains("make run"));
         assert!(html.contains("200x cheaper"));
         assert!(html.contains("long-term storage"));
         assert!(html.contains("https://www.softprobe.ai/"));
@@ -128,6 +179,91 @@ mod tests {
     }
 
     #[test]
+    fn embeds_standalone_explorer_and_hashed_assets() {
+        let html = ExplorerAssets::get("index.html").expect("Explorer index must be embedded");
+        let html = String::from_utf8(html.data.to_vec()).unwrap();
+        assert!(html.contains("/explorer/assets/"));
+        let asset = ExplorerAssets::iter()
+            .find(|path| path.starts_with("assets/") && path.ends_with(".js"))
+            .expect("Explorer JS bundle must be embedded");
+        assert_eq!(
+            content_type(asset.as_ref()),
+            "application/javascript; charset=utf-8"
+        );
+    }
+
+    #[tokio::test]
+    async fn explorer_routes_serve_index_assets_and_client_routes() {
+        let router = explorer_routes();
+        for path in ["/explorer/", "/explorer/sessions/session-1"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "text/html; charset=utf-8"
+            );
+        }
+
+        let js_path = ExplorerAssets::iter()
+            .find(|path| path.starts_with("assets/") && path.ends_with(".js"))
+            .expect("built JS bundle");
+        let path = format!("/explorer/{js_path}");
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/javascript; charset=utf-8"
+        );
+    }
+
+    #[tokio::test]
+    async fn explorer_mount_does_not_capture_root_api_or_health_routes() {
+        let router = Router::new()
+            .route("/v1/test", get(|| async { "api" }))
+            .route("/health", get(|| async { "health" }))
+            .merge(explorer_routes())
+            .merge(routes());
+
+        for (path, expected) in [("/", "thelake"), ("/v1/test", "api"), ("/health", "health")] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains(expected),
+                "{path} should be handled by its own route"
+            );
+        }
+    }
+
+    #[test]
     fn embeds_seo_crawl_and_llm_surface() {
         let robots = embedded_utf8("robots.txt");
         assert!(robots.contains("User-agent: *"));
@@ -145,7 +281,7 @@ mod tests {
         assert!(llms.contains("https://github.com/softprobe/thelake"));
         assert!(llms.contains("DuckDB"));
         assert!(llms.contains("200x"));
-        assert!(llms.contains("cargo run --bin thelake"));
+        assert!(llms.contains("make run"));
 
         assert!(
             WebsiteAssets::get("assets/og-image.png").is_some(),

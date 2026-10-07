@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softprobe.ai/contracts/observation-types.json",
+  "title": "SoftprobeObservationType",
+  "type": "string",
+  "enum": [
+    "span",
+    "event",
+    "generation",
+    "agent",
+    "tool",
+    "chain",
+    "retriever",
+    "evaluator",
+    "embedding",
+    "guardrail"
+  ]
+}

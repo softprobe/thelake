@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softprobe.ai/contracts/observation-attributes.json",
+  "title": "SoftprobeObservationAttributes",
+  "type": "object",
+  "additionalProperties": {
+    "type": ["string", "number", "boolean", "array", "null"]
+  },
+  "properties": {
+    "sp.observation.type": {
+      "$ref": "observation-types.json"
+    },
+    "sp.session.id": { "type": "string", "minLength": 1 },
+    "sp.user.id": { "type": "string" },
+    "sp.release": { "type": "string" },
+    "sp.tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "sp.input": { "type": "string" },
+    "sp.output": { "type": "string" },
+    "gen_ai.operation.name": { "type": "string" },
+    "gen_ai.provider.name": { "type": "string" },
+    "gen_ai.request.model": { "type": "string" },
+    "gen_ai.response.model": { "type": "string" },
+    "gen_ai.request.temperature": { "type": "number" },
+    "gen_ai.request.max_tokens": { "type": "integer" },
+    "gen_ai.response.id": { "type": "string" },
+    "gen_ai.response.finish_reasons": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gen_ai.usage.input_tokens": { "type": "integer" },
+    "gen_ai.usage.output_tokens": { "type": "integer" },
+    "gen_ai.usage.total_tokens": { "type": "integer" },
+    "sp.cost.input": { "type": "number" },
+    "sp.cost.output": { "type": "number" },
+    "sp.cost.total": { "type": "number" },
+    "sp.generation.completion_start_time": { "type": "string" },
+    "sp.prompt.id": { "type": "string" },
+    "sp.prompt.name": { "type": "string" },
+    "sp.prompt.version": { "type": "integer" },
+    "sp.tool.available_names": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "sp.tool.available_count": { "type": "integer" },
+    "sp.tool.call_names": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "sp.tool.call_count": { "type": "integer" },
+    "sp.tool.call_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gen_ai.tool.name": { "type": "string" },
+    "gen_ai.tool.call.id": { "type": "string" },
+    "sp.tool.kind": {
+      "type": "string",
+      "enum": ["function", "mcp", "shell", "file", "hook", "other"]
+    },
+    "sp.tool.status": {
+      "type": "string",
+      "enum": ["ok", "error", "cancelled"]
+    },
+    "sp.tool.index": { "type": "integer" },
+    "sp.mcp.server": { "type": "string" },
+    "sp.mcp.tool": { "type": "string" }
+  }
+}

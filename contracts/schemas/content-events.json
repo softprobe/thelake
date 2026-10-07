@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softprobe.ai/contracts/content-events.json",
+  "title": "SoftprobeContentEvents",
+  "type": "object",
+  "required": ["allowedEventNames"],
+  "properties": {
+    "allowedEventNames": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "gen_ai.client.inference.operation.details",
+          "gen_ai.content.prompt",
+          "gen_ai.content.completion",
+          "gen_ai.tool.message"
+        ]
+      },
+      "uniqueItems": true,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "contentAttributeKey": {
+      "type": "string",
+      "const": "content"
+    },
+    "contentEncoding": {
+      "type": "string",
+      "const": "json-string"
+    }
+  }
+}

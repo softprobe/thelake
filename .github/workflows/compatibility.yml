@@ -534,6 +534,20 @@ jobs:
     needs: [real-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    services:
+      ducklake-postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ducklake
+          POSTGRES_USER: ducklake
+          POSTGRES_DB: ducklake
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ducklake -d ducklake"
+          --health-interval 2s
+          --health-timeout 10s
+          --health-retries 15
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
@@ -554,16 +568,22 @@ jobs:
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
 
+      - name: Restore build cache
+        uses: ./.github/actions/thelake-cache
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install browser test dependencies and Chromium
+      - name: Install browser test dependencies
         run: |
           set -euo pipefail
           npm --prefix tests/compat/grafana/browser ci
-          npx --prefix tests/compat/grafana/browser playwright install --with-deps chromium
+          npm --prefix packages/thelake-explorer ci
+
+      - name: Run shared Explorer UI E2E
+        run: make test-explorer-ui
 
       - name: Run E2E browser automation suite
         run: make test-grafana-browser
@@ -575,6 +595,7 @@ jobs:
           name: grafana-browser-report
           path: |
             tests/compat/grafana/browser/playwright-report/
+            tests/compat/grafana/browser/explorer-playwright-report/
             tests/compat/grafana/browser/test-results/
           retention-days: 7
 

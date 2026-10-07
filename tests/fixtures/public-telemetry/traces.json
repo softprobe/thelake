@@ -1,0 +1,75 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"stringValue": "sp-llm-e2e"}},
+          {"key": "deployment.environment.name", "value": {"stringValue": "e2e"}},
+          {"key": "service.version", "value": {"stringValue": "phase1"}}
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {"name": "softprobe.llm.e2e", "version": "1.0.0"},
+          "spans": [
+            {
+              "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "spanId": "bbbbbbbbbbbbbbbb",
+              "name": "e2e-root",
+              "kind": 2,
+              "startTimeUnixNano": "1721390400000000000",
+              "endTimeUnixNano": "1721390403000000000",
+              "attributes": [
+                {"key": "sp.session.id", "value": {"stringValue": "sess-sp-llm-e2e-stable"}},
+                {"key": "sp.observation.type", "value": {"stringValue": "span"}},
+                {"key": "sp.user.id", "value": {"stringValue": "user-sp-llm-e2e"}}
+              ],
+              "status": {"code": 1}
+            },
+            {
+              "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "spanId": "cccccccccccccccc",
+              "parentSpanId": "bbbbbbbbbbbbbbbb",
+              "name": "chat.completions",
+              "kind": 3,
+              "startTimeUnixNano": "1721390400500000000",
+              "endTimeUnixNano": "1721390402500000000",
+              "attributes": [
+                {"key": "sp.session.id", "value": {"stringValue": "sess-sp-llm-e2e-stable"}},
+                {"key": "sp.observation.type", "value": {"stringValue": "generation"}},
+                {"key": "sp.user.id", "value": {"stringValue": "user-sp-llm-e2e"}},
+                {"key": "gen_ai.provider.name", "value": {"stringValue": "openai"}},
+                {"key": "gen_ai.request.model", "value": {"stringValue": "gpt-4o-mini"}},
+                {"key": "gen_ai.response.model", "value": {"stringValue": "gpt-4o-mini-2024-07-18"}},
+                {"key": "gen_ai.operation.name", "value": {"stringValue": "chat"}},
+                {"key": "gen_ai.usage.input_tokens", "value": {"intValue": "12"}},
+                {"key": "gen_ai.usage.output_tokens", "value": {"intValue": "8"}},
+                {"key": "gen_ai.usage.total_tokens", "value": {"intValue": "20"}},
+                {"key": "sp.cost.input", "value": {"doubleValue": 0.000002}},
+                {"key": "sp.cost.output", "value": {"doubleValue": 0.000005}},
+                {"key": "sp.cost.total", "value": {"doubleValue": 0.000007}}
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1721390400600000000",
+                  "name": "gen_ai.content.prompt",
+                  "attributes": [
+                    {"key": "content", "value": {"stringValue": "Say hello reproducibly."}}
+                  ]
+                },
+                {
+                  "timeUnixNano": "1721390402400000000",
+                  "name": "gen_ai.content.completion",
+                  "attributes": [
+                    {"key": "content", "value": {"stringValue": "Hello from Phase 1."}}
+                  ]
+                }
+              ],
+              "status": {"code": 1}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
