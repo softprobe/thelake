@@ -28,7 +28,7 @@ tags:
   - name: debug-query
     description: Internal/debug read-only query access
 paths:
-  /v1/llm/scores:
+  /v1/scores:
     post:
       tags: [scores]
       operationId: createScore
@@ -68,7 +68,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/observations/search:
+  /v1/spans/search:
     post:
       tags: [observations]
       operationId: searchObservations
@@ -106,7 +106,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/observations/{span_id}:
+  /v1/spans/{span_id}:
     get:
       tags: [observations]
       operationId: getObservation
@@ -150,7 +150,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/traces/{trace_id}:
+  /v1/traces/{trace_id}:
     get:
       tags: [traces]
       operationId: getTrace
@@ -213,14 +213,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/sessions/search:
+  /v1/sessions/search:
     post:
       tags: [sessions]
       operationId: searchSessions
       summary: Search sessions within a bounded time range
       description: >
         Returns sessions aggregated server-side. Clients must not assemble a
-        session list by paging /v1/llm/observations/search and grouping in
+        session list by paging /v1/spans/search and grouping in
         memory: that makes paging observation-level (one session is split
         across pages), limits ordering to the rows already fetched, and turns
         every aggregate into a per-page partial sum.
@@ -242,7 +242,7 @@ paths:
         "401":
           description: Invalid bearer token
 
-  /v1/llm/sessions/{session_id}:
+  /v1/sessions/{session_id}:
     get:
       tags: [sessions]
       operationId: getSession

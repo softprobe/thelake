@@ -25,7 +25,7 @@ impl From<anyhow::Error> for SessionSummaryListError {
 /// Query Postgres `session_summary` → public list shape (`SessionSummary` only).
 ///
 /// Never joins `traces`, never returns spans or `SessionDetail`. Detail stays on
-/// `GET /v1/llm/sessions/{id}` (lake). Empty table → empty page. No lake fallback.
+/// `GET /v1/sessions/{id}` (lake). Empty table → empty page. No lake fallback.
 pub async fn search_session_summary(
     pool: &Pool,
     metadata_schema: &str,

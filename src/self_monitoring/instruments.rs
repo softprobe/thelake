@@ -52,7 +52,7 @@ pub struct Instruments {
     pub session_summary_reduce_duration_ms: Histogram<f64>,
     /// session_summary_dirty UPSERT wall time (best-effort after traces commit).
     pub session_summary_dirty_upsert_duration_ms: Histogram<f64>,
-    /// GET /v1/llm/sessions/{id} stage wall time (pg_window / lake_sql / total).
+    /// GET /v1/sessions/{id} stage wall time (pg_window / lake_sql / total).
     pub session_detail_stage_duration_ms: Histogram<f64>,
     /// DuckDB worker sub-step wall time (sql_gate EXPLAIN / sql_exec).
     pub query_stage_duration_ms: Histogram<f64>,
@@ -343,9 +343,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .build(),
         session_detail_stage_duration_ms: meter
             .f64_histogram("thelake.api.session_detail.stage.duration")
-            .with_description(
-                "GET /v1/llm/sessions/{id} stage wall time (pg_window, lake_sql, total)",
-            )
+            .with_description("GET /v1/sessions/{id} stage wall time (pg_window, lake_sql, total)")
             .with_unit("ms")
             .build(),
         query_stage_duration_ms: meter

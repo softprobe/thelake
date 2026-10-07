@@ -1,11 +1,9 @@
 //! Local router + config helpers for `#[cfg(test)]` modules (`make test` / `cargo test --lib` / `llvm-cov --lib`).
 //! Mirrors `tests/util/config.rs` so unit tests do not depend on the integration-test crate.
 
-use crate::api::ingestion::traces::ingest_traces;
 use crate::api::{create_router, AppState};
 use crate::config::Config;
 use crate::ingest_engine::IngestEngine;
-use axum::routing::post;
 use axum::Router;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -35,7 +33,7 @@ pub fn file_backed_test_config(temp: &TempDir) -> Config {
 pub async fn local_router_and_state() -> anyhow::Result<(Router, AppState, TempDir)> {
     let temp = TempDir::new()?;
     let config = Arc::new(file_backed_test_config(&temp));
-    let (router, state) = create_router(config, post(ingest_traces), None).await?;
+    let (router, state) = create_router(config, None).await?;
     Ok((router, state, temp))
 }
 

@@ -1,13 +1,11 @@
 //! Shared authenticated router testkit for compatibility contracts.
 
 use axum::middleware::from_fn_with_state;
-use axum::routing::post;
 use axum::Router;
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::api::auth::runtime_auth_middleware;
 use softprobe_runtime::api::{create_router, AppState, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
-use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
 use softprobe_runtime::runtime_engine::ScopeProvisioningRequest;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,7 +49,7 @@ async fn authenticated_router_with_expected_token(
     let control = ControlPlaneRuntime {
         resolver: Resolver::new(format!("{}/", mock.uri()), Duration::from_secs(60)),
     };
-    let (router, state) = create_router(config, post(ingest_traces), Some(control))
+    let (router, state) = create_router(config, Some(control))
         .await
         .expect("authenticated test router");
     // Production requires an explicit `POST /v1/workspaces` admin provisioning step
@@ -68,8 +66,6 @@ async fn authenticated_router_with_expected_token(
         })
         .await
         .expect("provision compat test tenant scope");
-    let router = router
-        .merge(runtime_control_routes().with_state(state.clone()))
-        .layer(from_fn_with_state(state.clone(), runtime_auth_middleware));
+    let router = router.layer(from_fn_with_state(state.clone(), runtime_auth_middleware));
     (router, state, mock)
 }

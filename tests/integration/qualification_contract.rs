@@ -90,13 +90,9 @@ fn span_request(
 }
 
 async fn ingest_one_span(config: Arc<Config>, session_id: &str) {
-    let (router, state) = softprobe_runtime::api::create_router(
-        config.clone(),
-        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
+    let (router, state) = softprobe_runtime::api::create_router(config.clone(), None)
+        .await
+        .expect("router");
     let mut buf = Vec::new();
     span_request(session_id, [0xA1; 16], [0xB1; 8])
         .encode(&mut buf)
@@ -183,13 +179,9 @@ async fn isolated_main_schema_uses_three_part_qualification() {
     assert_eq!(config.ducklake.metadata_schema, "main");
     assert_three_part_probe(&config);
 
-    let (_router, state) = softprobe_runtime::api::create_router(
-        config.clone(),
-        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
-    )
-    .await
-    .expect("router for maintenance");
+    let (_router, state) = softprobe_runtime::api::create_router(config.clone(), None)
+        .await
+        .expect("router for maintenance");
     let maintenance = state
         .engines
         .maintenance_engine()
@@ -330,13 +322,9 @@ async fn sql_maintenance_merge_preserves_ducklake_layout() {
     ingest_one_span(config.clone(), "maintenance-layout-bootstrap").await;
     // Scope initialization creates the canonical DuckLake tables. A first pass
     // establishes their bootstrap watermarks before the candidate files arrive.
-    let (_router, state) = softprobe_runtime::api::create_router(
-        config.clone(),
-        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
+    let (_router, state) = softprobe_runtime::api::create_router(config.clone(), None)
+        .await
+        .expect("router");
     let maintenance = state
         .engines
         .maintenance_engine()
@@ -650,13 +638,9 @@ async fn shared_named_schema_probe_sees_ingested_rows() {
     ingest_one_span(config.clone(), "sess-qualify-shared").await;
     assert_three_part_probe(&config);
 
-    let (_router, state) = softprobe_runtime::api::create_router(
-        config.clone(),
-        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
+    let (_router, state) = softprobe_runtime::api::create_router(config.clone(), None)
+        .await
+        .expect("router");
     let maintenance = state
         .engines
         .maintenance_engine()

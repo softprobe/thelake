@@ -108,7 +108,6 @@ fn handlers_must_not_import_physical_scope() {
     let roots = [
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api"),
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/compat"),
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime_api.rs"),
     ];
     let mut hits = Vec::new();
     for root in &roots {
@@ -398,7 +397,6 @@ fn api_and_compat_must_not_reach_engine_internals() {
     let roots = [
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api"),
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/compat"),
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime_api.rs"),
     ];
     let forbidden = [
         ".physical_scope(",
@@ -528,8 +526,8 @@ fn manager_provision_returns_storage_hints_not_physical_scope() {
 }
 
 #[test]
-fn api_llm_query_uses_runtime_engine_summary_facade() {
-    let query = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/api/llm/query.rs"));
+fn api_sessions_uses_runtime_engine_summary_facade() {
+    let query = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/api/sessions.rs"));
     for needle in [
         "session_summary_scope",
         "TenantSummaryScope",
@@ -540,16 +538,16 @@ fn api_llm_query_uses_runtime_engine_summary_facade() {
     ] {
         assert!(
             !query.contains(needle),
-            "api/llm/query.rs must use RuntimeEngine summary methods only (found {needle})"
+            "api/sessions.rs must use RuntimeEngine summary methods only (found {needle})"
         );
     }
     assert!(
         query.contains("lookup_session_summary_window"),
-        "api/llm/query.rs must call RuntimeEngine::lookup_session_summary_window"
+        "api/sessions.rs must call RuntimeEngine::lookup_session_summary_window"
     );
     assert!(
         query.contains("search_session_summary"),
-        "api/llm/query.rs must call RuntimeEngine::search_session_summary"
+        "api/sessions.rs must call RuntimeEngine::search_session_summary"
     );
 
     let runtime = include_str!(concat!(

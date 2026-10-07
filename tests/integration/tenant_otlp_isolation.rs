@@ -1,11 +1,10 @@
 //! Tenant-scoped OTLP ingest isolation (**I2**) and gRPC OTLP parity (**G1** / **G2**) per
 //! [`docs/tenant-isolation-implementation-plan.md`](../../../docs/tenant-isolation-implementation-plan.md) §6.
 
-use axum::routing::post;
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceService;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::trace::v1::{span, Span};
-use softprobe_runtime::api::ingestion::traces::{ingest_traces, process_traces};
+use softprobe_runtime::api::ingest::process_traces;
 use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
 use softprobe_runtime::authn::{Resolver, TenantInfo};
 use softprobe_runtime::config::Config;
@@ -321,7 +320,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     };
 
     let config = std::sync::Arc::new(config);
-    let (_router, state) = create_router(config.clone(), post(ingest_traces), Some(control))
+    let (_router, state) = create_router(config.clone(), Some(control))
         .await
         .expect("router");
 

@@ -89,13 +89,9 @@ async fn build_summary_router_with_inlining(
     let mut config = postgres_summary_config(&temp, metadata_schema.clone());
     config.ducklake.data_inlining_row_limit = Some(data_inlining_row_limit);
     let config = Arc::new(config);
-    let (router, state) = softprobe_runtime::api::create_router(
-        config,
-        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
+    let (router, state) = softprobe_runtime::api::create_router(config, None)
+        .await
+        .expect("router");
 
     let client = catalog_client(&state).await;
     ensure_session_summary_tables(&client, &metadata_schema)
@@ -186,7 +182,7 @@ async fn search(router: &Router, body: Value) -> Value {
 async fn search_raw(router: &Router, body: Value) -> (StatusCode, Value) {
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/sessions/search")
+        .uri("/v1/sessions/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
         .unwrap();
@@ -753,7 +749,7 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     });
     let score_req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/scores")
+        .uri("/v1/scores")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(score.to_string()))
         .unwrap();
@@ -791,7 +787,7 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     );
 
     let trace_uri = format!(
-        "/v1/llm/traces/{}?from={}&to={}",
+        "/v1/traces/{}?from={}&to={}",
         hex::encode([spec.trace; 16]),
         from.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
         to.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
@@ -817,7 +813,7 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
     // D7: lake window comes from session_summary only — no query from/to.
     let detail = Request::builder()
         .method("GET")
-        .uri("/v1/llm/sessions/detail-sess")
+        .uri("/v1/sessions/detail-sess")
         .body(Body::empty())
         .unwrap();
     let resp = router.clone().oneshot(detail).await.expect("detail");
@@ -885,7 +881,7 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
 
     let point_detail = Request::builder()
         .method("GET")
-        .uri("/v1/llm/sessions/single-point-session")
+        .uri("/v1/sessions/single-point-session")
         .body(Body::empty())
         .unwrap();
     let point_response = router.clone().oneshot(point_detail).await.unwrap();
@@ -906,7 +902,7 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
 
     let missing = Request::builder()
         .method("GET")
-        .uri("/v1/llm/sessions/no-such-session")
+        .uri("/v1/sessions/no-such-session")
         .body(Body::empty())
         .unwrap();
     let missing_resp = router.clone().oneshot(missing).await.expect("missing");
@@ -914,7 +910,7 @@ async fn http_session_detail_still_reads_lake_after_summary_reduce() {
 
     let removed_observations_route = Request::builder()
         .method("GET")
-        .uri("/v1/llm/sessions/no-such-session/observations")
+        .uri("/v1/sessions/no-such-session/observations")
         .body(Body::empty())
         .unwrap();
     let removed_route_resp = router
@@ -1037,7 +1033,7 @@ async fn http_session_recording_uses_summary_window() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/v1/llm/sessions/rec-sess/recording")
+        .uri("/v1/sessions/rec-sess/recording")
         .body(Body::empty())
         .unwrap();
     let resp = router.clone().oneshot(req).await.expect("recording");
@@ -1072,7 +1068,7 @@ async fn http_session_recording_uses_summary_window() {
 
     let empty = Request::builder()
         .method("GET")
-        .uri("/v1/llm/sessions/rec-empty/recording")
+        .uri("/v1/sessions/rec-empty/recording")
         .body(Body::empty())
         .unwrap();
     let empty_resp = router
@@ -1087,7 +1083,7 @@ async fn http_session_recording_uses_summary_window() {
 
     let missing = Request::builder()
         .method("GET")
-        .uri("/v1/llm/sessions/no-rec-session/recording")
+        .uri("/v1/sessions/no-rec-session/recording")
         .body(Body::empty())
         .unwrap();
     let missing_resp = router.oneshot(missing).await.expect("missing recording");
@@ -1346,7 +1342,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     let detail_before = {
         let req = Request::builder()
             .method("GET")
-            .uri("/v1/llm/sessions/sess-ok")
+            .uri("/v1/sessions/sess-ok")
             .body(Body::empty())
             .unwrap();
         let resp = router.clone().oneshot(req).await.expect("detail");
@@ -1373,7 +1369,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     let detail_missing = {
         let req = Request::builder()
             .method("GET")
-            .uri("/v1/llm/sessions/sess-ok")
+            .uri("/v1/sessions/sess-ok")
             .body(Body::empty())
             .unwrap();
         router.clone().oneshot(req).await.expect("detail missing")
@@ -1384,7 +1380,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     let now = Utc::now();
     let bad_inv = Request::builder()
         .method("POST")
-        .uri("/v1/llm/sessions/summary/rebuild")
+        .uri("/v1/sessions/summary/rebuild")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -1404,7 +1400,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
         .max_reduce_span_seconds;
     let bad_big = Request::builder()
         .method("POST")
-        .uri("/v1/llm/sessions/summary/rebuild")
+        .uri("/v1/sessions/summary/rebuild")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -1419,7 +1415,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
 
     let rebuild_req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/sessions/summary/rebuild")
+        .uri("/v1/sessions/summary/rebuild")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -1450,7 +1446,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     let detail_after = {
         let req = Request::builder()
             .method("GET")
-            .uri("/v1/llm/sessions/sess-ok")
+            .uri("/v1/sessions/sess-ok")
             .body(Body::empty())
             .unwrap();
         let resp = router.clone().oneshot(req).await.expect("detail");
@@ -1502,13 +1498,9 @@ async fn build_summary_router_on_minio(
     config.ducklake.data_inlining_row_limit = Some(0);
 
     let config = Arc::new(config);
-    let (router, state) = softprobe_runtime::api::create_router(
-        config,
-        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
+    let (router, state) = softprobe_runtime::api::create_router(config, None)
+        .await
+        .expect("router");
 
     let client = catalog_client(&state).await;
     ensure_session_summary_tables(&client, &metadata_schema)
@@ -1561,7 +1553,7 @@ async fn rebuild_reads_parquet_from_minio_object_store() {
     let now = Utc::now();
     let rebuild_req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/sessions/summary/rebuild")
+        .uri("/v1/sessions/summary/rebuild")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({

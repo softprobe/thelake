@@ -28,13 +28,9 @@ async fn build_router() -> (Router, tempfile::TempDir) {
 async fn build_router_and_state() -> (Router, AppState, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let config = Arc::new(file_backed_test_config(&temp));
-    let (router, state) = softprobe_runtime::api::create_router(
-        config,
-        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
+    let (router, state) = softprobe_runtime::api::create_router(config, None)
+        .await
+        .expect("router");
     (router, state, temp)
 }
 
@@ -582,7 +578,7 @@ async fn telemetry_search_select_literal() {
     let (router, _t) = build_router().await;
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/telemetry/search")
+        .uri("/v1/traces/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -661,7 +657,7 @@ async fn telemetry_search_sessions_returns_summary_rows() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/telemetry/search")
+        .uri("/v1/traces/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
         .unwrap();
@@ -704,7 +700,7 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
 
     let search = Request::builder()
         .method("POST")
-        .uri("/v1/llm/spans/search")
+        .uri("/v1/spans/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -722,9 +718,9 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
     );
 
     for uri in [
-        format!("/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"),
+        format!("/v1/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"),
         format!(
-            "/v1/llm/traces/{}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z",
+            "/v1/traces/{}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z",
             hex::encode(trace_id)
         ),
     ] {
@@ -741,7 +737,7 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
     let session_resp = router
         .clone()
         .oneshot(
-            Request::get(format!("/v1/llm/sessions/{session_id}"))
+            Request::get(format!("/v1/sessions/{session_id}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -751,7 +747,7 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
 
     let telemetry = Request::builder()
         .method("POST")
-        .uri("/v1/telemetry/search")
+        .uri("/v1/traces/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -809,7 +805,7 @@ async fn telemetry_session_details_returns_spans_and_logs() {
 
     let req = Request::builder()
         .uri(format!(
-            "/v1/telemetry/sessions/{}?from=2026-05-03T10:00:00Z&to=2026-05-03T11:00:00Z",
+            "/v1/sessions/{}?from=2026-05-03T10:00:00Z&to=2026-05-03T11:00:00Z",
             session_id
         ))
         .body(Body::empty())
@@ -869,7 +865,7 @@ async fn llm_query_endpoints_return_spans_traces_sessions_and_scores() {
     });
     let score_req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/scores")
+        .uri("/v1/scores")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(score_body.to_string()))
         .unwrap();
@@ -878,7 +874,7 @@ async fn llm_query_endpoints_return_spans_traces_sessions_and_scores() {
 
     let search_req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/spans/search")
+        .uri("/v1/spans/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -915,7 +911,7 @@ async fn llm_query_endpoints_return_spans_traces_sessions_and_scores() {
     // Attribute-map key negative filter: wrong user_id must not match.
     let miss_req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/spans/search")
+        .uri("/v1/spans/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -936,7 +932,7 @@ async fn llm_query_endpoints_return_spans_traces_sessions_and_scores() {
 
     let obs_req = Request::builder()
         .uri(format!(
-            "/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();
@@ -953,7 +949,7 @@ async fn llm_query_endpoints_return_spans_traces_sessions_and_scores() {
 
     let trace_req = Request::builder()
         .uri(format!(
-            "/v1/llm/traces/{trace_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/traces/{trace_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();
@@ -966,7 +962,7 @@ async fn llm_query_endpoints_return_spans_traces_sessions_and_scores() {
     assert_eq!(trace["scores"].as_array().unwrap().len(), 1);
 
     let session_req = Request::builder()
-        .uri(format!("/v1/llm/sessions/{session_id}"))
+        .uri(format!("/v1/sessions/{session_id}"))
         .body(Body::empty())
         .unwrap();
     let session_resp = router.clone().oneshot(session_req).await.expect("session");
@@ -974,7 +970,7 @@ async fn llm_query_endpoints_return_spans_traces_sessions_and_scores() {
     assert_eq!(session_resp.status(), StatusCode::NOT_FOUND);
 
     let missing = Request::builder()
-        .uri("/v1/llm/spans/does-not-exist?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z")
+        .uri("/v1/spans/does-not-exist?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z")
         .body(Body::empty())
         .unwrap();
     let missing_resp = router.oneshot(missing).await.expect("missing");
@@ -1059,7 +1055,7 @@ async fn logs_promote_scope_name_to_logger_name_attribute() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/telemetry/details")
+        .uri("/v1/sessions/details")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -1122,7 +1118,7 @@ async fn spans_without_events_are_readable() {
     // The detail endpoint projects events; on 1.5.2 this is where it died.
     let req = Request::builder()
         .uri(format!(
-            "/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();
@@ -1148,7 +1144,7 @@ async fn spans_without_events_are_readable() {
     // And again through search, which projects a different column set.
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/spans/search")
+        .uri("/v1/spans/search")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -1214,13 +1210,9 @@ async fn inlined_data_stays_readable_across_maintenance() {
     config.maintenance.enabled = true;
     config.maintenance.metadata_enabled = true;
     let config = Arc::new(config);
-    let (router, state) = softprobe_runtime::api::create_router(
-        config.clone(),
-        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
+    let (router, state) = softprobe_runtime::api::create_router(config.clone(), None)
+        .await
+        .expect("router");
 
     let session_id = "sess-inline-maintenance";
     let trace_hex = hex::encode([0x51u8; 16]);
@@ -1268,7 +1260,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/scores")
+        .uri("/v1/scores")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(score_body.to_string()))
         .unwrap();
@@ -1296,7 +1288,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
     //    engine's ducklake attachment.
     let req = Request::builder()
         .uri(format!(
-            "/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();
@@ -1320,7 +1312,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
     // 5. Inlined read #2, after maintenance -- the production crash site.
     let req = Request::builder()
         .uri(format!(
-            "/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();
@@ -1361,7 +1353,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
     });
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/llm/scores")
+        .uri("/v1/scores")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(score_body.to_string()))
         .unwrap();
@@ -1374,7 +1366,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
 
     let req = Request::builder()
         .uri(format!(
-            "/v1/llm/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
+            "/v1/spans/{span_hex}?from=2024-07-18T00:00:00Z&to=2024-07-20T00:00:00Z"
         ))
         .body(Body::empty())
         .unwrap();
@@ -1431,7 +1423,7 @@ async fn session_recording_requires_session_summary_row() {
     engine.force_flush_spans().await.expect("flush spans");
 
     let empty = Request::builder()
-        .uri("/v1/llm/sessions/sess-no-recording/recording")
+        .uri("/v1/sessions/sess-no-recording/recording")
         .body(Body::empty())
         .unwrap();
     let empty_resp = router.clone().oneshot(empty).await.expect("empty");
@@ -1440,7 +1432,7 @@ async fn session_recording_requires_session_summary_row() {
     // Even the session with real ingested spans has no session_summary row
     // yet (no reduce has run), so it is also a 404, not a server error.
     let req = Request::builder()
-        .uri(format!("/v1/llm/sessions/{session_id}/recording"))
+        .uri(format!("/v1/sessions/{session_id}/recording"))
         .body(Body::empty())
         .unwrap();
     let resp = router.oneshot(req).await.expect("recording");

@@ -39,14 +39,14 @@ generations. Late spans mark the session dirty again and are included in a
 later reduction.
 
 The leased rebuild job uses the same aggregate and an explicit `{from,to}`
-window. The operator endpoint is `POST /v1/llm/sessions/summary/rebuild`.
+window. The operator endpoint is `POST /v1/sessions/summary/rebuild`.
 Periodic rebuilds use `rebuild_interval_ms` and
 `max_reduce_span_seconds` from `session_summary` configuration. Rebuilds do
 not scan the full lake.
 
 ## Read behavior
 
-- `POST /v1/llm/sessions/search` reads summary rows with cursor pagination. It
+- `POST /v1/sessions/search` reads summary rows with cursor pagination. It
   does not scan `traces` or fall back to a lake aggregation.
 - Session detail reads full span data and aggregates from DuckLake `traces`.
 - Session recording uses its separate recording endpoint.

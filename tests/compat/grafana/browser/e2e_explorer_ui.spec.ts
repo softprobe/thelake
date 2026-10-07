@@ -114,7 +114,7 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   // Postgres session-summary reducer have produced all three summaries.
   const query = async (days: number, agentName?: string) => {
     const to = new Date();
-    const result = await request.post(`${backend}/v1/llm/sessions/search`, {
+    const result = await request.post(`${backend}/v1/sessions/search`, {
       data: {
         from: new Date(to.getTime() - days * 86_400_000).toISOString(),
         to: to.toISOString(), order_by: 'start_time', order: 'desc', limit: 50,

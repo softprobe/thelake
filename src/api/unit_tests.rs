@@ -96,7 +96,7 @@ async fn unit_score_create_is_validated_and_idempotent() {
     let create = || {
         Request::builder()
             .method("POST")
-            .uri("/v1/llm/scores")
+            .uri("/v1/scores")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.clone()))
             .unwrap()
@@ -113,7 +113,7 @@ async fn unit_score_create_is_validated_and_idempotent() {
 
     let invalid = Request::builder()
         .method("POST")
-        .uri("/v1/llm/scores")
+        .uri("/v1/scores")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -140,7 +140,7 @@ async fn unit_score_config_list_seeds_defaults_and_validates_scores() {
 
     let list_req = Request::builder()
         .method("GET")
-        .uri("/v1/llm/score-configs")
+        .uri("/v1/score-configs")
         .body(Body::empty())
         .unwrap();
     let list_resp = router
@@ -165,7 +165,7 @@ async fn unit_score_config_list_seeds_defaults_and_validates_scores() {
 
     let ok_score = Request::builder()
         .method("POST")
-        .uri("/v1/llm/scores")
+        .uri("/v1/scores")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -187,7 +187,7 @@ async fn unit_score_config_list_seeds_defaults_and_validates_scores() {
 
     let bad_score = Request::builder()
         .method("POST")
-        .uri("/v1/llm/scores")
+        .uri("/v1/scores")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
@@ -224,7 +224,7 @@ async fn unit_openapi_llm_schema_contracts() {
         .expect("openapi body");
     let openapi: serde_json::Value =
         serde_json::from_slice(&openapi_body).expect("valid openapi json");
-    let score_post = &openapi["paths"]["/v1/llm/scores"]["post"];
+    let score_post = &openapi["paths"]["/v1/scores"]["post"];
     assert_eq!(score_post["operationId"], "createScore");
     assert_eq!(
         score_post["requestBody"]["content"]["application/json"]["schema"]["$ref"],
@@ -235,40 +235,40 @@ async fn unit_openapi_llm_schema_contracts() {
         json!(["numeric", "categorical", "boolean", "text"])
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/spans/search"]["post"]["operationId"],
+        openapi["paths"]["/v1/spans/search"]["post"]["operationId"],
         "searchSpans"
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/score-configs"]["get"]["operationId"],
+        openapi["paths"]["/v1/score-configs"]["get"]["operationId"],
         "listScoreConfigs"
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/score-configs"]["post"]["operationId"],
+        openapi["paths"]["/v1/score-configs"]["post"]["operationId"],
         "createScoreConfig"
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/spans/{span_id}"]["get"]["operationId"],
+        openapi["paths"]["/v1/spans/{span_id}"]["get"]["operationId"],
         "getSpan"
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/traces/{trace_id}"]["get"]["operationId"],
+        openapi["paths"]["/v1/traces/{trace_id}"]["get"]["operationId"],
         "getTrace"
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/sessions/{session_id}"]["get"]["operationId"],
+        openapi["paths"]["/v1/sessions/{session_id}"]["get"]["operationId"],
         "getSession"
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/sessions/search"]["post"]["operationId"],
+        openapi["paths"]["/v1/sessions/search"]["post"]["operationId"],
         "searchSessions"
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/sessions/search"]["post"]["requestBody"]["content"]
+        openapi["paths"]["/v1/sessions/search"]["post"]["requestBody"]["content"]
             ["application/json"]["schema"]["$ref"],
         "#/components/schemas/SessionSearchRequest"
     );
     assert_eq!(
-        openapi["paths"]["/v1/llm/sessions/summary/rebuild"]["post"]["operationId"],
+        openapi["paths"]["/v1/sessions/summary/rebuild"]["post"]["operationId"],
         "rebuildSessionSummary"
     );
     assert_eq!(openapi["info"]["title"], "thelake API");
@@ -307,7 +307,7 @@ async fn unit_openapi_llm_schema_contracts() {
         openapi["components"]["schemas"]["SessionSummaryRebuildResponse"]["required"],
         json!(["sessions_upserted"])
     );
-    let session_params = openapi["paths"]["/v1/llm/sessions/{session_id}"]["get"]["parameters"]
+    let session_params = openapi["paths"]["/v1/sessions/{session_id}"]["get"]["parameters"]
         .as_array()
         .expect("session params");
     let session_param_names: Vec<&str> = session_params
@@ -318,7 +318,7 @@ async fn unit_openapi_llm_schema_contracts() {
         !session_param_names.contains(&"from") && !session_param_names.contains(&"to"),
         "session detail must not take query from/to (D7): {session_param_names:?}"
     );
-    let recording_params = openapi["paths"]["/v1/llm/sessions/{session_id}/recording"]["get"]
+    let recording_params = openapi["paths"]["/v1/sessions/{session_id}/recording"]["get"]
         ["parameters"]
         .as_array()
         .expect("recording params");
@@ -332,13 +332,14 @@ async fn unit_openapi_llm_schema_contracts() {
     );
     assert!(
         !session_param_names.contains(&"limit") && !session_param_names.contains(&"cursor"),
-        "session detail is holistic and does not page its spans: {session_param_names:?}"
+        "session detail must not expose paging controls"
     );
-    assert!(openapi["components"]["schemas"]["SpanSearchRequest"].is_object());
-    assert!(openapi["components"]["schemas"]["SpanDetail"].is_object());
-    assert!(openapi["components"]["schemas"]["Trace"].is_object());
-    assert!(openapi["paths"]["/v1/llm/observations/search"].is_null());
-    assert!(openapi["paths"]["/v1/llm/sessions/{session_id}/observations"].is_null());
+    assert_eq!(
+        openapi["paths"]["/v1/sessions/{session_id}/recording"]["get"]["operationId"],
+        "getSessionRecording"
+    );
+    assert!(openapi["paths"]["/v1/observations/search"].is_null());
+    assert!(openapi["paths"]["/v1/sessions/{session_id}/observations"].is_null());
     assert!(openapi["components"]["schemas"]["TraceDetail"].is_object());
     assert!(openapi["components"]["schemas"]["SessionDetail"].is_object());
     assert!(
@@ -353,10 +354,10 @@ async fn unit_openapi_llm_schema_contracts() {
     assert!(openapi["components"]["schemas"]["SpanDetail"].is_object());
     assert!(openapi["components"]["schemas"]["SessionSearchRequest"].is_object());
     assert!(openapi["components"]["schemas"]["SessionSearchResponse"].is_object());
-    assert!(openapi["paths"]["/v1/telemetry/fields"]["get"].is_object());
-    assert!(openapi["paths"]["/v1/telemetry/fields/{field}/values"]["get"].is_object());
-    assert!(openapi["paths"]["/v1/telemetry/sessions/{session_id}"]["get"].is_object());
-    assert!(openapi["paths"]["/v1/telemetry/traces/{trace_id}"]["get"].is_object());
+    assert!(openapi["paths"]["/v1/fields"]["get"].is_object());
+    assert!(openapi["paths"]["/v1/fields/{field}/values"]["get"].is_object());
+    assert!(openapi["paths"]["/v1/sessions/{session_id}"]["get"].is_object());
+    assert!(openapi["paths"]["/v1/traces/{trace_id}"]["get"].is_object());
     assert!(openapi["paths"]["/v1/query/sql"]["post"].is_object());
     assert!(openapi["paths"]["/health"]["get"].is_object());
 }
@@ -380,8 +381,7 @@ async fn unit_query_sql_invalid_returns_500() {
 #[tokio::test]
 async fn unit_provision_rejects_non_uuid_workspace_id() {
     std::env::set_var("SOFTPROBE_ADMIN_API_KEY", "unit-admin-key");
-    let (router, state, _t) = local_router_and_state().await.expect("router");
-    let router = router.merge(crate::runtime_api::runtime_control_routes().with_state(state));
+    let (router, _state, _t) = local_router_and_state().await.expect("router");
     let req = Request::builder()
         .method("POST")
         .uri("/v1/workspaces")
@@ -553,7 +553,7 @@ fn map_execute_result_preserves_non_optional_errors() {
 #[test]
 fn openapi_session_search_request_matches_rust_dto_and_reexport() {
     // Wire contract lives in session_summary; api re-exports for OpenAPI/handlers.
-    let _: crate::api::llm::query::SessionSearchRequest =
+    let _: crate::api::sessions::SessionSearchRequest =
         crate::session_summary::list_query::SessionSearchRequest {
             from: chrono::Utc::now(),
             to: chrono::Utc::now(),

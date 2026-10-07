@@ -14,7 +14,6 @@ pub mod ingest_engine;
 pub mod models;
 pub mod promotion;
 pub mod query;
-pub mod runtime_api;
 pub mod runtime_engine;
 pub mod self_monitoring;
 pub mod session_summary;

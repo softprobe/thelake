@@ -194,11 +194,11 @@ async fn map_bags_hot_paths_and_nested_filters() {
 /// Cover MAP bag key paths used by LLM / telemetry SQL compilers + prefer-promoted SQL.
 #[tokio::test]
 async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
-    use softprobe_runtime::api::llm::query::SpanSearchRequest;
-    use softprobe_runtime::api::telemetry::{
+    use softprobe_runtime::api::traces::SpanSearchRequest;
+    use softprobe_runtime::sql::llm::compile_span_search_sql;
+    use softprobe_runtime::sql::telemetry::{
         compile_details_sql, TelemetryDetailsTarget, TelemetryTimeRange,
     };
-    use softprobe_runtime::sql::llm::compile_span_search_sql;
     use softprobe_runtime::storage::schema::attribute_map::prefer_attr_try_cast;
 
     let temp = TempDir::new().expect("tempdir");

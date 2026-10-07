@@ -157,20 +157,23 @@ OTLP ingestion (product signals: traces + logs):
 - `POST /v1/traces`
 - `POST /v1/logs`
 
-LLM evaluation:
+Evaluations:
 
-- `POST /v1/llm/scores`
+- `POST /v1/scores`
+- `GET|POST /v1/score-configs`
 
-Query and telemetry:
+Queries:
 
 - `POST /v1/query/sql` (internal/debug SQL surface)
-- `POST /v1/telemetry/search`
-- `POST /v1/telemetry/details`
-- `GET /v1/telemetry/fields`
-- `GET /v1/telemetry/fields/{field}/values`
-- `GET /v1/telemetry/sessions/{session_id}`
-- `GET /v1/telemetry/traces/{trace_id}`
-- `GET /v1/llm/sessions/{session_id}/recording` (web session replay batches)
+- `POST /v1/sessions/search`
+- `GET /v1/sessions/{session_id}`
+- `GET /v1/sessions/{session_id}/recording` (web session replay batches)
+- `POST /v1/sessions/summary/rebuild`
+- `POST /v1/spans/search`
+- `GET /v1/spans/{span_id}`
+- `GET /v1/traces/{trace_id}`
+- `GET /v1/fields`
+- `GET /v1/fields/{field}/values`
 - `GET /v1/data/ducklake-connection`
 
 Control-plane routes also cover tenant provisioning and promotions.

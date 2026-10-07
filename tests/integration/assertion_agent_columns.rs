@@ -3,7 +3,6 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::from_fn_with_state;
-use axum::routing::post;
 use axum::Router;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hmac::{Hmac, Mac};
@@ -17,10 +16,9 @@ use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Spa
 use prost::Message;
 use serde_json::{json, Value};
 use sha2::Sha256;
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::api::auth::runtime_auth_middleware;
 use softprobe_runtime::api::{create_router, AppState, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
-use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
 use softprobe_runtime::runtime_engine::ScopeProvisioningRequest;
 use softprobe_runtime::softprobe_assertion::ASSERTION_HEADER;
 use std::sync::Arc;
@@ -132,16 +130,10 @@ async fn assertion_router(secret: &str) -> (Router, AppState, TempDir) {
     let control = ControlPlaneRuntime {
         resolver: Resolver::new("http://127.0.0.1:9/", Duration::from_secs(60)),
     };
-    let (router, state) = create_router(
-        Arc::new(file_backed_test_config(&temp)),
-        post(ingest_traces),
-        Some(control),
-    )
-    .await
-    .expect("router");
-    let router = router
-        .merge(runtime_control_routes().with_state(state.clone()))
-        .layer(from_fn_with_state(state.clone(), runtime_auth_middleware));
+    let (router, state) = create_router(Arc::new(file_backed_test_config(&temp)), Some(control))
+        .await
+        .expect("router");
+    let router = router.layer(from_fn_with_state(state.clone(), runtime_auth_middleware));
     (router, state, temp)
 }
 
@@ -239,7 +231,7 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
 
     let details_request = Request::builder()
         .method("POST")
-        .uri("/v1/telemetry/details")
+        .uri("/v1/sessions/details")
         .header(header::CONTENT_TYPE, "application/json")
         .header(ASSERTION_HEADER, &token)
         .body(Body::from(
@@ -270,7 +262,7 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
 
     let search = Request::builder()
         .method("POST")
-        .uri("/v1/llm/sessions/search")
+        .uri("/v1/sessions/search")
         .header(header::CONTENT_TYPE, "application/json")
         .header(ASSERTION_HEADER, &token)
         .body(Body::from(

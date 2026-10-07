@@ -68,7 +68,7 @@ Tool helpers:
    helpers (`startGeneration`, `startAgent`, ...), or scoped helpers.
 3. Update attributes/events while open.
 4. End observations explicitly or via scoped helpers / context managers.
-5. Create scores with `createScore` / `create_score` against `/v1/llm/scores`.
+5. Create scores with `createScore` / `create_score` against `/v1/scores`.
 6. Call `forceFlush` / `force_flush` before process exit checks.
 7. Call `shutdown` once to flush and tear down exporters.
 
@@ -141,7 +141,7 @@ See `contracts/fixtures/privacy-redaction.json`.
 
 ## Scores
 
-`POST {baseUrl}/v1/llm/scores` with bearer auth.
+`POST {baseUrl}/v1/scores` with bearer auth.
 
 Required body fields: `score_id`, `timestamp`, `name`, `data_type`, `source`.
 Exactly one target among `span_id`, `trace_id`, or `session_id` must be usable

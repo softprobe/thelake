@@ -7,13 +7,10 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::from_fn;
-use axum::routing::post;
 use axum::Router;
 use http_body_util::BodyExt;
 use serde_json::json;
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::config::DuckLakeConfig;
-use softprobe_runtime::runtime_api::runtime_control_routes;
 use softprobe_runtime::storage::ducklake::{open_attached_from_config, AttachedSession};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -41,14 +38,11 @@ pub async fn setup_file_backed_promotion_env() -> FileBackedPromotionEnv {
     let config = file_backed_test_config(&temp);
     let ducklake = config.ducklake.clone();
 
-    let (router, state) =
-        softprobe_runtime::api::create_router(Arc::new(config), post(ingest_traces), None)
-            .await
-            .expect("router");
+    let (router, state) = softprobe_runtime::api::create_router(Arc::new(config), None)
+        .await
+        .expect("router");
     provision_local_sqlite_tenant(&state).await;
-    let router = router
-        .merge(runtime_control_routes().with_state(state))
-        .layer(from_fn(inject_tenant));
+    let router = router.layer(from_fn(inject_tenant));
 
     FileBackedPromotionEnv {
         _temp: temp,

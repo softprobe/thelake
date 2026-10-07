@@ -60,14 +60,14 @@ export class ExplorerApi {
     const body: Record<string, unknown> = { from, to: now.toISOString(), order_by: "start_time", order: "desc", limit: pageSize, cursor, roots_only: true };
     if (agentName?.trim()) body.agent_name = agentName.trim();
     const result = await this.request<{ items: SessionSummary[]; next_cursor?: string | null }>(
-      "/llm/sessions/search",
+      "/sessions/search",
       { method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
     );
     return { items: result.items ?? [], nextCursor: result.next_cursor };
   }
 
   async getSession(sessionId: string, signal?: AbortSignal): Promise<SessionDetail> {
-    const path = `/llm/sessions/${encodeURIComponent(sessionId)}`;
+    const path = `/sessions/${encodeURIComponent(sessionId)}`;
     const query = new URLSearchParams({ limit: "200" });
     const result = await this.request<SessionDetail>(`${path}?${query}`, { signal });
     return {
@@ -81,7 +81,7 @@ export class ExplorerApi {
   }
 
   async getTrace(traceId: string, signal?: AbortSignal, sessionId?: string): Promise<{ observations: Observation[]; next_cursor?: string | null }> {
-    const path = `/llm/traces/${encodeURIComponent(traceId)}`;
+    const path = `/traces/${encodeURIComponent(traceId)}`;
     const query = new URLSearchParams({ limit: "200" });
     if (sessionId) query.set("session_id", sessionId);
     const first = await this.request<{ observations: Observation[]; next_cursor?: string | null }>(`${path}?${query}`, { signal });
@@ -99,6 +99,6 @@ export class ExplorerApi {
   }
 
   createScore(input: { name: string; data_type: "categorical"; string_value: string; session_id?: string; trace_id?: string; span_id?: string; comment?: string }): Promise<ScoreRecord> {
-    return this.request("/llm/scores", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ score_id: crypto.randomUUID(), timestamp: new Date().toISOString(), source: "annotation", ...input }) });
+    return this.request("/scores", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ score_id: crypto.randomUUID(), timestamp: new Date().toISOString(), source: "annotation", ...input }) });
   }
 }

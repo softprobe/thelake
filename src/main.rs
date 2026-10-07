@@ -1,14 +1,10 @@
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
-use axum::routing::post;
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::api::auth::{local_anonymous_workspace_id, runtime_auth_middleware};
 use softprobe_runtime::api::{self, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp;
-use softprobe_runtime::runtime_api::{
-    local_anonymous_workspace_id, runtime_auth_middleware, runtime_control_routes,
-};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,10 +49,8 @@ async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
         anyhow::anyhow!("invalid SOFTPROBE_LOCAL_ANONYMOUS configuration: {status}")
     })?;
     let control_plane = control_plane_runtime_from_env()?;
-    let traces = post(ingest_traces);
 
-    let (mut app, state) =
-        api::create_router(config.clone(), traces, Some(control_plane.clone())).await?;
+    let (app, state) = api::create_router(config.clone(), Some(control_plane.clone())).await?;
 
     // The router construction is the shared-mode startup gate. Do not start
     // maintenance or any secondary storage path until it has completed schema
@@ -71,8 +65,6 @@ async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
         softprobe_runtime::session_summary::start_session_summary_reducer(state.engines.clone())
             .await?;
     info!("Session-summary reducer started");
-
-    app = app.merge(runtime_control_routes().with_state(state.clone()));
 
     // CorsLayer must be outermost: browsers send OPTIONS preflight without
     // Authorization. If auth wraps CORS, preflight 401s and SPA OTLP never runs;

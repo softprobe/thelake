@@ -54,4 +54,4 @@ only the matching day's files. The companion fixture is
 
 The related query compiler check is
 `one_day_session_fetch_predicates_do_not_name_unrelated_days` in
-`src/api/llm/query.rs`.
+`src/api/sessions.rs`.

@@ -421,7 +421,7 @@ Browser DOM recordings are ingested as ordinary OTLP spans (no separate write AP
 | event name | `sp.recording.batch` |
 | event attribute `sp.recording.events` | JSON string of rrweb events (FullSnapshots may set `isCompressed`) |
 
-Query: `GET /v1/llm/sessions/{session_id}/recording?from=&to=&limit=` returns
+Query: `GET /v1/sessions/{session_id}/recording?from=&to=&limit=` returns
 ordered `batches` and flattened `events` for the player. Batches are ordered by
 `sp.recording.batch_index` (then `start_time`). The response includes
 `truncated: true` when the batch `limit` (default 50, max 200) was hit — long

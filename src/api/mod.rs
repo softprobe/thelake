@@ -5,11 +5,17 @@
 // After binding tenant context, use tenant-scoped instances/contexts only.
 // ============================================================================
 
+pub mod auth;
+pub mod control;
+pub mod debug_sql;
+pub mod error;
+pub mod fields;
 pub mod health;
-pub mod ingestion;
-pub mod llm;
-pub mod query;
-pub mod telemetry;
+pub mod ingest;
+pub(crate) mod mapping;
+pub mod scores;
+pub mod sessions;
+pub mod traces;
 
 use crate::authn::TenantInfo;
 use crate::compat::loki::loki_routes;
@@ -18,7 +24,7 @@ use crate::compat::tempo::tempo_routes;
 use crate::config::Config;
 use axum::{
     response::Html,
-    routing::{get, post, MethodRouter},
+    routing::{get, post},
     Json, Router,
 };
 use once_cell::sync::Lazy;
@@ -81,9 +87,6 @@ impl AppState {
     }
 
     /// Execute raw SQL on the tenant-bound query engine (debug `/v1/query/sql` only).
-    ///
-    /// Product handlers must resolve an engine and call `execute_trusted` (or a
-    /// typed `QueryEngine` method) instead of this path.
     pub(crate) async fn execute_tenant_scoped_sql(
         &self,
         tenant: Option<&TenantInfo>,
@@ -99,7 +102,6 @@ impl AppState {
 /// lazily on first request via [`RuntimeEngineManager`].
 pub async fn create_router(
     config: Arc<Config>,
-    traces: MethodRouter<AppState>,
     control_plane: Option<ControlPlaneRuntime>,
 ) -> anyhow::Result<(Router, AppState)> {
     let shared_mode =
@@ -110,10 +112,6 @@ pub async fn create_router(
         engines: runtime_engine_manager,
     };
 
-    // Shared mode is a startup contract, not a lazy per-request feature flag.
-    // Build the default bound engine before returning the router so ownership
-    // schema incompatibility, DuckLake attach failures, and filtered-view
-    // initialization prevent the service from becoming ready.
     if shared_mode {
         state
             .engines
@@ -134,45 +132,33 @@ pub async fn create_router(
         .route("/ready", get(health::ready_check))
         .route("/openapi.json", get(openapi_spec))
         .route("/swagger", get(swagger_ui))
-        .route("/v1/traces", traces)
-        .route("/v1/logs", post(ingestion::logs::ingest_logs))
-        .route("/v1/llm/scores", post(llm::create_score))
+        .route("/v1/traces", post(ingest::ingest_traces))
+        .route("/v1/traces/search", post(traces::search_traces))
+        .route("/v1/traces/details", post(traces::trace_details_post))
+        .route("/v1/traces/{trace_id}", get(traces::get_trace))
+        .route("/v1/spans/search", post(traces::search_spans))
+        .route("/v1/spans/{span_id}", get(traces::get_span))
+        .route("/v1/sessions/search", post(sessions::search_sessions))
+        .route("/v1/sessions/details", post(sessions::session_details_post))
         .route(
-            "/v1/llm/score-configs",
-            get(llm::list_score_configs).post(llm::create_score_config),
+            "/v1/sessions/summary/rebuild",
+            post(sessions::rebuild_session_summary),
         )
-        .route("/v1/llm/spans/search", post(llm::query::search_spans))
-        .route("/v1/llm/spans/{span_id}", get(llm::query::get_span))
-        .route("/v1/llm/traces/{trace_id}", get(llm::query::get_trace))
-        .route("/v1/llm/sessions/search", post(llm::query::search_sessions))
+        .route("/v1/sessions/{session_id}", get(sessions::get_session))
         .route(
-            "/v1/llm/sessions/summary/rebuild",
-            post(llm::query::rebuild_session_summary),
+            "/v1/sessions/{session_id}/recording",
+            get(sessions::get_session_recording),
         )
+        .route("/v1/logs", post(ingest::ingest_logs))
+        .route("/v1/scores", post(scores::create_score))
         .route(
-            "/v1/llm/sessions/{session_id}",
-            get(llm::query::get_session),
+            "/v1/score-configs",
+            get(scores::list_score_configs).post(scores::create_score_config),
         )
-        .route(
-            "/v1/llm/sessions/{session_id}/recording",
-            get(llm::query::get_session_recording),
-        )
-        .route("/v1/query/sql", post(query::execute_sql))
-        .route("/v1/telemetry/search", post(telemetry::search))
-        .route("/v1/telemetry/details", post(telemetry::details_post))
-        .route("/v1/telemetry/fields", get(telemetry::fields))
-        .route(
-            "/v1/telemetry/fields/{field}/values",
-            get(telemetry::field_values),
-        )
-        .route(
-            "/v1/telemetry/sessions/{session_id}",
-            get(telemetry::session_details),
-        )
-        .route(
-            "/v1/telemetry/traces/{trace_id}",
-            get(telemetry::trace_details),
-        )
+        .route("/v1/fields", get(fields::fields))
+        .route("/v1/fields/{field}/values", get(fields::field_values))
+        .route("/v1/query/sql", post(debug_sql::execute_sql))
+        .merge(control::runtime_control_routes())
         .merge(loki_routes())
         .merge(tempo_routes())
         .merge(compat_stub_routes())

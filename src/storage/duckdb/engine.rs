@@ -272,7 +272,7 @@ pub fn set_self_heal_failures_for_test(value: u64) {
 /// workers rebuild instead of staying dead.
 ///
 /// Classification is anchored to the leading marker of the FIRST line, for the
-/// same reason [`crate::api::llm::query::classify_storage_error`] is: DuckDB
+/// same reason [`crate::api::error::classify_storage_error`] is: DuckDB
 /// echoes the offending statement (`LINE 1: ...`) into the message, and that
 /// statement embeds caller-supplied literals. A `contains` check here would let
 /// a filter value like `model_name = "database has been invalidated"` force two

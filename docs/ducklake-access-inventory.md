@@ -31,8 +31,8 @@ is not part of the public workspace API:
 | --- | --- | --- |
 | `src/storage/mod.rs` | Declares internal storage modules; no public `Storage` wrapper or writer re-export | Keep storage primitives behind engine construction |
 | `src/ingest_engine/mod.rs` | `IngestEngine` privately owns the writer and exposes one domain write path per signal (`add_spans`, `add_logs`, `add_scores`, and `add_score_configs`); `AdminEngine` owns promotion operations | Keep domain methods; no direct/batched writer or schema-DDL escape hatch |
-| `src/runtime_api.rs` | Runtime API routes promotion operations through the tenant-bound admin facade | Keep promotion access behind the engine/admin capability |
-| `src/api/llm/mod.rs` | LLM API reads/writes score and score-config data through `IngestEngine` | Keep workspace binding at the runtime engine boundary |
+| `src/api/control.rs` | Control API routes promotion operations through the tenant-bound admin facade | Keep promotion access behind the engine/admin capability |
+| `src/api/scores.rs` | Scores API reads/writes score and score-config data through `IngestEngine` | Keep workspace binding at the runtime engine boundary |
 | `src/main.rs` | Startup starts maintenance via `RuntimeEngineManager` | Keep registry access inside the manager / composition boundary |
 
 ## Access rules for the refactor

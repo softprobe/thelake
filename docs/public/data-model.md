@@ -128,22 +128,22 @@ LLM fields (`observation_type`, model, tokens, cost, `user_id`) are derived
 from span attribute maps (`gen_ai.*`, `sp.*`) at query time. Promotion makes
 those fields typed filter columns but is not required for correctness.
 
-### Observation list (`POST /v1/llm/observations/search`)
+### Span list (`POST /v1/spans/search`)
 
 Returns identity, type, name, timing, status, model, token, cost, and selected
 metadata fields. It does not return full attributes, events, or
 prompt/completion payloads. Default limit 50, max 200.
 
-### Observation detail (`GET /v1/llm/observations/{span_id}`)
+### Span detail (`GET /v1/spans/{span_id}`)
 
 Returns the full span, attributes, events, and attached scores for that span.
 
-### Trace detail (`GET /v1/llm/traces/{trace_id}`)
+### Trace detail (`GET /v1/traces/{trace_id}`)
 
 Returns a derived trace summary, paged observations (full payload), and scores
 attached to the trace or any member span.
 
-### Session summary (`GET /v1/llm/sessions/{session_id}?from=&to=`)
+### Session summary (`GET /v1/sessions/{session_id}?from=&to=`)
 
 Requires `from` and `to`. Returns bounded trace membership, users, aggregate
 token/cost values, paged trace summaries, and scores attached to the session or

@@ -12,7 +12,6 @@ use softprobe_runtime::authn::TenantInfo;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
 use softprobe_runtime::promotion::{parse_promotion_manifest, PromotionManifest};
-use softprobe_runtime::runtime_api::runtime_control_routes;
 use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -155,7 +154,7 @@ async fn json_response(response: axum::response::Response<Body>) -> (StatusCode,
 async fn typed_details(router: &Router, workspace: &str, trace_id: &str) -> (StatusCode, Value) {
     let mut request = Request::builder()
         .method("POST")
-        .uri("/v1/telemetry/details")
+        .uri("/v1/traces/details")
         .header("content-type", "application/json")
         .body(Body::from(
             json!({
@@ -179,7 +178,7 @@ async fn rebuild_summary(router: &Router, workspace: &str) -> (StatusCode, Value
     let to = Utc::now() + chrono::Duration::days(1);
     let mut request = Request::builder()
         .method("POST")
-        .uri("/v1/llm/sessions/summary/rebuild")
+        .uri("/v1/sessions/summary/rebuild")
         .header("content-type", "application/json")
         .body(Body::from(
             json!({
@@ -198,7 +197,7 @@ async fn search_sessions(router: &Router, workspace: &str) -> (StatusCode, Value
     let to = Utc::now() + chrono::Duration::days(1);
     let mut request = Request::builder()
         .method("POST")
-        .uri("/v1/llm/sessions/search")
+        .uri("/v1/sessions/search")
         .header("content-type", "application/json")
         .body(Body::from(
             json!({
@@ -226,7 +225,7 @@ async fn get_compat_json(router: &Router, workspace: &str, uri: String) -> (Stat
 async fn list_score_configs(router: &Router, workspace: &str) -> (StatusCode, Value) {
     let mut request = Request::builder()
         .method("GET")
-        .uri("/v1/llm/score-configs")
+        .uri("/v1/score-configs")
         .body(Body::empty())
         .expect("score config list request");
     request.extensions_mut().insert(tenant(workspace));
@@ -237,7 +236,7 @@ async fn get_trace(router: &Router, workspace: &str, trace_id: &str) -> (StatusC
     let mut request = Request::builder()
         .method("GET")
         .uri(format!(
-            "/v1/llm/traces/{trace_id}?from=2020-01-01T00:00:00Z&to=2030-01-01T00:00:00Z"
+            "/v1/traces/{trace_id}?from=2020-01-01T00:00:00Z&to=2030-01-01T00:00:00Z"
         ))
         .body(Body::empty())
         .expect("trace request");
@@ -281,13 +280,9 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
     let temp = TempDir::new().expect("tempdir");
     let suffix = Uuid::new_v4().simple().to_string();
     let config = shared_config(&temp, format!("shared_scope_contract_{suffix}"));
-    let (router, state) = softprobe_runtime::api::create_router(
-        Arc::new(config.clone()),
-        axum::routing::post(softprobe_runtime::api::ingestion::traces::ingest_traces),
-        None,
-    )
-    .await
-    .expect("shared router");
+    let (router, state) = softprobe_runtime::api::create_router(Arc::new(config.clone()), None)
+        .await
+        .expect("shared router");
     let engines = &state.engines;
     let peer_engines = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
         .await
@@ -595,7 +590,7 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
         .to_string()
         .contains("shared_scope_raw_sql_forbidden"));
 
-    let control_router = runtime_control_routes().with_state(state.clone());
+    let control_router = router.clone();
     let promotion_manifest = r#"
 specVersion: softprobe.promotion.v1
 target:
