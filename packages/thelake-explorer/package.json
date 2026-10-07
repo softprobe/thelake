@@ -16,6 +16,7 @@
   "scripts": {
     "build": "vite build && vite build --config vite.spa.config.ts && tsc -p tsconfig.lib.json",
     "build:embedded": "vite build --config vite.spa.config.ts --mode embedded",
+    "dev:spa": "vite --config vite.spa.config.ts --host 127.0.0.1 --port 4173 --strictPort",
     "test": "vitest run"
   },
   "peerDependencies": { "react": ">=18", "react-dom": ">=18" },

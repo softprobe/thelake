@@ -59,8 +59,11 @@ Demo overlay: [`otel-demo/`](otel-demo/).
 ## Browser e2e
 
 Playwright specs under [`browser/`](browser/) cover Loki Explore, Loki/Tempo
-smoke dashboards, and Tempo protocol envelopes. They do **not** exercise
-PromQL or Prometheus datasources.
+smoke dashboards, Tempo protocol envelopes, and the shared Explorer's session
+list, summary counts, filtering, and trace/span details. The Explorer UI spec
+uses deterministic API fixtures and runs in both the CI workflow and the PR
+compatibility workflow. The Grafana specs do **not** exercise PromQL or
+Prometheus datasources.
 
 ## CI compose smoke
 

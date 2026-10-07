@@ -1,6 +1,6 @@
 name: CI
 
-# Pre-merge / main push: make doctor → unit checks → two parallel DuckLake E2E jobs.
+# Pre-merge / main push: unit checks, two DuckLake E2E jobs, and Explorer UI E2E.
 # Dev Cargo profile only (clippy + tests share one compile). Warm SLO ≤ 18m.
 # Cache: ~/.cache/thelake via Make + actions/cache on registry + target.
 on:
@@ -167,3 +167,21 @@ jobs:
       - name: Teardown local infra
         if: always()
         run: make teardown
+
+  e2e-explorer-ui:
+    name: E2E (shared Explorer UI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run Explorer UI E2E
+        run: make test-explorer-ui

@@ -25,7 +25,7 @@ SHELL := /bin/bash
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
 	ducklake-extension \
-	test-grafana-static test-grafana-system test-grafana-browser test-compat \
+	test-grafana-static test-grafana-system test-grafana-browser test-explorer-ui test-compat \
 	stress test-deploy seed-lake bench-llm-seeded test-perf-helpers \
 	demo-session duckdb-shell duckdb-shell-prod generate-telemetry drop-tables telemetrygen \
 	grafana-up grafana-down \
@@ -649,6 +649,12 @@ test-tempo-diff: ensure-cache
 test-grafana-browser: ensure-cache
 	@chmod +x scripts/test-grafana-browser.sh
 	./scripts/test-grafana-browser.sh
+
+# Browser E2E for the shared standalone Explorer. Uses deterministic API fixtures,
+# so it covers the built UI without requiring Grafana, DuckLake, or credentials.
+test-explorer-ui:
+	@chmod +x scripts/test-explorer-ui.sh
+	./scripts/test-explorer-ui.sh
 
 # Manual Grafana inspection: host Softprobe + pinned Grafana 11.2.0 + seeded demo data.
 # Open http://127.0.0.1:3000 (admin/admin) → Softprobe datasources.
