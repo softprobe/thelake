@@ -534,6 +534,20 @@ jobs:
     needs: [real-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    services:
+      ducklake-postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ducklake
+          POSTGRES_USER: ducklake
+          POSTGRES_DB: ducklake
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ducklake -d ducklake"
+          --health-interval 2s
+          --health-timeout 10s
+          --health-retries 15
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
@@ -553,6 +567,9 @@ jobs:
 
       - name: Ensure compatibility toolchain
         uses: ./.github/actions/compat-deps
+
+      - name: Restore build cache
+        uses: ./.github/actions/thelake-cache
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

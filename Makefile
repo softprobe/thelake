@@ -650,8 +650,8 @@ test-grafana-browser: ensure-cache
 	@chmod +x scripts/test-grafana-browser.sh
 	./scripts/test-grafana-browser.sh
 
-# Browser E2E for the shared standalone Explorer. Uses deterministic API fixtures,
-# so it covers the built UI without requiring Grafana, DuckLake, or credentials.
+# Browser E2E for the shared standalone Explorer. Builds and starts a real thelake
+# process against Postgres and a temporary DuckLake, ingests OTLP, and drives the UI.
 test-explorer-ui:
 	@chmod +x scripts/test-explorer-ui.sh
 	./scripts/test-explorer-ui.sh

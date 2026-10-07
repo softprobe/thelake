@@ -189,12 +189,23 @@ impl MaintenanceEngine {
 
     /// Workspace ids for per-tenant jobs (session_summary). Not warehouse-deduped.
     pub async fn workspace_scope_keys(&self) -> Result<Vec<String>> {
-        Ok(self
+        let mut keys: Vec<String> = self
             .workspace_scopes()
             .await?
             .into_iter()
             .map(|(id, _)| id)
-            .collect())
+            .collect();
+        // Local anonymous mode intentionally has no workspace registry or
+        // provisioning API. Its configured workspace still needs per-workspace
+        // jobs (session-summary reduction/rebuild) to consume its dirty rows.
+        if let Some(workspace_id) = crate::runtime_api::local_anonymous_workspace_id()
+            .map_err(|status| anyhow!("invalid local anonymous workspace: {status}"))?
+        {
+            if !keys.contains(&workspace_id) {
+                keys.push(workspace_id);
+            }
+        }
+        Ok(keys)
     }
 
     pub(crate) async fn physical_scopes(&self) -> Result<Vec<(String, PhysicalScope)>> {

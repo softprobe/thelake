@@ -44,6 +44,7 @@ export function ThelakeExplorer({
   const [cursor, setCursor] = useState<string>();
   const [days, setDays] = useState(7);
   const [query, setQuery] = useState("");
+  const [agentName, setAgentName] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -57,12 +58,12 @@ export function ThelakeExplorer({
     setLoading(true);
     setCursor(undefined);
     setError(undefined);
-    api.searchSessions(pageSize, undefined, controller.signal, days)
+    api.searchSessions(pageSize, undefined, controller.signal, days, agentName)
       .then((result) => { setSessions(result.items); setCursor(result.nextCursor ?? undefined); })
       .catch((e: unknown) => { if (!controller.signal.aborted) setError(String(e)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [api, pageSize, days]);
+  }, [api, pageSize, days, agentName]);
 
   useEffect(() => {
     if (!selected) { setObservations([]); setSelectedSpan(undefined); return; }
@@ -71,9 +72,8 @@ export function ThelakeExplorer({
     setSelectedSpan(undefined);
     setLoadingDetail(true);
     setError(undefined);
-    api.getSession(selected, controller.signal).then(async (session) => {
-      const pages = await Promise.all(session.traces.map((trace) => api.getTrace(trace.trace_id, controller.signal, selected)));
-      const all = pages.flatMap((page) => page.observations)
+    api.getSession(selected, controller.signal).then((session) => {
+      const all = session.spans
         .filter((observation) => !observation.session_id || observation.session_id === selected)
         .sort((a, b) => a.start_time.localeCompare(b.start_time));
       setObservations(all);
@@ -106,7 +106,7 @@ export function ThelakeExplorer({
     if (!cursor || loadingMore) return;
     setLoadingMore(true);
     try {
-      const next = await api.searchSessions(pageSize, cursor, undefined, days);
+      const next = await api.searchSessions(pageSize, cursor, undefined, days, agentName);
       setSessions((prev) => [...prev, ...next.items.filter((item) => !prev.some((row) => row.session_id === item.session_id))]);
       setCursor(next.nextCursor ?? undefined);
     } catch (e) {
@@ -154,12 +154,13 @@ export function ThelakeExplorer({
             <select aria-label="Session time range" value={days} onChange={(event) => setDays(Number(event.target.value))}>
               <option value={1}>24 hours</option><option value={7}>7 days</option><option value={30}>30 days</option><option value={90}>90 days</option>
             </select>
+            <input aria-label="Filter by agent" placeholder="Agent name" value={agentName} onChange={(event) => setAgentName(event.target.value)} />
             <input aria-label="Filter sessions" placeholder="Filter session, model, user" value={query} onChange={(event) => setQuery(event.target.value)} />
           </div>
           {loading ? <p>Loading sessions…</p> : filteredSessions.length === 0 ? <p>No sessions match this range and filter.</p> : filteredSessions.map((session) => (
             <button className={selected === session.session_id ? "tle-selected" : ""} key={session.session_id} onClick={() => { setSelected(session.session_id); onSessionOpen?.(session.session_id); }}>
               <b>{session.session_id}</b>
-              <span>{session.trace_count} traces · {session.observation_count} spans · {session.error_count} errors</span>
+              <span>{session.span_count} spans · {session.error_count} errors</span>
               <span>{session.models?.join(", ") || "No model recorded"}</span>
               <time>{new Date(session.start_time).toLocaleString()}</time>
             </button>

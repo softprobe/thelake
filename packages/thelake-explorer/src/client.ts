@@ -11,9 +11,9 @@ export type ExplorerConfig = {
 
 export type SessionSummary = {
   session_id: string; start_time: string; end_time?: string | null;
-  trace_count: number; observation_count: number; error_count: number;
+  span_count: number; error_count: number;
   total_tokens?: number | null; total_cost?: number | null;
-  user_ids?: string[]; models?: string[];
+  agent_name?: string | null; user_ids?: string[]; models?: string[];
 };
 
 export type TraceSummary = {
@@ -22,7 +22,6 @@ export type TraceSummary = {
   total_cost?: number | null;
 };
 
-export type SessionDetail = { session_id: string; traces: TraceSummary[]; next_cursor?: string | null };
 export type Observation = {
   trace_id: string; span_id: string; parent_span_id?: string | null; session_id?: string | null;
   name: string; observation_type: string; start_time: string; end_time?: string | null;
@@ -31,6 +30,10 @@ export type Observation = {
   input?: unknown; output?: unknown; attributes?: Record<string, unknown>;
   events?: Array<{ name: string; timestamp?: string; attributes?: Record<string, unknown> }>;
   scores?: Array<{ score_id: string; name: string; data_type: string; numeric_value?: number | null; string_value?: string | null; boolean_value?: boolean | null; comment?: string | null }>;
+};
+export type SessionDetail = {
+  session_id: string; from: string; to: string; trace_count: number; span_count: number;
+  spans: Observation[]; scores?: ScoreRecord[];
 };
 export type ScoreRecord = {
   score_id: string; name: string; data_type: string; numeric_value?: number | null;
@@ -51,12 +54,14 @@ export class ExplorerApi {
     return response.json() as Promise<T>;
   }
 
-  async searchSessions(pageSize = 50, cursor?: string, signal?: AbortSignal, days = 7): Promise<{ items: SessionSummary[]; nextCursor?: string | null }> {
+  async searchSessions(pageSize = 50, cursor?: string, signal?: AbortSignal, days = 7, agentName?: string): Promise<{ items: SessionSummary[]; nextCursor?: string | null }> {
     const now = new Date();
     const from = new Date(now.getTime() - days * 86400_000).toISOString();
+    const body: Record<string, unknown> = { from, to: now.toISOString(), order_by: "start_time", order: "desc", limit: pageSize, cursor, roots_only: true };
+    if (agentName?.trim()) body.agent_name = agentName.trim();
     const result = await this.request<{ items: SessionSummary[]; next_cursor?: string | null }>(
       "/llm/sessions/search",
-      { method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from, to: now.toISOString(), order_by: "start_time", order: "desc", limit: pageSize, cursor, roots_only: true }) },
+      { method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
     );
     return { items: result.items ?? [], nextCursor: result.next_cursor };
   }
@@ -64,18 +69,15 @@ export class ExplorerApi {
   async getSession(sessionId: string, signal?: AbortSignal): Promise<SessionDetail> {
     const path = `/llm/sessions/${encodeURIComponent(sessionId)}`;
     const query = new URLSearchParams({ limit: "200" });
-    const first = await this.request<SessionDetail>(`${path}?${query}`, { signal });
-    const traces = [...first.traces];
-    let cursor = first.next_cursor ?? null;
-    let page = 1;
-    while (cursor && page < 25) {
-      query.set("cursor", cursor);
-      const next = await this.request<SessionDetail>(`${path}?${query}`, { signal });
-      traces.push(...next.traces);
-      cursor = next.next_cursor ?? null;
-      page += 1;
-    }
-    return { ...first, traces, next_cursor: cursor };
+    const result = await this.request<SessionDetail>(`${path}?${query}`, { signal });
+    return {
+      ...result,
+      spans: result.spans.map((span) => ({
+        ...span,
+        input: span.input ?? span.attributes?.["sp.input"],
+        output: span.output ?? span.attributes?.["sp.output"],
+      })),
+    };
   }
 
   async getTrace(traceId: string, signal?: AbortSignal, sessionId?: string): Promise<{ observations: Observation[]; next_cursor?: string | null }> {

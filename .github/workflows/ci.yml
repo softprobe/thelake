@@ -171,9 +171,25 @@ jobs:
   e2e-explorer-ui:
     name: E2E (shared Explorer UI)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    services:
+      ducklake-postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ducklake
+          POSTGRES_USER: ducklake
+          POSTGRES_DB: ducklake
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ducklake -d ducklake"
+          --health-interval 2s
+          --health-timeout 10s
+          --health-retries 15
     env:
       CI: "true"
+      CARGO_INCREMENTAL: "0"
+      DUCKDB_DOWNLOAD_LIB: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -182,6 +198,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: packages/thelake-explorer/package-lock.json
+
+      - name: Restore build cache
+        uses: ./.github/actions/thelake-cache
+
+      - name: Bootstrap ubuntu runner
+        uses: ./.github/actions/ubuntu-runner
 
       - name: Run Explorer UI E2E
         run: make test-explorer-ui
