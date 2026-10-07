@@ -64,7 +64,7 @@ def fetch_session_ids(
             "limit": 100,
             "cursor": cursor,
         }
-        response = request_json(f"{base_url}/v1/llm/sessions/search", token, body)
+        response = request_json(f"{base_url}/v1/sessions/search", token, body)
         if response.get("cursor_supported") is not True:
             raise RuntimeError("session search does not support the cursor order required to enumerate all sessions")
         pages += 1
@@ -135,13 +135,13 @@ def validate_detail(
 ) -> tuple[Failure | None, str]:
     encoded = urllib.parse.quote(session_id, safe="")
     try:
-        detail = request_json(f"{base_url}/v1/llm/sessions/{encoded}", token)
+        detail = request_json(f"{base_url}/v1/sessions/{encoded}", token)
     except RuntimeError as error:
         if str(error) != "HTTP 404":
             return Failure(session_id, str(error)), "detail"
         try:
             recording = request_json(
-                f"{base_url}/v1/llm/sessions/{encoded}/recording?limit=1000", token
+                f"{base_url}/v1/sessions/{encoded}/recording?limit=1000", token
             )
         except RuntimeError as recording_error:
             return Failure(session_id, f"detail {error}; recording {recording_error}"), "recording"

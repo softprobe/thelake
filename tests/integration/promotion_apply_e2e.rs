@@ -2,13 +2,11 @@
 
 use async_trait::async_trait;
 use axum::middleware::from_fn_with_state;
-use axum::routing::post;
 use axum::Router;
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
+use softprobe_runtime::api::auth::runtime_auth_middleware;
 use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
-use softprobe_runtime::runtime_api::{runtime_auth_middleware, runtime_control_routes};
 use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,12 +88,10 @@ async fn setup() -> PostgresBackend {
         resolver: Resolver::new(format!("{}/", mock.uri()), Duration::from_secs(60)),
     };
     let metadata_path = config.ducklake.metadata_path.clone();
-    let (router, state) = create_router(Arc::new(config), post(ingest_traces), Some(control))
+    let (router, state) = create_router(Arc::new(config), Some(control))
         .await
         .expect("router");
-    let router = router
-        .merge(runtime_control_routes().with_state(state.clone()))
-        .layer(from_fn_with_state(state, runtime_auth_middleware));
+    let router = router.layer(from_fn_with_state(state, runtime_auth_middleware));
 
     PostgresBackend {
         _temp: temp,

@@ -3,9 +3,9 @@
 //! Requires gRPC metadata `authorization: Bearer <api_key>` (same as HTTP).
 //! Listens on `OTEL_GRPC_PORT` (default **4317**) unless the process sets `SOFTPROBE_GRPC_DISABLE=1`.
 
-use crate::api::ingestion::traces::process_traces;
+use crate::api::auth::parse_bearer;
+use crate::api::ingest::process_traces;
 use crate::api::AppState;
-use crate::runtime_api::parse_bearer;
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::{
     TraceService, TraceServiceServer,
 };

@@ -5,11 +5,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::middleware::from_fn;
-use axum::routing::post;
 use axum::Router;
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::api::AppState;
-use softprobe_runtime::runtime_api::runtime_control_routes;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -19,17 +16,11 @@ use crate::util::tenant::{inject_local_sqlite_tenant, provision_local_sqlite_ten
 pub async fn build_tenant_router_with_state() -> (Router, AppState, TempDir) {
     let temp = TempDir::new().expect("temp");
     let config = file_backed_test_config(&temp);
-    let (router, state) = softprobe_runtime::api::create_router(
-        std::sync::Arc::new(config),
-        post(ingest_traces),
-        None,
-    )
-    .await
-    .expect("router");
+    let (router, state) = softprobe_runtime::api::create_router(std::sync::Arc::new(config), None)
+        .await
+        .expect("router");
     provision_local_sqlite_tenant(&state).await;
-    let router = router
-        .merge(runtime_control_routes().with_state(state.clone()))
-        .layer(from_fn(inject_local_sqlite_tenant));
+    let router = router.layer(from_fn(inject_local_sqlite_tenant));
     (router, state, temp)
 }
 

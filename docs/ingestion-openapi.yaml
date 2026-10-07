@@ -13,21 +13,21 @@ info:
     It also documents the tenant-scoped schema promotion endpoint:
     - `POST /v1/promotions/apply`
 
-    LLM evaluations are written through:
-    - `POST /v1/llm/scores`
-    - `GET|POST /v1/llm/score-configs`
+    Evaluations are written through:
+    - `POST /v1/scores`
+    - `GET|POST /v1/score-configs`
 
-    LLM query surfaces:
-    - `POST /v1/llm/spans/search`
-    - `GET /v1/llm/spans/{span_id}`
-    - `GET /v1/llm/traces/{trace_id}`
-    - `POST /v1/llm/sessions/search`
-    - `POST /v1/llm/sessions/summary/rebuild`
-    - `GET /v1/llm/sessions/{session_id}`
-    - `GET /v1/llm/sessions/{session_id}/recording`
+    Query surfaces:
+    - `POST /v1/spans/search`
+    - `GET /v1/spans/{span_id}`
+    - `GET /v1/traces/{trace_id}`
+    - `POST /v1/sessions/search`
+    - `POST /v1/sessions/summary/rebuild`
+    - `GET /v1/sessions/{session_id}`
+    - `GET /v1/sessions/{session_id}/recording`
 
     Also inventoried here (summary-level): health/ready, `POST /v1/query/sql`,
-    and `/v1/telemetry/*`. Loki/Tempo Grafana-compat query routes are served by
+    and `/v1/fields`. Loki/Tempo Grafana-compat query routes are served by
     the process but are not part of this product OpenAPI document.
 
     For JSON payloads, requests are expected to follow the OpenTelemetry collector export
@@ -169,7 +169,7 @@ paths:
           description: Request exceeds `server.max_body_size`
         "503":
           $ref: "#/components/responses/IngestUnavailable"
-  /v1/llm/scores:
+  /v1/scores:
     post:
       tags:
         - llm
@@ -241,7 +241,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/score-configs:
+  /v1/score-configs:
     get:
       tags:
         - llm
@@ -320,7 +320,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/spans/search:
+  /v1/spans/search:
     post:
       tags:
         - llm
@@ -360,7 +360,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/spans/{span_id}:
+  /v1/spans/{span_id}:
     get:
       tags:
         - llm
@@ -405,7 +405,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/traces/{trace_id}:
+  /v1/traces/{trace_id}:
     get:
       tags:
         - llm
@@ -469,7 +469,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/sessions/search:
+  /v1/sessions/search:
     post:
       tags:
         - llm
@@ -509,7 +509,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/sessions/summary/rebuild:
+  /v1/sessions/summary/rebuild:
     post:
       tags:
         - llm
@@ -546,7 +546,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/sessions/{session_id}:
+  /v1/sessions/{session_id}:
     get:
       tags:
         - llm
@@ -589,7 +589,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/llm/sessions/{session_id}/recording:
+  /v1/sessions/{session_id}/recording:
     get:
       tags:
         - llm
@@ -754,35 +754,19 @@ paths:
       responses:
         "200":
           description: Query result
-  /v1/telemetry/search:
-    post:
-      tags: [query]
-      summary: Search telemetry evidence
-      operationId: searchTelemetry
-      responses:
-        "200":
-          description: Search page
-  /v1/telemetry/details:
-    post:
-      tags: [query]
-      summary: Fetch evidence details
-      operationId: telemetryDetails
-      responses:
-        "200":
-          description: Detail payload
-  /v1/telemetry/fields:
+  /v1/fields:
     get:
       tags: [query]
-      summary: List telemetry fields
-      operationId: listTelemetryFields
+      summary: List filterable fields
+      operationId: listFields
       responses:
         "200":
           description: Field list
-  /v1/telemetry/fields/{field}/values:
+  /v1/fields/{field}/values:
     get:
       tags: [query]
-      summary: List values for a telemetry field
-      operationId: listTelemetryFieldValues
+      summary: List values for a field
+      operationId: listFieldValues
       parameters:
         - name: field
           in: path
@@ -792,34 +776,6 @@ paths:
       responses:
         "200":
           description: Field values
-  /v1/telemetry/sessions/{session_id}:
-    get:
-      tags: [query]
-      summary: Telemetry session details
-      operationId: getTelemetrySession
-      parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Session telemetry details
-  /v1/telemetry/traces/{trace_id}:
-    get:
-      tags: [query]
-      summary: Telemetry trace details
-      operationId: getTelemetryTrace
-      parameters:
-        - name: trace_id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Trace telemetry details
   /v1/data/ducklake-connection:
     get:
       tags: [query]

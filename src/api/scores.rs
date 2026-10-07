@@ -1,5 +1,4 @@
-pub mod query;
-
+use crate::api::error::{bad_request, ApiError};
 use crate::api::AppState;
 use crate::authn::TenantInfo;
 use crate::models::{Score, ScoreConfig, ScoreDataType, ScoreSource};
@@ -93,8 +92,6 @@ pub struct ScoreConfigListResponse {
     pub items: Vec<ScoreConfig>,
 }
 
-type ApiError = (StatusCode, Json<serde_json::Value>);
-
 pub async fn create_score(
     State(state): State<AppState>,
     tenant: Option<Extension<TenantInfo>>,
@@ -102,10 +99,7 @@ pub async fn create_score(
 ) -> Result<(StatusCode, Json<Score>), ApiError> {
     let score = Score::from(request);
     if let Err(message) = score.validate() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": message })),
-        ));
+        return Err(bad_request(message));
     }
 
     let tenant_info = tenant.as_ref().map(|extension| &extension.0);
@@ -130,16 +124,10 @@ pub async fn create_score(
             )
         })?;
         let Some(config) = config else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "unknown config_id" })),
-            ));
+            return Err(bad_request("unknown config_id"));
         };
         if let Err(message) = config.validate_score(&score) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": message })),
-            ));
+            return Err(bad_request(message));
         }
     }
 
@@ -178,10 +166,7 @@ pub async fn create_score_config(
 ) -> Result<(StatusCode, Json<ScoreConfig>), ApiError> {
     let config = ScoreConfig::from(request);
     if let Err(message) = config.validate() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": message })),
-        ));
+        return Err(bad_request(message));
     }
 
     let tenant_info = tenant.as_ref().map(|extension| &extension.0);
@@ -259,9 +244,6 @@ pub async fn list_score_configs(
         )
     })?;
 
-    // Score-config reads use the writer DuckLake pool (same connection family as
-    // writes). Query-engine SQL mapping for MAP/date columns was unreliable for
-    // this table; keep one read path to avoid empty-list re-seed loops.
     let mut items = engine.list_score_configs().await.map_err(|error| {
         warn!("score config list failed: {}", error);
         (

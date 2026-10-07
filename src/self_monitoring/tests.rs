@@ -177,7 +177,7 @@ fn query_worker_splits_sql_gate_from_sql_exec() {
 
 #[test]
 fn session_detail_records_stages_before_question_mark() {
-    let query = include_str!("../api/llm/query.rs");
+    let query = include_str!("../api/sessions.rs");
     let get_session = query
         .split("pub async fn get_session(")
         .nth(1)

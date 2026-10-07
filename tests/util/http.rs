@@ -1,6 +1,4 @@
-use axum::routing::post;
 use softprobe_runtime::api;
-use softprobe_runtime::api::ingestion::traces::ingest_traces;
 use softprobe_runtime::config::Config;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -30,9 +28,7 @@ pub async fn start_test_server() -> (String, TempDir) {
     apply_workspace_scope_mode(&mut config);
 
     let config = Arc::new(config);
-    let (app, _) = api::create_router(config, post(ingest_traces), None)
-        .await
-        .expect("router");
+    let (app, _) = api::create_router(config, None).await.expect("router");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let addr = listener.local_addr().expect("addr");

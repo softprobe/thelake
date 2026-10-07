@@ -198,7 +198,7 @@ impl MaintenanceEngine {
         // Local anonymous mode intentionally has no workspace registry or
         // provisioning API. Its configured workspace still needs per-workspace
         // jobs (session-summary reduction/rebuild) to consume its dirty rows.
-        if let Some(workspace_id) = crate::runtime_api::local_anonymous_workspace_id()
+        if let Some(workspace_id) = crate::api::auth::local_anonymous_workspace_id()
             .map_err(|status| anyhow!("invalid local anonymous workspace: {status}"))?
         {
             if !keys.contains(&workspace_id) {
