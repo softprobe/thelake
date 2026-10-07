@@ -3,6 +3,10 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
   testDir: '.',
   testMatch: /.*\.spec\.ts$/,
+  // The dedicated Explorer E2E owns and starts its own thelake process via
+  // scripts/test-explorer-ui.sh. This Grafana suite has a separate shared
+  // stack on port 8090 and intentionally does not provide that backend.
+  testIgnore: ['e2e_explorer_ui.spec.ts'],
   timeout: 60000,
   expect: {
     timeout: 15000,
