@@ -11,7 +11,7 @@ softprobe-code SPA
   → @softprobe/web-record (rrweb)
   → POST {baseUrl}/v1/traces   (OTLP JSON, Bearer publicKey)
   → thelake DuckLake
-  → GET /v1/llm/sessions/{session_id}/recording?from=&to=
+  → GET /v1/sessions/{session_id}/recording?from=&to=
   → sp-llm explorer WebReplayPane (rrweb-player)
 ```
 

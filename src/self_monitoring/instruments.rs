@@ -343,9 +343,7 @@ fn build_instruments(meter: &Meter) -> Instruments {
             .build(),
         session_detail_stage_duration_ms: meter
             .f64_histogram("thelake.api.session_detail.stage.duration")
-            .with_description(
-                "GET /v1/llm/sessions/{id} stage wall time (pg_window, lake_sql, total)",
-            )
+            .with_description("GET /v1/sessions/{id} stage wall time (pg_window, lake_sql, total)")
             .with_unit("ms")
             .build(),
         query_stage_duration_ms: meter

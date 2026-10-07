@@ -6,7 +6,7 @@ describe("ExplorerApi", () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ items: [] }), { status: 200 }));
     const api = new ExplorerApi({ apiBasePath: "/api/thelake/v1/", auth: { headers: () => ({ Authorization: "Bearer test" }) }, fetch: fetcher as typeof fetch });
     await api.searchSessions();
-    expect(fetcher.mock.calls[0][0]).toBe("/api/thelake/v1/llm/sessions/search");
+    expect(fetcher.mock.calls[0][0]).toBe("/api/thelake/v1/sessions/search");
     expect((fetcher.mock.calls[0][1]?.headers as Record<string, string>).Authorization).toBe("Bearer test");
   });
 
@@ -41,7 +41,7 @@ describe("ExplorerApi", () => {
     const fetcher = vi.fn(async () => new Response("{}", { status: 200 }));
     const api = new ExplorerApi({ apiBasePath: "/api/thelake/v1", auth: { headers: () => ({ "X-Softprobe-Assertion": "signed" }) }, fetch: fetcher as typeof fetch });
     await api.createScore({ name: "human_verdict", data_type: "categorical", string_value: "correct", session_id: "s1" });
-    expect(fetcher.mock.calls[0][0]).toBe("/api/thelake/v1/llm/scores");
+    expect(fetcher.mock.calls[0][0]).toBe("/api/thelake/v1/scores");
     const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
     expect(body).toMatchObject({ name: "human_verdict", string_value: "correct", session_id: "s1", source: "annotation" });
   });

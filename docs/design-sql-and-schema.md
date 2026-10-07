@@ -99,7 +99,7 @@ src/sql/
   literal.rs / ident.rs / bounds/{window,execute_gate}.rs
   schema/          # TableSpec + DDL
   llm/ compaction/ tempo/ session_summary/ writer/ promotion/ telemetry/
-src/api/llm/query.rs         # HTTP only → sql::llm
+src/api/sessions.rs          # HTTP only → sql::llm
 ```
 
 **Locality test:** SQL verb string literals only under `src/sql/**` or in tests.

@@ -120,19 +120,12 @@ pub fn is_local_anonymous_data_plane(method: &Method, path: &str) -> bool {
         (&Method::POST, "/v1/traces")
         | (&Method::POST, "/v1/logs")
         | (&Method::POST, "/v1/scores")
-        | (&Method::POST, "/v1/llm/scores")
         | (&Method::POST, "/v1/spans/search")
-        | (&Method::POST, "/v1/llm/spans/search")
         | (&Method::POST, "/v1/sessions/search")
-        | (&Method::POST, "/v1/llm/sessions/search")
-        | (&Method::GET, "/v1/score-configs")
-        | (&Method::GET, "/v1/llm/score-configs") => true,
+        | (&Method::GET, "/v1/score-configs") => true,
         (&Method::GET, p) if is_single_resource_path(p, "/v1/spans/") => true,
-        (&Method::GET, p) if is_single_resource_path(p, "/v1/llm/spans/") => true,
         (&Method::GET, p) if is_single_resource_path(p, "/v1/traces/") => true,
-        (&Method::GET, p) if is_single_resource_path(p, "/v1/llm/traces/") => true,
         (&Method::GET, p) if is_single_resource_path(p, "/v1/sessions/") => true,
-        (&Method::GET, p) if is_single_resource_path(p, "/v1/llm/sessions/") => true,
         _ => false,
     }
 }

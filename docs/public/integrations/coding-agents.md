@@ -82,7 +82,7 @@ export SOFTPROBE_BASE_URL="https://thelake.softprobe.ai"
    [explorer.softprobe.ai](https://explorer.softprobe.ai) or via API:
 
 ```bash
-curl -sS -X POST https://thelake.softprobe.ai/v1/llm/observations/search \
+curl -sS -X POST https://thelake.softprobe.ai/v1/spans/search \
   -H "Authorization: Bearer $SOFTPROBE_PUBLIC_KEY" \
   -H "Content-Type: application/json" \
   -H "User-Agent: Mozilla/5.0" \

@@ -158,21 +158,6 @@ pub async fn create_router(
         .route("/v1/fields", get(fields::fields))
         .route("/v1/fields/{field}/values", get(fields::field_values))
         .route("/v1/query/sql", post(debug_sql::execute_sql))
-        // Explorer SPA aliases
-        .route("/v1/llm/scores", post(scores::create_score))
-        .route(
-            "/v1/llm/score-configs",
-            get(scores::list_score_configs).post(scores::create_score_config),
-        )
-        .route("/v1/llm/spans/search", post(traces::search_spans))
-        .route("/v1/llm/spans/{span_id}", get(traces::get_span))
-        .route("/v1/llm/traces/{trace_id}", get(traces::get_trace))
-        .route("/v1/llm/sessions/search", post(sessions::search_sessions))
-        .route("/v1/llm/sessions/{session_id}", get(sessions::get_session))
-        .route(
-            "/v1/llm/sessions/{session_id}/recording",
-            get(sessions::get_session_recording),
-        )
         .merge(control::runtime_control_routes())
         .merge(loki_routes())
         .merge(tempo_routes())
