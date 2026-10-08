@@ -59,7 +59,7 @@ def run_agent(agent_name: str, api_url: str, model_name: str) -> str:
                 provider="google",
                 operation_name="chat",
                 input=first_input,
-                prompt_event={"role": "user", "content": user_prompt},
+                prompt_event=[{"role": "user", "content": user_prompt}],
             ) as generation:
                 first = client.models.generate_content(
                     model=model_name,

@@ -703,7 +703,7 @@ mod tests {
             vec![json!({
                 "name": "gen_ai.content.prompt",
                 "timestamp": "2026-10-08T12:00:00Z",
-                "attributes": {"content": json!({"role":"user","content":user_prompt}).to_string()}
+                "attributes": {"content": json!([{"role":"user","content":user_prompt}]).to_string()}
             })],
         );
         let tool_span = span_detail(
