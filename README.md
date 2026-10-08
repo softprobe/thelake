@@ -1,4 +1,16 @@
-# thelake
+<p align="center">
+  <a href="https://thelake.softprobe.ai/">
+    <img src="website/assets/logos/thelake.svg" alt="thelake" width="96" height="96" />
+  </a>
+</p>
+
+<h1 align="center">
+  <a href="https://thelake.softprobe.ai/">thelake</a>
+</h1>
+
+<p align="center">
+  <a href="https://thelake.softprobe.ai/">thelake.softprobe.ai</a>
+</p>
 
 > **Open source AI evidence lake on DuckDB.** thelake preserves production AI
 > traces and recordings as customer-controlled data assets — durable, SQL
