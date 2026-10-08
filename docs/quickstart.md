@@ -53,6 +53,9 @@ In another terminal, export the same Gemini key and run the command printed by
 the first terminal. It uses the right local-network address for your platform,
 calls Gemini with a real tool declaration, invokes the refund tool, and exports
 the resulting OTLP spans to your local theLake.
+The sample uses Softprobe's Python auto-instrumentation wrapper through
+Gemini's OpenAI-compatible endpoint; only the application-owned refund tool
+execution is instrumented explicitly.
 The demo agent makes live Gemini calls but its refund tool only returns a local
 demo result; it does not connect to a ticketing or payment system.
 
