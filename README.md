@@ -32,6 +32,10 @@ Product goals: [`docs/architecture/goals.md`](docs/architecture/goals.md).
 Architecture: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 Full index: [`docs/README.md`](docs/README.md).
 
+New here? Try the [5-minute quickstart](docs/quickstart.md) to describe a
+behavior check in chat, run a Gemini-powered sample agent, and see a real
+evaluation failure. First builds can take longer.
+
 ## Architecture
 
 DuckLake is the only durable telemetry backend. The catalog is PostgreSQL in
@@ -109,15 +113,19 @@ export THELAKE_DEFAULT_WORKSPACE_ID=550e8400-e29b-41d4-a716-446655440000
 make run
 ```
 
-Open the session and trace UI at `http://127.0.0.1:8090/explorer/`. Local
-anonymous mode (`SOFTPROBE_LOCAL_ANONYMOUS=1`) binds a fixed allowlist of
-`/v1/*` data-plane routes (OTLP ingest, scores POST, span/session search,
-score-config GET, and single span/trace/session GET) to
-`THELAKE_DEFAULT_WORKSPACE_ID` without a bearer. Other `/v1/*` routes
-(including recording, promotions, SQL, and workspaces) return 403. Anyone who
-can reach the listener can exercise that allowlist. Leave this mode disabled
-when the listener is reachable by untrusted users; assertion/Bearer auth
-remains the default.
+Open the session and trace UI at `http://127.0.0.1:8090/explorer/`. Full
+Explorer usage (working local config, embed, SPA dev, behavior checks):
+[`docs/how-to/explorer.md`](docs/how-to/explorer.md). Local anonymous mode
+(`SOFTPROBE_LOCAL_ANONYMOUS=1`) binds a fixed allowlist of `/v1/*` data-plane
+routes (OTLP ingest, scores POST, span/session search, score-config GET,
+single span/trace/session GET, and evaluator list/create/activate/deactivate)
+to `THELAKE_DEFAULT_WORKSPACE_ID` without a bearer. It does **not** provision
+that workspace: with the default **isolated** scope you must
+`POST /v1/workspaces` (admin key) first, or use shared scope as in the Explorer
+how-to. Other `/v1/*` routes (including recording, promotions, SQL, and
+workspaces) return 403. Anyone who can reach the listener can exercise that
+allowlist. Leave this mode disabled when the listener is reachable by
+untrusted users; assertion/Bearer auth remains the default.
 
 Defaults:
 
@@ -155,7 +163,11 @@ Health: `GET /health`, `GET /ready`, `GET /openapi.json`, `GET /swagger`
 
 Ingest: `POST /v1/traces`, `POST /v1/logs`
 
-Evaluations: `POST /v1/scores`, `GET|POST /v1/score-configs`
+Evaluations:
+
+- `GET|POST /v1/evaluators` (versioned natural-language behavior rules)
+- `POST /v1/scores`
+- `GET|POST /v1/score-configs`
 
 Queries:
 
@@ -185,6 +197,60 @@ Contracts:
   [SDK guide](docs/sdk/web-session-replay.md)
 - Promotion: [`docs/how-to/promotion.md`](docs/how-to/promotion.md)
 - Attributes: [`docs/architecture/attribute-storage.md`](docs/architecture/attribute-storage.md)
+
+### Online behavior evaluation
+
+Create a draft version of a plain-language rule with `POST /v1/evaluators`.
+Each rule must name its target agent. Drafts do not run until activated with
+`POST /v1/evaluators/{evaluator_id}/versions/{version}/activate`. After
+matching trace spans are committed, the runtime waits briefly, reads the
+bounded trace through its checked query path, and sends captured
+conversation/tool evidence to the DeepEval runner. The verdict is written as a
+trace-linked evaluator score. Stop new evaluations with the corresponding
+`/deactivate` endpoint.
+
+The runner is an optional private-network service. Start it from Compose with
+`--profile evaluation` and configure `THELAKE_EVALUATION_RUNNER_URL`,
+`THELAKE_EVALUATION_RUNNER_TOKEN`, and `GOOGLE_API_KEY` in the environment.
+Activation sends captured prompt, completion, and tool data for the selected
+agent to the configured Gemini provider. The runner redacts common credential
+fields and key formats, but does not perform general PII removal; review your
+trace data and provider settings before activation. See
+[`evaluation-runner/README.md`](evaluation-runner/README.md) for setup and an
+example request.
+
+For example, a team can save this behavior expectation without writing an
+assertion script:
+
+```bash
+curl -X POST "$THELAKE_API_URL/v1/evaluators" \
+  -H "Authorization: Bearer $THELAKE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "evaluator_id":"refund-eligibility",
+    "version":1,
+    "target_agent_name":"support-agent",
+    "name":"Check eligibility before refund",
+    "criteria":"Verify the agent checks refund eligibility and explains the result before issuing a refund.",
+    "required_tool_order":[{"before":"check_eligibility","action":"issue_refund"}]
+  }'
+
+curl -X POST "$THELAKE_API_URL/v1/evaluators/refund-eligibility/versions/1/activate" \
+  -H "Authorization: Bearer $THELAKE_API_KEY"
+```
+
+This initial online path runs in-process after ingestion and stores terminal
+verdicts as scores; it does not yet retain pending/running attempts or group
+repeated failures into a separate issue record. Trace completion is inferred
+from a completed root span after a short quiet period. Traces above the
+evidence span limit are skipped to avoid judging partial evidence. Runner
+outages, worker saturation, and process restarts can lose an in-flight attempt;
+a later ingest of that trace can cause another attempt. Evaluators apply to
+newly ingested traces; this version has no historical backfill or preview
+workflow. Tool-order rules return insufficient evidence if a prerequisite call
+is present but its result cannot be correlated. Missing prerequisite calls are
+judged only when tool-call evidence is present, so incomplete instrumentation
+can limit coverage.
 
 ## Query DuckLake locally
 

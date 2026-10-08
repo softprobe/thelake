@@ -176,6 +176,7 @@ pub(crate) fn map_span_summary(columns: &[String], row: &[Value]) -> Option<Span
         status_code: optional_string(columns, row, "status_code"),
         model_name: optional_string(columns, row, "model_name"),
         model_provider: optional_string(columns, row, "model_provider"),
+        agent_name: optional_string(columns, row, "agent_name"),
         user_id: optional_string(columns, row, "user_id"),
         input_tokens: optional_i64(columns, row, "input_tokens"),
         output_tokens: optional_i64(columns, row, "output_tokens"),

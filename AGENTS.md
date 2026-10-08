@@ -1,5 +1,10 @@
 # Engineering Principles
 
+## Public Repository Disclosure
+
+This repository is public. Never commit or push sensitive or internal information.
+If content classification is unclear, keep it private and ask the user.
+
 These requirements always apply to design, implementation, refactoring, and review:
 
 1. **DRY first.** Reuse production and test code. Keep behavior in one shared

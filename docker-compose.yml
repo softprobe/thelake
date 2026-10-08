@@ -85,6 +85,15 @@ services:
       - OTEL_GRPC_PORT=4317
       - SOFTPROBE_LISTEN_ADDR=0.0.0.0:8090
       - CONFIG_FILE=/app/config.yaml
+      - THELAKE_EVALUATION_RUNNER_URL=${THELAKE_EVALUATION_RUNNER_URL:-}
+      - THELAKE_EVALUATION_RUNNER_TOKEN=${THELAKE_EVALUATION_RUNNER_TOKEN:-}
+      - THELAKE_SLACK_SIGNING_SECRET=${THELAKE_SLACK_SIGNING_SECRET:-}
+      - THELAKE_SLACK_BOT_TOKEN=${THELAKE_SLACK_BOT_TOKEN:-}
+      - THELAKE_SLACK_TEAM_ID=${THELAKE_SLACK_TEAM_ID:-}
+      - THELAKE_SLACK_WORKSPACE_ID=${THELAKE_SLACK_WORKSPACE_ID:-}
+      - THELAKE_SLACK_ALLOWED_USERS=${THELAKE_SLACK_ALLOWED_USERS:-}
+      - THELAKE_SLACK_ALLOWED_CHANNELS=${THELAKE_SLACK_ALLOWED_CHANNELS:-}
+      - THELAKE_DEFAULT_WORKSPACE_ID=${THELAKE_DEFAULT_WORKSPACE_ID:-}
     volumes:
       - ./tests/config/test-docker.yaml:/app/config.yaml:ro
     networks:
@@ -92,6 +101,18 @@ services:
     ports:
       - "4317:4317"  # OTLP gRPC
       - "8090:8090"  # Runtime HTTP API
+
+  evaluation-runner:
+    profiles: [evaluation]
+    build:
+      context: ./evaluation-runner
+    environment:
+      - EVALUATION_RUNNER_TOKEN=${THELAKE_EVALUATION_RUNNER_TOKEN:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - USE_GEMINI_MODEL=1
+      - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-2.5-flash}
+    networks:
+      - backend_net
 
   grafana:
     image: grafana/grafana:10.4.0-ubuntu  # Ubuntu-based for glibc/libstdc++ compatibility

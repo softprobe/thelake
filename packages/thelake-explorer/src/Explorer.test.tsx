@@ -4,14 +4,14 @@ import { describe, expect, it } from "vitest";
 import { ThelakeExplorer } from "./Explorer";
 
 describe("ThelakeExplorer", () => {
-  it("renders the session and trace navigation shell", () => {
+  it("opens into the first-party chat and keeps trace exploration available", () => {
     const html = renderToStaticMarkup(createElement(ThelakeExplorer, {
       config: { apiBasePath: "/v1" },
     }));
 
-    expect(html).toContain("thelake Explorer");
-    expect(html).toContain('aria-label="Sessions"');
-    expect(html).toContain('aria-label="Trace details"');
-    expect(html).toContain("Select a session");
+    expect(html).toContain("theLake");
+    expect(html).toContain('aria-label="TheLake chat"');
+    expect(html).toContain("Welcome. Tell me a behavior you want to catch");
+    expect(html).toContain("Sessions");
   });
 });

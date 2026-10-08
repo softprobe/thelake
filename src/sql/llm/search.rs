@@ -42,6 +42,7 @@ pub struct SpanSummary {
     pub status_code: Option<String>,
     pub model_name: Option<String>,
     pub model_provider: Option<String>,
+    pub agent_name: Option<String>,
     pub user_id: Option<String>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,

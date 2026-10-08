@@ -583,6 +583,7 @@ fn observation_projection(include_payload: bool) -> String {
         "status_code".to_string(),
         format!("{} AS model_name", expr_model_name()),
         format!("{} AS model_provider", expr_model_provider()),
+        format!("{} AS agent_name", expr_agent_name_attr()),
         format!("{} AS user_id", expr_user_id()),
         format!("{} AS input_tokens", expr_input_tokens()),
         format!("{} AS output_tokens", expr_output_tokens()),

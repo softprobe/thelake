@@ -9,12 +9,14 @@ pub mod auth;
 pub mod control;
 pub mod debug_sql;
 pub mod error;
+pub mod evaluators;
 pub mod fields;
 pub mod health;
 pub mod ingest;
 pub(crate) mod mapping;
 pub mod scores;
 pub mod sessions;
+pub mod slack;
 pub mod traces;
 
 use crate::authn::WorkspaceAuth;
@@ -155,9 +157,22 @@ pub async fn create_router(
         .route("/v1/logs", post(ingest::ingest_logs))
         .route("/v1/scores", post(scores::create_score))
         .route(
+            "/v1/evaluators",
+            get(evaluators::list_evaluators).post(evaluators::create_evaluator),
+        )
+        .route(
+            "/v1/evaluators/{evaluator_id}/versions/{version}/activate",
+            post(evaluators::activate_evaluator),
+        )
+        .route(
+            "/v1/evaluators/{evaluator_id}/versions/{version}/deactivate",
+            post(evaluators::deactivate_evaluator),
+        )
+        .route(
             "/v1/score-configs",
             get(scores::list_score_configs).post(scores::create_score_config),
         )
+        .route("/slack/events", post(slack::events))
         .route("/v1/fields", get(fields::fields))
         .route("/v1/fields/{field}/values", get(fields::field_values))
         .route("/v1/query/sql", post(debug_sql::execute_sql))

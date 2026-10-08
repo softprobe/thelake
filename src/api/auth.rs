@@ -6,7 +6,7 @@ use axum::{
     response::Response,
 };
 
-/// Prefer `X-Softprobe-Assertion` (sp-llm#39). Fall back to Bearer assertion JWT,
+/// Prefer `X-Softprobe-Assertion`. Fall back to Bearer assertion JWT,
 /// then optional `SOFTPROBE_DEFAULT_WORKSPACE_ID`, then Softprobe auth service.
 pub async fn runtime_auth_middleware(
     State(state): State<AppState>,
@@ -117,10 +117,12 @@ pub fn local_anonymous_workspace_id() -> Result<Option<String>, StatusCode> {
 }
 
 pub fn is_local_anonymous_data_plane(method: &Method, path: &str) -> bool {
-    match (method, path) {
+    (match (method, path) {
         (&Method::POST, "/v1/traces")
         | (&Method::POST, "/v1/logs")
         | (&Method::POST, "/v1/scores")
+        | (&Method::GET, "/v1/evaluators")
+        | (&Method::POST, "/v1/evaluators")
         | (&Method::POST, "/v1/spans/search")
         | (&Method::POST, "/v1/sessions/search")
         | (&Method::GET, "/v1/score-configs") => true,
@@ -128,7 +130,9 @@ pub fn is_local_anonymous_data_plane(method: &Method, path: &str) -> bool {
         (&Method::GET, p) if is_single_resource_path(p, "/v1/traces/") => true,
         (&Method::GET, p) if is_single_resource_path(p, "/v1/sessions/") => true,
         _ => false,
-    }
+    }) || (*method == Method::POST
+        && path.starts_with("/v1/evaluators/")
+        && (path.ends_with("/activate") || path.ends_with("/deactivate")))
 }
 
 fn is_single_resource_path(path: &str, prefix: &str) -> bool {

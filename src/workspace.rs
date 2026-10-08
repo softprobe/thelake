@@ -176,6 +176,10 @@ impl WorkspaceManager {
         crate::async_jobs::PostgresLeaseStore::from_resolver(&self.scope_registry)
     }
 
+    pub(crate) fn slack_event_store(&self) -> crate::slack_events::PostgresSlackEventStore {
+        crate::slack_events::PostgresSlackEventStore::from_resolver(&self.scope_registry)
+    }
+
     /// Construct the process maintenance façade (owns a registry clone).
     pub async fn maintenance_engine(&self) -> Result<crate::compaction::MaintenanceEngine> {
         crate::compaction::MaintenanceEngine::new(self.config(), self.scope_registry.clone()).await

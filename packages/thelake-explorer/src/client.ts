@@ -6,6 +6,8 @@ export type ExplorerConfig = {
   /** API root, for example `/v1` or `/api/thelake/v1`. */
   apiBasePath: string;
   auth?: AuthProvider;
+  /** Optional workspace-scoped browser key for chat history persistence. */
+  chatStorageKey?: string;
   fetch?: typeof fetch;
 };
 
@@ -29,15 +31,27 @@ export type Observation = {
   output_tokens?: number | null; total_tokens?: number | null; total_cost?: number | null;
   input?: unknown; output?: unknown; attributes?: Record<string, unknown>;
   events?: Array<{ name: string; timestamp?: string; attributes?: Record<string, unknown> }>;
-  scores?: Array<{ score_id: string; name: string; data_type: string; numeric_value?: number | null; string_value?: string | null; boolean_value?: boolean | null; comment?: string | null }>;
+  scores?: ScoreRecord[];
 };
 export type SessionDetail = {
   session_id: string; from: string; to: string; trace_count: number; span_count: number;
   spans: Observation[]; scores?: ScoreRecord[];
 };
 export type ScoreRecord = {
-  score_id: string; name: string; data_type: string; numeric_value?: number | null;
-  string_value?: string | null; boolean_value?: boolean | null; comment?: string | null;
+  score_id: string; name: string; data_type: string; source?: string; span_id?: string | null; numeric_value?: number | null;
+  string_value?: string | null; boolean_value?: boolean | null; comment?: string | null; config_id?: string | null;
+};
+
+export type BehaviorEvaluator = {
+  evaluator_id: string;
+  version: number;
+  target_agent_name: string;
+  name: string;
+  criteria: string;
+  threshold: number;
+  uncertainty_margin: number;
+  required_tool_order: Array<{ before: string; action: string; require_result_before_action: boolean }>;
+  active: boolean;
 };
 
 export class ExplorerApi {
@@ -70,12 +84,14 @@ export class ExplorerApi {
     const path = `/sessions/${encodeURIComponent(sessionId)}`;
     const query = new URLSearchParams({ limit: "200" });
     const result = await this.request<SessionDetail>(`${path}?${query}`, { signal });
+    const scores = result.scores ?? [];
     return {
       ...result,
       spans: result.spans.map((span) => ({
         ...span,
         input: span.input ?? span.attributes?.["sp.input"],
         output: span.output ?? span.attributes?.["sp.output"],
+        scores: scores.filter((score) => score.span_id === span.span_id),
       })),
     };
   }
@@ -100,5 +116,18 @@ export class ExplorerApi {
 
   createScore(input: { name: string; data_type: "categorical"; string_value: string; session_id?: string; trace_id?: string; span_id?: string; comment?: string }): Promise<ScoreRecord> {
     return this.request("/scores", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ score_id: crypto.randomUUID(), timestamp: new Date().toISOString(), source: "annotation", ...input }) });
+  }
+
+  listEvaluators(): Promise<BehaviorEvaluator[]> {
+    return this.request("/evaluators");
+  }
+
+  createEvaluator(input: Pick<BehaviorEvaluator, "evaluator_id" | "version" | "target_agent_name" | "name" | "criteria">): Promise<BehaviorEvaluator> {
+    return this.request("/evaluators", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  }
+
+  setEvaluatorActive(evaluatorId: string, version: number, active: boolean): Promise<BehaviorEvaluator> {
+    const action = active ? "activate" : "deactivate";
+    return this.request(`/evaluators/${encodeURIComponent(evaluatorId)}/versions/${version}/${action}`, { method: "POST" });
   }
 }

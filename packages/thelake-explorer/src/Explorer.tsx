@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ExplorerApi, type ExplorerConfig, type Observation, type SessionSummary } from "./client";
+import { ChatView } from "./ChatView";
 import "./style.css";
 
 export type ThelakeExplorerProps = {
@@ -49,6 +50,7 @@ export function ThelakeExplorer({
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [showChat, setShowChat] = useState(!initialSessionId);
   const [error, setError] = useState<string>();
 
   useEffect(() => setSelected(initialSessionId), [initialSessionId]);
@@ -143,11 +145,15 @@ export function ThelakeExplorer({
   return (
     <main className={`thelake-explorer ${className ?? ""}`}>
       <header>
-        <div><strong>thelake Explorer</strong><small>Trace and session viewer</small></div>
-        {selected && <button onClick={goBack}>Sessions</button>}
+        <div><strong>theLake</strong><small>Investigate agent behavior</small></div>
+        <nav aria-label="Main navigation">
+          <button aria-pressed={showChat} onClick={() => setShowChat(true)}>Chat</button>
+          <button aria-pressed={!showChat} onClick={() => { setShowChat(false); setSelected(undefined); }}>Sessions</button>
+        </nav>
+        {selected && !showChat && <button onClick={goBack}>Sessions</button>}
       </header>
       {error && <div role="alert" className="tle-error">{error}</div>}
-      <div className="tle-layout">
+      {showChat ? <ChatView key={config.chatStorageKey ?? "workspace-unspecified"} api={api} storageKey={config.chatStorageKey} onOpenSession={(sessionId) => { setSelected(sessionId); setShowChat(false); }} /> : <div className="tle-layout">
         <aside aria-label="Sessions">
           <div className="tle-list-tools">
             <h2>Sessions</h2>
@@ -187,11 +193,14 @@ export function ThelakeExplorer({
             <div className="tle-inspector-title"><div><b>{focused.name}</b><span>{focused.observation_type} · {focused.span_id}</span></div><time>{focused.start_time}</time></div>
             <details open><summary>Input and output</summary><div className="tle-payload"><h4>Input</h4><pre>{json(focused.input)}</pre><h4>Output</h4><pre>{json(focused.output)}</pre></div></details>
             <details><summary>Attributes and events</summary><pre>{json({ attributes: focused.attributes, events: focused.events })}</pre></details>
-            <details><summary>Scores ({focused.scores?.length ?? 0})</summary><pre>{json(focused.scores ?? [])}</pre></details>
+            <details open><summary>Evaluation results ({focused.scores?.filter((score) => score.source === "evaluator").length ?? 0})</summary>
+              {(focused.scores ?? []).filter((score) => score.source === "evaluator").length === 0 ? <p>No evaluator result on this span.</p> : (focused.scores ?? []).filter((score) => score.source === "evaluator").map((score) => <div className={`tle-eval-result tle-eval-${score.string_value ?? "unknown"}`} key={score.score_id}><b>{score.name}: {score.string_value ?? "unknown"}</b><p>{score.comment}</p></div>)}
+            </details>
+            <details><summary>All scores ({focused.scores?.length ?? 0})</summary><pre>{json(focused.scores ?? [])}</pre></details>
             <div className="tle-score">{(["correct", "wrong", "unsure"] as const).map((verdict) => <button key={verdict} disabled={saving} onClick={() => void saveVerdict(verdict)}>{saving ? "Saving…" : verdict}</button>)}</div>
           </article>}
         </section>
-      </div>
+      </div>}
     </main>
   );
 }

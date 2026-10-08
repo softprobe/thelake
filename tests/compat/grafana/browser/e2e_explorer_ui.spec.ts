@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 
 const backend = process.env.THELAKE_E2E_URL ?? 'http://127.0.0.1:18090';
 const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
@@ -137,6 +139,7 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   expect(alphaSummary.total_tokens).toBe(18);
 
   await page.goto('/explorer/');
+  await page.getByRole('button', { name: 'Sessions', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
 
   const range = page.getByRole('combobox', { name: 'Session time range' });
@@ -177,4 +180,86 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await openDetails(page, 'Attributes and events');
   await expect(page.getByText('Matched the active subscription.')).toBeVisible();
   await expect(page.locator('.tle-payload').getByText('The customer is on the pro plan.', { exact: true })).toBeVisible();
+});
+
+test('embedded web chat to real Gemini agent, online evaluator, persisted issue, and trace details', async ({ page, request }) => {
+  test.skip(process.env.THELAKE_EXPLORER_E2E_ONLINE !== '1', 'requires the real online-evaluation E2E stack');
+  test.setTimeout(240_000);
+  const agentName = `refund-agent-e2e-${suffix}`;
+
+  await page.goto(`${backend}/explorer/`);
+  await expect(page.getByRole('region', { name: 'TheLake chat' })).toBeVisible();
+  await page.getByRole('button', { name: 'Create a behavior check' }).click();
+  const composer = page.getByRole('textbox', { name: 'Message theLake' });
+  await composer.fill('Before issuing a refund, verify the ticket is eligible and explain the result.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByText(/Which agent should I watch\?/)).toBeVisible();
+  await composer.fill(agentName);
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByRole('heading', { name: 'Review behavior check' })).toBeVisible();
+  await page.getByRole('checkbox', { name: 'I understand and want to activate this check.' }).check();
+  await page.getByRole('button', { name: 'Activate check' }).click();
+  await expect(page.getByText(/Behavior check is active for/)).toBeVisible({ timeout: 30_000 });
+
+  const composeFile = resolve(process.cwd(), '../../../../examples/quickstart/compose.yaml');
+  const project = process.env.THELAKE_E2E_COMPOSE_PROJECT;
+  const lakePort = process.env.THELAKE_E2E_LAKE_PORT;
+  expect(project, 'online E2E compose project must be configured').toBeTruthy();
+  expect(lakePort, 'online E2E lake port must be configured').toBeTruthy();
+  const agentApiHost = process.platform === 'linux' ? '127.0.0.1' : 'host.docker.internal';
+  const agentOutput = execFileSync('docker', [
+    'compose', '--project-name', project!, '--file', composeFile,
+    'run', '--rm', 'refund-agent', '--agent-name', agentName,
+    '--api-url', `http://${agentApiHost}:${lakePort}`,
+  ], { encoding: 'utf8', timeout: 150_000, env: process.env });
+  const sessionId = agentOutput.match(/session_id=([A-Za-z0-9._-]+)/)?.[1];
+  expect(sessionId, `real demo agent did not report a session ID:\n${agentOutput}`).toBeTruthy();
+
+  const sessionUrl = `${backend}/v1/sessions/${encodeURIComponent(sessionId!)}?limit=200`;
+  type EvaluatorScore = { score_id: string; name: string; source?: string; string_value?: string; comment?: string; config_id?: string; span_id?: string };
+  let detail: { spans?: Array<{ span_id: string; name: string }>; scores?: EvaluatorScore[] } | undefined;
+  await expect.poll(async () => {
+    const response = await request.get(sessionUrl);
+    if (!response.ok()) return undefined;
+    detail = await response.json();
+    const scores = detail.scores?.filter((score) => score.source === 'evaluator' && score.config_id?.startsWith('evaluator:')) ?? [];
+    return scores.length ? scores.map((score) => `${score.string_value}: ${score.comment ?? ''}`).join('\n') : `no evaluator scores; spans=${detail.spans?.length ?? 0}`;
+  }, { timeout: 120_000, intervals: [1_000, 2_000, 4_000] }).toContain('fail:');
+
+  expect(detail?.spans).toHaveLength(4);
+  await expect(page.getByRole('heading', { name: 'Behavior issue found' })).toBeVisible({ timeout: 60_000 });
+  const issue = page.getByRole('article', { name: 'Evaluation result' }).filter({ hasText: 'fail' });
+  await expect(issue).toContainText('fail');
+  await expect(issue).toContainText(/eligib/i);
+  const evaluatorScore = detail?.scores?.find((score) => score.source === 'evaluator' && score.string_value === 'fail');
+  expect(evaluatorScore?.span_id, 'online evaluator result must be attached to an ingested span').toBeTruthy();
+  expect(evaluatorScore?.config_id).toMatch(/^evaluator:.+:v1$/);
+  await page.getByRole('button', { name: 'Open trace in Sessions' }).click();
+  await expect(page.getByRole('heading', { name: `Session ${sessionId}` })).toBeVisible();
+  const scoredSpan = detail!.spans!.find((item) => item.span_id === evaluatorScore!.span_id);
+  expect(scoredSpan).toBeTruthy();
+  await page.getByRole('button', { name: new RegExp(scoredSpan!.name) }).click();
+  await expect(page.locator('.tle-eval-fail')).toBeVisible();
+
+  const evaluatorId = evaluatorScore!.config_id!.replace(/^evaluator:/, '').replace(/:v1$/, '');
+  const evaluatorsUrl = `${backend}/v1/evaluators`;
+  const evaluatorState = async () => {
+    const response = await request.get(evaluatorsUrl);
+    expect(response.ok()).toBeTruthy();
+    const definitions = await response.json() as Array<{ evaluator_id: string; active: boolean }>;
+    return definitions.find((item) => item.evaluator_id === evaluatorId)?.active;
+  };
+  expect(await evaluatorState()).toBe(true);
+  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await page.getByRole('button', { name: /Pause Before issuing a refund/ }).click();
+  await expect.poll(evaluatorState).toBe(false);
+  const reactivate = page.getByRole('button', { name: /Activate Before issuing a refund/ });
+  await reactivate.click();
+  await expect(page.getByRole('heading', { name: 'Reactivate behavior check' })).toBeVisible();
+  const reactivationConsent = page.getByRole('checkbox', { name: 'I understand and want to activate this check.' });
+  const reactivateButton = page.getByRole('button', { name: 'Activate check' });
+  await expect(reactivateButton).toBeDisabled();
+  await reactivationConsent.check();
+  await reactivateButton.click();
+  await expect.poll(evaluatorState).toBe(true);
 });
