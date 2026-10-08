@@ -65,13 +65,13 @@ pub fn batch_reduce_window(
             .copied()
             .map(|(start, end)| {
                 (
-                    crate::session_summary::time::from_ns(start),
-                    end.map(crate::session_summary::time::from_ns),
+                    crate::models::event_time::from_ns(start),
+                    end.map(crate::models::event_time::from_ns),
                 )
             });
         let (from, to) = compute_reduce_bounds(
-            crate::session_summary::time::from_ns(c.min_ts_ns),
-            crate::session_summary::time::from_ns(c.max_ts_ns),
+            crate::models::event_time::from_ns(c.min_ts_ns),
+            crate::models::event_time::from_ns(c.max_ts_ns),
             bounds.map(|(start, _)| start),
             bounds.and_then(|(_, end)| end),
         );
@@ -724,10 +724,10 @@ mod tests {
         let claims = vec![
             DirtyClaim {
                 session_id: "a".into(),
-                min_ts_ns: crate::session_summary::time::to_ns(
+                min_ts_ns: crate::models::event_time::to_ns(
                     Utc.with_ymd_and_hms(2024, 1, 5, 0, 0, 0).unwrap(),
                 ),
-                max_ts_ns: crate::session_summary::time::to_ns(
+                max_ts_ns: crate::models::event_time::to_ns(
                     Utc.with_ymd_and_hms(2024, 1, 5, 1, 0, 0).unwrap(),
                 ),
                 updated_at: Utc::now(),
@@ -736,10 +736,10 @@ mod tests {
             },
             DirtyClaim {
                 session_id: "b".into(),
-                min_ts_ns: crate::session_summary::time::to_ns(
+                min_ts_ns: crate::models::event_time::to_ns(
                     Utc.with_ymd_and_hms(2024, 1, 8, 0, 0, 0).unwrap(),
                 ),
-                max_ts_ns: crate::session_summary::time::to_ns(
+                max_ts_ns: crate::models::event_time::to_ns(
                     Utc.with_ymd_and_hms(2024, 1, 8, 2, 0, 0).unwrap(),
                 ),
                 updated_at: Utc::now(),
@@ -750,12 +750,9 @@ mod tests {
         let (from, to) = batch_reduce_window(&claims, &Default::default()).unwrap();
         assert_eq!(
             from,
-            crate::session_summary::time::from_ns(claims[0].min_ts_ns)
+            crate::models::event_time::from_ns(claims[0].min_ts_ns)
         );
-        assert_eq!(
-            to,
-            crate::session_summary::time::from_ns(claims[1].max_ts_ns)
-        );
+        assert_eq!(to, crate::models::event_time::from_ns(claims[1].max_ts_ns));
     }
 
     #[test]

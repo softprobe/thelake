@@ -60,8 +60,8 @@ fn row(
 ) -> SummaryRow {
     SummaryRow {
         session_id: id.into(),
-        start_time_ns: crate::session_summary::time::to_ns(ts(start)),
-        end_time_ns: Some(crate::session_summary::time::to_ns(ts(end))),
+        start_time_ns: crate::models::event_time::to_ns(ts(start)),
+        end_time_ns: Some(crate::models::event_time::to_ns(ts(end))),
         observation_count: 3,
         error_count: errors,
         input_tokens: Some(tokens / 2),
@@ -338,8 +338,8 @@ async fn postgres_session_summary_cursor_distinguishes_submicrosecond_timestamps
     let later = chrono::DateTime::from_timestamp(1_700_000_000, 456).unwrap();
     let make_row = |id: &str, at| SummaryRow {
         session_id: id.into(),
-        start_time_ns: crate::session_summary::time::to_ns(at),
-        end_time_ns: Some(crate::session_summary::time::to_ns(at)),
+        start_time_ns: crate::models::event_time::to_ns(at),
+        end_time_ns: Some(crate::models::event_time::to_ns(at)),
         observation_count: 1,
         error_count: 0,
         input_tokens: None,
@@ -465,7 +465,7 @@ async fn postgres_session_summary_list_corner_cases() {
         &[
             SummaryRow {
                 session_id: "null-tokens".into(),
-                start_time_ns: crate::session_summary::time::to_ns(ts(1700)),
+                start_time_ns: crate::models::event_time::to_ns(ts(1700)),
                 end_time_ns: None,
                 observation_count: 1,
                 error_count: 0,

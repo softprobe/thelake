@@ -183,11 +183,11 @@ async fn postgres_session_summary_dirty_upsert_merge() {
     assert_eq!(rows[0].get::<_, String>(0), "s1");
     assert_eq!(
         rows[0].get::<_, i64>(1),
-        crate::session_summary::time::to_ns(Utc.timestamp_opt(1, 0).unwrap())
+        crate::models::event_time::to_ns(Utc.timestamp_opt(1, 0).unwrap())
     );
     assert_eq!(
         rows[0].get::<_, i64>(2),
-        crate::session_summary::time::to_ns(Utc.timestamp_opt(50, 0).unwrap())
+        crate::models::event_time::to_ns(Utc.timestamp_opt(50, 0).unwrap())
     );
     assert_eq!(rows[1].get::<_, String>(0), "s2");
 
@@ -228,11 +228,11 @@ async fn postgres_session_summary_mark_after_commit_writes_dirty() {
     assert_eq!(rows[0].get::<_, String>(0), "a");
     assert_eq!(
         rows[0].get::<_, i64>(1),
-        crate::session_summary::time::to_ns(Utc.timestamp_opt(5, 0).unwrap())
+        crate::models::event_time::to_ns(Utc.timestamp_opt(5, 0).unwrap())
     );
     assert_eq!(
         rows[0].get::<_, i64>(2),
-        crate::session_summary::time::to_ns(Utc.timestamp_opt(10, 0).unwrap())
+        crate::models::event_time::to_ns(Utc.timestamp_opt(10, 0).unwrap())
     );
 }
 
@@ -381,8 +381,8 @@ async fn postgres_upsert_summary_absolute_replace_all_fields() {
         .expect("ducklake-postgres required (make setup)");
     let row = SummaryRow {
         session_id: "s1".into(),
-        start_time_ns: crate::session_summary::time::to_ns(Utc.timestamp_opt(100, 0).unwrap()),
-        end_time_ns: Some(crate::session_summary::time::to_ns(
+        start_time_ns: crate::models::event_time::to_ns(Utc.timestamp_opt(100, 0).unwrap()),
+        end_time_ns: Some(crate::models::event_time::to_ns(
             Utc.timestamp_opt(200, 0).unwrap(),
         )),
         observation_count: 2,
@@ -548,7 +548,7 @@ async fn postgres_expired_claim_cannot_publish_summary() {
         .expect("reclaim");
     let summary = SummaryRow {
         session_id: "s1".into(),
-        start_time_ns: crate::session_summary::time::to_ns(Utc.timestamp_opt(1, 0).unwrap()),
+        start_time_ns: crate::models::event_time::to_ns(Utc.timestamp_opt(1, 0).unwrap()),
         end_time_ns: None,
         observation_count: 1,
         error_count: 0,
@@ -605,7 +605,7 @@ async fn postgres_dirty_generation_fences_stale_publication() {
         .expect("touch claimed row");
     let summary = SummaryRow {
         session_id: "s1".into(),
-        start_time_ns: crate::session_summary::time::to_ns(Utc.timestamp_opt(1, 0).unwrap()),
+        start_time_ns: crate::models::event_time::to_ns(Utc.timestamp_opt(1, 0).unwrap()),
         end_time_ns: None,
         observation_count: 1,
         error_count: 0,
