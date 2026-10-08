@@ -118,6 +118,44 @@ pub(crate) fn trace_attributes_for_span(
     approved_query(trace_attributes_sql(&predicates.join(" AND ")))
 }
 
+const SCORE_EXISTS_SQL: &str = include_str!("scores/score_exists.sql");
+const SCORE_CONFIG_EXISTS_SQL: &str = include_str!("scores/score_config_exists.sql");
+const LIST_SCORE_CONFIGS_SQL: &str = include_str!("scores/list_score_configs.sql");
+const GET_SCORE_CONFIG_SQL: &str = include_str!("scores/get_score_config.sql");
+
+pub(crate) fn score_exists(
+    score_id: &str,
+    time_window: QueryWindow,
+) -> Result<TrustedSql, TrustedSqlError> {
+    let mut predicates = timestamp_predicates(time_window);
+    predicates.push(format!("score_id = {}", sql_string_literal(score_id)));
+    approved_query(
+        SCORE_EXISTS_SQL
+            .trim()
+            .replace("{{predicates}}", &predicates.join(" AND ")),
+    )
+}
+
+pub(crate) fn score_config_exists(config_id: &str) -> Result<TrustedSql, TrustedSqlError> {
+    approved_query(
+        SCORE_CONFIG_EXISTS_SQL
+            .trim()
+            .replace("{{config_id}}", &sql_string_literal(config_id)),
+    )
+}
+
+pub(crate) fn list_score_configs() -> Result<TrustedSql, TrustedSqlError> {
+    approved_query(LIST_SCORE_CONFIGS_SQL.trim().to_string())
+}
+
+pub(crate) fn get_score_config(config_id: &str) -> Result<TrustedSql, TrustedSqlError> {
+    approved_query(
+        GET_SCORE_CONFIG_SQL
+            .trim()
+            .replace("{{config_id}}", &sql_string_literal(config_id)),
+    )
+}
+
 fn count_rows(table: &str, predicates: &[String]) -> Result<TrustedSql, TrustedSqlError> {
     approved_query(count_rows_sql(table, &predicates.join(" AND ")))
 }
@@ -246,5 +284,38 @@ mod tests {
         assert_bare_timestamp_bounds(&sql);
         assert!(sql.contains(&attribute_map_varchar("attributes", "sp.user.id")));
         assert!(sql.contains("'u''1'"));
+    }
+
+    #[test]
+    fn score_recipes_render_valid_sql_and_bounds() {
+        let exists = score_exists("score-1", sample_window())
+            .expect("trusted")
+            .as_str()
+            .to_string();
+        assert!(exists.contains("SELECT EXISTS(SELECT 1 FROM scores WHERE"));
+        assert!(exists.contains("score_id = 'score-1'"));
+        assert_bare_timestamp_bounds(&exists);
+
+        let cfg_exists = score_config_exists("cfg-1")
+            .expect("trusted")
+            .as_str()
+            .to_string();
+        assert_eq!(
+            cfg_exists,
+            "SELECT EXISTS(SELECT 1 FROM score_configs WHERE config_id = 'cfg-1' LIMIT 1)"
+        );
+
+        let list = list_score_configs().expect("trusted").as_str().to_string();
+        assert!(list.contains("FROM score_configs") && list.contains("ORDER BY timestamp DESC"));
+
+        let get = get_score_config("cfg-1")
+            .expect("trusted")
+            .as_str()
+            .to_string();
+        assert!(
+            get.contains("FROM score_configs")
+                && get.contains("WHERE config_id = 'cfg-1'")
+                && get.contains("LIMIT 1")
+        );
     }
 }

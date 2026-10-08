@@ -7,11 +7,10 @@ use crate::compat::backends::logs::{
 };
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::loki::{project_loki, DEFAULT_STREAM_LABEL_ALLOWLIST};
-use crate::compat::tenant::TenantContext;
-use crate::query::QueryEngine;
+use crate::compat::workspace::CompatWorkspaceContext;
+use crate::query::{QueryEngine, QueryResult};
 use crate::sql::logs::{resolve_loki_scan_window, LOG_HOT_PROMOTIONS};
 use crate::sql::trusted::TrustedSql;
-use crate::storage::duckdb::QueryResult;
 use crate::storage::schema::attribute_map::attribute_map_json_to_string_map;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -29,7 +28,7 @@ impl DuckLakeLogsBackend {
 
     async fn execute(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         trusted: TrustedSql,
     ) -> Result<QueryResult, CompatError> {
         if ctx.remaining().is_zero() {
@@ -64,7 +63,7 @@ impl DuckLakeLogsBackend {
 
     async fn scan(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         start_ns: Option<i64>,
         end_ns: Option<i64>,
         matchers: &[LabelMatcher],
@@ -207,7 +206,7 @@ impl DuckLakeLogsBackend {
 
     async fn discovery_rows(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         request: &LogsDiscoveryRequest,
     ) -> Result<Vec<LogHit>, CompatError> {
         // Discovery matchers are OR-of-AND groups. Pushdown only when a single
@@ -271,7 +270,7 @@ impl DuckLakeLogsBackend {
 impl LogsQueryBackend for DuckLakeLogsBackend {
     async fn query_range(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         request: LogsQueryRequest,
     ) -> Result<Vec<LogHit>, CompatError> {
         let mut hits = self
@@ -294,7 +293,7 @@ impl LogsQueryBackend for DuckLakeLogsBackend {
 
     async fn label_names(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         request: LogsDiscoveryRequest,
     ) -> Result<Vec<String>, CompatError> {
         let mut names = BTreeSet::new();
@@ -306,7 +305,7 @@ impl LogsQueryBackend for DuckLakeLogsBackend {
 
     async fn label_values(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         name: &str,
         request: LogsDiscoveryRequest,
     ) -> Result<Vec<String>, CompatError> {
@@ -321,7 +320,7 @@ impl LogsQueryBackend for DuckLakeLogsBackend {
 
     async fn series(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         request: LogsDiscoveryRequest,
     ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
         let mut series = BTreeSet::new();

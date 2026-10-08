@@ -1,7 +1,6 @@
 use crate::api::error::{bad_request, storage_error, ApiError};
 use crate::api::{map_execute_result, AppState};
-use crate::authn::TenantInfo;
-use crate::runtime_engine::RuntimeEngine;
+use crate::authn::WorkspaceAuth;
 use crate::sql::telemetry::{
     details_logs, details_spans, field_spec, search as search_sql, TelemetryDetailsTarget,
     TelemetrySearchRequest, TelemetrySearchScope, TelemetryTimeRange,
@@ -9,19 +8,20 @@ use crate::sql::telemetry::{
 use crate::storage::schema::attribute_map::{
     attribute_map_json_to_string_map, parse_projected_json_value,
 };
+use crate::workspace::WorkspaceContext;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub async fn resolve_engine(
+pub async fn resolve_workspace(
     state: &AppState,
-    tenant: Option<&TenantInfo>,
-) -> Result<Arc<RuntimeEngine>, ApiError> {
-    match tenant {
-        Some(info) => state.engine_for_tenant(info).await,
-        None => state.engine_for_id("").await,
+    auth: Option<&WorkspaceAuth>,
+) -> Result<Arc<WorkspaceContext>, ApiError> {
+    match auth {
+        Some(info) => state.workspace_for_auth(info).await,
+        None => state.workspace_for_id("").await,
     }
     .map_err(storage_error)
 }
@@ -182,13 +182,13 @@ fn default_version_1() -> u32 {
 
 pub async fn execute_dynamic_search(
     state: &AppState,
-    tenant: Option<&TenantInfo>,
+    auth: Option<&WorkspaceAuth>,
     request: &TelemetrySearchRequest,
 ) -> Result<Value, ApiError> {
     let trusted = search_sql(request).map_err(bad_request)?;
-    let engine = resolve_engine(state, tenant).await?;
+    let ws = resolve_workspace(state, auth).await?;
     let result =
-        map_execute_result(engine.execute_trusted(trusted).await).map_err(storage_error)?;
+        map_execute_result(ws.query().execute_trusted(trusted).await).map_err(storage_error)?;
     let rows = rows_to_search_response(&request.scope, &result.columns, &result.rows);
 
     Ok(json!({
@@ -206,19 +206,19 @@ pub async fn execute_dynamic_search(
 
 pub async fn details_for_target(
     state: AppState,
-    tenant: Option<&TenantInfo>,
+    auth: Option<&WorkspaceAuth>,
     target: TelemetryDetailsTarget,
     time_range: Option<TelemetryTimeRange>,
     limit: usize,
 ) -> Result<Value, ApiError> {
     let time_range = time_range.ok_or_else(|| bad_request("timeRange is required"))?;
-    let engine = resolve_engine(&state, tenant).await?;
+    let ws = resolve_workspace(&state, auth).await?;
     let spans_sql = details_spans(&target, &time_range, limit).map_err(bad_request)?;
     let logs_sql = details_logs(&target, &time_range, limit).map_err(bad_request)?;
     let spans_result =
-        map_execute_result(engine.execute_trusted(spans_sql).await).map_err(storage_error)?;
+        map_execute_result(ws.query().execute_trusted(spans_sql).await).map_err(storage_error)?;
     let logs_result =
-        map_execute_result(engine.execute_trusted(logs_sql).await).map_err(storage_error)?;
+        map_execute_result(ws.query().execute_trusted(logs_sql).await).map_err(storage_error)?;
     let spans = rows_to_objects(&spans_result.columns, &spans_result.rows);
     let logs = rows_to_objects(&logs_result.columns, &logs_result.rows);
     let summary = json!({

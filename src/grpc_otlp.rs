@@ -37,15 +37,15 @@ impl TraceService for GrpcTraceService {
             .ok_or_else(|| Status::unauthenticated("missing or invalid authorization metadata"))?;
         let control_plane = self
             .state
-            .engines
+            .workspaces
             .control_plane()
             .ok_or_else(|| Status::internal("gRPC ingest requires control-plane runtime"))?;
-        let tenant = control_plane
+        let auth = control_plane
             .resolver
             .resolve(&token)
             .await
-            .map_err(|_| Status::permission_denied("tenant resolution failed"))?;
-        process_traces(self.state.clone(), inner, body_size, Some(tenant))
+            .map_err(|_| Status::permission_denied("workspace auth resolution failed"))?;
+        process_traces(self.state.clone(), inner, body_size, Some(auth))
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(ExportTraceServiceResponse::default()))
@@ -56,7 +56,7 @@ pub async fn run_trace_grpc_server(
     addr: std::net::SocketAddr,
     state: AppState,
 ) -> anyhow::Result<()> {
-    if state.engines.control_plane().is_none() {
+    if state.workspaces.control_plane().is_none() {
         anyhow::bail!("gRPC ingest requires control-plane runtime");
     }
     let svc = GrpcTraceService { state };
@@ -76,7 +76,7 @@ mod tests {
         let (_r, state, _t) = crate::test_support::local_router_and_state()
             .await
             .expect("state");
-        assert!(state.engines.control_plane().is_none());
+        assert!(state.workspaces.control_plane().is_none());
         let svc = GrpcTraceService { state };
         let req = Request::new(ExportTraceServiceRequest::default());
         let got = TraceService::export(&svc, req).await;
@@ -94,7 +94,7 @@ mod tests {
         let (_r, state, _t) = crate::test_support::local_router_and_state()
             .await
             .expect("state");
-        assert!(state.engines.control_plane().is_none());
+        assert!(state.workspaces.control_plane().is_none());
         let svc = GrpcTraceService { state };
         let mut req = Request::new(ExportTraceServiceRequest::default());
         req.metadata_mut()

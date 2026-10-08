@@ -4,7 +4,7 @@ use axum::Json;
 use serde_json::json;
 
 use crate::api::AppState;
-use crate::storage::duckdb;
+use crate::query;
 
 /// Liveness gives up only when self-heal has failed this many times in a row
 /// with nothing succeeding in between (the counter is cleared by any successful
@@ -22,7 +22,7 @@ const MAX_CONSECUTIVE_REBUILD_FAILURES: u64 = 3;
 /// and over. The previous version returned a hardcoded "ok", which is how the
 /// 2026-08-03 outage served 503s for half an hour behind a green health check.
 pub async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
-    let heal = duckdb::self_heal_snapshot();
+    let heal = query::self_heal_snapshot();
     let export_drops = crate::self_monitoring::self_monitoring_export_drops();
     if heal.consecutive_failures >= MAX_CONSECUTIVE_REBUILD_FAILURES {
         return (
@@ -71,8 +71,8 @@ pub async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
 /// `timeoutSeconds` bounds each attempt.
 pub async fn ready_check(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let probe = tokio::spawn(async move {
-        let engine = state.engine_for_id("").await?;
-        engine
+        let ws = state.workspace_for_id("").await?;
+        ws.query()
             .execute_trusted(crate::sql::health::readiness_sql())
             .await
     });
@@ -117,7 +117,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_check_shape() {
-        duckdb::set_self_heal_failures_for_test(0);
+        query::set_self_heal_failures_for_test(0);
         let (status, j) = health_check().await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(j.0["status"], "ok");
@@ -133,11 +133,11 @@ mod tests {
         // 503s for an hour and a half behind a hardcoded green liveness probe.
         // The counters are process-global, so this test drives them directly
         // and restores them before returning.
-        duckdb::set_self_heal_failures_for_test(MAX_CONSECUTIVE_REBUILD_FAILURES - 1);
+        query::set_self_heal_failures_for_test(MAX_CONSECUTIVE_REBUILD_FAILURES - 1);
         let (status, _) = health_check().await;
         assert_eq!(status, StatusCode::OK, "below threshold must stay healthy");
 
-        duckdb::set_self_heal_failures_for_test(MAX_CONSECUTIVE_REBUILD_FAILURES);
+        query::set_self_heal_failures_for_test(MAX_CONSECUTIVE_REBUILD_FAILURES);
         let (status, j) = health_check().await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(j.0["status"], "unhealthy");
@@ -146,7 +146,7 @@ mod tests {
             serde_json::json!(MAX_CONSECUTIVE_REBUILD_FAILURES)
         );
 
-        duckdb::set_self_heal_failures_for_test(0);
+        query::set_self_heal_failures_for_test(0);
     }
 
     // ready_check needs an AppState with a live engine; it is covered by the

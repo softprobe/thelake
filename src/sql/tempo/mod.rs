@@ -497,7 +497,7 @@ mod tests {
     fn trace_scan_is_tenant_neutral_and_bounded() {
         let params = parse_tempo_search_params(
             &[("limit".into(), "5".into())],
-            &crate::compat::tenant::QueryLimits::default(),
+            &crate::compat::workspace::QueryLimits::default(),
         )
         .unwrap();
         let sql = trace_scan_sql(

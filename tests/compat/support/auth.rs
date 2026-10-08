@@ -6,7 +6,7 @@ use softprobe_runtime::api::auth::runtime_auth_middleware;
 use softprobe_runtime::api::{create_router, AppState, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
-use softprobe_runtime::runtime_engine::ScopeProvisioningRequest;
+use softprobe_runtime::workspace::ScopeProvisioningRequest;
 use std::sync::Arc;
 use std::time::Duration;
 use wiremock::matchers::{body_json, method, path};
@@ -56,9 +56,9 @@ async fn authenticated_router_with_expected_token(
     // before a tenant can resolve a DuckLake scope. Register the fixture tenant
     // directly against the registry so compat contract tests can skip that HTTP
     // round trip and still exercise a real resolved scope.
-    let ducklake = state.engines.config().ducklake.clone();
+    let ducklake = state.workspaces.config().ducklake.clone();
     state
-        .engines
+        .workspaces
         .provision_scope(ScopeProvisioningRequest {
             scope_id: workspace_id.to_string(),
             metadata_schema: ducklake.metadata_schema,

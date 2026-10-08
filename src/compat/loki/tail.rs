@@ -3,7 +3,7 @@ use super::logql::parse_logql;
 use super::params::LokiTailParams;
 use crate::api::AppState;
 use crate::compat::backends::logs::{LogDirection, LogsQueryBackend};
-use crate::compat::tenant::TenantContext;
+use crate::compat::workspace::CompatWorkspaceContext;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use std::time::Duration;
@@ -13,7 +13,7 @@ const TAIL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub async fn run(
     state: AppState,
-    ctx: TenantContext,
+    ctx: CompatWorkspaceContext,
     mut socket: WebSocket,
     params: LokiTailParams,
 ) {

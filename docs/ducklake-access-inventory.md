@@ -1,7 +1,7 @@
 # DuckLake access inventory
 
 This inventory records the production DuckDB and DuckLake access boundaries.
-Workspace engines are obtained through `RuntimeEngineManager::engine_for` via
+Workspace engines are obtained through `WorkspaceManager::workspace_for` via
 `AppState`.
 
 ## Connection-owning and connection-consuming code
@@ -11,29 +11,29 @@ Workspace engines are obtained through `RuntimeEngineManager::engine_for` via
 | Session infrastructure | `src/storage/ducklake/attach.rs`, `src/storage/ducklake/object_store.rs` | Configure DuckDB extensions, object storage, and PostgreSQL DuckLake catalog attachments | Storage engine setup |
 | Ingest | `src/storage/ducklake/writer.rs` | Writer pool, catalog initialization, schema setup, and durable OTLP writes | Owned by `IngestEngine` |
 | Ingest schema support | `src/storage/schema/otlp_layout.rs`, `src/storage/schema/ducklake_partition.rs`, `src/storage/ducklake/util.rs` | Partition and sort probes and ingest-time schema checks on an engine-owned connection | Internal ingest support |
-| Query | `src/storage/duckdb/engine.rs`, `src/storage/duckdb/cache.rs`, `src/storage/ducklake/workspace_views.rs` | Query pool, DuckLake attachments, cache setup, and workspace table qualification | Owned by `QueryEngine` |
+| Query | `src/query/engine.rs`, `src/storage/duckdb/cache.rs`, `src/storage/ducklake/workspace_views.rs` | Query pool, DuckLake attachments, cache setup, and workspace table qualification | Owned by `QueryEngine` |
 | Maintenance | `src/compaction/engine.rs`, `src/compaction/merge.rs`, `src/compaction/session_summary_access.rs`, `src/sql/maintenance/mod.rs` | Physical-scope maintenance sessions, file merge, snapshot cleanup, and session-summary jobs | Owned by `MaintenanceEngine` |
 | Maintenance implementation | `src/session_summary/reduce.rs` | Claim/ack and summary-domain logic; invokes the internal maintenance access adapter | `MaintenanceEngine` |
-| Control plane | `src/storage/ducklake/promotion.rs`, `src/ingest_engine/mod.rs` | Promotion-spec reads and local promotion application using a writer connection | `AdminEngine`; never ordinary workspace query SQL |
+| Control plane | `src/storage/ducklake/promotion.rs`, `src/control_plane/admin.rs` | Promotion-spec reads and local promotion application using a writer connection | `AdminEngine`; never ordinary workspace query SQL |
 | Shared SQL utility | `src/sql/bounds/execute_gate.rs` | Checked execution and preparation on a caller-owned connection | Narrow internal primitive; callers must be engine-owned |
-
+ 
 Test-only direct connections are intentionally excluded from this production
 inventory. They remain valuable regression coverage and are listed by search
 patterns in review rather than converted to engine calls in this contract work.
-
+ 
 ## Direct writer exposure
-
+ 
 `DuckLakeWriter` is crate-private and is only constructible or consumable by
 the ingest composition boundary and the internal DuckLake storage modules. It
 is not part of the public workspace API:
-
+ 
 | Location | Current use | Boundary work required |
 | --- | --- | --- |
 | `src/storage/mod.rs` | Declares internal storage modules; no public `Storage` wrapper or writer re-export | Keep storage primitives behind engine construction |
-| `src/ingest_engine/mod.rs` | `IngestEngine` privately owns the writer and exposes one domain write path per signal (`add_spans`, `add_logs`, `add_scores`, and `add_score_configs`); `AdminEngine` owns promotion operations | Keep domain methods; no direct/batched writer or schema-DDL escape hatch |
-| `src/api/control.rs` | Control API routes promotion operations through the tenant-bound admin facade | Keep promotion access behind the engine/admin capability |
-| `src/api/scores.rs` | Scores API reads/writes score and score-config data through `IngestEngine` | Keep workspace binding at the runtime engine boundary |
-| `src/main.rs` | Startup starts maintenance via `RuntimeEngineManager` | Keep registry access inside the manager / composition boundary |
+| `src/ingest/mod.rs` | `IngestEngine` privately owns the writer and exposes one domain write path per signal (`add_spans`, `add_logs`, `add_scores`, and `add_score_configs`); `AdminEngine` in `src/control_plane/admin.rs` owns promotion operations | Keep domain methods; no direct/batched writer or schema-DDL escape hatch |
+| `src/api/control.rs` | Control API routes promotion operations through the workspace-bound admin facade | Keep promotion access behind the engine/admin capability |
+| `src/api/scores.rs` | Scores API reads score and score-config data through `QueryEngine` and writes through `IngestEngine` | Keep workspace binding at the workspace context boundary |
+| `src/main.rs` | Startup starts maintenance via `WorkspaceManager` | Keep registry access inside the manager / composition boundary |
 
 ## Access rules for the refactor
 
@@ -69,7 +69,7 @@ regression coverage.
 
 ## Workspace scope
 
-`RuntimeEngineManager` owns engine creation and caching by workspace scope.
+`WorkspaceManager` owns engine creation and caching by workspace scope.
 Application handlers receive engines through `AppState`; they do not open
 DuckDB connections or construct catalog attachments themselves. Catalog
 metadata uses PostgreSQL in production. See [workspace identity](workspace-identity.md)

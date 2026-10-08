@@ -81,72 +81,6 @@ fn insert_deduped_parquet_sql_inner(
     )
 }
 
-pub fn score_exists_sql(table: &str, window: &crate::sql::QueryWindow) -> String {
-    format!(
-        "SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? AND {} LIMIT 1)",
-        window.timestamp_filter_sql("")
-    )
-}
-
-pub fn score_exists_sql_for_workspace(
-    table: &str,
-    workspace_id: &str,
-    window: &crate::sql::QueryWindow,
-) -> String {
-    format!(
-        "SELECT EXISTS(SELECT 1 FROM {table} WHERE score_id = ? AND workspace_id = {} AND {} LIMIT 1)",
-        crate::sql::sql_string_literal(workspace_id),
-        window.timestamp_filter_sql("")
-    )
-}
-
-pub fn score_config_exists_sql(table: &str) -> String {
-    format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE config_id = ? LIMIT 1)")
-}
-
-pub fn score_config_exists_sql_for_workspace(table: &str, workspace_id: &str) -> String {
-    format!(
-        "SELECT EXISTS(SELECT 1 FROM {table} WHERE config_id = ? AND workspace_id = {} LIMIT 1)",
-        crate::sql::sql_string_literal(workspace_id)
-    )
-}
-
-pub fn score_config_select_sql(table: &str) -> String {
-    format!(
-        "SELECT config_id::VARCHAR, timestamp::VARCHAR, name::VARCHAR, data_type::VARCHAR, \
-         description::VARCHAR, min_value, max_value, categories::VARCHAR, author_id::VARCHAR, \
-         CAST(to_json(metadata) AS VARCHAR), workspace_id::VARCHAR FROM {table} ORDER BY timestamp DESC, config_id DESC"
-    )
-}
-
-pub fn score_config_select_sql_for_workspace(table: &str, workspace_id: &str) -> String {
-    format!(
-        "SELECT config_id::VARCHAR, timestamp::VARCHAR, name::VARCHAR, data_type::VARCHAR, \
-         description::VARCHAR, min_value, max_value, categories::VARCHAR, author_id::VARCHAR, \
-         CAST(to_json(metadata) AS VARCHAR), workspace_id::VARCHAR FROM {table} \
-         WHERE workspace_id = {} ORDER BY timestamp DESC, config_id DESC",
-        crate::sql::sql_string_literal(workspace_id)
-    )
-}
-
-pub fn score_config_by_id_sql(table: &str) -> String {
-    format!(
-        "SELECT config_id::VARCHAR, strftime(timestamp, '%Y-%m-%dT%H:%M:%S.%fZ'), name::VARCHAR, data_type::VARCHAR, \
-         description::VARCHAR, min_value, max_value, categories::VARCHAR, author_id::VARCHAR, \
-         CAST(to_json(metadata) AS VARCHAR), workspace_id::VARCHAR FROM {table} WHERE config_id = ? LIMIT 1"
-    )
-}
-
-pub fn score_config_by_id_sql_for_workspace(table: &str, workspace_id: &str) -> String {
-    format!(
-        "SELECT config_id::VARCHAR, strftime(timestamp, '%Y-%m-%dT%H:%M:%S.%fZ'), name::VARCHAR, data_type::VARCHAR, \
-         description::VARCHAR, min_value, max_value, categories::VARCHAR, author_id::VARCHAR, \
-         CAST(to_json(metadata) AS VARCHAR), workspace_id::VARCHAR FROM {table} \
-         WHERE config_id = ? AND workspace_id = {} LIMIT 1",
-        crate::sql::sql_string_literal(workspace_id)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,22 +89,6 @@ mod tests {
     fn score_window() -> crate::sql::QueryWindow {
         let timestamp = Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0).unwrap();
         crate::sql::QueryWindow::try_new(timestamp, timestamp).unwrap()
-    }
-
-    #[test]
-    fn workspace_score_queries_filter_and_escape_ownership() {
-        let score = score_exists_sql_for_workspace("scores", "workspace'42", &score_window());
-        let config = score_config_by_id_sql_for_workspace("score_configs", "workspace'42");
-        assert!(score.contains("workspace_id = 'workspace''42'"));
-        assert!(score.contains("timestamp >= '2026-09-10T12:00:00.000000000Z'::TIMESTAMP_NS"));
-        assert!(score.contains("timestamp <= '2026-09-10T12:00:00.000000000Z'::TIMESTAMP_NS"));
-        assert!(config.contains("WHERE config_id = ? AND workspace_id = 'workspace''42'"));
-    }
-
-    #[test]
-    fn score_config_projection_keeps_tenant_id_for_round_trip() {
-        let sql = score_config_select_sql("score_configs");
-        assert!(sql.contains("workspace_id::VARCHAR"));
     }
 
     #[test]

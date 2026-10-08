@@ -6,12 +6,12 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::trace::v1::{span, Span};
 use softprobe_runtime::api::ingest::process_traces;
 use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
-use softprobe_runtime::authn::{Resolver, TenantInfo};
+use softprobe_runtime::authn::{Resolver, WorkspaceAuth};
 use softprobe_runtime::config::Config;
 use softprobe_runtime::grpc_otlp::GrpcTraceService;
 use softprobe_runtime::models::Span as ModelSpan;
 use softprobe_runtime::query::TraceCountFilter;
-use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
+use softprobe_runtime::workspace::{ScopeProvisioningRequest, WorkspaceManager};
 use softprobe_runtime::workspace_scope::WorkspaceScopeMode;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -109,7 +109,7 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
     let path_a = temp.path().join("data_a").to_string_lossy().to_string();
     let path_b = temp.path().join("data_b").to_string_lossy().to_string();
 
-    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
+    let manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
 
@@ -130,19 +130,19 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         .await
         .expect("provision B");
 
-    let engine_b = manager
-        .engine_for(&tenant_b)
+    let ws_b = manager
+        .workspace_for(&tenant_b)
         .await
-        .expect("tenant B engine");
-    let engine_a = manager
-        .engine_for(&tenant_a)
+        .expect("tenant B context");
+    let ws_a = manager
+        .workspace_for(&tenant_a)
         .await
-        .expect("tenant A engine");
+        .expect("tenant A context");
     let session_id = format!("sess-iso-{suffix}");
     let trace_id = format!("trace-iso-{suffix}");
     // Provision does not create telemetry Iceberg tables; a tenant with no ingest has no `traces`
     // table yet. Materialize B's table with a decoy session so we can COUNT tenant A's session_id.
-    engine_b
+    ws_b.ingest()
         .add_spans(
             vec![isolation_span(
                 &tenant_b,
@@ -153,7 +153,7 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
         )
         .await
         .expect("bootstrap traces table for tenant B");
-    engine_a
+    ws_a.ingest()
         .add_spans(vec![isolation_span(&tenant_a, &session_id, &trace_id)], 0)
         .await
         .expect("write spans for tenant A");
@@ -163,7 +163,8 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
             scope_a, scope_b,
             "shared workspaces bind one physical scope"
         );
-        let n_b = engine_b
+        let n_b = ws_b
+            .query()
             .count_traces(TraceCountFilter {
                 session_id: Some(session_id.clone()),
                 time_window: crate::util::query_window(),
@@ -173,7 +174,8 @@ async fn tenant_scoped_ingest_is_isolated_between_two_registry_tenants() {
             })
             .await
             .expect("workspace B filtered query");
-        let n_a = engine_a
+        let n_a = ws_a
+            .query()
             .count_traces(TraceCountFilter {
                 session_id: Some(session_id.clone()),
                 time_window: crate::util::query_window(),
@@ -278,7 +280,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     let tenant_schema = format!("softprobe_grpc_it_data_{suffix}");
     let tenant_data_path = format!("s3://warehouse/grpc_it/{}/", suffix);
 
-    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
+    let manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
     let hints = manager
@@ -338,7 +340,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
         .await
         .expect("gRPC export should accept bearer metadata and ingest");
 
-    let tenant_info = TenantInfo {
+    let auth = WorkspaceAuth {
         workspace_id,
         bucket_name: String::new(),
         dataset_id: String::new(),
@@ -347,7 +349,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     };
     let http_export = otlp_export_with_session(&format!("http-sess-{suffix}"));
     let http_body_size = prost::Message::encoded_len(&http_export);
-    process_traces(state, http_export, http_body_size, Some(tenant_info))
+    process_traces(state, http_export, http_body_size, Some(auth))
         .await
         .expect("HTTP-path export should write to the same tenant scope");
 

@@ -1,5 +1,5 @@
 //! Integration tests for the OTLP HTTP surface (in-process router — same handlers as
-//! production without `main` middleware layers). Engines are lazy via RuntimeEngineManager.
+//! production without `main` middleware layers). Workspaces are lazy via WorkspaceManager.
 
 use axum::body::Body;
 use axum::http::{header, Request, Response, StatusCode};
@@ -635,8 +635,8 @@ async fn telemetry_search_sessions_returns_summary_rows() {
     let resp = router.clone().oneshot(req).await.expect("trace ingest");
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let engine = state.engine_for_id("").await.expect("engine");
-    engine.force_flush_spans().await.expect("flush spans");
+    let ws = state.workspace_for_id("").await.expect("workspace context");
+    ws.ingest().force_flush_spans().await.expect("flush spans");
 
     let body = json!({
         "version": 1,
@@ -691,9 +691,10 @@ async fn timestamp_ns_span_queries_work_through_http_paths() {
     let response = router.clone().oneshot(ingest).await.expect("ingest");
     assert_eq!(response.status(), StatusCode::OK);
     state
-        .engine_for_id("")
+        .workspace_for_id("")
         .await
-        .expect("engine")
+        .expect("workspace context")
+        .ingest()
         .force_flush_spans()
         .await
         .expect("flush spans");
@@ -799,9 +800,9 @@ async fn telemetry_session_details_returns_spans_and_logs() {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    let engine = state.engine_for_id("").await.expect("engine");
-    engine.force_flush_spans().await.expect("flush spans");
-    engine.force_flush_logs().await.expect("flush logs");
+    let ws = state.workspace_for_id("").await.expect("workspace context");
+    ws.ingest().force_flush_spans().await.expect("flush spans");
+    ws.ingest().force_flush_logs().await.expect("flush logs");
 
     let req = Request::builder()
         .uri(format!(
@@ -848,8 +849,8 @@ async fn llm_query_endpoints_return_spans_traces_sessions_and_scores() {
     let ingest_resp = router.clone().oneshot(ingest).await.expect("ingest");
     assert_eq!(ingest_resp.status(), StatusCode::OK);
 
-    let engine = state.engine_for_id("").await.expect("engine");
-    engine.force_flush_spans().await.expect("flush spans");
+    let ws = state.workspace_for_id("").await.expect("workspace context");
+    ws.ingest().force_flush_spans().await.expect("flush spans");
 
     let score_body = json!({
         "score_id": "score-llm-query-1",
@@ -1046,9 +1047,10 @@ async fn logs_promote_scope_name_to_logger_name_attribute() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     state
-        .engine_for_id("")
+        .workspace_for_id("")
         .await
-        .expect("engine")
+        .expect("workspace context")
+        .ingest()
         .force_flush_logs()
         .await
         .expect("flush logs");
@@ -1108,9 +1110,10 @@ async fn spans_without_events_are_readable() {
     let resp = router.clone().oneshot(req).await.expect("ingest");
     assert_eq!(resp.status(), StatusCode::OK);
     state
-        .engine_for_id("")
+        .workspace_for_id("")
         .await
-        .expect("engine")
+        .expect("workspace context")
+        .ingest()
         .force_flush_spans()
         .await
         .expect("flush spans");
@@ -1234,9 +1237,10 @@ async fn inlined_data_stays_readable_across_maintenance() {
     let resp = router.clone().oneshot(req).await.expect("ingest");
     assert_eq!(resp.status(), StatusCode::OK);
     state
-        .engine_for_id("")
+        .workspace_for_id("")
         .await
-        .expect("engine")
+        .expect("workspace context")
+        .ingest()
         .force_flush_spans()
         .await
         .expect("flush spans");
@@ -1303,7 +1307,7 @@ async fn inlined_data_stays_readable_across_maintenance() {
     //    Merge and cleanup outcomes are persisted by the SQL script. A SQL
     //    failure returns Err from run_once and fails this integration pass.
     let maintenance = state
-        .engines
+        .workspaces
         .maintenance_engine()
         .await
         .expect("maintenance executor");
@@ -1419,8 +1423,8 @@ async fn session_recording_requires_session_summary_row() {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    let engine = state.engine_for_id("").await.expect("engine");
-    engine.force_flush_spans().await.expect("flush spans");
+    let ws = state.workspace_for_id("").await.expect("workspace context");
+    ws.ingest().force_flush_spans().await.expect("flush spans");
 
     let empty = Request::builder()
         .uri("/v1/sessions/sess-no-recording/recording")

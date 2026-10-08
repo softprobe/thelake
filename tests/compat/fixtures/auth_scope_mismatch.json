@@ -11,6 +11,6 @@
   "expect": {
     "http_status": 403,
     "body_protocol": "loki",
-    "notes": "stub returns Loki error envelope after TenantContext rejects mismatched scope"
+    "notes": "stub returns Loki error envelope after CompatWorkspaceContext rejects mismatched scope"
   }
 }

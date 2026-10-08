@@ -8,11 +8,10 @@ use super::traces::{
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use crate::compat::projection::tempo::{project_tempo_link_attributes, project_tempo_tags};
 use crate::compat::tempo::traceql::{is_numeric_field, TraceField, TracePredicate, TraceSelector};
-use crate::compat::tenant::TenantContext;
-use crate::query::QueryEngine;
+use crate::compat::workspace::CompatWorkspaceContext;
+use crate::query::{QueryEngine, QueryResult};
 use crate::sql::tempo::{scan_reached_cap, trace_scan_cap, trace_scan_sql};
 use crate::sql::trusted::TrustedSql;
-use crate::storage::duckdb::QueryResult;
 use crate::storage::schema::attribute_map::attribute_map_json_to_string_map;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -30,7 +29,7 @@ impl DuckLakeTraceBackend {
 
     async fn execute(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         trusted: TrustedSql,
     ) -> Result<QueryResult, CompatError> {
         if ctx.remaining().is_zero() {
@@ -59,7 +58,7 @@ impl DuckLakeTraceBackend {
 
     async fn scan(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         request: &TraceSearchRequest,
         trace_id: Option<&str>,
     ) -> Result<Vec<TraceSpan>, CompatError> {
@@ -244,7 +243,7 @@ impl DuckLakeTraceBackend {
 impl TraceQueryBackend for DuckLakeTraceBackend {
     async fn get_trace(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         trace_id: &str,
         bounds: TraceLookupBounds,
     ) -> Result<Option<TraceData>, CompatError> {
@@ -267,7 +266,7 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
 
     async fn search(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         request: TraceSearchRequest,
     ) -> Result<Vec<TraceSearchHit>, CompatError> {
         let spans = self.scan(ctx, &request, None).await?;
@@ -329,7 +328,7 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
         Ok(hits)
     }
 
-    async fn search_tags(&self, ctx: &TenantContext) -> Result<Vec<String>, CompatError> {
+    async fn search_tags(&self, ctx: &CompatWorkspaceContext) -> Result<Vec<String>, CompatError> {
         let request = TraceSearchRequest {
             tags: BTreeMap::new(),
             selector: None,
@@ -349,7 +348,7 @@ impl TraceQueryBackend for DuckLakeTraceBackend {
 
     async fn search_tag_values(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         tag: &str,
     ) -> Result<Vec<String>, CompatError> {
         let request = TraceSearchRequest {

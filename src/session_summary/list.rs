@@ -1,10 +1,10 @@
 //! Read the session list from catalog PostgreSQL `session_summary`.
 
-use crate::runtime_engine::quote_pg_ident;
 use crate::session_summary::list_query::{
     next_cursor_from_sessions, SessionOrderBy, SessionSearchRequest, SessionSearchResponse,
     SessionSummary, SortDirection,
 };
+use crate::workspace::quote_pg_ident;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;

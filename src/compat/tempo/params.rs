@@ -1,6 +1,6 @@
 use super::traceql::{parse_traceql, TraceSelector};
 use crate::compat::errors::{CompatError, CompatErrorCode};
-use crate::compat::tenant::QueryLimits;
+use crate::compat::workspace::QueryLimits;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

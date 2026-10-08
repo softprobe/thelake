@@ -82,12 +82,12 @@ def choose_base() -> str:
 
 
 def changed_paths(base: str) -> list[str]:
-    # Include deletes so moved SQL can be credited from the old path.
-    paths = {
-        line.strip()
-        for line in git("diff", "--name-only", "--diff-filter=ACMRD", base, "--").splitlines()
-        if line.strip()
-    }
+    # Include deletes and renames so moved SQL can be credited from the old path.
+    paths: set[str] = set()
+    for line in git("diff", "--name-status", "-M", "--diff-filter=ACMRD", base, "--").splitlines():
+        parts = [p.strip() for p in line.split("\t") if p.strip()]
+        for p in parts[1:]:
+            paths.add(p)
     if base == "HEAD":
         paths.update(
             line.strip()

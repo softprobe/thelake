@@ -1,5 +1,5 @@
 use softprobe_runtime::config::Config;
-use softprobe_runtime::ingest_engine::IngestEngine;
+use softprobe_runtime::ingest::IngestEngine;
 use softprobe_runtime::query::{self, QueryEngine};
 use std::sync::Arc;
 use tempfile::TempDir;

@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM scores WHERE {{predicates}} LIMIT 1)

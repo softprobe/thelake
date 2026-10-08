@@ -1,9 +1,9 @@
 //! Claim dirty → full session bounds → lake aggregate → UPSERT → ack.
 
 use crate::config::Config;
-use crate::runtime_engine::quote_pg_ident;
 use crate::sql::session_summary::compile_session_summary_upsert_sql;
 use crate::storage::ducklake::PhysicalScope;
+use crate::workspace::quote_pg_ident;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
@@ -522,7 +522,7 @@ pub fn validate_rebuild_window(
 
 /// Window rebuild: lake aggregate (no IN-list) → absolute UPSERT. No dirty claim/ack.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn rebuild_tenant_window(
+pub(crate) async fn rebuild_workspace_window(
     pool: &Pool,
     metadata_schema: &str,
     config: &Config,
@@ -538,9 +538,9 @@ pub(crate) async fn rebuild_tenant_window(
         config.ducklake.workspace_scope_mode == crate::workspace_scope::WorkspaceScopeMode::Shared;
     let config = config.clone();
     let scope = scope.clone();
-    let tenant_id_for_lake = workspace_id.to_string();
+    let workspace_id_for_lake = workspace_id.to_string();
     let rows = tokio::task::spawn_blocking(move || {
-        let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
+        let workspace_filter = workspace_scoped.then_some(workspace_id_for_lake.as_str());
         crate::compaction::session_summary_access::aggregate_sessions_from_lake_pooled(
             &duck_pool,
             &config,
@@ -561,9 +561,9 @@ pub(crate) async fn rebuild_tenant_window(
     Ok(rows.len())
 }
 
-/// Full reduce pipeline for one tenant. Empty dirty → Ok no-op.
+/// Full reduce pipeline for one workspace. Empty dirty → Ok no-op.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn reduce_tenant(
+pub(crate) async fn reduce_workspace(
     pool: &Pool,
     metadata_schema: &str,
     workspace_id: &str,

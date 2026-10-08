@@ -1,7 +1,7 @@
 use crate::async_jobs::{self, Job};
 use crate::compaction::PhysicalScopeMaintenanceJob;
-use crate::runtime_engine::RuntimeEngineManager;
 use crate::session_summary::SessionSummaryRebuildJob;
+use crate::workspace::WorkspaceManager;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,13 +11,13 @@ use tokio::task::JoinHandle;
 ///
 /// One `spawn_runner` only — never a second timer loop.
 pub async fn start_maintenance_scheduler(
-    engines: Arc<RuntimeEngineManager>,
+    workspaces: Arc<WorkspaceManager>,
 ) -> Result<Option<JoinHandle<()>>> {
-    let config = engines.config();
+    let config = workspaces.config();
     let metadata_enabled = config.maintenance.metadata_enabled;
     let compaction_enabled = config.maintenance.enabled;
     let mut jobs: Vec<Arc<dyn Job>> = Vec::new();
-    let maintenance = engines.maintenance_engine().await?;
+    let maintenance = workspaces.maintenance_engine().await?;
 
     if metadata_enabled || compaction_enabled {
         let wake = Duration::from_secs(config.maintenance.interval_seconds.max(1));
@@ -36,7 +36,7 @@ pub async fn start_maintenance_scheduler(
         return Ok(None);
     }
 
-    let leases = Arc::new(engines.lease_store());
+    let leases = Arc::new(workspaces.lease_store());
     Ok(async_jobs::spawn_runner(&config.async_jobs, leases, jobs))
 }
 
@@ -44,7 +44,7 @@ pub async fn start_maintenance_scheduler(
 mod tests {
     use super::start_maintenance_scheduler;
     use crate::config::Config;
-    use crate::runtime_engine::RuntimeEngineManager;
+    use crate::workspace::WorkspaceManager;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -53,12 +53,12 @@ mod tests {
         c.maintenance.enabled = false;
         c.maintenance.metadata_enabled = true;
         c.maintenance.interval_seconds = 60;
-        let engines = Arc::new(
-            RuntimeEngineManager::connect(Arc::new(c), None)
+        let workspaces = Arc::new(
+            WorkspaceManager::connect(Arc::new(c), None)
                 .await
-                .expect("connect engines"),
+                .expect("connect workspaces"),
         );
-        let out = start_maintenance_scheduler(engines)
+        let out = start_maintenance_scheduler(workspaces)
             .await
             .expect("scheduler");
         assert!(out.is_some());

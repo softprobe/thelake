@@ -2,8 +2,8 @@
 
 use crate::compaction::maint_conn_pool::MaintenanceConnPool;
 use crate::config::Config;
-use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::storage::ducklake::PhysicalScope;
+use crate::workspace::DuckLakeScopeResolver;
 use crate::workspace_scope::DEFAULT_WORKSPACE_ID;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -138,7 +138,7 @@ impl MaintenanceEngine {
         scope: &MaintenanceScope,
         max_sessions: u64,
     ) -> Result<usize> {
-        crate::session_summary::reduce_tenant(
+        crate::session_summary::reduce_workspace(
             &scope.pool,
             scope.physical.pg_namespace(),
             &scope.scope_key,
@@ -157,7 +157,7 @@ impl MaintenanceEngine {
         to: chrono::DateTime<Utc>,
         max_reduce_span_seconds: u64,
     ) -> Result<usize> {
-        crate::session_summary::rebuild_tenant_window(
+        crate::session_summary::rebuild_workspace_window(
             &scope.pool,
             scope.physical.pg_namespace(),
             &self.config,

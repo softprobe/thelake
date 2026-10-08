@@ -31,7 +31,7 @@ async fn try_pg_pool(schema: &str) -> Option<Pool> {
         _ => return None,
     };
     ensure_session_summary_tables(&client, schema).await.ok()?;
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     client
         .execute(
             &format!("TRUNCATE {q}.session_summary, {q}.session_summary_dirty"),
@@ -267,7 +267,7 @@ async fn postgres_session_summary_list_cursor_and_orders() {
     );
 
     // Re-seed clean fixture for order_by asserts (ties must not steal first place).
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     pool.get()
         .await
         .expect("client")

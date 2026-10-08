@@ -3,7 +3,7 @@
 //! Explorer / Cloudflare gateways mint a short-lived HS256 JWT. thelake verifies
 //! the signature and binds DuckLake scope from claim `workspace_id`.
 
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use anyhow::{anyhow, bail, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hmac::{Hmac, Mac};
@@ -136,7 +136,7 @@ pub fn parse_workspace_id(raw: &str) -> Result<String> {
     Ok(parsed.to_string())
 }
 
-pub fn tenant_info_from_assertion(claims: &SoftprobeAssertionClaims) -> Result<TenantInfo> {
+pub fn workspace_auth_from_assertion(claims: &SoftprobeAssertionClaims) -> Result<WorkspaceAuth> {
     let workspace_id =
         parse_workspace_id(&claims.workspace_id).map_err(|err| anyhow!("assertion: {err}"))?;
     let agent_id = claims
@@ -151,7 +151,7 @@ pub fn tenant_info_from_assertion(claims: &SoftprobeAssertionClaims) -> Result<T
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    Ok(TenantInfo {
+    Ok(WorkspaceAuth {
         workspace_id,
         // Bucket/dataset historically came from Softprobe auth resources.
         // DuckLake scope registry is authoritative for storage paths; these
@@ -195,13 +195,13 @@ pub fn default_workspace_id_from_env() -> Option<String> {
 }
 
 /// Bind Bearer-only traffic to a configured default workspace.
-pub fn tenant_info_for_default_lake(workspace_id: &str) -> Result<TenantInfo> {
+pub fn workspace_auth_for_default_lake(workspace_id: &str) -> Result<WorkspaceAuth> {
     let workspace_id =
         parse_workspace_id(workspace_id).map_err(|err| anyhow!("default workspace_id: {err}"))?;
     if crate::self_monitoring::is_reserved_workspace_id(&workspace_id) {
         bail!("default workspace_id must not be reserved ops scope");
     }
-    Ok(TenantInfo {
+    Ok(WorkspaceAuth {
         workspace_id,
         bucket_name: std::env::var("DATALAKE_BUCKET").unwrap_or_default(),
         dataset_id: String::new(),
@@ -245,14 +245,14 @@ mod tests {
         let claims = verify_softprobe_assertion(&token, "test-secret", now).expect("ok");
         assert_eq!(claims.sub, "user-1");
         assert_eq!(claims.workspace_id, WS);
-        let info = tenant_info_from_assertion(&claims).unwrap();
+        let info = workspace_auth_from_assertion(&claims).unwrap();
         assert_eq!(info.workspace_id, WS);
         assert_eq!(info.agent_id, None);
         assert_eq!(info.agent_name, None);
     }
 
     #[test]
-    fn carries_agent_claims_into_tenant_info() {
+    fn carries_agent_claims_into_workspace_auth() {
         let now = 1_700_000_000_i64;
         let token = mint(
             serde_json::json!({
@@ -269,13 +269,13 @@ mod tests {
         let claims = verify_softprobe_assertion(&token, "test-secret", now).expect("ok");
         assert_eq!(claims.agent_id.as_deref(), Some("support-refund-agent"));
         assert_eq!(claims.agent_name.as_deref(), Some("Support Refund Agent"));
-        let info = tenant_info_from_assertion(&claims).unwrap();
+        let info = workspace_auth_from_assertion(&claims).unwrap();
         assert_eq!(info.agent_id.as_deref(), Some("support-refund-agent"));
         assert_eq!(info.agent_name.as_deref(), Some("Support Refund Agent"));
     }
 
     #[test]
-    fn rejects_missing_workspace_id_for_tenant_info() {
+    fn rejects_missing_workspace_id_for_workspace_auth() {
         let now = 1_700_000_000_i64;
         let token = mint(
             serde_json::json!({
@@ -303,7 +303,7 @@ mod tests {
             "test-secret",
         );
         let claims = verify_softprobe_assertion(&token, "test-secret", now).unwrap();
-        assert!(tenant_info_from_assertion(&claims).is_err());
+        assert!(workspace_auth_from_assertion(&claims).is_err());
     }
 
     #[test]
@@ -354,12 +354,12 @@ mod tests {
     }
 
     #[test]
-    fn tenant_info_for_default_lake_binds_scope() {
-        let info = tenant_info_for_default_lake(WS).unwrap();
+    fn workspace_auth_for_default_lake_binds_scope() {
+        let info = workspace_auth_for_default_lake(WS).unwrap();
         assert_eq!(info.workspace_id, WS);
         assert!(info.agent_id.is_none());
-        assert!(tenant_info_for_default_lake("thelake-ops").is_err());
-        assert!(tenant_info_for_default_lake("  ").is_err());
-        assert!(tenant_info_for_default_lake("ws-slug").is_err());
+        assert!(workspace_auth_for_default_lake("thelake-ops").is_err());
+        assert!(workspace_auth_for_default_lake("  ").is_err());
+        assert!(workspace_auth_for_default_lake("ws-slug").is_err());
     }
 }

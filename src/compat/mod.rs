@@ -1,7 +1,7 @@
 //! Shared Grafana/Loki/Tempo compatibility layer.
 //!
 //! Protocol HTTP adapters stay thin: parse the wire request,
-//! call typed backends with a [`TenantContext`], and encode protocol responses.
+//! call typed backends with a [`CompatWorkspaceContext`], and encode protocol responses.
 //! Auth, projection, ordering, and error classes live here — not under a
 //! single protocol module.
 
@@ -15,8 +15,8 @@ pub mod projection;
 pub mod query_string;
 pub mod stubs;
 pub mod tempo;
-pub mod tenant;
+pub mod workspace;
 
 pub use capability::{load_capability_v0, CapabilityManifest};
 pub use errors::{CompatError, CompatErrorCode};
-pub use tenant::{ProtocolScope, QueryLimits, TenantContext};
+pub use workspace::{CompatWorkspaceContext, ProtocolScope, QueryLimits};

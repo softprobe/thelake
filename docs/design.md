@@ -108,16 +108,16 @@ Each catalog scope owns a pool of already-attached writer connections.
 Writes run on Tokio's blocking pool so PostgreSQL and object-store waits do not
 pin async workers.
 
-## Tenant isolation
+## Workspace isolation
 
-Authentication resolves a tenant before operational work begins. A
-`RuntimeEngine` is then built and cached for that tenant with:
+Authentication resolves a workspace before operational work begins. A
+`WorkspaceContext` is then built and cached for that workspace with:
 
-- a tenant-bound DuckLake metadata schema and data path;
-- a tenant-bound writer and query engine.
+- a workspace-bound DuckLake metadata schema and data path;
+- a workspace-bound writer and query engine.
 
-With a PostgreSQL catalog, `RuntimeEngineManager` stores scope mappings in the
-configured registry schema. Operational APIs do not accept arbitrary tenant or
+With a PostgreSQL catalog, `WorkspaceManager` stores scope mappings in the
+configured registry schema. Operational APIs do not accept arbitrary workspace or
 scope parameters after binding.
 
 ### Self-monitoring (process instruments)

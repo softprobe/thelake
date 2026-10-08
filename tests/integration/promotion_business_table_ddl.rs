@@ -2,7 +2,7 @@ use softprobe_runtime::config::Config;
 use softprobe_runtime::promotion::{
     business_table_create_ddls, parse_promotion_manifest, PromotionManifest,
 };
-use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
+use softprobe_runtime::workspace::{ScopeProvisioningRequest, WorkspaceManager};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio_postgres::NoTls;
@@ -77,7 +77,7 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
     apply_workspace_scope_mode(&mut config);
 
-    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
+    let manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
     let business_workspace_id = Uuid::new_v4().to_string();
@@ -89,17 +89,18 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
         })
         .await
         .expect("provision workspace");
-    let engine = manager
-        .engine_for(&business_workspace_id)
+    let ws = manager
+        .workspace_for(&business_workspace_id)
         .await
-        .expect("workspace engine");
+        .expect("workspace context");
     let manifest = parse_promotion_manifest(BUSINESS_MANIFEST).expect("valid manifest");
     let PromotionManifest::BusinessTable(spec) = manifest else {
         panic!("expected business table manifest");
     };
 
-    let spec_id = match engine
-        .apply_business_promotion(BUSINESS_MANIFEST, &spec)
+    let spec_id = match ws
+        .admin()
+        .apply_business_promotion_guarded(BUSINESS_MANIFEST, &spec)
         .await
     {
         Ok(spec_id) => spec_id,

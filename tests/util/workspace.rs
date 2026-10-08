@@ -2,10 +2,10 @@
 
 use axum::middleware::Next;
 use softprobe_runtime::api::AppState;
-use softprobe_runtime::authn::TenantInfo;
-use softprobe_runtime::runtime_engine::ScopeProvisioningRequest;
+use softprobe_runtime::authn::WorkspaceAuth;
+use softprobe_runtime::workspace::ScopeProvisioningRequest;
 
-/// Default test workspace UUID when no `x-test-tenant-id` header is set.
+/// Default test workspace UUID when no `x-test-workspace-id` header is set.
 pub const LOCAL_WORKSPACE_ID: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 
 // Re-export for compat routers; unused when only `integration_perf` is compiled.
@@ -16,11 +16,11 @@ pub use super::workspace_ids::*;
 /// this process's configured physical scope. Production requires an explicit
 /// `POST /v1/workspaces` admin provisioning step before a workspace can resolve a
 /// DuckLake scope; router-level tests that bypass real auth via
-/// [`inject_local_sqlite_tenant`] must provision it directly instead.
-pub async fn provision_local_sqlite_tenant(state: &AppState) {
-    let ducklake = state.engines.config().ducklake.clone();
+/// [`inject_local_workspace`] must provision it directly instead.
+pub async fn provision_local_workspace(state: &AppState) {
+    let ducklake = state.workspaces.config().ducklake.clone();
     state
-        .engines
+        .workspaces
         .provision_scope(ScopeProvisioningRequest {
             scope_id: LOCAL_WORKSPACE_ID.to_string(),
             metadata_schema: ducklake.metadata_schema,
@@ -31,20 +31,20 @@ pub async fn provision_local_sqlite_tenant(state: &AppState) {
 }
 
 /// Header used by multi-workspace Prom isolation tests to select the injected workspace.
-pub const TEST_TENANT_HEADER: &str = "x-test-tenant-id";
+pub const TEST_WORKSPACE_HEADER: &str = "x-test-workspace-id";
 
-pub async fn inject_local_sqlite_tenant(
+pub async fn inject_local_workspace(
     mut request: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
     let workspace_id = request
         .headers()
-        .get(TEST_TENANT_HEADER)
+        .get(TEST_WORKSPACE_HEADER)
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .unwrap_or(LOCAL_WORKSPACE_ID)
         .to_string();
-    request.extensions_mut().insert(TenantInfo {
+    request.extensions_mut().insert(WorkspaceAuth {
         workspace_id,
         bucket_name: String::new(),
         dataset_id: String::new(),

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
-pub struct TenantInfo {
+pub struct WorkspaceAuth {
     pub workspace_id: String,
     pub bucket_name: String,
     pub dataset_id: String,
@@ -21,7 +21,7 @@ pub struct TenantInfo {
 pub struct Resolver {
     url: String,
     ttl: Duration,
-    cache: Arc<DashMap<String, (TenantInfo, Instant)>>,
+    cache: Arc<DashMap<String, (WorkspaceAuth, Instant)>>,
     client: reqwest::Client,
 }
 
@@ -38,7 +38,7 @@ impl Resolver {
         }
     }
 
-    pub async fn resolve(&self, api_key: &str) -> Result<TenantInfo> {
+    pub async fn resolve(&self, api_key: &str) -> Result<WorkspaceAuth> {
         if api_key.is_empty() {
             return Err(anyhow!("authn: empty API key"));
         }
@@ -61,7 +61,7 @@ async fn call_auth_service(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
-) -> Result<TenantInfo> {
+) -> Result<WorkspaceAuth> {
     let body = serde_json::to_string(&serde_json::json!({ "apiKey": api_key }))?;
 
     let resp = client
@@ -113,7 +113,7 @@ async fn call_auth_service(
     let workspace_id = crate::softprobe_assertion::parse_workspace_id(&data.workspace_id)
         .map_err(|err| anyhow!("authn: {err}"))?;
 
-    let mut info = TenantInfo {
+    let mut info = WorkspaceAuth {
         workspace_id,
         bucket_name: String::new(),
         dataset_id: String::new(),

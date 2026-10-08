@@ -1,9 +1,9 @@
-//! Design contract: DuckLake storage must not depend on runtime_engine.
+//! Design contract: DuckLake storage must not depend on workspace.
 //!
 //! Writers hold WorkspaceBinding only; registry/manifest loads stay in ingest/admin.
 
 #[test]
-fn ducklake_storage_must_not_import_runtime_engine() {
+fn ducklake_storage_must_not_import_workspace() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/storage/ducklake");
     let entries = std::fs::read_dir(dir).expect("ducklake dir");
     for entry in entries {
@@ -14,8 +14,8 @@ fn ducklake_storage_must_not_import_runtime_engine() {
         }
         let src = std::fs::read_to_string(&path).expect("read ducklake source");
         assert!(
-            !src.contains("use crate::runtime_engine") && !src.contains("crate::runtime_engine::"),
-            "{} must not import runtime_engine (registry belongs above the writer)",
+            !src.contains("use crate::workspace") && !src.contains("crate::workspace::"),
+            "{} must not import workspace (registry belongs above the writer)",
             path.display()
         );
         assert!(
@@ -28,10 +28,7 @@ fn ducklake_storage_must_not_import_runtime_engine() {
 
 #[test]
 fn ingest_pipeline_type_is_deleted() {
-    let ingest = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/ingest_engine/mod.rs"
-    ));
+    let ingest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ingest/mod.rs"));
     assert!(
         !ingest.contains("struct IngestPipeline"),
         "IngestPipeline must be deleted; use IngestEngine::bound / bound_default"
@@ -56,9 +53,10 @@ fn writer_constructor_takes_binding_only() {
 
 #[test]
 fn engine_types_do_not_export_writer_or_resolver_fields() {
-    let ingest = include_str!(concat!(
+    let ingest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ingest/mod.rs"));
+    let admin = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/ingest_engine/mod.rs"
+        "/src/control_plane/admin.rs"
     ));
     for needle in [
         "pub writer:",
@@ -69,7 +67,7 @@ fn engine_types_do_not_export_writer_or_resolver_fields() {
         "pub(crate) fn physical_scope(",
     ] {
         assert!(
-            !ingest.contains(needle),
+            !ingest.contains(needle) && !admin.contains(needle),
             "IngestEngine/AdminEngine must not export internals via {needle}"
         );
     }
@@ -92,10 +90,7 @@ fn engine_types_do_not_export_writer_or_resolver_fields() {
         "DuckLakeWriter must expose metadata_schema for engine composition"
     );
 
-    let runtime = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/runtime_engine.rs"
-    ));
+    let runtime = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/workspace.rs"));
     for needle in [
         "pub binding:",
         "pub catalog_pool:",
@@ -106,7 +101,7 @@ fn engine_types_do_not_export_writer_or_resolver_fields() {
     ] {
         assert!(
             !runtime.contains(needle),
-            "RuntimeEngine must not export internals via {needle}"
+            "WorkspaceContext must not export internals via {needle}"
         );
     }
 }

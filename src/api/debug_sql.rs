@@ -1,5 +1,5 @@
 use crate::api::AppState;
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use axum::extract::Extension;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ pub struct SqlQueryResponse {
 /// `GET /v1/data/ducklake-connection` instead of this runtime SQL endpoint.
 pub async fn execute_sql(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    auth: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<SqlQueryRequest>,
 ) -> Result<Json<SqlQueryResponse>, (StatusCode, Json<serde_json::Value>)> {
     if request.sql.trim().is_empty() {
@@ -35,7 +35,7 @@ pub async fn execute_sql(
     }
 
     match state
-        .execute_tenant_scoped_sql(tenant.as_ref().map(|e| &e.0), &request.sql)
+        .execute_workspace_scoped_sql(auth.as_ref().map(|e| &e.0), &request.sql)
         .await
     {
         Ok(result) => Ok(Json(SqlQueryResponse {

@@ -272,7 +272,7 @@ impl PhysicalScope {
 /// The logical workspace-to-physical-scope binding used by engine contracts.
 ///
 /// Physical identity is crate-private: handlers and protocol adapters must not
-/// reach through to [`PhysicalScope`]; use RuntimeEngine / manager façades.
+/// reach through to [`PhysicalScope`]; use WorkspaceContext / manager façades.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceBinding {
     pub workspace_id: String,

@@ -1,11 +1,11 @@
 //! Unit tests for self-monitoring helpers.
 
 use crate::config::Config;
-use crate::self_monitoring::{is_reserved_workspace_id, OPS_TENANT_ID};
+use crate::self_monitoring::{is_reserved_workspace_id, OPS_WORKSPACE_ID};
 
 #[test]
 fn reserved_workspace_id_is_thelake_ops() {
-    assert_eq!(OPS_TENANT_ID, "thelake-ops");
+    assert_eq!(OPS_WORKSPACE_ID, "thelake-ops");
     assert!(is_reserved_workspace_id("thelake-ops"));
     assert!(is_reserved_workspace_id(" thelake-ops "));
     assert!(!is_reserved_workspace_id("softprobe-local"));
@@ -41,13 +41,13 @@ fn otlp_metrics_exporter_builds_with_defaults() {
 #[tokio::test]
 async fn health_stays_ok_when_only_export_drops_rise() {
     use crate::api::health::health_check;
+    use crate::query;
     use crate::self_monitoring::instruments::ensure_noop_instruments_for_test;
     use crate::self_monitoring::record_export_drop;
-    use crate::storage::duckdb;
     use axum::http::StatusCode;
 
     ensure_noop_instruments_for_test();
-    duckdb::set_self_heal_failures_for_test(0);
+    query::set_self_heal_failures_for_test(0);
     record_export_drop();
     let (status, j) = health_check().await;
     assert_eq!(status, StatusCode::OK);
@@ -137,7 +137,7 @@ fn maintenance_pass_records_step_durations() {
 
 #[test]
 fn ingest_and_session_summary_record_commit_and_reduce_durations() {
-    let ingest = include_str!("../ingest_engine/mod.rs");
+    let ingest = include_str!("../ingest/mod.rs");
     assert!(
         ingest.contains("commit_started") && ingest.contains("record_ingest_commit"),
         "ingest commit path must time DuckLake writes"
@@ -150,7 +150,7 @@ fn ingest_and_session_summary_record_commit_and_reduce_durations() {
             && reduce.contains("reduce_step::UPSERT")
             && reduce.contains("reduce_step::ACK")
             && reduce.contains("reduce_step::TOTAL"),
-        "reduce_tenant must time claim/aggregate/upsert/ack/total"
+        "reduce_workspace must time claim/aggregate/upsert/ack/total"
     );
     let dirty = include_str!("../session_summary/dirty.rs");
     assert!(
@@ -162,7 +162,7 @@ fn ingest_and_session_summary_record_commit_and_reduce_durations() {
 
 #[test]
 fn query_worker_splits_sql_gate_from_sql_exec() {
-    let engine = include_str!("../storage/duckdb/engine.rs");
+    let engine = include_str!("../query/engine.rs");
     assert!(
         engine.contains("struct TimedExecute")
             && engine.contains("gate_elapsed")

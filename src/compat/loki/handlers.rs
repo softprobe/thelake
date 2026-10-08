@@ -13,13 +13,13 @@ use super::volume::{
     default_step_ns, eval_logs_volume, parse_logs_volume_query, volume_query_request,
 };
 use crate::api::AppState;
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::compat::backends::ducklake_logs::DuckLakeLogsBackend;
 use crate::compat::backends::logs::{LogsDiscoveryRequest, LogsQueryBackend};
 use crate::compat::envelopes::error_response;
 use crate::compat::errors::{CompatError, CompatErrorCode};
-use crate::compat::tenant::{
-    scope_header_value, ProtocolScope, QueryLimits, TenantContext, LOKI_SCOPE_HEADER,
+use crate::compat::workspace::{
+    scope_header_value, CompatWorkspaceContext, ProtocolScope, QueryLimits, LOKI_SCOPE_HEADER,
 };
 use axum::extract::{Extension, Path, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, Uri};
@@ -33,20 +33,23 @@ const INSTANT_QUERY_LOOKBACK_NS: i64 = 30_000_000_000;
 
 pub(crate) async fn backend_for(
     state: &AppState,
-    ctx: &TenantContext,
+    ctx: &CompatWorkspaceContext,
 ) -> Result<DuckLakeLogsBackend, CompatError> {
-    let engine = state.engine_for_tenant(&ctx.tenant).await.map_err(|err| {
+    let ws = state.workspace_for_auth(&ctx.auth).await.map_err(|err| {
         CompatError::new(
             CompatErrorCode::BadRequest,
-            format!("tenant engine unavailable: {err}"),
+            format!("workspace engine unavailable: {err}"),
         )
     })?;
-    Ok(DuckLakeLogsBackend::new(engine.query_engine()))
+    Ok(DuckLakeLogsBackend::new(ws.query().clone()))
 }
 
-fn tenant_context(tenant: TenantInfo, headers: &HeaderMap) -> Result<TenantContext, CompatError> {
-    TenantContext::from_authenticated(
-        tenant,
+fn compat_workspace_context(
+    auth: WorkspaceAuth,
+    headers: &HeaderMap,
+) -> Result<CompatWorkspaceContext, CompatError> {
+    CompatWorkspaceContext::from_authenticated(
+        auth,
         PROTOCOL,
         scope_header_value(headers, LOKI_SCOPE_HEADER),
         QueryLimits::default(),
@@ -61,30 +64,30 @@ fn pairs(uri: &Uri) -> Vec<(String, String)> {
 
 async fn query_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    run_query(&state, tenant, headers, uri, false).await
+    run_query(&state, auth, headers, uri, false).await
 }
 
 async fn query_range_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    run_query(&state, tenant, headers, uri, true).await
+    run_query(&state, auth, headers, uri, true).await
 }
 
 async fn run_query(
     state: &AppState,
-    tenant: TenantInfo,
+    auth: WorkspaceAuth,
     headers: HeaderMap,
     uri: Uri,
     range: bool,
 ) -> Response {
-    let ctx = match tenant_context(tenant, &headers) {
+    let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };
@@ -159,11 +162,11 @@ async fn run_query(
 
 async fn labels_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    let ctx = match tenant_context(tenant, &headers) {
+    let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };
@@ -184,12 +187,12 @@ async fn labels_handler(
 
 async fn label_values_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     Path(name): Path<String>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    let ctx = match tenant_context(tenant, &headers) {
+    let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };
@@ -211,11 +214,11 @@ async fn label_values_handler(
 
 async fn series_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    let ctx = match tenant_context(tenant, &headers) {
+    let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };
@@ -236,11 +239,11 @@ async fn series_handler(
 
 async fn index_stats_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    let ctx = match tenant_context(tenant, &headers) {
+    let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };
@@ -266,12 +269,12 @@ async fn index_stats_handler(
 
 async fn tail_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     headers: HeaderMap,
     uri: Uri,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let ctx = match tenant_context(tenant, &headers) {
+    let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };

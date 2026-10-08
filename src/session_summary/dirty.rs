@@ -1,7 +1,7 @@
 //! Ephemeral fold of one flush batch → durable dirty UPSERT (process-stateless).
 
 use crate::models::Span;
-use crate::runtime_engine::quote_pg_ident;
+use crate::workspace::quote_pg_ident;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;

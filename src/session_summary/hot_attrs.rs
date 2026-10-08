@@ -4,9 +4,9 @@ use crate::promotion::{
     load_active_telemetry_columns_manifests, parse_promotion_manifest, PromotionManifest,
     TelemetryColumnsManifest, TelemetryTable,
 };
-use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::sql::llm::llm_promo;
 use crate::storage::ducklake::PhysicalScope;
+use crate::workspace::DuckLakeScopeResolver;
 use anyhow::{Context, Result};
 
 /// Canonical Softprobe traces hot-attr manifest (shipped under docs/promotion/).

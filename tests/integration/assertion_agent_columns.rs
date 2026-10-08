@@ -19,8 +19,8 @@ use sha2::Sha256;
 use softprobe_runtime::api::auth::runtime_auth_middleware;
 use softprobe_runtime::api::{create_router, AppState, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
-use softprobe_runtime::runtime_engine::ScopeProvisioningRequest;
 use softprobe_runtime::softprobe_assertion::ASSERTION_HEADER;
+use softprobe_runtime::workspace::ScopeProvisioningRequest;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -144,9 +144,9 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
     let workspace_id = "550e8400-e29b-41d4-a716-4466554400aa";
     // Production requires an explicit `POST /v1/workspaces` admin provisioning step
     // before a tenant can resolve a DuckLake scope; register it directly here.
-    let ducklake = state.engines.config().ducklake.clone();
+    let ducklake = state.workspaces.config().ducklake.clone();
     state
-        .engines
+        .workspaces
         .provision_scope(ScopeProvisioningRequest {
             scope_id: workspace_id.to_string(),
             metadata_schema: ducklake.metadata_schema,
@@ -210,18 +210,21 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .expect("logs");
     assert_eq!(log_resp.status(), StatusCode::OK);
 
-    let engine = state.engine_for_id(workspace_id).await.expect("engine");
-    engine.force_flush_spans().await.expect("flush spans");
-    engine.force_flush_logs().await.expect("flush logs");
+    let ws = state
+        .workspace_for_id(workspace_id)
+        .await
+        .expect("workspace context");
+    ws.ingest().force_flush_spans().await.expect("flush spans");
+    ws.ingest().force_flush_logs().await.expect("flush logs");
 
     // sessions/search is backed exclusively by the reduced `session_summary`
     // table; drive the same claim-dirty → reduce pipeline the leased job runs.
     let maintenance = state
-        .engines
+        .workspaces
         .maintenance_engine()
         .await
         .expect("maintenance engine");
-    let session_cfg = &state.engines.config().session_summary;
+    let session_cfg = &state.workspaces.config().session_summary;
     maintenance
         .reduce_session_summary_for_key(workspace_id, session_cfg.max_sessions_per_reduce)
         .await
