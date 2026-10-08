@@ -388,6 +388,7 @@ ducklake-extension:
 
 test: ensure-cache ducklake-extension explorer-assets
 	bash tests/scripts/ducklake_extension_download_test.sh
+	python3 -m unittest examples/quickstart/agent/test_refund_agent_sdk.py
 	@echo "unit + lightweight tests (no e2e infra)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compatibility -- --test-threads=1
 	npm --prefix "$(EXPLORER_DIR)" test
