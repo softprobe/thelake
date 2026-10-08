@@ -16,10 +16,11 @@ time window with a bare `timestamp` predicate so partitions can be pruned.
 
 ## PostgreSQL tables
 
-`session_summary` is stored in the tenant metadata schema and contains the
-list fields: session ID, start and end timestamps, observation and error
-counts, token totals, cost, and promoted filter fields such as agent and user.
-It does not store span payloads, prompts, attributes, or events.
+`session_summary` is stored in the physical-scope PostgreSQL metadata schema
+(shared tables also key rows by `workspace_id`) and contains the list fields:
+session ID, start and end timestamps, observation and error counts, token
+totals, cost, and promoted filter fields such as agent and user. It does not
+store span payloads, prompts, attributes, or events.
 
 `session_summary_dirty` stores one row per session needing reduction, including
 the dirty time bounds and claim ownership. A generation value protects a newer
@@ -70,4 +71,4 @@ path. A positive value coalesces requests in memory before commit; dirty writes
 still follow successful lake flushes. Physical maintenance and summary rebuild
 share the fenced PostgreSQL lease runner. Dirty-row reduction uses row claims
 to distribute work among replicas. See [async jobs](async-jobs.md) and
-[event-time layout](design-event-time-layout.md).
+[event-time layout](../architecture/event-time-layout.md).

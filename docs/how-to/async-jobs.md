@@ -30,7 +30,10 @@ Leased jobs are:
 
 ## Dirty-row claims
 
-Both isolated and shared-scope `session_summary_dirty` tables have nullable `claim_holder` and `claim_until` columns. Claiming runs in a short transaction: select eligible rows ordered by `updated_at`, lock with `FOR UPDATE SKIP LOCKED`, then update their claim token and expiry. Shared tables constrain each batch by `tenant_id`.
+Both isolated and shared-scope `session_summary_dirty` tables have nullable `claim_holder` and `claim_until` columns. Claiming runs in a short transaction: select eligible rows ordered by
+`min_ts_ns`, then `updated_at`, lock with `FOR UPDATE SKIP LOCKED`, then update
+their claim token and expiry. Shared tables constrain each batch by
+`workspace_id`.
 
 Each claim attempt has a unique token. The dirty table keeps a per-row `generation`; a PostgreSQL trigger increments it on every update, including writes from older application versions. The claim returns that generation. The reducer aggregates from DuckLake, then opens a short publication transaction that locks and verifies all claimed rows still have the same owner and generation before UPSERTing absolute summary values. It deletes only rows whose generation still matches the claim; changed rows keep their dirty hint and have the claim cleared for retry. Timestamp ties, wall-clock corrections, and older app-clock writers cannot make a newer hint look old.
 
@@ -74,4 +77,4 @@ session_summary:
 - Maintenance actions: `src/compaction/engine.rs`
 - Dirty schema and claim/ack: `src/session_summary/ddl.rs`, `src/session_summary/reduce.rs`
 - Reducer loop and rebuild job: `src/session_summary/job.rs`
-- Session list design: [`session-list-summary.md`](./session-list-summary.md)
+- Session list design: [session summaries](session-summaries.md)

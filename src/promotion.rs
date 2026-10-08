@@ -714,7 +714,7 @@ fn validate_business_table_additive(
 }
 
 /// Merge several `telemetry_columns` manifests into the single platform manifest a tenant can
-/// have active at once ([`thelake/docs/promotion.md`]).
+/// have active at once ([`thelake/docs/how-to/promotion.md`]).
 ///
 /// All input manifests must target the exact same table set. `telemetry_column_add_ddls` /
 /// `validate_telemetry_column_additive` apply **every** column in a manifest to **every** table

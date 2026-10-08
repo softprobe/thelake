@@ -9,7 +9,7 @@
 
 - OTLP trace and log ingestion over HTTP
 - OTLP trace ingestion over gRPC
-- tenant-scoped DuckLake storage and DuckDB queries
+- workspace-scoped DuckLake storage and DuckDB queries
 - telemetry search and detail APIs
 - schema promotion
 - optional process self-monitoring (Meter instruments → standard OTLP metrics export)
@@ -28,7 +28,7 @@ metric tables or a Prometheus query API.
 OTLP HTTP/gRPC request
         |
         v
-authenticate and bind tenant
+authenticate and bind workspace
         |
         v
 decode OTLP -> Span / Log
@@ -54,7 +54,7 @@ DuckLake
   rows: catalog-inlined or Parquet under data_path
         |
         v
-DuckDB query workers ATTACH the same tenant scope
+DuckDB query workers ATTACH the same workspace scope
 ```
 
 **Default** (`ingest.flush_interval_seconds: 0`): each OTLP request is written
@@ -84,7 +84,7 @@ attached catalog.
 The writer in `src/storage/ducklake/` (`writer.rs` plus domain modules
 `otlp.rs`, `scores.rs`, `promotion.rs`) is the sole durable writer. It:
 
-1. resolves the tenant's DuckLake scope;
+1. resolves the workspace's DuckLake scope;
 2. applies active telemetry-column promotions;
 3. converts records to Arrow using the canonical schemas in
    `src/storage/schema/`;
@@ -129,8 +129,8 @@ through the **standard OTLP metrics exporter**. Destination is controlled by
 fails soft if the exporter cannot be built; customer HTTP bind is never blocked.
 
 Process metrics are **not** written into DuckLake (no ops-lake self-export, no
-customer `metric_*` path). Reserved tenant id `thelake-ops` remains rejected by
-`POST /v1/tenants` and default-lake binding so it cannot collide with customer
+customer `metric_*` path). Reserved workspace id `thelake-ops` remains rejected by
+`POST /v1/workspaces` and default-lake binding so it cannot collide with customer
 scopes.
 
 #### Cardinality rules
@@ -149,41 +149,27 @@ Prometheus does not collide with resource `job` from `service.name`), `step`
 `path` (`coalesce|flush_through` on ingest commit).
 Resource: `service.name=thelake`.
 
-Latency instrument names use `*_duration_milliseconds_{sum,count}` style.
+Instrument **names** are OpenTelemetry dotted identifiers registered in
+`src/self_monitoring/instruments.rs` (for example `thelake.ingest.requests`,
+`thelake.ingest.duration`, `thelake.write.duration`,
+`thelake.ingest.commit.duration`, `thelake.query.duration`,
+`thelake.job.duration`, `thelake.maintenance.step.duration`,
+`thelake.session_summary.reduce.duration`,
+`thelake.self_monitoring.export_drops`). Downstream Prometheus/OTLP converters
+may rename/suffix series; treat that file as the catalog, not this page.
+
+Observable / gauge inventory (`register_observables` and related helpers in the
+same module) covers process RSS/CPU, query-worker busy counts, pending ingest
+batches, writer pool size, async-job wake ms, and self-heal counters.
 
 Snapshot expiration and scheduled-file cleanup outcomes are returned by the SQL
 maintenance script and persisted per physical scope. Cleanup runs when
 `maintenance.metadata_enabled` is enabled; disabling compaction does not skip
 cleanup. Routine maintenance does not delete unscheduled orphan files.
 
-#### Instrument catalog (locked)
-
-| Name | Type | Labels |
-|------|------|--------|
-| `thelake_ingest_requests_total` / `thelake_ingest_errors_total` | counter | tenant, signal, status, app |
-| `thelake_ingest_duration_milliseconds_{sum,count}` | hist | tenant, signal, app |
-| `thelake_write_duration_milliseconds_{sum,count}` | hist | tenant, signal |
-| `thelake_ingest_commit_duration_milliseconds_{sum,count}` | hist | tenant, signal, path |
-| `thelake_ingest_commits_total` / `rows_committed` / `coalesce_flushes` | counter | tenant, signal, path |
-| `thelake_query_duration_milliseconds_{sum,count}` | hist | tenant, sql_kind |
-| `thelake_query_queue_wait_milliseconds_{sum,count}` | hist | tenant, sql_kind |
-| `thelake_slow_queries_total` | counter | tenant, sql_kind |
-| `thelake_table_live_files` / `live_bytes` | gauge | tenant, table |
-| `thelake_table_files_by_size_bucket` | gauge | tenant, table, size_bucket |
-| `thelake_job_duration_milliseconds_{sum,count}` | hist | job_name, scope, status |
-| `thelake_job_skips_total` | counter | job_name, scope, reason |
-| `thelake_maintenance_step_duration_milliseconds_{sum,count}` | hist | scope, step, table |
-| `thelake_session_summary_reduce_duration_milliseconds_{sum,count}` | hist | tenant, step |
-| `thelake_session_summary_dirty_upsert_duration_milliseconds_{sum,count}` | hist | tenant |
-| `thelake_async_jobs_wake_ms` | gauge | — |
-| `thelake_self_heal_rebuilds_total` / `thelake_self_heal_consecutive_failures` | counter/gauge | — |
-| `thelake_process_*` (RSS/VSZ/CPU/threads/disk) | gauge/counter | — |
-| `thelake_query_workers` / `workers_busy` / `ingest_pending_batches` / `writer_pool_size` | gauge | — |
-| `thelake_self_monitoring_export_drops_total` | counter | — |
-
-Anti-recursion: never instrument reserved-tenant ingest; inventory uses
+Anti-recursion: never instrument reserved-workspace ingest; inventory uses
 uninstrumented one-shot SQL where applicable. OTLP decode failures on
-logs/traces increment `thelake_ingest_errors_total` for customer tenants.
+logs/traces increment `thelake.ingest.errors` for customer workspaces.
 Slow DuckDB queries (≥200ms) may emit ops log events for operator drill-down
 (standard logging / OTLP logs path — not product metrics). Bootstrap is
 best-effort and never blocks customer HTTP bind.
@@ -197,15 +183,16 @@ DuckLake creates tables lazily from Arrow schemas.
 Core columns include:
 
 - correlation: `session_id`, `trace_id`, `span_id`, `parent_span_id`
-- tenancy/application: `app_id`, `organization_id`, `tenant_id`
+- tenancy/application: `app_id`, `organization_id`, `workspace_id`
 - timing/status: `timestamp`, `end_timestamp`, `status_code`,
   `status_message`
 - OTLP data: `attributes`, `events`, `span_kind`, `message_type`
 - HTTP data: request method/path/headers/body and response
   status/headers/body
 
-Rows are inserted ordered by `app_id`, `session_id`, and `timestamp`
-(one-clock partition on calendar day of `timestamp`).
+Rows are inserted ordered by `session_id`, `trace_id`, and `timestamp`
+(`thelake_otlp_sorted_by` in `src/sql/schema/otlp_layout.sql`; one-clock
+partition on calendar day of `timestamp`).
 
 ### `logs`
 
@@ -218,14 +205,14 @@ resource attributes, trace/span correlation, and event-time `timestamp`
 Immutable LLM evaluation records are stored separately from spans because an
 evaluation commonly arrives after the observed work. A score targets at least
 one trace, span, or session and contains one typed numeric, categorical,
-boolean, or text value. `score_id` is the tenant-local idempotency key.
+boolean, or text value. `score_id` is the workspace-local idempotency key
+(with `timestamp` for day prune on lookup).
 
 ### `score_configs`
 
 Append-only score schemas (name + data type + optional numeric bounds /
-categorical values). `config_id` is the tenant-local idempotency key. There is
-no PATCH; replace a config by inserting a new `config_id`. Human annotation
-(Annotate panel → scores) is documented in Softprobe LLM `docs/annotation.md`.
+categorical values). `config_id` is the workspace-local idempotency key. There
+is no PATCH; replace a config by inserting a new `config_id`.
 
 ## Schema promotion
 
@@ -244,16 +231,16 @@ global to every workspace using that scope.
 
 `sp.*` attributes are an instrumentation convention only. Softprobe does not
 auto-promote them. Canonical contract:
-[`promotion.md`](promotion.md).
+[`promotion.md`](../how-to/promotion.md).
 
 ## Query path
 
-`src/query/duckdb.rs` owns a pool of independent DuckDB worker connections.
+`src/query/engine.rs` owns a pool of independent DuckDB worker connections.
 Every worker loads `httpfs` and DuckLake, configures object-store access, and
-ATTACHes the same DuckLake scope used by its tenant-bound writer.
+ATTACHes the same DuckLake scope used by its workspace-bound writer.
 
 Public query names are `traces`, `logs`, and `scores`. Bare names are expanded
-to the tenant's qualified DuckLake catalog table before execution. Internal
+to the workspace's qualified DuckLake catalog table before execution. Internal
 catalog and storage names are not part of the query interface.
 
 First-party compilers emit preferred names only. Ingest defaults to
@@ -261,20 +248,20 @@ flush-through (optional soft coalesce does not add a queryable buffer tier).
 
 Query surfaces include:
 
-- tenant-scoped `POST /v1/query/sql` for internal/debug use;
+- workspace-bound `POST /v1/query/sql` for internal/debug use;
 - telemetry search, details, fields, sessions, and traces endpoints;
-- Loki- and Tempo-compatible query APIs (see [`compat/matrix.md`](compat/matrix.md));
+- Loki- and Tempo-compatible query APIs (see [`compat/matrix.md`](../compat/matrix.md));
 - `GET /v1/data/ducklake-connection` for clients that query DuckLake locally;
 - `make duckdb-shell` for local ad hoc access.
 
-See [`adhoc-duckdb-ducklake.md`](adhoc-duckdb-ducklake.md) for the supported
-interactive workflow.
+See [adhoc DuckDB](../how-to/adhoc-duckdb.md) for the supported interactive
+workflow.
 
 ## Maintenance
 
 The leased async scheduler invokes one SQL maintenance script per physical
 DuckLake scope when compaction or metadata maintenance is enabled (default
-interval **300s**). The script reads its configuration and per-table watermarks
+interval **60s**). The script reads its configuration and per-table watermarks
 from the PostgreSQL registry. It advances a watermark only after its merge
 succeeds, then expires snapshots and cleans files scheduled for deletion after
 all eligible table merges succeed. `reader_safety_grace_seconds` protects
@@ -294,69 +281,48 @@ delete orphan files.
 Operators should still batch OTLP upstream (collector `batch` processor) so
 flush-through ingest does not create one tiny file per export.
 
-Iceberg manifest rewrite and Iceberg REST catalog maintenance do not
-exist in the current path.
-
 ## Configuration
 
-The canonical shape is `config.yaml`; defaults and validation live in
-`src/config.rs`.
-
-Important DuckLake settings:
-
-- `metadata_path`: PostgreSQL connection string (the DuckLake catalog is always Postgres)
-- `data_path`: local, `s3://`, or `gs://` data location
-- `catalog_alias`
-- `metadata_schema`
-- `data_inlining_row_limit` (default `500`; set `0` only when a fixture needs Parquet-per-batch)
-- `writer_pool_size` (default `4`, clamped to `1..=16`)
-
-Non-secret object-store settings live in the `object_store` section (`region`
-and an optional custom `endpoint` for MinIO/R2). Object-store credentials are
-never stored in YAML; they are resolved from the environment: `AWS_ACCESS_KEY_ID`
-/ `AWS_SECRET_ACCESS_KEY` (with optional `AWS_SESSION_TOKEN`) for `s3://` paths,
-and GCS HMAC interoperability credentials `GCS_HMAC_ACCESS_KEY_ID` /
-`GCS_HMAC_SECRET` (with `GCP_HMAC_*` aliases) for `gs://` paths.
-
-Config precedence is:
-
-1. supported environment overrides;
-2. `CONFIG_FILE` (default `config.yaml`);
-3. built-in defaults when the file does not exist.
-
-Supported direct overrides in `src/config.rs` are `PORT`, `S3_REGION`, and
-`SOFTPROBE_MAX_HTTP_BODY_BYTES`.
+See the [configuration reference](../reference/config.md). Canonical example:
+`config.yaml`. Defaults and validation live in `src/config.rs`.
 
 ## Network surfaces
 
 - HTTP listens on `SOFTPROBE_LISTEN_ADDR` when set; otherwise it binds
-  `0.0.0.0` with `server.port` (default `8090`). The current binary does not
-  use `server.host` for its listen address.
+  `0.0.0.0` with `server.port` (default `8090`). The binary does not use
+  `server.host` for its listen address.
 - OTLP/gRPC traces listen on `OTEL_GRPC_PORT` (default `4317`), unless
   `SOFTPROBE_GRPC_DISABLE=1`.
-- `/v1/*` operational routes require bearer authentication, except tenant
-  provisioning which performs its own admin-token validation.
+- `/v1/*` operational routes require authentication (assertion header or
+  Bearer), except `OPTIONS` CORS preflight and workspace provisioning
+  (`POST /v1/workspaces`), which validates an admin bearer in the handler.
+  Local anonymous mode uses a fixed data-plane allowlist (see root README).
 - Auth wiring uses `SOFTPROBE_AUTH_URL` (defaults to a local auth stub URL).
 
-The implemented HTTP product contract is
-[`docs/ingestion-openapi.yaml`](ingestion-openapi.yaml), served live as
+The HTTP product contract is
+[`docs/reference/openapi.yaml`](../reference/openapi.yaml), served as
 `/openapi.json` (UI at `/swagger`). Loki/Tempo Grafana-compat routes are
-implemented outside that document. Promotion semantics are in
-[`promotion.md`](promotion.md).
+documented under [`compat/`](../compat/README.md). Promotion semantics are in
+[schema promotion](../how-to/promotion.md).
 
 ## Validation
 
-From the repository root:
+Local pre-merge gate (from the repository root):
 
 ```bash
 make setup
 make ci
 ```
 
-CI on GitHub runs the same Make entry points (`make ci` after
-`make setup`; see `.github/workflows/ci.yml` — fmt, lint, `test`, and `test-e2e`;
-release packaging is `make release` / `release.yml`). Performance suites are
-manual (`make test-perf` / `.github/workflows/performance.yml`).
+`make ci` runs `check-fmt`, `lint`, `test`, and (when MinIO/Postgres are up)
+`make test-e2e`. `make test-e2e` runs the DuckLake mode matrix (**isolated and
+shared**) via `scripts/run-e2e-matrix.sh`.
 
-`make test` is unit/lightweight; `make test-e2e` is isolated MinIO/PostgreSQL
-integration. `make duckdb-shell` is the supported manual ATTACH smoke.
+GitHub Actions (`.github/workflows/ci.yml`) does **not** invoke `make ci`. It
+runs `make doctor` → `setup` → `check-fmt` / `lint` / `test`, plus separate
+jobs for DuckLake E2E (isolated and shared) and Explorer UI. Release packaging
+is `make release` / `release.yml`. Performance suites are manual
+(`make test-perf` / `.github/workflows/performance.yml`).
+
+`make test` is unit/lightweight. `make duckdb-shell` is the supported manual
+ATTACH smoke.

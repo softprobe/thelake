@@ -2,7 +2,7 @@
 
 **Strict enforcement:** `tests/integration/storage_contract_validation.rs` (run with `make test-e2e` / `cargo test --features integration-e2e --test tests`).
 
-**Working DuckDB attach** for local dev: `scripts/duckdb_ducklake_local_init.sql` (used by `make duckdb-shell` / `scripts/interactive_query.sh`). See [`docs/adhoc-duckdb-ducklake.md`](../../docs/adhoc-duckdb-ducklake.md).
+**Working DuckDB attach** for local dev: `scripts/duckdb_ducklake_local_init.sql` (used by `make duckdb-shell` / `scripts/interactive_query.sh`). See [`docs/how-to/adhoc-duckdb.md`](../../docs/how-to/adhoc-duckdb.md).
 
 | File | Notes |
 |------|--------|

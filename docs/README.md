@@ -1,26 +1,57 @@
 # Documentation
 
-## Runtime
+Pick the page by what you are trying to do.
 
-- [Architecture](design.md) — ingestion, storage, query, and maintenance.
-- [Workspace identity](workspace-identity.md) — tenancy and physical scopes.
-- [Async jobs](async-jobs.md) — leases, dirty-row claims, and scheduled work.
-- [Session summaries](session-list-summary.md) — list and rebuild behavior.
-- [SQL and schema](design-sql-and-schema.md) — canonical tables and query rules.
-- [Event-time layout](design-event-time-layout.md) — timestamp partitioning and pruning.
-- [Attribute storage](attribute-storage.md) — MAP columns and promoted fields.
-- [DuckLake access inventory](ducklake-access-inventory.md) — connection ownership.
+| Goal | Start here |
+|------|------------|
+| Run, build, CI, Docker | Root [`README.md`](../README.md) |
+| Understand how the system works | [Architecture](architecture/overview.md) |
+| Complete a task | [How-to guides](#how-to) |
+| Look up an API, config key, or compat route | [Reference](#reference) |
+| Softprobe SDK attribute / observation contracts | [SDK contracts](sdk/README.md) |
+| Agent engineering invariants | [`AGENTS.md`](../AGENTS.md) |
 
-## Guides and API contracts
+## Architecture
 
-- [Instrumentation](instrumentation_guide.md)
-- [Schema promotion](promotion.md)
-- [HTTP API](ingestion-openapi.yaml)
-- [Local DuckLake queries](adhoc-duckdb-ducklake.md)
+Concepts and runtime design (read for understanding, not step-by-step).
 
-## Compatibility and operations
+- [Overview](architecture/overview.md) — ingest, DuckLake storage, query, maintenance
+- [Product goals](architecture/goals.md)
+- [Workspace identity](architecture/workspace-identity.md) — `workspace_id` and physical scopes
+- [SQL and schema](architecture/sql-and-schema.md) — tables, one-clock rules
+- [Event-time layout](architecture/event-time-layout.md) — partition pruning
+- [Attribute storage](architecture/attribute-storage.md) — `MAP` columns and promotion
+- [DuckLake access inventory](architecture/ducklake-access.md) — engine ownership boundaries
 
-- [Loki and Tempo compatibility](compat/README.md)
-- [Performance](perf/README.md)
-- [Product positioning](positioning.md)
-- [Runtime goals](goals.md)
+## How-to
+
+- [Instrument applications](how-to/instrumentation.md)
+- [Apply schema promotion](how-to/promotion.md)
+- [Query DuckLake locally](how-to/adhoc-duckdb.md)
+- [Operate async jobs](how-to/async-jobs.md)
+- [Session list summaries](how-to/session-summaries.md)
+
+## Reference
+
+- [HTTP OpenAPI](reference/openapi.yaml) — served as `GET /openapi.json`
+- [Configuration](reference/config.md) — YAML sections, defaults, env overrides
+- [Loki / Tempo compatibility](compat/README.md)
+- [Performance gates](perf/README.md)
+- Promotion manifests (applied at runtime): [`promotion/`](promotion/)
+- Event-time EXPLAIN fixtures: [`fixtures/`](fixtures/)
+
+## SDK contracts
+
+Language-neutral Softprobe SDK docs live under [`sdk/`](sdk/README.md).
+Machine-readable schemas are under [`contracts/`](../contracts/README.md).
+The runtime does not implement those SDK packages; it stores the OTLP they emit.
+
+## Source of truth
+
+| Fact | Authority |
+|------|-----------|
+| HTTP routes + JSON shapes | [`reference/openapi.yaml`](reference/openapi.yaml) and `src/api/` |
+| Config keys and defaults | [`reference/config.md`](reference/config.md) and `src/config.rs` |
+| Table DDL | `src/sql/schema/*.sql` |
+| SQL safety invariants | [`AGENTS.md`](../AGENTS.md) |
+| Make targets | `Makefile` / [`scripts/README.md`](../scripts/README.md) |

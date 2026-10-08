@@ -51,8 +51,11 @@ and `gen_ai.tool.name` from AI SDK telemetry context.
 
 ## Verification
 
+In this repository, validate language-neutral fixtures with:
+
 ```bash
-make phase2-contract-test
-make tool-call-e2e
-make tool-call-e2e-inspect
+make contracts-test
 ```
+
+Provider / tool-call live E2E targets live in Softprobe SDK repositories, not
+in thelake's Makefile.

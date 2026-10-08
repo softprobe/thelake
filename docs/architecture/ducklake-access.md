@@ -12,7 +12,7 @@ Workspace engines are obtained through `WorkspaceManager::workspace_for` via
 | Ingest | `src/storage/ducklake/writer.rs` | Writer pool, catalog initialization, schema setup, and durable OTLP writes | Owned by `IngestEngine` |
 | Ingest schema support | `src/storage/schema/otlp_layout.rs`, `src/storage/schema/ducklake_partition.rs`, `src/storage/ducklake/util.rs` | Partition and sort probes and ingest-time schema checks on an engine-owned connection | Internal ingest support |
 | Query | `src/query/engine.rs`, `src/storage/duckdb/cache.rs`, `src/storage/ducklake/workspace_views.rs` | Query pool, DuckLake attachments, cache setup, and workspace table qualification | Owned by `QueryEngine` |
-| Maintenance | `src/compaction/engine.rs`, `src/compaction/merge.rs`, `src/compaction/session_summary_access.rs`, `src/sql/maintenance/mod.rs` | Physical-scope maintenance sessions, file merge, snapshot cleanup, and session-summary jobs | Owned by `MaintenanceEngine` |
+| Maintenance | `src/compaction/engine.rs`, `src/compaction/maint_conn_pool.rs`, `src/compaction/session_summary_access.rs`, `src/sql/maintenance/mod.rs` | Physical-scope maintenance sessions, file merge, snapshot cleanup, and session-summary jobs | Owned by `MaintenanceEngine` |
 | Maintenance implementation | `src/session_summary/reduce.rs` | Claim/ack and summary-domain logic; invokes the internal maintenance access adapter | `MaintenanceEngine` |
 | Control plane | `src/storage/ducklake/promotion.rs`, `src/control_plane/admin.rs` | Promotion-spec reads and local promotion application using a writer connection | `AdminEngine`; never ordinary workspace query SQL |
 | Shared SQL utility | `src/sql/bounds/execute_gate.rs` | Checked execution and preparation on a caller-owned connection | Narrow internal primitive; callers must be engine-owned |
@@ -35,7 +35,7 @@ is not part of the public workspace API:
 | `src/api/scores.rs` | Scores API reads score and score-config data through `QueryEngine` and writes through `IngestEngine` | Keep workspace binding at the workspace context boundary |
 | `src/main.rs` | Startup starts maintenance via `WorkspaceManager` | Keep registry access inside the manager / composition boundary |
 
-## Access rules for the refactor
+## Access rules
 
 1. `IngestEngine` is the only workspace-facing owner of writes.
 2. `QueryEngine` is the only workspace-facing owner of reads. Its raw SQL
@@ -74,3 +74,6 @@ Application handlers receive engines through `AppState`; they do not open
 DuckDB connections or construct catalog attachments themselves. Catalog
 metadata uses PostgreSQL in production. See [workspace identity](workspace-identity.md)
 for isolated and shared physical scopes.
+
+Test coverage: `src/storage/ducklake/physical_scope.rs` asserts this inventory
+lists every production connection-owning path.

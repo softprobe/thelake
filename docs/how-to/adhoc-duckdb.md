@@ -4,16 +4,16 @@ Committed telemetry lives in **DuckLake** (PostgreSQL catalog plus the
 configured `data_path`). End-to-end verification is automated by repository
 root **`make test`**.
 
-## Same scope as the runtime (multi-tenant / per-config)
+## Same scope as the runtime
 
-The query worker ATTACHes using **`ducklake.catalog_alias`**, **`ducklake.metadata_schema`**, **`ducklake.data_path`**, and **`ducklake.metadata_path`** from the runtime YAML. **`make duckdb-shell`** does the same: it runs `scripts/duckdb_ducklake_render_init.py` on **`CONFIG_FILE`**. Object-store endpoint/region come from **`object_store`**; credentials come from the environment (`AWS_*` for `s3://`, `GCS_HMAC_*` / `GCP_HMAC_*` for `gs://`) — never from YAML.
+The query worker ATTACHes using **`ducklake.catalog_alias`**, **`ducklake.metadata_schema`**, **`ducklake.data_path`**, and **`ducklake.metadata_path`** from the runtime YAML. **`make duckdb-shell`** does the same: it runs `scripts/duckdb_ducklake_render_init.py` on **`CONFIG_FILE`**. Object-store endpoint/region come from **`object_store`**; credentials come from the environment (`AWS_*` for `s3://`, `GCS_HMAC_*` / `GCP_HMAC_*` for `gs://`) — never from YAML. The catalog DSN in `metadata_path` may include a Postgres password.
 
 1. **Default on the host:** `tests/config/duckdb-shell-host.yaml` (localhost Postgres + MinIO, same `metadata_schema` / `data_path` as typical e2e stacks).
 2. **Match a running container:**  
    `CONFIG_FILE=config.yaml make duckdb-shell`  
 
    (uses Docker hostnames — run DuckDB **inside** the network or fix hosts; usually you use the host yaml when the DB is port-forwarded to localhost.)
-3. **Another tenant / scope:** use a YAML (or generated config) where `ducklake.metadata_schema` and `ducklake.data_path` are exactly that tenant’s scope — same as the server process for that tenant.
+3. **Another physical scope:** use a YAML where `ducklake.metadata_schema` and `ducklake.data_path` match that scope — same as the server process for that warehouse.
 
 If `CONFIG_FILE` is wrong, you will ATTACH to an empty or wrong schema and see no rows (or errors).
 

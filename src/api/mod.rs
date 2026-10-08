@@ -177,8 +177,8 @@ pub async fn create_router(
 async fn openapi_spec() -> Json<serde_json::Value> {
     static SPEC: Lazy<serde_json::Value> = Lazy::new(|| {
         let mut spec: serde_json::Value =
-            serde_yaml::from_str(include_str!("../../docs/ingestion-openapi.yaml"))
-                .expect("docs/ingestion-openapi.yaml must parse as OpenAPI JSON");
+            serde_yaml::from_str(include_str!("../../docs/reference/openapi.yaml"))
+                .expect("docs/reference/openapi.yaml must parse as OpenAPI JSON");
         if let Some(info) = spec.get_mut("info").and_then(|v| v.as_object_mut()) {
             info.insert(
                 "version".to_string(),

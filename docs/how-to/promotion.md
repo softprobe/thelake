@@ -11,7 +11,7 @@ promotion. Other docs link here; do not duplicate the full contract elsewhere.
 
 OTLP spans store arbitrary attributes in an `attributes` MAP column
 (`MAP(VARCHAR, VARCHAR)`). Nested field filters work; selected fields can be
-promoted to typed columns. See [attribute storage](attribute-storage.md) for
+promoted to typed columns. See [attribute storage](../architecture/attribute-storage.md) for
 the current physical model:
 
 ```sql
@@ -65,7 +65,7 @@ span.setAttribute('sp.session.id', sessionId);
 span.setAttribute('sp.workflow', 'checkout');
 ```
 
-See [`instrumentation_guide.md`](instrumentation_guide.md) for body capture and
+See [instrumentation](instrumentation.md) for body capture and
 language examples. Keep large HTTP bodies in `http.request` /
 `http.response` span events; keep searchable identifiers in attributes.
 
@@ -497,10 +497,9 @@ payload storage.
 
 ## Related docs
 
-- [`instrumentation_guide.md`](instrumentation_guide.md) — how to emit bodies and `sp.*`
-- [`design.md`](design.md) — runtime architecture
-- [`attribute-storage.md`](attribute-storage.md) — MAP columns and promoted fields
-- [`docs/promotion/`](promotion/) — product-hot manifests (traces/logs)
-
-- [`ingestion-openapi.yaml`](ingestion-openapi.yaml) — HTTP contract including apply
-- [`adhoc-duckdb-ducklake.md`](adhoc-duckdb-ducklake.md) — local SQL against DuckLake
+- [Instrumentation](instrumentation.md) — bodies and `sp.*`
+- [Architecture overview](../architecture/overview.md)
+- [Attribute storage](../architecture/attribute-storage.md)
+- [Product-hot manifests](../promotion/) — traces/logs YAML applied at runtime
+- [OpenAPI](../reference/openapi.yaml) — HTTP contract including apply
+- [Ad hoc DuckDB](adhoc-duckdb.md)

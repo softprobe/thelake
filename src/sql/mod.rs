@@ -1,6 +1,6 @@
 //! Production lake SQL — recipes, bounds, literals, schema registry.
 //!
-//! Design: [`docs/design-sql-and-schema.md`](../../docs/design-sql-and-schema.md).
+//! Design: [`docs/architecture/sql-and-schema.md`](../../docs/architecture/sql-and-schema.md).
 //! Callers outside this package must not embed SQL verbs.
 
 pub mod bounds;

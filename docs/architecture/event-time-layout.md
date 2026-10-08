@@ -2,7 +2,7 @@
 
 This document defines the physical layout and query-time rules for DuckLake
 `traces`, `logs`, and `scores`. SQL and schema ownership are described in
-[`design-sql-and-schema.md`](design-sql-and-schema.md).
+[SQL and schema](sql-and-schema.md).
 
 ## Timestamp contract
 
@@ -50,8 +50,4 @@ The locked layout check is
 `tests/integration/one_clock_prune.rs::production_writers_partition_and_prune_one_clock_fact_tables`.
 It writes through production writers and verifies that a one-day query reads
 only the matching day's files. The companion fixture is
-[`fixtures/one-clock-prune-explain.md`](fixtures/one-clock-prune-explain.md).
-
-The related query compiler check is
-`one_day_session_fetch_predicates_do_not_name_unrelated_days` in
-`src/api/sessions.rs`.
+[`fixtures/one-clock-prune-explain.md`](../fixtures/one-clock-prune-explain.md).

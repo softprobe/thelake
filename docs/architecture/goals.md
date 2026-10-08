@@ -24,34 +24,37 @@ operational telemetry.
    - Keep non-inlined data in Parquet under a configurable local or
      object-store data path.
 
-3. **Tenant isolation**
-   - Bind tenant identity before ingest, query, session, or promotion work.
-   - Give each provisioned tenant a DuckLake metadata schema and data path.
+3. **Workspace isolation**
+   - Bind `workspace_id` before ingest, query, session, or promotion work.
+   - Give each provisioned workspace a DuckLake metadata schema and data path
+     (or a shared physical scope with row-level `workspace_id`).
 
 4. **SQL accessibility**
    - Query with DuckDB through the attached DuckLake catalog.
    - Support telemetry APIs for common evidence searches.
-   - Provide tenant-scoped connection material for local DuckDB clients.
+   - Provide workspace-scoped connection material for local DuckDB clients
+     (isolated mode).
 
 5. **Operational simplicity**
    - Let the OpenTelemetry collector batch upstream.
-   - Commit each request directly to DuckLake.
+   - Default flush-through: commit each OTLP request to DuckLake before ack
+     (`ingest.flush_interval_seconds: 0`; soft coalesce is optional).
    - Rely on DuckLake for conflict retries, snapshots, data inlining, and file
      management.
    - Run DuckLake-native compaction and retention maintenance.
 
 6. **Schema evolution without parallel storage paths**
    - Keep canonical trace and log schemas in one shared module.
-   - Add tenant-scoped nullable columns through promotion manifests
+   - Add workspace-scoped nullable columns through promotion manifests
      (`POST /v1/promotions/apply`).
    - Keep `sp.*` as an explicit instrumentation convention; promote only the
-     fields a tenant declares.
+     fields a workspace declares.
 
 7. **Query-only observability compatibility**
    - Keep OTLP as the canonical write path for traces and logs.
    - Expose Loki- and Tempo-compatible **query** APIs so existing Grafana
      datasources can read lake evidence without a second write pipeline. See
-     [compat/matrix.md](compat/matrix.md).
+     [compat/matrix.md](../compat/matrix.md).
    - Product signals are traces and logs. Process self-monitoring metrics are
      exported through OTLP and are not stored as customer telemetry.
 
@@ -70,15 +73,15 @@ operational telemetry.
   (`ingest.flush_interval_seconds` > 0; default 0 = flush-through) is allowed;
   it is not a durable buffer.
 - Hiding failed commits behind an application retry/fallback path.
-- Accepting arbitrary tenant identifiers in already tenant-bound operational
-  APIs.
+- Accepting arbitrary workspace identifiers in already workspace-bound
+  operational APIs.
 
 ## References
 
-- [Current architecture](design.md)
+- [Current architecture](overview.md)
 - [Workspace identity](workspace-identity.md)
-- [Instrumentation guide](instrumentation_guide.md)
-- [Schema promotion](promotion.md)
-- [Ad hoc DuckDB/DuckLake queries](adhoc-duckdb-ducklake.md)
-- [Compatibility matrix (Loki/Tempo)](compat/matrix.md)
-- [Performance documentation](perf/README.md)
+- [Instrumentation guide](../how-to/instrumentation.md)
+- [Schema promotion](../how-to/promotion.md)
+- [Ad hoc DuckDB/DuckLake queries](../how-to/adhoc-duckdb.md)
+- [Compatibility matrix (Loki/Tempo)](../compat/matrix.md)
+- [Performance documentation](../perf/README.md)

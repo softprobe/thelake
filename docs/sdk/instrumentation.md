@@ -5,9 +5,9 @@
 Softprobe SDKs produce standard OpenTelemetry spans. This document defines the
 additional attributes and events needed for LLM observability.
 
-The Phase 2 public SDK API, lifecycle, privacy controls, and fixture parity
-rules are defined in [sdk-contract.md](sdk-contract.md). Machine-readable
-schemas and expected fixtures live under `contracts/`.
+The public SDK API, lifecycle, privacy controls, and fixture parity rules are
+defined in [sdk-contract.md](sdk-contract.md). Machine-readable schemas and
+expected fixtures live under [`contracts/`](../../contracts/).
 
 Use stable OpenTelemetry semantic conventions where available. Softprobe keys
 fill product-specific gaps and must use the `sp.` namespace.
