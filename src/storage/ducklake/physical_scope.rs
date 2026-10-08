@@ -512,7 +512,7 @@ mod tests {
             "src/storage/schema/otlp_layout.rs",
             "src/storage/schema/ducklake_partition.rs",
             "src/storage/ducklake/util.rs",
-            "src/storage/duckdb/engine.rs",
+            "src/query/engine.rs",
             "src/storage/duckdb/cache.rs",
             "src/storage/ducklake/workspace_views.rs",
             "src/compaction/engine.rs",
@@ -521,6 +521,7 @@ mod tests {
             "src/sql/maintenance/mod.rs",
             "src/session_summary/reduce.rs",
             "src/storage/ducklake/promotion.rs",
+            "src/control_plane/admin.rs",
             "src/sql/bounds/execute_gate.rs",
         ] {
             assert!(

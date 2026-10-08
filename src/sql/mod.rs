@@ -383,6 +383,7 @@ mod locality_tests {
         let mut violations = Vec::new();
         let approved = [
             "/ingest/",
+            "/control_plane/",
             "/query/",
             "/compaction/",
             "/storage/",
