@@ -109,15 +109,19 @@ export THELAKE_DEFAULT_WORKSPACE_ID=550e8400-e29b-41d4-a716-446655440000
 make run
 ```
 
-Open the session and trace UI at `http://127.0.0.1:8090/explorer/`. Local
-anonymous mode (`SOFTPROBE_LOCAL_ANONYMOUS=1`) binds a fixed allowlist of
-`/v1/*` data-plane routes (OTLP ingest, scores POST, span/session search,
-score-config GET, and single span/trace/session GET) to
-`THELAKE_DEFAULT_WORKSPACE_ID` without a bearer. Other `/v1/*` routes
-(including recording, promotions, SQL, and workspaces) return 403. Anyone who
-can reach the listener can exercise that allowlist. Leave this mode disabled
-when the listener is reachable by untrusted users; assertion/Bearer auth
-remains the default.
+Open the session and trace UI at `http://127.0.0.1:8090/explorer/`. Full
+Explorer usage (working local config, embed, SPA dev, behavior checks):
+[`docs/how-to/explorer.md`](docs/how-to/explorer.md). Local anonymous mode
+(`SOFTPROBE_LOCAL_ANONYMOUS=1`) binds a fixed allowlist of `/v1/*` data-plane
+routes (OTLP ingest, scores POST, span/session search, score-config GET,
+single span/trace/session GET, and evaluator list/create/activate/deactivate)
+to `THELAKE_DEFAULT_WORKSPACE_ID` without a bearer. It does **not** provision
+that workspace: with the default **isolated** scope you must
+`POST /v1/workspaces` (admin key) first, or use shared scope as in the Explorer
+how-to. Other `/v1/*` routes (including recording, promotions, SQL, and
+workspaces) return 403. Anyone who can reach the listener can exercise that
+allowlist. Leave this mode disabled when the listener is reachable by
+untrusted users; assertion/Bearer auth remains the default.
 
 Defaults:
 

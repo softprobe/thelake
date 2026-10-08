@@ -303,12 +303,31 @@ async fn evaluate_trace(
             ]),
             workspace_id: None,
         };
-        if !ws
+        let is_new_score = !ws
             .query()
             .score_exists(&score.score_id, score.timestamp)
-            .await?
-        {
+            .await?;
+        if is_new_score {
             ws.ingest().add_scores(vec![score]).await?;
+            if output.status == "fail" {
+                let definition = definition.clone();
+                let trace_id = trace_id.to_owned();
+                let rationale = output.rationale.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = crate::api::slack::notify_evaluator_failure(
+                        &definition,
+                        &trace_id,
+                        &rationale,
+                    )
+                    .await
+                    {
+                        warn!(
+                            trace_id,
+                            "Slack failure notification was not delivered: {error}"
+                        );
+                    }
+                });
+            }
         }
     }
     Ok(())

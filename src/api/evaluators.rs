@@ -44,6 +44,10 @@ pub struct EvaluatorDefinition {
     pub required_tool_order: Vec<OrderedToolRequirement>,
     pub timestamp: DateTime<Utc>,
     pub active: bool,
+    #[serde(skip)]
+    pub slack_channel_id: Option<String>,
+    #[serde(skip)]
+    pub slack_thread_ts: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,6 +63,10 @@ pub struct CreateEvaluatorRequest {
     pub uncertainty_margin: f64,
     #[serde(default)]
     pub required_tool_order: Vec<OrderedToolRequirement>,
+    #[serde(skip)]
+    pub slack_channel_id: Option<String>,
+    #[serde(skip)]
+    pub slack_thread_ts: Option<String>,
 }
 
 fn default_threshold() -> f64 {
@@ -153,6 +161,12 @@ fn config_from_request(request: CreateEvaluatorRequest) -> ScoreConfig {
         ),
     ]);
     metadata.insert("thelake.evaluator.contract".into(), "1".into());
+    if let Some(channel) = request.slack_channel_id {
+        metadata.insert("thelake.evaluator.slack_channel_id".into(), channel);
+    }
+    if let Some(thread_ts) = request.slack_thread_ts {
+        metadata.insert("thelake.evaluator.slack_thread_ts".into(), thread_ts);
+    }
     ScoreConfig {
         config_id: config_id(&request.evaluator_id, request.version),
         timestamp,
@@ -215,6 +229,14 @@ pub(crate) fn definition_from_config(config: ScoreConfig) -> Option<EvaluatorDef
         required_tool_order,
         timestamp: config.timestamp,
         active: false,
+        slack_channel_id: config
+            .metadata
+            .get("thelake.evaluator.slack_channel_id")
+            .cloned(),
+        slack_thread_ts: config
+            .metadata
+            .get("thelake.evaluator.slack_thread_ts")
+            .cloned(),
     })
 }
 
@@ -262,6 +284,20 @@ pub async fn create_evaluator(
         )
     })?;
 
+    let (definition, created) = save_evaluator(&ws, request).await?;
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(definition)))
+}
+
+pub(crate) async fn save_evaluator(
+    ws: &crate::workspace::WorkspaceContext,
+    request: CreateEvaluatorRequest,
+) -> Result<(EvaluatorDefinition, bool), ApiError> {
+    validate(&request).map_err(|message| bad_request(message.to_string()))?;
     let config = config_from_request(request);
     if let Some(stored) = ws
         .query()
@@ -284,6 +320,8 @@ pub async fn create_evaluator(
             || definition.criteria != requested.criteria
             || definition.threshold != requested.threshold
             || definition.uncertainty_margin != requested.uncertainty_margin
+            || definition.slack_channel_id != requested.slack_channel_id
+            || definition.slack_thread_ts != requested.slack_thread_ts
             || definition.required_tool_order.len() != requested.required_tool_order.len()
             || serde_json::to_value(&definition.required_tool_order).ok()
                 != serde_json::to_value(&requested.required_tool_order).ok()
@@ -301,7 +339,7 @@ pub async fn create_evaluator(
                     Json(serde_json::json!({"error":"evaluator activation lookup failed"})),
                 )
             })?;
-        return Ok((StatusCode::OK, Json(definition)));
+        return Ok((definition, false));
     }
 
     ws.ingest()
@@ -315,7 +353,7 @@ pub async fn create_evaluator(
             )
         })?;
     let definition = definition_from_config(config).expect("new evaluator config is valid");
-    Ok((StatusCode::CREATED, Json(definition)))
+    Ok((definition, true))
 }
 
 pub async fn list_evaluators(
@@ -414,6 +452,28 @@ async fn set_evaluator_activation(
     version: u32,
     enabled: bool,
 ) -> Result<Json<EvaluatorDefinition>, ApiError> {
+    let auth_info = auth.as_ref().map(|extension| &extension.0);
+    let ws = match auth_info {
+        Some(info) => state.workspace_for_auth(info).await,
+        None => state.workspace_for_id("").await,
+    }
+    .map_err(|error| {
+        warn!("failed to resolve workspace for evaluator state change: {error}");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"workspace runtime unavailable"})),
+        )
+    })?;
+    let definition = set_activation_for_workspace(&ws, evaluator_id, version, enabled).await?;
+    Ok(Json(definition))
+}
+
+pub(crate) async fn set_activation_for_workspace(
+    ws: &crate::workspace::WorkspaceContext,
+    evaluator_id: String,
+    version: u32,
+    enabled: bool,
+) -> Result<EvaluatorDefinition, ApiError> {
     if enabled
         && (std::env::var("THELAKE_EVALUATION_RUNNER_URL")
             .ok()
@@ -427,18 +487,6 @@ async fn set_evaluator_activation(
             Json(serde_json::json!({"error":"online evaluation runner is not configured"})),
         ));
     }
-    let auth_info = auth.as_ref().map(|extension| &extension.0);
-    let ws = match auth_info {
-        Some(info) => state.workspace_for_auth(info).await,
-        None => state.workspace_for_id("").await,
-    }
-    .map_err(|error| {
-        warn!("failed to resolve workspace for evaluator state change: {error}");
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"workspace runtime unavailable"})),
-        )
-    })?;
     let Some(config) = ws
         .query()
         .get_score_config(&config_id(&evaluator_id, version))
@@ -455,6 +503,20 @@ async fn set_evaluator_activation(
     };
     let mut definition = definition_from_config(config.clone())
         .ok_or_else(|| bad_request("evaluator version not found"))?;
+    if enabled
+        && is_version_active(ws, &evaluator_id, version)
+            .await
+            .map_err(|error| {
+                warn!("evaluator activation check failed: {error}");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"error":"evaluator activation check failed"})),
+                )
+            })?
+    {
+        definition.active = true;
+        return Ok(definition);
+    }
     let activation = activation_config(&evaluator_id, version, &definition.name, enabled);
     ws.ingest()
         .add_score_configs(vec![activation])
@@ -467,7 +529,7 @@ async fn set_evaluator_activation(
             )
         })?;
     definition.active = enabled;
-    Ok(Json(definition))
+    Ok(definition)
 }
 
 async fn is_version_active(

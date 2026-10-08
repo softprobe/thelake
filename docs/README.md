@@ -26,6 +26,8 @@ Concepts and runtime design (read for understanding, not step-by-step).
 ## How-to
 
 - [Instrument applications](how-to/instrumentation.md)
+- [Use Explorer](how-to/explorer.md) — session/trace UI at `/explorer/`
+- [Use Slack behavior checks](how-to/slack-evaluator.md) — author checks and receive online evaluation failures in threads
 - [Apply schema promotion](how-to/promotion.md)
 - [Query DuckLake locally](how-to/adhoc-duckdb.md)
 - [Operate async jobs](how-to/async-jobs.md)

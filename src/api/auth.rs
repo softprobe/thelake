@@ -6,7 +6,7 @@ use axum::{
     response::Response,
 };
 
-/// Prefer `X-Softprobe-Assertion` (sp-llm#39). Fall back to Bearer assertion JWT,
+/// Prefer `X-Softprobe-Assertion`. Fall back to Bearer assertion JWT,
 /// then optional `SOFTPROBE_DEFAULT_WORKSPACE_ID`, then Softprobe auth service.
 pub async fn runtime_auth_middleware(
     State(state): State<AppState>,

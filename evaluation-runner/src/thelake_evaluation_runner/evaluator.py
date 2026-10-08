@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 
+from deepeval.models import GeminiModel
 from deepeval.metrics import ConversationalGEval
 from deepeval.test_case import (
     ConversationalTestCase,
@@ -25,6 +27,18 @@ _KEY_LIKE = re.compile(
     r"\b(?:sk[-_][A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{30,}|"
     r"ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
 )
+
+
+def create_judge_model() -> GeminiModel:
+    """Build the configured Gemini judge used for online G-Eval."""
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GOOGLE_API_KEY or GEMINI_API_KEY is required for Gemini evaluation")
+    return GeminiModel(
+        model=os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash"),
+        api_key=api_key,
+        temperature=0,
+    )
 
 
 def _redact(value: object, key: str = "") -> object:
@@ -247,6 +261,7 @@ def evaluate(request: EvaluationRequest) -> EvaluationResponse:
         name=request.evaluator.name,
         criteria=str(_redact(request.evaluator.criteria)),
         evaluation_params=evaluation_params,
+        model=create_judge_model(),
         threshold=request.evaluator.threshold,
         async_mode=False,
         verbose_mode=False,

@@ -17,6 +17,7 @@ pub mod promotion;
 pub mod query;
 pub mod self_monitoring;
 pub mod session_summary;
+pub mod slack_events;
 pub mod softprobe_assertion;
 pub mod sql;
 pub mod storage;

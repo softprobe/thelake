@@ -70,6 +70,8 @@ mooncake/
 # Cursor stop-hook local cache/logs (HEAD test stamp, gate output)
 .cursor/hooks/.state/
 .tmp/
+# DuckDB C++ library scratch dirs left in cwd by local test runs
+duckdb_unittest_tempdir/
 playwright-report/
 explorer-playwright-report/
 test-results/

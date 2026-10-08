@@ -27,6 +27,19 @@ CREATE TABLE IF NOT EXISTS {{schema}}.thelake_job_lease (
 );
 CREATE INDEX IF NOT EXISTS thelake_job_lease_until
   ON {{schema}}.thelake_job_lease (lease_until);
+CREATE TABLE IF NOT EXISTS {{schema}}.thelake_slack_event (
+  team_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  claim_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('processing', 'complete')),
+  lease_until TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (team_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS thelake_slack_event_completed
+  ON {{schema}}.thelake_slack_event (completed_at)
+  WHERE state = 'complete';
 CREATE TABLE IF NOT EXISTS {{schema}}.maintenance_scope_config (
   scope_key TEXT NOT NULL,
   catalog_alias TEXT NOT NULL,

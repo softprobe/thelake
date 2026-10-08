@@ -76,9 +76,46 @@ tags:
     description: LLM observability records
   - name: query
     description: SQL and telemetry query surfaces
+  - name: integrations
+    description: External event and notification integrations
 security:
   - bearerAuth: []
 paths:
+  /slack/events:
+    post:
+      tags: [integrations]
+      summary: Receive Slack Events API callbacks
+      description: |
+        Slack verifies this endpoint using the configured signing secret. It
+        accepts URL verification challenges and authorized evaluator commands
+        from Slack event callbacks. This endpoint does not use bearer auth.
+      operationId: receiveSlackEvent
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              additionalProperties: true
+              description: Slack Events API envelope, signed over the raw body.
+      responses:
+        "200":
+          description: Challenge response or event acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Malformed Slack event envelope
+        "401":
+          description: Missing, stale, or invalid Slack request signature
+        "403":
+          description: Slack team or author is not authorized
+        "503":
+          description: Slack integration is unavailable; Slack may retry the event
   /health:
     get:
       tags: [health]

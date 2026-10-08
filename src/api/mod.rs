@@ -16,6 +16,7 @@ pub mod ingest;
 pub(crate) mod mapping;
 pub mod scores;
 pub mod sessions;
+pub mod slack;
 pub mod traces;
 
 use crate::authn::WorkspaceAuth;
@@ -171,6 +172,7 @@ pub async fn create_router(
             "/v1/score-configs",
             get(scores::list_score_configs).post(scores::create_score_config),
         )
+        .route("/slack/events", post(slack::events))
         .route("/v1/fields", get(fields::fields))
         .route("/v1/fields/{field}/values", get(fields::field_values))
         .route("/v1/query/sql", post(debug_sql::execute_sql))
