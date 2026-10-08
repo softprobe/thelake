@@ -641,29 +641,33 @@ mod tests {
     use super::*;
     use crate::sql::llm::{SpanDetail, SpanSummary};
 
+    struct SpanFixture<'a> {
+        span_id: &'a str,
+        parent_span_id: Option<&'a str>,
+        name: &'a str,
+        span_type: &'a str,
+        start_time: &'a str,
+        end_time: &'a str,
+    }
+
     fn span_detail(
-        span_id: &str,
-        parent_span_id: Option<&str>,
-        name: &str,
-        span_type: &str,
-        start_time: &str,
-        end_time: &str,
+        fixture: SpanFixture<'_>,
         attributes: HashMap<String, String>,
         events: Vec<Value>,
     ) -> SpanDetail {
         SpanDetail {
             summary: SpanSummary {
                 trace_id: "trace-1".into(),
-                span_id: span_id.into(),
-                parent_span_id: parent_span_id.map(str::to_owned),
+                span_id: fixture.span_id.into(),
+                parent_span_id: fixture.parent_span_id.map(str::to_owned),
                 session_id: Some("session-1".into()),
-                name: name.into(),
-                span_type: span_type.into(),
-                start_time: chrono::DateTime::parse_from_rfc3339(start_time)
+                name: fixture.name.into(),
+                span_type: fixture.span_type.into(),
+                start_time: chrono::DateTime::parse_from_rfc3339(fixture.start_time)
                     .unwrap()
                     .with_timezone(&Utc),
                 end_time: Some(
-                    chrono::DateTime::parse_from_rfc3339(end_time)
+                    chrono::DateTime::parse_from_rfc3339(fixture.end_time)
                         .unwrap()
                         .with_timezone(&Utc),
                 ),
@@ -687,12 +691,14 @@ mod tests {
     fn sdk_agent_trace_evidence_has_one_user_turn_and_ordered_tool_result() {
         let user_prompt = "Please refund ticket DEMO-42.";
         let first_generation = span_detail(
-            "generation-1",
-            Some("agent-1"),
-            "gemini.generate_content",
-            "generation",
-            "2026-10-08T12:00:00Z",
-            "2026-10-08T12:00:01Z",
+            SpanFixture {
+                span_id: "generation-1",
+                parent_span_id: Some("agent-1"),
+                name: "gemini.generate_content",
+                span_type: "generation",
+                start_time: "2026-10-08T12:00:00Z",
+                end_time: "2026-10-08T12:00:01Z",
+            },
             HashMap::from([("sp.input".into(), user_prompt.into())]),
             vec![json!({
                 "name": "gen_ai.content.prompt",
@@ -701,12 +707,14 @@ mod tests {
             })],
         );
         let tool_span = span_detail(
-            "tool-1",
-            Some("generation-1"),
-            "issue_refund",
-            "tool",
-            "2026-10-08T12:00:01Z",
-            "2026-10-08T12:00:02Z",
+            SpanFixture {
+                span_id: "tool-1",
+                parent_span_id: Some("generation-1"),
+                name: "issue_refund",
+                span_type: "tool",
+                start_time: "2026-10-08T12:00:01Z",
+                end_time: "2026-10-08T12:00:02Z",
+            },
             HashMap::from([
                 ("gen_ai.tool.name".into(), "issue_refund".into()),
                 ("sp.input".into(), r#"{"ticket_id":"DEMO-42"}"#.into()),
@@ -718,12 +726,14 @@ mod tests {
             vec![],
         );
         let final_generation = span_detail(
-            "generation-2",
-            Some("agent-1"),
-            "gemini.final_response",
-            "generation",
-            "2026-10-08T12:00:02Z",
-            "2026-10-08T12:00:03Z",
+            SpanFixture {
+                span_id: "generation-2",
+                parent_span_id: Some("agent-1"),
+                name: "gemini.final_response",
+                span_type: "generation",
+                start_time: "2026-10-08T12:00:02Z",
+                end_time: "2026-10-08T12:00:03Z",
+            },
             HashMap::new(),
             vec![json!({
                 "name": "gen_ai.content.completion",
