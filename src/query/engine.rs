@@ -1,4 +1,8 @@
 use crate::config::Config;
+use crate::models::ScoreConfig;
+use crate::sql::lake_reads::{LogCountFilter, TraceCountFilter};
+use crate::sql::trusted::TrustedSql;
+use crate::sql::QueryWindow;
 use crate::storage::duckdb::cache::CacheSettings;
 use crate::storage::duckdb::cache::{cache_httpfs_disabled_by_env, wrap_one, WrapAttempt};
 use crate::storage::ducklake::workspace_views;
@@ -8,8 +12,10 @@ use crate::storage::ducklake::{
 use crate::storage::ducklake::{DuckLakeAccess, WorkspaceScopeMode};
 #[cfg(test)]
 use crate::storage::ducklake::{PhysicalScope, WorkspaceBinding};
+use crate::workspace_scope::{SharedScopeError, SharedScopeErrorCode};
 use anyhow::{anyhow, Result};
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use duckdb::types::Value as DuckValue;
 use duckdb::Connection;
 use serde_json::Value;
@@ -28,10 +34,26 @@ pub struct QueryResult {
     pub row_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpSpan {
+    pub request_method: Option<String>,
+    pub request_path: Option<String>,
+    pub request_headers: Option<String>,
+    pub request_body: Option<String>,
+    pub response_status_code: Option<i64>,
+    pub response_headers: Option<String>,
+    pub response_body: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct QueryEngine {
+    inner: Arc<QueryEngineInner>,
+}
+
 type InflightWaiters = Vec<oneshot::Sender<Result<QueryResult>>>;
 type InflightMap = HashMap<u64, InflightWaiters>;
 
-pub(crate) struct QueryEngineCore {
+struct QueryEngineInner {
     _shared_connection: Arc<Mutex<Connection>>,
     workers: Vec<WorkerHandle>,
     next_worker: AtomicUsize,
@@ -440,7 +462,7 @@ impl Drop for InflightLease {
     }
 }
 
-impl QueryEngineCore {
+impl QueryEngineInner {
     /// `counts_toward_liveness=false` for ops/self-monitoring engines so rebuild
     /// failures never trip process `/health` liveness.
     pub(crate) async fn new_with_liveness(
@@ -634,7 +656,7 @@ impl QueryEngineCore {
                 failures.len(),
                 worker_count
             );
-            // `Drop for QueryEngineCore` is the only place workers are
+            // `Drop for QueryEngineInner` is the only place workers are
             // joined, and it cannot run here because `Self` was never
             // constructed -- so simply dropping `workers` detaches threads
             // holding live DuckDB connections, which is what that Drop impl
@@ -815,7 +837,7 @@ impl QueryEngineCore {
     }
 }
 
-impl Drop for QueryEngineCore {
+impl Drop for QueryEngineInner {
     fn drop(&mut self) {
         // DuckDB/extension connections are not safe to leave on detached threads while the process
         // or test binary is exiting. Close every worker channel first so all workers can break out
@@ -831,6 +853,282 @@ impl Drop for QueryEngineCore {
             }
         }
     }
+}
+
+impl QueryEngine {
+    pub(crate) async fn new_with_scope(
+        config: &Config,
+        scope: &crate::storage::ducklake::PhysicalScope,
+        counts_toward_liveness: bool,
+        workspace_id: &str,
+    ) -> Result<Self> {
+        let binding = crate::workspace_scope::WorkspaceBinding::new(
+            workspace_id,
+            scope.clone(),
+            config.ducklake.workspace_scope_mode,
+        )
+        .map_err(|error| anyhow!(error))?;
+        let access = DuckLakeAccess::Workspace(binding);
+        Self::new_with_liveness(config, access, counts_toward_liveness, workspace_id).await
+    }
+
+    pub(crate) async fn new_with_liveness(
+        config: &Config,
+        access: DuckLakeAccess,
+        counts_toward_liveness: bool,
+        workspace_id: &str,
+    ) -> Result<Self> {
+        let inner = Arc::new(
+            QueryEngineInner::new_with_liveness(
+                config,
+                access,
+                counts_toward_liveness,
+                workspace_id,
+            )
+            .await?,
+        );
+        Ok(Self { inner })
+    }
+
+    pub(crate) fn catalog_alias(&self) -> &str {
+        self.inner.catalog_alias()
+    }
+
+    pub fn workspace_id(&self) -> &str {
+        &self.inner.workspace_id
+    }
+
+    pub fn workspace_scope_mode(&self) -> WorkspaceScopeMode {
+        self.inner.workspace_scope_mode()
+    }
+
+    pub async fn execute_query(&self, query: &str) -> Result<QueryResult> {
+        self.ensure_raw_sql_allowed()?;
+        self.inner.execute_query(query).await
+    }
+
+    pub async fn execute_query_uninstrumented(&self, query: &str) -> Result<QueryResult> {
+        self.ensure_raw_sql_allowed()?;
+        self.inner.execute_query_uninstrumented(query).await
+    }
+
+    pub(crate) async fn execute_queries_uninstrumented(
+        &self,
+        queries: Vec<&str>,
+    ) -> Result<Vec<Result<QueryResult>>> {
+        self.ensure_raw_sql_allowed()?;
+        self.inner.execute_queries_uninstrumented(queries).await
+    }
+
+    pub(crate) async fn execute_trusted(&self, query: TrustedSql) -> Result<QueryResult> {
+        self.inner.execute_trusted(query).await
+    }
+
+    pub async fn count_logs(&self, filter: LogCountFilter) -> Result<u64> {
+        let query = crate::sql::lake_reads::count_logs(&filter).map_err(|e| anyhow!(e))?;
+        let result = self.execute_trusted(query).await?;
+        Ok(first_count(&result))
+    }
+
+    pub async fn count_traces(&self, filter: TraceCountFilter) -> Result<u64> {
+        let query = crate::sql::lake_reads::count_traces(&filter).map_err(|e| anyhow!(e))?;
+        let result = self.execute_trusted(query).await?;
+        Ok(first_count(&result))
+    }
+
+    pub async fn find_http_span(
+        &self,
+        session_id: &str,
+        time_window: QueryWindow,
+    ) -> Result<Option<HttpSpan>> {
+        let query = crate::sql::lake_reads::find_http_span(session_id, time_window)
+            .map_err(|e| anyhow!(e))?;
+        let result = self.execute_trusted(query).await?;
+        let Some(row) = result.rows.first() else {
+            return Ok(None);
+        };
+        Ok(Some(HttpSpan {
+            request_method: row.first().and_then(|v| v.as_str()).map(str::to_owned),
+            request_path: row.get(1).and_then(|v| v.as_str()).map(str::to_owned),
+            request_headers: row.get(2).and_then(|v| v.as_str()).map(str::to_owned),
+            request_body: row.get(3).and_then(|v| v.as_str()).map(str::to_owned),
+            response_status_code: row.get(4).and_then(|v| v.as_i64()),
+            response_headers: row.get(5).and_then(|v| v.as_str()).map(str::to_owned),
+            response_body: row.get(6).and_then(|v| v.as_str()).map(str::to_owned),
+        }))
+    }
+
+    pub async fn count_trace_days(
+        &self,
+        session_id: &str,
+        time_window: QueryWindow,
+    ) -> Result<u64> {
+        let query = crate::sql::lake_reads::count_trace_days(session_id, time_window)
+            .map_err(|e| anyhow!(e))?;
+        let result = self.execute_trusted(query).await?;
+        Ok(first_count(&result))
+    }
+
+    pub async fn count_traces_by_attribute(
+        &self,
+        session_id: &str,
+        key: &str,
+        value: &str,
+        time_window: QueryWindow,
+    ) -> Result<u64> {
+        let query =
+            crate::sql::lake_reads::count_traces_by_attribute(session_id, key, value, time_window)
+                .map_err(|e| anyhow!(e))?;
+        let result = self.execute_trusted(query).await?;
+        Ok(first_count(&result))
+    }
+
+    pub async fn count_logs_by_attribute(
+        &self,
+        key: &str,
+        value: &str,
+        time_window: QueryWindow,
+    ) -> Result<u64> {
+        let query = crate::sql::lake_reads::count_logs_by_attribute(key, value, time_window)
+            .map_err(|e| anyhow!(e))?;
+        let result = self.execute_trusted(query).await?;
+        Ok(first_count(&result))
+    }
+
+    pub async fn trace_attributes_by_attribute(
+        &self,
+        session_id: &str,
+        key: &str,
+        value: &str,
+        time_window: QueryWindow,
+    ) -> Result<Option<Value>> {
+        let query = crate::sql::lake_reads::trace_attributes_by_attribute(
+            session_id,
+            key,
+            value,
+            time_window,
+        )
+        .map_err(|e| anyhow!(e))?;
+        let result = self.execute_trusted(query).await?;
+        Ok(map_attributes_row(&result))
+    }
+
+    pub async fn trace_attributes_for_span(
+        &self,
+        span_id: &str,
+        time_window: QueryWindow,
+    ) -> Result<Option<Value>> {
+        let query = crate::sql::lake_reads::trace_attributes_for_span(span_id, time_window)
+            .map_err(|e| anyhow!(e))?;
+        let result = self.execute_trusted(query).await?;
+        Ok(map_attributes_row(&result))
+    }
+
+    pub async fn search_spans(
+        &self,
+        request: &crate::sql::llm::search::SpanSearchRequest,
+    ) -> Result<QueryResult> {
+        let query = crate::sql::llm::search_spans(request).map_err(anyhow::Error::msg)?;
+        self.execute_trusted(query).await
+    }
+
+    pub async fn telemetry_details_logs(
+        &self,
+        target: &crate::sql::telemetry::TelemetryDetailsTarget,
+        time_range: &crate::sql::telemetry::TelemetryTimeRange,
+        limit: usize,
+    ) -> Result<QueryResult> {
+        let query = crate::sql::telemetry::details_logs(target, time_range, limit)
+            .map_err(anyhow::Error::msg)?;
+        self.execute_trusted(query).await
+    }
+
+    pub async fn score_exists(&self, score_id: &str, timestamp: DateTime<Utc>) -> Result<bool> {
+        let window = QueryWindow::try_new(timestamp, timestamp).map_err(|e| anyhow!(e))?;
+        let query =
+            crate::sql::lake_reads::score_exists(score_id, window).map_err(|e| anyhow!(e))?;
+        let result = match self.execute_trusted(query).await {
+            Ok(res) => res,
+            Err(err) if err.to_string().contains("does not exist") => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        Ok(result
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
+    }
+
+    pub async fn score_config_exists(&self, config_id: &str) -> Result<bool> {
+        let query =
+            crate::sql::lake_reads::score_config_exists(config_id).map_err(|e| anyhow!(e))?;
+        let result = match self.execute_trusted(query).await {
+            Ok(res) => res,
+            Err(err) if err.to_string().contains("does not exist") => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        Ok(result
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
+    }
+
+    pub async fn list_score_configs(&self) -> Result<Vec<ScoreConfig>> {
+        let query = crate::sql::lake_reads::list_score_configs().map_err(|e| anyhow!(e))?;
+        let result = match self.execute_trusted(query).await {
+            Ok(res) => res,
+            Err(err) if err.to_string().contains("does not exist") => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|r| ScoreConfig::from_json_row(r))
+            .collect())
+    }
+
+    pub async fn get_score_config(&self, config_id: &str) -> Result<Option<ScoreConfig>> {
+        let query = crate::sql::lake_reads::get_score_config(config_id).map_err(|e| anyhow!(e))?;
+        let result = match self.execute_trusted(query).await {
+            Ok(res) => res,
+            Err(err) if err.to_string().contains("does not exist") => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        Ok(result
+            .rows
+            .first()
+            .and_then(|r| ScoreConfig::from_json_row(r)))
+    }
+
+    fn ensure_raw_sql_allowed(&self) -> Result<()> {
+        if self.workspace_scope_mode() == WorkspaceScopeMode::Shared {
+            return Err(anyhow!(SharedScopeError::new(
+                SharedScopeErrorCode::RawSqlForbidden,
+                "raw SQL is disabled for shared workspace scope; use a typed query API",
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn first_count(result: &QueryResult) -> u64 {
+    result
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|value| value.as_i64())
+        .unwrap_or_default() as u64
+}
+
+fn map_attributes_row(result: &QueryResult) -> Option<Value> {
+    let value = result.rows.first().and_then(|row| row.first())?;
+    value
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .or_else(|| Some(value.clone()))
 }
 
 impl DuckDBCore {

@@ -10,7 +10,6 @@ mod job;
 mod list;
 pub mod list_query;
 mod reduce;
-mod time;
 
 pub use ddl::{
     ensure_session_summary_tables, ensure_shared_session_summary_tables,

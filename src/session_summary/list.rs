@@ -120,11 +120,11 @@ pub async fn lookup_session_summary_window_for_workspace(
     let Some(row) = rows.first() else {
         return Ok(None);
     };
-    let start_time = crate::session_summary::time::from_ns(
+    let start_time = crate::models::event_time::from_ns(
         row.try_get("start_time_ns")
             .map_err(|e| SessionSummaryListError::Storage(e.into()))?,
     );
-    let end_time = crate::session_summary::time::from_ns(
+    let end_time = crate::models::event_time::from_ns(
         row.try_get("end_time_ns")
             .map_err(|e| SessionSummaryListError::Storage(e.into()))?,
     );
@@ -136,10 +136,10 @@ fn map_pg_summary_row(row: &tokio_postgres::Row) -> Result<SessionSummary, tokio
     let models: Vec<String> = row.try_get("models").unwrap_or_default();
     Ok(SessionSummary {
         session_id: row.try_get("session_id")?,
-        start_time: crate::session_summary::time::from_ns(row.try_get("start_time_ns")?),
+        start_time: crate::models::event_time::from_ns(row.try_get("start_time_ns")?),
         end_time: row
             .try_get::<_, Option<i64>>("end_time_ns")?
-            .map(crate::session_summary::time::from_ns),
+            .map(crate::models::event_time::from_ns),
         trace_count: row.try_get::<_, i64>("trace_count").unwrap_or(0),
         span_count: row.try_get::<_, i64>("observation_count").unwrap_or(0),
         error_count: row.try_get::<_, i64>("error_count").unwrap_or(0),

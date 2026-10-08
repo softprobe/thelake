@@ -44,8 +44,8 @@ where
         .into_iter()
         .map(|(session_id, (min_ts, max_ts))| DirtyHint {
             session_id,
-            min_ts_ns: crate::session_summary::time::to_ns(min_ts),
-            max_ts_ns: crate::session_summary::time::to_ns(max_ts),
+            min_ts_ns: crate::models::event_time::to_ns(min_ts),
+            max_ts_ns: crate::models::event_time::to_ns(max_ts),
         })
         .collect();
     out.sort_by(|a, b| a.session_id.cmp(&b.session_id));
@@ -210,11 +210,11 @@ mod fold_tests {
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].session_id, "a");
         assert_eq!(
-            crate::session_summary::time::from_ns(hints[0].min_ts_ns),
+            crate::models::event_time::from_ns(hints[0].min_ts_ns),
             chrono::TimeZone::timestamp_opt(&Utc, 5, 0).unwrap()
         );
         assert_eq!(
-            crate::session_summary::time::from_ns(hints[0].max_ts_ns),
+            crate::models::event_time::from_ns(hints[0].max_ts_ns),
             chrono::TimeZone::timestamp_opt(&Utc, 20, 0).unwrap()
         );
     }
@@ -227,11 +227,11 @@ mod fold_tests {
         assert_eq!(hints[0].session_id, "a");
         assert_eq!(hints[1].session_id, "b");
         assert_eq!(
-            crate::session_summary::time::from_ns(hints[1].min_ts_ns),
+            crate::models::event_time::from_ns(hints[1].min_ts_ns),
             chrono::TimeZone::timestamp_opt(&Utc, 2, 0).unwrap()
         );
         assert_eq!(
-            crate::session_summary::time::from_ns(hints[1].max_ts_ns),
+            crate::models::event_time::from_ns(hints[1].max_ts_ns),
             chrono::TimeZone::timestamp_opt(&Utc, 9, 0).unwrap()
         );
     }

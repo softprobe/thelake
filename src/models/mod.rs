@@ -12,7 +12,7 @@ pub use any_value::{
     any_value_to_json, any_value_to_stored_string, key_values_to_map, strip_nested_json_prefix,
     NESTED_JSON_PREFIX,
 };
-pub use event_time::partition_day_from_event_time;
+pub use event_time::{from_ns, partition_day_from_event_time, to_ns};
 pub use log::Log;
 pub use score::{Score, ScoreDataType, ScoreSource};
 pub use score_config::ScoreConfig;
