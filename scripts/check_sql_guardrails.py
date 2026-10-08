@@ -46,8 +46,26 @@ SQL_PATTERNS = [
     re.compile(r"\bCREATE\s+(?:(?:OR\s+REPLACE|TEMP(?:ORARY)?)\s+)?(?:TABLE|VIEW|SCHEMA)\b", re.IGNORECASE),
     re.compile(r"\bALTER\s+TABLE\b", re.IGNORECASE),
     re.compile(r"\bDROP\s+(?:TABLE|VIEW|SCHEMA)\b", re.IGNORECASE),
-    re.compile(r"\b(?:ATTACH|DETACH|EXPLAIN|PRAGMA)\b", re.IGNORECASE),
-    re.compile(r"\b(?:timestamp|trace_id|session_id|span_id)\s*(?:=|<>|!=|>=|<=|>|<|\bIN\b|\bIS\b)", re.IGNORECASE),
+    re.compile(
+        r"\b(?:ATTACH|DETACH)\s+(?:DATABASE\s+)?(?:'[^']+'|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_.]*)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bEXPLAIN(?:\s+(?:ANALYZE|VERBOSE|QUERY\s+PLAN))*\s+"
+        r"(?:SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bPRAGMA\s+[A-Za-z_][A-Za-z0-9_]*(?=\s*(?:[;(=]|$))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:timestamp|trace_id|session_id|span_id)\s*"
+        r"(?:=|<>|!=|>=|<=|>|<|\bIN\b|\bIS\b)\s*"
+        r"(?:\?|:[A-Za-z_][A-Za-z0-9_]*|\$[0-9]+|[-+]?[0-9]+|"
+        r"'[^']*'|\"[^\"]*\"|\bNULL\b|\bCURRENT_TIMESTAMP\b|\bTRUE\b|\bFALSE\b)",
+        re.IGNORECASE,
+    ),
 ]
 
 

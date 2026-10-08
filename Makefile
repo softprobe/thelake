@@ -315,6 +315,7 @@ test-publish-tags:
 
 check-sql-guardrails:
 	@python3 scripts/check_sql_guardrails.py ${SQL_GUARDRAIL_BASE:-}
+	@python3 -m unittest tests/test_sql_guardrails.py
 
 lint: ensure-cache check-sql-guardrails
 	cargo clippy $(CARGO_PROFILE_FLAG) --all-targets -- -D warnings

@@ -107,7 +107,6 @@ pub(crate) async fn schedule_for_traces(
         let definitions = definitions.clone();
         let endpoint = endpoint.clone();
         let token = token.clone();
-        let quiet_delay = quiet_delay;
         tokio::spawn(async move {
             let _permit = permit;
             loop {

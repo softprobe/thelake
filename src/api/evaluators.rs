@@ -330,7 +330,7 @@ pub(crate) async fn save_evaluator(
                 "evaluator_id and version already identify a different immutable definition",
             ));
         }
-        definition.active = is_version_active(&ws, &definition.evaluator_id, definition.version)
+        definition.active = is_version_active(ws, &definition.evaluator_id, definition.version)
             .await
             .map_err(|error| {
                 warn!("evaluator activation lookup failed: {error}");
