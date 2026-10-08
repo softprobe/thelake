@@ -2,7 +2,7 @@
 //! bare timestamp predicates prune them without legacy date columns.
 
 use chrono::{TimeZone, Utc};
-use softprobe_runtime::ingest_engine::IngestEngine;
+use softprobe_runtime::ingest::IngestEngine;
 use softprobe_runtime::models::{Log, Score, ScoreDataType, ScoreSource, Span, SpanEvent};
 use softprobe_runtime::query::{LogCountFilter, TraceCountFilter};
 use std::collections::HashMap;

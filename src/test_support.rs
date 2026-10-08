@@ -3,7 +3,7 @@
 
 use crate::api::{create_router, AppState};
 use crate::config::Config;
-use crate::ingest_engine::IngestEngine;
+use crate::ingest::IngestEngine;
 use axum::Router;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -37,7 +37,7 @@ pub async fn local_router_and_state() -> anyhow::Result<(Router, AppState, TempD
     Ok((router, state, temp))
 }
 
-/// Builds the local test router (lazy [`RuntimeEngineManager`], same as production HTTP wiring).
+/// Builds the local test router (lazy [`WorkspaceManager`], same as production HTTP wiring).
 pub async fn local_router() -> anyhow::Result<(Router, TempDir)> {
     let (router, _, temp) = local_router_and_state().await?;
     Ok((router, temp))

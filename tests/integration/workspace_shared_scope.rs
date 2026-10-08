@@ -8,11 +8,11 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use softprobe_runtime::async_jobs::{LeaseStore, PostgresLeaseStore};
-use softprobe_runtime::authn::TenantInfo;
+use softprobe_runtime::authn::WorkspaceAuth;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
 use softprobe_runtime::promotion::{parse_promotion_manifest, PromotionManifest};
-use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
+use softprobe_runtime::workspace::{ScopeProvisioningRequest, WorkspaceManager};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,8 +39,8 @@ fn shared_config(temp: &TempDir, registry_schema: String) -> Config {
     config
 }
 
-fn tenant(id: &str) -> TenantInfo {
-    TenantInfo {
+fn mock_auth(id: &str) -> WorkspaceAuth {
+    WorkspaceAuth {
         workspace_id: id.to_string(),
         bucket_name: "shared-scope-test".to_string(),
         dataset_id: "shared-scope-test".to_string(),
@@ -169,7 +169,7 @@ async fn typed_details(router: &Router, workspace: &str, trace_id: &str) -> (Sta
             .to_string(),
         ))
         .expect("request");
-    request.extensions_mut().insert(tenant(workspace));
+    request.extensions_mut().insert(mock_auth(workspace));
     json_response(router.clone().oneshot(request).await.expect("route")).await
 }
 
@@ -188,7 +188,7 @@ async fn rebuild_summary(router: &Router, workspace: &str) -> (StatusCode, Value
             .to_string(),
         ))
         .expect("summary rebuild request");
-    request.extensions_mut().insert(tenant(workspace));
+    request.extensions_mut().insert(mock_auth(workspace));
     json_response(router.clone().oneshot(request).await.expect("route")).await
 }
 
@@ -208,7 +208,7 @@ async fn search_sessions(router: &Router, workspace: &str) -> (StatusCode, Value
             .to_string(),
         ))
         .expect("session search request");
-    request.extensions_mut().insert(tenant(workspace));
+    request.extensions_mut().insert(mock_auth(workspace));
     json_response(router.clone().oneshot(request).await.expect("route")).await
 }
 
@@ -218,7 +218,7 @@ async fn get_compat_json(router: &Router, workspace: &str, uri: String) -> (Stat
         .uri(uri)
         .body(Body::empty())
         .expect("compatibility request");
-    request.extensions_mut().insert(tenant(workspace));
+    request.extensions_mut().insert(mock_auth(workspace));
     json_response(router.clone().oneshot(request).await.expect("route")).await
 }
 
@@ -228,7 +228,7 @@ async fn list_score_configs(router: &Router, workspace: &str) -> (StatusCode, Va
         .uri("/v1/score-configs")
         .body(Body::empty())
         .expect("score config list request");
-    request.extensions_mut().insert(tenant(workspace));
+    request.extensions_mut().insert(mock_auth(workspace));
     json_response(router.clone().oneshot(request).await.expect("route")).await
 }
 
@@ -240,7 +240,7 @@ async fn get_trace(router: &Router, workspace: &str, trace_id: &str) -> (StatusC
         ))
         .body(Body::empty())
         .expect("trace request");
-    request.extensions_mut().insert(tenant(workspace));
+    request.extensions_mut().insert(mock_auth(workspace));
     json_response(router.clone().oneshot(request).await.expect("route")).await
 }
 
@@ -283,21 +283,21 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
     let (router, state) = softprobe_runtime::api::create_router(Arc::new(config.clone()), None)
         .await
         .expect("shared router");
-    let engines = &state.engines;
-    let peer_engines = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
+    let workspaces = &state.workspaces;
+    let peer_workspaces = WorkspaceManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("second runtime manager for same registry");
+        .expect("second workspace manager for same registry");
     let shared_schema = config.ducklake.metadata_schema.clone();
     let shared_data = config.ducklake.data_path.clone();
     let workspace_a = Uuid::new_v4().to_string();
     let workspace_b = Uuid::new_v4().to_string();
     tokio::try_join!(
-        engines.provision_scope(ScopeProvisioningRequest {
+        workspaces.provision_scope(ScopeProvisioningRequest {
             scope_id: workspace_a.to_string(),
             metadata_schema: shared_schema.clone(),
             data_path: shared_data.clone(),
         }),
-        peer_engines.provision_scope(ScopeProvisioningRequest {
+        workspaces.provision_scope(ScopeProvisioningRequest {
             scope_id: workspace_b.to_string(),
             metadata_schema: shared_schema.clone(),
             data_path: shared_data.clone(),
@@ -305,47 +305,53 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
     )
     .expect("concurrent provision of workspaces in one physical scope");
 
-    let (engine_a, peer_engine_b) = tokio::try_join!(
-        state.engines.engine_for(&workspace_a),
-        peer_engines.engine_for(&workspace_b),
+    let (ws_a, peer_ws_b) = tokio::try_join!(
+        state.workspaces.workspace_for(&workspace_a),
+        peer_workspaces.workspace_for(&workspace_b),
     )
-    .expect("concurrent engines");
+    .expect("concurrent workspaces");
     // Keep score deduplication assertions within one writer pool; cross-manager
     // initialization and concurrent telemetry writes are exercised above.
-    let engine_b = engines
-        .engine_for(&workspace_b)
+    let ws_b = workspaces
+        .workspace_for(&workspace_b)
         .await
-        .expect("workspace B engine");
+        .expect("workspace B context");
     let trace_a = format!("a{}", &suffix[..31]);
     let trace_b = format!("b{}", &suffix[..31]);
     let shared_session = format!("shared-session-{suffix}");
 
     tokio::try_join!(
-        engine_a.add_spans(vec![span(&workspace_a, &trace_a, &shared_session)], 0),
-        peer_engine_b.add_spans(vec![span(&workspace_b, &trace_b, &shared_session)], 0),
-        engine_a.add_logs(vec![log(&workspace_a, &trace_a, &shared_session)], 0),
-        peer_engine_b.add_logs(vec![log(&workspace_b, &trace_b, &shared_session)], 0),
+        ws_a.ingest()
+            .add_spans(vec![span(&workspace_a, &trace_a, &shared_session)], 0),
+        peer_ws_b
+            .ingest()
+            .add_spans(vec![span(&workspace_b, &trace_b, &shared_session)], 0),
+        ws_a.ingest()
+            .add_logs(vec![log(&workspace_a, &trace_a, &shared_session)], 0),
+        peer_ws_b
+            .ingest()
+            .add_logs(vec![log(&workspace_b, &trace_b, &shared_session)], 0),
     )
     .expect("concurrent shared writes");
 
     let config_id = format!("shared-config-{suffix}");
-    engine_a
+    ws_a.ingest()
         .add_score_configs(vec![score_config(&config_id, &workspace_a)])
         .await
         .expect("shared score-config write A");
-    engine_b
+    ws_b.ingest()
         .add_score_configs(vec![score_config(&config_id, &workspace_b)])
         .await
         .expect("shared score-config write B");
     let score_a = score("shared-score", &trace_a, &config_id, &workspace_a);
     let score_a_timestamp = score_a.timestamp;
-    engine_a
+    ws_a.ingest()
         .add_scores(vec![score_a])
         .await
         .expect("shared score write A");
     let score_b = score("shared-score", &trace_b, &config_id, &workspace_b);
     let score_b_timestamp = score_b.timestamp;
-    engine_b
+    ws_b.ingest()
         .add_scores(vec![score_b])
         .await
         .expect("shared score write B");
@@ -376,10 +382,10 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
     let score_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let (score_a, score_b, config_a, config_b) = tokio::join!(
-            engine_a.score_exists("shared-score", score_a_timestamp),
-            engine_b.score_exists("shared-score", score_b_timestamp),
-            engine_a.score_config_exists(&config_id),
-            engine_b.score_config_exists(&config_id),
+            ws_a.query().score_exists("shared-score", score_a_timestamp),
+            ws_b.query().score_exists("shared-score", score_b_timestamp),
+            ws_a.query().score_config_exists(&config_id),
+            ws_b.query().score_config_exists(&config_id),
         );
         let score_visibility = (
             score_a.unwrap(),
@@ -392,7 +398,7 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
         }
         assert!(tokio::time::Instant::now() < score_deadline,
             "shared score/config writes never became visible to both managers: {score_visibility:?}; configs A={:?}, B={:?}",
-            engine_a.list_score_configs().await.unwrap(), engine_b.list_score_configs().await.unwrap());
+            ws_a.query().list_score_configs().await.unwrap(), ws_b.query().list_score_configs().await.unwrap());
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
@@ -520,7 +526,7 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
     assert_eq!(loki_b["data"]["result"].as_array().unwrap().len(), 1);
     assert!(loki_b.to_string().contains(&format!("log-{workspace_b}")));
 
-    let leases = PostgresLeaseStore::from_engines(&state.engines);
+    let leases = PostgresLeaseStore::from_workspaces(&state.workspaces);
     let (lease_a, lease_b) = tokio::join!(
         leases.acquire_lease(
             "workspace_session_summary_rebuild",
@@ -549,7 +555,7 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
         .expect("release workspace lease");
 
     let maintenance = state
-        .engines
+        .workspaces
         .maintenance_engine()
         .await
         .expect("shared maintenance engine");
@@ -582,7 +588,7 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
             .to_string(),
         ))
         .expect("raw SQL request");
-    raw_request.extensions_mut().insert(tenant(&workspace_a));
+    raw_request.extensions_mut().insert(mock_auth(&workspace_a));
     let (raw_status, raw_body) =
         json_response(router.clone().oneshot(raw_request).await.unwrap()).await;
     assert_eq!(raw_status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -614,7 +620,7 @@ columns:
         .expect("promotion request");
     promotion_request
         .extensions_mut()
-        .insert(tenant(&workspace_a));
+        .insert(mock_auth(&workspace_a));
     let (promotion_status, promotion_body) = json_response(
         control_router
             .clone()
@@ -638,16 +644,16 @@ columns:
         .attributes
         .insert("shared.scope.test".to_string(), promoted_value.to_string());
     tokio::try_join!(
-        engine_a.add_spans(
+        ws_a.ingest().add_spans(
             vec![span(&workspace_a, &promoted_trace_a, &shared_session,)],
             0
         ),
-        engine_b.add_spans(
+        ws_b.ingest().add_spans(
             vec![span(&workspace_b, &promoted_trace_b, &shared_session,)],
             0
         ),
-        engine_a.add_logs(vec![promoted_log_a], 0),
-        engine_b.add_logs(vec![promoted_log_b], 0),
+        ws_a.ingest().add_logs(vec![promoted_log_a], 0),
+        ws_b.ingest().add_logs(vec![promoted_log_b], 0),
     )
     .expect("ingest through both shared workspaces after global promotion");
 
@@ -707,7 +713,7 @@ columns:
         .expect("business promotion request");
     business_request
         .extensions_mut()
-        .insert(tenant(&workspace_a));
+        .insert(mock_auth(&workspace_a));
     let (business_status, business_body) = json_response(
         control_router
             .clone()
@@ -723,8 +729,8 @@ columns:
         "business table promoted by A must exist in B's physical scope"
     );
     assert!(
-        engine_b
-            .apply_business_promotion(business_manifest, &business_spec)
+        ws_b.admin()
+            .apply_business_promotion_guarded(business_manifest, &business_spec)
             .await
             .is_ok(),
         "workspace B can observe the shared business promotion"
@@ -732,22 +738,20 @@ columns:
 
     let previous_reset = std::env::var_os("SPLAKE_RESET_DUCKLAKE");
     std::env::set_var("SPLAKE_RESET_DUCKLAKE", "1");
-    let restarted_manager = softprobe_runtime::runtime_engine::RuntimeEngineManager::connect(
-        Arc::new(config.clone()),
-        None,
-    )
-    .await
-    .expect("restart manager");
-    let restarted_b = restarted_manager
-        .engine_for(&workspace_b)
+    let restarted_manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("restart workspace B engine");
+        .expect("restart manager");
+    let restarted_b = restarted_manager
+        .workspace_for(&workspace_b)
+        .await
+        .expect("restart workspace B context");
     let restarted_trace = format!("restart-promo-{suffix}");
     let mut restarted_log = log(&workspace_b, &restarted_trace, &shared_session);
     restarted_log
         .attributes
         .insert("shared.scope.test".to_string(), promoted_value.to_string());
     restarted_b
+        .ingest()
         .add_spans(
             vec![span(&workspace_b, &restarted_trace, &shared_session)],
             0,
@@ -755,6 +759,7 @@ columns:
         .await
         .expect("restart span write");
     restarted_b
+        .ingest()
         .add_logs(vec![restarted_log], 0)
         .await
         .expect("restart log write");
@@ -786,7 +791,7 @@ columns:
         .expect("connection request");
     connection_request
         .extensions_mut()
-        .insert(tenant(&workspace_a));
+        .insert(mock_auth(&workspace_a));
     let (connection_status, connection_body) =
         json_response(control_router.oneshot(connection_request).await.unwrap()).await;
     assert_eq!(connection_status, StatusCode::CONFLICT);

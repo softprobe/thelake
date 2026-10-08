@@ -37,4 +37,4 @@ These are hard repository contracts, not review preferences:
 
 Production uses a **Postgres** DuckLake catalog only. Do not reintroduce
 sqlite/postgres catalog branching in production code. Workspace engines are
-obtained only via `RuntimeEngineManager::engine_for` (through `AppState`).
+obtained only via `WorkspaceManager::workspace_for` (through `AppState`).

@@ -191,18 +191,18 @@ impl PostgresLeaseStore {
     pub fn new(pool: Pool, registry_schema: &str) -> Self {
         let table = format!(
             "{}.thelake_job_lease",
-            crate::runtime_engine::quote_pg_ident(registry_schema)
+            crate::workspace::quote_pg_ident(registry_schema)
         );
         Self { pool, table }
     }
 
-    pub(crate) fn from_resolver(resolver: &crate::runtime_engine::DuckLakeScopeResolver) -> Self {
+    pub(crate) fn from_resolver(resolver: &crate::workspace::DuckLakeScopeResolver) -> Self {
         Self::new(resolver.pool().clone(), resolver.registry_schema())
     }
 
     /// Lease store backed by the process catalog registry.
-    pub fn from_engines(engines: &crate::runtime_engine::RuntimeEngineManager) -> Self {
-        engines.lease_store()
+    pub fn from_workspaces(workspaces: &crate::workspace::WorkspaceManager) -> Self {
+        workspaces.lease_store()
     }
 }
 

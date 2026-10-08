@@ -2,7 +2,7 @@ use chrono::Utc;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::Span;
 use softprobe_runtime::promotion::ensure_promotion_metadata_tables;
-use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
+use softprobe_runtime::workspace::{ScopeProvisioningRequest, WorkspaceManager};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -35,7 +35,7 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().to_string());
 
     let workspace_id = Uuid::new_v4().to_string();
-    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
+    let manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
     let _hints = manager
@@ -49,11 +49,11 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     insert_active_trace_promotion_spec(&tenant_schema).await;
 
     // Bind writer to the provisioned tenant scope (not the registry schema on config).
-    let engine = manager
-        .engine_for(&workspace_id)
+    let ws = manager
+        .workspace_for(&workspace_id)
         .await
-        .expect("tenant engine");
-    engine
+        .expect("workspace context");
+    ws.ingest()
         .add_spans(vec![promoted_span(&workspace_id)], 0)
         .await
         .expect("ingest promoted span");

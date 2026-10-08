@@ -1,6 +1,6 @@
 use crate::api::error::{bad_request, ApiError};
 use crate::api::AppState;
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::models::{Score, ScoreConfig, ScoreDataType, ScoreSource};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
@@ -94,7 +94,7 @@ pub struct ScoreConfigListResponse {
 
 pub async fn create_score(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    auth: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<CreateScoreRequest>,
 ) -> Result<(StatusCode, Json<Score>), ApiError> {
     let score = Score::from(request);
@@ -102,27 +102,31 @@ pub async fn create_score(
         return Err(bad_request(message));
     }
 
-    let tenant_info = tenant.as_ref().map(|extension| &extension.0);
-    let engine = match tenant_info {
-        Some(info) => state.engine_for_tenant(info).await,
-        None => state.engine_for_id("").await,
+    let auth_info = auth.as_ref().map(|extension| &extension.0);
+    let ws = match auth_info {
+        Some(info) => state.workspace_for_auth(info).await,
+        None => state.workspace_for_id("").await,
     }
     .map_err(|error| {
-        warn!("failed to resolve tenant runtime for score: {}", error);
+        warn!("failed to resolve workspace runtime for score: {}", error);
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "error": "tenant runtime unavailable" })),
+            Json(serde_json::json!({ "error": "workspace runtime unavailable" })),
         )
     })?;
 
     if let Some(config_id) = score.config_id.as_deref() {
-        let config = engine.get_score_config(config_id).await.map_err(|error| {
-            warn!("score config lookup failed: {}", error);
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "score config lookup failed" })),
-            )
-        })?;
+        let config = ws
+            .query()
+            .get_score_config(config_id)
+            .await
+            .map_err(|error| {
+                warn!("score config lookup failed: {}", error);
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": "score config lookup failed" })),
+                )
+            })?;
         let Some(config) = config else {
             return Err(bad_request("unknown config_id"));
         };
@@ -131,7 +135,8 @@ pub async fn create_score(
         }
     }
 
-    if engine
+    if ws
+        .query()
         .score_exists(&score.score_id, score.timestamp)
         .await
         .map_err(|error| {
@@ -145,7 +150,7 @@ pub async fn create_score(
         return Ok((StatusCode::OK, Json(score)));
     }
 
-    engine
+    ws.ingest()
         .add_scores(vec![score.clone()])
         .await
         .map_err(|error| {
@@ -161,7 +166,7 @@ pub async fn create_score(
 
 pub async fn create_score_config(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    auth: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<CreateScoreConfigRequest>,
 ) -> Result<(StatusCode, Json<ScoreConfig>), ApiError> {
     let config = ScoreConfig::from(request);
@@ -169,23 +174,24 @@ pub async fn create_score_config(
         return Err(bad_request(message));
     }
 
-    let tenant_info = tenant.as_ref().map(|extension| &extension.0);
-    let engine = match tenant_info {
-        Some(info) => state.engine_for_tenant(info).await,
-        None => state.engine_for_id("").await,
+    let auth_info = auth.as_ref().map(|extension| &extension.0);
+    let ws = match auth_info {
+        Some(info) => state.workspace_for_auth(info).await,
+        None => state.workspace_for_id("").await,
     }
     .map_err(|error| {
         warn!(
-            "failed to resolve tenant runtime for score config: {}",
+            "failed to resolve workspace runtime for score config: {}",
             error
         );
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "error": "tenant runtime unavailable" })),
+            Json(serde_json::json!({ "error": "workspace runtime unavailable" })),
         )
     })?;
 
-    if engine
+    if ws
+        .query()
         .score_config_exists(&config.config_id)
         .await
         .map_err(|error| {
@@ -196,7 +202,8 @@ pub async fn create_score_config(
             )
         })?
     {
-        let stored = engine
+        let stored = ws
+            .query()
             .get_score_config(&config.config_id)
             .await
             .map_err(|error| {
@@ -210,7 +217,7 @@ pub async fn create_score_config(
         return Ok((StatusCode::OK, Json(stored)));
     }
 
-    engine
+    ws.ingest()
         .add_score_configs(vec![config.clone()])
         .await
         .map_err(|error| {
@@ -226,25 +233,25 @@ pub async fn create_score_config(
 
 pub async fn list_score_configs(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    auth: Option<Extension<WorkspaceAuth>>,
 ) -> Result<Json<ScoreConfigListResponse>, ApiError> {
-    let tenant_info = tenant.as_ref().map(|extension| &extension.0);
-    let engine = match tenant_info {
-        Some(info) => state.engine_for_tenant(info).await,
-        None => state.engine_for_id("").await,
+    let auth_info = auth.as_ref().map(|extension| &extension.0);
+    let ws = match auth_info {
+        Some(info) => state.workspace_for_auth(info).await,
+        None => state.workspace_for_id("").await,
     }
     .map_err(|error| {
         warn!(
-            "failed to resolve tenant runtime for score config list: {}",
+            "failed to resolve workspace runtime for score config list: {}",
             error
         );
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "error": "tenant runtime unavailable" })),
+            Json(serde_json::json!({ "error": "workspace runtime unavailable" })),
         )
     })?;
 
-    let mut items = engine.list_score_configs().await.map_err(|error| {
+    let mut items = ws.query().list_score_configs().await.map_err(|error| {
         warn!("score config list failed: {}", error);
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -253,18 +260,19 @@ pub async fn list_score_configs(
     })?;
     if items.is_empty() {
         for seed in ScoreConfig::seed_defaults(Utc::now()) {
-            if engine
+            if ws
+                .query()
                 .score_config_exists(&seed.config_id)
                 .await
                 .unwrap_or(false)
             {
                 continue;
             }
-            if let Err(error) = engine.add_score_configs(vec![seed]).await {
+            if let Err(error) = ws.ingest().add_score_configs(vec![seed]).await {
                 warn!("score config seed write skipped: {}", error);
             }
         }
-        items = engine.list_score_configs().await.map_err(|error| {
+        items = ws.query().list_score_configs().await.map_err(|error| {
             warn!("score config list after seed failed: {}", error);
             (
                 StatusCode::SERVICE_UNAVAILABLE,

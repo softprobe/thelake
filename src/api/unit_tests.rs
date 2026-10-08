@@ -1,5 +1,5 @@
 //! Lib-only coverage that is not duplicated by `tests/integration/http_api.rs`.
-//! HTTP status/envelope smoke lives in `http_api`; keep RuntimeEngine, score
+//! HTTP status/envelope smoke lives in `http_api`; keep WorkspaceContext, score
 //! validation, OpenAPI schema, SQL-error, and pure telemetry compile checks here.
 
 use axum::body::Body;
@@ -7,18 +7,18 @@ use axum::http::{header, Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
 
-use crate::authn::TenantInfo;
-use crate::runtime_engine::ScopeProvisioningRequest;
+use crate::authn::WorkspaceAuth;
 use crate::sql::telemetry::{
     compile_details_sql, compile_search_sql, TelemetryDetailsTarget, TelemetryFilter,
     TelemetryFilterExpr, TelemetrySearchRequest, TelemetrySearchScope, TelemetrySort,
     TelemetrySortDirection, TelemetryTimeRange,
 };
 use crate::test_support::local_router_and_state;
+use crate::workspace::ScopeProvisioningRequest;
 use std::sync::Arc;
 
-fn test_tenant() -> TenantInfo {
-    TenantInfo {
+fn test_auth() -> WorkspaceAuth {
+    WorkspaceAuth {
         workspace_id: "11111111-1111-1111-1111-111111111111".to_string(),
         bucket_name: "unit-bucket".to_string(),
         dataset_id: "unit-dataset".to_string(),
@@ -31,9 +31,9 @@ fn test_tenant() -> TenantInfo {
 /// process's default physical scope (isolated mode allows a workspace to
 /// share the configured metadata schema/data path).
 async fn provision_test_scope(state: &crate::api::AppState, workspace_id: &str) {
-    let ducklake = state.engines.config().ducklake.clone();
+    let ducklake = state.workspaces.config().ducklake.clone();
     state
-        .engines
+        .workspaces
         .provision_scope(ScopeProvisioningRequest {
             scope_id: workspace_id.to_string(),
             metadata_schema: ducklake.metadata_schema,
@@ -44,34 +44,40 @@ async fn provision_test_scope(state: &crate::api::AppState, workspace_id: &str) 
 }
 
 #[tokio::test]
-async fn unit_runtime_engine_manager_cache_hit_same_arc() {
+async fn unit_workspace_manager_cache_hit_same_arc() {
     let (_router, state, _t) = local_router_and_state().await.expect("router");
-    let t = test_tenant();
+    let t = test_auth();
     provision_test_scope(&state, &t.workspace_id).await;
-    let e1 = state.engine_for_tenant(&t).await.expect("engine");
-    let e2 = state.engine_for_tenant(&t).await.expect("engine");
+    let e1 = state
+        .workspace_for_auth(&t)
+        .await
+        .expect("workspace context");
+    let e2 = state
+        .workspace_for_auth(&t)
+        .await
+        .expect("workspace context");
     assert!(Arc::ptr_eq(&e1, &e2));
 }
 
 #[tokio::test]
-async fn unit_runtime_engine_manager_single_flight_build_once() {
+async fn unit_workspace_manager_single_flight_build_once() {
     let (_router, state, _t) = local_router_and_state().await.expect("router");
     let workspace_id = "22222222-2222-2222-2222-222222222222".to_string();
     provision_test_scope(&state, &workspace_id).await;
     let (a, b, c, d) = tokio::join!(
-        state.engine_for_id(&workspace_id),
-        state.engine_for_id(&workspace_id),
-        state.engine_for_id(&workspace_id),
-        state.engine_for_id(&workspace_id),
+        state.workspace_for_id(&workspace_id),
+        state.workspace_for_id(&workspace_id),
+        state.workspace_for_id(&workspace_id),
+        state.workspace_for_id(&workspace_id),
     );
-    let e1 = a.expect("engine");
-    let e2 = b.expect("engine");
-    let e3 = c.expect("engine");
-    let e4 = d.expect("engine");
+    let e1 = a.expect("workspace context");
+    let e2 = b.expect("workspace context");
+    let e3 = c.expect("workspace context");
+    let e4 = d.expect("workspace context");
     assert!(Arc::ptr_eq(&e1, &e2));
     assert!(Arc::ptr_eq(&e1, &e3));
     assert!(Arc::ptr_eq(&e1, &e4));
-    assert_eq!(state.engines.build_count(), 1);
+    assert_eq!(state.workspaces.build_count(), 1);
 }
 
 #[tokio::test]

@@ -37,7 +37,7 @@ pub fn spawn_inventory_loop(state: AppState, interval_secs: u64) {
             ticker.tick().await;
             super::instruments::refresh_process_gauges();
             gauge_store::WRITER_POOL_SIZE.store(
-                state.engines.config().ducklake.writer_pool_size,
+                state.workspaces.config().ducklake.writer_pool_size,
                 std::sync::atomic::Ordering::Relaxed,
             );
             // Interval fires immediately; skip DuckDB attach on that first tick so
@@ -47,31 +47,31 @@ pub fn spawn_inventory_loop(state: AppState, interval_secs: u64) {
             if SKIP_FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 continue;
             }
-            let tenants = state.engines.list_cached_workspace_ids();
-            for tenant in tenants {
-                if tenant.trim().is_empty() {
+            let workspaces = state.workspaces.list_cached_workspace_ids();
+            for workspace in workspaces {
+                if workspace.trim().is_empty() {
                     continue;
                 }
                 // Ops scope inventory feeds the same writer; skip the feedback loop.
-                if crate::self_monitoring::is_reserved_workspace_id(&tenant) {
+                if crate::self_monitoring::is_reserved_workspace_id(&workspace) {
                     continue;
                 }
-                let Ok(engine) = state.engines.engine_for(&tenant).await else {
+                let Ok(ws) = state.workspaces.workspace_for(&workspace).await else {
                     continue;
                 };
-                // One attach per tenant (not per SQL) — each uninstrumented query
+                // One attach per workspace (not per SQL) — each uninstrumented query
                 // used to open+INSTALL+ATTACH and dominated Softprobe CPU.
-                scrape_tenant(engine.as_ref()).await;
+                scrape_workspace(ws.as_ref()).await;
             }
         }
     });
 }
 
-async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
+async fn scrape_workspace(ws: &crate::workspace::WorkspaceContext) {
     let tables = maintenance_table_names();
-    let query = engine.query_engine();
+    let query = ws.query();
     let catalog = query.catalog_alias().to_string();
-    let tenant = engine.workspace_id().to_string();
+    let workspace = ws.workspace_id().to_string();
     let sqls: Vec<String> = tables
         .iter()
         .map(|table| live_file_sizes_sql(&catalog, table))
@@ -80,7 +80,7 @@ async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
     let results = match query.execute_queries_uninstrumented(sql_refs).await {
         Ok(r) => r,
         Err(err) => {
-            warn!(tenant = %tenant, "inventory scrape failed: {err}");
+            warn!(workspace = %workspace, "inventory scrape failed: {err}");
             return;
         }
     };
@@ -111,15 +111,15 @@ async fn scrape_tenant(engine: &crate::runtime_engine::RuntimeEngine) {
                 }
             }
             Some(Err(err)) => {
-                warn!(tenant = %tenant, table, "inventory size buckets failed: {err}");
+                warn!(workspace = %workspace, table, "inventory size buckets failed: {err}");
             }
             None => {}
         }
         for (bucket, c) in counts {
-            gauge_store::set_size_bucket(&tenant, table, bucket, c);
+            gauge_store::set_size_bucket(&workspace, table, bucket, c);
         }
         gauge_store::set_table_inventory(
-            &tenant,
+            &workspace,
             table,
             TableInventory {
                 live_files: live_files as u64,

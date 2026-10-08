@@ -11,7 +11,7 @@ mod size_bucket;
 #[cfg(test)]
 mod tests;
 
-pub use ids::{instrument_customer_tenant, is_reserved_workspace_id, OPS_TENANT_ID};
+pub use ids::{instrument_customer_workspace, is_reserved_workspace_id, OPS_WORKSPACE_ID};
 pub use instruments::{
     maintenance_step, query_stage, record_export_drop, record_ingest, record_ingest_commit,
     record_job_duration, record_job_error, record_job_skip, record_lease_acquire,

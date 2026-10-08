@@ -7,7 +7,7 @@ use softprobe_runtime::api::auth::runtime_auth_middleware;
 use softprobe_runtime::api::{create_router, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
-use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
+use softprobe_runtime::workspace::{ScopeProvisioningRequest, WorkspaceManager};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -63,7 +63,7 @@ async fn setup() -> PostgresBackend {
     config.ducklake.data_inlining_row_limit = Some(0);
     apply_workspace_scope_mode(&mut config);
 
-    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
+    let manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
         .await
         .expect("connect runtime engines");
     let _physical = manager

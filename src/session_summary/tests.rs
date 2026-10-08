@@ -2,7 +2,7 @@
 //! Run via `make test-lease-pg` / `make test-e2e` (`cargo test --lib postgres_ -- --ignored`).
 
 use super::*;
-use crate::ingest_engine::maybe_after_traces_commit;
+use crate::ingest::maybe_after_traces_commit;
 use crate::session_summary::reduce::{
     ack_dirty, claim_dirty, dirty_depth, publish_claimed_summary_rows, upsert_summary_rows,
     SummaryRow,
@@ -33,7 +33,7 @@ async fn try_pg_pool(schema: &str) -> Option<Pool> {
         _ => return None,
     };
     ensure_session_summary_tables(&client, schema).await.ok()?;
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     client
         .execute(
             &format!("TRUNCATE {q}.session_summary, {q}.session_summary_dirty"),
@@ -104,7 +104,7 @@ async fn postgres_session_summary_concurrent_trigger_ensure_is_idempotent() {
     let pool = try_pg_pool(schema)
         .await
         .expect("ducklake-postgres required (make setup)");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     pool.get()
         .await
         .expect("client")
@@ -169,7 +169,7 @@ async fn postgres_session_summary_dirty_upsert_merge() {
         .expect("third upsert keeps outer bounds");
 
     let client = pool.get().await.expect("client");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     let rows = client
         .query(
             &format!(
@@ -214,7 +214,7 @@ async fn postgres_session_summary_mark_after_commit_writes_dirty() {
         .mark_after_traces_commit(&[span_at("a", 10), span_at("b", 20), span_at("a", 5)])
         .await;
     let client = pool.get().await.expect("client");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     let rows = client
         .query(
             &format!(
@@ -256,7 +256,7 @@ async fn postgres_maybe_after_traces_commit_write_err_skips_dirty() {
     )
     .await;
     let client = pool.get().await.expect("client");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     let n: i64 = client
         .query_one(
             &format!("SELECT count(*)::bigint FROM {q}.session_summary_dirty"),
@@ -328,7 +328,7 @@ async fn postgres_claim_ack_snapshot_preserves_newer_dirty() {
     // Simulate a backwards database clock correction or an older app-clock
     // writer. The trigger still advances the row generation.
     let client = pool.get().await.expect("client");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     client
         .execute(
             &format!("UPDATE {q}.session_summary_dirty SET updated_at = '2000-01-01T00:00:00Z' WHERE session_id = 's1'"),
@@ -410,7 +410,7 @@ async fn postgres_upsert_summary_absolute_replace_all_fields() {
         .expect("upsert2");
 
     let client = pool.get().await.expect("client");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     let r = client
         .query_one(
             &format!(
@@ -477,7 +477,7 @@ async fn postgres_dirty_claimers_get_disjoint_rows_and_expired_claims_recover() 
         .await
         .expect("no active claims");
     assert!(none.is_empty());
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     pool.get()
         .await
         .expect("client")
@@ -510,7 +510,7 @@ async fn postgres_dirty_ack_requires_current_claim_token() {
     let (old, _snapshot) = claim_dirty(&pool, schema, 1, Duration::from_secs(30))
         .await
         .expect("claim");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     pool.get().await.expect("client").execute(
         &format!("UPDATE {q}.session_summary_dirty SET claim_holder = 'new-token', claim_until = now() + INTERVAL '30 seconds'"), &[]
     ).await.expect("steal token");
@@ -536,7 +536,7 @@ async fn postgres_expired_claim_cannot_publish_summary() {
     let (claims, _snapshot) = claim_dirty(&pool, schema, 1, Duration::from_secs(30))
         .await
         .expect("claim");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     pool.get()
         .await
         .expect("client")
@@ -632,7 +632,7 @@ async fn postgres_dirty_generation_fences_stale_publication() {
         "changed generation must reject stale publication"
     );
     assert_eq!(dirty_depth(&pool, schema).await.expect("dirty depth"), 1);
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     let summaries: i64 = pool
         .get()
         .await
@@ -654,7 +654,7 @@ async fn postgres_legacy_dirty_update_without_generation_advances_fence() {
     let pool = try_pg_pool(schema)
         .await
         .expect("ducklake-postgres required (make setup)");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     let client = pool.get().await.expect("client");
     // Simulate a mixed-version writer that knows the old schema and omits the
     // newly introduced generation column from its conflict update.
@@ -715,7 +715,7 @@ async fn postgres_shared_dirty_claims_are_workspace_scoped() {
     crate::session_summary::ensure_shared_session_summary_tables(&client, schema)
         .await
         .expect("shared DDL");
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     client
         .execute(
             &format!("TRUNCATE {q}.session_summary, {q}.session_summary_dirty"),
@@ -788,10 +788,10 @@ async fn postgres_shared_dirty_claims_are_workspace_scoped() {
 async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
     use crate::config::Config;
     use crate::promotion::load_active_telemetry_columns_manifests;
-    use crate::runtime_engine::DuckLakeScopeResolver;
     use crate::session_summary::ensure_product_hot_attrs_for_scope;
     use crate::sql::llm::llm_promo;
     use crate::storage::ducklake::PhysicalScope;
+    use crate::workspace::DuckLakeScopeResolver;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -821,7 +821,7 @@ async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
 
     // Connect already ensures when enabled; deactivate to prove ensure re-activates.
     let client = resolver.pool().get().await.expect("client");
-    let q = crate::runtime_engine::quote_pg_ident(&schema);
+    let q = crate::workspace::quote_pg_ident(&schema);
     client
         .execute(
             &format!("UPDATE {q}.promotion_specs SET status = 'inactive' WHERE status = 'active'"),

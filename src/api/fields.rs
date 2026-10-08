@@ -1,7 +1,7 @@
 use crate::api::error::{bad_request, storage_error, ApiError};
-use crate::api::mapping::resolve_engine;
+use crate::api::mapping::resolve_workspace;
 use crate::api::{map_execute_result, AppState};
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::sql::telemetry::{
     field_spec, field_values as field_values_sql, query_window_from_time_range, TelemetryTimeRange,
     SEARCH_FIELDS,
@@ -29,7 +29,7 @@ pub async fn fields() -> Json<Value> {
 
 pub async fn field_values(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    auth: Option<Extension<WorkspaceAuth>>,
     Path(field): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -44,9 +44,9 @@ pub async fn field_values(
         .clamp(1, 10_000);
     let window = parse_field_values_window(&params).map_err(bad_request)?;
     let trusted = field_values_sql(spec.sql, &window, limit).map_err(bad_request)?;
-    let engine = resolve_engine(&state, tenant.as_ref().map(|e| &e.0)).await?;
+    let ws = resolve_workspace(&state, auth.as_ref().map(|e| &e.0)).await?;
     let result =
-        map_execute_result(engine.execute_trusted(trusted).await).map_err(storage_error)?;
+        map_execute_result(ws.query().execute_trusted(trusted).await).map_err(storage_error)?;
     let values = result
         .rows
         .iter()

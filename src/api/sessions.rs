@@ -1,11 +1,11 @@
 use crate::api::error::{bad_request, not_found, storage_error, ApiError};
 use crate::api::mapping::{
-    column_value, optional_f64, optional_i64, parse_timestamp_text, resolve_engine,
+    column_value, optional_f64, optional_i64, parse_timestamp_text, resolve_workspace,
 };
 use crate::api::traces::map_span_detail;
 use crate::api::{map_execute_result, AppState};
 use crate::async_jobs::LeaseStore;
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::models::Score;
 use crate::sql::llm::{clamp_limit, session_detail, session_recording, DEFAULT_SESSION_LIMIT};
 use axum::extract::{Extension, Path, Query, State};
@@ -57,16 +57,16 @@ pub struct SessionRecording {
 /// Resolve the lake window from the Postgres session summary. Missing row → 404.
 async fn resolve_session_lake_window(
     state: &AppState,
-    tenant_ref: Option<&TenantInfo>,
+    tenant_ref: Option<&WorkspaceAuth>,
     session_id: &str,
 ) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
     let workspace_id = tenant_ref.map(|t| t.workspace_id.as_str()).unwrap_or("");
-    let engine = state
-        .engines
-        .engine_for(workspace_id)
+    let ws = state
+        .workspaces
+        .workspace_for(workspace_id)
         .await
         .map_err(storage_error)?;
-    match engine.lookup_session_summary_window(session_id).await {
+    match ws.lookup_session_summary_window(session_id).await {
         Ok(Some(window)) => Ok(window),
         Ok(None) => Err(not_found()),
         Err(crate::session_summary::SessionSummaryListError::BadRequest(msg)) => {
@@ -80,7 +80,7 @@ async fn resolve_session_lake_window(
 
 pub async fn get_session(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     Path(session_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -124,8 +124,8 @@ pub async fn get_session(
 
     let detail_sql = session_detail(&session_id, from, to).map_err(bad_request)?;
     let lake_start = std::time::Instant::now();
-    let engine = resolve_engine(&state, tenant_ref).await?;
-    let lake = map_execute_result(engine.execute_trusted(detail_sql).await);
+    let ws = resolve_workspace(&state, tenant_ref).await?;
+    let lake = map_execute_result(ws.query().execute_trusted(detail_sql).await);
     let lake_elapsed = lake_start.elapsed();
     crate::self_monitoring::record_session_detail_stage(
         tenant_label,
@@ -187,7 +187,7 @@ pub async fn get_session(
 
 pub async fn session_details_post(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<crate::api::mapping::EntityDetailsRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let session_id = request
@@ -212,7 +212,7 @@ pub async fn session_details_post(
 /// Fetch web session recording batches for a session (`sp.observation.type=recording`).
 pub async fn get_session_recording(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     Path(session_id): Path<String>,
     Query(params): Query<RecordingQuery>,
 ) -> Result<Json<SessionRecording>, ApiError> {
@@ -223,8 +223,9 @@ pub async fn get_session_recording(
     let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
     let limit = clamp_limit(params.limit, DEFAULT_RECORDING_LIMIT);
     let sql = session_recording(&session_id, from, to, limit).map_err(bad_request)?;
-    let engine = resolve_engine(&state, tenant_ref).await?;
-    let result = map_execute_result(engine.execute_trusted(sql).await).map_err(storage_error)?;
+    let ws = resolve_workspace(&state, tenant_ref).await?;
+    let result =
+        map_execute_result(ws.query().execute_trusted(sql).await).map_err(storage_error)?;
 
     let mut batches = result
         .rows
@@ -344,19 +345,19 @@ fn event_index(event: &Value) -> i64 {
 /// Session list backed by Postgres `session_summary`.
 pub async fn search_sessions(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<SessionSearchRequest>,
 ) -> Result<Json<SessionSearchResponse>, ApiError> {
     let limit = clamp_limit(request.limit, DEFAULT_SESSION_LIMIT);
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
 
     let workspace_id = tenant_ref.map(|t| t.workspace_id.as_str()).unwrap_or("");
-    let engine = state
-        .engines
-        .engine_for(workspace_id)
+    let ws = state
+        .workspaces
+        .workspace_for(workspace_id)
         .await
         .map_err(storage_error)?;
-    match engine.search_session_summary(&request, limit).await {
+    match ws.search_session_summary(&request, limit).await {
         Ok(response) => Ok(Json(response)),
         Err(crate::session_summary::SessionSummaryListError::BadRequest(msg)) => {
             Err(bad_request(msg))
@@ -384,10 +385,10 @@ fn session_summary_rebuild_holder_id(instance_id: &str) -> String {
 
 pub async fn rebuild_session_summary(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<SessionSummaryRebuildRequest>,
 ) -> Result<Json<SessionSummaryRebuildResponse>, ApiError> {
-    let cfg = &state.engines.config().session_summary;
+    let cfg = &state.workspaces.config().session_summary;
 
     crate::session_summary::validate_rebuild_window(
         request.from,
@@ -401,14 +402,20 @@ pub async fn rebuild_session_summary(
         .map(|extension| extension.0.workspace_id.as_str())
         .unwrap_or("");
     let scope_key = crate::workspace_scope::effective_workspace_id(workspace_id);
-    let leases = crate::async_jobs::PostgresLeaseStore::from_engines(&state.engines);
+    let leases = crate::async_jobs::PostgresLeaseStore::from_workspaces(&state.workspaces);
     let holder = session_summary_rebuild_holder_id(
-        &state.engines.config().async_jobs.resolved_instance_id(),
+        &state.workspaces.config().async_jobs.resolved_instance_id(),
     );
-    let ttl =
-        std::time::Duration::from_secs(state.engines.config().async_jobs.lease_ttl_seconds.max(1));
+    let ttl = std::time::Duration::from_secs(
+        state
+            .workspaces
+            .config()
+            .async_jobs
+            .lease_ttl_seconds
+            .max(1),
+    );
     let maintenance = state
-        .engines
+        .workspaces
         .maintenance_engine()
         .await
         .map_err(storage_error)?;
@@ -433,8 +440,14 @@ pub async fn rebuild_session_summary(
     let hb_job = crate::session_summary::WORKSPACE_SESSION_SUMMARY_REBUILD_JOB;
     let hb_scope = scope_key.to_string();
     let hb_token = token.clone();
-    let heartbeat_every =
-        std::time::Duration::from_secs(state.engines.config().async_jobs.heartbeat_seconds.max(1));
+    let heartbeat_every = std::time::Duration::from_secs(
+        state
+            .workspaces
+            .config()
+            .async_jobs
+            .heartbeat_seconds
+            .max(1),
+    );
     let heartbeat = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(heartbeat_every);
         ticker.tick().await;

@@ -1,6 +1,6 @@
 use crate::compat::errors::CompatError;
 use crate::compat::tempo::traceql::TraceSelector;
-use crate::compat::tenant::TenantContext;
+use crate::compat::workspace::CompatWorkspaceContext;
 use crate::sql::tempo::TraceScanParams;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
@@ -107,22 +107,22 @@ pub struct TraceLookupBounds {
 pub trait TraceQueryBackend: Send + Sync {
     async fn get_trace(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         trace_id: &str,
         bounds: TraceLookupBounds,
     ) -> Result<Option<TraceData>, CompatError>;
 
     async fn search(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         request: TraceSearchRequest,
     ) -> Result<Vec<TraceSearchHit>, CompatError>;
 
-    async fn search_tags(&self, ctx: &TenantContext) -> Result<Vec<String>, CompatError>;
+    async fn search_tags(&self, ctx: &CompatWorkspaceContext) -> Result<Vec<String>, CompatError>;
 
     async fn search_tag_values(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         tag: &str,
     ) -> Result<Vec<String>, CompatError>;
 }
@@ -134,7 +134,7 @@ pub struct UnsupportedTraceBackend;
 impl TraceQueryBackend for UnsupportedTraceBackend {
     async fn get_trace(
         &self,
-        _ctx: &TenantContext,
+        _ctx: &CompatWorkspaceContext,
         _trace_id: &str,
         _bounds: TraceLookupBounds,
     ) -> Result<Option<TraceData>, CompatError> {
@@ -143,19 +143,19 @@ impl TraceQueryBackend for UnsupportedTraceBackend {
 
     async fn search(
         &self,
-        _ctx: &TenantContext,
+        _ctx: &CompatWorkspaceContext,
         _request: TraceSearchRequest,
     ) -> Result<Vec<TraceSearchHit>, CompatError> {
         Err(CompatError::unsupported("trace_search"))
     }
 
-    async fn search_tags(&self, _ctx: &TenantContext) -> Result<Vec<String>, CompatError> {
+    async fn search_tags(&self, _ctx: &CompatWorkspaceContext) -> Result<Vec<String>, CompatError> {
         Err(CompatError::unsupported("trace_search_tags"))
     }
 
     async fn search_tag_values(
         &self,
-        _ctx: &TenantContext,
+        _ctx: &CompatWorkspaceContext,
         _tag: &str,
     ) -> Result<Vec<String>, CompatError> {
         Err(CompatError::unsupported("trace_search_tag_values"))

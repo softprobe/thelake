@@ -115,9 +115,10 @@ async fn ingest_one_span(config: Arc<Config>, session_id: &str) {
         String::from_utf8_lossy(&body_bytes)
     );
     state
-        .engine_for_id("")
+        .workspace_for_id("")
         .await
-        .expect("engine")
+        .expect("workspace context")
+        .ingest()
         .force_flush_spans()
         .await
         .expect("flush");
@@ -183,7 +184,7 @@ async fn isolated_main_schema_uses_three_part_qualification() {
         .await
         .expect("router for maintenance");
     let maintenance = state
-        .engines
+        .workspaces
         .maintenance_engine()
         .await
         .expect("maintenance engine");
@@ -326,7 +327,7 @@ async fn sql_maintenance_merge_preserves_ducklake_layout() {
         .await
         .expect("router");
     let maintenance = state
-        .engines
+        .workspaces
         .maintenance_engine()
         .await
         .expect("maintenance engine");
@@ -642,7 +643,7 @@ async fn shared_named_schema_probe_sees_ingested_rows() {
         .await
         .expect("router");
     let maintenance = state
-        .engines
+        .workspaces
         .maintenance_engine()
         .await
         .expect("maintenance engine");

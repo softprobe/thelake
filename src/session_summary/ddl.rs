@@ -1,6 +1,6 @@
 //! Per-tenant Postgres DDL for `session_summary` + `session_summary_dirty`.
 
-use crate::runtime_engine::quote_pg_ident;
+use crate::workspace::quote_pg_ident;
 use anyhow::{Context, Result};
 
 /// Fresh isolated-schema DDL. The SQL file is the source of truth.

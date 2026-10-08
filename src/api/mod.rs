@@ -17,7 +17,7 @@ pub mod scores;
 pub mod sessions;
 pub mod traces;
 
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::compat::loki::loki_routes;
 use crate::compat::stubs::compat_stub_routes;
 use crate::compat::tempo::tempo_routes;
@@ -32,7 +32,7 @@ use regex::Regex;
 use std::sync::Arc;
 
 pub use crate::control_plane::ControlPlaneRuntime;
-pub use crate::runtime_engine::{RuntimeEngine, RuntimeEngineManager};
+pub use crate::workspace::{WorkspaceContext, WorkspaceManager};
 
 /// DuckDB catalog miss for optional OTLP/score tables before first ingest.
 static MISSING_OPTIONAL_TABLE: Lazy<Regex> = Lazy::new(|| {
@@ -40,8 +40,8 @@ static MISSING_OPTIONAL_TABLE: Lazy<Regex> = Lazy::new(|| {
         .expect("valid missing-optional-table regex")
 });
 
-fn empty_query_result() -> crate::storage::duckdb::QueryResult {
-    crate::storage::duckdb::QueryResult {
+fn empty_query_result() -> crate::query::QueryResult {
+    crate::query::QueryResult {
         columns: Vec::new(),
         rows: Vec::new(),
         row_count: 0,
@@ -50,7 +50,7 @@ fn empty_query_result() -> crate::storage::duckdb::QueryResult {
 
 pub(crate) fn map_missing_optional_table(
     err: anyhow::Error,
-) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
+) -> anyhow::Result<crate::query::QueryResult> {
     if MISSING_OPTIONAL_TABLE.is_match(&err.to_string()) {
         Ok(empty_query_result())
     } else {
@@ -60,8 +60,8 @@ pub(crate) fn map_missing_optional_table(
 
 /// Apply [`map_missing_optional_table`] after a typed/`execute_trusted` lake read.
 pub(crate) fn map_execute_result(
-    result: anyhow::Result<crate::storage::duckdb::QueryResult>,
-) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
+    result: anyhow::Result<crate::query::QueryResult>,
+) -> anyhow::Result<crate::query::QueryResult> {
     match result {
         Ok(rows) => Ok(rows),
         Err(err) => map_missing_optional_table(err),
@@ -71,55 +71,58 @@ pub(crate) fn map_execute_result(
 /// Unified application state for Axum router
 #[derive(Clone)]
 pub struct AppState {
-    pub engines: Arc<RuntimeEngineManager>,
+    pub workspaces: Arc<WorkspaceManager>,
 }
 
 impl AppState {
-    pub async fn engine_for_tenant(
+    pub async fn workspace_for_auth(
         &self,
-        tenant: &TenantInfo,
-    ) -> anyhow::Result<Arc<RuntimeEngine>> {
-        self.engines.engine_for_tenant(tenant).await
+        auth: &WorkspaceAuth,
+    ) -> anyhow::Result<Arc<WorkspaceContext>> {
+        self.workspaces.workspace_for_auth(auth).await
     }
 
-    pub async fn engine_for_id(&self, workspace_id: &str) -> anyhow::Result<Arc<RuntimeEngine>> {
-        self.engines.engine_for(workspace_id).await
+    pub async fn workspace_for_id(
+        &self,
+        workspace_id: &str,
+    ) -> anyhow::Result<Arc<WorkspaceContext>> {
+        self.workspaces.workspace_for(workspace_id).await
     }
 
-    /// Execute raw SQL on the tenant-bound query engine (debug `/v1/query/sql` only).
-    pub(crate) async fn execute_tenant_scoped_sql(
+    /// Execute raw SQL on the workspace-bound query engine (debug `/v1/query/sql` only).
+    pub(crate) async fn execute_workspace_scoped_sql(
         &self,
-        tenant: Option<&TenantInfo>,
+        auth: Option<&WorkspaceAuth>,
         sql: &str,
-    ) -> anyhow::Result<crate::storage::duckdb::QueryResult> {
-        let workspace_id = tenant.map(|t| t.workspace_id.as_str()).unwrap_or("");
-        let engine = self.engines.engine_for(workspace_id).await?;
-        map_execute_result(engine.execute_query(sql).await)
+    ) -> anyhow::Result<crate::query::QueryResult> {
+        let workspace_id = auth.map(|a| a.workspace_id.as_str()).unwrap_or("");
+        let ws = self.workspaces.workspace_for(workspace_id).await?;
+        map_execute_result(ws.query().execute_query(sql).await)
     }
 }
 
-/// HTTP router + [`AppState`]. Per-tenant DuckLake/query engines are created
-/// lazily on first request via [`RuntimeEngineManager`].
+/// HTTP router + [`AppState`]. Per-workspace DuckLake/query engines are created
+/// lazily on first request via [`WorkspaceManager`].
 pub async fn create_router(
     config: Arc<Config>,
     control_plane: Option<ControlPlaneRuntime>,
 ) -> anyhow::Result<(Router, AppState)> {
     let shared_mode =
         config.ducklake.workspace_scope_mode == crate::workspace_scope::WorkspaceScopeMode::Shared;
-    let runtime_engine_manager =
-        Arc::new(RuntimeEngineManager::connect(config, control_plane.clone()).await?);
+    let workspace_manager =
+        Arc::new(WorkspaceManager::connect(config, control_plane.clone()).await?);
     let state = AppState {
-        engines: runtime_engine_manager,
+        workspaces: workspace_manager,
     };
 
     if shared_mode {
         state
-            .engines
-            .engine_for("")
+            .workspaces
+            .workspace_for("")
             .await
             .map_err(|error| anyhow::anyhow!("shared DuckLake startup gate: {error}"))?;
         state
-            .engines
+            .workspaces
             .maintenance_engine()
             .await?
             .validate_startup()

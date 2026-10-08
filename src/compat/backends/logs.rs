@@ -1,6 +1,6 @@
 use crate::compat::backends::label_match::LabelMatcher;
 use crate::compat::errors::CompatError;
-use crate::compat::tenant::TenantContext;
+use crate::compat::workspace::CompatWorkspaceContext;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 
@@ -59,26 +59,26 @@ pub struct LogsDiscoveryRequest {
 pub trait LogsQueryBackend: Send + Sync {
     async fn query_range(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         request: LogsQueryRequest,
     ) -> Result<Vec<LogHit>, CompatError>;
 
     async fn label_names(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         request: LogsDiscoveryRequest,
     ) -> Result<Vec<String>, CompatError>;
 
     async fn label_values(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         name: &str,
         request: LogsDiscoveryRequest,
     ) -> Result<Vec<String>, CompatError>;
 
     async fn series(
         &self,
-        ctx: &TenantContext,
+        ctx: &CompatWorkspaceContext,
         request: LogsDiscoveryRequest,
     ) -> Result<Vec<BTreeMap<String, String>>, CompatError>;
 }
@@ -90,7 +90,7 @@ pub struct UnsupportedLogsBackend;
 impl LogsQueryBackend for UnsupportedLogsBackend {
     async fn query_range(
         &self,
-        _ctx: &TenantContext,
+        _ctx: &CompatWorkspaceContext,
         _request: LogsQueryRequest,
     ) -> Result<Vec<LogHit>, CompatError> {
         Err(CompatError::unsupported("logs_query_backend"))
@@ -98,7 +98,7 @@ impl LogsQueryBackend for UnsupportedLogsBackend {
 
     async fn label_names(
         &self,
-        _ctx: &TenantContext,
+        _ctx: &CompatWorkspaceContext,
         _request: LogsDiscoveryRequest,
     ) -> Result<Vec<String>, CompatError> {
         Err(CompatError::unsupported("logs_label_names"))
@@ -106,7 +106,7 @@ impl LogsQueryBackend for UnsupportedLogsBackend {
 
     async fn label_values(
         &self,
-        _ctx: &TenantContext,
+        _ctx: &CompatWorkspaceContext,
         _name: &str,
         _request: LogsDiscoveryRequest,
     ) -> Result<Vec<String>, CompatError> {
@@ -115,7 +115,7 @@ impl LogsQueryBackend for UnsupportedLogsBackend {
 
     async fn series(
         &self,
-        _ctx: &TenantContext,
+        _ctx: &CompatWorkspaceContext,
         _request: LogsDiscoveryRequest,
     ) -> Result<Vec<BTreeMap<String, String>>, CompatError> {
         Err(CompatError::unsupported("logs_series"))

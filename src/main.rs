@@ -55,14 +55,15 @@ async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
     // The router construction is the shared-mode startup gate. Do not start
     // maintenance or any secondary storage path until it has completed schema
     // validation, catalog attachment, and filtered-view initialization.
-    if let Some(_handle) =
-        softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(state.engines.clone())
-            .await?
+    if let Some(_handle) = softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
+        state.workspaces.clone(),
+    )
+    .await?
     {
         info!("Maintenance scheduler started");
     }
     let _session_summary_reducer =
-        softprobe_runtime::session_summary::start_session_summary_reducer(state.engines.clone())
+        softprobe_runtime::session_summary::start_session_summary_reducer(state.workspaces.clone())
             .await?;
     info!("Session-summary reducer started");
 

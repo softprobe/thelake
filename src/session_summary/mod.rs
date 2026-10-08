@@ -30,7 +30,7 @@ pub use list_query::{
 };
 pub use reduce::validate_rebuild_window;
 pub(crate) use reduce::SummaryRow;
-pub(crate) use reduce::{rebuild_tenant_window, reduce_tenant};
+pub(crate) use reduce::{rebuild_workspace_window, reduce_workspace};
 
 #[cfg(test)]
 pub(crate) mod test_span;

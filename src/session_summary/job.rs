@@ -13,10 +13,10 @@ use tracing::warn;
 pub(crate) const WORKSPACE_SESSION_SUMMARY_REBUILD_JOB: &str = "workspace_session_summary_rebuild";
 
 pub async fn start_session_summary_reducer(
-    engines: std::sync::Arc<crate::runtime_engine::RuntimeEngineManager>,
+    workspaces: std::sync::Arc<crate::workspace::WorkspaceManager>,
 ) -> Result<JoinHandle<()>> {
-    let maintenance = engines.maintenance_engine().await?;
-    Ok(spawn_reduce_loop(maintenance, engines.config()))
+    let maintenance = workspaces.maintenance_engine().await?;
+    Ok(spawn_reduce_loop(maintenance, workspaces.config()))
 }
 
 /// Drain durable dirty rows without taking a workspace lease. PostgreSQL row

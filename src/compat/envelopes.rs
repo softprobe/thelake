@@ -4,7 +4,7 @@
 //! protocol error message (and Tempo's `softprobe_code` field).
 
 use crate::compat::errors::CompatError;
-use crate::compat::tenant::ProtocolScope;
+use crate::compat::workspace::ProtocolScope;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};

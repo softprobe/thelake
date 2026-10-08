@@ -31,7 +31,7 @@ pub struct QueryResult {
 type InflightWaiters = Vec<oneshot::Sender<Result<QueryResult>>>;
 type InflightMap = HashMap<u64, InflightWaiters>;
 
-pub struct DuckDBQueryEngine {
+pub(crate) struct QueryEngineCore {
     _shared_connection: Arc<Mutex<Connection>>,
     workers: Vec<WorkerHandle>,
     next_worker: AtomicUsize,
@@ -440,7 +440,7 @@ impl Drop for InflightLease {
     }
 }
 
-impl DuckDBQueryEngine {
+impl QueryEngineCore {
     /// `counts_toward_liveness=false` for ops/self-monitoring engines so rebuild
     /// failures never trip process `/health` liveness.
     pub(crate) async fn new_with_liveness(
@@ -634,7 +634,7 @@ impl DuckDBQueryEngine {
                 failures.len(),
                 worker_count
             );
-            // `Drop for DuckDBQueryEngine` is the only place workers are
+            // `Drop for QueryEngineCore` is the only place workers are
             // joined, and it cannot run here because `Self` was never
             // constructed -- so simply dropping `workers` detaches threads
             // holding live DuckDB connections, which is what that Drop impl
@@ -815,7 +815,7 @@ impl DuckDBQueryEngine {
     }
 }
 
-impl Drop for DuckDBQueryEngine {
+impl Drop for QueryEngineCore {
     fn drop(&mut self) {
         // DuckDB/extension connections are not safe to leave on detached threads while the process
         // or test binary is exiting. Close every worker channel first so all workers can break out

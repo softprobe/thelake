@@ -7,10 +7,9 @@ mod coalesce;
 
 use crate::config::{resolve_write_timeout_seconds, Config};
 use crate::models::{Log, Score, ScoreConfig, Span};
-use crate::promotion::{BusinessApplyError, BusinessTableManifest, TelemetryColumnsManifest};
-use crate::runtime_engine::DuckLakeScopeResolver;
 use crate::session_summary::{DirtyHint, SessionSummaryDirty};
 use crate::storage::ducklake::DuckLakeWriter;
+use crate::workspace::DuckLakeScopeResolver;
 use crate::workspace_scope::{WorkspaceBinding, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID};
 use anyhow::{anyhow, Result};
 use coalesce::CoalesceBuf;
@@ -22,23 +21,10 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct IngestEngine {
     writer: Arc<DuckLakeWriter>,
-    resolver: DuckLakeScopeResolver,
     workspace_id: String,
     flush_interval_seconds: u64,
     logs: Arc<CoalesceBuf<Log>>,
     spans: Arc<CoalesceBuf<Span>>,
-}
-
-/// Administrative schema/promotion surface for one authenticated workspace.
-///
-/// Promotion changes are deliberately separate from the ingest data path:
-/// callers cannot reach schema DDL through the ordinary signal-write facade.
-/// In shared mode the bound physical scope makes these changes global to every
-/// workspace using that scope.
-#[derive(Clone)]
-pub struct AdminEngine {
-    writer: Arc<DuckLakeWriter>,
-    resolver: DuckLakeScopeResolver,
 }
 
 /// Bound a DuckLake write so a hung INSERT cannot stall the coalesce worker forever.
@@ -207,7 +193,6 @@ impl IngestEngine {
         };
         Self {
             writer,
-            resolver,
             workspace_id,
             flush_interval_seconds,
             logs,
@@ -264,31 +249,11 @@ impl IngestEngine {
         self.writer.write_score_batches(vec![items]).await
     }
 
-    pub async fn score_exists(
-        &self,
-        score_id: &str,
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        self.writer.score_exists(score_id, timestamp).await
-    }
-
     /// Add score configurations through the authenticated workspace write path.
     pub async fn add_score_configs(&self, items: Vec<ScoreConfig>) -> Result<()> {
         let mut items = items;
         self.bind_score_configs_to_workspace(&mut items);
         self.writer.write_score_config_batches(vec![items]).await
-    }
-
-    pub async fn score_config_exists(&self, config_id: &str) -> Result<bool> {
-        self.writer.score_config_exists(config_id).await
-    }
-
-    pub async fn list_score_configs(&self) -> Result<Vec<ScoreConfig>> {
-        self.writer.list_score_configs().await
-    }
-
-    pub async fn get_score_config(&self, config_id: &str) -> Result<Option<ScoreConfig>> {
-        self.writer.get_score_config(config_id).await
     }
 
     fn bind_spans_to_workspace(&self, spans: &mut [Span]) {
@@ -314,55 +279,9 @@ impl IngestEngine {
             config.workspace_id = Some(self.workspace_id.clone());
         }
     }
-}
 
-impl AdminEngine {
-    pub(crate) fn from_ingest(ingest: &Arc<IngestEngine>) -> Self {
-        Self {
-            writer: ingest.writer.clone(),
-            resolver: ingest.resolver.clone(),
-        }
-    }
-
-    pub async fn apply_and_record_telemetry_promotion(
-        &self,
-        manifest_yaml: &str,
-        spec: &TelemetryColumnsManifest,
-        target_tables: &[String],
-    ) -> Result<String> {
-        self.resolver
-            .apply_telemetry_promotion_guarded(
-                self.writer.metadata_schema(),
-                manifest_yaml,
-                target_tables,
-                || async {
-                    self.writer
-                        .apply_telemetry_column_promotion(spec)
-                        .await
-                        .map(|_| ())
-                },
-            )
-            .await
-    }
-
-    pub async fn apply_business_promotion_guarded(
-        &self,
-        manifest_yaml: &str,
-        spec: &BusinessTableManifest,
-    ) -> std::result::Result<String, BusinessApplyError> {
-        self.resolver
-            .apply_business_promotion_guarded(
-                self.writer.metadata_schema(),
-                manifest_yaml,
-                spec,
-                || async {
-                    self.writer
-                        .apply_business_table_promotion(spec)
-                        .await
-                        .map(|_| ())
-                },
-            )
-            .await
+    pub(crate) fn writer_handle(&self) -> &Arc<DuckLakeWriter> {
+        &self.writer
     }
 }
 
@@ -409,24 +328,7 @@ mod after_commit_tests {
     }
 
     #[tokio::test]
-    async fn score_operations_are_exposed_by_ingest_engine() {
-        let (engine, _temp) = crate::test_support::sample_ingest()
-            .await
-            .expect("sample ingest");
-
-        assert!(!engine
-            .score_exists("missing-score", chrono::Utc::now())
-            .await
-            .expect("score lookup"));
-        assert!(engine
-            .list_score_configs()
-            .await
-            .expect("score config list")
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn ingest_engine_rebinds_spans_to_its_workspace() {
+    async fn ingest_rebinds_spans_to_its_workspace() {
         let (engine, _temp) = crate::test_support::sample_ingest()
             .await
             .expect("sample ingest");

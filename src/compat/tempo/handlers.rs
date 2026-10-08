@@ -5,13 +5,13 @@ use super::params::{
     parse_tempo_search_params, parse_tempo_tag_params, parse_tempo_trace_lookup_params,
 };
 use crate::api::AppState;
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::compat::backends::ducklake_traces::DuckLakeTraceBackend;
 use crate::compat::backends::traces::{TraceLookupBounds, TraceQueryBackend, TraceSearchRequest};
 use crate::compat::envelopes::error_response;
 use crate::compat::errors::{CompatError, CompatErrorCode};
-use crate::compat::tenant::{
-    scope_header_value, ProtocolScope, QueryLimits, TenantContext, TEMPO_SCOPE_HEADER,
+use crate::compat::workspace::{
+    scope_header_value, CompatWorkspaceContext, ProtocolScope, QueryLimits, TEMPO_SCOPE_HEADER,
 };
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
@@ -24,20 +24,23 @@ const PROTOCOL: ProtocolScope = ProtocolScope::Tempo;
 
 async fn backend_for(
     state: &AppState,
-    ctx: &TenantContext,
+    ctx: &CompatWorkspaceContext,
 ) -> Result<DuckLakeTraceBackend, CompatError> {
-    let engine = state.engine_for_tenant(&ctx.tenant).await.map_err(|err| {
+    let ws = state.workspace_for_auth(&ctx.auth).await.map_err(|err| {
         CompatError::new(
             CompatErrorCode::BadRequest,
-            format!("tenant engine unavailable: {err}"),
+            format!("workspace engine unavailable: {err}"),
         )
     })?;
-    Ok(DuckLakeTraceBackend::new(engine.query_engine()))
+    Ok(DuckLakeTraceBackend::new(ws.query().clone()))
 }
 
-fn tenant_context(tenant: TenantInfo, headers: &HeaderMap) -> Result<TenantContext, CompatError> {
-    TenantContext::from_authenticated(
-        tenant,
+fn compat_workspace_context(
+    auth: WorkspaceAuth,
+    headers: &HeaderMap,
+) -> Result<CompatWorkspaceContext, CompatError> {
+    CompatWorkspaceContext::from_authenticated(
+        auth,
         PROTOCOL,
         scope_header_value(headers, TEMPO_SCOPE_HEADER),
         QueryLimits::default(),
@@ -52,13 +55,13 @@ fn pairs(uri: &Uri) -> Vec<(String, String)> {
 
 async fn trace_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     Path(trace_id): Path<String>,
     headers: HeaderMap,
     uri: Uri,
     v2: bool,
 ) -> Response {
-    let ctx = match tenant_context(tenant, &headers) {
+    let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };
@@ -96,31 +99,31 @@ async fn trace_handler(
 
 async fn trace_v1_handler(
     state: State<AppState>,
-    tenant: Extension<TenantInfo>,
+    auth: Extension<WorkspaceAuth>,
     path: Path<String>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    trace_handler(state, tenant, path, headers, uri, false).await
+    trace_handler(state, auth, path, headers, uri, false).await
 }
 
 async fn trace_v2_handler(
     state: State<AppState>,
-    tenant: Extension<TenantInfo>,
+    auth: Extension<WorkspaceAuth>,
     path: Path<String>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    trace_handler(state, tenant, path, headers, uri, true).await
+    trace_handler(state, auth, path, headers, uri, true).await
 }
 
 async fn search_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    let ctx = match tenant_context(tenant, &headers) {
+    let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };
@@ -150,14 +153,14 @@ async fn search_handler(
 
 async fn tags_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
     if let Err(err) = parse_tempo_tag_params(&pairs(&uri)) {
         return error_response(PROTOCOL, err);
     }
-    let ctx = match tenant_context(tenant, &headers) {
+    let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };
@@ -174,7 +177,7 @@ async fn tags_handler(
 
 async fn tag_values_handler(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
     Path(tag): Path<String>,
     headers: HeaderMap,
     uri: Uri,
@@ -182,7 +185,7 @@ async fn tag_values_handler(
     if let Err(err) = parse_tempo_tag_params(&pairs(&uri)) {
         return error_response(PROTOCOL, err);
     }
-    let ctx = match tenant_context(tenant, &headers) {
+    let ctx = match compat_workspace_context(auth, &headers) {
         Ok(ctx) => ctx,
         Err(err) => return error_response(PROTOCOL, err),
     };

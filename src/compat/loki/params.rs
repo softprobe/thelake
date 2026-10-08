@@ -1,6 +1,6 @@
 use crate::compat::backends::logs::LogDirection;
 use crate::compat::errors::{CompatError, CompatErrorCode};
-use crate::compat::tenant::QueryLimits;
+use crate::compat::workspace::QueryLimits;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

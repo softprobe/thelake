@@ -2,10 +2,10 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use softprobe_runtime::authn::TenantInfo;
+use softprobe_runtime::authn::WorkspaceAuth;
 use softprobe_runtime::compat::envelopes::{error_envelope, success_envelope_minimal};
 use softprobe_runtime::compat::errors::{CompatError, CompatErrorCode};
-use softprobe_runtime::compat::tenant::{ProtocolScope, QueryLimits, TenantContext};
+use softprobe_runtime::compat::workspace::{CompatWorkspaceContext, ProtocolScope, QueryLimits};
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -41,16 +41,16 @@ fn load_fixture(name: &str) -> serde_json::Value {
 
 #[test]
 fn loki_scope_header_must_match_tenant() {
-    let err = TenantContext::from_authenticated(
-        TenantInfo {
-            workspace_id: crate::util::tenant::COMPAT_WORKSPACE_A.into(),
+    let err = CompatWorkspaceContext::from_authenticated(
+        WorkspaceAuth {
+            workspace_id: crate::util::workspace::COMPAT_WORKSPACE_A.into(),
             bucket_name: "b".into(),
             dataset_id: "d".into(),
             agent_id: None,
             agent_name: None,
         },
         ProtocolScope::Loki,
-        Some(crate::util::tenant::COMPAT_WORKSPACE_B),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_B),
         QueryLimits::default(),
     )
     .unwrap_err();
@@ -59,16 +59,16 @@ fn loki_scope_header_must_match_tenant() {
 
 #[test]
 fn loki_matching_scope_header_ok() {
-    TenantContext::from_authenticated(
-        TenantInfo {
-            workspace_id: crate::util::tenant::COMPAT_WORKSPACE_A.into(),
+    CompatWorkspaceContext::from_authenticated(
+        WorkspaceAuth {
+            workspace_id: crate::util::workspace::COMPAT_WORKSPACE_A.into(),
             bucket_name: "b".into(),
             dataset_id: "d".into(),
             agent_id: None,
             agent_name: None,
         },
         ProtocolScope::Loki,
-        Some(crate::util::tenant::COMPAT_WORKSPACE_A),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_A),
         QueryLimits::default(),
     )
     .expect("match");
@@ -292,7 +292,7 @@ async fn loki_query_contract_cases_cover_envelopes_results_and_boundaries() {
     let fixture = fixture();
     let (router, state, _temp) = build_loki_router().await;
     ingest_records(&router, &fixture.records, None).await;
-    flush_logs(&state, crate::util::tenant::LOCAL_WORKSPACE_ID).await;
+    flush_logs(&state, crate::util::workspace::LOCAL_WORKSPACE_ID).await;
 
     for case in &fixture.cases {
         let (status, body) = query_case(&router, case, None).await;
@@ -331,13 +331,13 @@ async fn loki_query_tenant_isolation_keeps_streams_and_metadata_scoped() {
     let temp_b = TempDir::new().expect("tenant B temp");
     let (router_a, state_a, _mock_a) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&temp_a)),
-        crate::util::tenant::COMPAT_WORKSPACE_A,
+        crate::util::workspace::COMPAT_WORKSPACE_A,
         true,
     )
     .await;
     let (router_b, state_b, _mock_b) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&temp_b)),
-        crate::util::tenant::COMPAT_WORKSPACE_B,
+        crate::util::workspace::COMPAT_WORKSPACE_B,
         true,
     )
     .await;
@@ -355,8 +355,8 @@ async fn loki_query_tenant_isolation_keeps_streams_and_metadata_scoped() {
         Some("tenant-b-key"),
     )
     .await;
-    flush_logs(&state_a, crate::util::tenant::COMPAT_WORKSPACE_A).await;
-    flush_logs(&state_b, crate::util::tenant::COMPAT_WORKSPACE_B).await;
+    flush_logs(&state_a, crate::util::workspace::COMPAT_WORKSPACE_A).await;
+    flush_logs(&state_b, crate::util::workspace::COMPAT_WORKSPACE_B).await;
 
     let case = LokiCase {
         id: "tenant-isolation-query".into(),
@@ -420,7 +420,7 @@ async fn loki_query_missing_and_invalid_auth_are_denied_on_all_get_endpoints() {
     let missing_temp = TempDir::new().expect("missing-auth temp");
     let (missing_router, _state, _mock) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&missing_temp)),
-        crate::util::tenant::COMPAT_WORKSPACE_ID,
+        crate::util::workspace::COMPAT_WORKSPACE_ID,
         true,
     )
     .await;
@@ -446,7 +446,7 @@ async fn loki_query_missing_and_invalid_auth_are_denied_on_all_get_endpoints() {
     let invalid_temp = TempDir::new().expect("invalid-auth temp");
     let (invalid_router, _state, _mock) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&invalid_temp)),
-        crate::util::tenant::COMPAT_WORKSPACE_ID,
+        crate::util::workspace::COMPAT_WORKSPACE_ID,
         false,
     )
     .await;
@@ -640,7 +640,7 @@ async fn loki_query_differential_vs_pinned_loki() {
     let oracle = start_loki_oracle(exec_records, readiness_exec);
     let (router, state, _temp) = build_loki_router().await;
     ingest_records(&router, exec_records, None).await;
-    flush_logs(&state, crate::util::tenant::LOCAL_WORKSPACE_ID).await;
+    flush_logs(&state, crate::util::workspace::LOCAL_WORKSPACE_ID).await;
 
     let mut executed = BTreeSet::new();
     for selected in selected_cases {

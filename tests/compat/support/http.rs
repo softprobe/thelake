@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::util::config::file_backed_test_config;
-use crate::util::tenant::{inject_local_sqlite_tenant, provision_local_sqlite_tenant};
+use crate::util::workspace::{inject_local_workspace, provision_local_workspace};
 
 pub async fn build_tenant_router_with_state() -> (Router, AppState, TempDir) {
     let temp = TempDir::new().expect("temp");
@@ -19,8 +19,8 @@ pub async fn build_tenant_router_with_state() -> (Router, AppState, TempDir) {
     let (router, state) = softprobe_runtime::api::create_router(std::sync::Arc::new(config), None)
         .await
         .expect("router");
-    provision_local_sqlite_tenant(&state).await;
-    let router = router.layer(from_fn(inject_local_sqlite_tenant));
+    provision_local_workspace(&state).await;
+    let router = router.layer(from_fn(inject_local_workspace));
     (router, state, temp)
 }
 

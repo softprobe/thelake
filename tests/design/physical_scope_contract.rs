@@ -360,7 +360,7 @@ fn from_ducklake_is_ingress_only_outside_cfg_test() {
     visit_rs(&src_root, &mut |path, contents| {
         let rel = path.strip_prefix(&src_root).unwrap_or(path);
         // Allowed config→scope ingress sites only.
-        if rel.ends_with("runtime_engine.rs")
+        if rel.ends_with("workspace.rs")
             || rel.ends_with("physical_scope.rs")
             || rel == std::path::Path::new("storage/ducklake/attach.rs")
         {
@@ -386,8 +386,7 @@ fn from_ducklake_is_ingress_only_outside_cfg_test() {
     });
     assert!(
         hits.is_empty(),
-        "PhysicalScope::from_ducklake escaped ingress (runtime_engine / physical_scope / \
-         storage/ducklake/attach) in non-test production code:\n{}",
+        "PhysicalScope::from_ducklake escaped ingress in non-test production code:\n{}",
         hits.join("\n")
     );
 }
@@ -487,32 +486,29 @@ fn workspace_binding_does_not_expose_physical_scope() {
 
 #[test]
 fn manager_provision_returns_storage_hints_not_physical_scope() {
-    let runtime = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/runtime_engine.rs"
-    ));
+    let runtime = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/workspace.rs"));
     // Manager façade signature (not DuckLakeScopeResolver::provision_scope).
     let manager_impl = runtime
-        .split("impl RuntimeEngineManager")
+        .split("impl WorkspaceManager")
         .nth(1)
-        .expect("RuntimeEngineManager impl");
+        .expect("WorkspaceManager impl");
     assert!(
         manager_impl.contains("pub async fn provision_scope(")
             && manager_impl.contains("Result<ScopeStorageHints>"),
-        "RuntimeEngineManager::provision_scope must return ScopeStorageHints"
+        "WorkspaceManager::provision_scope must return ScopeStorageHints"
     );
     assert!(
         manager_impl.contains("pub async fn scope_storage_hints("),
-        "RuntimeEngineManager must expose scope_storage_hints"
+        "WorkspaceManager must expose scope_storage_hints"
     );
     assert!(
         manager_impl.contains("pub fn lease_store(")
             && manager_impl.contains("pub async fn maintenance_engine("),
-        "RuntimeEngineManager must expose lease_store and maintenance_engine"
+        "WorkspaceManager must expose lease_store and maintenance_engine"
     );
     assert!(
         !manager_impl.contains("fn scope_registry("),
-        "RuntimeEngineManager must not expose scope_registry"
+        "WorkspaceManager must not expose scope_registry"
     );
     assert!(
         !manager_impl
@@ -521,15 +517,16 @@ fn manager_provision_returns_storage_hints_not_physical_scope() {
             .and_then(|rest| rest.split("pub async fn").next())
             .expect("provision_scope body")
             .contains("Result<PhysicalScope>"),
-        "RuntimeEngineManager::provision_scope must not return PhysicalScope"
+        "WorkspaceManager::provision_scope must not return PhysicalScope"
     );
 }
 
 #[test]
-fn api_sessions_uses_runtime_engine_summary_facade() {
+fn api_sessions_uses_workspace_context_summary_facade() {
     let query = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/api/sessions.rs"));
     for needle in [
         "session_summary_scope",
+        "WorkspaceSummaryScope",
         "TenantSummaryScope",
         "summary_scope.physical",
         ".physical.pg_namespace",
@@ -538,34 +535,31 @@ fn api_sessions_uses_runtime_engine_summary_facade() {
     ] {
         assert!(
             !query.contains(needle),
-            "api/sessions.rs must use RuntimeEngine summary methods only (found {needle})"
+            "api/sessions.rs must use WorkspaceContext summary methods only (found {needle})"
         );
     }
     assert!(
         query.contains("lookup_session_summary_window"),
-        "api/sessions.rs must call RuntimeEngine::lookup_session_summary_window"
+        "api/sessions.rs must call WorkspaceContext::lookup_session_summary_window"
     );
     assert!(
         query.contains("search_session_summary"),
-        "api/sessions.rs must call RuntimeEngine::search_session_summary"
+        "api/sessions.rs must call WorkspaceContext::search_session_summary"
     );
 
-    let runtime = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/runtime_engine.rs"
-    ));
+    let runtime = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/workspace.rs"));
     assert!(
-        runtime.contains("struct TenantSummaryScope {"),
-        "TenantSummaryScope must remain a private helper inside runtime_engine"
+        runtime.contains("struct WorkspaceSummaryScope {"),
+        "WorkspaceSummaryScope must remain a private helper inside workspace.rs"
     );
     assert!(
-        !runtime.contains("pub(crate) struct TenantSummaryScope")
-            && !runtime.contains("pub struct TenantSummaryScope"),
-        "TenantSummaryScope must not be exported"
+        !runtime.contains("pub(crate) struct WorkspaceSummaryScope")
+            && !runtime.contains("pub struct WorkspaceSummaryScope"),
+        "WorkspaceSummaryScope must not be exported"
     );
     assert!(
         !runtime.contains("pub(crate) fn session_summary_scope"),
-        "session_summary_scope must stay private to RuntimeEngine"
+        "session_summary_scope must stay private to WorkspaceContext"
     );
 }
 

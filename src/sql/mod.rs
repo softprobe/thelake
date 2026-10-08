@@ -167,7 +167,7 @@ mod locality_tests {
             "/tests.rs",
             "/unit_tests.rs",
             "/promotion.rs",
-            "/runtime_engine.rs",
+            "/workspace.rs",
             "/async_jobs/tests.rs",
             "/session_summary/ddl.rs",
             "/session_summary/dirty.rs",
@@ -182,7 +182,7 @@ mod locality_tests {
             "/storage/ducklake/promotion.rs",
             "/storage/ducklake/writer.rs",
             "/storage/duckdb/cache.rs",
-            "/storage/duckdb/engine.rs",
+            "/query/engine.rs",
             "/storage/ducklake/workspace_views.rs",
         ];
         let hard: Vec<_> = hits
@@ -291,7 +291,7 @@ mod locality_tests {
         );
         assert!(
             violations.is_empty(),
-            "AppState::execute_tenant_scoped_trusted_sql must be removed; product handlers use RuntimeEngine::execute_trusted / QueryEngine typed methods:\n{}",
+            "AppState::execute_tenant_scoped_trusted_sql must be removed; product handlers use WorkspaceContext / QueryEngine typed methods:\n{}",
             violations.join("\n")
         );
     }
@@ -382,7 +382,8 @@ mod locality_tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut violations = Vec::new();
         let approved = [
-            "/ingest_engine/",
+            "/ingest/",
+            "/control_plane/",
             "/query/",
             "/compaction/",
             "/storage/",

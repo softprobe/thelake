@@ -1,17 +1,17 @@
 use crate::api::error::{bad_request, not_found, storage_error, ApiError};
 use crate::api::mapping::{
     column_value, map_events, map_string_map, optional_f64, optional_i64, optional_string,
-    optional_timestamp, required_string, required_timestamp, resolve_engine,
+    optional_timestamp, required_string, required_timestamp, resolve_workspace,
 };
 use crate::api::{map_execute_result, AppState};
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::models::{Score, ScoreDataType, ScoreSource};
-use crate::runtime_engine::RuntimeEngine;
 use crate::sql::llm::{
     clamp_limit, scores_for_span, scores_for_trace, search_spans as compile_search_spans,
     span_detail, trace_spans, trace_summary, DEFAULT_SEARCH_LIMIT, DEFAULT_TRACE_LIMIT,
 };
 use crate::sql::paging::encode_cursor;
+use crate::workspace::WorkspaceContext;
 use axum::extract::{Extension, Path, Query, State};
 use axum::Json;
 use chrono::{DateTime, Utc};
@@ -35,13 +35,14 @@ pub struct DetailQuery {
 
 pub async fn search_spans(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<SpanSearchRequest>,
 ) -> Result<Json<SpanSearchResponse>, ApiError> {
     let sql = compile_search_spans(&request).map_err(bad_request)?;
-    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let engine = resolve_engine(&state, tenant_ref).await?;
-    let result = map_execute_result(engine.execute_trusted(sql).await).map_err(storage_error)?;
+    let auth_ref = tenant.as_ref().map(|extension| &extension.0);
+    let ws = resolve_workspace(&state, auth_ref).await?;
+    let result =
+        map_execute_result(ws.query().execute_trusted(sql).await).map_err(storage_error)?;
 
     let limit = clamp_limit(request.limit, DEFAULT_SEARCH_LIMIT);
     let mut summaries = result
@@ -58,7 +59,7 @@ pub async fn search_spans(
 
 pub async fn get_span(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     Path(span_id): Path<String>,
     Query(params): Query<DetailQuery>,
 ) -> Result<Json<SpanDetail>, ApiError> {
@@ -66,13 +67,14 @@ pub async fn get_span(
         return Err(bad_request("missing span_id".to_string()));
     }
     let sql = span_detail(&span_id, params.from, params.to).map_err(bad_request)?;
-    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let engine = resolve_engine(&state, tenant_ref).await?;
-    let result = map_execute_result(engine.execute_trusted(sql).await).map_err(storage_error)?;
+    let auth_ref = tenant.as_ref().map(|extension| &extension.0);
+    let ws = resolve_workspace(&state, auth_ref).await?;
+    let result =
+        map_execute_result(ws.query().execute_trusted(sql).await).map_err(storage_error)?;
     let row = result.rows.first().ok_or_else(not_found)?;
     let mut detail = map_span_detail(&result.columns, row).ok_or_else(not_found)?;
     detail.scores = query_scores(
-        &engine,
+        &ws,
         scores_for_span(&span_id, params.from, params.to).map_err(bad_request)?,
     )
     .await?;
@@ -81,15 +83,15 @@ pub async fn get_span(
 
 pub async fn get_trace(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     Path(trace_id): Path<String>,
     Query(params): Query<DetailQuery>,
 ) -> Result<Json<TraceDetail>, ApiError> {
     if trace_id.trim().is_empty() {
         return Err(bad_request("missing trace_id".to_string()));
     }
-    let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let engine = resolve_engine(&state, tenant_ref).await?;
+    let auth_ref = tenant.as_ref().map(|extension| &extension.0);
+    let ws = resolve_workspace(&state, auth_ref).await?;
     let summary_sql = trace_summary(
         &trace_id,
         params.from,
@@ -98,7 +100,7 @@ pub async fn get_trace(
     )
     .map_err(bad_request)?;
     let summary_result =
-        map_execute_result(engine.execute_trusted(summary_sql).await).map_err(storage_error)?;
+        map_execute_result(ws.query().execute_trusted(summary_sql).await).map_err(storage_error)?;
     let summary_row = summary_result.rows.first().ok_or_else(not_found)?;
     let trace = map_trace(&summary_result.columns, summary_row).ok_or_else(not_found)?;
 
@@ -113,7 +115,7 @@ pub async fn get_trace(
     )
     .map_err(bad_request)?;
     let spans_result =
-        map_execute_result(engine.execute_trusted(spans_sql).await).map_err(storage_error)?;
+        map_execute_result(ws.query().execute_trusted(spans_sql).await).map_err(storage_error)?;
     let mut spans = spans_result
         .rows
         .iter()
@@ -122,7 +124,7 @@ pub async fn get_trace(
     let next_span_cursor = next_cursor_from_span_details(&mut spans, limit);
 
     let scores = query_scores(
-        &engine,
+        &ws,
         scores_for_trace(&trace_id, params.from, params.to).map_err(bad_request)?,
     )
     .await?;
@@ -149,10 +151,11 @@ pub async fn get_trace(
 }
 
 pub(crate) async fn query_scores(
-    engine: &RuntimeEngine,
+    ws: &WorkspaceContext,
     sql: crate::sql::trusted::TrustedSql,
 ) -> Result<Vec<Score>, ApiError> {
-    let result = map_execute_result(engine.execute_trusted(sql).await).map_err(storage_error)?;
+    let result =
+        map_execute_result(ws.query().execute_trusted(sql).await).map_err(storage_error)?;
     Ok(result
         .rows
         .iter()
@@ -272,7 +275,7 @@ fn next_cursor_from_span_details(items: &mut Vec<SpanDetail>, limit: usize) -> O
 
 pub async fn search_traces(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<crate::sql::telemetry::TelemetrySearchRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let res = crate::api::mapping::execute_dynamic_search(
@@ -286,7 +289,7 @@ pub async fn search_traces(
 
 pub async fn trace_details_post(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<crate::api::mapping::EntityDetailsRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let trace_id = request

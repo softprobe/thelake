@@ -310,9 +310,10 @@ pub async fn ingest_records_with_bearer(
 
 pub async fn flush_logs(state: &softprobe_runtime::api::AppState, workspace_id: &str) {
     state
-        .engine_for_id(workspace_id)
+        .workspace_for_id(workspace_id)
         .await
-        .expect("tenant engine")
+        .expect("workspace context")
+        .ingest()
         .force_flush_logs()
         .await
         .expect("flush logs");

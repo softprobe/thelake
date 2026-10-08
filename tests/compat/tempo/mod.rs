@@ -2,14 +2,14 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use softprobe_runtime::authn::TenantInfo;
+use softprobe_runtime::authn::WorkspaceAuth;
 use softprobe_runtime::compat::backends::traces::{TraceData, TraceSpan};
 use softprobe_runtime::compat::envelopes::{
     error_envelope, error_response, success_envelope_minimal,
 };
 use softprobe_runtime::compat::errors::{CompatError, CompatErrorCode};
 use softprobe_runtime::compat::tempo::encode::{trace_v1_response, trace_v2_response};
-use softprobe_runtime::compat::tenant::{ProtocolScope, QueryLimits, TenantContext};
+use softprobe_runtime::compat::workspace::{CompatWorkspaceContext, ProtocolScope, QueryLimits};
 use std::collections::BTreeSet;
 use std::net::TcpListener;
 use tempfile::TempDir;
@@ -80,16 +80,16 @@ fn skip_if_sandbox_cannot_bind_test_port(test_id: &str) -> bool {
 
 #[test]
 fn tempo_scope_header_must_match_tenant() {
-    let err = TenantContext::from_authenticated(
-        TenantInfo {
-            workspace_id: crate::util::tenant::COMPAT_WORKSPACE_A.into(),
+    let err = CompatWorkspaceContext::from_authenticated(
+        WorkspaceAuth {
+            workspace_id: crate::util::workspace::COMPAT_WORKSPACE_A.into(),
             bucket_name: "b".into(),
             dataset_id: "d".into(),
             agent_id: None,
             agent_name: None,
         },
         ProtocolScope::Tempo,
-        Some(crate::util::tenant::COMPAT_OTHER_WORKSPACE_ID),
+        Some(crate::util::workspace::COMPAT_OTHER_WORKSPACE_ID),
         QueryLimits::default(),
     )
     .unwrap_err();
@@ -599,7 +599,7 @@ async fn tempo_query_malformed_trace_ids_use_tempo_bad_request_envelope() {
     let temp = TempDir::new().expect("malformed trace ID temp");
     let (router, _state, _mock) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&temp)),
-        crate::util::tenant::COMPAT_WORKSPACE_ID,
+        crate::util::workspace::COMPAT_WORKSPACE_ID,
         true,
     )
     .await;
@@ -614,7 +614,7 @@ async fn tempo_query_malformed_trace_ids_use_tempo_bad_request_envelope() {
             &router,
             path,
             Some("tenant-auth-key"),
-            Some(crate::util::tenant::COMPAT_WORKSPACE_ID),
+            Some(crate::util::workspace::COMPAT_WORKSPACE_ID),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
@@ -632,7 +632,7 @@ async fn tempo_query_unknown_trace_lookup_params_are_explicitly_unsupported() {
     let temp = TempDir::new().expect("unknown lookup parameter temp");
     let (router, _state, _mock) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&temp)),
-        crate::util::tenant::COMPAT_WORKSPACE_ID,
+        crate::util::workspace::COMPAT_WORKSPACE_ID,
         true,
     )
     .await;
@@ -645,7 +645,7 @@ async fn tempo_query_unknown_trace_lookup_params_are_explicitly_unsupported() {
             &router,
             path,
             Some("tenant-auth-key"),
-            Some(crate::util::tenant::COMPAT_WORKSPACE_ID),
+            Some(crate::util::workspace::COMPAT_WORKSPACE_ID),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}: {body}");
@@ -774,7 +774,7 @@ async fn tempo_query_auth_middleware_is_required_on_all_get_routes() {
     let missing_temp = TempDir::new().expect("missing-auth temp");
     let (missing_router, _state, _mock) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&missing_temp)),
-        crate::util::tenant::COMPAT_WORKSPACE_ID,
+        crate::util::workspace::COMPAT_WORKSPACE_ID,
         true,
     )
     .await;
@@ -800,7 +800,7 @@ async fn tempo_query_auth_middleware_is_required_on_all_get_routes() {
     let invalid_temp = TempDir::new().expect("invalid-auth temp");
     let (invalid_router, _state, _mock) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&invalid_temp)),
-        crate::util::tenant::COMPAT_WORKSPACE_ID,
+        crate::util::workspace::COMPAT_WORKSPACE_ID,
         false,
     )
     .await;
@@ -832,13 +832,13 @@ async fn tempo_query_same_trace_id_isolated_across_all_routes() {
     let temp_b = TempDir::new().expect("tenant B temp");
     let (router_a, state_a, _mock_a) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&temp_a)),
-        crate::util::tenant::COMPAT_WORKSPACE_A,
+        crate::util::workspace::COMPAT_WORKSPACE_A,
         true,
     )
     .await;
     let (router_b, state_b, _mock_b) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&temp_b)),
-        crate::util::tenant::COMPAT_WORKSPACE_B,
+        crate::util::workspace::COMPAT_WORKSPACE_B,
         true,
     )
     .await;
@@ -852,8 +852,8 @@ async fn tempo_query_same_trace_id_isolated_across_all_routes() {
         .attributes
         .insert("tenant.only".into(), "tenant-b".into());
     ingest_records(&router_b, &tenant_b_records, Some("tenant-b-key")).await;
-    flush_traces(&state_a, crate::util::tenant::COMPAT_WORKSPACE_A).await;
-    flush_traces(&state_b, crate::util::tenant::COMPAT_WORKSPACE_B).await;
+    flush_traces(&state_a, crate::util::workspace::COMPAT_WORKSPACE_A).await;
+    flush_traces(&state_b, crate::util::workspace::COMPAT_WORKSPACE_B).await;
 
     let v1 = fixture
         .cases
@@ -864,14 +864,14 @@ async fn tempo_query_same_trace_id_isolated_across_all_routes() {
         &router_a,
         v1,
         Some("tenant-a-key"),
-        Some(crate::util::tenant::COMPAT_WORKSPACE_A),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_A),
     )
     .await;
     let (status_b, body_b) = query_case_with_scope(
         &router_b,
         v1,
         Some("tenant-b-key"),
-        Some(crate::util::tenant::COMPAT_WORKSPACE_B),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_B),
     )
     .await;
     assert_eq!(status_a, StatusCode::OK);
@@ -900,14 +900,14 @@ async fn tempo_query_same_trace_id_isolated_across_all_routes() {
         &router_a,
         v2,
         Some("tenant-a-key"),
-        Some(crate::util::tenant::COMPAT_WORKSPACE_A),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_A),
     )
     .await;
     let (status_b, body_b) = query_case_with_scope(
         &router_b,
         v2,
         Some("tenant-b-key"),
-        Some(crate::util::tenant::COMPAT_WORKSPACE_B),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_B),
     )
     .await;
     assert_eq!(status_a, StatusCode::OK);
@@ -924,14 +924,14 @@ async fn tempo_query_same_trace_id_isolated_across_all_routes() {
         &router_a,
         name,
         Some("tenant-a-key"),
-        Some(crate::util::tenant::COMPAT_WORKSPACE_A),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_A),
     )
     .await;
     let (status_b, body_b) = query_case_with_scope(
         &router_b,
         name,
         Some("tenant-b-key"),
-        Some(crate::util::tenant::COMPAT_WORKSPACE_B),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_B),
     )
     .await;
     assert_eq!(
@@ -952,14 +952,14 @@ async fn tempo_query_same_trace_id_isolated_across_all_routes() {
         &router_a,
         tag_names,
         Some("tenant-a-key"),
-        Some(crate::util::tenant::COMPAT_WORKSPACE_A),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_A),
     )
     .await;
     let (status_b, body_b) = query_case_with_scope(
         &router_b,
         tag_names,
         Some("tenant-b-key"),
-        Some(crate::util::tenant::COMPAT_WORKSPACE_B),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_B),
     )
     .await;
     assert_eq!(status_a, StatusCode::OK);
@@ -989,14 +989,14 @@ async fn tempo_query_same_trace_id_isolated_across_all_routes() {
         &router_a,
         tag_values,
         Some("tenant-a-key"),
-        Some(crate::util::tenant::COMPAT_WORKSPACE_A),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_A),
     )
     .await;
     let (status_b, body_b) = query_case_with_scope(
         &router_b,
         tag_values,
         Some("tenant-b-key"),
-        Some(crate::util::tenant::COMPAT_WORKSPACE_B),
+        Some(crate::util::workspace::COMPAT_WORKSPACE_B),
     )
     .await;
     assert_eq!(status_a, StatusCode::OK);
@@ -1015,7 +1015,7 @@ async fn tempo_query_spoofed_scope_header_is_forbidden_on_all_routes() {
     let temp = TempDir::new().expect("spoofed scope temp");
     let (router, _state, _mock) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&temp)),
-        crate::util::tenant::COMPAT_WORKSPACE_ID,
+        crate::util::workspace::COMPAT_WORKSPACE_ID,
         true,
     )
     .await;
@@ -1049,32 +1049,32 @@ async fn tempo_query_parameter_matrix_preserves_authenticated_tenant_and_rejects
     let temp = TempDir::new().expect("parameter matrix temp");
     let (router, state, _mock) = crate::compat_support::auth::authenticated_router(
         std::sync::Arc::new(file_backed_test_config(&temp)),
-        crate::util::tenant::COMPAT_WORKSPACE_ID,
+        crate::util::workspace::COMPAT_WORKSPACE_ID,
         true,
     )
     .await;
     ingest_records(&router, &fixture.records, Some("tenant-auth-key")).await;
-    flush_traces(&state, crate::util::tenant::COMPAT_WORKSPACE_ID).await;
+    flush_traces(&state, crate::util::workspace::COMPAT_WORKSPACE_ID).await;
 
     for TempoParameterMatrixCase { id, path } in TEMPO_PARAMETER_MATRIX {
         let (baseline_status, baseline_body) = query_path_with_scope(
             &router,
             path,
             Some("tenant-auth-key"),
-            Some(crate::util::tenant::COMPAT_WORKSPACE_ID),
+            Some(crate::util::workspace::COMPAT_WORKSPACE_ID),
         )
         .await;
         assert_eq!(baseline_status, StatusCode::OK, "{id}: baseline {path}");
 
         let workspace_id_path = format!(
             "{path}?workspace_id={}",
-            crate::util::tenant::COMPAT_OTHER_WORKSPACE_ID
+            crate::util::workspace::COMPAT_OTHER_WORKSPACE_ID
         );
         let (workspace_id_status, workspace_id_body) = query_path_with_scope(
             &router,
             &workspace_id_path,
             Some("tenant-auth-key"),
-            Some(crate::util::tenant::COMPAT_WORKSPACE_ID),
+            Some(crate::util::workspace::COMPAT_WORKSPACE_ID),
         )
         .await;
         assert_eq!(
@@ -1091,7 +1091,7 @@ async fn tempo_query_parameter_matrix_preserves_authenticated_tenant_and_rejects
             &router,
             &unknown_path,
             Some("tenant-auth-key"),
-            Some(crate::util::tenant::COMPAT_WORKSPACE_ID),
+            Some(crate::util::workspace::COMPAT_WORKSPACE_ID),
         )
         .await;
         assert_eq!(
@@ -1333,7 +1333,7 @@ async fn tempo_query_differential_vs_pinned_tempo() {
     let oracle = start_tempo_oracle(&fixture.records, readiness_case.case);
     let (router, state, _temp) = build_tempo_router().await;
     ingest_records(&router, &fixture.records, None).await;
-    flush_traces(&state, crate::util::tenant::LOCAL_WORKSPACE_ID).await;
+    flush_traces(&state, crate::util::workspace::LOCAL_WORKSPACE_ID).await;
 
     let mut executed = BTreeSet::new();
     let mut executed_fixture_ids = BTreeSet::new();

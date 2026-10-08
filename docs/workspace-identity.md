@@ -13,12 +13,12 @@
 | `isolated` | one workspace → its own physical scope |
 
 A user belongs to one or more workspaces. Each workspace binds to exactly one
-physical scope (a `RuntimeEngine`). There is no `lake_scope_id`, `tenant_key`,
+physical scope (a `WorkspaceContext`). There is no `lake_scope_id`, `tenant_key`,
 or product `tenant` identity.
 
 ## Shared mode (weak bind)
 
-Process config owns the single physical scope. `engine_for(workspace_id)` uses
+Process config owns the single physical scope. `workspace_for(workspace_id)` uses
 that default without requiring `workspace_scope_binding`. Row filters and
 temp views use `workspace_id = <uuid>`.
 
@@ -50,7 +50,7 @@ must provision the fixture UUIDs returned by auth mocks
 
 - `lake_scope_id` / `ws-…` slug generator
 - assertion `tenant_key`
-- `TenantInfo.tenant_id` → `workspace_id`
+- `WorkspaceAuth.workspace_id`
 - row column `tenant_id` → tables `CREATE`d with `workspace_id`
 - hard shared allowlist on `engine_for`
 - `workspace_lake` as lake identity SoT

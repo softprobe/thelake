@@ -2,7 +2,7 @@ use softprobe_runtime::config::Config;
 use softprobe_runtime::promotion::{
     load_active_telemetry_columns_manifests, parse_promotion_manifest, PromotionManifest,
 };
-use softprobe_runtime::runtime_engine::{RuntimeEngineManager, ScopeProvisioningRequest};
+use softprobe_runtime::workspace::{ScopeProvisioningRequest, WorkspaceManager};
 use softprobe_runtime::workspace_scope::WorkspaceScopeMode;
 use std::sync::Arc;
 use tokio_postgres::NoTls;
@@ -54,7 +54,7 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
         == softprobe_runtime::workspace_scope::WorkspaceScopeMode::Isolated
     {
         let unknown = manager
-            .engine_for(&workspace_id)
+            .workspace_for(&workspace_id)
             .await
             .err()
             .expect("unknown scopes must not be lazily provisioned");
@@ -64,7 +64,7 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
         );
     } else {
         manager
-            .engine_for(&workspace_id)
+            .workspace_for(&workspace_id)
             .await
             .expect("shared mode resolves without registry binding");
     }
@@ -79,11 +79,11 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
         .await
         .expect("provision workspace");
     manager
-        .engine_for(&workspace_id)
+        .workspace_for(&workspace_id)
         .await
         .expect("first engine resolve");
     manager
-        .engine_for(&workspace_id)
+        .workspace_for(&workspace_id)
         .await
         .expect("second engine resolve");
     let repeated = manager
@@ -123,14 +123,14 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
         .await
         .expect("provision tenant B");
 
-    let engine_a = manager
-        .engine_for(&tenant_a)
+    let ws_a = manager
+        .workspace_for(&tenant_a)
         .await
-        .expect("tenant A engine");
-    let engine_b = manager
-        .engine_for(&tenant_b)
+        .expect("tenant A context");
+    let ws_b = manager
+        .workspace_for(&tenant_b)
         .await
-        .expect("tenant B engine");
+        .expect("tenant B context");
     let PromotionManifest::TelemetryColumns(spec_a) =
         parse_promotion_manifest(MANIFEST_DIVISION).expect("tenant A manifest")
     else {
@@ -141,8 +141,8 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
     else {
         panic!("expected telemetry manifest for tenant B");
     };
-    engine_a
-        .apply_telemetry_promotion(MANIFEST_DIVISION, &spec_a, &["logs".to_string()])
+    ws_a.admin()
+        .apply_and_record_telemetry_promotion(MANIFEST_DIVISION, &spec_a, &["logs".to_string()])
         .await
         .expect("record tenant A spec");
     // Shared mode binds both workspaces to the process-default catalog; load
@@ -158,8 +158,8 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
     let manifests_a = load_active_telemetry_columns_manifests(&client, &load_schema_a)
         .await
         .expect("load tenant A manifests");
-    engine_b
-        .apply_telemetry_promotion(MANIFEST_REGION, &spec_b, &["traces".to_string()])
+    ws_b.admin()
+        .apply_and_record_telemetry_promotion(MANIFEST_REGION, &spec_b, &["traces".to_string()])
         .await
         .expect("record tenant B spec");
     let client = postgres_client().await;
@@ -211,10 +211,10 @@ async fn resolver_loads_active_promotion_specs_from_only_the_resolved_tenant_sch
     }
 }
 
-async fn postgres_manager() -> RuntimeEngineManager {
-    RuntimeEngineManager::connect(Arc::new(postgres_config()), None)
+async fn postgres_manager() -> WorkspaceManager {
+    WorkspaceManager::connect(Arc::new(postgres_config()), None)
         .await
-        .expect("connect runtime engine manager")
+        .expect("connect workspace manager")
 }
 
 async fn postgres_client() -> tokio_postgres::Client {

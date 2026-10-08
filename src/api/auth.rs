@@ -23,7 +23,7 @@ pub async fn runtime_auth_middleware(
         if !is_local_anonymous_data_plane(req.method(), path) {
             return Err(StatusCode::FORBIDDEN);
         }
-        let info = crate::softprobe_assertion::tenant_info_for_default_lake(&workspace_id)
+        let info = crate::softprobe_assertion::workspace_auth_for_default_lake(&workspace_id)
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         req.extensions_mut().insert(info);
         return Ok(next.run(req).await);
@@ -44,7 +44,7 @@ pub async fn runtime_auth_middleware(
         let now = chrono::Utc::now().timestamp();
         let claims = crate::softprobe_assertion::verify_softprobe_assertion(raw, &secret, now)
             .map_err(|_| StatusCode::UNAUTHORIZED)?;
-        let info = crate::softprobe_assertion::tenant_info_from_assertion(&claims)
+        let info = crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
             .map_err(|_| StatusCode::FORBIDDEN)?;
         req.extensions_mut().insert(info);
         return Ok(next.run(req).await);
@@ -67,7 +67,8 @@ pub async fn runtime_auth_middleware(
             if let Ok(claims) =
                 crate::softprobe_assertion::verify_softprobe_assertion(&token, &secret, now)
             {
-                if let Ok(info) = crate::softprobe_assertion::tenant_info_from_assertion(&claims) {
+                if let Ok(info) = crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
+                {
                     req.extensions_mut().insert(info);
                     return Ok(next.run(req).await);
                 }
@@ -78,14 +79,14 @@ pub async fn runtime_auth_middleware(
     // Legacy direct-to-thelake clients: no assertion header. Optional default
     // lake routes them onto a configured MAP-ready scope (Bearer still required).
     if let Some(default_key) = crate::softprobe_assertion::default_workspace_id_from_env() {
-        let info = crate::softprobe_assertion::tenant_info_for_default_lake(&default_key)
+        let info = crate::softprobe_assertion::workspace_auth_for_default_lake(&default_key)
             .map_err(|_| StatusCode::FORBIDDEN)?;
         req.extensions_mut().insert(info);
         return Ok(next.run(req).await);
     }
 
     let control_plane = state
-        .engines
+        .workspaces
         .control_plane()
         .expect("runtime auth middleware requires control-plane state");
     let info = control_plane

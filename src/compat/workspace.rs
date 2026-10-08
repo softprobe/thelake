@@ -1,6 +1,6 @@
-//! Authenticated tenant context for compatibility (and future adapter) handlers.
+//! Authenticated workspace context for compatibility (and future adapter) handlers.
 
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::compat::capability::{parse_capability_yaml, CapabilityLimits, EMBEDDED_CAPABILITY_V0};
 use crate::compat::errors::{CompatError, CompatErrorCode};
 use std::time::{Duration, Instant};
@@ -88,11 +88,11 @@ impl QueryLimits {
     }
 }
 
-/// Tenant-bound request context. Handlers must not accept tenant ids from
+/// Workspace-bound request context. Handlers must not accept workspace ids from
 /// query parameters or bodies — only from this type.
 #[derive(Debug, Clone)]
-pub struct TenantContext {
-    pub tenant: TenantInfo,
+pub struct CompatWorkspaceContext {
+    pub auth: WorkspaceAuth,
     pub protocol: ProtocolScope,
     /// Validated protocol scope header value when the client sent one.
     pub scope_header: Option<String>,
@@ -100,27 +100,27 @@ pub struct TenantContext {
     pub deadline: Instant,
 }
 
-impl TenantContext {
+impl CompatWorkspaceContext {
     pub fn from_authenticated(
-        tenant: TenantInfo,
+        auth: WorkspaceAuth,
         protocol: ProtocolScope,
         scope_header: Option<&str>,
         limits: QueryLimits,
     ) -> Result<Self, CompatError> {
-        if tenant.workspace_id.trim().is_empty() {
+        if auth.workspace_id.trim().is_empty() {
             return Err(CompatError::new(
                 CompatErrorCode::Forbidden,
-                "authenticated tenant id is empty",
+                "authenticated workspace id is empty",
             ));
         }
 
         let scope_header = match scope_header.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(raw) if raw != tenant.workspace_id => {
+            Some(raw) if raw != auth.workspace_id => {
                 return Err(CompatError::new(
                     CompatErrorCode::Forbidden,
                     format!(
-                        "scope header '{raw}' does not match authenticated tenant '{}'",
-                        tenant.workspace_id
+                        "scope header '{raw}' does not match authenticated workspace '{}'",
+                        auth.workspace_id
                     ),
                 ));
             }
@@ -130,7 +130,7 @@ impl TenantContext {
 
         let deadline = Instant::now() + limits.query_timeout;
         Ok(Self {
-            tenant,
+            auth,
             protocol,
             scope_header,
             limits,
@@ -139,7 +139,7 @@ impl TenantContext {
     }
 
     pub fn workspace_id(&self) -> &str {
-        &self.tenant.workspace_id
+        &self.auth.workspace_id
     }
 
     pub fn remaining(&self) -> Duration {
@@ -159,8 +159,8 @@ pub fn scope_header_value<'a>(headers: &'a http::HeaderMap, header_name: &str) -
 mod tests {
     use super::*;
 
-    fn tenant(id: &str) -> TenantInfo {
-        TenantInfo {
+    fn mock_auth(id: &str) -> WorkspaceAuth {
+        WorkspaceAuth {
             workspace_id: id.to_string(),
             bucket_name: "bucket".to_string(),
             dataset_id: "dataset".to_string(),
@@ -171,8 +171,8 @@ mod tests {
 
     #[test]
     fn builds_context_without_scope_header() {
-        let ctx = TenantContext::from_authenticated(
-            tenant("t1"),
+        let ctx = CompatWorkspaceContext::from_authenticated(
+            mock_auth("t1"),
             ProtocolScope::Loki,
             None,
             QueryLimits::default(),
@@ -184,8 +184,8 @@ mod tests {
 
     #[test]
     fn accepts_matching_scope_header() {
-        let ctx = TenantContext::from_authenticated(
-            tenant("t1"),
+        let ctx = CompatWorkspaceContext::from_authenticated(
+            mock_auth("t1"),
             ProtocolScope::Loki,
             Some("t1"),
             QueryLimits::default(),
@@ -196,8 +196,8 @@ mod tests {
 
     #[test]
     fn rejects_mismatched_scope_header() {
-        let err = TenantContext::from_authenticated(
-            tenant("t1"),
+        let err = CompatWorkspaceContext::from_authenticated(
+            mock_auth("t1"),
             ProtocolScope::Loki,
             Some("other"),
             QueryLimits::default(),
@@ -207,9 +207,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_tenant() {
-        let err = TenantContext::from_authenticated(
-            tenant("  "),
+    fn rejects_empty_workspace() {
+        let err = CompatWorkspaceContext::from_authenticated(
+            mock_auth("  "),
             ProtocolScope::Tempo,
             None,
             QueryLimits::default(),

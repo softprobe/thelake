@@ -1,5 +1,7 @@
+mod engine;
+
 use crate::config::Config;
-use crate::storage::duckdb::{DuckDBQueryEngine, QueryResult};
+use crate::models::ScoreConfig;
 use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
 use crate::workspace_scope::{
     SharedScopeError, SharedScopeErrorCode, WorkspaceBinding, WorkspaceScopeMode,
@@ -8,10 +10,14 @@ use crate::workspace_scope::{
 use std::sync::Arc;
 
 pub use crate::sql::lake_reads::{LogCountFilter, TraceCountFilter};
+pub(crate) use engine::QueryEngineCore;
+pub use engine::{
+    self_heal_snapshot, set_self_heal_failures_for_test, QueryResult, SelfHealSnapshot,
+};
 
 #[derive(Clone)]
 pub struct QueryEngine {
-    duckdb: Arc<DuckDBQueryEngine>,
+    core: Arc<QueryEngineCore>,
     /// When false (ops/self-monitoring engine), skip process self-monitoring
     /// query instruments (anti-recursion).
     record_self_monitoring: bool,
@@ -30,7 +36,7 @@ pub struct HttpSpan {
 }
 
 pub async fn create_query_engine(config: &Config) -> anyhow::Result<QueryEngine> {
-    let scope = crate::runtime_engine::physical_scope_from_config(config);
+    let scope = crate::workspace::physical_scope_from_config(config);
     create_query_engine_for_scope_with_liveness(config, &scope, true, DEFAULT_WORKSPACE_ID).await
 }
 
@@ -48,12 +54,12 @@ pub(crate) async fn create_query_engine_for_scope_with_liveness(
     )
     .map_err(|error| anyhow::anyhow!(error))?;
     let access = DuckLakeAccess::Workspace(binding);
-    let duckdb = Arc::new(
-        DuckDBQueryEngine::new_with_liveness(config, access, counts_toward_liveness, workspace_id)
+    let core = Arc::new(
+        QueryEngineCore::new_with_liveness(config, access, counts_toward_liveness, workspace_id)
             .await?,
     );
     Ok(QueryEngine {
-        duckdb,
+        core,
         record_self_monitoring: counts_toward_liveness,
         workspace_id: workspace_id.to_string(),
     })
@@ -62,7 +68,7 @@ pub(crate) async fn create_query_engine_for_scope_with_liveness(
 impl QueryEngine {
     /// DuckLake catalog alias used by this engine (e.g. `softprobe`).
     pub(crate) fn catalog_alias(&self) -> &str {
-        self.duckdb.catalog_alias()
+        self.core.catalog_alias()
     }
 
     pub fn workspace_id(&self) -> &str {
@@ -218,16 +224,86 @@ impl QueryEngine {
         self.execute_trusted(query).await
     }
 
+    /// Check if a score exists by ID and timestamp.
+    pub async fn score_exists(
+        &self,
+        score_id: &str,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<bool> {
+        let window = crate::sql::QueryWindow::try_new(timestamp, timestamp)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let query = crate::sql::lake_reads::score_exists(score_id, window)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let result = match self.execute_trusted(query).await {
+            Ok(res) => res,
+            Err(err) if err.to_string().contains("does not exist") => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        Ok(result
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
+    }
+
+    /// Check if a score configuration exists by ID.
+    pub async fn score_config_exists(&self, config_id: &str) -> anyhow::Result<bool> {
+        let query = crate::sql::lake_reads::score_config_exists(config_id)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let result = match self.execute_trusted(query).await {
+            Ok(res) => res,
+            Err(err) if err.to_string().contains("does not exist") => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        Ok(result
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
+    }
+
+    /// List all score configurations ordered by timestamp DESC.
+    pub async fn list_score_configs(&self) -> anyhow::Result<Vec<ScoreConfig>> {
+        let query = crate::sql::lake_reads::list_score_configs().map_err(|e| anyhow::anyhow!(e))?;
+        let result = match self.execute_trusted(query).await {
+            Ok(res) => res,
+            Err(err) if err.to_string().contains("does not exist") => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|r| ScoreConfig::from_json_row(r))
+            .collect())
+    }
+
+    /// Get a score configuration by ID.
+    pub async fn get_score_config(&self, config_id: &str) -> anyhow::Result<Option<ScoreConfig>> {
+        let query =
+            crate::sql::lake_reads::get_score_config(config_id).map_err(|e| anyhow::anyhow!(e))?;
+        let result = match self.execute_trusted(query).await {
+            Ok(res) => res,
+            Err(err) if err.to_string().contains("does not exist") => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        Ok(result
+            .rows
+            .first()
+            .and_then(|r| ScoreConfig::from_json_row(r)))
+    }
+
     pub async fn execute_query(&self, query: &str) -> anyhow::Result<QueryResult> {
         self.ensure_raw_sql_allowed()?;
         let _ = self.record_self_monitoring;
-        self.duckdb.execute_query(query).await
+        self.core.execute_query(query).await
     }
 
     /// Metadata / inventory SQL: dedicated connection, no self-monitoring.
     pub async fn execute_query_uninstrumented(&self, query: &str) -> anyhow::Result<QueryResult> {
         self.ensure_raw_sql_allowed()?;
-        self.duckdb.execute_query_uninstrumented(query).await
+        self.core.execute_query_uninstrumented(query).await
     }
 
     /// Execute the opaque result of an approved internal query builder.
@@ -235,7 +311,7 @@ impl QueryEngine {
         &self,
         query: crate::sql::trusted::TrustedSql,
     ) -> anyhow::Result<QueryResult> {
-        self.duckdb.execute_trusted(query).await
+        self.core.execute_trusted(query).await
     }
 
     /// Several inventory SQLs on one open+attach (avoids per-query DuckDB init).
@@ -244,11 +320,11 @@ impl QueryEngine {
         queries: Vec<&str>,
     ) -> anyhow::Result<Vec<anyhow::Result<QueryResult>>> {
         self.ensure_raw_sql_allowed()?;
-        self.duckdb.execute_queries_uninstrumented(queries).await
+        self.core.execute_queries_uninstrumented(queries).await
     }
 
     fn ensure_raw_sql_allowed(&self) -> anyhow::Result<()> {
-        if self.duckdb.workspace_scope_mode() == WorkspaceScopeMode::Shared {
+        if self.core.workspace_scope_mode() == WorkspaceScopeMode::Shared {
             return Err(anyhow::anyhow!(SharedScopeError::new(
                 SharedScopeErrorCode::RawSqlForbidden,
                 "raw SQL is disabled for shared workspace scope; use a typed query API",

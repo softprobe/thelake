@@ -1,4 +1,4 @@
-//! HTTP contract: ingest → dirty → `reduce_tenant` → `sessions/search`.
+//! HTTP contract: ingest → dirty → `reduce_workspace` → `sessions/search`.
 //!
 //! Covers every list filter against rows the reducer wrote (not hand-seeded
 //! SQL). Summary path must not return spans/details; detail still reads lake.
@@ -62,7 +62,7 @@ async fn pg_reachable() -> bool {
 }
 
 async fn catalog_client(state: &AppState) -> tokio_postgres::Client {
-    let metadata_path = state.engines.config().ducklake.metadata_path.clone();
+    let metadata_path = state.workspaces.config().ducklake.metadata_path.clone();
     let (client, connection) = tokio_postgres::connect(&metadata_path, tokio_postgres::NoTls)
         .await
         .expect("connect ducklake postgres");
@@ -135,9 +135,10 @@ async fn ingest(router: &Router, req: ExportTraceServiceRequest) {
 
 async fn flush(state: &AppState) {
     state
-        .engine_for_id("")
+        .workspace_for_id("")
         .await
-        .expect("engine")
+        .expect("workspace context")
+        .ingest()
         .force_flush_spans()
         .await
         .expect("flush");
@@ -145,9 +146,9 @@ async fn flush(state: &AppState) {
 
 /// Run the same pipeline the leased job runs (claim dirty → lake agg → UPSERT).
 async fn run_reduce(state: &AppState) -> usize {
-    let cfg = &state.engines.config().session_summary;
+    let cfg = &state.workspaces.config().session_summary;
     let maintenance = state
-        .engines
+        .workspaces
         .maintenance_engine()
         .await
         .expect("maintenance engine");
@@ -440,11 +441,11 @@ async fn http_session_summary_writer_reducer_rebuild_and_maintenance_overlap() {
         cost: 0.01,
     };
     let maintenance = state
-        .engines
+        .workspaces
         .maintenance_engine()
         .await
         .expect("maintenance engine");
-    let cfg = state.engines.config().session_summary.clone();
+    let cfg = state.workspaces.config().session_summary.clone();
     let rebuild_from = Utc::now() - ChronoDuration::hours(2);
     let rebuild_to = Utc::now() + ChronoDuration::minutes(5);
     let reduce_engine = maintenance.clone();
@@ -490,7 +491,7 @@ async fn http_session_summary_writer_reducer_rebuild_and_maintenance_overlap() {
     assert_eq!(
         maintenance_scope.get::<_, i64>(3),
         state
-            .engines
+            .workspaces
             .config()
             .maintenance
             .reader_safety_grace_seconds as i64
@@ -1394,7 +1395,7 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
     assert_eq!(inv_resp.status(), StatusCode::BAD_REQUEST);
 
     let max_span = state
-        .engines
+        .workspaces
         .config()
         .session_summary
         .max_reduce_span_seconds;
@@ -1527,7 +1528,7 @@ async fn rebuild_reads_parquet_from_minio_object_store() {
 
     assert!(
         state
-            .engines
+            .workspaces
             .config()
             .ducklake
             .data_path

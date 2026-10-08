@@ -1,15 +1,15 @@
 // ============================================================================
-// TENANT BINDING CONSTITUTION (HARD RULE)
-// Tenant identity appears only at auth -> RuntimeEngine mapping.
+// WORKSPACE BINDING CONSTITUTION (HARD RULE)
+// Workspace identity appears only at auth -> WorkspaceContext mapping.
 // Operational APIs MUST NOT accept workspace_id or scope parameters.
 // ============================================================================
 
-//! Per-tenant [`RuntimeEngine`] cache.
+//! Per-workspace [`WorkspaceContext`] cache and lifecycle management.
 
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::config::{Config, DuckLakeConfig};
-use crate::control_plane::ControlPlaneRuntime;
-use crate::ingest_engine::{AdminEngine, IngestEngine};
+use crate::control_plane::{AdminEngine, ControlPlaneRuntime};
+use crate::ingest::IngestEngine;
 use crate::promotion::{
     business_manifest_from_row, business_spec_activation, ensure_promotion_metadata_tables,
     load_active_telemetry_columns_manifests, run_business_apply, run_telemetry_apply,
@@ -31,7 +31,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_postgres::NoTls;
 
-pub type TenantId = String;
+pub type WorkspaceId = String;
 
 const POSTGRES_IDENTIFIER_MAX_BYTES: usize = 63;
 
@@ -45,8 +45,8 @@ fn validate_metadata_schema_name(schema: &str) -> Result<()> {
     Ok(())
 }
 
-/// One tenant's canonical bound ingest and query surfaces.
-pub struct RuntimeEngine {
+/// One workspace's canonical bound ingest, admin, and query surfaces.
+pub struct WorkspaceContext {
     workspace_id: String,
     binding: WorkspaceBinding,
     /// Stashed at build — never re-derived via a binding getter.
@@ -57,126 +57,33 @@ pub struct RuntimeEngine {
     query: Arc<QueryEngine>,
 }
 
-/// Private catalog binding for session-summary SQL. Not part of the engine API —
-/// use [`RuntimeEngine::lookup_session_summary_window`] /
-/// [`RuntimeEngine::search_session_summary`].
-struct TenantSummaryScope {
+/// Private catalog binding for session-summary SQL.
+struct WorkspaceSummaryScope {
     pool: Pool,
     physical: PhysicalScope,
     workspace_id: Option<String>,
 }
 
-impl RuntimeEngine {
-    /// Stable logical identity of this tenant-bound runtime.
+impl WorkspaceContext {
+    /// Stable logical identity of this workspace-bound context.
     pub fn workspace_id(&self) -> &str {
         &self.workspace_id
     }
 
-    /// Tenant-scoped write API. Storage scope and buffering are fixed when the
-    /// runtime is built and are not part of this operation's contract.
-    pub async fn add_spans(
-        &self,
-        items: Vec<crate::models::Span>,
-        request_size: usize,
-    ) -> Result<()> {
-        self.ingest.add_spans(items, request_size).await
+    pub fn ingest(&self) -> &Arc<IngestEngine> {
+        &self.ingest
     }
 
-    pub async fn execute_query(&self, sql: &str) -> Result<crate::storage::duckdb::QueryResult> {
-        self.query.execute_query(sql).await
+    pub fn query(&self) -> &Arc<QueryEngine> {
+        &self.query
     }
 
-    pub async fn count_traces(&self, filter: crate::query::TraceCountFilter) -> Result<u64> {
-        self.query.count_traces(filter).await
+    pub fn admin(&self) -> &Arc<AdminEngine> {
+        &self.admin
     }
 
-    pub async fn count_logs(&self, filter: crate::query::LogCountFilter) -> Result<u64> {
-        self.query.count_logs(filter).await
-    }
-
-    pub(crate) async fn execute_trusted(
-        &self,
-        query: crate::sql::trusted::TrustedSql,
-    ) -> Result<crate::storage::duckdb::QueryResult> {
-        self.query.execute_trusted(query).await
-    }
-
-    pub async fn add_logs(
-        &self,
-        items: Vec<crate::models::Log>,
-        request_size: usize,
-    ) -> Result<()> {
-        self.ingest.add_logs(items, request_size).await
-    }
-
-    pub async fn force_flush_logs(&self) -> Result<()> {
-        self.ingest.force_flush_logs().await
-    }
-
-    pub async fn force_flush_spans(&self) -> Result<()> {
-        self.ingest.force_flush_spans().await
-    }
-
-    pub async fn add_scores(&self, items: Vec<crate::models::Score>) -> Result<()> {
-        self.ingest.add_scores(items).await
-    }
-
-    pub async fn score_exists(
-        &self,
-        score_id: &str,
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        self.ingest.score_exists(score_id, timestamp).await
-    }
-
-    pub async fn list_score_configs(&self) -> Result<Vec<crate::models::ScoreConfig>> {
-        self.ingest.list_score_configs().await
-    }
-
-    pub async fn add_score_configs(&self, items: Vec<crate::models::ScoreConfig>) -> Result<()> {
-        self.ingest.add_score_configs(items).await
-    }
-
-    pub async fn score_config_exists(&self, config_id: &str) -> Result<bool> {
-        self.ingest.score_config_exists(config_id).await
-    }
-
-    pub async fn get_score_config(
-        &self,
-        config_id: &str,
-    ) -> Result<Option<crate::models::ScoreConfig>> {
-        self.ingest.get_score_config(config_id).await
-    }
-
-    pub async fn apply_telemetry_promotion(
-        &self,
-        manifest_yaml: &str,
-        spec: &TelemetryColumnsManifest,
-        target_tables: &[String],
-    ) -> Result<String> {
-        self.admin
-            .apply_and_record_telemetry_promotion(manifest_yaml, spec, target_tables)
-            .await
-    }
-
-    pub async fn apply_business_promotion(
-        &self,
-        manifest_yaml: &str,
-        spec: &BusinessTableManifest,
-    ) -> std::result::Result<String, BusinessApplyError> {
-        self.admin
-            .apply_business_promotion_guarded(manifest_yaml, spec)
-            .await
-    }
-
-    /// Internal query capability for protocol adapters and trusted query
-    /// builders. Callers cannot inspect the bound physical scope.
-    pub(crate) fn query_engine(&self) -> Arc<QueryEngine> {
-        self.query.clone()
-    }
-
-    fn session_summary_scope(&self) -> TenantSummaryScope {
-        TenantSummaryScope {
+    fn session_summary_scope(&self) -> WorkspaceSummaryScope {
+        WorkspaceSummaryScope {
             pool: self.catalog_pool.clone(),
             physical: self.physical.clone(),
             workspace_id: (self.binding.mode == WorkspaceScopeMode::Shared)
@@ -202,7 +109,7 @@ impl RuntimeEngine {
         .await
     }
 
-    /// List sessions from Postgres `session_summary` for this tenant binding.
+    /// List sessions from Postgres `session_summary` for this workspace binding.
     pub(crate) async fn search_session_summary(
         &self,
         request: &crate::session_summary::list_query::SessionSearchRequest,
@@ -223,10 +130,10 @@ impl RuntimeEngine {
     }
 }
 
-/// Global cache: `tenantId` -> tenant-bound runtime (unbounded until restart).
-pub struct RuntimeEngineManager {
+/// Global cache: workspace_id -> workspace-bound context (unbounded until restart).
+pub struct WorkspaceManager {
     config: Arc<Config>,
-    engines: DashMap<String, Arc<RuntimeEngine>>,
+    workspaces: DashMap<String, Arc<WorkspaceContext>>,
     creation_locks: DashMap<String, Arc<Mutex<()>>>,
     scope_locks: DashMap<String, Arc<Mutex<()>>>,
     scope_initialization_lock: Mutex<()>,
@@ -236,8 +143,8 @@ pub struct RuntimeEngineManager {
     build_counter: AtomicUsize,
 }
 
-impl RuntimeEngineManager {
-    /// Connect the catalog registry and build the process-wide engine cache.
+impl WorkspaceManager {
+    /// Connect the catalog registry and build the process-wide workspace cache.
     pub async fn connect(
         config: Arc<Config>,
         control_plane: Option<ControlPlaneRuntime>,
@@ -245,7 +152,7 @@ impl RuntimeEngineManager {
         let scope_registry = DuckLakeScopeResolver::connect(config.as_ref()).await?;
         Ok(Self {
             config,
-            engines: DashMap::new(),
+            workspaces: DashMap::new(),
             creation_locks: DashMap::new(),
             scope_locks: DashMap::new(),
             scope_initialization_lock: Mutex::new(()),
@@ -355,12 +262,12 @@ impl RuntimeEngineManager {
             .clone()
     }
 
-    /// Build DuckLake connection material for isolated-mode tenants.
+    /// Build DuckLake connection material for isolated-mode workspaces.
     ///
     /// Shared mode refuses — direct catalog credentials are not exposed.
     pub async fn ducklake_connection_material_for(
         &self,
-        tenant: &TenantInfo,
+        auth: &WorkspaceAuth,
     ) -> Result<DuckLakeConnectionMaterial, String> {
         if self.config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
             return Err(
@@ -368,24 +275,24 @@ impl RuntimeEngineManager {
             );
         }
         let scope = self
-            .resolve_scope(&tenant.workspace_id)
+            .resolve_scope(&auth.workspace_id)
             .await
             .map_err(|err| err.to_string())?;
-        DuckLakeConnectionMaterial::from_tenant_scope(tenant, &scope, self.config.as_ref())
+        DuckLakeConnectionMaterial::from_workspace_scope(auth, &scope, self.config.as_ref())
     }
 
     pub fn list_cached_workspace_ids(&self) -> Vec<String> {
-        self.engines.iter().map(|e| e.key().clone()).collect()
+        self.workspaces.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Return a cached engine without building (for opportunistic gauges).
-    pub fn cached_engine(&self, workspace_id: &str) -> Option<Arc<RuntimeEngine>> {
-        self.engines.get(workspace_id).map(|e| e.clone())
+    /// Return a cached workspace context without building (for opportunistic gauges).
+    pub fn cached_workspace(&self, workspace_id: &str) -> Option<Arc<WorkspaceContext>> {
+        self.workspaces.get(workspace_id).map(|e| e.clone())
     }
 
-    /// Drop cached engine (e.g. after provisioning changes scope).
+    /// Drop cached workspace context (e.g. after provisioning changes scope).
     pub fn invalidate(&self, workspace_id: &str) {
-        self.engines.remove(workspace_id);
+        self.workspaces.remove(workspace_id);
     }
 
     #[cfg(test)]
@@ -393,9 +300,9 @@ impl RuntimeEngineManager {
         self.build_counter.load(Ordering::Relaxed)
     }
 
-    /// Resolve registry scope (when configured) and return or construct a cached [`RuntimeEngine`].
-    pub async fn engine_for(&self, workspace_id: &str) -> Result<Arc<RuntimeEngine>> {
-        if let Some(r) = self.engines.get(workspace_id) {
+    /// Resolve registry scope (when configured) and return or construct a cached [`WorkspaceContext`].
+    pub async fn workspace_for(&self, workspace_id: &str) -> Result<Arc<WorkspaceContext>> {
+        if let Some(r) = self.workspaces.get(workspace_id) {
             return Ok(r.clone());
         }
         let lock = self
@@ -404,26 +311,22 @@ impl RuntimeEngineManager {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _hold = lock.lock().await;
-        if let Some(r) = self.engines.get(workspace_id) {
+        if let Some(r) = self.workspaces.get(workspace_id) {
             return Ok(r.clone());
         }
-        let engine = self.build_engine(workspace_id).await?;
-        self.engines
-            .insert(workspace_id.to_string(), engine.clone());
-        Ok(engine)
+        let ws = self.build_workspace(workspace_id).await?;
+        self.workspaces.insert(workspace_id.to_string(), ws.clone());
+        Ok(ws)
     }
 
-    pub async fn engine_for_tenant(&self, tenant: &TenantInfo) -> Result<Arc<RuntimeEngine>> {
-        self.engine_for(&tenant.workspace_id).await
+    pub async fn workspace_for_auth(&self, auth: &WorkspaceAuth) -> Result<Arc<WorkspaceContext>> {
+        self.workspace_for(&auth.workspace_id).await
     }
 
-    async fn build_engine(&self, workspace_id: &str) -> Result<Arc<RuntimeEngine>> {
+    async fn build_workspace(&self, workspace_id: &str) -> Result<Arc<WorkspaceContext>> {
         #[cfg(test)]
         self.build_counter.fetch_add(1, Ordering::Relaxed);
 
-        // The unauthenticated local/default runtime has no external workspace ID, but
-        // workspace-bound engines still need a non-empty identity for their access
-        // contract. Keep the empty ID only for resolving the configured default scope.
         let bound_workspace_id = effective_workspace_id(workspace_id);
 
         let resolver = &self.scope_registry;
@@ -450,8 +353,11 @@ impl RuntimeEngineManager {
                 )
                 .await?,
             );
-            let admin = Arc::new(AdminEngine::from_ingest(&ingest));
-            Ok(Arc::new(RuntimeEngine {
+            let admin = Arc::new(AdminEngine::new(
+                ingest.writer_handle().clone(),
+                resolver.clone(),
+            ));
+            Ok(Arc::new(WorkspaceContext {
                 workspace_id: bound_workspace_id.to_string(),
                 binding,
                 physical: physical.clone(),
@@ -512,8 +418,8 @@ pub struct DuckLakeConnectionMaterial {
 }
 
 impl DuckLakeConnectionMaterial {
-    pub(crate) fn from_tenant_scope(
-        tenant: &TenantInfo,
+    pub(crate) fn from_workspace_scope(
+        auth: &WorkspaceAuth,
         scope: &PhysicalScope,
         config: &Config,
     ) -> Result<Self, String> {
@@ -539,17 +445,17 @@ impl DuckLakeConnectionMaterial {
                     .to_string(),
             );
         }
-        if tenant.bucket_name.trim().is_empty() {
-            return Err("tenant is missing bucket_name".to_string());
+        if auth.bucket_name.trim().is_empty() {
+            return Err("auth is missing bucket_name".to_string());
         }
 
         Ok(Self {
             version: 1,
-            workspace_id: tenant.workspace_id.clone(),
+            workspace_id: auth.workspace_id.clone(),
             ducklake_pg_uri,
             ducklake_metadata_schema,
             ducklake_data_path,
-            gcs_bucket: tenant.bucket_name.clone(),
+            gcs_bucket: auth.bucket_name.clone(),
             gcs_hmac_access_key_id: creds.access_key_id.unwrap_or_default(),
             gcs_hmac_secret: creds.secret_access_key.unwrap_or_default(),
             session_token: creds.session_token.unwrap_or_default(),
@@ -574,8 +480,8 @@ fn path_requires_object_store_creds(data_path: &str) -> bool {
 
 /// Process-wide Postgres registry for workspace → physical-scope bindings.
 ///
-/// Owned only by [`RuntimeEngineManager`]. Not part of the public crate API —
-/// request handlers use [`RuntimeEngineManager::engine_for`]; admin/ops use the
+/// Owned only by [`WorkspaceManager`]. Not part of the public crate API —
+/// request handlers use [`WorkspaceManager::workspace_for`]; admin/ops use the
 /// manager facades (`provision_scope`, `catalog_pool`, …).
 #[derive(Clone)]
 pub(crate) struct DuckLakeScopeResolver {
@@ -1177,13 +1083,15 @@ pub(crate) fn quote_pg_ident(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::validate_metadata_schema_name;
-    use super::{QueryEngine, RuntimeEngine};
+    use super::{AdminEngine, IngestEngine, QueryEngine, WorkspaceContext};
     use std::sync::Arc;
 
     #[test]
-    fn tenant_runtime_exposes_logical_accessors() {
-        let _tenant_id: fn(&RuntimeEngine) -> &str = RuntimeEngine::workspace_id;
-        let _query: fn(&RuntimeEngine) -> Arc<QueryEngine> = RuntimeEngine::query_engine;
+    fn workspace_context_exposes_logical_accessors() {
+        let _workspace_id: fn(&WorkspaceContext) -> &str = WorkspaceContext::workspace_id;
+        let _query: fn(&WorkspaceContext) -> &Arc<QueryEngine> = WorkspaceContext::query;
+        let _ingest: fn(&WorkspaceContext) -> &Arc<IngestEngine> = WorkspaceContext::ingest;
+        let _admin: fn(&WorkspaceContext) -> &Arc<AdminEngine> = WorkspaceContext::admin;
     }
 
     #[test]

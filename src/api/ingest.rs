@@ -1,5 +1,5 @@
 use crate::api::AppState;
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::models::{Log as LogData, Span as SpanData};
 use anyhow::Result;
 use axum::extract::{Extension, State};
@@ -34,14 +34,14 @@ pub(crate) fn ingest_write_failed(message: String) -> Response {
 
 /// Count a failed OTLP decode toward `thelake_ingest_errors_total` (customer tenants only).
 pub(crate) fn record_ingest_decode_failure(
-    tenant: Option<&TenantInfo>,
+    tenant: Option<&WorkspaceAuth>,
     signal: &str,
     start: Instant,
 ) {
     let Some(t) = tenant else {
         return;
     };
-    if crate::self_monitoring::instrument_customer_tenant(&t.workspace_id) {
+    if crate::self_monitoring::instrument_customer_workspace(&t.workspace_id) {
         crate::self_monitoring::record_ingest(
             &t.workspace_id,
             signal,
@@ -55,7 +55,7 @@ pub(crate) fn record_ingest_decode_failure(
 /// Unified OTLP /v1/traces handler that switches on Content-Type
 pub async fn ingest_traces(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    tenant: Option<Extension<WorkspaceAuth>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
@@ -117,13 +117,13 @@ pub async fn ingest_traces(
 /// Unified OTLP /v1/logs handler that switches on Content-Type
 pub async fn ingest_logs(
     State(state): State<AppState>,
-    tenant: Option<Extension<TenantInfo>>,
+    auth: Option<Extension<WorkspaceAuth>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let start = Instant::now();
     let body_size = body.len();
-    let runtime_engine = tenant.map(|t| t.0);
+    let workspace_auth = auth.map(|t| t.0);
     let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -133,7 +133,7 @@ pub async fn ingest_logs(
     if content_type.contains("protobuf") || content_type.contains("application/x-protobuf") {
         match prost::Message::decode(body.as_ref()) {
             Ok(request) => {
-                match process_logs(state, request, body_size, runtime_engine.clone()).await {
+                match process_logs(state, request, body_size, workspace_auth.clone()).await {
                     Ok(count) => Json(IngestResponse {
                         success: true,
                         ingested_count: count,
@@ -147,7 +147,7 @@ pub async fn ingest_logs(
                 }
             }
             Err(e) => {
-                record_ingest_decode_failure(runtime_engine.as_ref(), "logs", start);
+                record_ingest_decode_failure(workspace_auth.as_ref(), "logs", start);
                 error!("Failed to decode protobuf: {}", e);
                 (StatusCode::BAD_REQUEST, "Protobuf decode failed").into_response()
             }
@@ -155,7 +155,7 @@ pub async fn ingest_logs(
     } else {
         match serde_json::from_slice::<ExportLogsServiceRequest>(&body) {
             Ok(request) => {
-                match process_logs(state, request, body_size, runtime_engine.clone()).await {
+                match process_logs(state, request, body_size, workspace_auth.clone()).await {
                     Ok(count) => Json(IngestResponse {
                         success: true,
                         ingested_count: count,
@@ -169,7 +169,7 @@ pub async fn ingest_logs(
                 }
             }
             Err(e) => {
-                record_ingest_decode_failure(runtime_engine.as_ref(), "logs", start);
+                record_ingest_decode_failure(workspace_auth.as_ref(), "logs", start);
                 error!("Failed to decode JSON: {}", e);
                 (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)).into_response()
             }
@@ -182,7 +182,7 @@ pub async fn process_traces(
     state: AppState,
     request: ExportTraceServiceRequest,
     body_size: usize,
-    auth_tenant: Option<TenantInfo>,
+    auth_tenant: Option<WorkspaceAuth>,
 ) -> Result<usize> {
     let start = std::time::Instant::now();
     let tid_hint = auth_tenant
@@ -190,7 +190,7 @@ pub async fn process_traces(
         .map(|t| t.workspace_id.clone())
         .unwrap_or_default();
     let result = process_traces_inner(state, request, body_size, auth_tenant).await;
-    if crate::self_monitoring::instrument_customer_tenant(&tid_hint) {
+    if crate::self_monitoring::instrument_customer_workspace(&tid_hint) {
         let (ok, app) = match &result {
             Ok((_, app)) => (true, app.clone()),
             Err(_) => (false, None),
@@ -211,7 +211,7 @@ async fn process_traces_inner(
     state: AppState,
     request: ExportTraceServiceRequest,
     body_size: usize,
-    auth_tenant: Option<TenantInfo>,
+    auth_tenant: Option<WorkspaceAuth>,
 ) -> Result<(usize, Option<String>)> {
     let mut spans = Vec::new();
     let mut app: Option<String> = None;
@@ -264,10 +264,10 @@ async fn process_traces_inner(
 
     let span_count = spans.len();
 
-    let engine = state.engine_for_id(&tid).await?;
+    let ws = state.workspace_for_id(&tid).await?;
     let write_start = std::time::Instant::now();
-    engine.add_spans(spans, body_size).await?;
-    if crate::self_monitoring::instrument_customer_tenant(&tid) {
+    ws.ingest().add_spans(spans, body_size).await?;
+    if crate::self_monitoring::instrument_customer_workspace(&tid) {
         crate::self_monitoring::record_write(&tid, "traces", app.as_deref(), write_start.elapsed());
     }
 
@@ -282,7 +282,7 @@ async fn process_logs(
     state: AppState,
     request: ExportLogsServiceRequest,
     body_size: usize,
-    tenant: Option<TenantInfo>,
+    tenant: Option<WorkspaceAuth>,
 ) -> Result<usize> {
     let start = std::time::Instant::now();
     let tid = tenant
@@ -290,7 +290,7 @@ async fn process_logs(
         .map(|t| t.workspace_id.clone())
         .unwrap_or_default();
     let result = process_logs_inner(state, request, body_size, tenant).await;
-    if crate::self_monitoring::instrument_customer_tenant(&tid) {
+    if crate::self_monitoring::instrument_customer_workspace(&tid) {
         let (ok, app) = match &result {
             Ok((_, app)) => (true, app.clone()),
             Err(_) => (false, None),
@@ -305,7 +305,7 @@ async fn process_logs_inner(
     state: AppState,
     request: ExportLogsServiceRequest,
     body_size: usize,
-    tenant: Option<TenantInfo>,
+    tenant: Option<WorkspaceAuth>,
 ) -> Result<(usize, Option<String>)> {
     let mut logs = Vec::new();
     let mut app: Option<String> = None;
@@ -343,10 +343,10 @@ async fn process_logs_inner(
         log.agent_id = agent_id.clone();
         log.agent_name = agent_name.clone();
     }
-    let engine = state.engine_for_id(&workspace_id).await?;
+    let ws = state.workspace_for_id(&workspace_id).await?;
     let write_start = std::time::Instant::now();
-    engine.add_logs(logs, body_size).await?;
-    if crate::self_monitoring::instrument_customer_tenant(&workspace_id) {
+    ws.ingest().add_logs(logs, body_size).await?;
+    if crate::self_monitoring::instrument_customer_workspace(&workspace_id) {
         crate::self_monitoring::record_write(
             &workspace_id,
             "logs",

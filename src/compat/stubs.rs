@@ -1,13 +1,13 @@
 //! Compatibility stub HTTP handlers for declared Loki/Tempo compatibility routes.
 //!
 //! Auth is enforced by [`crate::api::auth::runtime_auth_middleware`].
-//! Scope-header mismatch is checked here after `TenantInfo` is available.
+//! Scope-header mismatch is checked here after `WorkspaceAuth` is available.
 //! Error bodies use protocol-native envelopes (see [`crate::compat::envelopes`]).
 
 use crate::api::AppState;
 use crate::compat::envelopes::error_envelope;
 use crate::compat::errors::CompatError;
-use crate::compat::tenant::ProtocolScope;
+use crate::compat::workspace::ProtocolScope;
 use axum::Router;
 use serde_json::Value;
 

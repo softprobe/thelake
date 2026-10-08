@@ -1116,7 +1116,7 @@ async fn try_postgres_store(schema: &str) -> Option<PostgresLeaseStore> {
         Ok(Ok(c)) => c,
         _ => return None,
     };
-    let q = crate::runtime_engine::quote_pg_ident(schema);
+    let q = crate::workspace::quote_pg_ident(schema);
     client
         .execute(&format!("CREATE SCHEMA IF NOT EXISTS {q}"), &[])
         .await
@@ -1295,7 +1295,7 @@ async fn postgres_runner_cancels_maintenance_after_lease_is_stolen() {
         .await
         .expect("maintenance started");
 
-    let q = crate::runtime_engine::quote_pg_ident("thelake_lease_loss");
+    let q = crate::workspace::quote_pg_ident("thelake_lease_loss");
     client.execute(
         &format!("UPDATE {q}.thelake_job_lease SET lease_until = now() - interval '1 second' WHERE job_name = 'pg_lease_loss_fence' AND scope_key = 'maintenance'"),
         &[],

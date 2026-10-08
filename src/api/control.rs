@@ -1,12 +1,12 @@
 use crate::api::auth::parse_bearer;
 use crate::api::AppState;
-use crate::authn::TenantInfo;
+use crate::authn::WorkspaceAuth;
 use crate::promotion::{
     business_current_view_name, business_physical_table_name, parse_promotion_manifest,
     BusinessApplyError, BusinessTableManifest, PromotionDataType, PromotionManifest,
     TelemetryColumnsManifest, TelemetryTable,
 };
-use crate::runtime_engine::ScopeProvisioningRequest;
+use crate::workspace::ScopeProvisioningRequest;
 use crate::workspace_scope::{SharedScopeError, WorkspaceScopeMode};
 use axum::{
     extract::{Extension, State},
@@ -94,7 +94,7 @@ async fn v1_provision_scope(
         ));
     }
 
-    let engines = &state.engines;
+    let workspaces = &state.workspaces;
 
     let hints = body.storage_hints.ok_or_else(|| {
         (
@@ -113,7 +113,7 @@ async fn v1_provision_scope(
         ));
     }
 
-    if let Ok(existing) = engines.scope_storage_hints(&workspace_id).await {
+    if let Ok(existing) = workspaces.scope_storage_hints(&workspace_id).await {
         if existing.matches_warehouse_hints(&metadata_schema, &data_path) {
             let mut scope = json!({
                 "ducklakeMetadataSchema": existing.metadata_schema,
@@ -137,7 +137,7 @@ async fn v1_provision_scope(
         ));
     }
 
-    let scope = engines
+    let scope = workspaces
         .provision_scope(ScopeProvisioningRequest {
             scope_id: workspace_id.clone(),
             metadata_schema: metadata_schema.clone(),
@@ -159,7 +159,7 @@ async fn v1_provision_scope(
         scope_json["gcsBucket"] = json!(b);
     }
 
-    state.engines.invalidate(&workspace_id);
+    state.workspaces.invalidate(&workspace_id);
 
     Ok(Json(json!({
         "version": 1,
@@ -187,9 +187,9 @@ pub fn runtime_control_routes() -> Router<AppState> {
 
 async fn v1_ducklake_connection(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(auth): Extension<WorkspaceAuth>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    if state.engines.config().ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
+    if state.workspaces.config().ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
         return Err((
             StatusCode::CONFLICT,
             Json(json!({
@@ -201,8 +201,8 @@ async fn v1_ducklake_connection(
         ));
     }
     match state
-        .engines
-        .ducklake_connection_material_for(&tenant)
+        .workspaces
+        .ducklake_connection_material_for(&auth)
         .await
     {
         Ok(material) => Ok(Json(material)),
@@ -226,7 +226,7 @@ struct PromotionApplyRequest {
 
 async fn v1_promotions_apply(
     State(state): State<AppState>,
-    Extension(tenant): Extension<TenantInfo>,
+    Extension(tenant): Extension<WorkspaceAuth>,
     Json(req): Json<PromotionApplyRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let manifest = parse_promotion_manifest(&req.manifest_yaml).map_err(|err| {
@@ -252,17 +252,17 @@ async fn v1_promotions_apply(
 
 async fn apply_telemetry_promotion(
     state: AppState,
-    tenant: TenantInfo,
+    auth: WorkspaceAuth,
     manifest_yaml: String,
     spec: TelemetryColumnsManifest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let engine = state
-        .engine_for_tenant(&tenant)
+    let ws = state
+        .workspace_for_auth(&auth)
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
     let tables = telemetry_table_names(&spec.target.tables);
-    engine
-        .apply_telemetry_promotion(&manifest_yaml, &spec, &tables)
+    ws.admin()
+        .apply_and_record_telemetry_promotion(&manifest_yaml, &spec, &tables)
         .await
         .map_err(|err| {
             promotion_apply_error_preserving_shared_scope("promotion_schema_apply_failed", err)
@@ -280,16 +280,16 @@ async fn apply_telemetry_promotion(
 
 async fn apply_business_table_promotion(
     state: AppState,
-    tenant: TenantInfo,
+    auth: WorkspaceAuth,
     manifest_yaml: String,
     spec: BusinessTableManifest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let engine = state
-        .engine_for_tenant(&tenant)
+    let ws = state
+        .workspace_for_auth(&auth)
         .await
         .map_err(|err| promotion_apply_error("ducklake_scope_unavailable", err))?;
-    engine
-        .apply_business_promotion(&manifest_yaml, &spec)
+    ws.admin()
+        .apply_business_promotion_guarded(&manifest_yaml, &spec)
         .await
         .map_err(|err| match err {
             BusinessApplyError::Incompatible(e) => (
@@ -401,10 +401,10 @@ fn promotion_type_name(data_type: &PromotionDataType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::authn::TenantInfo;
+    use crate::authn::WorkspaceAuth;
     use crate::config::Config;
-    use crate::runtime_engine::DuckLakeConnectionMaterial;
     use crate::storage::ducklake::PhysicalScope;
+    use crate::workspace::DuckLakeConnectionMaterial;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -424,7 +424,7 @@ mod tests {
         config.ducklake.data_path = "./warehouse/ducklake/data/".to_string();
         config.ducklake.metadata_schema = "tenant_meta".to_string();
 
-        let tenant = TenantInfo {
+        let tenant = WorkspaceAuth {
             workspace_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
@@ -438,7 +438,7 @@ mod tests {
             "tenant_tenant_123".to_string(),
         );
 
-        let material = DuckLakeConnectionMaterial::from_tenant_scope(&tenant, &scope, &config)
+        let material = DuckLakeConnectionMaterial::from_workspace_scope(&tenant, &scope, &config)
             .expect("connection material");
         assert_eq!(material.version, 1);
         assert_eq!(material.workspace_id, "tenant-123");
@@ -465,7 +465,7 @@ mod tests {
         config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
 
-        let tenant = TenantInfo {
+        let tenant = WorkspaceAuth {
             workspace_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
@@ -479,7 +479,7 @@ mod tests {
             "tenant_tenant_123".to_string(),
         );
 
-        let material = DuckLakeConnectionMaterial::from_tenant_scope(&tenant, &scope, &config)
+        let material = DuckLakeConnectionMaterial::from_workspace_scope(&tenant, &scope, &config)
             .expect("connection material");
         assert_eq!(material.ducklake_metadata_schema, "tenant_tenant_123");
         assert_eq!(material.ducklake_data_path, "gs://bucket/ducklake/data/");
@@ -505,7 +505,7 @@ mod tests {
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
         config.object_store.region = "us-west-2".to_string();
 
-        let tenant = TenantInfo {
+        let tenant = WorkspaceAuth {
             workspace_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
@@ -519,7 +519,7 @@ mod tests {
             "tenant_tenant_123".to_string(),
         );
 
-        let material = DuckLakeConnectionMaterial::from_tenant_scope(&tenant, &scope, &config)
+        let material = DuckLakeConnectionMaterial::from_workspace_scope(&tenant, &scope, &config)
             .expect("connection material");
         assert_eq!(material.gcs_hmac_access_key_id, "AKIATEST");
         assert_eq!(material.gcs_hmac_secret, "secret-test");
@@ -544,7 +544,7 @@ mod tests {
         config.ducklake.metadata_path =
             "host=pg port=5432 dbname=ducklake user=reader password=secret".to_string();
 
-        let tenant = TenantInfo {
+        let tenant = WorkspaceAuth {
             workspace_id: "tenant-123".to_string(),
             bucket_name: "softprobe-tenant-bucket".to_string(),
             dataset_id: "ignored".to_string(),
@@ -558,14 +558,14 @@ mod tests {
             "tenant_tenant_123".to_string(),
         );
 
-        let err = DuckLakeConnectionMaterial::from_tenant_scope(&tenant, &scope, &config)
+        let err = DuckLakeConnectionMaterial::from_workspace_scope(&tenant, &scope, &config)
             .expect_err("missing hmac should fail");
         assert!(err.contains("GCS_HMAC_ACCESS_KEY_ID") || err.contains("object-store credentials"));
     }
 
     #[test]
     fn scope_storage_hints_match_warehouse_identity() {
-        use crate::runtime_engine::ScopeStorageHints;
+        use crate::workspace::ScopeStorageHints;
         let hints = ScopeStorageHints {
             metadata_schema: "meta_a".into(),
             data_path: "/data/a".into(),

@@ -1,7 +1,7 @@
 //! Verify MAP attribute storage and prefer-promoted SQL compilers.
 
 use chrono::Utc;
-use softprobe_runtime::ingest_engine::IngestEngine;
+use softprobe_runtime::ingest::IngestEngine;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::query;
 use softprobe_runtime::storage::schema::attribute_map::{

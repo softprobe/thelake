@@ -24,6 +24,58 @@ pub struct ScoreConfig {
 }
 
 impl ScoreConfig {
+    pub fn from_json_row(row: &[serde_json::Value]) -> Option<Self> {
+        let config_id = row.first()?.as_str()?.to_string();
+        let timestamp_raw = row.get(1)?.as_str()?;
+        let name = row.get(2)?.as_str()?.to_string();
+        let data_type_raw = row.get(3)?.as_str()?;
+        let data_type = match data_type_raw {
+            "numeric" => ScoreDataType::Numeric,
+            "categorical" => ScoreDataType::Categorical,
+            "boolean" => ScoreDataType::Boolean,
+            "text" => ScoreDataType::Text,
+            _ => return None,
+        };
+        let description = row.get(4).and_then(|v| v.as_str()).map(str::to_owned);
+        let min_value = row.get(5).and_then(|v| v.as_f64());
+        let max_value = row.get(6).and_then(|v| v.as_f64());
+        let categories = row
+            .get(7)
+            .and_then(|v| v.as_str())
+            .filter(|raw| !raw.is_empty())
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+            .unwrap_or_default();
+        let author_id = row.get(8).and_then(|v| v.as_str()).map(str::to_owned);
+        let metadata = row
+            .get(9)
+            .and_then(|v| v.as_str())
+            .filter(|raw| !raw.is_empty() && *raw != "null")
+            .and_then(|raw| serde_json::from_str::<HashMap<String, String>>(raw).ok())
+            .unwrap_or_default();
+        let workspace_id = row.get(10).and_then(|v| v.as_str()).map(str::to_owned);
+        let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp_raw)
+            .or_else(|_| chrono::DateTime::parse_from_str(timestamp_raw, "%Y-%m-%dT%H:%M:%S%.fZ"))
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(timestamp_raw, "%Y-%m-%d %H:%M:%S%.f")
+                    .map(|value| chrono::DateTime::from_naive_utc_and_offset(value, chrono::Utc))
+            })
+            .unwrap_or_else(|_| chrono::Utc::now());
+        Some(Self {
+            config_id,
+            timestamp,
+            name,
+            data_type,
+            description,
+            min_value,
+            max_value,
+            categories,
+            author_id,
+            metadata,
+            workspace_id,
+        })
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.config_id.trim().is_empty() {
             return Err("config_id cannot be empty");

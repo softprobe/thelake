@@ -22,13 +22,13 @@ pub mod promotion_telemetry_ingest;
 #[cfg(feature = "integration-e2e")]
 pub mod qualification_contract;
 #[cfg(feature = "integration-e2e")]
-pub mod tenant_ducklake_registry;
+pub mod workspace_ducklake_registry;
 #[cfg(feature = "integration-e2e")]
-pub mod tenant_otlp_isolation;
+pub mod workspace_otlp_isolation;
 #[cfg(feature = "integration-e2e")]
-pub mod tenant_promotion_specs;
+pub mod workspace_promotion_specs;
 #[cfg(feature = "integration-e2e")]
-pub mod tenant_shared_scope;
+pub mod workspace_shared_scope;
 
 #[cfg(feature = "integration-e2e")]
 pub mod ingest_coalesce;

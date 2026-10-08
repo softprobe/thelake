@@ -5,7 +5,7 @@ pub mod promotion_file_backed;
 pub mod promotion_fixtures;
 #[cfg(feature = "integration-e2e")]
 pub mod scope;
-pub mod tenant;
+pub mod workspace;
 pub mod workspace_ids;
 
 /// Narrow time window for integration data seeded around the test run.

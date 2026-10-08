@@ -17,8 +17,9 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::util::config::file_backed_test_config;
-use crate::util::tenant::{
-    inject_local_sqlite_tenant as inject_tenant, provision_local_sqlite_tenant,
+use crate::util::workspace::{
+    inject_local_workspace as inject_tenant,
+    provision_local_workspace as provision_local_sqlite_tenant,
 };
 
 pub struct FileBackedPromotionEnv {

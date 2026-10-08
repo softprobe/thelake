@@ -4,10 +4,10 @@
 use chrono::Utc;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::query::{LogCountFilter, TraceCountFilter};
-use softprobe_runtime::runtime_engine::{RuntimeEngine, RuntimeEngineManager};
 use softprobe_runtime::storage::schema::{
     describe_probe_count, partition_sort_probe_count, total_schema_probe_count,
 };
+use softprobe_runtime::workspace::{ScopeProvisioningRequest, WorkspaceContext, WorkspaceManager};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -71,17 +71,19 @@ fn sample_log(i: usize) -> LogData {
 }
 
 async fn assert_warm_writes_zero_probes_contract(
-    runtime: &RuntimeEngine,
+    runtime: &WorkspaceContext,
     workspace_id: Option<&str>,
 ) {
     let _guard = HOTPATH_CONTRACT_LOCK.lock().await;
 
     // Perform one initial write across signals to ensure cold paths / pool creation are complete.
     runtime
+        .ingest()
         .add_spans(vec![sample_span(0, workspace_id)], 0)
         .await
         .expect("warm span write");
     runtime
+        .ingest()
         .add_logs(vec![sample_log(0)], 0)
         .await
         .expect("warm log write");
@@ -94,10 +96,12 @@ async fn assert_warm_writes_zero_probes_contract(
     const N: usize = 5;
     for i in 1..=N {
         runtime
+            .ingest()
             .add_spans(vec![sample_span(i, workspace_id)], 0)
             .await
             .unwrap_or_else(|e| panic!("span write {i} failed: {e}"));
         runtime
+            .ingest()
             .add_logs(vec![sample_log(i)], 0)
             .await
             .unwrap_or_else(|e| panic!("log write {i} failed: {e}"));
@@ -126,6 +130,7 @@ async fn assert_warm_writes_zero_probes_contract(
 
     // Verify all rows were committed and queryable through the query engine.
     let span_n = runtime
+        .query()
         .count_traces(TraceCountFilter {
             time_window: crate::util::query_window(),
             session_id: None,
@@ -137,6 +142,7 @@ async fn assert_warm_writes_zero_probes_contract(
     assert_eq!(span_n, (N + 1) as u64, "all traces must be committed");
 
     let log_n = runtime
+        .query()
         .count_logs(LogCountFilter {
             time_window: crate::util::query_window(),
             session_id: None,
@@ -172,29 +178,27 @@ async fn warm_writes_perform_zero_schema_probes_postgres() {
     let suffix = uuid::Uuid::new_v4().to_string().replace('-', "_");
     config.ducklake.metadata_schema = format!("hotpath_reg_{suffix}");
 
-    let manager = RuntimeEngineManager::connect(Arc::new(config.clone()), None)
+    let manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
         .await
-        .expect("connect runtime engines");
+        .expect("connect workspace manager");
 
     let workspace_id = uuid::Uuid::new_v4().to_string();
     let tenant_schema = format!("hotpath_tenant_{suffix}");
     let tenant_data = temp.path().join("data").to_string_lossy().to_string();
 
     manager
-        .provision_scope(
-            softprobe_runtime::runtime_engine::ScopeProvisioningRequest {
-                scope_id: workspace_id.clone(),
-                metadata_schema: tenant_schema.clone(),
-                data_path: tenant_data.clone(),
-            },
-        )
+        .provision_scope(ScopeProvisioningRequest {
+            scope_id: workspace_id.clone(),
+            metadata_schema: tenant_schema.clone(),
+            data_path: tenant_data.clone(),
+        })
         .await
         .expect("provision scope");
 
     let runtime = manager
-        .engine_for(&workspace_id)
+        .workspace_for(&workspace_id)
         .await
-        .expect("tenant engine");
+        .expect("workspace context");
 
     assert_warm_writes_zero_probes_contract(runtime.as_ref(), Some(&workspace_id)).await;
 }
