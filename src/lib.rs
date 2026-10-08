@@ -12,6 +12,7 @@ pub mod control_plane;
 pub mod grpc_otlp;
 pub mod ingest;
 pub mod models;
+pub mod online_evaluation;
 pub mod promotion;
 pub mod query;
 pub mod self_monitoring;

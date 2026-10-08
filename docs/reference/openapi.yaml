@@ -255,6 +255,131 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /v1/evaluators:
+    get:
+      tags: [llm]
+      summary: List no-code behavior evaluators
+      description: Returns versioned evaluator criteria stored in the authenticated workspace.
+      operationId: listEvaluators
+      responses:
+        "200":
+          description: Evaluator definitions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/EvaluatorDefinition"
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+    post:
+      tags: [llm]
+      summary: Create a draft no-code behavior evaluator version
+      description: |
+        Stores a natural-language criterion and optional ordered tool
+        requirement for one named agent in the authenticated workspace. Drafts
+        do not trigger evaluations. Explicit activation opts this evaluator
+        into sending matching trace content to the configured judge provider.
+      operationId: createEvaluator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEvaluatorRequest"
+            examples:
+              eligibilityBeforeRefund:
+                value:
+                  evaluator_id: refund-eligibility
+                  version: 1
+                  target_agent_name: support-agent
+                  name: Refund eligibility before refund
+                  criteria: Verify the agent checks refund eligibility and explains the result before issuing a refund.
+                  threshold: 0.7
+                  uncertainty_margin: 0.1
+                  required_tool_order:
+                    - before: check_eligibility
+                      action: issue_refund
+                      require_result_before_action: true
+      responses:
+        "201":
+          description: Evaluator version created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluatorDefinition"
+        "200":
+          description: Idempotent retry of the same evaluator version
+        "400":
+          description: Invalid evaluator definition or conflicting config ID
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+  /v1/evaluators/{evaluator_id}/versions/{version}/activate:
+    post:
+      tags: [llm]
+      summary: Activate an evaluator version for one agent
+      description: |
+        Activates this workspace-scoped evaluator for new matching traces. When
+        the DeepEval runner is configured, captured prompt, completion, and
+        tool data for the selected agent is sent to the configured Gemini
+        provider. The runner applies a narrow credential redaction filter;
+        this is not general PII scrubbing.
+      operationId: activateEvaluator
+      parameters:
+        - name: evaluator_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: version
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Evaluator activated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluatorDefinition"
+        "400":
+          description: Evaluator version not found
+        "503":
+          description: Online evaluation runner is not configured
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+  /v1/evaluators/{evaluator_id}/versions/{version}/deactivate:
+    post:
+      tags: [llm]
+      summary: Stop evaluating new traces with this evaluator
+      operationId: deactivateEvaluator
+      parameters:
+        - name: evaluator_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: version
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Evaluator deactivated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluatorDefinition"
+        "400":
+          description: Evaluator version not found
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
   /v1/score-configs:
     get:
       tags:
@@ -959,6 +1084,64 @@ components:
             ingested_count: 0
             message: "Ingestion failed: DuckLake write failed"
   schemas:
+    OrderedToolRequirement:
+      type: object
+      required: [before, action]
+      properties:
+        before:
+          type: string
+          maxLength: 256
+        action:
+          type: string
+          maxLength: 256
+        require_result_before_action:
+          type: boolean
+          default: true
+    CreateEvaluatorRequest:
+      type: object
+      required: [evaluator_id, version, target_agent_name, name, criteria]
+      properties:
+        evaluator_id:
+          type: string
+          maxLength: 200
+        version:
+          type: integer
+          minimum: 1
+        target_agent_name:
+          type: string
+          maxLength: 256
+        name:
+          type: string
+          maxLength: 200
+        criteria:
+          type: string
+          maxLength: 8000
+        threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.7
+        uncertainty_margin:
+          type: number
+          minimum: 0
+          maximum: 0.49
+          default: 0.1
+        required_tool_order:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/OrderedToolRequirement"
+    EvaluatorDefinition:
+      allOf:
+        - $ref: "#/components/schemas/CreateEvaluatorRequest"
+        - type: object
+          required: [timestamp, active]
+          properties:
+            timestamp:
+              type: string
+              format: date-time
+            active:
+              type: boolean
     IngestResponse:
       type: object
       required:

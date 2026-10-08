@@ -10,7 +10,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IngestResponse {
@@ -263,10 +263,23 @@ async fn process_traces_inner(
     }
 
     let span_count = spans.len();
+    let mut trace_windows = std::collections::HashMap::new();
+    for span in &spans {
+        let bounds = trace_windows
+            .entry(span.trace_id.clone())
+            .or_insert((span.timestamp, span.end_timestamp.unwrap_or(span.timestamp)));
+        bounds.0 = bounds.0.min(span.timestamp);
+        bounds.1 = bounds.1.max(span.end_timestamp.unwrap_or(span.timestamp));
+    }
 
     let ws = state.workspace_for_id(&tid).await?;
     let write_start = std::time::Instant::now();
     ws.ingest().add_spans(spans, body_size).await?;
+    if let Err(error) =
+        crate::online_evaluation::schedule_for_traces(ws.clone(), trace_windows).await
+    {
+        warn!("failed to schedule automatic trace evaluation: {error}");
+    }
     if crate::self_monitoring::instrument_customer_workspace(&tid) {
         crate::self_monitoring::record_write(&tid, "traces", app.as_deref(), write_start.elapsed());
     }

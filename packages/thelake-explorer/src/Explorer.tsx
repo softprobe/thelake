@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ExplorerApi, type ExplorerConfig, type Observation, type SessionSummary } from "./client";
+import { ExplorerApi, type BehaviorEvaluator, type ExplorerConfig, type Observation, type SessionSummary } from "./client";
 import "./style.css";
 
 export type ThelakeExplorerProps = {
@@ -49,9 +49,20 @@ export function ThelakeExplorer({
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [showEvaluators, setShowEvaluators] = useState(false);
+  const [evaluators, setEvaluators] = useState<BehaviorEvaluator[]>([]);
+  const [evaluatorAgent, setEvaluatorAgent] = useState("");
+  const [evaluatorName, setEvaluatorName] = useState("");
+  const [evaluatorCriteria, setEvaluatorCriteria] = useState("");
+  const [providerConsent, setProviderConsent] = useState(false);
   const [error, setError] = useState<string>();
 
   useEffect(() => setSelected(initialSessionId), [initialSessionId]);
+
+  useEffect(() => {
+    if (!showEvaluators) return;
+    api.listEvaluators().then(setEvaluators).catch((e: unknown) => setError(String(e)));
+  }, [api, showEvaluators]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -135,6 +146,45 @@ export function ThelakeExplorer({
     }
   }
 
+  async function createEvaluator(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!providerConsent) return;
+    setSaving(true);
+    setError(undefined);
+    const name = evaluatorName.trim();
+    const slug = name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 100) || "behavior-check";
+    const evaluatorId = `${slug}-${crypto.randomUUID().slice(0, 8)}`;
+    try {
+      const draft = await api.createEvaluator({
+        evaluator_id: evaluatorId,
+        version: 1,
+        target_agent_name: evaluatorAgent.trim(),
+        name,
+        criteria: evaluatorCriteria.trim(),
+      });
+      await api.setEvaluatorActive(draft.evaluator_id, draft.version, true);
+      setEvaluatorName("");
+      setEvaluatorCriteria("");
+      setProviderConsent(false);
+      setEvaluators(await api.listEvaluators());
+    } catch (e) {
+      setError(String(e));
+      api.listEvaluators().then(setEvaluators).catch(() => undefined);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggleEvaluator(evaluator: BehaviorEvaluator) {
+    setError(undefined);
+    try {
+      const updated = await api.setEvaluatorActive(evaluator.evaluator_id, evaluator.version, !evaluator.active);
+      setEvaluators((current) => current.map((item) => item.evaluator_id === updated.evaluator_id && item.version === updated.version ? updated : item));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   function goBack() {
     if (onBack) onBack();
     else setSelected(undefined);
@@ -143,11 +193,38 @@ export function ThelakeExplorer({
   return (
     <main className={`thelake-explorer ${className ?? ""}`}>
       <header>
-        <div><strong>thelake Explorer</strong><small>Trace and session viewer</small></div>
-        {selected && <button onClick={goBack}>Sessions</button>}
+        <div><strong>thelake Explorer</strong><small>Trace investigation and behavior checks</small></div>
+        <nav aria-label="Explorer views">
+          <button aria-pressed={!showEvaluators} onClick={() => setShowEvaluators(false)}>Sessions</button>
+          <button aria-pressed={showEvaluators} onClick={() => { setShowEvaluators(true); setSelected(undefined); }}>Behavior checks</button>
+        </nav>
+        {selected && !showEvaluators && <button onClick={goBack}>Sessions</button>}
       </header>
       {error && <div role="alert" className="tle-error">{error}</div>}
-      <div className="tle-layout">
+      {showEvaluators ? <div className="tle-evaluators" aria-label="Behavior checks">
+        <section>
+          <h2>Find behavior issues from new traces</h2>
+          <p>Describe what the agent should do. TheLake evaluates each new trace for the selected agent and records a result on the trace. You do not need to identify a failed conversation first.</p>
+          <form onSubmit={(event) => void createEvaluator(event)}>
+            <label>Agent name<input required value={evaluatorAgent} onChange={(event) => setEvaluatorAgent(event.target.value)} placeholder="support-agent" /></label>
+            <label>Check name<input required value={evaluatorName} onChange={(event) => setEvaluatorName(event.target.value)} placeholder="Check eligibility before refund" /></label>
+            <label>Expected behavior<textarea required minLength={5} maxLength={8000} rows={5} value={evaluatorCriteria} onChange={(event) => setEvaluatorCriteria(event.target.value)} placeholder="Before issuing a refund, the agent checks eligibility, explains the result, and only refunds if eligible." /></label>
+            <div className="tle-provider-notice">
+              <b>Trace data goes to your configured Gemini provider</b>
+              <p>Activating sends captured prompts, responses, and tool data for this agent. The runner redacts common credential patterns but does not remove general personal data.</p>
+              <label><input type="checkbox" required checked={providerConsent} onChange={(event) => setProviderConsent(event.target.checked)} /> I understand and want to activate this check.</label>
+            </div>
+            <button disabled={saving || !providerConsent}>{saving ? "Saving and activating…" : "Save and activate"}</button>
+          </form>
+        </section>
+        <section>
+          <h2>Saved checks</h2>
+          {evaluators.length === 0 ? <p>No behavior checks yet.</p> : <ul className="tle-evaluator-list">{evaluators.map((evaluator) => <li key={`${evaluator.evaluator_id}:${evaluator.version}`}>
+            <div><b>{evaluator.name}</b><span>{evaluator.target_agent_name} · version {evaluator.version} · {evaluator.active ? "active" : "draft / paused"}</span><p>{evaluator.criteria}</p></div>
+            <button onClick={() => void toggleEvaluator(evaluator)}>{evaluator.active ? "Pause" : "Activate"}</button>
+          </li>)}</ul>}
+        </section>
+      </div> : <div className="tle-layout">
         <aside aria-label="Sessions">
           <div className="tle-list-tools">
             <h2>Sessions</h2>
@@ -187,11 +264,14 @@ export function ThelakeExplorer({
             <div className="tle-inspector-title"><div><b>{focused.name}</b><span>{focused.observation_type} · {focused.span_id}</span></div><time>{focused.start_time}</time></div>
             <details open><summary>Input and output</summary><div className="tle-payload"><h4>Input</h4><pre>{json(focused.input)}</pre><h4>Output</h4><pre>{json(focused.output)}</pre></div></details>
             <details><summary>Attributes and events</summary><pre>{json({ attributes: focused.attributes, events: focused.events })}</pre></details>
-            <details><summary>Scores ({focused.scores?.length ?? 0})</summary><pre>{json(focused.scores ?? [])}</pre></details>
+            <details open><summary>Evaluation results ({focused.scores?.filter((score) => score.source === "evaluator").length ?? 0})</summary>
+              {(focused.scores ?? []).filter((score) => score.source === "evaluator").length === 0 ? <p>No evaluator result on this span.</p> : (focused.scores ?? []).filter((score) => score.source === "evaluator").map((score) => <div className={`tle-eval-result tle-eval-${score.string_value ?? "unknown"}`} key={score.score_id}><b>{score.name}: {score.string_value ?? "unknown"}</b><p>{score.comment}</p></div>)}
+            </details>
+            <details><summary>All scores ({focused.scores?.length ?? 0})</summary><pre>{json(focused.scores ?? [])}</pre></details>
             <div className="tle-score">{(["correct", "wrong", "unsure"] as const).map((verdict) => <button key={verdict} disabled={saving} onClick={() => void saveVerdict(verdict)}>{saving ? "Saving…" : verdict}</button>)}</div>
           </article>}
         </section>
-      </div>
+      </div>}
     </main>
   );
 }

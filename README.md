@@ -155,7 +155,11 @@ Health: `GET /health`, `GET /ready`, `GET /openapi.json`, `GET /swagger`
 
 Ingest: `POST /v1/traces`, `POST /v1/logs`
 
-Evaluations: `POST /v1/scores`, `GET|POST /v1/score-configs`
+Evaluations:
+
+- `GET|POST /v1/evaluators` (versioned natural-language behavior rules)
+- `POST /v1/scores`
+- `GET|POST /v1/score-configs`
 
 Queries:
 
@@ -185,6 +189,60 @@ Contracts:
   [SDK guide](docs/sdk/web-session-replay.md)
 - Promotion: [`docs/how-to/promotion.md`](docs/how-to/promotion.md)
 - Attributes: [`docs/architecture/attribute-storage.md`](docs/architecture/attribute-storage.md)
+
+### Online behavior evaluation
+
+Create a draft version of a plain-language rule with `POST /v1/evaluators`.
+Each rule must name its target agent. Drafts do not run until activated with
+`POST /v1/evaluators/{evaluator_id}/versions/{version}/activate`. After
+matching trace spans are committed, the runtime waits briefly, reads the
+bounded trace through its checked query path, and sends captured
+conversation/tool evidence to the DeepEval runner. The verdict is written as a
+trace-linked evaluator score. Stop new evaluations with the corresponding
+`/deactivate` endpoint.
+
+The runner is an optional private-network service. Start it from Compose with
+`--profile evaluation` and configure `THELAKE_EVALUATION_RUNNER_URL`,
+`THELAKE_EVALUATION_RUNNER_TOKEN`, and `GOOGLE_API_KEY` in the environment.
+Activation sends captured prompt, completion, and tool data for the selected
+agent to the configured Gemini provider. The runner redacts common credential
+fields and key formats, but does not perform general PII removal; review your
+trace data and provider settings before activation. See
+[`evaluation-runner/README.md`](evaluation-runner/README.md) for setup and an
+example request.
+
+For example, a team can save this behavior expectation without writing an
+assertion script:
+
+```bash
+curl -X POST "$THELAKE_API_URL/v1/evaluators" \
+  -H "Authorization: Bearer $THELAKE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "evaluator_id":"refund-eligibility",
+    "version":1,
+    "target_agent_name":"support-agent",
+    "name":"Check eligibility before refund",
+    "criteria":"Verify the agent checks refund eligibility and explains the result before issuing a refund.",
+    "required_tool_order":[{"before":"check_eligibility","action":"issue_refund"}]
+  }'
+
+curl -X POST "$THELAKE_API_URL/v1/evaluators/refund-eligibility/versions/1/activate" \
+  -H "Authorization: Bearer $THELAKE_API_KEY"
+```
+
+This initial online path runs in-process after ingestion and stores terminal
+verdicts as scores; it does not yet retain pending/running attempts or group
+repeated failures into a separate issue record. Trace completion is inferred
+from a completed root span after a short quiet period. Traces above the
+evidence span limit are skipped to avoid judging partial evidence. Runner
+outages, worker saturation, and process restarts can lose an in-flight attempt;
+a later ingest of that trace can cause another attempt. Evaluators apply to
+newly ingested traces; this version has no historical backfill or preview
+workflow. Tool-order rules return insufficient evidence if a prerequisite call
+is present but its result cannot be correlated. Missing prerequisite calls are
+judged only when tool-call evidence is present, so incomplete instrumentation
+can limit coverage.
 
 ## Query DuckLake locally
 
