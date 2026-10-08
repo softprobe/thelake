@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn production_access_inventory_covers_connection_sites() {
-        let inventory = include_str!("../../../docs/ducklake-access-inventory.md");
+        let inventory = include_str!("../../../docs/architecture/ducklake-access.md");
         for path in [
             "src/storage/ducklake/attach.rs",
             "src/storage/ducklake/object_store.rs",
@@ -516,7 +516,7 @@ mod tests {
             "src/storage/duckdb/cache.rs",
             "src/storage/ducklake/workspace_views.rs",
             "src/compaction/engine.rs",
-            "src/compaction/merge.rs",
+            "src/compaction/maint_conn_pool.rs",
             "src/compaction/session_summary_access.rs",
             "src/sql/maintenance/mod.rs",
             "src/session_summary/reduce.rs",
@@ -524,6 +524,10 @@ mod tests {
             "src/control_plane/admin.rs",
             "src/sql/bounds/execute_gate.rs",
         ] {
+            assert!(
+                std::path::Path::new(path).exists(),
+                "inventory path must exist on disk: {path}"
+            );
             assert!(
                 inventory.contains(path),
                 "missing inventory entry for {path}"

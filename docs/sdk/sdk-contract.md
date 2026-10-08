@@ -1,13 +1,14 @@
 # Softprobe Instrumentation SDK Contract
 
-This document defines the shared public contract for Softprobe Phase 2 SDKs:
+This document defines the shared public contract for Softprobe SDK packages:
 
 - TypeScript: `@softprobe/tracing`
 - Python: `softprobe`
 
 Both packages must emit equivalent OTLP spans/events and score HTTP payloads.
-Tenant identity is derived from the bearer token and must never appear as an SDK
-payload field (`tenant_id` is not accepted on client APIs or score bodies).
+Workspace identity is derived from the bearer token and must never appear as an
+SDK payload field (`workspace_id` / `tenant_id` are not accepted on client APIs
+or score bodies).
 
 ## Configuration
 

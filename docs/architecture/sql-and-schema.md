@@ -2,7 +2,7 @@
 
 **Status:** Canonical SQL DDL and shared OTLP Parquet profile
 **Constraints:** simple shared schemas, finite query windows, and explicit SQL contracts
-**Related:** [`design-event-time-layout.md`](./design-event-time-layout.md)
+**Related:** [`design-event-time-layout.md`](event-time-layout.md)
 
 The fact tables covered here are `traces`, `logs`, and `scores`.
 
@@ -49,7 +49,7 @@ Every DuckLake fact table has **`timestamp`** as its only time column. Partition
 | `scores` | `TIMESTAMP_NS` | `session_id, trace_id, timestamp` |
 
 Score deduplication identity is `(score_id, timestamp)` in isolated scope and
-`(tenant_id, score_id, timestamp)` in shared scope. A repeated `score_id` at a
+`(workspace_id, score_id, timestamp)` in shared scope. A repeated `score_id` at a
 different timestamp is a distinct score; every idempotency lookup carries the
 score timestamp so it can prune to that day.
 

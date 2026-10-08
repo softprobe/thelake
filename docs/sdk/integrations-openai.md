@@ -58,11 +58,7 @@ await client.chat.completions.create({
 
 ## Live E2E
 
-Keys are loaded from `../.env` (`OPENAI_API_KEY`, `GEMINI_KEY`) or `sp-llm/.env`.
-See `.env.example`.
-
-```bash
-make e2e-up
-make phase3-live-llm
-make phase3-live-llm-inspect
-```
+Live provider E2E lives in the Softprobe SDK / `sp-llm` repositories, not in
+thelake's Makefile. Keys typically come from that repo's `.env`
+(`OPENAI_API_KEY`, `GEMINI_KEY`). Point the SDK `baseUrl` at a running thelake
+instance (`make run` or a deployed runtime).

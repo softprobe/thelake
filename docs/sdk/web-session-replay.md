@@ -25,7 +25,7 @@ session list/detail aggregates and conversation traces; use
 | Producer | [`@softprobe/web-record`](https://github.com/softprobe/softprobe-js/tree/main/packages/web-record) | rrweb capture → OTLP |
 | Host SPA | [`softprobe-code`](https://github.com/softprobe/softprobe-code) `web-record-boot.ts` | Boot after `ses_*` is in the URL |
 | Store / query | [`thelake`](https://github.com/softprobe/thelake) | Ingest + `GET …/recording` |
-| Player | [`@softprobe/explorer`](../apps/explorer) | Conversation / Web replay tabs |
+| Player | [`sp-llm` Explorer](https://github.com/softprobe/sp-llm/tree/main/apps/explorer) | Conversation / Web replay tabs |
 
 Merge order for the feature PRs: softprobe-js → thelake → softprobe-code → sp-llm.
 
@@ -96,6 +96,6 @@ dev and strips `Origin` for hosted thelake quirks.
 
 ## Related docs
 
-- thelake [instrumentation guide — web session recording](https://github.com/softprobe/thelake/blob/main/docs/instrumentation_guide.md#web-session-recording-rrweb)
+- thelake [instrumentation guide — web session recording](../how-to/instrumentation.md#web-session-recording-rrweb)
 - [`@softprobe/web-record` README](https://github.com/softprobe/softprobe-js/blob/main/packages/web-record/README.md)
-- Explorer [app README](../apps/explorer/README.md)
+- [Explorer app README](https://github.com/softprobe/sp-llm/blob/main/apps/explorer/README.md)

@@ -1,7 +1,7 @@
 # Compatibility matrix
 
 OpenTelemetry is the canonical write path for traces and logs. Loki and Tempo
-provide tenant-scoped, query-only APIs over the same DuckLake data. Grafana
+provide workspace-scoped, query-only APIs over the same DuckLake data. Grafana
 uses native Loki and Tempo data sources.
 
 | Product | Supported surface | Contract |

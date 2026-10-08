@@ -1,7 +1,7 @@
 # Attribute storage
 
 The runtime stores flexible OpenTelemetry attributes in DuckLake `MAP` columns.
-Tenant-declared promotion manifests add typed columns for fields that need a
+Workspace-declared promotion manifests add typed columns for fields that need a
 stable, efficient query path. Promotion affects new writes; existing evidence
 remains in its original attribute maps.
 
@@ -12,7 +12,7 @@ remains in its original attribute maps.
 | `traces` | `attributes`, `resource_attributes`, `instrumentation_scope`, `links` | `MAP(VARCHAR, VARCHAR)` |
 | `logs` | `attributes`, `resource_attributes` | `MAP(VARCHAR, VARCHAR)` |
 | `scores`, `score_configs` | `metadata` | `MAP(VARCHAR, VARCHAR)` |
-| nested `traces.events[].attributes` | | `MAP(VARCHAR, VARCHAR)` |
+| `traces.events` | (whole column) | `VARCHAR` (JSON text of span events) |
 
 ## Ingest and query
 
@@ -29,7 +29,7 @@ SELECT CAST(attributes AS JSON) AS attributes FROM traces
 ```
 
 When a matching promoted column is active, SQL compilers prefer that typed
-column. See [schema promotion](promotion.md).
+column. See [schema promotion](../how-to/promotion.md).
 
 ## Catalog compatibility
 

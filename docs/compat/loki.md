@@ -32,14 +32,14 @@ downsampled. The following are explicit compatibility boundaries and return
 unlisted pipeline stages. A malformed or non-positive duration is instead
 `400 bad_request`.
 
-## Tenant and isolation semantics
+## Workspace and isolation semantics
 
-Every route requires the bearer-authenticated tenant context. `tenant_id` in a
-query string or body is ignored and cannot select data. When supplied,
-`X-Scope-OrgID` must exactly match the authenticated tenant; a mismatch is `403`.
-Queries, label discovery, series discovery, and structured metadata are scoped
-to that tenant’s data. See [`auth.md`](auth.md) for the shared authentication
-contract.
+Every route requires the bearer-authenticated workspace context. A
+`workspace_id` in a query string or body is ignored and cannot select data.
+When supplied, `X-Scope-OrgID` must exactly match the authenticated workspace;
+a mismatch is `403`. Queries, label discovery, series discovery, and structured
+metadata are scoped to that workspace’s data. See [`auth.md`](auth.md) for the
+shared authentication contract.
 
 ## Differential evidence
 

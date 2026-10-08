@@ -573,7 +573,7 @@ fn openapi_session_search_request_matches_rust_dto_and_reexport() {
             limit: None,
             cursor: None,
         };
-    let yaml = include_str!("../../docs/ingestion-openapi.yaml");
+    let yaml = include_str!("../../docs/reference/openapi.yaml");
     assert!(
         yaml.contains("SessionSearchRequest:"),
         "OpenAPI must keep SessionSearchRequest schema"

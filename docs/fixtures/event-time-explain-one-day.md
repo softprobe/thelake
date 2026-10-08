@@ -17,4 +17,5 @@
 
 Do **not** assert on the date string `2026-09-11` alone — wide BETWEEN SQL embeds that literal and would make the gate vacuous.
 
-**Compile companion:** `one_day_session_fetch_predicates_do_not_name_unrelated_days` in `api/sessions.rs`.
+**Authority:** the integration test above is the lock; do not cite deleted unit
+tests.

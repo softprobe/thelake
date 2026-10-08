@@ -18,13 +18,22 @@ info:
     - `GET|POST /v1/score-configs`
 
     Query surfaces:
+    - `POST /v1/traces/search`
+    - `POST /v1/traces/details`
     - `POST /v1/spans/search`
     - `GET /v1/spans/{span_id}`
     - `GET /v1/traces/{trace_id}`
     - `POST /v1/sessions/search`
+    - `POST /v1/sessions/details`
     - `POST /v1/sessions/summary/rebuild`
     - `GET /v1/sessions/{session_id}`
     - `GET /v1/sessions/{session_id}/recording`
+
+    Control plane:
+    - `POST /v1/workspaces` (admin bearer)
+    - `GET /v1/meta`
+    - `POST /v1/promotions/apply`
+    - `GET /v1/data/ducklake-connection`
 
     Also inventoried here (summary-level): health/ready, `POST /v1/query/sql`,
     and `/v1/fields`. Loki/Tempo Grafana-compat query routes are served by
@@ -40,14 +49,17 @@ info:
     Content type behavior mirrors implementation:
     - Any `Content-Type` containing `protobuf` is treated as protobuf.
     - All other content types (including missing header) are treated as JSON.
-    - Each accepted request is committed directly to the tenant's DuckLake scope.
-    - Durable write failures return HTTP 503 so the exporter can retry.
+    - Default ingest is flush-through (`ingest.flush_interval_seconds: 0`): each
+      accepted request is committed to the workspace DuckLake scope before ack.
+    - Soft coalesce (`flush_interval_seconds` > 0) acks after enqueue; unflushed
+      rows may be lost on crash or post-ack write failure.
+    - Flush-through durable write failures return HTTP 503 so the exporter can retry.
 
     Canonical promotion contract (manifest YAML, lifecycle, failure modes):
-    `docs/promotion.md`.
+    `docs/how-to/promotion.md`.
   externalDocs:
     description: Softprobe schema promotion guide
-    url: https://github.com/softprobe/thelake/blob/main/docs/promotion.md
+    url: https://github.com/softprobe/thelake/blob/main/docs/how-to/promotion.md
 servers:
   - url: http://localhost:8090
     description: Local endpoint from default `config.yaml`
@@ -56,8 +68,10 @@ tags:
     description: Process health and readiness
   - name: ingestion
     description: OTLP ingestion endpoints
+  - name: control
+    description: Workspace provisioning and runtime metadata
   - name: promotion
-    description: Tenant-scoped schema promotion
+    description: Workspace-scoped schema promotion
   - name: llm
     description: LLM observability records
   - name: query
@@ -636,11 +650,155 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /v1/traces/search:
+    post:
+      tags: [llm]
+      summary: Search traces with a dynamic filter expression
+      description: |
+        Uses `TelemetrySearchRequest`: `version`, `scope` (`traces`), required
+        nested `timeRange` (`from`/`to`), optional `filter` / `columns` / `sort` /
+        `limit` / `cursor`. JSON fields are camelCase.
+      operationId: searchTraces
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TelemetrySearchRequest"
+      responses:
+        "200":
+          description: Bounded trace search page
+        "400":
+          description: Missing timeRange, invalid filter, or malformed cursor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing or invalid bearer token
+        "503":
+          description: Workspace runtime or query unavailable
+  /v1/traces/details:
+    post:
+      tags: [llm]
+      summary: Fetch trace details by id with an explicit time window
+      description: |
+        Body must include `traceId` (or `target.id` with `kind: trace`) plus
+        nested `timeRange`. JSON fields are camelCase.
+      operationId: traceDetailsPost
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EntityDetailsRequest"
+      responses:
+        "200":
+          description: Trace detail payload
+        "400":
+          description: Missing traceId or invalid timeRange
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing or invalid bearer token
+        "503":
+          description: Workspace runtime or query unavailable
+  /v1/sessions/details:
+    post:
+      tags: [llm]
+      summary: Fetch session details by id with an explicit time window
+      description: |
+        Body must include `sessionId` (or `target.id` with `kind: session`) plus
+        nested `timeRange`. JSON fields are camelCase.
+      operationId: sessionDetailsPost
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EntityDetailsRequest"
+      responses:
+        "200":
+          description: Session detail payload
+        "400":
+          description: Missing sessionId or invalid timeRange
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing or invalid bearer token
+        "503":
+          description: Workspace runtime or query unavailable
+  /v1/workspaces:
+    post:
+      tags: [control]
+      summary: Provision a workspace DuckLake scope
+      description: |
+        Admin-only. Requires `Authorization: Bearer` matching
+        `SOFTPROBE_ADMIN_API_KEY`. Body uses camelCase `workspaceId` and
+        required `storageHints` (`ducklakeMetadataSchema`, `ducklakeDataPath`).
+      operationId: provisionWorkspace
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workspaceId, storageHints]
+              properties:
+                workspaceId:
+                  type: string
+                  format: uuid
+                storageHints:
+                  type: object
+                  required: [ducklakeMetadataSchema, ducklakeDataPath]
+                  properties:
+                    ducklakeMetadataSchema:
+                      type: string
+                    ducklakeDataPath:
+                      type: string
+                    gcsBucket:
+                      type: string
+      responses:
+        "200":
+          description: Scope created or already exists with matching hints
+        "400":
+          description: Invalid workspace id, reserved id, or missing storage hints
+        "401":
+          description: Missing bearer token
+        "403":
+          description: Admin API key required
+        "409":
+          description: Workspace exists with a different storage scope
+  /v1/meta:
+    get:
+      tags: [control]
+      summary: Runtime and control-plane version metadata
+      operationId: getMeta
+      responses:
+        "200":
+          description: Version metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runtimeVersion:
+                    type: string
+                  specVersion:
+                    type: string
+                  schemaVersion:
+                    type: string
   /v1/promotions/apply:
     post:
       tags:
         - promotion
-      summary: Apply a tenant-scoped promotion manifest
+      summary: Apply a workspace-scoped promotion manifest
       description: |
         Parses a `softprobe.promotion.v1` YAML manifest, applies DuckLake schema
         changes for the authenticated tenant, and records the active spec in that
@@ -655,11 +813,11 @@ paths:
           tenant ingest.
         - Business-table apply provisions `<table>_vN` + `<table>_current` and
           records the spec; automatic OTLP row materialization is not wired yet.
-        - Full contract: `docs/promotion.md`.
+        - Full contract: `docs/how-to/promotion.md`.
       operationId: applyPromotion
       externalDocs:
         description: Canonical promotion guide
-        url: https://github.com/softprobe/thelake/blob/main/docs/promotion.md
+        url: https://github.com/softprobe/thelake/blob/main/docs/how-to/promotion.md
       requestBody:
         required: true
         content:
@@ -971,6 +1129,70 @@ components:
       properties:
         error:
           type: string
+    TelemetryTimeRange:
+      type: object
+      required: [from, to]
+      properties:
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+    TelemetrySearchRequest:
+      type: object
+      required: [version, scope, timeRange]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        scope:
+          type: string
+          enum: [sessions, traces]
+        timeRange:
+          $ref: "#/components/schemas/TelemetryTimeRange"
+        filter:
+          description: Nested and/or filter expression over telemetry fields
+          type: object
+          additionalProperties: true
+        columns:
+          type: array
+          items:
+            type: string
+        sort:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        limit:
+          type: integer
+          minimum: 1
+        cursor:
+          type: string
+    EntityDetailsRequest:
+      type: object
+      required: [timeRange]
+      properties:
+        version:
+          type: integer
+          default: 1
+        target:
+          type: object
+          required: [kind, id]
+          properties:
+            kind:
+              type: string
+            id:
+              type: string
+        traceId:
+          type: string
+        sessionId:
+          type: string
+        timeRange:
+          $ref: "#/components/schemas/TelemetryTimeRange"
+        limit:
+          type: integer
+          minimum: 1
     SpanSearchRequest:
       type: object
       required: [from, to]
@@ -1236,7 +1458,7 @@ components:
           type: string
           description: |
             YAML document with `specVersion: softprobe.promotion.v1`.
-            See `docs/promotion.md` for the full manifest contract.
+            See `docs/how-to/promotion.md` for the full manifest contract.
     PromotionApplyResponse:
       type: object
       required:

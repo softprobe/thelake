@@ -2,7 +2,7 @@
 
 | Doc / area | Purpose |
 |------------|---------|
-| `make test-perf` | Manual / release performance suites (latency, concurrency, stability) |
+| `make test-perf` | Manual / release performance suites (`PERF_SUITE=all|latency|concurrency`) |
 | `make bench-demo-cpu-full` | Full OTEL demo + Grafana refresh CPU gate |
 
 Compatibility performance work uses Loki and Tempo query workloads together

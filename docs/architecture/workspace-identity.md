@@ -1,7 +1,6 @@
 # Workspace identity
 
 **Status:** Current contract
-**Rule:** No backward compatibility. New deployments only. DDL is `CREATE` only — never `ALTER TABLE` for this cutover.
 
 ## Canonical concepts
 
@@ -13,8 +12,8 @@
 | `isolated` | one workspace → its own physical scope |
 
 A user belongs to one or more workspaces. Each workspace binds to exactly one
-physical scope (a `WorkspaceContext`). There is no `lake_scope_id`, `tenant_key`,
-or product `tenant` identity.
+physical scope (a `WorkspaceContext`). There is no `lake_scope_id`, product
+`tenant` identity, or assertion `tenant_key`.
 
 ## Shared mode (weak bind)
 
@@ -23,7 +22,7 @@ that default without requiring `workspace_scope_binding`. Row filters and
 temp views use `workspace_id = <uuid>`.
 
 `workspace_scope_binding` is not on the shared request path (`engine_for`).
-Admin `provision_scope` still records workspace UUID → default physical so
+Admin `POST /v1/workspaces` still records workspace UUID → default physical so
 maintenance can list provisioned workspace keys. Isolated mode uses the
 registry for workspace UUID → physical scope on every resolve.
 
@@ -39,24 +38,19 @@ registry for workspace UUID → physical scope on every resolve.
 }
 ```
 
-thelake binds from `workspace_id` only. No `tenant_key`.
+thelake binds from `workspace_id` only.
 
 `POST /v1/workspaces` rejects non-UUID `workspaceId` (same
 `parse_workspace_id` contract as auth). Dedicated Grafana / seed harnesses
 must provision the fixture UUIDs returned by auth mocks
-(`tests/util/workspace_ids.rs`), not legacy slug labels used as API keys.
+(`tests/util/workspace_ids.rs`).
 
-## Kill list
+## Row and API rules
 
-- `lake_scope_id` / `ws-…` slug generator
-- assertion `tenant_key`
-- `WorkspaceAuth.workspace_id`
-- row column `tenant_id` → tables `CREATE`d with `workspace_id`
-- hard shared allowlist on `engine_for`
-- `workspace_lake` as lake identity SoT
+- Fact tables use a `workspace_id` column (see `src/sql/schema/`).
+- Operational APIs do not accept arbitrary workspace selectors after auth
+  binding; identity comes from the bearer assertion (or local anonymous mode).
+- Reserved id `thelake-ops` cannot be provisioned via `POST /v1/workspaces`.
 
-## Cutover
-
-Brand-new env (new Postgres schemas / data prefix). Bootstrap from rewritten
-SQL sources. Copy **traces only**, rewriting old `tenant_id` slug → workspace
-UUID. Other signals start empty.
+See also [DuckLake access inventory](ducklake-access.md) and
+[async jobs](../how-to/async-jobs.md).

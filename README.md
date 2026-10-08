@@ -25,11 +25,12 @@ Traditional software telemetry is often retained only for a short incident
 window. AI traces have lasting value: today's production recording can become
 tomorrow's evaluation case, regression test, audit evidence, or improvement
 dataset. thelake keeps that evidence open and durable. Flexible attributes
-live in DuckLake `MAP` columns; tenant-controlled column promotion adds typed
+live in DuckLake `MAP` columns; workspace-scoped column promotion adds typed
 query paths without discarding the original context.
 
-Product goals: [`docs/goals.md`](docs/goals.md). Architecture:
-[`docs/design.md`](docs/design.md). Full index: [`docs/README.md`](docs/README.md).
+Product goals: [`docs/architecture/goals.md`](docs/architecture/goals.md).
+Architecture: [`docs/architecture/overview.md`](docs/architecture/overview.md).
+Full index: [`docs/README.md`](docs/README.md).
 
 ## Architecture
 
@@ -88,16 +89,16 @@ make teardown
 `make ci` is the pre-merge gate. Performance is `make test-perf` (manual /
 release).
 
-GitHub Actions (Make-only; no Actions cargo/`target` cache):
+GitHub Actions (Make-only; cache under `~/.cache/thelake` via
+`.github/actions/thelake-cache`):
 
-- `.github/workflows/ci.yml` — on push/PR: `make doctor` → `setup` → `ci`.
-  Warm SLO ≤ 18m.
+- `.github/workflows/ci.yml` — on push/PR: `make doctor` → `setup` →
+  `check-fmt` / `lint` / `test`, plus separate DuckLake E2E and Explorer UI
+  jobs. Local pre-merge gate remains `make setup && make ci` (warm SLO ≤ 18m).
 - `.github/workflows/performance.yml` — **manual** only: `make test-perf`
-  (`PERF_SUITE=all|latency|concurrency|stability`, `PERF_TARGET_MS=1000`).
-  Warm SLO ≤ 8m.
+  (`PERF_SUITE=all|latency|concurrency`, `PERF_TARGET_MS=1000`). Warm SLO ≤ 8m.
 - `.github/workflows/release.yml` — on GitHub Release: `make release`
-  (`test-perf` + `build-release` + `publish`, `--release`; PR already ran
-  `ci`). Warm SLO ≤ 25m.
+  (`test-perf` + `build-release` + `publish`, `--release`). Warm SLO ≤ 25m.
 
 ## Run
 
@@ -109,10 +110,13 @@ make run
 ```
 
 Open the session and trace UI at `http://127.0.0.1:8090/explorer/`. Local
-anonymous mode binds allowed ingest/query/score requests to this one workspace
-and ignores caller-provided tenant selectors. Anyone who can reach the
-listener can read and write that workspace. Leave this mode disabled when the
-listener is reachable by untrusted users; external assertion/Bearer auth
+anonymous mode (`SOFTPROBE_LOCAL_ANONYMOUS=1`) binds a fixed allowlist of
+`/v1/*` data-plane routes (OTLP ingest, scores POST, span/session search,
+score-config GET, and single span/trace/session GET) to
+`THELAKE_DEFAULT_WORKSPACE_ID` without a bearer. Other `/v1/*` routes
+(including recording, promotions, SQL, and workspaces) return 403. Anyone who
+can reach the listener can exercise that allowlist. Leave this mode disabled
+when the listener is reachable by untrusted users; assertion/Bearer auth
 remains the default.
 
 Defaults:
@@ -125,8 +129,8 @@ Set `SOFTPROBE_GRPC_DISABLE=1` to disable the gRPC listener.
 
 ## Configuration
 
-The canonical example is [`config.yaml`](config.yaml). The active storage
-section is `ducklake`:
+Canonical example: [`config.yaml`](config.yaml). Full key reference:
+[`docs/reference/config.md`](docs/reference/config.md).
 
 ```yaml
 ducklake:
@@ -139,77 +143,48 @@ ducklake:
   writer_pool_size: 4
 ```
 
-YAML holds non-secret settings only. Top-level sections include `server`,
-`object_store` (`region` / optional `endpoint`), `query`, `maintenance`,
-`async_jobs`, `ingest`, `session_summary`, `self_monitoring`, and `ducklake`.
-Unknown or legacy keys are rejected. Object-storage credentials are never
-stored in YAML; resolve them from the environment:
-
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` [/ `AWS_SESSION_TOKEN`]: `s3://`
-  paths (MinIO, R2, AWS)
-- `GCS_HMAC_ACCESS_KEY_ID` / `GCS_HMAC_SECRET` (or `GCP_HMAC_*`): `gs://` paths
-
-Supported direct environment overrides:
-
-- `CONFIG_FILE`
-- `PORT`
-- `S3_REGION`
-- `SOFTPROBE_MAX_HTTP_BODY_BYTES`
-
-Deployment variables also include `SOFTPROBE_AUTH_URL`,
-`SOFTPROBE_LISTEN_ADDR`, and `OTEL_GRPC_PORT`.
+Object-store credentials are environment-only (`AWS_*` for `s3://`,
+`GCS_HMAC_*` / `GCP_HMAC_*` for `gs://`) — not YAML keys. The DuckLake
+catalog DSN in `ducklake.metadata_path` may include a Postgres password.
+Common overrides: `CONFIG_FILE`, `PORT`, `SOFTPROBE_LISTEN_ADDR`,
+`OTEL_GRPC_PORT`, `SOFTPROBE_AUTH_URL`.
 
 ## Main HTTP endpoints
 
-Health and discovery:
+Health: `GET /health`, `GET /ready`, `GET /openapi.json`, `GET /swagger`
 
-- `GET /health`
-- `GET /ready`
-- `GET /openapi.json`
-- `GET /swagger`
+Ingest: `POST /v1/traces`, `POST /v1/logs`
 
-OTLP ingestion (product signals: traces + logs):
-
-- `POST /v1/traces`
-- `POST /v1/logs`
-
-Evaluations:
-
-- `POST /v1/scores`
-- `GET|POST /v1/score-configs`
+Evaluations: `POST /v1/scores`, `GET|POST /v1/score-configs`
 
 Queries:
 
-- `POST /v1/query/sql` (internal/debug SQL surface)
-- `POST /v1/sessions/search`
-- `GET /v1/sessions/{session_id}`
-- `GET /v1/sessions/{session_id}/recording` (web session replay batches)
+- `POST /v1/query/sql` (internal/debug)
+- `POST /v1/traces/search`, `POST /v1/traces/details`, `GET /v1/traces/{trace_id}`
+- `POST /v1/spans/search`, `GET /v1/spans/{span_id}`
+- `POST /v1/sessions/search`, `POST /v1/sessions/details`
+- `GET /v1/sessions/{session_id}`, `GET /v1/sessions/{session_id}/recording`
 - `POST /v1/sessions/summary/rebuild`
-- `POST /v1/spans/search`
-- `GET /v1/spans/{span_id}`
-- `GET /v1/traces/{trace_id}`
-- `GET /v1/fields`
-- `GET /v1/fields/{field}/values`
+- `GET /v1/fields`, `GET /v1/fields/{field}/values`
 - `GET /v1/data/ducklake-connection`
 
-Control-plane routes also cover workspace provisioning and promotions
-(`POST /v1/promotions/apply`). Grafana Loki/Tempo compatibility routes are
-documented under [`docs/compat/`](docs/compat/README.md).
+Control: `POST /v1/workspaces` (admin), `GET /v1/meta`, `POST /v1/promotions/apply`
 
-`/v1/*` operational routes require bearer authentication (`OPTIONS /v1/*` is
-exempt for browser CORS preflight); provisioning validates its admin bearer
-inside the handler.
+Grafana Loki/Tempo routes: [`docs/compat/`](docs/compat/README.md).
 
-Web session recording contract:
-[`docs/instrumentation_guide.md`](docs/instrumentation_guide.md#web-session-recording-rrweb)
-and the Softprobe LLM
-[web session replay guide](https://github.com/softprobe/sp-llm/blob/main/docs/web-session-replay.md).
+`/v1/*` requires bearer auth (`OPTIONS /v1/*` exempt for CORS); workspace
+provisioning validates its admin bearer in-handler.
 
-The HTTP product contract is
-[`docs/ingestion-openapi.yaml`](docs/ingestion-openapi.yaml), served by a
-running process as [`GET /openapi.json`](http://localhost:8090/openapi.json)
-and browsable at [`GET /swagger`](http://localhost:8090/swagger). Schema
-promotion semantics are in [`docs/promotion.md`](docs/promotion.md).
+Contracts:
+
+- OpenAPI: [`docs/reference/openapi.yaml`](docs/reference/openapi.yaml) →
+  [`GET /openapi.json`](http://localhost:8090/openapi.json) /
+  [`GET /swagger`](http://localhost:8090/swagger)
+- Instrumentation: [`docs/how-to/instrumentation.md`](docs/how-to/instrumentation.md)
+- Web recording: [how-to § recording](docs/how-to/instrumentation.md#web-session-recording-rrweb),
+  [SDK guide](docs/sdk/web-session-replay.md)
+- Promotion: [`docs/how-to/promotion.md`](docs/how-to/promotion.md)
+- Attributes: [`docs/architecture/attribute-storage.md`](docs/architecture/attribute-storage.md)
 
 ## Query DuckLake locally
 
@@ -217,27 +192,12 @@ promotion semantics are in [`docs/promotion.md`](docs/promotion.md).
 make duckdb-shell
 ```
 
-This renders the configured DuckLake ATTACH statement, performs a `SELECT 1`
-smoke, and starts DuckDB. See
-[`docs/adhoc-duckdb-ducklake.md`](docs/adhoc-duckdb-ducklake.md).
-
-## Instrumentation and promotion
-
-HTTP bodies are captured from `http.request` and `http.response` span events.
-When those event fields are absent, the runtime accepts equivalent span
-attributes, including OBI `.content` body keys. Business identifiers are
-explicit searchable `sp.*` span attributes set by the application — thelake
-does not invent them.
-
-- Instrumentation: [`docs/instrumentation_guide.md`](docs/instrumentation_guide.md)
-- Schema promotion (explicit manifests for declared `sp.*` and other sources):
-  [`docs/promotion.md`](docs/promotion.md)
-- Attribute storage (`MAP` columns): [`docs/attribute-storage.md`](docs/attribute-storage.md)
+See [`docs/how-to/adhoc-duckdb.md`](docs/how-to/adhoc-duckdb.md).
 
 ## Maintenance
 
-thelake schedules DuckLake-native maintenance for every configured workspace
-scope:
+thelake schedules DuckLake-native maintenance once per physical DuckLake scope
+(shared warehouses are deduped):
 
 - merge adjacent data files;
 - expire old snapshots;
@@ -259,7 +219,7 @@ Images push to public Docker Hub **`softprobe/thelake:<tag>`** (and `:latest`
 for non-prerelease). Auth: Actions secret `DOCKER_HUB_PASSWORD` (username
 `softprobe`).
 
-PR CI (`make ci`, dev profile) does not build `dist/`.
+PR Actions (`.github/workflows/ci.yml`, dev profile) do not build `dist/`.
 
 Local/emergency image push: `docker login` then
 `make build-release && make publish TAG=vX.Y.Z`

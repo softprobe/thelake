@@ -1,7 +1,7 @@
 # Softprobe SDK contracts
 
 Language-neutral schemas and fixtures shared by `@softprobe/tracing` and
-`softprobe`.
+`softprobe`. Narrative docs: [`docs/sdk/`](../docs/sdk/README.md).
 
 - `schemas/` — JSON Schema for observation types, attributes, content events,
   score requests, and normalized spans
@@ -10,5 +10,6 @@ Language-neutral schemas and fixtures shared by `@softprobe/tracing` and
 Validate with:
 
 ```bash
-python3 scripts/validate_contracts.py
+make contracts-test
+# or: python3 scripts/validate_contracts.py
 ```

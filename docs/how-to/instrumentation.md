@@ -21,11 +21,10 @@ We use two complementary OpenTelemetry features:
 2. **Span Attributes** - For capturing searchable business metadata (user IDs, order IDs, etc.)
 
 This separation provides:
-- **Query efficiency**: metadata queries do not need to select body columns
-- **No attribute limits**: Bodies stored as events avoid the 128 span attribute limit
-- **Semantic clarity**: Events represent "notable moments", attributes represent "searchable metadata"
 
-The original rationale is preserved in the
+- **Query efficiency**: metadata queries do not need to select body columns
+- **No attribute limits**: bodies stored as events avoid the 128 span attribute limit
+- **Semantic clarity**: events are notable moments; attributes are searchable metadata
 
 ## HTTP Body Instrumentation Pattern
 
@@ -449,6 +448,6 @@ and keeps `CorsLayer` outermost so SPA recorders (e.g. softprobe-code) can expor
 ## Support
 
 For questions or issues:
-- Check the [current design](design.md) for the runtime architecture.
+- Check the [current design](../architecture/overview.md) for the runtime architecture.
 - See [schema promotion](promotion.md) for `sp.*`, manifests, and apply API.
-- See [ad hoc DuckDB/DuckLake queries](adhoc-duckdb-ducklake.md) for local SQL access.
+- See [ad hoc DuckDB/DuckLake queries](adhoc-duckdb.md) for local SQL access.
