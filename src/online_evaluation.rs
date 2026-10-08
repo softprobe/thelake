@@ -732,11 +732,8 @@ mod tests {
             })],
         );
 
-        let evidence = build_evidence(
-            "trace-1",
-            &[first_generation, tool_span, final_generation],
-        )
-        .unwrap();
+        let evidence =
+            build_evidence("trace-1", &[first_generation, tool_span, final_generation]).unwrap();
         let events = evidence["events"].as_array().unwrap();
         let user_turns = events
             .iter()
