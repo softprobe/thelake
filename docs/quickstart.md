@@ -1,8 +1,10 @@
 # 5-minute quickstart
 
-Send a sample agent trace, describe the behavior you expect, and see the
-evaluation result attached to that trace. This walkthrough uses a synthetic
-refund conversation, so it does not need access to your agent's codebase.
+Describe a behavior you want to catch, run a real Gemini-powered sample agent,
+and see the evaluation result attached to its trace. The included refund agent
+is deliberately flawed so the check can demonstrate a real detected issue.
+The walkthrough uses the built-in browser chat; it does not require a Slack
+workspace or Slack admin access.
 
 The quickstart runs theLake and Postgres locally. The evaluation runner sends
 captured prompt, response, and tool evidence to Gemini. Set a Gemini API key
@@ -14,7 +16,8 @@ credential patterns are redacted, but general personal data is not.
 - Docker with Compose, Rust, Node.js with npm, Python 3, `make`, and `curl`
 - A Gemini API key in `GOOGLE_API_KEY` or `GEMINI_API_KEY`
 
-The first build and runner image download can take longer than five minutes.
+The first builds and image downloads for the runner and sample agent can take
+longer than five minutes.
 The timed walkthrough starts after those are ready. The start script chooses
 free localhost ports from a small range and prints the Explorer URL. You can
 pin ports with `THELAKE_QUICKSTART_DB_PORT`,
@@ -35,35 +38,31 @@ The script generates a local runner token for this session and binds theLake
 and runner to localhost. It uses a dedicated quickstart config and local data
 directory; it does not change your normal `config.yaml`.
 
-Open the Explorer URL printed in the first terminal, choose **Behavior
-checks**, and save this check:
+Open the Explorer URL printed in the first terminal. In **Chat**, describe
+this behavior:
 
-| Field | Value |
-|---|---|
-| Agent name | `quickstart-refund-agent` |
-| Check name | `Check eligibility before refund` |
-| Expected behavior | `Before issuing a refund, verify the ticket is eligible. If eligibility has not been checked, do not issue the refund.` |
+> Before issuing a refund, verify the ticket is eligible and explain the result.
 
-Confirm the Gemini data notice and choose **Save and activate**. The check
-applies to new matching traces.
+When TheLake asks which agent to watch, enter `quickstart-refund-agent`.
+Review the check, confirm the Gemini data notice, and choose **Activate check**.
+The check applies to new matching traces.
 
-## Send the sample trace
+## Run the sample agent
 
-In another terminal, run:
+In another terminal, export the same Gemini key and run the command printed by
+the first terminal. It uses the right local-network address for your platform,
+calls Gemini with a real tool declaration, invokes the refund tool, and exports
+the resulting OTLP spans to your local theLake.
+The demo agent makes live Gemini calls but its refund tool only returns a local
+demo result; it does not connect to a ticketing or payment system.
 
-```bash
-python3 examples/quickstart/send_sample_trace.py
-```
+The command prints the session ID. The chat checks recent traces automatically;
+it should show a `fail` result with
+the judge's explanation and links to the session and trace evidence.
 
-This sends a synthetic conversation where the agent issues a refund without
-checking eligibility. The command prints the session ID. Refresh Explorer,
-choose **Sessions**, search for that ID, open the session, then select the
-agent span. After a few seconds, **Evaluation results** should show a `fail`
-result with the judge's explanation and trace evidence.
-
-That is the core loop: theLake receives OpenTelemetry traces, applies your
-plain-language behavior check to new traces, and stores the result with the
-trace so you can inspect what happened.
+That is the core loop: a live agent sends OpenTelemetry traces, theLake applies
+your plain-language behavior check, and the result returns to the conversation
+with links to the stored trace evidence.
 
 ## Next steps
 

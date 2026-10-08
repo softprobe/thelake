@@ -4,7 +4,8 @@ Explorer is the self-hosted session and trace UI for thelake. Source lives in
 [`packages/thelake-explorer`](../../packages/thelake-explorer/). `make build`
 embeds the SPA into the binary; thelake serves it at `/explorer/`.
 
-For a fast first run that sends a sample trace and shows a behavior check, see
+For a fast first run that creates a check in chat, runs a live sample agent,
+and shows the evaluation result in the conversation, see
 the [5-minute quickstart](../quickstart.md).
 
 ## Prerequisites
@@ -149,10 +150,15 @@ mismatched `data_path` fails attach / readiness.
 - Record a human verdict (`correct` / `wrong` / `unsure`) as a categorical
   score named `human_verdict` on the focused span.
 
-### Behavior checks
+### Chat and behavior checks
 
-- Create a natural-language check for a target agent name.
-- Activate / pause saved checks. **Activate requires**
+- Create and activate a natural-language behavior check in Chat by describing
+  the behavior and the exact agent name from its root trace.
+- Follow multiple conversations in the sidebar. Chat history stays in memory by
+  default; embedding applications can opt into browser persistence with a
+  workspace-scoped `chatStorageKey` in Explorer config. Evaluator definitions
+  and results remain stored by theLake.
+- Pause or reactivate saved checks from the Chat sidebar. **Activate requires**
   `THELAKE_EVALUATION_RUNNER_URL` and `THELAKE_EVALUATION_RUNNER_TOKEN` to be
   set; otherwise activate returns HTTP 503
   (`online evaluation runner is not configured`). Creating a draft without
@@ -235,16 +241,23 @@ For a host-native `make run`, run the evaluation-runner on the host (see
 [`evaluation-runner/README.md`](../../evaluation-runner/README.md)) and set
 `THELAKE_EVALUATION_RUNNER_URL=http://127.0.0.1:8081/v1/evaluate` instead.
 
-Then in Explorer → **Behavior checks**, create and activate a check for the
-agent name on your traces. Ingest a new matching trace; open the span to see
-results under **Evaluation results**.
+Then in Explorer → **Chat**, describe the check and enter the agent name on
+its traces. Confirm the provider data notice and activate it. New matching
+traces are evaluated and the result appears in that conversation; use
+**Open trace in Sessions** to inspect the source evidence.
 
 ## Verify
 
 ```bash
 make test-explorer-ui   # Playwright against a temporary thelake + embedded SPA
+make test-explorer-online-e2e  # Real Gemini agent + runner + web chat, no service mocks
 cd packages/thelake-explorer && npm test
 ```
+
+The online E2E requires Docker and `GOOGLE_API_KEY` (or `GEMINI_API_KEY`). It
+makes real Gemini calls from the sample agent and evaluator, so provider usage
+may be billed. Its refund tool returns a local demo result; it does not connect
+to an external ticketing or payment system.
 
 ## Related
 

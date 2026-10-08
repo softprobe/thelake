@@ -13,9 +13,17 @@ if [[ -z "${GOOGLE_API_KEY:-}" ]]; then
 fi
 command -v docker >/dev/null || { echo "Docker is required." >&2; exit 1; }
 command -v curl >/dev/null || { echo "curl is required." >&2; exit 1; }
-command -v python3 >/dev/null || { echo "Python 3 is required for the sample trace command." >&2; exit 1; }
+command -v python3 >/dev/null || { echo "Python 3 is required to select local ports." >&2; exit 1; }
 command -v make >/dev/null || { echo "Make is required to build and run theLake." >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "Start Docker Desktop or the Docker daemon, then retry." >&2; exit 1; }
+if [[ "$(uname -s)" == "Linux" ]]; then
+  export THELAKE_QUICKSTART_AGENT_NETWORK=host
+  agent_api_host="127.0.0.1"
+  agent_network_setting="THELAKE_QUICKSTART_AGENT_NETWORK=host "
+else
+  agent_api_host="host.docker.internal"
+  agent_network_setting=""
+fi
 
 choose_port() {
   python3 - "$1" "${2:-}" <<'PY'
@@ -88,5 +96,5 @@ printf '%s\n' "$THELAKE_API_URL" > warehouse/quickstart/api_url
 
 echo "Starting theLake at http://${SOFTPROBE_LISTEN_ADDR}/explorer/"
 echo "Leave this terminal running. In another terminal, run:"
-echo "  python3 examples/quickstart/send_sample_trace.py"
+echo "  ${agent_network_setting}docker compose --project-name thelake-quickstart --file examples/quickstart/compose.yaml run --build --rm refund-agent --agent-name quickstart-refund-agent --api-url http://${agent_api_host}:${THELAKE_QUICKSTART_PORT}"
 exec make run

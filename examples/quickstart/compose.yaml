@@ -26,5 +26,14 @@ services:
     ports:
       - "127.0.0.1:${THELAKE_QUICKSTART_RUNNER_PORT:-18081}:8081"
 
+  refund-agent:
+    profiles: [demo-agent]
+    network_mode: ${THELAKE_QUICKSTART_AGENT_NETWORK:-bridge}
+    build:
+      context: ./agent
+    environment:
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:?Set GOOGLE_API_KEY before running the demo agent}
+      GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-2.5-flash}
+
 volumes:
   postgres-data:

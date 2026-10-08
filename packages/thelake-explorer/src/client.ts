@@ -6,6 +6,8 @@ export type ExplorerConfig = {
   /** API root, for example `/v1` or `/api/thelake/v1`. */
   apiBasePath: string;
   auth?: AuthProvider;
+  /** Optional workspace-scoped browser key for chat history persistence. */
+  chatStorageKey?: string;
   fetch?: typeof fetch;
 };
 
@@ -29,7 +31,7 @@ export type Observation = {
   output_tokens?: number | null; total_tokens?: number | null; total_cost?: number | null;
   input?: unknown; output?: unknown; attributes?: Record<string, unknown>;
   events?: Array<{ name: string; timestamp?: string; attributes?: Record<string, unknown> }>;
-  scores?: Array<{ score_id: string; name: string; data_type: string; source?: string; span_id?: string | null; numeric_value?: number | null; string_value?: string | null; boolean_value?: boolean | null; comment?: string | null }>;
+  scores?: ScoreRecord[];
 };
 export type SessionDetail = {
   session_id: string; from: string; to: string; trace_count: number; span_count: number;
@@ -37,7 +39,7 @@ export type SessionDetail = {
 };
 export type ScoreRecord = {
   score_id: string; name: string; data_type: string; source?: string; span_id?: string | null; numeric_value?: number | null;
-  string_value?: string | null; boolean_value?: boolean | null; comment?: string | null;
+  string_value?: string | null; boolean_value?: boolean | null; comment?: string | null; config_id?: string | null;
 };
 
 export type BehaviorEvaluator = {

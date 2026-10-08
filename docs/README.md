@@ -25,9 +25,9 @@ Concepts and runtime design (read for understanding, not step-by-step).
 
 ## How-to
 
-- [5-minute quickstart](quickstart.md) — send a sample agent trace and see an online evaluation result
+- [5-minute quickstart](quickstart.md) — create a check in chat, run a Gemini sample agent, and inspect the result
 - [Instrument applications](how-to/instrumentation.md)
-- [Use Explorer](how-to/explorer.md) — session/trace UI at `/explorer/`
+- [Use Explorer](how-to/explorer.md) — browser chat and session/trace UI at `/explorer/`
 - [Use Slack behavior checks](how-to/slack-evaluator.md) — author checks and receive online evaluation failures in threads
 - [Apply schema promotion](how-to/promotion.md)
 - [Query DuckLake locally](how-to/adhoc-duckdb.md)
