@@ -32,6 +32,10 @@ Product goals: [`docs/architecture/goals.md`](docs/architecture/goals.md).
 Architecture: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 Full index: [`docs/README.md`](docs/README.md).
 
+New here? Try the [5-minute quickstart](docs/quickstart.md) to send a sample
+agent trace, create a behavior check, and see an evaluation failure in
+Explorer. First builds can take longer.
+
 ## Architecture
 
 DuckLake is the only durable telemetry backend. The catalog is PostgreSQL in

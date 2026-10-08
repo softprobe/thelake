@@ -4,6 +4,9 @@ Explorer is the self-hosted session and trace UI for thelake. Source lives in
 [`packages/thelake-explorer`](../../packages/thelake-explorer/). `make build`
 embeds the SPA into the binary; thelake serves it at `/explorer/`.
 
+For a fast first run that sends a sample trace and shows a behavior check, see
+the [5-minute quickstart](../quickstart.md).
+
 ## Prerequisites
 
 ```bash

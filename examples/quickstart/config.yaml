@@ -1,0 +1,23 @@
+server:
+  host: 127.0.0.1
+  port: 8090
+  max_body_size: 104857600
+
+ducklake:
+  metadata_path: "host=127.0.0.1 port=55432 dbname=ducklake user=ducklake password=ducklake"
+  data_path: "./warehouse/quickstart/data/"
+  catalog_alias: thelake_quickstart
+  metadata_schema: thelake_quickstart
+  extension_path: ./target/ducklake-extension/ducklake.duckdb_extension
+  workspace_scope_mode: shared
+  writer_pool_size: 1
+
+maintenance:
+  enabled: false
+  metadata_enabled: false
+
+query:
+  max_connections: 2
+
+session_summary:
+  reducer_interval_ms: 250
