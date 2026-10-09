@@ -218,12 +218,13 @@ async fn process_traces_inner(
 
     for resource_spans in request.resource_spans {
         let resource_attributes = SpanData::extract_resource_attributes(&resource_spans);
-        let resource_agent_name = effective_agent_name(
-            auth_tenant
-                .as_ref()
-                .and_then(|tenant| tenant.agent_name.as_deref()),
-            resource_attributes.get("service.name").map(String::as_str),
-        );
+        let authenticated_agent_name = auth_tenant
+            .as_ref()
+            .and_then(|tenant| tenant.agent_name.as_deref());
+        let resource_agent_name = resource_attributes
+            .get(crate::models::attr_keys::sp::AGENT_NAME)
+            .map(String::as_str);
+        let service_name = resource_attributes.get("service.name").map(String::as_str);
         if app.is_none() {
             app = resource_attributes.get("service.name").cloned();
         }
@@ -250,7 +251,15 @@ async fn process_traces_inner(
                         .attributes
                         .insert(crate::models::span::LINKS_ATTRIBUTE.into(), links);
                 }
-                span_data.agent_name = resource_agent_name.clone();
+                span_data.agent_name = effective_agent_name(
+                    authenticated_agent_name,
+                    span_data
+                        .attributes
+                        .get(crate::models::attr_keys::sp::AGENT_NAME)
+                        .map(String::as_str)
+                        .or(resource_agent_name),
+                    service_name,
+                );
                 spans.push(span_data);
             }
         }
@@ -301,10 +310,12 @@ async fn process_traces_inner(
 
 fn effective_agent_name(
     authenticated_name: Option<&str>,
+    declared_agent_name: Option<&str>,
     service_name: Option<&str>,
 ) -> Option<String> {
     authenticated_name
         .filter(|name| !name.trim().is_empty())
+        .or_else(|| declared_agent_name.filter(|name| !name.trim().is_empty()))
         .or_else(|| service_name.filter(|name| !name.trim().is_empty()))
         .map(str::to_owned)
 }
@@ -426,18 +437,30 @@ mod agent_identity_tests {
     #[test]
     fn authenticated_agent_name_takes_precedence_over_service_name() {
         assert_eq!(
-            effective_agent_name(Some("registered-agent"), Some("service-name")),
+            effective_agent_name(
+                Some("registered-agent"),
+                Some("declared-agent"),
+                Some("service-name")
+            ),
             Some("registered-agent".into())
+        );
+    }
+
+    #[test]
+    fn declared_agent_name_takes_precedence_over_service_name() {
+        assert_eq!(
+            effective_agent_name(None, Some("agent-alpha-e2e"), Some("explorer-e2e")),
+            Some("agent-alpha-e2e".into())
         );
     }
 
     #[test]
     fn service_name_identifies_local_agents_without_authenticated_identity() {
         assert_eq!(
-            effective_agent_name(None, Some("quickstart-refund-agent")),
+            effective_agent_name(None, None, Some("quickstart-refund-agent")),
             Some("quickstart-refund-agent".into())
         );
-        assert_eq!(effective_agent_name(None, Some("  ")), None);
+        assert_eq!(effective_agent_name(None, None, Some("  ")), None);
     }
 
     #[test]
