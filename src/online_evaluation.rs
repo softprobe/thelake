@@ -26,6 +26,7 @@ static EVALUATION_SLOTS: Lazy<Arc<tokio::sync::Semaphore>> =
 const DEFAULT_SAMPLE_INTERVAL_SECONDS: u64 = 60;
 const SAMPLE_INTERVAL_ENV: &str = "THELAKE_EVALUATION_SAMPLE_INTERVAL_SECONDS";
 static SAMPLE_INTERVAL: Lazy<Duration> = Lazy::new(configured_sample_interval);
+type TraceWindow = (chrono::DateTime<Utc>, chrono::DateTime<Utc>, Option<String>);
 
 #[derive(Clone, Copy)]
 struct ScheduledTrace {
@@ -72,7 +73,7 @@ struct EvidenceReference {
 /// in-process and score IDs remain stable across retried runner calls.
 pub(crate) async fn schedule_for_traces(
     ws: Arc<WorkspaceContext>,
-    trace_windows: HashMap<String, (chrono::DateTime<Utc>, chrono::DateTime<Utc>, Option<String>)>,
+    trace_windows: HashMap<String, TraceWindow>,
 ) -> anyhow::Result<()> {
     let Some(endpoint) = std::env::var("THELAKE_EVALUATION_RUNNER_URL")
         .ok()
@@ -161,17 +162,20 @@ pub(crate) async fn schedule_for_traces(
                 }
                 tokio::time::sleep(quiet_delay - elapsed).await;
             }
-            if let Err(error) = evaluate_trace(
+            let context = EvaluationContext {
                 ws,
+                endpoint: &endpoint,
+                token: &token,
+                sampled: &LAST_SAMPLED,
+                sample_key: &sample_key,
+                sample_interval,
+            };
+            if let Err(error) = evaluate_trace(
+                context,
                 &trace_id,
                 observed_from - ChronoDuration::days(7),
                 observed_to + ChronoDuration::days(1),
                 &definitions,
-                &endpoint,
-                &token,
-                &LAST_SAMPLED,
-                &sample_key,
-                sample_interval,
             )
             .await
             {
@@ -247,18 +251,30 @@ fn claim_sample_window_if_eligible(
     eligible && claim_sample_window(sampled, key, now, interval)
 }
 
-async fn evaluate_trace(
+struct EvaluationContext<'a> {
     ws: Arc<WorkspaceContext>,
+    endpoint: &'a str,
+    token: &'a str,
+    sampled: &'a dashmap::DashMap<String, std::time::Instant>,
+    sample_key: &'a str,
+    sample_interval: Duration,
+}
+
+async fn evaluate_trace(
+    context: EvaluationContext<'_>,
     trace_id: &str,
     from: chrono::DateTime<Utc>,
     to: chrono::DateTime<Utc>,
     definitions: &[EvaluatorDefinition],
-    endpoint: &str,
-    token: &str,
-    sampled: &dashmap::DashMap<String, std::time::Instant>,
-    sample_key: &str,
-    sample_interval: Duration,
 ) -> anyhow::Result<()> {
+    let EvaluationContext {
+        ws,
+        endpoint,
+        token,
+        sampled,
+        sample_key,
+        sample_interval,
+    } = context;
     let configs = ws.query().list_score_configs().await?;
     let stored = configs
         .into_iter()

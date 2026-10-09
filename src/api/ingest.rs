@@ -333,59 +333,6 @@ fn record_trace_window(
     }
 }
 
-#[cfg(test)]
-mod agent_identity_tests {
-    use super::effective_agent_name;
-
-    #[test]
-    fn authenticated_agent_name_takes_precedence_over_service_name() {
-        assert_eq!(
-            effective_agent_name(Some("registered-agent"), Some("service-name")),
-            Some("registered-agent".into())
-        );
-    }
-
-    #[test]
-    fn service_name_identifies_local_agents_without_authenticated_identity() {
-        assert_eq!(
-            effective_agent_name(None, Some("quickstart-refund-agent")),
-            Some("quickstart-refund-agent".into())
-        );
-        assert_eq!(effective_agent_name(None, Some("  ")), None);
-    }
-
-    #[test]
-    fn multiple_resources_keep_agent_identity_per_trace() {
-        use super::record_trace_window;
-        use chrono::{DateTime, Utc};
-        use std::collections::HashMap;
-
-        let start = DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let mut windows = HashMap::new();
-        record_trace_window(
-            &mut windows,
-            "trace-support",
-            true,
-            start,
-            start,
-            Some("support-agent"),
-        );
-        record_trace_window(
-            &mut windows,
-            "trace-billing",
-            true,
-            start,
-            start,
-            Some("billing-agent"),
-        );
-
-        assert_eq!(windows["trace-support"].2.as_deref(), Some("support-agent"));
-        assert_eq!(windows["trace-billing"].2.as_deref(), Some("billing-agent"));
-    }
-}
-
 async fn process_logs(
     state: AppState,
     request: ExportLogsServiceRequest,
@@ -468,4 +415,55 @@ async fn process_logs_inner(
         log_count, body_size
     );
     Ok((log_count, app))
+}
+
+#[cfg(test)]
+mod agent_identity_tests {
+    use super::{effective_agent_name, record_trace_window};
+    use chrono::{DateTime, Utc};
+    use std::collections::HashMap;
+
+    #[test]
+    fn authenticated_agent_name_takes_precedence_over_service_name() {
+        assert_eq!(
+            effective_agent_name(Some("registered-agent"), Some("service-name")),
+            Some("registered-agent".into())
+        );
+    }
+
+    #[test]
+    fn service_name_identifies_local_agents_without_authenticated_identity() {
+        assert_eq!(
+            effective_agent_name(None, Some("quickstart-refund-agent")),
+            Some("quickstart-refund-agent".into())
+        );
+        assert_eq!(effective_agent_name(None, Some("  ")), None);
+    }
+
+    #[test]
+    fn multiple_resources_keep_agent_identity_per_trace() {
+        let start = DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut windows = HashMap::new();
+        record_trace_window(
+            &mut windows,
+            "trace-support",
+            true,
+            start,
+            start,
+            Some("support-agent"),
+        );
+        record_trace_window(
+            &mut windows,
+            "trace-billing",
+            true,
+            start,
+            start,
+            Some("billing-agent"),
+        );
+
+        assert_eq!(windows["trace-support"].2.as_deref(), Some("support-agent"));
+        assert_eq!(windows["trace-billing"].2.as_deref(), Some("billing-agent"));
+    }
 }
