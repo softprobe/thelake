@@ -11,6 +11,11 @@ current system as a persistent Lisa agent: Lisa's durable workspace home and
 background learner are not implemented. Explorer chat currently creates a
 behavior evaluator, not a `POLICY.md` memory.
 
+The Explorer area is labeled **Chat**, but its composer is not connected to a
+conversational model. It is a scripted criteria/agent-name wizard that calls
+the evaluator APIs and polls for results. Gemini is invoked later by the
+online evaluation runner when it judges a matching trace.
+
 ## Choose the verification level
 
 - For a deterministic local test without provider calls, run the dogfood

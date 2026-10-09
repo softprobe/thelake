@@ -3,8 +3,11 @@
 Describe a behavior you want to catch, run a real Gemini-powered sample agent,
 and see the evaluation result attached to its trace. The included refund agent
 is deliberately flawed so the check can demonstrate a real detected issue.
-The walkthrough uses the built-in browser chat; it does not require a Slack
-workspace or Slack admin access.
+The walkthrough uses Explorer's browser-based behavior-check wizard; it does
+not require a Slack workspace or Slack admin access. The UI labels this area
+**Chat**, but it is not a conversational AI agent: its assistant messages are
+fixed prompts for entering criteria and an agent name. Gemini is used later by
+the evaluation runner to judge traces after the sample agent runs.
 
 The quickstart runs theLake and Postgres locally. The evaluation runner sends
 captured prompt, response, and tool evidence to Gemini. Set a Gemini API key
@@ -38,34 +41,38 @@ The script generates a local runner token for this session and binds theLake
 and runner to localhost. It uses a dedicated quickstart config and local data
 directory; it does not change your normal `config.yaml`.
 
-Open the Explorer URL printed in the first terminal. In **Chat**, describe
-this behavior:
+Open the Explorer URL printed in the first terminal. In **Chat**, enter the
+behavior-check criteria when the wizard prompts you:
 
 > Before issuing a refund, verify the ticket is eligible and explain the result.
 
-When TheLake asks which agent to watch, enter `quickstart-refund-agent`.
+When the wizard prompts for an agent, enter `quickstart-refund-agent`.
 Review the check, confirm the Gemini data notice, and choose **Activate check**.
 The check applies to new matching traces.
 
 ## Run the sample agent
 
 In another terminal, export the same Gemini key and run the command printed by
-the first terminal. It uses the right local-network address for your platform,
-calls Gemini with a real tool declaration, invokes the refund tool, and exports
-the resulting OTLP spans to your local theLake.
+the first terminal. The command loads the generated runner token from the
+local-only `warehouse/quickstart/compose.env` file, so it does not need to be
+copied between terminals. It uses the right local-network address for your
+platform, calls Gemini with a real tool declaration, invokes the refund tool,
+and exports the resulting OTLP spans to your local theLake.
 The sample uses Softprobe's Python auto-instrumentation wrapper through
 Gemini's OpenAI-compatible endpoint; only the application-owned refund tool
 execution is instrumented explicitly.
 The demo agent makes live Gemini calls but its refund tool only returns a local
 demo result; it does not connect to a ticketing or payment system.
 
-The command prints the session ID. The chat checks recent traces automatically;
-it should show a `fail` result with
-the judge's explanation and links to the session and trace evidence.
+The command prints the session ID. Explorer's monitoring view polls for recent
+evaluation results; it should show a `fail` result with the judge's explanation
+and links to the session and trace evidence. The composer does not call Gemini
+or interpret follow-up questions.
 
 That is the core loop: a live agent sends OpenTelemetry traces, theLake applies
-your plain-language behavior check, and the result returns to the conversation
-with links to the stored trace evidence.
+your plain-language behavior check through the online evaluation runner, and
+Explorer displays the trace-linked result. The wizard creates the check; it
+does not act as a chat agent.
 
 ## Next steps
 
@@ -83,6 +90,7 @@ Press Ctrl+C in the first terminal to stop theLake. Stop the quickstart
 containers with:
 
 ```bash
-docker compose --project-name thelake-quickstart \
+docker compose --env-file warehouse/quickstart/compose.env \
+  --project-name thelake-quickstart \
   --file examples/quickstart/compose.yaml down -v
 ```

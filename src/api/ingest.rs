@@ -218,6 +218,13 @@ async fn process_traces_inner(
 
     for resource_spans in request.resource_spans {
         let resource_attributes = SpanData::extract_resource_attributes(&resource_spans);
+        let authenticated_agent_name = auth_tenant
+            .as_ref()
+            .and_then(|tenant| tenant.agent_name.as_deref());
+        let resource_agent_name = resource_attributes
+            .get(crate::models::attr_keys::sp::AGENT_NAME)
+            .map(String::as_str);
+        let service_name = resource_attributes.get("service.name").map(String::as_str);
         if app.is_none() {
             app = resource_attributes.get("service.name").cloned();
         }
@@ -244,6 +251,15 @@ async fn process_traces_inner(
                         .attributes
                         .insert(crate::models::span::LINKS_ATTRIBUTE.into(), links);
                 }
+                span_data.agent_name = effective_agent_name(
+                    authenticated_agent_name,
+                    span_data
+                        .attributes
+                        .get(crate::models::attr_keys::sp::AGENT_NAME)
+                        .map(String::as_str)
+                        .or(resource_agent_name),
+                    service_name,
+                );
                 spans.push(span_data);
             }
         }
@@ -254,33 +270,30 @@ async fn process_traces_inner(
         .map(|t| t.workspace_id.clone())
         .unwrap_or_default();
     let agent_id = auth_tenant.as_ref().and_then(|t| t.agent_id.clone());
-    let agent_name = auth_tenant.as_ref().and_then(|t| t.agent_name.clone());
 
     for span in &mut spans {
         span.workspace_id = Some(tid.clone());
         span.agent_id = agent_id.clone();
-        span.agent_name = agent_name.clone();
     }
 
     let span_count = spans.len();
     let mut trace_windows = std::collections::HashMap::new();
     for span in &spans {
-        let bounds = trace_windows
-            .entry(span.trace_id.clone())
-            .or_insert((span.timestamp, span.end_timestamp.unwrap_or(span.timestamp)));
-        bounds.0 = bounds.0.min(span.timestamp);
-        bounds.1 = bounds.1.max(span.end_timestamp.unwrap_or(span.timestamp));
+        record_trace_window(
+            &mut trace_windows,
+            &span.trace_id,
+            span.parent_span_id.is_none(),
+            span.timestamp,
+            span.end_timestamp.unwrap_or(span.timestamp),
+            span.agent_name.as_deref(),
+        );
     }
 
     let ws = state.workspace_for_id(&tid).await?;
     let write_start = std::time::Instant::now();
     ws.ingest().add_spans(spans, body_size).await?;
-    if let Err(error) = crate::online_evaluation::schedule_for_traces(
-        ws.clone(),
-        trace_windows,
-        agent_name.as_deref(),
-    )
-    .await
+    if let Err(error) =
+        crate::online_evaluation::schedule_for_traces(ws.clone(), trace_windows).await
     {
         warn!("failed to schedule automatic trace evaluation: {error}");
     }
@@ -293,6 +306,42 @@ async fn process_traces_inner(
         span_count, body_size
     );
     Ok((span_count, app))
+}
+
+fn effective_agent_name(
+    authenticated_name: Option<&str>,
+    declared_agent_name: Option<&str>,
+    service_name: Option<&str>,
+) -> Option<String> {
+    authenticated_name
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| declared_agent_name.filter(|name| !name.trim().is_empty()))
+        .or_else(|| service_name.filter(|name| !name.trim().is_empty()))
+        .map(str::to_owned)
+}
+
+type TraceWindow = (
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+    Option<String>,
+);
+
+fn record_trace_window(
+    windows: &mut std::collections::HashMap<String, TraceWindow>,
+    trace_id: &str,
+    is_root: bool,
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    agent_name: Option<&str>,
+) {
+    let bounds = windows
+        .entry(trace_id.to_owned())
+        .or_insert((start, end, None));
+    bounds.0 = bounds.0.min(start);
+    bounds.1 = bounds.1.max(end);
+    if is_root {
+        bounds.2 = agent_name.map(str::to_owned);
+    }
 }
 
 async fn process_logs(
@@ -377,4 +426,67 @@ async fn process_logs_inner(
         log_count, body_size
     );
     Ok((log_count, app))
+}
+
+#[cfg(test)]
+mod agent_identity_tests {
+    use super::{effective_agent_name, record_trace_window};
+    use chrono::{DateTime, Utc};
+    use std::collections::HashMap;
+
+    #[test]
+    fn authenticated_agent_name_takes_precedence_over_service_name() {
+        assert_eq!(
+            effective_agent_name(
+                Some("registered-agent"),
+                Some("declared-agent"),
+                Some("service-name")
+            ),
+            Some("registered-agent".into())
+        );
+    }
+
+    #[test]
+    fn declared_agent_name_takes_precedence_over_service_name() {
+        assert_eq!(
+            effective_agent_name(None, Some("agent-alpha-e2e"), Some("explorer-e2e")),
+            Some("agent-alpha-e2e".into())
+        );
+    }
+
+    #[test]
+    fn service_name_identifies_local_agents_without_authenticated_identity() {
+        assert_eq!(
+            effective_agent_name(None, None, Some("quickstart-refund-agent")),
+            Some("quickstart-refund-agent".into())
+        );
+        assert_eq!(effective_agent_name(None, None, Some("  ")), None);
+    }
+
+    #[test]
+    fn multiple_resources_keep_agent_identity_per_trace() {
+        let start = DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut windows = HashMap::new();
+        record_trace_window(
+            &mut windows,
+            "trace-support",
+            true,
+            start,
+            start,
+            Some("support-agent"),
+        );
+        record_trace_window(
+            &mut windows,
+            "trace-billing",
+            true,
+            start,
+            start,
+            Some("billing-agent"),
+        );
+
+        assert_eq!(windows["trace-support"].2.as_deref(), Some("support-agent"));
+        assert_eq!(windows["trace-billing"].2.as_deref(), Some("billing-agent"));
+    }
 }

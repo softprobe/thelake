@@ -50,10 +50,18 @@ if [[ ! -f target/ducklake-extension/ducklake.duckdb_extension ]]; then
 fi
 
 export THELAKE_EVALUATION_RUNNER_TOKEN="${THELAKE_EVALUATION_RUNNER_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')}"
+if [[ ! "$THELAKE_EVALUATION_RUNNER_TOKEN" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+  echo "THELAKE_EVALUATION_RUNNER_TOKEN must contain only letters, numbers, dots, underscores, or hyphens." >&2
+  exit 1
+fi
 export THELAKE_QUICKSTART_DB_PORT="$(choose_port 55432 "${THELAKE_QUICKSTART_DB_PORT:-}")"
 export THELAKE_QUICKSTART_RUNNER_PORT="$(choose_port 18081 "${THELAKE_QUICKSTART_RUNNER_PORT:-}")"
 export THELAKE_QUICKSTART_PORT="$(choose_port 8090 "${THELAKE_QUICKSTART_PORT:-}")"
-compose=(docker compose --project-name thelake-quickstart --file examples/quickstart/compose.yaml)
+compose_env_file=warehouse/quickstart/compose.env
+mkdir -p "$(dirname "$compose_env_file")"
+(umask 077; printf 'THELAKE_EVALUATION_RUNNER_TOKEN=%s\n' "$THELAKE_EVALUATION_RUNNER_TOKEN" > "$compose_env_file")
+chmod 600 "$compose_env_file"
+compose=(docker compose --env-file "$compose_env_file" --project-name thelake-quickstart --file examples/quickstart/compose.yaml)
 "${compose[@]}" up --build --detach
 
 echo "Waiting for Postgres..."
@@ -96,5 +104,5 @@ printf '%s\n' "$THELAKE_API_URL" > warehouse/quickstart/api_url
 
 echo "Starting theLake at http://${SOFTPROBE_LISTEN_ADDR}/explorer/"
 echo "Leave this terminal running. In another terminal, run:"
-echo "  ${agent_network_setting}docker compose --project-name thelake-quickstart --file examples/quickstart/compose.yaml run --build --rm refund-agent --agent-name quickstart-refund-agent --api-url http://${agent_api_host}:${THELAKE_QUICKSTART_PORT}"
+echo "  ${agent_network_setting}docker compose --env-file ${compose_env_file} --project-name thelake-quickstart --file examples/quickstart/compose.yaml run --build --rm refund-agent --agent-name quickstart-refund-agent --api-url http://${agent_api_host}:${THELAKE_QUICKSTART_PORT}"
 exec make run
