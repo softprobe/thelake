@@ -50,9 +50,11 @@ The check applies to new matching traces.
 ## Run the sample agent
 
 In another terminal, export the same Gemini key and run the command printed by
-the first terminal. It uses the right local-network address for your platform,
-calls Gemini with a real tool declaration, invokes the refund tool, and exports
-the resulting OTLP spans to your local theLake.
+the first terminal. The command loads the generated runner token from the
+local-only `warehouse/quickstart/compose.env` file, so it does not need to be
+copied between terminals. It uses the right local-network address for your
+platform, calls Gemini with a real tool declaration, invokes the refund tool,
+and exports the resulting OTLP spans to your local theLake.
 The sample uses Softprobe's Python auto-instrumentation wrapper through
 Gemini's OpenAI-compatible endpoint; only the application-owned refund tool
 execution is instrumented explicitly.
@@ -83,6 +85,7 @@ Press Ctrl+C in the first terminal to stop theLake. Stop the quickstart
 containers with:
 
 ```bash
-docker compose --project-name thelake-quickstart \
+docker compose --env-file warehouse/quickstart/compose.env \
+  --project-name thelake-quickstart \
   --file examples/quickstart/compose.yaml down -v
 ```
