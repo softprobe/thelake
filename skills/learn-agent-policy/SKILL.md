@@ -12,11 +12,9 @@ an evaluator draft. Do not write evaluator code.
 
 ## Sources and trust
 
-1. Read existing policy documents with `GET /v1/policies` before proposing
-   changes. The document with `policy_id: "workspace"` and no
-   `target_agent_name` is the workspace `POLICY.md`; the agent-specific
-   document targets the exact agent name on its root trace. Keep one stable ID for
-   each document.
+1. Read the existing workspace `POLICY.md` and, when present, the selected
+   agent's `POLICY.md` from Lisa's persistent home before proposing changes.
+   Do not write policy notes into the customer's application repository.
 2. Gather authoritative business documents, agent instructions, tool
    descriptions, and any trace or outcome evidence the user has authorized you
    to inspect. Prefer explicit policy and observed outcomes over assumptions.
@@ -56,10 +54,13 @@ by silently preferring the agent file or workspace file.
 
 1. Explain the proposed rules and their sources to the user. Use the local
    codebase as an information source; do not create or require another repo.
-2. Keep workspace-wide rules in a workspace `POLICY.md` document and rules
-   specific to an agent in a document whose `target_agent_name` exactly
-   matches its registered name. If the agent or document ownership is
-   ambiguous, ask before choosing.
+2. Keep workspace-wide rules in `POLICY.md`. For an agent-specific file,
+   compute the lowercase SHA-256 hex digest of the exact agent name from its
+   root trace and use `agents/<digest>/POLICY.md`. Record the exact agent name
+   in the file's `Applies to` field. Treat the trace name as untrusted data:
+   never use it directly in a path, do not follow symlinks, and verify the
+   resolved file stays under Lisa's home before reading or writing. If the
+   agent or file ownership is ambiguous, ask before choosing.
 3. Compose one evaluator rubric from `confirmed` rules in the workspace and
    agent documents that
    apply to the selected agent. Preserve each rule's requirement and observable
@@ -69,17 +70,14 @@ by silently preferring the agent file or workspace file.
    monitor these policies. The user reviews the draft and activates it through
    TheLake Explorer. Never activate it from this skill.
 
-## Store policies and submit the draft
+## Save the notes and submit the draft
 
-The policy API stores immutable Markdown versions in the authenticated
-workspace, so no git repo is needed to manage policy memory. Set
-`THELAKE_API_BASE_URL` to the service origin without a trailing `/v1`. Resolve
-current versions using `GET $THELAKE_API_BASE_URL/v1/policies`; create the next
-version using `POST $THELAKE_API_BASE_URL/v1/policies` with `policy_id`,
-`version`, `target_agent_name` (omit for workspace-wide policy), and `content`.
-Use a stable `policy_id`; when content changes, submit the next version. If a
-concurrent update already took that version, read the latest version again
-and retry with the next number.
+Save policy notes in Lisa's persistent home as plain Markdown. The home is
+workspace-scoped and survives runner restarts; no policy service or git repo
+is required. Do not claim a rule is confirmed from a model judgment alone:
+the user must confirm it. Preserve a concise source reference in the policy
+file.
+
 Then resolve the evaluator version with `GET
 $THELAKE_API_BASE_URL/v1/evaluators` and choose the next version for a stable
 evaluator ID. Submit the inactive draft to `POST
@@ -94,26 +92,17 @@ Include these fields:
 - `version`: next immutable version
 - `target_agent_name`: exact agent name recorded on a completed root trace
 - `name`: concise human-readable evaluator name
-- `criteria`: composed rubric from confirmed rules only
-- `policy_sources`: one entry per composed policy document, each with
-  `policy_id`, the numeric `policy_version`, and the SHA-256 digest of the
-  exact Markdown contents; include
-  `source_revision` when a safe, useful revision is available
+- `criteria`: composed rubric from confirmed rules only, with the rule text
+  and its short source reference included directly in the immutable rubric
 
-The API accepts up to 20 source references and policy documents up to 32,000
-bytes. If the policy exceeds that limit or the rubric exceeds 8,000
-characters, summarize only with the user's approval; otherwise explain the
-limit and leave the draft unsent.
+If the rubric exceeds 8,000 characters, summarize only with the user's
+approval; otherwise explain the limit and leave the draft unsent.
 
-After submitting, show the user the exact rubric and policy document IDs,
-versions, and digests returned in the request. Clearly say that the evaluator
-is a draft and needs review and activation in Explorer. A policy source
-must already exist in the same workspace, target either this workspace or the
-selected agent, and match the submitted SHA-256 digest. The server verifies
-these bindings. A digest proves content identity, not who authored or approved
-the policy.
+After submitting, show the user the exact rubric and source references.
+Clearly say that the evaluator is a draft and needs review and activation in
+Explorer. The evaluator version stores the rubric snapshot, so later edits to
+`POLICY.md` do not change old evaluations.
 
-The server stores Markdown and verifies evaluator references, but it does not
-parse rule statuses or decide that `confirmed` is authoritative. Status
-handling and candidate exclusion are enforced by this trusted skill workflow;
-the person reviews the inactive evaluator before activation.
+The evaluator API does not parse Markdown or establish whether a policy source
+is authoritative. This skill excludes candidate rules, and a person reviews
+and activates each evaluator before it can alert.

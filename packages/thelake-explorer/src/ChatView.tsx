@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BehaviorEvaluator, ExplorerApi, Observation, PolicyDocument, ScoreRecord } from "./client";
+import type { BehaviorEvaluator, ExplorerApi, Observation, ScoreRecord } from "./client";
 import "./ChatView.css";
 
 type ChatStage = "criteria" | "agent" | "confirm" | "monitoring";
@@ -85,7 +85,6 @@ export function ChatView({ api, storageKey, onOpenSession }: { api: ExplorerApi;
   const [activationConsent, setActivationConsent] = useState(false);
   const [activationError, setActivationError] = useState<string>();
   const [evaluators, setEvaluators] = useState<BehaviorEvaluator[]>([]);
-  const [policies, setPolicies] = useState<PolicyDocument[]>([]);
   const composer = useRef<HTMLTextAreaElement>(null);
   const threadsRef = useRef(threads);
   const refreshingRef = useRef(false);
@@ -103,17 +102,7 @@ export function ChatView({ api, storageKey, onOpenSession }: { api: ExplorerApi;
 
   useEffect(() => {
     api.listEvaluators().then(setEvaluators).catch(() => setEvaluators([]));
-    api.listPolicies().then(setPolicies).catch(() => setPolicies([]));
   }, [api]);
-
-  const latestPolicies = useMemo(() => {
-    const latest = new Map<string, PolicyDocument>();
-    for (const policy of policies) {
-      const key = `${policy.policy_id}:${policy.target_agent_name ?? "workspace"}`;
-      if (!latest.has(key) || latest.get(key)!.version < policy.version) latest.set(key, policy);
-    }
-    return [...latest.values()].sort((left, right) => left.policy_id.localeCompare(right.policy_id));
-  }, [policies]);
 
   const activeEvaluatorName = useMemo(() => active?.criteria ? checkName(active.criteria) : "", [active?.criteria]);
 
@@ -271,20 +260,11 @@ export function ChatView({ api, storageKey, onOpenSession }: { api: ExplorerApi;
             </button>
           ))}
         </nav>
-        <section className="tle-chat-policies" aria-label="Policy memory">
-          <h3>Policy memory</h3>
-          {latestPolicies.length === 0 ? <span>No policies yet</span> : latestPolicies.slice(0, 8).map((policy) => (
-            <details key={`${policy.policy_id}:${policy.target_agent_name ?? "workspace"}`}>
-              <summary><b>{policy.policy_id}</b><small>{policy.target_agent_name ?? "Workspace"} · v{policy.version}</small></summary>
-              <pre>{policy.content}</pre>
-            </details>
-          ))}
-        </section>
         <section className="tle-chat-checks" aria-label="Behavior checks">
           <h3>Behavior checks</h3>
           {evaluators.length === 0 ? <span>No checks yet</span> : evaluators.slice(0, 8).map((evaluator) => (
             <div key={`${evaluator.evaluator_id}:${evaluator.version}`}>
-              <span><b>{evaluator.name}</b><small>{evaluator.target_agent_name} · {evaluator.active ? "active" : "paused"}</small>{(evaluator.policy_sources?.length ?? 0) > 0 && <small>Verified against {evaluator.policy_sources!.length} policy document{evaluator.policy_sources!.length === 1 ? "" : "s"}</small>}</span>
+              <span><b>{evaluator.name}</b><small>{evaluator.target_agent_name} · {evaluator.active ? "active" : "paused"}</small></span>
               <button aria-label={`${evaluator.active ? "Pause" : "Activate"} ${evaluator.name}`} onClick={() => void toggleEvaluator(evaluator)}>{evaluator.active ? "Ⅱ" : "▶"}</button>
             </div>
           ))}
@@ -322,7 +302,6 @@ export function ChatView({ api, storageKey, onOpenSession }: { api: ExplorerApi;
           {pendingActivation && <article className="tle-chat-card" aria-label="Reactivate behavior check">
             <h3>Reactivate behavior check</h3>
             <dl><dt>Agent</dt><dd>{pendingActivation.target_agent_name}</dd><dt>What to check</dt><dd>{pendingActivation.criteria}</dd></dl>
-            {(pendingActivation.policy_sources?.length ?? 0) > 0 && <details><summary>Verified policy sources ({pendingActivation.policy_sources!.length})</summary><ul>{pendingActivation.policy_sources!.map((source) => <li key={`${source.policy_id}:${source.policy_version}`}><code>{source.policy_id}</code> · v{source.policy_version}{source.source_revision ? ` · reported revision ${source.source_revision}` : ""} · SHA-256 <code>{source.sha256}</code></li>)}</ul></details>}
             <div className="tle-chat-consent"><b>Gemini data notice</b><p>Activating sends captured prompts, responses, and tool data for this agent to Gemini. Common credential patterns are redacted; general personal data is not.</p>
               <label><input type="checkbox" checked={activationConsent} onChange={(event) => setActivationConsent(event.target.checked)} /> I understand and want to activate this check.</label>
             </div>

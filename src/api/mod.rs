@@ -14,7 +14,6 @@ pub mod fields;
 pub mod health;
 pub mod ingest;
 pub(crate) mod mapping;
-pub mod policies;
 pub mod scores;
 pub mod sessions;
 pub mod slack;
@@ -160,10 +159,6 @@ pub async fn create_router(
         .route(
             "/v1/evaluators",
             get(evaluators::list_evaluators).post(evaluators::create_evaluator),
-        )
-        .route(
-            "/v1/policies",
-            get(policies::list_policies).post(policies::create_policy),
         )
         .route(
             "/v1/evaluators/{evaluator_id}/versions/{version}/activate",

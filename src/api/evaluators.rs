@@ -13,7 +13,6 @@ use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::warn;
 
@@ -26,18 +25,6 @@ pub struct OrderedToolRequirement {
     pub action: String,
     #[serde(default = "default_true")]
     pub require_result_before_action: bool,
-}
-
-/// Client-supplied provenance for evaluator criteria composed from policy
-/// memory. These references are for review and audit; they are not trusted as
-/// proof that a policy is authoritative.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicySource {
-    pub policy_id: String,
-    pub policy_version: u32,
-    pub sha256: String,
-    #[serde(default)]
-    pub source_revision: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -55,8 +42,6 @@ pub struct EvaluatorDefinition {
     pub uncertainty_margin: f64,
     #[serde(default)]
     pub required_tool_order: Vec<OrderedToolRequirement>,
-    #[serde(default)]
-    pub policy_sources: Vec<PolicySource>,
     pub timestamp: DateTime<Utc>,
     pub active: bool,
     #[serde(skip)]
@@ -78,8 +63,6 @@ pub struct CreateEvaluatorRequest {
     pub uncertainty_margin: f64,
     #[serde(default)]
     pub required_tool_order: Vec<OrderedToolRequirement>,
-    #[serde(default)]
-    pub policy_sources: Vec<PolicySource>,
     #[serde(skip)]
     pub slack_channel_id: Option<String>,
     #[serde(skip)]
@@ -137,22 +120,6 @@ fn validate(request: &CreateEvaluatorRequest) -> Result<(), &'static str> {
     }) {
         return Err("tool names must be between 1 and 256 characters");
     }
-    if request.policy_sources.len() > 20 {
-        return Err("policy_sources cannot contain more than 20 references");
-    }
-    if request.policy_sources.iter().any(|source| {
-        source.policy_id.trim().is_empty()
-            || source.policy_id.len() > 256
-            || source.policy_version == 0
-            || source.sha256.len() != 64
-            || !source.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || source
-                .source_revision
-                .as_ref()
-                .is_some_and(|revision| revision.len() > 256)
-    }) {
-        return Err("policy source requires an id, version, and 64-character SHA-256 digest");
-    }
     Ok(())
 }
 
@@ -191,10 +158,6 @@ fn config_from_request(request: CreateEvaluatorRequest) -> ScoreConfig {
         (
             "thelake.evaluator.required_tool_order".to_string(),
             serde_json::to_string(&request.required_tool_order).unwrap_or_else(|_| "[]".into()),
-        ),
-        (
-            "thelake.evaluator.policy_sources".to_string(),
-            serde_json::to_string(&request.policy_sources).unwrap_or_else(|_| "[]".into()),
         ),
     ]);
     metadata.insert("thelake.evaluator.contract".into(), "1".into());
@@ -255,11 +218,6 @@ pub(crate) fn definition_from_config(config: ScoreConfig) -> Option<EvaluatorDef
         .get("thelake.evaluator.required_tool_order")
         .and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or_default();
-    let policy_sources = config
-        .metadata
-        .get("thelake.evaluator.policy_sources")
-        .and_then(|value| serde_json::from_str(value).ok())
-        .unwrap_or_default();
     Some(EvaluatorDefinition {
         evaluator_id,
         version,
@@ -269,7 +227,6 @@ pub(crate) fn definition_from_config(config: ScoreConfig) -> Option<EvaluatorDef
         threshold,
         uncertainty_margin,
         required_tool_order,
-        policy_sources,
         timestamp: config.timestamp,
         active: false,
         slack_channel_id: config
@@ -343,7 +300,6 @@ pub(crate) async fn save_evaluator(
     validate(&request).map_err(|message| bad_request(message.to_string()))?;
     let lock_key = format!("{}:evaluator:{}", ws.workspace_id(), request.evaluator_id);
     ws.with_score_config_write_lock(&lock_key, || async move {
-        validate_policy_sources(ws, &request).await?;
         let config = config_from_request(request);
         if let Some(stored) = ws
             .query()
@@ -367,7 +323,6 @@ pub(crate) async fn save_evaluator(
                 || definition.criteria != requested.criteria
                 || definition.threshold != requested.threshold
                 || definition.uncertainty_margin != requested.uncertainty_margin
-                || definition.policy_sources != requested.policy_sources
                 || definition.slack_channel_id != requested.slack_channel_id
                 || definition.slack_thread_ts != requested.slack_thread_ts
                 || definition.required_tool_order.len() != requested.required_tool_order.len()
@@ -411,47 +366,6 @@ pub(crate) async fn save_evaluator(
             Json(serde_json::json!({"error":"evaluator write lock unavailable"})),
         )
     })?
-}
-
-async fn validate_policy_sources(
-    ws: &crate::workspace::WorkspaceContext,
-    request: &CreateEvaluatorRequest,
-) -> Result<(), ApiError> {
-    for source in &request.policy_sources {
-        let Some(config) = ws
-            .query()
-            .get_score_config(&crate::api::policies::config_id(
-                &source.policy_id,
-                source.policy_version,
-            ))
-            .await
-            .map_err(|error| {
-                warn!("policy source lookup failed: {error}");
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({"error":"policy source lookup failed"})),
-                )
-            })?
-        else {
-            return Err(bad_request("evaluator policy source version not found"));
-        };
-        let policy = crate::api::policies::document_from_config(config)
-            .ok_or_else(|| bad_request("evaluator policy source version not found"))?;
-        if policy
-            .target_agent_name
-            .as_ref()
-            .is_some_and(|target| target != &request.target_agent_name)
-        {
-            return Err(bad_request(
-                "evaluator policy source targets a different agent",
-            ));
-        }
-        let digest = format!("{:x}", Sha256::digest(policy.content.as_bytes()));
-        if !digest.eq_ignore_ascii_case(&source.sha256) {
-            return Err(bad_request("evaluator policy source digest does not match"));
-        }
-    }
-    Ok(())
 }
 
 pub async fn list_evaluators(
@@ -665,7 +579,7 @@ async fn is_version_active(
 mod tests {
     use super::*;
 
-    fn request(policy_sources: Vec<PolicySource>) -> CreateEvaluatorRequest {
+    fn request() -> CreateEvaluatorRequest {
         CreateEvaluatorRequest {
             evaluator_id: "refund-check".into(),
             version: 1,
@@ -675,39 +589,19 @@ mod tests {
             threshold: 0.7,
             uncertainty_margin: 0.1,
             required_tool_order: Vec::new(),
-            policy_sources,
             slack_channel_id: None,
             slack_thread_ts: None,
         }
     }
 
-    fn source() -> PolicySource {
-        PolicySource {
-            policy_id: "workspace/refunds".into(),
-            policy_version: 1,
-            sha256: "a".repeat(64),
-            source_revision: Some("abc123".into()),
-        }
-    }
-
     #[test]
-    fn evaluator_definition_round_trips_policy_provenance() {
-        let original = request(vec![source()]);
+    fn evaluator_definition_round_trips_criteria_with_policy_source() {
+        let mut original = request();
+        original.criteria =
+            "Check refund eligibility before issuing a refund. Source: travel-policy.md § Refunds."
+                .into();
         let config = config_from_request(original);
         let definition = definition_from_config(config).expect("evaluator definition");
-        assert_eq!(definition.policy_sources, vec![source()]);
-    }
-
-    #[test]
-    fn policy_provenance_requires_a_sha256_digest() {
-        let mut invalid = source();
-        invalid.sha256 = "not-a-digest".into();
-        assert!(validate(&request(vec![invalid])).is_err());
-    }
-
-    #[test]
-    fn policy_provenance_is_bounded() {
-        let sources = (0..21).map(|_| source()).collect();
-        assert!(validate(&request(sources)).is_err());
+        assert!(definition.criteria.contains("travel-policy.md § Refunds"));
     }
 }

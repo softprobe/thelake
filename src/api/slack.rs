@@ -205,7 +205,6 @@ async fn create_rule_from_slack(
         threshold: 0.7,
         uncertainty_margin: 0.1,
         required_tool_order: Vec::new(),
-        policy_sources: Vec::new(),
         slack_channel_id: Some(channel.to_string()),
         slack_thread_ts: Some(thread_ts.to_string()),
     };

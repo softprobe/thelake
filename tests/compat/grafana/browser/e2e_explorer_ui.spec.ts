@@ -1,5 +1,4 @@
 import { expect, test } from '@playwright/test';
-import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -201,23 +200,17 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await expect(page.locator('.tle-payload').getByText('The customer is on the pro plan.', { exact: true })).toBeVisible();
 });
 
-test('policy-backed evaluator detects a live trace and exposes policy provenance', async ({ page, request }) => {
+test('Markdown policy rubric detects a live trace', async ({ page, request }) => {
   test.skip(process.env.THELAKE_EXPLORER_E2E_ONLINE !== '1', 'requires the real online-evaluation E2E stack');
   test.setTimeout(240_000);
 
   const agentName = `policy-refund-agent-${suffix}`;
   const evaluatorId = `policy-dogfood-${suffix}`;
-  const policyId = 'refund-eligibility';
   const policyContent = readFileSync(
     resolve(process.cwd(), '../../../../examples/policy-dogfood/refund-eligibility/POLICY.md'),
     'utf8',
   );
-  const policyDigest = createHash('sha256').update(policyContent).digest('hex');
-
-  const policyResponse = await request.post(`${backend}/v1/policies`, {
-    data: { policy_id: policyId, version: 1, target_agent_name: agentName, content: policyContent },
-  });
-  expect(policyResponse.status(), await policyResponse.text()).toBe(201);
+  const criteria = `${policyContent}\n\nEvaluate the session against this confirmed rule. Cite the source as examples/policy-dogfood/refund-eligibility/POLICY.md.`;
 
   const evaluatorResponse = await request.post(`${backend}/v1/evaluators`, {
     data: {
@@ -225,13 +218,12 @@ test('policy-backed evaluator detects a live trace and exposes policy provenance
       version: 1,
       target_agent_name: agentName,
       name: 'Refund policy dogfood',
-      criteria: 'Check eligibility and explain the result before issuing a refund. Never issue a refund for an ineligible ticket. For an eligible ticket, wait for customer confirmation before submitting the refund.',
-      policy_sources: [{ policy_id: policyId, policy_version: 1, sha256: policyDigest }],
+      criteria,
     },
   });
   expect(evaluatorResponse.status(), await evaluatorResponse.text()).toBe(201);
-  const savedEvaluator = await evaluatorResponse.json() as { policy_sources: Array<{ policy_id: string; policy_version: number; sha256: string }> };
-  expect(savedEvaluator.policy_sources).toEqual([{ policy_id: policyId, policy_version: 1, sha256: policyDigest, source_revision: null }]);
+  const savedEvaluator = await evaluatorResponse.json() as { criteria: string };
+  expect(savedEvaluator.criteria).toContain('examples/policy-dogfood/refund-eligibility/POLICY.md');
 
   const activation = await request.post(`${backend}/v1/evaluators/${evaluatorId}/versions/1/activate`);
   expect(activation.ok(), await activation.text()).toBeTruthy();
@@ -255,9 +247,7 @@ test('policy-backed evaluator detects a live trace and exposes policy provenance
 
   await page.goto(`${backend}/explorer/`);
   await expect(page.getByRole('region', { name: 'TheLake chat' })).toBeVisible();
-  await expect(page.getByText(policyId, { exact: true })).toBeVisible();
   await expect(page.getByText('Refund policy dogfood', { exact: true })).toBeVisible();
-  await expect(page.getByText('Verified against 1 policy document', { exact: true })).toBeVisible();
 });
 
 test('embedded web chat to real Gemini agent, online evaluator, persisted issue, and trace details', async ({ page, request }) => {

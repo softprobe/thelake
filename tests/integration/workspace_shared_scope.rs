@@ -232,35 +232,6 @@ async fn list_score_configs(router: &Router, workspace: &str) -> (StatusCode, Va
     json_response(router.clone().oneshot(request).await.expect("route")).await
 }
 
-async fn create_policy(router: &Router, workspace: &str, content: &str) -> (StatusCode, Value) {
-    let mut request = Request::builder()
-        .method("POST")
-        .uri("/v1/policies")
-        .header("content-type", "application/json")
-        .body(Body::from(
-            json!({ "policy_id": "workspace", "version": 1, "content": content }).to_string(),
-        ))
-        .expect("policy create request");
-    request.extensions_mut().insert(mock_auth(workspace));
-    json_response(
-        router
-            .clone()
-            .oneshot(request)
-            .await
-            .expect("policy create"),
-    )
-    .await
-}
-
-async fn list_policy_docs(router: &Router, workspace: &str) -> (StatusCode, Value) {
-    let mut request = Request::builder()
-        .uri("/v1/policies")
-        .body(Body::empty())
-        .expect("policy list request");
-    request.extensions_mut().insert(mock_auth(workspace));
-    json_response(router.clone().oneshot(request).await.expect("policy list")).await
-}
-
 async fn get_trace(router: &Router, workspace: &str, trace_id: &str) -> (StatusCode, Value) {
     let mut request = Request::builder()
         .method("GET")
@@ -346,18 +317,6 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
         .await
         .expect("workspace B context");
 
-    let (policy_status_a, _) = create_policy(&router, &workspace_a, "# Workspace A policy").await;
-    let (policy_status_b, _) = create_policy(&router, &workspace_b, "# Workspace B policy").await;
-    assert_eq!(policy_status_a, StatusCode::CREATED);
-    assert_eq!(policy_status_b, StatusCode::CREATED);
-    let (policy_list_status_a, policies_a) = list_policy_docs(&router, &workspace_a).await;
-    let (policy_list_status_b, policies_b) = list_policy_docs(&router, &workspace_b).await;
-    assert_eq!(policy_list_status_a, StatusCode::OK);
-    assert_eq!(policy_list_status_b, StatusCode::OK);
-    assert_eq!(policies_a.as_array().unwrap().len(), 1);
-    assert_eq!(policies_b.as_array().unwrap().len(), 1);
-    assert_eq!(policies_a[0]["content"], "# Workspace A policy");
-    assert_eq!(policies_b[0]["content"], "# Workspace B policy");
     let trace_a = format!("a{}", &suffix[..31]);
     let trace_b = format!("b{}", &suffix[..31]);
     let shared_session = format!("shared-session-{suffix}");
