@@ -37,6 +37,12 @@ Concepts and runtime design (read for understanding, not step-by-step).
 - [Operate async jobs](how-to/async-jobs.md)
 - [Session list summaries](how-to/session-summaries.md)
 
+Project agent skills for recurring developer workflows live in
+[`../.agents/skills/`](../.agents/skills/): code changes, local setup, release
+packaging/deployment, workspace operations, Explorer, Slack, and automated
+tests. Evaluation dogfood and Slack alert verification have dedicated skills
+there as well. The skills link back to these docs as their source of truth.
+
 ## Reference
 
 - [HTTP OpenAPI](reference/openapi.yaml) — served as `GET /openapi.json`

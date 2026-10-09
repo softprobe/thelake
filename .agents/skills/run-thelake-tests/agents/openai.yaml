@@ -1,0 +1,3 @@
+interface:
+  display_name: "Run TheLake Tests"
+  short_description: "Choose and run TheLake test gates"

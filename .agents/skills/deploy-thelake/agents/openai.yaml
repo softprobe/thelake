@@ -1,0 +1,3 @@
+interface:
+  display_name: "Deploy TheLake"
+  short_description: "Package or deploy TheLake safely"
