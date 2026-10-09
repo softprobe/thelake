@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 const backend = process.env.THELAKE_E2E_URL ?? 'http://127.0.0.1:18090';
 const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
@@ -57,6 +58,23 @@ async function openDetails(page: import('@playwright/test').Page, label: string)
   const summary = page.getByText(label, { exact: true });
   const details = summary.locator('xpath=..');
   if (!await details.evaluate((element) => (element as HTMLDetailsElement).open)) await summary.click();
+}
+
+function runRefundAgent(agentName: string): string {
+  const composeFile = resolve(process.cwd(), '../../../../examples/quickstart/compose.yaml');
+  const project = process.env.THELAKE_E2E_COMPOSE_PROJECT;
+  const lakePort = process.env.THELAKE_E2E_LAKE_PORT;
+  expect(project, 'online E2E compose project must be configured').toBeTruthy();
+  expect(lakePort, 'online E2E lake port must be configured').toBeTruthy();
+  const agentApiHost = process.platform === 'linux' ? '127.0.0.1' : 'host.docker.internal';
+  const agentOutput = execFileSync('docker', [
+    'compose', '--project-name', project!, '--file', composeFile,
+    'run', '--rm', 'refund-agent', '--agent-name', agentName,
+    '--api-url', `http://${agentApiHost}:${lakePort}`,
+  ], { encoding: 'utf8', timeout: 150_000, env: process.env });
+  const sessionId = agentOutput.match(/session_id=([A-Za-z0-9._-]+)/)?.[1];
+  expect(sessionId, `real demo agent did not report a session ID:\n${agentOutput}`).toBeTruthy();
+  return sessionId!;
 }
 
 test('live thelake ingest, reducer, session filters, and trace detail render in Explorer', async ({ page, request }) => {
@@ -182,6 +200,56 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await expect(page.locator('.tle-payload').getByText('The customer is on the pro plan.', { exact: true })).toBeVisible();
 });
 
+test('Markdown policy rubric detects a live trace', async ({ page, request }) => {
+  test.skip(process.env.THELAKE_EXPLORER_E2E_ONLINE !== '1', 'requires the real online-evaluation E2E stack');
+  test.setTimeout(240_000);
+
+  const agentName = `policy-refund-agent-${suffix}`;
+  const evaluatorId = `policy-dogfood-${suffix}`;
+  const policyContent = readFileSync(
+    resolve(process.cwd(), '../../../../examples/policy-dogfood/refund-eligibility/POLICY.md'),
+    'utf8',
+  );
+  const criteria = `${policyContent}\n\nEvaluate the session against this confirmed rule. Cite the source as examples/policy-dogfood/refund-eligibility/POLICY.md.`;
+
+  const evaluatorResponse = await request.post(`${backend}/v1/evaluators`, {
+    data: {
+      evaluator_id: evaluatorId,
+      version: 1,
+      target_agent_name: agentName,
+      name: 'Refund policy dogfood',
+      criteria,
+    },
+  });
+  expect(evaluatorResponse.status(), await evaluatorResponse.text()).toBe(201);
+  const savedEvaluator = await evaluatorResponse.json() as { criteria: string };
+  expect(savedEvaluator.criteria).toContain('examples/policy-dogfood/refund-eligibility/POLICY.md');
+
+  const activation = await request.post(`${backend}/v1/evaluators/${evaluatorId}/versions/1/activate`);
+  expect(activation.ok(), await activation.text()).toBeTruthy();
+
+  const sessionId = runRefundAgent(agentName);
+  const sessionUrl = `${backend}/v1/sessions/${encodeURIComponent(sessionId)}?limit=200`;
+  type EvaluationScore = { score_id: string; source?: string; string_value?: string; comment?: string; config_id?: string; span_id?: string; metadata?: Record<string, string> };
+  let detail: { spans?: Array<{ span_id: string }>; scores?: EvaluationScore[] } | undefined;
+  await expect.poll(async () => {
+    const response = await request.get(sessionUrl);
+    if (!response.ok()) return 'session unavailable';
+    detail = await response.json();
+    const score = detail.scores?.find((item) => item.config_id === `evaluator:${evaluatorId}:v1`);
+    return score ? `${score.string_value}: ${score.comment ?? ''}` : `waiting for score; spans=${detail.spans?.length ?? 0}`;
+  }, { timeout: 120_000, intervals: [1_000, 2_000, 4_000] }).toContain('fail:');
+
+  const failure = detail?.scores?.find((item) => item.config_id === `evaluator:${evaluatorId}:v1` && item.string_value === 'fail');
+  expect(failure?.source).toBe('evaluator');
+  expect(failure?.span_id, 'failure must reference evidence in the stored trace').toBeTruthy();
+  expect(detail?.spans?.some((span) => span.span_id === failure?.span_id)).toBe(true);
+
+  await page.goto(`${backend}/explorer/`);
+  await expect(page.getByRole('region', { name: 'TheLake chat' })).toBeVisible();
+  await expect(page.getByText('Refund policy dogfood', { exact: true })).toBeVisible();
+});
+
 test('embedded web chat to real Gemini agent, online evaluator, persisted issue, and trace details', async ({ page, request }) => {
   test.skip(process.env.THELAKE_EXPLORER_E2E_ONLINE !== '1', 'requires the real online-evaluation E2E stack');
   test.setTimeout(240_000);
@@ -201,19 +269,7 @@ test('embedded web chat to real Gemini agent, online evaluator, persisted issue,
   await page.getByRole('button', { name: 'Activate check' }).click();
   await expect(page.getByText(/Behavior check is active for/)).toBeVisible({ timeout: 30_000 });
 
-  const composeFile = resolve(process.cwd(), '../../../../examples/quickstart/compose.yaml');
-  const project = process.env.THELAKE_E2E_COMPOSE_PROJECT;
-  const lakePort = process.env.THELAKE_E2E_LAKE_PORT;
-  expect(project, 'online E2E compose project must be configured').toBeTruthy();
-  expect(lakePort, 'online E2E lake port must be configured').toBeTruthy();
-  const agentApiHost = process.platform === 'linux' ? '127.0.0.1' : 'host.docker.internal';
-  const agentOutput = execFileSync('docker', [
-    'compose', '--project-name', project!, '--file', composeFile,
-    'run', '--rm', 'refund-agent', '--agent-name', agentName,
-    '--api-url', `http://${agentApiHost}:${lakePort}`,
-  ], { encoding: 'utf8', timeout: 150_000, env: process.env });
-  const sessionId = agentOutput.match(/session_id=([A-Za-z0-9._-]+)/)?.[1];
-  expect(sessionId, `real demo agent did not report a session ID:\n${agentOutput}`).toBeTruthy();
+  const sessionId = runRefundAgent(agentName);
 
   const sessionUrl = `${backend}/v1/sessions/${encodeURIComponent(sessionId!)}?limit=200`;
   type EvaluatorScore = { score_id: string; name: string; source?: string; string_value?: string; comment?: string; config_id?: string; span_id?: string };

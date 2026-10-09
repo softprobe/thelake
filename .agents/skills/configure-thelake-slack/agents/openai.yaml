@@ -1,0 +1,3 @@
+interface:
+  display_name: "Configure TheLake Slack"
+  short_description: "Connect Slack to TheLake behavior checks"

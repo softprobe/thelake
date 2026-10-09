@@ -45,4 +45,5 @@ describe("ExplorerApi", () => {
     const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
     expect(body).toMatchObject({ name: "human_verdict", string_value: "correct", session_id: "s1", source: "annotation" });
   });
+
 });

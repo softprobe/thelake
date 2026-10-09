@@ -107,3 +107,6 @@ customer DuckLake.
 | `SOFTPROBE_ADMIN_API_KEY` | Bearer for `POST /v1/workspaces` |
 | `SOFTPROBE_LOCAL_ANONYMOUS` | Local single-workspace mode (see root README) |
 | `THELAKE_DEFAULT_WORKSPACE_ID` | Workspace UUID used with local anonymous mode |
+| `THELAKE_EVALUATION_SAMPLE_INTERVAL_SECONDS` | Per-process cap: admit the first eligible trace per workspace and authenticated agent each rolling interval; defaults to `60`, `0` disables interval sampling. Replicas have independent windows; the worker cap still applies. |
+| `THELAKE_EVALUATION_RUNNER_URL` | Online evaluation runner endpoint; automatic checks are disabled when unset |
+| `THELAKE_EVALUATION_RUNNER_TOKEN` | Bearer token used to authenticate calls to the online evaluation runner |

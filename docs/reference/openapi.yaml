@@ -1153,6 +1153,7 @@ components:
         criteria:
           type: string
           maxLength: 8000
+          description: Natural-language rubric. Include source citations directly when the criteria come from business policy.
         threshold:
           type: number
           minimum: 0

@@ -316,6 +316,7 @@ async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
         .workspace_for(&workspace_b)
         .await
         .expect("workspace B context");
+
     let trace_a = format!("a{}", &suffix[..31]);
     let trace_b = format!("b{}", &suffix[..31]);
     let shared_session = format!("shared-session-{suffix}");

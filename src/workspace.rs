@@ -82,6 +82,37 @@ impl WorkspaceContext {
         &self.admin
     }
 
+    /// Serialize immutable config-version claims across runtime replicas using
+    /// a transaction-scoped Postgres advisory lock in the catalog registry.
+    pub(crate) async fn with_score_config_write_lock<T, E, F, Fut>(
+        &self,
+        lock_key: &str,
+        operation: F,
+    ) -> Result<Result<T, E>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let mut client = self.catalog_pool.get().await?;
+        let transaction = client.transaction().await?;
+        transaction
+            .query_one(
+                include_str!("sql/catalog/lock_score_config_version.sql"),
+                &[&lock_key],
+            )
+            .await?;
+        match operation().await {
+            Ok(value) => {
+                transaction.commit().await?;
+                Ok(Ok(value))
+            }
+            Err(error) => {
+                transaction.rollback().await?;
+                Ok(Err(error))
+            }
+        }
+    }
+
     fn session_summary_scope(&self) -> WorkspaceSummaryScope {
         WorkspaceSummaryScope {
             pool: self.catalog_pool.clone(),

@@ -100,7 +100,9 @@ export function ChatView({ api, storageKey, onOpenSession }: { api: ExplorerApi;
     }
   }, [storageKey, threads]);
 
-  useEffect(() => { api.listEvaluators().then(setEvaluators).catch(() => setEvaluators([])); }, [api]);
+  useEffect(() => {
+    api.listEvaluators().then(setEvaluators).catch(() => setEvaluators([]));
+  }, [api]);
 
   const activeEvaluatorName = useMemo(() => active?.criteria ? checkName(active.criteria) : "", [active?.criteria]);
 

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Manage Workspaces"
+  short_description: "Provision and troubleshoot DuckLake workspaces"

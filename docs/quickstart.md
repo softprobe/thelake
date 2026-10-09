@@ -76,6 +76,8 @@ with links to the stored trace evidence.
   failure notifications in a thread.
 - [Evaluation runner details](../evaluation-runner/README.md), including
   evidence limits and provider behavior.
+- [Policy memory](how-to/policy-memory.md) to maintain business rules as
+  Markdown and submit reviewable evaluator drafts from a coding agent.
 
 Press Ctrl+C in the first terminal to stop theLake. Stop the quickstart
 containers with:

@@ -73,3 +73,20 @@ tool-call evidence is present. A prerequisite call without a correlated result
 returns insufficient evidence. The G-Eval judge evaluates the natural-language
 behavior across the conversation. Scores link back to the trace and include the
 judge rationale, source span IDs, and evidence limitations.
+
+## Repeatable dogfood cases
+
+[`dogfood/connected_itinerary.json`](dogfood/connected_itinerary.json) contains
+paired compliant and violating traces plus an incomplete-evidence control. Run
+them against the live authenticated runner with:
+
+```bash
+export THELAKE_EVALUATION_RUNNER_URL=http://127.0.0.1:8081/v1/evaluate
+export THELAKE_EVALUATION_RUNNER_TOKEN=local-runner-token
+python scripts/run_policy_dogfood.py --output /tmp/thelake-policy-dogfood.json
+```
+
+The runner must have Gemini credentials configured. The script exits nonzero
+when an expected verdict differs; it does not substitute a mocked judge. See
+the [dogfood guide](../docs/how-to/policy-dogfood.md) for the complementary
+policy-authoring and full online-pipeline checks.

@@ -275,8 +275,12 @@ async fn process_traces_inner(
     let ws = state.workspace_for_id(&tid).await?;
     let write_start = std::time::Instant::now();
     ws.ingest().add_spans(spans, body_size).await?;
-    if let Err(error) =
-        crate::online_evaluation::schedule_for_traces(ws.clone(), trace_windows).await
+    if let Err(error) = crate::online_evaluation::schedule_for_traces(
+        ws.clone(),
+        trace_windows,
+        agent_name.as_deref(),
+    )
+    .await
     {
         warn!("failed to schedule automatic trace evaluation: {error}");
     }

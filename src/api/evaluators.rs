@@ -298,62 +298,74 @@ pub(crate) async fn save_evaluator(
     request: CreateEvaluatorRequest,
 ) -> Result<(EvaluatorDefinition, bool), ApiError> {
     validate(&request).map_err(|message| bad_request(message.to_string()))?;
-    let config = config_from_request(request);
-    if let Some(stored) = ws
-        .query()
-        .get_score_config(&config.config_id)
-        .await
-        .map_err(|error| {
-            warn!("evaluator idempotency lookup failed: {error}");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error":"evaluator lookup failed"})),
-            )
-        })?
-    {
-        let mut definition = definition_from_config(stored).ok_or_else(|| {
-            bad_request("config_id is already used by a non-evaluator score config")
-        })?;
-        let requested = definition_from_config(config).expect("request creates a valid definition");
-        if definition.target_agent_name != requested.target_agent_name
-            || definition.name != requested.name
-            || definition.criteria != requested.criteria
-            || definition.threshold != requested.threshold
-            || definition.uncertainty_margin != requested.uncertainty_margin
-            || definition.slack_channel_id != requested.slack_channel_id
-            || definition.slack_thread_ts != requested.slack_thread_ts
-            || definition.required_tool_order.len() != requested.required_tool_order.len()
-            || serde_json::to_value(&definition.required_tool_order).ok()
-                != serde_json::to_value(&requested.required_tool_order).ok()
-        {
-            return Err(bad_request(
-                "evaluator_id and version already identify a different immutable definition",
-            ));
-        }
-        definition.active = is_version_active(ws, &definition.evaluator_id, definition.version)
+    let lock_key = format!("{}:evaluator:{}", ws.workspace_id(), request.evaluator_id);
+    ws.with_score_config_write_lock(&lock_key, || async move {
+        let config = config_from_request(request);
+        if let Some(stored) = ws
+            .query()
+            .get_score_config(&config.config_id)
             .await
             .map_err(|error| {
-                warn!("evaluator activation lookup failed: {error}");
+                warn!("evaluator idempotency lookup failed: {error}");
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({"error":"evaluator activation lookup failed"})),
+                    Json(serde_json::json!({"error":"evaluator lookup failed"})),
+                )
+            })?
+        {
+            let mut definition = definition_from_config(stored).ok_or_else(|| {
+                bad_request("config_id is already used by a non-evaluator score config")
+            })?;
+            let requested =
+                definition_from_config(config).expect("request creates a valid definition");
+            if definition.target_agent_name != requested.target_agent_name
+                || definition.name != requested.name
+                || definition.criteria != requested.criteria
+                || definition.threshold != requested.threshold
+                || definition.uncertainty_margin != requested.uncertainty_margin
+                || definition.slack_channel_id != requested.slack_channel_id
+                || definition.slack_thread_ts != requested.slack_thread_ts
+                || definition.required_tool_order.len() != requested.required_tool_order.len()
+                || serde_json::to_value(&definition.required_tool_order).ok()
+                    != serde_json::to_value(&requested.required_tool_order).ok()
+            {
+                return Err(bad_request(
+                    "evaluator_id and version already identify a different immutable definition",
+                ));
+            }
+            definition.active = is_version_active(ws, &definition.evaluator_id, definition.version)
+                .await
+                .map_err(|error| {
+                    warn!("evaluator activation lookup failed: {error}");
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({"error":"evaluator activation lookup failed"})),
+                    )
+                })?;
+            return Ok((definition, false));
+        }
+
+        ws.ingest()
+            .add_score_configs(vec![config.clone()])
+            .await
+            .map_err(|error| {
+                warn!("evaluator definition write failed: {error}");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"error":"evaluator write failed"})),
                 )
             })?;
-        return Ok((definition, false));
-    }
-
-    ws.ingest()
-        .add_score_configs(vec![config.clone()])
-        .await
-        .map_err(|error| {
-            warn!("evaluator definition write failed: {error}");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error":"evaluator write failed"})),
-            )
-        })?;
-    let definition = definition_from_config(config).expect("new evaluator config is valid");
-    Ok((definition, true))
+        let definition = definition_from_config(config).expect("new evaluator config is valid");
+        Ok((definition, true))
+    })
+    .await
+    .map_err(|error| {
+        warn!("evaluator write lock failed: {error}");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"evaluator write lock unavailable"})),
+        )
+    })?
 }
 
 pub async fn list_evaluators(
@@ -561,4 +573,35 @@ async fn is_version_active(
                 .map(String::as_str)
                 == Some("true")
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> CreateEvaluatorRequest {
+        CreateEvaluatorRequest {
+            evaluator_id: "refund-check".into(),
+            version: 1,
+            target_agent_name: "support-agent".into(),
+            name: "Eligibility before refund".into(),
+            criteria: "Check eligibility before issuing a refund.".into(),
+            threshold: 0.7,
+            uncertainty_margin: 0.1,
+            required_tool_order: Vec::new(),
+            slack_channel_id: None,
+            slack_thread_ts: None,
+        }
+    }
+
+    #[test]
+    fn evaluator_definition_round_trips_criteria_with_policy_source() {
+        let mut original = request();
+        original.criteria =
+            "Check refund eligibility before issuing a refund. Source: travel-policy.md § Refunds."
+                .into();
+        let config = config_from_request(original);
+        let definition = definition_from_config(config).expect("evaluator definition");
+        assert!(definition.criteria.contains("travel-policy.md § Refunds"));
+    }
 }

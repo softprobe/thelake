@@ -17,6 +17,7 @@ Concepts and runtime design (read for understanding, not step-by-step).
 
 - [Overview](architecture/overview.md) — ingest, DuckLake storage, query, maintenance
 - [Product goals](architecture/goals.md)
+- [Lisa: proactive agent QA engineer](architecture/lisa-agent-qa.md) — product vision, workspace agent model, learning, online QA, and issue ownership
 - [Workspace identity](architecture/workspace-identity.md) — `workspace_id` and physical scopes
 - [SQL and schema](architecture/sql-and-schema.md) — tables, one-clock rules
 - [Event-time layout](architecture/event-time-layout.md) — partition pruning
@@ -28,11 +29,19 @@ Concepts and runtime design (read for understanding, not step-by-step).
 - [5-minute quickstart](quickstart.md) — create a check in chat, run a Gemini sample agent, and inspect the result
 - [Instrument applications](how-to/instrumentation.md)
 - [Use Explorer](how-to/explorer.md) — browser chat and session/trace UI at `/explorer/`
+- [Policy memory](how-to/policy-memory.md) — keep business rules in plain Markdown and compose confirmed rules into evaluator drafts
+- [Policy dogfood](how-to/policy-dogfood.md) — repeatably check policy learning, judge directionality, and online issue detection
 - [Use Slack behavior checks](how-to/slack-evaluator.md) — author checks and receive online evaluation failures in threads
 - [Apply schema promotion](how-to/promotion.md)
 - [Query DuckLake locally](how-to/adhoc-duckdb.md)
 - [Operate async jobs](how-to/async-jobs.md)
 - [Session list summaries](how-to/session-summaries.md)
+
+Project agent skills for recurring developer workflows live in
+[`../.agents/skills/`](../.agents/skills/): code changes, local setup, release
+packaging/deployment, workspace operations, Explorer, Slack, and automated
+tests. Evaluation dogfood and Slack alert verification have dedicated skills
+there as well. The skills link back to these docs as their source of truth.
 
 ## Reference
 

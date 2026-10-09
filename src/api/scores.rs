@@ -173,6 +173,18 @@ pub async fn create_score_config(
     if let Err(message) = config.validate() {
         return Err(bad_request(message));
     }
+    if config.config_id.starts_with("evaluator:")
+        || config.metadata.get("thelake.evaluator").map(String::as_str) == Some("true")
+        || config
+            .metadata
+            .get("thelake.evaluator.activation")
+            .map(String::as_str)
+            == Some("true")
+    {
+        return Err(bad_request(
+            "policy and evaluator configs must be created through their APIs",
+        ));
+    }
 
     let auth_info = auth.as_ref().map(|extension| &extension.0);
     let ws = match auth_info {

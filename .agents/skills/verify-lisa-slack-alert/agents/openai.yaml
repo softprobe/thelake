@@ -1,0 +1,3 @@
+interface:
+  display_name: "Verify Lisa Slack Alert"
+  short_description: "Check Slack failure notifications"

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Run TheLake Locally"
+  short_description: "Set up and run a local TheLake stack"
