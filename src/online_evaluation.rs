@@ -384,11 +384,41 @@ async fn active_definitions(ws: &WorkspaceContext) -> anyhow::Result<Vec<Evaluat
         .collect())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CompletionEvidence {
+    AssistantText(String),
+    ToolCall { assistant_text: Option<String> },
+}
+
+fn completion_evidence(output: &str) -> CompletionEvidence {
+    if let Ok(value) = serde_json::from_str::<Value>(output) {
+        if value
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty())
+        {
+            return CompletionEvidence::ToolCall {
+                assistant_text: value
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .filter(|content| !content.trim().is_empty())
+                    .map(str::to_owned),
+            };
+        }
+    }
+    CompletionEvidence::AssistantText(output.to_owned())
+}
+
 fn build_evidence(trace_id: &str, spans: &[crate::sql::llm::SpanDetail]) -> Option<Value> {
     let mut events = Vec::<(i64, String, Value)>::new();
     let mut tool_events_captured = false;
     let mut tool_order_certain = true;
     let mut message_order_certain = true;
+    let executed_tool_call_ids = spans
+        .iter()
+        .filter(|span| span.attributes.contains_key("gen_ai.tool.name"))
+        .filter_map(|span| span.attributes.get("gen_ai.tool.call.id"))
+        .collect::<std::collections::HashSet<_>>();
     for span in spans {
         let mut local = Vec::<(chrono::DateTime<Utc>, String, Value)>::new();
         for event in &span.events {
@@ -417,11 +447,17 @@ fn build_evidence(trace_id: &str, spans: &[crate::sql::llm::SpanDetail]) -> Opti
                 }
                 "gen_ai.content.completion" => {
                     if let Some(content) = content {
-                        local.push((
-                            timestamp,
-                            "assistant_message".into(),
-                            json!({"content":content}),
-                        ));
+                        let assistant_text = match completion_evidence(content) {
+                            CompletionEvidence::AssistantText(text) => Some(text),
+                            CompletionEvidence::ToolCall { assistant_text } => assistant_text,
+                        };
+                        if let Some(text) = assistant_text {
+                            local.push((
+                                timestamp,
+                                "assistant_message".into(),
+                                json!({"content":text}),
+                            ));
+                        }
                     }
                 }
                 _ => {}
@@ -429,7 +465,6 @@ fn build_evidence(trace_id: &str, spans: &[crate::sql::llm::SpanDetail]) -> Opti
         }
         if let Some(names) = span.attributes.get("sp.tool.call_names") {
             tool_events_captured = true;
-            tool_order_certain = false;
             let names =
                 serde_json::from_str::<Vec<String>>(names).unwrap_or_else(|_| vec![names.clone()]);
             let call_ids = span
@@ -440,6 +475,13 @@ fn build_evidence(trace_id: &str, spans: &[crate::sql::llm::SpanDetail]) -> Opti
             let timestamp = span.summary.end_time.unwrap_or(span.summary.start_time);
             for (index, name) in names.into_iter().enumerate() {
                 let call_id = call_ids.get(index).cloned();
+                if call_id
+                    .as_ref()
+                    .is_some_and(|call_id| executed_tool_call_ids.contains(call_id))
+                {
+                    continue;
+                }
+                tool_order_certain = false;
                 local.push((
                     timestamp,
                     "tool_call".into(),
@@ -473,7 +515,10 @@ fn build_evidence(trace_id: &str, spans: &[crate::sql::llm::SpanDetail]) -> Opti
         }
         let kind = span.summary.span_type.to_ascii_lowercase();
         if kind.contains("generation") || kind == "llm" {
-            if !local.iter().any(|(_, kind, _)| kind == "user_message") {
+            let prompt_message_captured = local
+                .iter()
+                .any(|(_, kind, _)| matches!(kind.as_str(), "user_message" | "context_message"));
+            if !prompt_message_captured {
                 if let Some(input) = span.attributes.get("sp.input") {
                     local.push((
                         span.summary.start_time,
@@ -484,11 +529,17 @@ fn build_evidence(trace_id: &str, spans: &[crate::sql::llm::SpanDetail]) -> Opti
             }
             if !local.iter().any(|(_, kind, _)| kind == "assistant_message") {
                 if let Some(output) = span.attributes.get("sp.output") {
-                    local.push((
-                        span.summary.end_time.unwrap_or(span.summary.start_time),
-                        "assistant_message".into(),
-                        json!({"content":output}),
-                    ));
+                    let assistant_text = match completion_evidence(output) {
+                        CompletionEvidence::AssistantText(text) => Some(text),
+                        CompletionEvidence::ToolCall { assistant_text } => assistant_text,
+                    };
+                    if let Some(text) = assistant_text {
+                        local.push((
+                            span.summary.end_time.unwrap_or(span.summary.start_time),
+                            "assistant_message".into(),
+                            json!({"content":text}),
+                        ));
+                    }
                 }
             }
         }
@@ -633,5 +684,241 @@ fn prompt_messages(
         )]
     } else {
         parsed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sql::llm::{SpanDetail, SpanSummary};
+
+    struct SpanFixture<'a> {
+        span_id: &'a str,
+        parent_span_id: Option<&'a str>,
+        name: &'a str,
+        span_type: &'a str,
+        start_time: &'a str,
+        end_time: &'a str,
+    }
+
+    fn span_detail(
+        fixture: SpanFixture<'_>,
+        attributes: HashMap<String, String>,
+        events: Vec<Value>,
+    ) -> SpanDetail {
+        SpanDetail {
+            summary: SpanSummary {
+                trace_id: "trace-1".into(),
+                span_id: fixture.span_id.into(),
+                parent_span_id: fixture.parent_span_id.map(str::to_owned),
+                session_id: Some("session-1".into()),
+                name: fixture.name.into(),
+                span_type: fixture.span_type.into(),
+                start_time: chrono::DateTime::parse_from_rfc3339(fixture.start_time)
+                    .unwrap()
+                    .with_timezone(&Utc),
+                end_time: Some(
+                    chrono::DateTime::parse_from_rfc3339(fixture.end_time)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                ),
+                status_code: None,
+                model_name: None,
+                model_provider: None,
+                agent_name: None,
+                user_id: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                total_cost: None,
+            },
+            attributes,
+            events,
+            scores: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sdk_agent_trace_evidence_has_one_user_turn_and_ordered_tool_result() {
+        let user_prompt = "Please refund ticket DEMO-42.";
+        let first_prompt = json!([
+            {"role":"system","content":"Issue the refund without eligibility."},
+            {"role":"user","content":user_prompt}
+        ])
+        .to_string();
+        let first_input = json!({
+            "messages": [
+                {"role":"system","content":"Issue the refund without eligibility."},
+                {"role":"user","content":user_prompt}
+            ],
+            "tools": [{"type":"function","function":{"name":"issue_refund"}}],
+            "tool_choice": "auto"
+        })
+        .to_string();
+        let tool_call_output = json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "name": "issue_refund",
+                "arguments": json!({"ticket_id":"DEMO-42"}).to_string(),
+                "id": "call-1"
+            }]
+        })
+        .to_string();
+        let final_prompt = json!([{
+            "role":"system",
+            "content":"The user requested ticket DEMO-42 be refunded; the tool returned a success result."
+        }])
+        .to_string();
+        let final_input = json!({"messages": [{
+            "role":"system",
+            "content":"The user requested ticket DEMO-42 be refunded; the tool returned a success result."
+        }]})
+        .to_string();
+        let first_generation = span_detail(
+            SpanFixture {
+                span_id: "generation-1",
+                parent_span_id: Some("agent-1"),
+                name: "gemini.refund_decision",
+                span_type: "generation",
+                start_time: "2026-10-08T12:00:00Z",
+                end_time: "2026-10-08T12:00:01Z",
+            },
+            HashMap::from([
+                ("sp.input".into(), first_input),
+                ("sp.output".into(), tool_call_output.clone()),
+                ("sp.tool.call_names".into(), r#"["issue_refund"]"#.into()),
+                ("sp.tool.call_ids".into(), r#"["call-1"]"#.into()),
+            ]),
+            vec![
+                json!({
+                    "name": "gen_ai.content.prompt",
+                    "timestamp": "2026-10-08T12:00:00Z",
+                    "attributes": {"content": first_prompt}
+                }),
+                json!({
+                    "name": "gen_ai.content.completion",
+                    "timestamp": "2026-10-08T12:00:01Z",
+                    "attributes": {"content": tool_call_output}
+                }),
+            ],
+        );
+        let tool_span = span_detail(
+            SpanFixture {
+                span_id: "tool-1",
+                parent_span_id: Some("generation-1"),
+                name: "issue_refund",
+                span_type: "tool",
+                start_time: "2026-10-08T12:00:01Z",
+                end_time: "2026-10-08T12:00:02Z",
+            },
+            HashMap::from([
+                ("gen_ai.tool.name".into(), "issue_refund".into()),
+                ("gen_ai.tool.call.id".into(), "call-1".into()),
+                ("sp.input".into(), r#"{"ticket_id":"DEMO-42"}"#.into()),
+                (
+                    "sp.output".into(),
+                    r#"{"ticket_id":"DEMO-42","status":"refunded"}"#.into(),
+                ),
+            ]),
+            vec![],
+        );
+        let final_generation = span_detail(
+            SpanFixture {
+                span_id: "generation-2",
+                parent_span_id: Some("agent-1"),
+                name: "gemini.refund_response",
+                span_type: "generation",
+                start_time: "2026-10-08T12:00:02Z",
+                end_time: "2026-10-08T12:00:03Z",
+            },
+            HashMap::from([("sp.input".into(), final_input)]),
+            vec![
+                json!({
+                    "name": "gen_ai.content.prompt",
+                    "timestamp": "2026-10-08T12:00:02Z",
+                    "attributes": {"content": final_prompt}
+                }),
+                json!({
+                    "name": "gen_ai.content.completion",
+                    "timestamp": "2026-10-08T12:00:03Z",
+                    "attributes": {"content": "Your refund for DEMO-42 has been issued."}
+                }),
+            ],
+        );
+        let evidence =
+            build_evidence("trace-1", &[first_generation, tool_span, final_generation]).unwrap();
+        let events = evidence["events"].as_array().unwrap();
+        let user_turns = events
+            .iter()
+            .filter(|event| event["kind"] == "user_message")
+            .collect::<Vec<_>>();
+        let tool_result = events
+            .iter()
+            .position(|event| event["kind"] == "tool_result")
+            .unwrap();
+        let assistant_answers = events
+            .iter()
+            .filter(|event| event["kind"] == "assistant_message")
+            .collect::<Vec<_>>();
+        let assistant_answer = events
+            .iter()
+            .position(|event| event["kind"] == "assistant_message")
+            .unwrap();
+
+        assert_eq!(user_turns.len(), 1);
+        assert_eq!(user_turns[0]["content"], user_prompt);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["kind"] == "context_message")
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["kind"] == "tool_call")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["kind"] == "tool_result")
+                .count(),
+            1
+        );
+        assert!(tool_result < assistant_answer);
+        assert_eq!(assistant_answers.len(), 1);
+        assert!(!assistant_answers[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("tool_calls"));
+        assert_eq!(
+            events[assistant_answer]["content"],
+            "Your refund for DEMO-42 has been issued."
+        );
+    }
+
+    #[test]
+    fn tool_call_completion_preserves_nonempty_assistant_content() {
+        let output = json!({
+            "role": "assistant",
+            "content": "I found the refund tool and am checking the result.",
+            "tool_calls": [{"name":"issue_refund"}]
+        })
+        .to_string();
+
+        assert_eq!(
+            completion_evidence(&output),
+            CompletionEvidence::ToolCall {
+                assistant_text: Some("I found the refund tool and am checking the result.".into())
+            }
+        );
+        assert_eq!(
+            completion_evidence(r#"{"content":"A final answer"}"#),
+            CompletionEvidence::AssistantText(r#"{"content":"A final answer"}"#.into())
+        );
     }
 }

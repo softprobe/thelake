@@ -20,7 +20,7 @@ services:
       context: ../../evaluation-runner
     environment:
       EVALUATION_RUNNER_TOKEN: ${THELAKE_EVALUATION_RUNNER_TOKEN:?quickstart script must set a runner token}
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:?Set GOOGLE_API_KEY before starting the quickstart}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-${GEMINI_API_KEY:?Set GOOGLE_API_KEY or GEMINI_API_KEY before starting the quickstart}}
       USE_GEMINI_MODEL: "1"
       GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-2.5-flash}
     ports:
@@ -32,7 +32,7 @@ services:
     build:
       context: ./agent
     environment:
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:?Set GOOGLE_API_KEY before running the demo agent}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-${GEMINI_API_KEY:?Set GOOGLE_API_KEY or GEMINI_API_KEY before running the demo agent}}
       GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-2.5-flash}
 
 volumes:
