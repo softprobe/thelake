@@ -61,7 +61,7 @@ class RefundAgentSdkContractTests(unittest.TestCase):
         self.assertIn('"gen_ai.tool.result"', AGENT_SOURCE)
         self.assertIn("session_id=session_id", AGENT_SOURCE)
 
-    def test_final_request_does_not_replay_user_turn(self):
+    def test_final_request_keeps_tool_exchange_without_extra_user_turn(self):
         self.assertNotIn("messages.append", AGENT_SOURCE)
         requests = sorted(
             (
@@ -85,7 +85,11 @@ class RefundAgentSdkContractTests(unittest.TestCase):
             for item in final_messages.elts
             if isinstance(item, ast.Dict)
         ]
-        self.assertEqual(roles, ["system"])
+        self.assertEqual(roles, ["system", "assistant", "tool"])
+        final_request = ast.unparse(final_messages)
+        self.assertIn("function_call.id", final_request)
+        self.assertIn("function_call.function.arguments", final_request)
+        self.assertIn("call_output", final_request)
         self.assertIn("final.choices[0].message.content", ast.unparse(AGENT_TREE))
 
 

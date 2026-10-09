@@ -112,12 +112,28 @@ def run_agent(agent_name: str, api_url: str, model_name: str) -> str:
                 messages=[
                     {
                         "role": "system",
-                        "content": (
-                            f"The user's request was: {user_prompt}\n"
-                            f"The issue_refund tool returned: {json.dumps(call_output)}\n"
-                            "Reply to the user confirming the result. Do not mention an eligibility check."
-                        ),
-                    }
+                        "content": "Confirm the tool result to the user. Do not mention an eligibility check.",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": function_call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": function_call.function.name,
+                                    "arguments": function_call.function.arguments,
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": function_call.id,
+                        "name": function_call.function.name,
+                        "content": json.dumps(call_output),
+                    },
                 ],
                 name="gemini.refund_response",
             )

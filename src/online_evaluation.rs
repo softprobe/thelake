@@ -791,9 +791,10 @@ fn prompt_messages(
             continue;
         };
         let role = object.get("role").and_then(Value::as_str);
-        let text = object.get("content").map(|value| match value {
-            Value::String(text) => text.clone(),
-            other => other.to_string(),
+        let text = object.get("content").and_then(|value| match value {
+            Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
+            Value::Null => None,
+            other => Some(other.to_string()),
         });
         let (Some(role), Some(text)) = (role, text) else {
             continue;
@@ -1011,16 +1012,32 @@ mod tests {
             }]
         })
         .to_string();
-        let final_prompt = json!([{
-            "role":"system",
-            "content":"The user requested ticket DEMO-42 be refunded; the tool returned a success result."
-        }])
-        .to_string();
-        let final_input = json!({"messages": [{
-            "role":"system",
-            "content":"The user requested ticket DEMO-42 be refunded; the tool returned a success result."
-        }]})
-        .to_string();
+        let final_messages = json!([
+            {
+                "role":"system",
+                "content":"Confirm the tool result to the user. Do not mention an eligibility check."
+            },
+            {
+                "role":"assistant",
+                "content":null,
+                "tool_calls":[{
+                    "id":"call-1",
+                    "type":"function",
+                    "function":{
+                        "name":"issue_refund",
+                        "arguments":json!({"ticket_id":"DEMO-42"}).to_string()
+                    }
+                }]
+            },
+            {
+                "role":"tool",
+                "tool_call_id":"call-1",
+                "name":"issue_refund",
+                "content":json!({"ticket_id":"DEMO-42","status":"refunded"}).to_string()
+            }
+        ]);
+        let final_prompt = final_messages.to_string();
+        let final_input = json!({"messages": final_messages}).to_string();
         let first_generation = span_detail(
             SpanFixture {
                 span_id: "generation-1",
