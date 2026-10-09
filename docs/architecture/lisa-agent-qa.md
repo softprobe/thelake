@@ -91,10 +91,55 @@ workspace storage.
 
 ## How Lisa finds issues
 
-Lisa works continuously after an agent is connected. A user does not have to
-first identify a bad session or ask Lisa to evaluate it.
+Lisa works after an agent is connected. A user does not have to first identify
+a bad session or ask Lisa to evaluate it. Trace arrival is the event that
+starts an evaluation decision; it does not imply that every trace must invoke
+an LLM judge.
 
-For each newly captured session, the QA loop:
+### Trigger and sampling plan
+
+Use three lanes as Lisa grows:
+
+1. **Policy coverage:** run confirmed, high-impact checks on every session to
+   which the policy applies. This is the dependable lane for known risks; do
+   not sample away rare, consequential violations.
+2. **Risk hints:** prioritize sessions with signals such as risky tool calls,
+   retries, errors, escalation, negative feedback, or unusual cost/latency.
+   Hints decide what Lisa inspects; they are not themselves proof of a defect.
+3. **Discovery sampling:** periodically inspect ordinary sessions to find
+   behaviors that current policies do not cover. A sampled pattern can become
+   a candidate question or rule, but traces alone cannot confirm business
+   policy.
+
+The first implementation uses a deliberately simple rolling time-window
+sampler: for each workspace and authenticated agent name with active
+evaluators, admit at most one trace every configured interval and run all
+matching active evaluators on that trace. The interval defaults to 60 seconds
+and is controlled by `THELAKE_EVALUATION_SAMPLE_INTERVAL_SECONDS`; setting it
+to `0` disables interval sampling. It selects the first eligible trace
+that reaches the sampler after the quiet period; it is admission-based, not a
+random or statistically representative sample. Ineligible traces without a
+completed root or usable evidence do not consume the window. The sampler is
+in-memory and per process, so replicas each have their own window and a
+restart resets it. A runner failure still consumes the window. This is a
+best-effort rate cap for current checks, not Lisa's future risk-hint or
+rule-discovery system.
+
+The ingest event schedules a candidate after ingest accepts spans; it does not
+prove those spans are durably committed. The quiet period allows buffered spans
+to flush before Lisa reads the trace. The process-local worker limit can also
+skip candidates when all slots are occupied. These limits mean this sampler
+cannot promise complete policy coverage. Use interval `0` to remove
+time-window sampling in a single-process dogfood run; the worker cap still
+applies. Production-wide coordination and durable retry remain future work.
+
+Sampling must not turn an unchecked trace into an apparent pass. The product
+should show evaluated, pending, skipped, and failed work with the reason, plus
+coverage by agent and check. Once delivery is durable, high-risk policy checks
+can bypass the discovery rate cap while ordinary discovery work remains
+sampled.
+
+For each newly captured session selected by its trigger policy, the QA loop:
 
 1. Resolves the workspace and agent, then selects the applicable confirmed
    rules and enabled checks.
@@ -154,6 +199,8 @@ checkout or code changes.
   findings. Use the workspace's credential boundary and least privilege.
 - Make evaluation cost, delay, failures, and coverage visible. Do not imply
   that an unevaluated session passed.
+- Sampling limits judge calls; it must not silently drop a confirmed
+  high-impact check that is configured for full coverage.
 - Avoid storing duplicate telemetry or introducing a second trace pipeline;
   evaluate from the workspace's captured session evidence.
 

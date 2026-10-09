@@ -105,3 +105,13 @@ judge fixture passes. A useful dogfood run records:
 The online scheduler is best effort, so a timeout is a failed run with a
 diagnostic—not a reason to fall back to a manual evaluator call and report
 success.
+
+Automatic evaluation currently admits the first eligible trace per workspace
+and authenticated agent every 60 seconds, per service process. This is a
+rate cap, not a representative random sample; each replica has an independent
+window. Set
+`THELAKE_EVALUATION_SAMPLE_INTERVAL_SECONDS=0` in the dogfood environment to
+disable time-window sampling so it does not affect the fixture. The process
+worker cap still applies. The default is useful for a light online smoke test,
+not for proving full-traffic coverage. A runner failure consumes the current
+interval.

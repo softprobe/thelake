@@ -1,8 +1,8 @@
 //! Automatic evaluation for newly ingested, completed traces.
 //!
-//! The task is scheduled only after DuckLake acknowledges the spans. A short
-//! quiet period lets sibling spans from the same OTLP export commit before a
-//! server-side bounded trace read builds the judge input.
+//! The task is scheduled after ingest accepts the spans. A short quiet period
+//! lets sibling spans from the same OTLP export commit before a server-side
+//! bounded trace read builds the judge input.
 
 use crate::api::evaluators::{definition_from_config, EvaluatorDefinition};
 use crate::api::traces::map_span_detail;
@@ -18,10 +18,20 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
 
-static SCHEDULED: Lazy<dashmap::DashMap<String, std::time::Instant>> =
+static SCHEDULED: Lazy<dashmap::DashMap<String, ScheduledTrace>> = Lazy::new(dashmap::DashMap::new);
+static LAST_SAMPLED: Lazy<dashmap::DashMap<String, std::time::Instant>> =
     Lazy::new(dashmap::DashMap::new);
 static EVALUATION_SLOTS: Lazy<Arc<tokio::sync::Semaphore>> =
     Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(8)));
+const DEFAULT_SAMPLE_INTERVAL_SECONDS: u64 = 60;
+const SAMPLE_INTERVAL_ENV: &str = "THELAKE_EVALUATION_SAMPLE_INTERVAL_SECONDS";
+static SAMPLE_INTERVAL: Lazy<Duration> = Lazy::new(configured_sample_interval);
+
+#[derive(Clone, Copy)]
+struct ScheduledTrace {
+    last_seen: std::time::Instant,
+    retention: Duration,
+}
 
 #[derive(Serialize)]
 struct EvaluationRequest<'a> {
@@ -58,11 +68,12 @@ struct EvidenceReference {
     name: Option<String>,
 }
 
-/// Called after a successful trace write. Duplicate deliveries are coalesced
+/// Called after ingest accepts the spans. Duplicate deliveries are coalesced
 /// in-process and score IDs remain stable across retried runner calls.
 pub(crate) async fn schedule_for_traces(
     ws: Arc<WorkspaceContext>,
     trace_windows: HashMap<String, (chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
+    agent_name: Option<&str>,
 ) -> anyhow::Result<()> {
     let Some(endpoint) = std::env::var("THELAKE_EVALUATION_RUNNER_URL")
         .ok()
@@ -80,16 +91,33 @@ pub(crate) async fn schedule_for_traces(
 
     // Snapshot activation at ingest time, before the debounce delay, so a draft
     // activated later cannot receive a trace that arrived while it was inactive.
-    let definitions = active_definitions(&ws).await?;
+    let Some(agent_name) = agent_name.filter(|name| !name.trim().is_empty()) else {
+        return Ok(());
+    };
+    let definitions = active_definitions(&ws)
+        .await?
+        .into_iter()
+        .filter(|definition| definition.target_agent_name == agent_name)
+        .collect::<Vec<_>>();
     if definitions.is_empty() {
         return Ok(());
     }
 
     let now = std::time::Instant::now();
+    let sample_interval = *SAMPLE_INTERVAL;
     let quiet_delay = Duration::from_secs(ws.ingest().flush_interval_seconds().saturating_add(3));
-    SCHEDULED.retain(|_, scheduled| now.duration_since(*scheduled) < Duration::from_secs(60));
+    let scheduled_ttl = scheduled_retention(quiet_delay);
+    SCHEDULED.retain(|_, scheduled| !scheduled_trace_expired(*scheduled, now));
+    let sample_retention = sample_interval
+        .saturating_mul(2)
+        .max(Duration::from_secs(60 * 60));
+    LAST_SAMPLED.retain(|_, sampled| now.duration_since(*sampled) < sample_retention);
     for (trace_id, (observed_from, observed_to)) in trace_windows {
         let key = format!("{}:{trace_id}", ws.workspace_id());
+        if let Some(mut scheduled) = SCHEDULED.get_mut(&key) {
+            scheduled.last_seen = now;
+            continue;
+        }
         let permit = match Arc::clone(&EVALUATION_SLOTS).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -100,17 +128,28 @@ pub(crate) async fn schedule_for_traces(
                 continue;
             }
         };
-        if SCHEDULED.insert(key.clone(), now).is_some() {
+        if SCHEDULED
+            .insert(
+                key.clone(),
+                ScheduledTrace {
+                    last_seen: now,
+                    retention: scheduled_ttl,
+                },
+            )
+            .is_some()
+        {
             continue;
         }
         let ws = Arc::clone(&ws);
         let definitions = definitions.clone();
         let endpoint = endpoint.clone();
         let token = token.clone();
+        let sample_key = format!("{}:{agent_name}", ws.workspace_id());
         tokio::spawn(async move {
             let _permit = permit;
             loop {
-                let Some(last_seen) = SCHEDULED.get(&key).map(|time| *time) else {
+                let Some(last_seen) = SCHEDULED.get(&key).map(|scheduled| scheduled.last_seen)
+                else {
                     return;
                 };
                 let elapsed = last_seen.elapsed();
@@ -127,6 +166,9 @@ pub(crate) async fn schedule_for_traces(
                 &definitions,
                 &endpoint,
                 &token,
+                &LAST_SAMPLED,
+                &sample_key,
+                sample_interval,
             )
             .await
             {
@@ -138,6 +180,70 @@ pub(crate) async fn schedule_for_traces(
     Ok(())
 }
 
+fn configured_sample_interval() -> Duration {
+    let value = std::env::var(SAMPLE_INTERVAL_ENV).ok();
+    if value
+        .as_deref()
+        .is_some_and(|value| value.parse::<u64>().is_err())
+    {
+        warn!(
+            variable = SAMPLE_INTERVAL_ENV,
+            "invalid evaluation sample interval; using the default"
+        );
+    }
+    sample_interval_from(value.as_deref())
+}
+
+fn sample_interval_from(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_SAMPLE_INTERVAL_SECONDS))
+}
+
+fn scheduled_retention(quiet_delay: Duration) -> Duration {
+    quiet_delay.saturating_add(Duration::from_secs(60))
+}
+
+fn scheduled_trace_expired(scheduled: ScheduledTrace, now: std::time::Instant) -> bool {
+    now.duration_since(scheduled.last_seen) >= scheduled.retention
+}
+
+fn claim_sample_window(
+    sampled: &dashmap::DashMap<String, std::time::Instant>,
+    key: &str,
+    now: std::time::Instant,
+    interval: Duration,
+) -> bool {
+    if interval.is_zero() {
+        return true;
+    }
+    match sampled.entry(key.to_owned()) {
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            entry.insert(now);
+            true
+        }
+        dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+            if now.saturating_duration_since(*entry.get()) < interval {
+                false
+            } else {
+                entry.insert(now);
+                true
+            }
+        }
+    }
+}
+
+fn claim_sample_window_if_eligible(
+    sampled: &dashmap::DashMap<String, std::time::Instant>,
+    key: &str,
+    now: std::time::Instant,
+    interval: Duration,
+    eligible: bool,
+) -> bool {
+    eligible && claim_sample_window(sampled, key, now, interval)
+}
+
 async fn evaluate_trace(
     ws: Arc<WorkspaceContext>,
     trace_id: &str,
@@ -146,6 +252,9 @@ async fn evaluate_trace(
     definitions: &[EvaluatorDefinition],
     endpoint: &str,
     token: &str,
+    sampled: &dashmap::DashMap<String, std::time::Instant>,
+    sample_key: &str,
+    sample_interval: Duration,
 ) -> anyhow::Result<()> {
     let configs = ws.query().list_score_configs().await?;
     let stored = configs
@@ -219,6 +328,27 @@ async fn evaluate_trace(
     let Some(evidence) = build_evidence(trace_id, &spans) else {
         return Ok(());
     };
+
+    // Only completed traces with usable conversation evidence consume a
+    // sample window. This keeps child-span arrivals and empty traces from
+    // suppressing a later eligible trace for the agent.
+    let sampled_at = std::time::Instant::now();
+    if !claim_sample_window_if_eligible(
+        sampled,
+        sample_key,
+        sampled_at,
+        sample_interval,
+        evidence["events"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty()),
+    ) {
+        debug!(
+            trace_id,
+            sample_interval_seconds = sample_interval.as_secs(),
+            "automatic evaluation skipped by sample interval or ineligible evidence"
+        );
+        return Ok(());
+    }
 
     // Only the latest saved version of each evaluator is active.
     definitions.sort_by(|a, b| {
@@ -690,6 +820,122 @@ fn prompt_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sample_window_allows_one_trace_per_workspace_and_agent_interval() {
+        let sampled = dashmap::DashMap::new();
+        let start = std::time::Instant::now();
+        let interval = Duration::from_secs(30);
+
+        assert!(claim_sample_window(
+            &sampled,
+            "workspace-a:agent-a",
+            start,
+            interval
+        ));
+        assert!(!claim_sample_window(
+            &sampled,
+            "workspace-a:agent-a",
+            start + Duration::from_secs(29),
+            interval
+        ));
+        assert!(claim_sample_window(
+            &sampled,
+            "workspace-a:agent-a",
+            start + interval,
+            interval
+        ));
+        assert!(claim_sample_window(
+            &sampled,
+            "workspace-b:agent-a",
+            start,
+            interval
+        ));
+    }
+
+    #[test]
+    fn zero_sample_interval_evaluates_every_trace() {
+        let sampled = dashmap::DashMap::new();
+        let now = std::time::Instant::now();
+        assert!(claim_sample_window(
+            &sampled,
+            "workspace:agent",
+            now,
+            Duration::ZERO
+        ));
+        assert!(claim_sample_window(
+            &sampled,
+            "workspace:agent",
+            now,
+            Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn ineligible_trace_does_not_consume_sample_window() {
+        let sampled = dashmap::DashMap::new();
+        let now = std::time::Instant::now();
+        let interval = Duration::from_secs(30);
+
+        assert!(!claim_sample_window_if_eligible(
+            &sampled,
+            "workspace:agent",
+            now,
+            interval,
+            false
+        ));
+        assert!(sampled.is_empty());
+        assert!(claim_sample_window_if_eligible(
+            &sampled,
+            "workspace:agent",
+            now,
+            interval,
+            true
+        ));
+    }
+
+    #[test]
+    fn sample_interval_defaults_and_accepts_seconds() {
+        assert_eq!(
+            sample_interval_from(None),
+            Duration::from_secs(DEFAULT_SAMPLE_INTERVAL_SECONDS)
+        );
+        assert_eq!(sample_interval_from(Some("15")), Duration::from_secs(15));
+        assert_eq!(sample_interval_from(Some("0")), Duration::ZERO);
+        assert_eq!(
+            sample_interval_from(Some("invalid")),
+            Duration::from_secs(DEFAULT_SAMPLE_INTERVAL_SECONDS)
+        );
+    }
+
+    #[test]
+    fn scheduled_trace_retention_exceeds_quiet_delay() {
+        let quiet_delay = Duration::from_secs(90);
+        assert!(scheduled_retention(quiet_delay) > quiet_delay);
+        assert_eq!(scheduled_retention(quiet_delay), Duration::from_secs(150));
+    }
+
+    #[test]
+    fn scheduled_trace_keeps_its_workspace_specific_retention() {
+        let now = std::time::Instant::now();
+        let short_delay = ScheduledTrace {
+            last_seen: now,
+            retention: scheduled_retention(Duration::from_secs(3)),
+        };
+        let long_delay = ScheduledTrace {
+            last_seen: now,
+            retention: scheduled_retention(Duration::from_secs(90)),
+        };
+
+        assert!(scheduled_trace_expired(
+            short_delay,
+            now + Duration::from_secs(64)
+        ));
+        assert!(!scheduled_trace_expired(
+            long_delay,
+            now + Duration::from_secs(64)
+        ));
+    }
     use crate::sql::llm::{SpanDetail, SpanSummary};
 
     struct SpanFixture<'a> {
