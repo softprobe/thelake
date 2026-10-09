@@ -1,0 +1,3 @@
+interface:
+  display_name: "Run Lisa Evaluation Dogfood"
+  short_description: "Run local live-evaluation checks"

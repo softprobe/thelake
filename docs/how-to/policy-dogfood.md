@@ -12,6 +12,12 @@ This separation matters: a good judge result does not prove the learning skill
 found the right rule, and a successful skill run does not prove online trace
 evaluation works.
 
+Codex and Cursor project skills for these developer workflows live in
+`.agents/skills/`: `run-lisa-evaluation-dogfood` exercises the local live path,
+and `verify-lisa-slack-alert` checks the optional Slack notification path.
+These developer skills are separate from Lisa's policy authoring skills in
+`skills/`.
+
 ## 1. Check policy learning
 
 Invoke `learn-agent-policy` with the files in
