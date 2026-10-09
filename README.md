@@ -117,8 +117,9 @@ Open the session and trace UI at `http://127.0.0.1:8090/explorer/`. Full
 Explorer usage (working local config, embed, SPA dev, behavior checks):
 [`docs/how-to/explorer.md`](docs/how-to/explorer.md). Local anonymous mode
 (`SOFTPROBE_LOCAL_ANONYMOUS=1`) binds a fixed allowlist of `/v1/*` data-plane
-routes (OTLP ingest, scores POST, span/session search, score-config GET,
-single span/trace/session GET, and evaluator list/create/activate/deactivate)
+routes (OTLP ingest, scores POST, span/session search, policy list/create,
+score-config GET, single span/trace/session GET, and evaluator
+list/create/activate/deactivate)
 to `THELAKE_DEFAULT_WORKSPACE_ID` without a bearer. It does **not** provision
 that workspace: with the default **isolated** scope you must
 `POST /v1/workspaces` (admin key) first, or use shared scope as in the Explorer
@@ -165,6 +166,7 @@ Ingest: `POST /v1/traces`, `POST /v1/logs`
 
 Evaluations:
 
+- `GET|POST /v1/policies` (versioned workspace and per-agent Markdown memory)
 - `GET|POST /v1/evaluators` (versioned natural-language behavior rules)
 - `POST /v1/scores`
 - `GET|POST /v1/score-configs`

@@ -123,6 +123,8 @@ pub fn is_local_anonymous_data_plane(method: &Method, path: &str) -> bool {
         | (&Method::POST, "/v1/scores")
         | (&Method::GET, "/v1/evaluators")
         | (&Method::POST, "/v1/evaluators")
+        | (&Method::GET, "/v1/policies")
+        | (&Method::POST, "/v1/policies")
         | (&Method::POST, "/v1/spans/search")
         | (&Method::POST, "/v1/sessions/search")
         | (&Method::GET, "/v1/score-configs") => true,

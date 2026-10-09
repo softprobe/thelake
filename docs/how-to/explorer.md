@@ -101,8 +101,8 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST "http://127.0.0.1:${PORT:-1809
 
 The embedded SPA calls `apiBasePath: "/v1"` with no auth headers
 (`packages/thelake-explorer/src/standalone.tsx`). Anonymous mode allowlists OTLP
-ingest, scores POST, span/session search, score-config GET, single
-span/trace/session GET, and evaluator list/create/activate/deactivate. Anyone
+ingest, scores POST, span/session search, policy list/create, score-config GET,
+single span/trace/session GET, and evaluator list/create/activate/deactivate. Anyone
 who can reach the listener can exercise that allowlist — leave this mode off
 when the listener is reachable by untrusted users.
 

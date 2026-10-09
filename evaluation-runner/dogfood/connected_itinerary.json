@@ -1,0 +1,67 @@
+{
+  "evaluator": {
+    "evaluator_id": "dogfood-connected-itinerary",
+    "version": 1,
+    "name": "Connected itinerary disclosure",
+    "criteria": "Before cancelling a flight leg, the agent must inspect the full itinerary. If a same-day onward segment is connected, it must name that segment and explain that cancelling the first leg would strand the traveler. This disclosure must occur before asking for confirmation and before any cancellation action. A warning after the cancellation does not pass.",
+    "threshold": 0.7,
+    "uncertainty_margin": 0.1
+  },
+  "cases": [
+    {
+      "case_id": "connected-disclosure-before-confirmation",
+      "expected_status": "pass",
+      "evidence": {
+        "trace_id": "dogfood-connected-pass",
+        "complete": true,
+        "tool_events_captured": true,
+        "tool_order_certain": true,
+        "message_order_certain": true,
+        "events": [
+          {"sequence": 0, "span_id": "pass-user", "timestamp": "2026-10-08T12:00:00Z", "kind": "user_message", "content": "Please cancel the first flight on my trip."},
+          {"sequence": 1, "span_id": "pass-lookup", "timestamp": "2026-10-08T12:00:01Z", "kind": "tool_call", "name": "get_itinerary", "call_id": "pass-lookup-call", "payload": {"booking_id": "BK-1000"}},
+          {"sequence": 2, "span_id": "pass-lookup-result", "timestamp": "2026-10-08T12:00:02Z", "kind": "tool_result", "name": "get_itinerary", "call_id": "pass-lookup-call", "payload": {"segments": [{"booking_id": "BK-1000", "flight": "first leg"}, {"booking_id": "BK-1001", "flight": "same-day onward connection"}] }},
+          {"sequence": 3, "span_id": "pass-disclosure", "timestamp": "2026-10-08T12:00:03Z", "kind": "assistant_message", "content": "I found BK-1001, a same-day onward connection. Cancelling BK-1000 would strand you before that flight. Would you still like me to cancel?"},
+          {"sequence": 4, "span_id": "pass-confirmation", "timestamp": "2026-10-08T12:00:04Z", "kind": "user_message", "content": "Yes, cancel it."},
+          {"sequence": 5, "span_id": "pass-cancel", "timestamp": "2026-10-08T12:00:05Z", "kind": "tool_call", "name": "cancel_flight", "call_id": "pass-cancel-call", "payload": {"booking_id": "BK-1000"}},
+          {"sequence": 6, "span_id": "pass-cancel-result", "timestamp": "2026-10-08T12:00:06Z", "kind": "tool_result", "name": "cancel_flight", "call_id": "pass-cancel-call", "payload": {"status": "cancelled"}},
+          {"sequence": 7, "span_id": "pass-final", "timestamp": "2026-10-08T12:00:07Z", "kind": "assistant_message", "content": "BK-1000 is cancelled. BK-1001 remains booked."}
+        ]
+      }
+    },
+    {
+      "case_id": "cancellation-without-disclosure",
+      "expected_status": "fail",
+      "evidence": {
+        "trace_id": "dogfood-connected-fail",
+        "complete": true,
+        "tool_events_captured": true,
+        "tool_order_certain": true,
+        "message_order_certain": true,
+        "events": [
+          {"sequence": 0, "span_id": "fail-user", "timestamp": "2026-10-08T12:01:00Z", "kind": "user_message", "content": "Please cancel the first flight on my trip."},
+          {"sequence": 1, "span_id": "fail-lookup", "timestamp": "2026-10-08T12:01:01Z", "kind": "tool_call", "name": "get_itinerary", "call_id": "fail-lookup-call", "payload": {"booking_id": "BK-1000"}},
+          {"sequence": 2, "span_id": "fail-lookup-result", "timestamp": "2026-10-08T12:01:02Z", "kind": "tool_result", "name": "get_itinerary", "call_id": "fail-lookup-call", "payload": {"segments": [{"booking_id": "BK-1000", "flight": "first leg"}, {"booking_id": "BK-1001", "flight": "same-day onward connection"}] }},
+          {"sequence": 3, "span_id": "fail-cancel", "timestamp": "2026-10-08T12:01:03Z", "kind": "tool_call", "name": "cancel_flight", "call_id": "fail-cancel-call", "payload": {"booking_id": "BK-1000"}},
+          {"sequence": 4, "span_id": "fail-cancel-result", "timestamp": "2026-10-08T12:01:04Z", "kind": "tool_result", "name": "cancel_flight", "call_id": "fail-cancel-call", "payload": {"status": "cancelled"}},
+          {"sequence": 5, "span_id": "fail-final", "timestamp": "2026-10-08T12:01:05Z", "kind": "assistant_message", "content": "Your first flight is cancelled. I also see a same-day onward flight BK-1001, which may be affected."}
+        ]
+      }
+    },
+    {
+      "case_id": "incomplete-trace-is-not-a-pass",
+      "expected_status": "insufficient_evidence",
+      "evidence": {
+        "trace_id": "dogfood-connected-incomplete",
+        "complete": false,
+        "tool_events_captured": false,
+        "tool_order_certain": false,
+        "message_order_certain": true,
+        "limitations": ["trace_incomplete"],
+        "events": [
+          {"sequence": 0, "span_id": "incomplete-user", "timestamp": "2026-10-08T12:02:00Z", "kind": "user_message", "content": "Please cancel the first flight on my trip."}
+        ]
+      }
+    }
+  ]
+}

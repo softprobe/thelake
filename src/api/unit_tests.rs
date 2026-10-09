@@ -230,6 +230,19 @@ async fn unit_openapi_llm_schema_contracts() {
         .expect("openapi body");
     let openapi: serde_json::Value =
         serde_json::from_slice(&openapi_body).expect("valid openapi json");
+    assert_eq!(
+        openapi["paths"]["/v1/policies"]["get"]["operationId"],
+        "listPolicies"
+    );
+    assert_eq!(
+        openapi["paths"]["/v1/policies"]["post"]["operationId"],
+        "createPolicy"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["CreateEvaluatorRequest"]["properties"]["policy_sources"]
+            ["maxItems"],
+        20
+    );
     let score_post = &openapi["paths"]["/v1/scores"]["post"];
     assert_eq!(score_post["operationId"], "createScore");
     assert_eq!(
@@ -366,6 +379,294 @@ async fn unit_openapi_llm_schema_contracts() {
     assert!(openapi["paths"]["/v1/traces/{trace_id}"]["get"].is_object());
     assert!(openapi["paths"]["/v1/query/sql"]["post"].is_object());
     assert!(openapi["paths"]["/health"]["get"].is_object());
+}
+
+#[tokio::test]
+async fn unit_policy_markdown_is_versioned_and_workspace_scoped() {
+    let (router, _state, _t) = local_router_and_state().await.expect("router");
+    let content = "# Workspace POLICY.md\n\n## Refunds\n- Status: candidate";
+    let create = Request::builder()
+        .method("POST")
+        .uri("/v1/policies")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "policy_id": "workspace",
+                "version": 1,
+                "content": content
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let created = router.clone().oneshot(create).await.expect("create policy");
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let retry = Request::builder()
+        .method("POST")
+        .uri("/v1/policies")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "policy_id": "workspace",
+                "version": 1,
+                "content": content
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let retried = router.clone().oneshot(retry).await.expect("retry policy");
+    assert_eq!(retried.status(), StatusCode::OK);
+
+    use sha2::Digest;
+    let digest = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
+    let evaluator = Request::builder()
+        .method("POST")
+        .uri("/v1/evaluators")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "evaluator_id": "refund-policy",
+                "version": 1,
+                "target_agent_name": "support-agent",
+                "name": "Refund policy",
+                "criteria": "Check refund policy requirements.",
+                "policy_sources": [{ "policy_id": "workspace", "policy_version": 1, "sha256": digest }]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let evaluator_response = router
+        .clone()
+        .oneshot(evaluator)
+        .await
+        .expect("create policy-backed evaluator");
+    assert_eq!(evaluator_response.status(), StatusCode::CREATED);
+
+    let bad_digest = Request::builder()
+        .method("POST")
+        .uri("/v1/evaluators")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "evaluator_id": "refund-policy-invalid",
+                "version": 1,
+                "target_agent_name": "support-agent",
+                "name": "Invalid policy reference",
+                "criteria": "Check refund policy requirements.",
+                "policy_sources": [{ "policy_id": "workspace", "policy_version": 1, "sha256": "a".repeat(64) }]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let bad_digest_response = router
+        .clone()
+        .oneshot(bad_digest)
+        .await
+        .expect("reject unbound policy digest");
+    assert_eq!(bad_digest_response.status(), StatusCode::BAD_REQUEST);
+
+    let missing_source = Request::builder()
+        .method("POST")
+        .uri("/v1/evaluators")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "evaluator_id": "refund-policy-missing",
+                "version": 1,
+                "target_agent_name": "support-agent",
+                "name": "Missing policy source",
+                "criteria": "Check refund policy requirements.",
+                "policy_sources": [{ "policy_id": "does-not-exist", "policy_version": 1, "sha256": digest }]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let missing_source_response = router
+        .clone()
+        .oneshot(missing_source)
+        .await
+        .expect("reject missing policy source");
+    assert_eq!(missing_source_response.status(), StatusCode::BAD_REQUEST);
+
+    let targeted_policy = Request::builder()
+        .method("POST")
+        .uri("/v1/policies")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "policy_id": "billing-agent",
+                "version": 1,
+                "target_agent_name": "billing-agent",
+                "content": "# Billing policy\n\n- Status: confirmed"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let targeted_policy_response = router
+        .clone()
+        .oneshot(targeted_policy)
+        .await
+        .expect("create targeted policy");
+    assert_eq!(targeted_policy_response.status(), StatusCode::CREATED);
+    let targeted_content = "# Billing policy\n\n- Status: confirmed";
+    let targeted_digest = format!("{:x}", sha2::Sha256::digest(targeted_content.as_bytes()));
+    let mismatched_target = Request::builder()
+        .method("POST")
+        .uri("/v1/evaluators")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "evaluator_id": "wrong-target-policy",
+                "version": 1,
+                "target_agent_name": "support-agent",
+                "name": "Wrong target",
+                "criteria": "Check billing policy requirements.",
+                "policy_sources": [{ "policy_id": "billing-agent", "policy_version": 1, "sha256": targeted_digest }]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let mismatched_target_response = router
+        .clone()
+        .oneshot(mismatched_target)
+        .await
+        .expect("reject wrong target policy source");
+    assert_eq!(mismatched_target_response.status(), StatusCode::BAD_REQUEST);
+
+    let list = Request::builder()
+        .uri("/v1/policies")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(list).await.expect("list policies");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("policy response body");
+    let policies: serde_json::Value = serde_json::from_slice(&body).expect("policy JSON");
+    assert_eq!(policies.as_array().expect("policy list").len(), 2);
+    let workspace_policy = policies
+        .as_array()
+        .expect("policy list")
+        .iter()
+        .find(|policy| policy["policy_id"] == "workspace")
+        .expect("workspace policy");
+    assert_eq!(workspace_policy["version"], 1);
+    assert_eq!(
+        workspace_policy["target_agent_name"],
+        serde_json::Value::Null
+    );
+
+    let score_configs = Request::builder()
+        .uri("/v1/score-configs")
+        .body(Body::empty())
+        .unwrap();
+    let score_configs_response = router
+        .clone()
+        .oneshot(score_configs)
+        .await
+        .expect("list score configs");
+    assert_eq!(score_configs_response.status(), StatusCode::OK);
+    let score_configs_body = axum::body::to_bytes(score_configs_response.into_body(), usize::MAX)
+        .await
+        .expect("score config response body");
+    let score_configs_json: serde_json::Value =
+        serde_json::from_slice(&score_configs_body).expect("score config JSON");
+    assert!(score_configs_json["items"]
+        .as_array()
+        .expect("score config items")
+        .iter()
+        .all(|item| !item["config_id"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("policy:")));
+}
+
+#[tokio::test]
+async fn unit_concurrent_policy_versions_cannot_claim_conflicting_content() {
+    let (router, _state, _t) = local_router_and_state().await.expect("router");
+    let create = |content: &'static str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/policies")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "policy_id": "parallel-policy", "version": 1, "content": content })
+                    .to_string(),
+            ))
+            .unwrap()
+    };
+    let (first, second) = tokio::join!(
+        router.clone().oneshot(create("# Policy A")),
+        router.oneshot(create("# Policy B")),
+    );
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+    assert!(statuses.contains(&StatusCode::CREATED));
+    assert!(statuses.contains(&StatusCode::BAD_REQUEST));
+}
+
+#[tokio::test]
+async fn unit_concurrent_evaluator_versions_cannot_claim_conflicting_content() {
+    let (router, _state, _t) = local_router_and_state().await.expect("router");
+    let create = |criteria: &'static str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/evaluators")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "evaluator_id": "parallel-evaluator",
+                    "version": 1,
+                    "target_agent_name": "support-agent",
+                    "name": "Parallel evaluator",
+                    "criteria": criteria
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let (first, second) = tokio::join!(
+        router
+            .clone()
+            .oneshot(create("Require eligibility before refund.")),
+        router.oneshot(create("Require manager approval before refund.")),
+    );
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+    assert!(statuses.contains(&StatusCode::CREATED));
+    assert!(statuses.contains(&StatusCode::BAD_REQUEST));
+}
+
+#[tokio::test]
+async fn unit_generic_score_config_cannot_create_policy_or_evaluator_records() {
+    let (router, _state, _t) = local_router_and_state().await.expect("router");
+    for body in [
+        json!({
+            "config_id": "policy:forged:v1",
+            "timestamp": "2026-10-08T12:00:00Z",
+            "name": "Forged policy",
+            "data_type": "text",
+            "metadata": { "thelake.policy": "true" }
+        }),
+        json!({
+            "config_id": "evaluator:forged:v1",
+            "timestamp": "2026-10-08T12:00:00Z",
+            "name": "Forged evaluator",
+            "data_type": "categorical",
+            "metadata": { "thelake.evaluator": "true" }
+        }),
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/score-configs")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("score config request");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 #[tokio::test]

@@ -292,6 +292,51 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /v1/policies:
+    get:
+      tags: [llm]
+      summary: List workspace and agent Markdown policy versions
+      description: Returns workspace-scoped immutable Markdown policy versions.
+      operationId: listPolicies
+      responses:
+        "200":
+          description: Policy documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PolicyDocument"
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
+    post:
+      tags: [llm]
+      summary: Create an immutable Markdown policy version
+      description: Stores workspace-wide or exact-agent policy content in the authenticated workspace.
+      operationId: createPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePolicyRequest"
+      responses:
+        "201":
+          description: Policy version created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyDocument"
+        "200":
+          description: Idempotent retry of the same policy version
+        "400":
+          description: Invalid policy or conflicting immutable version
+        "401":
+          description: Missing or invalid bearer token
+        "403":
+          description: Bearer token could not be resolved to a tenant
   /v1/evaluators:
     get:
       tags: [llm]
@@ -1134,6 +1179,56 @@ components:
         require_result_before_action:
           type: boolean
           default: true
+    CreatePolicyRequest:
+      type: object
+      required: [policy_id, version, content]
+      properties:
+        policy_id:
+          type: string
+          maxLength: 200
+          description: Stable policy ID, unique within its workspace.
+        version:
+          type: integer
+          minimum: 1
+        target_agent_name:
+          type: string
+          nullable: true
+          maxLength: 256
+          description: Exact agent name recorded on telemetry; omit for workspace-wide policy.
+        content:
+          type: string
+          minLength: 1
+          maxLength: 32000
+          description: Human-readable Markdown POLICY.md content.
+    PolicyDocument:
+      allOf:
+        - $ref: "#/components/schemas/CreatePolicyRequest"
+        - type: object
+          required: [timestamp]
+          properties:
+            timestamp:
+              type: string
+              format: date-time
+    PolicySource:
+      type: object
+      required: [policy_id, policy_version, sha256]
+      properties:
+        policy_id:
+          type: string
+          maxLength: 256
+          description: Identifier of the stored Markdown policy document.
+        policy_version:
+          type: integer
+          minimum: 1
+          description: Exact immutable version returned by GET /v1/policies.
+        sha256:
+          type: string
+          pattern: "^[a-fA-F0-9]{64}$"
+          description: SHA-256 digest verified against the stored document version.
+        source_revision:
+          type: string
+          maxLength: 256
+          nullable: true
     CreateEvaluatorRequest:
       type: object
       required: [evaluator_id, version, target_agent_name, name, criteria]
@@ -1168,6 +1263,12 @@ components:
           maxItems: 20
           items:
             $ref: "#/components/schemas/OrderedToolRequirement"
+        policy_sources:
+          type: array
+          maxItems: 20
+          description: Optional, client-supplied provenance for criteria composed from policy memory.
+          items:
+            $ref: "#/components/schemas/PolicySource"
     EvaluatorDefinition:
       allOf:
         - $ref: "#/components/schemas/CreateEvaluatorRequest"

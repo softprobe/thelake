@@ -45,4 +45,23 @@ describe("ExplorerApi", () => {
     const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
     expect(body).toMatchObject({ name: "human_verdict", string_value: "correct", session_id: "s1", source: "annotation" });
   });
+
+  it("sends policy source provenance with evaluator drafts", async () => {
+    const fetcher = vi.fn(async () => new Response("{}", { status: 200 }));
+    const api = new ExplorerApi({ apiBasePath: "/v1", fetch: fetcher as typeof fetch });
+    const policy_sources = [{ policy_id: "workspace/refunds", policy_version: 1, sha256: "a".repeat(64), source_revision: "abc123" }];
+    await api.createEvaluator({ evaluator_id: "refund-check", version: 1, target_agent_name: "support-agent", name: "Refund eligibility", criteria: "Check eligibility before refunding.", policy_sources });
+    const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    expect(body.policy_sources).toEqual(policy_sources);
+  });
+
+  it("reads and writes workspace policy documents through the authenticated API", async () => {
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify({ policy_id: "workspace", version: 1, content: "# POLICY.md" }), { status: init?.method === "POST" ? 201 : 200 }));
+    const api = new ExplorerApi({ apiBasePath: "/v1", auth: { headers: () => ({ Authorization: "Bearer test" }) }, fetch: fetcher as typeof fetch });
+    await api.listPolicies();
+    await api.createPolicy({ policy_id: "workspace", version: 1, content: "# POLICY.md" });
+    expect(fetcher.mock.calls[0][0]).toBe("/v1/policies");
+    expect((fetcher.mock.calls[1][1]?.headers as Record<string, string>).Authorization).toBe("Bearer test");
+    expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toMatchObject({ policy_id: "workspace", version: 1, content: "# POLICY.md" });
+  });
 });

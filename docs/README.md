@@ -28,6 +28,8 @@ Concepts and runtime design (read for understanding, not step-by-step).
 - [5-minute quickstart](quickstart.md) — create a check in chat, run a Gemini sample agent, and inspect the result
 - [Instrument applications](how-to/instrumentation.md)
 - [Use Explorer](how-to/explorer.md) — browser chat and session/trace UI at `/explorer/`
+- [Policy memory](how-to/policy-memory.md) — maintain human-readable policy and submit versioned evaluator drafts from a coding agent
+- [Policy dogfood](how-to/policy-dogfood.md) — repeatably check policy learning, judge directionality, and online issue detection
 - [Use Slack behavior checks](how-to/slack-evaluator.md) — author checks and receive online evaluation failures in threads
 - [Apply schema promotion](how-to/promotion.md)
 - [Query DuckLake locally](how-to/adhoc-duckdb.md)

@@ -11,6 +11,11 @@ command -v node >/dev/null 2>&1 || { echo "ERROR: node is required for Explorer 
 command -v cargo >/dev/null 2>&1 || { echo "ERROR: cargo is required for Explorer UI E2E." >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is required for Explorer UI E2E." >&2; exit 1; }
 PORT="${THELAKE_EXPLORER_E2E_PORT:-18090}"
+BACKEND="http://127.0.0.1:$PORT"
+if curl -fsS "$BACKEND/ready" >/dev/null 2>&1; then
+  echo "ERROR: Explorer E2E backend port $PORT is already serving a process." >&2
+  exit 1
+fi
 
 ONLINE_E2E="${THELAKE_EXPLORER_E2E_ONLINE:-0}"
 E2E_COMPOSE_PROJECT=""
@@ -60,7 +65,6 @@ fi
 
 THELAKE_CACHE_ROOT="${THELAKE_CACHE_ROOT:-$HOME/.cache/thelake}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$THELAKE_CACHE_ROOT/target}"
-BACKEND="http://127.0.0.1:$PORT"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/thelake-explorer-e2e.XXXXXX")"
 mkdir -p "$TMP_DIR/warehouse"
 WORKSPACE_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
@@ -124,11 +128,8 @@ if [[ "$ONLINE_E2E" == "1" ]]; then
     exit 1
   fi
   export THELAKE_EVALUATION_RUNNER_URL="http://127.0.0.1:$E2E_RUNNER_PORT/v1/evaluate"
-fi
-
-if curl -fsS "$BACKEND/ready" >/dev/null 2>&1; then
-  echo "ERROR: Explorer E2E backend port $PORT is already serving a process." >&2
-  exit 1
+  echo "==> Calibrating live evaluator verdicts with paired policy cases..."
+  python3 "$ROOT/evaluation-runner/scripts/run_policy_dogfood.py"
 fi
 
 cat > "$TMP_DIR/config.yaml" <<EOF

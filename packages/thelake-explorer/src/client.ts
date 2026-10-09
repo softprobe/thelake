@@ -51,7 +51,16 @@ export type BehaviorEvaluator = {
   threshold: number;
   uncertainty_margin: number;
   required_tool_order: Array<{ before: string; action: string; require_result_before_action: boolean }>;
+  policy_sources?: Array<{ policy_id: string; policy_version: number; sha256: string; source_revision?: string | null }>;
   active: boolean;
+};
+
+export type PolicyDocument = {
+  policy_id: string;
+  version: number;
+  target_agent_name?: string | null;
+  content: string;
+  timestamp: string;
 };
 
 export class ExplorerApi {
@@ -122,7 +131,15 @@ export class ExplorerApi {
     return this.request("/evaluators");
   }
 
-  createEvaluator(input: Pick<BehaviorEvaluator, "evaluator_id" | "version" | "target_agent_name" | "name" | "criteria">): Promise<BehaviorEvaluator> {
+  listPolicies(): Promise<PolicyDocument[]> {
+    return this.request("/policies");
+  }
+
+  createPolicy(input: Pick<PolicyDocument, "policy_id" | "version" | "content"> & Partial<Pick<PolicyDocument, "target_agent_name">>): Promise<PolicyDocument> {
+    return this.request("/policies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  }
+
+  createEvaluator(input: Pick<BehaviorEvaluator, "evaluator_id" | "version" | "target_agent_name" | "name" | "criteria"> & Partial<Pick<BehaviorEvaluator, "policy_sources">>): Promise<BehaviorEvaluator> {
     return this.request("/evaluators", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
   }
 
