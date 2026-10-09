@@ -107,39 +107,7 @@ def run_agent(agent_name: str, api_url: str, model_name: str) -> str:
             finally:
                 tool_span.end()
 
-            final = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Confirm the tool result to the user. Do not mention an eligibility check.",
-                    },
-                    {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": function_call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": function_call.function.name,
-                                    "arguments": function_call.function.arguments,
-                                },
-                            }
-                        ],
-                    },
-                    {
-                        "role": "tool",
-                        "tool_call_id": function_call.id,
-                        "name": function_call.function.name,
-                        "content": json.dumps(call_output),
-                    },
-                ],
-                name="gemini.refund_response",
-            )
-            assistant_text = (
-                final.choices[0].message.content or f"Your refund for {ticket_id} has been issued."
-            ).strip()
+            assistant_text = f"Your refund for {ticket_id} has been issued."
             agent.update(output={"content": assistant_text})
 
         if not telemetry.force_flush():

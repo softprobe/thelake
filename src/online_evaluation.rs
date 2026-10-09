@@ -72,8 +72,7 @@ struct EvidenceReference {
 /// in-process and score IDs remain stable across retried runner calls.
 pub(crate) async fn schedule_for_traces(
     ws: Arc<WorkspaceContext>,
-    trace_windows: HashMap<String, (chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
-    agent_name: Option<&str>,
+    trace_windows: HashMap<String, (chrono::DateTime<Utc>, chrono::DateTime<Utc>, Option<String>)>,
 ) -> anyhow::Result<()> {
     let Some(endpoint) = std::env::var("THELAKE_EVALUATION_RUNNER_URL")
         .ok()
@@ -91,15 +90,8 @@ pub(crate) async fn schedule_for_traces(
 
     // Snapshot activation at ingest time, before the debounce delay, so a draft
     // activated later cannot receive a trace that arrived while it was inactive.
-    let Some(agent_name) = agent_name.filter(|name| !name.trim().is_empty()) else {
-        return Ok(());
-    };
-    let definitions = active_definitions(&ws)
-        .await?
-        .into_iter()
-        .filter(|definition| definition.target_agent_name == agent_name)
-        .collect::<Vec<_>>();
-    if definitions.is_empty() {
+    let definitions = active_definitions(&ws).await?;
+    if definitions.is_empty() || trace_windows.is_empty() {
         return Ok(());
     }
 
@@ -112,7 +104,18 @@ pub(crate) async fn schedule_for_traces(
         .saturating_mul(2)
         .max(Duration::from_secs(60 * 60));
     LAST_SAMPLED.retain(|_, sampled| now.duration_since(*sampled) < sample_retention);
-    for (trace_id, (observed_from, observed_to)) in trace_windows {
+    for (trace_id, (observed_from, observed_to, agent_name)) in trace_windows {
+        let Some(agent_name) = agent_name.filter(|name| !name.trim().is_empty()) else {
+            continue;
+        };
+        let matching_definitions = definitions
+            .iter()
+            .filter(|definition| definition.target_agent_name == agent_name)
+            .cloned()
+            .collect::<Vec<_>>();
+        if matching_definitions.is_empty() {
+            continue;
+        }
         let key = format!("{}:{trace_id}", ws.workspace_id());
         if let Some(mut scheduled) = SCHEDULED.get_mut(&key) {
             scheduled.last_seen = now;
@@ -141,7 +144,7 @@ pub(crate) async fn schedule_for_traces(
             continue;
         }
         let ws = Arc::clone(&ws);
-        let definitions = definitions.clone();
+        let definitions = matching_definitions;
         let endpoint = endpoint.clone();
         let token = token.clone();
         let sample_key = format!("{}:{agent_name}", ws.workspace_id());
@@ -673,6 +676,32 @@ fn build_evidence(trace_id: &str, spans: &[crate::sql::llm::SpanDetail]) -> Opti
                 }
             }
         }
+        if kind == "agent" && span.summary.parent_span_id.is_none() {
+            if let Some(text) = span
+                .attributes
+                .get("sp.output")
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .and_then(|value| {
+                    value
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .filter(|text| !text.trim().is_empty())
+            {
+                let already_emitted = spans.iter().any(|candidate| {
+                    candidate.summary.span_id != span.summary.span_id
+                        && span_emits_assistant_text(candidate, &text)
+                });
+                if !already_emitted {
+                    local.push((
+                        span.summary.end_time.unwrap_or(span.summary.start_time),
+                        "assistant_message".into(),
+                        json!({"content":text}),
+                    ));
+                }
+            }
+        }
         for (timestamp, kind, data) in local {
             events.push((timestamp.timestamp_nanos_opt().unwrap_or_default(), span.summary.span_id.clone(), json!({"kind":kind,"span_id":span.summary.span_id,"parent_span_id":span.summary.parent_span_id,"timestamp":timestamp.to_rfc3339(),"call_id":data["call_id"],"name":data["name"],"content":data["content"],"payload":data["payload"]})));
         }
@@ -764,6 +793,41 @@ fn build_evidence(trace_id: &str, spans: &[crate::sql::llm::SpanDetail]) -> Opti
     }))
 }
 
+fn span_emits_assistant_text(span: &crate::sql::llm::SpanDetail, text: &str) -> bool {
+    let kind = span.summary.span_type.to_ascii_lowercase();
+    if !kind.contains("generation") && kind != "llm" {
+        return false;
+    }
+    if span
+        .attributes
+        .get("sp.output")
+        .and_then(|output| match completion_evidence(output) {
+            CompletionEvidence::AssistantText(value) => Some(value),
+            CompletionEvidence::ToolCall { assistant_text } => assistant_text,
+        })
+        .is_some_and(|value| value == text)
+    {
+        return true;
+    }
+    span.events.iter().any(|event| {
+        event.get("name").and_then(Value::as_str) == Some("gen_ai.content.completion")
+            && event
+                .get("attributes")
+                .and_then(Value::as_object)
+                .and_then(|attributes| {
+                    attributes
+                        .get("content")
+                        .or_else(|| attributes.get("body"))
+                        .and_then(Value::as_str)
+                })
+                .and_then(|output| match completion_evidence(output) {
+                    CompletionEvidence::AssistantText(value) => Some(value),
+                    CompletionEvidence::ToolCall { assistant_text } => assistant_text,
+                })
+                .is_some_and(|value| value == text)
+    })
+}
+
 fn prompt_messages(
     content: &str,
     timestamp: chrono::DateTime<Utc>,
@@ -791,10 +855,9 @@ fn prompt_messages(
             continue;
         };
         let role = object.get("role").and_then(Value::as_str);
-        let text = object.get("content").and_then(|value| match value {
-            Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
-            Value::Null => None,
-            other => Some(other.to_string()),
+        let text = object.get("content").map(|value| match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
         });
         let (Some(role), Some(text)) = (role, text) else {
             continue;
@@ -1012,32 +1075,6 @@ mod tests {
             }]
         })
         .to_string();
-        let final_messages = json!([
-            {
-                "role":"system",
-                "content":"Confirm the tool result to the user. Do not mention an eligibility check."
-            },
-            {
-                "role":"assistant",
-                "content":null,
-                "tool_calls":[{
-                    "id":"call-1",
-                    "type":"function",
-                    "function":{
-                        "name":"issue_refund",
-                        "arguments":json!({"ticket_id":"DEMO-42"}).to_string()
-                    }
-                }]
-            },
-            {
-                "role":"tool",
-                "tool_call_id":"call-1",
-                "name":"issue_refund",
-                "content":json!({"ticket_id":"DEMO-42","status":"refunded"}).to_string()
-            }
-        ]);
-        let final_prompt = final_messages.to_string();
-        let final_input = json!({"messages": final_messages}).to_string();
         let first_generation = span_detail(
             SpanFixture {
                 span_id: "generation-1",
@@ -1086,6 +1123,21 @@ mod tests {
             ]),
             vec![],
         );
+        let agent_span = span_detail(
+            SpanFixture {
+                span_id: "agent-1",
+                parent_span_id: None,
+                name: "quickstart-refund-agent",
+                span_type: "agent",
+                start_time: "2026-10-08T12:00:00Z",
+                end_time: "2026-10-08T12:00:03Z",
+            },
+            HashMap::from([(
+                "sp.output".into(),
+                json!({"content":"Your refund for DEMO-42 has been issued."}).to_string(),
+            )]),
+            vec![],
+        );
         let final_generation = span_detail(
             SpanFixture {
                 span_id: "generation-2",
@@ -1095,22 +1147,17 @@ mod tests {
                 start_time: "2026-10-08T12:00:02Z",
                 end_time: "2026-10-08T12:00:03Z",
             },
-            HashMap::from([("sp.input".into(), final_input)]),
-            vec![
-                json!({
-                    "name": "gen_ai.content.prompt",
-                    "timestamp": "2026-10-08T12:00:02Z",
-                    "attributes": {"content": final_prompt}
-                }),
-                json!({
-                    "name": "gen_ai.content.completion",
-                    "timestamp": "2026-10-08T12:00:03Z",
-                    "attributes": {"content": "Your refund for DEMO-42 has been issued."}
-                }),
-            ],
+            HashMap::from([(
+                "sp.output".into(),
+                "Your refund for DEMO-42 has been issued.".into(),
+            )]),
+            vec![],
         );
-        let evidence =
-            build_evidence("trace-1", &[first_generation, tool_span, final_generation]).unwrap();
+        let evidence = build_evidence(
+            "trace-1",
+            &[agent_span, first_generation, tool_span, final_generation],
+        )
+        .unwrap();
         let events = evidence["events"].as_array().unwrap();
         let user_turns = events
             .iter()
@@ -1136,7 +1183,7 @@ mod tests {
                 .iter()
                 .filter(|event| event["kind"] == "context_message")
                 .count(),
-            2
+            1
         );
         assert_eq!(
             events
@@ -1162,6 +1209,50 @@ mod tests {
             events[assistant_answer]["content"],
             "Your refund for DEMO-42 has been issued."
         );
+    }
+
+    #[test]
+    fn nested_agent_output_is_not_reported_as_a_user_facing_answer() {
+        let root = span_detail(
+            SpanFixture {
+                span_id: "root-agent",
+                parent_span_id: None,
+                name: "support-agent",
+                span_type: "agent",
+                start_time: "2026-10-08T12:00:00Z",
+                end_time: "2026-10-08T12:00:03Z",
+            },
+            HashMap::from([(
+                "sp.output".into(),
+                json!({"content":"The user-facing answer."}).to_string(),
+            )]),
+            vec![],
+        );
+        let nested = span_detail(
+            SpanFixture {
+                span_id: "nested-agent",
+                parent_span_id: Some("root-agent"),
+                name: "eligibility-subagent",
+                span_type: "agent",
+                start_time: "2026-10-08T12:00:01Z",
+                end_time: "2026-10-08T12:00:02Z",
+            },
+            HashMap::from([(
+                "sp.output".into(),
+                json!({"content":"Internal eligibility notes."}).to_string(),
+            )]),
+            vec![],
+        );
+
+        let evidence = build_evidence("trace-1", &[root, nested]).unwrap();
+        let answers = evidence["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == "assistant_message")
+            .collect::<Vec<_>>();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0]["content"], "The user-facing answer.");
     }
 
     #[test]

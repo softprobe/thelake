@@ -4,8 +4,8 @@ Explorer is the self-hosted session and trace UI for thelake. Source lives in
 [`packages/thelake-explorer`](../../packages/thelake-explorer/). `make build`
 embeds the SPA into the binary; thelake serves it at `/explorer/`.
 
-For a fast first run that creates a check in chat, runs a live sample agent,
-and shows the evaluation result in the conversation, see
+For a fast first run that creates a check in the guided wizard, runs a live
+sample agent, and shows the evaluation result in Explorer, see
 the [5-minute quickstart](../quickstart.md).
 
 ## Prerequisites
@@ -150,7 +150,16 @@ mismatched `data_path` fails attach / readiness.
 - Record a human verdict (`correct` / `wrong` / `unsure`) as a categorical
   score named `human_verdict` on the focused span.
 
-### Chat and behavior checks
+### Behavior-check wizard (labeled Chat in the UI)
+
+The **Chat** view is a scripted setup wizard and results inbox, not a
+conversational AI agent. Its assistant messages are fixed prompts; the composer
+does not call an LLM, stream model output, or interpret free-form follow-ups.
+It stores the entered criteria and target agent in browser state, then uses the
+TheLake API to create and activate an evaluator. Once monitoring, it polls
+session data for that evaluator's scores every 10 seconds. The online
+evaluation runner separately judges matching completed traces after ingestion;
+Gemini does not power the wizard.
 
 - Create and activate a natural-language behavior check in Chat by describing
   the behavior and the exact agent name from its root trace.
