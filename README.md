@@ -199,26 +199,25 @@ Contracts:
 - Promotion: [`docs/how-to/promotion.md`](docs/how-to/promotion.md)
 - Attributes: [`docs/architecture/attribute-storage.md`](docs/architecture/attribute-storage.md)
 
-### Online behavior evaluation
+### Lisa and behavior checks
 
 Create a draft version of a plain-language rule with `POST /v1/evaluators`.
-Each rule must name its target agent. Drafts do not run until activated with
-`POST /v1/evaluators/{evaluator_id}/versions/{version}/activate`. After
-matching trace spans are committed, the runtime waits briefly, reads the
-bounded trace through its checked query path, and sends captured
-conversation/tool evidence to the DeepEval runner. The verdict is written as a
-trace-linked evaluator score. Stop new evaluations with the corresponding
-`/deactivate` endpoint.
+Each rule names its target agent. Activate it with
+`POST /v1/evaluators/{evaluator_id}/versions/{version}/activate`. TheLake stores
+the rule and session evidence. Lisa's workspace schedule starts Lisa, who uses
+TheLake's APIs to inspect sessions and checks, runs local evaluations, stores
+verdicts, investigates failures, and sends configured Slack alerts.
+Trace ingestion does not start Lisa work. Pause future checks with the
+corresponding `/deactivate` endpoint.
 
-The runner is an optional private-network service. Start it from Compose with
-`--profile evaluation` and configure `THELAKE_EVALUATION_RUNNER_URL`,
-`THELAKE_EVALUATION_RUNNER_TOKEN`, and `GOOGLE_API_KEY` in the environment.
-Activation sends captured prompt, completion, and tool data for the selected
-agent to the configured Gemini provider. The runner redacts common credential
-fields and key formats, but does not perform general PII removal; review your
-trace data and provider settings before activation. See
-[`evaluation-runner/README.md`](evaluation-runner/README.md) for setup and an
-example request.
+Configure Lisa with `LISA_WORKSPACE_ID`, `LISA_QA_CRON`, and Gemini
+credentials. The default cron schedule runs `Lisa scheduled QA` hourly at
+minute 0 UTC; it does not run a model turn on startup.
+Lisa runs bounded, redacted DeepEval G-Eval checks in her own MCP tool process,
+then stores verdicts and evidence references through TheLake. No separate
+evaluation service or evaluator-service token is required. Lisa redacts common
+credential fields and key formats, but does not perform general PII removal.
+Review trace data and provider settings before activating checks.
 
 For example, a team can save this behavior expectation without writing an
 assertion script:
@@ -240,18 +239,13 @@ curl -X POST "$THELAKE_API_URL/v1/evaluators/refund-eligibility/versions/1/activ
   -H "Authorization: Bearer $THELAKE_API_KEY"
 ```
 
-This initial online path runs in-process after ingestion and stores terminal
-verdicts as scores; it does not yet retain pending/running attempts or group
-repeated failures into a separate issue record. Trace completion is inferred
-from a completed root span after a short quiet period. Traces above the
-evidence span limit are skipped to avoid judging partial evidence. Runner
-outages, worker saturation, and process restarts can lose an in-flight attempt;
-a later ingest of that trace can cause another attempt. Evaluators apply to
-newly ingested traces; this version has no historical backfill or preview
-workflow. Tool-order rules return insufficient evidence if a prerequisite call
-is present but its result cannot be correlated. Missing prerequisite calls are
-judged only when tool-call evidence is present, so incomplete instrumentation
-can limit coverage.
+Lisa samples at most one unchecked matching session per configured cycle from
+the recent session list. Evaluation is not in the agent's request path. The
+first release uses a periodic schedule and idempotent score IDs; it does not
+yet have a durable work queue or grouped issue records. During an outage, a
+session can age out of the recent-session window before Lisa evaluates it. See
+the [Lisa QA design](docs/architecture/lisa-agent-qa.md) for the durable
+ownership workflow.
 
 ## Query DuckLake locally
 

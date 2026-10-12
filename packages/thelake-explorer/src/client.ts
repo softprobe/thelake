@@ -5,6 +5,8 @@ export type AuthProvider = {
 export type ExplorerConfig = {
   /** API root, for example `/v1` or `/api/thelake/v1`. */
   apiBasePath: string;
+  /** Direct browser-reachable Lisa API root. */
+  lisaApiBasePath?: string;
   auth?: AuthProvider;
   /** Optional workspace-scoped browser key for chat history persistence. */
   chatStorageKey?: string;
@@ -54,11 +56,59 @@ export type BehaviorEvaluator = {
   active: boolean;
 };
 
+export type LisaMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  created_at?: string;
+  sequence?: number;
+};
+
+export type LisaActivity = {
+  id: string;
+  kind: "tool" | "status" | "evidence";
+  label: string;
+  detail?: string;
+  session_id?: string;
+  created_at?: string;
+  sequence?: number;
+  tool_call_id?: string;
+  tool_name?: string;
+  arguments?: string;
+};
+
+export type LisaConversation = {
+  conversation_id: string;
+  title: string;
+  updated_at?: string;
+  event_source?: string;
+  event_status?: "pending" | "processing" | "complete" | "failed";
+  event_id?: string;
+  event_error?: string;
+  messages: LisaMessage[];
+  activities?: LisaActivity[];
+};
+
+export type LisaTurn = {
+  conversation_id: string;
+  messages: LisaMessage[];
+  activities: LisaActivity[];
+};
+
 export class ExplorerApi {
   constructor(readonly config: ExplorerConfig) {}
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const base = this.config.apiBasePath.replace(/\/$/, "");
+    return this.requestAt<T>(this.config.apiBasePath, path, init);
+  }
+
+  private async requestLisa<T>(path: string, init: RequestInit = {}): Promise<T> {
+    if (!this.config.lisaApiBasePath) throw new Error("Lisa's direct API URL is not configured");
+    return this.requestAt<T>(this.config.lisaApiBasePath, path, init);
+  }
+
+  private async requestAt<T>(apiBasePath: string, path: string, init: RequestInit): Promise<T> {
+    const base = apiBasePath.replace(/\/$/, "");
     const authHeaders = await this.config.auth?.headers?.();
     const response = await (this.config.fetch ?? fetch)(`${base}${path}`, {
       ...init,
@@ -122,12 +172,38 @@ export class ExplorerApi {
     return this.request("/evaluators");
   }
 
+  listLisaConversations(): Promise<LisaConversation[]> {
+    return this.requestLisa("/conversations");
+  }
+
+  createLisaConversation(): Promise<LisaConversation> {
+    return this.requestLisa("/conversations", { method: "POST" });
+  }
+
+  getLisaConversation(conversationId: string): Promise<LisaConversation> {
+    return this.requestLisa(`/conversations/${encodeURIComponent(conversationId)}`);
+  }
+
+  deleteLisaConversation(conversationId: string): Promise<{ deleted: boolean }> {
+    return this.requestLisa(`/conversations/${encodeURIComponent(conversationId)}`, { method: "DELETE" });
+  }
+
+  sendLisaMessage(conversationId: string, text: string, consent: boolean): Promise<LisaTurn> {
+    return this.requestLisa(`/conversations/${encodeURIComponent(conversationId)}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, consent }),
+    });
+  }
+
   createEvaluator(input: Pick<BehaviorEvaluator, "evaluator_id" | "version" | "target_agent_name" | "name" | "criteria">): Promise<BehaviorEvaluator> {
     return this.request("/evaluators", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
   }
 
   setEvaluatorActive(evaluatorId: string, version: number, active: boolean): Promise<BehaviorEvaluator> {
     const action = active ? "activate" : "deactivate";
-    return this.request(`/evaluators/${encodeURIComponent(evaluatorId)}/versions/${version}/${action}`, { method: "POST" });
+    return this.request(`/evaluators/${encodeURIComponent(evaluatorId)}/versions/${version}/${action}`, {
+      method: "POST",
+    });
   }
 }

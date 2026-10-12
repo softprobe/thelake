@@ -1,80 +1,82 @@
-# Slack behavior checks
+# Slack conversations with Lisa
 
-TheLake can create and activate a natural-language behavior check from a Slack
-thread, then post failures from online evaluation back into that thread. The
-thread destination is stored with the evaluator definition; evaluation scores
-remain in the workspace's normal score store.
+Slack is an optional front door to Lisa. Slack sends events directly to Lisa;
+Lisa keeps the conversation, uses her policy and evaluation tools, reads trace
+and check data from TheLake, and posts her own replies and issue alerts. TheLake
+stores the telemetry and evaluation results. It does not receive Slack events
+or start Lisa work.
 
-## Configure a Slack app
+## Configure Lisa's Slack connection
 
-Create a Slack app for your installation and configure:
+Create a Slack app for the deployment and configure:
 
 - Bot token scope: `chat:write`
-- Event subscription: `app_mention`
-- Event subscription: `message.channels` for plain replies in public-channel
-  threads
-- Add `message.groups` and the `groups:history` scope to support private-channel
-  threads; invite the bot to the channel
-- Bot scopes: `app_mentions:read`, `channels:history` (for plain thread replies),
-  and `groups:history` when private channels are enabled
-- Event Request URL: `https://<thelake-host>/slack/events`
+- Event subscriptions: `app_mention` and `message.channels`
+- For private channels, also subscribe to `message.groups`, request the
+  `groups:history` scope, and invite the bot to the channel
+- Bot scopes: `app_mentions:read`, `channels:history` for plain public-channel
+  thread replies, and `groups:history` for private-channel replies
+- Event Request URL: `https://<lisa-host>/slack/events`
 
-Set these environment variables on theLake service:
+Set these variables on Lisa's service:
 
 ```bash
-THELAKE_SLACK_SIGNING_SECRET=<Slack app signing secret>
-THELAKE_SLACK_BOT_TOKEN=<Slack bot token>
-THELAKE_SLACK_TEAM_ID=<Slack workspace ID where the app is installed>
-THELAKE_SLACK_ALLOWED_USERS=<comma-separated Slack user IDs>
-# Or restrict authoring to one or more channels instead:
-THELAKE_SLACK_ALLOWED_CHANNELS=<comma-separated Slack channel IDs>
+LISA_SLACK_SIGNING_SECRET=<Slack app signing secret>
+LISA_SLACK_BOT_TOKEN=<Slack bot token>
+LISA_SLACK_TEAM_ID=<Slack workspace ID where the app is installed>
+LISA_SLACK_ALLOWED_USERS=<comma-separated Slack user IDs>
+# Or restrict access to one or more channels instead:
+LISA_SLACK_ALLOWED_CHANNELS=<comma-separated Slack channel IDs>
 ```
 
-At least one of the author allowlists must contain an ID. A request is
-authorized when its user ID **or** its channel ID is allowlisted.
+At least one allowlist must be configured. A request is authorized when its
+user ID or channel ID is allowlisted. `LISA_WORKSPACE_ID` scopes this Lisa
+runtime to its workspace. Run one Lisa runtime per workspace and use a separate
+Slack app or deployment for each workspace.
 
-In isolated workspace mode, also set `THELAKE_SLACK_WORKSPACE_ID` to the
-workspace that owns the checks. If it is unset, the integration uses
-`THELAKE_DEFAULT_WORKSPACE_ID`, then the shared workspace. Provision isolated
-workspaces before using Slack. This installation currently binds one Slack app
-to one configured theLake workspace.
+The `LISA_THELAKE_API_URL` and `LISA_THELAKE_TOKEN` settings let Lisa read
+workspace-scoped telemetry and checks and write scores. The token is shared
+with TheLake only to authenticate these Lisa-to-storage calls.
 
-For online evaluation, configure and run the evaluation runner as described in
-the [Explorer behavior checks guide](explorer.md#behavior-checks):
-`THELAKE_EVALUATION_RUNNER_URL` and `THELAKE_EVALUATION_RUNNER_TOKEN` must be
-set on theLake service, and the runner needs its model-provider credentials.
+Set `LISA_SLACK_CHANNEL_ID` to choose a workspace-level destination for alerts
+from checks that are not associated with a Slack thread. A check created from a
+Slack conversation keeps that conversation's channel and thread as its alert
+destination; those per-check bindings take precedence over the workspace
+default. This default also allows checks created before Slack was configured to
+send alerts without editing the evaluator definition.
 
-## Create a check from Slack
+## Talk with Lisa
 
-In a channel thread, mention the bot using this form:
+Mention the bot in a channel or reply in a supported thread. Lisa responds in
+the same thread and keeps multi-turn context there. She can explain existing
+policy and session evidence, propose policy updates, and create behavior
+checks. Lisa saves a new check as a draft; activate it only when an authorized
+owner explicitly asks her to monitor that behavior.
 
-```text
-@thelake evaluate support-agent :: Before issuing a refund, check the ticket's eligibility and explain the result.
-```
+Lisa schedules evaluation independently of Slack. Slack is a conversation and
+notification surface; deleting or disconnecting it does not stop Lisa's
+scheduled QA.
 
-The agent name must match the authenticated agent name on the root trace. The
-criteria are evaluated by the configured online judge against each completed
-trace. TheLake creates and activates the check and replies in the same thread.
-Plain thread replies work with the same command when the bot has the history
-scopes above. Other conversation text is ignored.
+## Receive issue alerts
 
-Each evaluator failure is stored as a score and then posted to the originating
-thread with the check name, agent name, trace ID, and judge rationale. Slack
-delivery is best effort; Explorer and the score API remain the source of truth
-for evaluation results.
+When Lisa's scheduled evaluation finds a failure, she stores the score in
+TheLake and posts the finding to the Slack thread associated with the check, or
+to `LISA_SLACK_CHANNEL_ID` when the check has no Slack binding.
+The alert includes the affected agent, session, check, and evaluator rationale.
+Lisa keeps delivery receipts in her persistent workspace data so later
+scheduled cycles suppress repeat alerts for the same evaluator version, trace,
+and Slack destination. A duplicate is still possible if Slack accepts a message
+but Lisa stops before saving its receipt. Slack delivery is best effort;
+Explorer and TheLake's score API remain the source of truth for recorded
+results.
 
-The Events API response is sent after the evaluator is saved and activated. If
-Slack retries a failed or timed-out event, its event ID maps to the same
-evaluator, so the retry won't create a second check. If Slack accepted the
-thread reply but the response was lost immediately before the durable receipt
-was completed, a later retry can repeat that reply. Event receipts are kept in
-the catalog Postgres registry and completed receipts are pruned after 30 days.
+## Current limits
 
-## Current boundaries
-
-- A Slack app is bound to one configured theLake workspace. Use separate app
-  installations or deployments to connect separate workspaces.
-- Slack authoring currently uses the `evaluate <agent> :: <criteria>` command.
-  Evaluator editing and pause/resume remain available in Explorer or the API.
-- Failed-score notifications are sent after score persistence. Delivery is not
-  queued for retry if Slack is unavailable.
+- Slack Events API is the supported inbound transport. Point its Request URL
+  directly at Lisa; TheLake does not proxy Slack events.
+- One Slack app installation maps to the workspace configured on that Lisa
+  runtime.
+- Failed evaluations remain in Lisa's persistent workspace follow-up queue
+  until the notification succeeds or Lisa confirms there is no destination.
+  The queue is local to the Lisa runtime and depends on retaining its data
+  volume; it is not a distributed durable job queue.

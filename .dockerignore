@@ -2,7 +2,15 @@
 *
 !dist/
 !dist/**
+!lisa-agent/
+!lisa-agent/**
+!skills/
+!skills/**
 
 # Keep explicit denies if someone force-includes sources later.
 .git
+.env
+.env.*
+**/.env
+**/.env.*
 gha-creds-*.json

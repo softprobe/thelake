@@ -58,7 +58,21 @@ async fn explorer_asset(Path(path): Path<String>) -> Response {
 }
 
 fn explorer_index() -> Response {
-    explorer_asset_response("index.html")
+    let Some(file) = ExplorerAssets::get("index.html") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let lisa_url = std::env::var("LISA_PUBLIC_URL").unwrap_or_default();
+    let escaped_url = serde_json::to_string(&lisa_url).unwrap_or_else(|_| "\"\"".into());
+    let html =
+        String::from_utf8_lossy(&file.data).replace("\"__LISA_API_BASE_PATH__\"", &escaped_url);
+    (
+        [
+            (header::CONTENT_TYPE, content_type("index.html")),
+            (header::CACHE_CONTROL, cache_control("index.html")),
+        ],
+        html,
+    )
+        .into_response()
 }
 
 fn explorer_asset_response(path: &str) -> Response {
@@ -212,6 +226,22 @@ mod tests {
                 "text/html; charset=utf-8"
             );
         }
+
+        let response = explorer_routes()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/explorer/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&body);
+        assert!(!html.contains("__LISA_API_BASE_PATH__"));
+        assert!(html.contains("window.__LISA_API_BASE_PATH__"));
 
         let js_path = ExplorerAssets::iter()
             .find(|path| path.starts_with("assets/") && path.ends_with(".js"))

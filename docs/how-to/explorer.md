@@ -4,8 +4,8 @@ Explorer is the self-hosted session and trace UI for thelake. Source lives in
 [`packages/thelake-explorer`](../../packages/thelake-explorer/). `make build`
 embeds the SPA into the binary; thelake serves it at `/explorer/`.
 
-For a fast first run that creates a check in the guided wizard, runs a live
-sample agent, and shows the evaluation result in Explorer, see
+For a fast first run with Lisa, a live sample agent, and a detected evaluation
+result in Explorer, see
 the [5-minute quickstart](../quickstart.md).
 
 ## Prerequisites
@@ -150,31 +150,36 @@ mismatched `data_path` fails attach / readiness.
 - Record a human verdict (`correct` / `wrong` / `unsure`) as a categorical
   score named `human_verdict` on the focused span.
 
-### Behavior-check wizard (labeled Chat in the UI)
+### Lisa
 
-The **Chat** view is a scripted setup wizard and results inbox, not a
-conversational AI agent. Its assistant messages are fixed prompts; the composer
-does not call an LLM, stream model output, or interpret free-form follow-ups.
-It stores the entered criteria and target agent in browser state, then uses the
-TheLake API to create and activate an evaluator. Once monitoring, it polls
-session data for that evaluator's scores every 10 seconds. The online
-evaluation runner separately judges matching completed traces after ingestion;
-Gemini does not power the wizard.
+**Lisa** is a model-backed workspace QA agent running in the `lisa-agent`
+container. The current backend adapter uses the OpenHands SDK. Its reusable
+tools are exposed over local stdio MCP and its workflows use standard
+`SKILL.md` files, so another runtime can use the same tool and skill contract
+without importing OpenHands code. Lisa supports persistent multi-turn chats,
+workspace and agent `POLICY.md` memory, bounded session evidence search,
+inactive evaluator drafts, and scheduled evaluation of active checks. She does
+not run shell commands or access a connected Git repository.
 
-- Create and activate a natural-language behavior check in Chat by describing
-  the behavior and the exact agent name from its root trace.
-- Follow multiple conversations in the sidebar. Chat history stays in memory by
-  default; embedding applications can opt into browser persistence with a
-  workspace-scoped `chatStorageKey` in Explorer config. Evaluator definitions
-  and results remain stored by theLake.
-- Pause or reactivate saved checks from the Chat sidebar. **Activate requires**
-  `THELAKE_EVALUATION_RUNNER_URL` and `THELAKE_EVALUATION_RUNNER_TOKEN` to be
-  set; otherwise activate returns HTTP 503
-  (`online evaluation runner is not configured`). Creating a draft without
-  activating does not need the runner.
-- Activating sends captured prompts, responses, and tool data for matching
-  agents to the configured Gemini provider via the evaluation runner (common
-  credential patterns are redacted; this is not general PII scrubbing).
+  - Before each message, Explorer requires consent to send the message and recent
+  workspace session evidence to the configured model provider. Lisa masks
+  common credential patterns in both; general personal data is not redacted.
+- In **Online checks**, an owner can review checks and activate or pause them.
+  Lisa's schedule selects matching sessions and runs deterministic evidence
+  checks plus DeepEval G-Eval inside her MCP tool process. Lisa writes scores
+  to TheLake and reports failures in her scheduled conversation. The schedule
+  schedule is `LISA_QA_CRON`, a five-field UTC cron expression. The default is
+  hourly at minute 0; the `Lisa scheduled QA` job does not run on startup.
+- Conversations are stored in the runner's `lisa-data` volume, scoped by the
+  authenticated workspace. One runtime service serves a deployment; this is
+  not yet a separate VM per workspace or a multi-replica durable store. Delete
+  a conversation from its header to remove its persisted OpenHands state.
+- Lisa uses the `GOOGLE_API_KEY` or `GEMINI_API_KEY` and `LISA_MODEL` settings
+  in the Lisa container. Explorer connects directly to Lisa using `LISA_PUBLIC_URL`. Lisa reads TheLake
+  using `LISA_THELAKE_API_URL` and `LISA_THELAKE_TOKEN`.
+- Lisa's evaluation tool uses `GOOGLE_API_KEY` or `GEMINI_API_KEY` and optional
+  `GEMINI_MODEL_NAME`. Lisa also needs a configured chat model and TheLake
+  service credentials to read sessions and write scores.
 
 ## Embed the React package
 
@@ -236,30 +241,28 @@ before entering the container (`IN_LINUX_BUILDER=1` does not run `npm`).
 
 ## Behavior evaluation
 
-Compose starts the private runner on the Docker network (no host port published).
-Point thelake at the service hostname, not `127.0.0.1`:
+Lisa runs the evaluator in her own MCP tool process. Compose passes the Gemini
+key to Lisa; no evaluator service URL, token, or extra container is needed:
 
 ```bash
-export THELAKE_EVALUATION_RUNNER_URL=http://evaluation-runner:8081/v1/evaluate
-export THELAKE_EVALUATION_RUNNER_TOKEN=local-runner-token
 export GOOGLE_API_KEY=your-key
-docker compose --profile evaluation up --build
+docker compose --profile lisa up --build
 ```
 
-For a host-native `make run`, run the evaluation-runner on the host (see
-[`evaluation-runner/README.md`](../../evaluation-runner/README.md)) and set
-`THELAKE_EVALUATION_RUNNER_URL=http://127.0.0.1:8081/v1/evaluate` instead.
+For a host-native `make run`, run Lisa with the same Gemini and TheLake
+credentials. The OpenHands MCP subprocess receives only the credentials needed
+to call Gemini and TheLake.
 
-Then in Explorer → **Chat**, describe the check and enter the agent name on
-its traces. Confirm the provider data notice and activate it. New matching
-traces are evaluated and the result appears in that conversation; use
-**Open trace in Sessions** to inspect the source evidence.
+Then open Explorer → **Lisa** to ask questions about recent sessions and their
+trace evidence. Evaluator creation and activation use the evaluator API. Lisa
+selects matching sessions on her schedule and writes evaluation scores to
+Sessions.
 
 ## Verify
 
 ```bash
 make test-explorer-ui   # Playwright against a temporary thelake + embedded SPA
-make test-explorer-online-e2e  # Real Gemini agent + runner + web chat, no service mocks
+make test-explorer-online-e2e  # Real Gemini agent + Lisa's local judge, no service mocks
 cd packages/thelake-explorer && npm test
 ```
 

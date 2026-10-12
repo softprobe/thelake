@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""Run paired policy-evaluation cases against a live theLake evaluation runner."""
+"""Calibrate Lisa's local evaluator against paired policy cases."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import math
-import os
 import sys
 import time
-import urllib.error
-import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,28 +15,10 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = ROOT / "evaluation-runner" / "dogfood" / "connected_itinerary.json"
-
-
-def post_evaluation(endpoint: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=150) as response:
-            return json.loads(response.read())
-    except urllib.error.HTTPError as error:
-        # The runner intentionally returns a generic provider error. Avoid
-        # echoing request headers or environment variables in diagnostics.
-        raise RuntimeError(f"evaluation runner returned HTTP {error.code}") from None
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"could not reach evaluation runner: {error.reason}") from None
+FIXTURE = ROOT / "lisa-agent" / "tests" / "fixtures" / "connected_itinerary.json"
+sys.path.insert(0, str(ROOT / "lisa-agent" / "src"))
+from thelake_lisa.evaluation.contracts import EvaluationRequest  # noqa: E402
+from thelake_lisa.evaluation.evaluator import evaluate  # noqa: E402
 
 
 def validate_response(case: dict[str, Any], response: dict[str, Any]) -> list[str]:
@@ -71,7 +50,7 @@ def validate_response(case: dict[str, Any], response: dict[str, Any]) -> list[st
     return errors
 
 
-def run(endpoint: str, token: str, output_path: Path | None = None) -> list[dict[str, Any]]:
+def run(output_path: Path | None = None) -> list[dict[str, Any]]:
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     evaluator = fixture["evaluator"]
     results = []
@@ -79,13 +58,13 @@ def run(endpoint: str, token: str, output_path: Path | None = None) -> list[dict
 
     for case in fixture["cases"]:
         run_id = f"dogfood:{case['case_id']}:{uuid.uuid4().hex[:12]}"
-        payload = {
+        request = EvaluationRequest.model_validate({
             "run_id": run_id,
             "evaluator": evaluator,
             "evidence": case["evidence"],
-        }
+        })
         started = time.monotonic()
-        response = post_evaluation(endpoint, token, payload)
+        response = evaluate(request).model_dump(mode="json")
         elapsed_ms = round((time.monotonic() - started) * 1000)
         expected = case["expected_status"]
         actual = response.get("status")
@@ -131,29 +110,17 @@ def run(endpoint: str, token: str, output_path: Path | None = None) -> list[dict
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--url",
-        default=os.getenv("THELAKE_EVALUATION_RUNNER_URL"),
-        help="Evaluation runner URL (defaults to THELAKE_EVALUATION_RUNNER_URL).",
-    )
-    parser.add_argument(
         "--output",
         type=Path,
         help="Optional JSON report path. The report includes verdicts and evidence references, not trace payloads or credentials.",
     )
     args = parser.parse_args()
-    token = os.getenv("THELAKE_EVALUATION_RUNNER_TOKEN") or os.getenv(
-        "EVALUATION_RUNNER_TOKEN"
-    )
-    if not args.url:
-        parser.error("set THELAKE_EVALUATION_RUNNER_URL or pass --url")
-    if not token:
-        parser.error("set THELAKE_EVALUATION_RUNNER_TOKEN")
     try:
-        results = run(args.url, token, args.output)
+        results = run(args.output)
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         parser.exit(1, f"dogfood evaluation failed: {error}\n")
     print(
-        f"Dogfood suite passed: {len(results)} cases against the live evaluation runner.",
+        f"Dogfood suite passed: {len(results)} cases against Lisa's local evaluator.",
         file=sys.stderr,
     )
 

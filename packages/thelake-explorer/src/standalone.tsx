@@ -2,6 +2,15 @@ import { createRoot } from "react-dom/client";
 import { ThelakeExplorer } from "./Explorer";
 import "./style.css";
 
+declare global {
+  interface Window {
+    __LISA_API_BASE_PATH__?: string;
+  }
+}
+
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");
-createRoot(root).render(<ThelakeExplorer config={{ apiBasePath: "/v1" }} />);
+createRoot(root).render(<ThelakeExplorer config={{
+  apiBasePath: "/v1",
+  lisaApiBasePath: window.__LISA_API_BASE_PATH__,
+}} />);

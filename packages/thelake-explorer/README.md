@@ -71,6 +71,5 @@ npm test
 - **Sessions** — time range, agent/text filters, span tree, input/output
   inspector, human verdict scores (`human_verdict`).
 - **Behavior checks** — create/activate natural-language evaluators for an
-  agent. Activate requires `THELAKE_EVALUATION_RUNNER_URL` /
-  `THELAKE_EVALUATION_RUNNER_TOKEN`; see
-  [`evaluation-runner/README.md`](../../evaluation-runner/README.md).
+  agent. Lisa runs active checks on her schedule; configure the runner in
+  Lisa's environment. See

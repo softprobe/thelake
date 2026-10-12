@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ExplorerApi, type ExplorerConfig, type Observation, type SessionSummary } from "./client";
-import { ChatView } from "./ChatView";
+import { LisaView } from "./LisaView";
 import "./style.css";
 
 export type ThelakeExplorerProps = {
@@ -147,13 +147,13 @@ export function ThelakeExplorer({
       <header>
         <div><strong>theLake</strong><small>Investigate agent behavior</small></div>
         <nav aria-label="Main navigation">
-          <button aria-pressed={showChat} onClick={() => setShowChat(true)}>Chat</button>
+          <button aria-pressed={showChat} onClick={() => setShowChat(true)}>Lisa</button>
           <button aria-pressed={!showChat} onClick={() => { setShowChat(false); setSelected(undefined); }}>Sessions</button>
         </nav>
         {selected && !showChat && <button onClick={goBack}>Sessions</button>}
       </header>
       {error && <div role="alert" className="tle-error">{error}</div>}
-      {showChat ? <ChatView key={config.chatStorageKey ?? "workspace-unspecified"} api={api} storageKey={config.chatStorageKey} onOpenSession={(sessionId) => { setSelected(sessionId); setShowChat(false); }} /> : <div className="tle-layout">
+      {showChat ? <LisaView key={config.chatStorageKey ?? "workspace-unspecified"} api={api} /> : <div className="tle-layout">
         <aside aria-label="Sessions">
           <div className="tle-list-tools">
             <h2>Sessions</h2>

@@ -29,6 +29,10 @@ _KEY_LIKE = re.compile(
 )
 
 
+class JudgeUnavailableError(RuntimeError):
+    """Raised when a semantic check needs a judge but no provider is configured."""
+
+
 def create_judge_model() -> GeminiModel:
     """Build the configured Gemini judge used for online G-Eval."""
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
@@ -38,7 +42,12 @@ def create_judge_model() -> GeminiModel:
         model=os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash"),
         api_key=api_key,
         temperature=0,
+        http_options={"timeout": 120_000},
     )
+
+
+def _judge_is_configured() -> bool:
+    return bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
 
 
 def _redact(value: object, key: str = "") -> object:
@@ -252,6 +261,9 @@ def evaluate(request: EvaluationRequest) -> EvaluationResponse:
             evidence=refs,
             limitations=evidence.limitations + ["conversation_turns_missing"],
         )
+
+    if not _judge_is_configured():
+        raise JudgeUnavailableError("semantic judge credentials are not configured")
 
     test_case = ConversationalTestCase(turns=turns)
     evaluation_params = [MultiTurnParams.CONTENT]

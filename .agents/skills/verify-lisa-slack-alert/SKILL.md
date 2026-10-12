@@ -1,64 +1,56 @@
 ---
 name: verify-lisa-slack-alert
-description: Verify that a failing online evaluator score is posted to its originating Slack thread. Use when a developer wants to test TheLake's configured Slack evaluator integration.
+description: Verify that Lisa proactively evaluates a fresh agent trace and posts a verified failure through the workspace's single Slack connection.
 ---
 
-# Verify Lisa Slack alert
+# Verify Lisa's Slack alert
 
-This skill verifies the optional Slack notification path for TheLake evaluator
-failures. It does not configure a Slack app or create a Lisa workspace agent.
-The integration binds one configured Slack app to one TheLake workspace, and
-notification delivery is best effort after the failure score is stored.
+Lisa owns the Slack connection for her workspace. The bot token authenticates
+that one connection; `LISA_SLACK_CHANNEL_ID` is the workspace's default alert
+channel. A check created from a Slack thread may keep that thread as its
+destination. A check without a Slack binding uses the workspace default.
+TheLake stores traces and scores; it does not run or notify Lisa.
 
 ## Preconditions
 
-1. Run only when the user explicitly requests a Slack notification test. It
-   sends a message to Slack.
-2. Use a dedicated test channel and thread, a test workspace, and a sample
-   agent with local-only tools. Do not test on customer or production channels.
-3. Confirm the TheLake service has the required Slack environment variables
-   configured. Check variable names or service configuration status only;
-   never print or copy token/signing-secret values.
-4. Confirm the online evaluation runner is configured and has its model key.
-   Stop and report missing configuration rather than searching files for
-   credentials.
-5. Read `docs/how-to/slack-evaluator.md` for the current Slack scopes,
-   allowlist, event URL, and workspace binding.
+1. Run only when the user explicitly requests a live Slack test. It sends a
+   message to Slack and makes paid model calls.
+2. Use a dedicated test workspace and channel, and a sample agent with
+   local-only tools. Do not use a customer or production channel.
+3. Confirm the Lisa service has its bot token and workspace default channel
+   configured. Check configuration status only; never print or copy secret
+   values.
+4. Confirm TheLake and Lisa are healthy and Lisa's TheLake API URL points to
+   the running TheLake service. Do not proceed if traces or evaluator reads
+   fail due to a disconnected catalog.
+5. Read `docs/how-to/slack-evaluator.md` for current Slack setup and routing.
 
-## Run the notification check
+## Run the autonomous check
 
-1. In the dedicated test thread, use the documented Slack command form:
+1. Record the current scheduled QA conversation timestamp using a read-only
+   request. Do not prompt Lisa or call her scheduled-cycle endpoint.
+2. Ensure an active behavior check applies to the sample agent. Prefer a check
+   without `slack_channel_id` to verify the workspace default route.
+3. Run the deliberately flawed quickstart refund agent and record its session
+   ID. It only simulates a refund tool; it does not contact a payment system.
+4. Wait for Lisa's normal schedule. Verify that she selects the new session,
+   stores a failing evaluator score, and reports the evidence in her scheduled
+   QA conversation.
+5. Verify Slack separately: the alert should appear in the configured default
+   channel, include the new session, and name the failed check. If a check has
+   its own Slack channel and thread binding, verify it in that thread instead.
+6. Let Lisa evaluate and notify through her scheduled workflow. Do not call the
+   evaluator or notification tools directly and then describe that as
+   proactive behavior.
 
-   ```text
-   @thelake evaluate <test-agent-name> :: <a clear behavior rule that the test agent will violate>
-   ```
+## Report
 
-   Slack-created checks activate immediately. Keep the rule harmless and
-   observable; do not make it direct a real refund, booking, or other external
-   action. Note the exact agent name and originating thread.
-2. Run the test agent and confirm it sends a completed trace to the configured
-   TheLake workspace. Reuse the sample agent and connection setup in the
-   `run-lisa-evaluation-dogfood` skill where appropriate. The trace root's
-   authenticated agent name must exactly match the evaluator target. Avoid an
-   agent name that already has a sampled trace inside the current 60-second
-   interval, or wait for the interval to expire; otherwise the notification
-   path may not run for this test trace.
-3. Verify the evaluator failure score is persisted and references the trace.
-   Explorer or the session API is the source of truth for this step.
-4. Verify a bot reply appears in the same Slack thread and includes the
-   evaluator failure details, trace ID, and rationale. Confirm it is linked to
-   the same score/trace you inspected.
+Report trace evaluation, Lisa's scheduled report, and Slack delivery as
+separate outcomes. Include the session and score IDs, check name, destination
+type (workspace default or check thread), and whether the Slack message was
+found. Never include API keys, bot tokens, or full trace payloads.
 
-## Report the result
-
-Report score persistence and Slack delivery as separate outcomes:
-
-- **Score missing:** investigate trace ingest, sampler eligibility, evaluator
-  activation/agent-name match, and runner outcome before diagnosing Slack.
-- **Score present, Slack reply missing:** report notification delivery as
-  failed. It is best effort and is not retried after a delivery failure.
-- **Both present:** record the evaluator ID, trace ID, score ID, test channel,
-  and thread timestamp. Do not include Slack tokens or customer payloads.
-
-Do not claim the broader policy-learning/review flow was tested; this check
-covers only the Slack command-to-online-evaluation notification path.
+Slack delivery is best effort. Persistent receipts suppress ordinary repeated
+alerts for the same evaluator version, trace, and destination. A duplicate is
+still possible if Slack accepts a message but Lisa stops before saving the
+receipt.

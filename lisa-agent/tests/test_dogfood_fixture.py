@@ -4,17 +4,17 @@ import json
 import runpy
 from pathlib import Path
 
-from thelake_evaluation_runner.contracts import EvaluationRequest
+from thelake_lisa.evaluation.contracts import EvaluationRequest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "dogfood" / "connected_itinerary.json"
+FIXTURE = ROOT / "tests" / "fixtures" / "connected_itinerary.json"
 VALIDATE_RESPONSE = runpy.run_path(
     ROOT / "scripts" / "run_policy_dogfood.py"
 )["validate_response"]
 
 
-def test_policy_dogfood_cases_match_runner_contract_and_have_opposite_controls():
+def test_policy_dogfood_cases_match_lisa_contract_and_have_opposite_controls():
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     evaluator = fixture["evaluator"]
     statuses = {}

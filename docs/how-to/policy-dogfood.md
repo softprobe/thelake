@@ -5,8 +5,8 @@ Use this small travel scenario to check three different claims independently:
 1. A coding agent can learn a supported rule from an authoritative source.
 2. The Gemini/DeepEval runner distinguishes compliant behavior from a real
    violation and refuses to pass incomplete evidence.
-3. TheLake's online path persists trace-linked evaluator scores and displays
-   failures.
+3. Lisa selects a captured session, runs the check, stores the score in
+   TheLake, and reports a failure with its evidence.
 
 This separation matters: a good judge result does not prove the learning skill
 found the right rule, and a successful skill run does not prove online trace
@@ -41,18 +41,15 @@ score its output automatically.
 
 ## 2. Calibrate the live judge
 
-Start the evaluation runner with Gemini credentials and its service token, then
-point this command at its authenticated endpoint:
+Run the paired calibration cases through the same local evaluator Lisa uses:
 
 ```bash
-export THELAKE_EVALUATION_RUNNER_URL=http://127.0.0.1:8081/v1/evaluate
-export THELAKE_EVALUATION_RUNNER_TOKEN=local-runner-token
-python3 evaluation-runner/scripts/run_policy_dogfood.py \
+uv run --project lisa-agent python lisa-agent/scripts/run_policy_dogfood.py \
   --output /tmp/thelake-policy-dogfood.json
 ```
 
-The runner evaluates three fixed cases from
-[`connected_itinerary.json`](../../evaluation-runner/dogfood/connected_itinerary.json):
+Lisa evaluates three fixed cases from
+[`connected_itinerary.json`](../../lisa-agent/tests/fixtures/connected_itinerary.json):
 
 - A policy-compliant disclosure before confirmation: expected `pass`.
 - A cancellation followed by a late warning: expected `fail`.
@@ -68,34 +65,22 @@ quality issue, not as a passing evaluation.
 The fixture contract can be checked without a Gemini call:
 
 ```bash
-cd evaluation-runner
-.venv/bin/pytest tests/test_dogfood_fixture.py
+uv run --project lisa-agent --extra test pytest lisa-agent/tests/test_dogfood_fixture.py
 ```
 
-## 3. Verify TheLake's online path
+## 3. Verify Lisa's scheduled QA cycle
 
-Run the existing real-stack browser test:
+Start the quickstart with the five-minute cron shown in [the quickstart](../quickstart.md), then run:
 
 ```bash
-make test-explorer-online-e2e
+python3 tests/e2e/quickstart_online_eval.py
 ```
 
-It starts an isolated Postgres catalog, TheLake, and the live evaluation
-runner; creates and activates a behavior check in Explorer; runs a deliberately
-flawed Gemini agent; then waits for the real trace-linked failure score and
-checks the Explorer issue view. It makes provider calls and may incur Gemini
-charges. In online mode the script also runs the three paired travel rubric
-cases from step 2 against that same live runner before starting the browser
-tests. The test agent only simulates a local refund tool; it does not connect
-to a payment system.
-
-The online browser E2E currently uses its refund-eligibility scenario. It proves
-trace capture → automatic runner call → persisted score → visible issue. The
-connected-itinerary fixture above calibrates the policy rubric and judge
-directionality. A follow-up should run the STATE-Bench task agent through this
-same automatic trace-triggered path, rather than its older post-run evaluator
-helper, and assert the evaluator score and evidence against the benchmark's
-expected behavior.
+The driver creates and activates a check, runs the deliberately flawed Gemini
+agent, waits for Lisa's configured schedule to pick up its trace, and verifies
+the persisted failure score plus Lisa's report. It makes provider calls and
+may incur Gemini charges. The test agent only simulates a local refund tool;
+it does not connect to a payment system.
 
 ## Interpreting the result
 
@@ -108,16 +93,9 @@ judge fixture passes. A useful dogfood run records:
 - Whether the issue view showed the failure and linked evidence to the source
   trace.
 
-The online scheduler is best effort, so a timeout is a failed run with a
-diagnostic—not a reason to fall back to a manual evaluator call and report
-success.
-
-Automatic evaluation currently admits the first eligible trace per workspace
-and authenticated agent every 60 seconds, per service process. This is a
-rate cap, not a representative random sample; each replica has an independent
-window. Set
-`THELAKE_EVALUATION_SAMPLE_INTERVAL_SECONDS=0` in the dogfood environment to
-disable time-window sampling so it does not affect the fixture. The process
-worker cap still applies. The default is useful for a light online smoke test,
-not for proving full-traffic coverage. A runner failure consumes the current
-interval.
+The dogfood override fires `Lisa scheduled QA` every five minutes through a
+cron trigger. Normal deployments default to hourly at minute 0 UTC. Each fire
+starts one model turn and evaluates at most one unchecked session; it is not a
+guarantee of complete production coverage. The cron registration is process
+local, and a Lisa restart can miss a scheduled fire. A durable work queue and
+grouped issue records remain part of the product design.

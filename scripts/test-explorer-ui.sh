@@ -19,7 +19,6 @@ fi
 
 ONLINE_E2E="${THELAKE_EXPLORER_E2E_ONLINE:-0}"
 E2E_COMPOSE_PROJECT=""
-E2E_RUNNER_PORT=""
 E2E_DB_PORT="5432"
 if [[ "$ONLINE_E2E" == "1" ]]; then
   command -v docker >/dev/null 2>&1 || { echo "ERROR: Docker is required for online evaluation E2E." >&2; exit 1; }
@@ -27,31 +26,24 @@ if [[ "$ONLINE_E2E" == "1" ]]; then
   [[ -n "${GOOGLE_API_KEY:-}" ]] || { echo "ERROR: Set GOOGLE_API_KEY (or GEMINI_API_KEY) for live Gemini agent and evaluator calls." >&2; exit 1; }
   docker info >/dev/null 2>&1 || { echo "ERROR: Start Docker before online evaluation E2E." >&2; exit 1; }
   E2E_COMPOSE_PROJECT="thelake-explorer-e2e-$$"
-  read -r E2E_DB_PORT E2E_RUNNER_PORT < <(python3 - <<'PY'
+  read -r E2E_DB_PORT < <(python3 - <<'PY'
 import socket
-chosen = []
-for start, end in ((55440, 55460), (18100, 18120)):
-    selected = None
-    for port in range(start, end):
-        with socket.socket() as sock:
-            try:
-                sock.bind(("127.0.0.1", port))
-                selected = port
-                break
-            except OSError:
-                continue
-    if selected is None:
-        raise SystemExit(f"No free localhost port in {start}-{end - 1}.")
-    chosen.append(selected)
-print(*chosen)
+for port in range(55440, 55460):
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+            print(port)
+            break
+        except OSError:
+            continue
+else:
+    raise SystemExit("No free localhost port in 55440-55459.")
 PY
 )
   export THELAKE_QUICKSTART_DB_PORT="$E2E_DB_PORT"
-  export THELAKE_QUICKSTART_RUNNER_PORT="$E2E_RUNNER_PORT"
   if [[ "$(uname -s)" == "Linux" ]]; then
     export THELAKE_QUICKSTART_AGENT_NETWORK=host
   fi
-  export THELAKE_EVALUATION_RUNNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
   export THELAKE_E2E_COMPOSE_PROJECT="$E2E_COMPOSE_PROJECT"
   export THELAKE_E2E_LAKE_PORT="$PORT"
 fi
@@ -74,9 +66,7 @@ SERVER_PID=""
 cleanup() {
   if [[ -n "$E2E_COMPOSE_PROJECT" ]]; then
       GOOGLE_API_KEY="${GOOGLE_API_KEY:-}" \
-      THELAKE_EVALUATION_RUNNER_TOKEN="${THELAKE_EVALUATION_RUNNER_TOKEN:-}" \
       THELAKE_QUICKSTART_DB_PORT="$E2E_DB_PORT" \
-      THELAKE_QUICKSTART_RUNNER_PORT="$E2E_RUNNER_PORT" \
       docker compose --project-name "$E2E_COMPOSE_PROJECT" \
         --file "$ROOT/examples/quickstart/compose.yaml" down --remove-orphans -v >/dev/null 2>&1 || true
   fi
@@ -93,10 +83,10 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "$ONLINE_E2E" == "1" ]]; then
-  echo "==> Starting isolated real Gemini evaluation runner..."
+  echo "==> Starting isolated Postgres for Lisa's local Gemini evaluator..."
   docker compose --project-name "$E2E_COMPOSE_PROJECT" \
     --file "$ROOT/examples/quickstart/compose.yaml" \
-    up --build --detach postgres evaluation-runner
+    up --detach postgres
   db_ready=0
   for _ in $(seq 1 60); do
     if docker compose --project-name "$E2E_COMPOSE_PROJECT" \
@@ -113,23 +103,8 @@ if [[ "$ONLINE_E2E" == "1" ]]; then
     echo "ERROR: isolated E2E Postgres did not become ready." >&2
     exit 1
   fi
-  runner_ready=0
-  for _ in $(seq 1 90); do
-    if curl -fsS "http://127.0.0.1:$E2E_RUNNER_PORT/health" >/dev/null 2>&1; then
-      runner_ready=1
-      break
-    fi
-    sleep 1
-  done
-  if [[ "$runner_ready" != 1 ]]; then
-    docker compose --project-name "$E2E_COMPOSE_PROJECT" \
-      --file "$ROOT/examples/quickstart/compose.yaml" logs evaluation-runner >&2
-    echo "ERROR: live evaluator runner did not become ready." >&2
-    exit 1
-  fi
-  export THELAKE_EVALUATION_RUNNER_URL="http://127.0.0.1:$E2E_RUNNER_PORT/v1/evaluate"
-  echo "==> Calibrating live evaluator verdicts with paired policy cases..."
-  python3 "$ROOT/evaluation-runner/scripts/run_policy_dogfood.py"
+  echo "==> Calibrating Lisa's local evaluator with paired policy cases..."
+  uv run --project "$ROOT/lisa-agent" python "$ROOT/lisa-agent/scripts/run_policy_dogfood.py"
 fi
 
 cat > "$TMP_DIR/config.yaml" <<EOF
@@ -178,8 +153,6 @@ SOFTPROBE_LOCAL_ANONYMOUS=1 \
 THELAKE_DEFAULT_WORKSPACE_ID="$WORKSPACE_ID" \
 SOFTPROBE_LISTEN_ADDR="127.0.0.1:$PORT" \
 SOFTPROBE_GRPC_DISABLE=1 \
-THELAKE_EVALUATION_RUNNER_URL="${THELAKE_EVALUATION_RUNNER_URL:-}" \
-THELAKE_EVALUATION_RUNNER_TOKEN="${THELAKE_EVALUATION_RUNNER_TOKEN:-}" \
 RUST_LOG="${RUST_LOG:-info}" \
   "$THELAKE_BIN" >"$TMP_DIR/thelake.log" 2>&1 &
 SERVER_PID=$!

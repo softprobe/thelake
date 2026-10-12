@@ -76,46 +76,9 @@ tags:
     description: LLM observability records
   - name: query
     description: SQL and telemetry query surfaces
-  - name: integrations
-    description: External event and notification integrations
 security:
   - bearerAuth: []
 paths:
-  /slack/events:
-    post:
-      tags: [integrations]
-      summary: Receive Slack Events API callbacks
-      description: |
-        Slack verifies this endpoint using the configured signing secret. It
-        accepts URL verification challenges and authorized evaluator commands
-        from Slack event callbacks. This endpoint does not use bearer auth.
-      operationId: receiveSlackEvent
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [type]
-              additionalProperties: true
-              description: Slack Events API envelope, signed over the raw body.
-      responses:
-        "200":
-          description: Challenge response or event acknowledged
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-        "400":
-          description: Malformed Slack event envelope
-        "401":
-          description: Missing, stale, or invalid Slack request signature
-        "403":
-          description: Slack team or author is not authorized
-        "503":
-          description: Slack integration is unavailable; Slack may retry the event
   /health:
     get:
       tags: [health]
@@ -360,11 +323,11 @@ paths:
       tags: [llm]
       summary: Activate an evaluator version for one agent
       description: |
-        Activates this workspace-scoped evaluator for new matching traces. When
-        the DeepEval runner is configured, captured prompt, completion, and
-        tool data for the selected agent is sent to the configured Gemini
-        provider. The runner applies a narrow credential redaction filter;
-        this is not general PII scrubbing.
+        Activates this workspace-scoped evaluator. Lisa selects matching
+        sessions on her schedule, evaluates bounded evidence and the rubric
+        with DeepEval G-Eval in Lisa's MCP tool process, and stores the result
+        in TheLake. Lisa applies a narrow credential redaction filter; this is
+        not general PII scrubbing.
       operationId: activateEvaluator
       parameters:
         - name: evaluator_id
@@ -384,8 +347,6 @@ paths:
                 $ref: "#/components/schemas/EvaluatorDefinition"
         "400":
           description: Evaluator version not found
-        "503":
-          description: Online evaluation runner is not configured
         "401":
           description: Missing or invalid bearer token
         "403":

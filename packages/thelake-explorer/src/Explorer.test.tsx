@@ -10,8 +10,13 @@ describe("ThelakeExplorer", () => {
     }));
 
     expect(html).toContain("theLake");
-    expect(html).toContain('aria-label="TheLake chat"');
-    expect(html).toContain("Welcome. Tell me a behavior you want to catch");
+    expect(html).toContain('aria-label="Lisa conversation"');
+    expect(html).toContain("Connecting to Lisa");
+    expect(html).toContain('aria-label="Message Lisa"');
+    expect(html).toContain("Lisa reviews agent sessions on her schedule");
+    expect(html).toContain("Online checks");
+    expect(html).toContain("Workspace agent · investigates and drafts checks");
+    expect(html).not.toContain("Review behavior check");
     expect(html).toContain("Sessions");
   });
 });

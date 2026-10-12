@@ -107,6 +107,10 @@ customer DuckLake.
 | `SOFTPROBE_ADMIN_API_KEY` | Bearer for `POST /v1/workspaces` |
 | `SOFTPROBE_LOCAL_ANONYMOUS` | Local single-workspace mode (see root README) |
 | `THELAKE_DEFAULT_WORKSPACE_ID` | Workspace UUID used with local anonymous mode |
-| `THELAKE_EVALUATION_SAMPLE_INTERVAL_SECONDS` | Per-process cap: admit the first eligible trace per workspace and authenticated agent each rolling interval; defaults to `60`, `0` disables interval sampling. Replicas have independent windows; the worker cap still applies. |
-| `THELAKE_EVALUATION_RUNNER_URL` | Online evaluation runner endpoint; automatic checks are disabled when unset |
-| `THELAKE_EVALUATION_RUNNER_TOKEN` | Bearer token used to authenticate calls to the online evaluation runner |
+| `LISA_WORKSPACE_ID` | Workspace scope for this Lisa runtime. Configure one Lisa runtime per workspace; leave unset to disable scheduled QA. The local Compose quickstart runs one workspace. |
+| `LISA_QA_CRON` | Five-field UTC cron expression for the `Lisa scheduled QA` job; defaults to `0 * * * *` (hourly at minute 0). Lisa does not run a cycle on startup. |
+| `LISA_LOCAL_ANONYMOUS` | `1` enables unauthenticated Lisa chat for the localhost quickstart only. Leave disabled in a shared deployment. |
+| `LISA_CORS_ORIGINS` | Comma-separated browser origins allowed to call Lisa directly. |
+| `SOFTPROBE_ASSERTION_HMAC_SECRET` | Shared edge assertion key Lisa uses to verify workspace-scoped browser requests. |
+| `LISA_PUBLIC_URL` | Browser-reachable Lisa API base URL injected into Explorer. Lisa chat connects directly to this service. |
+| `GEMINI_MODEL_NAME` | Gemini model used by Lisa's DeepEval judge (defaults to `gemini-2.5-flash`). |

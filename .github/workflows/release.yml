@@ -37,7 +37,7 @@ jobs:
       - name: Set up Node.js for the embedded Explorer
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
           cache: npm
           cache-dependency-path: packages/thelake-explorer/package-lock.json

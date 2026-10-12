@@ -10,7 +10,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IngestResponse {
@@ -277,26 +277,9 @@ async fn process_traces_inner(
     }
 
     let span_count = spans.len();
-    let mut trace_windows = std::collections::HashMap::new();
-    for span in &spans {
-        record_trace_window(
-            &mut trace_windows,
-            &span.trace_id,
-            span.parent_span_id.is_none(),
-            span.timestamp,
-            span.end_timestamp.unwrap_or(span.timestamp),
-            span.agent_name.as_deref(),
-        );
-    }
-
     let ws = state.workspace_for_id(&tid).await?;
     let write_start = std::time::Instant::now();
     ws.ingest().add_spans(spans, body_size).await?;
-    if let Err(error) =
-        crate::online_evaluation::schedule_for_traces(ws.clone(), trace_windows).await
-    {
-        warn!("failed to schedule automatic trace evaluation: {error}");
-    }
     if crate::self_monitoring::instrument_customer_workspace(&tid) {
         crate::self_monitoring::record_write(&tid, "traces", app.as_deref(), write_start.elapsed());
     }
@@ -318,30 +301,6 @@ fn effective_agent_name(
         .or_else(|| declared_agent_name.filter(|name| !name.trim().is_empty()))
         .or_else(|| service_name.filter(|name| !name.trim().is_empty()))
         .map(str::to_owned)
-}
-
-type TraceWindow = (
-    chrono::DateTime<chrono::Utc>,
-    chrono::DateTime<chrono::Utc>,
-    Option<String>,
-);
-
-fn record_trace_window(
-    windows: &mut std::collections::HashMap<String, TraceWindow>,
-    trace_id: &str,
-    is_root: bool,
-    start: chrono::DateTime<chrono::Utc>,
-    end: chrono::DateTime<chrono::Utc>,
-    agent_name: Option<&str>,
-) {
-    let bounds = windows
-        .entry(trace_id.to_owned())
-        .or_insert((start, end, None));
-    bounds.0 = bounds.0.min(start);
-    bounds.1 = bounds.1.max(end);
-    if is_root {
-        bounds.2 = agent_name.map(str::to_owned);
-    }
 }
 
 async fn process_logs(
@@ -430,9 +389,7 @@ async fn process_logs_inner(
 
 #[cfg(test)]
 mod agent_identity_tests {
-    use super::{effective_agent_name, record_trace_window};
-    use chrono::{DateTime, Utc};
-    use std::collections::HashMap;
+    use super::effective_agent_name;
 
     #[test]
     fn authenticated_agent_name_takes_precedence_over_service_name() {
@@ -461,32 +418,5 @@ mod agent_identity_tests {
             Some("quickstart-refund-agent".into())
         );
         assert_eq!(effective_agent_name(None, None, Some("  ")), None);
-    }
-
-    #[test]
-    fn multiple_resources_keep_agent_identity_per_trace() {
-        let start = DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let mut windows = HashMap::new();
-        record_trace_window(
-            &mut windows,
-            "trace-support",
-            true,
-            start,
-            start,
-            Some("support-agent"),
-        );
-        record_trace_window(
-            &mut windows,
-            "trace-billing",
-            true,
-            start,
-            start,
-            Some("billing-agent"),
-        );
-
-        assert_eq!(windows["trace-support"].2.as_deref(), Some("support-agent"));
-        assert_eq!(windows["trace-billing"].2.as_deref(), Some("billing-agent"));
     }
 }

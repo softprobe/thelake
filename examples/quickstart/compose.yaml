@@ -15,16 +15,32 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
-  evaluation-runner:
+  lisa-agent:
     build:
-      context: ../../evaluation-runner
+      context: ../..
+      dockerfile: lisa-agent/Dockerfile
     environment:
-      EVALUATION_RUNNER_TOKEN: ${THELAKE_EVALUATION_RUNNER_TOKEN:?quickstart script must set a runner token}
+      LISA_THELAKE_TOKEN: ${LISA_THELAKE_TOKEN:?quickstart script must set a Lisa service token}
+      LISA_THELAKE_API_URL: http://host.docker.internal:${THELAKE_QUICKSTART_PORT:-8090}
+      LISA_SKILL_DIR: /app/skills
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-${GEMINI_API_KEY:?Set GOOGLE_API_KEY or GEMINI_API_KEY before starting the quickstart}}
-      USE_GEMINI_MODEL: "1"
+      LISA_MODEL: ${LISA_MODEL:-gemini/gemini-2.5-flash}
+      LISA_DATA_DIR: /var/lib/lisa/workspaces
+      LISA_WORKSPACE_ID: ${THELAKE_DEFAULT_WORKSPACE_ID:-550e8400-e29b-41d4-a716-446655440000}
+      LISA_QA_CRON: ${LISA_QA_CRON:-0 * * * *}
+      LISA_LOCAL_ANONYMOUS: ${LISA_LOCAL_ANONYMOUS:-1}
+      LISA_CORS_ORIGINS: http://127.0.0.1:${THELAKE_QUICKSTART_PORT:-8090},http://localhost:${THELAKE_QUICKSTART_PORT:-8090}
       GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-2.5-flash}
+      LISA_SLACK_BOT_TOKEN: ${LISA_SLACK_BOT_TOKEN:-}
+      LISA_SLACK_SIGNING_SECRET: ${LISA_SLACK_SIGNING_SECRET:-}
+      LISA_SLACK_TEAM_ID: ${LISA_SLACK_TEAM_ID:-}
+      LISA_SLACK_ALLOWED_USERS: ${LISA_SLACK_ALLOWED_USERS:-}
+      LISA_SLACK_ALLOWED_CHANNELS: ${LISA_SLACK_ALLOWED_CHANNELS:-}
+      LISA_SLACK_CHANNEL_ID: ${LISA_SLACK_CHANNEL_ID:-}
     ports:
-      - "127.0.0.1:${THELAKE_QUICKSTART_RUNNER_PORT:-18081}:8081"
+      - "127.0.0.1:${THELAKE_QUICKSTART_LISA_PORT:-18082}:8082"
+    volumes:
+      - lisa-data:/var/lib/lisa
 
   refund-agent:
     profiles: [demo-agent]
@@ -37,3 +53,4 @@ services:
 
 volumes:
   postgres-data:
+  lisa-data:

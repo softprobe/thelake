@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from thelake_evaluation_runner import evaluator
-from thelake_evaluation_runner.contracts import EvaluationRequest
+from thelake_lisa.evaluation import evaluator
+from thelake_lisa.evaluation.contracts import EvaluationRequest
 
 
 def test_create_judge_model_uses_configured_gemini_credentials(monkeypatch):
@@ -25,6 +25,7 @@ def test_create_judge_model_uses_configured_gemini_credentials(monkeypatch):
             "model": "gemini-test-model",
             "api_key": "google-test-key",
             "temperature": 0,
+            "http_options": {"timeout": 120_000},
         }
     ]
 
@@ -48,6 +49,7 @@ def test_create_judge_model_falls_back_to_gemini_api_key(monkeypatch):
             "model": "gemini-2.5-flash",
             "api_key": "gemini-test-key",
             "temperature": 0,
+            "http_options": {"timeout": 120_000},
         }
     ]
 
@@ -75,6 +77,7 @@ def test_evaluate_passes_gemini_model_to_conversational_geval(monkeypatch):
 
     monkeypatch.setattr(evaluator, "create_judge_model", lambda: model)
     monkeypatch.setattr(evaluator, "ConversationalGEval", FakeMetric)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
     request = EvaluationRequest.model_validate(
         {
             "run_id": "test-run",

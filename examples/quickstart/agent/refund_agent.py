@@ -15,6 +15,7 @@ from softprobe.openai import create_gemini_openai_client, observe_openai
 
 def run_agent(agent_name: str, api_url: str, model_name: str) -> str:
     session_id = f"gemini-refund-{uuid.uuid4().hex[:12]}"
+    print(f"agent={agent_name} session_id={session_id}", flush=True)
     user_prompt = "Please refund ticket DEMO-42."
     telemetry = SoftprobeClient(
         public_key=os.getenv("SOFTPROBE_PUBLIC_KEY", "quickstart-local"),
@@ -112,7 +113,6 @@ def run_agent(agent_name: str, api_url: str, model_name: str) -> str:
 
         if not telemetry.force_flush():
             raise RuntimeError("Softprobe did not flush the agent trace")
-        print(f"agent={agent_name} session_id={session_id} tool=issue_refund")
         return session_id
     finally:
         telemetry.shutdown()

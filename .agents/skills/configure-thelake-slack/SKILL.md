@@ -38,10 +38,10 @@ The target name must match the authenticated agent name on the root trace.
 Slack-created checks activate immediately. Run a safe sample agent, then check
 score persistence in Explorer/API and the failure reply in the originating
 thread separately. Failure notifications are best effort and are not queued for
-retry. Automatic evaluation admits the first eligible trace per workspace and
-authenticated agent every 60 seconds per service process by default. Wait for
-that interval if the agent had a recent trace, or the sample may not trigger an
-evaluation. For a controlled test, use `verify-lisa-slack-alert`.
+retry. Lisa evaluates on her `Lisa scheduled QA` cron schedule, hourly at
+minute 0 UTC by default; she does not run on startup. For a faster controlled
+test, configure a short `LISA_QA_CRON` before starting Lisa, then use
+`verify-lisa-slack-alert`.
 
 Do not send test messages to customer channels or use rules that trigger real
 business actions.

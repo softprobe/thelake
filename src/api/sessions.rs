@@ -109,11 +109,21 @@ pub async fn get_session(
     }
 
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
+    Ok(Json(
+        session_detail_for_workspace(&state, tenant_ref, &session_id).await?,
+    ))
+}
+
+pub(crate) async fn session_detail_for_workspace(
+    state: &AppState,
+    tenant_ref: Option<&WorkspaceAuth>,
+    session_id: &str,
+) -> Result<Value, ApiError> {
     let tenant_label = tenant_ref.map(|t| t.workspace_id.as_str()).unwrap_or("");
     let total_start = std::time::Instant::now();
 
     let pg_start = std::time::Instant::now();
-    let window = resolve_session_lake_window(&state, tenant_ref, &session_id).await;
+    let window = resolve_session_lake_window(state, tenant_ref, session_id).await;
     let pg_elapsed = pg_start.elapsed();
     crate::self_monitoring::record_session_detail_stage(
         tenant_label,
@@ -122,9 +132,9 @@ pub async fn get_session(
     );
     let (from, to) = window?;
 
-    let detail_sql = session_detail(&session_id, from, to).map_err(bad_request)?;
+    let detail_sql = session_detail(session_id, from, to).map_err(bad_request)?;
     let lake_start = std::time::Instant::now();
-    let ws = resolve_workspace(&state, tenant_ref).await?;
+    let ws = resolve_workspace(state, tenant_ref).await?;
     let lake = map_execute_result(ws.query().execute_trusted(detail_sql).await);
     let lake_elapsed = lake_start.elapsed();
     crate::self_monitoring::record_session_detail_stage(
@@ -156,7 +166,7 @@ pub async fn get_session(
     );
     if total_elapsed >= std::time::Duration::from_millis(500) {
         tracing::warn!(
-            session_id = %session_id,
+            session_id,
             pg_window_ms = pg_elapsed.as_millis() as u64,
             lake_sql_ms = lake_elapsed.as_millis() as u64,
             total_ms = total_elapsed.as_millis() as u64,
@@ -166,23 +176,21 @@ pub async fn get_session(
         );
     }
 
-    Ok(Json(
-        serde_json::to_value(SessionDetail {
-            session_id,
-            from,
-            to,
-            trace_count: aggregate.trace_count,
-            span_count: aggregate.span_count,
-            user_ids: aggregate.user_ids,
-            input_tokens: aggregate.input_tokens,
-            output_tokens: aggregate.output_tokens,
-            total_tokens: aggregate.total_tokens,
-            total_cost: aggregate.total_cost,
-            spans,
-            scores,
-        })
-        .unwrap(),
-    ))
+    Ok(serde_json::to_value(SessionDetail {
+        session_id: session_id.to_string(),
+        from,
+        to,
+        trace_count: aggregate.trace_count,
+        span_count: aggregate.span_count,
+        user_ids: aggregate.user_ids,
+        input_tokens: aggregate.input_tokens,
+        output_tokens: aggregate.output_tokens,
+        total_tokens: aggregate.total_tokens,
+        total_cost: aggregate.total_cost,
+        spans,
+        scores,
+    })
+    .unwrap())
 }
 
 pub async fn session_details_post(

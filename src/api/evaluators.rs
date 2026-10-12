@@ -333,7 +333,7 @@ pub(crate) async fn save_evaluator(
                     "evaluator_id and version already identify a different immutable definition",
                 ));
             }
-            definition.active = is_version_active(ws, &definition.evaluator_id, definition.version)
+            let activation = activation_for_version(ws, &definition.evaluator_id)
                 .await
                 .map_err(|error| {
                     warn!("evaluator activation lookup failed: {error}");
@@ -342,6 +342,9 @@ pub(crate) async fn save_evaluator(
                         Json(serde_json::json!({"error":"evaluator activation lookup failed"})),
                     )
                 })?;
+            if let Some((version, enabled)) = activation {
+                definition.active = version == definition.version && enabled;
+            }
             return Ok((definition, false));
         }
 
@@ -486,19 +489,6 @@ pub(crate) async fn set_activation_for_workspace(
     version: u32,
     enabled: bool,
 ) -> Result<EvaluatorDefinition, ApiError> {
-    if enabled
-        && (std::env::var("THELAKE_EVALUATION_RUNNER_URL")
-            .ok()
-            .is_none_or(|value| value.trim().is_empty())
-            || std::env::var("THELAKE_EVALUATION_RUNNER_TOKEN")
-                .ok()
-                .is_none_or(|value| value.trim().is_empty()))
-    {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"online evaluation runner is not configured"})),
-        ));
-    }
     let Some(config) = ws
         .query()
         .get_score_config(&config_id(&evaluator_id, version))
@@ -516,7 +506,7 @@ pub(crate) async fn set_activation_for_workspace(
     let mut definition = definition_from_config(config.clone())
         .ok_or_else(|| bad_request("evaluator version not found"))?;
     if enabled
-        && is_version_active(ws, &evaluator_id, version)
+        && activation_for_version(ws, &evaluator_id)
             .await
             .map_err(|error| {
                 warn!("evaluator activation check failed: {error}");
@@ -525,6 +515,7 @@ pub(crate) async fn set_activation_for_workspace(
                     Json(serde_json::json!({"error":"evaluator activation check failed"})),
                 )
             })?
+            .is_some_and(|(active_version, active)| active_version == version && active)
     {
         definition.active = true;
         return Ok(definition);
@@ -544,11 +535,10 @@ pub(crate) async fn set_activation_for_workspace(
     Ok(definition)
 }
 
-async fn is_version_active(
+async fn activation_for_version(
     ws: &crate::workspace::WorkspaceContext,
     evaluator_id: &str,
-    version: u32,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<(u32, bool)>> {
     let configs = ws.query().list_score_configs().await?;
     let latest = configs
         .iter()
@@ -561,17 +551,17 @@ async fn is_version_active(
                     == Some(evaluator_id)
         })
         .max_by_key(|config| config.timestamp);
-    Ok(latest.is_some_and(|config| {
-        config
-            .metadata
-            .get("thelake.evaluator.version")
-            .and_then(|value| value.parse::<u32>().ok())
-            == Some(version)
-            && config
+    Ok(latest.and_then(|config| {
+        Some((
+            config
+                .metadata
+                .get("thelake.evaluator.version")
+                .and_then(|value| value.parse::<u32>().ok())?,
+            config
                 .metadata
                 .get("thelake.evaluator.enabled")
-                .map(String::as_str)
-                == Some("true")
+                .and_then(|value| value.parse::<bool>().ok())?,
+        ))
     }))
 }
 

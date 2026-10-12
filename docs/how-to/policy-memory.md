@@ -1,67 +1,40 @@
-# Policy memory for agent behavior checks
+# Policy memory and evaluation tools
 
-Lisa keeps business context as short, readable Markdown in her durable
-workspace home. Use one workspace `POLICY.md` for shared rules and an optional
-`agents/<sha256-of-exact-agent-name>/POLICY.md` for rules that apply to one
-agent. Record the exact agent name inside the file. Never use telemetry names
-directly as filesystem paths or follow symlinks outside Lisa's home. This is a
-file convention, not a new policy API or a second git repository.
+Lisa keeps business context as short Markdown in a workspace-scoped persistent
+home. The shared file is `POLICY.md`; agent-specific files are stored below a
+hashed exact agent name. `list_policies`, `read_policy`, and `update_policy`
+are standard MCP tools. The model never supplies a filesystem path, and the
+runtime checks workspace scope, path containment, compare-before-write, and
+secret redaction.
 
-The reusable skills are:
+Lisa’s workflows are defined by standard AgentSkills in the root
+[`skills/`](../../skills/) directory. `POLICY.md` stores owner-approved rules as
+named Markdown sections, without IDs, status fields, or evaluator metadata.
+Lisa keeps proposed rules in chat and writes them only after the owner sends
+`Confirm policy rule: <exact heading>`. The `review-agent-policy` skill checks
+for stale, duplicate, conflicting, and unsupported rules. Lisa does not yet
+fetch documents from external business systems. Lisa creates or reuses a
+named evaluation after policy approval; an owner reviews and activates it in
+Explorer. Scheduled Lisa reports policy coverage gaps but cannot create or
+activate evaluations.
 
-- [`learn-agent-policy`](../../skills/learn-agent-policy/SKILL.md) to gather
-  evidence, update Markdown notes, and draft an evaluator.
-- [`review-agent-policy`](../../skills/review-agent-policy/SKILL.md) to find
-  stale, duplicate, conflicting, or unsupported rules.
+The tools live in `lisa-agent/src/thelake_lisa/mcp_tools.py` and use FastMCP.
+They do not import OpenHands. OpenHands is one adapter: it loads the standard
+skills with `AgentContext` and launches the tool package using its normal
+`mcp_config` stdio support. The same MCP tool package can be launched by
+another runtime by launching the same local stdio MCP package with workspace
+identity and service credentials supplied by that runtime. The MCP process is
+owned by the agent adapter; it is not a separately deployed service.
 
-## Write reviewable rules
+## Proactive findings
 
-Keep each rule short and include what must happen, when it applies, what trace
-evidence can establish it, and where it came from:
+On a scheduled cycle, Lisa selects an unchecked session, applies its active
+evaluations, and starts a finding conversation when an evaluation fails. She follows the
+[`investigate-evaluator-failure`](../../skills/investigate-evaluator-failure/SKILL.md)
+skill. She checks the relevant session and policy, then reports the evidence,
+likely business impact, uncertainty, and a practical next step in Explorer.
+If the evaluation has a Slack thread binding, Lisa also notifies that thread.
 
-```md
-# Workspace policy
-
-## Check refund eligibility before issuing a refund
-
-- Status: confirmed
-- Applies to: support agents handling refund requests
-- Requirement: Check ticket eligibility before issuing a refund.
-- Evidence: A successful eligibility result must precede the refund action.
-- Source: `docs/refunds.md` (Refund eligibility section)
-```
-
-Use `candidate` for an unresolved interpretation and `observed` for a pattern
-that describes behavior but does not establish what the agent should do. A
-trace alone is not proof of business intent. A person must confirm a rule
-before it can become an active check; a model's confidence or a source link
-alone is not approval.
-
-When rules conflict, preserve the sources and leave the affected requirement
-as a candidate until a person resolves it. Do not copy credentials or private
-data into policy files.
-
-## Turn policy into an online check
-
-When asked to monitor policy, the skill composes the applicable confirmed
-rules and their citations into the evaluator's natural-language `criteria`.
-The existing evaluator API versions that criteria, and the existing online
-runner evaluates new sessions. This keeps policy authoring out of customer
-code and avoids maintaining a separate evaluator script repository.
-
-Review the exact rubric and activate it explicitly in Explorer. Because the
-source citation is included in the versioned criteria, later edits to
-`POLICY.md` do not silently change what an earlier evaluator means. The API
-does not verify the author-provided source citation or parse policy status; the
-skill and reviewer are authoring aids, and human review/activation is the trust
-boundary.
-
-## Current boundary
-
-The public repository includes policy examples and reusable learning/review
-skills, along with the evaluator API and online runner. It does not yet provide
-Lisa's persistent workspace home or an automatically learning background
-agent. Until that home exists, a host agent must supply a durable, private
-directory for these Markdown files; do not store them in the customer's app
-repository. The separate [Lisa product design](../architecture/lisa-agent-qa.md)
-describes the target workspace agent and its responsibilities.
+The score and evaluation version are durable in TheLake. Lisa keeps the
+scheduled work in her workspace conversation and uses stable score IDs so a
+repeated cycle does not create a second score for the same evaluation and trace.
