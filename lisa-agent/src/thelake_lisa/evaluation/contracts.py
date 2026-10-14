@@ -6,7 +6,9 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
-BoundedText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20_000)]
+BoundedText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20_000)
+]
 
 
 class StrictModel(BaseModel):
@@ -18,9 +20,12 @@ class EvidenceEvent(StrictModel):
     span_id: Identifier
     parent_span_id: str | None = Field(default=None, max_length=256)
     timestamp: Annotated[str, StringConstraints(max_length=64)]
-    kind: Literal["user_message", "assistant_message", "context_message", "tool_call", "tool_result"]
+    kind: Literal[
+        "user_message", "assistant_message", "context_message", "tool_call", "tool_result"
+    ]
     name: str | None = Field(default=None, max_length=512)
     call_id: str | None = Field(default=None, max_length=256)
+    status: str | None = Field(default=None, max_length=128)
     content: str | None = Field(default=None, max_length=20_000)
     payload: Any | None = None
 
@@ -43,7 +48,11 @@ class TraceEvidence(StrictModel):
             raise ValueError("trace evidence exceeds the 1 MB evaluation limit")
         text_chars = sum(
             len(event.content or "")
-            + (len(json.dumps(event.payload, ensure_ascii=False)) if event.payload is not None else 0)
+            + (
+                len(json.dumps(event.payload, ensure_ascii=False))
+                if event.payload is not None
+                else 0
+            )
             for event in self.events
         )
         if text_chars > 120_000:
@@ -51,25 +60,17 @@ class TraceEvidence(StrictModel):
         return self
 
 
-class OrderedToolRequirement(StrictModel):
-    before: Identifier
-    action: Identifier
-    require_result_before_action: bool = True
-
-
-class EvaluatorSpec(StrictModel):
-    evaluator_id: Identifier
-    version: int = Field(ge=1)
+class PolicySpec(StrictModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    scope: Literal["workspace", "agent"]
+    revision: Identifier
+    approved: Literal[True]
     criteria: BoundedText
-    threshold: float = Field(default=0.7, ge=0.0, le=1.0)
-    uncertainty_margin: float = Field(default=0.1, ge=0.0, le=0.49)
-    required_tool_order: list[OrderedToolRequirement] = Field(default_factory=list, max_length=20)
 
 
 class EvaluationRequest(StrictModel):
     run_id: Identifier
-    evaluator: EvaluatorSpec
+    policy: PolicySpec
     evidence: TraceEvidence
 
 
@@ -79,15 +80,19 @@ class EvidenceReference(StrictModel):
     name: str | None = None
 
 
+class JudgeVerdict(StrictModel):
+    status: Literal["pass", "fail", "uncertain"]
+    rationale: BoundedText
+    span_ids: list[Identifier] = Field(default_factory=list, max_length=1000)
+
+
 class EvaluationResponse(StrictModel):
     run_id: str
-    evaluator_id: str
-    evaluator_version: int
+    policy_name: str
+    policy_revision: str
     trace_id: str
     status: Literal["pass", "fail", "uncertain", "insufficient_evidence", "error"]
-    score: float | None = None
-    threshold: float
     rationale: str
     evidence: list[EvidenceReference] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
-    framework: str = "deepeval"
+    framework: str = "gemini"

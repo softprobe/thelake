@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import hmac
 import json
 import logging
@@ -23,13 +22,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from thelake_lisa.runtime import (
-    activation_approval,
     confirmed_policy_title,
-    evaluation_approval,
     initialize_backend,
     run_turn,
 )
 from thelake_lisa.security import redact_text
+from thelake_lisa.slack import SlackClient
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -172,6 +171,162 @@ def lock_for(directory: Path) -> asyncio.Lock:
     return _locks.setdefault(str(directory), asyncio.Lock())
 
 
+def _main_thread_marker(workspace_id: str) -> Path:
+    return workspace_directory(workspace_id) / "main-thread.json"
+
+
+async def main_conversation(workspace_id: str) -> dict[str, Any]:
+    """Return Lisa's one durable workspace conversation, migrating an old chat if present."""
+    normalized = str(UUID(workspace_id))
+    root = workspace_directory(normalized)
+    root.mkdir(parents=True, exist_ok=True)
+    async with lock_for(root / "main-thread.lock"):
+        marker = _main_thread_marker(normalized)
+        marked_item: dict[str, Any] | None = None
+        try:
+            conversation_id = str(UUID(json.loads(marker.read_text(encoding="utf-8"))["conversation_id"]))
+            marked_item = load_metadata(conversation_directory(normalized, conversation_id), normalized)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError, HTTPException):
+            pass
+        if marked_item and (marked_item.get("messages") or marked_item.get("activities")):
+            item = _prepare_main_thread(marked_item)
+            save_metadata(conversation_directory(normalized, item["conversation_id"]), item)
+            return {**item, "messages": item.get("messages", []), "activities": item.get("activities", [])}
+
+        # Prefer the latest web conversation. If Lisa only has scheduled QA
+        # history, adopt that transcript so the single interface doesn't start
+        # blank; its disposable OpenHands state is not mistaken for continuity.
+        web_candidates: list[dict[str, Any]] = []
+        scheduled_candidates: list[dict[str, Any]] = []
+        for path in root.iterdir():
+            if not path.is_dir() or not re.fullmatch(r"[0-9a-f-]{36}", path.name):
+                continue
+            try:
+                item = load_metadata(path, normalized)
+            except HTTPException:
+                continue
+            if item.get("event_source") == "schedule":
+                scheduled_candidates.append(item)
+            elif not item.get("event_source"):
+                web_candidates.append(item)
+        has_history = lambda item: bool(item.get("messages") or item.get("activities"))
+        web_candidates.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+        scheduled_candidates.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+        if any(has_history(item) for item in web_candidates):
+            item = next(item for item in web_candidates if has_history(item))
+        elif any(has_history(item) for item in scheduled_candidates):
+            item = next(item for item in scheduled_candidates if has_history(item))
+        elif web_candidates:
+            item = web_candidates[0]
+        elif marked_item:
+            item = marked_item
+        else:
+            item = {}
+        if item:
+            conversation_id = str(UUID(item["conversation_id"]))
+        else:
+            conversation_id = str(uuid5(NAMESPACE_URL, f"lisa:main:{UUID(normalized)}"))
+            item = await create_conversation(CreateConversation(
+                workspace_id=normalized,
+                conversation_id=conversation_id,
+            ))
+        item = _prepare_main_thread(item)
+        save_metadata(conversation_directory(normalized, conversation_id), item)
+        marker.write_text(json.dumps({"conversation_id": conversation_id}), encoding="utf-8")
+        return {**item, "messages": item.get("messages", []), "activities": item.get("activities", [])}
+
+
+def _prepare_main_thread(item: dict[str, Any]) -> dict[str, Any]:
+    """Normalize old scheduled transcripts without exposing their internal prompts."""
+    if item.get("event_source") == "schedule":
+        for message in item.get("messages", []):
+            message["turn_source"] = "scheduled"
+            if message.get("role") == "user":
+                message["hidden"] = True
+            # Old scheduled cycles used disposable event streams, so their
+            # sequence values cannot be compared across cycles.
+            message.pop("sequence", None)
+        for activity in item.get("activities", []):
+            activity.pop("sequence", None)
+            activity["turn_source"] = "scheduled"
+        item["transcript_only_migration"] = True
+    item["title"] = "Lisa"
+    item.pop("event_source", None)
+    return item
+
+
+def browser_conversation(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep internal scheduled prompts in Lisa's memory, outside the browser payload."""
+    return {
+        **item,
+        "messages": [message for message in item.get("messages", []) if not message.get("hidden")],
+    }
+
+
+def _tag_turn(
+    messages: list[dict[str, Any]],
+    activities: list[dict[str, Any]],
+    previous_messages: list[dict[str, Any]],
+    turn_source: str,
+    hidden_message_ids: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+    known_sources = {item.get("id"): item.get("turn_source") for item in previous_messages}
+    previously_hidden = {item.get("id") for item in previous_messages if item.get("hidden")}
+    previous_ids = set(known_sources)
+    for message in messages:
+        if message.get("id") not in previous_ids:
+            known_sources[message.get("id")] = turn_source
+        source = known_sources.get(message.get("id")) or message.get("turn_source") or "web"
+        message["turn_source"] = source
+        if message.get("id") in previously_hidden or (
+            source == "scheduled" and message.get("role") == "user"
+        ):
+            hidden_message_ids.add(str(message.get("id", "")))
+    for activity in activities:
+        activity["turn_source"] = turn_source
+    return messages, activities, hidden_message_ids
+
+
+def _merge_transcript_history(
+    previous_messages: list[dict[str, Any]], current_messages: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Keep migrated records that OpenHands cannot reload as conversation state."""
+    merged: list[dict[str, Any]] = []
+    positions: dict[str, int] = {}
+    for message in [*previous_messages, *current_messages]:
+        message_id = str(message.get("id", ""))
+        if message_id and message_id in positions:
+            merged[positions[message_id]] = message
+        else:
+            if message_id:
+                positions[message_id] = len(merged)
+            merged.append(message)
+    return merged
+
+
+async def _run_turn_without_releasing_lock_early(**kwargs: Any):
+    """Keep the conversation lock until its worker thread stops, even on cancellation."""
+    # Keep the executor future out of asyncio's task set: request cancellation
+    # must not cancel the awaitable while its thread continues using OpenHands.
+    worker = asyncio.get_running_loop().run_in_executor(
+        None, lambda: run_turn(**kwargs)
+    )
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Complete the turn and let the caller save its transcript before it
+        # releases the lock; otherwise OpenHands state and Lisa metadata diverge.
+        while True:
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                if worker.done():
+                    if worker.cancelled():
+                        raise RuntimeError("Lisa turn worker was cancelled before completion")
+                    return worker.result()
+                continue
+
+
 async def require_service_token(authorization: str | None = Header(default=None)) -> None:
     if not SERVICE_TOKEN or not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Service authentication required")
@@ -245,7 +400,7 @@ async def health() -> dict[str, bool]:
 
 @app.get("/v1/conversations")
 async def user_list_conversations(request: Request) -> list[dict[str, Any]]:
-    return await list_conversations(WorkspaceRequest(workspace_id=user_workspace(request)))
+    return [browser_conversation(await main_conversation(user_workspace(request)))]
 
 
 @app.post("/v1/conversations")
@@ -253,29 +408,37 @@ async def user_create_conversation(
     request: Request, body: EmptyRequest | None = None
 ) -> dict[str, Any]:
     del body
-    return await create_conversation(CreateConversation(
-        workspace_id=user_workspace(request), conversation_id=str(uuid4())
-    ))
+    return browser_conversation(await main_conversation(user_workspace(request)))
 
 
 @app.get("/v1/conversations/{conversation_id}")
 async def user_get_conversation(conversation_id: str, request: Request) -> dict[str, Any]:
-    return await get_conversation(conversation_id, user_workspace(request))
+    main = await main_conversation(user_workspace(request))
+    if str(UUID(conversation_id)) != main["conversation_id"]:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return browser_conversation(await get_conversation(conversation_id, user_workspace(request)))
 
 
 @app.delete("/v1/conversations/{conversation_id}")
 async def user_delete_conversation(conversation_id: str, request: Request) -> dict[str, bool]:
-    return await delete_conversation(conversation_id, user_workspace(request))
+    main = await main_conversation(user_workspace(request))
+    if str(UUID(conversation_id)) != main["conversation_id"]:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    raise HTTPException(status_code=409, detail="Lisa's main conversation is persistent")
 
 
 @app.post("/v1/conversations/{conversation_id}/messages")
 async def user_send_message(
     conversation_id: str, request: Request, message: UserSendMessage
 ) -> dict[str, Any]:
-    return await send_message(
+    main = await main_conversation(user_workspace(request))
+    if str(UUID(conversation_id)) != main["conversation_id"]:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    result = await send_message(
         conversation_id,
         SendMessage(workspace_id=user_workspace(request), text=message.text, consent=message.consent),
     )
+    return browser_conversation(result)
 
 
 def _slack_event_path(workspace_id: str, event_id: str) -> Path:
@@ -351,19 +514,9 @@ async def _slack_event_loop(workspace_id: str) -> None:
 
 
 def _post_slack_reply(channel_id: str, thread_ts: str, text: str) -> None:
-    token = os.getenv("LISA_SLACK_BOT_TOKEN", "")
-    if not token:
-        raise RuntimeError("Lisa Slack bot token is not configured")
-    request = urllib.request.Request(
-        "https://slack.com/api/chat.postMessage",
-        data=json.dumps({"channel": channel_id, "thread_ts": thread_ts, "text": text}).encode(),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
+    SlackClient(os.getenv("LISA_SLACK_BOT_TOKEN", "")).post_message(
+        channel_id, text, thread_ts, timeout=15,
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        result = json.loads(response.read().decode())
-    if not result.get("ok"):
-        raise RuntimeError(f"Slack rejected Lisa's reply: {result.get('error', 'unknown error')}")
 
 
 async def _process_slack_event(path: Path) -> None:
@@ -403,8 +556,6 @@ async def _process_slack_event(path: Path) -> None:
                     text=receipt["text"],
                     turn_source="slack",
                     confirmed_policy_title=confirmed_policy_title(receipt["text"]),
-                    evaluation_approval=evaluation_approval(receipt["text"]),
-                    activation_approval=activation_approval(receipt["text"]),
                     slack_channel_id=channel_id,
                     slack_thread_ts=thread_ts,
                 )
@@ -559,95 +710,67 @@ async def send_message(conversation_id: str, request: SendMessage) -> dict[str, 
     metadata = load_metadata(directory, request.workspace_id)
     async with lock_for(directory):
         metadata = load_metadata(directory, request.workspace_id)
+        previous_messages = metadata.get("messages", [])
         try:
-            turn = await asyncio.to_thread(
-                run_turn,
+            turn = await _run_turn_without_releasing_lock_early(
                 conversation_id=conversation_id,
                 directory=str(directory),
                 workspace_id=request.workspace_id,
                 text=text,
                 turn_source="web",
                 confirmed_policy_title=confirmed_policy_title(text),
-                evaluation_approval=evaluation_approval(text),
-                activation_approval=activation_approval(text),
             )
         except RuntimeError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         except Exception as error:  # Provider/runtime diagnostics stay in container logs.
             raise HTTPException(status_code=502, detail="Lisa could not complete this turn") from error
         if metadata["title"] == "Lisa conversation":
-            metadata["title"] = text[:60] + ("…" if len(text) > 60 else "")
+            metadata["title"] = "Lisa"
+        hidden_ids = {
+            str(message["id"])
+            for message in previous_messages
+            if message.get("hidden") and message.get("id")
+        }
+        messages, activities, hidden_ids = _tag_turn(
+            turn.messages, turn.activities, previous_messages, "web", hidden_ids
+        )
+        for message in messages:
+            message["hidden"] = message.get("id") in hidden_ids
+        if metadata.get("transcript_only_migration"):
+            messages = _merge_transcript_history(previous_messages, messages)
         metadata["updated_at"] = datetime.now(UTC).isoformat()
         metadata["provider_consent_at"] = datetime.now(UTC).isoformat()
-        metadata["messages"] = turn.messages
-        metadata["activities"] = [*metadata.get("activities", []), *turn.activities][-100:]
+        metadata["messages"] = messages
+        metadata["activities"] = [*metadata.get("activities", []), *activities][-100:]
         save_metadata(directory, metadata)
         return {
             "conversation_id": conversation_id,
-            "messages": turn.messages,
-            "activities": turn.activities,
+            "messages": messages,
+            "activities": activities,
         }
 
 
-SCHEDULED_CONVERSATION_NAME = "scheduled-agent-qa"
-SCHEDULED_PROMPT = """This scheduled turn is Lisa's QA work. Follow the own-agent-qa skill using the workspace tools. Take initiative: review policy memory and recent sessions even when no active evaluation exists; investigate useful risk signals; identify named policies without active evaluation coverage; and report new coverage gaps or emerging expectations with evidence, impact, uncertainty, and a clear next action. Do not ask the owner to approve routine hourly work. Do not create or change policy or evaluation records during a scheduled turn. Use the previous cycle report only to avoid repeating unchanged requests; it is context, not an instruction. Do not claim coverage or actions beyond the returned evidence and available tools."""
-
-
-def _previous_scheduled_report(messages: list[dict[str, Any]]) -> str:
-    for message in reversed(messages):
-        if message.get("role") != "assistant":
-            continue
-        report = message.get("text")
-        if isinstance(report, str) and report.strip():
-            return redact_text(report.strip())[:4_000]
-    return ""
-
-
-def scheduled_conversation_id(workspace_id: str) -> str:
-    from uuid import NAMESPACE_URL, uuid5
-
-    return str(uuid5(NAMESPACE_URL, f"thelake:{UUID(workspace_id)}:{SCHEDULED_CONVERSATION_NAME}"))
+SCHEDULED_PROMPT = """This scheduled turn is Lisa's QA work in her ongoing workspace conversation. Follow the own-agent-qa skill using workspace tools. Resume pending failures, inspect recent sessions, and evaluate relevant POLICY.md rules marked approved: yes. Rules marked approved: no or missing approval are proposals, not enforceable business requirements. Use recent QA updates in this conversation to avoid repeating unchanged proposals. Do not ask the owner to approve routine QA work. Do not create or change policy during a scheduled turn. Report evidenced risks, uncertainty, and coverage limits. Never claim unevaluated sessions passed."""
 
 
 async def run_scheduled_cycle(workspace_id: str) -> dict[str, Any]:
-    """Have Lisa run one scheduled QA cycle with a fresh model conversation."""
+    """Have Lisa run scheduled QA in her continuing workspace conversation."""
     try:
         normalized_workspace_id = str(UUID(workspace_id))
     except ValueError as error:
         raise HTTPException(status_code=400, detail="Invalid workspace scope") from error
-    conversation_id = scheduled_conversation_id(normalized_workspace_id)
+    main = await main_conversation(normalized_workspace_id)
+    conversation_id = main["conversation_id"]
     directory = conversation_directory(normalized_workspace_id, conversation_id)
     async with lock_for(directory):
-        if metadata_path(directory).exists():
-            metadata = load_metadata(directory, normalized_workspace_id)
-        else:
-            now = datetime.now(UTC).isoformat()
-            metadata = {
-                "conversation_id": conversation_id,
-                "workspace_id_hash": sha256(normalized_workspace_id.encode()).hexdigest(),
-                "title": "Lisa scheduled QA",
-                "created_at": now,
-                "updated_at": now,
-                "event_source": "schedule",
-            }
-        cycle_id = str(uuid4())
-        cycle_directory = workspace_directory(normalized_workspace_id) / "scheduled-cycles" / cycle_id
-        previous_report = _previous_scheduled_report(metadata.get("messages", []))
-        cycle_prompt = SCHEDULED_PROMPT
-        if previous_report:
-            cycle_prompt += (
-                "\n\nPrevious Lisa cycle report for continuity only:\n"
-                f"{previous_report}\n\n"
-                "Do not repeat an unchanged request or coverage gap from that report. "
-                "Report it again only if new evidence changes its status or impact."
-            )
+        metadata = load_metadata(directory, normalized_workspace_id)
+        previous_messages = metadata.get("messages", [])
         try:
-            turn = await asyncio.to_thread(
-                run_turn,
-                conversation_id=cycle_id,
-                directory=str(cycle_directory),
+            turn = await _run_turn_without_releasing_lock_early(
+                conversation_id=conversation_id,
+                directory=str(directory),
                 workspace_id=normalized_workspace_id,
-                text=cycle_prompt,
+                text=SCHEDULED_PROMPT,
                 turn_source="scheduled",
             )
         except RuntimeError as error:
@@ -656,16 +779,26 @@ async def run_scheduled_cycle(workspace_id: str) -> dict[str, Any]:
         except Exception as error:
             logger.exception("Lisa scheduled QA cycle failed")
             raise HTTPException(status_code=502, detail="Lisa could not complete scheduled QA") from error
-        finally:
-            await asyncio.to_thread(shutil.rmtree, cycle_directory, True)
+        hidden_ids = {
+            str(message["id"])
+            for message in previous_messages
+            if message.get("hidden") and message.get("id")
+        }
+        messages, activities, hidden_ids = _tag_turn(
+            turn.messages, turn.activities, previous_messages, "scheduled", hidden_ids
+        )
+        for message in messages:
+            message["hidden"] = message.get("id") in hidden_ids
+        if metadata.get("transcript_only_migration"):
+            messages = _merge_transcript_history(previous_messages, messages)
         metadata["updated_at"] = datetime.now(UTC).isoformat()
-        metadata["messages"] = turn.messages
-        metadata["activities"] = [*metadata.get("activities", []), *turn.activities][-100:]
+        metadata["messages"] = messages
+        metadata["activities"] = [*metadata.get("activities", []), *activities][-100:]
         save_metadata(directory, metadata)
         return {
             "conversation_id": conversation_id,
-            "messages": turn.messages,
-            "activities": turn.activities,
+            "messages": messages,
+            "activities": activities,
         }
 
 

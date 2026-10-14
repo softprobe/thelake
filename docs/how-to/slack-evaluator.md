@@ -35,7 +35,7 @@ runtime to its workspace. Run one Lisa runtime per workspace and use a separate
 Slack app or deployment for each workspace.
 
 The `LISA_THELAKE_API_URL` and `LISA_THELAKE_TOKEN` settings let Lisa read
-workspace-scoped telemetry and checks and write scores. The token is shared
+workspace-scoped telemetry and write scores. The token is shared
 with TheLake only to authenticate these Lisa-to-storage calls.
 
 Set `LISA_SLACK_CHANNEL_ID` to choose a workspace-level destination for alerts
@@ -43,15 +43,17 @@ from checks that are not associated with a Slack thread. A check created from a
 Slack conversation keeps that conversation's channel and thread as its alert
 destination; those per-check bindings take precedence over the workspace
 default. This default also allows checks created before Slack was configured to
-send alerts without editing the evaluator definition.
+send alerts without editing the policy text.
 
 ## Talk with Lisa
 
 Mention the bot in a channel or reply in a supported thread. Lisa responds in
 the same thread and keeps multi-turn context there. She can explain existing
 policy and session evidence, propose policy updates, and create behavior
-checks. Lisa saves a new check as a draft; activate it only when an authorized
-owner explicitly asks her to monitor that behavior.
+policies. Lisa proposes the named section with `approved: yes/no`; the owner
+sends `Confirm policy rule: <exact heading>` before Lisa saves it. Approved policy
+is eligible for QA immediately. There is no separate draft or activation step.
+
 
 Lisa schedules evaluation independently of Slack. Slack is a conversation and
 notification surface; deleting or disconnecting it does not stop Lisa's
@@ -62,9 +64,9 @@ scheduled QA.
 When Lisa's scheduled evaluation finds a failure, she stores the score in
 TheLake and posts the finding to the Slack thread associated with the check, or
 to `LISA_SLACK_CHANNEL_ID` when the check has no Slack binding.
-The alert includes the affected agent, session, check, and evaluator rationale.
+The alert includes the affected agent, session, policy, and judge rationale.
 Lisa keeps delivery receipts in her persistent workspace data so later
-scheduled cycles suppress repeat alerts for the same evaluator version, trace,
+scheduled cycles suppress repeat alerts for the same policy snapshot, trace,
 and Slack destination. A duplicate is still possible if Slack accepts a message
 but Lisa stops before saving its receipt. Slack delivery is best effort;
 Explorer and TheLake's score API remain the source of truth for recorded

@@ -31,14 +31,17 @@ developers cannot bypass that customer-side requirement.
 In an approved test channel/thread, use the documented command:
 
 ```text
-@thelake evaluate support-agent :: Before issuing a refund, check eligibility and explain the result.
+@Lisa Propose an agent POLICY.md rule named "Refund eligibility" for support-agent:
+check eligibility before issuing a refund. Show approved: yes, but do not save yet.
 ```
 
+Review the section, then send `@Lisa Confirm policy rule: Refund eligibility`.
+
+
 The target name must match the authenticated agent name on the root trace.
-Slack-created checks activate immediately. Run a safe sample agent, then check
+Owner-confirmed rules with `approved: yes` are eligible for evaluation immediately. Run a safe sample agent, then check
 score persistence in Explorer/API and the failure reply in the originating
-thread separately. Failure notifications are best effort and are not queued for
-retry. Lisa evaluates on her `Lisa scheduled QA` cron schedule, hourly at
+thread separately. Failed notification attempts remain pending in Lisa's workspace home for retry. Lisa evaluates on her `Lisa scheduled QA` cron schedule, hourly at
 minute 0 UTC by default; she does not run on startup. For a faster controlled
 test, configure a short `LISA_QA_CRON` before starting Lisa, then use
 `verify-lisa-slack-alert`.

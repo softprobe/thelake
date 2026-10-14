@@ -6,24 +6,21 @@ from pathlib import Path
 
 from thelake_lisa.evaluation.contracts import EvaluationRequest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "connected_itinerary.json"
-VALIDATE_RESPONSE = runpy.run_path(
-    ROOT / "scripts" / "run_policy_dogfood.py"
-)["validate_response"]
+VALIDATE_RESPONSE = runpy.run_path(ROOT / "scripts" / "run_policy_dogfood.py")["validate_response"]
 
 
 def test_policy_dogfood_cases_match_lisa_contract_and_have_opposite_controls():
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    evaluator = fixture["evaluator"]
+    evaluator = fixture["policy"]
     statuses = {}
 
     for case in fixture["cases"]:
         request = EvaluationRequest.model_validate(
             {
                 "run_id": f"fixture:{case['case_id']}",
-                "evaluator": evaluator,
+                "policy": evaluator,
                 "evidence": case["evidence"],
             }
         )
@@ -53,13 +50,12 @@ def test_policy_dogfood_cases_capture_warning_and_action_order():
     )
 
 
-def test_live_dogfood_response_checks_trace_identity_and_score_bounds():
+def test_live_dogfood_response_checks_trace_identity_and_evidence():
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     case = fixture["cases"][0]
     good_response = {
         "status": "pass",
         "trace_id": case["evidence"]["trace_id"],
-        "score": 0.95,
         "evidence": [{"span_id": "pass-disclosure"}],
     }
     assert VALIDATE_RESPONSE(case, good_response) == []
@@ -67,9 +63,8 @@ def test_live_dogfood_response_checks_trace_identity_and_score_bounds():
     bad_response = {
         **good_response,
         "trace_id": "another-trace",
-        "score": 1.2,
     }
-    assert len(VALIDATE_RESPONSE(case, bad_response)) == 2
+    assert len(VALIDATE_RESPONSE(case, bad_response)) == 1
     bad_response = {**good_response, "evidence": [{"kind": "assistant_message"}]}
     assert VALIDATE_RESPONSE(case, bad_response) == [
         "pass/fail verdict must include valid evidence span references"

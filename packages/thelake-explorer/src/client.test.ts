@@ -10,15 +10,6 @@ describe("ExplorerApi", () => {
     expect(fetcher.mock.calls[0][1]?.method).toBe("DELETE");
   });
 
-  it("activates an evaluator version for Lisa's scheduled checks", async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ active: true }), { status: 200 }));
-    const api = new ExplorerApi({ apiBasePath: "/v1", fetch: fetcher as typeof fetch });
-    await api.setEvaluatorActive("refund-check", 2, true, true);
-
-    expect(fetcher.mock.calls[0][0]).toBe("/v1/evaluators/refund-check/versions/2/activate");
-    expect(fetcher.mock.calls[0][1]?.body).toBeUndefined();
-  });
-
   it("uses the authenticated Lisa conversation API", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -31,7 +22,7 @@ describe("ExplorerApi", () => {
     const api = new ExplorerApi({ apiBasePath: "/v1", lisaApiBasePath: "http://lisa.local/v1", auth: { headers: () => ({ "X-Softprobe-Assertion": "signed" }) }, fetch: fetcher as typeof fetch });
 
     const conversation = await api.createLisaConversation();
-    const reply = await api.sendLisaMessage(conversation.conversation_id, "Investigate recent errors", true);
+    const reply = await api.sendLisaMessage(conversation.conversation_id, "Investigate recent errors");
 
     expect(calls[0].url).toBe("http://lisa.local/v1/conversations");
     expect(calls[0].init?.method).toBe("POST");

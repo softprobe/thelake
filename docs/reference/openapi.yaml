@@ -255,129 +255,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
-  /v1/evaluators:
-    get:
-      tags: [llm]
-      summary: List no-code behavior evaluators
-      description: Returns versioned evaluator criteria stored in the authenticated workspace.
-      operationId: listEvaluators
-      responses:
-        "200":
-          description: Evaluator definitions
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/EvaluatorDefinition"
-        "401":
-          description: Missing or invalid bearer token
-        "403":
-          description: Bearer token could not be resolved to a tenant
-    post:
-      tags: [llm]
-      summary: Create a draft no-code behavior evaluator version
-      description: |
-        Stores a natural-language criterion and optional ordered tool
-        requirement for one named agent in the authenticated workspace. Drafts
-        do not trigger evaluations. Explicit activation opts this evaluator
-        into sending matching trace content to the configured judge provider.
-      operationId: createEvaluator
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateEvaluatorRequest"
-            examples:
-              eligibilityBeforeRefund:
-                value:
-                  evaluator_id: refund-eligibility
-                  version: 1
-                  target_agent_name: support-agent
-                  name: Refund eligibility before refund
-                  criteria: Verify the agent checks refund eligibility and explains the result before issuing a refund.
-                  threshold: 0.7
-                  uncertainty_margin: 0.1
-                  required_tool_order:
-                    - before: check_eligibility
-                      action: issue_refund
-                      require_result_before_action: true
-      responses:
-        "201":
-          description: Evaluator version created
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EvaluatorDefinition"
-        "200":
-          description: Idempotent retry of the same evaluator version
-        "400":
-          description: Invalid evaluator definition or conflicting config ID
-        "401":
-          description: Missing or invalid bearer token
-        "403":
-          description: Bearer token could not be resolved to a tenant
-  /v1/evaluators/{evaluator_id}/versions/{version}/activate:
-    post:
-      tags: [llm]
-      summary: Activate an evaluator version for one agent
-      description: |
-        Activates this workspace-scoped evaluator. Lisa selects matching
-        sessions on her schedule, evaluates bounded evidence and the rubric
-        with DeepEval G-Eval in Lisa's MCP tool process, and stores the result
-        in TheLake. Lisa applies a narrow credential redaction filter; this is
-        not general PII scrubbing.
-      operationId: activateEvaluator
-      parameters:
-        - name: evaluator_id
-          in: path
-          required: true
-          schema: { type: string }
-        - name: version
-          in: path
-          required: true
-          schema: { type: integer, minimum: 1 }
-      responses:
-        "200":
-          description: Evaluator activated
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EvaluatorDefinition"
-        "400":
-          description: Evaluator version not found
-        "401":
-          description: Missing or invalid bearer token
-        "403":
-          description: Bearer token could not be resolved to a tenant
-  /v1/evaluators/{evaluator_id}/versions/{version}/deactivate:
-    post:
-      tags: [llm]
-      summary: Stop evaluating new traces with this evaluator
-      operationId: deactivateEvaluator
-      parameters:
-        - name: evaluator_id
-          in: path
-          required: true
-          schema: { type: string }
-        - name: version
-          in: path
-          required: true
-          schema: { type: integer, minimum: 1 }
-      responses:
-        "200":
-          description: Evaluator deactivated
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EvaluatorDefinition"
-        "400":
-          description: Evaluator version not found
-        "401":
-          description: Missing or invalid bearer token
-        "403":
-          description: Bearer token could not be resolved to a tenant
   /v1/score-configs:
     get:
       tags:
@@ -690,8 +567,9 @@ paths:
       summary: Get full session detail using the session summary time window
       description: |
         Does not accept query `from`/`to`. The lake window is taken from the
-        tenant's `session_summary` row for `session_id`. Returns all session spans,
-        trace and token totals, and scores in one response.
+        tenant's `session_summary` row for `session_id`. Returns session spans,
+        trace and token totals, agent names, and scores in one response. The
+        optional `limit` caps returned spans; `span_count` remains the total.
       operationId: getSession
       parameters:
         - name: session_id
@@ -699,9 +577,16 @@ paths:
           required: true
           schema:
             type: string
+        - name: limit
+          in: query
+          description: Maximum number of spans to return; totals and scores remain complete.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
       responses:
         "200":
-          description: Complete session detail
+          description: Session detail with complete totals and scores
           content:
             application/json:
               schema:
@@ -1082,65 +967,6 @@ components:
             ingested_count: 0
             message: "Ingestion failed: DuckLake write failed"
   schemas:
-    OrderedToolRequirement:
-      type: object
-      required: [before, action]
-      properties:
-        before:
-          type: string
-          maxLength: 256
-        action:
-          type: string
-          maxLength: 256
-        require_result_before_action:
-          type: boolean
-          default: true
-    CreateEvaluatorRequest:
-      type: object
-      required: [evaluator_id, version, target_agent_name, name, criteria]
-      properties:
-        evaluator_id:
-          type: string
-          maxLength: 200
-        version:
-          type: integer
-          minimum: 1
-        target_agent_name:
-          type: string
-          maxLength: 256
-        name:
-          type: string
-          maxLength: 200
-        criteria:
-          type: string
-          maxLength: 8000
-          description: Natural-language rubric. Include source citations directly when the criteria come from business policy.
-        threshold:
-          type: number
-          minimum: 0
-          maximum: 1
-          default: 0.7
-        uncertainty_margin:
-          type: number
-          minimum: 0
-          maximum: 0.49
-          default: 0.1
-        required_tool_order:
-          type: array
-          maxItems: 20
-          items:
-            $ref: "#/components/schemas/OrderedToolRequirement"
-    EvaluatorDefinition:
-      allOf:
-        - $ref: "#/components/schemas/CreateEvaluatorRequest"
-        - type: object
-          required: [timestamp, active]
-          properties:
-            timestamp:
-              type: string
-              format: date-time
-            active:
-              type: boolean
     IngestResponse:
       type: object
       required:
@@ -1487,13 +1313,17 @@ components:
           type: [string, "null"]
     SessionDetail:
       type: object
-      required: [session_id, from, to, trace_count, span_count, spans, scores]
+      required: [session_id, from, to, trace_count, span_count, agent_names, spans, scores]
       properties:
         session_id: { type: string }
         from: { type: string, format: date-time }
         to: { type: string, format: date-time }
         trace_count: { type: integer }
         span_count: { type: integer }
+        agent_names:
+          type: array
+          items:
+            type: string
         user_ids:
           type: array
           items:
@@ -1504,7 +1334,7 @@ components:
         total_cost: { type: number }
         spans:
           type: array
-          description: All detailed spans in the session, ordered newest first
+          description: Detailed spans ordered newest first; optionally capped by the limit query parameter
           items:
             $ref: "#/components/schemas/SpanDetail"
         scores:

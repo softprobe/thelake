@@ -77,3 +77,6 @@ explorer-playwright-report/
 test-results/
 
 .tools/
+
+# Python package build metadata
+*.egg-info/

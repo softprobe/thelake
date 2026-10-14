@@ -26,19 +26,22 @@ LISA_QA_CRON="*/5 * * * *" bash examples/quickstart/start.sh
 
 The script generates a local Lisa service token, starts Postgres and Lisa, then
 runs TheLake in the foreground. This five-minute cron is for the walkthrough;
-deployments default to hourly. Lisa runs the DeepEval judge in her MCP tool
+deployments default to hourly. Lisa runs the categorical Gemini judge in her MCP tool
 process. It prints the Explorer URL and the next commands. Keep this terminal
 open and open the printed URL.
 
-## 2. Create the behavior check
+## 2. Approve the policy
 
 In Explorer, open Lisa's chat and send:
 
-> For `quickstart-refund-agent`, check refund eligibility and wait for the result before issuing a refund. Start monitoring now.
+> Propose an agent POLICY.md rule named "Refund eligibility before refund" for `quickstart-refund-agent`: check refund eligibility and wait for the result before issuing a refund. Show the section with `approved: yes`; do not save it yet.
 
-Lisa creates the behavior check from your request, activates it because you
-explicitly asked her to start monitoring, and confirms the active version.
-That check is available to Lisa's scheduled QA cycle.
+Review Lisa's proposal, then send:
+
+> Confirm policy rule: Refund eligibility before refund
+
+Lisa saves the approved rule in that agent's `POLICY.md`. It is eligible for her
+next scheduled QA cycle immediately; there is no separate activation step.
 
 ## 3. Run the sample agent
 
@@ -69,7 +72,7 @@ You can reply in the report conversation to ask follow-up questions.
 
 The user walkthrough above is intentionally step by step. With the stack
 running from step 1, the automated driver asks Lisa through her chat API to
-create and activate a natural-language check, runs the sample agent, verifies
+propose and save an explicitly approved policy, runs the sample agent, verifies
 the expected failure verdict, and checks that Lisa reports the evidence:
 
 ```bash
@@ -99,4 +102,4 @@ docker compose --env-file .env --env-file warehouse/quickstart/compose.env \
   thread when a scheduled evaluation finds an issue.
 - [Behavior evaluation and Lisa's evidence limits](how-to/explorer.md#behavior-evaluation).
 - [Policy memory](how-to/policy-memory.md) to maintain business rules as
-  Markdown and submit reviewable evaluator drafts from a coding agent.
+  Markdown with explicit approval.

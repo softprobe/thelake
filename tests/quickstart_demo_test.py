@@ -42,17 +42,6 @@ class QuickstartDemoTest(unittest.TestCase):
         self.assertEqual(request.call_count, 2)
         sleep.assert_called_once_with(3)
 
-    def test_active_check_lookup_requires_the_sample_agent_and_name(self):
-        with patch.object(evaluator, "request_json", return_value=[
-            {"name": "Wrong agent", "target_agent_name": "other", "active": True},
-            {"name": "Quickstart rule", "target_agent_name": "quickstart-refund-agent", "active": False},
-            {"name": "Quickstart rule", "target_agent_name": "quickstart-refund-agent", "active": True},
-        ]):
-            result = evaluator.find_active_evaluator("http://lake", "Quickstart rule")
-
-        self.assertTrue(result["active"])
-        self.assertEqual(result["target_agent_name"], "quickstart-refund-agent")
-
     def test_result_lookup_returns_only_the_sample_evaluator_verdict(self):
         session = {
             "scores": [
@@ -90,24 +79,23 @@ class QuickstartDemoTest(unittest.TestCase):
         )
 
     @patch.object(e2e, "lisa_request")
-    def test_demo_authors_and_activates_the_check_through_lisa_chat(self, lisa_request):
+    def test_demo_saves_policy_only_after_exact_owner_confirmation(self, lisa_request):
+        import json
         lisa_request.side_effect = [
-            {"conversation_id": "conversation-1"},
-            {
-                "activities": [
-                    {"label": "Lisa used create_evaluator_draft"},
-                    {"label": "Lisa used activate_evaluator"},
-                ]
-            },
+            {"conversation_id": "conversation-1"}, {"activities": []},
+            {"activities": [{"tool_name": "update_policy", "arguments": json.dumps({
+                "scope": "agent", "agent_name": "quickstart-refund-agent",
+                "content": "## Quickstart rule\napproved: yes\n\nCheck eligibility.",
+            })}]},
         ]
-
-        conversation_id, _turn = e2e.ask_lisa_to_create_check("http://lisa/v1", "Quickstart rule")
-
+        conversation_id, _turn = e2e.ask_lisa_to_approve_policy("http://lisa/v1", "Quickstart rule")
         self.assertEqual(conversation_id, "conversation-1")
-        self.assertEqual(lisa_request.call_args_list[0].args, ("http://lisa/v1", None, "/v1/conversations", {}))
-        message_request = lisa_request.call_args_list[1]
-        self.assertIn("Create and activate a behavior check", message_request.args[3]["text"])
-        self.assertTrue(message_request.args[3]["consent"])
+        proposal_prompt = lisa_request.call_args_list[1].args[3]["text"]
+        self.assertIn("Do not save it yet", proposal_prompt)
+        self.assertIn("scope=agent", proposal_prompt)
+        self.assertIn("agent_name=quickstart-refund-agent", proposal_prompt)
+        self.assertEqual(lisa_request.call_args_list[2].args[3]["text"], "Confirm policy rule: Quickstart rule")
+        self.assertTrue(lisa_request.call_args_list[2].args[3]["consent"])
 
 
 if __name__ == "__main__":

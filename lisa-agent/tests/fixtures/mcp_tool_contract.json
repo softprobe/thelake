@@ -1,0 +1,664 @@
+[
+  {
+    "name": "complete_evaluation_failure_followup",
+    "description": "Clear a pending failure after Lisa investigated and reported it.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "failure_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "failure_key"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    }
+  },
+  {
+    "name": "evaluate_session",
+    "description": "Evaluate one approved named policy against a session and store its verdict.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "target_agent_name": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_agent_name",
+        "name",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_session",
+    "description": "Read one session as a compact user/tool/assistant trajectory.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "agent_names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trace_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "events": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "sequence": {
+                "type": "integer"
+              },
+              "span_id": {
+                "type": "string"
+              },
+              "parent_span_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "timestamp": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "user_message",
+                  "assistant_message",
+                  "tool_call",
+                  "tool_result"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "call_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "content": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "payload": {
+                "anyOf": [
+                  {},
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "sequence",
+              "span_id",
+              "timestamp",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "tool_events_captured": {
+          "type": "boolean"
+        },
+        "tool_order_certain": {
+          "type": "boolean"
+        },
+        "message_order_certain": {
+          "type": "boolean"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "session_id",
+        "agent_names",
+        "trace_ids",
+        "events",
+        "complete",
+        "tool_events_captured",
+        "tool_order_certain",
+        "message_order_certain",
+        "limitations"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_approved_policies",
+    "description": "List approved workspace and agent policies applicable to an exact agent.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "target_agent_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_agent_name"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object",
+      "x-fastmcp-wrap-result": true
+    }
+  },
+  {
+    "name": "list_pending_evaluation_failures",
+    "description": "List stored evaluation failures that still need Lisa's follow-up.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object",
+      "x-fastmcp-wrap-result": true
+    }
+  },
+  {
+    "name": "list_policies",
+    "description": "List Lisa's workspace and agent-specific POLICY.md memory files.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object",
+      "x-fastmcp-wrap-result": true
+    }
+  },
+  {
+    "name": "notify_evaluation_failure",
+    "description": "Notify Slack only after Lisa reviews a stored policy failure.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "target_agent_name": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "failure_key": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_agent_name",
+        "name",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    }
+  },
+  {
+    "name": "read_policy",
+    "description": "Read workspace policy or the policy for one exact registered agent.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "default": "workspace",
+          "type": "string"
+        },
+        "agent_name": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object",
+      "x-fastmcp-wrap-result": true
+    }
+  },
+  {
+    "name": "search_sessions",
+    "description": "Search session summaries using the same filters and page shape as TheLake's session API.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "has_errors": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "model_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "agent_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "roots_only": {
+          "default": true,
+          "type": "boolean"
+        },
+        "order_by": {
+          "default": "start_time",
+          "enum": [
+            "start_time",
+            "error_count",
+            "duration",
+            "total_tokens",
+            "total_cost"
+          ],
+          "type": "string"
+        },
+        "order": {
+          "default": "desc",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "type": "string"
+        },
+        "limit": {
+          "default": 50,
+          "type": "integer"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "session_id": {
+                "type": "string"
+              },
+              "start_time": {
+                "type": "string"
+              },
+              "end_time": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "trace_count": {
+                "type": "integer"
+              },
+              "span_count": {
+                "type": "integer"
+              },
+              "error_count": {
+                "type": "integer"
+              },
+              "input_tokens": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "output_tokens": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "total_tokens": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "total_cost": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "agent_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "user_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "models": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "session_id",
+              "start_time",
+              "trace_count",
+              "span_count",
+              "error_count"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cursor_supported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "items",
+        "cursor_supported"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "update_policy",
+    "description": "Save complete policy Markdown after reading its current value.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "expected_content": {
+          "type": "string"
+        },
+        "scope": {
+          "default": "workspace",
+          "type": "string"
+        },
+        "agent_name": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "expected_content"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object",
+      "x-fastmcp-wrap-result": true
+    }
+  }
+]

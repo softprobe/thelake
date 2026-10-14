@@ -118,6 +118,14 @@ fn log(day: u32, id: &str) -> Log {
     }
 }
 
+fn fixture_window() -> softprobe_runtime::sql::QueryWindow {
+    softprobe_runtime::sql::QueryWindow::try_new(
+        Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap(),
+    )
+    .expect("valid fixture query window")
+}
+
 fn score(day: u32, id: &str) -> Score {
     Score {
         score_id: format!("score-{id}"),
@@ -464,7 +472,7 @@ async fn typed_query_gate_covers_traces_and_logs() {
         query
             .count_traces(TraceCountFilter {
                 session_id: Some("persistent-session".into()),
-                time_window: crate::util::query_window(),
+                time_window: fixture_window(),
 
                 app_id: None,
                 span_id: None,
@@ -477,7 +485,7 @@ async fn typed_query_gate_covers_traces_and_logs() {
         query
             .count_logs(LogCountFilter {
                 session_id: Some("persistent-session".into()),
-                time_window: crate::util::query_window(),
+                time_window: fixture_window(),
 
                 body: None,
                 trace_id: None,

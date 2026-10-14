@@ -140,6 +140,88 @@ def skip_comment(text: str, i: int, suffix: str) -> int | None:
     return None
 
 
+def skip_javascript_regex(text: str, i: int) -> int | None:
+    """Skip a JavaScript regexp literal when `/` can begin an expression.
+
+    This is intentionally a small lexer heuristic, not a JavaScript parser. It
+    handles escaped slashes and character classes, and only treats `/` as a
+    regexp delimiter after tokens that permit an expression to start. Division
+    operators therefore leave following string literals visible to the SQL
+    guardrail.
+    """
+    if i >= len(text) or text[i] != "/" or text.startswith(("//", "/*"), i):
+        return None
+
+    previous = i - 1
+    while previous >= 0 and text[previous].isspace():
+        previous -= 1
+    if previous < 0:
+        can_start = True
+    elif (
+        text[previous] in "+-"
+        and previous > 0
+        and text[previous - 1] == text[previous]
+    ):
+        # `n++ / value` and `n-- / value` are division expressions. A doubled
+        # operator is postfix when the token before it already ends an
+        # expression; otherwise it can be a prefix operator.
+        before_operator = previous - 2
+        while before_operator >= 0 and text[before_operator].isspace():
+            before_operator -= 1
+        can_start = not (
+            before_operator >= 0
+            and (
+                text[before_operator].isalnum()
+                or text[before_operator] in "_$)]}\"'"
+            )
+        )
+    elif text[previous] in "=([{,:;!?&|+-*%^~<>":
+        can_start = True
+    else:
+        word_end = previous + 1
+        while previous >= 0 and (text[previous].isalnum() or text[previous] in "_$"):
+            previous -= 1
+        word = text[previous + 1 : word_end]
+        can_start = word in {
+            "await",
+            "case",
+            "delete",
+            "do",
+            "else",
+            "in",
+            "instanceof",
+            "of",
+            "return",
+            "throw",
+            "typeof",
+            "void",
+            "yield",
+        }
+    if not can_start:
+        return None
+
+    j = i + 1
+    escaped = False
+    in_character_class = False
+    while j < len(text) and text[j] != "\n":
+        char = text[j]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "[":
+            in_character_class = True
+        elif char == "]":
+            in_character_class = False
+        elif char == "/" and not in_character_class:
+            j += 1
+            while j < len(text) and text[j].isalpha():
+                j += 1
+            return j
+        j += 1
+    return None
+
+
 def read_standard_string(text: str, i: int, quote: str) -> tuple[str, int]:
     triple = text.startswith(quote * 3, i)
     delimiter = quote * (3 if triple else 1)
@@ -258,6 +340,13 @@ def sql_literals(text: str, suffix: str) -> list[tuple[str, int]]:
             line += text[i:comment_end].count("\n")
             i = comment_end
             continue
+
+        if suffix in {".ts", ".tsx", ".js", ".jsx"}:
+            regex_end = skip_javascript_regex(text, i)
+            if regex_end is not None:
+                line += text[i:regex_end].count("\n")
+                i = regex_end
+                continue
 
         # Rust strings are double-quoted only. Single quotes are lifetimes/chars
         # (`<'_>`, `'a', '\\'`) and must not be treated as string delimiters.

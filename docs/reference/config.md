@@ -113,4 +113,4 @@ customer DuckLake.
 | `LISA_CORS_ORIGINS` | Comma-separated browser origins allowed to call Lisa directly. |
 | `SOFTPROBE_ASSERTION_HMAC_SECRET` | Shared edge assertion key Lisa uses to verify workspace-scoped browser requests. |
 | `LISA_PUBLIC_URL` | Browser-reachable Lisa API base URL injected into Explorer. Lisa chat connects directly to this service. |
-| `GEMINI_MODEL_NAME` | Gemini model used by Lisa's DeepEval judge (defaults to `gemini-2.5-flash`). |
+| `GEMINI_MODEL_NAME` | Gemini model used by Lisa's categorical policy judge (defaults to `gemini-2.5-flash`). |

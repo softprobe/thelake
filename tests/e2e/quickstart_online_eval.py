@@ -3,26 +3,24 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
-import json
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 from urllib.error import URLError
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
-
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "examples/quickstart"))
 from evaluator import (  # noqa: E402
     AGENT_NAME,
     TheLakeApiError,
-    find_active_evaluator,
     request_json,
 )
 
@@ -51,13 +49,21 @@ def lisa_report_describes_failure(reply: str, session_id: str) -> bool:
 def run_sample_agent(api_url: str) -> str:
     compose_env = ROOT / "warehouse/quickstart/compose.env"
     command = [
-        "docker", "compose",
-        "--env-file", ".env",
-        "--env-file", str(compose_env.relative_to(ROOT)),
-        "--project-name", "thelake-quickstart",
-        "--file", "examples/quickstart/compose.yaml",
-        "run", "--rm", "refund-agent",
-        "--agent-name", AGENT_NAME,
+        "docker",
+        "compose",
+        "--env-file",
+        ".env",
+        "--env-file",
+        str(compose_env.relative_to(ROOT)),
+        "--project-name",
+        "thelake-quickstart",
+        "--file",
+        "examples/quickstart/compose.yaml",
+        "run",
+        "--rm",
+        "refund-agent",
+        "--agent-name",
+        AGENT_NAME,
     ]
     env = os.environ.copy()
     parsed_url = urlsplit(api_url)
@@ -83,7 +89,9 @@ def run_sample_agent(api_url: str) -> str:
                 ".env, then rerun. This request did not produce a refund or an evaluator verdict."
             )
         print(completed.stderr[-2000:], end="", file=sys.stderr)
-        raise RuntimeError(f"The sample agent exited with status {completed.returncode}.")
+        raise RuntimeError(
+            f"The sample agent exited with status {completed.returncode}."
+        )
     if completed.stderr:
         print(completed.stderr, end="", file=sys.stderr)
     match = re.search(r"session_id=([A-Za-z0-9_-]+)", completed.stdout)
@@ -110,7 +118,9 @@ def wait_for_evaluation(
                 return score
         time.sleep(3)
     if not session_available:
-        raise TimeoutError(f"Session {session_id} was not available in TheLake within {timeout_seconds} seconds.")
+        raise TimeoutError(
+            f"Session {session_id} was not available in TheLake within {timeout_seconds} seconds."
+        )
     raise TimeoutError(
         f"No '{evaluator_name}' score appeared for session {session_id} within "
         f"{timeout_seconds} seconds. Check theLake and lisa-agent logs."
@@ -118,27 +128,35 @@ def wait_for_evaluation(
 
 
 def wait_for_lisa_report(
-    lisa_url: str, token: str, workspace_id: str, conversation_id: str,
-    session_id: str, evaluator_name: str, previous_updated_at: str,
+    lisa_url: str,
+    token: str,
+    workspace_id: str,
+    conversation_id: str,
+    session_id: str,
+    evaluator_name: str,
+    previous_updated_at: str,
     timeout_seconds: int = 240,
 ) -> dict:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         conversation = lisa_request(
-            lisa_url, token,
+            lisa_url,
+            token,
             f"/internal/v1/conversations/{conversation_id}?workspace_id={workspace_id}",
         )
         if conversation.get("updated_at") == previous_updated_at:
             time.sleep(3)
             continue
         replies = [
-            message.get("text", "") for message in conversation.get("messages", [])
+            message.get("text", "")
+            for message in conversation.get("messages", [])
             if message.get("role") == "assistant"
         ]
         activities = conversation.get("activities", [])
         matching_activity = next(
             (
-                item for item in activities
+                item
+                for item in activities
                 if "evaluate_session returned evidence" in item.get("label", "")
                 and session_id in item.get("detail", "")
                 and evaluator_name in item.get("detail", "")
@@ -167,7 +185,8 @@ def lisa_request(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = Request(
-        f"{lisa_url}{path}", data=body,
+        f"{lisa_url}{path}",
+        data=body,
         headers=headers,
         method="GET" if body is None else "POST",
     )
@@ -175,27 +194,50 @@ def lisa_request(
         return json.loads(response.read())
 
 
-def ask_lisa_to_create_check(lisa_url: str, evaluator_name: str) -> tuple[str, dict]:
+def ask_lisa_to_approve_policy(lisa_url: str, policy_name: str) -> tuple[str, dict]:
     conversation = lisa_request(lisa_url, None, "/v1/conversations", {})
     conversation_id = conversation["conversation_id"]
-    turn = lisa_request(
+    path = f"/v1/conversations/{conversation_id}/messages"
+    lisa_request(
         lisa_url,
         None,
-        f"/v1/conversations/{conversation_id}/messages",
+        path,
         {
             "text": (
-                f"Create and activate a behavior check named '{evaluator_name}' for the exact agent "
-                f"'{AGENT_NAME}'. The requirement is: check refund eligibility and wait for the "
-                "eligibility result before issuing a refund. Start monitoring this behavior now."
+                f"Propose an agent POLICY.md rule named '{policy_name}' for '{AGENT_NAME}': "
+                "check refund eligibility and wait for the result before issuing a refund. "
+                f"Read and save it with scope=agent and agent_name={AGENT_NAME}. "
+                "When updating, use the raw Markdown returned by read_policy as expected_content, "
+                "without any tool-display wrapper. Show the exact section with approved: yes "
+                "for me to confirm. Do not save it yet."
             ),
             "consent": True,
         },
     )
-    tool_labels = [item.get("label", "") for item in turn.get("activities", [])]
-    if not any("create_evaluator_draft" in label for label in tool_labels):
-        raise RuntimeError("Lisa did not create the requested behavior check through her tools.")
-    if not any("activate_evaluator" in label for label in tool_labels):
-        raise RuntimeError("Lisa did not activate the behavior check after the explicit request.")
+    turn = lisa_request(
+        lisa_url,
+        None,
+        path,
+        {
+            "text": f"Confirm policy rule: {policy_name}",
+            "consent": True,
+        },
+    )
+    saved = [
+        item
+        for item in turn.get("activities", [])
+        if item.get("tool_name") == "update_policy"
+    ]
+    if not any(
+        (args := json.loads(item.get("arguments") or "{}")).get("agent_name")
+        == AGENT_NAME
+        and args.get("scope") == "agent"
+        and f"## {policy_name}\napproved: yes" in args.get("content", "")
+        for item in saved
+    ):
+        raise RuntimeError(
+            "Lisa did not save the owner-approved policy through her tools."
+        )
     return conversation_id, turn
 
 
@@ -213,16 +255,6 @@ def wait_for_lisa_ready(lisa_url: str, timeout_seconds: int = 90) -> None:
     raise TimeoutError(f"Lisa did not become ready within {timeout_seconds} seconds.")
 
 
-def wait_for_active_evaluator(api_url: str, name: str, timeout_seconds: int = 30) -> dict:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        evaluator = find_active_evaluator(api_url, name)
-        if evaluator:
-            return evaluator
-        time.sleep(1)
-    raise TimeoutError(f"Lisa did not activate the requested behavior check '{name}'.")
-
-
 def read_compose_value(key: str) -> str:
     path = ROOT / "warehouse/quickstart/compose.env"
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -235,25 +267,35 @@ def read_compose_value(key: str) -> str:
 def main() -> int:
     api_file = ROOT / "warehouse/quickstart/api_url"
     if not api_file.exists():
-        raise RuntimeError("Start the quickstart first with bash examples/quickstart/start.sh.")
+        raise RuntimeError(
+            "Start the quickstart first with bash examples/quickstart/start.sh."
+        )
     api_url = api_file.read_text(encoding="utf-8").strip().rstrip("/")
-    lisa_url = (ROOT / "warehouse/quickstart/lisa_api_url").read_text(encoding="utf-8").strip().rstrip("/")
+    lisa_url = (
+        (ROOT / "warehouse/quickstart/lisa_api_url")
+        .read_text(encoding="utf-8")
+        .strip()
+        .rstrip("/")
+    )
     workspace_id = read_compose_value("THELAKE_DEFAULT_WORKSPACE_ID")
     lisa_token = read_compose_value("LISA_THELAKE_TOKEN")
     evaluator_name = f"Quickstart refund check {uuid4().hex[:6]}"
     wait_for_lisa_ready(lisa_url)
-    conversation_id, _turn = ask_lisa_to_create_check(lisa_url, evaluator_name)
-    evaluator = wait_for_active_evaluator(api_url, evaluator_name)
-    print(f"Lisa created and activated: {evaluator_name} (version {evaluator['version']})")
+    conversation_id, _turn = ask_lisa_to_approve_policy(lisa_url, evaluator_name)
+    print(f"Lisa saved approved policy: {evaluator_name}")
     conversation_id = str(
         uuid5(NAMESPACE_URL, f"thelake:{workspace_id}:scheduled-agent-qa")
     )
     conversation = lisa_request(
-        lisa_url, lisa_token, "/internal/v1/conversations",
+        lisa_url,
+        lisa_token,
+        "/internal/v1/conversations",
         {"workspace_id": workspace_id, "conversation_id": conversation_id},
     )
     previous_updated_at = conversation.get("updated_at", "")
-    print("Running the deliberately flawed refund agent and sending its trace to TheLake...")
+    print(
+        "Running the deliberately flawed refund agent and sending its trace to TheLake..."
+    )
     session_id = run_sample_agent(api_url)
     print(f"Lisa will evaluate session {session_id} on her next scheduled cycle...")
     result = wait_for_evaluation(api_url, session_id, evaluator_name)
@@ -261,16 +303,27 @@ def main() -> int:
     comment = result.get("comment") or "No evaluator explanation was recorded."
     if status == "error":
         print(f"Online evaluation could not run: {comment}")
-        print(f"Open Explorer and view session {session_id} to inspect the trace and evaluator error.")
+        print(
+            f"Open Explorer and view session {session_id} to inspect the trace and evaluator error."
+        )
         return 1
     print(f"\nLisa found: {status.upper()} — {comment}")
-    print(f"Open Explorer and view session {session_id} to inspect the trace and evidence.")
+    print(
+        f"Open Explorer and view session {session_id} to inspect the trace and evidence."
+    )
     if status != "fail":
-        print("The walkthrough expected a failure; inspect this evaluator result before continuing.")
+        print(
+            "The walkthrough expected a failure; inspect this evaluator result before continuing."
+        )
         return 1
     report = wait_for_lisa_report(
-        lisa_url, lisa_token, workspace_id, conversation_id, session_id,
-        evaluator_name, previous_updated_at,
+        lisa_url,
+        lisa_token,
+        workspace_id,
+        conversation_id,
+        session_id,
+        evaluator_name,
+        previous_updated_at,
     )
     print("Lisa evaluated the captured session and stored the result in TheLake.")
     print(f"Lisa report: {report['reply']}")

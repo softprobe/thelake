@@ -35,7 +35,7 @@ Anonymous mode lets the embedded SPA call `/v1` without a bearer. It only
 that workspace.
 
 Stock [`config.yaml`](../../config.yaml) defaults to **isolated** workspace
-scope (`ducklake.workspace_scope_mode`). In that mode, session/trace/evaluator
+scope (`ducklake.workspace_scope_mode`). In that mode, session/trace/score
 calls fail with `unknown scope` until you `POST /v1/workspaces` with
 `SOFTPROBE_ADMIN_API_KEY` (admin provisioning is **not** on the anonymous
 allowlist).
@@ -102,7 +102,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST "http://127.0.0.1:${PORT:-1809
 The embedded SPA calls `apiBasePath: "/v1"` with no auth headers
 (`packages/thelake-explorer/src/standalone.tsx`). Anonymous mode allowlists OTLP
 ingest, scores POST, span/session search, score-config GET,
-single span/trace/session GET, and evaluator list/create/activate/deactivate. Anyone
+single span/trace/session GET. Anyone
 who can reach the listener can exercise that allowlist — leave this mode off
 when the listener is reachable by untrusted users.
 
@@ -158,18 +158,20 @@ tools are exposed over local stdio MCP and its workflows use standard
 `SKILL.md` files, so another runtime can use the same tool and skill contract
 without importing OpenHands code. Lisa supports persistent multi-turn chats,
 workspace and agent `POLICY.md` memory, bounded session evidence search,
-inactive evaluator drafts, and scheduled evaluation of active checks. She does
+explicitly approved policy rules, and scheduled policy evaluation. She does
 not run shell commands or access a connected Git repository.
 
-  - Before each message, Explorer requires consent to send the message and recent
-  workspace session evidence to the configured model provider. Lisa masks
-  common credential patterns in both; general personal data is not redacted.
-- In **Online checks**, an owner can review checks and activate or pause them.
-  Lisa's schedule selects matching sessions and runs deterministic evidence
-  checks plus DeepEval G-Eval inside her MCP tool process. Lisa writes scores
-  to TheLake and reports failures in her scheduled conversation. The schedule
-  schedule is `LISA_QA_CRON`, a five-field UTC cron expression. The default is
-  hourly at minute 0; the `Lisa scheduled QA` job does not run on startup.
+  - Explorer discloses beside the composer that messages and recent workspace
+  evidence go to the configured model provider. Sending a message proceeds
+  without a separate checkbox. Lisa masks common credential patterns; general
+  personal data is not redacted.
+- Ask Lisa to propose a named `POLICY.md` section with `approved: yes/no`.
+  Review it and send `Confirm policy rule: <exact heading>` to save the change.
+  Approved rules are eligible immediately; there is no separate activation UI.
+  Lisa's schedule reads policy and bounded session evidence, obtains categorical
+  Gemini verdicts, and stores scores and historical rule snapshots in TheLake.
+  `LISA_QA_CRON` is a five-field UTC cron expression, default hourly at minute 0;
+  the `Lisa scheduled QA` job does not run on startup.
 - Conversations are stored in the runner's `lisa-data` volume, scoped by the
   authenticated workspace. One runtime service serves a deployment; this is
   not yet a separate VM per workspace or a multi-replica durable store. Delete
@@ -254,7 +256,7 @@ credentials. The OpenHands MCP subprocess receives only the credentials needed
 to call Gemini and TheLake.
 
 Then open Explorer → **Lisa** to ask questions about recent sessions and their
-trace evidence. Evaluator creation and activation use the evaluator API. Lisa
+trace evidence. Rule text and approval live in `POLICY.md`; missing approval means no. Lisa
 selects matching sessions on her schedule and writes evaluation scores to
 Sessions.
 

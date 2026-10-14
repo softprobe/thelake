@@ -27,8 +27,9 @@ investigation immediately.
    the report with the trace evidence and the unresolved business question. Do
    not save it to `POLICY.md`: a failed trace cannot establish business intent
    by itself. Ask the owner to approve or correct the proposed wording.
-6. Do not create an evaluation from the failure event. The owner approves the
-   named policy and separately activates its evaluation.
+6. Do not create an evaluation from the failure event. If the owner approves
+   the proposed rule, record `approved: yes` under its heading in
+   `POLICY.md`. Lisa evaluates approved policy rules automatically.
 
 Policy headings are human-readable names. Do not expose internal IDs in the
 report.

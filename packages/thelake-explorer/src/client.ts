@@ -44,17 +44,7 @@ export type ScoreRecord = {
   string_value?: string | null; boolean_value?: boolean | null; comment?: string | null; config_id?: string | null;
 };
 
-export type BehaviorEvaluator = {
-  evaluator_id: string;
-  version: number;
-  target_agent_name: string;
-  name: string;
-  criteria: string;
-  threshold: number;
-  uncertainty_margin: number;
-  required_tool_order: Array<{ before: string; action: string; require_result_before_action: boolean }>;
-  active: boolean;
-};
+
 
 export type LisaMessage = {
   id: string;
@@ -62,6 +52,8 @@ export type LisaMessage = {
   text: string;
   created_at?: string;
   sequence?: number;
+  turn_source?: "web" | "scheduled" | "slack";
+  hidden?: boolean;
 };
 
 export type LisaActivity = {
@@ -168,9 +160,6 @@ export class ExplorerApi {
     return this.request("/scores", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ score_id: crypto.randomUUID(), timestamp: new Date().toISOString(), source: "annotation", ...input }) });
   }
 
-  listEvaluators(): Promise<BehaviorEvaluator[]> {
-    return this.request("/evaluators");
-  }
 
   listLisaConversations(): Promise<LisaConversation[]> {
     return this.requestLisa("/conversations");
@@ -188,22 +177,15 @@ export class ExplorerApi {
     return this.requestLisa(`/conversations/${encodeURIComponent(conversationId)}`, { method: "DELETE" });
   }
 
-  sendLisaMessage(conversationId: string, text: string, consent: boolean): Promise<LisaTurn> {
+  sendLisaMessage(conversationId: string, text: string): Promise<LisaTurn> {
     return this.requestLisa(`/conversations/${encodeURIComponent(conversationId)}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, consent }),
+      // The composer displays the provider/data disclosure next to Send.
+      // Sending a message is the user's affirmative action to proceed.
+      body: JSON.stringify({ text, consent: true }),
     });
   }
 
-  createEvaluator(input: Pick<BehaviorEvaluator, "evaluator_id" | "version" | "target_agent_name" | "name" | "criteria">): Promise<BehaviorEvaluator> {
-    return this.request("/evaluators", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
-  }
 
-  setEvaluatorActive(evaluatorId: string, version: number, active: boolean): Promise<BehaviorEvaluator> {
-    const action = active ? "activate" : "deactivate";
-    return this.request(`/evaluators/${encodeURIComponent(evaluatorId)}/versions/${version}/${action}`, {
-      method: "POST",
-    });
-  }
 }

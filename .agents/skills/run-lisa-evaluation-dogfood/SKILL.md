@@ -18,7 +18,7 @@ definitions, and scores; telemetry ingestion does not call Lisa.
   `skills/learn-agent-policy/SKILL.md` and
   `skills/review-agent-policy/SKILL.md`.
 - For Slack delivery, use `verify-lisa-slack-alert` after a failing score is
-  stored and the evaluator has a Slack thread binding.
+  stored and the pending failure has a captured Slack destination.
 
 ## Preconditions
 
@@ -42,7 +42,7 @@ the value in a command, history, file, or report. From the repository root:
 python3 tests/e2e/quickstart_online_eval.py
 ```
 
-The scenario creates and activates a refund behavior check, runs the
+The scenario saves an explicitly approved refund policy, runs the
 deliberately flawed sample agent, waits for Lisa's autonomous schedule, and
 verifies the trace-linked failure score and Lisa's report. It does not prove
 policy-memory learning or policy review and approval.
@@ -61,7 +61,7 @@ for the next scheduled cycle; it does not call the cycle endpoint directly.
 - Lisa's scheduled conversation reports the evaluated session and finding.
 
 If a stage fails, inspect its logs and preserve the original failure. Do not
-call the evaluator API directly as a fallback and report the autonomous path
+write a policy file directly as a fallback and report the autonomous path
 as passed. In the final report, identify which stages ran live, the trace and
 score IDs, and whether Slack delivery was verified. Never include API keys or
 full sensitive trace payloads.

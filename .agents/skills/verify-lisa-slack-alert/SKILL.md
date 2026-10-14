@@ -21,7 +21,7 @@ TheLake stores traces and scores; it does not run or notify Lisa.
    configured. Check configuration status only; never print or copy secret
    values.
 4. Confirm TheLake and Lisa are healthy and Lisa's TheLake API URL points to
-   the running TheLake service. Do not proceed if traces or evaluator reads
+   the running TheLake service. Do not proceed if trace reads
    fail due to a disconnected catalog.
 5. Read `docs/how-to/slack-evaluator.md` for current Slack setup and routing.
 
@@ -51,6 +51,6 @@ type (workspace default or check thread), and whether the Slack message was
 found. Never include API keys, bot tokens, or full trace payloads.
 
 Slack delivery is best effort. Persistent receipts suppress ordinary repeated
-alerts for the same evaluator version, trace, and destination. A duplicate is
+alerts for the same policy snapshot, trace, and destination. A duplicate is
 still possible if Slack accepts a message but Lisa stops before saving the
 receipt.

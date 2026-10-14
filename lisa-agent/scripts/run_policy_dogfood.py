@@ -5,14 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "lisa-agent" / "tests" / "fixtures" / "connected_itinerary.json"
@@ -28,41 +26,38 @@ def validate_response(case: dict[str, Any], response: dict[str, Any]) -> list[st
         errors.append(f"expected status {expected}, got {response.get('status')}")
     expected_trace_id = case["evidence"]["trace_id"]
     if response.get("trace_id") != expected_trace_id:
-        errors.append(
-            f"expected trace_id {expected_trace_id}, got {response.get('trace_id')}"
-        )
-    score = response.get("score")
+        errors.append(f"expected trace_id {expected_trace_id}, got {response.get('trace_id')}")
     if expected in {"pass", "fail"}:
-        if not isinstance(score, (int, float)) or isinstance(score, bool):
-            errors.append("pass/fail verdict must include a numeric score")
-        elif not math.isfinite(score) or not 0 <= score <= 1:
-            errors.append("score must be finite and between 0 and 1")
         evidence = response.get("evidence")
-        if not isinstance(evidence, list) or not evidence or any(
-            not isinstance(reference, dict)
-            or not isinstance(reference.get("span_id"), str)
-            or not reference["span_id"].strip()
-            for reference in evidence
+        if (
+            not isinstance(evidence, list)
+            or not evidence
+            or any(
+                not isinstance(reference, dict)
+                or not isinstance(reference.get("span_id"), str)
+                or not reference["span_id"].strip()
+                for reference in evidence
+            )
         ):
             errors.append("pass/fail verdict must include valid evidence span references")
-    elif score is not None:
-        errors.append("insufficient evidence must not include a judge score")
     return errors
 
 
 def run(output_path: Path | None = None) -> list[dict[str, Any]]:
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    evaluator = fixture["evaluator"]
+    evaluator = fixture["policy"]
     results = []
     failures = []
 
     for case in fixture["cases"]:
         run_id = f"dogfood:{case['case_id']}:{uuid.uuid4().hex[:12]}"
-        request = EvaluationRequest.model_validate({
-            "run_id": run_id,
-            "evaluator": evaluator,
-            "evidence": case["evidence"],
-        })
+        request = EvaluationRequest.model_validate(
+            {
+                "run_id": run_id,
+                "policy": evaluator,
+                "evidence": case["evidence"],
+            }
+        )
         started = time.monotonic()
         response = evaluate(request).model_dump(mode="json")
         elapsed_ms = round((time.monotonic() - started) * 1000)
@@ -73,7 +68,6 @@ def run(output_path: Path | None = None) -> list[dict[str, Any]]:
             "case_id": case["case_id"],
             "expected_status": expected,
             "actual_status": actual,
-            "score": response.get("score"),
             "matched": not validation_errors,
             "validation_errors": validation_errors,
             "elapsed_ms": elapsed_ms,
@@ -90,8 +84,8 @@ def run(output_path: Path | None = None) -> list[dict[str, Any]]:
     report = {
         "suite": "connected-itinerary-policy-dogfood",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "evaluator_id": evaluator["evaluator_id"],
-        "evaluator_version": evaluator["version"],
+        "policy_name": evaluator["name"],
+        "policy_revision": evaluator["revision"],
         "case_count": len(results),
         "passed": len(results) - len(failures),
         "failed": len(failures),

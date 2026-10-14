@@ -5,8 +5,8 @@ from uuid import uuid4
 
 import pytest
 
-from thelake_lisa.backends import openhands as agent
 from thelake_lisa import runtime
+from thelake_lisa.backends import openhands as agent
 
 
 def configure_openhands(monkeypatch):

@@ -3,7 +3,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "tests/e2e/quickstart_online_eval.py"
 SPEC = spec_from_file_location("quickstart_online_eval", SCRIPT)

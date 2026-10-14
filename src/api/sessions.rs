@@ -88,6 +88,19 @@ pub async fn get_session(
         return Err(bad_request("missing session_id"));
     }
 
+    let span_limit = params
+        .get("limit")
+        .map(|raw| {
+            let limit = raw
+                .parse::<usize>()
+                .map_err(|_| bad_request("limit must be a positive integer"))?;
+            if limit == 0 {
+                return Err(bad_request("limit must be a positive integer"));
+            }
+            Ok(clamp_limit(Some(limit), DEFAULT_SESSION_LIMIT))
+        })
+        .transpose()?;
+
     if let (Some(from), Some(to)) = (params.get("from"), params.get("to")) {
         let target = crate::sql::telemetry::TelemetryDetailsTarget {
             kind: "session".to_string(),
@@ -102,16 +115,25 @@ pub async fn get_session(
             tenant.as_ref().map(|e| &e.0),
             target,
             time_range,
-            1000,
+            span_limit.unwrap_or(1000),
         )
         .await?;
         return Ok(Json(res));
     }
 
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    Ok(Json(
-        session_detail_for_workspace(&state, tenant_ref, &session_id).await?,
-    ))
+    let mut detail = session_detail_for_workspace(&state, tenant_ref, &session_id).await?;
+    truncate_session_spans(&mut detail, span_limit);
+    Ok(Json(detail))
+}
+
+fn truncate_session_spans(detail: &mut Value, limit: Option<usize>) {
+    let Some(limit) = limit else {
+        return;
+    };
+    if let Some(spans) = detail.get_mut("spans").and_then(Value::as_array_mut) {
+        spans.truncate(limit);
+    }
 }
 
 pub(crate) async fn session_detail_for_workspace(
@@ -157,6 +179,12 @@ pub(crate) async fn session_detail_for_workspace(
         .collect::<Vec<_>>();
 
     let scores = map_session_scores(&detail_result.columns, detail_row);
+    let agent_names = spans
+        .iter()
+        .filter_map(|span| span.summary.agent_name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
 
     let total_elapsed = total_start.elapsed();
     crate::self_monitoring::record_session_detail_stage(
@@ -182,6 +210,7 @@ pub(crate) async fn session_detail_for_workspace(
         to,
         trace_count: aggregate.trace_count,
         span_count: aggregate.span_count,
+        agent_names,
         user_ids: aggregate.user_ids,
         input_tokens: aggregate.input_tokens,
         output_tokens: aggregate.output_tokens,
@@ -191,6 +220,45 @@ pub(crate) async fn session_detail_for_workspace(
         scores,
     })
     .unwrap())
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::truncate_session_spans;
+    use serde_json::json;
+
+    #[test]
+    fn session_span_limit_preserves_totals_agent_scope_and_scores() {
+        let mut detail = json!({
+            "span_count": 3,
+            "agent_names": ["agent-a", "agent-b"],
+            "spans": [{"span_id":"newest"}, {"span_id":"middle"}, {"span_id":"oldest"}],
+            "scores": [{"score_id":"older-score"}]
+        });
+
+        truncate_session_spans(&mut detail, Some(2));
+
+        assert_eq!(detail["spans"].as_array().unwrap().len(), 2);
+        assert_eq!(detail["span_count"], 3);
+        assert_eq!(detail["agent_names"], json!(["agent-a", "agent-b"]));
+        assert_eq!(detail["scores"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn public_session_detail_contract_exposes_the_span_limit_and_agent_names() {
+        let openapi: serde_json::Value =
+            serde_yaml::from_str(include_str!("../../docs/reference/openapi.yaml"))
+                .expect("valid OpenAPI YAML");
+        let params = openapi["paths"]["/v1/sessions/{session_id}"]["get"]["parameters"]
+            .as_array()
+            .expect("session detail parameters");
+
+        assert!(params.iter().any(|parameter| parameter["name"] == "limit"));
+        assert!(
+            openapi["components"]["schemas"]["SessionDetail"]["properties"]["agent_names"]
+                .is_object()
+        );
+    }
 }
 
 pub async fn session_details_post(
@@ -356,8 +424,8 @@ pub async fn search_sessions(
     tenant: Option<Extension<WorkspaceAuth>>,
     Json(request): Json<SessionSearchRequest>,
 ) -> Result<Json<SessionSearchResponse>, ApiError> {
-    let limit = clamp_limit(request.limit, DEFAULT_SESSION_LIMIT);
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
+    let limit = clamp_limit(request.limit, DEFAULT_SESSION_LIMIT);
 
     let workspace_id = tenant_ref.map(|t| t.workspace_id.as_str()).unwrap_or("");
     let ws = state

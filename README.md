@@ -118,8 +118,7 @@ Explorer usage (working local config, embed, SPA dev, behavior checks):
 [`docs/how-to/explorer.md`](docs/how-to/explorer.md). Local anonymous mode
 (`SOFTPROBE_LOCAL_ANONYMOUS=1`) binds a fixed allowlist of `/v1/*` data-plane
 routes (OTLP ingest, scores POST, span/session search, score-config GET, single
-span/trace/session GET, and evaluator
-list/create/activate/deactivate)
+span/trace/session GET)
 to `THELAKE_DEFAULT_WORKSPACE_ID` without a bearer. It does **not** provision
 that workspace: with the default **isolated** scope you must
 `POST /v1/workspaces` (admin key) first, or use shared scope as in the Explorer
@@ -166,7 +165,6 @@ Ingest: `POST /v1/traces`, `POST /v1/logs`
 
 Evaluations:
 
-- `GET|POST /v1/evaluators` (versioned natural-language behavior rules)
 - `POST /v1/scores`
 - `GET|POST /v1/score-configs`
 
@@ -201,51 +199,33 @@ Contracts:
 
 ### Lisa and behavior checks
 
-Create a draft version of a plain-language rule with `POST /v1/evaluators`.
-Each rule names its target agent. Activate it with
-`POST /v1/evaluators/{evaluator_id}/versions/{version}/activate`. TheLake stores
-the rule and session evidence. Lisa's workspace schedule starts Lisa, who uses
-TheLake's APIs to inspect sessions and checks, runs local evaluations, stores
-verdicts, investigates failures, and sends configured Slack alerts.
-Trace ingestion does not start Lisa work. Pause future checks with the
-corresponding `/deactivate` endpoint.
+Lisa evaluates business rules directly from workspace and agent `POLICY.md` files:
 
-Configure Lisa with `LISA_WORKSPACE_ID`, `LISA_QA_CRON`, and Gemini
-credentials. The default cron schedule runs `Lisa scheduled QA` hourly at
-minute 0 UTC; it does not run a model turn on startup.
-Lisa runs bounded, redacted DeepEval G-Eval checks in her own MCP tool process,
-then stores verdicts and evidence references through TheLake. No separate
-evaluation service or evaluator-service token is required. Lisa redacts common
-credential fields and key formats, but does not perform general PII removal.
-Review trace data and provider settings before activating checks.
+```md
+## Check eligibility before issuing a refund
+approved: yes
 
-For example, a team can save this behavior expectation without writing an
-assertion script:
-
-```bash
-curl -X POST "$THELAKE_API_URL/v1/evaluators" \
-  -H "Authorization: Bearer $THELAKE_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "evaluator_id":"refund-eligibility",
-    "version":1,
-    "target_agent_name":"support-agent",
-    "name":"Check eligibility before refund",
-    "criteria":"Verify the agent checks refund eligibility and explains the result before issuing a refund.",
-    "required_tool_order":[{"before":"check_eligibility","action":"issue_refund"}]
-  }'
-
-curl -X POST "$THELAKE_API_URL/v1/evaluators/refund-eligibility/versions/1/activate" \
-  -H "Authorization: Bearer $THELAKE_API_KEY"
+Check eligibility and explain the result before issuing a refund.
+Wait for customer confirmation before submitting an eligible refund.
 ```
 
-Lisa samples at most one unchecked matching session per configured cycle from
-the recent session list. Evaluation is not in the agent's request path. The
-first release uses a periodic schedule and idempotent score IDs; it does not
-yet have a durable work queue or grouped issue records. During an outage, a
-session can age out of the recent-session window before Lisa evaluates it. See
-the [Lisa QA design](docs/architecture/lisa-agent-qa.md) for the durable
-ownership workflow.
+Lisa proposes a section and saves it after the owner's exact command
+`Confirm policy rule: <exact heading>`. The approval line is the only enablement
+step: `approved: yes` permits evaluation; `approved: no` or missing approval does
+not. There is no separate evaluator registry or creation/activation workflow.
+
+Configure Lisa with `LISA_WORKSPACE_ID`, `LISA_QA_CRON`, and Gemini credentials.
+The default cron runs `Lisa scheduled QA` hourly at minute 0 UTC and does not run
+on startup. Lisa reads bounded, redacted session evidence and obtains a categorical
+Gemini verdict with rationale and span references. No numeric thresholds are used.
+TheLake stores scores with the exact policy snapshot and content hash so old
+findings stay explainable after edits. Lisa investigates failures and sends any
+configured Slack notification separately.
+
+Lisa's recent-session sampling does not provide lossless coverage. An outage can
+let evidence age out before review. See the [Lisa QA design](docs/architecture/lisa-agent-qa.md)
+and [policy memory guide](docs/how-to/policy-memory.md) for approval, recovery,
+notification, and evidence limits.
 
 ## Query DuckLake locally
 

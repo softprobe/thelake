@@ -62,8 +62,15 @@ mkdir -p "$TMP_DIR/warehouse"
 WORKSPACE_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 SCHEMA="explorer_e2e_$(python3 -c 'import os; print(os.getpid())')"
 SERVER_PID=""
+LISA_PID=""
+LISA_PORT="${THELAKE_EXPLORER_E2E_LISA_PORT:-18082}"
+LISA_TOKEN=""
 
 cleanup() {
+  if [[ -n "$LISA_PID" ]] && kill -0 "$LISA_PID" 2>/dev/null; then
+    kill "$LISA_PID" 2>/dev/null || true
+    wait "$LISA_PID" 2>/dev/null || true
+  fi
   if [[ -n "$E2E_COMPOSE_PROJECT" ]]; then
       GOOGLE_API_KEY="${GOOGLE_API_KEY:-}" \
       THELAKE_QUICKSTART_DB_PORT="$E2E_DB_PORT" \
@@ -148,6 +155,12 @@ if [[ -n "$DUCKDB_LIB_DIR" ]]; then
     *) export LD_LIBRARY_PATH="$DUCKDB_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
   esac
 fi
+if [[ "$ONLINE_E2E" == "1" ]]; then
+  LISA_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  export LISA_PUBLIC_URL="http://127.0.0.1:$LISA_PORT/v1"
+fi
+
+LISA_THELAKE_TOKEN="$LISA_TOKEN" \
 CONFIG_FILE="$TMP_DIR/config.yaml" \
 SOFTPROBE_LOCAL_ANONYMOUS=1 \
 THELAKE_DEFAULT_WORKSPACE_ID="$WORKSPACE_ID" \
@@ -174,6 +187,36 @@ if [[ "$ready" != 1 ]]; then
   cat "$TMP_DIR/thelake.log" >&2
   echo "ERROR: thelake did not become ready within 180 seconds." >&2
   exit 1
+fi
+
+if [[ "$ONLINE_E2E" == "1" ]]; then
+  LISA_WORKSPACE_ID="$WORKSPACE_ID" \
+  LISA_DATA_DIR="$TMP_DIR/lisa-workspaces" \
+  LISA_THELAKE_API_URL="$BACKEND" \
+  LISA_THELAKE_TOKEN="$LISA_TOKEN" \
+  LISA_LOCAL_ANONYMOUS=1 \
+  LISA_QA_CRON="* * * * *" \
+  LISA_SLACK_BOT_TOKEN="" LISA_SLACK_CHANNEL_ID="" \
+    uv run --project "$ROOT/lisa-agent" --extra openhands uvicorn thelake_lisa.api:app \
+      --host 127.0.0.1 --port "$LISA_PORT" >"$TMP_DIR/lisa.log" 2>&1 &
+  LISA_PID=$!
+  lisa_ready=0
+  for _ in $(seq 1 90); do
+    if curl -fsS "http://127.0.0.1:$LISA_PORT/health" >/dev/null 2>&1; then
+      lisa_ready=1
+      break
+    fi
+    if ! kill -0 "$LISA_PID" 2>/dev/null; then
+      cat "$TMP_DIR/lisa.log" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  if [[ "$lisa_ready" != "1" ]]; then
+    cat "$TMP_DIR/lisa.log" >&2
+    echo "ERROR: Lisa did not become ready." >&2
+    exit 1
+  fi
 fi
 
 export THELAKE_E2E_URL="$BACKEND"

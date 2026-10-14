@@ -240,7 +240,7 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8_lossy(&body);
-        assert!(!html.contains("__LISA_API_BASE_PATH__"));
+        assert!(!html.contains("=\"__LISA_API_BASE_PATH__\";"));
         assert!(html.contains("window.__LISA_API_BASE_PATH__"));
 
         let js_path = ExplorerAssets::iter()

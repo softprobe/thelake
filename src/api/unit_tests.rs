@@ -231,10 +231,7 @@ async fn unit_openapi_llm_schema_contracts() {
     let openapi: serde_json::Value =
         serde_json::from_slice(&openapi_body).expect("valid openapi json");
     assert!(openapi["paths"]["/v1/policies"].is_null());
-    assert!(
-        openapi["components"]["schemas"]["CreateEvaluatorRequest"]["properties"]["policy_sources"]
-            .is_null()
-    );
+    assert!(openapi["components"]["schemas"]["CreateEvaluatorRequest"].is_null());
     let score_post = &openapi["paths"]["/v1/scores"]["post"];
     assert_eq!(score_post["operationId"], "createScore");
     assert_eq!(
@@ -329,6 +326,10 @@ async fn unit_openapi_llm_schema_contracts() {
         !session_param_names.contains(&"from") && !session_param_names.contains(&"to"),
         "session detail must not take query from/to (D7): {session_param_names:?}"
     );
+    assert!(session_param_names.contains(&"limit"));
+    assert!(
+        openapi["components"]["schemas"]["SessionDetail"]["properties"]["agent_names"].is_object()
+    );
     let recording_params = openapi["paths"]["/v1/sessions/{session_id}/recording"]["get"]
         ["parameters"]
         .as_array()
@@ -342,8 +343,8 @@ async fn unit_openapi_llm_schema_contracts() {
         "recording must not take query from/to (D7): {recording_param_names:?}"
     );
     assert!(
-        !session_param_names.contains(&"limit") && !session_param_names.contains(&"cursor"),
-        "session detail must not expose paging controls"
+        !session_param_names.contains(&"cursor"),
+        "session detail must not expose cursor paging"
     );
     assert_eq!(
         openapi["paths"]["/v1/sessions/{session_id}/recording"]["get"]["operationId"],
@@ -373,69 +374,19 @@ async fn unit_openapi_llm_schema_contracts() {
     assert!(openapi["paths"]["/health"]["get"].is_object());
 }
 
-#[tokio::test]
-async fn unit_evaluator_keeps_policy_rule_and_source_in_criteria_snapshot() {
-    let (router, _state, _t) = local_router_and_state().await.expect("router");
-    let evaluator = Request::builder()
-        .method("POST")
-        .uri("/v1/evaluators")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            json!({
-                "evaluator_id": "refund-policy",
-                "version": 1,
-                "target_agent_name": "support-agent",
-                "name": "Refund policy",
-                "criteria": "Check refund eligibility before issuing a refund. Source: docs/refunds.md § Eligibility."
-            })
-            .to_string(),
-        ))
-        .unwrap();
-    let response = router
-        .clone()
-        .oneshot(evaluator)
-        .await
-        .expect("create evaluator");
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("evaluator response body");
-    let definition: serde_json::Value = serde_json::from_slice(&body).expect("evaluator JSON");
-    assert!(definition["criteria"]
-        .as_str()
-        .expect("evaluator criteria")
-        .contains("docs/refunds.md § Eligibility"));
-}
-
-#[tokio::test]
-async fn unit_concurrent_evaluator_versions_cannot_claim_conflicting_content() {
-    let (router, _state, _t) = local_router_and_state().await.expect("router");
-    let create = |criteria: &'static str| {
-        Request::builder()
-            .method("POST")
-            .uri("/v1/evaluators")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                json!({
-                    "evaluator_id": "parallel-evaluator",
-                    "version": 1,
-                    "target_agent_name": "support-agent",
-                    "name": "Parallel evaluator",
-                    "criteria": criteria
-                })
-                .to_string(),
-            ))
-            .unwrap()
-    };
-    let (first, second) = tokio::join!(
-        router
-            .clone()
-            .oneshot(create("Require eligibility before refund.")),
-        router.oneshot(create("Require manager approval before refund.")),
-    );
-    let statuses = [first.unwrap().status(), second.unwrap().status()];
-    assert!(statuses.contains(&StatusCode::CREATED));
-    assert!(statuses.contains(&StatusCode::BAD_REQUEST));
+#[test]
+fn unit_policy_qa_does_not_expose_a_separate_evaluator_registry() {
+    let openapi: serde_json::Value =
+        serde_yaml::from_str(include_str!("../../docs/reference/openapi.yaml")).expect("OpenAPI");
+    assert!(openapi["paths"]["/v1/evaluators"].is_null());
+    assert!(!super::auth::is_local_anonymous_data_plane(
+        &axum::http::Method::POST,
+        "/v1/evaluators"
+    ));
+    assert!(!super::auth::is_local_anonymous_data_plane(
+        &axum::http::Method::POST,
+        "/v1/evaluators/old/versions/1/activate"
+    ));
 }
 
 #[tokio::test]

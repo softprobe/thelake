@@ -3,7 +3,7 @@
 Use this small travel scenario to check three different claims independently:
 
 1. A coding agent can learn a supported rule from an authoritative source.
-2. The Gemini/DeepEval runner distinguishes compliant behavior from a real
+2. The categorical Gemini judge distinguishes compliant behavior from a real
    violation and refuses to pass incomplete evidence.
 3. Lisa selects a captured session, runs the check, stores the score in
    TheLake, and reports a failure with its evidence.
@@ -76,7 +76,7 @@ Start the quickstart with the five-minute cron shown in [the quickstart](../quic
 python3 tests/e2e/quickstart_online_eval.py
 ```
 
-The driver creates and activates a check, runs the deliberately flawed Gemini
+The driver saves an explicitly owner-approved policy, runs the deliberately flawed Gemini
 agent, waits for Lisa's configured schedule to pick up its trace, and verifies
 the persisted failure score plus Lisa's report. It makes provider calls and
 may incur Gemini charges. The test agent only simulates a local refund tool;

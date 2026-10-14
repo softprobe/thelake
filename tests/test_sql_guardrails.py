@@ -46,6 +46,26 @@ class SqlLiteralDetectionTests(unittest.TestCase):
         source = 'query = "' + query + '"'
         self.assertEqual(CHECKER.sql_literals(source, ".py"), [(query, 1)])
 
+    def test_javascript_regex_does_not_hide_or_create_sql_literals(self):
+        regex = 'const pattern = /["\']SELECT * ' + "FROM sessions WHERE/;"
+        self.assertEqual(CHECKER.sql_literals(regex, ".js"), [])
+
+        query = 'const query = "SELECT * ' + 'FROM sessions WHERE id=?";'
+        self.assertEqual(
+            CHECKER.sql_literals(query, ".js"),
+            [("SELECT * " + "FROM sessions WHERE id=?", 1)],
+        )
+
+    def test_javascript_division_after_postfix_increment_or_decrement_keeps_strings_visible(self):
+        query = "SELECT * " + "FROM sessions"
+        for operator in ("++", "--"):
+            with self.subTest(operator=operator):
+                source = 'const q = n' + operator + ' / "SELECT * ' + 'FROM sessions" / count;'
+                self.assertEqual(
+                    CHECKER.sql_literals(source, ".js"),
+                    [(query, 1)],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

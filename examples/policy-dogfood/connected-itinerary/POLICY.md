@@ -1,6 +1,7 @@
 # Travel agent policy
 
 ## Disclose a same-day onward connection before cancellation
+approved: yes
 
 Before cancelling a flight leg, the travel agent must inspect the full
 itinerary. If another same-day segment is connected, it must name the affected

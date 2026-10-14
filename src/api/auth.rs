@@ -1,10 +1,14 @@
 use crate::api::AppState;
 use axum::{
     extract::{Request, State},
-    http::{header, Method, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     middleware::Next,
     response::Response,
 };
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Prefer `X-Softprobe-Assertion`. Fall back to Bearer assertion JWT,
 /// then optional `SOFTPROBE_DEFAULT_WORKSPACE_ID`, then Softprobe auth service.
@@ -17,6 +21,15 @@ pub async fn runtime_auth_middleware(
     if req.method() == Method::OPTIONS {
         return Ok(next.run(req).await);
     }
+
+    let configured_service_token = std::env::var("LISA_THELAKE_TOKEN").unwrap_or_default();
+    if let Some(auth) =
+        lisa_service_auth_for_route(req.method(), path, req.headers(), &configured_service_token)?
+    {
+        req.extensions_mut().insert(auth);
+        return Ok(next.run(req).await);
+    }
+
     let local_anonymous_enabled = std::env::var("SOFTPROBE_LOCAL_ANONYMOUS").as_deref() == Ok("1");
     if local_anonymous_enabled && path.starts_with("/v1/") {
         let workspace_id = local_anonymous_workspace_id()?.ok_or(StatusCode::UNAUTHORIZED)?;
@@ -99,6 +112,116 @@ pub async fn runtime_auth_middleware(
     Ok(next.run(req).await)
 }
 
+fn authenticate_lisa_service(
+    headers: &HeaderMap,
+    configured_token: &str,
+) -> Result<Option<crate::authn::WorkspaceAuth>, StatusCode> {
+    const WORKSPACE_ID: &str = "x-thelake-workspace-id";
+    const WORKSPACE_SIGNATURE: &str = "x-thelake-workspace-signature";
+    let has_workspace_binding =
+        headers.contains_key(WORKSPACE_ID) || headers.contains_key(WORKSPACE_SIGNATURE);
+    let unauthorized = || Err(StatusCode::UNAUTHORIZED);
+
+    let Some(authorization) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return if has_workspace_binding {
+            unauthorized()
+        } else {
+            Ok(None)
+        };
+    };
+    let Some(supplied_token) = parse_bearer(authorization) else {
+        return if has_workspace_binding {
+            unauthorized()
+        } else {
+            Ok(None)
+        };
+    };
+    if !verify_lisa_service_token(configured_token, &supplied_token) {
+        return if has_workspace_binding {
+            unauthorized()
+        } else {
+            Ok(None)
+        };
+    }
+
+    let workspace_id = headers
+        .get(WORKSPACE_ID)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let workspace_id = crate::softprobe_assertion::parse_workspace_id(workspace_id)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let signature = headers
+        .get(WORKSPACE_SIGNATURE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if !verify_lisa_workspace_binding(configured_token, &workspace_id, signature) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(Some(crate::authn::WorkspaceAuth {
+        workspace_id,
+        bucket_name: String::new(),
+        dataset_id: String::new(),
+        agent_id: None,
+        agent_name: None,
+    }))
+}
+
+fn lisa_service_auth_for_route(
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+    configured_token: &str,
+) -> Result<Option<crate::authn::WorkspaceAuth>, StatusCode> {
+    let Some(auth) = authenticate_lisa_service(headers, configured_token)? else {
+        return Ok(None);
+    };
+    if headers.contains_key(crate::softprobe_assertion::ASSERTION_HEADER) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !is_lisa_service_route(method, path) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(Some(auth))
+}
+
+fn verify_lisa_service_token(configured: &str, supplied: &str) -> bool {
+    if configured.is_empty() || supplied.is_empty() {
+        return false;
+    }
+    let Ok(mut expected_mac) = HmacSha256::new_from_slice(configured.as_bytes()) else {
+        return false;
+    };
+    expected_mac.update(configured.as_bytes());
+    let expected = expected_mac.finalize().into_bytes();
+    let Ok(mut actual_mac) = HmacSha256::new_from_slice(configured.as_bytes()) else {
+        return false;
+    };
+    actual_mac.update(supplied.as_bytes());
+    actual_mac.verify_slice(&expected).is_ok()
+}
+
+fn verify_lisa_workspace_binding(token: &str, workspace_id: &str, signature: &str) -> bool {
+    let Ok(signature) = hex::decode(signature) else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(token.as_bytes()) else {
+        return false;
+    };
+    mac.update(b"thelake-lisa-workspace-v1:");
+    mac.update(workspace_id.as_bytes());
+    mac.verify_slice(&signature).is_ok()
+}
+
+fn is_lisa_service_route(method: &Method, path: &str) -> bool {
+    matches!(
+        (method, path),
+        (&Method::POST, "/v1/sessions/search") | (&Method::POST, "/v1/scores")
+    ) || (*method == Method::GET && is_single_resource_path(path, "/v1/sessions/"))
+}
+
 /// Returns the configured local anonymous workspace, validating it whenever
 /// the feature is enabled. Startup calls this once so bad configuration fails
 /// before the listener accepts traffic; middleware calls it to bind requests.
@@ -117,12 +240,10 @@ pub fn local_anonymous_workspace_id() -> Result<Option<String>, StatusCode> {
 }
 
 pub fn is_local_anonymous_data_plane(method: &Method, path: &str) -> bool {
-    (match (method, path) {
+    match (method, path) {
         (&Method::POST, "/v1/traces")
         | (&Method::POST, "/v1/logs")
         | (&Method::POST, "/v1/scores")
-        | (&Method::GET, "/v1/evaluators")
-        | (&Method::POST, "/v1/evaluators")
         | (&Method::POST, "/v1/spans/search")
         | (&Method::POST, "/v1/sessions/search")
         | (&Method::GET, "/v1/score-configs") => true,
@@ -130,9 +251,7 @@ pub fn is_local_anonymous_data_plane(method: &Method, path: &str) -> bool {
         (&Method::GET, p) if is_single_resource_path(p, "/v1/traces/") => true,
         (&Method::GET, p) if is_single_resource_path(p, "/v1/sessions/") => true,
         _ => false,
-    }) || (*method == Method::POST
-        && path.starts_with("/v1/evaluators/")
-        && (path.ends_with("/activate") || path.ends_with("/deactivate")))
+    }
 }
 
 fn is_single_resource_path(path: &str, prefix: &str) -> bool {
@@ -281,6 +400,103 @@ mod tests {
             &Method::GET,
             "/v1/sessions/session-1/recording"
         ));
+    }
+
+    #[test]
+    fn lisa_service_auth_is_workspace_bound_and_rejects_invalid_binding() {
+        let workspace_id = "550e8400-e29b-41d4-a716-446655440000";
+        let mut headers = lisa_headers("service-secret", workspace_id);
+        let auth = authenticate_lisa_service(&headers, "service-secret")
+            .expect("valid credentials")
+            .expect("Lisa service identity");
+        assert_eq!(auth.workspace_id, workspace_id);
+
+        headers.insert(
+            "x-thelake-workspace-signature",
+            "bad-signature".parse().unwrap(),
+        );
+        assert!(matches!(
+            authenticate_lisa_service(&headers, "service-secret"),
+            Err(StatusCode::UNAUTHORIZED)
+        ));
+    }
+
+    #[test]
+    fn lisa_service_credentials_cannot_escape_allowlist_or_mix_identities() {
+        let mut headers = lisa_headers("service-secret", "550e8400-e29b-41d4-a716-446655440000");
+        headers.insert(
+            crate::softprobe_assertion::ASSERTION_HEADER,
+            "another-identity".parse().unwrap(),
+        );
+        assert!(matches!(
+            lisa_service_auth_for_route(
+                &Method::POST,
+                "/v1/sessions/search",
+                &headers,
+                "service-secret"
+            ),
+            Err(StatusCode::UNAUTHORIZED)
+        ));
+
+        headers.remove(crate::softprobe_assertion::ASSERTION_HEADER);
+        assert!(matches!(
+            lisa_service_auth_for_route(
+                &Method::GET,
+                "/v1/sessions/session-1/recording",
+                &headers,
+                "service-secret"
+            ),
+            Err(StatusCode::FORBIDDEN)
+        ));
+    }
+
+    #[test]
+    fn ordinary_bearer_credentials_are_not_treated_as_lisa_service_auth() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer regular-api-key".parse().unwrap(),
+        );
+        assert!(authenticate_lisa_service(&headers, "service-secret")
+            .expect("ordinary auth continues")
+            .is_none());
+    }
+
+    #[test]
+    fn lisa_service_auth_is_limited_to_existing_session_and_score_routes() {
+        for (method, path) in [
+            (&Method::POST, "/v1/sessions/search"),
+            (&Method::GET, "/v1/sessions/session-1"),
+            (&Method::POST, "/v1/scores"),
+        ] {
+            assert!(is_lisa_service_route(method, path), "{method} {path}");
+        }
+
+        for (method, path) in [
+            (&Method::POST, "/v1/sessions/session-1"),
+            (&Method::GET, "/v1/sessions/session-1/recording"),
+            (&Method::POST, "/v1/traces"),
+            (&Method::POST, "/v1/score-configs"),
+        ] {
+            assert!(!is_lisa_service_route(method, path), "{method} {path}");
+        }
+    }
+
+    fn lisa_headers(token: &str, workspace_id: &str) -> axum::http::HeaderMap {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(token.as_bytes()).unwrap();
+        mac.update(format!("thelake-lisa-workspace-v1:{workspace_id}").as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers.insert("x-thelake-workspace-id", workspace_id.parse().unwrap());
+        headers.insert("x-thelake-workspace-signature", signature.parse().unwrap());
+        headers
     }
 
     #[test]

@@ -93,6 +93,7 @@ pub struct SessionDetail {
     pub to: DateTime<Utc>,
     pub trace_count: i64,
     pub span_count: i64,
+    pub agent_names: Vec<String>,
     #[serde(default)]
     pub user_ids: Vec<String>,
     pub input_tokens: Option<i64>,
