@@ -4,7 +4,7 @@ Use this small travel scenario to check three different claims independently:
 
 1. A coding agent can learn a supported rule from an authoritative source.
 2. The categorical Gemini judge distinguishes compliant behavior from a real
-   violation and refuses to pass incomplete evidence.
+   violation and refuses to pass incomplete trajectories.
 3. Lisa selects a captured session, runs the check, stores the score in
    TheLake, and reports a failure with its evidence.
 
@@ -44,12 +44,12 @@ score its output automatically.
 Run the paired calibration cases through the same local evaluator Lisa uses:
 
 ```bash
-uv run --project lisa-agent python lisa-agent/scripts/run_policy_dogfood.py \
+uv run --project lisa python lisa/scripts/run_policy_dogfood.py \
   --output /tmp/thelake-policy-dogfood.json
 ```
 
 Lisa evaluates three fixed cases from
-[`connected_itinerary.json`](../../lisa-agent/tests/fixtures/connected_itinerary.json):
+[`connected_itinerary.json`](../../lisa/tests/fixtures/connected_itinerary.json):
 
 - A policy-compliant disclosure before confirmation: expected `pass`.
 - A cancellation followed by a late warning: expected `fail`.
@@ -65,7 +65,7 @@ quality issue, not as a passing evaluation.
 The fixture contract can be checked without a Gemini call:
 
 ```bash
-uv run --project lisa-agent --extra test pytest lisa-agent/tests/test_dogfood_fixture.py
+uv run --project lisa --extra test pytest lisa/tests/test_dogfood_fixture.py
 ```
 
 ## 3. Verify Lisa's scheduled QA cycle

@@ -6,7 +6,7 @@
 #   CONFIG_FILE=/path/to/runtime.yaml ./scripts/interactive_query.sh
 #
 # Optional:
-#   SOFTPROBE_DUCKDB_INIT  If set, path to a static attach-only .sql (skips YAML renderer; legacy).
+#   SOFTPROBE_DUCKDB_INIT  If set, path to a static attach-only .sql (skips YAML renderer; older static attach).
 
 set -euo pipefail
 cd "$(dirname "$0")/.."

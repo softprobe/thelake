@@ -416,7 +416,7 @@ pub async fn load_active_telemetry_columns_manifests(
 /// Load the active business-table manifest for one logical table name, if any.
 ///
 /// Apply keeps at most one active `business_table` row per `target_tables` value. When multiple
-/// active rows exist (legacy data), the newest by `applied_at` wins.
+/// active rows exist (older rows), the newest by `applied_at` wins.
 pub async fn load_active_business_table_manifest(
     client: &tokio_postgres::Client,
     tenant_schema: &str,

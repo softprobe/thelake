@@ -171,14 +171,14 @@ export function lisaTimeline(
   });
 
   // Persisted sequenced events belong to OpenHands' exact event stream.
-  // Legacy events have timestamps only, so place that older history first;
+  // Unsequenced events have timestamps only, so place that older history first;
   // optimistic messages have no server sequence and stay after persisted work.
   // This gives mixed histories a total order rather than a non-transitive
   // pairwise comparison between sequence and timestamp.
   const isOptimistic = (item: TimedMessage) => String(item.message.id ?? "").startsWith("pending-");
-  const hasLegacy = timeline.some((item) => item.sequence === undefined && !isOptimistic(item));
+  const hasUnsequenced = timeline.some((item) => item.sequence === undefined && !isOptimistic(item));
   timeline.sort((left, right) => {
-    if (hasLegacy) {
+    if (hasUnsequenced) {
       const group = (item: TimedMessage) => item.sequence === undefined
         ? (isOptimistic(item) ? 2 : 0)
         : 1;

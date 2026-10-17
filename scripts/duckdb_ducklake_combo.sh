@@ -28,7 +28,7 @@ softprobe_ducklake_build_combo_init() {
       echo "ERROR: attach SQL not found: $attach" >&2
       return 1
     fi
-    # Static file: keep legacy hardcoded names (docker defaults).
+    # Static file: keep static hardcoded names (docker defaults).
     catalog="softprobe"
     schema="softprobe"
     qual_prefix="softprobe.softprobe"

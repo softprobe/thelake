@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_legacy_tenant_id_query_param() {
+    fn rejects_tenant_id_query_param() {
         let err = parse_tempo_search_params(
             &[("tenant_id".into(), "attacker".into())],
             &QueryLimits::default(),

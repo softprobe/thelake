@@ -649,8 +649,8 @@ async fn postgres_dirty_generation_fences_stale_publication() {
 
 #[tokio::test]
 #[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
-async fn postgres_legacy_dirty_update_without_generation_advances_fence() {
-    let schema = "thelake_ss_legacy_generation";
+async fn postgres_dirty_update_without_generation_column_advances_fence() {
+    let schema = "thelake_ss_dirty_without_generation";
     let pool = try_pg_pool(schema)
         .await
         .expect("ducklake-postgres required (make setup)");
@@ -659,13 +659,13 @@ async fn postgres_legacy_dirty_update_without_generation_advances_fence() {
     // Simulate a mixed-version writer that knows the old schema and omits the
     // newly introduced generation column from its conflict update.
     client.execute(
-        &format!("INSERT INTO {q}.session_summary_dirty (session_id, min_ts_ns, max_ts_ns, updated_at) VALUES ('legacy', 10000000000, 10000000000, now())"),
+        &format!("INSERT INTO {q}.session_summary_dirty (session_id, min_ts_ns, max_ts_ns, updated_at) VALUES ('sample-session', 10000000000, 10000000000, now())"),
         &[],
-    ).await.expect("legacy insert");
+    ).await.expect("insert without generation");
     let initial: i64 = client
         .query_one(
             &format!(
-                "SELECT generation FROM {q}.session_summary_dirty WHERE session_id = 'legacy'"
+                "SELECT generation FROM {q}.session_summary_dirty WHERE session_id = 'sample-session'"
             ),
             &[],
         )
@@ -673,13 +673,13 @@ async fn postgres_legacy_dirty_update_without_generation_advances_fence() {
         .expect("initial generation")
         .get(0);
     client.execute(
-        &format!("INSERT INTO {q}.session_summary_dirty (session_id, min_ts_ns, max_ts_ns, updated_at) VALUES ('legacy', 20000000000, 20000000000, now()) ON CONFLICT (session_id) DO UPDATE SET min_ts_ns = LEAST({q}.session_summary_dirty.min_ts_ns, EXCLUDED.min_ts_ns), max_ts_ns = GREATEST({q}.session_summary_dirty.max_ts_ns, EXCLUDED.max_ts_ns), updated_at = EXCLUDED.updated_at"),
+        &format!("INSERT INTO {q}.session_summary_dirty (session_id, min_ts_ns, max_ts_ns, updated_at) VALUES ('sample-session', 20000000000, 20000000000, now()) ON CONFLICT (session_id) DO UPDATE SET min_ts_ns = LEAST({q}.session_summary_dirty.min_ts_ns, EXCLUDED.min_ts_ns), max_ts_ns = GREATEST({q}.session_summary_dirty.max_ts_ns, EXCLUDED.max_ts_ns), updated_at = EXCLUDED.updated_at"),
         &[],
-    ).await.expect("legacy conflict update");
+    ).await.expect("conflict update without generation");
     let after: i64 = client
         .query_one(
             &format!(
-                "SELECT generation FROM {q}.session_summary_dirty WHERE session_id = 'legacy'"
+                "SELECT generation FROM {q}.session_summary_dirty WHERE session_id = 'sample-session'"
             ),
             &[],
         )
@@ -689,7 +689,7 @@ async fn postgres_legacy_dirty_update_without_generation_advances_fence() {
     assert_eq!(
         after,
         initial + 1,
-        "legacy writes must advance the publication fence"
+        "writes without generation must advance the publication fence"
     );
 }
 

@@ -17,7 +17,7 @@ Concepts and runtime design (read for understanding, not step-by-step).
 
 - [Overview](architecture/overview.md) — ingest, DuckLake storage, query, maintenance
 - [Product goals](architecture/goals.md)
-- [Lisa: proactive agent QA engineer](architecture/lisa-agent-qa.md) — product vision, workspace agent model, learning, online QA, and issue ownership
+- [Lisa: proactive agent QA engineer](architecture/lisa-qa.md) — product vision, workspace agent model, learning, online QA, and issue ownership
 - [Workspace identity](architecture/workspace-identity.md) — `workspace_id` and physical scopes
 - [SQL and schema](architecture/sql-and-schema.md) — tables, one-clock rules
 - [Event-time layout](architecture/event-time-layout.md) — partition pruning

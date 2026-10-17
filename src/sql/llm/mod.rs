@@ -170,7 +170,7 @@ pub fn compile_session_search_sql(
     }
 
     let observation_type = format!("COALESCE({}, 'span')", expr_observation_type());
-    // Legacy OpenCode child sessions stamped their own ses_* as session_id and
+    // Nested-only OpenCode child sessions stamped their own ses_* as session_id and
     // marked the turn with parentSessionID. Drop those from the default list;
     // holistic (new) sessions keep a root agent turn without that metadata.
     // COALESCE inside arg_min matters: DuckDB arg_min skips NULLs, so a later

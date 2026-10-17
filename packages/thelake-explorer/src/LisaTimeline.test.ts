@@ -36,16 +36,16 @@ describe("Lisa timeline", () => {
     ]);
   });
 
-  it("gives mixed legacy, sequenced, and optimistic items a deterministic order", () => {
+  it("gives mixed unsequenced, sequenced, and optimistic items a deterministic order", () => {
     const messages: LisaMessage[] = [
       { id: "seq-2", role: "assistant", text: "Later event", sequence: 2, created_at: "2026-10-13T12:00:01Z" },
       { id: "pending-user", role: "user", text: "New question", created_at: "2026-10-13T12:00:00Z" },
-      { id: "legacy", role: "assistant", text: "Old history", created_at: "2026-10-13T12:00:03Z" },
+      { id: "unsequenced", role: "assistant", text: "Old history", created_at: "2026-10-13T12:00:03Z" },
       { id: "seq-1", role: "user", text: "Earlier event", sequence: 1, created_at: "2026-10-13T12:00:04Z" },
     ];
 
     expect(lisaTimeline(messages, [], true).map((message) => message.id)).toEqual([
-      "legacy",
+      "unsequenced",
       "seq-1",
       "seq-2",
       "pending-user",

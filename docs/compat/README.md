@@ -14,7 +14,7 @@ supported dashboard client for these APIs.
 - [Reference images and fixture provenance](references-provenance.md)
 - [Capability manifest](capability.v0.yaml)
 - [Image pins](references.v0.yaml)
-- [Query feature checklist](query_features_checklist.md)
+- [Query feature checklist](query-features-checklist.md)
 
 Run local checks with `make test-compat` and `make test-grafana-static`.
 Service-backed checks are available through `make test-loki-diff`,

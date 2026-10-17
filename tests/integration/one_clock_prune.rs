@@ -1,5 +1,5 @@
 //! One-clock production contract: real writers create calendar-day files and
-//! bare timestamp predicates prune them without legacy date columns.
+//! bare timestamp predicates prune them (year/month/day from timestamp only).
 
 use chrono::{TimeZone, Utc};
 use softprobe_runtime::ingest::IngestEngine;
@@ -212,7 +212,7 @@ async fn production_writers_partition_and_prune_one_clock_fact_tables() {
     }
     assert!(
         !joined.contains("record_date="),
-        "legacy partition path:\n{joined}"
+        "unexpected record_date partition path:\n{joined}"
     );
 
     let conn = attach(&config.ducklake);

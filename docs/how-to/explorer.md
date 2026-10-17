@@ -152,24 +152,27 @@ mismatched `data_path` fails attach / readiness.
 
 ### Lisa
 
-**Lisa** is a model-backed workspace QA agent running in the `lisa-agent`
+**Lisa** is a model-backed workspace QA agent running in the `lisa`
 container. The current backend adapter uses the OpenHands SDK. Its reusable
 tools are exposed over local stdio MCP and its workflows use standard
 `SKILL.md` files, so another runtime can use the same tool and skill contract
 without importing OpenHands code. Lisa supports persistent multi-turn chats,
-workspace and agent `POLICY.md` memory, bounded session evidence search,
+workspace and agent policy records, bounded session-detail search,
 explicitly approved policy rules, and scheduled policy evaluation. She does
 not run shell commands or access a connected Git repository.
 
   - Explorer discloses beside the composer that messages and recent workspace
-  evidence go to the configured model provider. Sending a message proceeds
+  telemetry go to the configured model provider. Sending a message proceeds
   without a separate checkbox. Lisa masks common credential patterns; general
   personal data is not redacted.
-- Ask Lisa to propose a named `POLICY.md` section with `approved: yes/no`.
+- Ask Lisa to propose a named policy section with `approved: yes/no`.
   Review it and send `Confirm policy rule: <exact heading>` to save the change.
   Approved rules are eligible immediately; there is no separate activation UI.
-  Lisa's schedule reads policy and bounded session evidence, obtains categorical
-  Gemini verdicts, and stores scores and historical rule snapshots in TheLake.
+  Lisa's schedule reads policy and bounded session detail, builds a compact
+  trajectory, then runs OpenAI Decisions. It selects only `applicable` rules
+  with confidence at or above `LISA_POLICY_SELECTION_MIN_CONFIDENCE` (default
+  `0.8`); Gemini then returns a categorical verdict and Lisa stores scores with
+  the policy ID and criteria in TheLake.
   `LISA_QA_CRON` is a five-field UTC cron expression, default hourly at minute 0;
   the `Lisa scheduled QA` job does not run on startup.
 - Conversations are stored in the runner's `lisa-data` volume, scoped by the
@@ -256,7 +259,7 @@ credentials. The OpenHands MCP subprocess receives only the credentials needed
 to call Gemini and TheLake.
 
 Then open Explorer → **Lisa** to ask questions about recent sessions and their
-trace evidence. Rule text and approval live in `POLICY.md`; missing approval means no. Lisa
+trajectories. Rule text and approval live in the Lisa Postgres policy table; missing approval means no. Lisa
 selects matching sessions on her schedule and writes evaluation scores to
 Sessions.
 

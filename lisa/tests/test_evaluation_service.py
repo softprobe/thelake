@@ -1,0 +1,436 @@
+import json
+
+import pytest
+from policy_cases import session_detail, save_rule
+
+from lisa.bootstrap import build_services
+from lisa.context import WorkspaceContext
+from lisa.evaluation.trajectory import build_trajectory_events
+
+
+@pytest.fixture
+def services(tmp_path):
+    services = build_services(
+        WorkspaceContext(
+            workspace="11111111-1111-4111-8111-111111111111",
+            data_dir=tmp_path,
+            confirmed_policy_title="Rule",
+            slack_channel="original-channel",
+            slack_thread="original-thread",
+        )
+    )
+    save_rule(services)
+    return services
+
+
+@pytest.mark.parametrize(
+    "session,expected",
+    [
+        ({"agent_names": ["other-agent"]}, "skipped_agent_mismatch"),
+        ({"spans": []}, "insufficient_evidence"),
+    ],
+)
+def test_unusable_session_does_not_judge_or_store(services, monkeypatch, session, expected):
+    monkeypatch.setattr(services.client, "get", lambda path: {**session_detail(), **session})
+    monkeypatch.setattr(services.evaluations, "judge", lambda r: pytest.fail("Must not judge"))
+    result = services.evaluations._evaluate_session("agent", "Rule", "session")
+    assert result["status"] == expected
+    assert result["stored"] is False
+
+
+def test_real_refund_trace_becomes_a_compact_judgment_trajectory(services, monkeypatch):
+    spans = [
+        {
+            "span_id": "tool-span",
+            "parent_span_id": "generation-span",
+            "start_time": "2026-10-12T03:30:09.918549466Z",
+            "end_time": "2026-10-12T03:30:09.918615466Z",
+            "name": "issue_refund",
+            "attributes": {
+                "gen_ai.tool.name": "issue_refund",
+                "gen_ai.tool.call.id": "call-1",
+                "sp.input": '{"ticket_id":"DEMO-42"}',
+                "sp.output": '{"ticket_id":"DEMO-42","status":"refunded"}',
+                "sp.tool.status": "ok",
+            },
+        },
+        {
+            "span_id": "generation-span",
+            "parent_span_id": "agent-span",
+            "start_time": "2026-10-12T03:30:09.080647174Z",
+            "end_time": "2026-10-12T03:30:09.918281508Z",
+            "name": "gemini.refund_decision",
+            "model_name": "gemini-2.5-flash",
+            "attributes": {
+                "sp.input": json.dumps(
+                    {
+                        "messages": [
+                            {"role": "system", "content": "long repeated system prompt"},
+                            {"role": "user", "content": "Please refund ticket DEMO-42."},
+                        ],
+                        "tools": [{"name": "issue_refund", "description": "large schema"}],
+                    }
+                ),
+                "sp.output": json.dumps(
+                    {
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "name": "issue_refund",
+                                "arguments": '{"ticket_id":"DEMO-42"}',
+                            }
+                        ]
+                    }
+                ),
+                "sp.tool.call.count": 1,
+                "gen_ai.usage.input_tokens": 92,
+            },
+        },
+        {
+            "span_id": "agent-span",
+            "trace_id": "trace",
+            "start_time": "2026-10-12T03:30:09.069094258Z",
+            "end_time": "2026-10-12T03:30:09.918654341Z",
+            "name": "quickstart-refund-agent",
+            "attributes": {
+                "sp.input": json.dumps(
+                    [{"role": "user", "content": "Please refund ticket DEMO-42."}]
+                ),
+                "sp.output": '{"content":"Your refund for DEMO-42 has been issued."}',
+            },
+        },
+    ]
+
+    events = build_trajectory_events(spans)
+
+    assert [
+        (event["kind"], event.get("name"), event.get("content")) for event in events.events
+    ] == [
+        ("user_message", None, "Please refund ticket DEMO-42."),
+        ("tool_call", "issue_refund", None),
+        ("tool_result", "issue_refund", None),
+        ("assistant_message", None, "Your refund for DEMO-42 has been issued."),
+    ]
+    assert events.events[1]["payload"] == {"ticket_id": "DEMO-42"}
+    assert events.events[2]["payload"] == {"ticket_id": "DEMO-42", "status": "refunded"}
+    assert events.events[2]["status"] == "ok"
+    assert "long repeated system prompt" not in str(events.events)
+    assert "large schema" not in str(events.events)
+
+    request = {}
+
+    def get(path):
+        assert path == "/v1/sessions/session?limit=500"
+        return {
+            "session_id": "session",
+            "span_count": len(spans),
+            "agent_names": ["agent"],
+            "scores": [],
+            "spans": spans,
+        }
+
+    monkeypatch.setattr(services.client, "get", get)
+    monkeypatch.setattr(services.client, "post", lambda *args, **kwargs: ({}, 201))
+    monkeypatch.setattr(
+        services.evaluations,
+        "judge",
+        lambda value: (
+            request.update(value) or {"status": "pass", "rationale": "Observed trajectory"}
+        ),
+    )
+    result = services.evaluations._evaluate_session("agent", "Rule", "session")
+
+    assert result["status"] == "pass"
+    assert request["trajectory"]["events"] == events.events
+
+
+def test_bounded_public_session_detail_marks_partial_data_and_keeps_score_history(
+    services, monkeypatch
+):
+    detail = {**session_detail(), "span_count": 501, "scores": [{"score_id": str(i)} for i in range(25)]}
+    requested = []
+    monkeypatch.setattr(services.client, "get", lambda path: requested.append(path) or detail)
+
+    captured = services.evaluations._session_detail("session / one")
+    trajectory = services.evaluations._trajectory(captured)
+
+    assert requested == ["/v1/sessions/session%20%2F%20one?limit=500"]
+    assert len(captured["scores"]) == 25
+    assert trajectory["complete"] is False
+    assert "span limit was reached" in trajectory["limitations"][0]
+
+
+def test_model_reported_tool_call_without_a_tool_span_marks_trajectory_incomplete():
+    events = build_trajectory_events(
+        [
+            {
+                "span_id": "generation",
+                "start_time": "2026-10-12T03:30:09Z",
+                "end_time": "2026-10-12T03:30:10Z",
+                "attributes": {
+                    "sp.output": json.dumps(
+                        {
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "name": "check_eligibility",
+                                    "arguments": '{"ticket_id":"DEMO-42"}',
+                                }
+                            ]
+                        }
+                    )
+                },
+            }
+        ]
+    )
+
+    assert events.events[0]["kind"] == "tool_call"
+    assert events.events[0]["payload"] == {"ticket_id": "DEMO-42"}
+    assert events.complete is False
+    assert "no matching tool span" in events.limitations[0]
+
+
+def test_repeated_confirmations_in_distinct_turns_are_preserved():
+    events = build_trajectory_events(
+        [
+            {
+                "span_id": "agent",
+                "start_time": "2026-10-12T03:30:09Z",
+                "attributes": {
+                    "sp.input": json.dumps(
+                        [
+                            {"role": "user", "content": "yes"},
+                            {"role": "assistant", "content": "Proceeding."},
+                            {"role": "user", "content": "yes"},
+                        ]
+                    )
+                },
+            }
+        ]
+    )
+
+    assert [event["content"] for event in events.events if event["kind"] == "user_message"] == [
+        "yes",
+        "yes",
+    ]
+
+
+def test_repeated_confirmation_in_nested_later_turn_is_preserved():
+    events = build_trajectory_events(
+        [
+            {
+                "span_id": "agent",
+                "start_time": "2026-10-12T03:30:00Z",
+                "attributes": {"sp.input": '[{"role":"user","content":"yes"}]'},
+            },
+            {
+                "span_id": "generation",
+                "parent_span_id": "agent",
+                "start_time": "2026-10-12T03:30:10Z",
+                "attributes": {"sp.input": '[{"role":"user","content":"yes"}]'},
+            },
+        ]
+    )
+
+    assert [event["content"] for event in events.events if event["kind"] == "user_message"] == [
+        "yes",
+        "yes",
+    ]
+
+
+def test_explicitly_mismatched_tool_call_ids_remain_visible_and_incomplete():
+    events = build_trajectory_events(
+        [
+            {
+                "span_id": "tool",
+                "name": "issue_refund",
+                "attributes": {
+                    "gen_ai.tool.name": "issue_refund",
+                    "gen_ai.tool.call.id": "captured-id",
+                    "sp.input": '{"ticket_id":"DEMO-42"}',
+                },
+            },
+            {
+                "span_id": "generation",
+                "start_time": "2026-10-12T03:30:09Z",
+                "end_time": "2026-10-12T03:30:10Z",
+                "attributes": {
+                    "sp.output": json.dumps(
+                        {
+                            "tool_calls": [
+                                {"id": "reported-id", "name": "issue_refund", "arguments": "{}"}
+                            ]
+                        }
+                    )
+                },
+            },
+        ]
+    )
+
+    calls = [event for event in events.events if event["kind"] == "tool_call"]
+    assert {event["call_id"] for event in calls} == {"captured-id", "reported-id"}
+    assert events.complete is False
+    assert "no matching tool span" in events.limitations[0]
+
+
+def test_list_shaped_assistant_message_preserves_nested_tool_calls():
+    events = build_trajectory_events(
+        [
+            {
+                "span_id": "generation",
+                "start_time": "2026-10-12T03:30:09Z",
+                "end_time": "2026-10-12T03:30:10Z",
+                "attributes": {
+                    "sp.output": json.dumps(
+                        [
+                            {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "function": {
+                                            "name": "issue_refund",
+                                            "arguments": '{"ticket_id":"DEMO-42"}',
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    )
+                },
+            }
+        ]
+    )
+
+    assert events.events[0]["kind"] == "tool_call"
+    assert events.events[0]["name"] == "issue_refund"
+    assert events.events[0]["payload"] == {"ticket_id": "DEMO-42"}
+    assert events.complete is False
+
+
+@pytest.mark.parametrize("status", ["pass", "fail", "uncertain", "insufficient_evidence"])
+def test_categorical_outcomes_are_stored_with_policy(services, monkeypatch, status):
+    writes = []
+
+    def post(path, body, *, include_status=False):
+        writes.append(body)
+        return ({}, 201)
+
+    monkeypatch.setattr(services.client, "get", lambda path: session_detail())
+    monkeypatch.setattr(services.client, "post", post)
+    monkeypatch.setattr(
+        services.evaluations, "judge", lambda r: {"status": status, "rationale": "Explanation"}
+    )
+    result = services.evaluations._evaluate_session("agent", "Rule", "session")
+    assert result["status"] == status
+    assert result["stored"] is True
+    assert writes[0]["numeric_value"] is None
+    assert writes[0]["config_id"] is None
+    assert writes[0]["metadata"]["policy_id"]
+    assert writes[0]["metadata"]["criteria"]
+    assert bool(services.failures.repository.list_all()) == (status == "fail")
+
+
+def test_transient_judge_errors_leave_no_score_or_failure(services, monkeypatch):
+    monkeypatch.setattr(services.client, "get", lambda path: session_detail())
+    monkeypatch.setattr(services.client, "post", lambda *args, **kwargs: pytest.fail("No write"))
+    monkeypatch.setattr(
+        services.evaluations, "judge", lambda r: {"status": "error", "rationale": "Unavailable"}
+    )
+    result = services.evaluations._evaluate_session("agent", "Rule", "session")
+    assert result["stored"] is False
+    assert services.failures.repository.list_all() == []
+
+
+def test_notification_requires_stored_failure_and_keeps_captured_destination(services, monkeypatch):
+    policy = services.evaluations._policy("agent", "Rule")
+    services.failures.record(policy, "session", "trace", "Failure", None)
+    calls = []
+    session = session_detail()
+    monkeypatch.setattr(services.client, "get", lambda path: session)
+    monkeypatch.setattr(
+        services.notifier, "notify", lambda *args: calls.append(args) or {"status": "sent"}
+    )
+    assert (
+        services.evaluations.notify_evaluation_failure("agent", "Rule", "session")["status"]
+        == "not_a_stored_failure"
+    )
+    assert calls == []
+    session["scores"] = [
+        {
+            "trace_id": "trace",
+            "source": "evaluator",
+            "string_value": "fail",
+            "metadata": {"policy_hash": policy["policy_hash"]},
+        }
+    ]
+    services.evaluations.notify_evaluation_failure("agent", "Rule", "session")
+    assert calls[0][0]["slack_channel_id"] == "original-channel"
+    assert calls[0][0]["slack_thread_ts"] == "original-thread"
+
+
+def test_queued_trace_is_verified_in_multi_trace_session(services, monkeypatch):
+    policy = services.evaluations._policy("agent", "Rule")
+    services.failures.record(policy, "session", "trace-2", "Failure", None)
+    monkeypatch.setattr(services.client, "get", lambda path: session_detail())
+    assert (
+        services.evaluations.notify_evaluation_failure("agent", "Rule", "session")["status"]
+        == "trace_not_found"
+    )
+
+
+def test_policy_criteria_edit_permits_a_fresh_evaluation(services, monkeypatch):
+    save_rule(services)
+    scores, runs = [], []
+
+    def get(_path):
+        return {**session_detail(), "scores": list(scores)}
+
+    def post(path, body, *, include_status=False):
+        assert path == "/v1/scores"
+        scores.append(body)
+        return ({}, 201) if include_status else {}
+
+    monkeypatch.setattr(services.client, "get", get)
+    monkeypatch.setattr(services.client, "post", post)
+    monkeypatch.setattr(
+        services.evaluations,
+        "judge",
+        lambda request: (
+            runs.append(request)
+            or {
+                "status": "pass",
+                "rationale": "Policy satisfied",
+                "references": [],
+                "limitations": [],
+            }
+        ),
+    )
+    services.evaluations._evaluate_session("agent", "Rule", "session")
+    save_rule(services, text="Require a confirmation before refunding.")
+    result = services.evaluations._evaluate_session("agent", "Rule", "session")
+
+    assert result["status"] == "pass"
+    assert len(runs) == 2
+    assert len(scores) == 2
+    assert scores[0]["metadata"]["policy_hash"] != scores[1]["metadata"]["policy_hash"]
+
+
+def test_reused_failure_preserves_the_score_destination_after_a_later_turn(services, monkeypatch):
+    policy = services.evaluations._policy("agent", "Rule")
+    score = {
+        "trace_id": "trace",
+        "source": "evaluator",
+        "string_value": "fail",
+        "metadata": {
+            "policy_hash": policy["policy_hash"],
+            "slack_channel_id": "historical-channel",
+            "slack_thread_ts": "historical-thread",
+        },
+    }
+    monkeypatch.setattr(services.client, "get", lambda path: {**session_detail(), "scores": [score]})
+    services.evaluations._evaluate_session("agent", "Rule", "session")
+    queued = services.failures.repository.list_all()[0]
+    assert queued["slack_channel_id"] == "historical-channel"
+    assert queued["slack_thread_ts"] == "historical-thread"

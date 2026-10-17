@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
 ROOT = Path(__file__).resolve().parents[1]
 EVALUATOR_SPEC = importlib.util.spec_from_file_location(
     "quickstart_evaluator", ROOT / "examples/quickstart/evaluator.py"
@@ -20,6 +19,9 @@ E2E_SPEC.loader.exec_module(e2e)
 
 
 class QuickstartDemoTest(unittest.TestCase):
+    def test_online_eval_uses_the_readable_quickstart_policy_name(self):
+        self.assertEqual(e2e.EVALUATOR_NAME, evaluator.EVALUATOR_NAME)
+
     @patch.object(e2e.time, "sleep")
     @patch.object(e2e, "request_json")
     def test_wait_for_evaluation_retries_until_session_summary_is_ready(self, request, sleep):

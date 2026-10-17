@@ -531,7 +531,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 }
 
 #[tokio::test]
-async fn map_write_fails_fast_on_legacy_variant_table() {
+async fn map_write_fails_fast_on_unsupported_variant_table() {
     // make test-e2e exports SPLAKE_RESET_DUCKLAKE=1; that path drops tables for local
     // iteration only. This test must not rely on DROP and must not fight that reset.
     let previous_reset = std::env::var_os("SPLAKE_RESET_DUCKLAKE");
@@ -541,15 +541,15 @@ async fn map_write_fails_fast_on_legacy_variant_table() {
     let mut config = file_backed_test_config(&temp);
     config.ducklake.data_inlining_row_limit = Some(0);
 
-    // Fresh catalog: create the complete canonical schema with legacy VARIANT
+    // Fresh catalog: create the complete canonical schema with unsupported VARIANT
     // attributes first (no DROP). Writer CREATE IF NOT EXISTS leaves it alone;
     // the clean-cutover check must identify the incompatible hot-column type.
     {
         let conn = attach(&config.ducklake);
-        let legacy_ddl = include_str!("../../src/sql/schema/traces.sql")
+        let variant_ddl = include_str!("../../src/sql/schema/traces.sql")
             .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE")
             .replace("MAP(VARCHAR, VARCHAR)", "VARIANT");
-        conn.execute_batch(&legacy_ddl)
+        conn.execute_batch(&variant_ddl)
             .expect("create canonical table with leftover variant columns");
         let dtype: String = conn
             .query_row(

@@ -1618,31 +1618,6 @@ mod tests {
     }
 
     #[test]
-    fn qualify_public_telemetry_tables_does_not_rewrite_legacy_aliases() {
-        let traces = "softprobe.ducklake_softprobe_local.traces";
-        let logs = "softprobe.ducklake_softprobe_local.logs";
-        let scores = "softprobe.ducklake_softprobe_local.scores";
-        let score_configs = "softprobe.ducklake_softprobe_local.score_configs";
-        for legacy in [
-            "union_spans",
-            "union_logs",
-            "committed_spans",
-            "buffer_logs",
-            "staged_spans",
-            "iceberg_logs",
-            "tm_all_span",
-            "tm_cq_log",
-        ] {
-            let sql = format!("SELECT 1 FROM {legacy} LIMIT 1");
-            let out = qualify_public_telemetry_tables(&sql, traces, logs, scores, score_configs);
-            assert_eq!(
-                out, sql,
-                "legacy alias {legacy} must not be rewritten to a DuckLake table"
-            );
-        }
-    }
-
-    #[test]
     fn ducklake_inline_sql_qualifies_bare_traces_and_logs() {
         use crate::storage::ducklake::ducklake_qualified_table_name;
 

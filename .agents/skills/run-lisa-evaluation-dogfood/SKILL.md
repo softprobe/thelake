@@ -11,7 +11,7 @@ definitions, and scores; telemetry ingestion does not call Lisa.
 ## Verification levels
 
 - For evaluator behavior without provider calls, run the fixture tests in
-  `lisa-agent`.
+  `lisa`.
 - For the real scheduled agent-to-issue path, run the quickstart E2E. It uses
   the existing quickstart stack and makes paid Gemini calls.
 - For Markdown policy learning or review, use

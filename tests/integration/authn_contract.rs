@@ -65,7 +65,7 @@ async fn resolve_rejects_non_uuid_workspace_id() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "success": true,
             "data": {
-                "workspaceId": "legacy-tenant-slug",
+                "workspaceId": "sample-tenant-slug",
                 "resources": []
             }
         })))

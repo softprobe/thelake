@@ -736,7 +736,7 @@ async fn test_pinned_metadata_updates_on_commit() {
     let pointer_dir = test_pipeline.cache_dir.path().join("catalog_metadata");
     assert!(
         !pointer_dir.join("traces.json").exists(),
-        "legacy catalog_metadata pointer files must not be written"
+        "catalog_metadata pointer files must not be written"
     );
 
     let first = test_pipeline
@@ -772,7 +772,7 @@ async fn test_pinned_metadata_updates_on_commit() {
     assert_eq!(second, 20, "expected 20 spans after second flush");
     assert!(
         !pointer_dir.join("traces.json").exists(),
-        "legacy catalog_metadata pointer files must not be written"
+        "catalog_metadata pointer files must not be written"
     );
 }
 
@@ -1154,8 +1154,8 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         union_count_before
     );
 
-    // Step 4-7: Legacy catalog_metadata pointer files are gone; durable data is DuckLake only.
-    println!("📌 Step 4-7: Confirming no legacy catalog_metadata pointer files...");
+    // Step 4-7: catalog_metadata pointer files are gone; durable data is DuckLake only.
+    println!("📌 Step 4-7: Confirming no catalog_metadata pointer files...");
     let pointer_path = test_pipeline
         .cache_dir
         .path()
@@ -1163,7 +1163,7 @@ async fn test_commit_staged_data_updates_metadata_and_removes_files_no_double_co
         .join("traces.json");
     assert!(
         !pointer_path.exists(),
-        "legacy catalog_metadata pointer files must not be written"
+        "catalog_metadata pointer files must not be written"
     );
     println!("⚙️  Step 5-6: Ingest is flush-through (no staged optimizer)");
     println!("✅ No Softprobe metadata pointer files (DuckLake catalog owns snapshots)");

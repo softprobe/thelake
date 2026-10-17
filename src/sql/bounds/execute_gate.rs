@@ -269,7 +269,7 @@ fn ensure_one_fact_scan_uses_timestamp_pruning(
         .iter()
         .any(|forbidden| upper.contains(&forbidden.to_ascii_uppercase()))
     {
-        anyhow::bail!("forbidden legacy time column in SQL");
+        anyhow::bail!("forbidden time column in SQL");
     }
     if upper.trim_start().starts_with("EXPORT ") {
         anyhow::bail!("EXPORT can read every table and is not allowed by the fact-scan gate");
@@ -999,9 +999,7 @@ fn is_external_fact_write(sql: &str) -> bool {
 fn ensure_one(sql: &str) -> Result<(), String> {
     let lower = code_view(sql).to_ascii_lowercase();
     if is_allowlisted_infra(sql) {
-        // Still forbid legacy column names even in DDL that shouldn't use them for scans —
-        // but CREATE/ALTER defining columns historically might mention them during cutover.
-        // After cutover, DDL must not name forbidden columns either when creating fact tables.
+        // Fact-table DDL must not introduce forbidden time columns either.
         if sql_is_mutating_fact_ddl(sql) {
             for bad in FORBIDDEN_TIME_COLUMNS {
                 if lower.contains(bad) {

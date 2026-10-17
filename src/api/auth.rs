@@ -89,7 +89,7 @@ pub async fn runtime_auth_middleware(
         }
     }
 
-    // Legacy direct-to-thelake clients: no assertion header. Optional default
+    // Direct-to-thelake clients without an assertion header: no assertion header. Optional default
     // lake routes them onto a configured MAP-ready scope (Bearer still required).
     if let Some(default_key) = crate::softprobe_assertion::default_workspace_id_from_env() {
         let info = crate::softprobe_assertion::workspace_auth_for_default_lake(&default_key)
@@ -210,6 +210,7 @@ fn verify_lisa_workspace_binding(token: &str, workspace_id: &str, signature: &st
     let Ok(mut mac) = HmacSha256::new_from_slice(token.as_bytes()) else {
         return false;
     };
+    // Stable cross-service protocol label; changing it breaks mixed-version auth.
     mac.update(b"thelake-lisa-workspace-v1:");
     mac.update(workspace_id.as_bytes());
     mac.verify_slice(&signature).is_ok()

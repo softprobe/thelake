@@ -706,7 +706,7 @@ RETURNING physical_scope_id;"#,
         WorkspaceBinding::new(workspace_id, physical, self.workspace_scope_mode).map_err(Into::into)
     }
 
-    async fn resolve_scope_legacy(&self, scope_id: &str) -> Result<PhysicalScope> {
+    async fn resolve_scope_for_id(&self, scope_id: &str) -> Result<PhysicalScope> {
         if scope_id.trim().is_empty() || self.workspace_scope_mode == WorkspaceScopeMode::Shared {
             return Ok(self.default_physical_scope.clone());
         }
@@ -721,7 +721,7 @@ RETURNING physical_scope_id;"#,
         &self,
         scope_id: &str,
     ) -> Result<PhysicalScope> {
-        self.resolve_scope_legacy(scope_id).await
+        self.resolve_scope_for_id(scope_id).await
     }
 
     /// Idempotently create or verify a scope registry entry and its metadata tables.

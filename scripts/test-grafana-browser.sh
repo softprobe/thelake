@@ -67,5 +67,5 @@ npx playwright test --config "$CONFIG_FILE" "$@"
 
 echo "================================================================"
 echo " All E2E browser automation & query feature tests PASSED!"
-echo " Checklist: docs/compat/query_features_checklist.md"
+echo " Checklist: docs/compat/query-features-checklist.md"
 echo "================================================================"

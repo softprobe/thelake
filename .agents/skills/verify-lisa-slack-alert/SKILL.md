@@ -51,6 +51,5 @@ type (workspace default or check thread), and whether the Slack message was
 found. Never include API keys, bot tokens, or full trace payloads.
 
 Slack delivery is best effort. Persistent receipts suppress ordinary repeated
-alerts for the same policy snapshot, trace, and destination. A duplicate is
-still possible if Slack accepts a message but Lisa stops before saving the
-receipt.
+alerts for the same policy, trace, and destination. A duplicate is still
+possible if Slack accepts a message but Lisa stops before saving the receipt.

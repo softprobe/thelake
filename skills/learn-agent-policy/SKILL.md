@@ -1,11 +1,11 @@
 ---
 name: learn-agent-policy
-description: Maintain named business rules and explicit approval in Lisa's POLICY.md files.
+description: Maintain named business rules and explicit approval in Lisa's policy table.
 ---
 
 # Learn agent policy
 
-`POLICY.md` is the source of truth. Use `list_policies`, `read_policy`, and
+Postgres `lisa.policies` is the source of truth. Use `list_policies`, `read_policy`, and
 `update_policy`; do not create a separate evaluator definition or activation record.
 
 ## Format
@@ -48,8 +48,8 @@ are needed later, they belong with the rule; do not add them speculatively.
    There is no second creation or activation step. Set `approved: no` to stop future
    evaluations, with the same exact owner confirmation. Scheduled QA cannot edit
    files or change approval.
-6. Use `list_approved_policies` with the exact target agent to check applicability.
-   Never claim a session passed until a stored evaluation verdict establishes it.
+6. `evaluate_session` selects applicable approved rules automatically. Never
+   claim a session passed until a stored evaluation verdict establishes it.
 
-Policy edits affect future runs. Old scores retain the exact policy snapshot used
-at the time; they do not retroactively change when Markdown is edited.
+Policy IDs are stable strings. Policy edits affect future runs; old scores retain
+the policy ID and criteria text recorded on the score at the time.

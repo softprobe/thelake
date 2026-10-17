@@ -14,12 +14,13 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, uuid5
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "examples/quickstart"))
-from evaluator import (  # noqa: E402
+from evaluator import (
     AGENT_NAME,
+    EVALUATOR_NAME,
     TheLakeApiError,
     request_json,
 )
@@ -123,7 +124,7 @@ def wait_for_evaluation(
         )
     raise TimeoutError(
         f"No '{evaluator_name}' score appeared for session {session_id} within "
-        f"{timeout_seconds} seconds. Check theLake and lisa-agent logs."
+        f"{timeout_seconds} seconds. Check theLake and lisa logs."
     )
 
 
@@ -173,7 +174,7 @@ def wait_for_lisa_report(
         time.sleep(3)
     raise TimeoutError(
         f"Lisa's autonomous schedule did not record an evaluation for session {session_id} "
-        f"within {timeout_seconds} seconds. Check lisa-agent logs."
+        f"within {timeout_seconds} seconds. Check lisa logs."
     )
 
 
@@ -279,7 +280,7 @@ def main() -> int:
     )
     workspace_id = read_compose_value("THELAKE_DEFAULT_WORKSPACE_ID")
     lisa_token = read_compose_value("LISA_THELAKE_TOKEN")
-    evaluator_name = f"Quickstart refund check {uuid4().hex[:6]}"
+    evaluator_name = EVALUATOR_NAME
     wait_for_lisa_ready(lisa_url)
     conversation_id, _turn = ask_lisa_to_approve_policy(lisa_url, evaluator_name)
     print(f"Lisa saved approved policy: {evaluator_name}")

@@ -15,18 +15,22 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
-  lisa-agent:
+  lisa:
     build:
       context: ../..
-      dockerfile: lisa-agent/Dockerfile
+      dockerfile: lisa/Dockerfile
     environment:
       LISA_THELAKE_TOKEN: ${LISA_THELAKE_TOKEN:?quickstart script must set a Lisa service token}
       LISA_THELAKE_API_URL: http://host.docker.internal:${THELAKE_QUICKSTART_PORT:-8090}
       LISA_SKILL_DIR: /app/skills
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-${GEMINI_API_KEY:?Set GOOGLE_API_KEY or GEMINI_API_KEY before starting the quickstart}}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LISA_POLICY_SELECTION_MIN_CONFIDENCE: ${LISA_POLICY_SELECTION_MIN_CONFIDENCE:-0.8}
       LISA_MODEL: ${LISA_MODEL:-gemini/gemini-2.5-flash}
       LISA_DATA_DIR: /var/lib/lisa/workspaces
       LISA_WORKSPACE_ID: ${THELAKE_DEFAULT_WORKSPACE_ID:-550e8400-e29b-41d4-a716-446655440000}
+      LISA_DATABASE_URL: postgresql://lisa_writer:${LISA_DATABASE_WRITER_PASSWORD}@postgres:5432/lisa
+      LISA_DATABASE_READ_URL: postgresql://lisa_reader:${LISA_DATABASE_READER_PASSWORD}@postgres:5432/lisa
       LISA_QA_CRON: ${LISA_QA_CRON:-0 * * * *}
       LISA_LOCAL_ANONYMOUS: ${LISA_LOCAL_ANONYMOUS:-1}
       LISA_CORS_ORIGINS: http://127.0.0.1:${THELAKE_QUICKSTART_PORT:-8090},http://localhost:${THELAKE_QUICKSTART_PORT:-8090}

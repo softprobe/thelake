@@ -405,7 +405,7 @@ pub(crate) fn open_attached_connection(
 }
 
 /// Scoping clause for `CALL <catalog>.set_option(...)` matching a qualified table name.
-/// Three-part `catalog.schema.table` → `schema` + `table_name`; legacy two-part → `table_name` only.
+/// Three-part `catalog.schema.table` → `schema` + `table_name`; two-part → `table_name` only.
 pub(crate) fn ducklake_set_option_scope_for_qualified(qualified_table: &str) -> String {
     let parts: Vec<&str> = qualified_table.split('.').collect();
     match parts.len() {
@@ -442,7 +442,7 @@ mod tests {
             ducklake_set_option_scope_for_qualified("softprobe.tenant_a.traces"),
             "schema => 'tenant_a', table_name => 'traces'"
         );
-        // Legacy two-part still maps to table_name-only (should not appear for product paths).
+        // Two-part still maps to table_name-only (should not appear for product paths).
         assert_eq!(
             ducklake_set_option_scope_for_qualified("softprobe.traces"),
             "table_name => 'traces'"

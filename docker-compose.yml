@@ -96,23 +96,27 @@ services:
       - "4317:4317"  # OTLP gRPC
       - "8090:8090"  # Runtime HTTP API
 
-  lisa-agent:
+  lisa:
     profiles: [lisa]
     build:
       context: .
-      dockerfile: lisa-agent/Dockerfile
+      dockerfile: lisa/Dockerfile
     environment:
       - LISA_THELAKE_TOKEN=${LISA_THELAKE_TOKEN:?Set LISA_THELAKE_TOKEN to enable Lisa}
       - LISA_THELAKE_API_URL=http://otlp-backend:8090
       - LISA_SKILL_DIR=/app/skills
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LISA_POLICY_SELECTION_MIN_CONFIDENCE=${LISA_POLICY_SELECTION_MIN_CONFIDENCE:-0.8}
       - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-2.5-flash}
       - LISA_MODEL=${LISA_MODEL:-gemini/gemini-2.5-flash}
       - LISA_BASE_URL=${LISA_BASE_URL:-}
       - LISA_API_KEY=${LISA_API_KEY:-}
       - LISA_DATA_DIR=/var/lib/lisa/workspaces
       - LISA_WORKSPACE_ID=${THELAKE_DEFAULT_WORKSPACE_ID:-}
+      - LISA_DATABASE_URL=${LISA_DATABASE_URL:-}
+      - LISA_DATABASE_READ_URL=${LISA_DATABASE_READ_URL:-}
       - LISA_QA_CRON=${LISA_QA_CRON:-0 * * * *}
       - LISA_LOCAL_ANONYMOUS=${LISA_LOCAL_ANONYMOUS:-0}
       - LISA_CORS_ORIGINS=${LISA_CORS_ORIGINS:-http://127.0.0.1:8090,http://localhost:8090}

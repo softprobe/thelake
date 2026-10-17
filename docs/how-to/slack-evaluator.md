@@ -49,7 +49,7 @@ send alerts without editing the policy text.
 
 Mention the bot in a channel or reply in a supported thread. Lisa responds in
 the same thread and keeps multi-turn context there. She can explain existing
-policy and session evidence, propose policy updates, and create behavior
+policy and session trajectories, propose policy updates, and create behavior
 policies. Lisa proposes the named section with `approved: yes/no`; the owner
 sends `Confirm policy rule: <exact heading>` before Lisa saves it. Approved policy
 is eligible for QA immediately. There is no separate draft or activation step.
@@ -66,7 +66,7 @@ TheLake and posts the finding to the Slack thread associated with the check, or
 to `LISA_SLACK_CHANNEL_ID` when the check has no Slack binding.
 The alert includes the affected agent, session, policy, and judge rationale.
 Lisa keeps delivery receipts in her persistent workspace data so later
-scheduled cycles suppress repeat alerts for the same policy snapshot, trace,
+scheduled cycles suppress repeat alerts for the same policy, trace,
 and Slack destination. A duplicate is still possible if Slack accepts a message
 but Lisa stops before saving its receipt. Slack delivery is best effort;
 Explorer and TheLake's score API remain the source of truth for recorded

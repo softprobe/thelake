@@ -1159,9 +1159,9 @@ mod tests {
         };
 
         let span = parse_rows(&result)
-            .expect("legacy schema")
+            .expect("sample schema")
             .pop()
-            .expect("legacy span");
+            .expect("sample span");
         assert_eq!(span.end_time_unix_nano, None);
         assert!(span.attributes.is_empty());
         assert!(span.resource_attributes.is_empty());

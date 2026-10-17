@@ -2,8 +2,8 @@
 *
 !dist/
 !dist/**
-!lisa-agent/
-!lisa-agent/**
+!lisa/
+!lisa/**
 !skills/
 !skills/**
 

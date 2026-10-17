@@ -1,0 +1,2 @@
+SELECT workspace_fingerprint
+FROM lisa.readable_deployment;

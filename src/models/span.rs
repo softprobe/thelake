@@ -58,7 +58,7 @@ pub fn encode_links(links: &[opentelemetry_proto::tonic::trace::v1::span::Link])
 /// Used for: OTLP ingestion → DuckLake storage → query results → JSON responses
 ///
 /// This struct matches the telemetry schema in `src/storage/schema/tables.rs`
-/// (legacy path; Arrow/DuckLake column order).
+/// (compact path; Arrow/DuckLake column order).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     // Field 1: session_id (REQUIRED)
@@ -312,7 +312,7 @@ impl Span {
     /// Looks for `http.request` / `http.response` events and span-attribute fallbacks.
     /// Request/response bodies accept the proxy/SDK keys (`http.request.body`, `http.response.body`)
     /// and the OBI eBPF convention (`http.request.body.content`, `http.response.body.content`);
-    /// when both are present, the shorter legacy keys win.
+    /// when both are present, the shorter body attribute keys win.
     fn extract_http_data_from_events(&mut self) {
         // Find http.request event
         if let Some(request_event) = self.events.iter().find(|e| e.name == "http.request") {
@@ -745,16 +745,16 @@ mod tests {
     }
 
     #[test]
-    fn extract_http_data_prefers_legacy_body_keys_when_both_conventions_present() {
+    fn extract_http_data_prefers_short_body_keys_when_both_conventions_present() {
         let mut span = base_span();
         span.attributes
-            .insert("http.request.body".to_string(), "legacy-req".to_string());
+            .insert("http.request.body".to_string(), "short-req".to_string());
         span.attributes.insert(
             "http.request.body.content".to_string(),
             "obi-req".to_string(),
         );
         span.attributes
-            .insert("http.response.body".to_string(), "legacy-res".to_string());
+            .insert("http.response.body".to_string(), "short-res".to_string());
         span.attributes.insert(
             "http.response.body.content".to_string(),
             "obi-res".to_string(),
@@ -762,12 +762,12 @@ mod tests {
 
         span.extract_http_data_from_events();
 
-        assert_eq!(span.http_request_body.as_deref(), Some("legacy-req"));
-        assert_eq!(span.http_response_body.as_deref(), Some("legacy-res"));
+        assert_eq!(span.http_request_body.as_deref(), Some("short-req"));
+        assert_eq!(span.http_response_body.as_deref(), Some("short-res"));
 
         let mut span2 = base_span();
         let mut request_attrs = HashMap::new();
-        request_attrs.insert("http.request.body".to_string(), "legacy-req-ev".to_string());
+        request_attrs.insert("http.request.body".to_string(), "short-req-ev".to_string());
         request_attrs.insert(
             "http.request.body.content".to_string(),
             "obi-req-ev".to_string(),
@@ -775,7 +775,7 @@ mod tests {
         let mut response_attrs = HashMap::new();
         response_attrs.insert(
             "http.response.body".to_string(),
-            "legacy-res-ev".to_string(),
+            "short-res-ev".to_string(),
         );
         response_attrs.insert(
             "http.response.body.content".to_string(),
@@ -796,7 +796,7 @@ mod tests {
 
         span2.extract_http_data_from_events();
 
-        assert_eq!(span2.http_request_body.as_deref(), Some("legacy-req-ev"));
-        assert_eq!(span2.http_response_body.as_deref(), Some("legacy-res-ev"));
+        assert_eq!(span2.http_request_body.as_deref(), Some("short-req-ev"));
+        assert_eq!(span2.http_response_body.as_deref(), Some("short-res-ev"));
     }
 }

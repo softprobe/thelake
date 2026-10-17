@@ -1,8 +1,8 @@
 # Configuration reference
 
 Canonical example: [`config.yaml`](../../config.yaml).
-Validation and defaults: `src/config.rs` (`deny_unknown_fields` — unknown or
-legacy keys are rejected).
+Validation and defaults: `src/config.rs` (`deny_unknown_fields` — unknown
+keys are rejected).
 
 Object-store credentials come from the environment, never from YAML.
 `ducklake.metadata_path` is a PostgreSQL connection string and may include a
@@ -108,9 +108,17 @@ customer DuckLake.
 | `SOFTPROBE_LOCAL_ANONYMOUS` | Local single-workspace mode (see root README) |
 | `THELAKE_DEFAULT_WORKSPACE_ID` | Workspace UUID used with local anonymous mode |
 | `LISA_WORKSPACE_ID` | Workspace scope for this Lisa runtime. Configure one Lisa runtime per workspace; leave unset to disable scheduled QA. The local Compose quickstart runs one workspace. |
+| `LISA_DATABASE_URL` | PostgreSQL URL for Lisa's runtime work-item and policy writer. Use a dedicated `lisa_writer` role; this database stores activity and policy state and is separate from TheLake's DuckLake catalog. |
+| `LISA_DATABASE_READ_URL` | PostgreSQL URL for Lisa's read-only `lisa_db` tool. Use a dedicated `lisa_reader` role that can read curated `lisa.readable_*` views and approved columns from `lisa.policies`. |
+| `LISA_DATABASE_PROVISION_URL` | Deployment-only PostgreSQL URL used by `lisa/scripts/provision_lisa.py`; never provide this credential to Lisa's runtime. |
+| `LISA_DATABASE_WRITER_PASSWORD` / `LISA_DATABASE_READER_PASSWORD` | When both are set, the provision script also creates the `lisa` database and writer/reader roles (local/quickstart bootstrap). |
+| `LISA_DATABASE_RECREATE` | Set to `1` to `DROP SCHEMA lisa CASCADE` and provision a fresh schema. Required when the schema shape changes; without it, an already-bound database is left untouched. |
+| `LISA_DATABASE_WRITER_ROLE` / `LISA_DATABASE_READER_ROLE` | Optional database role names to grant during schema provisioning; defaults are `lisa_writer` and `lisa_reader`. |
 | `LISA_QA_CRON` | Five-field UTC cron expression for the `Lisa scheduled QA` job; defaults to `0 * * * *` (hourly at minute 0). Lisa does not run a cycle on startup. |
 | `LISA_LOCAL_ANONYMOUS` | `1` enables unauthenticated Lisa chat for the localhost quickstart only. Leave disabled in a shared deployment. |
 | `LISA_CORS_ORIGINS` | Comma-separated browser origins allowed to call Lisa directly. |
 | `SOFTPROBE_ASSERTION_HMAC_SECRET` | Shared edge assertion key Lisa uses to verify workspace-scoped browser requests. |
 | `LISA_PUBLIC_URL` | Browser-reachable Lisa API base URL injected into Explorer. Lisa chat connects directly to this service. |
+| `OPENAI_API_KEY` | API key for Lisa's first-stage policy applicability selection through OpenAI Decisions. The existing Gemini judge evaluates only the selected policies. |
+| `LISA_POLICY_SELECTION_MIN_CONFIDENCE` | Minimum OpenAI Decisions confidence required to select an `applicable` policy for evaluation; defaults to `0.8`. Below-cutoff or `not_applicable` answers are dropped. Tune it against labeled application examples; it controls policy routing, not the judge's verdict. |
 | `GEMINI_MODEL_NAME` | Gemini model used by Lisa's categorical policy judge (defaults to `gemini-2.5-flash`). |

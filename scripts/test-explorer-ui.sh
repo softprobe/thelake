@@ -111,7 +111,7 @@ if [[ "$ONLINE_E2E" == "1" ]]; then
     exit 1
   fi
   echo "==> Calibrating Lisa's local evaluator with paired policy cases..."
-  uv run --project "$ROOT/lisa-agent" python "$ROOT/lisa-agent/scripts/run_policy_dogfood.py"
+  uv run --project "$ROOT/lisa" python "$ROOT/lisa/scripts/run_policy_dogfood.py"
 fi
 
 cat > "$TMP_DIR/config.yaml" <<EOF
@@ -197,7 +197,7 @@ if [[ "$ONLINE_E2E" == "1" ]]; then
   LISA_LOCAL_ANONYMOUS=1 \
   LISA_QA_CRON="* * * * *" \
   LISA_SLACK_BOT_TOKEN="" LISA_SLACK_CHANNEL_ID="" \
-    uv run --project "$ROOT/lisa-agent" --extra openhands uvicorn thelake_lisa.api:app \
+    uv run --project "$ROOT/lisa" --extra openhands uvicorn lisa.app:app \
       --host 127.0.0.1 --port "$LISA_PORT" >"$TMP_DIR/lisa.log" 2>&1 &
   LISA_PID=$!
   lisa_ready=0

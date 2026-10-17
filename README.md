@@ -216,14 +216,16 @@ not. There is no separate evaluator registry or creation/activation workflow.
 
 Configure Lisa with `LISA_WORKSPACE_ID`, `LISA_QA_CRON`, and Gemini credentials.
 The default cron runs `Lisa scheduled QA` hourly at minute 0 UTC and does not run
-on startup. Lisa reads bounded, redacted session evidence and obtains a categorical
-Gemini verdict with rationale and span references. No numeric thresholds are used.
-TheLake stores scores with the exact policy snapshot and content hash so old
+on startup. Lisa uses OpenAI Decisions to select policies with an `applicable`
+answer and confidence at or above `LISA_POLICY_SELECTION_MIN_CONFIDENCE` (default
+`0.8`), then obtains a categorical Gemini verdict with rationale and span
+references. Verdicts themselves do not use a numeric threshold.
+TheLake stores scores with the policy ID, criteria text, and policy hash so old
 findings stay explainable after edits. Lisa investigates failures and sends any
 configured Slack notification separately.
 
 Lisa's recent-session sampling does not provide lossless coverage. An outage can
-let evidence age out before review. See the [Lisa QA design](docs/architecture/lisa-agent-qa.md)
+let evidence age out before review. See the [Lisa QA design](docs/architecture/lisa-qa.md)
 and [policy memory guide](docs/how-to/policy-memory.md) for approval, recovery,
 notification, and evidence limits.
 

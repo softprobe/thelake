@@ -8,6 +8,7 @@ command -v docker >/dev/null || { echo "Docker is required." >&2; exit 1; }
 command -v curl >/dev/null || { echo "curl is required." >&2; exit 1; }
 command -v python3 >/dev/null || { echo "Python 3 is required to select local ports." >&2; exit 1; }
 command -v make >/dev/null || { echo "Make is required to build and run theLake." >&2; exit 1; }
+command -v uv >/dev/null || { echo "uv is required to provision Lisa's local database." >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "Start Docker Desktop or the Docker daemon, then retry." >&2; exit 1; }
 
 local_env_file=.env
@@ -112,6 +113,8 @@ if [[ ! "$LISA_THELAKE_TOKEN" =~ ^[A-Za-z0-9_.-]+$ ]]; then
 fi
 export THELAKE_DEFAULT_WORKSPACE_ID="${THELAKE_DEFAULT_WORKSPACE_ID:-550e8400-e29b-41d4-a716-446655440000}"
 export LISA_QA_CRON="${LISA_QA_CRON:-0 * * * *}"
+LISA_DATABASE_WRITER_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+LISA_DATABASE_READER_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 THELAKE_QUICKSTART_DB_PORT="$(choose_port 55432 "${THELAKE_QUICKSTART_DB_PORT:-}")"
 export THELAKE_QUICKSTART_DB_PORT
 selected_ports+=("$THELAKE_QUICKSTART_DB_PORT")
@@ -132,10 +135,10 @@ if [[ ! "$THELAKE_QUICKSTART_DATA_PATH" =~ ^\./warehouse/quickstart/[a-zA-Z0-9_-
 fi
 compose_env_file=warehouse/quickstart/compose.env
 mkdir -p "$(dirname "$compose_env_file")"
-(umask 077; printf 'LISA_THELAKE_TOKEN=%s\nTHELAKE_DEFAULT_WORKSPACE_ID=%s\nLISA_QA_CRON=%s\nTHELAKE_QUICKSTART_DB_PORT=%s\nTHELAKE_QUICKSTART_LISA_PORT=%s\nTHELAKE_QUICKSTART_PORT=%s\n' "$LISA_THELAKE_TOKEN" "$THELAKE_DEFAULT_WORKSPACE_ID" "$LISA_QA_CRON" "$THELAKE_QUICKSTART_DB_PORT" "$THELAKE_QUICKSTART_LISA_PORT" "$THELAKE_QUICKSTART_PORT" > "$compose_env_file")
+(umask 077; printf 'LISA_THELAKE_TOKEN=%s\nTHELAKE_DEFAULT_WORKSPACE_ID=%s\nLISA_QA_CRON=%s\nTHELAKE_QUICKSTART_DB_PORT=%s\nTHELAKE_QUICKSTART_LISA_PORT=%s\nTHELAKE_QUICKSTART_PORT=%s\nLISA_DATABASE_WRITER_PASSWORD=%s\nLISA_DATABASE_READER_PASSWORD=%s\n' "$LISA_THELAKE_TOKEN" "$THELAKE_DEFAULT_WORKSPACE_ID" "$LISA_QA_CRON" "$THELAKE_QUICKSTART_DB_PORT" "$THELAKE_QUICKSTART_LISA_PORT" "$THELAKE_QUICKSTART_PORT" "$LISA_DATABASE_WRITER_PASSWORD" "$LISA_DATABASE_READER_PASSWORD" > "$compose_env_file")
 chmod 600 "$compose_env_file"
 compose=(docker compose --env-file "$local_env_file" --env-file "$compose_env_file" --project-name "$THELAKE_QUICKSTART_PROJECT_NAME" --file examples/quickstart/compose.yaml)
-"${compose[@]}" up --build --detach
+"${compose[@]}" up --detach postgres
 
 echo "Waiting for Postgres..."
 for _ in $(seq 1 60); do
@@ -150,6 +153,16 @@ if ! "${compose[@]}" exec --no-TTY postgres pg_isready -U ducklake -d ducklake >
   exit 1
 fi
 
+echo "Provisioning Lisa's separate PostgreSQL database..."
+LISA_DATABASE_PROVISION_URL="postgresql://ducklake:ducklake@127.0.0.1:${THELAKE_QUICKSTART_DB_PORT}/lisa" \
+LISA_WORKSPACE_ID="$THELAKE_DEFAULT_WORKSPACE_ID" \
+LISA_DATABASE_WRITER_PASSWORD="$LISA_DATABASE_WRITER_PASSWORD" \
+LISA_DATABASE_READER_PASSWORD="$LISA_DATABASE_READER_PASSWORD" \
+LISA_DATABASE_RECREATE=1 \
+  uv run --project lisa python lisa/scripts/provision_lisa.py
+
+"${compose[@]}" up --build --detach
+
 echo "Waiting for Lisa..."
 for _ in $(seq 1 90); do
   if curl --silent --fail "http://127.0.0.1:${THELAKE_QUICKSTART_LISA_PORT}/health" >/dev/null; then
@@ -158,7 +171,7 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 if ! curl --silent --fail "http://127.0.0.1:${THELAKE_QUICKSTART_LISA_PORT}/health" >/dev/null; then
-  "${compose[@]}" logs lisa-agent
+  "${compose[@]}" logs lisa
   echo "Lisa agent did not become ready." >&2
   exit 1
 fi

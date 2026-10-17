@@ -1,4 +1,4 @@
--- Legacy static ATTACH (Docker service hostnames). Prefer CONFIG_FILE + duckdb_ducklake_render_init.py
+-- Static ATTACH (Docker service hostnames). Prefer CONFIG_FILE + duckdb_ducklake_render_init.py
 -- so catalog_alias / metadata_schema / data_path match the running runtime.
 -- Use: SOFTPROBE_DUCKDB_INIT=scripts/duckdb_ducklake_local_init.sql ./scripts/interactive_query.sh
 

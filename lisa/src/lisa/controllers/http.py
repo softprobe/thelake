@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import base64
+import hmac
+import json
+import logging
+import os
+from datetime import UTC, datetime
+from hashlib import sha256
+from typing import Any
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+
+from lisa.bootstrap import WorkspaceServices
+from lisa.models.contracts import (
+    CreateConversation,
+    EmptyRequest,
+    SendMessage,
+    UserSendMessage,
+    WorkspaceRequest,
+)
+from lisa.repositories.conversations import (
+    ConversationNotFound,
+)
+from lisa.runtime import (
+    confirmed_policy_title,
+    run_turn,
+)
+from lisa.security import redact_text
+from lisa.services.conversations import (
+    ConversationTurnError,
+    ScheduledQAError,
+)
+from lisa.views.conversations import browser_conversation, conversation_summary
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+SERVICE_TOKEN = os.getenv("LISA_THELAKE_TOKEN", "")
+
+
+def _services(request: Request) -> WorkspaceServices:
+    services = getattr(request.app.state, "workspace_services", None)
+    if services is None:
+        raise HTTPException(status_code=503, detail="Lisa services are not initialized")
+    return services
+
+
+async def require_service_token(authorization: str | None = Header(default=None)) -> None:
+    if not SERVICE_TOKEN or not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Service authentication required")
+    candidate = authorization.removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(candidate, SERVICE_TOKEN):
+        raise HTTPException(status_code=401, detail="Service authentication required")
+
+
+def _decode_assertion_part(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _workspace_for_assertion(token: str) -> str | None:
+    secret = os.getenv("SOFTPROBE_ASSERTION_HMAC_SECRET") or os.getenv("ASSERTION_HMAC_SECRET")
+    if not secret:
+        return None
+    parts = token.strip().split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        header = json.loads(_decode_assertion_part(parts[0]))
+        claims = json.loads(_decode_assertion_part(parts[1]))
+        signature = _decode_assertion_part(parts[2])
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if header.get("alg") != "HS256":
+        return None
+    expected = hmac.new(secret.encode(), f"{parts[0]}.{parts[1]}".encode(), sha256).digest()
+    if not hmac.compare_digest(expected, signature):
+        return None
+    audience = claims.get("aud")
+    audiences = audience if isinstance(audience, list) else [audience]
+    if claims.get("iss") != "softprobe-edge" or "sp-backend" not in audiences:
+        return None
+    if not str(claims.get("sub", "")).strip():
+        return None
+    expires = claims.get("exp")
+    if expires is not None and (
+        not isinstance(expires, (int, float)) or expires < datetime.now(UTC).timestamp()
+    ):
+        return None
+    try:
+        workspace_id = str(UUID(str(claims.get("workspace_id", ""))))
+        configured_workspace = str(UUID(os.environ["LISA_WORKSPACE_ID"]))
+    except (ValueError, KeyError):
+        return None
+    return workspace_id if workspace_id == configured_workspace else None
+
+
+def user_workspace(request: Request) -> str:
+    try:
+        configured_workspace = str(UUID(os.environ["LISA_WORKSPACE_ID"]))
+    except (ValueError, KeyError) as error:
+        raise HTTPException(status_code=503, detail="Lisa workspace is not configured") from error
+    if os.getenv("LISA_LOCAL_ANONYMOUS") == "1":
+        return configured_workspace
+    assertion = request.headers.get("x-softprobe-assertion", "")
+    workspace_id = _workspace_for_assertion(assertion)
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="Workspace authentication required")
+    return workspace_id
+
+
+@router.get("/health")
+async def health() -> dict[str, bool]:
+    base_url = os.getenv("LISA_BASE_URL")
+    configured = bool(
+        (base_url and os.getenv("LISA_MODEL"))
+        or (not base_url and (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")))
+    )
+    return {
+        "ok": True,
+        "model_configured": configured,
+        "service_auth_configured": bool(SERVICE_TOKEN),
+    }
+
+
+@router.get("/v1/conversations")
+async def user_list_conversations(request: Request) -> list[dict[str, Any]]:
+    services = _services(request)
+    return [
+        browser_conversation(
+            await services.conversations.main_conversation(user_workspace(request))
+        )
+    ]
+
+
+@router.post("/v1/conversations")
+async def user_create_conversation(
+    request: Request, body: EmptyRequest | None = None
+) -> dict[str, Any]:
+    del body
+    services = _services(request)
+    return browser_conversation(
+        await services.conversations.main_conversation(user_workspace(request))
+    )
+
+
+@router.get("/v1/conversations/{conversation_id}")
+async def user_get_conversation(conversation_id: str, request: Request) -> dict[str, Any]:
+    services = _services(request)
+    workspace_id = user_workspace(request)
+    main = await services.conversations.main_conversation(workspace_id)
+    if str(UUID(conversation_id)) != main["conversation_id"]:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return browser_conversation(
+        services.conversations.get_conversation(workspace_id, conversation_id)
+    )
+
+
+@router.delete("/v1/conversations/{conversation_id}")
+async def user_delete_conversation(conversation_id: str, request: Request) -> dict[str, bool]:
+    main = await _services(request).conversations.main_conversation(user_workspace(request))
+    if str(UUID(conversation_id)) != main["conversation_id"]:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    raise HTTPException(status_code=409, detail="Lisa's main conversation is persistent")
+
+
+@router.post("/v1/conversations/{conversation_id}/messages")
+async def user_send_message(
+    conversation_id: str, request: Request, message: UserSendMessage
+) -> dict[str, Any]:
+    services = _services(request)
+    workspace_id = user_workspace(request)
+    main = await services.conversations.main_conversation(workspace_id)
+    if str(UUID(conversation_id)) != main["conversation_id"]:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    result = await send_message(
+        conversation_id,
+        SendMessage(
+            workspace_id=workspace_id, text=message.text, consent=message.consent
+        ),
+        services=services,
+    )
+    return browser_conversation(result)
+
+
+def _slack_signature_valid(secret: str, timestamp: str, signature: str, body: bytes) -> bool:
+    try:
+        timestamp_number = int(timestamp)
+    except ValueError:
+        return False
+    if abs(datetime.now(UTC).timestamp() - timestamp_number) > 300:
+        return False
+    expected = (
+        "v0="
+        + hmac.new(
+            secret.encode("utf-8"), b"v0:" + timestamp.encode() + b":" + body, sha256
+        ).hexdigest()
+    )
+    return hmac.compare_digest(expected, signature)
+
+
+def _slack_user_allowed(user_id: str, channel_id: str) -> bool:
+    users = {
+        item.strip()
+        for item in os.getenv("LISA_SLACK_ALLOWED_USERS", "").split(",")
+        if item.strip()
+    }
+    channels = {
+        item.strip()
+        for item in os.getenv("LISA_SLACK_ALLOWED_CHANNELS", "").split(",")
+        if item.strip()
+    }
+    return user_id in users or channel_id in channels
+
+
+@router.post("/slack/events")
+async def slack_events(
+    request: Request, services: WorkspaceServices = Depends(_services)
+) -> dict[str, Any]:
+    signing_secret = os.getenv("LISA_SLACK_SIGNING_SECRET", "")
+    timestamp = request.headers.get("x-slack-request-timestamp", "")
+    signature = request.headers.get("x-slack-signature", "")
+    body = await request.body()
+    if not signing_secret or not _slack_signature_valid(signing_secret, timestamp, signature, body):
+        raise HTTPException(status_code=401, detail="Invalid Slack request signature")
+    try:
+        envelope = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=400, detail="Malformed Slack event") from error
+    if envelope.get("type") == "url_verification":
+        return {"challenge": envelope.get("challenge", "")}
+    if envelope.get("type") != "event_callback":
+        return {"ok": True}
+    if envelope.get("team_id") != os.getenv("LISA_SLACK_TEAM_ID"):
+        raise HTTPException(status_code=403, detail="Slack team is not authorized")
+    workspace_id = os.getenv("LISA_WORKSPACE_ID", "")
+    try:
+        workspace_id = str(UUID(workspace_id))
+    except ValueError as error:
+        raise HTTPException(status_code=503, detail="Lisa workspace is not configured") from error
+    event_id = str(envelope.get("event_id", ""))
+    event = envelope.get("event") or {}
+    kind = event.get("type")
+    eligible = kind == "app_mention" or (
+        kind == "message" and event.get("thread_ts") and not event.get("subtype")
+    )
+    if not eligible or event.get("bot_id"):
+        return {"ok": True}
+    channel_id = str(event.get("channel", ""))
+    user_id = str(event.get("user", ""))
+    message_ts = str(event.get("ts", ""))
+    text = str(event.get("text", "")).strip()
+    if not event_id or not channel_id or not message_ts or not text:
+        return {"ok": True}
+    if not _slack_user_allowed(user_id, channel_id):
+        raise HTTPException(status_code=403, detail="Slack author is not authorized")
+    thread_ts = str(event.get("thread_ts") or message_ts)
+    try:
+        services.slack_event_service.queue(
+            {
+                "status": "pending",
+                "workspace_id": workspace_id,
+                "event_id": event_id,
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+                "text": redact_text(text),
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid Slack event path") from error
+    return {"ok": True}
+
+
+@router.post("/internal/v1/scheduled-cycle", dependencies=[Depends(require_service_token)])
+async def scheduled_cycle(
+    request: WorkspaceRequest, services: WorkspaceServices = Depends(_services)
+) -> dict[str, Any]:
+    try:
+        return await services.scheduled_qa.run_cycle(
+            request.workspace_id,
+            run_turn=run_turn,
+            confirm_policy_title=confirmed_policy_title,
+        )
+    except ScheduledQAError as error:
+        if error.status_code >= 500:
+            logger.exception("Lisa scheduled QA cycle failed")
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+
+
+@router.post("/internal/v1/conversations/search", dependencies=[Depends(require_service_token)])
+async def list_conversations(
+    request: WorkspaceRequest, services: WorkspaceServices = Depends(_services)
+) -> list[dict[str, Any]]:
+    records = services.conversations.list_conversations(request.workspace_id)
+    return [conversation_summary(item) for item in records]
+
+
+@router.post("/internal/v1/conversations", dependencies=[Depends(require_service_token)])
+async def create_conversation(
+    request: CreateConversation, services: WorkspaceServices = Depends(_services)
+) -> dict[str, Any]:
+    try:
+        return services.conversations.create_conversation(
+            request.workspace_id, request.conversation_id
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid conversation scope") from error
+
+
+@router.get(
+    "/internal/v1/conversations/{conversation_id}", dependencies=[Depends(require_service_token)]
+)
+async def get_conversation(
+    conversation_id: str,
+    workspace_id: str,
+    services: WorkspaceServices = Depends(_services),
+) -> dict[str, Any]:
+    try:
+        return services.conversations.get_conversation(workspace_id, conversation_id)
+    except ConversationNotFound as error:
+        raise HTTPException(status_code=404, detail="Conversation not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid conversation scope") from error
+
+
+@router.delete(
+    "/internal/v1/conversations/{conversation_id}", dependencies=[Depends(require_service_token)]
+)
+async def delete_conversation(
+    conversation_id: str,
+    workspace_id: str,
+    services: WorkspaceServices = Depends(_services),
+) -> dict[str, bool]:
+    try:
+        await services.conversations.delete_conversation(workspace_id, conversation_id)
+    except ConversationNotFound as error:
+        raise HTTPException(status_code=404, detail="Conversation not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid conversation scope") from error
+    return {"deleted": True}
+
+
+@router.post(
+    "/internal/v1/conversations/{conversation_id}/messages",
+    dependencies=[Depends(require_service_token)],
+)
+async def send_message(
+    conversation_id: str,
+    request: SendMessage,
+    services: WorkspaceServices = Depends(_services),
+) -> dict[str, Any]:
+    if not request.consent:
+        raise HTTPException(status_code=403, detail="Provider data consent is required")
+    text = redact_text(request.text.strip())
+    if not text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    try:
+        return await services.conversations.run_user_turn(
+            conversation_id,
+            request.workspace_id,
+            text,
+            run_turn=run_turn,
+            confirmed_policy_title=confirmed_policy_title(text),
+        )
+    except ConversationTurnError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    except ConversationNotFound as error:
+        raise HTTPException(status_code=404, detail="Conversation not found") from error

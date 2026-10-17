@@ -51,7 +51,7 @@ pub struct SessionSearchRequest {
     pub model_name: Option<String>,
     /// Match session-level `agent_name` (persisted column, `sp.agent.name`, else agent span name).
     pub agent_name: Option<String>,
-    /// When true (default), hide legacy nested-only OpenCode child sessions.
+    /// When true (default), hide nested-only OpenCode child sessions.
     #[serde(default = "default_true")]
     pub roots_only: bool,
     #[serde(default)]

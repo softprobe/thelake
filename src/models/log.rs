@@ -6,7 +6,7 @@ use std::collections::HashMap;
 /// Used for: OTLP ingestion → DuckLake storage → query results → JSON responses
 ///
 /// This struct matches the telemetry schema in `src/storage/schema/tables.rs`
-/// (legacy path; Arrow/DuckLake column order).
+/// (compact path; Arrow/DuckLake column order).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Log {
     // Field 1: session_id (OPTIONAL)

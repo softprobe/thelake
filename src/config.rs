@@ -747,14 +747,14 @@ ingest:
     }
 
     #[test]
-    fn reject_legacy_top_level_keys() {
+    fn reject_unknown_top_level_keys() {
         let yaml = r#"
 storage:
   s3_region: us-east-1
 ducklake:
-  metadata_path: /tmp/reject-legacy.sqlite
+  metadata_path: /tmp/reject-unknown-keys.sqlite
 "#;
-        let err = serde_yaml::from_str::<Config>(yaml).expect_err("legacy rejected");
+        let err = serde_yaml::from_str::<Config>(yaml).expect_err("unknown field rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("unknown field") || msg.contains("storage"),
