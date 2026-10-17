@@ -18,7 +18,6 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 import psycopg
 
 from ..context import WorkspaceContext
-from ..evaluation.trajectory import build_trajectory_events, session_timestamp
 from ..evaluation.judge import run_evaluation
 from ..evaluation.policy_selection import OpenAIPolicySelector
 from ..evaluation.scores import (
@@ -26,11 +25,13 @@ from ..evaluation.scores import (
     next_evaluation_score_id,
     successful_policy_score,
 )
+from ..evaluation.trajectory import build_trajectory_events, session_timestamp
+from ..llm_recording import recording_scope
+from ..models.work_items import EvaluationWorkItem, ScoreOutboxItem, WorkItemClaim
 from ..repositories.evaluation_artifacts import EvaluationArtifactRepository
+from ..repositories.work_items import PostgresWorkItemStore, StaleLeaseError
 from ..security import redact_evidence, redact_text
 from ..thelake_client import TheLakeClient
-from ..models.work_items import EvaluationWorkItem, ScoreOutboxItem, WorkItemClaim
-from ..repositories.work_items import PostgresWorkItemStore, StaleLeaseError
 from .failures import FailureService
 from .notifications import SlackNotifier
 from .policies import PolicyService
@@ -132,7 +133,8 @@ class EvaluationService:
                 trajectory,
             )
         # The selector answers “which rules apply?”; it does not judge compliance.
-        selection = self.policy_selector.select(trajectory, rules)
+        with recording_scope(self.context, session_id=session_id):
+            selection = self.policy_selector.select(trajectory, rules)
         return (
             {
                 "session_id": session_id,
@@ -140,6 +142,8 @@ class EvaluationService:
                 "candidate_count": len(rules),
                 "selected_policies": selection["selected_policies"],
                 "minimum_confidence": selection["minimum_confidence"],
+                **{key: selection[key] for key in ('limitations', 'prompt_truncations')
+                   if key in selection},
             },
             trajectory,
         )
@@ -181,6 +185,8 @@ class EvaluationService:
             "minimum_confidence": selection["minimum_confidence"],
             "candidate_count": selection["candidate_count"],
             "selected_policies": selected,
+            **{key: selection[key] for key in ('limitations', 'prompt_truncations')
+               if key in selection},
         }
         evaluations = []
         for decision in selected:
@@ -482,6 +488,10 @@ class EvaluationService:
             policy, session_id, trace_id, spans, trajectory, run_id, selection
         )
 
+    def _run_judge(self, request: dict, *, session_id: str, work_item_id: str | None = None):
+        with recording_scope(self.context, session_id=session_id, work_item_id=work_item_id):
+            return self.judge(request)
+
     def _evaluate_untracked(
         self,
         policy: dict,
@@ -493,8 +503,11 @@ class EvaluationService:
         selection: dict | None = None,
     ) -> dict:
         limitations = list(trajectory["limitations"])
+        limitations.extend((selection or {}).get("limitations", []))
         result = redact_evidence(
-            self.judge(self._judge_request(run_id, policy, trajectory, trace_id))
+            self._run_judge(
+                self._judge_request(run_id, policy, trajectory, trace_id), session_id=session_id
+            )
         )
         # Provider/validation errors are not verdicts. Leave the ledger unchanged
         # so Lisa can retry later; incomplete evidence is a stored, explicit outcome.
@@ -526,6 +539,7 @@ class EvaluationService:
             self.failures.mark_ready(policy, session_id, trace_id)
         return {
             **result,
+            "limitations": list(dict.fromkeys(limitations)),
             "evaluation_name": policy["name"],
             "session_id": session_id,
             "stored": True,
@@ -563,7 +577,7 @@ class EvaluationService:
             policy_name=policy["name"],
             policy_id=policy["policy_id"],
             policy_hash=policy["policy_hash"],
-            judge_config={"model": os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")},
+            judge_config={"model": os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash")},
             request_key=request_key,
             work_item_id=work_item_id,
             context_path=context_path,
@@ -637,7 +651,10 @@ class EvaluationService:
             )
             try:
                 result = redact_evidence(
-                    self.judge(self._judge_request(run_id, policy, trajectory, trace_id))
+                    self._run_judge(
+                        self._judge_request(run_id, policy, trajectory, trace_id),
+                        session_id=session_id, work_item_id=work_item.id,
+                    )
                 )
             except Exception:
                 self._release_retryable(work_item.id, owner, claim, "Judge call interrupted")
@@ -654,6 +671,7 @@ class EvaluationService:
                     "work_item_id": work_item.id,
                 }
             limitations = list(trajectory.get("limitations", []))
+            limitations.extend((selection or {}).get("limitations", []))
             limitations.extend(result.get("limitations", []))
             payload = self._score_payload(
                 policy,
@@ -710,6 +728,7 @@ class EvaluationService:
             self.failures.mark_ready(policy, session_id, trace_id)
         return {
             **result,
+            "limitations": self._result_from_score_payload(payload)["limitations"],
             "evaluation_name": policy["name"],
             "session_id": session_id,
             "stored": True,

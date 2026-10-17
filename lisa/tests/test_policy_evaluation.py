@@ -2,7 +2,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from policy_cases import evaluation_request, session_detail, save_rule
+from policy_cases import evaluation_request, save_rule, session_detail
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
@@ -150,7 +150,7 @@ def test_judge_returns_categorical_verdict_without_threshold(monkeypatch, verdic
                 parsed={
                     "status": verdict,
                     "rationale": "Evidence explanation",
-                    "span_ids": ["span"],
+                    "span_ids": ["e1"],
                 }
             )
 

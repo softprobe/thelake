@@ -1,21 +1,28 @@
 """Expose workspace domain services through the Model Context Protocol."""
 
+from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from pydantic import Field
 
 from ..bootstrap import WorkspaceServices
+from ..llm_recording import recording_maintenance
 from ..security import redact_evidence
+from ..views.database import LISA_DATABASE_SCHEMA
+from ..views.failures import render_pending_failures
 from ..views.mcp import McpSessionSearchResponse, McpSessionTrajectory
 from ..views.policies import render_policy_list, render_policy_records, render_policy_saved
-from ..views.failures import render_pending_failures
 from ..views.tools import hide_evaluation_ids
-from ..views.database import LISA_DATABASE_SCHEMA
 
 
 def create_server(services: WorkspaceServices) -> FastMCP:
-    server = FastMCP("Lisa workspace tools")
+    @asynccontextmanager
+    async def lifespan(_server):
+        async with recording_maintenance(services.context):
+            yield {}
+
+    server = FastMCP("Lisa workspace tools", lifespan=lifespan)
     for handler in (
         services.failures.complete_evaluation_failure_followup,
         services.evaluations.notify_evaluation_failure,

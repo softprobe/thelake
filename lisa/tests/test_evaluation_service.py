@@ -60,7 +60,7 @@ def test_real_refund_trace_becomes_a_compact_judgment_trajectory(services, monke
             "start_time": "2026-10-12T03:30:09.080647174Z",
             "end_time": "2026-10-12T03:30:09.918281508Z",
             "name": "gemini.refund_decision",
-            "model_name": "gemini-2.5-flash",
+            "model_name": "gemini-3.8-flash",
             "attributes": {
                 "sp.input": json.dumps(
                     {

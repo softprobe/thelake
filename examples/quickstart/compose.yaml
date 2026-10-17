@@ -25,8 +25,10 @@ services:
       LISA_SKILL_DIR: /app/skills
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-${GEMINI_API_KEY:?Set GOOGLE_API_KEY or GEMINI_API_KEY before starting the quickstart}}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LISA_LLM_TRACE_ENABLED: ${LISA_LLM_TRACE_ENABLED:-0}
       LISA_POLICY_SELECTION_MIN_CONFIDENCE: ${LISA_POLICY_SELECTION_MIN_CONFIDENCE:-0.8}
-      LISA_MODEL: ${LISA_MODEL:-gemini/gemini-2.5-flash}
+      LISA_GEMINI_THINKING_LEVEL: ${LISA_GEMINI_THINKING_LEVEL:-low}
+      LISA_MODEL: ${LISA_MODEL:-gemini/gemini-3.8-flash}
       LISA_DATA_DIR: /var/lib/lisa/workspaces
       LISA_WORKSPACE_ID: ${THELAKE_DEFAULT_WORKSPACE_ID:-550e8400-e29b-41d4-a716-446655440000}
       LISA_DATABASE_URL: postgresql://lisa_writer:${LISA_DATABASE_WRITER_PASSWORD}@postgres:5432/lisa
@@ -34,7 +36,7 @@ services:
       LISA_QA_CRON: ${LISA_QA_CRON:-0 * * * *}
       LISA_LOCAL_ANONYMOUS: ${LISA_LOCAL_ANONYMOUS:-1}
       LISA_CORS_ORIGINS: http://127.0.0.1:${THELAKE_QUICKSTART_PORT:-8090},http://localhost:${THELAKE_QUICKSTART_PORT:-8090}
-      GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-2.5-flash}
+      GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-3.8-flash}
       LISA_SLACK_BOT_TOKEN: ${LISA_SLACK_BOT_TOKEN:-}
       LISA_SLACK_SIGNING_SECRET: ${LISA_SLACK_SIGNING_SECRET:-}
       LISA_SLACK_TEAM_ID: ${LISA_SLACK_TEAM_ID:-}
@@ -53,7 +55,7 @@ services:
       context: ./agent
     environment:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-${GEMINI_API_KEY:?Set GOOGLE_API_KEY or GEMINI_API_KEY before running the demo agent}}
-      GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-2.5-flash}
+      GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-3.8-flash}
 
 volumes:
   postgres-data:

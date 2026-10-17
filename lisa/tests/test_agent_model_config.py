@@ -138,7 +138,7 @@ def test_gemini_default_remains_available_without_custom_endpoint(monkeypatch, t
     agent.build_conversation(str(uuid4()), str(tmp_path), workspace_id=str(uuid4()))
 
     assert captured["llm"] == {
-        "model": "gemini/gemini-2.5-flash",
+        "model": "gemini/gemini-3.8-flash",
         "api_key": "gemini-test-key",
         "base_url": None,
         "usage_id": "lisa",
@@ -150,6 +150,7 @@ def test_decisions_api_key_is_forwarded_only_to_lisa_mcp(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
     monkeypatch.setenv("OPENAI_API_KEY", "decisions-test-key")
     monkeypatch.setenv("LISA_POLICY_SELECTION_MIN_CONFIDENCE", "0.91")
+    monkeypatch.setenv("LISA_GEMINI_THINKING_LEVEL", "medium")
 
     agent.build_conversation(str(uuid4()), str(tmp_path), workspace_id=str(uuid4()))
 
@@ -159,6 +160,10 @@ def test_decisions_api_key_is_forwarded_only_to_lisa_mcp(monkeypatch, tmp_path):
         "LISA_POLICY_SELECTION_MIN_CONFIDENCE"
     ]
     assert minimum_confidence.get_secret_value() == "0.91"
+    thinking_level = captured["agent"]["mcp_config"]["lisa"].env[
+        "LISA_GEMINI_THINKING_LEVEL"
+    ]
+    assert thinking_level.get_secret_value() == "medium"
     assert captured["llm"]["api_key"] == "gemini-test-key"
 
 

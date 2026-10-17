@@ -128,6 +128,59 @@ hash, span references, and limitations. Identical policy content and trace reuse
 an existing non-error verdict; a criteria edit produces a new hash and permits a
 fresh run.
 
+## Provider prompts and Lisa call records
+
+The formal tool-event grammar, status rules, and truncation contract are in
+[Lisa judge trajectory format](../reference/lisa-trajectory-format.md).
+
+Policy selection and judging share a compact plaintext trajectory view. Each
+judge event uses a short local citation (`e1`, `e2`, ...) and short tool-call
+link (`c1`, `c2`, ...) where needed. Judge requests do not repeat full telemetry
+IDs. Policy routing retains its existing ID labels. Recording metadata retains
+local-to-real ID maps; judge references are validated against the displayed IDs
+and resolved back to actual telemetry spans. For example:
+
+```text
+[e4] tool call: get_booking {"booking_id":"BK-1000"}; [e5] result: {"booking_id":"BK-1000","status":"confirmed"}
+```
+
+Paired calls and results share one line while keeping their source-span
+citations. Failed calls use an `error,` clause. Exceptional tool names are
+quoted. Message roles and tool associations are preserved.
+Structured payloads use compact JSON; text and header control characters are
+escaped so each event stays on one physical line. Both providers receive
+redacted trajectory and policy text.
+
+Only this provider view clips event bodies to 2,000 serialized characters.
+Truncation markers report omitted characters, and limitations flow through
+selection results (including empty selections), saved context, verdicts, and
+score metadata. Stored trajectories retain their existing fidelity and bounds.
+Upstream incomplete or unordered captures still cannot be judged. Prompt-view
+clipping deliberately permits a verdict or policy exclusion from visible text;
+omitted text can change either conclusion. The judge must return uncertain
+when the visible text cannot support a conclusion. Recalibrate representative
+policy fixtures after changing this prompt view.
+
+Set `LISA_LLM_TRACE_ENABLED=1` to record Lisa's own provider calls separately
+from target-agent trajectories. Under Lisa's workspace home,
+`llm-calls/<call-id>.jsonl` contains a request line followed by a response or
+sanitized error line. The request includes the actual application prompt,
+model, available tool definitions/schema, formatting-loss metadata, and known
+conversation/session/run/work-item links. Selector records do not require a
+selected policy or work item. Chat records capture LiteLLM-hook-observable
+attempts, including SDK retries; they are not a wire-level capture.
+
+Recording is off by default. Before any write, records remove credential values
+and provider thinking/reasoning content. Numeric token-usage counters such as `usage.prompt_token_count` and
+`usage.total_token_count` remain numeric; unavailable counters remain `null`. Judge responses store parsed output once, falling back to visible raw
+text only when parsing is unavailable. Error records retain exception types
+without raw messages or tracebacks. Request files are written atomically before
+calls; terminal writes replace them atomically. A crash may leave a readable
+request-only file. Recording errors warn without interrupting Lisa. Directories
+and files use owner-only permissions. Startup and hourly cleanup remove only
+recorder-owned files older than 30 days, including abandoned requests. Existing
+OpenHands runtime state and evaluation inputs are retained independently.
+
 ## Investigation and recovery
 
 A failure is recorded in Lisa's workspace home with its score payload before the

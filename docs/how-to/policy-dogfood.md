@@ -68,6 +68,64 @@ The fixture contract can be checked without a Gemini call:
 uv run --project lisa --extra test pytest lisa/tests/test_dogfood_fixture.py
 ```
 
+### STATE-Bench gold formatting and model quality
+
+The five cases in `lisa/tests/fixtures/state_bench_gold.jsonl` have policy-selection
+labels, verdict labels, and illustrative supporting spans. Verify exact event
+content, tool linkage, and provider-boundary prompts without provider calls:
+
+```bash
+uv run --project lisa --extra test pytest \
+  lisa/tests/test_state_bench_prompt.py \
+  lisa/tests/test_prompt_citations.py \
+  lisa/tests/test_tool_result_format.py \
+  lisa/tests/test_trajectory_prompt.py -v
+```
+
+For live quality, load the known local `.env` into the test process without
+printing secrets. Existing exported credentials take precedence. This invokes
+paid Gemini calls, plus OpenAI Decisions calls for the two-stage checks:
+
+```bash
+uv run --project lisa --extra test python - <<'PY'
+import os
+from dotenv import load_dotenv
+import pytest
+
+load_dotenv(".env", override=False)
+os.environ["LISA_RUN_STATE_BENCH_LIVE"] = "1"
+raise SystemExit(pytest.main([
+    "lisa/tests/test_state_bench_policy_selection_live.py", "-v", "-rs",
+]))
+PY
+```
+
+Each case reports separately for judge-only quality and for selection through
+Lisa's MCP `evaluate_session` tool. The selection test supplies fixture-backed
+session and approved-policy data, then exercises Lisa's production controller
+and evaluation service. It checks that the service records one Gemini judge
+request and score per selected policy before asserting the gold policy selection;
+an over-selection therefore remains visible without preventing its extra judge
+call from being exercised. The fixture trajectory is injected at Lisa's session
+trajectory boundary, so this live check does not exercise raw TheLake span
+conversion or upstream completeness gating. Tests also check gold verdict
+direction, nonempty rationale, and citations that belong to the trajectory;
+valid alternate citations need not match the illustrative gold span exactly.
+Missing credentials produce explicit skips, which are not successful quality
+checks. These five trajectories fit without clipping, so their results validate
+compact-input quality on this fixture set; they do not establish quality after
+clipping or no regression against the old JSON prompt.
+
+The judge defaults to Gemini's `low` thinking level to reduce reasoning-token
+cost. Set `LISA_GEMINI_THINKING_LEVEL=medium` or `high` when calibration shows
+that the lower-cost setting misses expected verdicts. The live gold suite is
+the quality check for this tradeoff. Lisa does not set a hard output-token cap:
+Gemini counts reasoning tokens against that cap, and exhausting it can truncate
+the required structured response.
+The current `gemini-3.8-flash` judge uses implicit caching only, which requires
+at least 4,096 input tokens; compact gold prompts are below that threshold, so
+they should not be expected to report cached input tokens.
+
 ## 3. Verify Lisa's scheduled QA cycle
 
 Start the quickstart with the five-minute cron shown in [the quickstart](../quickstart.md), then run:

@@ -122,7 +122,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent-name", required=True)
     parser.add_argument("--api-url", required=True)
-    parser.add_argument("--model", default=os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash"))
+    parser.add_argument("--model", default=os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash"))
     args = parser.parse_args()
     run_agent(args.agent_name, args.api_url, args.model)
 

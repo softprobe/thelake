@@ -11,7 +11,12 @@ definitions, and scores; telemetry ingestion does not call Lisa.
 ## Verification levels
 
 - For evaluator behavior without provider calls, run the fixture tests in
-  `lisa`.
+  `lisa`. `test_state_bench_prompt.py` verifies all STATE-Bench gold trajectories
+  and their exact selector/judge inputs; mocked responses do not prove quality.
+- For labeled model quality, run `test_state_bench_policy_selection_live.py` with
+  `LISA_RUN_STATE_BENCH_LIVE=1`. It reports each gold case separately for the
+  Gemini judge and for Decisions selection followed by judging. See the
+  STATE-Bench command in `docs/how-to/policy-dogfood.md`.
 - For the real scheduled agent-to-issue path, run the quickstart E2E. It uses
   the existing quickstart stack and makes paid Gemini calls.
 - For Markdown policy learning or review, use
@@ -20,18 +25,28 @@ definitions, and scores; telemetry ingestion does not call Lisa.
 - For Slack delivery, use `verify-lisa-slack-alert` after a failing score is
   stored and the pending failure has a captured Slack destination.
 
+The five gold cases do not exercise prompt-view clipping. If they guide prompt
+adjustments, report the outcome as calibration, not independent holdout accuracy.
+Preserve the first failure and rerun every gold case after changing the prompt;
+keep gold labels and confidence thresholds unchanged.
+
 ## Preconditions
 
 Before a live run:
 
 1. Confirm the user asked for a live test because it sends captured test-agent
    evidence to Gemini and may incur provider charges.
-2. Confirm Docker, Rust/Cargo, Python, and `make` are available.
-3. Check whether `GOOGLE_API_KEY` or `GEMINI_API_KEY` is present without
-   printing, copying, or reading its value. If absent, report that the live
-   test cannot run; do not search files for credentials.
+2. Fixture calibration needs Lisa’s Python test dependencies. Scheduled-path
+   E2E additionally needs Docker, Rust/Cargo, and `make`.
+3. Check provider credentials in the process environment and the repository-local
+   `.env`, or a dotenv file explicitly identified by the user. Load that known
+   file inside the test process with `python-dotenv`; preserve existing exports
+   and never print values or shell-source the file. Gemini needs `GOOGLE_API_KEY`
+   or `GEMINI_API_KEY`; two-stage selection also needs `OPENAI_API_KEY`. Missing
+   exports alone do not establish that credentials are unavailable. Do not
+   search unrelated files or copy credentials into scripts, reports, or commands.
 4. Preserve the working tree and existing local services. Start the local
-   quickstart first if it is not already running.
+   quickstart only for the scheduled-path E2E, if it is not already running.
 
 ## Run the live path
 

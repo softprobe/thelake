@@ -166,3 +166,19 @@ def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(tmp_path, monkeypat
     assert "select_policies_for_session" not in tools
     assert "confirmed_rule_title" not in tools["update_policy"].inputSchema["properties"]
     assert "openhands" not in Path(create_server.__code__.co_filename).read_text(encoding="utf-8").lower()
+
+
+def test_call_recording_setting_and_conversation_link_reach_mcp(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-key")
+    monkeypatch.setenv("LISA_LLM_TRACE_ENABLED", "1")
+    captured = {}
+    monkeypatch.setattr(agent, "LLM", lambda **_: object())
+    monkeypatch.setattr(agent, "Agent", lambda **kwargs: captured.update(kwargs) or object())
+    monkeypatch.setattr(agent, "Conversation", lambda **_: object())
+    conversation_id = "be3c93b1-d225-4ce7-8dff-06ac2924289f"
+    agent.build_conversation(
+        conversation_id, str(tmp_path), workspace_id="11111111-1111-4111-8111-111111111111"
+    )
+    environment = captured["mcp_config"]["lisa"].env
+    assert environment["LISA_LLM_TRACE_ENABLED"].get_secret_value() == "1"
+    assert environment["LISA_CONVERSATION_ID"].get_secret_value() == conversation_id

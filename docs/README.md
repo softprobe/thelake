@@ -52,6 +52,8 @@ there as well. The skills link back to these docs as their source of truth.
 - Promotion manifests (applied at runtime): [`promotion/`](promotion/)
 - Event-time EXPLAIN fixtures: [`fixtures/`](fixtures/)
 
+- [Lisa judge trajectory format](reference/lisa-trajectory-format.md) — tool-call/result grammar, status, citations, and truncation
+
 ## SDK contracts
 
 Language-neutral Softprobe SDK docs live under [`sdk/`](sdk/README.md).

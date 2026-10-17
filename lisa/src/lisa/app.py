@@ -12,11 +12,12 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .bootstrap import WorkspaceServices, build_services
+from .context import WorkspaceContext
 from .controllers.http import (
     router as http_router,
 )
-from .bootstrap import WorkspaceServices, build_services
-from .context import WorkspaceContext
+from .llm_recording import recording_maintenance
 from .runtime import confirmed_policy_title, initialize_backend, run_turn
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,8 @@ async def lifespan(_app: FastAPI):
         slack_worker_task = asyncio.create_task(
             services.slack_worker.run_forever(workspace_id)
         )
-    yield
+    async with recording_maintenance(services.context):
+        yield
     if qa_scheduler is not None:
         qa_scheduler.shutdown(wait=False)
     if slack_worker_task is not None:

@@ -493,7 +493,7 @@ def test_incomplete_trajectory_does_not_exclude_any_approved_policy():
     assert selector.calls == []
 
 
-def test_evaluate_session_is_one_call_and_reuses_the_selected_evidence(tmp_path):
+def test_evaluate_session_judges_every_selected_policy_with_the_same_evidence(tmp_path):
     rule = PolicyRule(
         name="Check refund eligibility",
         criteria="Check eligibility before refunding.",
@@ -507,37 +507,39 @@ def test_evaluate_session_is_one_call_and_reuses_the_selected_evidence(tmp_path)
         "spans": [{"trace_id": "trace-1", "start_time": "2026-10-12T00:00:00Z"}],
         "scores": [],
     }
-    unrelated_rule = PolicyRule(
-        name="Do not cancel delivered orders",
-        criteria="Do not cancel an order after delivery.",
+    second_rule = PolicyRule(
+        name="Keep the customer informed",
+        criteria="Explain the applicable fee before asking for confirmation.",
         approved=True,
         scope="workspace",
         id="P1.2",
     )
     client = FakeSessionClient(session_detail)
+    decisions = [rule, second_rule]
     selector = FakeSelector(
         [
             {
-                "id": rule.id,
-                "name": rule.name,
-                "scope": rule.scope,
+                "id": selected.id,
+                "name": selected.name,
+                "scope": selected.scope,
                 "confidence": 0.99,
             }
-        ],
+            for selected in decisions
+        ]
     )
     judge_requests = []
     context = WorkspaceContext(workspace="11111111-1111-4111-8111-111111111111", data_dir=tmp_path)
     service = make_evaluation_service(
         context=context,
         client=client,
-        policies=FakePolicyStore([rule, unrelated_rule]),
+        policies=FakePolicyStore([rule, second_rule]),
         failures=None,
         notifier=None,
         judge=lambda request: (
             judge_requests.append(request)
             or {
                 "status": "pass",
-                "rationale": "Eligibility was checked.",
+                "rationale": f"{request['policy']['name']} was checked.",
                 "references": [],
                 "limitations": [],
             }
@@ -557,12 +559,25 @@ def test_evaluate_session_is_one_call_and_reuses_the_selected_evidence(tmp_path)
 
     assert result["status"] == "evaluated"
     assert result["candidate_count"] == 2
-    assert len(result["evaluations"]) == 1
-    assert result["evaluations"][0]["status"] == "pass"
-    assert result["selected_policies"][0]["id"] == rule.id
-    assert unrelated_rule.id not in {item["id"] for item in result["selected_policies"]}
+    assert len(result["evaluations"]) == 2
+    assert {item["evaluation_name"] for item in result["evaluations"]} == {
+        rule.name,
+        second_rule.name,
+    }
+    assert all(item["status"] == "pass" for item in result["evaluations"])
+    assert {item["id"] for item in result["selected_policies"]} == {rule.id, second_rule.id}
     assert len(client.get_calls) == 1
     assert len(selector.calls) == 1
-    assert client.posts[0][1]["metadata"]["policy_id"] == rule.id
-    assert judge_requests[0]["trajectory"]["events"] == selector.calls[0][0]["events"]
-    assert len(judge_requests) == 1
+    assert {body["metadata"]["policy_id"] for _, body in client.posts} == {
+        rule.id,
+        second_rule.id,
+    }
+    assert len(judge_requests) == 2
+    assert {request["policy"]["name"] for request in judge_requests} == {
+        rule.name,
+        second_rule.name,
+    }
+    assert all(
+        request["trajectory"]["events"] == selector.calls[0][0]["events"]
+        for request in judge_requests
+    )

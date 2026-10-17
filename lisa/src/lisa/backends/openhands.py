@@ -17,8 +17,12 @@ from openhands.sdk.event import ActionEvent, MessageEvent, ObservationEvent
 from openhands.sdk.mcp.config import MCPServer
 from pydantic import SecretStr
 
+from lisa.context import WorkspaceContext
+from lisa.llm_recording import recording_scope
 from lisa.runtime import AgentTurn
 from lisa.views.database import LISA_DATABASE_SCHEMA
+
+from .llm_recording import install_call_logger
 
 LISA_SYSTEM_PROMPT = """You are Lisa, the workspace's AI agent QA engineer. Own the quality review:
 find behavior that could harm a customer or business outcome, explain the evidence,
@@ -87,7 +91,7 @@ def build_conversation(
         api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("Lisa requires GOOGLE_API_KEY or GEMINI_API_KEY")
-        model_name = os.getenv("LISA_MODEL", "gemini/gemini-2.5-flash")
+        model_name = os.getenv("LISA_MODEL", "gemini/gemini-3.8-flash")
     llm = LLM(model=model_name, api_key=api_key, base_url=base_url, usage_id="lisa")
     skill_dir = Path(os.getenv("LISA_SKILL_DIR", "/app/skills"))
     if not skill_dir.is_dir():
@@ -102,6 +106,8 @@ def build_conversation(
     ]
     mcp_env = {
         "LISA_WORKSPACE_ID": workspace_id,
+        "LISA_LLM_TRACE_ENABLED": os.getenv("LISA_LLM_TRACE_ENABLED", ""),
+        "LISA_CONVERSATION_ID": conversation_id,
         "LISA_DATA_DIR": os.getenv("LISA_DATA_DIR", "/var/lib/lisa/workspaces"),
         "LISA_THELAKE_API_URL": os.getenv("LISA_THELAKE_API_URL", "http://otlp-backend:8090"),
         "LISA_THELAKE_TOKEN": os.getenv("LISA_THELAKE_TOKEN", ""),
@@ -113,7 +119,8 @@ def build_conversation(
         "LISA_POLICY_SELECTION_MIN_CONFIDENCE": os.getenv(
             "LISA_POLICY_SELECTION_MIN_CONFIDENCE", "0.8"
         ),
-        "GEMINI_MODEL_NAME": os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash"),
+        "GEMINI_MODEL_NAME": os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash"),
+        "LISA_GEMINI_THINKING_LEVEL": os.getenv("LISA_GEMINI_THINKING_LEVEL", "low"),
         "LISA_SLACK_BOT_TOKEN": os.getenv("LISA_SLACK_BOT_TOKEN", ""),
         "LISA_CONFIRMED_POLICY_TITLE": confirmed_policy_title or "",
         "LISA_TURN_SOURCE": turn_source,
@@ -170,6 +177,7 @@ class OpenHandsBackend:
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
     ) -> AgentTurn:
+        install_call_logger()
         conversation = build_conversation(
             conversation_id,
             directory,
@@ -182,7 +190,12 @@ class OpenHandsBackend:
         try:
             before = len(conversation.state.events)
             conversation.send_message(text)
-            conversation.run()
+            context = WorkspaceContext(
+                workspace=workspace_id,
+                data_dir=Path(os.getenv("LISA_DATA_DIR", "/var/lib/lisa/workspaces")),
+            )
+            with recording_scope(context, conversation_id=conversation_id):
+                conversation.run()
             messages, activities = conversation_content(conversation)
             events = list(conversation.state.events)
             new_ids = {str(event.id) for event in events[before:]}

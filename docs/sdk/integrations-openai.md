@@ -26,7 +26,7 @@ sp.shutdown()
 ```
 
 Gemini uses the OpenAI-compatible endpoint (default model
-`gemini-2.5-flash`):
+`gemini-3.8-flash`):
 
 ```python
 from softprobe.openai import GEMINI_OPENAI_BASE_URL, observe_openai

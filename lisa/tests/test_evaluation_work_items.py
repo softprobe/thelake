@@ -331,7 +331,7 @@ def test_workspace_policy_pending_recovery_is_scoped_to_target_agent(
     assert len(posts) == 1
 
 
-def test_tracked_live_reload_releases_lease_when_policy_is_unapproved(tmp_path):
+def _tracked_service_with_saved_inputs(tmp_path, *, approved_rules):
     context = WorkspaceContext(
         workspace=WORKSPACE_ID,
         data_dir=tmp_path,
@@ -374,7 +374,7 @@ def test_tracked_live_reload_releases_lease_when_policy_is_unapproved(tmp_path):
         }
     )
     policies = MagicMock()
-    policies.approved_rules.return_value = []
+    policies.approved_rules.return_value = approved_rules
     service = EvaluationService(
         context=context,
         client=MagicMock(),
@@ -387,6 +387,11 @@ def test_tracked_live_reload_releases_lease_when_policy_is_unapproved(tmp_path):
         artifact_repository=EvaluationArtifactRepository(context),
         render_context=render_evaluation_context,
     )
+    return service, store, work_item
+
+
+def test_tracked_live_reload_releases_lease_when_policy_is_unapproved(tmp_path):
+    service, store, work_item = _tracked_service_with_saved_inputs(tmp_path, approved_rules=[])
 
     result = service._evaluate_tracked(
         {
@@ -429,6 +434,7 @@ def test_tracked_retry_judges_live_criteria_after_interrupt_before_outbox(
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
     monkeypatch.setattr(services.client, "get", lambda _: detail)
+    old_policy_hash = services.evaluations._policy("agent", "Rule")["policy_hash"]
     judged = []
 
     def judge_once(request):
@@ -456,12 +462,15 @@ def test_tracked_retry_judges_live_criteria_after_interrupt_before_outbox(
         services.evaluations._evaluate_session("agent", "Rule", session_id)
 
     save_rule(services, text="Require confirmation before refunding.")
+    current_policy_hash = services.evaluations._policy("agent", "Rule")["policy_hash"]
     result = services.evaluations._evaluate_session("agent", "Rule", session_id)
 
     assert result["status"] == "pass"
     assert len(judged) == 2
     assert judged[1]["policy"]["criteria"] == "Require confirmation before refunding."
     assert scores[0]["metadata"]["criteria"] == "Require confirmation before refunding."
+    assert scores[0]["metadata"]["policy_hash"] == current_policy_hash
+    assert current_policy_hash != old_policy_hash
     store = PostgresWorkItemStore(services.context.database_url, WORKSPACE_ID)
     run = store.get_evaluation(result["work_item_id"])
     assert run is not None

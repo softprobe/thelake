@@ -133,6 +133,81 @@ def test_judge_redacts_nested_evidence_and_uses_categorical_schema(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [(None, "low"), ("medium", "medium"), ("high", "high")],
+)
+def test_judge_uses_cost_bounded_gemini_generation_config(
+    monkeypatch, configured, expected
+):
+    calls = []
+
+    class FakeClient:
+        models = SimpleNamespace(
+            generate_content=lambda **kwargs: (
+                calls.append(kwargs)
+                or SimpleNamespace(
+                    parsed={"status": "pass", "rationale": "Evidence supports compliance", "span_ids": ["e1"]}
+                )
+            )
+        )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(evaluator, "create_judge_client", FakeClient)
+    monkeypatch.delenv("LISA_GEMINI_THINKING_LEVEL", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL_NAME", raising=False)
+    if configured is not None:
+        monkeypatch.setenv("LISA_GEMINI_THINKING_LEVEL", configured)
+
+    evaluator.evaluate(evaluation_request())
+
+    config = calls[0]["config"]
+    assert config.thinking_config.thinking_level.value.lower() == expected
+    assert config.max_output_tokens is None
+
+
+def test_gemini_25_model_uses_its_thinking_budget_api(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        models = SimpleNamespace(
+            generate_content=lambda **kwargs: (
+                calls.append(kwargs)
+                or SimpleNamespace(
+                    parsed={"status": "pass", "rationale": "Evidence supports compliance", "span_ids": ["e1"]}
+                )
+            )
+        )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(evaluator, "create_judge_client", FakeClient)
+    monkeypatch.setenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+    monkeypatch.delenv("LISA_GEMINI_THINKING_LEVEL", raising=False)
+
+    evaluator.evaluate(evaluation_request())
+
+    config = calls[0]["config"]
+    assert config.thinking_config.thinking_budget == 512
+    assert config.thinking_config.thinking_level is None
+    assert config.max_output_tokens is None
+
+
+@pytest.mark.parametrize("level", ["", "minimal", "extreme"])
+def test_invalid_gemini_thinking_level_fails_before_provider_call(monkeypatch, level):
+    monkeypatch.setenv("LISA_GEMINI_THINKING_LEVEL", level)
+    monkeypatch.setattr(
+        evaluator,
+        "create_judge_client",
+        lambda: pytest.fail("Invalid thinking level must fail before provider call"),
+    )
+    with pytest.raises(ValueError, match="LISA_GEMINI_THINKING_LEVEL"):
+        evaluator.evaluate(evaluation_request())
+
+
 def test_serialized_evidence_limits_and_unapproved_requests_are_rejected():
     request = evaluation_request().model_dump(mode="json")
     request["trajectory"]["events"][0]["payload"] = {"large": "x" * 1_000_001}
