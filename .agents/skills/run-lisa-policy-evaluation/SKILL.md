@@ -10,9 +10,10 @@ Use this skill for labeled dataset-based quality runs. Use
 
 ## Required production path
 
-- Use the labeled dataset as input and scoring truth only. Never pass a
-  manifest's annotated policy subset directly to the triager and call that a
-  Lisa production evaluation.
+- Use the dataset's trajectory and policy records to prepare the isolated
+  evaluation workspace and sessions. Use annotations only as scoring truth.
+  Never pass a manifest's annotated policy subset directly to the triager and
+  call that a Lisa production evaluation.
 - Run each trajectory through Lisa's production `EvaluationService` (or the
   production MCP/API entry point that calls it). It must retrieve approved
   candidate rules through `PolicyService` backed by Lisa's PostgreSQL policy

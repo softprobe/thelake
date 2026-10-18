@@ -199,7 +199,9 @@ Contracts:
 
 ### Lisa and behavior checks
 
-Lisa evaluates business rules directly from workspace and agent `POLICY.md` files:
+Lisa evaluates owner-approved workspace and agent policies stored in her
+PostgreSQL policy catalog. Markdown is the readable policy format, not the
+runtime source of truth:
 
 ```md
 ## Check eligibility before issuing a refund
@@ -214,11 +216,16 @@ Lisa proposes a section and saves it after the owner's exact command
 step: `approved: yes` permits evaluation; `approved: no` or missing approval does
 not. There is no separate evaluator registry or creation/activation workflow.
 
-Configure Lisa with `LISA_WORKSPACE_ID`, `LISA_QA_CRON`, and Gemini credentials.
+Configure Lisa with `LISA_WORKSPACE_ID`, `LISA_QA_CRON`, an OpenAI API key for
+Decisions triage, and Gemini credentials for judging escalated policies.
 The default cron runs `Lisa scheduled QA` hourly at minute 0 UTC and does not run
-on startup. Lisa uses OpenAI Decisions to select policies marked `applicable`,
-then obtains a categorical Gemini verdict with rationale and span
-references. Verdicts themselves do not use a numeric threshold.
+on startup. Each complete, ordered trajectory is triaged against every approved
+candidate policy through OpenAI Decisions. Decisions classify each policy as
+`suspected_violation`, `no_violation_found`, or `insufficient_evidence`; Lisa
+sends `suspected_violation` and `insufficient_evidence` decisions to the Gemini
+judge. Triage negatives do not create pass scores. Gemini returns `pass`, `fail`, or
+`uncertain` with rationale and span references. Verdicts do not use a numeric
+threshold.
 TheLake stores scores with the policy ID, criteria text, and policy hash so old
 findings stay explainable after edits. Lisa investigates failures and sends any
 configured Slack notification separately.

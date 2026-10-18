@@ -11,10 +11,11 @@ returns a local demo result and is not connected to a payment system.
 ## Before you start
 
 Install Docker with Compose, Rust, Node.js 24 LTS with npm, Python 3, `make`, and
-`curl`. Put a Gemini API key with available Gemini API credits in the gitignored
-`.env` file as `GEMINI_API_KEY=...`, or enter it at the hidden prompt when the
-start script asks. The sample agent and Lisa's local evaluator make live Gemini
-API calls.
+`curl`. Put API keys with available credits in the gitignored `.env` file:
+`GEMINI_API_KEY=...` for the sample agent and Lisa's judge, and
+`OPENAI_API_KEY=...` for Lisa's Decisions policy triage. The start script prompts
+for Gemini credentials if they are missing; set the OpenAI key in `.env` before
+running the scheduled evaluation. Both providers receive live requests.
 
 ## 1. Start TheLake
 
@@ -26,9 +27,12 @@ LISA_QA_CRON="*/5 * * * *" bash examples/quickstart/start.sh
 
 The script generates a local Lisa service token, starts Postgres and Lisa, then
 runs TheLake in the foreground. This five-minute cron is for the walkthrough;
-deployments default to hourly. Lisa runs the categorical Gemini judge in her MCP tool
-process. It prints the Explorer URL and the next commands. Keep this terminal
-open and open the printed URL.
+deployments default to hourly. Lisa first sends every approved candidate policy
+to OpenAI Decisions for triage. It sends policies marked
+`suspected_violation` or `insufficient_evidence` to the categorical Gemini
+judge; `no_violation_found` does not produce a pass score. It prints the
+Explorer URL and the next commands. Keep this terminal open and open the printed
+URL.
 
 ## 2. Approve the policy
 
@@ -50,10 +54,10 @@ start script. The agent uses Gemini to decide to issue a refund, and
 Softprobe's Python instrumentation sends its live trace to TheLake. The sample
 is deliberately written to call the refund tool without checking eligibility.
 
-The command prints the session ID. If Gemini reports that prepayment credits
+The command prints the session ID. If either provider reports that credits
 are depleted, the trace may still be present, but a successful evaluator
-verdict requires available Gemini credits. An evaluator `error` means the rule
-could not be judged; it is not a pass or a behavior failure.
+verdict requires available OpenAI and Gemini credits. An evaluator `error` means
+triage or judging could not complete; it is not a pass or a behavior failure.
 
 ## 4. Inspect Lisa's report
 
@@ -80,8 +84,8 @@ python3 tests/e2e/quickstart_online_eval.py
 ```
 
 This driver currently expects the quickstart services to be running; it does
-not start and stop the stack itself. The sample and judge both require Gemini
-API credits.
+not start and stop the stack itself. The sample and judge require Gemini API
+credits; policy triage also requires OpenAI API credits.
 
 ## Stop the quickstart
 

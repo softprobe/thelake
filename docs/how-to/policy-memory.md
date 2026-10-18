@@ -41,7 +41,8 @@ grant approval to a policy.
 
 An agent section overrides the workspace section of the same title, including
 when the agent section is unapproved. `evaluate_session` resolves the effective
-approved rules for the exact agent internally before selecting which ones apply.
+approved candidate set for the exact agent internally. It does not accept a
+caller-supplied policy list.
 
 ## Execution and findings
 
@@ -53,15 +54,20 @@ that same projection. Repeated system prompts, tool schemas, and model-usage
 metadata are omitted, while tool arguments, results, status, timestamps, and
 span references remain available to the judge.
 
-Lisa's schedule searches recent sessions and applies the approved policy text
-to those trajectories. The Gemini judge returns `pass`, `fail`, or `uncertain`
-with a rationale and captured span references. Incomplete or unordered trajectories
-produce `insufficient_evidence`; a provider/validation error produces an
-execution error. No numeric threshold or uncertainty margin is used.
+For each eligible session, Lisa builds the production trajectory and sends one
+Decisions question for every approved candidate policy read from PostgreSQL.
+Decisions returns `suspected_violation`, `no_violation_found`, or
+`insufficient_evidence` per policy. Lisa escalates suspected violations and
+insufficient evidence to the Gemini judge, which returns `pass`, `fail`, or
+`uncertain` with a rationale and captured span references. A triage negative
+does not create a pass score. Incomplete or unordered trajectories are gated as
+`insufficient_evidence` before provider calls; provider or validation errors
+remain execution errors. No numeric threshold or uncertainty margin is used.
 
 TheLake stores each categorical score with the policy ID (for example, `P1.2`)
 and the criteria text used for that judgment. Policies live in `lisa.policies`;
-evaluations load the current approved rule and pass it to the judge.
+evaluation gets candidates through `PolicyService`, records triage decisions,
+and passes only escalated approved rules to the judge.
 
 Lisa investigates stored failures and can send configured Slack alerts. Pending
 failure records preserve delivery destination across restart.
@@ -72,7 +78,7 @@ The standard MCP tools are exposed from
 `lisa/src/lisa/controllers/mcp.py` and composed through
 `bootstrap.py`. `services/policies.py` parses and validates rules;
 `repositories/policies.py` persists records with a Postgres transaction and
-compare-and-swap lock. `services/evaluations.py` loads an approved rule, passes
-it to the judge, and stores the score. The tool package is independent of
-OpenHands; the backend supplies trusted workspace credentials and
-owner-confirmation context when launching it.
+compare-and-swap lock. `services/evaluations.py` resolves approved candidates,
+calls `evaluation/policy_triage.py`, judges escalations, and stores scores. The
+tool package is independent of OpenHands; the backend supplies trusted
+workspace credentials and owner-confirmation context when launching it.

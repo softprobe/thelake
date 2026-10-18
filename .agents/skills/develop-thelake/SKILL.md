@@ -9,6 +9,10 @@ Use this for code changes in this repository. Keep the change inside the public
 open-source product; never add private cloud implementation details, credentials,
 customer data, or internal-only endpoints.
 
+For Lisa service, policy, or evaluation changes, also use
+[`develop-lisa`](../develop-lisa/SKILL.md), which captures Lisa's production
+service boundaries and current Decisions-to-Gemini workflow.
+
 ## Before editing
 
 - Read the repository `AGENTS.md` and the relevant authoritative docs. Route by

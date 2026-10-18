@@ -64,7 +64,10 @@ scheduled QA.
 When Lisa's scheduled evaluation finds a failure, she stores the score in
 TheLake and posts the finding to the Slack thread associated with the check, or
 to `LISA_SLACK_CHANNEL_ID` when the check has no Slack binding.
-The alert includes the affected agent, session, policy, and judge rationale.
+Before a finding can be posted, OpenAI Decisions triages every approved
+candidate policy and Gemini judges only suspected violations or unresolved
+evidence. The alert includes the affected agent, session, policy, and judge
+rationale; a Decisions `no_violation_found` result does not create a pass score.
 Lisa keeps delivery receipts in her persistent workspace data so later
 scheduled cycles suppress repeat alerts for the same policy, trace,
 and Slack destination. A duplicate is still possible if Slack accepts a message

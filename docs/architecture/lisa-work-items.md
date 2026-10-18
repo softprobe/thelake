@@ -1,5 +1,12 @@
 # Lisa work items and run context
 
+> This document describes the durable work-item architecture and its intended
+> boundaries. For the current policy-evaluation request path, see
+> [Lisa QA](lisa-qa.md): `EvaluationService` loads approved candidate policies
+> from PostgreSQL, calls Decisions triage for every candidate, and sends only
+> suspected violations or insufficient evidence to the Gemini judge. A triage
+> negative is not a passing score.
+
 ## Purpose
 
 Lisa should remain one assistant with one main conversation. That conversation is
@@ -49,6 +56,9 @@ or product-specific activity types.
    inspect `lisa.policies` but cannot change policy text or approval. At judge
    time, Lisa loads the current approved rule by policy ID and passes it to the
    evaluator; evaluation rows keep the policy ID, not a copied policy body.
+   In the implemented policy-evaluation path, the service resolves the effective
+   approved candidate set, sends every candidate to Decisions, retains each
+   routing decision, and supplies only escalated policies to the judge.
 7. **Consequential actions require explicit approval.** Approval is attached
    to the exact work item and proposed action, and is recorded as a durable
    decision by a trusted user-facing transport. The model cannot approve its
@@ -222,12 +232,15 @@ user-visible explanations instead.
    transactionally, using an idempotency key from the triggering request.
 2. **Store trajectory inputs.** The runner stores the compact session trajectory
    in an `evaluation_inputs` context item and `inputs.json` run artifact so a
-   retry does not silently re-query changed session data. The approved policy
-   is loaded from `lisa.policies` at judge time and passed to the evaluator; it
-   is not copied onto the evaluation row.
+   retry does not silently re-query changed session data. Approved candidates
+   are loaded from `lisa.policies`; Decisions triages all candidates and the
+   Gemini judge receives only escalated policies. The policy ID, rather than a
+   copied policy body, remains on the evaluation row.
 3. **Claim and execute.** A worker claims the queued item with a lease, records
-   a start event, loads the run inputs, and judges the stored trajectory
-   against the current approved policy. Only initial preparation fetches
+   a start event, loads the run inputs, and follows the production policy flow:
+   retrieve approved candidates from `PolicyService`, triage all candidates
+   through Decisions, then judge only escalations against the approved policy.
+   Only initial preparation fetches
    bounded session detail via TheLake's existing query path. It writes
    checkpoints and meaningful events as it progresses.
 4. **Approve when required.** If an action crosses the configured approval
@@ -264,8 +277,9 @@ the unfinished children.
 `lisa.policies` is the editable policy source, including its approval state.
 Policy tools display and accept a readable Markdown form. Each rule has a
 short paragraph-style ID (`P1.1`, `P1.2`, …) that remains stable when the rule
-is edited. Evaluation runs keep the policy ID; at judge time Lisa loads the
-current approved rule from `lisa.policies` and passes it to the evaluator.
+is edited. Evaluation runs keep the policy ID. The current evaluation service
+loads the approved candidate set from `lisa.policies`, triages each candidate,
+and passes only escalated policies to the judge.
 Lisa must not silently modify policy or change approval state as a side effect
 of judging. Policy approval answers whether a policy may be used for
 evaluation; `approval_requests` answer whether Lisa may perform a specific
@@ -296,28 +310,29 @@ resume a work item, but the work-item state is authoritative once created. A
 one-off question should remain a chat exchange; it does not need a work item
 unless it creates follow-up, execution, or a durable evaluation record.
 
-## Provisioning and rollout
+## Implementation status and remaining work
 
-1. Add Lisa operational database configuration, the current `schema.sql`,
-   deployment-bound roles, and the tables above. Keep this separate from the
-   DuckLake catalog. Do not introduce upgrade migrations.
-2. Implement repository methods and typed lifecycle tools, plus the documented
-   read-only `lisa.db` query interface and schema resource.
-3. Move evaluation idempotency/locking and run status from filesystem-only
-   locks/metadata into Postgres. Keep the current evaluation score write path
-   and store its returned ID in `evaluation_runs`.
-4. Create a context directory per run and make the evaluator consume only the
-   run's selected context and trajectory. Add checkpoint/lease recovery before
-   enabling long-running background work.
-5. Change scheduled evaluation to create a batch and child runs. Surface
-   lifecycle messages in the single main chat and render details from the
-   work-item event stream.
+Lisa now has PostgreSQL provisioning for its workspace-bound operational
+database, typed repositories and MCP lifecycle tools, a bounded read-only
+`lisa_db` interface, and persisted work items for individual evaluations.
+`EvaluationService` stores evaluation inputs, claims work with leases, writes
+scores through an outbox, and can recover interrupted score writes. Policy
+triage and judge execution use the production path documented in
+[Lisa QA](lisa-qa.md).
 
-Roll out first with one extracted benchmark agent and one approved policy:
-verify creation, retry/idempotency, isolated context, event order, score
-linkage, crash recovery, approval wait/resume, and the user-visible result.
-Then run the existing Lisa dogfood evaluation and session-sampling checks
-before expanding to more policies or proactive task kinds.
+The remaining product work is to make scheduled sweeps create a parent batch
+and child work items, then expose their progress and outcomes as a readable
+activity timeline in Lisa's main conversation and UI. The current scheduler
+still performs bounded session sampling in a model turn; it does not provide a
+durable resumable batch with independent child status. Richer per-run context
+selection and checkpointing should be designed around the existing persisted
+inputs, events, and lease recovery rather than recreating those mechanisms.
+
+Before enabling durable scheduled batches, verify batch and child idempotency,
+isolated context, event ordering, score linkage, crash recovery, approval
+wait/resume where relevant, and the user-visible result. Use the production-path
+evaluation and dogfood workflows as quality checks; do not treat a standalone
+judge call as validation of the scheduled workflow.
 
 ## References
 

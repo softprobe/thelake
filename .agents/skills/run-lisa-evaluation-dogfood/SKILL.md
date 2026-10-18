@@ -5,8 +5,9 @@ description: Verify Lisa's workspace conversation, autonomous sampling, online e
 
 # Run Lisa evaluation dogfood
 
-Lisa is the proactive agent. TheLake stores and serves telemetry, evaluator
-definitions, and scores; telemetry ingestion does not call Lisa.
+Lisa owns approved policies, evaluation decisions, and scheduling. TheLake
+stores and serves telemetry and resulting scores; telemetry ingestion does not
+call Lisa.
 
 ## Verification levels
 
@@ -23,7 +24,8 @@ definitions, and scores; telemetry ingestion does not call Lisa.
   `OpenAIPolicyTriager` and injected session fixtures do not measure Lisa's
   production policy lookup or end-to-end session path.
 - For the real scheduled agent-to-issue path, run the quickstart E2E. It uses
-  the existing quickstart stack and makes paid Gemini calls.
+  the existing quickstart stack and makes paid OpenAI Decisions and Gemini
+  calls. Decisions triages all approved policies; Gemini judges only escalations.
 - For Markdown policy learning or review, use
   `skills/learn-agent-policy/SKILL.md` and
   `skills/review-agent-policy/SKILL.md`.

@@ -41,9 +41,10 @@ lisa/.venv/bin/python lisa/scripts/evaluate_policies.py \
 ```
 
 `--mode triage` uses Decisions only. `--mode judge` evaluates the presented
-catalog directly with Gemini. `--mode pipeline` runs Decisions then Gemini on
-suspected violations and uncertain evidence. Select another frozen catalog with
-`--manifest`; omit `--split` to run all manifest batches.
+catalog directly with Gemini as a harness-only diagnostic; it bypasses Lisa's
+production policy lookup and Decisions triage. `--mode pipeline` runs Decisions
+then Gemini on suspected violations and uncertain evidence. Select another
+frozen catalog with `--manifest`; omit `--split` to run all manifest batches.
 
 ## Production-path evaluation
 

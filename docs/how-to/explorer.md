@@ -169,9 +169,12 @@ not run shell commands or access a connected Git repository.
   Review it and send `Confirm policy rule: <exact heading>` to save the change.
   Approved rules are eligible immediately; there is no separate activation UI.
   Lisa's schedule reads policy and bounded session detail, builds a compact
-  trajectory, then runs OpenAI Decisions. It selects rules marked
-  `applicable`; Gemini then returns a categorical verdict and Lisa stores scores
-  with the policy ID and criteria in TheLake.
+  trajectory, then sends every approved candidate policy to OpenAI Decisions.
+  Decisions classifies each policy as `suspected_violation`,
+  `no_violation_found`, or `insufficient_evidence`; Lisa sends suspected and
+  uncertain cases to Gemini for a categorical verdict. Triage negatives do not
+  create pass scores. Lisa stores judge scores with the policy ID and criteria
+  in TheLake.
   `LISA_QA_CRON` is a five-field UTC cron expression, default hourly at minute 0;
   the `Lisa scheduled QA` job does not run on startup.
 - Conversations are stored in the runner's `lisa-data` volume, scoped by the
@@ -181,9 +184,10 @@ not run shell commands or access a connected Git repository.
 - Lisa uses the `GOOGLE_API_KEY` or `GEMINI_API_KEY` and `LISA_MODEL` settings
   in the Lisa container. Explorer connects directly to Lisa using `LISA_PUBLIC_URL`. Lisa reads TheLake
   using `LISA_THELAKE_API_URL` and `LISA_THELAKE_TOKEN`.
-- Lisa's evaluation tool uses `GOOGLE_API_KEY` or `GEMINI_API_KEY` and optional
-  `GEMINI_MODEL_NAME`. Lisa also needs a configured chat model and TheLake
-  service credentials to read sessions and write scores.
+- Lisa's evaluation flow uses `OPENAI_API_KEY` for Decisions triage, and
+  `GOOGLE_API_KEY` or `GEMINI_API_KEY` plus optional `GEMINI_MODEL_NAME` for the
+  judge. Lisa also needs a configured chat model and TheLake service credentials
+  to read sessions and write scores.
 
 ## Embed the React package
 
@@ -270,9 +274,10 @@ make test-explorer-online-e2e  # Real Gemini agent + Lisa's local judge, no serv
 cd packages/thelake-explorer && npm test
 ```
 
-The online E2E requires Docker and `GOOGLE_API_KEY` (or `GEMINI_API_KEY`). It
-makes real Gemini calls from the sample agent and evaluator, so provider usage
-may be billed. Its refund tool returns a local demo result; it does not connect
+The online E2E requires Docker, `GOOGLE_API_KEY` (or `GEMINI_API_KEY`), and
+`OPENAI_API_KEY`. It makes real Gemini calls from the sample agent and judge,
+and OpenAI calls for policy triage, so provider usage may be billed. Its refund
+tool returns a local demo result; it does not connect
 to an external ticketing or payment system.
 
 ## Related

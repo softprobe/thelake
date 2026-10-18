@@ -25,7 +25,8 @@ report commands and environmental limits accurately.
 ## Focused checks
 
 - Explorer browser path: `make test-explorer-ui`.
-- Live Gemini evaluator and browser path: `make test-explorer-online-e2e`.
+- Live Decisions triage, Gemini evaluator, and browser path:
+  `make test-explorer-online-e2e`.
   This uses paid provider calls; run only when explicitly requested and when
   credentials are securely provisioned.
 - Explorer component tests: `npm --prefix packages/thelake-explorer test`.

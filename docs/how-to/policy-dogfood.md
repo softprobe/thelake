@@ -3,7 +3,8 @@
 Use this small travel scenario to check three different claims independently:
 
 1. A coding agent can learn a supported rule from an authoritative source.
-2. The categorical Gemini judge distinguishes compliant behavior from a real
+2. Decisions triage routes possible violations and unresolved evidence to the
+   categorical Gemini judge, which distinguishes compliance from a real
    violation and refuses to pass incomplete trajectories.
 3. Lisa selects a captured session, runs the check, stores the score in
    TheLake, and reports a failure with its evidence.
@@ -43,9 +44,11 @@ score its output automatically.
 
 All examples use the [shared evaluation dataset](../../lisa/datasets/policy_evaluation/README.md).
 Itinerary controls include disclosure before confirmation, cancellation with a
-late warning, and incomplete capture. Their labels are proposed author judgments,
-not independently adjudicated gold. Run those explicit calibration checks with
-paid Gemini calls:
+late warning, and incomplete capture. Check each pair's review status in the
+shared dataset and use only `adjudicated` rows as quality labels. The release is
+AI-adjudicated rather than human-reviewed. The harness test calls the Gemini
+judge directly for calibration and does not exercise Decisions routing. Run
+those explicit checks with paid Gemini calls:
 
 ```bash
 LISA_RUN_EVALUATION_LIVE=1 uv run --project lisa --extra test pytest -q \
@@ -80,9 +83,9 @@ raise SystemExit(pytest.main(["lisa/tests/test_evaluation_live.py", "-v", "-rs"]
 PYCODE
 ```
 
-Judge calibration compares explicit annotations, including proposed author
-expectations. The MCP subset test injects both the annotated policy subset and a
-fixture trajectory, so it checks tool wiring and citations only; it does not
+Judge calibration compares explicit annotations. The MCP subset test injects
+both the annotated policy subset and a fixture trajectory, so it checks tool
+wiring and citations only; it does not
 measure candidate discovery from Lisa's PostgreSQL catalog or production
 session retrieval. Skipped tests do not establish quality. For labeled quality,
 use the [production-path evaluation skill](../../.agents/skills/run-lisa-policy-evaluation/SKILL.md),
@@ -98,10 +101,12 @@ Start the quickstart with the five-minute cron shown in [the quickstart](../quic
 python3 tests/e2e/quickstart_online_eval.py
 ```
 
-The driver saves an explicitly owner-approved policy, runs the deliberately flawed Gemini
-agent, waits for Lisa's configured schedule to pick up its trace, and verifies
-the persisted failure score plus Lisa's report. It makes provider calls and
-may incur Gemini charges. The test agent only simulates a local refund tool;
+The driver saves an explicitly owner-approved policy, runs the deliberately
+flawed Gemini agent, waits for Lisa's configured schedule to pick up its trace,
+and verifies the persisted failure score plus Lisa's report. It makes provider
+calls and may incur Gemini and OpenAI charges. The scheduled path sends the
+complete approved policy catalog through Decisions triage and asks Gemini to
+judge escalations. The test agent only simulates a local refund tool;
 it does not connect to a payment system.
 
 ## Interpreting the result
