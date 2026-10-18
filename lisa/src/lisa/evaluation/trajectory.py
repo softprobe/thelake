@@ -47,16 +47,10 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
         limitations.append("Session spans exceeded the 1000 span limit.")
     tool_names = [name for span in spans if (name := _tool_name(span))]
     idless_tool_name_counts = Counter(
-        name
-        for span in spans
-        if _tool_call_id(span) is None and (name := _tool_name(span))
+        name for span in spans if _tool_call_id(span) is None and (name := _tool_name(span))
     )
     matched_idless_tool_names: Counter[str] = Counter()
-    tool_call_ids = {
-        str(call_id)
-        for span in spans
-        if (call_id := _tool_call_id(span)) is not None
-    }
+    tool_call_ids = {str(call_id) for span in spans if (call_id := _tool_call_id(span)) is not None}
     tool_events_captured = bool(tool_names)
     tool_order_certain = True
 
@@ -105,7 +99,7 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
 
         prompt = attrs.get("sp.input", span.get("input"))
         for message in _messages(prompt, limitations):
-            if message["kind"] == "user_message":
+            if message["kind"] in {"user_message", "context_message"}:
                 raw_events.append((start, span_id, _event(span_id, parent_span_id, start, message)))
 
         completion = attrs.get("sp.output", span.get("output"))
@@ -120,11 +114,17 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
                 call_id = message.get("call_id")
                 if call_id and str(call_id) in tool_call_ids:
                     continue
-                if not call_id and name and matched_idless_tool_names[name] < idless_tool_name_counts[name]:
+                if (
+                    not call_id
+                    and name
+                    and matched_idless_tool_names[name] < idless_tool_name_counts[name]
+                ):
                     matched_idless_tool_names[name] += 1
                     continue
                 tool_events_captured = True
-                limitations.append(f"Tool call {message.get('name', 'unknown')} has no matching tool span.")
+                limitations.append(
+                    f"Tool call {message.get('name', 'unknown')} has no matching tool span."
+                )
                 raw_events.append((end, span_id, _event(span_id, parent_span_id, end, message)))
 
     # Parent and child telemetry can both carry the same transcript. Suppress
@@ -138,13 +138,13 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
     }
     message_times_by_span: dict[str, dict[tuple[str, str], list[str]]] = {}
     for timestamp, span_id, event in raw_events:
-        if event["kind"] in {"user_message", "assistant_message"}:
+        if event["kind"] in {"user_message", "assistant_message", "context_message"}:
             identity = (event["kind"], str(event.get("content") or ""))
             message_times_by_span.setdefault(span_id, {}).setdefault(identity, []).append(timestamp)
     events: list[tuple[str, str, dict]] = []
     occurrences_by_span: dict[str, Counter[tuple[str, str]]] = {}
     for timestamp, span_id, event in raw_events:
-        if event["kind"] in {"user_message", "assistant_message"}:
+        if event["kind"] in {"user_message", "assistant_message", "context_message"}:
             identity = (event["kind"], str(event.get("content") or ""))
             occurrences = occurrences_by_span.setdefault(span_id, Counter())
             occurrences[identity] += 1
@@ -156,7 +156,10 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
                 ancestor_times = message_times_by_span.get(ancestor_id, {}).get(identity, [])
                 ancestor_count = max(
                     ancestor_count,
-                    sum(_near_same_time(timestamp, ancestor_time) for ancestor_time in ancestor_times),
+                    sum(
+                        _near_same_time(timestamp, ancestor_time)
+                        for ancestor_time in ancestor_times
+                    ),
                 )
                 ancestor_id = parent_by_span.get(ancestor_id)
             if occurrences[identity] <= ancestor_count:
@@ -173,7 +176,7 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
             if timestamp == previous_tool_timestamp:
                 tool_order_certain = False
             previous_tool_timestamp = timestamp
-        if event["kind"] in {"user_message", "assistant_message"}:
+        if event["kind"] in {"user_message", "assistant_message", "context_message"}:
             message_spans_by_time.setdefault(timestamp, set()).add(span_id)
         normalized.append({"sequence": sequence, **event})
     return TrajectoryEvents(
@@ -188,8 +191,8 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
 def _near_same_time(left: str, right: str) -> bool:
     """Treat only near-simultaneous parent/child copies as the same turn."""
     try:
-        left_time = datetime.fromisoformat(left.replace("Z", "+00:00"))
-        right_time = datetime.fromisoformat(right.replace("Z", "+00:00"))
+        left_time = datetime.fromisoformat(left)
+        right_time = datetime.fromisoformat(right)
     except ValueError:
         return False
     return abs((left_time - right_time).total_seconds()) <= 0.05
@@ -198,7 +201,9 @@ def _near_same_time(left: str, right: str) -> bool:
 def _tool_name(span: dict) -> str | None:
     attrs = span.get("attributes") if isinstance(span.get("attributes"), dict) else {}
     tool_name = attrs.get("gen_ai.tool.name") or span.get("tool_name")
-    observation_type = str(attrs.get("observation_type") or span.get("observation_type") or span.get("type") or "").lower()
+    observation_type = str(
+        attrs.get("observation_type") or span.get("observation_type") or span.get("type") or ""
+    ).lower()
     if not tool_name and "tool" in observation_type:
         tool_name = span.get("name")
     return str(tool_name) if tool_name else None
@@ -248,11 +253,15 @@ def _messages(value: object, limitations: list[str], output: bool = False) -> li
             # not observed behavior. Tool calls/results are represented by spans.
             if role == "assistant" and output and isinstance(item.get("tool_calls"), list):
                 messages.extend(_tool_call_messages(item["tool_calls"]))
-            if role not in {"user", "assistant"} or content is None:
+            if role not in {"user", "assistant", "context"} or content is None:
                 continue
             messages.append(
                 {
-                    "kind": "user_message" if role == "user" else "assistant_message",
+                    "kind": {
+                        "user": "user_message",
+                        "assistant": "assistant_message",
+                        "context": "context_message",
+                    }[role],
                     "content": _text(content, limitations),
                 }
             )

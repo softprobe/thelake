@@ -66,8 +66,8 @@ def test_pair_judge_calibration(pair):
     ),
 )
 @pytest.mark.parametrize("batch", BATCHES, ids=lambda batch: batch.trajectory_ref)
-def test_catalog_selection_through_mcp(batch, monkeypatch, tmp_path):
-    """Exercise Lisa's MCP evaluation path and judge every policy it selects."""
+def test_manifest_policy_subset_harness_through_mcp(batch, monkeypatch, tmp_path):
+    """Calibrate MCP behavior with annotated pair policies; not production recall."""
     rules = {
         ref: PolicyRule(id=ref, **DATA.policies[ref].policy.model_dump())
         for ref in batch.policy_refs

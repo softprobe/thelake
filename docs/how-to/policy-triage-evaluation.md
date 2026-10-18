@@ -5,12 +5,12 @@ There is one schema and loader: trajectories, exact policies, sparse pair
 annotations, and a manifest pinning revisions, file hashes, splits and policy
 catalogs. Synthetic, STATE-Bench and itinerary examples use that same schema.
 
-The release contains 48 trajectories, 17 policies, 223 annotations and 313
-presented pairs. Only the 210 AI-adjudicated synthetic annotations enter accuracy
-metrics. Thirteen proposed author annotations remain available for explicit
-calibration checks, and 90 unreviewed pairs remain unlabeled. No absent annotation
-is treated as a negative. Read the [synthetic example review](policy-triage-dataset-review.md)
-for review findings and remaining quality limits.
+The official release contains 48 trajectories, 18 policies, and 202 curated
+adjudicated pairs: 17 violations, 18 compliant, 143 not applicable, and 24
+insufficient evidence. There are 425 annotation records including earlier
+revisions; the manifest selects the current 202. No absent annotation is treated
+as a negative. See the dataset [release review](../../lisa/datasets/policy_evaluation/synthesize/release.md)
+for annotation provenance and limitations.
 
 ## Offline validation
 
@@ -24,9 +24,15 @@ lisa/.venv/bin/python -m pytest -q \
 Checks cover record integrity, sparse annotations, input isolation, metric
 arithmetic and provider wiring. Mocked results do not establish model quality.
 
-## Live evaluation
+## Pair-harness calibration
 
-With credentials provisioned, explicitly opt into paid inference:
+`lisa/scripts/evaluate_policies.py` calls the triager directly with each
+manifest batch's `policy_refs`. It is useful for prompt calibration, but it
+does **not** measure production selection when the batch contains only the
+annotated policies. Do not report its recall as Lisa production quality.
+
+With credentials provisioned, use it only for an explicitly requested
+harness diagnostic:
 
 ```sh
 lisa/.venv/bin/python lisa/scripts/evaluate_policies.py \
@@ -39,11 +45,37 @@ catalog directly with Gemini. `--mode pipeline` runs Decisions then Gemini on
 suspected violations and uncertain evidence. Select another frozen catalog with
 `--manifest`; omit `--split` to run all manifest batches.
 
-Reports retain every presented pair, exact manifest digest, available annotation
-revision/status, actual decisions and judge responses. Proposed, disputed and
-unreviewed pairs contribute to workload, but not accuracy. Provider execution
-failures abort rather than becoming healthy negatives. Reports stay outside the
-dataset; keep reports private when evaluating private inputs.
+## Production-path evaluation
+
+Production quality runs must call Lisa's `EvaluationService` with the full
+approved catalog loaded into Lisa's PostgreSQL policy database through
+`PolicyService`. A manifest's sparse pair list is scoring truth, never the
+candidate-policy source. The runner below uses a unique evaluation agent scope,
+reads approved candidates back from PostgreSQL, ingests dataset trajectories
+into local TheLake, and calls the production `EvaluationService.evaluate_session`
+through its normal session and policy services:
+
+```bash
+LISA_LLM_TRACE_ENABLED=1 uv run --project lisa --env-file .env \
+  python lisa/scripts/evaluate_policy_dataset.py --live \
+  --manifest /tmp/policy-sample/manifests/sample.json \
+  --output /tmp/policy-sample/production-report.json
+```
+
+Start the runner against a fresh local quickstart Compose project and workspace;
+do not use a user's existing Lisa database. The runner uses the complete catalog
+from `evaluation.json` by default, even if the sample manifest references only
+one labeled policy per trajectory. It verifies that Lisa reads the full catalog
+from PostgreSQL and that the reconstructed sessions remain complete before
+making provider calls. `LISA_LLM_TRACE_ENABLED=1` records the actual Decisions
+and Gemini request/response artifacts under the isolated workspace data dir.
+Keep them and the report private. Provider failures abort; they do not become
+healthy negatives.
+
+Accuracy joins Lisa's decisions to adjudicated labels for those exact
+trajectory-policy pairs. Unlabeled candidate decisions contribute to candidate
+coverage and workload only; they are never scored as negatives. Capture-gated
+trajectories are reported separately.
 
 The current runtime stops before model calls for incomplete captures or uncertain
 ordering. The runner mirrors that gate and records gated pairs separately. Of

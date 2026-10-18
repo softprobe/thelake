@@ -39,7 +39,7 @@ Keep this as a human-reviewed stage while the skill runs inside each user's
 coding agent. TheLake does not currently execute the policy-learning skill or
 score its output automatically.
 
-## 2. Calibrate the evaluator
+## 2. Calibrate the evaluator harness
 
 All examples use the [shared evaluation dataset](../../lisa/datasets/policy_evaluation/README.md).
 Itinerary controls include disclosure before confirmation, cancellation with a
@@ -81,12 +81,14 @@ PYCODE
 ```
 
 Judge calibration compares explicit annotations, including proposed author
-expectations. The MCP path checks every adjudicated violation survives triage,
-one judge request and score per escalation, and valid citations. It injects the
-trajectory at the session boundary; raw telemetry conversion is tested separately.
-Skipped tests do not establish quality. These short examples do not establish
-production recall. See [the evaluation guide](policy-triage-evaluation.md) for
-metrics scored only against adjudicated annotations and dataset expansion.
+expectations. The MCP subset test injects both the annotated policy subset and a
+fixture trajectory, so it checks tool wiring and citations only; it does not
+measure candidate discovery from Lisa's PostgreSQL catalog or production
+session retrieval. Skipped tests do not establish quality. For labeled quality,
+use the [production-path evaluation skill](../../.agents/skills/run-lisa-policy-evaluation/SKILL.md),
+which loads the full policy catalog through Lisa's policy-management service and
+calls `EvaluationService` against TheLake sessions. See [the evaluation guide](policy-triage-evaluation.md)
+for metrics and limits.
 
 ## 3. Verify Lisa's scheduled QA cycle
 

@@ -10,7 +10,7 @@ VALUES (
               AND target_agent_name = %(target_agent_name)s
               AND name = %(name)s
         ),
-        format('P1.%s', nextval('lisa.policy_paragraph_id_seq'))
+        format('P1.%%s', nextval('lisa.policy_paragraph_id_seq'))
     ),
     %(scope)s, %(target_agent_name)s, %(name)s, %(criteria)s, %(approved)s, NULL
 )

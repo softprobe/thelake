@@ -7,9 +7,7 @@ from pathlib import Path
 
 
 def _schema_sql() -> str:
-    return files("lisa").joinpath("sql", "work_items", "schema.sql").read_text(
-        encoding="utf-8"
-    )
+    return files("lisa").joinpath("sql", "work_items", "schema.sql").read_text(encoding="utf-8")
 
 
 def test_schema_is_a_clean_create_not_an_upgrade_migration():
@@ -28,10 +26,27 @@ def test_evaluation_runs_require_policy_id():
 
 
 def test_provision_script_requires_explicit_recreate_for_existing_schema():
-    script = (
-        Path(__file__).resolve().parents[1] / "scripts" / "provision_lisa.py"
-    ).read_text(encoding="utf-8")
+    script = (Path(__file__).resolve().parents[1] / "scripts" / "provision_lisa.py").read_text(
+        encoding="utf-8"
+    )
     assert "LISA_DATABASE_RECREATE" in script
     assert "DROP SCHEMA IF EXISTS lisa CASCADE" in (
         files("lisa").joinpath("sql", "work_items", "drop_schema.sql").read_text()
     )
+
+
+def test_database_creation_uses_the_provisioning_connection_owner():
+    statement = (
+        files("lisa")
+        .joinpath("sql", "work_items", "create_lisa_database.sql")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
+    assert statement == "CREATE DATABASE lisa"
+
+
+def test_policy_insert_escapes_postgres_format_percent_for_psycopg():
+    statement = (
+        files("lisa").joinpath("sql", "policies", "save_policy.sql").read_text(encoding="utf-8")
+    )
+    assert "format('P1.%%s', nextval" in statement

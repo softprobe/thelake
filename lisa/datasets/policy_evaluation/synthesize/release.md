@@ -119,5 +119,10 @@ approval/denial results tied to the action identity and time, and independently
 established emergency exceptions. Do not convert this known coverage gap into
 confident labels.
 
-For later Lisa evaluation, use `lisa/scripts/evaluate_policies.py`; its default
-manifest is this release. Paid prediction runs remain an explicit later action.
+For production-path Lisa evaluation, use the `run-lisa-policy-evaluation` skill
+and `lisa/scripts/evaluate_policy_dataset.py`. That runner loads this complete
+policy catalog through Lisa's policy-management service into a disposable
+PostgreSQL workspace, ingests trajectories into TheLake, and invokes Lisa's
+`EvaluationService`. `lisa/scripts/evaluate_policies.py` is a manifest-fed
+triager harness for prompt calibration only; its metrics do not establish Lisa
+production quality.

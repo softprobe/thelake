@@ -13,10 +13,15 @@ definitions, and scores; telemetry ingestion does not call Lisa.
 - For evaluator behavior without provider calls, run the fixture tests in
   `lisa`. `test_evaluation_prompt.py` verifies all canonical evaluation trajectories
   and their exact selector/judge inputs; mocked responses do not prove quality.
-- For labeled model quality, run `test_evaluation_live.py` with
-  `LISA_RUN_EVALUATION_LIVE=1`. It reports each annotated pair separately for the
-  Gemini judge and for Decisions selection followed by judging. See the
-  shared dataset command in `docs/how-to/policy-dogfood.md`.
+- For labeled model quality, use `run-lisa-policy-evaluation`. It must load the
+  complete dataset policy catalog through Lisa's policy-management service into
+  a disposable PostgreSQL workspace, ingest trajectories into TheLake, and
+  call Lisa's production `EvaluationService`. A manifest-only triager run or a
+  test that injects policies/trajectories is calibration, not production
+  quality evidence.
+- `test_evaluation_live.py` is harness calibration. Its direct
+  `OpenAIPolicyTriager` and injected session fixtures do not measure Lisa's
+  production policy lookup or end-to-end session path.
 - For the real scheduled agent-to-issue path, run the quickstart E2E. It uses
   the existing quickstart stack and makes paid Gemini calls.
 - For Markdown policy learning or review, use
@@ -26,10 +31,10 @@ definitions, and scores; telemetry ingestion does not call Lisa.
   stored and the pending failure has a captured Slack destination.
 
 The shared dataset distinguishes proposed author labels from AI-adjudicated
-annotations. Calibration checks can compare proposed labels, but accuracy metrics
-use adjudicated pairs only. Prompt tuning on these visible examples is calibration,
-not independent holdout evidence. Preserve the first failure and never change
-annotations merely to match model output.
+annotations. Production-path accuracy metrics use adjudicated pairs only;
+unlabeled candidate policies are not negatives. Prompt tuning on visible
+examples is calibration, not independent holdout evidence. Preserve the first
+failure and never change annotations merely to match model output.
 
 ## Preconditions
 
