@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -104,15 +105,15 @@ def mutate(path, kind, change):
 def test_release_has_all_sources_without_inventing_pairs():
     data = load_dataset(ROOT / "manifests/evaluation.json")
     assert len(data.trajectories) == 48
-    assert len(data.annotations) == 223
-    assert len(data.pairs()) == 223
-    assert len(data.pairs(adjudicated_only=True)) == 210
+    assert len(data.annotations) == 425
+    assert len(data.pairs()) == 202
+    assert len(data.pairs(adjudicated_only=True)) == 202
     assert {t.provenance["source"] for t in data.trajectories.values()} == {
         "synthetic",
         "state_bench",
         "connected_itinerary",
     }
-    assert sum(len(batch.policy_refs) for batch in data.manifest.batches) == 313
+    assert sum(len(batch.policy_refs) for batch in data.manifest.batches) == 202
 
 
 def test_pair_builds_only_runtime_inputs(tmp_path):
@@ -227,7 +228,12 @@ def test_all_source_inputs_use_opaque_ids_and_hide_annotations():
 
 def test_itinerary_controls_preserve_warning_before_confirmation_and_action():
     data = load_dataset()
-    pairs = [p for p in data.pairs() if p.trajectory.provenance["source"] == "connected_itinerary"]
+    pairs = [
+        p
+        for p in data.pairs()
+        if p.trajectory.provenance["source"] == "connected_itinerary"
+        and p.policy.policy.name == "Connected itinerary disclosure"
+    ]
     assert {p.annotation.outcome for p in pairs} == {
         "compliant",
         "violation",
@@ -243,3 +249,58 @@ def test_itinerary_controls_preserve_warning_before_confirmation_and_action():
     assert warning < confirmation < cancellation
     incomplete = next(p for p in pairs if p.annotation.outcome == "insufficient_evidence")
     assert not incomplete.trajectory.trajectory.complete
+
+
+def test_official_golden_release_exactly_covers_curated_pairs():
+    data = load_dataset(ROOT / "manifests/evaluation.json")
+    selected = [json.loads(line) for line in (ROOT / "golden_pairs.jsonl").read_text().splitlines()]
+    expected = {(row["trajectory_ref"], row["policy_ref"]) for row in selected}
+    actual = {(pair.trajectory.ref, pair.policy.ref) for pair in data.pairs()}
+    catalog = {
+        (batch.trajectory_ref, policy_ref)
+        for batch in data.manifest.batches
+        for policy_ref in batch.policy_refs
+    }
+    assert len(expected) == len(selected) == 202
+    assert actual == catalog == expected
+    assert len(data.pairs(adjudicated_only=True)) == 202
+    assert Counter(pair.annotation.outcome for pair in data.pairs()) == {
+        "violation": 17,
+        "compliant": 18,
+        "not_applicable": 143,
+        "insufficient_evidence": 24,
+    }
+    assert all(
+        any(
+            review.kind == "ai" and "adjudicat" in review.scope.lower()
+            for review in pair.annotation.reviews
+        )
+        for pair in data.pairs()
+    )
+    splits = sorted((batch.trajectory_ref, batch.split) for batch in data.manifest.batches)
+    assert (
+        hashlib.sha256(json.dumps(splits).encode()).hexdigest()
+        == "39a883b9dab5fa6a10f7b2b07391d5e9399c6df21e48a0d599e20a8226a43003"
+    )
+
+
+def test_annotation_identity_never_moves_between_pairs():
+    data = load_dataset(ROOT / "manifests/evaluation.json")
+    identities = {}
+    for annotation in data.annotations.values():
+        pair = (annotation.trajectory_ref, annotation.policy_ref)
+        assert identities.setdefault(annotation.id, pair) == pair
+    assert all(
+        pair.annotation.reviews[-1].outcome == pair.annotation.outcome for pair in data.pairs()
+    )
+    latest = {}
+    for annotation in data.annotations.values():
+        latest[annotation.id] = max(latest.get(annotation.id, 0), annotation.revision)
+    assert all(pair.annotation.revision == latest[pair.annotation.id] for pair in data.pairs())
+
+
+def test_official_release_preserves_prior_annotation_revisions():
+    history = (ROOT / "annotations.jsonl").read_bytes().splitlines(keepends=True)[:223]
+    assert hashlib.sha256(b"".join(history)).hexdigest() == (
+        "b935ec4b8067db709fe8e62038a7777cdefbacb3052e35152228d1c92ec119a0"
+    )

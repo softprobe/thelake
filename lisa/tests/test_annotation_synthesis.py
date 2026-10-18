@@ -17,7 +17,19 @@ spec.loader.exec_module(synthesis)
 
 
 def selection():
-    return synthesis.Selection.model_validate_json((DIRECTORY / "selection.json").read_text())
+    # Explicit nine-pair smoke sample; production only consumes listed pairs.
+    trajectories = ["t_91c1305c0b999fed@1", "t_f2b75cbf276b4d5c@1", "t_353325e9f04ccc1c@1"]
+    policies = ["p_edfd18f238cbfbe6@1", "p_16941d28a98e672e@1", "p_b521b5c8e42de53d@1"]
+    return [
+        synthesis.SelectedPair(trajectory_ref=t, policy_ref=p)
+        for t in trajectories
+        for p in policies
+    ]
+
+
+def write_pairs(path, selected):
+    path.write_text("".join(row.model_dump_json(exclude_none=True) + "\n" for row in selected))
+    return path
 
 
 class FakeClient:
@@ -72,12 +84,10 @@ def test_selection_is_exactly_three_by_three():
     assert all(t.provenance["source"] == "synthetic" for t, _ in pairs)
 
 
-@pytest.mark.parametrize("field", ["trajectory_refs", "policy_refs"])
-def test_selection_rejects_duplicate_or_expanded_inputs(field):
-    chosen = selection().model_dump()
-    chosen[field].append(chosen[field][0])
-    with pytest.raises(ValueError):
-        synthesis.Selection.model_validate(chosen)
+def test_selection_rejects_duplicate_pairs():
+    selected = selection()
+    with pytest.raises(ValueError, match="Duplicate"):
+        synthesis.select_pairs(load_dataset(), [*selected, selected[0]], max_pairs=10)
 
 
 def test_prompts_hide_labels_and_keep_full_incomplete_evidence():
@@ -220,7 +230,7 @@ def test_resume_rejects_different_request_configuration(tmp_path):
 
 
 def test_unknown_selection_fails_before_provider_calls(tmp_path):
-    chosen = selection().model_copy(update={"policy_refs": ["unknown@1"]})
+    chosen = [selection()[0].model_copy(update={"policy_ref": "unknown@1"})]
     client = FakeClient()
     with pytest.raises(ValueError, match="unknown policy"):
         synthesis.run(load_dataset(), chosen, tmp_path, client)
@@ -228,7 +238,10 @@ def test_unknown_selection_fails_before_provider_calls(tmp_path):
 
 
 def test_cli_requires_explicit_live_authorization_before_client(tmp_path, monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["annotate.py", "--output", str(tmp_path)])
+    pair_file = write_pairs(tmp_path / "pairs.jsonl", selection())
+    monkeypatch.setattr(
+        sys, "argv", ["annotate.py", "--pairs", str(pair_file), "--output", str(tmp_path)]
+    )
     monkeypatch.setattr(
         synthesis, "ADCClient", lambda *_: pytest.fail("No provider initialization")
     )
@@ -239,7 +252,18 @@ def test_cli_requires_explicit_live_authorization_before_client(tmp_path, monkey
 
 def test_cli_enforces_pair_limit_before_client(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        sys, "argv", ["annotate.py", "--output", str(tmp_path), "--live", "--max-pairs", "8"]
+        sys,
+        "argv",
+        [
+            "annotate.py",
+            "--pairs",
+            str(write_pairs(tmp_path / "pairs.jsonl", selection())),
+            "--output",
+            str(tmp_path),
+            "--live",
+            "--max-pairs",
+            "8",
+        ],
     )
     monkeypatch.setattr(
         synthesis, "ADCClient", lambda *_: pytest.fail("No provider initialization")
@@ -253,7 +277,10 @@ def test_cli_wires_the_nine_pair_run_and_closes_client(tmp_path, monkeypatch, ca
     closed = []
     client.close = lambda: closed.append(True)
     monkeypatch.setattr(synthesis, "ADCClient", lambda *_: client)
-    monkeypatch.setattr(sys, "argv", ["annotate.py", "--live", "--output", str(tmp_path)])
+    pair_file = write_pairs(tmp_path / "pairs.jsonl", selection())
+    monkeypatch.setattr(
+        sys, "argv", ["annotate.py", "--pairs", str(pair_file), "--live", "--output", str(tmp_path)]
+    )
     synthesis.main()
     assert len(client.requests) == 18
     assert closed == [True]
@@ -278,12 +305,7 @@ def test_matching_label_with_different_evidence_requires_review(tmp_path):
             return response
 
     chosen = selection()
-    chosen = chosen.model_copy(
-        update={
-            "trajectory_refs": chosen.trajectory_refs[1:2],
-            "policy_refs": chosen.policy_refs[1:2],
-        }
-    )
+    chosen = [chosen[4]]
     report = synthesis.run(load_dataset(), chosen, tmp_path, DifferentEvidenceClient())
     assert report["agreement_count"] == 0
     assert report["outcome_agreement_count"] == 1
@@ -364,3 +386,80 @@ def test_missing_or_invalid_usage_does_not_discard_valid_judgments(tmp_path, usa
     assert report["new_calls_without_usage"] == 18
     assert report["token_usage_complete"] is False
     assert report["new_response_tokens"] == 0
+
+
+def test_curated_pairs_are_not_expanded(tmp_path):
+    selected = [selection()[0], selection()[4]]
+    report = synthesis.run(load_dataset(), selected, tmp_path, FakeClient())
+    assert report["pair_count"] == 2
+    assert report["attempted_calls"] == 4
+    rows = [json.loads(line) for line in (tmp_path / "annotations.jsonl").read_text().splitlines()]
+    assert [(r["trajectory_ref"], r["policy_ref"]) for r in rows] == [
+        (r.trajectory_ref, r.policy_ref) for r in selected
+    ]
+
+
+def test_load_curated_file_preserves_rows_and_metadata():
+    data = load_dataset()
+    path = DIRECTORY.parent / "golden_pairs.jsonl"
+    selected, file_digest = synthesis.load_pairs(path, data)
+    assert len(selected) == 202
+    assert sum(p.domain_applicable is True for p in selected) == 72
+    assert sum(p.domain_applicable is False for p in selected) == 130
+    assert len(file_digest) == 64
+    assert len(synthesis.select_pairs(data, selected, max_pairs=202)) == 202
+    with pytest.raises(ValueError, match="pair limit"):
+        synthesis.select_pairs(data, selected)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"trajectory_ref": "unknown@1", "policy_ref": "unknown@1"},
+        {
+            "trajectory_ref": "t_91c1305c0b999fed@1",
+            "policy_ref": "p_edfd18f238cbfbe6@1",
+            "domain_applicable": "false",
+        },
+    ],
+)
+def test_invalid_tail_is_rejected_before_cli_limit(tmp_path, monkeypatch, row):
+    path = write_pairs(tmp_path / "pairs.jsonl", selection()[:1])
+    with path.open("a") as file:
+        file.write(json.dumps(row) + "\n")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["annotate.py", "--pairs", str(path), "--limit", "1", "--live", "--output", str(tmp_path)],
+    )
+    monkeypatch.setattr(
+        synthesis, "ADCClient", lambda *_: pytest.fail("No provider initialization")
+    )
+    with pytest.raises(ValueError):
+        synthesis.main()
+
+
+def test_domain_curation_metadata_never_becomes_model_input(tmp_path):
+    selected = [selection()[0].model_copy(update={"domain_applicable": False})]
+    client = FakeClient()
+    synthesis.run(load_dataset(), selected, tmp_path, client)
+    assert all("domain_applicable" not in json.dumps(request) for request in client.requests)
+    record = json.loads((tmp_path / "run.json").read_text())
+    assert record["pairs"][0]["domain_applicable"] is False
+
+
+def test_cli_explicit_limit_records_full_pair_source(tmp_path, monkeypatch, capsys):
+    client = FakeClient()
+    client.close = lambda: None
+    monkeypatch.setattr(synthesis, "ADCClient", lambda *_: client)
+    monkeypatch.setattr(
+        sys, "argv", ["annotate.py", "--live", "--limit", "2", "--output", str(tmp_path)]
+    )
+    synthesis.main()
+    report = json.loads((tmp_path / "run.json").read_text())
+    assert len(client.requests) == 4
+    assert len(report["pairs"]) == 2
+    assert report["pair_source"]["total_pairs"] == 202
+    assert report["pair_source"]["limit"] == 2
+    assert len(report["pair_source"]["digest"]) == 64
+    assert '"available_pairs": 202' in capsys.readouterr().out

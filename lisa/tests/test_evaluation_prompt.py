@@ -49,7 +49,8 @@ def test_evaluation_transcript_preserves_each_message_and_tool_payload(pair):
                 event["payload"], ensure_ascii=False, separators=(",", ":")
             )
             assert compact_payload in view.text
-    assert f"[{aliases[pair.annotation.evidence[0]]}]" in view.text
+    for span in pair.annotation.evidence:
+        assert f"[{aliases[span]}]" in view.text
     assert "statebench-fixture:" not in view.text
     assert trajectory == before
     assert len(view.text) < len(json.dumps(events, ensure_ascii=False))
@@ -67,6 +68,7 @@ def test_evaluation_transcript_reaches_both_provider_boundaries(pair, monkeypatc
     expected_status = {
         "violation": "fail",
         "compliant": "pass",
+        "not_applicable": "pass",
         "insufficient_evidence": "uncertain",
     }[pair.annotation.outcome]
     client = FakeDecisionsClient(
@@ -81,10 +83,14 @@ def test_evaluation_transcript_reaches_both_provider_boundaries(pair, monkeypatc
     )
     assert [item["name"] for item in selection["selected_policies"]] == [pair.policy.policy.name]
     judge_view = format_trajectory_for_llm(pair.request()["trajectory"]["events"])
+    # Negative gold may need no citations; the fake provider still cites a real event.
+    supporting_span = (
+        pair.annotation.evidence[0]
+        if pair.annotation.evidence
+        else pair.trajectory.trajectory.events[0].span_id
+    )
     supporting_alias = next(
-        alias
-        for alias, span in judge_view.span_id_map.items()
-        if span == pair.annotation.evidence[0]
+        alias for alias, span in judge_view.span_id_map.items() if span == supporting_span
     )
     captures = []
     closed = []
@@ -126,7 +132,7 @@ def test_evaluation_transcript_reaches_both_provider_boundaries(pair, monkeypatc
         criteria_line = client.request["input"].split(rule.name + "\n", 1)[1].splitlines()[0]
         assert json.loads('"' + criteria_line + '"') == rule.criteria
     assert result.status == expected_status
-    assert result.references[0].span_id == pair.annotation.evidence[0]
+    assert result.references[0].span_id == supporting_span
     assert not any("truncated" in limitation for limitation in result.limitations)
     assert closed == [True]
     assert pair == original

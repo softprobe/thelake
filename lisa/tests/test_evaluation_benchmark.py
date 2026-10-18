@@ -96,25 +96,22 @@ def test_enabled_judge_with_all_violations_skipped_has_zero_recall():
     assert metrics["end_to_end_detection_confusion"]["fn"] == 1
 
 
-def test_runs_every_catalog_pair_and_judges_only_escalations():
+@pytest.mark.parametrize("decision", ["suspected_violation", "insufficient_evidence"])
+def test_runs_every_catalog_pair_and_judges_only_escalations(decision):
     data = subset()
-    selector = OpenAIPolicySelector(
-        client=FakeDecisionsClient(
-            ["suspected_violation", "insufficient_evidence", *(["no_violation_found"] * 4)]
-        )
-    )
+    selector = OpenAIPolicySelector(client=FakeDecisionsClient([decision, "no_violation_found"]))
     requests = []
 
     def judge(request):
         requests.append(request)
-        return {"status": "fail" if request["policy"]["name"] == "Refund approval" else "pass"}
+        return {"status": "fail" if request["policy"]["name"] == "Deletion consent" else "pass"}
 
     report = benchmark().run(data, selector, judge)
-    assert len(report["rows"]) == 6
-    assert len(requests) == 2
+    assert len(report["rows"]) == 2
+    assert len(requests) == 1
     assert report["metrics"]["violation_recall"] == 1
     assert report["metrics"]["end_to_end_violation_recall"] == 1
-    assert sum(row["verdict"] is None for row in report["rows"]) == 4
+    assert sum(row["verdict"] is None for row in report["rows"]) == 1
     assert all(request["trajectory"] == requests[0]["trajectory"] for request in requests)
 
 
@@ -138,20 +135,32 @@ def test_capture_gate_stops_both_providers_and_is_not_scored():
         subset(incomplete=True), NoProviderCalls(), lambda _: pytest.fail("No judge call")
     )
     assert report["metrics"]["pair_count"] == 0
-    assert report["capture_gate"] == {"case_count": 4, "pair_count": 24}
+    assert report["capture_gate"] == {"case_count": 4, "pair_count": 6}
     assert all(row["gate_status"] == "insufficient_evidence" for row in report["rows"])
 
 
 def test_sparse_and_proposed_pairs_do_not_enter_accuracy():
     data = subset(source="state_bench")
-    selector = OpenAIPolicySelector(client=FakeDecisionsClient(["no_violation_found"] * 10))
+    batch = data.manifest.batches[0]
+    ref = batch.annotation_refs[0]
+    annotation = data.annotations[ref].model_copy(update={"status": "proposed"})
+    # Construct sparse coverage explicitly; the official release is fully adjudicated.
+    data = replace(
+        data,
+        annotations={**data.annotations, ref: annotation},
+        manifest=data.manifest.model_copy(
+            update={"batches": [batch.model_copy(update={"annotation_refs": [ref]})]}
+        ),
+    )
+    count = len(batch.policy_refs)
+    selector = OpenAIPolicySelector(client=FakeDecisionsClient(["no_violation_found"] * count))
     report = benchmark().run(data, selector, mode="triage")
-    assert len(report["rows"]) == 10
-    assert report["coverage"]["unlabeled_pair_count"] == 9
+    assert len(report["rows"]) == count
+    assert report["coverage"]["unlabeled_pair_count"] == count - 1
     assert report["coverage"]["proposed_pair_count"] == 1
     assert report["coverage"]["scored_pair_count"] == 0
     assert report["metrics"]["triage_accuracy"] is None
-    assert report["workload"]["eligible_pair_count"] == 10
+    assert report["workload"]["eligible_pair_count"] == count
     assert report["workload"]["escalation_rate"] == 0
 
 
@@ -160,12 +169,12 @@ def test_judge_only_mode_does_not_claim_triage_recall():
     assert report["metrics"]["triage_accuracy"] is None
     assert report["metrics"]["violation_recall"] is None
     assert report["metrics"]["end_to_end_violation_recall"] == 0
-    assert report["workload"]["judge_count"] == 6
+    assert report["workload"]["judge_count"] == 2
 
 
 def test_optional_ordering_flags_use_validated_defaults():
     data = subset()
-    record = next(iter(data.trajectories.values()))
+    record = data.trajectories[data.manifest.batches[0].trajectory_ref]
     payload = record.trajectory.model_dump(mode="json", exclude_unset=True)
     payload.pop("tool_order_certain")
     payload.pop("message_order_certain")
@@ -176,4 +185,19 @@ def test_optional_ordering_flags_use_validated_defaults():
     selector = OpenAIPolicySelector(client=FakeDecisionsClient(["no_violation_found"] * 6))
     report = benchmark().run(data, selector, mode="triage")
     assert report["capture_gate"]["pair_count"] == 0
-    assert report["metrics"]["pair_count"] == 6
+    assert report["metrics"]["pair_count"] == 2
+
+
+def test_official_release_executes_every_pair_through_the_shared_harness():
+    data = load_dataset()
+    maximum_catalog = max(len(batch.policy_refs) for batch in data.manifest.batches)
+    selector = OpenAIPolicySelector(
+        client=FakeDecisionsClient(["no_violation_found"] * maximum_catalog)
+    )
+    report = benchmark().run(data, selector, mode="triage")
+    assert len(report["rows"]) == 202
+    assert report["capture_gate"]["pair_count"] == 16
+    assert report["coverage"]["scored_pair_count"] == 186
+    assert report["coverage"]["unlabeled_pair_count"] == 0
+    assert report["coverage"]["proposed_pair_count"] == 0
+    assert report["metrics"]["triage_confusion"]["fn"] == 17

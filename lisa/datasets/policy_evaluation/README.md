@@ -44,11 +44,25 @@ resolution; conflicting reviews may remain in history. Adjudicated status
 requires review provenance and never implies human review. Annotation metadata
 is never supplied as model input.
 
-The current release contains 48 trajectories, 17 policies, 223 annotations and
-313 presented pairs. The 210 synthetic annotations are AI-adjudicated. The ten
-STATE-Bench and three itinerary annotations remain proposed author judgments.
-There are 90 unreviewed pairs in the STATE-Bench catalogs. All sources use the
-same loader and runtime request construction.
+The official release contains exactly the 202 curated pairs from
+`golden_pairs.jsonl`, across 48 trajectories and 18 policies. Every selected
+annotation is AI-adjudicated: 17 violations, 18 compliant, 143 not applicable,
+and 24 insufficient evidence. The shared annotation store contains 425 records,
+including 223 unchanged earlier revisions; the manifest selects only the 202
+current judgments. All sources use the same loader and runtime request
+construction. Default evaluation loads this official manifest.
+
+Each pair received two blind Gemini judgments and a separate blind Codex review
+of its full inputs, followed by explicit adjudication. This is AI-reviewed gold,
+not human-reviewed ground truth. See the [release review](synthesize/release.md)
+for generation configuration, disagreements, evidence decisions and limitations.
+Explicit scope exclusions and approval exemptions are not applicable. A caller's
+approval flag alone does not establish external approval or its absence.
+
+The selection is curated, not sampled from production prevalence. Aggregate
+accuracy and precision describe this selected set. Report violation recall and
+uncertainty handling separately; approval examples currently lack authoritative
+approval records and do not establish positive violation/compliance coverage.
 
 ## Splits and limits
 
@@ -69,5 +83,8 @@ using [the evaluation guide](../../../docs/how-to/policy-triage-evaluation.md).
 No model predictions are stored in these dataset files.
 
 Generate candidate annotations with the [synthesis tool](synthesize/README.md).
-Its checked-in verification selection is limited to three synthetic policies
-and three trajectories; generated candidates never publish themselves.
+It consumes explicit rows from `golden_pairs.jsonl` without cross-product
+expansion; generated candidates never publish themselves. The file is a curated
+selection, not a replacement for reviewed pair annotations. Its optional
+`domain_applicable` field is selection metadata and never a model input or a
+compliance label.

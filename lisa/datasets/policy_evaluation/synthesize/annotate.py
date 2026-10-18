@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+# TODO: After core Lisa development, synthesize trajectories for policies lacking
+# violation coverage, with compliant controls, boundary/exception cases, and
+# missing-evidence cases. Keep tool results and messages consistent, establish
+# approval state through authoritative evidence, independently annotate intended
+# outcomes, and keep each original trajectory and its variants in the same split.
+
 import argparse
 import hashlib
 import json
@@ -13,7 +19,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field, StrictBool, model_validator
 
 from lisa.evaluation.contracts import StrictModel
 from lisa.evaluation.dataset import DEFAULT_MANIFEST, Annotation, Outcome, load_dataset
@@ -63,17 +69,10 @@ RESPONSE_SCHEMA = {
 }
 
 
-class Selection(StrictModel):
-    trajectory_refs: list[str] = Field(min_length=1)
-    policy_refs: list[str] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def unique_inputs(self):
-        if len(set(self.trajectory_refs)) != len(self.trajectory_refs) or len(
-            set(self.policy_refs)
-        ) != len(self.policy_refs):
-            raise ValueError("Selection must contain unique input revisions")
-        return self
+class SelectedPair(StrictModel):
+    trajectory_ref: str = Field(min_length=1)
+    policy_ref: str = Field(min_length=1)
+    domain_applicable: StrictBool | None = None
 
 
 class Judgment(StrictModel):
@@ -101,17 +100,31 @@ def digest(value):
     ).hexdigest()
 
 
-def select_pairs(data, selection, max_pairs=9):
-    if len(selection.trajectory_refs) * len(selection.policy_refs) > max_pairs:
-        raise ValueError(f"Selection exceeds explicit pair limit {max_pairs}")
-    if not set(selection.trajectory_refs) <= data.trajectories.keys():
+def validate_pairs(data, selected):
+    if not selected:
+        raise ValueError("Pair selection must not be empty")
+    identities = [(row.trajectory_ref, row.policy_ref) for row in selected]
+    if len(set(identities)) != len(identities):
+        raise ValueError("Duplicate selected pair")
+    if not {row.trajectory_ref for row in selected} <= data.trajectories.keys():
         raise ValueError("Selection contains an unknown trajectory revision")
-    if not set(selection.policy_refs) <= data.policies.keys():
+    if not {row.policy_ref for row in selected} <= data.policies.keys():
         raise ValueError("Selection contains an unknown policy revision")
+
+
+def load_pairs(path, data):
+    raw = Path(path).read_bytes()
+    selected = [SelectedPair.model_validate_json(line) for line in raw.splitlines() if line.strip()]
+    validate_pairs(data, selected)
+    return selected, hashlib.sha256(raw).hexdigest()
+
+
+def select_pairs(data, selected, max_pairs=9):
+    validate_pairs(data, selected)
+    if max_pairs < 1 or len(selected) > max_pairs:
+        raise ValueError(f"Selection exceeds explicit pair limit {max_pairs}")
     return [
-        (data.trajectories[t], data.policies[p])
-        for t in selection.trajectory_refs
-        for p in selection.policy_refs
+        (data.trajectories[row.trajectory_ref], data.policies[row.policy_ref]) for row in selected
     ]
 
 
@@ -232,6 +245,7 @@ def run(
     workers=3,
     max_pairs=9,
     dataset_root=None,
+    pair_source=None,
 ):
     pairs = select_pairs(data, selection, max_pairs)
     if not 1 <= workers <= 8:
@@ -247,7 +261,8 @@ def run(
         raise ValueError("Output directory must be private (mode 0700)")
     config = {
         "manifest_digest": data.digest,
-        "selection": selection.model_dump(),
+        "pairs": [row.model_dump(exclude_none=True) for row in selection],
+        "pair_source": pair_source,
         "model": model,
         "thinking_level": thinking_level,
         "prompt_digest": digest(
@@ -441,8 +456,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument(
-        "--selection", type=Path, default=Path(__file__).with_name("selection.json")
+        "--pairs", type=Path, default=DEFAULT_MANIFEST.parent.parent / "golden_pairs.jsonl"
     )
+    parser.add_argument("--limit", type=int, help="Explicitly select the first N validated pairs")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--project")
     parser.add_argument("--location", choices=["global", "us", "eu"], default="global")
@@ -452,13 +468,20 @@ def main():
     parser.add_argument("--live", action="store_true")
     args = parser.parse_args()
     data = load_dataset(args.manifest)
-    selected = Selection.model_validate_json(args.selection.read_text())
+    selected, source_digest = load_pairs(args.pairs, data)
+    total_pairs = len(selected)
+    if args.limit is not None:
+        if args.limit < 1:
+            parser.error("--limit must be positive")
+        selected = selected[: args.limit]
     pairs = select_pairs(data, selected, args.max_pairs)
     print(
         json.dumps(
             {
-                "policies": len(selected.policy_refs),
-                "trajectories": len(selected.trajectory_refs),
+                "available_pairs": total_pairs,
+                "limit": args.limit,
+                "policies": len({row.policy_ref for row in selected}),
+                "trajectories": len({row.trajectory_ref for row in selected}),
                 "pairs": len(pairs),
                 "maximum_new_calls": 2 * len(pairs),
             }
@@ -478,6 +501,7 @@ def main():
             workers=args.workers,
             max_pairs=args.max_pairs,
             dataset_root=args.manifest.resolve().parent.parent,
+            pair_source={"digest": source_digest, "total_pairs": total_pairs, "limit": args.limit},
         )
     finally:
         client.close()

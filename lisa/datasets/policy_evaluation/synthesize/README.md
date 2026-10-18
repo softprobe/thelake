@@ -1,16 +1,24 @@
 # Synthesize pair annotations
 
-`annotate.py` creates candidate annotations for an explicitly selected Cartesian
-product of trajectory revisions and policy revisions. It uses Gemini 4 Argon
-through Google REST with Application Default Credentials (ADC). The runtime's
-API-key client and SDK dependencies are unchanged.
+`annotate.py` creates candidate annotations for explicitly listed trajectory–policy
+pairs. It uses Gemini 4 Argon through Google REST with Application Default
+Credentials (ADC). The runtime's API-key client and SDK dependencies are unchanged.
 
-The checked-in `selection.json` selects exactly three synthetic policies and
-three synthetic trajectories: **nine pairs and eighteen blind-sample calls**.
-It includes an unapproved refund, a consented deletion, and a wire disclosure
-with explicitly incomplete capture. There are no STATE-Bench trajectories in
-this selection. The default pair limit is nine; the script never silently
-expands to the manifest's catalogs or the whole dataset.
+The default input is `../golden_pairs.jsonl`: 202 unique pairs referencing 48
+trajectories and 18 policies. Only listed pairs are generated; repeated policies
+or trajectories do not expand into a Cartesian product. The complete file is
+validated before any limit or provider initialization. Invalid references,
+duplicate pairs and malformed metadata are rejected.
+
+Each JSONL row contains `trajectory_ref`, `policy_ref`, and optional boolean
+`domain_applicable` curation metadata. The current file includes 72 true and 130
+false rows. Both groups are retained; this field is never supplied to the model
+or interpreted as a compliance outcome. The filename does not make the pairs
+reviewed gold. A domain-relevant policy may still have an absent specific trigger.
+
+The default pair budget remains nine. Running the full 202-row input without an
+explicit limit or budget increase fails; the tool never silently truncates or
+expands the selection. `--limit N` explicitly chooses a prefix in file order.
 
 ## Run
 
@@ -24,8 +32,14 @@ From the repository root, after installing Lisa's dependencies:
 ```sh
 uv run --project lisa --with 'google-auth[requests]>=2,<3' python \
   lisa/datasets/policy_evaluation/synthesize/annotate.py \
-  --live --output /tmp/lisa-annotation-verification
+  --limit 9 --live --output /tmp/lisa-annotation-verification
 ```
+
+The example above selects exactly nine curated pairs, with at most eighteen new
+calls. To process the entire file in a separately authorized live run, omit
+`--limit` and explicitly set `--max-pairs 202`. `--pairs` can select another
+JSONL file with the same row schema. No separate policy-list/trajectory-list
+selection format is supported.
 
 Google's [Argon REST documentation](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon)
 describes the `v1beta1` endpoint and supported thinking levels. Direct REST avoids
@@ -79,7 +93,8 @@ errors, never negative annotations. Responses marked `MAX_TOKENS`, `SAFETY`, or
   version. `annotation_ref` links the comparison to the candidate. Reviewers do
   not need to search raw call files to understand a dispute.
 - `run.json`: selected input revisions, source manifest digest, model/prompt
-  configuration, attempted/completed/cached/failed counts, separate outcome and
+  configuration, exact selected rows and source-file SHA-256/total count/limit,
+  attempted/completed/cached/failed counts, separate outcome and
   evidence agreement counts, and outcome counts.
 
 `attempted_calls` counts new requests started, including failed ones.
@@ -94,7 +109,7 @@ cached call lacks valid usage. Even complete reported tokens are not a billing
 estimate, and counters describe this invocation, not lifetime run spending.
 
 Resume with the same command and output directory. Model, thinking level,
-prompt/schema, selection and manifest changes require a new directory. Each
+prompt/schema, selected pairs, pair-source file and manifest changes require a new directory. Each
 call additionally hashes its exact request, role, input revisions and model;
 that per-call hash is authoritative for generation parameters and input bytes.
 Cached raw responses are revalidated before reuse. Errors are never reused as
@@ -104,11 +119,12 @@ removes both previous candidate and comparison exports to avoid stale success ar
 This command never edits canonical inputs, annotations, or manifests. Review
 candidates explicitly before publishing new annotation revisions. Keep generated
 artifacts outside the public repository. Pair coverage is not violation coverage:
-a dense cross product can be mostly easy negatives.
+the curated file still includes domain-negative controls. Inspect difficult relevant
+cases and false alarms separately rather than reporting aggregate accuracy alone.
 
-## Small-selection verification
+## Earlier small-selection verification
 
-Verified on 2026-10-17 using ADC and actual `gemini-4-argon` responses. Both
+A nine-pair synthetic smoke sample was verified on 2026-10-17 using ADC and actual `gemini-4-argon` responses. Both
 samples matched outcomes on all nine pairs; comparison with existing synthetic
 annotations, performed only after generation, also matched all nine. Outcomes were
 one violation, one compliant pair, one insufficient-evidence pair and six
@@ -128,3 +144,20 @@ and the other cited none. This does not establish three wrong labels; the
 side-by-side export makes those differences reviewable. Historical cached usage
 was 35,088 tokens; new response usage during reprocessing was zero. Canonical
 data remained unchanged. No STATE-Bench pairs were annotated.
+
+## Curated-selection verification
+
+Offline tests resolve all 202 rows against the canonical inputs, verify the
+72/130 curation metadata counts, and exercise nonrectangular selections without
+expansion. Invalid tail rows are rejected even with `--limit 1`; applicability
+metadata stays outside requests. No live synthesis of this curated file was
+performed as part of the selection change.
+
+## Live check on curated pairs
+
+The first nine curated pairs were subsequently run through the real CLI and
+reviewed individually against their complete evidence. All 18 calls succeeded;
+nine outcomes matched the pre-generation direct inspection. One evidence-only
+dispute was reviewed and resolved without changing the raw output. See the
+[per-pair verification report](verification.md) for findings, scope and input
+hashes. The remaining 193 curated pairs were not covered by that run.
