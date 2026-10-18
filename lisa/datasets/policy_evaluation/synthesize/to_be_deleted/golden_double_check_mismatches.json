@@ -1,0 +1,98 @@
+[
+  {
+    "golden_index": 11,
+    "trajectory_ref": "t_8a0a3a0104fad1d6@1",
+    "policy_ref": "p_3cc312a399a2a2ff@1",
+    "golden_applicable": true,
+    "xyz_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": false,
+      "Z": false
+    }
+  },
+  {
+    "golden_index": 17,
+    "trajectory_ref": "t_3fb0931961bba999@1",
+    "policy_ref": "p_842688cbf7180769@1",
+    "golden_applicable": true,
+    "xyz_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": false,
+      "Z": false
+    }
+  },
+  {
+    "golden_index": 27,
+    "trajectory_ref": "t_8797ec92bfaecf68@1",
+    "policy_ref": "p_2eaeed46415bc6da@1",
+    "golden_applicable": false,
+    "xyz_applicable": true,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": true
+    }
+  },
+  {
+    "golden_index": 31,
+    "trajectory_ref": "t_2d3af9e098acde21@1",
+    "policy_ref": "p_3cc312a399a2a2ff@1",
+    "golden_applicable": false,
+    "xyz_applicable": true,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": true
+    }
+  },
+  {
+    "golden_index": 48,
+    "trajectory_ref": "t_41ab1cc34b27a2d6@1",
+    "policy_ref": "p_46a3310d0be28269@1",
+    "golden_applicable": false,
+    "xyz_applicable": true,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": true
+    }
+  },
+  {
+    "golden_index": 69,
+    "trajectory_ref": "t_41ab1cc34b27a2d6@1",
+    "policy_ref": "p_6e25ad2db442b0fa@1",
+    "golden_applicable": false,
+    "xyz_applicable": true,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": true
+    }
+  },
+  {
+    "golden_index": 92,
+    "trajectory_ref": "t_8797ec92bfaecf68@1",
+    "policy_ref": "p_8dffaab311d214e9@1",
+    "golden_applicable": false,
+    "xyz_applicable": true,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": true
+    }
+  },
+  {
+    "golden_index": 94,
+    "trajectory_ref": "t_cc9a4f949b8604d2@1",
+    "policy_ref": "p_8dffaab311d214e9@1",
+    "golden_applicable": false,
+    "xyz_applicable": true,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": true
+    }
+  }
+]

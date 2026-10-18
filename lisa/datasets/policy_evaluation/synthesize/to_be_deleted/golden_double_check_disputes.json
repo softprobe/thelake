@@ -1,0 +1,99 @@
+[
+  {
+    "golden_index": 42,
+    "trajectory_ref": "t_024ff3f3ef9cf924@1",
+    "policy_ref": "p_46a3310d0be28269@1",
+    "golden_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Policy applies only when a cheaper replacement yields a negative fare difference that offsets the change fee. Previews show positive fare differences ($110/$60) with weather-waived $0 change fee\u2014no negative fare-offset situation.",
+        "evidence_spans": [
+          "888f437497e824b0",
+          "f3193f4a7ed5250d",
+          "b47db39eee6e30c5"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "f3193f4a7ed5250d",
+          "7d54c546d231f52c",
+          "b47db39eee6e30c5"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Weather change with positive fare diffs; no negative fare-offset scenario"
+      }
+    }
+  },
+  {
+    "golden_index": 43,
+    "trajectory_ref": "t_1b3d573d62bb64b0@1",
+    "policy_ref": "p_46a3310d0be28269@1",
+    "golden_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Policy is about negative fare difference offsetting change fees; this bereavement international change has a positive $100 fare difference plus a discounted $25 fee. Bereavement discount math, not negative-fare offset.",
+        "evidence_spans": [
+          "8cdd15890233487d",
+          "35e7081dec2f19ed",
+          "5f425a8710241455"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "8cdd15890233487d",
+          "83aad935d73bd82b",
+          "25534cccc3fc7ddc"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Bereavement intl fee discount with positive fare diff; not negative-offset rule"
+      }
+    }
+  },
+  {
+    "golden_index": 50,
+    "trajectory_ref": "t_cc9a4f949b8604d2@1",
+    "policy_ref": "p_46a3310d0be28269@1",
+    "golden_applicable": false,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Direct flight-change previews quote both change_fee and fare_difference, so the policy on combining those amounts when explaining additional due must be checked even though fare differences here are positive.",
+        "evidence_spans": [
+          "072dde2fad415dd5",
+          "627a70abf15a1285",
+          "30538b90bfc9757c"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "627a70abf15a1285",
+          "bc9646bbe62fe48e",
+          "30538b90bfc9757c",
+          "cb1b03b893c12a2e"
+        ]
+      },
+      "Z": {
+        "coverage_note": "personal change with positive fare diffs; policy scoped to negative-FD offset"
+      }
+    }
+  }
+]

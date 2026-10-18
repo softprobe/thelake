@@ -1,63 +1,37 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from lisa.context import WorkspaceContext
+from lisa.evaluation.dataset import load_dataset
 from lisa.evaluation.policy_selection import OpenAIPolicySelector
 from lisa.models.policies import PolicyRule
 from lisa.repositories.evaluation_artifacts import EvaluationArtifactRepository
-from lisa.repositories.policies import InMemoryPolicyRepository
 from lisa.services.evaluations import EvaluationService
-from lisa.services.policies import PolicyService
 from lisa.services.sessions import SessionService
-
-ROOT = Path(__file__).parent
-POLICY_FILE = ROOT / "fixtures" / "state_bench_policies" / "POLICY.md"
-GOLD_FILE = ROOT / "fixtures" / "state_bench_gold.jsonl"
-
-
-def test_state_bench_policy_file_contains_all_gold_rules():
-    policies = PolicyService(context=None, repository=InMemoryPolicyRepository()).parse_rules(
-        POLICY_FILE.read_text(encoding="utf-8"),
-        "workspace",
-    )
-    gold = [
-        json.loads(line)
-        for line in GOLD_FILE.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-
-    expected = {row["input"]["policy"]["name"]: row["input"]["policy"]["criteria"] for row in gold}
-    assert set(policies) == set(expected)
-    assert {name: rule.criteria for name, rule in policies.items()} == expected
-    assert all(rule.approved for rule in policies.values())
 
 
 class FakeDecisionsClient:
     def __init__(self, choices, confidences=None):
         self.choices = choices
-        self.confidences = confidences or [0.99] * len(choices)
+        self.confidences = confidences
         self.request = None
 
     def post(self, _url, *, json):
         self.request = json
-        return FakeResponse(
-            {
-                "answers": [
-                    {
-                        "type": "choice",
-                        "name": question["name"],
-                        "choice": self.choices[index],
-                        "confidence": self.confidences[index],
-                    }
-                    for index, question in enumerate(json["questions"])
-                ]
+        answers = []
+        for index, question in enumerate(json["questions"]):
+            answer = {
+                "type": "choice",
+                "name": question["name"],
+                "choice": self.choices[index],
             }
-        )
+            if self.confidences is not None:
+                answer["confidence"] = self.confidences[index]
+            answers.append(answer)
+        return FakeResponse({"answers": answers})
 
 
 class FakeResponse:
@@ -99,14 +73,10 @@ class FakeSelector:
         self.selected = selected
         self.calls = []
         self.model = "test-decisions-model"
-        self.minimum_confidence = 0.8
 
     def select(self, trajectory, rules):
         self.calls.append((trajectory, rules))
-        return {
-            "selected_policies": self.selected,
-            "minimum_confidence": self.minimum_confidence,
-        }
+        return {"selected_policies": self.selected}
 
 
 def make_evaluation_service(**kwargs):
@@ -122,34 +92,43 @@ def make_evaluation_service(**kwargs):
     )
 
 
-def test_decisions_selects_the_matching_policy_from_one_shared_file():
-    policies = PolicyService(context=None, repository=InMemoryPolicyRepository()).parse_rules(
-        POLICY_FILE.read_text(encoding="utf-8"), "workspace"
-    )
-    gold = [
-        json.loads(line)
-        for line in GOLD_FILE.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+def test_decisions_routes_each_catalog_choice_independently():
+    data = load_dataset()
+    batch = data.batches(source="synthetic")[0]
+    rules = [
+        PolicyRule(id=ref, **data.policies[ref].policy.model_dump()) for ref in batch.policy_refs
     ]
-
-    for row in gold:
-        expected_name = row["expected"]["selected_policy"]
-        choices = [
-            "applicable" if rule.name == expected_name else "not_applicable"
-            for rule in policies.values()
-        ]
-        client = FakeDecisionsClient(choices)
-        selector = OpenAIPolicySelector(client=client)
-
-        selection = selector.select(row["input"]["trajectory"], list(policies.values()))
-
-        assert [item["name"] for item in selection["selected_policies"]] == [expected_name]
-        assert len(client.request["questions"]) == 5
-        assert len({q["name"] for q in client.request["questions"]}) == 5
-        assert client.request["model"] == "gpt-6-luna"
+    client = FakeDecisionsClient(["suspected_violation", *(["no_violation_found"] * 5)])
+    result = OpenAIPolicySelector(client=client).select(
+        data.trajectories[batch.trajectory_ref].trajectory.model_dump(), rules
+    )
+    assert [p["id"] for p in result["selected_policies"]] == [rules[0].id]
+    assert len(client.request["questions"]) == len(rules)
+    assert len({q["name"] for q in client.request["questions"]}) == len(rules)
+    assert client.request["model"] == "gpt-6-luna"
 
 
-def test_only_confident_applicable_policy_is_sent_to_the_judge():
+def test_selector_prompt_preserves_scope_and_uncertainty():
+    client = FakeDecisionsClient(["no_violation_found"])
+    OpenAIPolicySelector(client=client).select(
+        {"events": []},
+        [
+            PolicyRule(
+                name="Economy to First upgrade",
+                criteria="Only this direction.",
+                approved=True,
+                scope="workspace",
+                id="p1",
+            )
+        ],
+    )
+    question = client.request["questions"][0]
+    assert "Match every named type, source, destination, and trigger" in question["instructions"]
+    assert "suspected violation" in question["instructions"]
+    assert "insufficient_evidence" in {c["value"] for c in question["choices"]}
+
+
+def test_every_suspected_violation_is_sent_to_the_judge_regardless_of_confidence():
     rules = [
         SimpleNamespace(
             id="P1.1",
@@ -166,8 +145,8 @@ def test_only_confident_applicable_policy_is_sent_to_the_judge():
     ]
     selector = OpenAIPolicySelector(
         client=FakeDecisionsClient(
-            ["applicable", "applicable"],
-            confidences=[0.79, 0.8],
+            ["suspected_violation", "suspected_violation"],
+            confidences=[0.69, 0.7],
         ),
     )
 
@@ -175,16 +154,34 @@ def test_only_confident_applicable_policy_is_sent_to_the_judge():
 
     assert selection["selected_policies"] == [
         {
+            "id": "P1.1",
+            "name": "Low confidence cancellation policy",
+            "scope": "workspace",
+        },
+        {
             "id": "P1.2",
             "name": "Confident refund policy",
             "scope": "workspace",
-            "confidence": 0.8,
-        }
+        },
     ]
-    assert set(selection) == {"selected_policies", "minimum_confidence"}
+    assert set(selection) == {"selected_policies", "policy_decisions"}
 
 
-def test_selector_uses_binary_choices_and_incomplete_answers_fail_closed():
+def test_suspected_violation_selection_does_not_require_confidence():
+    selector = OpenAIPolicySelector(client=FakeDecisionsClient(["suspected_violation"]))
+    rule = SimpleNamespace(
+        id="P1.1",
+        name="Same-day connected itinerary disclosure",
+        criteria="Disclose the stranding risk before cancellation.",
+        scope="workspace",
+    )
+
+    selection = selector.select({"events": []}, [rule])
+
+    assert selection["selected_policies"][0]["id"] == "P1.1"
+
+
+def test_selector_uses_triage_choices_and_incomplete_answers_fail_closed():
     rule = SimpleNamespace(
         id="P1.2",
         name="Cancellation policy",
@@ -192,13 +189,18 @@ def test_selector_uses_binary_choices_and_incomplete_answers_fail_closed():
         scope="workspace",
     )
     selector = OpenAIPolicySelector(
-        client=FakeDecisionsClient(["applicable"]),
+        client=FakeDecisionsClient(["suspected_violation"]),
     )
     selection = selector.select({"events": []}, [rule])
     assert selection["selected_policies"][0]["id"] == "P1.2"
+    assert (
+        "A policy lookup alone is not a violation"
+        in (selector.client.request["questions"][0]["instructions"])
+    )
     assert [choice["value"] for choice in selector.client.request["questions"][0]["choices"]] == [
-        "applicable",
-        "not_applicable",
+        "suspected_violation",
+        "no_violation_found",
+        "insufficient_evidence",
     ]
 
     class IncompleteClient(FakeDecisionsClient):
@@ -210,7 +212,7 @@ def test_selector_uses_binary_choices_and_incomplete_answers_fail_closed():
         OpenAIPolicySelector(client=IncompleteClient([])).select({"events": []}, [rule])
 
 
-def test_missing_decision_confidence_fails_closed():
+def test_missing_decision_confidence_does_not_change_triage():
     rule = SimpleNamespace(
         id="P1.2",
         name="Cancellation policy",
@@ -227,20 +229,24 @@ def test_missing_decision_confidence_fails_closed():
                         {
                             "type": "choice",
                             "name": "policy_0",
-                            "choice": "applicable",
+                            "choice": "suspected_violation",
                         }
                     ]
                 }
             )
 
-    with pytest.raises(RuntimeError, match="invalid confidence"):
-        OpenAIPolicySelector(client=MissingConfidenceClient(["applicable"])).select(
-            {"events": []}, [rule]
-        )
+    selection = OpenAIPolicySelector(
+        client=MissingConfidenceClient(["suspected_violation"])
+    ).select({"events": []}, [rule])
+    assert selection["selected_policies"] == [
+        {"id": "P1.2", "name": rule.name, "scope": rule.scope}
+    ]
 
 
-@pytest.mark.parametrize("confidence", [True, "0.9", float("nan"), float("inf"), -0.1, 1.01])
-def test_invalid_decision_confidence_fails_closed(confidence):
+@pytest.mark.parametrize(
+    "confidence", [True, "not-a-number", float("nan"), float("inf"), -0.1, 1.01]
+)
+def test_decision_confidence_is_ignored(confidence):
     rule = SimpleNamespace(
         id="P1.2",
         name="Cancellation policy",
@@ -248,27 +254,22 @@ def test_invalid_decision_confidence_fails_closed(confidence):
         scope="workspace",
     )
 
-    with pytest.raises(RuntimeError, match="invalid confidence"):
-        OpenAIPolicySelector(client=FakeDecisionsClient(["applicable"], [confidence])).select(
-            {"events": []}, [rule]
-        )
+    selection = OpenAIPolicySelector(
+        client=FakeDecisionsClient(["suspected_violation"], [confidence])
+    ).select({"events": []}, [rule])
+    assert selection["selected_policies"] == [
+        {"id": "P1.2", "name": rule.name, "scope": rule.scope}
+    ]
 
 
-def test_policy_selection_confidence_cutoff_can_be_configured(monkeypatch):
-    monkeypatch.setenv("LISA_POLICY_SELECTION_MIN_CONFIDENCE", "0.9")
-    selector = OpenAIPolicySelector(client=FakeDecisionsClient(["applicable"], [0.85]))
-    rule = SimpleNamespace(
-        id="P1.2",
-        name="Cancellation policy",
-        criteria="Cancellation rules",
-        scope="workspace",
+def test_policy_selection_result_has_no_confidence_cutoff_metadata():
+    result = OpenAIPolicySelector(client=FakeDecisionsClient(["no_violation_found"])).select(
+        {"events": []},
+        [SimpleNamespace(name="Cancellation", criteria="Cancel", scope="workspace")],
     )
 
-    result = selector.select({"events": []}, [rule])
-
-    assert selector.minimum_confidence == 0.9
-    assert result["minimum_confidence"] == 0.9
     assert result["selected_policies"] == []
+    assert result["policy_decisions"][0]["decision"] == "no_violation_found"
 
 
 def test_session_selection_checks_agent_and_returns_only_selected_rules():
@@ -296,9 +297,7 @@ def test_session_selection_checks_agent_and_returns_only_selected_rules():
     assert "status" not in result
     assert result["selected_policies"] == selector.selected
     assert result["candidate_count"] == 1
-    assert trajectory["events"] == [
-        {"kind": "user_message", "content": "cancel this flight"}
-    ]
+    assert trajectory["events"] == [{"kind": "user_message", "content": "cancel this flight"}]
     assert selector.calls[0][0]["events"] == trajectory["events"]
 
 
@@ -342,7 +341,7 @@ def test_session_with_no_selected_policies_returns_empty_selection():
             message_order_certain=True,
         ),
         policy_selector=OpenAIPolicySelector(
-            client=FakeDecisionsClient(["applicable"], [0.5]),
+            client=FakeDecisionsClient(["no_violation_found"]),
         ),
     )
 
@@ -356,7 +355,6 @@ def test_session_with_no_selected_policies_returns_empty_selection():
         "target_agent_name",
         "candidate_count",
         "selected_policies",
-        "minimum_confidence",
     }
     assert "not_selected_policies" not in result
 
@@ -375,7 +373,6 @@ def test_selected_policy_missing_from_candidates_fails_closed():
                 "id": "missing-policy",
                 "name": rule.name,
                 "scope": rule.scope,
-                "confidence": 0.99,
             }
         ]
     )
@@ -406,7 +403,7 @@ def test_selected_policy_missing_from_candidates_fails_closed():
         service.evaluate_session("refund-agent", "session-1")
 
 
-def test_evaluation_selection_keeps_the_confidence_cutoff():
+def test_evaluation_selection_passes_triage_to_judge():
     rule = PolicyRule(
         name="Check refund eligibility",
         criteria="Check eligibility before refunding.",
@@ -418,10 +415,8 @@ def test_evaluation_selection_keeps_the_confidence_cutoff():
         "id": rule.id,
         "name": rule.name,
         "scope": rule.scope,
-        "confidence": 0.94,
     }
     selector = FakeSelector([decision])
-    selector.minimum_confidence = 0.9
     service = make_evaluation_service(
         context=None,
         client=FakeSessionClient(
@@ -452,10 +447,8 @@ def test_evaluation_selection_keeps_the_confidence_cutoff():
     result = service.evaluate_session("refund-agent", "session-1")
 
     assert result["status"] == "evaluated"
-    assert result["minimum_confidence"] == 0.9
     assert evaluation_calls[0]["_selection"] == {
         "model": "test-decisions-model",
-        "minimum_confidence": 0.9,
         "candidate_count": 1,
         "selected_policies": [decision],
     }
@@ -515,17 +508,8 @@ def test_evaluate_session_judges_every_selected_policy_with_the_same_evidence(tm
         id="P1.2",
     )
     client = FakeSessionClient(session_detail)
-    decisions = [rule, second_rule]
-    selector = FakeSelector(
-        [
-            {
-                "id": selected.id,
-                "name": selected.name,
-                "scope": selected.scope,
-                "confidence": 0.99,
-            }
-            for selected in decisions
-        ]
+    selector = OpenAIPolicySelector(
+        client=FakeDecisionsClient(["suspected_violation", "insufficient_evidence"])
     )
     judge_requests = []
     context = WorkspaceContext(workspace="11111111-1111-4111-8111-111111111111", data_dir=tmp_path)
@@ -567,7 +551,7 @@ def test_evaluate_session_judges_every_selected_policy_with_the_same_evidence(tm
     assert all(item["status"] == "pass" for item in result["evaluations"])
     assert {item["id"] for item in result["selected_policies"]} == {rule.id, second_rule.id}
     assert len(client.get_calls) == 1
-    assert len(selector.calls) == 1
+    assert len(selector.client.request["questions"]) == 2
     assert {body["metadata"]["policy_id"] for _, body in client.posts} == {
         rule.id,
         second_rule.id,
@@ -578,6 +562,27 @@ def test_evaluate_session_judges_every_selected_policy_with_the_same_evidence(tm
         second_rule.name,
     }
     assert all(
-        request["trajectory"]["events"] == selector.calls[0][0]["events"]
+        request["trajectory"]["events"] == judge_requests[0]["trajectory"]["events"]
         for request in judge_requests
     )
+
+
+def test_uncertain_decision_is_escalated_alongside_suspected_violations():
+    rules = [
+        SimpleNamespace(id=str(i), name=str(i), scope="workspace", criteria="Rule")
+        for i in range(3)
+    ]
+    result = OpenAIPolicySelector(
+        client=FakeDecisionsClient(
+            ["suspected_violation", "no_violation_found", "insufficient_evidence"]
+        )
+    ).select({"events": []}, rules)
+    assert [p["id"] for p in result["selected_policies"]] == ["0", "2"]
+
+
+@pytest.mark.parametrize("choice", ["applicable", "not_applicable", "violation", None])
+def test_obsolete_or_invalid_triage_choices_are_rejected(choice):
+    with pytest.raises(RuntimeError, match="invalid policy choice"):
+        OpenAIPolicySelector(client=FakeDecisionsClient([choice])).select(
+            {"events": []}, [SimpleNamespace(name="Rule", criteria="Rule", scope="workspace")]
+        )

@@ -116,9 +116,6 @@ def build_conversation(
         "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY", ""),
         "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY", ""),
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
-        "LISA_POLICY_SELECTION_MIN_CONFIDENCE": os.getenv(
-            "LISA_POLICY_SELECTION_MIN_CONFIDENCE", "0.8"
-        ),
         "GEMINI_MODEL_NAME": os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash"),
         "LISA_GEMINI_THINKING_LEVEL": os.getenv("LISA_GEMINI_THINKING_LEVEL", "low"),
         "LISA_SLACK_BOT_TOKEN": os.getenv("LISA_SLACK_BOT_TOKEN", ""),

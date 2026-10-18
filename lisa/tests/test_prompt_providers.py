@@ -31,7 +31,7 @@ def rule():
 def test_empty_selection_discloses_clipping_and_redacts_policy(tmp_path, monkeypatch):
     monkeypatch.setenv("LISA_LLM_TRACE_ENABLED", "1")
     ctx = context(tmp_path)
-    client = FakeDecisionsClient(["not_applicable"])
+    client = FakeDecisionsClient(["no_violation_found"])
     selector = OpenAIPolicySelector(client=client)
     service = make_evaluation_service(
         context=ctx,
@@ -56,7 +56,8 @@ def test_empty_selection_discloses_clipping_and_redacts_policy(tmp_path, monkeyp
         policy_selector=selector,
     )
     result, trajectory = service._select_policies_for_session("agent", "session1")
-    assert result["selected_policies"] == []
+    assert [p["id"] for p in result["selected_policies"]] == ["P1"]
+    assert result["policy_decisions"][0]["decision"] == "insufficient_evidence"
     assert result["limitations"]
     assert result["prompt_truncations"][0]["omitted_chars"] == 1000
     assert len(trajectory["events"][0]["content"]) == 3000

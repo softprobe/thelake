@@ -93,12 +93,17 @@ Run one scheduler process per workspace; multiple replicas can each fire a turn.
 
 Lisa first resumes pending failures, then inspects recent sessions and policy
 memory. For each agent she checks recent unchecked sessions against approved
-policies. OpenAI Decisions gives each policy a binary applicability choice and
-confidence; Lisa judges only `applicable` choices at or above
-`LISA_POLICY_SELECTION_MIN_CONFIDENCE` (default `0.8`). If none clear that bar,
-selection returns an empty selected set (below-cutoff answers are dropped, not
-audited separately). She prioritizes consequential business risks, tool
-errors, incomplete outcomes, and unusual repeated behavior. Ordinary discovery
+policies. OpenAI Decisions triages each policy as `suspected_violation`,
+`no_violation_found`, or `insufficient_evidence`. Lisa sends suspected violations
+and insufficient-evidence decisions to the Gemini judge; only that judge produces
+final verdicts. A triage negative does not produce a passing score. Confidence
+never filters escalation. All per-policy decisions are retained in selection
+metadata. If the selector prompt clips any evidence, all candidates escalate as
+insufficient evidence. Incomplete session capture or uncertain event ordering
+still returns unresolved coverage before triage; this change does not add
+context retrieval or investigation tools to Gemini. She prioritizes
+consequential business risks, tool errors, incomplete outcomes, and unusual
+repeated behavior. Ordinary discovery
 can suggest new rules, but cannot establish approval. The previous bounded report
 helps avoid repeating unchanged proposals every cycle.
 

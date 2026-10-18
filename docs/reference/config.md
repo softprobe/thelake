@@ -121,6 +121,5 @@ customer DuckLake.
 | `SOFTPROBE_ASSERTION_HMAC_SECRET` | Shared edge assertion key Lisa uses to verify workspace-scoped browser requests. |
 | `LISA_PUBLIC_URL` | Browser-reachable Lisa API base URL injected into Explorer. Lisa chat connects directly to this service. |
 | `OPENAI_API_KEY` | API key for Lisa's first-stage policy applicability selection through OpenAI Decisions. The existing Gemini judge evaluates only the selected policies. |
-| `LISA_POLICY_SELECTION_MIN_CONFIDENCE` | Minimum OpenAI Decisions confidence required to select an `applicable` policy for evaluation; defaults to `0.8`. Below-cutoff or `not_applicable` answers are dropped. Tune it against labeled application examples; it controls policy routing, not the judge's verdict. |
 | `GEMINI_MODEL_NAME` | Gemini model used by Lisa's categorical policy judge (defaults to `gemini-3.8-flash`). |
 | `LISA_GEMINI_THINKING_LEVEL` | Gemini judge reasoning: `low`, `medium`, or `high`; defaults to `low` to reduce reasoning-token cost. Gemini 2.5 uses thinking budgets of 512, 1,024, and 2,048 tokens for these settings. No hard output-token cap is applied, so the model can finish its structured response. |

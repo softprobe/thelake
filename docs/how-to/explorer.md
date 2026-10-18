@@ -169,10 +169,9 @@ not run shell commands or access a connected Git repository.
   Review it and send `Confirm policy rule: <exact heading>` to save the change.
   Approved rules are eligible immediately; there is no separate activation UI.
   Lisa's schedule reads policy and bounded session detail, builds a compact
-  trajectory, then runs OpenAI Decisions. It selects only `applicable` rules
-  with confidence at or above `LISA_POLICY_SELECTION_MIN_CONFIDENCE` (default
-  `0.8`); Gemini then returns a categorical verdict and Lisa stores scores with
-  the policy ID and criteria in TheLake.
+  trajectory, then runs OpenAI Decisions. It selects rules marked
+  `applicable`; Gemini then returns a categorical verdict and Lisa stores scores
+  with the policy ID and criteria in TheLake.
   `LISA_QA_CRON` is a five-field UTC cron expression, default hourly at minute 0;
   the `Lisa scheduled QA` job does not run on startup.
 - Conversations are stored in the runner's `lisa-data` volume, scoped by the

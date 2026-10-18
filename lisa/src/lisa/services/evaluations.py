@@ -1,7 +1,7 @@
 """Load approved policies and judge them against captured sessions.
 
 There is no evaluator registry or numeric threshold. Owners approve named rules
-in Postgres; Lisa selects applicable rules and passes each live policy to the
+in Postgres; Lisa flags suspected policy violations and passes each live policy to the
 judge with a compact trajectory.
 """
 
@@ -132,7 +132,7 @@ class EvaluationService:
                 },
                 trajectory,
             )
-        # The selector answers “which rules apply?”; it does not judge compliance.
+        # Triage escalates suspected violations and uncertain evidence; only the judge issues verdicts.
         with recording_scope(self.context, session_id=session_id):
             selection = self.policy_selector.select(trajectory, rules)
         return (
@@ -141,15 +141,14 @@ class EvaluationService:
                 "target_agent_name": target_agent_name,
                 "candidate_count": len(rules),
                 "selected_policies": selection["selected_policies"],
-                "minimum_confidence": selection["minimum_confidence"],
-                **{key: selection[key] for key in ('limitations', 'prompt_truncations')
+                **{key: selection[key] for key in ('limitations', 'prompt_truncations', 'policy_decisions')
                    if key in selection},
             },
             trajectory,
         )
 
     def evaluate_session(self, target_agent_name: str, session_id: str) -> dict:
-        """Route one captured session to applicable rules and judge each result."""
+        """Investigate suspected violations and unresolved evidence in one session."""
         if self.work_items:
             pending = self.work_items.find_pending_evaluations_for_session(
                 target_agent_name, session_id
@@ -182,10 +181,9 @@ class EvaluationService:
         rules_by_id = {rule.id: rule for rule in rules}
         selection_context = {
             "model": self.policy_selector.model,
-            "minimum_confidence": selection["minimum_confidence"],
             "candidate_count": selection["candidate_count"],
             "selected_policies": selected,
-            **{key: selection[key] for key in ('limitations', 'prompt_truncations')
+            **{key: selection[key] for key in ('limitations', 'prompt_truncations', 'policy_decisions')
                if key in selection},
         }
         evaluations = []

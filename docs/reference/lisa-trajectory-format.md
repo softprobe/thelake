@@ -64,5 +64,5 @@ conclusion. Stored trajectories and upstream completeness checks are unchanged.
 calls and results, errors, JSON values, ambiguous links, and exact clipping.
 `test_trajectory_prompt.py` covers message formatting, escaping, redaction,
 empty values, and truncation. `test_prompt_citations.py` and
-`test_state_bench_prompt.py` cover citation mapping and provider inputs across
+`test_evaluation_prompt.py` cover citation mapping and provider inputs across
 the gold trajectories.

@@ -60,7 +60,7 @@ def create_server(services: WorkspaceServices) -> FastMCP:
 
     @server.tool()
     def evaluate_session(target_agent_name: str, session_id: str) -> dict[str, Any]:
-        """Select applicable approved policies and evaluate them against one session."""
+        """Triage approved policies for suspected violations and judge escalated policies."""
         result = services.evaluations.evaluate_session(target_agent_name, session_id)
         return hide_evaluation_ids(redact_evidence(result))
 

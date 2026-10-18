@@ -1,0 +1,1364 @@
+[
+  {
+    "golden_index": 18,
+    "trajectory_ref": "t_403e8606bb7a33a9@1",
+    "policy_ref": "p_842688cbf7180769@1",
+    "golden_domain_applicable": true,
+    "votes": {
+      "X": false,
+      "Y": false,
+      "Z": true
+    },
+    "details": {
+      "X": {
+        "rationale": "Incomplete trace has only an empty user_message and no booking, cancel, or eligibility evidence, so no cancellation-domain act is present.",
+        "evidence_spans": [
+          "baa235c4520454f6"
+        ]
+      },
+      "Y": {
+        "veto_reason": "incomplete empty trace, no cancel act",
+        "forcing_spans": [
+          "baa235c4520454f6"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Incomplete stub still judged under cancel-eligibility domain, not a cross-product."
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": true,
+      "rationale": "This pair is scored under the cancellation-eligibility rulebook; an empty incomplete stub is a completeness/evidence gap, not a cross-domain distractor. Domain stays applicable even though no cancel tool call appears yet, because the trajectory is not an unrelated product act.",
+      "agree_with": "golden",
+      "batch": "00"
+    }
+  },
+  {
+    "golden_index": 31,
+    "trajectory_ref": "t_2d3af9e098acde21@1",
+    "policy_ref": "p_3cc312a399a2a2ff@1",
+    "golden_domain_applicable": true,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": true
+    },
+    "details": {
+      "X": {
+        "rationale": "Act is cancelling one leg of a connected itinerary with no Basic Economy cabin or free-window/insurance eligibility facts.",
+        "evidence_spans": [
+          "0950718b3291074f",
+          "6a773834f6637491",
+          "dca969d16f83067d"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "6a773834f6637491",
+          "dca969d16f83067d"
+        ]
+      },
+      "Z": {
+        "coverage_note": "cancel_flight on connected itinerary; cancellation eligibility domain"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": true,
+      "rationale": "The act is cancelling a flight leg on a connected itinerary, which falls under cancellation-eligibility classification for this Basic Economy rulebook. Missing cabin/free-window/insurance facts affect trigger or compliance judgment, not domain membership; absence of those facts is not an off-topic distractor.",
+      "agree_with": "golden",
+      "batch": "00"
+    }
+  },
+  {
+    "golden_index": 32,
+    "trajectory_ref": "t_31d041acad67639a@1",
+    "policy_ref": "p_3cc312a399a2a2ff@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Subject is comparing cancel and change fees for an international business ticket, outside Basic Economy cancellation.",
+        "evidence_spans": [
+          "f7c0478892577c9a",
+          "674dadc65db2ae3b",
+          "36a6230b7cb3f945"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "674dadc65db2ae3b",
+          "36a6230b7cb3f945"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Business cancel/change fee compare; not basic-economy cancel"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Subject matter is comparing cancel and change fees for an international business cabin booking. That act sits outside the Basic Economy cancellation-eligibility rulebook domain, which is cabin-specific. Business cancel/change fee comparison is a clear wrong-domain distractor.",
+      "agree_with": "golden",
+      "batch": "00"
+    }
+  },
+  {
+    "golden_index": 34,
+    "trajectory_ref": "t_8797ec92bfaecf68@1",
+    "policy_ref": "p_3cc312a399a2a2ff@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": true
+    },
+    "details": {
+      "X": {
+        "rationale": "Agent cancels a regular economy booking after a change-fee compare; not Basic Economy cancellation eligibility.",
+        "evidence_spans": [
+          "483961f3474d89a3",
+          "2b405296ce3a63ff",
+          "1a3bd8dd0bd6093a"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "95aa009a9dff55ec",
+          "d9082d347331aa34",
+          "1a3bd8dd0bd6093a"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Economy cancel confirmed after change preview; cancel eligibility domain"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Booking cabin_class is regular economy, and the trajectory cancels after a change-fee compare and rebook. That is outside Basic Economy cancellation eligibility, which applies to Basic Economy fare rules. Economy cancel/change accounting is the wrong domain for this policy.",
+      "agree_with": "golden",
+      "batch": "00"
+    }
+  },
+  {
+    "golden_index": 36,
+    "trajectory_ref": "t_024ff3f3ef9cf924@1",
+    "policy_ref": "p_4071a9787b349537@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Act is a weather-waived change on an economy domestic booking retaining fare_difference; policy domain is business international cancellation/change fees, wrong cabin and route.",
+        "evidence_spans": [
+          "30cdb545f8be6153",
+          "d84d616c6d04164e",
+          "6a757fea5b320aa6"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "30cdb545f8be6153",
+          "d84d616c6d04164e",
+          "6a757fea5b320aa6"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Business international fees vs economy domestic weather change"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The act is a weather-waived change on an economy domestic booking (ORD–ATL). The policy rulebook is business international cancellation and change fees, which is cabin- and product-specific. Economy domestic weather change is a clear wrong-domain distractor.",
+      "agree_with": "golden",
+      "batch": "01"
+    }
+  },
+  {
+    "golden_index": 37,
+    "trajectory_ref": "t_1b3d573d62bb64b0@1",
+    "policy_ref": "p_4071a9787b349537@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Act is an economy international bereavement change with discounted change_fee; policy domain is business international cancel/change fees, not economy bereavement.",
+        "evidence_spans": [
+          "fe7f1df511b48427",
+          "6d0089ce9b045d6d",
+          "25534cccc3fc7ddc"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "fe7f1df511b48427",
+          "6d0089ce9b045d6d",
+          "25534cccc3fc7ddc"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Business international fees vs economy international bereavement change"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The trajectory performs an economy international bereavement change with a discounted change fee. That subject matter sits outside the business international cancel/change fee rulebook, which targets business cabin. Economy bereavement fee accounting is the wrong domain.",
+      "agree_with": "golden",
+      "batch": "01"
+    }
+  },
+  {
+    "golden_index": 38,
+    "trajectory_ref": "t_2d3af9e098acde21@1",
+    "policy_ref": "p_4071a9787b349537@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Act is canceling one leg of a connected itinerary after disclosure; no business/international booking or fee accounting ties it to the business international fee rulebook.",
+        "evidence_spans": [
+          "0950718b3291074f",
+          "6a773834f6637491",
+          "dca969d16f83067d"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "0950718b3291074f",
+          "6a773834f6637491",
+          "dca969d16f83067d"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Business international fee schedule vs connected-itinerary cancel disclosure"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The act is canceling one leg of a connected itinerary after disclosure, with no business cabin or international fee accounting. That connected-cancel disclosure flow is not the business international fee schedule rulebook. It is an off-topic distractor for this policy.",
+      "agree_with": "golden",
+      "batch": "01"
+    }
+  },
+  {
+    "golden_index": 39,
+    "trajectory_ref": "t_3a483250f87bca34@1",
+    "policy_ref": "p_4071a9787b349537@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Act is basic-economy cancellation eligibility after the free window; policy domain is business international cancellation/change fees, wrong cabin class.",
+        "evidence_spans": [
+          "be0f98db686a47be",
+          "31d038a7c0f47db8",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "be0f98db686a47be",
+          "31d038a7c0f47db8",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Business international fees vs basic economy cancellation after window"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Subject matter is basic-economy domestic cancellation eligibility after the free window. The policy domain is business international cancellation and change fees, a different cabin and fee schedule. Basic-economy cancel rules are a clear wrong-domain distractor.",
+      "agree_with": "golden",
+      "batch": "01"
+    }
+  },
+  {
+    "golden_index": 40,
+    "trajectory_ref": "t_41ab1cc34b27a2d6@1",
+    "policy_ref": "p_4071a9787b349537@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Domestic personal flight change with change_fee and fare_difference; policy rulebook covers change/cancel fees that differ by route_type.",
+        "evidence_spans": [
+          "61b41af56d37863a",
+          "645fec959d0501ad",
+          "c7249fed01cd323c"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "61b41af56d37863a",
+          "645fec959d0501ad",
+          "33d1e2477b8e5ae6"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Economy domestic personal change; business cabin fee rulebook is off-product"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The act is an economy domestic personal flight change with change_fee and fare_difference. The policy rulebook is business international cancellation and change fees, which is cabin- and product-specific. Economy domestic personal change fees are a clear wrong-domain distractor.",
+      "agree_with": "golden",
+      "batch": "02"
+    }
+  },
+  {
+    "golden_index": 41,
+    "trajectory_ref": "t_cc9a4f949b8604d2@1",
+    "policy_ref": "p_4071a9787b349537@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Insured domestic personal flight change quoting change_fee plus fare_difference; still inside cancellation/change-fee domain with route_type fee rules.",
+        "evidence_spans": [
+          "fa237efeb8b64a66",
+          "627a70abf15a1285",
+          "cb1b03b893c12a2e"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "fa237efeb8b64a66",
+          "627a70abf15a1285",
+          "cb1b03b893c12a2e"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Economy domestic personal change; business cancel/change fees are off-product"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Subject matter is an insured economy domestic personal change that still incurs change_fee plus fare_difference. That act sits outside the business international cancel/change fee schedule. Economy domestic change accounting is the wrong domain for this policy.",
+      "agree_with": "golden",
+      "batch": "02"
+    }
+  },
+  {
+    "golden_index": 45,
+    "trajectory_ref": "t_31d041acad67639a@1",
+    "policy_ref": "p_46a3310d0be28269@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Act is cancel-fee preview and cancel-vs-change fee comparison for an international business ticket; no direct change preview with change_fee and fare_difference to classify under this fee+fare-diff accounting rulebook.",
+        "evidence_spans": [
+          "674dadc65db2ae3b",
+          "36a6230b7cb3f945",
+          "1459e7741cac8a16",
+          "b5db6400891e8ebd"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "674dadc65db2ae3b",
+          "36a6230b7cb3f945",
+          "1459e7741cac8a16",
+          "b5db6400891e8ebd"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Cancel vs change fee compare; no change preview or fee+FD netting act"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The trajectory previews cancellation fees and looks up change policy text for an international business ticket, without a direct change preview that nets change_fee and fare_difference. The policy domain is fee+fare-difference accounting on a cheaper-replacement change preview. Cancel-vs-change fee comparison without that act is off-domain.",
+      "agree_with": "golden",
+      "batch": "02"
+    }
+  },
+  {
+    "golden_index": 46,
+    "trajectory_ref": "t_3a483250f87bca34@1",
+    "policy_ref": "p_46a3310d0be28269@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Subject is basic-economy cancellation after the free window (cancel/baggage/upgrade policy lookups); not a direct flight change involving change fee and fare_difference accounting.",
+        "evidence_spans": [
+          "be0f98db686a47be",
+          "31d038a7c0f47db8",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "31d038a7c0f47db8",
+          "2c04be3fc8daa290",
+          "53aae83d9ac3dfea",
+          "32a2d1ba700c1002"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Basic-economy cancellation after free window; not change fee+FD domain"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Subject matter is basic-economy cancellation eligibility after the free window, with baggage/upgrade/cancel policy lookups. The policy applies to direct change previews where negative fare_difference offsets change fee. Cancellation after the free window is a clear wrong-domain distractor.",
+      "agree_with": "golden",
+      "batch": "02"
+    }
+  },
+  {
+    "golden_index": 49,
+    "trajectory_ref": "t_8a0a3a0104fad1d6@1",
+    "policy_ref": "p_46a3310d0be28269@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Act is cancelling the first leg of a same-day connection with cancellation_fee/refund only; no direct change with change fee and fare_difference.",
+        "evidence_spans": [
+          "20e07a99bf840de7",
+          "e02831e59b546fac",
+          "fdd3b06d3aa4c6f9",
+          "b4eb4d5837e3dcb8"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "20e07a99bf840de7",
+          "e02831e59b546fac",
+          "fdd3b06d3aa4c6f9",
+          "b4eb4d5837e3dcb8"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Cancels connection first leg; cancellation not change FD accounting"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The act is cancelling the first leg of a same-day connection with cancellation_fee and refund only. The policy domain is fee-plus-fare-difference accounting on a direct change preview with a cheaper replacement. Pure leg cancellation without a change_fee/fare_difference preview is off-domain.",
+      "agree_with": "golden",
+      "batch": "03"
+    }
+  },
+  {
+    "golden_index": 52,
+    "trajectory_ref": "t_024ff3f3ef9cf924@1",
+    "policy_ref": "p_6cb5225b728179d9@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Domestic weather change still produces change_fee and fare_difference quotes; weather waiver carve-out remains inside the change-fee rulebook domain.",
+        "evidence_spans": [
+          "1f329cde6eca1826",
+          "888f437497e824b0",
+          "f3193f4a7ed5250d",
+          "6a757fea5b320aa6"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "1f329cde6eca1826",
+          "888f437497e824b0",
+          "6a757fea5b320aa6"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Domestic weather change; not international bereavement discount domain"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The trajectory performs a domestic weather-reason change that waives the change fee while retaining fare_difference. The policy rulebook is international economy bereavement change discounts, which is route- and reason-specific. Domestic weather change is a clear wrong-domain distractor.",
+      "agree_with": "golden",
+      "batch": "03"
+    }
+  },
+  {
+    "golden_index": 55,
+    "trajectory_ref": "t_31d041acad67639a@1",
+    "policy_ref": "p_6cb5225b728179d9@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "International booking change/cancel fee comparison: agent retrieves change policies and previews cancellation fees for JFK–LHR business, which sits in the change-fee rulebook that includes economy bereavement discounts as cabin/reason carve-outs.",
+        "evidence_spans": [
+          "f7c0478892577c9a",
+          "36a6230b7cb3f945",
+          "b5db6400891e8ebd"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "f7c0478892577c9a",
+          "36a6230b7cb3f945",
+          "b5db6400891e8ebd"
+        ]
+      },
+      "Z": {
+        "coverage_note": "International business cancel/change fee compare; not economy bereavement change"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Subject matter is comparing cancel and change fees for an international business ticket, with cancel preview and business change-policy lookup. That cabin and act sit outside the international economy bereavement change-discount rulebook. Business cancel/change fee comparison is off-domain.",
+      "agree_with": "golden",
+      "batch": "03"
+    }
+  },
+  {
+    "golden_index": 56,
+    "trajectory_ref": "t_3a483250f87bca34@1",
+    "policy_ref": "p_6cb5225b728179d9@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Subject is domestic basic_economy cancellation after the free window, not an international economy change or bereavement change-fee quote.",
+        "evidence_spans": [
+          "be0f98db686a47be",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "be0f98db686a47be",
+          "32a2d1ba700c1002",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Domestic basic_economy cancellation; off-topic from intl economy bereavement change"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The act is domestic basic_economy cancellation eligibility after the free window, with cancel/baggage/upgrade policy lookups. The policy domain is international economy bereavement change discounts. Basic-economy domestic cancellation is a clear wrong-domain distractor.",
+      "agree_with": "golden",
+      "batch": "03"
+    }
+  },
+  {
+    "golden_index": 58,
+    "trajectory_ref": "t_41ab1cc34b27a2d6@1",
+    "policy_ref": "p_6cb5225b728179d9@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Domestic economy flight change with change_fee and fare_difference quotes; route/timing/reason boundaries still fall under the change-fee rulebook this policy belongs to.",
+        "evidence_spans": [
+          "61b41af56d37863a",
+          "645fec959d0501ad",
+          "33d1e2477b8e5ae6"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "61b41af56d37863a",
+          "9cdd99611e10583a",
+          "33d1e2477b8e5ae6"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Domestic economy personal 7-day change; not intl bereavement rulebook"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The policy rulebook is international economy bereavement change discounts (route_type international, change_reason bereavement). The trajectory is a domestic ORD–ATL economy personal change within the ≤7-day fee band. That act belongs to domestic personal change fees, not this international bereavement domain.",
+      "agree_with": "golden",
+      "batch": "04"
+    }
+  },
+  {
+    "golden_index": 59,
+    "trajectory_ref": "t_8797ec92bfaecf68@1",
+    "policy_ref": "p_6cb5225b728179d9@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": true,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Economy change preview quotes change_fee and negative fare_difference before cancel/rebook; fee plus fare-difference accounting is in this policy’s change-fee domain.",
+        "evidence_spans": [
+          "483961f3474d89a3",
+          "7b0f8a4eaf73f11e"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "483961f3474d89a3",
+          "ad03dc8274604dba",
+          "7b0f8a4eaf73f11e"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Domestic economy change/cancel-rebook; not intl bereavement change"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Policy domain is international economy bereavement change fee discounting. The trajectory is a domestic ORD–SFO personal change preview then cancel/rebook with domestic change and cancellation fees. Wrong route type and reason; not the bereavement international rulebook.",
+      "agree_with": "golden",
+      "batch": "04"
+    }
+  },
+  {
+    "golden_index": 61,
+    "trajectory_ref": "t_cc9a4f949b8604d2@1",
+    "policy_ref": "p_6cb5225b728179d9@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Trajectory performs a domestic economy personal change with fees; that act is outside the international bereavement change-discount rulebook.",
+        "evidence_spans": [
+          "fa237efeb8b64a66",
+          "d2dd4108dc80e2d6",
+          "cb1b03b893c12a2e"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "fa237efeb8b64a66",
+          "072dde2fad415dd5",
+          "d2dd4108dc80e2d6",
+          "cb1b03b893c12a2e"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Domestic personal insured change; policy is international bereavement discount — wrong route/reason."
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Policy covers international economy bereavement change discounts. Trajectory performs a domestic ORD–BOS insured personal change with standard domestic personal fees. Domestic personal (even with insurance) is outside this international bereavement domain.",
+      "agree_with": "golden",
+      "batch": "04"
+    }
+  },
+  {
+    "golden_index": 63,
+    "trajectory_ref": "t_024ff3f3ef9cf924@1",
+    "policy_ref": "p_6e25ad2db442b0fa@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Trajectory is a weather-reason domestic change retaining fare difference; the policy domain is insurance vs voluntary personal change fees, not weather waivers.",
+        "evidence_spans": [
+          "30cdb545f8be6153",
+          "d84d616c6d04164e",
+          "6a757fea5b320aa6"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "30cdb545f8be6153",
+          "1f329cde6eca1826",
+          "d84d616c6d04164e",
+          "6a757fea5b320aa6"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Weather-waived change retaining FD; policy is insurance vs personal change fees — off-topic."
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Policy domain is whether travel insurance waives voluntary personal change fees when that question is in play. Trajectory is a weather-reason domestic change with fee waived and fare difference retained. Weather waivers are a different rulebook; no insurance-vs-personal-fee question arises.",
+      "agree_with": "golden",
+      "batch": "04"
+    }
+  },
+  {
+    "golden_index": 64,
+    "trajectory_ref": "t_1b3d573d62bb64b0@1",
+    "policy_ref": "p_6e25ad2db442b0fa@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Trajectory is an international economy bereavement change with a discounted fee; that subject matter is outside the insurance-does-not-waive-personal-change-fees rulebook.",
+        "evidence_spans": [
+          "fe7f1df511b48427",
+          "6d0089ce9b045d6d",
+          "25534cccc3fc7ddc"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "fe7f1df511b48427",
+          "57bd7f8f827a9f32",
+          "6d0089ce9b045d6d",
+          "25534cccc3fc7ddc"
+        ]
+      },
+      "Z": {
+        "coverage_note": "International bereavement change; policy is insurance not waiving personal fees — off-topic."
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The trajectory is an international economy bereavement change with a discounted fee on an insured booking. The policy rulebook covers whether insurance waives voluntary personal change fees when that question arises; bereavement-change fee treatment is a different subject. This is an off-topic distractor for that domain.",
+      "agree_with": "majority",
+      "batch": "05"
+    }
+  },
+  {
+    "golden_index": 65,
+    "trajectory_ref": "t_2d3af9e098acde21@1",
+    "policy_ref": "p_6e25ad2db442b0fa@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Act is canceling one leg of a connected itinerary (get_itinerary then cancel_flight), not a voluntary personal change fee or insurance-waiver question.",
+        "evidence_spans": [
+          "0950718b3291074f",
+          "6a773834f6637491",
+          "dca969d16f83067d"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "b8d763a116896ccf",
+          "0950718b3291074f",
+          "6a773834f6637491",
+          "dca969d16f83067d"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Connected cancel/disclosure; not insurance or personal change fees"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The act is inspecting a connected itinerary and canceling one leg. That is cancellation/connection disclosure, not a voluntary personal change fee or an insurance-waiver question. The insurance-does-not-waive-personal-change-fees rulebook does not apply.",
+      "agree_with": "majority",
+      "batch": "05"
+    }
+  },
+  {
+    "golden_index": 66,
+    "trajectory_ref": "t_31d041acad67639a@1",
+    "policy_ref": "p_6e25ad2db442b0fa@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Subject is comparing international business cancellation versus change fees on an uninsured business ticket; not personal change fees or whether insurance waives them.",
+        "evidence_spans": [
+          "f7c0478892577c9a",
+          "36a6230b7cb3f945",
+          "b5db6400891e8ebd"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "f7c0478892577c9a",
+          "36a6230b7cb3f945",
+          "1459e7741cac8a16",
+          "b5db6400891e8ebd"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Intl business cancel/change fee compare; not insurance-change rulebook"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The subject is comparing international business cancellation versus change fees on an uninsured business ticket. The policy domain is personal change fees and whether insurance reduces them, not business cancel/change fee comparison. Clear off-topic distractor.",
+      "agree_with": "majority",
+      "batch": "05"
+    }
+  },
+  {
+    "golden_index": 67,
+    "trajectory_ref": "t_3a483250f87bca34@1",
+    "policy_ref": "p_6e25ad2db442b0fa@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Subject is basic-economy cancellation after the free window (cancel policy lookup), not a voluntary personal change with insurance fee treatment.",
+        "evidence_spans": [
+          "be0f98db686a47be",
+          "31d038a7c0f47db8",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "be0f98db686a47be",
+          "53aae83d9ac3dfea",
+          "32a2d1ba700c1002",
+          "31d038a7c0f47db8",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Basic-economy cancellation after window; cancel domain not change+insurance"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The trajectory is basic-economy cancellation after the free window, with cancel-policy lookup as the operative subject. That is cancellation domain, not voluntary personal change fees or insurance-waiver treatment. Off-topic for this policy rulebook.",
+      "agree_with": "majority",
+      "batch": "05"
+    }
+  },
+  {
+    "golden_index": 86,
+    "trajectory_ref": "t_1b3d573d62bb64b0@1",
+    "policy_ref": "p_8dffaab311d214e9@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "International economy bereavement change (ORD–MEX) is outside this domestic personal seven-day change-fee rulebook; different route type and change-reason domain.",
+        "evidence_spans": [
+          "fe7f1df511b48427",
+          "57bd7f8f827a9f32",
+          "8cdd15890233487d"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "fe7f1df511b48427",
+          "57bd7f8f827a9f32",
+          "8cdd15890233487d",
+          "788c9710ea77ee7c",
+          "6d0089ce9b045d6d"
+        ]
+      },
+      "Z": {
+        "coverage_note": "International bereavement change; wrong route/reason vs domestic personal 7-day fees"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The booking is international ORD–MEX economy with change_reason=bereavement, not a domestic economy personal change at the seven-day fee boundary. This policy’s rulebook is domestic personal seven-day fees; international bereavement is a different route and reason domain.",
+      "agree_with": "golden",
+      "batch": "06"
+    }
+  },
+  {
+    "golden_index": 88,
+    "trajectory_ref": "t_31d041acad67639a@1",
+    "policy_ref": "p_8dffaab311d214e9@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "International business ticket fee comparison (cancel preview plus business change rules) is wrong cabin and route versus domestic economy personal seven-day change fees.",
+        "evidence_spans": [
+          "f7c0478892577c9a",
+          "36a6230b7cb3f945",
+          "b5db6400891e8ebd"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "f7c0478892577c9a",
+          "1459e7741cac8a16",
+          "b5db6400891e8ebd"
+        ]
+      },
+      "Z": {
+        "coverage_note": "International business cancel/change compare; cross-cabin/route vs domestic economy personal"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The act compares cancellation and change fees on an international business JFK–LHR ticket, not domestic economy personal seven-day change fees. Cabin, route type, and cancel-vs-personal-change subject matter place it outside this policy’s domain.",
+      "agree_with": "golden",
+      "batch": "06"
+    }
+  },
+  {
+    "golden_index": 90,
+    "trajectory_ref": "t_403e8606bb7a33a9@1",
+    "policy_ref": "p_8dffaab311d214e9@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Incomplete empty user_message only; no evidenced domestic personal change, fee quote, or seven-day departure act to place in this policy's rulebook.",
+        "evidence_spans": [
+          "baa235c4520454f6"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "baa235c4520454f6"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Incomplete empty trace; no domestic personal-change act to classify"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The trajectory is an incomplete empty user_message with no booking, change, fee quote, or seven-day departure act. Without evidenced domestic personal-change subject matter, this policy’s rulebook does not apply.",
+      "agree_with": "golden",
+      "batch": "06"
+    }
+  },
+  {
+    "golden_index": 97,
+    "trajectory_ref": "t_1b3d573d62bb64b0@1",
+    "policy_ref": "p_a204c92d08ca3c59@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "International economy rebooking uses change_reason='bereavement' with a discounted change fee; that is not a weather-related change act.",
+        "evidence_spans": [
+          "fe7f1df511b48427",
+          "57bd7f8f827a9f32",
+          "8cdd15890233487d",
+          "6d0089ce9b045d6d"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "57bd7f8f827a9f32",
+          "8cdd15890233487d",
+          "6d0089ce9b045d6d",
+          "25534cccc3fc7ddc"
+        ]
+      },
+      "Z": {
+        "coverage_note": "International bereavement change; not weather waiver domain"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The rebooking uses change_reason=bereavement with a discounted bereavement change fee on an international economy itinerary. The weather fee-waiver rulebook requires change_reason=weather; this is a different change-reason domain.",
+      "agree_with": "golden",
+      "batch": "06"
+    }
+  },
+  {
+    "golden_index": 99,
+    "trajectory_ref": "t_31d041acad67639a@1",
+    "policy_ref": "p_a204c92d08ca3c59@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Trajectory compares cancellation versus change fees for an international business ticket; it is not a weather economy change with fee waiver.",
+        "evidence_spans": [
+          "f7c0478892577c9a",
+          "674dadc65db2ae3b",
+          "36a6230b7cb3f945",
+          "1459e7741cac8a16"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "674dadc65db2ae3b",
+          "36a6230b7cb3f945",
+          "1459e7741cac8a16",
+          "b5db6400891e8ebd"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Business cancel vs change fee compare; not weather economy domain"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The act compares cancellation versus change fees for an international business ticket, with cancel preview and business change-policy lookup. The policy rulebook is weather-related economy changes that waive change fee while retaining fare difference. Business cancel/change fee comparison is a clear wrong-domain distractor.",
+      "agree_with": "golden",
+      "batch": "07"
+    }
+  },
+  {
+    "golden_index": 100,
+    "trajectory_ref": "t_3a483250f87bca34@1",
+    "policy_ref": "p_a204c92d08ca3c59@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Act is basic-economy cancellation after the free window (cancel policy lookup; no flight change with change_fee/fare_difference). Weather change fee-waiver rulebook is off-domain.",
+        "evidence_spans": [
+          "be0f98db686a47be",
+          "31d038a7c0f47db8",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "be0f98db686a47be",
+          "53aae83d9ac3dfea",
+          "32a2d1ba700c1002",
+          "31d038a7c0f47db8",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Z": {
+        "coverage_note": "basic-economy cancellation; off-topic from weather change fee/FD"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Subject matter is basic-economy cancellation after the free window, with cancel-policy lookup as the operative act. The weather change fee-waiver and fare-difference rulebook covers flight changes with change_reason=weather, not cancellation eligibility. Basic-economy cancel is off-domain.",
+      "agree_with": "golden",
+      "batch": "07"
+    }
+  },
+  {
+    "golden_index": 104,
+    "trajectory_ref": "t_8a0a3a0104fad1d6@1",
+    "policy_ref": "p_a204c92d08ca3c59@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Act is cancelling the first leg of a same-day connection (cancellation_fee/refund only); no weather-related or other flight-change fee/fare-difference act.",
+        "evidence_spans": [
+          "20e07a99bf840de7",
+          "fdd3b06d3aa4c6f9",
+          "b4eb4d5837e3dcb8"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "20e07a99bf840de7",
+          "e02831e59b546fac",
+          "fdd3b06d3aa4c6f9",
+          "b4eb4d5837e3dcb8"
+        ]
+      },
+      "Z": {
+        "coverage_note": "pure leg cancellation; not weather change domain"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The trajectory cancels the first leg of a same-day connection with cancellation_fee and refund only. No weather-reason flight change, change_fee waiver, or fare_difference accounting appears. Pure leg cancellation is outside the weather change fee-waiver domain.",
+      "agree_with": "golden",
+      "batch": "07"
+    }
+  },
+  {
+    "golden_index": 114,
+    "trajectory_ref": "t_d4bdaf4785309fad@1",
+    "policy_ref": "p_b521b5c8e42de53d@1",
+    "golden_domain_applicable": true,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": true
+    },
+    "details": {
+      "X": {
+        "rationale": "Only an empty assistant_message appears; no wire preview, transfer, or fee subject-matter to place this in the wire fee disclosure domain.",
+        "evidence_spans": [
+          "75fc7c686fdeb929"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "75fc7c686fdeb929"
+        ]
+      },
+      "Z": {
+        "coverage_note": "wire-fee disclosure act under same fee-disclosure rulebook"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": true,
+      "rationale": "This pair is scored under the wire fee disclosure rulebook; the trajectory is a wire-fee disclosure act even though the assistant message payload is empty. An empty complete stub is a completeness/evidence gap, not a cross-domain distractor, so domain stays applicable.",
+      "agree_with": "golden",
+      "batch": "07"
+    }
+  },
+  {
+    "golden_index": 124,
+    "trajectory_ref": "t_3a483250f87bca34@1",
+    "policy_ref": "p_ff5cdff378e429a8@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": true
+    },
+    "details": {
+      "X": {
+        "rationale": "Subject is basic-economy cancel eligibility/fee policy lookup with no cancel action or connected-itinerary cancel flow, so connection disclosure-before-cancel is off-domain.",
+        "evidence_spans": [
+          "31d038a7c0f47db8",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "31d038a7c0f47db8",
+          "2c04be3fc8daa290"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Basic-economy cancel eligibility; cancellation domain"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Subject matter is basic-economy cancel eligibility after the free window on a single-leg JFK–MIA booking, with cancel-policy lookup and no cancel_flight or connected-itinerary inspection. The policy rulebook is disclosing same-day onward connection risk before cancelling a leg. Cancel-eligibility lookup without a connection-cancel act is off-domain for this rulebook.",
+      "agree_with": "golden",
+      "batch": "08"
+    }
+  },
+  {
+    "golden_index": 125,
+    "trajectory_ref": "t_403e8606bb7a33a9@1",
+    "policy_ref": "p_ff5cdff378e429a8@1",
+    "golden_domain_applicable": true,
+    "votes": {
+      "X": false,
+      "Y": false,
+      "Z": true
+    },
+    "details": {
+      "X": {
+        "rationale": "Incomplete trace shows only an empty user_message with no booking lookup, cancellation, or itinerary act, so there is no evidenced cancellation/connection-risk subject-matter in this policy domain.",
+        "evidence_spans": [
+          "baa235c4520454f6"
+        ]
+      },
+      "Y": {
+        "veto_reason": "incomplete empty trace; no cancel or itinerary act",
+        "forcing_spans": [
+          "baa235c4520454f6"
+        ]
+      },
+      "Z": {
+        "coverage_note": "incomplete empty trace still judged under cancellation-disclosure rulebook"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": true,
+      "rationale": "This pair is scored under the connection-disclosure-before-cancellation rulebook; an empty incomplete stub is a completeness/evidence gap, not a cross-domain distractor. Domain stays applicable even though no itinerary lookup or cancel tool call appears yet, because the trajectory is not an unrelated product act.",
+      "agree_with": "golden",
+      "batch": "08"
+    }
+  },
+  {
+    "golden_index": 135,
+    "trajectory_ref": "t_403e8606bb7a33a9@1",
+    "policy_ref": "p_1908e5c6f45f96c7@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": false,
+      "Z": true
+    },
+    "details": {
+      "X": {
+        "rationale": "Incomplete empty user_message only; no delay, rebooking-for-delay, meal voucher, or overnight hotel act appears, so delay-compensation domain does not apply.",
+        "evidence_spans": [
+          "baa235c4520454f6"
+        ]
+      },
+      "Y": {
+        "veto_reason": "empty incomplete trace; no delay/compensation act",
+        "forcing_spans": [
+          "baa235c4520454f6"
+        ]
+      },
+      "Z": {
+        "coverage_note": "Incomplete empty trace; not a clear off-topic cross-product"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "The trajectory is an incomplete empty user_message with no delay, rebooking-for-delay, meal voucher, or overnight hotel act. Without evidenced delay-compensation subject matter, this 240-minute delay-compensation rulebook does not apply.",
+      "agree_with": "golden",
+      "batch": "08"
+    }
+  },
+  {
+    "golden_index": 193,
+    "trajectory_ref": "t_aa9bd5321cf1ad31@1",
+    "policy_ref": "p_16941d28a98e672e@1",
+    "golden_domain_applicable": false,
+    "votes": {
+      "X": false,
+      "Y": true,
+      "Z": false
+    },
+    "details": {
+      "X": {
+        "rationale": "Only empty user/assistant messages with no delete_account call or deletion-consent subject matter.",
+        "evidence_spans": [
+          "11cde2cd14a8ab4c",
+          "831230cb315256c1"
+        ]
+      },
+      "Y": {
+        "veto_reason": "",
+        "forcing_spans": [
+          "11cde2cd14a8ab4c",
+          "831230cb315256c1"
+        ]
+      },
+      "Z": {
+        "coverage_note": "empty chat; no delete_account act"
+      }
+    },
+    "adjudicator_opinion": {
+      "domain_applicable": false,
+      "rationale": "Only empty user and assistant messages appear, with no delete_account call or deletion-consent dialogue. Without evidenced account-deletion subject matter, the deletion-consent rulebook does not apply.",
+      "agree_with": "golden",
+      "batch": "08"
+    }
+  }
+]

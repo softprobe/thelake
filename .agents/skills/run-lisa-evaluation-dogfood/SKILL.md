@@ -11,12 +11,12 @@ definitions, and scores; telemetry ingestion does not call Lisa.
 ## Verification levels
 
 - For evaluator behavior without provider calls, run the fixture tests in
-  `lisa`. `test_state_bench_prompt.py` verifies all STATE-Bench gold trajectories
+  `lisa`. `test_evaluation_prompt.py` verifies all canonical evaluation trajectories
   and their exact selector/judge inputs; mocked responses do not prove quality.
-- For labeled model quality, run `test_state_bench_policy_selection_live.py` with
-  `LISA_RUN_STATE_BENCH_LIVE=1`. It reports each gold case separately for the
+- For labeled model quality, run `test_evaluation_live.py` with
+  `LISA_RUN_EVALUATION_LIVE=1`. It reports each annotated pair separately for the
   Gemini judge and for Decisions selection followed by judging. See the
-  STATE-Bench command in `docs/how-to/policy-dogfood.md`.
+  shared dataset command in `docs/how-to/policy-dogfood.md`.
 - For the real scheduled agent-to-issue path, run the quickstart E2E. It uses
   the existing quickstart stack and makes paid Gemini calls.
 - For Markdown policy learning or review, use
@@ -25,10 +25,11 @@ definitions, and scores; telemetry ingestion does not call Lisa.
 - For Slack delivery, use `verify-lisa-slack-alert` after a failing score is
   stored and the pending failure has a captured Slack destination.
 
-The five gold cases do not exercise prompt-view clipping. If they guide prompt
-adjustments, report the outcome as calibration, not independent holdout accuracy.
-Preserve the first failure and rerun every gold case after changing the prompt;
-keep gold labels and confidence thresholds unchanged.
+The shared dataset distinguishes proposed author labels from AI-adjudicated
+annotations. Calibration checks can compare proposed labels, but accuracy metrics
+use adjudicated pairs only. Prompt tuning on these visible examples is calibration,
+not independent holdout evidence. Preserve the first failure and never change
+annotations merely to match model output.
 
 ## Preconditions
 

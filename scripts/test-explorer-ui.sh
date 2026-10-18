@@ -111,7 +111,8 @@ if [[ "$ONLINE_E2E" == "1" ]]; then
     exit 1
   fi
   echo "==> Calibrating Lisa's local evaluator with paired policy cases..."
-  uv run --project "$ROOT/lisa" python "$ROOT/lisa/scripts/run_policy_dogfood.py"
+  LISA_RUN_EVALUATION_LIVE=1 uv run --project "$ROOT/lisa" --extra test pytest -q \
+    "$ROOT/lisa/tests/test_evaluation_live.py" -k "pair_judge_calibration and connected_itinerary"
 fi
 
 cat > "$TMP_DIR/config.yaml" <<EOF

@@ -1,0 +1,32 @@
+{
+  "scope": "first 50 pairs of candidate_pairs.jsonl",
+  "batch_size": 5,
+  "batches": 10,
+  "passes": {
+    "X": "careful evidence annotator",
+    "Y": "hostile skeptic (default false)",
+    "Z": "gold-set coverage auditor"
+  },
+  "pair_count": 50,
+  "unanimous_count": 43,
+  "disputed_count": 7,
+  "pairwise_agreement": {
+    "X_Y": 43,
+    "X_Z": 45,
+    "Y_Z": 48
+  },
+  "gold_applicable_count": 13,
+  "gold_not_applicable_count": 30,
+  "gold_total": 43,
+  "vote_patterns": {
+    "(True, True, True)": 13,
+    "(False, False, False)": 30,
+    "(True, False, False)": 5,
+    "(True, False, True)": 2
+  },
+  "files": {
+    "gold": "lisa/datasets/policy_evaluation/synthesize/golden_pairs_first50.jsonl",
+    "full_validation": "lisa/datasets/policy_evaluation/synthesize/golden_pairs_first50_validation.jsonl",
+    "report": "lisa/datasets/policy_evaluation/synthesize/golden_pairs_first50_report.json"
+  }
+}

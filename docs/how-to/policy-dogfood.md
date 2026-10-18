@@ -39,92 +39,54 @@ Keep this as a human-reviewed stage while the skill runs inside each user's
 coding agent. TheLake does not currently execute the policy-learning skill or
 score its output automatically.
 
-## 2. Calibrate the live judge
+## 2. Calibrate the evaluator
 
-Run the paired calibration cases through the same local evaluator Lisa uses:
+All examples use the [shared evaluation dataset](../../lisa/datasets/policy_evaluation/README.md).
+Itinerary controls include disclosure before confirmation, cancellation with a
+late warning, and incomplete capture. Their labels are proposed author judgments,
+not independently adjudicated gold. Run those explicit calibration checks with
+paid Gemini calls:
 
 ```bash
-uv run --project lisa python lisa/scripts/run_policy_dogfood.py \
-  --output /tmp/thelake-policy-dogfood.json
+LISA_RUN_EVALUATION_LIVE=1 uv run --project lisa --extra test pytest -q \
+  lisa/tests/test_evaluation_live.py \
+  -k "pair_judge_calibration and connected_itinerary"
 ```
 
-Lisa evaluates three fixed cases from
-[`connected_itinerary.json`](../../lisa/tests/fixtures/connected_itinerary.json):
-
-- A policy-compliant disclosure before confirmation: expected `pass`.
-- A cancellation followed by a late warning: expected `fail`.
-- An incomplete trace: expected `insufficient_evidence`.
-
-The command exits nonzero on a verdict mismatch. Its optional report contains
-case IDs, scores, rationale, timings, and evidence span IDs; it does not include
-the full trace payload or credentials. Gemini results are live model judgments,
-so rerun the suite when changing rubric wording, judge configuration, or trace
-evidence. Treat repeated false positives or unstable verdicts as a rubric/trace
-quality issue, not as a passing evaluation.
-
-The fixture contract can be checked without a Gemini call:
+Check the shared data and provider wiring without provider calls:
 
 ```bash
-uv run --project lisa --extra test pytest lisa/tests/test_dogfood_fixture.py
+uv run --project lisa --extra test pytest -q \
+  lisa/tests/test_evaluation_dataset.py lisa/tests/test_evaluation_prompt.py
 ```
 
-### STATE-Bench gold formatting and model quality
+The dataset also contains ten STATE-Bench trajectories. Only each authored target
+pair is annotated; other catalog pairs remain unreviewed. All provider formatting
+and calibration tests resolve the same canonical trajectory and policy records.
 
-The five cases in `lisa/tests/fixtures/state_bench_gold.jsonl` have policy-selection
-labels, verdict labels, and illustrative supporting spans. Verify exact event
-content, tool linkage, and provider-boundary prompts without provider calls:
-
-```bash
-uv run --project lisa --extra test pytest \
-  lisa/tests/test_state_bench_prompt.py \
-  lisa/tests/test_prompt_citations.py \
-  lisa/tests/test_tool_result_format.py \
-  lisa/tests/test_trajectory_prompt.py -v
-```
-
-For live quality, load the known local `.env` into the test process without
-printing secrets. Existing exported credentials take precedence. This invokes
-paid Gemini calls, plus OpenAI Decisions calls for the two-stage checks:
+For live judge calibration and the MCP selection-to-score path, load the known
+local `.env` inside the test process, preserving existing exports and never
+printing secrets. This invokes paid Gemini and OpenAI calls:
 
 ```bash
-uv run --project lisa --extra test python - <<'PY'
+uv run --project lisa --extra test python - <<'PYCODE'
 import os
 from dotenv import load_dotenv
 import pytest
 
 load_dotenv(".env", override=False)
-os.environ["LISA_RUN_STATE_BENCH_LIVE"] = "1"
-raise SystemExit(pytest.main([
-    "lisa/tests/test_state_bench_policy_selection_live.py", "-v", "-rs",
-]))
-PY
+os.environ["LISA_RUN_EVALUATION_LIVE"] = "1"
+raise SystemExit(pytest.main(["lisa/tests/test_evaluation_live.py", "-v", "-rs"]))
+PYCODE
 ```
 
-Each case reports separately for judge-only quality and for selection through
-Lisa's MCP `evaluate_session` tool. The selection test supplies fixture-backed
-session and approved-policy data, then exercises Lisa's production controller
-and evaluation service. It checks that the service records one Gemini judge
-request and score per selected policy before asserting the gold policy selection;
-an over-selection therefore remains visible without preventing its extra judge
-call from being exercised. The fixture trajectory is injected at Lisa's session
-trajectory boundary, so this live check does not exercise raw TheLake span
-conversion or upstream completeness gating. Tests also check gold verdict
-direction, nonempty rationale, and citations that belong to the trajectory;
-valid alternate citations need not match the illustrative gold span exactly.
-Missing credentials produce explicit skips, which are not successful quality
-checks. These five trajectories fit without clipping, so their results validate
-compact-input quality on this fixture set; they do not establish quality after
-clipping or no regression against the old JSON prompt.
-
-The judge defaults to Gemini's `low` thinking level to reduce reasoning-token
-cost. Set `LISA_GEMINI_THINKING_LEVEL=medium` or `high` when calibration shows
-that the lower-cost setting misses expected verdicts. The live gold suite is
-the quality check for this tradeoff. Lisa does not set a hard output-token cap:
-Gemini counts reasoning tokens against that cap, and exhausting it can truncate
-the required structured response.
-The current `gemini-3.8-flash` judge uses implicit caching only, which requires
-at least 4,096 input tokens; compact gold prompts are below that threshold, so
-they should not be expected to report cached input tokens.
+Judge calibration compares explicit annotations, including proposed author
+expectations. The MCP path checks every adjudicated violation survives triage,
+one judge request and score per escalation, and valid citations. It injects the
+trajectory at the session boundary; raw telemetry conversion is tested separately.
+Skipped tests do not establish quality. These short examples do not establish
+production recall. See [the evaluation guide](policy-triage-evaluation.md) for
+metrics scored only against adjudicated annotations and dataset expansion.
 
 ## 3. Verify Lisa's scheduled QA cycle
 
@@ -157,3 +119,6 @@ starts one model turn and evaluates at most one unchecked session; it is not a
 guarantee of complete production coverage. The cron registration is process
 local, and a Lisa restart can miss a scheduled fire. A durable work queue and
 grouped issue records remain part of the product design.
+
+For multi-policy synthetic cases, recall metrics, and production dataset design,
+see [Policy triage evaluation](policy-triage-evaluation.md).

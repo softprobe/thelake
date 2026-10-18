@@ -145,7 +145,7 @@ def test_gemini_default_remains_available_without_custom_endpoint(monkeypatch, t
     }
 
 
-def test_decisions_api_key_is_forwarded_only_to_lisa_mcp(monkeypatch, tmp_path):
+def test_decisions_api_key_is_forwarded_without_obsolete_selection_cutoff(monkeypatch, tmp_path):
     captured = configure_openhands(monkeypatch)
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
     monkeypatch.setenv("OPENAI_API_KEY", "decisions-test-key")
@@ -156,10 +156,7 @@ def test_decisions_api_key_is_forwarded_only_to_lisa_mcp(monkeypatch, tmp_path):
 
     configured = captured["agent"]["mcp_config"]["lisa"].env["OPENAI_API_KEY"]
     assert configured.get_secret_value() == "decisions-test-key"
-    minimum_confidence = captured["agent"]["mcp_config"]["lisa"].env[
-        "LISA_POLICY_SELECTION_MIN_CONFIDENCE"
-    ]
-    assert minimum_confidence.get_secret_value() == "0.91"
+    assert "LISA_POLICY_SELECTION_MIN_CONFIDENCE" not in captured["agent"]["mcp_config"]["lisa"].env
     thinking_level = captured["agent"]["mcp_config"]["lisa"].env[
         "LISA_GEMINI_THINKING_LEVEL"
     ]

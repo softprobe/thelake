@@ -21,7 +21,7 @@
   },
   {
     "name": "evaluate_session",
-    "description": "Select applicable approved policies and evaluate them against one session.",
+    "description": "Triage approved policies for suspected violations and judge escalated policies.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

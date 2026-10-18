@@ -1,0 +1,263 @@
+{
+  "strategy": "majority of X,Y,Z and adjudicator_opinion (when present); 2-2 tie keeps prior golden",
+  "pair_count": 202,
+  "vote_sizes": {
+    "3": 166,
+    "4": 36
+  },
+  "kept": 193,
+  "flipped": 9,
+  "ties_kept_golden": 10,
+  "flip_to_true": 8,
+  "flip_to_false": 1,
+  "final_true": 72,
+  "final_false": 130,
+  "flips": [
+    {
+      "index": 11,
+      "before": true,
+      "after": false,
+      "votes": {
+        "X": false,
+        "Y": false,
+        "Z": false
+      },
+      "true_n": 0,
+      "false_n": 3,
+      "trajectory_ref": "t_8a0a3a0104fad1d6@1",
+      "policy_ref": "p_3cc312a399a2a2ff@1",
+      "was_dispute": false,
+      "domain_dc": "agreed"
+    },
+    {
+      "index": 24,
+      "before": false,
+      "after": true,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": true
+      },
+      "true_n": 3,
+      "false_n": 0,
+      "trajectory_ref": "t_31d041acad67639a@1",
+      "policy_ref": "p_2eaeed46415bc6da@1",
+      "was_dispute": false,
+      "domain_dc": "agreed"
+    },
+    {
+      "index": 25,
+      "before": false,
+      "after": true,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": true
+      },
+      "true_n": 3,
+      "false_n": 0,
+      "trajectory_ref": "t_3a483250f87bca34@1",
+      "policy_ref": "p_2eaeed46415bc6da@1",
+      "was_dispute": false,
+      "domain_dc": "agreed"
+    },
+    {
+      "index": 70,
+      "before": false,
+      "after": true,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": true
+      },
+      "true_n": 3,
+      "false_n": 0,
+      "trajectory_ref": "t_8797ec92bfaecf68@1",
+      "policy_ref": "p_6e25ad2db442b0fa@1",
+      "was_dispute": false,
+      "domain_dc": "agreed"
+    },
+    {
+      "index": 85,
+      "before": false,
+      "after": true,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": true
+      },
+      "true_n": 3,
+      "false_n": 0,
+      "trajectory_ref": "t_024ff3f3ef9cf924@1",
+      "policy_ref": "p_8dffaab311d214e9@1",
+      "was_dispute": false,
+      "domain_dc": "agreed"
+    },
+    {
+      "index": 102,
+      "before": false,
+      "after": true,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": true
+      },
+      "true_n": 3,
+      "false_n": 0,
+      "trajectory_ref": "t_41ab1cc34b27a2d6@1",
+      "policy_ref": "p_a204c92d08ca3c59@1",
+      "was_dispute": false,
+      "domain_dc": "agreed"
+    },
+    {
+      "index": 103,
+      "before": false,
+      "after": true,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": true
+      },
+      "true_n": 3,
+      "false_n": 0,
+      "trajectory_ref": "t_8797ec92bfaecf68@1",
+      "policy_ref": "p_a204c92d08ca3c59@1",
+      "was_dispute": false,
+      "domain_dc": "agreed"
+    },
+    {
+      "index": 105,
+      "before": false,
+      "after": true,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": true
+      },
+      "true_n": 3,
+      "false_n": 0,
+      "trajectory_ref": "t_cc9a4f949b8604d2@1",
+      "policy_ref": "p_a204c92d08ca3c59@1",
+      "was_dispute": false,
+      "domain_dc": "agreed"
+    },
+    {
+      "index": 123,
+      "before": false,
+      "after": true,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": true
+      },
+      "true_n": 3,
+      "false_n": 0,
+      "trajectory_ref": "t_31d041acad67639a@1",
+      "policy_ref": "p_ff5cdff378e429a8@1",
+      "was_dispute": false,
+      "domain_dc": "agreed"
+    }
+  ],
+  "ties": [
+    {
+      "index": 18,
+      "votes": {
+        "X": false,
+        "Y": false,
+        "Z": true,
+        "adjudicator": true
+      },
+      "kept_golden": true
+    },
+    {
+      "index": 34,
+      "votes": {
+        "X": false,
+        "Y": true,
+        "Z": true,
+        "adjudicator": false
+      },
+      "kept_golden": false
+    },
+    {
+      "index": 40,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": false,
+        "adjudicator": false
+      },
+      "kept_golden": false
+    },
+    {
+      "index": 41,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": false,
+        "adjudicator": false
+      },
+      "kept_golden": false
+    },
+    {
+      "index": 52,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": false,
+        "adjudicator": false
+      },
+      "kept_golden": false
+    },
+    {
+      "index": 55,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": false,
+        "adjudicator": false
+      },
+      "kept_golden": false
+    },
+    {
+      "index": 58,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": false,
+        "adjudicator": false
+      },
+      "kept_golden": false
+    },
+    {
+      "index": 59,
+      "votes": {
+        "X": true,
+        "Y": true,
+        "Z": false,
+        "adjudicator": false
+      },
+      "kept_golden": false
+    },
+    {
+      "index": 124,
+      "votes": {
+        "X": false,
+        "Y": true,
+        "Z": true,
+        "adjudicator": false
+      },
+      "kept_golden": false
+    },
+    {
+      "index": 125,
+      "votes": {
+        "X": false,
+        "Y": false,
+        "Z": true,
+        "adjudicator": true
+      },
+      "kept_golden": true
+    }
+  ]
+}

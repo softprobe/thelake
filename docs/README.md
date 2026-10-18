@@ -30,6 +30,7 @@ Concepts and runtime design (read for understanding, not step-by-step).
 - [Instrument applications](how-to/instrumentation.md)
 - [Use Explorer](how-to/explorer.md) — browser chat and session/trace UI at `/explorer/`
 - [Policy memory](how-to/policy-memory.md) — keep business rules in plain Markdown and mark approved rules for direct policy evaluation
+- [Policy triage evaluation](how-to/policy-triage-evaluation.md) — dataset design, recall metrics, and opt-in calibration
 - [Policy dogfood](how-to/policy-dogfood.md) — repeatably check policy learning, judge directionality, and online issue detection
 - [Use Slack behavior checks](how-to/slack-evaluator.md) — author checks and receive online evaluation failures in threads
 - [Apply schema promotion](how-to/promotion.md)
