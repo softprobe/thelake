@@ -5,10 +5,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from test_policy_selection import FakeDecisionsClient
+from test_policy_triage import FakeDecisionsClient
 
 from lisa.evaluation.dataset import load_dataset
-from lisa.evaluation.policy_selection import OpenAIPolicySelector
+from lisa.evaluation.policy_triage import OpenAIPolicyTriager
 
 spec = importlib.util.spec_from_file_location(
     "evaluation_benchmark", Path(__file__).resolve().parents[1] / "scripts/evaluate_policies.py"
@@ -99,14 +99,14 @@ def test_enabled_judge_with_all_violations_skipped_has_zero_recall():
 @pytest.mark.parametrize("decision", ["suspected_violation", "insufficient_evidence"])
 def test_runs_every_catalog_pair_and_judges_only_escalations(decision):
     data = subset()
-    selector = OpenAIPolicySelector(client=FakeDecisionsClient([decision, "no_violation_found"]))
+    triager = OpenAIPolicyTriager(client=FakeDecisionsClient([decision, "no_violation_found"]))
     requests = []
 
     def judge(request):
         requests.append(request)
         return {"status": "fail" if request["policy"]["name"] == "Deletion consent" else "pass"}
 
-    report = benchmark().run(data, selector, judge)
+    report = benchmark().run(data, triager, judge)
     assert len(report["rows"]) == 2
     assert len(requests) == 1
     assert report["metrics"]["violation_recall"] == 1
@@ -117,18 +117,18 @@ def test_runs_every_catalog_pair_and_judges_only_escalations(decision):
 
 @pytest.mark.parametrize("status", ["error", "invalid", None])
 def test_aborts_judge_execution_failures(status):
-    selector = OpenAIPolicySelector(
+    triager = OpenAIPolicyTriager(
         client=FakeDecisionsClient(["suspected_violation", *(["no_violation_found"] * 5)])
     )
     with pytest.raises(RuntimeError, match="Judge failed"):
-        benchmark().run(subset(), selector, lambda _: {"status": status})
+        benchmark().run(subset(), triager, lambda _: {"status": status})
 
 
 def test_capture_gate_stops_both_providers_and_is_not_scored():
     class NoProviderCalls:
         model = "unused"
 
-        def select(self, *_):
+        def triage(self, *_):
             pytest.fail("Incomplete capture must stop before triage")
 
     report = benchmark().run(
@@ -153,8 +153,8 @@ def test_sparse_and_proposed_pairs_do_not_enter_accuracy():
         ),
     )
     count = len(batch.policy_refs)
-    selector = OpenAIPolicySelector(client=FakeDecisionsClient(["no_violation_found"] * count))
-    report = benchmark().run(data, selector, mode="triage")
+    triager = OpenAIPolicyTriager(client=FakeDecisionsClient(["no_violation_found"] * count))
+    report = benchmark().run(data, triager, mode="triage")
     assert len(report["rows"]) == count
     assert report["coverage"]["unlabeled_pair_count"] == count - 1
     assert report["coverage"]["proposed_pair_count"] == 1
@@ -182,8 +182,8 @@ def test_optional_ordering_flags_use_validated_defaults():
 
     updated = record.model_copy(update={"trajectory": Trajectory.model_validate(payload)})
     data = replace(data, trajectories={**data.trajectories, record.ref: updated})
-    selector = OpenAIPolicySelector(client=FakeDecisionsClient(["no_violation_found"] * 6))
-    report = benchmark().run(data, selector, mode="triage")
+    triager = OpenAIPolicyTriager(client=FakeDecisionsClient(["no_violation_found"] * 6))
+    report = benchmark().run(data, triager, mode="triage")
     assert report["capture_gate"]["pair_count"] == 0
     assert report["metrics"]["pair_count"] == 2
 
@@ -191,10 +191,10 @@ def test_optional_ordering_flags_use_validated_defaults():
 def test_official_release_executes_every_pair_through_the_shared_harness():
     data = load_dataset()
     maximum_catalog = max(len(batch.policy_refs) for batch in data.manifest.batches)
-    selector = OpenAIPolicySelector(
+    triager = OpenAIPolicyTriager(
         client=FakeDecisionsClient(["no_violation_found"] * maximum_catalog)
     )
-    report = benchmark().run(data, selector, mode="triage")
+    report = benchmark().run(data, triager, mode="triage")
     assert len(report["rows"]) == 202
     assert report["capture_gate"]["pair_count"] == 16
     assert report["coverage"]["scored_pair_count"] == 186

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Run Lisa Policy Evaluation"
+  short_description: "Run balanced Lisa policy eval samples"

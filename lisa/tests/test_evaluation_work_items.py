@@ -382,7 +382,7 @@ def _tracked_service_with_saved_inputs(tmp_path, *, approved_rules):
         failures=MagicMock(),
         notifier=MagicMock(),
         sessions=MagicMock(),
-        policy_selector=MagicMock(),
+        policy_triage=MagicMock(),
         work_items=store,
         artifact_repository=EvaluationArtifactRepository(context),
         render_context=render_evaluation_context,

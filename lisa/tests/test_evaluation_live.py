@@ -119,8 +119,8 @@ def test_catalog_selection_through_mcp(batch, monkeypatch, tmp_path):
             )
 
     tool_result = asyncio.run(call_production_tool())
-    if services.evaluations.policy_selector.client is not None:
-        services.evaluations.policy_selector.client.close()
+    if services.evaluations.policy_triage.client is not None:
+        services.evaluations.policy_triage.client.close()
     assert not tool_result.is_error, str(tool_result)
     result = tool_result.data
 
@@ -142,17 +142,17 @@ def test_catalog_selection_through_mcp(batch, monkeypatch, tmp_path):
         [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         for path in sorted(new_records)
     ]
-    selector_requests = [
+    triager_requests = [
         rows[0]
         for rows in call_records
-        if rows and rows[0].get("type") == "request" and rows[0].get("surface") == "selector"
+        if rows and rows[0].get("type") == "request" and rows[0].get("surface") == "policy_triage"
     ]
     judge_records = [
         rows
         for rows in call_records
         if rows and rows[0].get("type") == "request" and rows[0].get("surface") == "judge"
     ]
-    assert len(selector_requests) == 1
+    assert len(triager_requests) == 1
     assert len(judge_records) == len(selected_names), (
         f"Lisa selected {selected_names!r} but recorded {len(judge_records)} judge requests"
     )

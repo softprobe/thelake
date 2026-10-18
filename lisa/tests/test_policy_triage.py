@@ -6,7 +6,7 @@ import pytest
 
 from lisa.context import WorkspaceContext
 from lisa.evaluation.dataset import load_dataset
-from lisa.evaluation.policy_selection import OpenAIPolicySelector
+from lisa.evaluation.policy_triage import OpenAIPolicyTriager
 from lisa.models.policies import PolicyRule
 from lisa.repositories.evaluation_artifacts import EvaluationArtifactRepository
 from lisa.services.evaluations import EvaluationService
@@ -68,13 +68,13 @@ class FakeSessionClient:
         return ({}, 201) if include_status else {}
 
 
-class FakeSelector:
+class FakeTriager:
     def __init__(self, selected):
         self.selected = selected
         self.calls = []
         self.model = "test-decisions-model"
 
-    def select(self, trajectory, rules):
+    def triage(self, trajectory, rules):
         self.calls.append((trajectory, rules))
         return {"selected_policies": self.selected}
 
@@ -82,12 +82,12 @@ class FakeSelector:
 def make_evaluation_service(**kwargs):
     client = kwargs.pop("client")
     build_events = kwargs.pop("build_events", None)
-    selector = kwargs.pop("policy_selector", FakeSelector([]))
+    triager = kwargs.pop("policy_triage", FakeTriager([]))
     sessions = SessionService(client, build_events) if build_events else SessionService(client)
     return EvaluationService(
         client=client,
         sessions=sessions,
-        policy_selector=selector,
+        policy_triage=triager,
         **kwargs,
     )
 
@@ -99,7 +99,7 @@ def test_decisions_routes_each_catalog_choice_independently():
         PolicyRule(id=ref, **data.policies[ref].policy.model_dump()) for ref in batch.policy_refs
     ]
     client = FakeDecisionsClient(["suspected_violation", *(["no_violation_found"] * 5)])
-    result = OpenAIPolicySelector(client=client).select(
+    result = OpenAIPolicyTriager(client=client).triage(
         data.trajectories[batch.trajectory_ref].trajectory.model_dump(), rules
     )
     assert [p["id"] for p in result["selected_policies"]] == [rules[0].id]
@@ -108,9 +108,9 @@ def test_decisions_routes_each_catalog_choice_independently():
     assert client.request["model"] == "gpt-6-luna"
 
 
-def test_selector_prompt_preserves_scope_and_uncertainty():
+def test_triager_prompt_preserves_scope_and_uncertainty():
     client = FakeDecisionsClient(["no_violation_found"])
-    OpenAIPolicySelector(client=client).select(
+    OpenAIPolicyTriager(client=client).triage(
         {"events": []},
         [
             PolicyRule(
@@ -143,14 +143,14 @@ def test_every_suspected_violation_is_sent_to_the_judge_regardless_of_confidence
             scope="workspace",
         ),
     ]
-    selector = OpenAIPolicySelector(
+    triager = OpenAIPolicyTriager(
         client=FakeDecisionsClient(
             ["suspected_violation", "suspected_violation"],
             confidences=[0.69, 0.7],
         ),
     )
 
-    selection = selector.select({"events": []}, rules)
+    selection = triager.triage({"events": []}, rules)
 
     assert selection["selected_policies"] == [
         {
@@ -168,7 +168,7 @@ def test_every_suspected_violation_is_sent_to_the_judge_regardless_of_confidence
 
 
 def test_suspected_violation_selection_does_not_require_confidence():
-    selector = OpenAIPolicySelector(client=FakeDecisionsClient(["suspected_violation"]))
+    triager = OpenAIPolicyTriager(client=FakeDecisionsClient(["suspected_violation"]))
     rule = SimpleNamespace(
         id="P1.1",
         name="Same-day connected itinerary disclosure",
@@ -176,28 +176,28 @@ def test_suspected_violation_selection_does_not_require_confidence():
         scope="workspace",
     )
 
-    selection = selector.select({"events": []}, [rule])
+    selection = triager.triage({"events": []}, [rule])
 
     assert selection["selected_policies"][0]["id"] == "P1.1"
 
 
-def test_selector_uses_triage_choices_and_incomplete_answers_fail_closed():
+def test_triager_uses_triage_choices_and_incomplete_answers_fail_closed():
     rule = SimpleNamespace(
         id="P1.2",
         name="Cancellation policy",
         criteria="Cancellation rules",
         scope="workspace",
     )
-    selector = OpenAIPolicySelector(
+    triager = OpenAIPolicyTriager(
         client=FakeDecisionsClient(["suspected_violation"]),
     )
-    selection = selector.select({"events": []}, [rule])
+    selection = triager.triage({"events": []}, [rule])
     assert selection["selected_policies"][0]["id"] == "P1.2"
     assert (
         "A policy lookup alone is not a violation"
-        in (selector.client.request["questions"][0]["instructions"])
+        in (triager.client.request["questions"][0]["instructions"])
     )
-    assert [choice["value"] for choice in selector.client.request["questions"][0]["choices"]] == [
+    assert [choice["value"] for choice in triager.client.request["questions"][0]["choices"]] == [
         "suspected_violation",
         "no_violation_found",
         "insufficient_evidence",
@@ -208,8 +208,8 @@ def test_selector_uses_triage_choices_and_incomplete_answers_fail_closed():
             self.request = json
             return FakeResponse({"answers": []})
 
-    with pytest.raises(RuntimeError, match="incomplete policy selection"):
-        OpenAIPolicySelector(client=IncompleteClient([])).select({"events": []}, [rule])
+    with pytest.raises(RuntimeError, match="incomplete policy triage"):
+        OpenAIPolicyTriager(client=IncompleteClient([])).triage({"events": []}, [rule])
 
 
 def test_missing_decision_confidence_does_not_change_triage():
@@ -235,9 +235,9 @@ def test_missing_decision_confidence_does_not_change_triage():
                 }
             )
 
-    selection = OpenAIPolicySelector(
-        client=MissingConfidenceClient(["suspected_violation"])
-    ).select({"events": []}, [rule])
+    selection = OpenAIPolicyTriager(client=MissingConfidenceClient(["suspected_violation"])).triage(
+        {"events": []}, [rule]
+    )
     assert selection["selected_policies"] == [
         {"id": "P1.2", "name": rule.name, "scope": rule.scope}
     ]
@@ -254,16 +254,16 @@ def test_decision_confidence_is_ignored(confidence):
         scope="workspace",
     )
 
-    selection = OpenAIPolicySelector(
+    selection = OpenAIPolicyTriager(
         client=FakeDecisionsClient(["suspected_violation"], [confidence])
-    ).select({"events": []}, [rule])
+    ).triage({"events": []}, [rule])
     assert selection["selected_policies"] == [
         {"id": "P1.2", "name": rule.name, "scope": rule.scope}
     ]
 
 
-def test_policy_selection_result_has_no_confidence_cutoff_metadata():
-    result = OpenAIPolicySelector(client=FakeDecisionsClient(["no_violation_found"])).select(
+def test_policy_triage_result_has_no_confidence_cutoff_metadata():
+    result = OpenAIPolicyTriager(client=FakeDecisionsClient(["no_violation_found"])).triage(
         {"events": []},
         [SimpleNamespace(name="Cancellation", criteria="Cancel", scope="workspace")],
     )
@@ -274,7 +274,7 @@ def test_policy_selection_result_has_no_confidence_cutoff_metadata():
 
 def test_session_selection_checks_agent_and_returns_only_selected_rules():
     rule = SimpleNamespace(name="Cancellation policy", scope="workspace")
-    selector = FakeSelector([{"name": rule.name, "scope": rule.scope}])
+    triager = FakeTriager([{"name": rule.name, "scope": rule.scope}])
     detail = {"agent_names": ["travel-agent"], "spans": [{"trace_id": "trace-1"}]}
     service = make_evaluation_service(
         context=None,
@@ -289,34 +289,34 @@ def test_session_selection_checks_agent_and_returns_only_selected_rules():
             tool_order_certain=True,
             message_order_certain=True,
         ),
-        policy_selector=selector,
+        policy_triage=triager,
     )
 
-    result, trajectory = service._select_policies_for_session("travel-agent", "session-1")
+    result, trajectory = service._triage_policies_for_session("travel-agent", "session-1")
 
     assert "status" not in result
-    assert result["selected_policies"] == selector.selected
+    assert result["selected_policies"] == triager.selected
     assert result["candidate_count"] == 1
     assert trajectory["events"] == [{"kind": "user_message", "content": "cancel this flight"}]
-    assert selector.calls[0][0]["events"] == trajectory["events"]
+    assert triager.calls[0][0]["events"] == trajectory["events"]
 
 
-def test_session_policy_selection_skips_a_different_agent():
-    selector = FakeSelector([])
+def test_session_policy_triage_skips_a_different_agent():
+    triager = FakeTriager([])
     service = make_evaluation_service(
         context=None,
         client=FakeSessionClient({"agent_names": ["other-agent"], "spans": []}),
         policies=FakePolicyStore([SimpleNamespace(name="Rule", scope="workspace")]),
         failures=None,
         notifier=None,
-        policy_selector=selector,
+        policy_triage=triager,
     )
 
-    result, trajectory = service._select_policies_for_session("travel-agent", "session-1")
+    result, trajectory = service._triage_policies_for_session("travel-agent", "session-1")
 
     assert result["status"] == "skipped_agent_mismatch"
     assert trajectory is None
-    assert selector.calls == []
+    assert triager.calls == []
 
 
 def test_session_with_no_selected_policies_returns_empty_selection():
@@ -340,12 +340,12 @@ def test_session_with_no_selected_policies_returns_empty_selection():
             tool_order_certain=True,
             message_order_certain=True,
         ),
-        policy_selector=OpenAIPolicySelector(
+        policy_triage=OpenAIPolicyTriager(
             client=FakeDecisionsClient(["no_violation_found"]),
         ),
     )
 
-    result, trajectory = service._select_policies_for_session("travel-agent", "session-1")
+    result, trajectory = service._triage_policies_for_session("travel-agent", "session-1")
 
     assert result["selected_policies"] == []
     assert "status" not in result
@@ -367,7 +367,7 @@ def test_selected_policy_missing_from_candidates_fails_closed():
         scope="workspace",
         id="P1.1",
     )
-    selector = FakeSelector(
+    triager = FakeTriager(
         [
             {
                 "id": "missing-policy",
@@ -396,7 +396,7 @@ def test_selected_policy_missing_from_candidates_fails_closed():
             tool_order_certain=True,
             message_order_certain=True,
         ),
-        policy_selector=selector,
+        policy_triage=triager,
     )
 
     with pytest.raises(RuntimeError, match="not in the approved candidate set"):
@@ -416,7 +416,7 @@ def test_evaluation_selection_passes_triage_to_judge():
         "name": rule.name,
         "scope": rule.scope,
     }
-    selector = FakeSelector([decision])
+    triager = FakeTriager([decision])
     service = make_evaluation_service(
         context=None,
         client=FakeSessionClient(
@@ -437,7 +437,7 @@ def test_evaluation_selection_passes_triage_to_judge():
             tool_order_certain=True,
             message_order_certain=True,
         ),
-        policy_selector=selector,
+        policy_triage=triager,
     )
     evaluation_calls = []
     service._evaluate_session = lambda *args, **kwargs: (
@@ -459,7 +459,7 @@ def test_incomplete_trajectory_does_not_exclude_any_approved_policy():
         SimpleNamespace(name="Cancellation policy", scope="workspace"),
         SimpleNamespace(name="Upgrade policy", scope="workspace"),
     ]
-    selector = FakeSelector([])
+    triager = FakeTriager([])
     detail = {"agent_names": ["travel-agent"], "spans": [{"trace_id": "trace-1"}]}
     service = make_evaluation_service(
         context=None,
@@ -474,16 +474,16 @@ def test_incomplete_trajectory_does_not_exclude_any_approved_policy():
             tool_order_certain=False,
             message_order_certain=True,
         ),
-        policy_selector=selector,
+        policy_triage=triager,
     )
 
-    result, trajectory = service._select_policies_for_session("travel-agent", "session-1")
+    result, trajectory = service._triage_policies_for_session("travel-agent", "session-1")
 
     assert result["status"] == "insufficient_evidence"
     assert result["unresolved_policies"] == [rule.name for rule in rules]
     assert result["limitations"] == ["The session detail was bounded or truncated."]
     assert trajectory is not None
-    assert selector.calls == []
+    assert triager.calls == []
 
 
 def test_evaluate_session_judges_every_selected_policy_with_the_same_evidence(tmp_path):
@@ -508,7 +508,7 @@ def test_evaluate_session_judges_every_selected_policy_with_the_same_evidence(tm
         id="P1.2",
     )
     client = FakeSessionClient(session_detail)
-    selector = OpenAIPolicySelector(
+    triager = OpenAIPolicyTriager(
         client=FakeDecisionsClient(["suspected_violation", "insufficient_evidence"])
     )
     judge_requests = []
@@ -535,7 +535,7 @@ def test_evaluate_session_judges_every_selected_policy_with_the_same_evidence(tm
             tool_order_certain=True,
             message_order_certain=True,
         ),
-        policy_selector=selector,
+        policy_triage=triager,
         artifact_repository=EvaluationArtifactRepository(context),
     )
 
@@ -551,7 +551,7 @@ def test_evaluate_session_judges_every_selected_policy_with_the_same_evidence(tm
     assert all(item["status"] == "pass" for item in result["evaluations"])
     assert {item["id"] for item in result["selected_policies"]} == {rule.id, second_rule.id}
     assert len(client.get_calls) == 1
-    assert len(selector.client.request["questions"]) == 2
+    assert len(triager.client.request["questions"]) == 2
     assert {body["metadata"]["policy_id"] for _, body in client.posts} == {
         rule.id,
         second_rule.id,
@@ -572,17 +572,17 @@ def test_uncertain_decision_is_escalated_alongside_suspected_violations():
         SimpleNamespace(id=str(i), name=str(i), scope="workspace", criteria="Rule")
         for i in range(3)
     ]
-    result = OpenAIPolicySelector(
+    result = OpenAIPolicyTriager(
         client=FakeDecisionsClient(
             ["suspected_violation", "no_violation_found", "insufficient_evidence"]
         )
-    ).select({"events": []}, rules)
+    ).triage({"events": []}, rules)
     assert [p["id"] for p in result["selected_policies"]] == ["0", "2"]
 
 
 @pytest.mark.parametrize("choice", ["applicable", "not_applicable", "violation", None])
 def test_obsolete_or_invalid_triage_choices_are_rejected(choice):
     with pytest.raises(RuntimeError, match="invalid policy choice"):
-        OpenAIPolicySelector(client=FakeDecisionsClient([choice])).select(
+        OpenAIPolicyTriager(client=FakeDecisionsClient([choice])).triage(
             {"events": []}, [SimpleNamespace(name="Rule", criteria="Rule", scope="workspace")]
         )

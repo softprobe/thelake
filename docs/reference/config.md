@@ -114,12 +114,12 @@ customer DuckLake.
 | `LISA_DATABASE_WRITER_PASSWORD` / `LISA_DATABASE_READER_PASSWORD` | When both are set, the provision script also creates the `lisa` database and writer/reader roles (local/quickstart bootstrap). |
 | `LISA_DATABASE_RECREATE` | Set to `1` to `DROP SCHEMA lisa CASCADE` and provision a fresh schema. Required when the schema shape changes; without it, an already-bound database is left untouched. |
 | `LISA_DATABASE_WRITER_ROLE` / `LISA_DATABASE_READER_ROLE` | Optional database role names to grant during schema provisioning; defaults are `lisa_writer` and `lisa_reader`. |
-| `LISA_LLM_TRACE_ENABLED` | Opt-in local recording of Lisa chat, policy-selector, and judge calls; defaults off. `1`, `true`, or `yes` enables redacted per-call JSONL files under the workspace home’s `llm-calls/`. Records expire after 30 days; cleanup runs at startup and hourly while HTTP/MCP is running. Existing OpenHands conversation state has separate persistence. |
+| `LISA_LLM_TRACE_ENABLED` | Opt-in local recording of Lisa chat, policy-triage, and judge calls; defaults off. `1`, `true`, or `yes` enables redacted per-call JSONL files under the workspace home’s `llm-calls/`. Records expire after 30 days; cleanup runs at startup and hourly while HTTP/MCP is running. Existing OpenHands conversation state has separate persistence. |
 | `LISA_QA_CRON` | Five-field UTC cron expression for the `Lisa scheduled QA` job; defaults to `0 * * * *` (hourly at minute 0). Lisa does not run a cycle on startup. |
 | `LISA_LOCAL_ANONYMOUS` | `1` enables unauthenticated Lisa chat for the localhost quickstart only. Leave disabled in a shared deployment. |
 | `LISA_CORS_ORIGINS` | Comma-separated browser origins allowed to call Lisa directly. |
 | `SOFTPROBE_ASSERTION_HMAC_SECRET` | Shared edge assertion key Lisa uses to verify workspace-scoped browser requests. |
 | `LISA_PUBLIC_URL` | Browser-reachable Lisa API base URL injected into Explorer. Lisa chat connects directly to this service. |
-| `OPENAI_API_KEY` | API key for Lisa's first-stage policy applicability selection through OpenAI Decisions. The existing Gemini judge evaluates only the selected policies. |
+| `OPENAI_API_KEY` | API key for Lisa's first-stage policy triage through OpenAI Decisions. The Gemini judge evaluates only policies triage escalates. |
 | `GEMINI_MODEL_NAME` | Gemini model used by Lisa's categorical policy judge (defaults to `gemini-3.8-flash`). |
 | `LISA_GEMINI_THINKING_LEVEL` | Gemini judge reasoning: `low`, `medium`, or `high`; defaults to `low` to reduce reasoning-token cost. Gemini 2.5 uses thinking budgets of 512, 1,024, and 2,048 tokens for these settings. No hard output-token cap is applied, so the model can finish its structured response. |

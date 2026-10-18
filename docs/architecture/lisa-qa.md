@@ -52,7 +52,7 @@ Lisa uses three distinct names for evaluation inputs and outputs:
 | Term | Meaning |
 |------|---------|
 | **session detail** | Raw `GET /v1/sessions/{id}` payload from TheLake (spans, scores, agent names, truncation flags). |
-| **trajectory** | Compact ordered user/tool/assistant events plus completeness flags, built from session detail for policy selection and judging. |
+| **trajectory** | Compact ordered user/tool/assistant events plus completeness flags, built from session detail for policy triage and judging. |
 | **references** | Span citations on a judge verdict. Not the trajectory. |
 
 Do not call the trajectory “evidence.” “Evidence” in prose means telemetry or
@@ -76,7 +76,9 @@ can be launched by another backend with the same trusted workspace context.
   reports truncation instead of pretending partial data is complete.
 - `evaluation/evaluator.py` validates a trajectory and asks Gemini for a
   categorical verdict, rationale, and span references.
-- `services/evaluations.py` loads an approved policy and coordinates selection,
+- `evaluation/policy_triage.py` asks OpenAI Decisions to triage approved
+  policies for possible violations; its decisions only route candidates.
+- `services/evaluations.py` loads approved policies and coordinates triage,
   judging, idempotence, and result storage.
 - `repositories/failures.py` and `services/failures.py` own interrupted
   score-write recovery and follow-ups.
@@ -98,7 +100,7 @@ policies. OpenAI Decisions triages each policy as `suspected_violation`,
 and insufficient-evidence decisions to the Gemini judge; only that judge produces
 final verdicts. A triage negative does not produce a passing score. Confidence
 never filters escalation. All per-policy decisions are retained in selection
-metadata. If the selector prompt clips any evidence, all candidates escalate as
+metadata. If the triage prompt clips any evidence, all candidates escalate as
 insufficient evidence. Incomplete session capture or uncertain event ordering
 still returns unresolved coverage before triage; this change does not add
 context retrieval or investigation tools to Gemini. She prioritizes
@@ -138,7 +140,7 @@ fresh run.
 The formal tool-event grammar, status rules, and truncation contract are in
 [Lisa judge trajectory format](../reference/lisa-trajectory-format.md).
 
-Policy selection and judging share a compact plaintext trajectory view. Each
+Policy triage and judging share a compact plaintext trajectory view. Each
 judge event uses a short local citation (`e1`, `e2`, ...) and short tool-call
 link (`c1`, `c2`, ...) where needed. Judge requests do not repeat full telemetry
 IDs. Policy routing retains its existing ID labels. Recording metadata retains
@@ -171,7 +173,7 @@ from target-agent trajectories. Under Lisa's workspace home,
 `llm-calls/<call-id>.jsonl` contains a request line followed by a response or
 sanitized error line. The request includes the actual application prompt,
 model, available tool definitions/schema, formatting-loss metadata, and known
-conversation/session/run/work-item links. Selector records do not require a
+conversation/session/run/work-item links. Triage records do not require a
 selected policy or work item. Chat records capture LiteLLM-hook-observable
 attempts, including SDK retries; they are not a wire-level capture.
 

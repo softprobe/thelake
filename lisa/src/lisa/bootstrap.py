@@ -4,19 +4,19 @@ from dataclasses import dataclass
 from threading import Lock
 
 from .context import WorkspaceContext
-from .evaluation.policy_selection import OpenAIPolicySelector
-from .repositories.evaluation_artifacts import EvaluationArtifactRepository
+from .evaluation.policy_triage import OpenAIPolicyTriager
 from .repositories.conversations import FileConversationRepository
+from .repositories.evaluation_artifacts import EvaluationArtifactRepository
 from .repositories.failures import FailureRepository
 from .repositories.lisa_database import LisaDatabaseReader
 from .repositories.notifications import NotificationReceiptRepository
 from .repositories.policies import InMemoryPolicyRepository, PostgresPolicyRepository
-from .repositories.work_items import PostgresWorkItemStore
 from .repositories.slack_events import SlackEventRepository
+from .repositories.work_items import PostgresWorkItemStore
 from .runtime import confirmed_policy_title, run_turn
-from .services.evaluations import EvaluationService
-from .services.database_inspection import DatabaseInspectionService
 from .services.conversations import ConversationService, ScheduledQAService
+from .services.database_inspection import DatabaseInspectionService
+from .services.evaluations import EvaluationService
 from .services.failures import FailureService
 from .services.notifications import SlackNotifier
 from .services.policies import PolicyService
@@ -100,7 +100,7 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         failures,
         notifier,
         sessions=sessions,
-        policy_selector=OpenAIPolicySelector(),
+        policy_triage=OpenAIPolicyTriager(),
         work_items=work_items,
         artifact_repository=EvaluationArtifactRepository(context),
         render_context=render_evaluation_context,

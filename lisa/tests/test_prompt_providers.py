@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from policy_cases import evaluation_request
 from test_llm_recording import context, records
-from test_policy_selection import (
+from test_policy_triage import (
     FakeDecisionsClient,
     FakePolicyStore,
     FakeSessionClient,
@@ -12,7 +12,7 @@ from test_policy_selection import (
 )
 
 from lisa.evaluation import evaluator
-from lisa.evaluation.policy_selection import OpenAIPolicySelector
+from lisa.evaluation.policy_triage import OpenAIPolicyTriager
 from lisa.llm_recording import recording_scope
 from lisa.models.policies import PolicyRule
 from lisa.views.evaluations import render_evaluation_context
@@ -32,7 +32,7 @@ def test_empty_selection_discloses_clipping_and_redacts_policy(tmp_path, monkeyp
     monkeypatch.setenv("LISA_LLM_TRACE_ENABLED", "1")
     ctx = context(tmp_path)
     client = FakeDecisionsClient(["no_violation_found"])
-    selector = OpenAIPolicySelector(client=client)
+    triager = OpenAIPolicyTriager(client=client)
     service = make_evaluation_service(
         context=ctx,
         client=FakeSessionClient(
@@ -53,9 +53,9 @@ def test_empty_selection_discloses_clipping_and_redacts_policy(tmp_path, monkeyp
             tool_order_certain=True,
             message_order_certain=True,
         ),
-        policy_selector=selector,
+        policy_triage=triager,
     )
-    result, trajectory = service._select_policies_for_session("agent", "session1")
+    result, trajectory = service._triage_policies_for_session("agent", "session1")
     assert [p["id"] for p in result["selected_policies"]] == ["P1"]
     assert result["policy_decisions"][0]["decision"] == "insufficient_evidence"
     assert result["limitations"]
@@ -145,7 +145,7 @@ def test_selection_only_limitations_reach_scores_and_public_verdict(
         name="Rule", criteria="Check refund.", approved=True, scope="workspace", id="P1.1"
     )
     service, store, work_item = _tracked_service_with_saved_inputs(tmp_path, approved_rules=[live])
-    limitation = "prompt_event_body_truncated: selector-only omitted_chars=1000"
+    limitation = "prompt_event_body_truncated: triager-only omitted_chars=1000"
     selection = {"limitations": [limitation]}
     inputs = store.get_context_item_for_work_item.return_value.content
     inputs["policy_selection"] = selection

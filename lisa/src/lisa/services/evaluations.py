@@ -19,7 +19,7 @@ import psycopg
 
 from ..context import WorkspaceContext
 from ..evaluation.judge import run_evaluation
-from ..evaluation.policy_selection import OpenAIPolicySelector
+from ..evaluation.policy_triage import OpenAIPolicyTriager
 from ..evaluation.scores import (
     matches_policy_score,
     next_evaluation_score_id,
@@ -52,7 +52,7 @@ class EvaluationService:
         build_events=build_trajectory_events,
         *,
         sessions: SessionService,
-        policy_selector: OpenAIPolicySelector,
+        policy_triage: OpenAIPolicyTriager,
         work_items: PostgresWorkItemStore | None = None,
         artifact_repository: EvaluationArtifactRepository | None = None,
         render_context: Callable[[dict], str] | None = None,
@@ -65,20 +65,21 @@ class EvaluationService:
         self.judge = judge
         self.sessions = sessions
         self.work_items = work_items
-        self.policy_selector = policy_selector
+        self.policy_triage = policy_triage
         self.artifact_repository = artifact_repository
         self.render_context = render_context
 
-    def _select_policies_for_session(
+    def _triage_policies_for_session(
         self, target_agent_name: str, session_id: str, session_detail: dict | None = None
     ) -> tuple[dict, dict | None]:
-        """Prepare one session for policy routing and coordinate the selection step.
+        """Triage approved policies for a session and return its compact trajectory.
 
-        Returns ``(selection, trajectory)``. ``selection`` is the public result;
-        ``trajectory`` is built from session detail when available, else ``None``.
+        Returns ``(triage, trajectory)``. The triage result keeps its established
+        public field names for compatibility; ``trajectory`` is built from session
+        detail when available, else ``None``.
 
         ``session_detail`` is the raw TheLake session GET; ``trajectory`` is the
-        compact event list used for selection and judging.
+        compact event list used for triage and final judging.
         """
         rules = self.policies.approved_rules(target_agent_name)
         if not rules:
@@ -134,15 +135,18 @@ class EvaluationService:
             )
         # Triage escalates suspected violations and uncertain evidence; only the judge issues verdicts.
         with recording_scope(self.context, session_id=session_id):
-            selection = self.policy_selector.select(trajectory, rules)
+            selection = self.policy_triage.triage(trajectory, rules)
         return (
             {
                 "session_id": session_id,
                 "target_agent_name": target_agent_name,
                 "candidate_count": len(rules),
                 "selected_policies": selection["selected_policies"],
-                **{key: selection[key] for key in ('limitations', 'prompt_truncations', 'policy_decisions')
-                   if key in selection},
+                **{
+                    key: selection[key]
+                    for key in ("limitations", "prompt_truncations", "policy_decisions")
+                    if key in selection
+                },
             },
             trajectory,
         )
@@ -171,7 +175,7 @@ class EvaluationService:
                 "evaluations": [],
             }
         session_detail = self._session_detail(session_id)
-        selection, trajectory = self._select_policies_for_session(
+        selection, trajectory = self._triage_policies_for_session(
             target_agent_name, session_id, session_detail=session_detail
         )
         selected = selection["selected_policies"]
@@ -180,11 +184,14 @@ class EvaluationService:
 
         rules_by_id = {rule.id: rule for rule in rules}
         selection_context = {
-            "model": self.policy_selector.model,
+            "model": self.policy_triage.model,
             "candidate_count": selection["candidate_count"],
             "selected_policies": selected,
-            **{key: selection[key] for key in ('limitations', 'prompt_truncations', 'policy_decisions')
-               if key in selection},
+            **{
+                key: selection[key]
+                for key in ("limitations", "prompt_truncations", "policy_decisions")
+                if key in selection
+            },
         }
         evaluations = []
         for decision in selected:
@@ -859,7 +866,7 @@ class EvaluationService:
         return self.sessions.trajectory(session_detail)
 
     def get_session_trajectory(self, session_id: str) -> dict:
-        """Fetch the compact trajectory the selector and judge use."""
+        """Fetch the compact trajectory policy triage and the judge use."""
         return self.sessions.get_trajectory(session_id)
 
     def notify_evaluation_failure(

@@ -71,11 +71,11 @@ class TrajectoryPrompt:
 def format_trajectory_for_llm(events: list[dict], *, short_ids: bool = True) -> TrajectoryPrompt:
     """Redact and format a copy; never change the persisted trajectory."""
     if not short_ids:
-        return _format_selector_trajectory(events)
+        return _format_triage_trajectory(events)
     return _format_compact_judge_trajectory(events)
 
 
-def _format_selector_trajectory(source_events: list[dict]) -> TrajectoryPrompt:
+def _format_triage_trajectory(source_events: list[dict]) -> TrajectoryPrompt:
     events = redact_evidence(source_events)
     lines, truncations = [], []
     call_aliases: dict[str, str] = {}

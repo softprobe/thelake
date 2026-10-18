@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 from fastmcp import Client
+from policy_cases import read_policy
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
 from lisa.mcp_app import create_server
-from policy_cases import read_policy
 
 
 def test_mcp_public_policy_contract(tmp_path):
@@ -270,8 +270,8 @@ def test_evaluate_session_recovers_pending_scores_before_policy_or_telemetry_loo
         lambda _path: pytest.fail("Recovery must not fetch live telemetry"),
     )
     monkeypatch.setattr(
-        services.evaluations.policy_selector,
-        "select",
+        services.evaluations.policy_triage,
+        "triage",
         lambda *_args: pytest.fail("Recovery must not run policy selection"),
     )
 

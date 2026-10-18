@@ -8,7 +8,7 @@ from pathlib import Path
 
 from lisa.evaluation.dataset import DEFAULT_MANIFEST, load_dataset
 from lisa.evaluation.judge import run_evaluation
-from lisa.evaluation.policy_selection import OpenAIPolicySelector
+from lisa.evaluation.policy_triage import OpenAIPolicyTriager
 from lisa.models.policies import PolicyRule
 
 
@@ -88,12 +88,12 @@ def summarize(rows, judge_enabled=None, *, triage_enabled=True):
     return metrics
 
 
-def run(data, selector=None, judge=None, *, split=None, mode="pipeline"):
+def run(data, triager=None, judge=None, *, split=None, mode="pipeline"):
     """Present every catalog policy; score only explicitly adjudicated pairs."""
     if mode not in {"triage", "judge", "pipeline"}:
         raise ValueError("Unknown evaluation mode")
-    if mode != "judge" and selector is None:
-        raise ValueError("Triage requires a selector")
+    if mode != "judge" and triager is None:
+        raise ValueError("Triage requires a triager")
     if mode != "triage" and judge is None:
         raise ValueError("Judge mode requires a judge")
     rows = []
@@ -114,10 +114,10 @@ def run(data, selector=None, judge=None, *, split=None, mode="pipeline"):
         if not gated and mode != "judge":
             decisions = {
                 d["id"]: d["decision"]
-                for d in selector.select(trajectory, rules)["policy_decisions"]
+                for d in triager.triage(trajectory, rules)["policy_decisions"]
             }
             if set(decisions) != set(batch.policy_refs):
-                raise RuntimeError("Selector did not answer every catalog policy")
+                raise RuntimeError("Triager did not answer every catalog policy")
         for rule in rules:
             annotation = annotations.get(rule.id)
             decision = decisions.get(rule.id)
@@ -164,7 +164,7 @@ def run(data, selector=None, judge=None, *, split=None, mode="pipeline"):
     return {
         "manifest": data.manifest.name,
         "manifest_digest": data.digest,
-        "selector_model": selector.model if selector is not None else None,
+        "triage_model": triager.model if triager is not None else None,
         "mode": mode,
         "split": split,
         "coverage": {
@@ -203,18 +203,18 @@ def main():
     data = load_dataset(args.manifest)
     if not args.live:
         parser.error("--live is required to authorize provider calls")
-    selector = OpenAIPolicySelector() if args.mode != "judge" else None
+    triager = OpenAIPolicyTriager() if args.mode != "judge" else None
     try:
         report = run(
             data,
-            selector,
+            triager,
             run_evaluation if args.mode != "triage" else None,
             split=args.split,
             mode=args.mode,
         )
     finally:
-        if selector is not None and selector.client is not None:
-            selector.client.close()
+        if triager is not None and triager.client is not None:
+            triager.client.close()
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report["metrics"], indent=2))
 

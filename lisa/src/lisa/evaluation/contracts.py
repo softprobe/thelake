@@ -31,7 +31,7 @@ class TrajectoryEvent(StrictModel):
 
 
 class Trajectory(StrictModel):
-    """Compact ordered session events used for policy selection and judging."""
+    """Compact ordered session events used for policy triage and judging."""
 
     trace_id: Identifier
     events: list[TrajectoryEvent] = Field(min_length=1, max_length=1_000)

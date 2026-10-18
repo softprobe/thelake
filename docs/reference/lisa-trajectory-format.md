@@ -5,7 +5,7 @@ in `request.tool_format`; this metadata is not sent to Gemini. Earlier records
 may use a different notation.
 
 The formatter creates a compact, redacted view for the judge. It does not
-change stored trajectory events or the selector's full-ID format. The
+change stored trajectory events or the policy triage request's full-ID format. The
 implementation is in `lisa/evaluation/prompt.py`.
 
 ## Event lines

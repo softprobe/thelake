@@ -5,12 +5,12 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
-from test_policy_selection import FakeDecisionsClient
+from test_policy_triage import FakeDecisionsClient
 
 from lisa.evaluation import evaluator
 from lisa.evaluation.contracts import EvaluationRequest
 from lisa.evaluation.dataset import load_dataset
-from lisa.evaluation.policy_selection import OpenAIPolicySelector
+from lisa.evaluation.policy_triage import OpenAIPolicyTriager
 from lisa.evaluation.prompt import format_trajectory_for_llm
 from lisa.models.policies import PolicyRule
 from lisa.security import redact_evidence
@@ -77,7 +77,7 @@ def test_evaluation_transcript_reaches_both_provider_boundaries(pair, monkeypatc
             for rule in rules.values()
         ]
     )
-    selection = OpenAIPolicySelector(client=client).select(
+    selection = OpenAIPolicyTriager(client=client).triage(
         pair.request()["trajectory"],
         list(rules.values()),
     )
@@ -115,13 +115,13 @@ def test_evaluation_transcript_reaches_both_provider_boundaries(pair, monkeypatc
     )
     request = EvaluationRequest.model_validate(pair.request())
     result = evaluator.evaluate(request)
-    selector_transcript = client.request["input"].split("\n\nTrajectory:\n", 1)[1]
+    triager_transcript = client.request["input"].split("\n\nTrajectory:\n", 1)[1]
     judge_transcript = captures[0]["contents"].split(
         "Trajectory (cite span ids in brackets):\n",
         1,
     )[1]
     events = pair.request()["trajectory"]["events"]
-    assert selector_transcript == format_trajectory_for_llm(events, short_ids=False).text
+    assert triager_transcript == format_trajectory_for_llm(events, short_ids=False).text
     assert judge_transcript == judge_view.text
     assert "statebench-fixture:" not in judge_transcript
     for alias in judge_view.span_id_map:

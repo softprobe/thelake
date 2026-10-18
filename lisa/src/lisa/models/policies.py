@@ -24,7 +24,7 @@ class PolicyRecord:
 
 @dataclass(frozen=True)
 class PolicyRule:
-    """Approved policy passed into selection and judging."""
+    """Approved policy passed into triage and judging."""
 
     name: str
     criteria: str

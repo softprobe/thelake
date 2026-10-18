@@ -5,7 +5,7 @@ Terms used in Lisa evaluation:
 - ``session_detail``: raw ``GET /v1/sessions/{id}`` payload (spans, scores,
   agent names, truncation flags).
 - ``trajectory``: ordered user/tool/assistant events plus completeness
-  flags used for policy selection and judging.
+  flags used for policy triage and judging.
 - ``references``: span citations on a judge verdict (not the trajectory).
 """
 
@@ -34,7 +34,7 @@ class TrajectoryEvents:
 
 
 def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
-    """Project session spans into ordered trajectory events for selection/judging.
+    """Project session spans into ordered trajectory events for triage/judging.
 
     Generation spans often repeat the full prompt, system instructions, tool
     schemas, and usage metadata. Agent spans carry the conversational turns,
