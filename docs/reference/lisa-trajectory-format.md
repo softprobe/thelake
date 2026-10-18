@@ -8,6 +8,11 @@ The formatter creates a compact, redacted view for the judge. It does not
 change stored trajectory events or the policy triage request's full-ID format. The
 implementation is in `lisa/evaluation/prompt.py`.
 
+Stored events preserve a source timestamp when telemetry provides one. Missing
+timestamps are `null`; Lisa does not invent a wall-clock value. Event sequence
+remains deterministic, while cross-span ordering is marked uncertain when
+missing timing prevents Lisa from establishing it.
+
 ## Event lines
 
 Message events and unpaired tool events occupy one physical line. A paired

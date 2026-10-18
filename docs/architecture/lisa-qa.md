@@ -132,10 +132,19 @@ trajectories yield `insufficient_evidence`. Invalid provider output or provider
 failures are execution errors and do not occupy the verdict ledger; a later run
 can retry.
 
-TheLake stores the categorical score with the policy ID, criteria text, policy
-hash, span references, and limitations. Identical policy content and trace reuse
-an existing non-error verdict; a criteria edit produces a new hash and permits a
-fresh run.
+Lisa's tracked run identity includes the session, effective policy hash,
+canonical trajectory digest, Decisions model, judge model, and evaluation
+pipeline version. Postgres uses that identity to deduplicate completed work and
+resume pending score writes. The stable score ID comes from the same identity;
+TheLake scores are reporting copies, not Lisa's deduplication authority. Changed
+evidence, policy criteria, model, or pipeline version creates a new run. Runs
+created before this identity was introduced cannot be compared reliably and may
+be evaluated once more during the transition.
+
+The score in TheLake keeps the policy ID, criteria text, policy hash, trajectory
+digest, span references, and limitations. Triage-negative outcomes are not yet
+persisted in the Postgres evaluation ledger, so a later sweep can repeat the
+Decisions call when no policy was escalated.
 
 ## Provider prompts and Lisa call records
 

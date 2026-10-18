@@ -24,6 +24,14 @@ repository rules in `AGENTS.md` and the Lisa contracts in
   score. Incomplete or unordered trajectories are gated before provider calls.
 - Keep triage decisions, judge verdicts, execution errors, and capture gates
   distinct. Provider or validation errors must not become healthy negatives.
+- For tracked runs, deduplicate through Lisa's Postgres evaluation request
+  identity, derived from session, approved policy hash, sanitized trajectory,
+  triage/judge configuration, and pipeline version. TheLake scores are output
+  copies, not the source of truth for whether Lisa already evaluated evidence.
+- Persist each candidate's triage outcome in the canonical evaluation ledger
+  before judging. Negative triage is a completed `not_run` judge outcome with no
+  verdict or score; provider failures remain retryable. Do not add a second
+  identity or evaluation path for triage.
 - Dataset annotations supply scoring truth only. Dataset catalog policies may
   seed the disposable test workspace through Lisa's policy-management service,
   but must never be passed directly into evaluation. A production quality run

@@ -258,8 +258,11 @@ user-visible explanations instead.
    where supported), then records the returned score ID and marks the outbox
    acknowledged in a fenced transaction. That transaction also updates the
    evaluation result, finishes the work item, and appends its terminal event.
-   If the process crashes, recovery resubmits or queries by the same key and
-   cannot create a duplicate score or rerun the judge for changed evidence.
+   If the process crashes, recovery resubmits by the same key and does not rerun
+   the judge for that persisted result. A canonical Postgres request key is
+   derived from the session, policy hash, sanitized trajectory digest, model
+   configuration, and pipeline version; TheLake score history is not used to
+   deduplicate tracked runs. A changed trajectory creates a distinct run.
    If the score API cannot support idempotency or lookup by key, add that
    contract before enabling automatic retries.
 6. **Report.** The single main chat receives a concise start/progress/result

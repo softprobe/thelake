@@ -12,6 +12,7 @@ TOOL_FORMAT_VERSION = "lisa-judge-tools/v4"
 EVENT_BODY_LIMIT = 2_000
 TRANSCRIPT_GUIDE = (
     "Trajectory lines are ordered events; bracketed identifiers are span IDs. "
+    "A null timestamp means the source omitted timing; use event sequence order instead. "
     "Text uses backslash escapes (\\n newline, \\r carriage return, \\\\ backslash); "
     "structured payloads use compact JSON. Truncation markers mean text was omitted. "
     "Decisions use only visible evidence and may miss facts in omitted text."

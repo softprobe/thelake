@@ -13,7 +13,7 @@ import os
 import threading
 from collections.abc import Callable
 from hashlib import sha256
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import uuid4
 
 import psycopg
 
@@ -21,8 +21,9 @@ from ..context import WorkspaceContext
 from ..evaluation.judge import run_evaluation
 from ..evaluation.policy_triage import OpenAIPolicyTriager
 from ..evaluation.scores import (
+    EVALUATION_PIPELINE_VERSION,
+    evaluation_run_identity,
     matches_policy_score,
-    next_evaluation_score_id,
     successful_policy_score,
 )
 from ..evaluation.trajectory import build_trajectory_events, session_timestamp
@@ -262,9 +263,6 @@ class EvaluationService:
             "slack_thread_ts": self.context.slack_thread or None,
         }
 
-    def _evaluation_score_id(self, policy: dict, trace_id: str) -> str:
-        return sha256(f"{policy['policy_hash']}:{trace_id}".encode()).hexdigest()
-
     def _evaluate_session(
         self,
         target_agent_name: str,
@@ -418,27 +416,44 @@ class EvaluationService:
         if not trace_id:
             return {"status": "insufficient_evidence", "session_id": session_id, "stored": False}
         scores = session_detail.get("scores", [])
-        base_run_id = self._evaluation_score_id(policy, trace_id)
-        pending = (
-            self.work_items.find_pending_evaluation(policy["policy_hash"], session_id)
-            if self.work_items
-            else None
+        judge_model = os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash")
+        trajectory_hash, run_id, request_key = evaluation_run_identity(
+            session_id=session_id,
+            policy_hash=policy["policy_hash"],
+            trajectory=trajectory,
+            triage_model=self.policy_triage.model,
+            judge_model=judge_model,
         )
-        run_id = pending[1].score_payload["score_id"] if pending else base_run_id
-        if not pending and any(score.get("score_id") == run_id for score in scores):
-            run_id = next_evaluation_score_id(run_id, scores)
-        request_key = str(uuid5(NAMESPACE_URL, f"lisa-evaluation:{run_id}"))
+        policy["trajectory_hash"] = trajectory_hash
         existing = (
             self.work_items.get_evaluation_by_request(
                 policy["policy_hash"], session_id, request_key
             )
-            if self.work_items and not pending
-            else pending[0]
-            if pending
+            if self.work_items
             else None
         )
-        # Reuse a stored non-error outcome for the same policy and trace.
-        completed = successful_policy_score(scores, policy, trace_id)
+        outbox = self.work_items.get_score_outbox(existing.id) if existing else None
+        pending = (
+            (existing, outbox)
+            if existing and outbox and outbox.status == "pending"
+            else None
+        )
+        # Postgres request identity is the dedupe authority. TheLake scores are
+        # reporting copies and may outlive or lag the Lisa evaluation ledger.
+        if existing and existing.status == "succeeded" and not pending:
+            return {
+                "status": "already_evaluated",
+                "verdict": existing.verdict,
+                "session_id": session_id,
+                "stored": True,
+                "work_item_id": existing.id,
+            }
+        # The no-Postgres development adapter keeps its previous score-history fallback.
+        completed = (
+            successful_policy_score(scores, policy, trace_id)
+            if not self.work_items
+            else None
+        )
         if completed and not pending:
             if completed.get("string_value") == "fail":
                 metadata = completed.get("metadata") or {}
@@ -465,14 +480,6 @@ class EvaluationService:
             if existing:
                 result["work_item_id"] = existing.id
             return result
-        if existing and existing.status == "succeeded" and not pending:
-            return {
-                "status": "already_evaluated",
-                "verdict": existing.verdict,
-                "session_id": session_id,
-                "stored": True,
-                "work_item_id": existing.id,
-            }
         if not trajectory["events"] and not pending:
             return {"status": "insufficient_evidence", "session_id": session_id, "stored": False}
         if self.work_items:
@@ -582,7 +589,11 @@ class EvaluationService:
             policy_name=policy["name"],
             policy_id=policy["policy_id"],
             policy_hash=policy["policy_hash"],
-            judge_config={"model": os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash")},
+            judge_config={
+                "pipeline_version": EVALUATION_PIPELINE_VERSION,
+                "triage_model": self.policy_triage.model,
+                "judge_model": os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash"),
+            },
             request_key=request_key,
             work_item_id=work_item_id,
             context_path=context_path,
@@ -767,6 +778,7 @@ class EvaluationService:
             "author_id": None,
             "metadata": {
                 "policy_hash": policy["policy_hash"],
+                "trajectory_hash": policy.get("trajectory_hash", ""),
                 "policy_id": policy["policy_id"],
                 "policy_scope": policy["scope"],
                 "criteria": policy["criteria"],

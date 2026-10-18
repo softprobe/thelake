@@ -5,6 +5,8 @@ from policy_cases import session_detail, save_rule
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
+from lisa.evaluation.contracts import EvaluationRequest
+from lisa.evaluation.scores import evaluation_run_identity
 from lisa.evaluation.trajectory import build_trajectory_events
 
 
@@ -21,6 +23,101 @@ def services(tmp_path):
     )
     save_rule(services)
     return services
+
+
+def test_evaluation_run_identity_tracks_evidence_and_evaluator_versions():
+    trajectory = {
+        "events": [{"kind": "user_message", "content": "Check refund eligibility"}],
+        "complete": True,
+        "limitations": [],
+    }
+    first = evaluation_run_identity(
+        session_id="session",
+        policy_hash="policy-v1",
+        trajectory=trajectory,
+        triage_model="triage-v1",
+        judge_model="judge-v1",
+    )
+    same = evaluation_run_identity(
+        session_id="session",
+        policy_hash="policy-v1",
+        trajectory=trajectory,
+        triage_model="triage-v1",
+        judge_model="judge-v1",
+    )
+
+    assert first == same
+    assert evaluation_run_identity(
+        session_id="session",
+        policy_hash="policy-v1",
+        trajectory={**trajectory, "complete": False},
+        triage_model="triage-v1",
+        judge_model="judge-v1",
+    ) != first
+    assert evaluation_run_identity(
+        session_id="session",
+        policy_hash="policy-v1",
+        trajectory=trajectory,
+        triage_model="triage-v1",
+        judge_model="judge-v2",
+    ) != first
+
+
+def test_missing_span_timestamps_build_a_deterministic_trajectory():
+    spans = [
+        {
+            "span_id": "agent-a",
+            "attributes": {"sp.input": "First message", "sp.output": "First response"},
+        },
+        {
+            "span_id": "agent-b",
+            "attributes": {"sp.input": "Second message", "sp.output": "Second response"},
+        },
+    ]
+
+    first = build_trajectory_events(spans)
+    second = build_trajectory_events(spans)
+
+    assert first.events == second.events
+    assert all(event["timestamp"] is None for event in first.events)
+    EvaluationRequest.model_validate(
+        {
+            "run_id": "run-1",
+            "policy": {
+                "name": "Rule",
+                "scope": "workspace",
+                "approved": True,
+                "criteria": "Check the observed behavior.",
+            },
+            "trajectory": {
+                "trace_id": "trace-1",
+                "events": first.events,
+                "complete": True,
+                "tool_events_captured": False,
+                "tool_order_certain": True,
+                "message_order_certain": first.message_order_certain,
+                "limitations": [],
+            },
+        }
+    )
+
+
+def test_mixed_missing_timestamps_keep_the_same_order_across_builds():
+    spans = [
+        {
+            "span_id": "timed",
+            "start_time": "2026-10-12T03:30:00Z",
+            "attributes": {"sp.input": "Observed first"},
+        },
+        {"span_id": "untimed", "attributes": {"sp.input": "Timing unavailable"}},
+    ]
+
+    first = build_trajectory_events(spans)
+    second = build_trajectory_events(spans)
+
+    assert first.events == second.events
+    assert [event["timestamp"] for event in first.events] == [None, "2026-10-12T03:30:00Z"]
+    assert first.message_order_certain is False
 
 
 @pytest.mark.parametrize(

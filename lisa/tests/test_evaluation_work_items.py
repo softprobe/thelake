@@ -219,6 +219,66 @@ def test_retry_reuses_stored_trajectory_and_idempotent_score_payload(
     ]
 
 
+def test_changed_trajectory_gets_a_new_tracked_evaluation_despite_existing_score(
+    evaluation_services, monkeypatch
+):
+    services = evaluation_services
+    session_id = f"session-{uuid4()}"
+    detail = session_detail()
+    detail["spans"][0]["trace_id"] = session_id
+    scores = []
+    judged = []
+    monkeypatch.setattr(
+        services.client,
+        "get",
+        lambda _: {**detail, "scores": list(scores)},
+    )
+    monkeypatch.setattr(
+        services.evaluations,
+        "judge",
+        lambda request: (
+            judged.append(request)
+            or {
+                "status": "pass",
+                "rationale": "The captured trajectory was evaluated.",
+                "references": [],
+                "limitations": [],
+            }
+        ),
+    )
+
+    def post(path, payload, *, include_status=False):
+        scores.append(payload)
+        return ({}, 201) if include_status else {}
+
+    monkeypatch.setattr(services.client, "post", post)
+    first = services.evaluations._evaluate_session("agent", "Rule", session_id)
+    same = services.evaluations._evaluate_session("agent", "Rule", session_id)
+
+    assert same["status"] == "already_evaluated"
+    assert same["work_item_id"] == first["work_item_id"]
+    assert len(judged) == len(scores) == 1
+
+    detail["spans"].append(
+        {
+            **detail["spans"][0],
+            "span_id": "new-evidence",
+            "start_time": "2026-10-12T03:31:00Z",
+            "attributes": {
+                "sp.input": "I have now provided additional evidence.",
+                "sp.output": "Additional response.",
+            },
+        }
+    )
+    second = services.evaluations._evaluate_session("agent", "Rule", session_id)
+
+    assert first["status"] == second["status"] == "pass"
+    assert first["work_item_id"] != second["work_item_id"]
+    assert scores[0]["score_id"] != scores[1]["score_id"]
+    assert scores[0]["metadata"]["trajectory_hash"] != scores[1]["metadata"]["trajectory_hash"]
+    assert len(judged) == 2
+
+
 def test_pending_score_recovers_after_policy_is_declined_and_telemetry_is_unavailable(
     evaluation_services, monkeypatch
 ):

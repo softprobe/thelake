@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 SESSION_SPAN_LIMIT = 500
@@ -53,14 +53,21 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
     tool_call_ids = {str(call_id) for span in spans if (call_id := _tool_call_id(span)) is not None}
     tool_events_captured = bool(tool_names)
     tool_order_certain = True
+    # Missing timestamps sort deterministically before observed timestamps, while
+    # the projected events retain null to distinguish inferred time from evidence.
+    fallback_time = ""
 
     for span in spans:
         span_id = str(span.get("span_id") or "")
         if not span_id:
             continue
         parent_span_id = span.get("parent_span_id")
-        start = str(span.get("start_time") or datetime.now(UTC).isoformat())
+        has_start_time = bool(span.get("start_time"))
+        has_end_time = bool(span.get("end_time"))
+        start = str(span.get("start_time") or fallback_time)
         end = str(span.get("end_time") or start)
+        event_start = start if has_start_time else None
+        event_end = end if has_end_time else event_start
         attrs = span.get("attributes") if isinstance(span.get("attributes"), dict) else {}
         tool_name = _tool_name(span)
 
@@ -73,7 +80,7 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
                     {
                         "span_id": span_id,
                         "parent_span_id": parent_span_id,
-                        "timestamp": start,
+                        "timestamp": event_start,
                         "kind": "tool_call",
                         "name": str(tool_name),
                         "call_id": call_id,
@@ -85,7 +92,7 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
                 result = {
                     "span_id": span_id,
                     "parent_span_id": parent_span_id,
-                    "timestamp": end,
+                    "timestamp": event_end,
                     "kind": "tool_result",
                     "name": str(tool_name),
                     "call_id": call_id,
@@ -100,12 +107,16 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
         prompt = attrs.get("sp.input", span.get("input"))
         for message in _messages(prompt, limitations):
             if message["kind"] in {"user_message", "context_message"}:
-                raw_events.append((start, span_id, _event(span_id, parent_span_id, start, message)))
+                raw_events.append(
+                    (start, span_id, _event(span_id, parent_span_id, event_start, message))
+                )
 
         completion = attrs.get("sp.output", span.get("output"))
         for message in _messages(completion, limitations, output=True):
             if message["kind"] == "assistant_message":
-                raw_events.append((end, span_id, _event(span_id, parent_span_id, end, message)))
+                raw_events.append(
+                    (end, span_id, _event(span_id, parent_span_id, event_end, message))
+                )
             elif message["kind"] == "tool_call":
                 # The tool span is the authoritative call record: it includes
                 # the arguments that actually reached the tool. Keep a model
@@ -125,7 +136,9 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
                 limitations.append(
                     f"Tool call {message.get('name', 'unknown')} has no matching tool span."
                 )
-                raw_events.append((end, span_id, _event(span_id, parent_span_id, end, message)))
+                raw_events.append(
+                    (end, span_id, _event(span_id, parent_span_id, event_end, message))
+                )
 
     # Parent and child telemetry can both carry the same transcript. Suppress
     # only child copies already present in an ancestor span; identical messages
@@ -170,26 +183,42 @@ def build_trajectory_events(spans: list[dict]) -> TrajectoryEvents:
         limitations.append("Session events exceeded the 1000 event limit.")
     normalized = []
     previous_tool_timestamp = None
-    message_spans_by_time: dict[str, set[str]] = {}
+    message_spans_by_time: dict[str | None, set[str]] = {}
     for sequence, (timestamp, span_id, event) in enumerate(events[:1000]):
         if event["kind"] in {"tool_call", "tool_result"}:
             if timestamp == previous_tool_timestamp:
                 tool_order_certain = False
             previous_tool_timestamp = timestamp
         if event["kind"] in {"user_message", "assistant_message", "context_message"}:
-            message_spans_by_time.setdefault(timestamp, set()).add(span_id)
+            message_spans_by_time.setdefault(event.get("timestamp"), set()).add(span_id)
         normalized.append({"sequence": sequence, **event})
+    message_span_ids = {
+        span_id for span_ids in message_spans_by_time.values() for span_id in span_ids
+    }
+    if None in message_spans_by_time and len(message_span_ids) > 1:
+        message_order_certain = False
+    tool_events = [
+        event for _, _, event in events if event["kind"] in {"tool_call", "tool_result"}
+    ]
+    tool_span_ids = {event["span_id"] for event in tool_events}
+    if any(event["timestamp"] is None for event in tool_events) and len(tool_span_ids) > 1:
+        tool_order_certain = False
+    message_order_certain = all(
+        len(spans) == 1 for spans in message_spans_by_time.values()
+    ) and not (None in message_spans_by_time and len(message_span_ids) > 1)
     return TrajectoryEvents(
         normalized,
         tool_events_captured,
         tool_order_certain,
         list(dict.fromkeys(limitations)),
-        message_order_certain=all(len(spans) == 1 for spans in message_spans_by_time.values()),
+        message_order_certain=message_order_certain,
     )
 
 
 def _near_same_time(left: str, right: str) -> bool:
     """Treat only near-simultaneous parent/child copies as the same turn."""
+    if not left and not right:
+        return True
     try:
         left_time = datetime.fromisoformat(left)
         right_time = datetime.fromisoformat(right)
@@ -215,7 +244,9 @@ def _tool_call_id(span: dict) -> str | None:
     return str(value) if value else None
 
 
-def _event(span_id: str, parent_span_id: str | None, timestamp: str, fields: dict) -> dict:
+def _event(
+    span_id: str, parent_span_id: str | None, timestamp: str | None, fields: dict
+) -> dict:
     return {
         "span_id": span_id,
         "parent_span_id": parent_span_id,

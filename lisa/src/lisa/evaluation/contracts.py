@@ -19,7 +19,7 @@ class TrajectoryEvent(StrictModel):
     sequence: int = Field(ge=0)
     span_id: Identifier
     parent_span_id: str | None = Field(default=None, max_length=256)
-    timestamp: Annotated[str, StringConstraints(max_length=64)]
+    timestamp: str | None = Field(default=None, max_length=64)
     kind: Literal[
         "user_message", "assistant_message", "context_message", "tool_call", "tool_result"
     ]
