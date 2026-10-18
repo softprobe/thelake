@@ -71,8 +71,9 @@ verifies the trace-linked failure score and Lisa's report. It does not prove
 policy-memory learning or policy review and approval.
 
 One Lisa runtime is scoped to one workspace. Its `Lisa scheduled QA` cron job
-defaults to hourly at minute 0 UTC and does not run on startup. For a faster
-dogfood run, start the quickstart with a short explicit cron schedule, such as
+defaults to hourly at minute 0 UTC and does not run on startup. Only when running
+this time-bounded E2E, start the quickstart with a temporary five-minute cron so
+the test does not wait up to an hour:
 `LISA_QA_CRON="*/5 * * * *" bash examples/quickstart/start.sh`. The E2E waits
 for the next scheduled cycle; it does not call the cycle endpoint directly.
 

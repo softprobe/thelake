@@ -89,8 +89,10 @@ can be launched by another backend with the same trusted workspace context.
 ## Scheduled review
 
 One process-local APScheduler job, `Lisa scheduled QA`, runs a five-field UTC cron
-from `LISA_QA_CRON`, default `0 * * * *`. It does not run on startup. The quickstart
-uses `*/5 * * * *`. Each firing starts a fresh model turn using `own-agent-qa`.
+from `LISA_QA_CRON`, default `0 * * * *` (hourly at minute 0). It does not run on
+startup. The quickstart uses this hourly default; the dogfood E2E can temporarily
+override it to `*/5 * * * *` to keep its wait within the test timeout. Each firing
+starts a fresh model turn using `own-agent-qa`.
 Run one scheduler process per workspace; multiple replicas can each fire a turn.
 
 Lisa first resumes pending failures, then inspects recent sessions and policy

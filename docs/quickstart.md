@@ -22,12 +22,12 @@ running the scheduled evaluation. Both providers receive live requests.
 From the repository root, run:
 
 ```bash
-LISA_QA_CRON="*/5 * * * *" bash examples/quickstart/start.sh
+bash examples/quickstart/start.sh
 ```
 
 The script generates a local Lisa service token, starts Postgres and Lisa, then
-runs TheLake in the foreground. This five-minute cron is for the walkthrough;
-deployments default to hourly. Lisa first sends every approved candidate policy
+runs TheLake in the foreground. Lisa's scheduled QA defaults to once an hour at
+minute 0 UTC. Lisa first sends every approved candidate policy
 to OpenAI Decisions for triage. It sends policies marked
 `suspected_violation` or `insufficient_evidence` to the categorical Gemini
 judge; `no_violation_found` does not produce a pass score. It prints the
