@@ -1,3 +1,9 @@
+"""Lisa evaluation request and result shapes.
+
+See ``docs/architecture/lisa-terms.md`` for the relationship between a session
+and its trajectory, and for policy-pair identity.
+"""
+
 from __future__ import annotations
 
 import json
@@ -31,7 +37,7 @@ class TrajectoryEvent(StrictModel):
 
 
 class Trajectory(StrictModel):
-    """Compact ordered session events used for policy triage and judging."""
+    """Compact ordered projection of a session used for triage and judging."""
 
     trace_id: Identifier
     events: list[TrajectoryEvent] = Field(min_length=1, max_length=1_000)

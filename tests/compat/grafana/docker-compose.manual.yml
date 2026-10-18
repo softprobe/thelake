@@ -9,7 +9,7 @@
 
 services:
   postgres:
-    image: ${GRAFANA_PG_IMAGE:-postgres:19beta3}
+    image: ${GRAFANA_PG_IMAGE:-postgres:18}
     container_name: thelake-grafana-postgres
     environment:
       POSTGRES_USER: ducklake

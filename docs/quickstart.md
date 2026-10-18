@@ -1,5 +1,8 @@
 # 5-minute quickstart
 
+For Lisa's session, trajectory, policy, and evaluation-pair terms, see the
+[shared definitions](architecture/lisa-terms.md).
+
 Walk through TheLake's online evaluation yourself: start the local stack, create
 a natural-language behavior check, run a deliberately flawed support agent,
 then inspect its trace and evaluation in Explorer and ask Lisa to investigate.

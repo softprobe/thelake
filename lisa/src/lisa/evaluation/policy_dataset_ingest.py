@@ -32,10 +32,12 @@ def build_otlp_trace_export(
 ) -> dict:
     """Represent the dataset's compact events as ingestible OTLP spans.
 
+    See ``docs/architecture/lisa-terms.md`` for dataset and runtime pair IDs.
     The conversion preserves user/tool/assistant semantics so Lisa's normal
     SessionService reconstructs the trajectory before evaluation. Dataset
-    span IDs and trace IDs are retained only when they are valid OTLP IDs;
-    callers should use run-scoped IDs to avoid conflicts with source telemetry.
+    span IDs and trace IDs are retained when they are valid OTLP IDs. The
+    evaluation runner preserves each dataset session ID and rejects a workspace
+    that already contains it, preventing collisions with source telemetry.
     """
     events = sorted(trajectory["events"], key=lambda event: event["sequence"])
     if len({event["sequence"] for event in events}) != len(events):

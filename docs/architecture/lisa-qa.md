@@ -47,16 +47,10 @@ but cannot drive policy verdicts. Scheduled turns cannot write policy.
 
 ## Evaluation terms
 
-Lisa uses three distinct names for evaluation inputs and outputs:
-
-| Term | Meaning |
-|------|---------|
-| **session detail** | Raw `GET /v1/sessions/{id}` payload from TheLake (spans, scores, agent names, truncation flags). |
-| **trajectory** | Compact ordered user/tool/assistant events plus completeness flags, built from session detail for policy triage and judging. |
-| **references** | Span citations on a judge verdict. Not the trajectory. |
-
-Do not call the trajectory “evidence.” “Evidence” in prose means telemetry or
-supporting facts in general; code uses the terms above.
+Use the shared [Lisa evaluation terms](lisa-terms.md): `session_id` identifies
+the evaluation input; a trajectory is the ordered evidence projection from that
+session and has no separate ID. Span citations are references, not trajectories.
+In prose, “evidence” means telemetry or supporting facts in general.
 
 ## Runtime and module boundaries
 

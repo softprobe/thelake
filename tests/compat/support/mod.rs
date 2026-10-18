@@ -882,27 +882,40 @@ pub mod lifecycle {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
     use crate::compat_support::http::encode_query_owned;
 
     const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
     pub struct ContainerGuard {
-        name: String,
-    }
-
-    impl ContainerGuard {
-        pub fn name(&self) -> &str {
-            &self.name
-        }
+        state_file: String,
+        container_id: String,
     }
 
     impl Drop for ContainerGuard {
         fn drop(&mut self) {
-            let _ = Command::new("docker")
-                .args(["rm", "-f", &self.name])
-                .status();
+            let root = env!("CARGO_MANIFEST_DIR");
+            let result = Command::new("python3")
+                .args([
+                    format!("{root}/scripts/test_stack.py"),
+                    "stop".to_string(),
+                    "--state-file".to_string(),
+                    self.state_file.clone(),
+                ])
+                .current_dir(root)
+                .output();
+            match result {
+                Ok(output) if output.status.success() => {
+                    eprintln!("test container artifacts: target/test-artifacts/compat");
+                }
+                Ok(output) => eprintln!(
+                    "test container cleanup failed for {}: {}",
+                    self.container_id,
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+                Err(error) => eprintln!("test container cleanup could not run: {error}"),
+            }
         }
     }
 
@@ -927,60 +940,12 @@ pub mod lifecycle {
         }
     }
 
-    pub fn container_name(prefix: &str) -> String {
-        format!(
-            "{prefix}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        )
-    }
-
-    fn run_container(name: &str, args: &[String]) -> ContainerGuard {
-        let _ = Command::new("docker").args(["rm", "-f", name]).status();
-        // Keep the container after exit (--rm would discard logs we need
-        // when readiness fails); ContainerGuard removes it explicitly.
-        let run = Command::new("docker")
-            .args(["run", "-d", "--name", name])
-            .args(args)
-            .status()
-            .unwrap_or_else(|error| panic!("docker run {name}: {error}"));
-        assert!(run.success(), "failed to start oracle container {name}");
-        // Expose for readiness-timeout diagnostics.
-        std::env::set_var("COMPAT_ORACLE_CONTAINER", name);
-        ContainerGuard {
-            name: name.to_string(),
-        }
-    }
-
     /// Dump `docker logs` for a reference container (used on readiness
     /// timeouts so CI shows why the oracle never came up).
     pub fn print_container_logs(name: &str) {
         let _ = Command::new("docker")
             .args(["logs", "--tail", "80", name])
             .status();
-    }
-
-    fn docker_port(name: &str, container_port: &str) -> String {
-        let output = Command::new("docker")
-            .args(["port", name, container_port])
-            .output()
-            .unwrap_or_else(|error| panic!("docker port {name}:{container_port}: {error}"));
-        assert!(
-            output.status.success(),
-            "docker port failed for {name}:{container_port}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next()
-            .and_then(|line| line.rsplit(':').next())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| panic!("unexpected docker port output: {output:?}"))
     }
 
     pub fn require_docker(message: &str) {
@@ -1005,21 +970,61 @@ pub mod lifecycle {
         docker_message: &str,
     ) -> ReferenceService {
         require_docker(docker_message);
-        let name = container_name(prefix);
-        let mut args = options.to_vec();
-        args.push(image.to_string());
-        args.extend(command.iter().cloned());
-        let guard = run_container(&name, &args);
-        let mut ports = BTreeMap::new();
-        ports.insert(
-            http_container_port.to_string(),
-            docker_port(guard.name(), http_container_port),
-        );
+        let root = env!("CARGO_MANIFEST_DIR");
+        let suite = format!("compat-{}", prefix.trim_start_matches("thelake-"));
+        let mut process = Command::new("python3");
+        process
+            .arg(format!("{root}/scripts/test_stack.py"))
+            .arg("start-container")
+            .arg("--suite")
+            .arg(&suite)
+            .arg("--image")
+            .arg(image);
+        for option in options {
+            process.arg(format!("--docker-option={option}"));
+        }
+        process.arg(format!("--published-port={http_container_port}"));
         for container_port in extra_container_ports {
-            ports.insert(
-                (*container_port).to_string(),
-                docker_port(guard.name(), container_port),
-            );
+            process.arg(format!("--published-port={container_port}"));
+        }
+        process.arg("--").args(command).current_dir(root);
+        let output = process
+            .output()
+            .unwrap_or_else(|error| panic!("test-stack could not start {prefix}: {error}"));
+        assert!(
+            output.status.success(),
+            "test-stack could not start {prefix}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("invalid test-stack response: {error}"));
+        let state_file = state["state_file"]
+            .as_str()
+            .expect("test-stack response has a state file")
+            .to_string();
+        let container_id = state["container_id"]
+            .as_str()
+            .expect("test-stack response has a container id")
+            .to_string();
+        std::env::set_var("COMPAT_ORACLE_CONTAINER", &container_id);
+        let guard = ContainerGuard {
+            state_file,
+            container_id,
+        };
+        let mut ports = BTreeMap::new();
+        let published_ports = state["ports"].as_object().expect("test-stack ports");
+        let port = |container_port: &str| {
+            published_ports[container_port]
+                .as_array()
+                .and_then(|addresses| addresses.first())
+                .and_then(Value::as_str)
+                .and_then(|address| address.rsplit(':').next())
+                .unwrap_or_else(|| panic!("test-stack did not publish {container_port}"))
+                .to_string()
+        };
+        ports.insert(http_container_port.to_string(), port(http_container_port));
+        for container_port in extra_container_ports {
+            ports.insert((*container_port).to_string(), port(container_port));
         }
         let base = format!("http://127.0.0.1:{}", ports[http_container_port]);
         wait_http_ok(&format!("{base}{readiness_path}"), readiness_timeout);

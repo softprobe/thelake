@@ -18,10 +18,10 @@ spec.loader.exec_module(synthesis)
 
 def selection():
     # Explicit nine-pair smoke sample; production only consumes listed pairs.
-    trajectories = ["t_91c1305c0b999fed@1", "t_f2b75cbf276b4d5c@1", "t_353325e9f04ccc1c@1"]
-    policies = ["p_edfd18f238cbfbe6@1", "p_16941d28a98e672e@1", "p_b521b5c8e42de53d@1"]
+    trajectories = ["S001", "S006", "S011"]
+    policies = ["P1.1", "P1.2", "P1.3"]
     return [
-        synthesis.SelectedPair(trajectory_ref=t, policy_ref=p)
+        synthesis.SelectedPair(session_id=t, policy_id=p)
         for t in trajectories
         for p in policies
     ]
@@ -79,8 +79,8 @@ def test_selection_is_exactly_three_by_three():
     chosen = selection()
     pairs = synthesis.select_pairs(data, chosen)
     assert len(pairs) == 9
-    assert len({t.ref for t, _ in pairs}) == 3
-    assert len({p.ref for _, p in pairs}) == 3
+    assert len({t.session_id for t, _ in pairs}) == 3
+    assert len({p.policy_id for _, p in pairs}) == 3
     assert all(t.provenance["source"] == "synthetic" for t, _ in pairs)
 
 
@@ -230,7 +230,7 @@ def test_resume_rejects_different_request_configuration(tmp_path):
 
 
 def test_unknown_selection_fails_before_provider_calls(tmp_path):
-    chosen = [selection()[0].model_copy(update={"policy_ref": "unknown@1"})]
+    chosen = [selection()[0].model_copy(update={"policy_id": "P1.999"})]
     client = FakeClient()
     with pytest.raises(ValueError, match="unknown policy"):
         synthesis.run(load_dataset(), chosen, tmp_path, client)
@@ -313,7 +313,7 @@ def test_matching_label_with_different_evidence_requires_review(tmp_path):
     row = json.loads((tmp_path / "annotations.jsonl").read_text())
     assert row["status"] == "disputed"
     comparison = json.loads((tmp_path / "comparisons.jsonl").read_text())
-    assert comparison["annotation_ref"] == f"{row['id']}@{row['revision']}"
+    assert (comparison["session_id"], comparison["policy_id"]) == (row["session_id"], row["policy_id"])
     assert comparison["dispute_reasons"] == ["evidence_mismatch"]
     assert comparison["judgments"]["annotator"]["rationale"] == "Annotator rationale"
     assert comparison["judgments"]["reviewer"]["rationale"] == "Reviewer rationale"
@@ -394,8 +394,8 @@ def test_curated_pairs_are_not_expanded(tmp_path):
     assert report["pair_count"] == 2
     assert report["attempted_calls"] == 4
     rows = [json.loads(line) for line in (tmp_path / "annotations.jsonl").read_text().splitlines()]
-    assert [(r["trajectory_ref"], r["policy_ref"]) for r in rows] == [
-        (r.trajectory_ref, r.policy_ref) for r in selected
+    assert [(r["session_id"], r["policy_id"]) for r in rows] == [
+        (r.session_id, r.policy_id) for r in selected
     ]
 
 
@@ -415,10 +415,10 @@ def test_load_curated_file_preserves_rows_and_metadata():
 @pytest.mark.parametrize(
     "row",
     [
-        {"trajectory_ref": "unknown@1", "policy_ref": "unknown@1"},
+        {"session_id": "unknown", "policy_id": "P1.999"},
         {
-            "trajectory_ref": "t_91c1305c0b999fed@1",
-            "policy_ref": "p_edfd18f238cbfbe6@1",
+            "session_id": "S001",
+            "policy_id": "P1.1",
             "domain_applicable": "false",
         },
     ],

@@ -21,7 +21,7 @@ SHELL := /bin/bash
 .PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run \
 	clean clean-cache build build-release package publish test-publish-tags \
 	contracts-test lint check-sql-guardrails fmt check-fmt \
-	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
+	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff _test-lease-pg \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
 	ducklake-extension \
@@ -126,9 +126,8 @@ GRAFANA_REFERENCE_VERSION := $(COMPAT_REFERENCE_GRAFANA_TAG)
 GRAFANA_REFERENCE_DIGEST ?= $(COMPAT_REFERENCE_GRAFANA_DIGEST)
 GRAFANA_COMPOSE_IMAGE := $(COMPAT_REFERENCE_GRAFANA_MANIFEST)
 SOFTPROBE_BUILDER_IMAGE ?= rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4
-GRAFANA_SYSTEM_ARTIFACT_DIR ?= $(CURDIR)/target/compat/grafana
+GRAFANA_SYSTEM_ARTIFACT_DIR ?= $(CURDIR)/target/test-artifacts/grafana-system
 GRAFANA_SYSTEM_COMPOSE_FILE ?= $(CURDIR)/tests/compat/grafana/docker-compose.ci.yml
-GRAFANA_SYSTEM_COMPOSE_PROJECT ?= thelake-grafana-system
 GRAFANA_URL ?= http://127.0.0.1:3000
 GRAFANA_SYSTEM_TIMEOUT_SECS ?= 900
 
@@ -393,8 +392,16 @@ test: ensure-cache ducklake-extension explorer-assets
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compatibility -- --test-threads=1
 	npm --prefix "$(EXPLORER_DIR)" test
 
-# Postgres lease contract (ignored in `make test`; needs ducklake-postgres).
-test-lease-pg: ensure-cache check-infra
+# Postgres lease contract runs in the shared disposable test stack.
+test-lease-pg: ensure-cache
+	@set -euo pipefail; \
+	stack_json="$$(python3 scripts/test_stack.py start-compose --suite lease-pg --compose-file tests/compose.test.yaml --service ducklake-postgres --wait)"; \
+	stack_state="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$$stack_json")"; \
+	cleanup() { status=$$?; python3 scripts/test_stack.py stop --state-file "$$stack_state" || status=$$?; exit $$status; }; \
+	trap cleanup EXIT; \
+	$(MAKE) --no-print-directory _test-lease-pg
+
+_test-lease-pg:
 	@echo "async_jobs Postgres lease contract..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib postgres_ -- --ignored --test-threads=1
 
@@ -552,11 +559,11 @@ test-grafana-static: check-compat-reference-pins
 # here so cleanup runs for both harness failures and successful runs.
 test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
 	@set -euo pipefail; \
-	artifact_dir="$(GRAFANA_SYSTEM_ARTIFACT_DIR)"; compose_file="$(GRAFANA_SYSTEM_COMPOSE_FILE)"; \
-	compose_project="$(GRAFANA_SYSTEM_COMPOSE_PROJECT)"; grafana_url="$(GRAFANA_URL)"; \
+	artifact_dir="$(GRAFANA_SYSTEM_ARTIFACT_DIR)/$$(date -u +%Y%m%dT%H%M%SZ)-$$$$"; compose_file="$(GRAFANA_SYSTEM_COMPOSE_FILE)"; \
+	grafana_url="$(GRAFANA_URL)"; stack_state=""; \
 	mkdir -p "$$artifact_dir"; \
 	: > "$$artifact_dir/summary.txt"; \
-	skip_environment() { reason="$$1"; printf 'SKIP: %s\n' "$$reason" | tee "$$artifact_dir/summary.txt"; printf '{"outcome":"environment_skip","reason":"%s"}\n' "$$reason" > "$$artifact_dir/outcome.json"; exit 0; }; \
+	skip_environment() { reason="$$1"; mkdir -p "$$artifact_dir"; printf 'SKIP: %s\n' "$$reason" | tee "$$artifact_dir/summary.txt"; printf '{"outcome":"environment_skip","reason":"%s"}\n' "$$reason" > "$$artifact_dir/outcome.json"; exit 0; }; \
 	if ! docker info >/dev/null 2>&1; then \
 		skip_environment "Docker unavailable"; \
 	fi; \
@@ -576,29 +583,13 @@ test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
 	command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 unavailable" | tee "$$artifact_dir/summary.txt"; exit 1; }; \
 	test -f "$(CURDIR)/scripts/grafana-system-smoke.sh" || { echo "FAIL: missing Grafana smoke harness" | tee "$$artifact_dir/summary.txt"; exit 1; }; \
 	test -f "$$compose_file" || { echo "FAIL: missing compose harness $$compose_file" | tee "$$artifact_dir/summary.txt"; exit 1; }; \
+	mkdir -p "$$artifact_dir"; \
 	export GRAFANA_SEED_ARTIFACT_DIR="$$artifact_dir"; \
 	export GRAFANA_SEED_IN_COMPOSE=1; \
-	compose=( $(COMPOSE) --project-name "$$compose_project" --file "$$compose_file" ); \
-	redact() { sed -E \
-		-e 's/(Bearer[[:space:]]+)[^[:space:]"'"'"'<>]+/\1[REDACTED]/Ig' \
-		-e 's/((api[_-]?key|password|token|secret|authorization|cookie)[[:space:]]*[:=][[:space:]]*)[^[:space:],"'"'"'<>]+/\1[REDACTED]/Ig'; }; \
-	collect() { \
-		"$${compose[@]}" ps > "$$artifact_dir/compose-ps.raw" 2>&1 || true; \
-		"$${compose[@]}" logs --no-color grafana > "$$artifact_dir/compose-logs.raw" 2>&1 || true; \
-		"$${compose[@]}" logs --no-color grafana-seed > "$$artifact_dir/compose-seed-logs.raw" 2>&1 || true; \
-		redact < "$$artifact_dir/compose-ps.raw" > "$$artifact_dir/compose-ps.txt"; \
-		redact < "$$artifact_dir/compose-logs.raw" > "$$artifact_dir/compose-logs.txt"; \
-		redact < "$$artifact_dir/compose-seed-logs.raw" > "$$artifact_dir/compose-seed-logs.txt"; \
-		rm -f "$$artifact_dir/compose-ps.raw" "$$artifact_dir/compose-logs.raw" "$$artifact_dir/compose-seed-logs.raw"; \
-	}; \
-	cleanup() { status=$$?; collect; "$${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true; exit $$status; }; \
+	stack_json="$$(python3 scripts/test_stack.py start-compose --suite grafana-system --artifact-dir "$$artifact_dir" --compose-file "$$compose_file" --wait)"; \
+	stack_state="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$$stack_json")"; \
+	cleanup() { status=$$?; if [ -n "$$stack_state" ]; then python3 scripts/test_stack.py stop --state-file "$$stack_state" || status=$$?; fi; exit $$status; }; \
 	trap cleanup EXIT; \
-	"$${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true; \
-	"$${compose[@]}" up -d --wait || { \
-		echo "FAIL: compose harness failed to start" | tee "$$artifact_dir/summary.txt"; \
-		echo "--- grafana-seed logs ---" >&2; "$${compose[@]}" logs --no-color grafana-seed >&2 || true; \
-		echo "--- softprobe logs (tail) ---" >&2; "$${compose[@]}" logs --no-color --tail 50 softprobe >&2 || true; \
-		exit 1; }; \
 	GRAFANA_URL="$$grafana_url" \
 	GRAFANA_DASHBOARD_DIR="tests/compat/grafana/dashboards/compose" \
 	GRAFANA_DASHBOARD_UIDS="compose-cross-signal compose-loki compose-tempo" \
@@ -608,7 +599,6 @@ test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
 	GRAFANA_ADMIN_PASSWORD="$${GF_SECURITY_ADMIN_PASSWORD:-admin}" \
 	ARTIFACT_DIR="$$artifact_dir" \
 	"$(CURDIR)/scripts/compat/run-with-timeout" "$(GRAFANA_SYSTEM_TIMEOUT_SECS)" "$(SHELL)" "$(CURDIR)/scripts/grafana-system-smoke.sh"; \
-	collect; \
 	echo "Grafana system evidence: $$artifact_dir"
 
 # Loki query differential vs the pinned Loki reference (explicit Docker gate).
@@ -687,10 +677,16 @@ bench-demo-cpu-full: ensure-cache
 # The E2E gate is one simple, exhaustive mode matrix. Both jobs enumerate the
 # same integration:: selector in fresh processes, so every scenario runs under
 # both DuckLake workspace-scope implementations.
-test-e2e: ensure-cache check-infra
-	@$(MAKE) --no-print-directory test
-	@$(MAKE) --no-print-directory test-lease-pg
-	@E2E_BACKEND="$(E2E_BACKEND)" ./scripts/run-e2e-matrix.sh
+test-e2e: ensure-cache
+	@set -euo pipefail; \
+	stack_json="$$(python3 scripts/test_stack.py start-compose --suite integration-e2e --compose-file tests/compose.test.yaml --service ducklake-postgres --service minio --wait)"; \
+	stack_state="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$$stack_json")"; \
+	cleanup() { status=$$?; python3 scripts/test_stack.py stop --state-file "$$stack_state" || status=$$?; exit $$status; }; \
+	trap cleanup EXIT; \
+	python3 scripts/test_stack.py exec --state-file "$$stack_state" --service minio -- sh -ec 'mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc mb --ignore-existing local/warehouse'; \
+	$(MAKE) --no-print-directory test; \
+	$(MAKE) --no-print-directory _test-lease-pg; \
+	E2E_BACKEND="$(E2E_BACKEND)" ./scripts/run-e2e-matrix.sh
 
 test-perf: ensure-cache ducklake-extension
 	@set -e; \

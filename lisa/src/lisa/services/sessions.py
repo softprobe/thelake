@@ -1,4 +1,9 @@
-"""Session search and trajectory use cases shared by tools and evaluation."""
+"""Session search and trajectory use cases shared by tools and evaluation.
+
+Canonical Lisa terms are in ``docs/architecture/lisa-terms.md``: the TheLake
+session ID identifies the evaluation input; its trajectory is a projection,
+not a second identified object.
+"""
 
 from datetime import UTC, datetime, timedelta
 from typing import Any

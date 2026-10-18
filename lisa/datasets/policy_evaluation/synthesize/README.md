@@ -1,16 +1,19 @@
 # Synthesize pair annotations
 
-`annotate.py` creates candidate annotations for explicitly listed trajectory–policy
+For canonical session, trajectory, policy, and pair terminology, see the
+[Lisa evaluation terms](../../../../docs/architecture/lisa-terms.md).
+
+`annotate.py` creates candidate annotations for explicitly listed session-policy
 pairs. It uses Gemini 4 Argon through Google REST with Application Default
 Credentials (ADC). The runtime's API-key client and SDK dependencies are unchanged.
 
 The default input is `../golden_pairs.jsonl`: 202 unique pairs referencing 48
-trajectories and 18 policies. Only listed pairs are generated; repeated policies
+sessions and 18 policies. Only listed pairs are generated; repeated policies
 or trajectories do not expand into a Cartesian product. The complete file is
-validated before any limit or provider initialization. Invalid references,
+validated before any limit or provider initialization. Unknown session or policy IDs,
 duplicate pairs and malformed metadata are rejected.
 
-Each JSONL row contains `trajectory_ref`, `policy_ref`, and optional boolean
+Each JSONL row contains `session_id`, `policy_id`, and optional boolean
 `domain_applicable` curation metadata. The current file includes 72 true and 130
 false rows. Both groups are retained; this field is never supplied to the model
 or interpreted as a compliance outcome. The filename does not make the pairs
@@ -90,9 +93,9 @@ errors, never negative annotations. Responses marked `MAX_TOKENS`, `SAFETY`, or
 - `comparisons.jsonl`: side-by-side full judgments for every pair: outcomes,
   rationales, original evidence lists, missing facts, separate outcome/evidence
   agreement flags, explicit dispute reasons, and each call's request hash/model
-  version. `annotation_ref` links the comparison to the candidate. Reviewers do
+  version. The `(session_id, policy_id)` pair links the comparison to its candidate. Reviewers do
   not need to search raw call files to understand a dispute.
-- `run.json`: selected input revisions, source manifest digest, model/prompt
+- `run.json`: selected session-policy pairs, source manifest digest, model/prompt
   configuration, exact selected rows and source-file SHA-256/total count/limit,
   attempted/completed/cached/failed counts, separate outcome and
   evidence agreement counts, and outcome counts.
@@ -110,14 +113,14 @@ estimate, and counters describe this invocation, not lifetime run spending.
 
 Resume with the same command and output directory. Model, thinking level,
 prompt/schema, selected pairs, pair-source file and manifest changes require a new directory. Each
-call additionally hashes its exact request, role, input revisions and model;
+call additionally hashes its exact request, role, exact inputs and model;
 that per-call hash is authoritative for generation parameters and input bytes.
 Cached raw responses are revalidated before reuse. Errors are never reused as
 successful calls. A failed run does not export candidates, and failed resume
 removes both previous candidate and comparison exports to avoid stale success artifacts.
 
 This command never edits canonical inputs, annotations, or manifests. Review
-candidates explicitly before publishing new annotation revisions. Keep generated
+candidates explicitly before publishing updated pair judgments. Keep generated
 artifacts outside the public repository. Pair coverage is not violation coverage:
 the curated file still includes domain-negative controls. Inspect difficult relevant
 cases and false alarms separately rather than reporting aggregate accuracy alone.

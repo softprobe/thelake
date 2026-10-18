@@ -1,4 +1,8 @@
-"""Policy records and the approved rules consumed by evaluations."""
+"""Policy records and the approved rules consumed by evaluations.
+
+See ``docs/architecture/lisa-terms.md`` for the meaning of Lisa's readable
+policy ID and its role in a session-policy evaluation pair.
+"""
 
 from __future__ import annotations
 

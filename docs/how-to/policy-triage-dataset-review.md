@@ -1,5 +1,8 @@
 # Synthetic policy triage dataset review
 
+Use the shared [Lisa evaluation terms](../architecture/lisa-terms.md) for the
+meaning of session IDs, derived trajectories, policy IDs and session-policy pairs.
+
 Reviewed on 2026-10-17. Scope: the synthetic-source records in `lisa/datasets/policy_evaluation`,
 including literal policy semantics, every pair label, evidence references,
 provider-visible inputs, capture metadata, splits and benchmark accounting.

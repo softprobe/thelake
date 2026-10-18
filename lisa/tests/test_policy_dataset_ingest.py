@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -8,14 +10,120 @@ from lisa.context import WorkspaceContext
 from lisa.evaluation.dataset_benchmark import (
     _add_catalog_to_policy_management,
     _configure_quickstart_environment,
+    _dispose_quickstart_stack,
+    _ensure_sessions_absent,
+    _quickstart_cleanup_target,
+    evaluate,
     _recorded_triage_question_count,
     _trajectory_semantics,
     _wait_for_session,
 )
 from lisa.evaluation.policy_dataset_ingest import build_otlp_trace_export
+from lisa.evaluation.dataset import load_dataset
 from lisa.evaluation.trajectory import build_trajectory_events
-from lisa.repositories.policies import InMemoryPolicyRepository
-from lisa.services.policies import PolicyService
+from lisa.bootstrap import build_services
+
+
+def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path, monkeypatch):
+    """The CLI cleanup deletes run-owned stack/data but preserves useful results."""
+    # Model one completed evaluation: Lake files are disposable, but the report
+    # and provider recordings are the evidence developers need to inspect later.
+    compose_env = tmp_path / "warehouse" / "quickstart" / "lisa-policy-eval-run-1.env"
+    compose_env.parent.mkdir(parents=True)
+    lake_data = tmp_path / "warehouse" / "quickstart" / "lisa-policy-eval-run-1"
+    lake_data.mkdir(parents=True)
+    (lake_data / "trace.parquet").write_text("fixture", encoding="utf-8")
+    llm_data = tmp_path / "llm-calls"
+    llm_data.mkdir()
+    (llm_data / "request.jsonl").write_text("{}\n", encoding="utf-8")
+    report_path = tmp_path / "report.json"
+    report_path.write_text("{}\n", encoding="utf-8")
+    compose_env.write_text(
+        "THELAKE_QUICKSTART_PROJECT_NAME=lisa-policy-eval-run-1\n"
+        "THELAKE_QUICKSTART_INSTANCE_ID=run-token-1\n"
+        "THELAKE_QUICKSTART_DATA_PATH=./warehouse/quickstart/lisa-policy-eval-run-1\n",
+        encoding="utf-8",
+    )
+    commands = []
+    owned_resources = True
+
+    def run(command, **kwargs):
+        # Fake Docker's label queries. The first project is owned by this run;
+        # the second has a resource without the run's owner label.
+        commands.append((command, kwargs))
+        has_project_filter = any(
+            str(item).startswith("label=com.docker.compose.project=") for item in command
+        )
+        has_owner_filter = any(
+            str(item).startswith("label=io.arex.lisa.quickstart-instance=") for item in command
+        )
+        output = (
+            "resource-id\n"
+            if has_project_filter and (not has_owner_filter or owned_resources)
+            else ""
+        )
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr("lisa.evaluation.dataset_benchmark.subprocess.run", run)
+
+    _dispose_quickstart_stack(
+        _quickstart_cleanup_target(compose_env, tmp_path),
+        compose_env,
+        tmp_path,
+        report_path=report_path,
+        data_dir=llm_data,
+    )
+
+    # Cleanup should stop the isolated Compose project and remove Lake state,
+    # while leaving the report and LLM recordings available for review.
+    assert "lisa-policy-eval-run-1" in commands[-1][0]
+    assert commands[-1][0][-3:] == ["down", "--volumes", "--remove-orphans"]
+    assert not lake_data.exists()
+    assert (llm_data / "request.jsonl").exists()
+    assert report_path.exists()
+    assert not compose_env.exists()
+
+    other_env = compose_env.parent / "lisa-policy-eval-run-2.env"
+    other_data = lake_data.parent / "lisa-policy-eval-run-2"
+    other_data.mkdir()
+    other_env.write_text(
+        "THELAKE_QUICKSTART_PROJECT_NAME=lisa-policy-eval-run-2\n"
+        "THELAKE_QUICKSTART_INSTANCE_ID=run-token-2\n"
+        "THELAKE_QUICKSTART_DATA_PATH=./warehouse/quickstart/lisa-policy-eval-run-2\n",
+        encoding="utf-8",
+    )
+    owned_resources = False
+    # If any Compose resource is not labeled as belonging to this run, cleanup
+    # must refuse before `compose down` or deleting local data/metadata.
+    with pytest.raises(RuntimeError, match="not owned"):
+        _dispose_quickstart_stack(
+            _quickstart_cleanup_target(other_env, tmp_path),
+            other_env,
+            tmp_path,
+            report_path=report_path,
+            data_dir=llm_data,
+        )
+    assert other_data.exists()
+    assert other_env.exists()
+    assert sum(command[-3:-2] == ["down"] for command, _ in commands) == 1
+
+
+def test_quickstart_cleanup_rejects_symlinked_repository_paths(tmp_path):
+    repository = tmp_path / "repository"
+    external = tmp_path / "external"
+    repository.mkdir()
+    (external / "quickstart").mkdir(parents=True)
+    (repository / "warehouse").symlink_to(external, target_is_directory=True)
+    env_file = external / "quickstart" / "lisa-policy-eval-run.env"
+    env_file.write_text(
+        "THELAKE_QUICKSTART_PROJECT_NAME=lisa-policy-eval-run\n"
+        "THELAKE_QUICKSTART_INSTANCE_ID=run-token\n"
+        "THELAKE_QUICKSTART_DATA_PATH=./warehouse/quickstart/lisa-policy-eval-run\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="symlinked quickstart directory"):
+        _quickstart_cleanup_target(env_file, repository)
 
 
 def test_build_otlp_trace_export_keeps_trajectory_order_and_pairs_tool_events():
@@ -206,22 +314,19 @@ def test_provider_errors_abort_instead_of_scoring_as_misses():
         )
 
 
-def test_catalog_seed_uses_lisas_policy_management_service(tmp_path):
-    context = WorkspaceContext(
-        workspace="11111111-1111-4111-8111-111111111111",
-        data_dir=tmp_path,
-    )
-    service = PolicyService(context, InMemoryPolicyRepository())
+def test_catalog_seed_uses_lisas_policy_management_service(lisa_test_context):
+    context = lisa_test_context()
+    service = build_services(context).policy_service
     catalog = SimpleNamespace(
         policies={
-            "p_1@1": SimpleNamespace(
-                ref="p_1@1",
+            "P1.1": SimpleNamespace(
+                policy_id="P1.1",
                 policy=SimpleNamespace(
                     name="Cancellation inspection", criteria="Inspect itinerary.", approved=True
                 ),
             ),
-            "p_2@1": SimpleNamespace(
-                ref="p_2@1",
+            "P1.2": SimpleNamespace(
+                policy_id="P1.2",
                 policy=SimpleNamespace(
                     name="Refund eligibility", criteria="Check eligibility.", approved=True
                 ),
@@ -237,6 +342,7 @@ def test_catalog_seed_uses_lisas_policy_management_service(tmp_path):
     assert {rule.name for rule in loaded} == {"Cancellation inspection", "Refund eligibility"}
     assert all(rule.approved for rule in loaded)
     assert persisted_ids == {rule.name: rule.id for rule in loaded}
+    assert persisted_ids == {"Cancellation inspection": "P1.1", "Refund eligibility": "P1.2"}
 
 
 def test_candidate_count_is_read_from_lisas_recorded_decisions_request(tmp_path):
@@ -263,11 +369,15 @@ def test_candidate_count_is_read_from_lisas_recorded_decisions_request(tmp_path)
 
 
 def test_quickstart_metadata_overrides_inherited_workspace_settings(tmp_path, monkeypatch):
-    env_file = tmp_path / "compose.env"
+    env_file = tmp_path / "warehouse" / "quickstart" / "lisa-policy-eval-config-test.env"
+    env_file.parent.mkdir(parents=True)
     env_file.write_text(
         """THELAKE_DEFAULT_WORKSPACE_ID=22222222-2222-4222-8222-222222222222
 THELAKE_QUICKSTART_DB_PORT=55440
 THELAKE_QUICKSTART_PORT=8099
+THELAKE_QUICKSTART_PROJECT_NAME=lisa-policy-eval-config-test
+THELAKE_QUICKSTART_INSTANCE_ID=0123456789abcdef0123456789abcdef
+THELAKE_QUICKSTART_DATA_PATH=./warehouse/quickstart/lisa-policy-eval-config-test
 LISA_DATABASE_WRITER_PASSWORD=writer-secret
 LISA_DATABASE_READER_PASSWORD=reader-secret
 LISA_THELAKE_TOKEN=local-token
@@ -279,7 +389,7 @@ LISA_THELAKE_TOKEN=local-token
     monkeypatch.setenv("LISA_DATABASE_URL", "postgresql://unrelated")
     monkeypatch.setenv("LISA_THELAKE_API_URL", "http://unrelated")
 
-    _configure_quickstart_environment(env_file, data_dir)
+    _configure_quickstart_environment(env_file, data_dir, repository_root=tmp_path)
 
     assert os.environ["LISA_WORKSPACE_ID"] == "22222222-2222-4222-8222-222222222222"
     assert "127.0.0.1:55440/lisa" in os.environ["LISA_DATABASE_URL"]
@@ -305,3 +415,141 @@ def test_wait_for_session_retries_async_summary_not_found(monkeypatch):
 
     assert detail["session_id"] == "session-eventually-indexed"
     assert services.sessions.attempts == 3
+
+
+def test_dataset_preflight_allows_only_missing_session_ids():
+    class Sessions:
+        def detail(self, session_id):
+            if session_id == "S002":
+                raise RuntimeError("TheLake API request failed (404): not found")
+            return {"session_id": session_id}
+
+    with pytest.raises(RuntimeError, match="S001 already exists"):
+        _ensure_sessions_absent(SimpleNamespace(sessions=Sessions()), ["S001", "S002"])
+
+
+def test_dataset_preflight_propagates_non_not_found_errors():
+    class Sessions:
+        def detail(self, _session_id):
+            raise RuntimeError("TheLake API request failed (503): unavailable")
+
+    with pytest.raises(RuntimeError, match="503"):
+        _ensure_sessions_absent(SimpleNamespace(sessions=Sessions()), ["S001"])
+
+
+def test_production_runner_ingests_and_evaluates_the_canonical_session_id(
+    tmp_path, monkeypatch, lisa_test_context
+):
+    from lisa.evaluation import dataset_benchmark
+    from lisa.evaluation.policy_triage import OpenAIPolicyTriager
+    from lisa.thelake_client import TheLakeClient
+
+    data = load_dataset()
+    batch = next(
+        batch
+        for batch in data.batches(source="synthetic")
+        if (
+            data.trajectories[batch.session_id].trajectory.complete
+            and data.trajectories[batch.session_id].trajectory.tool_order_certain
+            and data.trajectories[batch.session_id].trajectory.message_order_certain
+        )
+    )
+    pair_data = replace(data, manifest=data.manifest.model_copy(update={"batches": [batch]}))
+    context = lisa_test_context(
+        data_dir=tmp_path,
+        api_url="http://127.0.0.1:8099",
+        api_token="local-token",
+    )
+    calls = {"ingested": []}
+
+    class DecisionsResponse:
+        def __init__(self, question_count):
+            self.question_count = question_count
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "answers": [
+                    {
+                        "type": "choice",
+                        "name": f"policy_{index}",
+                        "choice": "no_violation_found",
+                    }
+                    for index in range(self.question_count)
+                ]
+            }
+
+    class DecisionsClient:
+        def post(self, _url, *, json):
+            return DecisionsResponse(len(json["questions"]))
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        OpenAIPolicyTriager,
+        "_client_from_environment",
+        lambda _self: DecisionsClient(),
+    )
+
+    def thelake_detail(payload):
+        raw_spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        spans = []
+        for raw in raw_spans:
+            attributes = {
+                item["key"]: item["value"].get("stringValue")
+                for item in raw["attributes"]
+            }
+            spans.append(
+                {
+                    "span_id": raw["spanId"],
+                    "trace_id": raw["traceId"],
+                    "name": raw["name"],
+                    "start_time": raw["startTimeUnixNano"],
+                    "end_time": raw.get("endTimeUnixNano"),
+                    "attributes": attributes,
+                }
+            )
+        return {
+            "session_id": batch.session_id,
+            "agent_names": [
+                item["value"].get("stringValue")
+                for item in payload["resourceSpans"][0]["resource"]["attributes"]
+                if item["key"] == "service.name"
+            ],
+            "span_count": len(spans),
+            "spans": spans,
+            "scores": [],
+        }
+
+    def get_session(_client, _path):
+        if not calls["ingested"]:
+            raise RuntimeError("TheLake API request failed (404): not found")
+        return thelake_detail(calls["ingested"][0])
+
+    monkeypatch.setattr(TheLakeClient, "get", get_session)
+    monkeypatch.setattr(WorkspaceContext, "from_environment", lambda: context)
+    monkeypatch.setattr(
+        dataset_benchmark,
+        "_post_dataset_trace",
+        lambda _url, _token, payload: calls["ingested"].append(payload) or {"success": True},
+    )
+    monkeypatch.setenv("LISA_LLM_TRACE_ENABLED", "1")
+    monkeypatch.setenv("SOFTPROBE_PUBLIC_KEY", "test-token")
+
+    report = evaluate(pair_data, data, tmp_path / "report.json")
+
+    assert len(calls["ingested"]) == 1
+    first_span = calls["ingested"][0]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    session_attribute = next(
+        attribute
+        for attribute in first_span["attributes"]
+        if attribute["key"] == "sp.session.id"
+    )
+    assert session_attribute["value"]["stringValue"] == batch.session_id
+    assert report["sessions"][0]["recorded_decisions_question_count"] == len(data.policies)
+    assert report["sessions"][0]["candidate_count"] == len(data.policies)
+    assert {item["session_id"] for item in report["rows"]} == {batch.session_id}
+    assert report["sessions"][0]["session_id"] == batch.session_id

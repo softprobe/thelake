@@ -1,796 +1,498 @@
 {
-  "name": "policy-evaluation-golden-2026-10-17",
+  "name": "policy-evaluation-session-policy-2026-10-17",
   "files": {
-    "trajectories": "9bfc1f8113fc66e29580136ee65256613165192adba6f8f384a9d7979e95a7e6",
-    "policies": "559b04b5d466caa3437cbe43125fdf664569a334b8045146346ed3210400862e",
-    "annotations": "ea06cedc3b11604c5e51d5d110767e56eed477fbbb06c5414cabfd964ba6476c"
+    "trajectories": "419317f46482d0f310b821f223206eb19ffada92e9a3e07115602c16eed8eba6",
+    "policies": "65b98f2787bc3599f11708fbfecfc77387f8467f49cfd36267d338202f6717da",
+    "annotations": "84990ddabfb3dbf1ad2b7b2fb8040c542319817f80fb1f3a5c71c6ecba4f8e5c"
   },
   "batches": [
     {
-      "trajectory_ref": "t_014ba31ed147a255@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_b53231f1ebded967@2"
+      "session_id": "S007",
+      "policy_ids": [
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_1239074c3ea50174@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1",
-        "p_edfd18f238cbfbe6@1"
-      ],
-      "annotation_refs": [
-        "a_447401cbf37ac059@2",
-        "a_c7da87bed390b615@2"
+      "session_id": "S025",
+      "policy_ids": [
+        "P1.2",
+        "P1.1"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_45bfcbab0b2405b9@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_e8aa69674c80367b@2"
+      "session_id": "S005",
+      "policy_ids": [
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_90c46f18369e56ef@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_5b5faf7e7157db5c@2"
+      "session_id": "S035",
+      "policy_ids": [
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_f2b75cbf276b4d5c@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_5449e3d02266659a@2"
+      "session_id": "S006",
+      "policy_ids": [
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_3fb0931961bba999@1",
-      "policy_refs": [
-        "p_1908e5c6f45f96c7@1",
-        "p_842688cbf7180769@1",
-        "p_2eaeed46415bc6da@1",
-        "p_3cc312a399a2a2ff@1",
-        "p_4071a9787b349537@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_7c136e9a65a2a90a@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1"
-      ],
-      "annotation_refs": [
-        "a_c73c9971e477060b@2",
-        "a_6ec8278f2d1ab273@1",
-        "a_35198bbf9b94743d@1",
-        "a_d1270057f1df3742@1",
-        "a_2f09f09b0003300a@1",
-        "a_984330ef57b91735@1",
-        "a_75935cac56f4a204@1",
-        "a_e25ea9848c836992@1",
-        "a_5bed80b9c268faf0@1",
-        "a_5a40a0296d299fcb@1",
-        "a_cd866de3462ac527@1",
-        "a_73f6f875f1df395b@1"
+      "session_id": "S038",
+      "policy_ids": [
+        "P1.9",
+        "P1.18",
+        "P1.17",
+        "P1.8",
+        "P1.11",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.10",
+        "P1.16",
+        "P1.12",
+        "P1.7"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_2d3af9e098acde21@1",
-      "policy_refs": [
-        "p_2eaeed46415bc6da@1",
-        "p_842688cbf7180769@1",
-        "p_3cc312a399a2a2ff@1",
-        "p_4071a9787b349537@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_7c136e9a65a2a90a@1"
-      ],
-      "annotation_refs": [
-        "a_a9ce56a06b393750@2",
-        "a_3efb49d047751798@1",
-        "a_aa8b34fb85c4d78c@1",
-        "a_f10c9d1f6f2951e8@1",
-        "a_68588e296f80b5a9@1",
-        "a_38c3f4ba7eb5346d@1",
-        "a_91c28adae3e56b55@1",
-        "a_d78bf45708b7a807@1",
-        "a_398f568b061316da@1",
-        "a_e87739ce16f719a9@1",
-        "a_04f9c9d29741e047@1",
-        "a_2308e9d4acf9a38a@1"
+      "session_id": "S046",
+      "policy_ids": [
+        "P1.17",
+        "P1.18",
+        "P1.8",
+        "P1.11",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.7",
+        "P1.9",
+        "P1.10"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_403e8606bb7a33a9@1",
-      "policy_refs": [
-        "p_2eaeed46415bc6da@1",
-        "p_842688cbf7180769@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_7c136e9a65a2a90a@1"
-      ],
-      "annotation_refs": [
-        "a_16374795c150da3a@2",
-        "a_da98266461fc1b0d@1",
-        "a_22ef6bd172d289ff@1",
-        "a_2e070add0dae1044@1",
-        "a_0fb1a643347b0594@1",
-        "a_3aee90544403cb27@1",
-        "a_7a410fb1822e9e04@1",
-        "a_6d9fb162979bc027@1",
-        "a_bf11954eaa128fdd@1",
-        "a_82db2b12c0090ce6@1"
+      "session_id": "S048",
+      "policy_ids": [
+        "P1.17",
+        "P1.18",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.7",
+        "P1.9",
+        "P1.10"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_8a0a3a0104fad1d6@1",
-      "policy_refs": [
-        "p_2eaeed46415bc6da@1",
-        "p_3cc312a399a2a2ff@1",
-        "p_842688cbf7180769@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_7c136e9a65a2a90a@1"
-      ],
-      "annotation_refs": [
-        "a_be85863df20c776c@1",
-        "a_31ea85290a3d323a@1",
-        "a_34bf7c0709accb9e@1",
-        "a_6af6f9afffb0d91d@1",
-        "a_6d0bc7b442877673@1",
-        "a_dd00fa10edccbed2@1",
-        "a_e2a487d77217d2e9@1",
-        "a_17ca1332790e0031@1",
-        "a_2d8d97a79d195671@2",
-        "a_51c52c153b272843@1",
-        "a_7241e20c21909a99@1"
+      "session_id": "S036",
+      "policy_ids": [
+        "P1.17",
+        "P1.8",
+        "P1.18",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.7",
+        "P1.9",
+        "P1.10"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_f0b71b1e0bc4db45@1",
-      "policy_refs": [
-        "p_2eaeed46415bc6da@1",
-        "p_842688cbf7180769@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_7c136e9a65a2a90a@1"
-      ],
-      "annotation_refs": [
-        "a_2f85cc72d428d8d1@2",
-        "a_aefa24e86aae747f@1",
-        "a_d6a0c7c2e60f49aa@1",
-        "a_4b8da34f35a14051@1",
-        "a_2093b5d63e0ef85d@1",
-        "a_91c4121ad21380a0@1",
-        "a_2f8e4542f3da9281@1",
-        "a_7c29784d3c74ce0f@1",
-        "a_ed5d5e88b80d8254@1",
-        "a_abd0f2296cd97309@1"
+      "session_id": "S047",
+      "policy_ids": [
+        "P1.17",
+        "P1.18",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.7",
+        "P1.9",
+        "P1.10"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_3a483250f87bca34@1",
-      "policy_refs": [
-        "p_3cc312a399a2a2ff@1",
-        "p_842688cbf7180769@1",
-        "p_2eaeed46415bc6da@1",
-        "p_4071a9787b349537@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_7c136e9a65a2a90a@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1",
-        "p_1908e5c6f45f96c7@1"
-      ],
-      "annotation_refs": [
-        "a_dd5577a17bc4cc8e@2",
-        "a_71c46eb74c2c0cb7@1",
-        "a_505ae99de85100ab@1",
-        "a_025b4bc8307aad78@1",
-        "a_d4659b4c5a4c84de@1",
-        "a_697263382c9dd691@1",
-        "a_3b1eaef65b822301@1",
-        "a_b2ccb1e8d4ff590a@1",
-        "a_494cc1d08f00abf8@1",
-        "a_15555bc8838af9b4@1",
-        "a_206912d479d24a55@1",
-        "a_f75da6e8fd111f58@1"
+      "session_id": "S037",
+      "policy_ids": [
+        "P1.8",
+        "P1.18",
+        "P1.17",
+        "P1.11",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.10",
+        "P1.16",
+        "P1.12",
+        "P1.7",
+        "P1.9"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_31d041acad67639a@1",
-      "policy_refs": [
-        "p_4071a9787b349537@1",
-        "p_842688cbf7180769@1",
-        "p_2eaeed46415bc6da@1",
-        "p_3cc312a399a2a2ff@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_7c136e9a65a2a90a@1"
-      ],
-      "annotation_refs": [
-        "a_7e70d71278f4a126@2",
-        "a_2d3329fa66b38326@1",
-        "a_2a99487f1aee34fe@1",
-        "a_2f0dfb50a79bafe5@1",
-        "a_a9512e4fd09f0b24@1",
-        "a_d3fca1262f559f28@1",
-        "a_5126d0805a2b67e6@1",
-        "a_e5eba7d5dcf52d6a@1",
-        "a_ac4ac5e2938abaea@1",
-        "a_c7cff412ccde3fcc@1",
-        "a_89a87bbe614675e5@1",
-        "a_b515d031d23d388d@1"
+      "session_id": "S040",
+      "policy_ids": [
+        "P1.11",
+        "P1.18",
+        "P1.17",
+        "P1.8",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.7",
+        "P1.9",
+        "P1.10"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_8797ec92bfaecf68@1",
-      "policy_refs": [
-        "p_46a3310d0be28269@1",
-        "p_842688cbf7180769@1",
-        "p_2eaeed46415bc6da@1",
-        "p_3cc312a399a2a2ff@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_ff5cdff378e429a8@1",
-        "p_7c136e9a65a2a90a@1"
-      ],
-      "annotation_refs": [
-        "a_323a41d5aca9257b@2",
-        "a_5cee03f9b3c80dba@1",
-        "a_92d9a8b665741c4c@1",
-        "a_22576a50500980a0@1",
-        "a_8ade8cf8a0982824@1",
-        "a_1394a0ea607b37b0@1",
-        "a_e1e7718b20935669@1",
-        "a_5f1b9a5f5ba55a0b@1",
-        "a_9a50ed3e8a19df35@1",
-        "a_d1912489aaf1bc42@1",
-        "a_60449b847b521755@1"
+      "session_id": "S044",
+      "policy_ids": [
+        "P1.15",
+        "P1.18",
+        "P1.17",
+        "P1.8",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.9",
+        "P1.7",
+        "P1.10"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_024ff3f3ef9cf924@1",
-      "policy_refs": [
-        "p_2eaeed46415bc6da@1",
-        "p_3cc312a399a2a2ff@1",
-        "p_4071a9787b349537@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_7c136e9a65a2a90a@1"
-      ],
-      "annotation_refs": [
-        "a_857e203ebabcbb39@1",
-        "a_fb411152e4bab9f6@1",
-        "a_dce31ba6a4f9fcce@1",
-        "a_f39f5018ee0f24c6@1",
-        "a_4b43db62a216b4a3@1",
-        "a_f683284b283e9a36@1",
-        "a_007b41a5734b1c31@1",
-        "a_c4bebbc76cad6471@2",
-        "a_291bd812931b30e7@1",
-        "a_ffebe00ce7e4b98a@1",
-        "a_bd6243e5823e4cc8@1"
+      "session_id": "S041",
+      "policy_ids": [
+        "P1.17",
+        "P1.8",
+        "P1.11",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.7",
+        "P1.9",
+        "P1.10"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_1b3d573d62bb64b0@1",
-      "policy_refs": [
-        "p_2eaeed46415bc6da@1",
-        "p_3cc312a399a2a2ff@1",
-        "p_4071a9787b349537@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_7c136e9a65a2a90a@1"
-      ],
-      "annotation_refs": [
-        "a_8a3318f008e4767e@1",
-        "a_73d312fabdec4a1c@1",
-        "a_001ca205e8a0fb42@1",
-        "a_4fa417b372179672@1",
-        "a_94ed85f433632b8e@2",
-        "a_c063b5af8a86def3@1",
-        "a_a7f218750b4ebece@1",
-        "a_a0e9592677e1fec3@1",
-        "a_b222ad70da7f9c46@1",
-        "a_e7d3d5377ec5226f@1",
-        "a_4f7b80647b83e828@1"
+      "session_id": "S042",
+      "policy_ids": [
+        "P1.17",
+        "P1.8",
+        "P1.11",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.7",
+        "P1.9",
+        "P1.10"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_41ab1cc34b27a2d6@1",
-      "policy_refs": [
-        "p_2eaeed46415bc6da@1",
-        "p_3cc312a399a2a2ff@1",
-        "p_4071a9787b349537@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_7c136e9a65a2a90a@1"
-      ],
-      "annotation_refs": [
-        "a_fe2b1b54766b4a5c@1",
-        "a_ba4166b351168964@1",
-        "a_15da0ac85e277b86@1",
-        "a_6bc7ffc6373fb159@1",
-        "a_0a76c3a1f7ba8c6c@1",
-        "a_998648bd97dc8ee7@1",
-        "a_f255adc263e6a266@2",
-        "a_d722f17d15370baa@1",
-        "a_1bc48c380ee2dacc@1",
-        "a_af0bf0738221b14d@1",
-        "a_738ab2057fd8ddb5@1"
+      "session_id": "S045",
+      "policy_ids": [
+        "P1.17",
+        "P1.8",
+        "P1.11",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.7",
+        "P1.9",
+        "P1.10"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_cc9a4f949b8604d2@1",
-      "policy_refs": [
-        "p_2eaeed46415bc6da@1",
-        "p_3cc312a399a2a2ff@1",
-        "p_4071a9787b349537@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_7c136e9a65a2a90a@1"
-      ],
-      "annotation_refs": [
-        "a_b74e0e1441848d07@1",
-        "a_9e3609e9b49771ad@1",
-        "a_e6fba521f73a17ff@1",
-        "a_4fee50bf0ab8d65f@1",
-        "a_ff7245ec10d3fd87@1",
-        "a_198523bd600e9138@2",
-        "a_30413c882643d3e5@1",
-        "a_2804aca0d69081b9@1",
-        "a_34708e57ee2b1caa@1",
-        "a_c4895a7eb2213f77@1",
-        "a_6d634b174cc9bd93@1"
+      "session_id": "S043",
+      "policy_ids": [
+        "P1.17",
+        "P1.8",
+        "P1.11",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.7",
+        "P1.9",
+        "P1.10"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_425890402bd70f68@1",
-      "policy_refs": [
-        "p_72e102a3f3a38c81@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_dcff7760a4a90fdb@2",
-        "a_52b990f212b00496@2"
+      "session_id": "S013",
+      "policy_ids": [
+        "P1.4",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_566e69a41e0c2abb@1",
-      "policy_refs": [
-        "p_72e102a3f3a38c81@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_1c47e32da1d4e54b@2",
-        "a_f4207b6ab3579765@2"
+      "session_id": "S030",
+      "policy_ids": [
+        "P1.4",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_8a97d168700fb1dd@1",
-      "policy_refs": [
-        "p_72e102a3f3a38c81@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_6f2dac63a69ad6c5@2",
-        "a_b758c676e74aae84@2"
+      "session_id": "S015",
+      "policy_ids": [
+        "P1.4",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_aa9bd5321cf1ad31@1",
-      "policy_refs": [
-        "p_72e102a3f3a38c81@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_1547146d36c6b2ef@2",
-        "a_2953da91b04d6e08@2"
+      "session_id": "S014",
+      "policy_ids": [
+        "P1.4",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_a339a559121724d8@1",
-      "policy_refs": [
-        "p_7c136e9a65a2a90a@1",
-        "p_1908e5c6f45f96c7@1",
-        "p_2eaeed46415bc6da@1",
-        "p_3cc312a399a2a2ff@1",
-        "p_4071a9787b349537@1",
-        "p_46a3310d0be28269@1",
-        "p_6cb5225b728179d9@1",
-        "p_6e25ad2db442b0fa@1",
-        "p_8dffaab311d214e9@1",
-        "p_a204c92d08ca3c59@1",
-        "p_ff5cdff378e429a8@1"
-      ],
-      "annotation_refs": [
-        "a_00a46af3562b492d@2",
-        "a_01b5927f7a55efdc@1",
-        "a_37e810bca8818da7@1",
-        "a_1a2f334b66857310@1",
-        "a_a7229226ee14d945@1",
-        "a_325f6a14009b5cd1@1",
-        "a_acbd6671277fc708@1",
-        "a_959da779c313d78d@1",
-        "a_3434373a19b4142a@1",
-        "a_b89828a065be6def@1",
-        "a_504839846a0acaf2@1"
+      "session_id": "S039",
+      "policy_ids": [
+        "P1.10",
+        "P1.9",
+        "P1.17",
+        "P1.8",
+        "P1.11",
+        "P1.15",
+        "P1.13",
+        "P1.14",
+        "P1.16",
+        "P1.12",
+        "P1.7"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_32e60984d5b9b551@1",
-      "policy_refs": [
-        "p_815dd8ece8ae2e12@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_9b9e07f8de7b5130@2",
-        "a_5d79abfbbe2ab859@2"
+      "session_id": "S018",
+      "policy_ids": [
+        "P1.5",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_c9b6bf3f4c5e835c@1",
-      "policy_refs": [
-        "p_815dd8ece8ae2e12@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_98c412b97a277528@2",
-        "a_e51d850668e4e13c@2"
+      "session_id": "S017",
+      "policy_ids": [
+        "P1.5",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_d219da04efb1d6a9@1",
-      "policy_refs": [
-        "p_815dd8ece8ae2e12@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_9aacc5886864dd5a@2",
-        "a_ca2ef24736f1f3c4@2"
+      "session_id": "S032",
+      "policy_ids": [
+        "P1.5",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_e02dd60f0d9858b9@1",
-      "policy_refs": [
-        "p_815dd8ece8ae2e12@1"
-      ],
-      "annotation_refs": [
-        "a_25623b5ebe72f9ed@2"
+      "session_id": "S031",
+      "policy_ids": [
+        "P1.5"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_f7d1d8e0a466390d@1",
-      "policy_refs": [
-        "p_815dd8ece8ae2e12@1"
-      ],
-      "annotation_refs": [
-        "a_1333f30f311e2c67@2"
+      "session_id": "S019",
+      "policy_ids": [
+        "P1.5"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_1fbed09d886ccec7@1",
-      "policy_refs": [
-        "p_ad28545ad6846819@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_387a674e90f2a67a@2",
-        "a_cd3ff035c28a57ea@2"
+      "session_id": "S023",
+      "policy_ids": [
+        "P1.6",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_58a77bb1c0cfcf61@1",
-      "policy_refs": [
-        "p_ad28545ad6846819@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_3edba278840e5de5@2",
-        "a_cee6174c886c1986@2"
+      "session_id": "S021",
+      "policy_ids": [
+        "P1.6",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_5d330adb3c86beb0@1",
-      "policy_refs": [
-        "p_ad28545ad6846819@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_8d6fa88901e15d39@2",
-        "a_edfa44132c17218c@2"
+      "session_id": "S034",
+      "policy_ids": [
+        "P1.6",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_90814739a7c232ad@1",
-      "policy_refs": [
-        "p_ad28545ad6846819@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_e76fe92a80b70e73@2",
-        "a_14e0f94aa499a70c@2"
+      "session_id": "S022",
+      "policy_ids": [
+        "P1.6",
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_116db5111065b862@1",
-      "policy_refs": [
-        "p_b521b5c8e42de53d@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_a59597fe981b1357@2",
-        "a_4aba9ec52856564d@2"
+      "session_id": "S029",
+      "policy_ids": [
+        "P1.3",
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_9bd08d9cba828c40@1",
-      "policy_refs": [
-        "p_b521b5c8e42de53d@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_37e0b48fc959ada0@2",
-        "a_218d01e36f6dbe8e@2"
+      "session_id": "S010",
+      "policy_ids": [
+        "P1.3",
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_c45b88ca62b3cc9e@1",
-      "policy_refs": [
-        "p_b521b5c8e42de53d@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_f5bd93a2b65aa6bb@2",
-        "a_7264280392978377@2"
+      "session_id": "S009",
+      "policy_ids": [
+        "P1.3",
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_d4bdaf4785309fad@1",
-      "policy_refs": [
-        "p_b521b5c8e42de53d@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_e4323a716d39ac9b@2",
-        "a_cd94d8fafd3737e5@2"
+      "session_id": "S028",
+      "policy_ids": [
+        "P1.3",
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_61a36e498ee46baf@1",
-      "policy_refs": [
-        "p_edfd18f238cbfbe6@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_a5559e655e6f18a9@2",
-        "a_f2e09332114c4ef5@2"
+      "session_id": "S003",
+      "policy_ids": [
+        "P1.1",
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_91c1305c0b999fed@1",
-      "policy_refs": [
-        "p_edfd18f238cbfbe6@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_047db550992babd5@2",
-        "a_997b46fafc7a7824@2"
+      "session_id": "S001",
+      "policy_ids": [
+        "P1.1",
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_ab0450738b71b26e@1",
-      "policy_refs": [
-        "p_edfd18f238cbfbe6@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_1cd80d8733e509d9@2",
-        "a_f6b4b5c7b741d930@2"
+      "session_id": "S026",
+      "policy_ids": [
+        "P1.1",
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_d0ef8c850841fb27@1",
-      "policy_refs": [
-        "p_edfd18f238cbfbe6@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_000d39ee0ed69dfe@2",
-        "a_5fbe52db6bb880c1@2"
+      "session_id": "S027",
+      "policy_ids": [
+        "P1.1",
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_eb5043eab1070f2c@1",
-      "policy_refs": [
-        "p_ad28545ad6846819@1"
-      ],
-      "annotation_refs": [
-        "a_b0d6eeb3c354e322@2"
+      "session_id": "S033",
+      "policy_ids": [
+        "P1.6"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_353325e9f04ccc1c@1",
-      "policy_refs": [
-        "p_b521b5c8e42de53d@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_6c05adb064d4ec53@2",
-        "a_7f4fd70fc4f3d650@2"
+      "session_id": "S011",
+      "policy_ids": [
+        "P1.3",
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_7aac62248e6cfd37@1",
-      "policy_refs": [
-        "p_edfd18f238cbfbe6@1",
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_2839e01bcb007fd9@2",
-        "a_dff268c601c11978@2"
+      "session_id": "S002",
+      "policy_ids": [
+        "P1.1",
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_01a587fd0b7491bc@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_9ccf75ec6a8c554a@2"
+      "session_id": "S008",
+      "policy_ids": [
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_0c8bf5ffdf97e180@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_ca202318936122b4@2"
+      "session_id": "S012",
+      "policy_ids": [
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_179c5524c9f10c2a@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_06170fda7e15650f@2"
+      "session_id": "S024",
+      "policy_ids": [
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_59f6c0192cc37ec9@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_20c9bdd772c2c629@2"
+      "session_id": "S016",
+      "policy_ids": [
+        "P1.2"
       ],
       "split": "test"
     },
     {
-      "trajectory_ref": "t_cc2c49f92aa48252@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_52eec8b36a6d3b05@2"
+      "session_id": "S004",
+      "policy_ids": [
+        "P1.2"
       ],
       "split": "development"
     },
     {
-      "trajectory_ref": "t_cdd8d5cd762d3b34@1",
-      "policy_refs": [
-        "p_16941d28a98e672e@1"
-      ],
-      "annotation_refs": [
-        "a_39c3a360ad02be46@2"
+      "session_id": "S020",
+      "policy_ids": [
+        "P1.2"
       ],
       "split": "test"
     }

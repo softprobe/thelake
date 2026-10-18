@@ -3,6 +3,10 @@
 There is no evaluator registry or numeric threshold. Owners approve named rules
 in Postgres; Lisa flags suspected policy violations and passes each live policy to the
 judge with a compact trajectory.
+
+See ``docs/architecture/lisa-terms.md``: the session ID identifies the input;
+the trajectory is a derived projection, and evaluation pairs use the session
+ID with the readable policy ID.
 """
 
 from __future__ import annotations
@@ -643,12 +647,14 @@ class EvaluationService:
 
         if outbox is None:
             # Load the live approved rule for judging; do not copy policy text into the run.
+            trajectory_hash = policy.get("trajectory_hash")
             try:
                 policy = self._policy(
                     inputs["target_agent_name"],
                     inputs["policy_name"],
                     inputs["policy_id"],
                 )
+                policy["trajectory_hash"] = trajectory_hash
             except ValueError as error:
                 self._release_retryable(work_item.id, owner, claim, str(error))
                 return {

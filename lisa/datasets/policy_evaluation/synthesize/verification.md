@@ -1,5 +1,8 @@
 # Curated-pair live verification
 
+Use the canonical [Lisa evaluation terms](../../../../docs/architecture/lisa-terms.md)
+for session, trajectory, policy, and evaluation-pair terminology.
+
 Verified on 2026-10-17 against the first nine rows of `golden_pairs.jsonl`.
 This is a bounded workflow check: the remaining 193 curated pairs have not been reviewed by this run.
 
@@ -46,4 +49,4 @@ The delay case supports application of the full compensation entitlement: `fc842
 - Full pair-file SHA-256: `97e3fc6d6e4cf6a5c34fc5654d4e0918f65dd5c36c04c2419324890d0afd864a`.
 - The private run directory contains exact requests/responses, `initial_run.json`, `comparisons.jsonl`, pre-generation `manual_expectations.json`, and per-pair `manual_review.json`.
 - Raw generated candidates remain in `annotations.jsonl` (eight proposed, one disputed).
-- `reviewed_annotations.jsonl` contains nine canonical-schema AI-adjudicated candidate revisions with explicit primary-agent review provenance. They have not been published into the canonical dataset.
+- `reviewed_annotations.jsonl` contains nine canonical-schema AI-adjudicated candidate judgments with explicit primary-agent review provenance. They have not been published into the canonical dataset.

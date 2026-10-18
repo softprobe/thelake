@@ -60,10 +60,10 @@ def test_evaluation_transcript_preserves_each_message_and_tool_payload(pair):
 def test_evaluation_transcript_reaches_both_provider_boundaries(pair, monkeypatch):
     monkeypatch.delenv("LISA_LLM_TRACE_ENABLED", raising=False)
     original = deepcopy(pair)
-    batch = next(b for b in DATA.manifest.batches if b.trajectory_ref == pair.trajectory.ref)
+    batch = next(b for b in DATA.manifest.batches if b.session_id == pair.trajectory.session_id)
     rules = {
         ref: PolicyRule(id=ref, **DATA.policies[ref].policy.model_dump())
-        for ref in batch.policy_refs
+        for ref in batch.policy_ids
     }
     expected_status = {
         "violation": "fail",
@@ -73,7 +73,7 @@ def test_evaluation_transcript_reaches_both_provider_boundaries(pair, monkeypatc
     }[pair.annotation.outcome]
     client = FakeDecisionsClient(
         [
-            "suspected_violation" if rule.id == pair.policy.ref else "no_violation_found"
+            "suspected_violation" if rule.id == pair.policy.policy_id else "no_violation_found"
             for rule in rules.values()
         ]
     )

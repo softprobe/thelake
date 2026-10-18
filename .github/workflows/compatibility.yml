@@ -118,7 +118,7 @@ jobs:
     timeout-minutes: 45
     services:
       ducklake-postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: ducklake
           POSTGRES_USER: ducklake
@@ -250,7 +250,7 @@ jobs:
     timeout-minutes: 45
     services:
       ducklake-postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: ducklake
           POSTGRES_USER: ducklake
@@ -536,7 +536,7 @@ jobs:
     timeout-minutes: 45
     services:
       ducklake-postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: ducklake
           POSTGRES_USER: ducklake
@@ -609,7 +609,7 @@ jobs:
     timeout-minutes: 20
     services:
       ducklake-postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: ducklake
           POSTGRES_USER: ducklake

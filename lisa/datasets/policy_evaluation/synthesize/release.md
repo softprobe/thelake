@@ -1,7 +1,10 @@
 # Official annotation release — 2026-10-17
 
+Use the canonical [Lisa evaluation terms](../../../../docs/architecture/lisa-terms.md)
+when reading session-policy pairs in this release review.
+
 The default `manifests/evaluation.json` selects exactly the 202 rows in
-`golden_pairs.jsonl`: 48 trajectories and 18 policies. Every selected annotation
+`golden_pairs.jsonl`: 48 sessions and 18 policies. Every selected annotation
 is AI-adjudicated. This is an offline annotation release; Lisa predictions have
 not been generated against it during publication.
 
@@ -75,34 +78,29 @@ selected final judgment. Request hashes identify private raw provider artifacts.
   were redeemed or an overnight hotel was used. Bereavement evidence includes
   the required tool reason and applied fee, rather than assistant prose alone.
 
-## Freeze and verification
+## Current dataset IDs and verification
 
-Inputs and their revisions are unchanged. The 223 prior annotation records
-remain byte-for-byte unchanged; 202 new annotations/revisions were appended,
-reusing an existing annotation ID and incrementing its revision where applicable.
-The manifest selects only the new 202 judgments. Existing trajectory split
-membership and lineage grouping are preserved.
+The release uses the canonical IDs directly: session IDs are `S001` through
+`S048`, policy IDs are document section IDs `P1.1` through `P1.18`, and each
+annotation is keyed by `(session_id, policy_id)`. The dataset stores one selected
+judgment per labeled pair; annotation IDs and revision suffixes are not used.
+The migration preserved the selected 202 labels, review histories, evidence,
+splits and policy membership while removing superseded annotation rows.
 
-| Artifact | SHA-256 |
-|---|---|
-| Manifest | `aa05a3bd1b9f6907785eecde89866c54b9c034d0562345d53f7f4d64d75d9099` |
-| Trajectories | `9bfc1f8113fc66e29580136ee65256613165192adba6f8f384a9d7979e95a7e6` |
-| Policies | `559b04b5d466caa3437cbe43125fdf664569a334b8045146346ed3210400862e` |
-| Annotations | `ea06cedc3b11604c5e51d5d110767e56eed477fbbb06c5414cabfd964ba6476c` |
-| Pair selection | `97e3fc6d6e4cf6a5c34fc5654d4e0918f65dd5c36c04c2419324890d0afd864a` |
+Current file SHA-256 values are recorded in `manifests/evaluation.json` and
+verified by the dataset loader. The golden pair file contains the same 202
+session-policy keys. Regression tests verify exact pair/catalog equality,
+final counts, review provenance and split/lineage consistency. The evaluation
+harness retains incomplete-capture gates; 16 selected pairs are capture-gated,
+rather than silently scored as negatives.
 
-Loader and regression checks validate all references, evidence, file hashes,
-annotation identities and selected latest revisions. Regression tests pin exact
-pair/catalog equality, final counts, review provenance, unchanged splits and
-prior annotation bytes. The evaluation harness retains incomplete-capture gates;
-16 selected pairs are capture-gated, rather than silently scored as negatives.
-
-Post-publication verification: `lisa/.venv/bin/python -m pytest lisa/tests -q`
-completed with **570 passed, 129 skipped**. Skipped suites remain opt-in; this
-was not a paid Lisa prediction evaluation. Ruff checks and `git diff --check`
-also passed. A fake-provider end-to-end harness check exercises all 202 rows,
-retains the 16 capture gates, scores 186 annotated rows and records all 17
-violations as misses for a deliberately always-negative selector.
+Post-publication verification: focused dataset, synthesis, benchmark, policy
+triage and policy-ingest tests pass. This is not a paid Lisa prediction
+ evaluation. The production-path runner loads the complete policy catalog
+through Lisa's policy-management service into a disposable PostgreSQL workspace,
+ingests sessions into TheLake, and invokes Lisa's `EvaluationService`.
+`lisa/scripts/evaluate_policies.py` is a manifest-fed triager harness for prompt
+calibration only; its metrics do not establish Lisa production quality.
 
 ## Limits for later evaluation
 
@@ -114,7 +112,7 @@ precision and aggregate accuracy describe this selection. Keep insufficient
 labels and runtime capture gates separate from resolved model-quality metrics.
 
 Approval examples currently establish neither a compliant obligated action nor
-an actual approval violation. Future input revisions should include authoritative
+an actual approval violation. Future dataset updates should include authoritative
 approval/denial results tied to the action identity and time, and independently
 established emergency exceptions. Do not convert this known coverage gap into
 confident labels.

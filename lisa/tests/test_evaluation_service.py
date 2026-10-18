@@ -4,18 +4,15 @@ import pytest
 from policy_cases import session_detail, save_rule
 
 from lisa.bootstrap import build_services
-from lisa.context import WorkspaceContext
 from lisa.evaluation.contracts import EvaluationRequest
 from lisa.evaluation.scores import evaluation_run_identity
 from lisa.evaluation.trajectory import build_trajectory_events
 
 
 @pytest.fixture
-def services(tmp_path):
+def services(lisa_test_context):
     services = build_services(
-        WorkspaceContext(
-            workspace="11111111-1111-4111-8111-111111111111",
-            data_dir=tmp_path,
+        lisa_test_context(
             confirmed_policy_title="Rule",
             slack_channel="original-channel",
             slack_thread="original-thread",
@@ -514,7 +511,7 @@ def test_policy_criteria_edit_permits_a_fresh_evaluation(services, monkeypatch):
     assert scores[0]["metadata"]["policy_hash"] != scores[1]["metadata"]["policy_hash"]
 
 
-def test_reused_failure_preserves_the_score_destination_after_a_later_turn(services, monkeypatch):
+def test_remote_score_history_does_not_bypass_the_evaluation_ledger(services, monkeypatch):
     policy = services.evaluations._policy("agent", "Rule")
     score = {
         "trace_id": "trace",
@@ -527,7 +524,14 @@ def test_reused_failure_preserves_the_score_destination_after_a_later_turn(servi
         },
     }
     monkeypatch.setattr(services.client, "get", lambda path: {**session_detail(), "scores": [score]})
-    services.evaluations._evaluate_session("agent", "Rule", "session")
-    queued = services.failures.repository.list_all()[0]
-    assert queued["slack_channel_id"] == "historical-channel"
-    assert queued["slack_thread_ts"] == "historical-thread"
+    monkeypatch.setattr(services.client, "post", lambda *args, **kwargs: ({}, 201))
+    judged = []
+    monkeypatch.setattr(
+        services.evaluations,
+        "judge",
+        lambda request: judged.append(request) or {"status": "pass", "rationale": "Checked"},
+    )
+    result = services.evaluations._evaluate_session("agent", "Rule", "session")
+
+    assert result["status"] == "pass"
+    assert len(judged) == 1

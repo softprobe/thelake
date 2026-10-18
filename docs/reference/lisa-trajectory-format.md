@@ -1,5 +1,8 @@
 # Lisa judge trajectory format
 
+For the distinction between a TheLake session and Lisa's trajectory projection,
+see [Lisa evaluation terms](../architecture/lisa-terms.md).
+
 Tool notation version: `lisa-judge-tools/v4`. Judge request recordings store it
 in `request.tool_format`; this metadata is not sent to Gemini. Earlier records
 may use a different notation.

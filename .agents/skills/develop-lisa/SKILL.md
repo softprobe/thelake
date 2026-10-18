@@ -11,6 +11,9 @@ repository rules in `AGENTS.md` and the Lisa contracts in
 
 ## Source of truth and flow
 
+- Use [Lisa evaluation terms](../../../docs/architecture/lisa-terms.md):
+  `session_id` identifies the evaluation input, trajectory is its derived
+  evidence projection with no separate ID, and policy pairs use `policy_id`.
 - Policies are owned by Lisa's PostgreSQL `lisa.policies` catalog. Use
   `PolicyService` and its repository for policy operations; never make a
   quality evaluation by passing annotation-selected policies directly to the
@@ -40,6 +43,17 @@ repository rules in `AGENTS.md` and the Lisa contracts in
 
 ## Work and verification
 
+- Lisa tests follow the repository-wide transient-resource rule in `AGENTS.md`.
+  They use a disposable Postgres database per test through
+  [`lisa/tests/conftest.py`](../../../lisa/tests/conftest.py). It starts one
+  local `postgres:18-alpine` Docker container per test run and creates an
+  isolated database and writer/reader roles for each test. Removing the
+  container at session teardown removes all test databases and roles; no
+  external database URL is supported. Use transient Lisa databases and
+  TheLake workspaces for all automated tests; never connect to or mutate a
+  developer's running instance. Use these fixtures for database-backed
+  behavior, and stub external service calls when the test does not need a real
+  TheLake server.
 - Read [`docs/how-to/policy-memory.md`](../../../docs/how-to/policy-memory.md)
   for policy semantics and
   [`docs/how-to/policy-triage-evaluation.md`](../../../docs/how-to/policy-triage-evaluation.md)

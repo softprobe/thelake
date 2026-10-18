@@ -70,8 +70,8 @@ RESPONSE_SCHEMA = {
 
 
 class SelectedPair(StrictModel):
-    trajectory_ref: str = Field(min_length=1)
-    policy_ref: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    policy_id: str = Field(pattern=r"^P1\.[1-9][0-9]*$")
     domain_applicable: StrictBool | None = None
 
 
@@ -103,13 +103,13 @@ def digest(value):
 def validate_pairs(data, selected):
     if not selected:
         raise ValueError("Pair selection must not be empty")
-    identities = [(row.trajectory_ref, row.policy_ref) for row in selected]
+    identities = [(row.session_id, row.policy_id) for row in selected]
     if len(set(identities)) != len(identities):
         raise ValueError("Duplicate selected pair")
-    if not {row.trajectory_ref for row in selected} <= data.trajectories.keys():
-        raise ValueError("Selection contains an unknown trajectory revision")
-    if not {row.policy_ref for row in selected} <= data.policies.keys():
-        raise ValueError("Selection contains an unknown policy revision")
+    if not {row.session_id for row in selected} <= data.trajectories.keys():
+        raise ValueError("Selection contains an unknown session")
+    if not {row.policy_id for row in selected} <= data.policies.keys():
+        raise ValueError("Selection contains an unknown policy")
 
 
 def load_pairs(path, data):
@@ -124,7 +124,7 @@ def select_pairs(data, selected, max_pairs=9):
     if max_pairs < 1 or len(selected) > max_pairs:
         raise ValueError(f"Selection exceeds explicit pair limit {max_pairs}")
     return [
-        (data.trajectories[row.trajectory_ref], data.policies[row.policy_ref]) for row in selected
+        (data.trajectories[row.session_id], data.policies[row.policy_id]) for row in selected
     ]
 
 
@@ -296,8 +296,8 @@ def run(
         request = build_request(trajectory, policy, role, thinking_level)
         key = digest(
             {
-                "trajectory_ref": trajectory.ref,
-                "policy_ref": policy.ref,
+                "session_id": trajectory.session_id,
+                "policy_id": policy.policy_id,
                 "role": role,
                 "request": request,
                 "model": model,
@@ -306,8 +306,8 @@ def run(
         path = output / "calls" / f"{key}.json"
         spans = {event.span_id for event in trajectory.trajectory.events}
         record = {
-            "trajectory_ref": trajectory.ref,
-            "policy_ref": policy.ref,
+            "session_id": trajectory.session_id,
+            "policy_id": policy.policy_id,
             "role": role,
             "model": model,
             "request": request,
@@ -342,7 +342,7 @@ def run(
                 with lock:
                     stats["completed_calls"] += 1
             with lock:
-                results[(trajectory.ref, policy.ref, role)] = (
+                results[(trajectory.session_id, policy.policy_id, role)] = (
                     judgment,
                     key,
                     stored["response"].get("modelVersion"),
@@ -356,8 +356,8 @@ def run(
                     stats["new_calls_without_usage"] += 1
                 failures.append(
                     {
-                        "trajectory_ref": trajectory.ref,
-                        "policy_ref": policy.ref,
+                        "session_id": trajectory.session_id,
+                        "policy_id": policy.policy_id,
                         "role": role,
                         "error_type": type(error).__name__,
                     }
@@ -391,17 +391,15 @@ def run(
     annotations = []
     comparisons = []
     for trajectory, policy in pairs:
-        first, first_key, first_model = results[(trajectory.ref, policy.ref, "annotator")]
-        second, second_key, second_model = results[(trajectory.ref, policy.ref, "reviewer")]
+        first, first_key, first_model = results[(trajectory.session_id, policy.policy_id, "annotator")]
+        second, second_key, second_model = results[(trajectory.session_id, policy.policy_id, "reviewer")]
         comparison = compare_judgments(first, second)
         rationale = first.rationale
         if first.missing_facts:
             rationale += "\nMissing facts: " + "; ".join(first.missing_facts)
         annotation = Annotation(
-            id="a_" + digest([trajectory.ref, policy.ref, config_digest])[:16],
-            revision=1,
-            trajectory_ref=trajectory.ref,
-            policy_ref=policy.ref,
+            session_id=trajectory.session_id,
+            policy_id=policy.policy_id,
             outcome=first.outcome,
             rationale=rationale,
             evidence=first.evidence,
@@ -422,9 +420,8 @@ def run(
         annotations.append(annotation)
         comparisons.append(
             {
-                "annotation_ref": annotation.ref,
-                "trajectory_ref": trajectory.ref,
-                "policy_ref": policy.ref,
+                "session_id": trajectory.session_id,
+                "policy_id": policy.policy_id,
                 **comparison,
                 "judgments": {
                     "annotator": first.model_dump(),
@@ -480,8 +477,8 @@ def main():
             {
                 "available_pairs": total_pairs,
                 "limit": args.limit,
-                "policies": len({row.policy_ref for row in selected}),
-                "trajectories": len({row.trajectory_ref for row in selected}),
+                "policies": len({row.policy_id for row in selected}),
+                "sessions": len({row.session_id for row in selected}),
                 "pairs": len(pairs),
                 "maximum_new_calls": 2 * len(pairs),
             }

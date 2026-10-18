@@ -8,6 +8,8 @@ description: Configure TheLake's Slack app, event endpoint, workspace binding, a
 Follow `docs/how-to/slack-evaluator.md` as the source of truth. A Slack app
 administrator must create/install the app and grant its scopes; theLake
 developers cannot bypass that customer-side requirement.
+For Lisa's session and policy terminology, see
+[`docs/architecture/lisa-terms.md`](../../../docs/architecture/lisa-terms.md).
 
 ## Configure
 

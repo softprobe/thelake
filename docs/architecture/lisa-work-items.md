@@ -6,6 +6,9 @@
 > from PostgreSQL, calls Decisions triage for every candidate, and sends only
 > suspected violations or insufficient evidence to the Gemini judge. A triage
 > negative is not a passing score.
+>
+> Use [Lisa evaluation terms](lisa-terms.md) for the meaning of `session_id`,
+> trajectory, `policy_id`, and the session-policy evaluation pair.
 
 ## Purpose
 

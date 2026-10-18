@@ -26,6 +26,10 @@ service boundaries and current Decisions-to-Gemini workflow.
 
 - Follow the public-repository disclosure rules and the engineering / SQL
   invariants in `AGENTS.md`.
+- Automated tests that write state must use transient, run-owned databases and
+  workspaces with automatic setup and teardown. Never use a developer's running
+  service or pre-existing data; stub external services when live behavior is
+  not under test.
 - Write a failing test before implementation and add proportionate unit,
   integration, and end-to-end coverage for behavior changes. Prefer shared
   contract tests over duplicated backend-specific suites.

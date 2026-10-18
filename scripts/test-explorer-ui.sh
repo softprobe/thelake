@@ -18,14 +18,15 @@ if curl -fsS "$BACKEND/ready" >/dev/null 2>&1; then
 fi
 
 ONLINE_E2E="${THELAKE_EXPLORER_E2E_ONLINE:-0}"
-E2E_COMPOSE_PROJECT=""
 E2E_DB_PORT="5432"
 if [[ "$ONLINE_E2E" == "1" ]]; then
   command -v docker >/dev/null 2>&1 || { echo "ERROR: Docker is required for online evaluation E2E." >&2; exit 1; }
   if [[ -z "${GOOGLE_API_KEY:-}" && -n "${GEMINI_API_KEY:-}" ]]; then export GOOGLE_API_KEY="$GEMINI_API_KEY"; fi
   [[ -n "${GOOGLE_API_KEY:-}" ]] || { echo "ERROR: Set GOOGLE_API_KEY (or GEMINI_API_KEY) for live Gemini agent and evaluator calls." >&2; exit 1; }
   docker info >/dev/null 2>&1 || { echo "ERROR: Start Docker before online evaluation E2E." >&2; exit 1; }
-  E2E_COMPOSE_PROJECT="thelake-explorer-e2e-$$"
+  LISA_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  export LISA_THELAKE_TOKEN="$LISA_TOKEN"
+  export THELAKE_QUICKSTART_INSTANCE_ID="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
   read -r E2E_DB_PORT < <(python3 - <<'PY'
 import socket
 for port in range(55440, 55460):
@@ -44,8 +45,6 @@ PY
   if [[ "$(uname -s)" == "Linux" ]]; then
     export THELAKE_QUICKSTART_AGENT_NETWORK=host
   fi
-  export THELAKE_E2E_COMPOSE_PROJECT="$E2E_COMPOSE_PROJECT"
-  export THELAKE_E2E_LAKE_PORT="$PORT"
 fi
 
 if [[ ! -x "$BROWSER_DIR/node_modules/.bin/playwright" ]]; then
@@ -57,7 +56,25 @@ fi
 
 THELAKE_CACHE_ROOT="${THELAKE_CACHE_ROOT:-$HOME/.cache/thelake}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$THELAKE_CACHE_ROOT/target}"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/thelake-explorer-e2e.XXXXXX")"
+TMP_DIR=""
+E2E_STACK_STATE=""
+ARTIFACT_DIR=""
+if [[ "$ONLINE_E2E" == "1" ]]; then
+  stack_json="$(python3 scripts/test_stack.py start-compose \
+    --suite explorer-online \
+    --compose-file "$ROOT/examples/quickstart/compose.yaml" \
+    --service postgres \
+    --published-port postgres:5432 \
+    --wait)"
+  E2E_STACK_STATE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$stack_json")"
+  ARTIFACT_DIR="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["artifact_dir"])' "$stack_json")"
+  TMP_DIR="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["scratch_dir"])' "$stack_json")"
+  E2E_DB_PORT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["postgres:5432"][0].rsplit(":",1)[1])' "$stack_json")"
+else
+  TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/thelake-explorer-e2e.XXXXXX")"
+  ARTIFACT_DIR="$ROOT/target/test-artifacts/explorer-ui/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  mkdir -p "$ARTIFACT_DIR"
+fi
 mkdir -p "$TMP_DIR/warehouse"
 WORKSPACE_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 SCHEMA="explorer_e2e_$(python3 -c 'import os; print(os.getpid())')"
@@ -67,49 +84,30 @@ LISA_PORT="${THELAKE_EXPLORER_E2E_LISA_PORT:-18082}"
 LISA_TOKEN=""
 
 cleanup() {
+  local status=$?
   if [[ -n "$LISA_PID" ]] && kill -0 "$LISA_PID" 2>/dev/null; then
     kill "$LISA_PID" 2>/dev/null || true
     wait "$LISA_PID" 2>/dev/null || true
   fi
-  if [[ -n "$E2E_COMPOSE_PROJECT" ]]; then
-      GOOGLE_API_KEY="${GOOGLE_API_KEY:-}" \
-      THELAKE_QUICKSTART_DB_PORT="$E2E_DB_PORT" \
-      docker compose --project-name "$E2E_COMPOSE_PROJECT" \
-        --file "$ROOT/examples/quickstart/compose.yaml" down --remove-orphans -v >/dev/null 2>&1 || true
-  fi
   if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$E2E_STACK_STATE" ]]; then
+    python3 "$ROOT/scripts/test_stack.py" stop --state-file "$E2E_STACK_STATE" || status=$?
   fi
   if [[ "${THELAKE_E2E_KEEP_ARTIFACTS:-0}" == "1" ]]; then
     echo "Explorer E2E logs and temporary data kept at $TMP_DIR" >&2
   else
     rm -rf "$TMP_DIR"
   fi
+  echo "Explorer E2E artifacts retained at $ARTIFACT_DIR" >&2
+  exit "$status"
 }
 trap cleanup EXIT
 
 if [[ "$ONLINE_E2E" == "1" ]]; then
   echo "==> Starting isolated Postgres for Lisa's local Gemini evaluator..."
-  docker compose --project-name "$E2E_COMPOSE_PROJECT" \
-    --file "$ROOT/examples/quickstart/compose.yaml" \
-    up --detach postgres
-  db_ready=0
-  for _ in $(seq 1 60); do
-    if docker compose --project-name "$E2E_COMPOSE_PROJECT" \
-      --file "$ROOT/examples/quickstart/compose.yaml" \
-      exec --no-TTY postgres pg_isready -U ducklake -d ducklake >/dev/null 2>&1; then
-      db_ready=1
-      break
-    fi
-    sleep 1
-  done
-  if [[ "$db_ready" != "1" ]]; then
-    docker compose --project-name "$E2E_COMPOSE_PROJECT" \
-      --file "$ROOT/examples/quickstart/compose.yaml" logs postgres >&2
-    echo "ERROR: isolated E2E Postgres did not become ready." >&2
-    exit 1
-  fi
   echo "==> Calibrating Lisa's local evaluator with paired policy cases..."
   LISA_RUN_EVALUATION_LIVE=1 uv run --project "$ROOT/lisa" --extra test pytest -q \
     "$ROOT/lisa/tests/test_evaluation_live.py" -k "pair_judge_calibration and connected_itinerary"
@@ -157,7 +155,6 @@ if [[ -n "$DUCKDB_LIB_DIR" ]]; then
   esac
 fi
 if [[ "$ONLINE_E2E" == "1" ]]; then
-  LISA_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   export LISA_PUBLIC_URL="http://127.0.0.1:$LISA_PORT/v1"
 fi
 
@@ -168,7 +165,7 @@ THELAKE_DEFAULT_WORKSPACE_ID="$WORKSPACE_ID" \
 SOFTPROBE_LISTEN_ADDR="127.0.0.1:$PORT" \
 SOFTPROBE_GRPC_DISABLE=1 \
 RUST_LOG="${RUST_LOG:-info}" \
-  "$THELAKE_BIN" >"$TMP_DIR/thelake.log" 2>&1 &
+  "$THELAKE_BIN" >"$ARTIFACT_DIR/thelake.log" 2>&1 &
 SERVER_PID=$!
 
 ready=0
@@ -178,14 +175,14 @@ for _ in $(seq 1 180); do
     break
   fi
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    cat "$TMP_DIR/thelake.log" >&2
+    cat "$ARTIFACT_DIR/thelake.log" >&2
     echo "ERROR: thelake exited before becoming ready." >&2
     exit 1
   fi
   sleep 1
 done
 if [[ "$ready" != 1 ]]; then
-  cat "$TMP_DIR/thelake.log" >&2
+  cat "$ARTIFACT_DIR/thelake.log" >&2
   echo "ERROR: thelake did not become ready within 180 seconds." >&2
   exit 1
 fi
@@ -199,7 +196,7 @@ if [[ "$ONLINE_E2E" == "1" ]]; then
   LISA_QA_CRON="* * * * *" \
   LISA_SLACK_BOT_TOKEN="" LISA_SLACK_CHANNEL_ID="" \
     uv run --project "$ROOT/lisa" --extra openhands uvicorn lisa.app:app \
-      --host 127.0.0.1 --port "$LISA_PORT" >"$TMP_DIR/lisa.log" 2>&1 &
+      --host 127.0.0.1 --port "$LISA_PORT" >"$ARTIFACT_DIR/lisa.log" 2>&1 &
   LISA_PID=$!
   lisa_ready=0
   for _ in $(seq 1 90); do
@@ -208,13 +205,13 @@ if [[ "$ONLINE_E2E" == "1" ]]; then
       break
     fi
     if ! kill -0 "$LISA_PID" 2>/dev/null; then
-      cat "$TMP_DIR/lisa.log" >&2
+      cat "$ARTIFACT_DIR/lisa.log" >&2
       exit 1
     fi
     sleep 1
   done
   if [[ "$lisa_ready" != "1" ]]; then
-    cat "$TMP_DIR/lisa.log" >&2
+    cat "$ARTIFACT_DIR/lisa.log" >&2
     echo "ERROR: Lisa did not become ready." >&2
     exit 1
   fi
@@ -230,4 +227,4 @@ else
 fi
 
 cd "$BROWSER_DIR"
-npx playwright test --config playwright.explorer.config.ts "$@"
+npx playwright test --config playwright.explorer.config.ts "$@" 2>&1 | tee "$ARTIFACT_DIR/playwright.log"

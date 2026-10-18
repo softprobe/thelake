@@ -4,18 +4,13 @@ import pytest
 from policy_cases import save_rule
 
 from lisa.bootstrap import build_services
-from lisa.context import WorkspaceContext
 
 
 @pytest.mark.parametrize("accepted_before_interruption", [False, True])
 def test_failure_recovery_survives_interrupted_score_write(
-    tmp_path, monkeypatch, accepted_before_interruption
+    monkeypatch, accepted_before_interruption, lisa_test_context
 ):
-    context = WorkspaceContext(
-        workspace="11111111-1111-4111-8111-111111111111",
-        data_dir=tmp_path,
-        confirmed_policy_title="Rule",
-    )
+    context = lisa_test_context(confirmed_policy_title="Rule")
     services = build_services(context)
     save_rule(services)
     scores = []
@@ -78,12 +73,8 @@ def test_failure_recovery_survives_interrupted_score_write(
     assert restarted.failures.complete_evaluation_failure_followup(key)["status"] == "not_pending"
 
 
-def test_scheduled_turn_cannot_change_policy_or_create_checks(tmp_path):
-    context = WorkspaceContext(
-        workspace="11111111-1111-4111-8111-111111111111",
-        data_dir=tmp_path,
-        confirmed_policy_title="Rule",
-    )
+def test_scheduled_turn_cannot_change_policy_or_create_checks(lisa_test_context):
+    context = lisa_test_context(confirmed_policy_title="Rule")
     services = build_services(replace(context, turn_source="scheduled"))
     with pytest.raises(ValueError, match="owner conversation"):
         services.policy_service.update_policy("## Rule\n\nRule content", "")

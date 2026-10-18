@@ -9,6 +9,11 @@ Choose tests from the change surface; read the Makefile target before running
 unfamiliar or externally connected suites. Preserve the first failure and
 report commands and environmental limits accurately.
 
+Any automated test that writes state must run against transient, run-owned
+databases and workspaces and clean them up automatically, including after
+failure. Never point tests at a developer's running service or pre-existing
+data. Use mocks when a test does not require live service behavior.
+
 ## Common gates
 
 - `make doctor`: check the local toolchain and build prerequisites.

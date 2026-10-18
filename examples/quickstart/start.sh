@@ -128,14 +128,65 @@ if [[ ! "$THELAKE_QUICKSTART_PROJECT_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
   echo "THELAKE_QUICKSTART_PROJECT_NAME must start with a lowercase letter or number and contain only lowercase letters, numbers, underscores, or hyphens." >&2
   exit 1
 fi
+export THELAKE_QUICKSTART_INSTANCE_ID="${THELAKE_QUICKSTART_INSTANCE_ID:-$(python3 -c 'import secrets; print(secrets.token_hex(16))')}"
+if [[ ! "$THELAKE_QUICKSTART_INSTANCE_ID" =~ ^[a-f0-9]{32}$ ]]; then
+  echo "THELAKE_QUICKSTART_INSTANCE_ID must be a 32-character lowercase hexadecimal value." >&2
+  exit 1
+fi
 export THELAKE_QUICKSTART_DATA_PATH="${THELAKE_QUICKSTART_DATA_PATH:-./warehouse/quickstart/data/}"
 if [[ ! "$THELAKE_QUICKSTART_DATA_PATH" =~ ^\./warehouse/quickstart/[a-zA-Z0-9_-]+/?$ ]]; then
   echo "THELAKE_QUICKSTART_DATA_PATH must be a directory directly under warehouse/quickstart." >&2
   exit 1
 fi
-compose_env_file=warehouse/quickstart/compose.env
+export THELAKE_QUICKSTART_ENV_FILE="${THELAKE_QUICKSTART_ENV_FILE:-warehouse/quickstart/compose.env}"
+compose_env_file="$THELAKE_QUICKSTART_ENV_FILE"
+if [[ ! "$compose_env_file" =~ ^warehouse/quickstart/[a-zA-Z0-9_-]+\.env$ ]]; then
+  echo "THELAKE_QUICKSTART_ENV_FILE must be an env file directly under warehouse/quickstart." >&2
+  exit 1
+fi
+if [[ "$THELAKE_QUICKSTART_PROJECT_NAME" == lisa-policy-eval-* ]]; then
+  if [[ "$THELAKE_QUICKSTART_ENV_FILE" != "warehouse/quickstart/${THELAKE_QUICKSTART_PROJECT_NAME}.env" || "$THELAKE_QUICKSTART_DATA_PATH" != "./warehouse/quickstart/${THELAKE_QUICKSTART_PROJECT_NAME}" ]]; then
+    echo "Lisa policy evaluation project, metadata file, and data directory must use the same fresh run name." >&2
+    exit 1
+  fi
+  if [[ -L warehouse || -L warehouse/quickstart || -L "$THELAKE_QUICKSTART_DATA_PATH" ]]; then
+    echo "Refusing to use symlinked Lisa policy evaluation paths." >&2
+    exit 1
+  fi
+  if [[ -e "$THELAKE_QUICKSTART_DATA_PATH" || -L "$compose_env_file" || -e "$compose_env_file" ]]; then
+    echo "Refusing to reuse existing Lisa policy evaluation data or metadata." >&2
+    exit 1
+  fi
+  for artifact in \
+    "warehouse/quickstart/${THELAKE_QUICKSTART_PROJECT_NAME}.yaml" \
+    "warehouse/quickstart/${THELAKE_QUICKSTART_PROJECT_NAME}.api_url" \
+    "warehouse/quickstart/${THELAKE_QUICKSTART_PROJECT_NAME}.lisa_api_url"; do
+    if [[ -L "$artifact" || -e "$artifact" ]]; then
+      echo "Refusing to reuse existing Lisa policy evaluation metadata: $artifact" >&2
+      exit 1
+    fi
+  done
+fi
+if [[ "$THELAKE_QUICKSTART_PROJECT_NAME" == lisa-policy-eval-* ]]; then
+  config_file="warehouse/quickstart/${THELAKE_QUICKSTART_PROJECT_NAME}.yaml"
+  api_url_file="warehouse/quickstart/${THELAKE_QUICKSTART_PROJECT_NAME}.api_url"
+  lisa_api_url_file="warehouse/quickstart/${THELAKE_QUICKSTART_PROJECT_NAME}.lisa_api_url"
+else
+  config_file=warehouse/quickstart/config.yaml
+  api_url_file=warehouse/quickstart/api_url
+  lisa_api_url_file=warehouse/quickstart/lisa_api_url
+fi
+if [[ "$THELAKE_QUICKSTART_PROJECT_NAME" == lisa-policy-eval-* ]]; then
+  existing_containers="$(docker ps --all --quiet --filter "label=com.docker.compose.project=$THELAKE_QUICKSTART_PROJECT_NAME")"
+  existing_volumes="$(docker volume ls --quiet --filter "label=com.docker.compose.project=$THELAKE_QUICKSTART_PROJECT_NAME")"
+  existing_networks="$(docker network ls --quiet --filter "label=com.docker.compose.project=$THELAKE_QUICKSTART_PROJECT_NAME")"
+  if [[ -n "$existing_containers$existing_volumes$existing_networks" ]]; then
+    echo "Refusing to reuse existing Docker resources for Compose project $THELAKE_QUICKSTART_PROJECT_NAME." >&2
+    exit 1
+  fi
+fi
 mkdir -p "$(dirname "$compose_env_file")"
-(umask 077; printf 'LISA_THELAKE_TOKEN=%s\nTHELAKE_DEFAULT_WORKSPACE_ID=%s\nLISA_QA_CRON=%s\nTHELAKE_QUICKSTART_DB_PORT=%s\nTHELAKE_QUICKSTART_LISA_PORT=%s\nTHELAKE_QUICKSTART_PORT=%s\nLISA_DATABASE_WRITER_PASSWORD=%s\nLISA_DATABASE_READER_PASSWORD=%s\n' "$LISA_THELAKE_TOKEN" "$THELAKE_DEFAULT_WORKSPACE_ID" "$LISA_QA_CRON" "$THELAKE_QUICKSTART_DB_PORT" "$THELAKE_QUICKSTART_LISA_PORT" "$THELAKE_QUICKSTART_PORT" "$LISA_DATABASE_WRITER_PASSWORD" "$LISA_DATABASE_READER_PASSWORD" > "$compose_env_file")
+(umask 077; printf 'LISA_THELAKE_TOKEN=%s\nTHELAKE_DEFAULT_WORKSPACE_ID=%s\nLISA_QA_CRON=%s\nTHELAKE_QUICKSTART_PROJECT_NAME=%s\nTHELAKE_QUICKSTART_INSTANCE_ID=%s\nTHELAKE_QUICKSTART_DATA_PATH=%s\nTHELAKE_QUICKSTART_DB_PORT=%s\nTHELAKE_QUICKSTART_LISA_PORT=%s\nTHELAKE_QUICKSTART_PORT=%s\nLISA_DATABASE_WRITER_PASSWORD=%s\nLISA_DATABASE_READER_PASSWORD=%s\n' "$LISA_THELAKE_TOKEN" "$THELAKE_DEFAULT_WORKSPACE_ID" "$LISA_QA_CRON" "$THELAKE_QUICKSTART_PROJECT_NAME" "$THELAKE_QUICKSTART_INSTANCE_ID" "$THELAKE_QUICKSTART_DATA_PATH" "$THELAKE_QUICKSTART_DB_PORT" "$THELAKE_QUICKSTART_LISA_PORT" "$THELAKE_QUICKSTART_PORT" "$LISA_DATABASE_WRITER_PASSWORD" "$LISA_DATABASE_READER_PASSWORD" > "$compose_env_file")
 chmod 600 "$compose_env_file"
 compose=(docker compose --env-file "$local_env_file" --env-file "$compose_env_file" --project-name "$THELAKE_QUICKSTART_PROJECT_NAME" --file examples/quickstart/compose.yaml)
 "${compose[@]}" up --detach postgres
@@ -179,8 +230,8 @@ fi
 mkdir -p "$THELAKE_QUICKSTART_DATA_PATH"
 sed -e "s#^  metadata_path: .*#  metadata_path: \"host=127.0.0.1 port=${THELAKE_QUICKSTART_DB_PORT} dbname=ducklake user=ducklake password=ducklake\"#" \
   -e "s#^  data_path: .*#  data_path: \"${THELAKE_QUICKSTART_DATA_PATH}\"#" \
-  examples/quickstart/config.yaml > warehouse/quickstart/config.yaml
-export CONFIG_FILE=warehouse/quickstart/config.yaml
+  examples/quickstart/config.yaml > "$config_file"
+export CONFIG_FILE="$config_file"
 export SOFTPROBE_LOCAL_ANONYMOUS=1
 export LISA_LOCAL_ANONYMOUS=1
 export LISA_PUBLIC_URL="http://127.0.0.1:${THELAKE_QUICKSTART_LISA_PORT}/v1"
@@ -188,8 +239,8 @@ export LISA_THELAKE_TOKEN
 export SOFTPROBE_LISTEN_ADDR="127.0.0.1:${THELAKE_QUICKSTART_PORT}"
 export THELAKE_API_URL="http://${SOFTPROBE_LISTEN_ADDR}"
 export SOFTPROBE_GRPC_DISABLE=1
-printf '%s\n' "$THELAKE_API_URL" > warehouse/quickstart/api_url
-printf 'http://127.0.0.1:%s\n' "$THELAKE_QUICKSTART_LISA_PORT" > warehouse/quickstart/lisa_api_url
+printf '%s\n' "$THELAKE_API_URL" > "$api_url_file"
+printf 'http://127.0.0.1:%s\n' "$THELAKE_QUICKSTART_LISA_PORT" > "$lisa_api_url_file"
 
 echo "Starting theLake at http://${SOFTPROBE_LISTEN_ADDR}/explorer/"
 echo "Leave this terminal running. In Explorer, chat with Lisa and ask her to monitor this rule:"

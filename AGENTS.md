@@ -14,6 +14,12 @@ These requirements always apply to design, implementation, refactoring, and revi
 2. **TDD and complete coverage.** Write a failing test before implementation.
    Every change requires proportionate unit, integration, and end-to-end
    coverage. Prefer one shared contract suite over copying tests.
+   Every automated test or evaluation that writes state must use transient,
+   run-owned databases and workspaces. Never connect to or mutate a developer's
+   running service, database, workspace, or other pre-existing state. Provision
+   resources through shared fixtures/setup and tear them down automatically,
+   including on failure. Stub external services when live behavior is not part
+   of the test.
 3. **Senior architect review loop.** For design and code changes, launch a
    senior-architect subagent that reads the relevant code, tests, documentation,
    and project goals. The review must be substantive, not a rubber stamp.
@@ -23,9 +29,22 @@ These requirements always apply to design, implementation, refactoring, and revi
    Never encode planning/roadmap vocabulary in the tree (`phase0`/`phase1`,
    leftovers, milestones, epics, sprints, “option A/B”). Specs and plans may use
    those words; implementation code must not.
+5. **Document settings and major features with the implementation.** Update
+   authoritative reference docs and relevant development skills in the same
+   change. Add source comments where a setting's scope, lifecycle, or safety
+   constraints are not obvious. Clearly label test-only settings and state
+   which resources they create or modify.
 
 Prefer shared abstractions that remove duplication over parallel implementations.
 Especially enforce rules 1, 2, and 4.
+
+Verify every change with appropriate existing tests or checks. Keep lasting
+regression coverage in the existing test module for the same component and
+contract; create a new test module only for a distinct subsystem or test layer.
+Do not add one-off verification tests or scripts to the tracked codebase. When
+a temporary script is the clearest way to verify a change, put it in `/tmp` or
+another excluded location. Use `./tmp` only when Git confirms that path is
+ignored. Run the script and remove it when finished.
 
 # SQL safety invariants
 

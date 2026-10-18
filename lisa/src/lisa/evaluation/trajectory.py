@@ -1,5 +1,9 @@
 """Build compact session trajectories from TheLake span telemetry.
 
+See ``docs/architecture/lisa-terms.md`` for canonical Lisa evaluation terms.
+In particular, a trajectory is a projection of a session and has no separate
+identifier.
+
 Terms used in Lisa evaluation:
 
 - ``session_detail``: raw ``GET /v1/sessions/{id}`` payload (spans, scores,

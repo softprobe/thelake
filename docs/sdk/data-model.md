@@ -31,6 +31,9 @@ derived from constituent observations.
 
 ### Session
 
+For how Lisa uses a session as the identity of a policy-evaluation input, see
+[Lisa evaluation terms](../architecture/lisa-terms.md).
+
 A session is the product unit for a user-facing conversation or job: primary
 agent work and any nested sub-agents share one `session_id`. SDKs encode it as
 `sp.session.id` and SHOULD mirror the same value on `gen_ai.conversation.id`.

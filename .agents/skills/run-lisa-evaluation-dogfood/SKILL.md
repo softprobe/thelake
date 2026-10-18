@@ -5,6 +5,10 @@ description: Verify Lisa's workspace conversation, autonomous sampling, online e
 
 # Run Lisa evaluation dogfood
 
+Use [Lisa evaluation terms](../../../docs/architecture/lisa-terms.md): the
+session ID identifies the input; its trajectory is derived data with no
+separate ID.
+
 Lisa owns approved policies, evaluation decisions, and scheduling. TheLake
 stores and serves telemetry and resulting scores; telemetry ingestion does not
 call Lisa.
@@ -23,9 +27,13 @@ call Lisa.
 - `test_evaluation_live.py` is harness calibration. Its direct
   `OpenAIPolicyTriager` and injected session fixtures do not measure Lisa's
   production policy lookup or end-to-end session path.
-- For the real scheduled agent-to-issue path, run the quickstart E2E. It uses
-  the existing quickstart stack and makes paid OpenAI Decisions and Gemini
-  calls. Decisions triages all approved policies; Gemini judges only escalations.
+- For the real scheduled agent-to-issue path, use a quickstart E2E with an
+  isolated, run-owned stack and workspace; it makes paid OpenAI Decisions and
+  Gemini calls. It must not reuse a developer's running stack or workspace.
+  The current `tests/e2e/quickstart_online_eval.py` targets the shared
+  `thelake-quickstart` project, so do not run it until that harness provisions
+  and cleans up its own transient stack. Decisions triages all approved
+  policies; Gemini judges only escalations.
 - For Markdown policy learning or review, use
   `skills/learn-agent-policy/SKILL.md` and
   `skills/review-agent-policy/SKILL.md`.
@@ -53,10 +61,16 @@ Before a live run:
    or `GEMINI_API_KEY`; two-stage selection also needs `OPENAI_API_KEY`. Missing
    exports alone do not establish that credentials are unavailable. Do not
    search unrelated files or copy credentials into scripts, reports, or commands.
-4. Preserve the working tree and existing local services. Start the local
-   quickstart only for the scheduled-path E2E, if it is not already running.
+4. Preserve the working tree and existing local services. If the scheduled-
+   path harness cannot provision and clean up an isolated quickstart project
+   with a transient database and workspace, stop and report that prerequisite;
+   never point it at an existing local service.
 
 ## Run the live path
+
+Do not run the scheduled-path command below until its harness has been updated
+to own a transient quickstart stack and workspace. The current implementation
+uses the shared `thelake-quickstart` project and does not satisfy that rule.
 
 Provision the model key through the approved local secret mechanism. Do not put
 the value in a command, history, file, or report. From the repository root:

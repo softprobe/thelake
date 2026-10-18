@@ -129,21 +129,17 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(monkeypatch, tmp_path):
     } <= skill_names
 
 
-def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(tmp_path, monkeypatch):
+def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(monkeypatch, lisa_test_context):
     import asyncio
 
     from fastmcp import Client
 
     from lisa.bootstrap import build_services
-    from lisa.context import WorkspaceContext
     from lisa.controllers.mcp import create_server
 
-    monkeypatch.setenv("LISA_WORKSPACE_ID", "11111111-1111-4111-8111-111111111111")
-    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("LISA_THELAKE_API_URL", "http://thelake:8090")
-    monkeypatch.setenv("LISA_THELAKE_TOKEN", "test-token")
-
-    services = build_services(WorkspaceContext.from_environment())
+    services = build_services(
+        lisa_test_context(api_url="http://thelake:8090", api_token="test-token")
+    )
     server = create_server(services)
 
     async def list_tools():

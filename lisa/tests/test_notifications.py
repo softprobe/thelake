@@ -1,26 +1,19 @@
 import io
 
-import pytest
-
 from lisa import thelake_client
 from lisa.bootstrap import build_services
-from lisa.context import WorkspaceContext
 
 
-@pytest.fixture(autouse=True)
-def isolated_data_directory(monkeypatch, tmp_path):
-    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
-
-
-def test_failure_notification_routes_and_deduplicates(monkeypatch, tmp_path):
+def test_failure_notification_routes_and_deduplicates(monkeypatch, lisa_test_context):
     import json
 
     workspace_id = "11111111-1111-4111-8111-111111111111"
     monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
-    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("LISA_SLACK_BOT_TOKEN", "test-bot-token")
     monkeypatch.setenv("LISA_SLACK_CHANNEL_ID", "workspace-alerts")
-    services = build_services(WorkspaceContext.from_environment())
+    services = build_services(
+        lisa_test_context(slack_token="test-bot-token", slack_channel="workspace-alerts")
+    )
     policy = {
         "name": "Refund eligibility",
         "target_agent_name": "support-agent",

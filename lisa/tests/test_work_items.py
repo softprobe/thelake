@@ -1,29 +1,27 @@
 from __future__ import annotations
 
-import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from sql_cases import provision_lisa_schema
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
 from lisa.repositories.policies import PostgresPolicyRepository
 from lisa.services.policies import PolicyService
 from policy_cases import list_policies
+from policy_cases import read_policy
 from lisa.repositories.work_items import (
     DeploymentBindingError,
     PostgresWorkItemStore,
     StaleLeaseError,
 )
 
-WORKSPACE_ID = "8cd71112-21e0-4d45-a8cc-9ec553879df2"
+WORKSPACE_ID = "11111111-1111-4111-8111-111111111111"
 
 
 def _test_sql(name: str) -> str:
@@ -31,16 +29,8 @@ def _test_sql(name: str) -> str:
 
 
 @pytest.fixture
-def store() -> PostgresWorkItemStore:
-    pytest.importorskip("psycopg")
-    provision_dsn = os.getenv("LISA_TEST_PROVISION_URL") or os.getenv("LISA_TEST_DATABASE_URL")
-    if not provision_dsn:
-        pytest.skip("LISA_TEST_PROVISION_URL must point to a disposable PostgreSQL test database")
-    if "test" not in urlparse(provision_dsn).path.lower():
-        pytest.fail("LISA_TEST_DATABASE_URL must name a disposable database containing 'test'")
-    provision_lisa_schema(provision_dsn, WORKSPACE_ID)
-    runtime_dsn = os.getenv("LISA_TEST_WRITER_URL") or provision_dsn
-    return PostgresWorkItemStore(runtime_dsn, WORKSPACE_ID)
+def store(lisa_test_db) -> PostgresWorkItemStore:
+    return PostgresWorkItemStore(lisa_test_db.writer_url, WORKSPACE_ID)
 
 
 def _create_evaluation(store: PostgresWorkItemStore, request_key: str | None = None):
@@ -91,18 +81,13 @@ def _test_policy_id(store: PostgresWorkItemStore) -> str:
 
 def test_provision_binds_one_database_to_its_workspace(store: PostgresWorkItemStore):
     with pytest.raises(DeploymentBindingError):
-        PostgresWorkItemStore(
-            os.getenv("LISA_TEST_WRITER_URL")
-            or os.getenv("LISA_TEST_PROVISION_URL")
-            or os.environ["LISA_TEST_DATABASE_URL"],
-            "1480b512-0b71-44e3-90a1-25b5a4f90d72",
-        )
+        PostgresWorkItemStore(store.dsn, "1480b512-0b71-44e3-90a1-25b5a4f90d72")
 
 
 def test_on_disk_policy_markdown_is_not_loaded_into_postgres(
     store: PostgresWorkItemStore, tmp_path: Path
 ):
-    writer_dsn = os.getenv("LISA_TEST_WRITER_URL") or os.getenv("LISA_TEST_PROVISION_URL")
+    writer_dsn = store.dsn
     agent_name = f"disk-agent-{uuid4()}"
     context = WorkspaceContext(
         workspace=WORKSPACE_ID,
@@ -163,6 +148,7 @@ def test_evaluation_creation_is_idempotent_and_intentional_rerun_is_distinct(
 def test_concurrent_retries_create_one_evaluation(store: PostgresWorkItemStore):
     request_key = str(uuid4())
     session_id = f"session-{uuid4()}"
+    policy_id = _test_policy_id(store)
 
     def create():
         return store.create_evaluation(
@@ -171,7 +157,7 @@ def test_concurrent_retries_create_one_evaluation(store: PostgresWorkItemStore):
             target_agent_name="quickstart-refund-agent",
             session_id=session_id,
             policy_name="refund eligibility",
-            policy_id=_test_policy_id(store),
+            policy_id=policy_id,
             policy_hash="policy-sha256-concurrent",
             judge_config={"model": "test-judge"},
             request_key=request_key,
@@ -265,15 +251,12 @@ def test_expired_lease_is_rejected_after_waiting_for_row_lock(
         blocker.close()
 
 
-def test_runtime_roles_are_separated_from_provision(store: PostgresWorkItemStore):
+def test_runtime_roles_are_separated_from_provision(
+    store: PostgresWorkItemStore, lisa_test_db
+):
     import psycopg
 
-    reader_dsn = os.getenv("LISA_TEST_READER_URL")
-    provision_dsn = os.getenv("LISA_TEST_PROVISION_URL") or os.getenv("LISA_TEST_DATABASE_URL")
-    if not reader_dsn or not provision_dsn:
-        pytest.skip("test provision and reader role URLs are required")
-
-    with psycopg.connect(reader_dsn, autocommit=True) as reader:
+    with psycopg.connect(lisa_test_db.reader_url, autocommit=True) as reader:
         assert reader.execute(_test_sql("count_readable_work_items.sql")).fetchone()
         reader.execute(_test_sql("read_policies.sql"))
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
@@ -283,10 +266,7 @@ def test_runtime_roles_are_separated_from_provision(store: PostgresWorkItemStore
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             reader.execute(_test_sql("reader_ddl.sql"))
 
-    writer_dsn = os.getenv("LISA_TEST_WRITER_URL")
-    if not writer_dsn:
-        pytest.skip("LISA_TEST_WRITER_URL is required")
-    with psycopg.connect(writer_dsn, autocommit=True) as writer:
+    with psycopg.connect(lisa_test_db.writer_url, autocommit=True) as writer:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             writer.execute(_test_sql("rewrite_deployment.sql"))
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
@@ -322,12 +302,13 @@ def test_postgres_policy_records_keep_string_ids_and_agent_scope(store, tmp_path
         agent_name,
     )
     first = next(rule for rule in policies.approved_rules(agent_name) if rule.name == title)
-    listing = policies.list_policies()
-    workspace_text = policies.read_policy()
-    agent_text = policies.read_policy("agent", agent_name)
+    services = build_services(policies.context)
+    listing = list_policies(services)
+    workspace_text = read_policy(services)
+    agent_text = read_policy(services, "agent", agent_name)
     policies.update_policy(
         f"## {title}\napproved: yes\n\nCheck the changed requirement.",
-        policies.read_policy("agent", agent_name),
+        read_policy(services, "agent", agent_name),
         "agent",
         agent_name,
     )
@@ -339,7 +320,10 @@ def test_postgres_policy_records_keep_string_ids_and_agent_scope(store, tmp_path
         f"{workspace_rule.id} | {title} | Applies to: all agents by default" in row
         for row in listing
     )
-    assert any(f"{first.id} | {title} | Applies to: {agent_name} only" in row for row in listing)
+    assert any(
+        f"{first.id} | {title} | Applies to: {agent_name} only" in row
+        for row in listing
+    )
     assert f"## {workspace_rule.id} | {title}" in workspace_text
     assert "Workspace requirement." in workspace_text
     assert f"## {first.id} | {title}" in agent_text
@@ -351,8 +335,7 @@ def test_postgres_policy_records_keep_string_ids_and_agent_scope(store, tmp_path
 def test_policy_primary_key_column_uses_postgres_text(store):
     import psycopg
 
-    provision_dsn = os.getenv("LISA_TEST_PROVISION_URL") or os.getenv("LISA_TEST_DATABASE_URL")
-    with psycopg.connect(provision_dsn) as connection:
+    with psycopg.connect(store.dsn) as connection:
         row = connection.execute(_test_sql("policy_id_column_type.sql")).fetchone()
     assert row == ("text",)
 

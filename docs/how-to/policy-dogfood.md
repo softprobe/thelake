@@ -1,5 +1,8 @@
 # Repeatable policy and online-evaluation dogfood
 
+Use [Lisa evaluation terms](../architecture/lisa-terms.md) when referring to
+sessions, derived trajectories, policies, and evaluation pairs.
+
 Use this small travel scenario to check three different claims independently:
 
 1. A coding agent can learn a supported rule from an authoritative source.

@@ -151,7 +151,7 @@ Grafana is ready for manual inspection (live Astronomy Shop traffic).
   Dashboards:  Softprobe Loki / Tempo / cross-signal smoke boards
   Softprobe:   $SOFTPROBE_URL_HOST  (Bearer $API_KEY)
   Ingest:      flush_interval_seconds=$flush_shown  (0=flush-through; >0=coalesce; from live config when present)
-  DuckLake:    Postgres 19 catalog on $PG_HOST:$PG_PORT (schema $PG_SCHEMA)
+  DuckLake:    Postgres 18 catalog on $PG_HOST:$PG_PORT (schema $PG_SCHEMA)
   Parquet:     $STATE_DIR/data/
   Store UI:    $STORE_URL
   Demo pin:    $OTEL_DEMO_TAG  ($DEMO_DIR)
@@ -314,7 +314,7 @@ if [[ ! -x "$RUNTIME_BIN" ]]; then
   exit 1
 fi
 
-echo "==> starting Grafana + auth-mock + Postgres 19"
+echo "==> starting Grafana + auth-mock + Postgres 18"
 THELAKE_GRAFANA_STATE_DIR="$STATE_DIR" GRAFANA_PG_HOST_PORT="$PG_PORT" GRAFANA_AUTH_MOCK_PORT="$GRAFANA_AUTH_MOCK_PORT" \
   $COMPOSE -f "$COMPOSE_FILE" up -d
 

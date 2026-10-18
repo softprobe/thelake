@@ -1,5 +1,8 @@
 # Slack conversations with Lisa
 
+For Lisa's canonical session, policy, and evaluation-pair terminology, see
+[Lisa evaluation terms](../architecture/lisa-terms.md).
+
 Slack is an optional front door to Lisa. Slack sends events directly to Lisa;
 Lisa keeps the conversation, uses her policy and evaluation tools, reads trace
 and check data from TheLake, and posts her own replies and issue alerts. TheLake

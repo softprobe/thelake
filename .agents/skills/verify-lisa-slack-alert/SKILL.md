@@ -5,6 +5,9 @@ description: Verify that Lisa proactively evaluates a fresh agent trace and post
 
 # Verify Lisa's Slack alert
 
+Use [Lisa evaluation terms](../../../docs/architecture/lisa-terms.md) for the
+session, policy, and evaluation-pair identifiers reported by this workflow.
+
 Lisa owns the Slack connection for her workspace. The bot token authenticates
 that one connection; `LISA_SLACK_CHANNEL_ID` is the workspace's default alert
 channel. A check created from a Slack thread may keep that thread as its

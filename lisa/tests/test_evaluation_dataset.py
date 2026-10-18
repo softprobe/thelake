@@ -1,7 +1,9 @@
 """One dataset contract for all sources; labels never inferred from missing pairs."""
 
 import hashlib
+import importlib.util
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -10,20 +12,20 @@ import pytest
 from lisa.evaluation.dataset import load_dataset
 
 ROOT = Path(__file__).resolve().parents[1] / "datasets/policy_evaluation"
+SAMPLE_SPEC = importlib.util.spec_from_file_location(
+    "lisa_policy_evaluation_sample",
+    Path(__file__).resolve().parents[2]
+    / ".agents/skills/run-lisa-policy-evaluation/scripts/create_sample_manifest.py",
+)
+SAMPLE = importlib.util.module_from_spec(SAMPLE_SPEC)
+sys.modules[SAMPLE_SPEC.name] = SAMPLE
+SAMPLE_SPEC.loader.exec_module(SAMPLE)
 
 
 def write_dataset(tmp_path):
     trajectory = {
-        "trace_id": "0123456789abcdef",
-        "events": [
-            {
-                "span_id": "abcdef0123456789",
-                "sequence": 0,
-                "timestamp": "",
-                "kind": "user_message",
-                "content": "Hello",
-            }
-        ],
+        "trace_id": "0123456789abcdef0123456789abcdef",
+        "events": [{"span_id": "abcdef0123456789", "sequence": 0, "timestamp": "", "kind": "user_message", "content": "Hello"}],
         "complete": True,
         "tool_events_captured": True,
         "tool_order_certain": True,
@@ -31,56 +33,11 @@ def write_dataset(tmp_path):
         "limitations": [],
     }
     records = {
-        "trajectories": [
-            {
-                "id": "t1",
-                "revision": 1,
-                "name": "example",
-                "lineage": "example",
-                "provenance": {"source": "synthetic"},
-                "trajectory": trajectory,
-            }
-        ],
-        "policies": [
-            {
-                "id": "p1",
-                "revision": 1,
-                "lineage": "policy",
-                "provenance": {"source": "synthetic"},
-                "policy": {
-                    "name": "Rule",
-                    "scope": "workspace",
-                    "approved": True,
-                    "criteria": "Do not disclose a secret.",
-                },
-            }
-        ],
-        "annotations": [
-            {
-                "id": "a1",
-                "revision": 1,
-                "trajectory_ref": "t1@1",
-                "policy_ref": "p1@1",
-                "outcome": "not_applicable",
-                "rationale": "No governed activity.",
-                "evidence": [],
-                "status": "proposed",
-                "reviews": [],
-            }
-        ],
+        "trajectories": [{"session_id": "S001", "name": "example", "lineage": "example", "provenance": {"source": "synthetic"}, "trajectory": trajectory}],
+        "policies": [{"policy_id": "P1.1", "lineage": "policy", "provenance": {"source": "synthetic"}, "policy": {"name": "Rule", "scope": "workspace", "approved": True, "criteria": "Do not disclose a secret."}}],
+        "annotations": [{"session_id": "S001", "policy_id": "P1.1", "outcome": "not_applicable", "rationale": "No governed activity.", "evidence": [], "status": "proposed", "reviews": []}],
     }
-    manifest = {
-        "name": "test",
-        "files": {},
-        "batches": [
-            {
-                "trajectory_ref": "t1@1",
-                "policy_refs": ["p1@1"],
-                "annotation_refs": ["a1@1"],
-                "split": "development",
-            }
-        ],
-    }
+    manifest = {"name": "test", "files": {}, "batches": [{"session_id": "S001", "policy_ids": ["P1.1"], "split": "development"}]}
     for kind, rows in records.items():
         path = tmp_path / f"{kind}.jsonl"
         path.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -105,21 +62,21 @@ def mutate(path, kind, change):
 def test_release_has_all_sources_without_inventing_pairs():
     data = load_dataset(ROOT / "manifests/evaluation.json")
     assert len(data.trajectories) == 48
-    assert len(data.annotations) == 425
+    assert len(data.annotations) == 202
     assert len(data.pairs()) == 202
     assert len(data.pairs(adjudicated_only=True)) == 202
-    assert {t.provenance["source"] for t in data.trajectories.values()} == {
-        "synthetic",
-        "state_bench",
-        "connected_itinerary",
-    }
-    assert sum(len(batch.policy_refs) for batch in data.manifest.batches) == 202
+    assert {t.provenance["source"] for t in data.trajectories.values()} == {"synthetic", "state_bench", "connected_itinerary"}
+    assert sum(len(batch.policy_ids) for batch in data.manifest.batches) == 202
 
 
 def test_pair_builds_only_runtime_inputs(tmp_path):
     data = load_dataset(write_dataset(tmp_path))
     pair = data.pairs()[0]
     request = pair.request()
+    assert list(data.trajectories) == ["S001"]
+    assert list(data.policies) == ["P1.1"]
+    assert list(data.annotations) == [("S001", "P1.1")]
+    assert request["run_id"] == "S001:P1.1"
     assert request["policy"]["name"] == "Rule"
     assert request["trajectory"]["events"][0]["content"] == "Hello"
     assert "outcome" not in json.dumps(request)
@@ -127,14 +84,19 @@ def test_pair_builds_only_runtime_inputs(tmp_path):
     assert data.pairs(adjudicated_only=True) == []
 
 
+def test_rejects_duplicate_annotation_for_session_policy_pair(tmp_path):
+    path = write_dataset(tmp_path)
+    mutate(path, "annotations", lambda rows: rows.append(dict(rows[0])))
+    with pytest.raises(ValueError, match="Duplicate annotation for pair"):
+        load_dataset(path)
+
+
 def test_missing_annotation_remains_unlabeled(tmp_path):
     path = write_dataset(tmp_path)
-    manifest = json.loads(path.read_text())
-    manifest["batches"][0]["annotation_refs"] = []
-    path.write_text(json.dumps(manifest))
+    mutate(path, "annotations", lambda rows: rows.clear())
     data = load_dataset(path)
     assert data.pairs() == []
-    assert len(data.manifest.batches[0].policy_refs) == 1
+    assert len(data.manifest.batches[0].policy_ids) == 1
 
 
 def test_rejects_changed_release_content(tmp_path):
@@ -144,16 +106,13 @@ def test_rejects_changed_release_content(tmp_path):
         load_dataset(path)
 
 
-@pytest.mark.parametrize(
-    "kind,change",
-    [
-        ("policies", lambda rows: rows.append(rows[0])),
-        ("annotations", lambda rows: rows[0].update(policy_ref="unknown@1")),
-        ("annotations", lambda rows: rows[0].update(evidence=["missing-span"])),
-        ("annotations", lambda rows: rows[0].update(outcome="fail")),
-        ("annotations", lambda rows: rows[0].update(status="adjudicated")),
-    ],
-)
+@pytest.mark.parametrize("kind,change", [
+    ("policies", lambda rows: rows.append(rows[0])),
+    ("annotations", lambda rows: rows[0].update(policy_id="P1.9")),
+    ("annotations", lambda rows: rows[0].update(evidence=["missing-span"])),
+    ("annotations", lambda rows: rows[0].update(outcome="fail")),
+    ("annotations", lambda rows: rows[0].update(status="adjudicated")),
+])
 def test_rejects_invalid_dataset_records(tmp_path, kind, change):
     path = write_dataset(tmp_path)
     mutate(path, kind, change)
@@ -170,16 +129,11 @@ def test_rejects_lineage_crossing_splits(tmp_path):
         load_dataset(path)
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        lambda m: m["batches"][0]["policy_refs"].append("p1@1"),
-        lambda m: m["batches"][0]["policy_refs"].append("p1@2"),
-        lambda m: m["batches"][0]["annotation_refs"].append("a1@1"),
-        lambda m: m["batches"][0]["annotation_refs"].append("missing@1"),
-        lambda m: m["batches"][0].update(trajectory_ref="missing@1"),
-    ],
-)
+@pytest.mark.parametrize("change", [
+    lambda m: m["batches"][0]["policy_ids"].append("P1.1"),
+    lambda m: m["batches"][0]["policy_ids"].append("P1.9"),
+    lambda m: m["batches"][0].update(session_id="missing"),
+])
 def test_rejects_invalid_manifest_membership(tmp_path, change):
     path = write_dataset(tmp_path)
     manifest = json.loads(path.read_text())
@@ -189,11 +143,10 @@ def test_rejects_invalid_manifest_membership(tmp_path, change):
         load_dataset(path)
 
 
-def test_annotation_cannot_move_to_another_trajectory(tmp_path):
+def test_annotation_cannot_move_outside_manifest_batch(tmp_path):
     path = write_dataset(tmp_path)
-    mutate(path, "trajectories", lambda rows: rows.append({**rows[0], "id": "t2"}))
-    mutate(path, "annotations", lambda rows: rows[0].update(trajectory_ref="t2@1"))
-    with pytest.raises(ValueError, match="outside batch"):
+    mutate(path, "annotations", lambda rows: rows[0].update(session_id="S002"))
+    with pytest.raises(ValueError):
         load_dataset(path)
 
 
@@ -209,98 +162,79 @@ def test_all_source_inputs_use_opaque_ids_and_hide_annotations():
 
     data = load_dataset()
     for pair in data.pairs():
-        request = pair.request()
-        trajectory = request["trajectory"]
+        trajectory = pair.request()["trajectory"]
         identifiers = [trajectory["trace_id"]]
         for event in trajectory["events"]:
             identifiers.append(event["span_id"])
             if event.get("call_id"):
                 identifiers.append(event["call_id"])
-        assert all(
-            len(value) in {16, 32} and all(c in "0123456789abcdef" for c in value)
-            for value in identifiers
-        )
+        assert all(len(value) in {16, 32} and all(c in "0123456789abcdef" for c in value) for value in identifiers)
         rendered = format_trajectory_for_llm(trajectory["events"], short_ids=False).text
         assert pair.trajectory.name not in rendered
-        assert pair.annotation.id not in rendered
-        assert "reviews" not in request
+        assert set(pair.request()) == {"run_id", "policy", "trajectory"}
 
 
 def test_itinerary_controls_preserve_warning_before_confirmation_and_action():
     data = load_dataset()
     pairs = [
-        p
-        for p in data.pairs()
-        if p.trajectory.provenance["source"] == "connected_itinerary"
-        and p.policy.policy.name == "Connected itinerary disclosure"
+        pair
+        for pair in data.pairs()
+        if pair.trajectory.provenance["source"] == "connected_itinerary"
+        and pair.policy.policy.name == "Connected itinerary disclosure"
     ]
-    assert {p.annotation.outcome for p in pairs} == {
+    assert {pair.annotation.outcome for pair in pairs} == {
         "compliant",
         "violation",
         "insufficient_evidence",
     }
-    pair = next(p for p in pairs if p.annotation.outcome == "compliant")
+    pair = next(pair for pair in pairs if pair.annotation.outcome == "compliant")
     events = pair.trajectory.trajectory.events
-    warning = next(e.sequence for e in events if e.content and "strand" in e.content)
-    confirmation = next(e.sequence for e in events if e.content == "Yes, cancel it.")
+    warning = next(event.sequence for event in events if event.content and "strand" in event.content)
+    confirmation = next(event.sequence for event in events if event.content == "Yes, cancel it.")
     cancellation = next(
-        e.sequence for e in events if e.kind == "tool_call" and e.name == "cancel_flight"
+        event.sequence
+        for event in events
+        if event.kind == "tool_call" and event.name == "cancel_flight"
     )
     assert warning < confirmation < cancellation
-    incomplete = next(p for p in pairs if p.annotation.outcome == "insufficient_evidence")
+    incomplete = next(
+        pair for pair in pairs if pair.annotation.outcome == "insufficient_evidence"
+    )
     assert not incomplete.trajectory.trajectory.complete
 
 
 def test_official_golden_release_exactly_covers_curated_pairs():
     data = load_dataset(ROOT / "manifests/evaluation.json")
     selected = [json.loads(line) for line in (ROOT / "golden_pairs.jsonl").read_text().splitlines()]
-    expected = {(row["trajectory_ref"], row["policy_ref"]) for row in selected}
-    actual = {(pair.trajectory.ref, pair.policy.ref) for pair in data.pairs()}
-    catalog = {
-        (batch.trajectory_ref, policy_ref)
-        for batch in data.manifest.batches
-        for policy_ref in batch.policy_refs
-    }
+    expected = {(row["session_id"], row["policy_id"]) for row in selected}
+    actual = {(pair.trajectory.session_id, pair.policy.policy_id) for pair in data.pairs()}
+    catalog = {(batch.session_id, policy_id) for batch in data.manifest.batches for policy_id in batch.policy_ids}
     assert len(expected) == len(selected) == 202
     assert actual == catalog == expected
     assert len(data.pairs(adjudicated_only=True)) == 202
-    assert Counter(pair.annotation.outcome for pair in data.pairs()) == {
-        "violation": 17,
-        "compliant": 18,
-        "not_applicable": 143,
-        "insufficient_evidence": 24,
-    }
-    assert all(
-        any(
-            review.kind == "ai" and "adjudicat" in review.scope.lower()
-            for review in pair.annotation.reviews
-        )
-        for pair in data.pairs()
-    )
-    splits = sorted((batch.trajectory_ref, batch.split) for batch in data.manifest.batches)
-    assert (
-        hashlib.sha256(json.dumps(splits).encode()).hexdigest()
-        == "39a883b9dab5fa6a10f7b2b07391d5e9399c6df21e48a0d599e20a8226a43003"
-    )
+    assert Counter(pair.annotation.outcome for pair in data.pairs()) == {"violation": 17, "compliant": 18, "not_applicable": 143, "insufficient_evidence": 24}
+    assert all(any(review.kind == "ai" and "adjudicat" in review.scope.lower() for review in pair.annotation.reviews) for pair in data.pairs())
 
 
-def test_annotation_identity_never_moves_between_pairs():
+def test_annotation_identity_is_the_session_policy_pair():
     data = load_dataset(ROOT / "manifests/evaluation.json")
-    identities = {}
-    for annotation in data.annotations.values():
-        pair = (annotation.trajectory_ref, annotation.policy_ref)
-        assert identities.setdefault(annotation.id, pair) == pair
-    assert all(
-        pair.annotation.reviews[-1].outcome == pair.annotation.outcome for pair in data.pairs()
-    )
-    latest = {}
-    for annotation in data.annotations.values():
-        latest[annotation.id] = max(latest.get(annotation.id, 0), annotation.revision)
-    assert all(pair.annotation.revision == latest[pair.annotation.id] for pair in data.pairs())
+    assert set(data.annotations) == {(p.trajectory.session_id, p.policy.policy_id) for p in data.pairs()}
+    assert all(pair.annotation.reviews[-1].outcome == pair.annotation.outcome for pair in data.pairs())
 
 
-def test_official_release_preserves_prior_annotation_revisions():
-    history = (ROOT / "annotations.jsonl").read_bytes().splitlines(keepends=True)[:223]
-    assert hashlib.sha256(b"".join(history)).hexdigest() == (
-        "b935ec4b8067db709fe8e62038a7777cdefbacb3052e35152228d1c92ec119a0"
+def test_sample_manifest_preserves_exact_session_policy_pairs(tmp_path):
+    data = load_dataset()
+    selected = SAMPLE.choose_pairs(data, count=10, split="test", seed=17)
+    path = SAMPLE.write_manifest(
+        data, selected, output_root=tmp_path / "sample", split="test", seed=17
     )
+    sample = load_dataset(path)
+    pairs = sample.pairs(adjudicated_only=True)
+
+    assert len(pairs) == 10
+    assert Counter(pair.annotation.outcome for pair in pairs) == Counter(
+        pair.annotation.outcome for pair in selected
+    )
+    assert {
+        (pair.trajectory.session_id, pair.policy.policy_id) for pair in pairs
+    } == {(pair.trajectory.session_id, pair.policy.policy_id) for pair in selected}

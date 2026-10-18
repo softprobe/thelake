@@ -96,11 +96,11 @@ def test_decisions_routes_each_catalog_choice_independently():
     data = load_dataset()
     batch = data.batches(source="synthetic")[0]
     rules = [
-        PolicyRule(id=ref, **data.policies[ref].policy.model_dump()) for ref in batch.policy_refs
+        PolicyRule(id=ref, **data.policies[ref].policy.model_dump()) for ref in batch.policy_ids
     ]
     client = FakeDecisionsClient(["suspected_violation", *(["no_violation_found"] * 5)])
     result = OpenAIPolicyTriager(client=client).triage(
-        data.trajectories[batch.trajectory_ref].trajectory.model_dump(), rules
+        data.trajectories[batch.session_id].trajectory.model_dump(), rules
     )
     assert [p["id"] for p in result["selected_policies"]] == [rules[0].id]
     assert len(client.request["questions"]) == len(rules)

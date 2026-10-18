@@ -1,14 +1,16 @@
 # Evaluate policy violations
 
+Use the shared [Lisa evaluation terms](../architecture/lisa-terms.md) for
+session, trajectory, policy, and evaluation-pair identity.
+
 Evaluation data lives in [`lisa/datasets/policy_evaluation`](../../lisa/datasets/policy_evaluation/README.md).
 There is one schema and loader: trajectories, exact policies, sparse pair
-annotations, and a manifest pinning revisions, file hashes, splits and policy
+annotations, and a manifest pinning file hashes, splits and policy
 catalogs. Synthetic, STATE-Bench and itinerary examples use that same schema.
 
 The official release contains 48 trajectories, 18 policies, and 202 curated
 adjudicated pairs: 17 violations, 18 compliant, 143 not applicable, and 24
-insufficient evidence. There are 425 annotation records including earlier
-revisions; the manifest selects the current 202. No absent annotation is treated
+insufficient evidence. The annotations file contains one current record per labeled pair. No absent annotation is treated
 as a negative. See the dataset [release review](../../lisa/datasets/policy_evaluation/synthesize/release.md)
 for annotation provenance and limitations.
 
@@ -27,7 +29,7 @@ arithmetic and provider wiring. Mocked results do not establish model quality.
 ## Pair-harness calibration
 
 `lisa/scripts/evaluate_policies.py` calls the triager directly with each
-manifest batch's `policy_refs`. It is useful for prompt calibration, but it
+manifest batch's `policy_ids`. It is useful for prompt calibration, but it
 does **not** measure production selection when the batch contains only the
 annotated policies. Do not report its recall as Lisa production quality.
 
@@ -59,12 +61,16 @@ through its normal session and policy services:
 ```bash
 LISA_LLM_TRACE_ENABLED=1 uv run --project lisa --env-file .env \
   python lisa/scripts/evaluate_policy_dataset.py --live \
+  --quickstart-env-file warehouse/quickstart/lisa-policy-eval-<run-id>.env \
   --manifest /tmp/policy-sample/manifests/sample.json \
   --output /tmp/policy-sample/production-report.json
 ```
 
 Start the runner against a fresh local quickstart Compose project and workspace;
-do not use a user's existing Lisa database. The runner uses the complete catalog
+do not use a user's existing Lisa database. The runner also checks that each
+complete dataset `session_id` is absent before seeding policies or ingesting;
+it stops if a session already exists, so repeated runs cannot append spans to
+old evidence. The runner uses the complete catalog
 from `evaluation.json` by default, even if the sample manifest references only
 one labeled policy per trajectory. It verifies that Lisa reads the full catalog
 from PostgreSQL and that the reconstructed sessions remain complete before
@@ -73,8 +79,14 @@ and Gemini request/response artifacts under the isolated workspace data dir.
 Keep them and the report private. Provider failures abort; they do not become
 healthy negatives.
 
+When the CLI exits, it removes only the run-owned Compose project, its volumes,
+and its DuckLake data directory, even when evaluation fails. The report remains
+when produced, and `--data-dir` LLM recordings remain on disk. The runner refuses
+cleanup metadata that does not identify a `lisa-policy-eval-*` project and
+matching data directory.
+
 Accuracy joins Lisa's decisions to adjudicated labels for those exact
-trajectory-policy pairs. Unlabeled candidate decisions contribute to candidate
+`(session_id, policy_id)` pairs. Unlabeled candidate decisions contribute to candidate
 coverage and workload only; they are never scored as negatives. Capture-gated
 trajectories are reported separately.
 
@@ -112,7 +124,7 @@ the adjudicated subset, not the full catalog or production prevalence.
 
 Build independently human-adjudicated challenge cases and a separate sanitized
 production sample drawn independently of selector outcomes, including negatives.
-Use two reviewers and adjudicate disagreements. Label exact policy revisions,
+Use two reviewers and adjudicate disagreements. Label exact policy IDs,
 evidence, violated clauses, exceptions and missing facts; never use model
 agreement as ground truth.
 

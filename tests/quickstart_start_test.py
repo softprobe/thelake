@@ -88,6 +88,35 @@ class QuickstartStartTest(unittest.TestCase):
             self.assertIn("between 1 and 65535", result.stderr)
             self.assertFalse(docker_log.exists())
 
+            quickstart_data = root / "warehouse" / "quickstart"
+            quickstart_data.mkdir(parents=True)
+            metadata_target = root / "outside-eval-env"
+            env_file = quickstart_data / "lisa-policy-eval-symlink.env"
+            env_file.symlink_to(metadata_target)
+            env.update(
+                {
+                    "THELAKE_QUICKSTART_DB_PORT": str(free_port()),
+                    "THELAKE_QUICKSTART_LISA_PORT": str(free_port()),
+                    "THELAKE_QUICKSTART_PORT": str(free_port()),
+                    "THELAKE_QUICKSTART_PROJECT_NAME": "lisa-policy-eval-symlink",
+                    "THELAKE_QUICKSTART_ENV_FILE": "warehouse/quickstart/lisa-policy-eval-symlink.env",
+                    "THELAKE_QUICKSTART_DATA_PATH": "./warehouse/quickstart/lisa-policy-eval-symlink",
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(quickstart / "start.sh")],
+                cwd=root,
+                env=env,
+                input="",
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0, msg=f"stdout={result.stdout}\nstderr={result.stderr}")
+            self.assertIn("Refusing to reuse existing Lisa policy evaluation data or metadata", result.stderr)
+            self.assertTrue(env_file.is_symlink())
+            self.assertFalse(metadata_target.exists())
+
     def test_start_prints_the_guided_rule_and_agent_steps(self):
         with tempfile.TemporaryDirectory(prefix="thelake-quickstart-test-") as temp:
             root = Path(temp)
@@ -120,6 +149,7 @@ class QuickstartStartTest(unittest.TestCase):
                 "exit 0\n",
                 encoding="utf-8",
             )
+            (bin_dir / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             for command in bin_dir.iterdir():
                 command.chmod(0o755)
 

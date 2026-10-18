@@ -4,15 +4,6 @@ from threading import Barrier
 import pytest
 
 from lisa.bootstrap import build_services
-from lisa.context import WorkspaceContext
-
-
-@pytest.fixture(autouse=True)
-def workspace(monkeypatch, tmp_path):
-    monkeypatch.setenv("LISA_WORKSPACE_ID", "11111111-1111-4111-8111-111111111111")
-    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("LISA_TURN_SOURCE", "web")
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_TITLE", "Rule")
 
 
 def span(**values):
@@ -32,7 +23,7 @@ def span(**values):
         [span(span_id=f"span-{i}") for i in range(1001)],
     ],
 )
-def test_locally_bounded_evidence_is_never_marked_complete(monkeypatch, spans):
+def test_locally_bounded_evidence_is_never_marked_complete(monkeypatch, spans, lisa_test_context):
     requests = []
 
     def get(path):
@@ -46,7 +37,7 @@ def test_locally_bounded_evidence_is_never_marked_complete(monkeypatch, spans):
     def post(path, body, **kwargs):
         return ({}, 201)
 
-    services = build_services(WorkspaceContext.from_environment())
+    services = build_services(lisa_test_context(confirmed_policy_title="Rule"))
     services.policy_service.update_policy("## Rule\napproved: yes\n\nFollow the rule.", "")
     monkeypatch.setattr(services.client, "get", get)
     monkeypatch.setattr(services.client, "post", post)
@@ -77,8 +68,8 @@ def _write_policy(start, text, context):
         return "conflict"
 
 
-def test_policy_compare_and_swap_serializes_concurrent_writers():
-    context = WorkspaceContext.from_environment()
+def test_policy_compare_and_swap_serializes_concurrent_writers(lisa_test_context):
+    context = lisa_test_context(confirmed_policy_title="Rule")
     start = Barrier(2)
     with ThreadPoolExecutor(max_workers=2) as workers:
         outcomes = list(

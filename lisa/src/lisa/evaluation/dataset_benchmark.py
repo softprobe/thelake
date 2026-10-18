@@ -1,13 +1,81 @@
-"""Evaluate labeled trajectories through Lisa's PostgreSQL-backed service path."""
+"""Quality harness: score labeled dataset pairs through Lisa's production path.
+
+Goal
+----
+Measure triage/judge quality on adjudicated ``(session_id, policy_id)`` pairs.
+Annotations are scoring truth only. Candidate policies always come from Lisa's
+PostgreSQL catalog (seeded from the catalog manifest), never from the label set.
+
+Inputs
+------
+CLI / ``main``:
+
+- ``--manifest``: dataset manifest whose batches, trajectories, and adjudicated
+  annotations define *what to score* (pair_data).
+- ``--catalog-manifest``: dataset manifest whose policies define the *full*
+  approved catalog written into Postgres (catalog). May be larger than the
+  labeled subset in ``--manifest``.
+- ``--output``: path for the JSON report written at the end.
+- ``--quickstart-env-file``: local Compose env with DB/API ports, workspace ID,
+  Lisa DB passwords, and TheLake token (no credentials printed).
+- ``--data-dir``: directory for Lisa home / recorded LLM calls (defaults beside
+  ``--output``).
+- ``--live``: required flag; authorizes paid provider calls.
+
+``evaluate(pair_data, catalog, output_path)`` after env is configured:
+
+- ``pair_data``: loaded ``--manifest`` (sessions + labels).
+- ``catalog``: loaded ``--catalog-manifest`` (approved policies to seed).
+- ``output_path``: same as ``--output``.
+- Process env: ``LISA_*`` / ``SOFTPROBE_PUBLIC_KEY`` pointing at localhost only.
+
+Outputs
+-------
+
+- JSON report at ``output_path`` / ``--output``, including:
+  - ``rows``: per labeled pair — ``session_id``, ``policy_id``, ``expected``,
+    triage ``decision``, ``escalated``, judge ``verdict``, optional ``gate_status``.
+  - ``sessions``: per fixture session status and candidate counts.
+  - ``metrics`` / ``per_policy_support``: accuracy-style summaries over non-gated rows.
+  - digests, agent name, workspace id, approved policy id map.
+- Stdout: ``metrics`` JSON only (CLI).
+- During the CLI run: TheLake sessions under fixture ``session_id``s and Lisa
+  Postgres policies in the isolated quickstart stack. The CLI removes these with
+  the stack when the run exits, including on failure. LLM call traces under
+  ``--data-dir`` are retained; a report is retained when evaluation produces one.
+
+Lifecycle (local disposable workspace only)
+-------------------------------------------
+1. Setup (``main`` → ``_configure_quickstart_environment`` → ``evaluate``):
+   - Point Lisa at the local quickstart DB/API; record LLM calls under ``--data-dir``.
+   - Refuse remote hosts; require ``--live`` and ``LISA_LLM_TRACE_ENABLED``.
+   - Mint a unique agent name; refuse if any fixture ``session_id`` already exists.
+   - Seed the full approved policy catalog for that agent via ``PolicyService``.
+
+2. Execute (``evaluate``):
+   - For each complete fixture session: ingest OTLP under the dataset ``session_id``,
+     wait until TheLake can serve it, and verify ``SessionService`` reconstruction.
+   - Incomplete/unordered fixtures are capture-gated (listed in report, no providers).
+   - After every session reconstructs, call ``EvaluationService.evaluate_session`` once
+     per session; join decisions/verdicts to adjudicated labels; write the JSON report.
+
+3. Cleanup:
+   - When the CLI exits, it removes the run-owned Compose project and its
+     volumes, then deletes that run's DuckLake data directory, including ingested
+     sessions and Lisa's seeded policies. It refuses to clean other resources.
+   - The report and ``--data-dir`` LLM traces remain on disk; ``evaluate`` closes
+     the triage HTTP client. Programmatic callers own their disposable resources.
+"""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
+import shutil
+import subprocess
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -25,7 +93,7 @@ from lisa.services.policies import PolicyService
 
 def _render_policy_markdown(records: list[PolicyRecord]) -> str:
     return "\n\n".join(
-        f"## {record.name}\napproved: {'yes' if record.approved else 'no'}\n\n{record.criteria}"
+        f"## {record.id} | {record.name}\napproved: {'yes' if record.approved else 'no'}\n\n{record.criteria}"
         for record in records
     )
 
@@ -43,12 +111,14 @@ def _add_catalog_to_policy_management(
     if any(not item.policy.approved for item in catalog.policies.values()):
         raise ValueError("Every policy in the production evaluation catalog must be approved")
 
-    for policy in sorted(catalog.policies.values(), key=lambda item: item.ref):
+    for policy in sorted(
+        catalog.policies.values(), key=lambda item: int(item.policy_id.split(".")[1])
+    ):
         current = policy_service.read_policy_records("agent", target_agent_name)
         expected = _render_policy_markdown(current)
         rules = {record.name: record for record in current}
         rules[policy.policy.name] = PolicyRecord(
-            id="",
+            id=policy.policy_id,
             scope="agent",
             target_agent_name=target_agent_name,
             name=policy.policy.name,
@@ -67,26 +137,13 @@ def _add_catalog_to_policy_management(
         managed.update_policy(content, expected, scope="agent", agent_name=target_agent_name)
 
     loaded = policy_service.approved_rules(target_agent_name)
-    expected_names = {item.policy.name for item in catalog.policies.values()}
-    loaded_names = {item.name for item in loaded}
-    if loaded_names != expected_names or len(loaded) != len(expected_names):
+    expected_ids = {item.policy.name: item.policy_id for item in catalog.policies.values()}
+    loaded_ids = {item.name: item.id for item in loaded}
+    if loaded_ids != expected_ids or len(loaded) != len(expected_ids):
         raise RuntimeError(
-            "Lisa's approved PostgreSQL policy set does not match the dataset catalog"
+            "Lisa's approved PostgreSQL policy IDs do not match the dataset catalog"
         )
-    return {rule.name: rule.id for rule in loaded}
-
-
-def _run_scoped_ids(run_id: str, trajectory_ref: str, trajectory: dict) -> tuple[str, dict]:
-    trace_id = hashlib.sha256(f"{run_id}:{trajectory_ref}".encode()).hexdigest()[:32]
-    events = []
-    for event in trajectory["events"]:
-        copy = dict(event)
-        source_id = str(event["span_id"])
-        copy["span_id"] = hashlib.sha256(
-            f"{run_id}:{trajectory_ref}:{event['sequence']}:{source_id}".encode()
-        ).hexdigest()[:16]
-        events.append(copy)
-    return trace_id, {**trajectory, "trace_id": trace_id, "events": events}
+    return loaded_ids
 
 
 def _post_dataset_trace(api_url: str, bearer_token: str, payload: dict) -> dict:
@@ -127,6 +184,20 @@ def _wait_for_session(services, session_id: str, expected_spans: int) -> dict:
         if time.monotonic() >= deadline:
             raise TimeoutError(f"TheLake session {session_id} did not become queryable")
         time.sleep(0.5)
+
+
+def _ensure_sessions_absent(services, session_ids: list[str]) -> None:
+    """Do not append dataset spans to sessions from a prior evaluation run."""
+    for session_id in session_ids:
+        try:
+            services.sessions.detail(session_id)
+        except RuntimeError as error:
+            if "(404)" in str(error):
+                continue
+            raise
+        raise RuntimeError(
+            f"Dataset session {session_id} already exists; use an empty disposable workspace"
+        )
 
 
 def _trajectory_semantics(events: list[dict]) -> list[dict]:
@@ -210,7 +281,7 @@ def _per_policy_support(rows: list[dict]) -> dict[str, dict]:
     support = {}
     for row in rows:
         result = support.setdefault(
-            row["policy_ref"],
+            row["policy_id"],
             {
                 "pair_count": 0,
                 "outcomes": {},
@@ -259,9 +330,119 @@ def _read_environment_file(path: Path) -> dict[str, str]:
     return values
 
 
-def _configure_quickstart_environment(path: Path, data_dir: Path) -> None:
+@dataclass(frozen=True)
+class _QuickstartCleanupTarget:
+    project_name: str
+    instance_id: str
+    lake_data: Path
+
+
+def _quickstart_cleanup_target(path: Path, repository_root: Path) -> _QuickstartCleanupTarget:
+    repository_root = repository_root.resolve(strict=True)
+    warehouse_root = repository_root / "warehouse"
+    quickstart_root = warehouse_root / "quickstart"
+    if warehouse_root.is_symlink() or quickstart_root.is_symlink():
+        raise RuntimeError("Refusing cleanup through a symlinked quickstart directory")
+    data_root = quickstart_root.resolve(strict=True)
+    if data_root != quickstart_root or repository_root not in data_root.parents:
+        raise RuntimeError("Quickstart cleanup data path must remain inside the repository")
+    values = _read_environment_file(path)
+    project_name = values.get("THELAKE_QUICKSTART_PROJECT_NAME", "")
+    instance_id = values.get("THELAKE_QUICKSTART_INSTANCE_ID", "")
+    data_path = values.get("THELAKE_QUICKSTART_DATA_PATH", "")
+    relative_data_path = Path(data_path)
+    raw_lake_data = repository_root / relative_data_path
+    lake_data = raw_lake_data.resolve()
+    if (
+        not project_name.startswith("lisa-policy-eval-")
+        or not instance_id
+        or path.is_symlink()
+        or path.resolve().parent != data_root
+        or path.stem != project_name
+        or relative_data_path.is_absolute()
+        or relative_data_path.parts != ("warehouse", "quickstart", project_name)
+        or not relative_data_path.name.startswith("lisa-policy-eval-")
+        or lake_data.parent != data_root
+        or relative_data_path.name != project_name
+    ):
+        raise RuntimeError("Cleanup requires a run-owned Lisa policy evaluation stack and data path")
+    if raw_lake_data.is_symlink():
+        raise RuntimeError("Refusing to remove a symlinked quickstart data directory")
+    return _QuickstartCleanupTarget(project_name, instance_id, lake_data)
+
+
+def _dispose_quickstart_stack(
+    target: _QuickstartCleanupTarget,
+    compose_env_file: Path,
+    repository_root: Path,
+    *,
+    report_path: Path,
+    data_dir: Path,
+) -> None:
+    """Remove only this evaluation's disposable stack and DuckLake data."""
+    for retained_path in (report_path.resolve(), data_dir.resolve()):
+        if retained_path == target.lake_data or target.lake_data in retained_path.parents:
+            raise RuntimeError("Keep the evaluation report and LLM traces outside disposable lake data")
+
+    for resource, options in (
+        ("container", ["ps", "--all", "--quiet"]),
+        ("volume", ["volume", "ls", "--quiet"]),
+        ("network", ["network", "ls", "--quiet"]),
+    ):
+        project_filter = f"label=com.docker.compose.project={target.project_name}"
+        owner_filter = f"label=io.arex.lisa.quickstart-instance={target.instance_id}"
+        project_resources = subprocess.run(
+            ["docker", *options, "--filter", project_filter],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        owned_resources = subprocess.run(
+            ["docker", *options, "--filter", project_filter, "--filter", owner_filter],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        if set(project_resources) != set(owned_resources):
+            raise RuntimeError(f"Refusing to remove {resource}s not owned by this evaluation run")
+
+    command = [
+        "docker",
+        "compose",
+        "--env-file",
+        str(repository_root / ".env"),
+        "--env-file",
+        str(compose_env_file.resolve()),
+        "--project-name",
+        target.project_name,
+        "--file",
+        str(repository_root / "examples" / "quickstart" / "compose.yaml"),
+        "down",
+        "--volumes",
+        "--remove-orphans",
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("Failed to remove the disposable Lisa policy evaluation stack") from error
+    if target.lake_data.exists():
+        shutil.rmtree(target.lake_data)
+    compose_env_file.unlink(missing_ok=True)
+    for suffix in (".yaml", ".api_url", ".lisa_api_url"):
+        metadata_file = repository_root / "warehouse" / "quickstart" / f"{target.project_name}{suffix}"
+        if metadata_file.is_symlink():
+            raise RuntimeError("Refusing to remove symlinked quickstart metadata")
+        metadata_file.unlink(missing_ok=True)
+
+
+def _configure_quickstart_environment(
+    path: Path,
+    data_dir: Path,
+    repository_root: Path | None = None,
+) -> None:
     """Read local quickstart connection settings without printing credentials."""
     values = _read_environment_file(path)
+    _quickstart_cleanup_target(path, repository_root or Path(__file__).resolve().parents[4])
     workspace_id = values.get("THELAKE_DEFAULT_WORKSPACE_ID")
     database_port = values.get("THELAKE_QUICKSTART_DB_PORT")
     api_port = values.get("THELAKE_QUICKSTART_PORT")
@@ -290,6 +471,24 @@ def _configure_quickstart_environment(path: Path, data_dir: Path) -> None:
 
 
 def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
+    """Run one harness pass: setup → ingest/verify → evaluate → report.
+
+    Inputs:
+        pair_data: Scoring dataset — trajectories keyed by ``session_id``, sparse
+            adjudicated annotations, and manifest batches listing candidate
+            ``policy_ids`` per session. Labels are compared after evaluation;
+            they are never passed into the triager/judge.
+        catalog: Policy catalog dataset — every approved ``PolicySpec`` seeded
+            into Postgres for this run's agent. Must be the full candidate set
+            Lisa should triage (not only labeled pairs).
+        output_path: File to write the JSON report.
+
+    Returns:
+        The same report dict written to ``output_path``. Key fields:
+        ``rows`` (pair-level expected vs decision/verdict), ``sessions``,
+        ``metrics``, ``per_policy_support``, ``approved_policy_ids_by_name``.
+    """
+    # --- Setup: local-only services, unique agent, empty of fixture sessions ---
     context = WorkspaceContext.from_environment()
     if not context.database_url:
         raise RuntimeError("Production evaluation requires Lisa's PostgreSQL policy database")
@@ -307,28 +506,55 @@ def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
     if os.getenv("LISA_LLM_TRACE_ENABLED", "").lower() not in {"1", "true", "yes"}:
         raise RuntimeError("Set LISA_LLM_TRACE_ENABLED=1 to record production provider requests")
 
+    services = build_services(context)
+    try:
+        return _evaluate_with_services(pair_data, catalog, output_path, context, services)
+    finally:
+        client = services.evaluations.policy_triage.client
+        if client is not None:
+            client.close()
+
+
+def _evaluate_with_services(
+    pair_data: Dataset,
+    catalog: Dataset,
+    output_path: Path,
+    context: WorkspaceContext,
+    services,
+) -> dict:
     run_id = uuid4().hex[:12]
     agent_name = f"lisa-policy-eval-{run_id}"
-    services = build_services(context)
+    ingest_session_ids = [
+        batch.session_id
+        for batch in pair_data.manifest.batches
+        if pair_data.trajectories[batch.session_id].trajectory.complete
+        and pair_data.trajectories[batch.session_id].trajectory.tool_order_certain
+        and pair_data.trajectories[batch.session_id].trajectory.message_order_certain
+    ]
+    # Fixture session_ids are ingested as-is; refuse if they already exist so we
+    # never append spans onto prior harness evidence.
+    _ensure_sessions_absent(services, ingest_session_ids)
     policy_ids = _add_catalog_to_policy_management(
         context, services.policy_service, catalog, agent_name
     )
 
+    # --- Execute phase A: ingest each complete session and verify reconstruction ---
     ingest_token = os.getenv("SOFTPROBE_PUBLIC_KEY", "quickstart-local")
     rows = []
     sessions = []
     prepared = []
     for batch in pair_data.manifest.batches:
-        record = pair_data.trajectories[batch.trajectory_ref]
+        record = pair_data.trajectories[batch.session_id]
         trajectory = record.trajectory.model_dump(mode="json", exclude_unset=True)
         if not (
             trajectory["complete"]
             and trajectory["tool_order_certain"]
             and trajectory["message_order_certain"]
         ):
+            # Capture-gated: record labels for coverage, skip providers for this session.
             sessions.append(
                 {
-                    "trajectory_ref": batch.trajectory_ref,
+                    "session_id": batch.session_id,
                     "status": "capture_gated",
                     "candidate_count": len(policy_ids),
                     "policy_ids": policy_ids,
@@ -337,8 +563,8 @@ def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
             for pair in pair_data.pairs(batch, adjudicated_only=True):
                 rows.append(
                     {
-                        "trajectory_ref": batch.trajectory_ref,
-                        "policy_ref": pair.policy.ref,
+                        "session_id": batch.session_id,
+                        "policy_id": pair.policy.policy_id,
                         "expected": pair.annotation.outcome,
                         "decision": None,
                         "escalated": None,
@@ -348,8 +574,9 @@ def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
                 )
             continue
 
-        session_id = f"lisa-eval-{run_id}-{record.id}"
-        trace_id, scoped = _run_scoped_ids(run_id, batch.trajectory_ref, trajectory)
+        session_id = record.session_id
+        trace_id = trajectory["trace_id"]
+        scoped = trajectory
         payload = build_otlp_trace_export(
             scoped,
             session_id=session_id,
@@ -366,21 +593,21 @@ def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
             and reconstructed["message_order_certain"]
         ):
             raise RuntimeError(
-                f"SessionService reconstructed an incomplete or unordered trajectory for {batch.trajectory_ref}: "
+                f"SessionService reconstructed an incomplete or unordered trajectory for {batch.session_id}: "
                 f"{reconstructed['limitations']}"
             )
         if _trajectory_semantics(reconstructed["events"]) != _trajectory_semantics(
             redact_evidence(scoped["events"])
         ):
             raise RuntimeError(
-                f"TheLake changed trajectory event semantics for {batch.trajectory_ref}"
+                f"TheLake changed trajectory event semantics for {batch.session_id}"
             )
 
         prepared.append((batch, record, session_id, trace_id))
 
-    # Validate every selected trace through TheLake's production session path before
-    # invoking Lisa's production evaluator, so a later fidelity failure cannot leave
-    # a partial run of paid Decisions requests.
+    # --- Execute phase B: one production evaluate_session per verified session ---
+    # All sessions are verified first so a late fidelity failure does not burn
+    # paid Decisions calls on a partial batch.
     for batch, record, session_id, trace_id in prepared:
         result = services.evaluations.evaluate_session(agent_name, session_id)
 
@@ -405,8 +632,7 @@ def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
         verdicts = {item["evaluation_name"]: item for item in result.get("evaluations", [])}
         sessions.append(
             {
-                "trajectory_ref": batch.trajectory_ref,
-                "session_id": session_id,
+                "session_id": batch.session_id,
                 "trace_id": trace_id,
                 "status": result.get("status"),
                 "candidate_count": len(decisions),
@@ -421,9 +647,8 @@ def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
             verdict = verdicts.get(pair.policy.policy.name, {}).get("status")
             rows.append(
                 {
-                    "trajectory_ref": batch.trajectory_ref,
-                    "policy_ref": pair.policy.ref,
-                    "annotation_ref": pair.annotation.ref,
+                    "session_id": batch.session_id,
+                    "policy_id": pair.policy.policy_id,
                     "expected": pair.annotation.outcome,
                     "decision": decision,
                     "escalated": decision != "no_violation_found",
@@ -432,6 +657,7 @@ def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
                 }
             )
 
+    # --- Finish: write the report before the CLI removes its disposable stack ---
     report = {
         "run_id": run_id,
         "target_agent_name": agent_name,
@@ -452,35 +678,70 @@ def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    if services.evaluations.policy_triage.client is not None:
-        services.evaluations.policy_triage.client.close()
     return report
 
 
 def main() -> None:
+    """CLI entry: wire quickstart env, load manifests, run ``evaluate``, print metrics.
+
+    Inputs: ``--manifest`` (score), ``--catalog-manifest`` (seed policies),
+    ``--output`` (report path), ``--quickstart-env-file``, ``--data-dir``, ``--live``.
+    Outputs: report file at ``--output``; ``metrics`` JSON on stdout.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, required=True, help="Scoring pairs/trajectories")
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        required=True,
+        help="Input: scoring dataset manifest (sessions + adjudicated pair labels)",
+    )
     parser.add_argument(
         "--catalog-manifest",
         type=Path,
         default=Path("lisa/datasets/policy_evaluation/manifests/evaluation.json"),
-        help="Full approved-policy catalog; never infer candidates from labeled pairs",
+        help="Input: full approved-policy catalog to seed; never infer from labeled pairs",
     )
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Output: JSON report path (rows, sessions, metrics)",
+    )
     parser.add_argument(
         "--quickstart-env-file",
         type=Path,
         default=Path("warehouse/quickstart/compose.env"),
-        help="Load local DB/API connection metadata created by quickstart",
+        help="Input: local DB/API connection metadata created by quickstart",
     )
-    parser.add_argument("--data-dir", type=Path)
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        help="Output: Lisa data dir for recorded LLM calls (default beside --output)",
+    )
     parser.add_argument("--live", action="store_true", help="Allow paid provider calls")
     args = parser.parse_args()
     if not args.live:
         parser.error("--live is required to authorize provider calls")
+    # Setup: bind process env to the disposable quickstart stack + isolated data dir.
     data_dir = args.data_dir or args.output.parent / f".{args.output.stem}-lisa-data"
-    _configure_quickstart_environment(args.quickstart_env_file, data_dir.resolve())
-    report = evaluate(load_dataset(args.manifest), load_dataset(args.catalog_manifest), args.output)
+    repository_root = Path(__file__).resolve().parents[4]
+    cleanup_target = _quickstart_cleanup_target(args.quickstart_env_file, repository_root)
+    for retained_path in (args.output.resolve(), data_dir.resolve()):
+        if retained_path == cleanup_target.lake_data or cleanup_target.lake_data in retained_path.parents:
+            parser.error("--output and --data-dir must be outside the disposable quickstart data path")
+    try:
+        _configure_quickstart_environment(args.quickstart_env_file, data_dir.resolve())
+        report = evaluate(
+            load_dataset(args.manifest), load_dataset(args.catalog_manifest), args.output
+        )
+    finally:
+        _dispose_quickstart_stack(
+            cleanup_target,
+            args.quickstart_env_file,
+            repository_root,
+            report_path=args.output,
+            data_dir=data_dir,
+        )
     print(json.dumps(report["metrics"], indent=2))
 
 

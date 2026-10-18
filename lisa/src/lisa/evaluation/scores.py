@@ -19,6 +19,8 @@ def evaluation_run_identity(
 ) -> tuple[str, str, str]:
     """Return trajectory digest, stable score ID, and Postgres request key.
 
+    Per ``docs/architecture/lisa-terms.md``, ``session_id`` identifies the
+    runtime input; the trajectory hash fingerprints its derived evidence.
     Hash only the sanitized evidence and configuration that affect triage or judging;
     session score history and unrelated response fields must not change identity.
     """

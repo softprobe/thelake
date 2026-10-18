@@ -26,7 +26,7 @@ def subset(source="synthetic", incomplete=False):
     batches = [
         b
         for b in data.batches(source=source)
-        if data.trajectories[b.trajectory_ref].trajectory.complete != incomplete
+        if data.trajectories[b.session_id].trajectory.complete != incomplete
     ]
     return replace(
         data,
@@ -142,17 +142,15 @@ def test_capture_gate_stops_both_providers_and_is_not_scored():
 def test_sparse_and_proposed_pairs_do_not_enter_accuracy():
     data = subset(source="state_bench")
     batch = data.manifest.batches[0]
-    ref = batch.annotation_refs[0]
-    annotation = data.annotations[ref].model_copy(update={"status": "proposed"})
+    pair_key = next(key for key in data.annotations if key[0] == batch.session_id)
+    annotation = data.annotations[pair_key].model_copy(update={"status": "proposed"})
     # Construct sparse coverage explicitly; the official release is fully adjudicated.
     data = replace(
         data,
-        annotations={**data.annotations, ref: annotation},
-        manifest=data.manifest.model_copy(
-            update={"batches": [batch.model_copy(update={"annotation_refs": [ref]})]}
-        ),
+        annotations={pair_key: annotation},
+        manifest=data.manifest.model_copy(update={"batches": [batch]}),
     )
-    count = len(batch.policy_refs)
+    count = len(batch.policy_ids)
     triager = OpenAIPolicyTriager(client=FakeDecisionsClient(["no_violation_found"] * count))
     report = benchmark().run(data, triager, mode="triage")
     assert len(report["rows"]) == count
@@ -174,14 +172,14 @@ def test_judge_only_mode_does_not_claim_triage_recall():
 
 def test_optional_ordering_flags_use_validated_defaults():
     data = subset()
-    record = data.trajectories[data.manifest.batches[0].trajectory_ref]
+    record = data.trajectories[data.manifest.batches[0].session_id]
     payload = record.trajectory.model_dump(mode="json", exclude_unset=True)
     payload.pop("tool_order_certain")
     payload.pop("message_order_certain")
     from lisa.evaluation.contracts import Trajectory
 
     updated = record.model_copy(update={"trajectory": Trajectory.model_validate(payload)})
-    data = replace(data, trajectories={**data.trajectories, record.ref: updated})
+    data = replace(data, trajectories={**data.trajectories, record.session_id: updated})
     triager = OpenAIPolicyTriager(client=FakeDecisionsClient(["no_violation_found"] * 6))
     report = benchmark().run(data, triager, mode="triage")
     assert report["capture_gate"]["pair_count"] == 0
@@ -190,7 +188,7 @@ def test_optional_ordering_flags_use_validated_defaults():
 
 def test_official_release_executes_every_pair_through_the_shared_harness():
     data = load_dataset()
-    maximum_catalog = max(len(batch.policy_refs) for batch in data.manifest.batches)
+    maximum_catalog = max(len(batch.policy_ids) for batch in data.manifest.batches)
     triager = OpenAIPolicyTriager(
         client=FakeDecisionsClient(["no_violation_found"] * maximum_catalog)
     )

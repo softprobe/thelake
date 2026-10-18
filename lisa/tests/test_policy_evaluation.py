@@ -5,19 +5,12 @@ import pytest
 from policy_cases import evaluation_request, save_rule, session_detail
 
 from lisa.bootstrap import build_services
-from lisa.context import WorkspaceContext
 from lisa.evaluation import evaluator
 
 
 @pytest.fixture
-def services(tmp_path):
-    return build_services(
-        WorkspaceContext(
-            workspace="11111111-1111-4111-8111-111111111111",
-            data_dir=tmp_path,
-            confirmed_policy_title="Rule",
-        )
-    )
+def services(lisa_test_context):
+    return build_services(lisa_test_context(confirmed_policy_title="Rule"))
 
 
 @pytest.mark.parametrize("approval", ["no", "missing"])

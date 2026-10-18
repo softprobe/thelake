@@ -7,13 +7,25 @@ from pathlib import Path
 _PROVISION_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "provision_lisa.py"
 
 
-def provision_lisa_schema(dsn: str, workspace_id: str) -> None:
+def provision_lisa_schema(
+    dsn: str,
+    workspace_id: str,
+    *,
+    writer_role: str = "lisa_writer",
+    reader_role: str = "lisa_reader",
+) -> None:
     """Recreate the Lisa schema via the one-shot deploy script."""
     spec = spec_from_file_location("lisa_provision", _PROVISION_SCRIPT)
     module = module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(module)
-    module.provision(dsn, workspace_id, recreate=True)
+    module.provision(
+        dsn,
+        workspace_id,
+        writer_role=writer_role,
+        reader_role=reader_role,
+        recreate=True,
+    )
 
 
 def read_sql_case(name: str) -> str:

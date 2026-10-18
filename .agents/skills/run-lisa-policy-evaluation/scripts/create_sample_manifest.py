@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import shutil
@@ -54,7 +55,7 @@ def choose_pairs(data, *, count: int, split: str, seed: int):
             fresh = [
                 pair
                 for pair in available
-                if pair.trajectory.ref not in used_trajectories
+                if pair.trajectory.session_id not in used_trajectories
             ]
             pool = fresh or available
             if not pool:
@@ -68,7 +69,7 @@ def choose_pairs(data, *, count: int, split: str, seed: int):
             )
             pair = pool[0]
             selected.append(pair)
-            used_trajectories.add(pair.trajectory.ref)
+            used_trajectories.add(pair.trajectory.session_id)
             source_counts[pair.trajectory.provenance["source"]] += 1
             outcome_counts[(outcome, pair.trajectory.provenance["source"])] += 1
 
@@ -76,9 +77,9 @@ def choose_pairs(data, *, count: int, split: str, seed: int):
     # under each selected trajectory batch.
     selected.sort(
         key=lambda pair: (
-            pair.trajectory.ref,
+            pair.trajectory.session_id,
             pair.annotation.outcome,
-            pair.policy.ref,
+            pair.policy.policy_id,
         )
     )
     return selected
@@ -90,30 +91,37 @@ def write_manifest(data, pairs, *, output_root: Path, split: str, seed: int):
         raise ValueError(f"Output directory must be empty: {output_root}")
 
     source_root = DEFAULT_MANIFEST.parent.parent
-    for name in ("trajectories", "policies", "annotations"):
+    files = {}
+    for name in ("trajectories", "policies"):
         shutil.copyfile(source_root / f"{name}.jsonl", output_root / f"{name}.jsonl")
+        files[name] = hashlib.sha256((output_root / f"{name}.jsonl").read_bytes()).hexdigest()
+    annotations = [pair.annotation for pair in pairs]
+    annotation_path = output_root / "annotations.jsonl"
+    annotation_path.write_text(
+        "".join(annotation.model_dump_json() + "\n" for annotation in annotations)
+    )
+    files["annotations"] = hashlib.sha256(annotation_path.read_bytes()).hexdigest()
 
     by_trajectory: dict[str, list] = defaultdict(list)
     for pair in pairs:
-        by_trajectory[pair.trajectory.ref].append(pair)
+        by_trajectory[pair.trajectory.session_id].append(pair)
 
     source_batches = {
-        batch.trajectory_ref: batch for batch in data.batches(split=split)
+        batch.session_id: batch for batch in data.batches(split=split)
     }
     batches = []
-    for trajectory_ref, selected in sorted(by_trajectory.items()):
+    for session_id, selected in sorted(by_trajectory.items()):
         batches.append(
             {
-                "trajectory_ref": trajectory_ref,
-                "policy_refs": [pair.policy.ref for pair in selected],
-                "annotation_refs": [pair.annotation.ref for pair in selected],
-                "split": source_batches[trajectory_ref].split,
+                "session_id": session_id,
+                "policy_ids": [pair.policy.policy_id for pair in selected],
+                "split": source_batches[session_id].split,
             }
         )
 
     manifest = {
         "name": f"{data.manifest.name}-sample-{len(pairs)}-seed-{seed}",
-        "files": data.manifest.files,
+        "files": files,
         "batches": batches,
     }
     manifest_dir = output_root / "manifests"
@@ -156,14 +164,13 @@ def main():
         "sources": dict(
             Counter(pair.trajectory.provenance["source"] for pair in pairs)
         ),
-        "unique_trajectories": len({pair.trajectory.ref for pair in pairs}),
+        "unique_sessions": len({pair.trajectory.session_id for pair in pairs}),
         "pairs": [
             {
-                "trajectory_ref": pair.trajectory.ref,
+                "session_id": pair.trajectory.session_id,
                 "trajectory_name": pair.trajectory.name,
-                "policy_ref": pair.policy.ref,
+                "policy_id": pair.policy.policy_id,
                 "policy_name": pair.policy.policy.name,
-                "annotation_ref": pair.annotation.ref,
                 "outcome": pair.annotation.outcome,
                 "source": pair.trajectory.provenance["source"],
             }

@@ -1,5 +1,9 @@
 # Policy memory and evaluation
 
+Use the shared [Lisa evaluation terms](../architecture/lisa-terms.md): a
+trajectory is derived from a session and has no separate ID; policy pairs use
+`(session_id, policy_id)`.
+
 Lisa keeps business rules in the `lisa.policies` PostgreSQL table. A workspace
 rule applies across the workspace; an agent rule applies to one exact agent
 name. Each rule has a stable string ID, criteria, approval state, and timestamps.

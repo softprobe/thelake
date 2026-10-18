@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-from urllib.parse import urlparse
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import uuid4
 
 import pytest
 from policy_cases import session_detail, save_rule
-from sql_cases import provision_lisa_schema, read_sql_case
+from sql_cases import read_sql_case
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
@@ -21,7 +19,7 @@ from lisa.repositories.lisa_database import LisaDatabaseReader
 from lisa.repositories.work_items import PostgresWorkItemStore
 from lisa.views.evaluations import render_evaluation_context
 
-WORKSPACE_ID = "8cd71112-21e0-4d45-a8cc-9ec553879df2"
+WORKSPACE_ID = "11111111-1111-4111-8111-111111111111"
 
 
 def test_pending_score_accepts_stale_payload_policy_id():
@@ -55,21 +53,8 @@ def test_pending_score_accepts_stale_payload_policy_id():
 
 
 @pytest.fixture
-def evaluation_services(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    provision_dsn = os.getenv("LISA_TEST_PROVISION_URL") or os.getenv("LISA_TEST_DATABASE_URL")
-    writer_dsn = os.getenv("LISA_TEST_WRITER_URL")
-    if not provision_dsn or not writer_dsn:
-        pytest.skip("PostgreSQL provision and writer URLs are required")
-    if "test" not in urlparse(provision_dsn).path.lower():
-        pytest.fail("LISA_TEST_PROVISION_URL must name a disposable test database")
-    provision_lisa_schema(provision_dsn, WORKSPACE_ID)
-    context = WorkspaceContext(
-        workspace=WORKSPACE_ID,
-        data_dir=tmp_path,
-        database_url=writer_dsn,
-        database_read_url=os.getenv("LISA_TEST_READER_URL", ""),
-        confirmed_policy_title="Rule",
-    )
+def evaluation_services(lisa_test_context, monkeypatch: pytest.MonkeyPatch):
+    context = lisa_test_context(WORKSPACE_ID, confirmed_policy_title="Rule")
     services = build_services(context)
     save_rule(services)
     monkeypatch.setattr(services.client, "get", lambda _: session_detail())
@@ -195,19 +180,14 @@ def test_retry_reuses_stored_trajectory_and_idempotent_score_payload(
     assert len(judged) == 1
     assert judged[0]["trajectory"]["events"][0]["content"] == "Refund my ticket"
     assert submitted[0] == submitted[1]
-    policy = services.evaluations._policy("agent", "Rule")
     store = PostgresWorkItemStore(services.context.database_url, WORKSPACE_ID)
-    pending = store.find_pending_evaluation(policy["policy_hash"], session_id)
-    assert pending is None
-    runs = store.get_evaluation_by_request(
-        policy["policy_hash"],
-        session_id,
-        str(uuid5(NAMESPACE_URL, f"lisa-evaluation:{submitted[0]['score_id']}")),
-    )
-    assert runs is not None
-    assert runs.status == "succeeded"
+    pending = store.find_pending_evaluations_for_session("agent", session_id)
+    assert pending == []
+    run = store.get_evaluation(result["work_item_id"])
+    assert run is not None
+    assert run.status == "succeeded"
     assert store.find_pending_evaluations_for_session("agent", session_id) == []
-    assert [event.event_type for event in store.list_events(runs.id)] == [
+    assert [event.event_type for event in store.list_events(run.id)] == [
         "accepted",
         "claimed",
         "context_saved",
@@ -546,6 +526,14 @@ def test_tracked_retry_releases_lease_when_policy_is_unapproved_after_interrupt(
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
     monkeypatch.setattr(services.client, "get", lambda _: detail)
+    created = []
+    store = services.evaluations.work_items
+    create_evaluation = store.create_evaluation
+    monkeypatch.setattr(
+        store,
+        "create_evaluation",
+        lambda **values: (created.append(create_evaluation(**values)) or created[-1]),
+    )
     monkeypatch.setattr(
         services.evaluations,
         "judge",
@@ -555,20 +543,18 @@ def test_tracked_retry_releases_lease_when_policy_is_unapproved_after_interrupt(
     with pytest.raises(RuntimeError, match="judge interrupted"):
         services.evaluations._evaluate_session("agent", "Rule", session_id)
 
-    store = PostgresWorkItemStore(services.context.database_url, WORKSPACE_ID)
-    pending = store.find_pending_evaluations_for_session("agent", session_id)
-    assert len(pending) == 1
-    work_item_id = pending[0][0].id
+    assert len(created) == 1
+    work_item_id = created[0].id
+
+    run = store.get_evaluation(work_item_id)
+    assert run is not None
+    assert run.status != "running"
 
     save_rule(services, approved="no")
-    result = services.evaluations._evaluate_session("agent", "Rule", session_id)
-
-    assert result["status"] == "policy_unavailable"
-    assert result["stored"] is False
-    assert result["work_item_id"] == work_item_id
+    with pytest.raises(ValueError, match="No approved policy"):
+        services.evaluations._evaluate_session("agent", "Rule", session_id)
     run = store.get_evaluation(work_item_id)
     assert run is not None
     assert run.status != "running"
     events = [event.event_type for event in store.list_events(work_item_id)]
-    assert "judging_started" not in events or events.count("claimed") >= 2
-    assert "retryable_error" in events or run.status == "queued"
+    assert "retryable_error" in events

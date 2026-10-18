@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:17
+    image: postgres:18
+    labels:
+      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
     environment:
       POSTGRES_USER: ducklake
       POSTGRES_PASSWORD: ducklake
@@ -19,6 +21,8 @@ services:
     build:
       context: ../..
       dockerfile: lisa/Dockerfile
+    labels:
+      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
     environment:
       LISA_THELAKE_TOKEN: ${LISA_THELAKE_TOKEN:?quickstart script must set a Lisa service token}
       LISA_THELAKE_API_URL: http://host.docker.internal:${THELAKE_QUICKSTART_PORT:-8090}
@@ -49,6 +53,8 @@ services:
 
   refund-agent:
     profiles: [demo-agent]
+    labels:
+      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
     network_mode: ${THELAKE_QUICKSTART_AGENT_NETWORK:-bridge}
     build:
       context: ./agent
@@ -58,4 +64,13 @@ services:
 
 volumes:
   postgres-data:
+    labels:
+      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
   lisa-data:
+    labels:
+      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
+
+networks:
+  default:
+    labels:
+      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}

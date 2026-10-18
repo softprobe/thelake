@@ -4,13 +4,8 @@ from urllib.parse import urlparse
 import pytest
 
 from lisa import thelake_client
-from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
-
-
-@pytest.fixture(autouse=True)
-def isolated_data_directory(monkeypatch, tmp_path):
-    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
+from lisa.thelake_client import TheLakeClient
 
 
 def test_thelake_api_errors_include_safe_response_details(monkeypatch):
@@ -29,11 +24,11 @@ def test_thelake_api_errors_include_safe_response_details(monkeypatch):
             io.BytesIO(b'{"error":"evaluator_id contains invalid characters"}'),
         )
 
-    services = build_services(WorkspaceContext.from_environment())
+    client = TheLakeClient(WorkspaceContext.from_environment())
     monkeypatch.setattr(thelake_client.urllib.request, "urlopen", reject_request)
 
     with pytest.raises(RuntimeError, match="400.*evaluator_id contains invalid characters"):
-        services.client.get("/v1/sessions/session-1?limit=500")
+        client.get("/v1/sessions/session-1?limit=500")
 
 
 def test_get_uses_workspace_bound_service_auth(monkeypatch):
@@ -61,10 +56,10 @@ def test_get_uses_workspace_bound_service_auth(monkeypatch):
         captured["timeout"] = timeout
         return Response()
 
-    services = build_services(WorkspaceContext.from_environment())
+    client = TheLakeClient(WorkspaceContext.from_environment())
     monkeypatch.setattr(thelake_client.urllib.request, "urlopen", capture)
 
-    result = services.client.get("/v1/sessions/session-1?limit=500")
+    result = client.get("/v1/sessions/session-1?limit=500")
 
     assert result == {"session_id": "session-1"}
     assert captured["method"] == "GET"

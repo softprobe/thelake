@@ -98,17 +98,17 @@ def run(data, triager=None, judge=None, *, split=None, mode="pipeline"):
         raise ValueError("Judge mode requires a judge")
     rows = []
     for batch in data.batches(split=split):
-        record = data.trajectories[batch.trajectory_ref]
+        record = data.trajectories[batch.session_id]
         trajectory = record.trajectory.model_dump(mode="json", exclude_unset=True)
-        annotations = {p.policy.ref: p.annotation for p in data.pairs(batch)}
+        annotations = {p.policy.policy_id: p.annotation for p in data.pairs(batch)}
         gated = not (
             record.trajectory.complete
             and record.trajectory.tool_order_certain
             and record.trajectory.message_order_certain
         )
         rules = [
-            PolicyRule(id=ref, **data.policies[ref].policy.model_dump())
-            for ref in batch.policy_refs
+            PolicyRule(id=policy_id, **data.policies[policy_id].policy.model_dump())
+            for policy_id in batch.policy_ids
         ]
         decisions = {}
         if not gated and mode != "judge":
@@ -116,7 +116,7 @@ def run(data, triager=None, judge=None, *, split=None, mode="pipeline"):
                 d["id"]: d["decision"]
                 for d in triager.triage(trajectory, rules)["policy_decisions"]
             }
-            if set(decisions) != set(batch.policy_refs):
+            if set(decisions) != set(batch.policy_ids):
                 raise RuntimeError("Triager did not answer every catalog policy")
         for rule in rules:
             annotation = annotations.get(rule.id)
@@ -129,7 +129,7 @@ def run(data, triager=None, judge=None, *, split=None, mode="pipeline"):
             ):
                 verdict = judge(
                     {
-                        "run_id": f"{record.id}:{rule.id}",
+                        "run_id": f"{record.session_id}:{rule.id}",
                         "policy": data.policies[rule.id].policy.model_dump(mode="json"),
                         "trajectory": trajectory,
                     }
@@ -141,13 +141,12 @@ def run(data, triager=None, judge=None, *, split=None, mode="pipeline"):
                     "insufficient_evidence",
                 }:
                     raise RuntimeError(
-                        f"Judge failed for {record.ref}:{rule.id}: {verdict.get('status')}"
+                        f"Judge failed for {record.session_id}:{rule.id}: {verdict.get('status')}"
                     )
             rows.append(
                 {
-                    "trajectory_ref": record.ref,
-                    "policy_ref": rule.id,
-                    "annotation_ref": annotation.ref if annotation else None,
+                    "session_id": record.session_id,
+                    "policy_id": rule.id,
                     "annotation_status": annotation.status if annotation else None,
                     "expected": annotation.outcome if annotation else None,
                     "scored": annotation is not None and annotation.status == "adjudicated",
@@ -169,13 +168,13 @@ def run(data, triager=None, judge=None, *, split=None, mode="pipeline"):
         "split": split,
         "coverage": {
             "presented_pair_count": len(rows),
-            "unlabeled_pair_count": sum(r["annotation_ref"] is None for r in rows),
+            "unlabeled_pair_count": sum(r["annotation_status"] is None for r in rows),
             "proposed_pair_count": sum(r["annotation_status"] == "proposed" for r in rows),
             "disputed_pair_count": sum(r["annotation_status"] == "disputed" for r in rows),
             "scored_pair_count": len(scored),
         },
         "capture_gate": {
-            "case_count": len({r["trajectory_ref"] for r in gated}),
+            "case_count": len({r["session_id"] for r in gated}),
             "pair_count": len(gated),
         },
         "workload": {

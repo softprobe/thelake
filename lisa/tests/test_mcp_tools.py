@@ -11,14 +11,9 @@ from lisa.context import WorkspaceContext
 from lisa.mcp_app import create_server
 
 
-def test_mcp_public_policy_contract(tmp_path):
+def test_mcp_public_policy_contract(lisa_test_context):
     server = create_server(
-        build_services(
-            WorkspaceContext(
-                workspace="11111111-1111-4111-8111-111111111111",
-                data_dir=tmp_path,
-            )
-        )
+        build_services(lisa_test_context())
     )
 
     async def contract():
@@ -39,13 +34,8 @@ def test_mcp_public_policy_contract(tmp_path):
     assert asyncio.run(contract()) == expected
 
 
-def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, tmp_path):
-    services = build_services(
-        WorkspaceContext(
-            workspace="11111111-1111-4111-8111-111111111111",
-            data_dir=tmp_path,
-        )
-    )
+def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, lisa_test_context):
+    services = build_services(lisa_test_context())
     calls = []
 
     def post(path, body):
@@ -126,13 +116,8 @@ def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, tmp_p
     }
 
 
-def test_mcp_get_session_returns_the_evaluators_compact_trajectory(monkeypatch, tmp_path):
-    services = build_services(
-        WorkspaceContext(
-            workspace="11111111-1111-4111-8111-111111111111",
-            data_dir=tmp_path,
-        )
-    )
+def test_mcp_get_session_returns_the_evaluators_compact_trajectory(monkeypatch, lisa_test_context):
+    services = build_services(lisa_test_context())
     trajectory = {
         "session_id": "session",
         "agent_names": ["agent"],
@@ -163,12 +148,14 @@ def test_mcp_get_session_returns_the_evaluators_compact_trajectory(monkeypatch, 
     assert json.loads(result.content[0].text) == trajectory
 
 
-def test_context_captures_workspace_and_approvals_once(monkeypatch, tmp_path):
+def test_context_captures_workspace_and_approvals_once(monkeypatch, lisa_test_database):
     monkeypatch.setenv("LISA_WORKSPACE_ID", "11111111-1111-4111-8111-111111111111")
-    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("LISA_CONFIRMED_POLICY_TITLE", "Rule")
     monkeypatch.setenv("LISA_THELAKE_TOKEN", "private-lake-token")
     monkeypatch.setenv("LISA_SLACK_BOT_TOKEN", "private-slack-token")
+    database = lisa_test_database()
+    monkeypatch.setenv("LISA_DATABASE_URL", database.writer_url)
+    monkeypatch.setenv("LISA_DATABASE_READ_URL", database.reader_url)
     context = WorkspaceContext.from_environment()
     monkeypatch.setenv("LISA_WORKSPACE_ID", "22222222-2222-4222-8222-222222222222")
     monkeypatch.delenv("LISA_CONFIRMED_POLICY_TITLE")
@@ -180,8 +167,13 @@ def test_context_captures_workspace_and_approvals_once(monkeypatch, tmp_path):
     assert "private-slack-token" not in repr(context)
 
 
-def test_stdio_entrypoint_reads_and_updates_workspace_policy(tmp_path):
+def test_stdio_entrypoint_reads_and_updates_workspace_policy(tmp_path, lisa_test_context):
     import sys
+
+    context = lisa_test_context(
+        data_dir=tmp_path,
+        confirmed_policy_title="Rule",
+    )
 
     config = {
         "mcpServers": {
@@ -189,8 +181,10 @@ def test_stdio_entrypoint_reads_and_updates_workspace_policy(tmp_path):
                 "command": sys.executable,
                 "args": ["-m", "lisa.mcp_app"],
                 "env": {
-                    "LISA_WORKSPACE_ID": "11111111-1111-4111-8111-111111111111",
-                    "LISA_DATA_DIR": str(tmp_path),
+                    "LISA_WORKSPACE_ID": context.workspace,
+                    "LISA_DATA_DIR": str(context.data_dir),
+                    "LISA_DATABASE_URL": context.database_url,
+                    "LISA_DATABASE_READ_URL": context.database_read_url,
                     "LISA_TURN_SOURCE": "web",
                     "LISA_CONFIRMED_POLICY_TITLE": "Rule",
                 },
@@ -225,13 +219,8 @@ def test_stdio_entrypoint_reads_and_updates_workspace_policy(tmp_path):
     asyncio.run(roundtrip())
 
 
-def test_lisa_database_tool_and_schema_resource_are_exposed(tmp_path):
-    services = build_services(
-        WorkspaceContext(
-            workspace="11111111-1111-4111-8111-111111111111",
-            data_dir=tmp_path,
-        )
-    )
+def test_lisa_database_tool_and_schema_resource_are_exposed(lisa_test_context):
+    services = build_services(lisa_test_context())
 
     async def inspect_server():
         async with Client(create_server(services)) as client:
@@ -244,16 +233,11 @@ def test_lisa_database_tool_and_schema_resource_are_exposed(tmp_path):
 
 
 def test_evaluate_session_recovers_pending_scores_before_policy_or_telemetry_lookup(
-    monkeypatch, tmp_path
+    monkeypatch, lisa_test_context
 ):
     from types import SimpleNamespace
 
-    services = build_services(
-        WorkspaceContext(
-            workspace="11111111-1111-4111-8111-111111111111",
-            data_dir=tmp_path,
-        )
-    )
+    services = build_services(lisa_test_context())
     services.evaluations.work_items = SimpleNamespace(
         find_pending_evaluations_for_session=lambda agent, session: (
             [("work-item", "outbox")] if (agent, session) == ("agent", "session") else []

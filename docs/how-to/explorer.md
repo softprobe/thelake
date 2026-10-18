@@ -1,5 +1,9 @@
 # Use thelake Explorer
 
+For Lisa policy-evaluation terminology, use the shared
+[Lisa evaluation terms](../architecture/lisa-terms.md). In particular, a
+trajectory is derived from a session and has no separate ID.
+
 Explorer is the self-hosted session and trace UI for thelake. Source lives in
 [`packages/thelake-explorer`](../../packages/thelake-explorer/). `make build`
 embeds the SPA into the binary; thelake serves it at `/explorer/`.
