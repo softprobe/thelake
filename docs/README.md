@@ -30,6 +30,7 @@ Concepts and runtime design (read for understanding, not step-by-step).
 - [5-minute quickstart](quickstart.md) — create a check in chat, run a Gemini sample agent, and inspect the result
 - [Instrument applications](how-to/instrumentation.md)
 - [Use Explorer](how-to/explorer.md) — browser chat and session/trace UI at `/explorer/`
+- [Automated test environments](how-to/test-environments.md) — one transient Docker lifecycle, cleanup, and retained artifacts
 - [Policy memory](how-to/policy-memory.md) — maintain PostgreSQL-backed policies and understand Decisions triage and judge escalation
 - [Policy triage evaluation](how-to/policy-triage-evaluation.md) — dataset design, recall metrics, and opt-in calibration
 - [Policy dogfood](how-to/policy-dogfood.md) — repeatably check policy learning, judge directionality, and online issue detection

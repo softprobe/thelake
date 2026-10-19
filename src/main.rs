@@ -8,6 +8,8 @@ use softprobe_runtime::grpc_otlp;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(unix)]
+use std::{net::TcpListener as StdTcpListener, os::fd::FromRawFd};
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, decompression::RequestDecompressionLayer, trace::TraceLayer};
 use tracing::{info, Level};
@@ -104,8 +106,24 @@ async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], config.server.port)));
 
-    info!("HTTP listening on {listen}");
+    #[cfg(unix)]
+    let listener = match std::env::var("SOFTPROBE_LISTEN_FD") {
+        Ok(fd) => {
+            // The test harness binds the socket before launching Lisa so both
+            // services can discover each other's actual ephemeral ports safely.
+            let fd = fd.parse::<std::os::fd::RawFd>()?;
+            // The descriptor is supplied by the parent process and ownership
+            // transfers to this listener for the duration of the server.
+            let listener = unsafe { StdTcpListener::from_raw_fd(fd) };
+            listener.set_nonblocking(true)?;
+            tokio::net::TcpListener::from_std(listener)?
+        }
+        Err(std::env::VarError::NotPresent) => tokio::net::TcpListener::bind(listen).await?,
+        Err(error) => return Err(error.into()),
+    };
+    #[cfg(not(unix))]
     let listener = tokio::net::TcpListener::bind(listen).await?;
+    info!("HTTP listening on {}", listener.local_addr()?);
 
     // Self-monitoring bootstrap must not postpone customer bind or abort the process.
     if config.self_monitoring.enabled {

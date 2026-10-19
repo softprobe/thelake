@@ -22,9 +22,6 @@ use crate::util::promotion_contract::{
     contract_update_and_idempotency, PromotionContractBackend,
 };
 
-const POSTGRES_DSN: &str =
-    "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake";
-
 struct PostgresBackend {
     _temp: TempDir,
     _mock: MockServer,
@@ -56,7 +53,7 @@ async fn setup() -> PostgresBackend {
     config.maintenance.enabled = false;
     config.maintenance.metadata_enabled = false;
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
-    config.ducklake.metadata_path = POSTGRES_DSN.to_string();
+    config.ducklake.metadata_path = crate::util::config::test_postgres_dsn();
     config.ducklake.catalog_alias = "softprobe".to_string();
     config.ducklake.metadata_schema = metadata_schema.clone();
     config.ducklake.data_path = data_path.clone();
@@ -115,9 +112,10 @@ impl PostgresBackend {
     }
 
     async fn count_specs(&self, status: &str) -> i64 {
-        let (client, connection) = tokio_postgres::connect(POSTGRES_DSN, NoTls)
-            .await
-            .expect("postgres");
+        let (client, connection) =
+            tokio_postgres::connect(&crate::util::config::test_postgres_dsn(), NoTls)
+                .await
+                .expect("postgres");
         tokio::spawn(async move {
             let _ = connection.await;
         });

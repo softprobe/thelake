@@ -12,7 +12,7 @@ services:
     volumes:
       - ./fixtures/auth:/home/wiremock:ro
     ports:
-      - "${GRAFANA_AUTH_MOCK_PORT:-18080}:8080"
+      - "127.0.0.1:${GRAFANA_AUTH_MOCK_PORT:-0}:8080"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/__admin/health"]
       interval: 2s
@@ -26,15 +26,13 @@ services:
       POSTGRES_PASSWORD: ducklake
       POSTGRES_USER: ducklake
       POSTGRES_DB: ducklake
-    ports:
-      - "${GRAFANA_POSTGRES_PORT:-15432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ducklake -d ducklake"]
       interval: 2s
       timeout: 5s
       retries: 30
     volumes:
-      - grafana-postgres-data:/var/lib/postgresql/data
+      - grafana-postgres-data:/var/lib/postgresql
     networks: [grafana_compat]
 
   minio:
@@ -45,8 +43,6 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     command: ["server", "/data", "--console-address", ":9001"]
-    ports:
-      - "${GRAFANA_MINIO_PORT:-19000}:9000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
       interval: 2s
@@ -73,6 +69,8 @@ services:
 
   softprobe:
     image: ${SOFTPROBE_BUILDER_IMAGE:-rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4}
+    # The pinned DuckLake release currently ships a Linux amd64 extension.
+    platform: linux/amd64
     depends_on:
       auth-mock:
         condition: service_healthy
@@ -100,6 +98,7 @@ services:
       - |
         apt-get update -qq
         apt-get install -y -qq build-essential pkg-config libssl-dev cmake clang mold >/dev/null
+        DUCKLAKE_EXTENSION_TARGET_DIR=/tmp/thelake-grafana-target/ducklake-extension bash scripts/download-ducklake-extension.sh
         cargo run --locked --bin thelake
     volumes:
       - ../../..:/workspace:ro
@@ -107,8 +106,7 @@ services:
       # dependency tree instead of paying a second full cold build.
       - grafana-cargo-target:/tmp/thelake-grafana-target
     ports:
-      - "${GRAFANA_SOFTPROBE_HTTP_PORT:-18090}:8090"
-      - "${GRAFANA_SOFTPROBE_GRPC_PORT:-14317}:4317"
+      - "127.0.0.1:${GRAFANA_SOFTPROBE_HTTP_PORT:-0}:8090"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8090/ready >/dev/null"]
       interval: 3s
@@ -119,6 +117,7 @@ services:
 
   grafana-seed:
     image: ${SOFTPROBE_BUILDER_IMAGE:-rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4}
+    platform: linux/amd64
     depends_on:
       softprobe:
         condition: service_healthy
@@ -157,7 +156,7 @@ services:
       grafana-seed:
         condition: service_completed_successfully
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"
+      - "127.0.0.1:${GRAFANA_PORT:-0}:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}

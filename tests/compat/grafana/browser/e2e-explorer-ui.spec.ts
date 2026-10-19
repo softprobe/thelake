@@ -91,7 +91,10 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
     const toolSpanId = (BigInt(`0x${agentSpanId}`) + 1n).toString(16).padStart(16, '0');
     const reasoningSpanId = (BigInt(`0x${agentSpanId}`) + 2n).toString(16).padStart(16, '0');
     return [
-      span({ traceId, spanId: agentSpanId, sessionId, name: agent, type: 'agent', start }),
+      span({
+        traceId, spanId: agentSpanId, sessionId, name: agent, type: 'agent', start,
+        attributes: { 'sp.agent.name': agent },
+      }),
       span({
         traceId, spanId: toolSpanId, parentSpanId: agentSpanId, sessionId,
         name: 'lookup_customer', type: 'tool', start: new Date(start.getTime() + 5),

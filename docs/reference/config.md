@@ -101,6 +101,7 @@ customer DuckLake.
 | Variable | Effect |
 |----------|--------|
 | `SOFTPROBE_LISTEN_ADDR` | Full listen address (preferred over `server.host`, which is not used for bind) |
+| `SOFTPROBE_LISTEN_FD` | Unix listener descriptor supplied by a parent process for socket activation. Internal test-harness setting; TheLake takes ownership of the already-bound listener. |
 | `OTEL_GRPC_PORT` | OTLP/gRPC traces listen port (default `4317`) |
 | `SOFTPROBE_GRPC_DISABLE` | `1` disables gRPC listener |
 | `SOFTPROBE_AUTH_URL` | External assertion auth base URL |

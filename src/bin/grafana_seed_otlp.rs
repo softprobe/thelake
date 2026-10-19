@@ -413,7 +413,7 @@ fn tenant_payloads(tenant: &str, suffix: &str) -> TenantPayloads {
                     severity_number: 17,
                     severity_text: "ERROR".into(),
                     body: Some(string_any(&format!(
-                        r#"{{"level":"error","message":"grafana test","tenant_marker":"{tenant}","trace_id":"{trace_id}"}}"#
+                        r#"{{"level":"error","message":"HTTP GET /checkout","tenant_marker":"{tenant}","trace_id":"{trace_id}"}}"#
                     ))),
                     attributes: vec![kv("tenant.marker", tenant), kv("trace_id", &trace_id)],
                     trace_id: hex::decode(&trace_id).unwrap(),

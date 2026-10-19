@@ -773,10 +773,7 @@ mod tests {
             "obi-req-ev".to_string(),
         );
         let mut response_attrs = HashMap::new();
-        response_attrs.insert(
-            "http.response.body".to_string(),
-            "short-res-ev".to_string(),
-        );
+        response_attrs.insert("http.response.body".to_string(), "short-res-ev".to_string());
         response_attrs.insert(
             "http.response.body.content".to_string(),
             "obi-res-ev".to_string(),

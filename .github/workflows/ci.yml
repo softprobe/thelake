@@ -57,18 +57,32 @@ jobs:
       - name: Doctor
         run: make doctor
 
-      - name: Start local test infra
-        run: make setup
-
       - name: CI checks (fmt, lint, unit tests)
         run: |
+          set -euo pipefail
+          stack_json="$(python3 scripts/test_stack.py start-compose \
+            --suite github-ci \
+            --compose-file tests/compose.test.yaml \
+            --service ducklake-postgres --service minio \
+            --published-port ducklake-postgres:5432 --published-port minio:9000 --wait)"
+          state_file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$stack_json")"
+          trap 'python3 scripts/test_stack.py stop --state-file "$state_file"' EXIT
+          export THELAKE_TEST_POSTGRES_PORT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$stack_json")"
+          export THELAKE_TEST_MINIO_ENDPOINT="http://$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["minio:9000"][0])' "$stack_json")"
+          echo "THELAKE_TEST_POSTGRES_PORT=$THELAKE_TEST_POSTGRES_PORT" >> "$GITHUB_ENV"
+          echo "THELAKE_TEST_MINIO_ENDPOINT=$THELAKE_TEST_MINIO_ENDPOINT" >> "$GITHUB_ENV"
+          python3 scripts/test_stack.py exec --state-file "$state_file" --service minio -- sh -ec 'mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc mb --ignore-existing local/warehouse'
           make check-fmt
           make lint
-          make test
+          make _test
 
-      - name: Teardown local infra
+      - name: Upload test stack logs
         if: always()
-        run: make teardown
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stack-logs-ci
+          path: target/test-artifacts/
+          if-no-files-found: ignore
 
   e2e-isolated:
     name: E2E (isolated DuckLake)
@@ -100,24 +114,39 @@ jobs:
       - name: Bootstrap ubuntu runner
         uses: ./.github/actions/ubuntu-runner
 
-      - name: Start local test infra
-        run: make setup
-
       - name: Download pinned DuckLake extension
         run: make ducklake-extension
 
       - name: Run isolated DuckLake E2E suite
         run: |
+          set -euo pipefail
+          stack_json="$(python3 scripts/test_stack.py start-compose \
+            --suite github-e2e-isolated \
+            --compose-file tests/compose.test.yaml \
+            --service ducklake-postgres --service minio \
+            --published-port ducklake-postgres:5432 --published-port minio:9000 --wait)"
+          state_file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$stack_json")"
+          trap 'python3 scripts/test_stack.py stop --state-file "$state_file"' EXIT
+          export THELAKE_TEST_POSTGRES_PORT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$stack_json")"
+          export THELAKE_TEST_MINIO_ENDPOINT="http://$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["minio:9000"][0])' "$stack_json")"
+          echo "THELAKE_TEST_POSTGRES_PORT=$THELAKE_TEST_POSTGRES_PORT" >> "$GITHUB_ENV"
+          echo "THELAKE_TEST_MINIO_ENDPOINT=$THELAKE_TEST_MINIO_ENDPOINT" >> "$GITHUB_ENV"
+          python3 scripts/test_stack.py exec --state-file "$state_file" --service minio -- sh -ec 'mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc mb --ignore-existing local/warehouse'
           make ensure-cache
-          make test-lease-pg
+          make _test-lease-pg
           ./scripts/run-isolated-cargo-tests.sh \
             --features integration-e2e \
             --test tests \
             --list-prefix integration::
 
-      - name: Teardown local infra
+      - name: Upload test stack logs
         if: always()
-        run: make teardown
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stack-logs-e2e-isolated
+          path: target/test-artifacts/
+          if-no-files-found: ignore
+
 
   e2e-shared:
     name: E2E (shared DuckLake)
@@ -149,43 +178,44 @@ jobs:
       - name: Bootstrap ubuntu runner
         uses: ./.github/actions/ubuntu-runner
 
-      - name: Start local test infra
-        run: make setup
-
       - name: Download pinned DuckLake extension
         run: make ducklake-extension
 
       - name: Run shared DuckLake E2E suite
         run: |
+          set -euo pipefail
+          stack_json="$(python3 scripts/test_stack.py start-compose \
+            --suite github-e2e-shared \
+            --compose-file tests/compose.test.yaml \
+            --service ducklake-postgres --service minio \
+            --published-port ducklake-postgres:5432 --published-port minio:9000 --wait)"
+          state_file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$stack_json")"
+          trap 'python3 scripts/test_stack.py stop --state-file "$state_file"' EXIT
+          export THELAKE_TEST_POSTGRES_PORT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$stack_json")"
+          export THELAKE_TEST_MINIO_ENDPOINT="http://$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["minio:9000"][0])' "$stack_json")"
+          echo "THELAKE_TEST_POSTGRES_PORT=$THELAKE_TEST_POSTGRES_PORT" >> "$GITHUB_ENV"
+          echo "THELAKE_TEST_MINIO_ENDPOINT=$THELAKE_TEST_MINIO_ENDPOINT" >> "$GITHUB_ENV"
+          python3 scripts/test_stack.py exec --state-file "$state_file" --service minio -- sh -ec 'mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc mb --ignore-existing local/warehouse'
           make ensure-cache
-          make test-lease-pg
+          make _test-lease-pg
           ./scripts/run-isolated-cargo-tests.sh \
             --features integration-e2e \
             --test tests \
             --list-prefix integration::
 
-      - name: Teardown local infra
+      - name: Upload test stack logs
         if: always()
-        run: make teardown
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stack-logs-e2e-shared
+          path: target/test-artifacts/
+          if-no-files-found: ignore
+
 
   e2e-explorer-ui:
     name: E2E (shared Explorer UI)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    services:
-      ducklake-postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: ducklake
-          POSTGRES_USER: ducklake
-          POSTGRES_DB: ducklake
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U ducklake -d ducklake"
-          --health-interval 2s
-          --health-timeout 10s
-          --health-retries 15
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
@@ -209,3 +239,11 @@ jobs:
 
       - name: Run Explorer UI E2E
         run: make test-explorer-ui
+
+      - name: Upload test stack logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stack-logs-explorer-ui
+          path: target/test-artifacts/
+          if-no-files-found: ignore

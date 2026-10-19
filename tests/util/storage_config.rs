@@ -1,12 +1,25 @@
 use softprobe_runtime::config::Config;
 
-use super::config::apply_workspace_scope_mode;
+use super::config::{apply_workspace_scope_mode, test_minio_endpoint, test_postgres_dsn};
+
+pub fn configure_test_service_endpoints(config: &mut Config) {
+    config.ducklake.metadata_path = test_postgres_dsn();
+    if config
+        .object_store
+        .endpoint
+        .as_deref()
+        .is_some_and(|endpoint| endpoint == "http://localhost:9000")
+    {
+        config.object_store.endpoint = Some(test_minio_endpoint());
+    }
+}
 
 pub fn load_test_config() -> Config {
     if let Ok(config_file) = std::env::var("CONFIG_FILE") {
         if std::path::Path::new(&config_file).exists() {
             println!("Loading test config from CONFIG_FILE: {}", config_file);
             let mut config = Config::load().expect("Failed to load config");
+            configure_test_service_endpoints(&mut config);
             assign_unique_ducklake_paths(&mut config);
             configure_synchronous_ingest(&mut config);
             apply_workspace_scope_mode(&mut config);
@@ -26,6 +39,7 @@ pub fn load_test_config() -> Config {
     println!("Loading test config from: {}", config_file);
     std::env::set_var("CONFIG_FILE", config_file);
     let mut config = Config::load().expect("Failed to load test config");
+    configure_test_service_endpoints(&mut config);
     assign_unique_ducklake_paths(&mut config);
     configure_synchronous_ingest(&mut config);
     apply_workspace_scope_mode(&mut config);
@@ -46,7 +60,10 @@ fn configure_local_object_store_credentials(config: &Config) {
             .object_store
             .endpoint
             .as_deref()
-            .is_some_and(|endpoint| endpoint.contains("localhost:9000"))
+            .is_some_and(|endpoint| {
+                endpoint.starts_with("http://localhost:")
+                    || endpoint.starts_with("http://127.0.0.1:")
+            })
     {
         std::env::set_var("AWS_ACCESS_KEY_ID", "minioadmin");
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "minioadmin");
@@ -127,7 +144,7 @@ fn minio_hostname_resolves() -> bool {
 }
 
 /// Only when this config talks to hostname `minio` (e.g. test-docker.yaml).
-/// Host-local configs use localhost:9000 — no warning.
+/// Host-local endpoints use localhost/127.0.0.1 — no warning.
 fn warn_if_config_needs_minio_hostname(config: &Config) {
     let Some(endpoint) = config.object_store.endpoint.as_deref() else {
         return;

@@ -9,7 +9,7 @@ use super::config::apply_workspace_scope_mode;
 
 pub async fn start_test_server() -> (String, TempDir) {
     let mut config = Config::default();
-    config.object_store.endpoint = Some("http://localhost:9000".to_string());
+    super::storage_config::configure_test_service_endpoints(&mut config);
     config.object_store.region = "us-east-1".to_string();
     config.shrink_pools_for_tests();
 

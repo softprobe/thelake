@@ -1100,7 +1100,7 @@ async fn try_postgres_store(schema: &str) -> Option<PostgresLeaseStore> {
 
     let mut pg = tokio_postgres::Config::new();
     pg.host("localhost");
-    pg.port(5432);
+    pg.port(crate::test_support::test_postgres_port()?);
     pg.dbname("ducklake");
     pg.user("ducklake");
     pg.password("ducklake");
@@ -1265,7 +1265,7 @@ async fn postgres_runner_cancels_maintenance_after_lease_is_stolen() {
         .expect("ducklake-postgres required (make setup)");
     let mut pg = tokio_postgres::Config::new();
     pg.host("localhost");
-    pg.port(5432);
+    pg.port(crate::test_support::test_postgres_port().expect("test_stack Postgres port"));
     pg.dbname("ducklake");
     pg.user("ducklake");
     pg.password("ducklake");

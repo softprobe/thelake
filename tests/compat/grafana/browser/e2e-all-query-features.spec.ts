@@ -6,6 +6,10 @@ const SOFTPROBE_URL = process.env.SOFTPROBE_URL || 'http://127.0.0.1:8090';
 const API_KEY = process.env.SOFTPROBE_API_KEY || 'local-dev-key';
 const TENANT_ID =
   process.env.SOFTPROBE_TENANT_ID || 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+// Grafana's shared seed fixture uses a deterministic time window. The harness
+// reads it from the seed receipt and exports nanoseconds here.
+const START_NS = BigInt(process.env.GRAFANA_SEED_START_NS || '1700000000000000000');
+const END_NS = BigInt(process.env.GRAFANA_SEED_END_NS || '1700000060000000000');
 
 
 const GRAFANA_AUTH_HEADERS = {
@@ -16,9 +20,6 @@ test.describe('Query Features Verification (Loki + Tempo)', () => {
   test.describe('Loki LogQL Features', () => {
     for (const item of QUERY_FEATURE_CATALOG) {
       test(`[${item.id}] loki - ${item.name}: ${item.expr}`, async ({ request }) => {
-        const endNs = BigInt(Date.now()) * BigInt(1_000_000);
-        const startNs = endNs - BigInt(3600) * BigInt(1_000_000_000);
-
         const dsResp = await request.post(`${GRAFANA_URL}/api/ds/query`, {
           headers: {
             ...GRAFANA_AUTH_HEADERS,
@@ -46,8 +47,8 @@ test.describe('Query Features Verification (Loki + Tempo)', () => {
           headers: { Authorization: `Bearer ${API_KEY}`, 'X-Scope-OrgID': TENANT_ID },
           params: {
             query: item.expr,
-            start: startNs.toString(),
-            end: endNs.toString(),
+            start: START_NS.toString(),
+            end: END_NS.toString(),
             limit: '50',
           },
         });
@@ -64,12 +65,9 @@ test.describe('Query Features Verification (Loki + Tempo)', () => {
     }
 
     test('L-07: Loki labels and label values discovery', async ({ request }) => {
-      const endNs = BigInt(Date.now()) * BigInt(1_000_000);
-      const startNs = endNs - BigInt(3600) * BigInt(1_000_000_000);
-
       const labelsResp = await request.get(`${SOFTPROBE_URL}/loki/api/v1/labels`, {
         headers: { Authorization: `Bearer ${API_KEY}`, 'X-Scope-OrgID': TENANT_ID },
-        params: { start: startNs.toString(), end: endNs.toString() },
+        params: { start: START_NS.toString(), end: END_NS.toString() },
       });
       expect(labelsResp.status()).toBe(200);
       const labelsJson = await labelsResp.json();
@@ -80,7 +78,7 @@ test.describe('Query Features Verification (Loki + Tempo)', () => {
         `${SOFTPROBE_URL}/loki/api/v1/label/service_name/values`,
         {
           headers: { Authorization: `Bearer ${API_KEY}`, 'X-Scope-OrgID': TENANT_ID },
-          params: { start: startNs.toString(), end: endNs.toString() },
+          params: { start: START_NS.toString(), end: END_NS.toString() },
         },
       );
       expect(valuesResp.status()).toBe(200);

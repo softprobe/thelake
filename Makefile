@@ -21,7 +21,7 @@ SHELL := /bin/bash
 .PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run \
 	clean clean-cache build build-release package publish test-publish-tags \
 	contracts-test lint check-sql-guardrails fmt check-fmt \
-	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff _test-lease-pg \
+	test _test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff _test-lease-pg \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
 	ducklake-extension \
@@ -386,19 +386,31 @@ ducklake-extension:
 	bash scripts/download-ducklake-extension.sh
 
 test: ensure-cache ducklake-extension explorer-assets
+	@set -euo pipefail; \
+	stack_json="$$(python3 scripts/test_stack.py start-compose --suite unit-tests --compose-file tests/compose.test.yaml --service ducklake-postgres --service minio --published-port ducklake-postgres:5432 --published-port minio:9000 --wait)"; \
+	stack_state="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$$stack_json")"; \
+	cleanup() { status=$$?; python3 scripts/test_stack.py stop --state-file "$$stack_state" || status=$$?; exit $$status; }; \
+	trap cleanup EXIT; \
+	export THELAKE_TEST_POSTGRES_PORT="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$$stack_json")"; \
+	export THELAKE_TEST_MINIO_ENDPOINT="http://$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["minio:9000"][0])' "$$stack_json")"; \
+	python3 scripts/test_stack.py exec --state-file "$$stack_state" --service minio -- sh -ec 'mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc mb --ignore-existing local/warehouse'; \
+	$(MAKE) --no-print-directory _test
+
+_test: ensure-cache ducklake-extension explorer-assets
 	bash tests/scripts/ducklake_extension_download_test.sh
 	python3 -m unittest examples/quickstart/agent/test_refund_agent_sdk.py
-	@echo "unit + lightweight tests (no e2e infra)..."
+	@echo "unit + lightweight tests (isolated test stack)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compatibility -- --test-threads=1
 	npm --prefix "$(EXPLORER_DIR)" test
 
 # Postgres lease contract runs in the shared disposable test stack.
 test-lease-pg: ensure-cache
 	@set -euo pipefail; \
-	stack_json="$$(python3 scripts/test_stack.py start-compose --suite lease-pg --compose-file tests/compose.test.yaml --service ducklake-postgres --wait)"; \
+	stack_json="$$(python3 scripts/test_stack.py start-compose --suite lease-pg --compose-file tests/compose.test.yaml --service ducklake-postgres --published-port ducklake-postgres:5432 --wait)"; \
 	stack_state="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$$stack_json")"; \
 	cleanup() { status=$$?; python3 scripts/test_stack.py stop --state-file "$$stack_state" || status=$$?; exit $$status; }; \
 	trap cleanup EXIT; \
+	export THELAKE_TEST_POSTGRES_PORT="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$$stack_json")"; \
 	$(MAKE) --no-print-directory _test-lease-pg
 
 _test-lease-pg:
@@ -560,7 +572,7 @@ test-grafana-static: check-compat-reference-pins
 test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
 	@set -euo pipefail; \
 	artifact_dir="$(GRAFANA_SYSTEM_ARTIFACT_DIR)/$$(date -u +%Y%m%dT%H%M%SZ)-$$$$"; compose_file="$(GRAFANA_SYSTEM_COMPOSE_FILE)"; \
-	grafana_url="$(GRAFANA_URL)"; stack_state=""; \
+	grafana_url=""; stack_state=""; \
 	mkdir -p "$$artifact_dir"; \
 	: > "$$artifact_dir/summary.txt"; \
 	skip_environment() { reason="$$1"; mkdir -p "$$artifact_dir"; printf 'SKIP: %s\n' "$$reason" | tee "$$artifact_dir/summary.txt"; printf '{"outcome":"environment_skip","reason":"%s"}\n' "$$reason" > "$$artifact_dir/outcome.json"; exit 0; }; \
@@ -586,11 +598,20 @@ test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
 	mkdir -p "$$artifact_dir"; \
 	export GRAFANA_SEED_ARTIFACT_DIR="$$artifact_dir"; \
 	export GRAFANA_SEED_IN_COMPOSE=1; \
-	stack_json="$$(python3 scripts/test_stack.py start-compose --suite grafana-system --artifact-dir "$$artifact_dir" --compose-file "$$compose_file" --wait)"; \
+	export GRAFANA_AUTH_MOCK_PORT=0 GRAFANA_SOFTPROBE_HTTP_PORT=0 GRAFANA_PORT=0; \
+	stack_json="$$(python3 scripts/test_stack.py start-compose --suite grafana-system --artifact-dir "$$artifact_dir" --compose-file "$$compose_file" --service auth-mock --service softprobe --service grafana --published-port auth-mock:8080 --published-port softprobe:8090 --published-port grafana:3000 --wait)"; \
 	stack_state="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$$stack_json")"; \
+	auth_mock_port="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["auth-mock:8080"][0].rsplit(":",1)[1])' "$$stack_json")"; \
+	softprobe_port="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["softprobe:8090"][0].rsplit(":",1)[1])' "$$stack_json")"; \
+	grafana_port="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["grafana:3000"][0].rsplit(":",1)[1])' "$$stack_json")"; \
+	grafana_url="http://127.0.0.1:$$grafana_port"; \
+	export GRAFANA_AUTH_MOCK_PORT="$$auth_mock_port" GRAFANA_SOFTPROBE_HTTP_PORT="$$softprobe_port"; \
 	cleanup() { status=$$?; if [ -n "$$stack_state" ]; then python3 scripts/test_stack.py stop --state-file "$$stack_state" || status=$$?; fi; exit $$status; }; \
 	trap cleanup EXIT; \
 	GRAFANA_URL="$$grafana_url" \
+	SOFTPROBE_URL="http://127.0.0.1:$$softprobe_port" \
+	GRAFANA_AUTH_MOCK_URL="http://127.0.0.1:$$auth_mock_port" \
+	GRAFANA_SEED_SOFTPROBE_URL="http://127.0.0.1:$$softprobe_port" \
 	GRAFANA_DASHBOARD_DIR="tests/compat/grafana/dashboards/compose" \
 	GRAFANA_DASHBOARD_UIDS="compose-cross-signal compose-loki compose-tempo" \
 	GRAFANA_CHECK_DASHBOARD_QUERIES=1 \
@@ -638,9 +659,9 @@ test-tempo-diff: ensure-cache
 	"$(CURDIR)/scripts/compat/run-with-timeout" "$(TEMPO_DIFF_TIMEOUT_SECS)" cargo test $(CARGO_PROFILE_FLAG) --features integration-e2e --test tests compat_tempo::tempo_query_differential_vs_pinned_tempo -- --ignored --test-threads=1 --nocapture
 
 # End-to-end browser automation + Grafana + OTel demo ingestion tests.
-test-grafana-browser: ensure-cache
+test-grafana-browser: ensure-cache check-compat-reference-pins
 	@chmod +x scripts/test-grafana-browser.sh
-	./scripts/test-grafana-browser.sh
+	GRAFANA_COMPOSE_IMAGE="$(GRAFANA_COMPOSE_IMAGE)" ./scripts/test-grafana-browser.sh
 
 # Browser E2E for the shared standalone Explorer. Builds and starts a real thelake
 # process against Postgres and a temporary DuckLake, ingests OTLP, and drives the UI.
@@ -679,17 +700,26 @@ bench-demo-cpu-full: ensure-cache
 # both DuckLake workspace-scope implementations.
 test-e2e: ensure-cache
 	@set -euo pipefail; \
-	stack_json="$$(python3 scripts/test_stack.py start-compose --suite integration-e2e --compose-file tests/compose.test.yaml --service ducklake-postgres --service minio --wait)"; \
+	stack_json="$$(python3 scripts/test_stack.py start-compose --suite integration-e2e --compose-file tests/compose.test.yaml --service ducklake-postgres --service minio --published-port ducklake-postgres:5432 --published-port minio:9000 --wait)"; \
 	stack_state="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$$stack_json")"; \
 	cleanup() { status=$$?; python3 scripts/test_stack.py stop --state-file "$$stack_state" || status=$$?; exit $$status; }; \
 	trap cleanup EXIT; \
+	export THELAKE_TEST_POSTGRES_PORT="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$$stack_json")"; \
+	export THELAKE_TEST_MINIO_ENDPOINT="http://$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["minio:9000"][0])' "$$stack_json")"; \
 	python3 scripts/test_stack.py exec --state-file "$$stack_state" --service minio -- sh -ec 'mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc mb --ignore-existing local/warehouse'; \
-	$(MAKE) --no-print-directory test; \
+	$(MAKE) --no-print-directory _test; \
 	$(MAKE) --no-print-directory _test-lease-pg; \
 	E2E_BACKEND="$(E2E_BACKEND)" ./scripts/run-e2e-matrix.sh
 
 test-perf: ensure-cache ducklake-extension
-	@set -e; \
+	@set -euo pipefail; \
+	stack_json="$$(python3 scripts/test_stack.py start-compose --suite performance --compose-file tests/compose.test.yaml --service ducklake-postgres --service minio --published-port ducklake-postgres:5432 --published-port minio:9000 --wait)"; \
+	stack_state="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$$stack_json")"; \
+	cleanup() { status=$$?; python3 scripts/test_stack.py stop --state-file "$$stack_state" || status=$$?; exit $$status; }; \
+	trap cleanup EXIT; \
+	export THELAKE_TEST_POSTGRES_PORT="$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$$stack_json")"; \
+	export THELAKE_TEST_MINIO_ENDPOINT="http://$$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["minio:9000"][0])' "$$stack_json")"; \
+	python3 scripts/test_stack.py exec --state-file "$$stack_state" --service minio -- sh -ec 'mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc mb --ignore-existing local/warehouse'; \
 	t0=$$(date +%s); \
 	case "$(PERF_SUITE)" in \
 		all) tests="$(INTEGRATION_PERF_TESTS)" ;; \
@@ -697,7 +727,6 @@ test-perf: ensure-cache ducklake-extension
 		concurrency) tests="performance::perf_union_read_concurrency" ;; \
 		*) echo "unknown PERF_SUITE=$(PERF_SUITE) (all|latency|concurrency)"; exit 1 ;; \
 	esac; \
-	$(MAKE) check-infra; \
 	$(_export-minio-aws); \
 	export SPLAKE_RESET_DUCKLAKE=1 E2E_BACKEND=local; \
 	./scripts/run-isolated-cargo-tests.sh $(CARGO_PROFILE_FLAG) $(INTEGRATION_E2E_FEATURE) --test integration_perf --tests $$tests; \
@@ -711,14 +740,7 @@ ci: ensure-cache
 	t0=$$(date +%s); \
 	echo "PHASE=check-fmt start"; s=$$(date +%s); $(MAKE) check-fmt; echo "PHASE=check-fmt elapsed=$$(($$(date +%s) - $$s))s"; \
 	echo "PHASE=lint start"; s=$$(date +%s); $(MAKE) lint; echo "PHASE=lint elapsed=$$(($$(date +%s) - $$s))s"; \
-	echo "PHASE=test start"; s=$$(date +%s); $(MAKE) test; echo "PHASE=test elapsed=$$(($$(date +%s) - $$s))s"; \
-	if curl -sf http://localhost:9000/minio/health/live >/dev/null 2>&1 \
-		&& docker exec ducklake-postgres pg_isready -U ducklake -d ducklake >/dev/null 2>&1; then \
-		echo "PHASE=test-e2e start"; s=$$(date +%s); $(MAKE) test-e2e; echo "PHASE=test-e2e elapsed=$$(($$(date +%s) - $$s))s"; \
-	else \
-		if [ "$${CI:-}" = "true" ]; then echo "infra missing in CI — run make setup"; exit 1; fi; \
-		echo "infra missing; skipped test-e2e (local). Pre-merge: make setup && make ci"; \
-	fi; \
+	echo "PHASE=test-e2e start"; s=$$(date +%s); $(MAKE) test-e2e; echo "PHASE=test-e2e elapsed=$$(($$(date +%s) - $$s))s"; \
 	total=$$(($$(date +%s) - t0)); \
 	echo "TOTAL=$${total}s goal=$(CI_GOAL_SECS)s (ci)"; \
 	$(call enforce-slo,$$total,$(CI_GOAL_SECS),ci); \

@@ -34,6 +34,14 @@ These requirements always apply to design, implementation, refactoring, and revi
    change. Add source comments where a setting's scope, lifecycle, or safety
    constraints are not obvious. Clearly label test-only settings and state
    which resources they create or modify.
+6. **Use one Docker lifecycle for automated tests.** Tests must start and stop
+   Docker resources through `scripts/test_stack.py`; Compose files only describe
+   service topology. Never start test containers directly from fixtures or
+   harness scripts, and never attach an automated test to a developer's stack.
+   Keep reports and logs in `target/test-artifacts/`; the shared lifecycle
+   removes run-owned containers, volumes, networks, and scratch data after the
+   test. Operator workflows such as `make setup` and `make grafana-up` remain
+   separate. See [`docs/how-to/test-environments.md`](docs/how-to/test-environments.md).
 
 Prefer shared abstractions that remove duplication over parallel implementations.
 Especially enforce rules 1, 2, and 4.

@@ -310,16 +310,19 @@ documented under [`compat/`](../compat/README.md). Promotion semantics are in
 Local pre-merge gate (from the repository root):
 
 ```bash
-make setup
 make ci
 ```
 
-`make ci` runs `check-fmt`, `lint`, `test`, and (when MinIO/Postgres are up)
-`make test-e2e`. `make test-e2e` runs the DuckLake mode matrix (**isolated and
-shared**) via `scripts/run-e2e-matrix.sh`.
+`make ci` runs formatting, lint, unit tests, and `make test-e2e`.
+`make test-e2e` starts a run-owned Postgres/MinIO stack, runs the DuckLake mode
+matrix (**isolated and shared**) via `scripts/run-e2e-matrix.sh`, and tears down
+its stack while retaining logs and reports under `target/test-artifacts/`.
+Other Docker-backed automated tests use the same lifecycle owner; see
+[`Automated test environments`](../how-to/test-environments.md). Use
+`make setup` only when you need the persistent local development services.
 
 GitHub Actions (`.github/workflows/ci.yml`) does **not** invoke `make ci`. It
-runs `make doctor` → `setup` → `check-fmt` / `lint` / `test`, plus separate
+runs `make doctor` → `check-fmt` / `lint` / `test`, plus separate
 jobs for DuckLake E2E (isolated and shared) and Explorer UI. Release packaging
 is `make release` / `release.yml`. Performance suites are manual
 (`make test-perf` / `.github/workflows/performance.yml`).

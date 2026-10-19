@@ -80,7 +80,7 @@ Build and run checks (cargo cache under `~/.cache/thelake`):
 make doctor
 make build
 make test          # unit + lightweight
-make test-e2e      # needs setup
+make test-e2e      # starts and removes its own transient test stack
 make ci            # fmt + lint + test + test-e2e
 ```
 
@@ -93,12 +93,14 @@ make teardown
 `make ci` is the pre-merge gate. Performance is `make test-perf` (manual /
 release).
 
-GitHub Actions (Make-only; cache under `~/.cache/thelake` via
-`.github/actions/thelake-cache`):
+GitHub Actions uses the same test-stack lifecycle owner; Cargo and
+DuckDB caches live under `~/.cache/thelake` via `.github/actions/thelake-cache`:
 
-- `.github/workflows/ci.yml` — on push/PR: `make doctor` → `setup` →
+- `.github/workflows/ci.yml` — on push/PR: `make doctor` →
   `check-fmt` / `lint` / `test`, plus separate DuckLake E2E and Explorer UI
-  jobs. Local pre-merge gate remains `make setup && make ci` (warm SLO ≤ 18m).
+  jobs. Local pre-merge gate is `make ci` (warm SLO ≤ 18m). Docker-backed
+  automated tests use isolated stacks and retain logs under
+  `target/test-artifacts/`; `make setup` is only for local development.
 - `.github/workflows/performance.yml` — **manual** only: `make test-perf`
   (`PERF_SUITE=all|latency|concurrency`, `PERF_TARGET_MS=1000`). Warm SLO ≤ 8m.
 - `.github/workflows/release.yml` — on GitHub Release: `make release`

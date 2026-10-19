@@ -8,10 +8,42 @@ use axum::Router;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+/// The test-stack runner supplies the mapped Postgres port for ignored tests.
+/// Return `None` outside that isolated stack; never fall back to a developer DB.
+pub fn test_postgres_port() -> Option<u16> {
+    std::env::var("THELAKE_TEST_POSTGRES_PORT")
+        .ok()?
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+}
+
+/// Point tests using production configuration at the test stack's published services.
+/// Postgres is always required; MinIO is required only for configs that opt into
+/// the default local object-store endpoint.
+pub fn apply_test_service_endpoints(config: &mut Config) {
+    let port = test_postgres_port()
+        .expect("THELAKE_TEST_POSTGRES_PORT must be set by the isolated test stack");
+    config.ducklake.metadata_path =
+        format!("host=127.0.0.1 port={port} dbname=ducklake user=ducklake password=ducklake");
+    if config
+        .object_store
+        .endpoint
+        .as_deref()
+        .is_some_and(|endpoint| endpoint == "http://localhost:9000")
+    {
+        config.object_store.endpoint = Some(
+            std::env::var("THELAKE_TEST_MINIO_ENDPOINT")
+                .expect("THELAKE_TEST_MINIO_ENDPOINT must be set by the isolated test stack"),
+        );
+    }
+}
+
 /// File-backed DuckLake under `temp`; compaction/metadata off; test-sized pools
 /// via [`Config::shrink_pools_for_tests`].
 pub fn file_backed_test_config(temp: &TempDir) -> Config {
     let mut config = Config::default();
+    apply_test_service_endpoints(&mut config);
     // Test fixtures use the single ingest path with synchronous coalescing.
     config.ingest.flush_interval_seconds = 0;
     config.maintenance.enabled = false;

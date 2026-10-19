@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end browser automation + Grafana + OTel demo ingestion test suite.
-# Usage (repo root): ./scripts/test-grafana-browser.sh [playwright args]
-# Make: make test-grafana-browser
-
+# Run Grafana browser tests in a disposable, run-owned Compose stack.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -10,62 +7,62 @@ cd "$ROOT"
 
 BROWSER_DIR="$ROOT/tests/compat/grafana/browser"
 CONFIG_FILE="$BROWSER_DIR/playwright.config.ts"
-SOFTPROBE_URL="${SOFTPROBE_URL:-http://127.0.0.1:8090}"
-GRAFANA_URL="${GRAFANA_URL:-http://127.0.0.1:3000}"
+command -v node >/dev/null 2>&1 || { echo "ERROR: node is required for browser tests." >&2; exit 1; }
+[[ -n "${GRAFANA_COMPOSE_IMAGE:-}" ]] || { echo "ERROR: GRAFANA_COMPOSE_IMAGE must be supplied from the pinned reference manifest." >&2; exit 1; }
 
-echo "================================================================"
-echo " TheLake E2E Browser Automation + Grafana + OTel Ingestion Suite"
-echo "================================================================"
-
-# Check node & npx
-if ! command -v node >/dev/null 2>&1; then
-  echo "ERROR: node is required for browser automation tests." >&2
-  exit 1
-fi
-
-# Deterministically install declared Playwright dependencies
 if [[ ! -d "$BROWSER_DIR/node_modules/@playwright/test" ]]; then
-  echo "==> Installing browser automation dependencies in $BROWSER_DIR..."
-  if [[ -f "$BROWSER_DIR/package-lock.json" ]]; then
-    npm --prefix "$BROWSER_DIR" ci --no-audit
-  else
-    npm --prefix "$BROWSER_DIR" install --no-audit
-  fi
-fi
-
-# Ensure Playwright Chromium browser binary is installed
-if ! (cd "$BROWSER_DIR" && npx playwright --version >/dev/null 2>&1); then
-  echo "ERROR: playwright executable not found after install." >&2
-  exit 1
+  npm --prefix "$BROWSER_DIR" ci --no-audit
 fi
 (cd "$BROWSER_DIR" && npx playwright install chromium)
 
-# Force the manual stack to run the current binary from reviewed source
-export GRAFANA_REUSE_STACK="${GRAFANA_REUSE_STACK:-0}"
-# Match main Grafana SLO: no compaction and no ops self-export under demo load
-# so I-02/I-03 (fresh k6_http_reqs) stay green. Manual `make grafana-up` keeps both on.
-export THELAKE_MAINTENANCE_ENABLED="${THELAKE_MAINTENANCE_ENABLED:-false}"
-export THELAKE_SELF_MONITORING_ENABLED="${THELAKE_SELF_MONITORING_ENABLED:-false}"
-# Full OTLP + MAP bags is heavier than the old metrics-only demo; keep commits
-# frequent and unpin Softprobe so Playwright query load cannot starve ingest for
-# the 5m Prom lookback window. CPU SLO stays on `make bench-demo-cpu-full`.
-export THELAKE_INGEST_FLUSH_INTERVAL_SECONDS="${THELAKE_INGEST_FLUSH_INTERVAL_SECONDS:-10}"
-export THELAKE_CPU_AFFINITY="${THELAKE_CPU_AFFINITY:-}"
-echo "==> Ensuring Grafana stack + live OTel ingestion are ready (GRAFANA_REUSE_STACK=$GRAFANA_REUSE_STACK THELAKE_MAINTENANCE_ENABLED=$THELAKE_MAINTENANCE_ENABLED THELAKE_SELF_MONITORING_ENABLED=$THELAKE_SELF_MONITORING_ENABLED THELAKE_INGEST_FLUSH_INTERVAL_SECONDS=$THELAKE_INGEST_FLUSH_INTERVAL_SECONDS THELAKE_CPU_AFFINITY=${THELAKE_CPU_AFFINITY:-unpinned})..."
-./scripts/grafana-manual-up.sh
+ARTIFACT_DIR="$ROOT/target/test-artifacts/grafana-browser/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+mkdir -p "$ARTIFACT_DIR"
+export GRAFANA_SEED_ARTIFACT_DIR="$ARTIFACT_DIR"
+# Let Docker choose free host ports. The tests talk to Grafana through the
+# mapped port returned by the shared test-stack lifecycle owner.
+export GRAFANA_AUTH_MOCK_PORT=0 GRAFANA_POSTGRES_PORT=0 GRAFANA_MINIO_PORT=0
+export GRAFANA_SOFTPROBE_HTTP_PORT=0 GRAFANA_SOFTPROBE_GRPC_PORT=0 GRAFANA_PORT=0
+export GRAFANA_PLAYWRIGHT_REPORT_DIR="$ARTIFACT_DIR/playwright-report"
+export GRAFANA_PLAYWRIGHT_OUTPUT_DIR="$ARTIFACT_DIR/test-results"
 
-echo "==> Verifying Softprobe and Grafana connectivity..."
-curl -sf "$SOFTPROBE_URL/ready" >/dev/null || { echo "ERROR: Softprobe not ready at $SOFTPROBE_URL" >&2; exit 1; }
-curl -sf -u admin:admin "$GRAFANA_URL/api/health" >/dev/null || { echo "ERROR: Grafana not healthy at $GRAFANA_URL" >&2; exit 1; }
+stack_json=""
+stack_state=""
+cleanup() {
+  local status=$?
+  if [[ -n "$stack_state" ]]; then
+    python3 "$ROOT/scripts/test_stack.py" stop --state-file "$stack_state" || status=$?
+  fi
+  echo "Grafana browser artifacts retained at $ARTIFACT_DIR" >&2
+  exit "$status"
+}
+trap cleanup EXIT
 
-echo "==> Running Playwright E2E test suite..."
-export SOFTPROBE_URL
-export GRAFANA_URL
+stack_json="$(python3 scripts/test_stack.py start-compose \
+  --suite grafana-browser \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --compose-file tests/compat/grafana/docker-compose.ci.yml \
+  --service grafana \
+  --published-port grafana:3000 \
+  --published-port softprobe:8090 \
+  --wait)"
+stack_state="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$stack_json")"
+grafana_port="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["grafana:3000"][0].rsplit(":",1)[1])' "$stack_json")"
+softprobe_port="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["softprobe:8090"][0].rsplit(":",1)[1])' "$stack_json")"
+seed_window="$(python3 - "$ARTIFACT_DIR/seed-receipt.json" <<'PY'
+import json, sys
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+if receipt.get("status") != "pass":
+    raise SystemExit("Grafana seed did not produce a passing receipt")
+print(receipt["window_start_s"] * 1_000_000_000, receipt["window_end_s"] * 1_000_000_000)
+PY
+)"
+read -r GRAFANA_SEED_START_NS GRAFANA_SEED_END_NS <<<"$seed_window"
+export GRAFANA_SEED_START_NS GRAFANA_SEED_END_NS
+export GRAFANA_URL="http://127.0.0.1:$grafana_port"
+export SOFTPROBE_URL="http://127.0.0.1:$softprobe_port"
+export SOFTPROBE_API_KEY=grafana-test-tenant-a
+export SOFTPROBE_TENANT_ID=cccccccc-cccc-cccc-cccc-cccccccccccc
+curl -sf -u admin:admin "$GRAFANA_URL/api/health" >/dev/null
+curl -sf -H "Authorization: Bearer $SOFTPROBE_API_KEY" -H "X-Scope-OrgID: $SOFTPROBE_TENANT_ID" "$SOFTPROBE_URL/ready" >/dev/null
 
-cd "$BROWSER_DIR"
-npx playwright test --config "$CONFIG_FILE" "$@"
-
-echo "================================================================"
-echo " All E2E browser automation & query feature tests PASSED!"
-echo " Checklist: docs/compat/query-features-checklist.md"
-echo "================================================================"
+(cd "$BROWSER_DIR" && npx playwright test --config "$CONFIG_FILE" "$@")

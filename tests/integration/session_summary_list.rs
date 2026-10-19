@@ -34,8 +34,7 @@ fn postgres_summary_config(temp: &TempDir, metadata_schema: String) -> Config {
     config.shrink_pools_for_tests();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
 
-    config.ducklake.metadata_path =
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
+    config.ducklake.metadata_path = crate::util::config::test_postgres_dsn();
     config.ducklake.catalog_alias = "softprobe".to_string();
     config.ducklake.metadata_schema = metadata_schema;
     config.ducklake.data_path = temp.path().join("data").to_string_lossy().into();
@@ -48,11 +47,14 @@ fn postgres_summary_config(temp: &TempDir, metadata_schema: String) -> Config {
 }
 
 async fn pg_reachable() -> bool {
+    if std::env::var_os("THELAKE_TEST_POSTGRES_PORT").is_none() {
+        return false;
+    }
     matches!(
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             tokio_postgres::connect(
-                "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
+                &crate::util::config::test_postgres_dsn(),
                 tokio_postgres::NoTls,
             ),
         )
@@ -1462,11 +1464,23 @@ async fn truncate_summary_rebuild_restores_list_parquet_intact() {
 }
 
 fn minio_live() -> bool {
-    std::net::TcpStream::connect_timeout(
-        &"127.0.0.1:9000".parse().expect("addr"),
-        std::time::Duration::from_secs(1),
-    )
-    .is_ok()
+    use std::net::ToSocketAddrs;
+
+    let endpoint = crate::util::config::test_minio_endpoint();
+    let Some(authority) = endpoint.strip_prefix("http://") else {
+        return false;
+    };
+    let Ok(addresses) = authority
+        .split('/')
+        .next()
+        .unwrap_or(authority)
+        .to_socket_addrs()
+    else {
+        return false;
+    };
+    addresses.into_iter().any(|address| {
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1)).is_ok()
+    })
 }
 
 /// Same as [`build_summary_router`] but Parquet lands on MinIO (`s3://`).
@@ -1481,7 +1495,7 @@ async fn build_summary_router_on_minio(
         return None;
     }
     if !minio_live() {
-        eprintln!("skip: minio unreachable on :9000 (make setup)");
+        eprintln!("skip: test-stack MinIO endpoint is unreachable");
         return None;
     }
     if std::env::var_os("AWS_ACCESS_KEY_ID").is_none() {
@@ -1492,7 +1506,7 @@ async fn build_summary_router_on_minio(
     let temp = TempDir::new().expect("tempdir");
     let mut config = postgres_summary_config(&temp, metadata_schema.clone());
     let run_id = Uuid::new_v4();
-    config.object_store.endpoint = Some("http://localhost:9000".to_string());
+    config.object_store.endpoint = Some(crate::util::config::test_minio_endpoint());
     config.object_store.region = "us-east-1".to_string();
     config.ducklake.data_path = format!("s3://warehouse/ss-summary-e2e/{run_id}/");
     // Force object-store Parquet (no catalog inlining) so rebuild must use httpfs.

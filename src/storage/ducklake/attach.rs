@@ -595,6 +595,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let suffix = uuid::Uuid::new_v4().to_string().replace('-', "_");
         let mut config = Config::default();
+        crate::test_support::apply_test_service_endpoints(&mut config);
         config.query.cache_dir = None;
         config.ducklake.metadata_schema = format!("thelake_attach_{suffix}");
         config.ducklake.data_path = dir.path().join("data").to_string_lossy().into_owned();
@@ -637,6 +638,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let suffix = uuid::Uuid::new_v4().to_string().replace('-', "_");
         let mut config = Config::default();
+        crate::test_support::apply_test_service_endpoints(&mut config);
         config.query.cache_dir = None;
         config.ducklake.metadata_schema = format!("thelake_attach_fail_{suffix}");
         config.ducklake.data_path = dir.path().join("data").to_string_lossy().into_owned();

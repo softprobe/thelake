@@ -116,20 +116,6 @@ jobs:
     needs: [real-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    services:
-      ducklake-postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: ducklake
-          POSTGRES_USER: ducklake
-          POSTGRES_DB: ducklake
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U ducklake -d ducklake"
-          --health-interval 2s
-          --health-timeout 10s
-          --health-retries 15
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
@@ -162,7 +148,15 @@ jobs:
         run: make ducklake-extension
 
       - name: Run Loki differential gate
-        run: make test-loki-diff
+        run: |
+          set -euo pipefail
+          stack_json="$(python3 scripts/test_stack.py start-compose --suite github-loki-diff \
+            --compose-file tests/compose.test.yaml --service ducklake-postgres \
+            --published-port ducklake-postgres:5432 --wait)"
+          state_file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$stack_json")"
+          trap 'python3 scripts/test_stack.py stop --state-file "$state_file"' EXIT
+          export THELAKE_TEST_POSTGRES_PORT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$stack_json")"
+          make test-loki-diff
 
       - name: Require passing Loki result and evidence
         run: |
@@ -239,7 +233,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: loki-differential-evidence
-          path: target/compat/upload/loki/
+          path: |
+            target/compat/upload/loki/
+            target/test-artifacts/github-loki-diff/
           if-no-files-found: error
 
   tempo-diff:
@@ -248,20 +244,6 @@ jobs:
     needs: [real-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    services:
-      ducklake-postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: ducklake
-          POSTGRES_USER: ducklake
-          POSTGRES_DB: ducklake
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U ducklake -d ducklake"
-          --health-interval 2s
-          --health-timeout 10s
-          --health-retries 15
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
@@ -294,7 +276,15 @@ jobs:
         run: make ducklake-extension
 
       - name: Run Tempo differential gate
-        run: make test-tempo-diff
+        run: |
+          set -euo pipefail
+          stack_json="$(python3 scripts/test_stack.py start-compose --suite github-tempo-diff \
+            --compose-file tests/compose.test.yaml --service ducklake-postgres \
+            --published-port ducklake-postgres:5432 --wait)"
+          state_file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$stack_json")"
+          trap 'python3 scripts/test_stack.py stop --state-file "$state_file"' EXIT
+          export THELAKE_TEST_POSTGRES_PORT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$stack_json")"
+          make test-tempo-diff
 
       - name: Require passing Tempo result and evidence
         run: |
@@ -371,7 +361,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tempo-differential-evidence
-          path: target/compat/upload/tempo/
+          path: |
+            target/compat/upload/tempo/
+            target/test-artifacts/github-tempo-diff/
           if-no-files-found: error
 
   grafana-system:
@@ -534,24 +526,9 @@ jobs:
     needs: [real-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    services:
-      ducklake-postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: ducklake
-          POSTGRES_USER: ducklake
-          POSTGRES_DB: ducklake
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U ducklake -d ducklake"
-          --health-interval 2s
-          --health-timeout 10s
-          --health-retries 15
     env:
       CI: "true"
       CARGO_INCREMENTAL: "0"
-      GRAFANA_REUSE_STACK: "0"
     steps:
       - name: Pre-clean workspace permissions
         run: |
@@ -594,9 +571,8 @@ jobs:
         with:
           name: grafana-browser-report
           path: |
-            tests/compat/grafana/browser/playwright-report/
-            tests/compat/grafana/browser/explorer-playwright-report/
-            tests/compat/grafana/browser/test-results/
+            target/test-artifacts/explorer-ui/
+            target/test-artifacts/grafana-browser/
           retention-days: 7
 
   manifest-conformance:
@@ -607,20 +583,6 @@ jobs:
     needs: [real-preflight, loki-diff, tempo-diff, grafana-system]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    services:
-      ducklake-postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: ducklake
-          POSTGRES_USER: ducklake
-          POSTGRES_DB: ducklake
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U ducklake -d ducklake"
-          --health-interval 2s
-          --health-timeout 10s
-          --health-retries 15
     strategy:
       fail-fast: false
       matrix:
@@ -689,6 +651,12 @@ jobs:
         if: ${{ inputs.selector == '' || inputs.selector == 'real' }}
         run: |
           set -euo pipefail
+          stack_json="$(python3 scripts/test_stack.py start-compose --suite github-manifest-conformance \
+            --compose-file tests/compose.test.yaml --service ducklake-postgres \
+            --published-port ducklake-postgres:5432 --wait)"
+          state_file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$stack_json")"
+          trap 'python3 scripts/test_stack.py stop --state-file "$state_file"' EXIT
+          export THELAKE_TEST_POSTGRES_PORT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$stack_json")"
           scripts/compat/conformance.sh \
             --protocol "${{ matrix.protocol }}" \
             --out "$OUT"
@@ -791,7 +759,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: manifest-conformance-${{ matrix.protocol }}-${{ inputs.selector || 'real' }}-evidence
-          path: target/compat/upload/conformance/${{ matrix.protocol }}/
+          path: |
+            target/compat/upload/conformance/${{ matrix.protocol }}/
+            target/test-artifacts/github-manifest-conformance/
           if-no-files-found: error
 
   drift-preflight:
@@ -1279,15 +1249,11 @@ jobs:
       - name: Start DuckLake Postgres catalog
         run: |
           set -euo pipefail
-          docker compose up -d ducklake-postgres
-          for attempt in {1..60}; do
-            if docker exec ducklake-postgres pg_isready -U ducklake -d ducklake >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker compose logs ducklake-postgres
-          exit 1
+          stack_json="$(python3 scripts/test_stack.py start-compose --suite github-fast-pr \
+            --compose-file tests/compose.test.yaml --service ducklake-postgres \
+            --published-port ducklake-postgres:5432 --wait)"
+          echo "TEST_STACK_STATE=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$stack_json")" >> "$GITHUB_ENV"
+          echo "THELAKE_TEST_POSTGRES_PORT=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ports"]["ducklake-postgres:5432"][0].rsplit(":",1)[1])' "$stack_json")" >> "$GITHUB_ENV"
 
       - name: Download pinned DuckLake extension
         run: make ducklake-extension
@@ -1342,17 +1308,19 @@ jobs:
           the Postgres catalog required by the production DuckLake path.
           EOF
 
+      - name: Stop DuckLake Postgres catalog
+        if: always()
+        run: if [[ -n "${TEST_STACK_STATE:-}" ]]; then python3 scripts/test_stack.py stop --state-file "$TEST_STACK_STATE"; fi
+
       - name: Upload fast PR evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fast-pr-compatibility-evidence
-          path: target/compat/fast-pr/
+          path: |
+            target/compat/fast-pr/
+            target/test-artifacts/github-fast-pr/
           if-no-files-found: error
-
-      - name: Stop DuckLake Postgres catalog
-        if: always()
-        run: docker compose down --volumes --remove-orphans
 
   compatibility-report:
     name: Consolidated compatibility report

@@ -50,6 +50,7 @@ mod tests {
     #[tokio::test]
     async fn scheduler_starts_when_only_metadata_enabled() {
         let mut c = Config::default();
+        crate::test_support::apply_test_service_endpoints(&mut c);
         c.maintenance.enabled = false;
         c.maintenance.metadata_enabled = true;
         c.maintenance.interval_seconds = 60;

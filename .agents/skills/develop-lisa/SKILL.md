@@ -45,9 +45,9 @@ repository rules in `AGENTS.md` and the Lisa contracts in
 
 - Lisa tests follow the repository-wide transient-resource rule in `AGENTS.md`.
   They use a disposable Postgres database per test through
-  [`lisa/tests/conftest.py`](../../../lisa/tests/conftest.py). It starts one
-  local `postgres:18-alpine` Docker container per test run and creates an
-  isolated database and writer/reader roles for each test. Removing the
+  [`lisa/tests/conftest.py`](../../../lisa/tests/conftest.py). It starts the
+  `lisa-postgres` service in the shared transient test Compose stack and creates
+  an isolated database and writer/reader roles for each test. Removing the
   container at session teardown removes all test databases and roles; no
   external database URL is supported. Use transient Lisa databases and
   TheLake workspaces for all automated tests; never connect to or mutate a

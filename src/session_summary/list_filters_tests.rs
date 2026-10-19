@@ -14,7 +14,7 @@ use tokio_postgres::NoTls;
 async fn try_pg_pool(schema: &str) -> Option<Pool> {
     let mut pg = tokio_postgres::Config::new();
     pg.host("localhost");
-    pg.port(5432);
+    pg.port(crate::test_support::test_postgres_port()?);
     pg.dbname("ducklake");
     pg.user("ducklake");
     pg.password("ducklake");

@@ -4,6 +4,8 @@ const SOFTPROBE_URL = process.env.SOFTPROBE_URL || 'http://127.0.0.1:8090';
 const API_KEY = process.env.SOFTPROBE_API_KEY || 'local-dev-key';
 const TENANT_ID =
   process.env.SOFTPROBE_TENANT_ID || 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const START_NS = BigInt(process.env.GRAFANA_SEED_START_NS || '1700000000000000000');
+const END_NS = BigInt(process.env.GRAFANA_SEED_END_NS || '1700000060000000000');
 
 
 test.describe('OpenTelemetry Demo Ingestion Pipeline (E2E)', () => {
@@ -15,17 +17,14 @@ test.describe('OpenTelemetry Demo Ingestion Pipeline (E2E)', () => {
   });
 
   test('I-02: Application logs stream from Astronomy Shop demo', async ({ request }) => {
-    const endNs = BigInt(Date.now()) * BigInt(1_000_000);
-    const startNs = endNs - BigInt(3600) * BigInt(1_000_000_000);
-
     const resp = await request.get(`${SOFTPROBE_URL}/loki/api/v1/labels`, {
       headers: {
         Authorization: `Bearer ${API_KEY}`,
         'X-Scope-OrgID': TENANT_ID,
       },
       params: {
-        start: startNs.toString(),
-        end: endNs.toString(),
+        start: START_NS.toString(),
+        end: END_NS.toString(),
       },
     });
 
@@ -43,8 +42,8 @@ test.describe('OpenTelemetry Demo Ingestion Pipeline (E2E)', () => {
           'X-Scope-OrgID': TENANT_ID,
         },
         params: {
-          start: startNs.toString(),
-          end: endNs.toString(),
+          start: START_NS.toString(),
+          end: END_NS.toString(),
         },
       },
     );

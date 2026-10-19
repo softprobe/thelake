@@ -12,7 +12,12 @@ report commands and environmental limits accurately.
 Any automated test that writes state must run against transient, run-owned
 databases and workspaces and clean them up automatically, including after
 failure. Never point tests at a developer's running service or pre-existing
-data. Use mocks when a test does not require live service behavior.
+data. Docker-backed local test environments must use the shared lifecycle
+owner, `scripts/test_stack.py`; Compose files declare topology but test fixtures
+and harnesses must not start or remove containers directly. Reports and logs
+stay under `target/test-artifacts/`, while run-owned service resources and
+scratch data are removed. See
+[Automated test environments](../../../docs/how-to/test-environments.md).
 
 ## Common gates
 
@@ -21,9 +26,9 @@ data. Use mocks when a test does not require live service behavior.
   SQL guardrails.
 - `make test`: Rust library/integration/compatibility tests plus Explorer npm
   tests; it downloads/builds required artifacts.
-- `make test-e2e`: first run `make setup`; this target checks for already
-  running Postgres/MinIO and then runs the shared E2E matrix for DuckLake
-  workspace scopes. It does not start infrastructure itself.
+- `make test-e2e`: provisions its own transient Postgres and MinIO stack,
+  initializes the test bucket, runs the shared E2E matrix for DuckLake workspace
+  scopes, then removes its stack while retaining test artifacts.
 - `make ci`: repository pre-merge gate; see its Makefile recipe for the exact
   current composition.
 

@@ -1,4 +1,6 @@
 DO $$ BEGIN
+  -- Serialize the existence check and CREATE TRIGGER for concurrent ensures.
+  LOCK TABLE {{schema}}.session_summary_dirty IN SHARE ROW EXCLUSIVE MODE;
   IF NOT EXISTS (
     SELECT 1 FROM pg_trigger
     WHERE tgname = 'session_summary_dirty_bump_generation'

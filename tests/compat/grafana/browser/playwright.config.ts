@@ -14,9 +14,10 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  outputDir: process.env.GRAFANA_PLAYWRIGHT_OUTPUT_DIR || 'test-results',
   reporter: [
     ['list'],
-    ['html', { outputFolder: 'playwright-report', open: 'never' }],
+    ['html', { outputFolder: process.env.GRAFANA_PLAYWRIGHT_REPORT_DIR || 'playwright-report', open: 'never' }],
   ],
   use: {
     baseURL: process.env.GRAFANA_URL || 'http://127.0.0.1:3000',

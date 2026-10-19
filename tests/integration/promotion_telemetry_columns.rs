@@ -6,12 +6,10 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn applies_different_telemetry_columns_to_isolated_tenant_tables() {
-    let (client, connection) = tokio_postgres::connect(
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
-        NoTls,
-    )
-    .await
-    .expect("connect ducklake postgres");
+    let (client, connection) =
+        tokio_postgres::connect(&crate::util::config::test_postgres_dsn(), NoTls)
+            .await
+            .expect("connect ducklake postgres");
     tokio::spawn(async move {
         let _ = connection.await;
     });

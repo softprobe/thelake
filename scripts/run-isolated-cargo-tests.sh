@@ -115,8 +115,10 @@ if [[ -z "${TEST_BIN}" || ! -x "${TEST_BIN}" ]]; then
 fi
 echo "Using test binary: ${TEST_BIN}"
 
-# libduckdb is dynamically linked; the harness needs the download dir on the loader path.
-DUCKDB_LIB_DIR="$(find "${TARGET_DIR}/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
+# libduckdb is dynamically linked; match Cargo.lock rather than picking a stale
+# version from a durable cache that may contain several DuckDB downloads.
+DUCKDB_VERSION="$(awk '$1 == "duckdb_version" { print $2; exit }' "${ROOT}/scripts/ducklake-extension.lock")"
+DUCKDB_LIB_DIR="$(find "${TARGET_DIR}/duckdb-download" -type f \( -name 'libduckdb.so*' -o -name 'libduckdb.dylib*' \) -path "*/${DUCKDB_VERSION}/*" -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)"
 if [[ -n "${DUCKDB_LIB_DIR}" ]]; then
   case "$(uname -s)" in
     Darwin) export DYLD_LIBRARY_PATH="${DUCKDB_LIB_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" ;;

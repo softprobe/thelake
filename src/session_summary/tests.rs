@@ -16,7 +16,7 @@ use tokio_postgres::NoTls;
 async fn try_pg_pool(schema: &str) -> Option<Pool> {
     let mut pg = tokio_postgres::Config::new();
     pg.host("localhost");
-    pg.port(5432);
+    pg.port(crate::test_support::test_postgres_port()?);
     pg.dbname("ducklake");
     pg.user("ducklake");
     pg.password("ducklake");
@@ -699,7 +699,7 @@ async fn postgres_shared_dirty_claims_are_workspace_scoped() {
     let schema = "thelake_ss_shared_claim";
     let mut pg = tokio_postgres::Config::new();
     pg.host("localhost");
-    pg.port(5432);
+    pg.port(crate::test_support::test_postgres_port().expect("test_stack Postgres port"));
     pg.dbname("ducklake");
     pg.user("ducklake");
     pg.password("ducklake");
@@ -802,8 +802,10 @@ async fn postgres_ensure_product_hot_attrs_activates_when_missing() {
     config.shrink_pools_for_tests();
     config.maintenance.enabled = false;
     config.maintenance.metadata_enabled = false;
-    config.ducklake.metadata_path =
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
+    config.ducklake.metadata_path = format!(
+        "host=localhost port={} dbname=ducklake user=ducklake password=ducklake",
+        crate::test_support::test_postgres_port().expect("test_stack Postgres port")
+    );
     config.ducklake.metadata_schema = schema.clone();
     config.ducklake.data_path = temp.path().join("data").to_string_lossy().into();
     config.ingest.flush_interval_seconds = 2;

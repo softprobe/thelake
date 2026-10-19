@@ -72,9 +72,6 @@ jobs:
           username: softprobe
           password: ${{ secrets.DOCKER_HUB_PASSWORD }}
 
-      - name: Start local test infra
-        run: make setup
-
       - name: Release gate (test-perf + build-release + publish)
         run: |
           set -euo pipefail
@@ -84,6 +81,10 @@ jobs:
             make release TAG="${IMAGE_TAG}"
           fi
 
-      - name: Teardown local infra
+      - name: Upload test stack logs
         if: always()
-        run: make teardown
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stack-logs-release
+          path: target/test-artifacts/
+          if-no-files-found: ignore

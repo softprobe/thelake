@@ -218,12 +218,10 @@ async fn postgres_manager() -> WorkspaceManager {
 }
 
 async fn postgres_client() -> tokio_postgres::Client {
-    let (client, connection) = tokio_postgres::connect(
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
-        NoTls,
-    )
-    .await
-    .expect("connect ducklake postgres");
+    let (client, connection) =
+        tokio_postgres::connect(&crate::util::config::test_postgres_dsn(), NoTls)
+            .await
+            .expect("connect ducklake postgres");
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -234,8 +232,7 @@ fn postgres_config() -> Config {
     let mut config = Config::default();
     config.ducklake.writer_pool_size = 1;
     config.query.max_connections = 1;
-    config.ducklake.metadata_path =
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
+    config.ducklake.metadata_path = crate::util::config::test_postgres_dsn();
     config.ducklake.metadata_schema =
         format!("softprobe_registry_test_{}", Uuid::new_v4().simple());
     // This registry contract exercises Postgres metadata only. Keep the

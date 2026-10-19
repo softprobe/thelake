@@ -31,8 +31,7 @@ fn postgres_registry_config(temp: &TempDir, registry_schema: String) -> Config {
     config.shrink_pools_for_tests();
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
 
-    config.ducklake.metadata_path =
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
+    config.ducklake.metadata_path = crate::util::config::test_postgres_dsn();
     config.ducklake.catalog_alias = "softprobe".to_string();
     config.ducklake.metadata_schema = registry_schema;
     config.ducklake.data_path = temp.path().join("default_data").to_string_lossy().into();
@@ -273,7 +272,7 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
     std::env::set_var("AWS_ACCESS_KEY_ID", "minioadmin");
     std::env::set_var("AWS_SECRET_ACCESS_KEY", "minioadmin");
     std::env::set_var("AWS_REGION", "us-east-1");
-    config.object_store.endpoint = Some("http://localhost:9000".to_string());
+    config.object_store.endpoint = Some(crate::util::config::test_minio_endpoint());
     config.object_store.region = "us-east-1".to_string();
 
     let workspace_id = Uuid::new_v4().to_string();
@@ -355,7 +354,10 @@ async fn grpc_otlp_and_http_export_share_bearer_resolved_tenant_ducklake_scope()
 
     // Ingest is flush-through; no separate pipeline flush needed.
 
-    std::env::set_var("AWS_S3_ENDPOINT", "http://localhost:9000");
+    std::env::set_var(
+        "AWS_S3_ENDPOINT",
+        crate::util::config::test_minio_endpoint(),
+    );
     // Verify against the provisioned warehouse (shared mode ignores request overrides).
     let metadata_path = config.ducklake.metadata_path.clone();
     let n: i64 = trace_count_for_session(

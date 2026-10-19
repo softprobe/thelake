@@ -50,12 +50,13 @@ jobs:
       - name: Doctor
         run: make doctor
 
-      - name: Start local test infra
-        run: make setup
-
       - name: Run performance suite
         run: make test-perf PERF_SUITE=${{ inputs.suite }}
 
-      - name: Teardown local infra
+      - name: Upload test stack logs
         if: always()
-        run: make teardown
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stack-logs-performance
+          path: target/test-artifacts/
+          if-no-files-found: ignore

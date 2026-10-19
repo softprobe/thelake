@@ -36,12 +36,10 @@ columns:
 
 #[tokio::test]
 async fn active_telemetry_manifests_are_isolated_per_tenant_schema() {
-    let (client, connection) = tokio_postgres::connect(
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
-        NoTls,
-    )
-    .await
-    .expect("connect ducklake postgres");
+    let (client, connection) =
+        tokio_postgres::connect(&crate::util::config::test_postgres_dsn(), NoTls)
+            .await
+            .expect("connect ducklake postgres");
     tokio::spawn(async move {
         let _ = connection.await;
     });

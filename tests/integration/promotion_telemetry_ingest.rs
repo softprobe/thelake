@@ -16,8 +16,7 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
     let temp = TempDir::new().expect("tempdir");
     let mut config = Config::default();
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
-    config.ducklake.metadata_path =
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
+    config.ducklake.metadata_path = crate::util::config::test_postgres_dsn();
     config.ducklake.catalog_alias = "softprobe".to_string();
     // Shared mode binds to the process-default catalog; keep request schema identical.
     let tenant_schema = format!("softprobe_promoted_{suffix}");
@@ -76,12 +75,10 @@ async fn promoted_service_and_division_columns_are_queryable_after_ingest() {
 }
 
 async fn insert_active_trace_promotion_spec(schema: &str) {
-    let (client, connection) = tokio_postgres::connect(
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
-        NoTls,
-    )
-    .await
-    .expect("connect postgres");
+    let (client, connection) =
+        tokio_postgres::connect(&crate::util::config::test_postgres_dsn(), NoTls)
+            .await
+            .expect("connect postgres");
     tokio::spawn(async move {
         let _ = connection.await;
     });

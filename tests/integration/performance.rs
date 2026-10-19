@@ -46,8 +46,7 @@ fn load_perf_config() -> Config {
     // Local integration infrastructure uses the PostgreSQL DuckLake catalog.
     let backend = std::env::var("E2E_BACKEND").unwrap_or_else(|_| "local".to_string());
     if backend == "local" || backend == "gcs" {
-        config.ducklake.metadata_path =
-            "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
+        config.ducklake.metadata_path = crate::util::config::test_postgres_dsn();
     }
     config
 }

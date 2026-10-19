@@ -4,12 +4,10 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn creates_promotion_metadata_tables_in_separate_tenant_schemas() {
-    let (client, connection) = tokio_postgres::connect(
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
-        NoTls,
-    )
-    .await
-    .expect("connect ducklake postgres");
+    let (client, connection) =
+        tokio_postgres::connect(&crate::util::config::test_postgres_dsn(), NoTls)
+            .await
+            .expect("connect ducklake postgres");
     tokio::spawn(async move {
         let _ = connection.await;
     });

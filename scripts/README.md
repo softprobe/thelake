@@ -8,7 +8,7 @@ provide explicit operator utilities.
 | Area | Scripts | Make targets |
 |---|---|---|
 | Build | `download-ducklake-extension.sh`, `assert-duckdb-version.sh` | `build-release`, `test`, `test-e2e`, `test-perf` |
-| Test orchestration | `run-e2e-matrix.sh`, `run-isolated-cargo-tests.sh` | `test-e2e`, `test-perf` |
+| Test orchestration | `test_stack.py`, `run-e2e-matrix.sh`, `run-isolated-cargo-tests.sh` | `test-e2e`, `test-perf`, browser E2E targets |
 | Compatibility | `compat/*.sh`, `compat/run-with-timeout` | `test-compat`, `test-grafana-static`, `test-grafana-system`, `test-loki-diff`, `test-tempo-diff` |
 | Grafana | `grafana-system-smoke.sh`, `grafana-manual-up.sh`, `grafana-manual-down.sh`, `test-grafana-browser.sh` | `test-grafana-system`, `grafana-up`, `grafana-down`, `test-grafana-browser` |
 | Performance | `bench-demo-cpu-full.sh`, `bench-llm-seeded.sh`, `perf/*.py` | `bench-demo-cpu-full`, `bench-llm-seeded`, `test-perf-helpers` |
@@ -17,6 +17,12 @@ provide explicit operator utilities.
 Shared shell helpers live under `lib/`. Compatibility validation and image
 pinning helpers live under `compat/`; performance utilities live under
 `perf/`.
+
+Docker-backed automated tests use [`test_stack.py`](test_stack.py) as their
+single startup/teardown owner. See
+[`Automated test environments`](../docs/how-to/test-environments.md).
+The Explorer UI harness also uses `run-explorer-e2e-services.py` to supervise
+TheLake and Lisa on pre-bound, dynamically assigned HTTP ports.
 
 ## Operator utilities
 

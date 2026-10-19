@@ -28,8 +28,7 @@ fn shared_config(temp: &TempDir, registry_schema: String) -> Config {
     config.shrink_pools_for_tests();
     config.query.max_connections = 2;
     config.query.cache_dir = Some(temp.path().join("cache").to_string_lossy().into());
-    config.ducklake.metadata_path =
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
+    config.ducklake.metadata_path = crate::util::config::test_postgres_dsn();
     config.ducklake.metadata_schema = registry_schema;
     config.ducklake.data_path = temp.path().join("shared_data").to_string_lossy().into();
     config.ducklake.workspace_scope_mode =
@@ -245,12 +244,10 @@ async fn get_trace(router: &Router, workspace: &str, trace_id: &str) -> (StatusC
 }
 
 async fn ducklake_relation_exists(schema: &str, relation: &str) -> bool {
-    let (client, connection) = tokio_postgres::connect(
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
-        NoTls,
-    )
-    .await
-    .expect("connect DuckLake catalog");
+    let (client, connection) =
+        tokio_postgres::connect(&crate::util::config::test_postgres_dsn(), NoTls)
+            .await
+            .expect("connect DuckLake catalog");
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -268,8 +265,8 @@ async fn ducklake_relation_exists(schema: &str, relation: &str) -> bool {
 
 #[tokio::test]
 async fn shared_scope_stamps_writes_filters_queries_and_shares_promotions() {
-    let dsn = "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake";
-    let (client, connection) = tokio_postgres::connect(dsn, NoTls)
+    let dsn = crate::util::config::test_postgres_dsn();
+    let (client, connection) = tokio_postgres::connect(&dsn, NoTls)
         .await
         .expect("shared scope contract requires ducklake-postgres");
     tokio::spawn(async move {

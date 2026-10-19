@@ -156,25 +156,8 @@ async fn assert_warm_writes_zero_probes_contract(
 
 #[tokio::test]
 async fn warm_writes_perform_zero_schema_probes_postgres() {
-    let pg_host = std::env::var("PG_HOST").unwrap_or_else(|_| "localhost".to_string());
-    let pg_port = std::env::var("PG_PORT").unwrap_or_else(|_| "5432".to_string());
-    let conn_str =
-        format!("host={pg_host} port={pg_port} dbname=ducklake user=ducklake password=ducklake");
-
-    // Check if Postgres is reachable; skip if not running in local environment
-    if tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
-        .await
-        .is_err()
-    {
-        eprintln!(
-            "skipping warm_writes_perform_zero_schema_probes_postgres: PostgreSQL not reachable at {conn_str}"
-        );
-        return;
-    }
-
     let temp = TempDir::new().expect("temp");
     let mut config = file_backed_test_config(&temp);
-    config.ducklake.metadata_path = conn_str;
     let suffix = uuid::Uuid::new_v4().to_string().replace('-', "_");
     config.ducklake.metadata_schema = format!("hotpath_reg_{suffix}");
 

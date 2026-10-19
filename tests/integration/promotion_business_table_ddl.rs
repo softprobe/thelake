@@ -63,8 +63,7 @@ async fn ducklake_writer_applies_business_table_to_tenant_scope() {
     let temp = TempDir::new().expect("tempdir");
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
     let mut config = Config::default();
-    config.ducklake.metadata_path =
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
+    config.ducklake.metadata_path = crate::util::config::test_postgres_dsn();
     config.ducklake.catalog_alias = "softprobe".to_string();
     // Keep schema names ≤63 chars (Postgres identifier limit) to avoid silent truncation collisions.
     let short = &suffix[..8.min(suffix.len())];
@@ -125,12 +124,10 @@ async fn assert_ducklake_relation_exists(
     name_column: &str,
     relation: &str,
 ) {
-    let (client, connection) = tokio_postgres::connect(
-        "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake",
-        NoTls,
-    )
-    .await
-    .expect("connect ducklake postgres");
+    let (client, connection) =
+        tokio_postgres::connect(&crate::util::config::test_postgres_dsn(), NoTls)
+            .await
+            .expect("connect ducklake postgres");
     tokio::spawn(async move {
         let _ = connection.await;
     });

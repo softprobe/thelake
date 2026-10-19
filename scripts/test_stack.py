@@ -62,6 +62,25 @@ def _ensure_project_unused(project_name: str) -> None:
             )
 
 
+def _compose_resources(project_name: str) -> dict[str, list[str]]:
+    resources = {}
+    for name, command in (
+        ("containers", ["docker", "ps", "--all", "--quiet"]),
+        ("volumes", ["docker", "volume", "ls", "--quiet"]),
+        ("networks", ["docker", "network", "ls", "--quiet"]),
+    ):
+        result = _run(
+            [*command, "--filter", f"label=com.docker.compose.project={project_name}"],
+            check=False,
+        )
+        if result.returncode:
+            raise RuntimeError(
+                f"Cannot verify Docker project ownership: {result.stderr.strip()}"
+            )
+        resources[name] = sorted(result.stdout.split())
+    return resources
+
+
 def _save_state(state: dict) -> Path:
     path = Path(state["state_file"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,11 +141,34 @@ def _stop(state_file: Path) -> dict:
         raise RuntimeError("Invalid test-run state file")
     if state.get("project_name") != f"thelake-test-{suite}-{run_id}":
         raise RuntimeError("Test-run state does not own the declared Compose project")
+    if state.get("status") not in {"starting", "running", "cleanup-required"}:
+        raise RuntimeError("Refusing to stop a test run that is not active or awaiting cleanup")
     artifacts = Path(state["artifact_dir"]).resolve(strict=True)
     if state_path.parent != artifacts or state_path.name != "stack.json":
         raise RuntimeError("Test-run state must stay in its artifact directory")
 
     if state["kind"] == "compose":
+        recorded_resources = state.get("compose_resources")
+        if not isinstance(recorded_resources, dict):
+            if state.get("status") not in {"starting", "cleanup-required"}:
+                raise RuntimeError(
+                    "Refusing Compose teardown because this run has no verified resource snapshot"
+                )
+            # The unique project was preflighted empty. Snapshot its labeled
+            # resources before recovering from an interrupted startup or retrying
+            # cleanup after Docker was unavailable.
+            recorded_resources = _compose_resources(state["project_name"])
+            state["compose_resources"] = recorded_resources
+            state["status"] = "cleanup-required"
+            _save_state(state)
+        current_resources = _compose_resources(state["project_name"])
+        if any(
+            not set(current_resources[name]).issubset(recorded_resources.get(name, []))
+            for name in current_resources
+        ):
+            raise RuntimeError(
+                "Refusing Compose teardown because current resources do not match this test run"
+            )
         _capture_compose(state)
         result = _run([*_compose_prefix(state), "down", "--volumes", "--remove-orphans"], check=False)
         if result.returncode:
@@ -134,19 +176,58 @@ def _stop(state_file: Path) -> dict:
                 _redact(result.stderr or result.stdout or "Docker Compose teardown failed")
             )
     elif state["kind"] == "container":
-        container_id = state["container_id"]
+        container_id = state.get("container_id")
+        if not container_id:
+            # docker run may have created the named container before its CLI
+            # process was interrupted and returned the container ID.
+            recovered = _run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    f"{{{{.Id}}}} {{{{ index .Config.Labels \"{RUN_LABEL}\" }}}}",
+                    state["container_name"],
+                ],
+                check=False,
+            )
+            if recovered.returncode and "no such object" in (
+                recovered.stderr + recovered.stdout
+            ).lower():
+                (artifacts / "container-logs.txt").write_text("", encoding="utf-8")
+                state["status"] = "stopped"
+                _save_state(state)
+                _remove_scratch(state)
+                return state
+            if recovered.returncode:
+                raise RuntimeError(
+                    _redact(recovered.stderr or recovered.stdout or "Docker inspect failed")
+                )
+            recovered_id, owner_id = recovered.stdout.split(maxsplit=1)
+            if owner_id.strip() != run_id:
+                raise RuntimeError("Refusing to remove a container not owned by this test run")
+            container_id = recovered_id
+            state["container_id"] = container_id
+            _save_state(state)
         owner = _run(
             ["docker", "inspect", "--format", f"{{{{ index .Config.Labels \"{RUN_LABEL}\" }}}}", container_id],
             check=False,
         )
-        if owner.returncode == 0 and owner.stdout.strip() != run_id:
+        if owner.returncode and "no such object" in (owner.stderr + owner.stdout).lower():
+            (artifacts / "container-logs.txt").write_text("", encoding="utf-8")
+            state["status"] = "stopped"
+            _save_state(state)
+            _remove_scratch(state)
+            return state
+        if owner.returncode:
+            raise RuntimeError(_redact(owner.stderr or owner.stdout or "Docker inspect failed"))
+        if owner.stdout.strip() != run_id:
             raise RuntimeError("Refusing to remove a container not owned by this test run")
         logs = _run(["docker", "logs", container_id], check=False)
         (artifacts / "container-logs.txt").write_text(
             _redact(logs.stdout + logs.stderr), encoding="utf-8"
         )
         removed = _run(["docker", "rm", "--force", container_id], check=False)
-        if removed.returncode and owner.returncode == 0:
+        if removed.returncode:
             raise RuntimeError(_redact(removed.stderr or "Docker container teardown failed"))
     else:
         raise RuntimeError("Unknown test-run resource kind")
@@ -180,19 +261,92 @@ def _start_compose(args: argparse.Namespace) -> dict:
     if args.wait:
         command.append("--wait")
     command.extend(args.service)
-    result = _run(command, check=False)
+    try:
+        result = _run(command, check=False)
+    except KeyboardInterrupt as error:
+        (Path(state["artifact_dir"]) / "compose-start.txt").write_text(
+            "Test process interrupted during Docker Compose startup.\n", encoding="utf-8"
+        )
+        _capture_compose(state)
+        try:
+            state["compose_resources"] = _compose_resources(state["project_name"])
+            cleanup = _run(
+                [*prefix, "down", "--volumes", "--remove-orphans"], check=False
+            )
+        except (OSError, RuntimeError) as cleanup_error:
+            state["compose_resources"] = None
+            cleanup = subprocess.CompletedProcess([], 1, "", str(cleanup_error))
+        state["status"] = "failed" if cleanup.returncode == 0 else "cleanup-required"
+        _save_state(state)
+        if cleanup.returncode == 0:
+            _remove_scratch(state)
+        else:
+            (Path(state["artifact_dir"]) / "compose-cleanup.txt").write_text(
+                _redact(cleanup.stdout + cleanup.stderr), encoding="utf-8"
+            )
+        raise RuntimeError(
+            "Docker Compose startup was interrupted"
+            + (
+                f"; cleanup failed, retry with `python3 scripts/test_stack.py stop --state-file {state['state_file']}`"
+                if cleanup.returncode
+                else " and the test stack was removed"
+            )
+        ) from error
     (Path(state["artifact_dir"]) / "compose-start.txt").write_text(
         _redact(result.stdout + result.stderr), encoding="utf-8"
     )
     if result.returncode:
         _capture_compose(state)
-        _run([*prefix, "down", "--volumes", "--remove-orphans"], check=False)
-        state["status"] = "failed"
+        try:
+            state["compose_resources"] = _compose_resources(state["project_name"])
+        except (OSError, RuntimeError):
+            state["compose_resources"] = None
+        cleanup = _run(
+            [*prefix, "down", "--volumes", "--remove-orphans"], check=False
+        )
+        state["status"] = "failed" if cleanup.returncode == 0 else "cleanup-required"
         _save_state(state)
-        _remove_scratch(state)
+        if cleanup.returncode == 0:
+            _remove_scratch(state)
+        else:
+            (Path(state["artifact_dir"]) / "compose-cleanup.txt").write_text(
+                _redact(cleanup.stdout + cleanup.stderr), encoding="utf-8"
+            )
         raise RuntimeError(
             f"Docker Compose failed to start the test stack; see {state['artifact_dir']}/compose-start.txt"
+            + (
+                f". Cleanup also failed; retry with `python3 scripts/test_stack.py stop --state-file {state['state_file']}`"
+                if cleanup.returncode
+                else ""
+            )
         )
+    try:
+        state["compose_resources"] = _compose_resources(state["project_name"])
+    except (OSError, RuntimeError) as error:
+        _capture_compose(state)
+        try:
+            state["compose_resources"] = _compose_resources(state["project_name"])
+        except (OSError, RuntimeError):
+            state["compose_resources"] = None
+        cleanup = _run(
+            [*prefix, "down", "--volumes", "--remove-orphans"], check=False
+        )
+        state["status"] = "failed" if cleanup.returncode == 0 else "cleanup-required"
+        _save_state(state)
+        if cleanup.returncode == 0:
+            _remove_scratch(state)
+        else:
+            (Path(state["artifact_dir"]) / "compose-cleanup.txt").write_text(
+                _redact(cleanup.stdout + cleanup.stderr), encoding="utf-8"
+            )
+        raise RuntimeError(
+            f"Could not record Docker resources for test stack; see {state['artifact_dir']}"
+            + (
+                f". Cleanup also failed; retry with `python3 scripts/test_stack.py stop --state-file {state['state_file']}`"
+                if cleanup.returncode
+                else ""
+            )
+        ) from error
     ports = {}
     for specification in args.published_port:
         service, container_port = specification.rsplit(":", 1)
@@ -225,21 +379,62 @@ def _start_container(args: argparse.Namespace) -> dict:
     command.extend(container_command)
     state.update({"kind": "container", "container_name": container_name})
     _save_state(state)
-    result = _run(command, check=False)
+    try:
+        result = _run(command, check=False)
+    except KeyboardInterrupt as error:
+        (Path(state["artifact_dir"]) / "container-start.txt").write_text(
+            "Test process interrupted during Docker container startup.\n", encoding="utf-8"
+        )
+        state["status"] = "cleanup-required"
+        _save_state(state)
+        try:
+            _stop(Path(state["state_file"]))
+        except (OSError, RuntimeError) as cleanup_error:
+            raise RuntimeError(
+                "Docker container startup was interrupted; cleanup failed, retry with "
+                f"`python3 scripts/test_stack.py stop --state-file {state['state_file']}`"
+            ) from cleanup_error
+        raise RuntimeError(
+            "Docker container startup was interrupted and the test container was removed"
+        ) from error
     (Path(state["artifact_dir"]) / "container-start.txt").write_text(
         _redact(result.stdout + result.stderr), encoding="utf-8"
     )
     if result.returncode:
-        state["status"] = "failed"
+        # A failed `docker run` can still leave a created container behind.
+        # Resolve it by this run's unique name and verify its label before removal.
+        state["status"] = "cleanup-required"
         _save_state(state)
-        _remove_scratch(state)
+        try:
+            _stop(Path(state["state_file"]))
+        except (OSError, RuntimeError) as cleanup_error:
+            raise RuntimeError(
+                "Docker failed to start the test container; cleanup failed, retry with "
+                f"`python3 scripts/test_stack.py stop --state-file {state['state_file']}`; "
+                "see container-start.txt"
+            ) from cleanup_error
         raise RuntimeError("Docker failed to start the test container; see container-start.txt")
     state["container_id"] = result.stdout.strip()
+    _save_state(state)
     ports = {}
-    for container_port in args.published_port:
-        output = _run(["docker", "port", state["container_id"], container_port], check=False)
-        if output.returncode == 0 and output.stdout.strip():
-            ports[container_port] = output.stdout.strip().splitlines()
+    try:
+        for container_port in args.published_port:
+            output = _run(["docker", "port", state["container_id"], container_port], check=False)
+            if output.returncode == 0 and output.stdout.strip():
+                ports[container_port] = output.stdout.strip().splitlines()
+    except KeyboardInterrupt as error:
+        state["status"] = "cleanup-required"
+        _save_state(state)
+        try:
+            _stop(Path(state["state_file"]))
+        except (OSError, RuntimeError) as cleanup_error:
+            raise RuntimeError(
+                "Docker port discovery was interrupted; cleanup failed, retry with "
+                f"`python3 scripts/test_stack.py stop --state-file {state['state_file']}`"
+            ) from cleanup_error
+        raise RuntimeError(
+            "Docker port discovery was interrupted and the test container was removed"
+        ) from error
     state["ports"] = ports
     state["status"] = "running"
     _save_state(state)
