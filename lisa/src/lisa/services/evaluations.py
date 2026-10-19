@@ -32,9 +32,9 @@ from ..evaluation.scores import (
 )
 from ..evaluation.trajectory import build_trajectory_events, session_timestamp
 from ..llm_recording import recording_scope
-from ..models.work_items import EvaluationWorkItem, ScoreOutboxItem, WorkItemClaim
+from ..models.activities import EvaluationRun, ScoreOutboxItem, ActivityClaim
 from ..repositories.evaluation_artifacts import EvaluationArtifactRepository
-from ..repositories.work_items import PostgresWorkItemStore, StaleLeaseError
+from ..repositories.activities import PostgresActivityStore, StaleLeaseError
 from ..security import redact_evidence, redact_text
 from ..thelake_client import TheLakeClient
 from .failures import FailureService
@@ -58,7 +58,7 @@ class EvaluationService:
         *,
         sessions: SessionService,
         policy_triage: OpenAIPolicyTriager,
-        work_items: PostgresWorkItemStore | None = None,
+        activities: PostgresActivityStore | None = None,
         artifact_repository: EvaluationArtifactRepository | None = None,
         render_context: Callable[[dict], str] | None = None,
     ):
@@ -69,13 +69,17 @@ class EvaluationService:
         self.notifier = notifier
         self.judge = judge
         self.sessions = sessions
-        self.work_items = work_items
+        self.activities = activities
         self.policy_triage = policy_triage
         self.artifact_repository = artifact_repository
         self.render_context = render_context
 
     def _triage_policies_for_session(
-        self, target_agent_name: str, session_id: str, session_detail: dict | None = None
+        self,
+        target_agent_name: str,
+        session_id: str,
+        session_detail: dict | None = None,
+        activity_id: str | None = None,
     ) -> tuple[dict, dict | None]:
         """Triage approved policies for a session and return its compact trajectory.
 
@@ -138,28 +142,101 @@ class EvaluationService:
                 },
                 trajectory,
             )
-        # Triage escalates suspected violations and uncertain evidence; only the judge issues verdicts.
-        with recording_scope(self.context, session_id=session_id):
-            selection = self.policy_triage.triage(trajectory, rules)
+        known_decisions = (
+            self.activities.policy_triage_decisions(
+                session_id, [rule.id for rule in rules]
+            )
+            if self.activities
+            else {}
+        )
+        unseen_rules = [rule for rule in rules if rule.id not in known_decisions]
+        selection = {"selected_policies": [], "policy_decisions": []}
+        if unseen_rules:
+            # Triage only session-policy pairs that have no completed decision yet.
+            with recording_scope(
+                self.context, session_id=session_id, activity_id=activity_id
+            ):
+                selection = self.policy_triage.triage(trajectory, unseen_rules)
+            selected_ids = {
+                item.get("id") for item in selection.get("selected_policies", [])
+            }
+            expected_ids = {rule.id for rule in unseen_rules}
+            if not selected_ids <= expected_ids:
+                unknown_ids = ", ".join(
+                    sorted(str(policy_id) for policy_id in selected_ids - expected_ids)
+                )
+                raise RuntimeError(
+                    f"Selected policy {unknown_ids} is not in the approved candidate set"
+                )
+            decision_items = selection.get("policy_decisions")
+            if decision_items is None:
+                raise RuntimeError("Policy triage did not return one decision per candidate")
+            if (
+                len(decision_items) != len(expected_ids)
+                or {item.get("id") for item in decision_items} != expected_ids
+            ):
+                raise RuntimeError("Policy triage did not return one decision per candidate")
+            valid_decisions = {
+                "suspected_violation",
+                "no_violation_found",
+                "insufficient_evidence",
+            }
+            decision_selected_ids = set()
+            for item in decision_items:
+                if item.get("decision") not in valid_decisions:
+                    raise RuntimeError("Policy triage returned an invalid candidate decision")
+                if item["decision"] != "no_violation_found":
+                    decision_selected_ids.add(item["id"])
+            if selected_ids != decision_selected_ids:
+                raise RuntimeError("Policy triage selections and decisions do not match")
+            if self.activities:
+                self.activities.record_policy_triage_decisions(session_id, decision_items)
+            known_decisions.update(
+                {item["id"]: item["decision"] for item in decision_items}
+            )
+
+        if self.activities:
+            known_decisions = self.activities.policy_triage_decisions(
+                session_id, [rule.id for rule in rules]
+            )
+            if set(known_decisions) != {rule.id for rule in rules}:
+                raise RuntimeError("Policy triage decisions were not durably recorded")
+
+        decision_by_id = {
+            rule.id: {
+                "id": rule.id,
+                "name": rule.name,
+                "scope": rule.scope,
+                "decision": known_decisions.get(rule.id),
+            }
+            for rule in rules
+        }
+        policy_decisions = [decision_by_id[rule.id] for rule in rules]
+        selected = [
+            {key: decision_by_id[rule.id][key] for key in ("id", "name", "scope")}
+            for rule in rules
+            if decision_by_id[rule.id]["decision"] != "no_violation_found"
+        ]
         return (
             {
                 "session_id": session_id,
                 "target_agent_name": target_agent_name,
                 "candidate_count": len(rules),
-                "selected_policies": selection["selected_policies"],
+                "selected_policies": selected,
                 **{
                     key: selection[key]
                     for key in ("limitations", "prompt_truncations", "policy_decisions")
-                    if key in selection
+                    if key in selection and key != "policy_decisions"
                 },
+                "policy_decisions": policy_decisions,
             },
             trajectory,
         )
 
     def evaluate_session(self, target_agent_name: str, session_id: str) -> dict:
         """Investigate suspected violations and unresolved evidence in one session."""
-        if self.work_items:
-            pending = self.work_items.find_pending_evaluations_for_session(
+        if self.activities:
+            pending = self.activities.find_pending_evaluations_for_session(
                 target_agent_name, session_id
             )
             if pending:
@@ -180,12 +257,59 @@ class EvaluationService:
                 "evaluations": [],
             }
         session_detail = self._session_detail(session_id)
-        selection, trajectory = self._triage_policies_for_session(
-            target_agent_name, session_id, session_detail=session_detail
-        )
+        activity = None
+        if self.activities:
+            activity = self.activities.create_activity(
+                title=f"Evaluate {target_agent_name} session {session_id}",
+                source=self.context.turn_source,
+                kind="policy_evaluation",
+            )
+        try:
+            selection, trajectory = self._triage_policies_for_session(
+                target_agent_name,
+                session_id,
+                session_detail=session_detail,
+                activity_id=activity.id if activity else None,
+            )
+        except Exception as error:
+            if activity:
+                self.activities.record_activity_event(
+                    activity.id,
+                    "policy_triage_failed",
+                    title="Policy triage failed",
+                    summary=f"Policy triage failed with {type(error).__name__}.",
+                )
+                self.activities.finish_activity_without_claim(
+                    activity.id, "Policy triage failed.", status="failed"
+                )
+            raise
         selected = selection["selected_policies"]
+        if activity:
+            for item in selection.get("policy_decisions", []):
+                self.activities.record_activity_event(
+                    activity.id,
+                    "policy_triage_decision",
+                    title=f"Triaged policy {item['id']}: {item.get('name') or item['id']}",
+                    summary=item["decision"],
+                )
         if not selected:
-            return {**selection, "evaluations": []}
+            if activity:
+                status = selection.get("status", "triaged")
+                summary = (
+                    "Triage completed; no policies required judging."
+                    if status == "triaged"
+                    else f"Policy evaluation ended with status {status}."
+                )
+                self.activities.record_activity_event(
+                    activity.id,
+                    "policy_review_completed",
+                    title="Policy review completed",
+                    summary=summary,
+                )
+                self.activities.finish_activity_without_claim(
+                    activity.id, summary,
+                )
+            return {**selection, "activity_id": activity.id if activity else None, "evaluations": []}
 
         rules_by_id = {rule.id: rule for rule in rules}
         selection_context = {
@@ -214,15 +338,32 @@ class EvaluationService:
                     _session_detail=session_detail,
                     _trajectory=trajectory,
                     _selection=selection_context,
+                    _activity_id=activity.id if activity else None,
+                    _defer_activity_finish=True,
                 )
             )
+        evaluation_activity_ids = {activity.id} if activity else set()
+        evaluation_activity_ids.update(
+            item["activity_id"] for item in evaluations if item.get("activity_id")
+        )
+        if activity and all(
+            item.get("status") not in {"error", "already_running", "policy_unavailable"}
+            for item in evaluations
+        ):
+            for evaluation_activity_id in evaluation_activity_ids:
+                self.activities.finish_activity_when_complete(evaluation_activity_id)
         return {
             **selection,
             "status": (
                 "evaluation_error"
-                if any(item.get("status") in {"error", "already_running"} for item in evaluations)
+                if any(
+                    item.get("status")
+                    in {"error", "already_running", "policy_unavailable"}
+                    for item in evaluations
+                )
                 else "evaluated"
             ),
+            "activity_id": activity.id if activity else None,
             "evaluations": evaluations,
         }
 
@@ -277,12 +418,14 @@ class EvaluationService:
         _session_detail: dict | None = None,
         _trajectory: dict | None = None,
         _selection: dict | None = None,
+        _activity_id: str | None = None,
+        _defer_activity_finish: bool = False,
     ) -> dict:
         """Evaluate one approved named policy against a session and store its verdict."""
         policy = None
-        if self.work_items:
+        if self.activities:
             if policy_id is not None:
-                pending = self.work_items.find_pending_evaluation_for_policy(
+                pending = self.activities.find_pending_evaluation_for_policy(
                     policy_id, target_agent_name, session_id
                 )
                 if pending:
@@ -290,7 +433,7 @@ class EvaluationService:
                     return self._recover_pending_score(*pending)
             else:
                 policy = self._policy(target_agent_name, name)
-                pending = self.work_items.find_pending_evaluation_for_policy(
+                pending = self.activities.find_pending_evaluation_for_policy(
                     policy["policy_id"],
                     target_agent_name,
                     session_id,
@@ -307,11 +450,13 @@ class EvaluationService:
                 session_detail_override=_session_detail,
                 trajectory_override=_trajectory,
                 selection=_selection,
+                activity_id=_activity_id,
+                defer_activity_finish=_defer_activity_finish,
             )
 
     @staticmethod
     def _validate_pending_identity(
-        pending: tuple[EvaluationWorkItem, ScoreOutboxItem],
+        pending: tuple[EvaluationRun, ScoreOutboxItem],
         target_agent_name: str,
         name: str,
         policy_id: str | None = None,
@@ -332,18 +477,19 @@ class EvaluationService:
         ):
             raise ValueError("The selected policy ID does not match the pending policy")
 
-    def _recover_pending_score(self, work_item, outbox) -> dict:
-        assert self.work_items is not None
+    def _recover_pending_score(self, activity, outbox) -> dict:
+        assert self.activities is not None
         owner = "lisa-evaluation"
-        claim = self.work_items.claim_work_item(work_item.id, owner, lease_seconds=300)
+        claim = self.activities.claim_activity(activity.activity_id, owner, lease_seconds=300)
         if claim is None:
             return {
                 "status": "already_running",
-                "session_id": work_item.session_id,
+                "session_id": activity.session_id,
                 "stored": False,
-                "work_item_id": work_item.id,
+                "activity_id": activity.activity_id,
+                "evaluation_id": activity.id,
             }
-        self._start_lease_heartbeat(work_item.id, owner, claim)
+        self._start_lease_heartbeat(activity.activity_id, owner, claim)
         payload = outbox.score_payload
         result = self._result_from_score_payload(payload)
         metadata = payload.get("metadata") or {}
@@ -361,7 +507,7 @@ class EvaluationService:
         if result["status"] == "fail":
             self.failures.record(
                 failure_policy,
-                work_item.session_id,
+                activity.session_id,
                 payload["trace_id"],
                 str(result.get("rationale") or "Policy failed."),
                 payload.get("timestamp"),
@@ -370,10 +516,11 @@ class EvaluationService:
         try:
             _, status_code = self.client.post("/v1/scores", payload, include_status=True)
         except Exception:
-            self._release_retryable(work_item.id, owner, claim, "TheLake score write interrupted")
+            self._release_retryable(activity.activity_id, owner, claim, "TheLake score write interrupted")
             raise
-        self.work_items.acknowledge_score(
-            work_item.id,
+        self.activities.acknowledge_score(
+            activity.activity_id,
+            activity.id,
             outbox.id,
             score_id=payload["score_id"],
             verdict=payload["string_value"],
@@ -382,14 +529,15 @@ class EvaluationService:
             summary=str(payload.get("comment") or payload["string_value"]),
         )
         if result["status"] == "fail":
-            self.failures.mark_ready(failure_policy, work_item.session_id, payload["trace_id"])
+            self.failures.mark_ready(failure_policy, activity.session_id, payload["trace_id"])
         return {
             **result,
             "evaluation_name": payload["name"],
-            "session_id": work_item.session_id,
+            "session_id": activity.session_id,
             "stored": True,
             "new_score": status_code == 201,
-            "work_item_id": work_item.id,
+            "activity_id": activity.activity_id,
+            "evaluation_id": activity.id,
         }
 
     def _evaluate_session_locked(
@@ -400,6 +548,8 @@ class EvaluationService:
         session_detail_override: dict | None = None,
         trajectory_override: dict | None = None,
         selection: dict | None = None,
+        activity_id: str | None = None,
+        defer_activity_finish: bool = False,
     ) -> dict:
         # TheLake returns session detail with a bounded span list. Redact secrets before
         # building the trajectory and before anything can be forwarded to the provider.
@@ -430,13 +580,13 @@ class EvaluationService:
         )
         policy["trajectory_hash"] = trajectory_hash
         existing = (
-            self.work_items.get_evaluation_by_request(
+            self.activities.get_evaluation_by_request(
                 policy["policy_hash"], session_id, request_key
             )
-            if self.work_items
+            if self.activities
             else None
         )
-        outbox = self.work_items.get_score_outbox(existing.id) if existing else None
+        outbox = self.activities.get_score_outbox(existing.id) if existing else None
         pending = (
             (existing, outbox)
             if existing and outbox and outbox.status == "pending"
@@ -445,17 +595,25 @@ class EvaluationService:
         # Postgres request identity is the dedupe authority. TheLake scores are
         # reporting copies and may outlive or lag the Lisa evaluation ledger.
         if existing and existing.status == "succeeded" and not pending:
+            if activity_id:
+                self.activities.record_activity_event(
+                    activity_id,
+                    "evaluation_reused",
+                    title=f"Reused result for {policy['name']}",
+                    summary=f"Existing evaluation {existing.id} has verdict {existing.verdict}.",
+                )
             return {
                 "status": "already_evaluated",
                 "verdict": existing.verdict,
                 "session_id": session_id,
                 "stored": True,
-                "work_item_id": existing.id,
+                "activity_id": activity_id or existing.activity_id,
+                "evaluation_id": existing.id,
             }
         # The no-Postgres development adapter keeps its previous score-history fallback.
         completed = (
             successful_policy_score(scores, policy, trace_id)
-            if not self.work_items
+            if not self.activities
             else None
         )
         if completed and not pending:
@@ -482,11 +640,20 @@ class EvaluationService:
                 "stored": True,
             }
             if existing:
-                result["work_item_id"] = existing.id
+                result["activity_id"] = existing.id
             return result
         if not trajectory["events"] and not pending:
             return {"status": "insufficient_evidence", "session_id": session_id, "stored": False}
-        if self.work_items:
+        if self.activities:
+            activity_id = activity_id or str(uuid4())
+            if not self.activities.activity_exists(activity_id):
+                self.activities.create_activity(
+                    title=f"Evaluate {policy['name']} for {policy['target_agent_name']}",
+                    source=self.context.turn_source,
+                    kind="policy_evaluation",
+                    activity_id=activity_id,
+                    context_path=f"activities/{activity_id}",
+                )
             return self._evaluate_tracked(
                 policy,
                 session_id,
@@ -498,14 +665,16 @@ class EvaluationService:
                 existing,
                 pending[1] if pending else None,
                 selection,
+                activity_id,
+                defer_activity_finish,
             )
 
         return self._evaluate_untracked(
             policy, session_id, trace_id, spans, trajectory, run_id, selection
         )
 
-    def _run_judge(self, request: dict, *, session_id: str, work_item_id: str | None = None):
-        with recording_scope(self.context, session_id=session_id, work_item_id=work_item_id):
+    def _run_judge(self, request: dict, *, session_id: str, activity_id: str | None = None):
+        with recording_scope(self.context, session_id=session_id, activity_id=activity_id):
             return self.judge(request)
 
     def _evaluate_untracked(
@@ -571,21 +740,29 @@ class EvaluationService:
         trajectory: dict,
         run_id: str,
         request_key: str,
-        existing: EvaluationWorkItem | None,
+        existing: EvaluationRun | None,
         outbox,
         selection: dict | None = None,
+        requested_activity_id: str | None = None,
+        defer_activity_finish: bool = False,
     ) -> dict:
-        assert self.work_items is not None
+        assert self.activities is not None
         if self.artifact_repository is None or self.render_context is None:
             raise RuntimeError("Evaluation artifact storage and context view are not configured")
-        work_item_id = existing.id if existing else str(uuid4())
-        context_path = (
-            existing.context_path
-            if existing and existing.context_path
-            else f"work-items/{work_item_id}"
+        activity_id = (
+            existing.activity_id if existing else (requested_activity_id or str(uuid4()))
         )
-        run_dir = self.artifact_repository.prepare_run_directory(context_path, work_item_id)
-        work_item = self.work_items.create_evaluation(
+        context_path = existing.context_path if existing and existing.context_path else f"activities/{activity_id}"
+        if not self.activities.activity_exists(activity_id):
+            self.activities.create_activity(
+                title=f"Evaluate {policy['name']} for {policy['target_agent_name']}",
+                source=self.context.turn_source,
+                kind="policy_evaluation",
+                activity_id=activity_id,
+                context_path=context_path,
+            )
+        run_dir = self.artifact_repository.prepare_run_directory(context_path, activity_id)
+        evaluation = self.activities.create_evaluation(
             title=f"Evaluate {policy['name']} for {policy['target_agent_name']}",
             source=self.context.turn_source,
             target_agent_name=policy["target_agent_name"],
@@ -599,27 +776,31 @@ class EvaluationService:
                 "judge_model": os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash"),
             },
             request_key=request_key,
-            work_item_id=work_item_id,
+            activity_id=activity_id,
             context_path=context_path,
         )
-        if work_item.id != work_item_id:
-            run_dir = self.artifact_repository.prepare_run_directory(
-                work_item.context_path or f"work-items/{work_item.id}", work_item.id
+        activity_id = evaluation.activity_id
+        if requested_activity_id and requested_activity_id != activity_id:
+            self.activities.record_activity_event(
+                requested_activity_id,
+                "evaluation_resumed",
+                title=f"Resumed evaluation for {policy['name']}",
+                summary=f"Evaluation {evaluation.id} continues on activity {activity_id}.",
             )
         owner = "lisa-evaluation"
-        claim = self.work_items.claim_work_item(work_item.id, owner, lease_seconds=300)
+        claim = self.activities.claim_activity(activity_id, owner, lease_seconds=300)
         if claim is None:
             return {
                 "status": "already_running",
                 "session_id": session_id,
                 "stored": False,
-                "work_item_id": work_item.id,
+                "activity_id": activity_id,
+                "evaluation_id": evaluation.id,
             }
-        self._start_lease_heartbeat(work_item.id, owner, claim)
+        self._start_lease_heartbeat(activity_id, owner, claim)
 
-        saved = self.work_items.get_context_item_for_work_item(
-            work_item.id, "evaluation_inputs"
-        )
+        context_kind = f"evaluation_inputs_{policy['policy_id']}"
+        saved = self.activities.get_context_item_for_activity(activity_id, context_kind)
         if saved:
             inputs = saved.content
             trajectory = inputs["trajectory"]
@@ -635,127 +816,102 @@ class EvaluationService:
                 "trajectory": trajectory,
                 "policy_selection": selection,
             }
-            self.work_items.save_context_item(
-                work_item.id,
-                "evaluation_inputs",
+            self.activities.save_context_item(
+                activity_id,
+                context_kind,
                 inputs,
                 actor=owner,
                 fencing_token=claim.fencing_token,
                 source_ref=f"session:{session_id}",
             )
-        self.artifact_repository.save_inputs(run_dir, inputs, self.render_context(inputs))
+        self.artifact_repository.save_inputs(
+            run_dir, inputs, self.render_context(inputs), artifact_key=policy["policy_id"]
+        )
 
         if outbox is None:
-            # Load the live approved rule for judging; do not copy policy text into the run.
             trajectory_hash = policy.get("trajectory_hash")
             try:
                 policy = self._policy(
-                    inputs["target_agent_name"],
-                    inputs["policy_name"],
-                    inputs["policy_id"],
+                    inputs["target_agent_name"], inputs["policy_name"], inputs["policy_id"]
                 )
                 policy["trajectory_hash"] = trajectory_hash
             except ValueError as error:
-                self._release_retryable(work_item.id, owner, claim, str(error))
+                self._release_retryable(activity_id, owner, claim, str(error))
                 return {
-                    "status": "policy_unavailable",
-                    "rationale": str(error),
-                    "session_id": session_id,
-                    "stored": False,
-                    "work_item_id": work_item.id,
+                    "status": "policy_unavailable", "rationale": str(error),
+                    "session_id": session_id, "stored": False,
+                    "activity_id": activity_id,
+                    "evaluation_id": evaluation.id,
                 }
-            self.work_items.append_event(
-                work_item.id,
-                "judging_started",
-                title="Judging session trajectory",
-                actor=owner,
-                fencing_token=claim.fencing_token,
+            self.activities.append_event(
+                activity_id, "judging_started", title=f"Judging {policy['name']}",
+                actor=owner, fencing_token=claim.fencing_token,
             )
             try:
                 result = redact_evidence(
                     self._run_judge(
                         self._judge_request(run_id, policy, trajectory, trace_id),
-                        session_id=session_id, work_item_id=work_item.id,
+                        session_id=session_id, activity_id=activity_id,
                     )
                 )
             except Exception:
-                self._release_retryable(work_item.id, owner, claim, "Judge call interrupted")
+                self._release_retryable(activity_id, owner, claim, "Judge call interrupted")
                 raise
             if result.get("status") == "error":
                 self._release_retryable(
-                    work_item.id, owner, claim, str(result.get("rationale") or "Judge unavailable")
+                    activity_id, owner, claim, str(result.get("rationale") or "Judge unavailable")
                 )
                 return {
-                    **result,
-                    "evaluation_name": policy["name"],
-                    "session_id": session_id,
-                    "stored": False,
-                    "work_item_id": work_item.id,
+                    **result, "evaluation_name": policy["name"], "session_id": session_id,
+                    "stored": False, "activity_id": activity_id,
+                    "evaluation_id": evaluation.id,
                 }
             limitations = list(trajectory.get("limitations", []))
             limitations.extend((selection or {}).get("limitations", []))
             limitations.extend(result.get("limitations", []))
             payload = self._score_payload(
-                policy,
-                session_id,
-                trace_id,
-                run_id,
-                session_timestamp(spans),
-                result,
-                limitations,
+                policy, session_id, trace_id, run_id, session_timestamp(spans), result, limitations
             )
             if result["status"] == "fail":
                 self.failures.record(
-                    policy,
-                    session_id,
-                    trace_id,
+                    policy, session_id, trace_id,
                     str(result.get("rationale") or "Policy failed."),
-                    payload["timestamp"],
-                    score_payload=payload,
+                    payload["timestamp"], score_payload=payload,
                 )
-            outbox = self.work_items.prepare_score_outbox(
-                work_item.id,
-                payload,
-                actor=owner,
-                fencing_token=claim.fencing_token,
+            outbox = self.activities.prepare_score_outbox(
+                evaluation.id, payload, actor=owner, fencing_token=claim.fencing_token
             )
         else:
             payload = outbox.score_payload
             result = self._result_from_score_payload(payload)
             if result["status"] == "fail":
                 self.failures.record(
-                    policy,
-                    session_id,
-                    trace_id,
+                    policy, session_id, trace_id,
                     str(result.get("rationale") or "Policy failed."),
-                    payload.get("timestamp"),
-                    score_payload=payload,
+                    payload.get("timestamp"), score_payload=payload,
                 )
 
         try:
             _, status_code = self.client.post("/v1/scores", payload, include_status=True)
         except Exception:
-            self._release_retryable(work_item.id, owner, claim, "TheLake score write interrupted")
+            self._release_retryable(activity_id, owner, claim, "TheLake score write interrupted")
             raise
-        self.work_items.acknowledge_score(
-            work_item.id,
-            outbox.id,
-            score_id=payload["score_id"],
-            verdict=payload["string_value"],
-            actor=owner,
+        self.activities.acknowledge_score(
+            activity_id, evaluation.id, outbox.id,
+            score_id=payload["score_id"], verdict=payload["string_value"], actor=owner,
             fencing_token=claim.fencing_token,
             summary=str(payload.get("comment") or payload["string_value"]),
+            auto_finish=not defer_activity_finish,
         )
         if result["status"] == "fail":
             self.failures.mark_ready(policy, session_id, trace_id)
         return {
             **result,
             "limitations": self._result_from_score_payload(payload)["limitations"],
-            "evaluation_name": policy["name"],
-            "session_id": session_id,
-            "stored": True,
-            "new_score": status_code == 201,
-            "work_item_id": work_item.id,
+            "evaluation_name": policy["name"], "session_id": session_id,
+            "stored": True, "new_score": status_code == 201,
+            "activity_id": activity_id,
+            "evaluation_id": evaluation.id,
         }
 
     def _score_payload(
@@ -836,12 +992,12 @@ class EvaluationService:
         }
 
     def _release_retryable(
-        self, work_item_id: str, owner: str, claim: WorkItemClaim, reason: str
+        self, activity_id: str, owner: str, claim: ActivityClaim, reason: str
     ) -> None:
-        if self.work_items:
+        if self.activities:
             try:
-                self.work_items.release_work_item(
-                    work_item_id,
+                self.activities.release_activity(
+                    activity_id,
                     actor=owner,
                     fencing_token=claim.fencing_token,
                     reason=reason,
@@ -850,16 +1006,16 @@ class EvaluationService:
                 # The lease may have expired; recovery can reclaim it by fencing token.
                 return
 
-    def _start_lease_heartbeat(self, work_item_id: str, owner: str, claim: WorkItemClaim) -> None:
+    def _start_lease_heartbeat(self, activity_id: str, owner: str, claim: ActivityClaim) -> None:
         """Keep long provider calls fenced; a stale worker still cannot commit."""
-        assert self.work_items is not None
+        assert self.activities is not None
         stop = threading.Event()
 
         def renew() -> None:
             while not stop.wait(60):
                 try:
-                    current = self.work_items.renew_lease(
-                        work_item_id,
+                    current = self.activities.renew_lease(
+                        activity_id,
                         owner,
                         claim.fencing_token,
                         lease_seconds=300,
@@ -872,7 +1028,7 @@ class EvaluationService:
 
         threading.Thread(
             target=renew,
-            name=f"lisa-evaluation-lease-{work_item_id}",
+            name=f"lisa-evaluation-lease-{activity_id}",
             daemon=True,
         ).start()
 

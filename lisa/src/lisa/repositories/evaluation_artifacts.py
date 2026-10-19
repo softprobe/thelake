@@ -28,14 +28,14 @@ class EvaluationArtifactRepository:
         with file_lock(directory / f"{digest}.lock"):
             yield
 
-    def prepare_run_directory(self, relative_path: str, work_item_id: str) -> Path:
+    def prepare_run_directory(self, relative_path: str, activity_id: str) -> Path:
         home = self.context.home()
         relative = Path(relative_path)
         if relative.is_absolute() or ".." in relative.parts or not relative.parts:
             raise ValueError("Evaluation context path must stay inside Lisa's workspace home")
-        if relative.parts != ("work-items", work_item_id):
-            raise ValueError("Evaluation context path does not match its work item")
-        root = home / "work-items"
+        if relative.parts != ("activities", activity_id):
+            raise ValueError("Evaluation context path does not match its activity")
+        root = home / "activities"
         if root.is_symlink():
             raise ValueError("Evaluation context directory cannot be a symlink")
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -48,7 +48,10 @@ class EvaluationArtifactRepository:
         return run_dir
 
     @staticmethod
-    def save_inputs(run_dir: Path, inputs: dict, context_document: str) -> None:
+    def save_inputs(
+        run_dir: Path, inputs: dict, context_document: str, *, artifact_key: str | None = None
+    ) -> None:
         serialized = json.dumps(inputs, ensure_ascii=False, sort_keys=True, indent=2)
-        atomic_write_text(run_dir / "inputs.json", serialized)
-        atomic_write_text(run_dir / "context.md", context_document)
+        suffix = f"-{artifact_key}" if artifact_key else ""
+        atomic_write_text(run_dir / f"inputs{suffix}.json", serialized)
+        atomic_write_text(run_dir / f"context{suffix}.md", context_document)

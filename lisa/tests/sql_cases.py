@@ -41,6 +41,6 @@ def read_sql_case(name: str) -> str:
 
 
 def read_sql_file(name: str) -> str:
-    return (Path(__file__).parent / "sql" / "work_items" / f"{name}.sql").read_text(
+    return (Path(__file__).parent / "sql" / "activities" / f"{name}.sql").read_text(
         encoding="utf-8"
     )

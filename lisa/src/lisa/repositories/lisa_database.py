@@ -19,22 +19,25 @@ MAX_RESPONSE_BYTES = 32_000
 STATEMENT_TIMEOUT_MS = 1_500
 
 VIEW_COLUMNS = {
-    "readable_work_items": {
+    "readable_activities": {
         "id", "kind", "parent_id", "status", "title", "summary", "source",
         "created_at", "started_at", "updated_at", "finished_at",
     },
     "readable_evaluations": {
-        "work_item_id", "policy_id", "target_agent_name", "session_id", "policy_name",
-        "verdict", "score_id", "started_at", "finished_at",
+        "activity_id", "policy_id", "target_agent_name", "session_id", "policy_name",
+        "evaluation_id", "verdict", "score_id", "started_at", "finished_at",
     },
-    "readable_work_events": {
-        "work_item_id", "seq", "event_type", "title", "summary", "actor", "created_at",
+    "readable_evaluation_triage": {
+        "session_id", "policy_id", "decision", "created_at",
     },
-    "readable_work_context": {
-        "id", "work_item_id", "seq", "kind", "source_ref", "content_hash", "created_at",
+    "readable_activity_events": {
+        "activity_id", "seq", "event_type", "title", "summary", "actor", "created_at",
+    },
+    "readable_activity_context": {
+        "id", "activity_id", "seq", "kind", "source_ref", "content_hash", "created_at",
     },
     "readable_approvals": {
-        "id", "work_item_id", "scope", "status", "request_summary", "requested_at",
+        "id", "activity_id", "scope", "status", "request_summary", "requested_at",
         "expires_at", "resolved_at", "resolved_by", "decision_ref",
     },
     "policies": {
@@ -134,7 +137,7 @@ def _workspace_fingerprint(workspace_id: str) -> str:
 def _sql(name: str) -> str:
     return (
         files("lisa")
-        .joinpath("sql", "work_items", name)
+        .joinpath("sql", "activities", name)
         .read_text(encoding="utf-8")
     )
 

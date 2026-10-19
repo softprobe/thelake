@@ -12,7 +12,7 @@ from .repositories.lisa_database import LisaDatabaseReader
 from .repositories.notifications import NotificationReceiptRepository
 from .repositories.policies import InMemoryPolicyRepository, PostgresPolicyRepository
 from .repositories.slack_events import SlackEventRepository
-from .repositories.work_items import PostgresWorkItemStore
+from .repositories.activities import PostgresActivityStore
 from .runtime import confirmed_policy_title, run_turn
 from .services.conversations import ConversationService, ScheduledQAService
 from .services.database_inspection import DatabaseInspectionService
@@ -81,8 +81,8 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         SlackClient(context.slack_token),
         repository=NotificationReceiptRepository(context),
     )
-    work_items = (
-        PostgresWorkItemStore(context.database_url, context.workspace_id())
+    activities = (
+        PostgresActivityStore(context.database_url, context.workspace_id())
         if context.database_url
         else None
     )
@@ -101,7 +101,7 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         notifier,
         sessions=sessions,
         policy_triage=OpenAIPolicyTriager(),
-        work_items=work_items,
+        activities=activities,
         artifact_repository=EvaluationArtifactRepository(context),
         render_context=render_evaluation_context,
     )

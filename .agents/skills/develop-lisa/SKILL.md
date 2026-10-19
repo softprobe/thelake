@@ -8,6 +8,8 @@ description: Implement, debug, or review Lisa service, policy-management, triage
 Use for changes to Lisa's runtime or evaluation workflow. Follow the public
 repository rules in `AGENTS.md` and the Lisa contracts in
 [`docs/architecture/lisa-qa.md`](../../../docs/architecture/lisa-qa.md).
+Use [`docs/architecture/lisa-activities.md`](../../../docs/architecture/lisa-activities.md)
+for Lisa's generic, user-inspectable activity and its links to evaluation runs.
 
 ## Source of truth and flow
 
@@ -21,7 +23,14 @@ repository rules in `AGENTS.md` and the Lisa contracts in
 - Production evaluation enters through `EvaluationService`. It resolves the
   approved effective policy catalog for the exact agent and obtains the
   trajectory through `SessionService` / TheLake's normal session path.
-- `OpenAIPolicyTriager` sends one Decisions question per approved candidate.
+- `EvaluationService` filters candidates through `lisa.evaluation_triage`, keyed
+  only by `(session_id, policy_id)`. It sends one Decisions question for each
+  candidate pair with no stored triage decision and persists completed decisions
+  before judging. Reuse stored pair decisions on later calls even after
+  telemetry, policy content, or triage configuration changes; new IDs form new
+  pairs. Failed/incomplete provider calls create no row. Concurrent first calls
+  can both reach Decisions; the first persisted result is canonical.
+- `OpenAIPolicyTriager` sends one Decisions question per candidate it receives.
   `suspected_violation` and `insufficient_evidence` escalate to the Gemini
   judge; `no_violation_found` is routing metadata and does not create a pass
   score. Incomplete or unordered trajectories are gated before provider calls.
@@ -31,17 +40,21 @@ repository rules in `AGENTS.md` and the Lisa contracts in
   identity, derived from session, approved policy hash, sanitized trajectory,
   triage/judge configuration, and pipeline version. TheLake scores are output
   copies, not the source of truth for whether Lisa already evaluated evidence.
-- Persist each candidate's triage outcome in the canonical evaluation ledger
-  before judging. Negative triage is a completed `not_run` judge outcome with no
-  verdict or score; provider failures remain retryable. Do not add a second
-  identity or evaluation path for triage.
+- Keep triage outcomes in the pair-keyed `lisa.evaluation_triage` table. Record
+  Lisa's actions and decisions in the generic activity event timeline; one
+  activity may link to multiple evaluation runs through `activity_id`. Link
+  Decisions call recordings to that activity and record failed attempts without
+  writing a triage cache row. Keep judge results globally deduplicated by
+  evaluation request identity and keep
+  score outboxes keyed to evaluation results. Negative triage has no verdict or
+  score; provider failures remain retryable.
 - Dataset annotations supply scoring truth only. Dataset catalog policies may
   seed the disposable test workspace through Lisa's policy-management service,
   but must never be passed directly into evaluation. A production quality run
   ingests sessions into TheLake and calls `EvaluationService`; see
   [`run-lisa-policy-evaluation`](../run-lisa-policy-evaluation/SKILL.md).
 
-## Work and verification
+## Activity and verification
 
 - Lisa tests follow the repository-wide transient-resource rule in `AGENTS.md`.
   They use a disposable Postgres database per test through

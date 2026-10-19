@@ -178,7 +178,8 @@ not run shell commands or access a connected Git repository.
   `no_violation_found`, or `insufficient_evidence`; Lisa sends suspected and
   uncertain cases to Gemini for a categorical verdict. Triage negatives do not
   create pass scores. Lisa stores judge scores with the policy ID and criteria
-  in TheLake.
+  in TheLake, and records the action and its considered pairs as an inspectable
+  activity in Lisa's Postgres database.
   `LISA_QA_CRON` is a five-field UTC cron expression, default hourly at minute 0;
   the `Lisa scheduled QA` job does not run on startup.
 - Conversations are stored in the runner's `lisa-data` volume, scoped by the

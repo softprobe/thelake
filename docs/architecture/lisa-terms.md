@@ -15,11 +15,12 @@ the same session and policy IDs as the runtime contract.
 | **Annotation** | One dataset judgment for a session-policy pair. It has no separate identifier. | (`S017`, `P1.2`) is labeled `violation`. |
 | **Runtime evaluation pair** | The unit Lisa evaluates: `(session_id, policy_id)`. | (`S017`, `P1.2`) |
 | **Dataset pair** | The same pair key used for evaluation: `(session_id, policy_id)`. | (`S017`, `P1.2`) |
+| **Activity** | One inspectable Lisa action that can include multiple session-policy pairs and their triage and judgment results. | Lisa evaluates session `S017` against its approved policies in one activity. |
 
 Use `session_id` for the runtime evaluation input's ID. Do not introduce
 `trajectory_id` for the same session. Use `policy_id` for the policy's readable
-document section ID. A work-item ID identifies execution and lifecycle state;
-it is not the runtime evaluation pair ID. Evidence hashes may detect changed
+document section ID. An activity ID identifies a Lisa action; it is not the
+runtime evaluation pair ID. Evidence hashes may detect changed
 content but are not human-facing identifiers.
 
 Dataset annotations and runtime evaluations use the same `(session_id,

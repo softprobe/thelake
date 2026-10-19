@@ -1,0 +1,776 @@
+"""Lisa activity persistence using a deployment-bound PostgreSQL schema."""
+
+from __future__ import annotations
+
+import json
+from hashlib import sha256
+from importlib.resources import files
+from typing import Any
+from uuid import UUID, uuid4
+
+import psycopg
+from psycopg.errors import UniqueViolation
+from psycopg.rows import dict_row
+
+from ..models.activities import (
+    Activity,
+    EvaluationRun,
+    ScoreOutboxItem,
+    ActivityEvent,
+    ActivityClaim,
+    ActivityContext,
+)
+
+
+class DeploymentBindingError(RuntimeError):
+    """Raised when a Lisa database is bound to a different workspace."""
+
+
+class StaleLeaseError(RuntimeError):
+    """Raised when a worker attempts a write after its lease was superseded."""
+
+
+def _workspace_fingerprint(workspace_id: str) -> str:
+    normalized = str(UUID(workspace_id))
+    return sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _sql(name: str) -> str:
+    return files("lisa").joinpath("sql", "activities", name).read_text(encoding="utf-8")
+
+
+class PostgresActivityStore:
+    """Typed lifecycle operations for activities; raw SQL stays in .sql files."""
+
+    def __init__(self, dsn: str, workspace_id: str):
+        self.dsn = dsn
+        self.workspace_fingerprint = _workspace_fingerprint(workspace_id)
+        with self._connect() as connection:
+            binding = connection.execute(_sql("get_deployment.sql")).fetchone()
+        if not binding or binding["workspace_fingerprint"] != self.workspace_fingerprint:
+            raise DeploymentBindingError("Lisa database is not bound to the configured workspace")
+
+    def _connect(self):
+        return psycopg.connect(self.dsn, row_factory=dict_row)
+
+    def create_activity(
+        self, *, title: str, source: str, kind: str = "action", activity_id: str | None = None,
+        context_path: str | None = None,
+    ) -> Activity:
+        if not kind.strip():
+            raise ValueError("Activity kind must not be empty")
+        activity_id = activity_id or str(uuid4())
+        context_path = context_path or f"activities/{activity_id}"
+        with self._connect() as connection, connection.transaction():
+            connection.execute(
+                _sql("create_activity.sql"),
+                {"id": activity_id, "kind": kind, "title": title,
+                 "source": source, "context_path": context_path},
+            )
+            self._append_activity_event(
+                connection, activity_id, "accepted", title, None, "lisa"
+            )
+        return Activity(id=activity_id, created=True, context_path=context_path)
+
+    def activity_exists(self, activity_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                _sql("activity_exists.sql"), {"activity_id": activity_id}
+            ).fetchone()
+        return bool(row and row["found"])
+
+    def create_evaluation(
+        self,
+        *,
+        title: str,
+        source: str,
+        target_agent_name: str,
+        session_id: str,
+        policy_name: str,
+        policy_id: str,
+        policy_hash: str,
+        judge_config: dict[str, Any],
+        request_key: str,
+        activity_id: str | None = None,
+        context_path: str | None = None,
+    ) -> EvaluationRun:
+        """Create once per request key; a new key always starts an intentional rerun."""
+        normalized_key = str(request_key)
+        UUID(normalized_key)
+        existing = self._get_evaluation_by_request(policy_hash, session_id, normalized_key)
+        if existing:
+            return EvaluationRun(**existing, created=False)
+
+        standalone_activity = activity_id is None
+        activity_id = activity_id or str(uuid4())
+        evaluation_id = activity_id if standalone_activity else str(uuid4())
+        try:
+            with self._connect() as connection, connection.transaction():
+                if standalone_activity:
+                    connection.execute(
+                        _sql("create_activity.sql"),
+                        {"id": activity_id, "kind": "policy_evaluation", "title": title,
+                         "source": source, "context_path": context_path},
+                    )
+                connection.execute(
+                    _sql("create_evaluation.sql"),
+                    {
+                        "id": evaluation_id,
+                        "activity_id": activity_id,
+                        "target_agent_name": target_agent_name,
+                        "session_id": session_id,
+                        "policy_name": policy_name,
+                        "policy_id": policy_id,
+                        "policy_hash": policy_hash,
+                        "judge_config": json.dumps(judge_config),
+                        "request_key": normalized_key,
+                    },
+                )
+                if standalone_activity:
+                    self._append_activity_event(
+                        connection, activity_id, "accepted", title, None, "lisa"
+                    )
+        except UniqueViolation:
+            existing = self._get_evaluation_by_request(policy_hash, session_id, normalized_key)
+            if existing:
+                return EvaluationRun(**existing, created=False)
+            raise
+        return EvaluationRun(
+            id=evaluation_id,
+            activity_id=activity_id,
+            session_id=session_id,
+            created=True,
+            context_path=context_path,
+            policy_id=policy_id,
+        )
+
+    def _get_evaluation_by_request(
+        self, policy_hash: str, session_id: str, request_key: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                _sql("get_evaluation_by_request.sql"),
+                {
+                    "policy_hash": policy_hash,
+                    "session_id": session_id,
+                    "request_key": request_key,
+                },
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": str(row["evaluation_id"]),
+            "activity_id": str(row["activity_id"]),
+            "session_id": row["session_id"],
+            "policy_id": row["policy_id"],
+            "context_path": row["context_path"],
+            "status": row["status"],
+            "verdict": row["verdict"],
+            "score_id": row["score_id"],
+        }
+
+    def get_evaluation_by_request(
+        self, policy_hash: str, session_id: str, request_key: str
+    ) -> EvaluationRun | None:
+        row = self._get_evaluation_by_request(policy_hash, session_id, request_key)
+        return EvaluationRun(**row, created=False) if row else None
+
+    def find_pending_evaluation(
+        self, policy_hash: str, session_id: str
+    ) -> tuple[EvaluationRun, ScoreOutboxItem] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                _sql("find_pending_evaluation.sql"),
+                {"policy_hash": policy_hash, "session_id": session_id},
+            ).fetchone()
+        return self._pending_evaluation_from_row(row)
+
+    def find_pending_evaluations_for_session(
+        self, target_agent_name: str, session_id: str
+    ) -> list[tuple[EvaluationRun, ScoreOutboxItem]]:
+        """Find every ambiguous score write before the new policy/evidence path runs."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                _sql("find_pending_evaluations_for_session.sql"),
+                {"target_agent_name": target_agent_name, "session_id": session_id},
+            ).fetchall()
+        return [
+            pending
+            for row in rows
+            if (pending := self._pending_evaluation_from_row(row)) is not None
+        ]
+
+    def find_pending_evaluation_for_policy(
+        self,
+        policy_id: str,
+        target_agent_name: str,
+        session_id: str,
+    ) -> tuple[EvaluationRun, ScoreOutboxItem] | None:
+        """Find the pending score outbox for one policy and session."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                _sql("find_pending_evaluation_for_policy.sql"),
+                {
+                    "policy_id": policy_id,
+                    "target_agent_name": target_agent_name,
+                    "session_id": session_id,
+                },
+            ).fetchall()
+        if len(rows) > 1:
+            ids = ", ".join(str(row["id"]) for row in rows)
+            raise ValueError(
+                "Multiple pending evaluations match this policy; resume a specific activity: "
+                f"{ids}"
+            )
+        return self._pending_evaluation_from_row(rows[0] if rows else None)
+
+    def policy_triage_decisions(
+        self, session_id: str, policy_ids: list[str]
+    ) -> dict[str, str]:
+        """Return the triage decision already recorded for each session-policy pair."""
+        if not policy_ids:
+            return {}
+        with self._connect() as connection:
+            rows = connection.execute(
+                _sql("get_policy_triage_decisions.sql"),
+                {"session_id": session_id, "policy_ids": policy_ids},
+            ).fetchall()
+        return {row["policy_id"]: row["decision"] for row in rows}
+
+    def record_policy_triage_decisions(
+        self, session_id: str, decisions: list[dict[str, str]]
+    ) -> None:
+        """Persist completed Decisions answers once for each session-policy pair."""
+        policy_ids = [item.get("id", "") for item in decisions]
+        if any(not policy_id for policy_id in policy_ids) or len(set(policy_ids)) != len(policy_ids):
+            raise ValueError("Policy triage decisions require unique policy IDs")
+        valid_decisions = {
+            "suspected_violation",
+            "no_violation_found",
+            "insufficient_evidence",
+        }
+        if any(item.get("decision") not in valid_decisions for item in decisions):
+            raise ValueError("Policy triage decision is invalid")
+        with self._connect() as connection, connection.transaction():
+            for item in decisions:
+                connection.execute(
+                    _sql("record_policy_triage_decision.sql"),
+                    {
+                        "session_id": session_id,
+                        "policy_id": item["id"],
+                        "decision": item["decision"],
+                    },
+                )
+
+    def _pending_evaluation_from_row(
+        self, row: dict[str, Any] | None
+    ) -> tuple[EvaluationRun, ScoreOutboxItem] | None:
+        if row is None:
+            return None
+        activity = EvaluationRun(
+            id=str(row["evaluation_id"]),
+            activity_id=str(row["activity_id"]),
+            session_id=row["session_id"],
+            created=False,
+            context_path=row["context_path"],
+            status=row["status"],
+            verdict=row["verdict"],
+            score_id=row["evaluation_score_id"],
+            policy_id=row["policy_id"],
+        )
+        outbox = ScoreOutboxItem(
+            id=str(row["outbox_id"]),
+            evaluation_id=str(row["evaluation_id"]),
+            status=row["outbox_status"],
+            score_payload=row["score_payload"],
+            score_id=row["outbox_score_id"],
+        )
+        return activity, outbox
+
+    def finish_activity_without_claim(
+        self, activity_id: str, summary: str, *, status: str = "succeeded"
+    ) -> None:
+        if status not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError("Activity must finish with a terminal status")
+        with self._connect() as connection, connection.transaction():
+            connection.execute(
+                _sql("finish_unclaimed_activity.sql"),
+                {
+                    "activity_id": activity_id,
+                    "status": status,
+                    "title": f"Activity {status}",
+                    "summary": summary,
+                },
+            )
+
+    def finish_activity_when_complete(self, activity_id: str) -> None:
+        with self._connect() as connection, connection.transaction():
+            connection.execute(
+                _sql("finish_activity_when_complete.sql"), {"activity_id": activity_id}
+            )
+
+    def get_evaluation(self, evaluation_id: str) -> EvaluationRun | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                _sql("get_evaluation.sql"), {"evaluation_id": evaluation_id}
+            ).fetchone()
+        if row is None:
+            return None
+        return EvaluationRun(
+            id=str(row["evaluation_id"]),
+            activity_id=str(row["activity_id"]),
+            session_id=row["session_id"],
+            created=False,
+            context_path=row["context_path"],
+            status=row["status"],
+            verdict=row["verdict"],
+            score_id=row["score_id"],
+            policy_id=row["policy_id"],
+        )
+
+    def claim_activity(
+        self, activity_id: str, owner: str, *, lease_seconds: int = 300
+    ) -> ActivityClaim | None:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be greater than zero")
+        with self._connect() as connection, connection.transaction():
+            row = connection.execute(
+                _sql("claim_activity.sql"),
+                {
+                    "activity_id": activity_id,
+                    "owner": owner,
+                    "lease_seconds": lease_seconds,
+                },
+            ).fetchone()
+            if row is None:
+                return None
+            token = row["fencing_token"]
+            self._append_claimed_event(
+                connection,
+                activity_id,
+                token,
+                owner,
+                "claimed",
+                "Activity started",
+                None,
+            )
+        return ActivityClaim(
+            activity_id=str(row["id"]),
+            owner=owner,
+            fencing_token=token,
+            lease_expires_at=row["lease_expires_at"],
+        )
+
+    def renew_lease(
+        self,
+        activity_id: str,
+        owner: str,
+        fencing_token: int,
+        *,
+        lease_seconds: int = 300,
+    ) -> ActivityClaim | None:
+        """Extend a live lease without changing its fencing generation."""
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be greater than zero")
+        with self._connect() as connection:
+            row = connection.execute(
+                _sql("renew_lease.sql"),
+                {
+                    "activity_id": activity_id,
+                    "owner": owner,
+                    "fencing_token": fencing_token,
+                    "lease_seconds": lease_seconds,
+                },
+            ).fetchone()
+        if row is None:
+            return None
+        return ActivityClaim(
+            activity_id=str(row["id"]),
+            owner=owner,
+            fencing_token=row["fencing_token"],
+            lease_expires_at=row["lease_expires_at"],
+        )
+
+    def append_event(
+        self,
+        activity_id: str,
+        event_type: str,
+        *,
+        title: str,
+        actor: str,
+        fencing_token: int,
+        summary: str | None = None,
+    ) -> int:
+        with self._connect() as connection, connection.transaction():
+            return self._append_claimed_event(
+                connection,
+                activity_id,
+                fencing_token,
+                actor,
+                event_type,
+                title,
+                summary,
+            )
+
+    def record_activity_event(
+        self,
+        activity_id: str,
+        event_type: str,
+        *,
+        title: str,
+        summary: str | None = None,
+        actor: str = "lisa",
+    ) -> int:
+        """Append a user-inspectable event to a queued activity."""
+        if not event_type.strip() or not title.strip() or not actor.strip():
+            raise ValueError("Activity events require an event type, title, and actor")
+        with self._connect() as connection, connection.transaction():
+            return self._append_activity_event(
+                connection, activity_id, event_type, title, summary, actor
+            )
+
+    def _append_activity_event(
+        self, connection, activity_id, event_type, title, summary, actor
+    ) -> int:
+        row = connection.execute(
+            _sql("append_activity_event.sql"),
+            {
+                "activity_id": activity_id,
+                "event_type": event_type,
+                "title": title,
+                "summary": summary,
+                "actor": actor,
+            },
+        ).fetchone()
+        return row["seq"]
+
+    def _append_claimed_event(
+        self,
+        connection,
+        activity_id,
+        fencing_token,
+        actor,
+        event_type,
+        title,
+        summary,
+    ) -> int:
+        row = connection.execute(
+            _sql("append_claimed_event.sql"),
+            {
+                "activity_id": activity_id,
+                "fencing_token": fencing_token,
+                "owner": actor,
+                "event_type": event_type,
+                "title": title,
+                "summary": summary,
+                "actor": actor,
+            },
+        ).fetchone()
+        if row is None:
+            raise StaleLeaseError("Activity lease expired or was superseded")
+        return row["seq"]
+
+    def list_events(self, activity_id: str) -> list[ActivityEvent]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                _sql("list_events.sql"), {"activity_id": activity_id}
+            ).fetchall()
+        return [
+            ActivityEvent(
+                activity_id=str(row["activity_id"]),
+                sequence=row["seq"],
+                event_type=row["event_type"],
+                title=row["title"],
+                summary=row["summary"],
+                actor=row["actor"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def save_context_item(
+        self,
+        activity_id: str,
+        kind: str,
+        content: dict[str, Any],
+        *,
+        actor: str,
+        fencing_token: int,
+        source_ref: str | None = None,
+    ) -> str:
+        item_id = str(uuid4())
+        encoded = json.dumps(content, ensure_ascii=False, sort_keys=True)
+        content_hash = sha256(encoded.encode("utf-8")).hexdigest()
+        with self._connect() as connection, connection.transaction():
+            row = connection.execute(
+                _sql("save_context_item.sql"),
+                {
+                    "id": item_id,
+                    "activity_id": activity_id,
+                    "kind": kind,
+                    "content": encoded,
+                    "source_ref": source_ref,
+                    "content_hash": content_hash,
+                    "owner": actor,
+                    "fencing_token": fencing_token,
+                },
+            ).fetchone()
+            if row is None:
+                raise StaleLeaseError("Activity lease expired or was superseded")
+            self._append_claimed_event(
+                connection,
+                activity_id,
+                fencing_token,
+                actor,
+                "context_saved",
+                f"Saved {kind.replace('_', ' ')}",
+                source_ref,
+            )
+        return item_id
+
+    def get_context_item(self, context_id: str) -> ActivityContext:
+        with self._connect() as connection:
+            row = connection.execute(_sql("get_context_item.sql"), {"id": context_id}).fetchone()
+        if row is None:
+            raise KeyError(context_id)
+        return ActivityContext(
+            id=str(row["id"]),
+            activity_id=str(row["activity_id"]),
+            sequence=row["seq"],
+            kind=row["kind"],
+            content=row["content"],
+            content_hash=row["content_hash"],
+        )
+
+    def get_context_item_for_activity(
+        self, activity_id: str, kind: str
+    ) -> ActivityContext | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                _sql("get_context_item_for_activity.sql"),
+                {"activity_id": activity_id, "kind": kind},
+            ).fetchone()
+        if row is None:
+            return None
+        return ActivityContext(
+            id=str(row["id"]),
+            activity_id=str(row["activity_id"]),
+            sequence=row["seq"],
+            kind=row["kind"],
+            content=row["content"],
+            content_hash=row["content_hash"],
+        )
+
+    def prepare_score_outbox(
+        self,
+        evaluation_id: str,
+        payload: dict[str, Any],
+        *,
+        actor: str,
+        fencing_token: int,
+    ) -> ScoreOutboxItem:
+        """Persist a score payload before submitting it to TheLake."""
+        score_id = str(payload["score_id"])
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        payload_hash = sha256(encoded.encode("utf-8")).hexdigest()
+        with self._connect() as connection, connection.transaction():
+            parent = connection.execute(
+                _sql("get_activity_for_evaluation.sql"), {"evaluation_id": evaluation_id}
+            ).fetchone()
+            if parent is None:
+                raise KeyError(evaluation_id)
+            activity_id = str(parent["activity_id"])
+            if not self._lock_activity(connection, activity_id, actor, fencing_token):
+                raise StaleLeaseError("Activity lease expired or was superseded")
+            row = connection.execute(
+                _sql("create_score_outbox.sql"),
+                {
+                    "id": str(uuid4()),
+                    "evaluation_id": evaluation_id,
+                    "idempotency_key": score_id,
+                    "score_payload": encoded,
+                    "payload_hash": payload_hash,
+                },
+            ).fetchone()
+            created = row is not None
+            if row is None:
+                row = connection.execute(
+                    _sql("get_score_outbox_by_key.sql"),
+                    {"idempotency_key": score_id},
+                ).fetchone()
+                if (
+                    row is None
+                    or str(row["evaluation_id"]) != evaluation_id
+                    or row["payload_hash"] != payload_hash
+                ):
+                    raise ValueError("Score idempotency key already has a different payload")
+            if created:
+                self._append_claimed_event(
+                    connection,
+                    activity_id,
+                    fencing_token,
+                    actor,
+                    "score_prepared",
+                    "Evaluation score prepared",
+                    score_id,
+                )
+        return ScoreOutboxItem(
+            id=str(row["id"]),
+            evaluation_id=str(row["evaluation_id"]),
+            status=row["status"],
+            score_payload=row["score_payload"],
+            score_id=row["score_id"],
+        )
+
+    def get_score_outbox(self, evaluation_id: str) -> ScoreOutboxItem | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                _sql("get_score_outbox.sql"), {"evaluation_id": evaluation_id}
+            ).fetchone()
+        if row is None:
+            return None
+        return ScoreOutboxItem(
+            id=str(row["id"]),
+            evaluation_id=str(row["evaluation_id"]),
+            status=row["status"],
+            score_payload=row["score_payload"],
+            score_id=row["score_id"],
+        )
+
+    def acknowledge_score(
+        self,
+        activity_id: str,
+        evaluation_id: str,
+        outbox_id: str,
+        *,
+        score_id: str,
+        verdict: str,
+        actor: str,
+        fencing_token: int,
+        summary: str | None = None,
+        auto_finish: bool = True,
+    ) -> None:
+        if verdict not in {"pass", "fail", "uncertain", "insufficient_evidence"}:
+            raise ValueError("Unsupported evaluation verdict")
+        with self._connect() as connection, connection.transaction():
+            if not self._lock_activity(connection, activity_id, actor, fencing_token):
+                raise StaleLeaseError("Activity lease expired or was superseded")
+            acknowledged = connection.execute(
+                _sql("acknowledge_score_outbox.sql"),
+                {
+                    "outbox_id": outbox_id,
+                    "evaluation_id": evaluation_id,
+                    "score_id": score_id,
+                    "verdict": verdict,
+                },
+            ).fetchone()
+            if acknowledged is None:
+                raise ValueError("Score outbox entry is missing or already acknowledged")
+            result = connection.execute(
+                _sql("complete_evaluation_result.sql"),
+                {
+                    "evaluation_id": evaluation_id,
+                    "verdict": verdict,
+                    "score_id": score_id,
+                },
+            )
+            if result.rowcount == 0:
+                raise KeyError(evaluation_id)
+            if auto_finish:
+                remaining = connection.execute(
+                    _sql("activity_has_incomplete_evaluations.sql"), {"activity_id": activity_id}
+                ).fetchone()
+                if remaining and not remaining["has_incomplete"]:
+                    self._finish_activity(
+                        connection,
+                        activity_id,
+                        status="succeeded",
+                        actor=actor,
+                        fencing_token=fencing_token,
+                        summary=summary,
+                    )
+
+    def release_activity(
+        self,
+        activity_id: str,
+        *,
+        actor: str,
+        fencing_token: int,
+        reason: str,
+    ) -> None:
+        """Return a retryable run to the queue while preserving its inputs."""
+        with self._connect() as connection, connection.transaction():
+            row = connection.execute(
+                _sql("release_activity.sql"),
+                {
+                    "activity_id": activity_id,
+                    "owner": actor,
+                    "fencing_token": fencing_token,
+                    "summary": reason,
+                    "event_type": "retryable_error",
+                    "title": "Activity will retry",
+                    "actor": actor,
+                },
+            ).fetchone()
+        if row is None:
+            raise StaleLeaseError("Activity lease expired or was superseded")
+
+    def _lock_activity(self, connection, activity_id, actor, fencing_token) -> bool:
+        row = connection.execute(
+            _sql("lock_activity_claim.sql"),
+            {
+                "activity_id": activity_id,
+                "owner": actor,
+                "fencing_token": fencing_token,
+            },
+        ).fetchone()
+        return row is not None
+
+    def finish_activity(
+        self,
+        activity_id: str,
+        *,
+        status: str,
+        actor: str,
+        fencing_token: int,
+        summary: str | None = None,
+    ) -> None:
+        if status not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError("A activity must finish with a terminal status")
+        with self._connect() as connection, connection.transaction():
+            self._finish_activity(
+                connection,
+                activity_id,
+                status=status,
+                actor=actor,
+                fencing_token=fencing_token,
+                summary=summary,
+            )
+
+    def _finish_activity(
+        self, connection, activity_id, *, status, actor, fencing_token, summary
+    ) -> None:
+        row = connection.execute(
+            _sql("finish_activity.sql"),
+            {
+                "activity_id": activity_id,
+                "status": status,
+                "owner": actor,
+                "fencing_token": fencing_token,
+                "event_type": status,
+                "title": f"Activity {status}",
+                "summary": summary,
+                "actor": actor,
+            },
+        ).fetchone()
+        if row is None:
+            if status == "succeeded":
+                acknowledged = connection.execute(
+                    _sql("has_acknowledged_score.sql"),
+                    {"activity_id": activity_id},
+                ).fetchone()
+                if acknowledged and not acknowledged["acknowledged"]:
+                    raise ValueError(
+                        "A successful evaluation requires an acknowledged score outbox"
+                    )
+            raise StaleLeaseError("Activity lease expired or was superseded")

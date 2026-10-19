@@ -91,12 +91,18 @@ Run one scheduler process per workspace; multiple replicas can each fire a turn.
 
 Lisa first resumes pending failures, then inspects recent sessions and policy
 memory. For each agent she checks recent unchecked sessions against approved
-policies. OpenAI Decisions triages each policy as `suspected_violation`,
-`no_violation_found`, or `insufficient_evidence`. Lisa sends suspected violations
+policies. OpenAI Decisions triages each unrecorded session-policy pair as
+`suspected_violation`, `no_violation_found`, or `insufficient_evidence`. One
+inspectable Lisa activity records the action timeline and links to any judge
+runs it starts.
+Lisa sends suspected violations
 and insufficient-evidence decisions to the Gemini judge; only that judge produces
 final verdicts. A triage negative does not produce a passing score. Confidence
 never filters escalation. All per-policy decisions are retained in selection
-metadata. If the triage prompt clips any evidence, all candidates escalate as
+metadata and in Postgres under the `(session_id, policy_id)` pair key. Previously
+triaged pairs are filtered from later Decisions requests. Telemetry changes,
+policy edits, and triage configuration changes do not trigger another triage
+for the same pair. If the triage prompt clips any evidence, all current candidates escalate as
 insufficient evidence. Incomplete session capture or uncertain event ordering
 still returns unresolved coverage before triage; this change does not add
 context retrieval or investigation tools to Gemini. She prioritizes
@@ -136,9 +142,11 @@ created before this identity was introduced cannot be compared reliably and may
 be evaluated once more during the transition.
 
 The score in TheLake keeps the policy ID, criteria text, policy hash, trajectory
-digest, span references, and limitations. Triage-negative outcomes are not yet
-persisted in the Postgres evaluation ledger, so a later sweep can repeat the
-Decisions call when no policy was escalated.
+digest, span references, and limitations. Lisa stores every completed triage
+decision in the pair-only `lisa.evaluation_triage` cache, including negative
+decisions that produce no score. Lisa's generic activity event timeline records
+the decisions and outcomes from that action. Evaluation runs link to activities
+through `activity_id`; the triage cache remains independent of activity identity.
 
 ## Provider prompts and Lisa call records
 
@@ -178,9 +186,11 @@ from target-agent trajectories. Under Lisa's workspace home,
 `llm-calls/<call-id>.jsonl` contains a request line followed by a response or
 sanitized error line. The request includes the actual application prompt,
 model, available tool definitions/schema, formatting-loss metadata, and known
-conversation/session/run/work-item links. Triage records do not require a
-selected policy or work item. Chat records capture LiteLLM-hook-observable
-attempts, including SDK retries; they are not a wire-level capture.
+conversation/session/run/activity links. Triage records do not require a
+selected policy or activity. Chat records capture LiteLLM-hook-observable
+attempts, including SDK retries; they are not a wire-level capture. The
+pair-only cache is independent of activities. The activity event timeline
+records which cached or fresh decision each action used.
 
 Recording is off by default. Before any write, records remove credential values
 and provider thinking/reasoning content. Numeric token-usage counters such as `usage.prompt_token_count` and

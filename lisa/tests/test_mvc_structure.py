@@ -31,10 +31,10 @@ def test_core_lisa_components_have_mvc_owners():
         "controllers/http.py",
         "controllers/mcp.py",
         "models/contracts.py",
-        "models/work_items.py",
+        "models/activities.py",
         "repositories/conversations.py",
         "repositories/lisa_database.py",
-        "repositories/work_items.py",
+        "repositories/activities.py",
         "repositories/failures.py",
         "repositories/notifications.py",
         "models/policies.py",
@@ -66,9 +66,9 @@ def test_root_package_has_no_obsolete_mvc_facades():
         "evaluation/service.py",
         "evaluation/failures.py",
         "controllers/policies.py",
-        "work_items/__init__.py",
-        "work_items/query.py",
-        "work_items/repository.py",
+        "activities/__init__.py",
+        "activities/query.py",
+        "activities/repository.py",
     }
 
     present = {
@@ -80,11 +80,11 @@ def test_root_package_has_no_obsolete_mvc_facades():
     assert not present
 
 
-def test_work_item_models_and_persistence_have_distinct_mvc_owners():
-    assert (PACKAGE / "models" / "work_items.py").is_file()
-    assert (PACKAGE / "repositories" / "work_items.py").is_file()
+def test_activity_models_and_persistence_have_distinct_mvc_owners():
+    assert (PACKAGE / "models" / "activities.py").is_file()
+    assert (PACKAGE / "repositories" / "activities.py").is_file()
     assert (PACKAGE / "repositories" / "lisa_database.py").is_file()
-    assert not list((PACKAGE / "work_items").glob("*.py"))
+    assert not list((PACKAGE / "activities").glob("*.py"))
 
 
 def test_controllers_delegate_use_cases_and_app_does_not_reach_into_controller_internals():

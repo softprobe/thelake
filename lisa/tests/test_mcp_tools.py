@@ -227,7 +227,7 @@ def test_lisa_database_tool_and_schema_resource_are_exposed(lisa_test_context):
             tools = await client.list_tools()
             assert any(tool.name == "lisa_db" for tool in tools)
             resource = await client.read_resource("lisa://database/schema")
-            assert "lisa.readable_work_items" in str(resource)
+            assert "lisa.readable_activities" in str(resource)
 
     asyncio.run(inspect_server())
 
@@ -238,15 +238,15 @@ def test_evaluate_session_recovers_pending_scores_before_policy_or_telemetry_loo
     from types import SimpleNamespace
 
     services = build_services(lisa_test_context())
-    services.evaluations.work_items = SimpleNamespace(
+    services.evaluations.activities = SimpleNamespace(
         find_pending_evaluations_for_session=lambda agent, session: (
-            [("work-item", "outbox")] if (agent, session) == ("agent", "session") else []
+            [("activity", "outbox")] if (agent, session) == ("agent", "session") else []
         )
     )
     monkeypatch.setattr(
         services.evaluations,
         "_recover_pending_score",
-        lambda work_item, outbox: {"status": "pass", "work_item_id": work_item},
+        lambda activity, outbox: {"status": "pass", "activity_id": activity},
     )
     monkeypatch.setattr(
         services.client,
@@ -269,4 +269,4 @@ def test_evaluate_session_recovers_pending_scores_before_policy_or_telemetry_loo
     result = asyncio.run(call())
     assert not result.is_error
     assert result.data["status"] == "recovered_pending_evaluations"
-    assert result.data["evaluations"] == [{"status": "pass", "work_item_id": "work-item"}]
+    assert result.data["evaluations"] == [{"status": "pass", "activity_id": "activity"}]

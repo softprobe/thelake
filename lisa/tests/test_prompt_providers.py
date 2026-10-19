@@ -99,7 +99,7 @@ def test_judge_allows_limited_verdict_and_records_actual_prompt(
             pass
 
     monkeypatch.setattr(evaluator, "create_judge_client", Client)
-    with recording_scope(ctx, work_item_id="w1"):
+    with recording_scope(ctx, activity_id="w1"):
         result = evaluator.evaluate(request)
     assert result.status == verdict
     assert any("prompt_event_body_truncated" in item for item in result.limitations)
@@ -107,7 +107,7 @@ def test_judge_allows_limited_verdict_and_records_actual_prompt(
     (path,) = records(ctx)
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     assert rows[0]["request"]["contents"] == calls[0]["contents"]
-    assert rows[0]["correlation"]["work_item_id"] == "w1"
+    assert rows[0]["correlation"]["activity_id"] == "w1"
     assert rows[1]["response"]["parsed"]["status"] == verdict
 
 
@@ -137,17 +137,17 @@ def test_selection_only_limitations_reach_scores_and_public_verdict(
     tracked,
     status,
 ):
-    from test_evaluation_work_items import _tracked_service_with_saved_inputs
+    from test_evaluation_activities import _tracked_service_with_saved_inputs
 
-    from lisa.models.work_items import ScoreOutboxItem
+    from lisa.models.activities import ScoreOutboxItem
 
     live = PolicyRule(
         name="Rule", criteria="Check refund.", approved=True, scope="workspace", id="P1.1"
     )
-    service, store, work_item = _tracked_service_with_saved_inputs(tmp_path, approved_rules=[live])
+    service, store, activity = _tracked_service_with_saved_inputs(tmp_path, approved_rules=[live])
     limitation = "prompt_event_body_truncated: triager-only omitted_chars=1000"
     selection = {"limitations": [limitation]}
-    inputs = store.get_context_item_for_work_item.return_value.content
+    inputs = store.get_context_item_for_activity.return_value.content
     inputs["policy_selection"] = selection
     trajectory = inputs["trajectory"]
     policy = service._policy("agent", "Rule", "P1.1")
@@ -168,7 +168,7 @@ def test_selection_only_limitations_reach_scores_and_public_verdict(
     def prepare(_id, payload, **_kwargs):
         return ScoreOutboxItem(
             id="outbox",
-            work_item_id=work_item.id,
+            evaluation_id=activity.id,
             status="pending",
             score_payload=payload,
             score_id=payload["score_id"],
@@ -184,8 +184,13 @@ def test_selection_only_limitations_reach_scores_and_public_verdict(
         "run1",
     )
     if tracked:
-        result = service._evaluate_tracked(*args, "request1", work_item, None, selection)
-        document = (service.context.home() / "work-items" / work_item.id / "context.md").read_text()
+        result = service._evaluate_tracked(*args, "request1", activity, None, selection)
+        document = (
+            service.context.home()
+            / "activities"
+            / activity.activity_id
+            / "context-P1.1.md"
+        ).read_text()
         assert limitation in document
     else:
         result = service._evaluate_untracked(*args, selection)

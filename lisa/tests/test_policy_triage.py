@@ -76,7 +76,23 @@ class FakeTriager:
 
     def triage(self, trajectory, rules):
         self.calls.append((trajectory, rules))
-        return {"selected_policies": self.selected}
+        selected_ids = {item.get("id") for item in self.selected}
+        return {
+            "selected_policies": self.selected,
+            "policy_decisions": [
+                {
+                    "id": rule.id,
+                    "name": rule.name,
+                    "scope": rule.scope,
+                    "decision": (
+                        "suspected_violation"
+                        if rule.id in selected_ids
+                        else "no_violation_found"
+                    ),
+                }
+                for rule in rules
+            ],
+        }
 
 
 def make_evaluation_service(**kwargs):
@@ -273,8 +289,8 @@ def test_policy_triage_result_has_no_confidence_cutoff_metadata():
 
 
 def test_session_selection_checks_agent_and_returns_only_selected_rules():
-    rule = SimpleNamespace(name="Cancellation policy", scope="workspace")
-    triager = FakeTriager([{"name": rule.name, "scope": rule.scope}])
+    rule = SimpleNamespace(id="P1.1", name="Cancellation policy", scope="workspace")
+    triager = FakeTriager([{"id": rule.id, "name": rule.name, "scope": rule.scope}])
     detail = {"agent_names": ["travel-agent"], "spans": [{"trace_id": "trace-1"}]}
     service = make_evaluation_service(
         context=None,
@@ -451,6 +467,9 @@ def test_evaluation_selection_passes_triage_to_judge():
         "model": "test-decisions-model",
         "candidate_count": 1,
         "selected_policies": [decision],
+        "policy_decisions": [
+            {**decision, "decision": "suspected_violation"},
+        ],
     }
 
 

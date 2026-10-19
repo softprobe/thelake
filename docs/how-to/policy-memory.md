@@ -64,7 +64,9 @@ Decisions returns `suspected_violation`, `no_violation_found`, or
 `insufficient_evidence` per policy. Lisa escalates suspected violations and
 insufficient evidence to the Gemini judge, which returns `pass`, `fail`, or
 `uncertain` with a rationale and captured span references. A triage negative
-does not create a pass score. Incomplete or unordered trajectories are gated as
+does not create a pass score. Lisa saves each completed pair decision in its
+durable triage cache and records the pairs used by an action in an inspectable
+activity. Incomplete or unordered trajectories are gated as
 `insufficient_evidence` before provider calls; provider or validation errors
 remain execution errors. No numeric threshold or uncertainty margin is used.
 

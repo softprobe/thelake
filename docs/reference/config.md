@@ -109,7 +109,7 @@ customer DuckLake.
 | `SOFTPROBE_LOCAL_ANONYMOUS` | Local single-workspace mode (see root README) |
 | `THELAKE_DEFAULT_WORKSPACE_ID` | Workspace UUID used with local anonymous mode |
 | `LISA_WORKSPACE_ID` | Workspace scope for this Lisa runtime. Configure one Lisa runtime per workspace; leave unset to disable scheduled QA. The local Compose quickstart runs one workspace. |
-| `LISA_DATABASE_URL` | PostgreSQL URL for Lisa's runtime work-item and policy writer. Use a dedicated `lisa_writer` role; this database stores activity and policy state and is separate from TheLake's DuckLake catalog. |
+| `LISA_DATABASE_URL` | PostgreSQL URL for Lisa's runtime activity and policy writer. Use a dedicated `lisa_writer` role; this database stores activity and policy state and is separate from TheLake's DuckLake catalog. |
 | `LISA_DATABASE_READ_URL` | PostgreSQL URL for Lisa's read-only `lisa_db` tool. Use a dedicated `lisa_reader` role that can read curated `lisa.readable_*` views and approved columns from `lisa.policies`. |
 | `LISA_DATABASE_PROVISION_URL` | Deployment-only PostgreSQL URL used by `lisa/scripts/provision_lisa.py`; never provide this credential to Lisa's runtime. |
 | `LISA_DATABASE_WRITER_PASSWORD` / `LISA_DATABASE_READER_PASSWORD` | When both are set, the provision script also creates the `lisa` database and writer/reader roles (local/quickstart bootstrap). |

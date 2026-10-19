@@ -119,8 +119,8 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(monkeypatch, tmp_path):
     assert lisa_mcp.env["GOOGLE_API_KEY"].get_secret_value() == "judge-test-key"
     assert lisa_mcp.env["LISA_SLACK_BOT_TOKEN"].get_secret_value() == "slack-test-token"
     assert lisa_mcp.env["LISA_SLACK_CHANNEL_ID"].get_secret_value() == "channel-test"
-    assert "lisa.readable_work_items" in captured["system_prompt"]
-    assert "readable_work_events: work_item_id, seq, event_type" in captured["system_prompt"]
+    assert "lisa.readable_activities" in captured["system_prompt"]
+    assert "readable_activity_events: activity_id, seq, event_type" in captured["system_prompt"]
     skill_names = {skill.name for skill in captured["agent_context"].skills}
     assert {
         "learn-agent-policy",

@@ -22,7 +22,7 @@ from psycopg.rows import dict_row
 
 
 def _sql(name: str) -> str:
-    return files("lisa").joinpath("sql", "work_items", name).read_text(encoding="utf-8")
+    return files("lisa").joinpath("sql", "activities", name).read_text(encoding="utf-8")
 
 
 def _workspace_fingerprint(workspace_id: str) -> str:
@@ -124,10 +124,19 @@ def provision(
     ) as connection, connection.transaction():
         existing = _bound_fingerprint(connection)
         if recreate:
+            policies = (
+                connection.execute(_sql("snapshot_policies.sql")).fetchall()
+                if _schema_exists(connection)
+                else []
+            )
             connection.execute(_sql("drop_schema.sql"))
             _apply_schema(
                 connection, fingerprint, writer_role=writer_role, reader_role=reader_role
             )
+            if policies:
+                with connection.cursor() as cursor:
+                    cursor.executemany(_sql("restore_policies.sql"), policies)
+            connection.execute(_sql("reset_policy_sequence.sql"))
             return
         if existing == fingerprint:
             return
