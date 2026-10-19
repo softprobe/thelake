@@ -1,6 +1,8 @@
 from pathlib import Path
 from uuid import UUID
 
+import pytest
+
 from lisa.backends import openhands as agent
 from lisa.security import redact_text
 
@@ -86,7 +88,10 @@ def test_redacts_json_credentials_embedded_in_prose():
     assert '"clientSecret": "[REDACTED]"' in redacted
 
 
-def test_lisa_agent_uses_openhands_skills_and_mcp_config(monkeypatch, tmp_path):
+@pytest.mark.parametrize("use_configured_skill_dir", [True, False])
+def test_lisa_agent_uses_openhands_skills_and_mcp_config(
+    monkeypatch, tmp_path, use_configured_skill_dir
+):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("LISA_THELAKE_API_URL", "http://thelake:8090")
@@ -95,7 +100,12 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(monkeypatch, tmp_path):
     monkeypatch.setenv("LISA_SLACK_BOT_TOKEN", "slack-test-token")
     monkeypatch.setenv("LISA_SLACK_CHANNEL_ID", "channel-test")
     monkeypatch.setenv("LISA_DATABASE_READ_URL", "postgresql://reader:test@postgres/lisa")
-    monkeypatch.setenv("LISA_SKILL_DIR", str(Path(__file__).parents[2] / "skills"))
+    configured_skill_dir = (
+        Path(__file__).parents[1] / "skills"
+        if use_configured_skill_dir
+        else tmp_path / "missing-skills"
+    )
+    monkeypatch.setenv("LISA_SKILL_DIR", str(configured_skill_dir))
     captured = {}
 
     monkeypatch.setattr(agent, "LLM", lambda **kwargs: object())
@@ -126,7 +136,9 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(monkeypatch, tmp_path):
         "learn-agent-policy",
         "review-agent-policy",
         "investigate-evaluator-failure",
+        "manage-lisa-activities",
     } <= skill_names
+    assert "complete_activity" in captured["system_prompt"]
 
 
 def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(monkeypatch, lisa_test_context):

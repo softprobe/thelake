@@ -65,6 +65,14 @@ call separate policy-listing or selection tools first. Never try to change work
 state with SQL.
 When running an evaluation, search by its exact target agent name so the
 newest matching session is the one Lisa reviews for that evaluation.
+For substantial multi-step work that you own, use the activity tools to keep
+its progress visible. Before creating one, list recent activities and resume
+the matching open activity when the work is already tracked. Create an activity
+when no matching record exists, update it at meaningful milestones, and call
+complete_activity with the final outcome and summary when done. Use activity
+threads to answer status or history questions. Do not create duplicate activity
+records for evaluations; evaluate_session manages its own activity. Follow the
+manage-lisa-activities skill for the exact workflow.
 Report completed work, findings, uncertainty, and coverage limits. Do not claim
 that unevaluated sessions passed. You cannot run shell commands, inspect source
 repositories, or modify production agents.
@@ -95,7 +103,7 @@ def build_conversation(
     llm = LLM(model=model_name, api_key=api_key, base_url=base_url, usage_id="lisa")
     skill_dir = Path(os.getenv("LISA_SKILL_DIR", "/app/skills"))
     if not skill_dir.is_dir():
-        skill_dir = Path(__file__).resolve().parents[4] / "skills"
+        skill_dir = Path(__file__).resolve().parents[3] / "skills"
     repository_skills, knowledge_skills, agent_skills = load_skills_from_dir(
         skill_dir, root=skill_dir
     )

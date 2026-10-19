@@ -10,8 +10,18 @@ approved lifecycle views and the Lisa-owned policies table listed below:
   rows are Lisa's actual judge runs and link to an activity by activity_id.
 - lisa.readable_activity_events: activity_id, seq, event_type, title, summary,
   actor, created_at
+- lisa.readable_activity_feed: activity_id, activity_type, is_goal, message_id,
+  subtitle, status_title, task_label, agent_id, details, kind, status, title,
+  summary, source, created_at, started_at, updated_at, finished_at
+- lisa.readable_activity_monitor_threads: activity_id, icon, details, section_id,
+  section_title, section_status, section_order
+- lisa.readable_activity_monitor_thread_actions: activity_id, seq, event_type,
+  title, summary, actor, status, created_at
+- lisa.readable_activity_monitor_links: activity_id, reference_type,
+  reference_id. Types are agent, message, runtime_work, and carrier_message.
 - lisa.readable_activity_context: id, activity_id, seq, kind, source_ref,
   content_hash, created_at
+- lisa.readable_evaluation_triage: session_id, policy_id, decision, created_at
 - lisa.readable_approvals: id, activity_id, scope, status, request_summary,
   requested_at, expires_at, resolved_at, resolved_by, decision_ref
 - lisa.policies: id (text), scope, target_agent_name, name, criteria, approved,
@@ -19,8 +29,8 @@ approved lifecycle views and the Lisa-owned policies table listed below:
 
 Use these views to find activities and inspect their status, event timeline,
 context, and any evaluation runs linked to the activity. Activity events record
-Lisa's general actions; the evaluation views contain judge runs, while the
-triage view contains Lisa's durable session-policy routing cache. Keep queries
+Lisa's general actions; the evaluation views contain judge runs, while
+readable_evaluation_triage contains Lisa's durable session-policy routing cache. Keep queries
 bounded and name columns explicitly. Use TheLake session tools for telemetry evidence. Lisa's database
 stores Lisa activity history and outcomes, not the telemetry warehouse. Use lisa.policies
 to inspect policy IDs, approval, criteria, and scope. Policy changes still go

@@ -4,8 +4,6 @@
 !dist/**
 !lisa/
 !lisa/**
-!skills/
-!skills/**
 
 # Keep explicit denies if someone force-includes sources later.
 .git

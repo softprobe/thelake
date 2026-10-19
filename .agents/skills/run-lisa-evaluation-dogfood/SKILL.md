@@ -35,8 +35,8 @@ call Lisa.
   and cleans up its own transient stack. Decisions triages all approved
   policies; Gemini judges only escalations.
 - For Markdown policy learning or review, use
-  `skills/learn-agent-policy/SKILL.md` and
-  `skills/review-agent-policy/SKILL.md`.
+  `lisa/skills/learn-agent-policy/SKILL.md` and
+  `lisa/skills/review-agent-policy/SKILL.md`.
 - For Slack delivery, use `verify-lisa-slack-alert` after a failing score is
   stored and the pending failure has a captured Slack destination.
 

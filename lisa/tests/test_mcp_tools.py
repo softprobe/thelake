@@ -34,6 +34,41 @@ def test_mcp_public_policy_contract(lisa_test_context):
     assert asyncio.run(contract()) == expected
 
 
+def test_mcp_activity_tools_find_and_complete_owned_work(lisa_test_context):
+    services = build_services(lisa_test_context())
+    assert services.activity_store is not None
+
+    async def workflow():
+        async with Client(create_server(services)) as client:
+            created = await client.call_tool(
+                "create_activity",
+                {"title": "Review session", "activity_type": "task_running", "source": "chat"},
+            )
+            activity_id = created.data["activity_id"]
+            recent = await client.call_tool("list_recent_activities", {"limit": 10})
+            assert any(item["activity_key"] == activity_id for item in recent.data)
+            updated = await client.call_tool(
+                "update_activity",
+                {
+                    "activity_id": activity_id,
+                    "event_type": "progress",
+                    "event_title": "Session reviewed",
+                },
+            )
+            completed = await client.call_tool(
+                "complete_activity",
+                {"activity_id": activity_id, "status": "success", "summary": "No issue found."},
+            )
+            thread = await client.call_tool("get_activity_thread", {"activity_id": activity_id})
+            return updated, completed, thread
+
+    updated, completed, thread = asyncio.run(workflow())
+    assert not updated.is_error
+    assert completed.data["completed"] is True
+    assert thread.data["thread"]["status"] == "success"
+    assert thread.data["thread"]["finish_message"] == "No issue found."
+
+
 def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, lisa_test_context):
     services = build_services(lisa_test_context())
     calls = []

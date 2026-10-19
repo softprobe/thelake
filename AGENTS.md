@@ -34,7 +34,14 @@ These requirements always apply to design, implementation, refactoring, and revi
    change. Add source comments where a setting's scope, lifecycle, or safety
    constraints are not obvious. Clearly label test-only settings and state
    which resources they create or modify.
-6. **Use one Docker lifecycle for automated tests.** Tests must start and stop
+6. **Verify the actual consumer.** When adding a skill, prompt, tool, hook, or
+   configuration for an agent or product, trace how that runtime discovers and
+   loads it. A developer skill under `.agents/skills/` does not become a product
+   agent skill unless the product runtime loads or explicitly references it.
+   Verify the user-facing agent instructions explain when to use newly exposed
+   capabilities; do not claim an agent knows about a capability based only on
+   its existence in an MCP server or developer skill.
+7. **Use one Docker lifecycle for automated tests.** Tests must start and stop
    Docker resources through `scripts/test_stack.py`; Compose files only describe
    service topology. Never start test containers directly from fixtures or
    harness scripts, and never attach an automated test to a developer's stack.
@@ -44,7 +51,18 @@ These requirements always apply to design, implementation, refactoring, and revi
    separate. See [`docs/how-to/test-environments.md`](docs/how-to/test-environments.md).
 
 Prefer shared abstractions that remove duplication over parallel implementations.
-Especially enforce rules 1, 2, and 4.
+Especially enforce rules 1, 2, 4, and 6.
+
+## Clean cutoffs
+
+Treat a replacement implementation as a clean cutoff: assume the prior
+implementation and its data formats never existed. Do not add database
+migrations, compatibility branches, dual-read/write paths, old-format parsers,
+data preservation during schema recreation, backfills, fallback behavior, or
+regression tests whose purpose is to keep the prior implementation working.
+Replace the schema and contracts directly, and update their callers, docs, and
+tests together. Add backward compatibility only when the user explicitly asks
+for it.
 
 Verify every change with appropriate existing tests or checks. Keep lasting
 regression coverage in the existing test module for the same component and

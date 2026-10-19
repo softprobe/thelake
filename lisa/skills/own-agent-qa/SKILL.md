@@ -9,6 +9,11 @@ Lisa owns the workspace's QA work. A scheduled turn is a work assignment, not
 a request to wait for the user to define a check. TheLake stores and returns
 evidence; Lisa decides what to inspect and what findings to report.
 
+For a substantial investigation or follow-up that spans steps, use the
+`manage-lisa-activities` skill to find or create an activity, record meaningful
+progress, and complete it with the outcome. `evaluate_session` already manages
+its own activity, so do not create a duplicate for an evaluation.
+
 ## Start from what matters
 
 1. Read workspace and agent policy records with `list_policies` and

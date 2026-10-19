@@ -103,6 +103,72 @@ CREATE TABLE lisa.activity_events (
     PRIMARY KEY (activity_id, seq)
 );
 
+-- Feed and monitor projections. Lisa's lifecycle tables remain authoritative.
+CREATE TABLE lisa.activity_feed_entries (
+    activity_id uuid PRIMARY KEY REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    activity_type text NOT NULL,
+    is_goal boolean NOT NULL DEFAULT false,
+    message_id text,
+    subtitle text,
+    status_title text,
+    task_label text,
+    agent_id text,
+    details jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX activity_feed_recent_idx ON lisa.activity_feed_entries(updated_at DESC);
+
+CREATE TABLE lisa.activity_monitor_threads (
+    activity_id uuid PRIMARY KEY REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    icon text NOT NULL DEFAULT 'activity',
+    details jsonb NOT NULL DEFAULT '{}'::jsonb,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE lisa.activity_monitor_thread_sections (
+    activity_id uuid NOT NULL REFERENCES lisa.activity_monitor_threads(activity_id) ON DELETE CASCADE,
+    section_id text NOT NULL,
+    title text NOT NULL DEFAULT '',
+    status text NOT NULL DEFAULT 'pending',
+    section_order integer NOT NULL DEFAULT 0,
+    section_depth integer,
+    parent_section_key text,
+    ordinal_label text,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (activity_id, section_id)
+);
+CREATE TABLE lisa.activity_monitor_thread_actions (
+    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    seq bigint NOT NULL,
+    event_type text NOT NULL,
+    title text NOT NULL,
+    summary text,
+    actor text NOT NULL,
+    status text NOT NULL DEFAULT 'pending',
+    created_at timestamptz NOT NULL,
+    PRIMARY KEY (activity_id, seq)
+);
+CREATE TABLE lisa.activity_monitor_agent_threads (
+    agent_id text NOT NULL,
+    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    PRIMARY KEY (agent_id, activity_id)
+);
+CREATE TABLE lisa.activity_monitor_message_threads (
+    message_id text NOT NULL,
+    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    PRIMARY KEY (message_id, activity_id)
+);
+CREATE TABLE lisa.activity_monitor_runtime_work_threads (
+    runtime_work_id text NOT NULL,
+    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    PRIMARY KEY (runtime_work_id, activity_id)
+);
+CREATE TABLE lisa.activity_monitor_carrier_user_messages (
+    carrier_message_id text NOT NULL,
+    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    PRIMARY KEY (carrier_message_id, activity_id)
+);
+
 CREATE TABLE lisa.activity_context (
     id uuid PRIMARY KEY,
     activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
@@ -152,6 +218,39 @@ FROM lisa.activities;
 CREATE VIEW lisa.readable_activity_events AS
 SELECT activity_id, seq, event_type, title, summary, actor, created_at
 FROM lisa.activity_events;
+
+CREATE VIEW lisa.readable_activity_feed AS
+SELECT a.id AS activity_id, f.activity_type, f.is_goal, f.message_id,
+       f.subtitle, f.status_title, f.task_label, f.agent_id, f.details,
+       a.kind, a.status, a.title, a.summary, a.source,
+       a.created_at, a.started_at, a.updated_at, a.finished_at
+FROM lisa.activities AS a
+JOIN lisa.activity_feed_entries AS f ON f.activity_id = a.id;
+
+CREATE VIEW lisa.readable_activity_monitor_threads AS
+SELECT thread.activity_id, thread.icon, thread.details,
+       section.section_id, section.title AS section_title,
+       section.status AS section_status, section.section_order
+FROM lisa.activity_monitor_threads AS thread
+LEFT JOIN lisa.activity_monitor_thread_sections AS section
+  ON section.activity_id = thread.activity_id;
+
+CREATE VIEW lisa.readable_activity_monitor_thread_actions AS
+SELECT activity_id, seq, event_type, title, summary, actor, status, created_at
+FROM lisa.activity_monitor_thread_actions;
+
+CREATE VIEW lisa.readable_activity_monitor_links AS
+SELECT activity_id, 'agent'::text AS reference_type, agent_id AS reference_id
+FROM lisa.activity_monitor_agent_threads
+UNION ALL
+SELECT activity_id, 'message'::text, message_id
+FROM lisa.activity_monitor_message_threads
+UNION ALL
+SELECT activity_id, 'runtime_work'::text, runtime_work_id
+FROM lisa.activity_monitor_runtime_work_threads
+UNION ALL
+SELECT activity_id, 'carrier_message'::text, carrier_message_id
+FROM lisa.activity_monitor_carrier_user_messages;
 
 CREATE VIEW lisa.readable_activity_context AS
 SELECT id, activity_id, seq, kind, source_ref, content_hash, created_at

@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY lisa/pyproject.toml ./pyproject.toml
 COPY lisa/src ./src
-COPY skills ./skills
+COPY lisa/skills ./skills
 RUN pip install --no-cache-dir '.[openhands]'
 
 RUN useradd --system --uid 10002 --create-home lisa && \

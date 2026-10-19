@@ -5,6 +5,7 @@ from threading import Lock
 
 from .context import WorkspaceContext
 from .evaluation.policy_triage import OpenAIPolicyTriager
+from .repositories.activities import PostgresActivityStore
 from .repositories.conversations import FileConversationRepository
 from .repositories.evaluation_artifacts import EvaluationArtifactRepository
 from .repositories.failures import FailureRepository
@@ -12,7 +13,6 @@ from .repositories.lisa_database import LisaDatabaseReader
 from .repositories.notifications import NotificationReceiptRepository
 from .repositories.policies import InMemoryPolicyRepository, PostgresPolicyRepository
 from .repositories.slack_events import SlackEventRepository
-from .repositories.activities import PostgresActivityStore
 from .runtime import confirmed_policy_title, run_turn
 from .services.conversations import ConversationService, ScheduledQAService
 from .services.database_inspection import DatabaseInspectionService
@@ -45,6 +45,7 @@ class WorkspaceServices:
     slack_event_service: SlackEventService
     slack_worker: SlackEventWorker
     scheduled_qa: ScheduledQAService
+    activity_store: PostgresActivityStore | None = None
 
 
 def build_services(context: WorkspaceContext) -> WorkspaceServices:
@@ -119,4 +120,5 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         slack_event_service=slack_event_service,
         slack_worker=slack_worker,
         scheduled_qa=scheduled_qa,
+        activity_store=activities,
     )

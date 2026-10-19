@@ -10,6 +10,11 @@ repository rules in `AGENTS.md` and the Lisa contracts in
 [`docs/architecture/lisa-qa.md`](../../../docs/architecture/lisa-qa.md).
 Use [`docs/architecture/lisa-activities.md`](../../../docs/architecture/lisa-activities.md)
 for Lisa's generic, user-inspectable activity and its links to evaluation runs.
+Use [`lisa-activities`](../lisa-activities/SKILL.md) for the feed and monitor MCP
+tool contract, including thread sections and linked references.
+Lisa's packaged runtime skills live in [`lisa/skills/`](../../../lisa/skills/)
+and are copied into the Lisa image by `lisa/Dockerfile`; changes to those skills
+must be verified through `OpenHandsBackend`'s configured skill directory.
 
 ## Source of truth and flow
 

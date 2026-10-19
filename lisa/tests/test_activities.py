@@ -8,19 +8,19 @@ from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 
+import psycopg
 import pytest
+from policy_cases import list_policies, read_policy
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
-from lisa.repositories.policies import PostgresPolicyRepository
-from lisa.services.policies import PolicyService
-from policy_cases import list_policies
-from policy_cases import read_policy
 from lisa.repositories.activities import (
     DeploymentBindingError,
     PostgresActivityStore,
     StaleLeaseError,
 )
+from lisa.repositories.policies import PostgresPolicyRepository
+from lisa.services.policies import PolicyService
 
 WORKSPACE_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -85,15 +85,16 @@ def test_provision_binds_one_database_to_its_workspace(store: PostgresActivitySt
         PostgresActivityStore(store.dsn, "1480b512-0b71-44e3-90a1-25b5a4f90d72")
 
 
-def test_schema_recreation_preserves_policy_records(store, lisa_test_db):
+def test_schema_recreation_starts_with_empty_policy_catalog(store, lisa_test_db):
     from sql_cases import provision_lisa_schema
 
+    store.create_activity(title="Temporary activity", source="test")
     repository = PostgresPolicyRepository(store.dsn, WORKSPACE_ID)
     created = repository.replace_scope(
         "workspace",
         "",
         [],
-        [{"name": "Preserved rule", "criteria": "Keep this policy.", "approved": True}],
+        [{"name": "Temporary rule", "criteria": "This data is discarded.", "approved": True}],
     )
     writer_role = urlparse(lisa_test_db.writer_url).username
     reader_role = urlparse(lisa_test_db.reader_url).username
@@ -105,10 +106,144 @@ def test_schema_recreation_preserves_policy_records(store, lisa_test_db):
         reader_role=reader_role,
     )
 
-    preserved = repository.list_scope("workspace")
-    assert [(rule.id, rule.name, rule.criteria, rule.approved) for rule in preserved] == [
-        (created[0].id, "Preserved rule", "Keep this policy.", True)
+    assert created
+    assert repository.list_scope("workspace") == []
+    recreated = PostgresActivityStore(lisa_test_db.writer_url, WORKSPACE_ID)
+    assert recreated.list_activity_feed(limit=10) == []
+
+
+def test_activity_feed_and_monitor_thread_follow_activity_lifecycle(store):
+    activity = store.create_activity(
+        title="Review refund session",
+        source="mcp",
+        kind="policy_evaluation",
+        activity_type="task_running",
+        subtitle="Checking approved policies",
+        task_label="Refund review",
+        agent_id="refund-agent",
+    )
+
+    recent = store.list_activity_feed(activity_type="task_running", limit=10)
+    assert len(recent) == 1
+    assert recent[0]["activity_key"] == activity.id
+    assert recent[0]["status"] == "pending"
+    assert recent[0]["title"] == "Review refund session"
+    assert recent[0]["task_label"] == "Refund review"
+
+    detail = store.get_activity_thread(activity.id)
+    assert detail["thread"]["activity_thread_id"] == activity.id
+    assert detail["thread"]["status"] == "pending"
+    assert detail["actions"][0]["title"] == "Review refund session"
+    assert detail["actions"][0]["status"] == "pending"
+
+    store.finish_activity_without_claim(activity.id, "Review complete.")
+
+    recent = store.list_activity_feed(activity_type="task_running", limit=10)
+    assert recent[0]["status"] == "success"
+    detail = store.get_activity_thread(activity.id)
+    assert detail["thread"]["status"] == "success"
+    assert detail["thread"]["finish_message"] == "Review complete."
+    assert all(action["status"] == "success" for action in detail["actions"])
+
+
+def test_activity_update_and_sections_are_visible_in_thread(store):
+    activity = store.create_activity(title="Prepare report", source="mcp")
+    store.update_activity_presentation(
+        activity.id,
+        title="Prepare weekly report",
+        subtitle="Collecting current results",
+        status_title="In progress",
+        task_label="Weekly report",
+        details={"source": "scheduled"},
+    )
+    store.set_activity_section(
+        activity.id,
+        section_key="research",
+        title="Research",
+        status="pending",
+        section_order=1,
+    )
+    store.set_activity_section(
+        activity.id,
+        section_key="draft",
+        title="Draft",
+        status="pending",
+        section_order=2,
+    )
+
+    entry = store.list_activity_feed(limit=10)[0]
+    detail = store.get_activity_thread(activity.id)
+    assert entry["title"] == "Prepare weekly report"
+    assert entry["subtitle"] == "Collecting current results"
+    assert entry["status_title"] == "In progress"
+    assert entry["details_json"] == {"source": "scheduled"}
+    assert detail["thread"]["name"] == "Prepare weekly report"
+    assert [section["section_key"] for section in detail["sections"]] == [
+        "research", "draft"
     ]
+
+
+def test_agent_owned_activity_can_be_completed_once(store):
+    activity = store.create_activity(title="Prepare report", source="mcp")
+
+    assert store.finish_activity_without_claim(
+        activity.id, "Report delivered.", status="succeeded"
+    )
+    assert not store.finish_activity_without_claim(
+        activity.id, "Duplicate completion.", status="succeeded"
+    )
+
+    detail = store.get_activity_thread(activity.id)
+    assert detail["thread"]["status"] == "success"
+    assert detail["thread"]["finish_message"] == "Report delivered."
+    assert all(action["status"] == "success" for action in detail["actions"])
+
+
+def test_evaluation_activity_cannot_be_completed_by_agent_tool(store):
+    pending_evaluation = store.create_activity(
+        title="Evaluate session", source="evaluation", kind="policy_evaluation"
+    )
+    assert not store.complete_agent_activity(
+        pending_evaluation.id, "Evaluation still owns this lifecycle."
+    )
+
+    evaluation = _create_evaluation(store)
+
+    assert not store.complete_agent_activity(
+        evaluation.activity_id, "Evaluation still owns this lifecycle."
+    )
+    assert store.get_activity_thread(evaluation.activity_id)["thread"]["status"] == "pending"
+
+
+def test_activity_thread_references_are_queryable(store):
+    activity = store.create_activity(
+        title="Run task", source="mcp", agent_id="agent-1", message_id="message-1"
+    )
+    store.link_activity_reference(activity.id, "runtime_work", "work-1")
+    store.link_activity_reference(activity.id, "carrier_message", "carrier-1")
+
+    detail = store.get_activity_thread(activity.id)
+    assert detail["references"] == [
+        {"reference_type": "agent", "reference_id": "agent-1"},
+        {"reference_type": "carrier_message", "reference_id": "carrier-1"},
+        {"reference_type": "message", "reference_id": "message-1"},
+        {"reference_type": "runtime_work", "reference_id": "work-1"},
+    ]
+
+
+def test_release_activity_updates_thread_action_projection(store):
+    activity = _create_evaluation(store)
+    claim = store.claim_activity(activity.id, "worker-a", lease_seconds=60)
+    assert claim is not None
+
+    store.release_activity(
+        activity.id, actor="worker-a", fencing_token=claim.fencing_token,
+        reason="retry after provider timeout",
+    )
+
+    detail = store.get_activity_thread(activity.id)
+    assert detail["actions"][-1]["event_type"] == "retryable_error"
+    assert all(action["status"] == "pending" for action in detail["actions"])
 
 
 def test_on_disk_policy_markdown_is_not_loaded_into_postgres(
@@ -296,7 +431,6 @@ def test_expired_lease_is_rejected_after_waiting_for_row_lock(
 def test_runtime_roles_are_separated_from_provision(
     store: PostgresActivityStore, lisa_test_db
 ):
-    import psycopg
 
     with psycopg.connect(lisa_test_db.reader_url, autocommit=True) as reader:
         assert reader.execute(_test_sql("count_readable_activities.sql")).fetchone()
@@ -375,7 +509,6 @@ def test_postgres_policy_records_keep_string_ids_and_agent_scope(store, tmp_path
 
 
 def test_policy_primary_key_column_uses_postgres_text(store):
-    import psycopg
 
     with psycopg.connect(store.dsn) as connection:
         row = connection.execute(_test_sql("policy_id_column_type.sql")).fetchone()
@@ -466,7 +599,6 @@ def test_activity_cannot_finish_before_score_acknowledgement(store: PostgresActi
 def test_verdict_constraint_accepts_current_evaluation_outcomes(
     store: PostgresActivityStore,
 ):
-    import psycopg
 
     activity = _create_evaluation(store)
     with psycopg.connect(store.dsn) as connection:

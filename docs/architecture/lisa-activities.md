@@ -36,11 +36,38 @@ in its event timeline. Score delivery remains attached to each evaluation
 result, so it can retry its own stored payload and idempotency key.
 
 The read-only `lisa.readable_activities`, `lisa.readable_activity_events`,
-`lisa.readable_activity_context`, and `lisa.readable_evaluations` views expose
+feed, monitor, and link views, `lisa.readable_activity_context`, and
+`lisa.readable_evaluations` expose
 the inspection surface through `lisa_db`. The evaluation view reads actual
 judge runs and their linked activity, while activity events capture Lisa's
 actions in order. The writer uses typed repository methods; the reader cannot
 access base tables or modify state.
+
+## Feed and monitor contract
+
+Lisa's `activities` and `activity_events` remain canonical.
+`activity_feed_entries`
+stores card metadata such as type, goal flag, subtitle, task label, agent and
+details. `activity_monitor_threads`, `activity_monitor_thread_sections`, and
+`activity_monitor_thread_actions` provide the thread surface. The four link
+families map agent, message, runtime-work, and carrier-message IDs to activity
+threads. Activity events are mirrored into monitor actions in the same database
+transaction; terminal Lisa states map to feed statuses `success`, `error`, or
+`stopped`, while queued/running map to `pending` and waiting states to `blocked`.
+
+The MCP tools `create_activity`, `update_activity`, `complete_activity`,
+`list_recent_activities`, `get_activity_thread`, `set_activity_section`, and
+`link_activity_reference` expose the agent contract. Lisa's packaged
+`manage-lisa-activities` skill defines when she finds, creates, updates, and
+completes records; the runtime system prompt directs her to it for substantial
+multi-step work. `evaluate_session` owns its own activity lifecycle.
+`complete_activity` can finish only queued non-evaluation activities that have
+no linked evaluation run. The kind check protects the interval before an
+evaluation run exists; evaluator-managed lifecycles are completed by
+`EvaluationService`.
+The read-only `lisa_db` resource documents matching views. There is no Lisa
+frontend renderer in this repository; these tools and views are its published
+feed/thread API contract. Presentation updates cannot set lifecycle status.
 
 ## Triage and retry behavior
 
@@ -70,7 +97,8 @@ fingerprint. Policies remain in `lisa.policies`; policy tools and
 normal session and policy services and never accept dataset-selected policy
 objects directly.
 
-Provision the Lisa schema with `lisa/scripts/provision_lisa.py`. An explicit
-schema recreation preserves Lisa policy records before rebuilding operational
-tables. Automated tests use transient Lisa databases and must not connect to a
-developer's running service or database.
+Provision the Lisa schema with `lisa/scripts/provision_lisa.py`. Lisa uses one
+clean schema definition without migrations or compatibility paths. Explicit
+schema recreation drops and rebuilds the Lisa schema, clearing its policies,
+activities, and operational history. Automated tests use transient Lisa
+databases and must not connect to a developer's running service or database.

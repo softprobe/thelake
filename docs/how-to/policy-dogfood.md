@@ -19,12 +19,14 @@ evaluation works.
 Codex and Cursor project skills for these developer workflows live in
 `.agents/skills/`: `run-lisa-evaluation-dogfood` exercises the local live path,
 and `verify-lisa-slack-alert` checks the optional Slack notification path.
-These developer skills are separate from Lisa's policy authoring skills in
-`skills/`.
+These developer skills are separate from Lisa's runtime skills in
+[`lisa/skills/`](../../lisa/skills/).
 
 ## 1. Check policy learning
 
-Invoke `learn-agent-policy` with the files in
+Invoke `learn-agent-policy` from
+[`lisa/skills/learn-agent-policy/SKILL.md`](../../lisa/skills/learn-agent-policy/SKILL.md)
+with the files in
 [`examples/policy-dogfood/connected-itinerary/source/`](../../examples/policy-dogfood/connected-itinerary/source/)
 as the authoritative business source. Ask it to learn the behavior for a travel
 agent and explain which statements are confirmed versus unresolved. Compare the

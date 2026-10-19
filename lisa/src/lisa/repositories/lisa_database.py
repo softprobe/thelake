@@ -33,6 +33,23 @@ VIEW_COLUMNS = {
     "readable_activity_events": {
         "activity_id", "seq", "event_type", "title", "summary", "actor", "created_at",
     },
+    "readable_activity_feed": {
+        "activity_id", "activity_type", "is_goal", "message_id", "subtitle",
+        "status_title", "task_label", "agent_id", "details", "kind", "status",
+        "title", "summary", "source", "created_at", "started_at", "updated_at",
+        "finished_at",
+    },
+    "readable_activity_monitor_threads": {
+        "activity_id", "icon", "details", "section_id", "section_title",
+        "section_status", "section_order",
+    },
+    "readable_activity_monitor_thread_actions": {
+        "activity_id", "seq", "event_type", "title", "summary", "actor",
+        "status", "created_at",
+    },
+    "readable_activity_monitor_links": {
+        "activity_id", "reference_type", "reference_id",
+    },
     "readable_activity_context": {
         "id", "activity_id", "seq", "kind", "source_ref", "content_hash", "created_at",
     },
