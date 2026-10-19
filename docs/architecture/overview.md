@@ -318,7 +318,7 @@ make ci
 matrix (**isolated and shared**) via `scripts/run-e2e-matrix.sh`, and tears down
 its stack while retaining logs and reports under `target/test-artifacts/`.
 Other Docker-backed automated tests use the same lifecycle owner; see
-[`Automated test environments`](../how-to/test-environments.md). Use
+[`Tests and evaluations`](../how-to/test-and-eval.md). Use
 `make setup` only when you need the persistent local development services.
 
 GitHub Actions (`.github/workflows/ci.yml`) does **not** invoke `make ci`. It

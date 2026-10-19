@@ -27,6 +27,24 @@ The fact tables covered here are `traces`, `logs`, and `scores`.
 7. **Clean cutover.** Stop writers, export traces into the clean schema from every physical scope, validate, then flip once. Existing logs and scores files remain in place. No dual-read / feature flags.
 8. **Global scan rule:** every fact scan has an explicit, bare `timestamp` bound for partition pruning. One lower or upper bound can prune partitions on one side. Typed query APIs require a `QueryWindow`; there is no all-history default. A DuckDB JSON physical-plan check runs before query-worker execution when `query.sql_gate` is true (**default false**); writer/score-lookup paths remain gated. Off is an unsafe latency tradeoff. When enabled, the check requires a conjunctive bare-column timestamp filter on every traces/logs/scores scan, including nested queries, DML, CTAS, COPY, and relation commands. When statistics prove the timestamp bound redundant, the gate accepts that only for a direct query with one fact source; when the optimizer proves the entire result empty, there is no fact scan to gate. Raw SQL cannot read Parquet files directly; the writer has a separate checked ingest path for temporary Parquet inputs. One SQL statement is accepted per call so planning sees the same catalog state as execution. Unsupported query forms fail closed. The gate also rejects forbidden `record_date` / `event_date` / `window_ts` references.
 9. **Simplicity.** No ORM, no SQL AST framework, no `(year,month,day)` triples, no signal-specific clock aliases.
+10. **No query SQL in code string literals.** Put query statements in `.sql`
+    files and load/render them from code. Small non-query fragments
+    (identifiers, predicates, projection fragments) may be composed by
+    typed/query-builder helpers, but must not contain complete SQL statements.
+11. **Every `traces` or `logs` read is finitely time-bounded.** It must carry
+    both a lower and an upper bare-`timestamp` predicate so DuckLake can
+    partition-prune. Never add an unbounded historical scan, including
+    lookup/detail queries that already have trace/session IDs.
+12. **Do not bypass the execution gate.** Fact-table SQL must execute through
+    the checked query/engine paths. Do not add raw DuckDB execution sites to
+    work around a rejected query.
+13. **Fix the harness instead of adding exceptions.** If a legitimate query is
+    rejected, preserve the invariant and improve the template/builder/gate. Do
+    not add a file, directory, or call-site exemption merely to make CI green.
+
+`scripts/check_sql_guardrails.py` blocks newly introduced inline SQL and checks
+changed `.sql` templates that read traces/logs. Runtime DuckDB plan checks
+remain the final enforcement layer for time bounds.
 
 Violate any rule → reject the change.
 

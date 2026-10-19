@@ -35,7 +35,7 @@ service boundaries and current Decisions-to-Gemini workflow.
   topology only; test fixtures and scripts must not call `docker compose up/down`
   or `docker run/rm` directly. Retain logs and reports under
   `target/test-artifacts/` and remove only run-owned resources. See
-  [`Automated test environments`](../../../docs/how-to/test-environments.md).
+  [`Tests and evaluations`](../../../docs/how-to/test-and-eval.md).
 - Write a failing test before implementation and add proportionate unit,
   integration, and end-to-end coverage for behavior changes. Prefer shared
   contract tests over duplicated backend-specific suites.

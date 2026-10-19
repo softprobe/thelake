@@ -20,7 +20,7 @@ pinning helpers live under `compat/`; performance utilities live under
 
 Docker-backed automated tests use [`test_stack.py`](test_stack.py) as their
 single startup/teardown owner. See
-[`Automated test environments`](../docs/how-to/test-environments.md).
+[`Tests and evaluations`](../docs/how-to/test-and-eval.md).
 The Explorer UI harness also uses `run-explorer-e2e-services.py` to supervise
 TheLake and Lisa on pre-bound, dynamically assigned HTTP ports.
 

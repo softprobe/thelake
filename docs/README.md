@@ -32,10 +32,8 @@ Concepts and runtime design (read for understanding, not step-by-step).
 - [5-minute quickstart](quickstart.md) — create a check in chat, run a Gemini sample agent, and inspect the result
 - [Instrument applications](how-to/instrumentation.md)
 - [Use Explorer](how-to/explorer.md) — browser chat and session/trace UI at `/explorer/`
-- [Automated test environments](how-to/test-environments.md) — one transient Docker lifecycle, cleanup, and retained artifacts
-- [Clean cutoffs](how-to/clean-cutoffs.md) — replace prior implementations and formats without compatibility scaffolding
-- [Change validation](how-to/change-validation.md) — required test/eval execution and real agent validation
-- [SQL safety](how-to/sql-safety.md) — no inline query SQL, time-bounded fact reads, checked execution paths
+- [Tests and evaluations](how-to/test-and-eval.md) — TDD/coverage, transient Docker stacks, suite execution, real agent validation
+- [Clean cutoffs](how-to/clean-cutoffs.md) — no toxic leftovers; no migrations or compatibility unless asked
 - [Policy memory](how-to/policy-memory.md) — maintain PostgreSQL-backed policies and understand Decisions triage and judge escalation
 - [Policy triage evaluation](how-to/policy-triage-evaluation.md) — dataset design, recall metrics, and opt-in calibration
 - [Policy dogfood](how-to/policy-dogfood.md) — repeatably check policy learning, judge directionality, and online issue detection
@@ -76,5 +74,5 @@ The runtime does not implement those SDK packages; it stores the OTLP they emit.
 | HTTP routes + JSON shapes | [`reference/openapi.yaml`](reference/openapi.yaml) and `src/api/` |
 | Config keys and defaults | [`reference/config.md`](reference/config.md) and `src/config.rs` |
 | Table DDL | `src/sql/schema/*.sql` |
-| SQL safety invariants | [`how-to/sql-safety.md`](how-to/sql-safety.md) (summary in [`AGENTS.md`](../AGENTS.md)) |
+| SQL safety invariants | [`architecture/sql-and-schema.md`](architecture/sql-and-schema.md) (summary in [`AGENTS.md`](../AGENTS.md)) |
 | Make targets | `Makefile` / [`scripts/README.md`](../scripts/README.md) |

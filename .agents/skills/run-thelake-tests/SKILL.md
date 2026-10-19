@@ -17,7 +17,7 @@ owner, `scripts/test_stack.py`; Compose files declare topology but test fixtures
 and harnesses must not start or remove containers directly. Reports and logs
 stay under `target/test-artifacts/`, while run-owned service resources and
 scratch data are removed. See
-[Automated test environments](../../../docs/how-to/test-environments.md).
+[Tests and evaluations](../../../docs/how-to/test-and-eval.md).
 
 ## Common gates
 
