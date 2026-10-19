@@ -114,6 +114,7 @@ def _score_state(services, expected: dict) -> list[dict]:
             None,
         )
         ok = found is not None
+        timeline_summaries: list[str] = []
         if found is not None:
             if label.get("status"):
                 ok = ok and found["status"] == label["status"]
@@ -123,9 +124,18 @@ def _score_state(services, expected: dict) -> list[dict]:
                     and label["next_action_contains"].casefold()
                     in (found.get("next_action") or "").casefold()
                 )
-            if label.get("min_timeline_actions", 0):
+            if label.get("min_timeline_actions", 0) or label.get("timeline_text_contains"):
                 detail = services.activity_store.get_activity_thread(str(found["id"]))
+                timeline_summaries = [
+                    str(action.get("summary") or "") for action in detail["actions"]
+                ]
+            if label.get("min_timeline_actions", 0):
                 ok = ok and len(detail["actions"]) >= label["min_timeline_actions"]
+            if label.get("timeline_text_contains"):
+                timeline = "\n".join(timeline_summaries).casefold()
+                ok = ok and all(
+                    phrase.casefold() in timeline for phrase in label["timeline_text_contains"]
+                )
         checks.append(
             {
                 "check": f"activity:{label['title_contains']}",
@@ -138,6 +148,7 @@ def _score_state(services, expected: dict) -> list[dict]:
                     "title": found["title"],
                     "status": found["status"],
                     "next_action": found.get("next_action"),
+                    "timeline_summaries": timeline_summaries,
                 },
             }
         )
@@ -153,12 +164,23 @@ def _score_state(services, expected: dict) -> list[dict]:
         followups = (
             services.activity_store.list_activity_followups(str(activity["id"])) if activity else []
         )
-        ok = any(item["status"] == label["status"] for item in followups)
+        matching = [item for item in followups if item["status"] == label["status"]]
+        ok = bool(matching)
+        if label.get("count") is not None:
+            ok = ok and len(followups) == label["count"]
+        if label.get("trigger_event_type") is not None:
+            ok = ok and any(
+                item.get("trigger_event_type") == label["trigger_event_type"] for item in matching
+            )
+        if label.get("prompt_contains"):
+            prompt = "\n".join(str(item.get("prompt") or "") for item in matching).casefold()
+            ok = ok and all(phrase.casefold() in prompt for phrase in label["prompt_contains"])
         checks.append(
             {
                 "check": f"followup:{label['activity_title_contains']}:{label['status']}",
                 "passed": ok,
                 "actual_statuses": [item["status"] for item in followups],
+                "actual_count": len(followups),
             }
         )
     proposals = services.activity_store.list_policy_proposals()
@@ -225,6 +247,28 @@ def _score_turn(
         action_checks.append({"check": f"required_tool:{name}", "passed": name in tool_names})
     for name in forbidden:
         action_checks.append({"check": f"forbidden_tool:{name}", "passed": name not in tool_names})
+    if turn.tool_order:
+        ordered_names = iter(tool_names)
+        passed_order = all(
+            any(actual == wanted for actual in ordered_names) for wanted in turn.tool_order
+        )
+        action_checks.append(
+            {
+                "check": "tool_order:" + "->".join(turn.tool_order),
+                "passed": passed_order,
+                "actual": tool_names,
+            }
+        )
+    for name, expected_count in turn.tool_call_counts.items():
+        actual_count = tool_names.count(name)
+        action_checks.append(
+            {
+                "check": f"tool_call_count:{name}",
+                "passed": actual_count == expected_count,
+                "expected": expected_count,
+                "actual": actual_count,
+            }
+        )
     reply_checks = []
     for phrase in turn.reply_must_include:
         resolved = _interpolate(phrase, substitutions)

@@ -31,7 +31,9 @@ The runner validates the manifest digest, starts a run-owned Postgres service
 through `scripts/test_stack.py`, and provisions an isolated Lisa database and
 conversation directory for every case. It drives Lisa's OpenHands conversation
 backend and registered MCP tools with the case's main-chat or Slack-context
-turns, then scores actual tool events, database state, and labeled reply checks.
+turns, then scores actual tool events (including required order and exact call
+counts), activity timeline text, follow-up fields, database state, and labeled
+reply checks.
 The runner removes its transient Compose resources and stores the report,
 redacted stack logs, and local model recordings beneath
 `target/test-artifacts/lisa-activity-benchmark/<run-id>/`.

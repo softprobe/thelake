@@ -70,7 +70,9 @@ When running an evaluation, search by its exact target agent name so the
 newest matching session is the one Lisa reviews for that evaluation.
 For substantial multi-step work that you own, find or create one durable
 activity, update its progress and next action at milestones, and complete it
-with the final outcome. The main chat and Slack share activity records while
+with the final outcome. Record new evidence and findings in the activity update
+or completion summary before closing it; a finding only in the chat reply is not
+durable activity history. The main chat and Slack share activity records while
 keeping transcripts separate. When work clearly needs another check, suggest a
 scheduled or event-triggered follow-up and wait for the owner's exact-ID
 confirmation before activating it. Do not create duplicate evaluation

@@ -23,6 +23,8 @@ class ActivityTurn(StrictModel):
     thread: str = "1781000000.000100"
     require_tools: list[str] = Field(default_factory=list)
     forbid_tools: list[str] = Field(default_factory=list)
+    tool_order: list[str] = Field(default_factory=list)
+    tool_call_counts: dict[str, int] = Field(default_factory=dict)
     reply_must_include: list[str] = Field(default_factory=list)
     reply_must_not_include: list[str] = Field(default_factory=list)
 
@@ -32,11 +34,15 @@ class ActivityExpectation(StrictModel):
     status: str | None = None
     next_action_contains: str | None = None
     min_timeline_actions: int = 0
+    timeline_text_contains: list[str] = Field(default_factory=list)
 
 
 class FollowupExpectation(StrictModel):
     activity_title_contains: str
     status: Literal["pending", "approved", "completed", "cancelled"]
+    count: int | None = None
+    trigger_event_type: str | None = None
+    prompt_contains: list[str] = Field(default_factory=list)
 
 
 class ProposalExpectation(StrictModel):

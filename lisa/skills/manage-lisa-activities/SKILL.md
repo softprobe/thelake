@@ -27,6 +27,9 @@ across the main chat and separate Slack conversations.
 - Use `set_activity_progress` to set `queued`, `running`, or `waiting`, with a
   concise factual summary and the next action. Include a due time only when the
   next check has a real date and time.
+- When the user supplies evidence or a finding, record it in the activity's
+  update or completion summary before closing the work. The final user reply
+  does not replace the durable activity record.
 - Use `set_activity_section` when named stages make a substantial task easier
   to inspect. Link only references returned by workspace tools.
 - Complete agent-owned work with `complete_activity` exactly once and report
