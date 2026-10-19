@@ -49,64 +49,26 @@ These requirements always apply to design, implementation, refactoring, and revi
    removes run-owned containers, volumes, networks, and scratch data after the
    test. Operator workflows such as `make setup` and `make grafana-up` remain
    separate. See [`docs/how-to/test-environments.md`](docs/how-to/test-environments.md).
-8. **Clean cutoffs.** Treat a replacement implementation as a clean cutoff:
-   assume the prior implementation and its data formats never existed. Do not
-   add database migrations, compatibility branches, dual-read/write paths,
-   old-format parsers, data preservation during schema recreation, backfills,
-   fallback behavior, or regression tests whose purpose is to keep the prior
-   implementation working. Replace the schema and contracts directly, and
-   update their callers, docs, and tests together. Add backward compatibility
-   only when the user explicitly asks for it.
-9. **Actually run the relevant tests and evaluations.** Changing code without
-   executing the appropriate checks is not allowed. After every change, run the
-   relevant unit, integration, end-to-end, and labeled evaluation suites that
-   cover the touched behavior; report what ran and the outcomes. Keep lasting
-   regression coverage in the existing test module for the same component and
-   contract; create a new test module only for a distinct subsystem or test
-   layer. Do not add one-off verification tests or scripts to the tracked
-   codebase. When a temporary script is the clearest way to verify a change,
-   put it in `/tmp` or another excluded location. Use `./tmp` only when Git
-   confirms that path is ignored. Run the script and remove it when finished.
-10. **Real agent execution validation.** For any change to an agent's prompt,
-    skills, tools, hooks, routing, scheduling, or workflow, validate the actual
-    consumer through a real end-to-end execution. Run the relevant labeled
-    agent evaluation with its configured model and runtime; unit tests and
-    mocked integration tests supplement this check and never replace it. Use
-    the real production entrypoint for the behavior under evaluation, such as a
-    scheduled service for scheduled behavior. Keep all state transient and
-    run-owned under the automated-test rules above.
-    Before declaring model credentials unavailable, inspect the repository's
-    documented environment sources, including the repository-root `.env` when
-    present, and the current process environment. A credential in `.env` counts
-    as configured even when the shell did not export it. Load that file through
-    the project's supported dotenv/configuration mechanism before checking or
-    running the entrypoint. Check only whether required values are present; never
-    print, log, copy into reports, or commit secret values. Do not ask the user
-    to provide a credential until these sources have been checked. If no
-    configured credentials exist, report that the real execution could not run
-    and make no agent-performance claim.
-    A real agent execution means invoking the actual configured model and
-    runtime with a fresh run-owned workspace and observing its tool calls and
-    resulting state. Unit tests, mocks, canned transcripts, replayed traces, or
-    an offline scorer are not substitutes for that execution.
-    For before/after performance claims, capture a baseline before changing
-    agent behavior and compare it with the same pinned evaluation cases, model,
-    and runtime. If no comparable baseline exists, report current results
-    without attributing a measured improvement to the changes.
+8. **Clean cutoffs.** Replace prior implementations and data formats directly;
+   no migrations, dual paths, fallbacks, or compatibility unless the user
+   explicitly asks. See
+   [`docs/how-to/clean-cutoffs.md`](docs/how-to/clean-cutoffs.md).
+9. **Actually run the relevant tests and evaluations.** Do not ship code
+   changes without executing the covering unit, integration, e2e, and labeled
+   evaluation suites; report what ran and the outcomes. See
+   [`docs/how-to/change-validation.md`](docs/how-to/change-validation.md).
+10. **Real agent execution validation.** Prompt, skill, tool, hook, routing,
+    scheduling, or workflow changes require a real labeled evaluation with the
+    configured model and runtime—not mocks or offline scorers. Check the
+    repository-root `.env` (loaded via project dotenv) before claiming
+    credentials unavailable. See
+    [`docs/how-to/change-validation.md`](docs/how-to/change-validation.md).
+11. **SQL safety.** No query SQL in code string literals; every `traces`/`logs`
+    read is finitely time-bounded on bare `timestamp`; fact SQL only through
+    checked paths; fix the harness instead of adding exemptions. See
+    [`docs/how-to/sql-safety.md`](docs/how-to/sql-safety.md).
 
 Prefer shared abstractions that remove duplication over parallel implementations.
-Especially enforce rules 1, 2, 4, 6, 8, 9, and 10.
-
-# SQL safety invariants
-
-These are hard repository contracts, not review preferences:
-
-1. **No query SQL in code string literals.** Put query statements in `.sql` files and load/render them from code. Small non-query fragments (identifiers, predicates, projection fragments) may be composed by typed/query-builder helpers, but must not contain complete SQL statements.
-2. **Every `traces` or `logs` read is finitely time-bounded.** It must carry both a lower and an upper bare-`timestamp` predicate so DuckLake can partition-prune. Never add an unbounded historical scan, including lookup/detail queries that already have trace/session IDs.
-3. **Do not bypass the execution gate.** Fact-table SQL must execute through the checked query/engine paths. Do not add raw DuckDB execution sites to work around a rejected query.
-4. **Fix the harness instead of adding exceptions.** If a legitimate query is rejected, preserve the invariant and improve the template/builder/gate. Do not add a file, directory, or call-site exemption merely to make CI green.
-
-`scripts/check_sql_guardrails.py` blocks newly introduced inline SQL and checks changed `.sql` templates that read traces/logs. Runtime DuckDB plan checks remain the final enforcement layer for time bounds.
 
 # DuckLake catalog
 
