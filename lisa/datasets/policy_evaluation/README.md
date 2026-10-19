@@ -66,8 +66,8 @@ approval records and do not establish positive violation/compliance coverage.
 
 The manifest owns split membership. Related sessions and counterfactual
 variants share a lineage and must stay in one split. Current splits evaluate
-held-out sessions; policy catalogs overlap between development and test. They
-are **not** an unseen-policy benchmark or a sealed holdout.
+held-out sessions; policy catalogs overlap between development and benchmark.
+They are **not** an unseen-policy benchmark or a sealed holdout.
 
 Capture completeness belongs to the trajectory. Evidence sufficiency belongs
 to the pair annotation. Runtime abstention belongs to the prediction. Reports
@@ -76,7 +76,8 @@ Production-path evaluations load the full policy catalog through Lisa's
 `PolicyService` and its PostgreSQL repository. Dataset annotations provide
 scoring truth only.
 
-Load with `lisa.evaluation.dataset.load_dataset()`. Run and interpret results
-using [the evaluation guide](../../../docs/how-to/policy-triage-evaluation.md).
+Load with `lisa_benchmarks.dataset.load_dataset()` (offline harness under
+`lisa/benchmarks/`, not `lisa.evaluation`). Run and interpret results using
+[the evaluation guide](../../../docs/how-to/policy-triage-evaluation.md).
 No model predictions are stored in these dataset files. Generate candidate
 annotations with the [synthesis tool](synthesize/README.md).

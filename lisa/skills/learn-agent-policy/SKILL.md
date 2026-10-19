@@ -39,13 +39,20 @@ are needed later, they belong with the rule; do not add them speculatively.
 2. Choose workspace scope for shared rules or agent scope for one exact agent name
    established from the owner's request or captured root trace. Agent rules shadow
    workspace rules of the same title even when marked `approved: no`.
-3. Check `list_pending_policy_proposals` across conversations. Show the exact
-   named section, approval value, requirements, and sources. Create one linked
-   proposal using the content returned by `read_policy` as `expected_content`.
+3. Check `list_pending_policy_proposals` once across conversations. Do not run
+   `list_policies` after `read_policy` has returned the requested scope. Show the
+   exact named section, approval value, requirements, and sources. Create one
+   linked proposal using the exact content returned by `read_policy` as
+   `expected_content`. If the response is `No policy exists yet.`, pass that
+   exact text rather than an empty string. After `create_policy_proposal`
+   returns an ID, show it to the owner without an extra verification query.
 4. Ask the owner to send `Confirm policy proposal: <proposal_id>`. The same
    proposal may be confirmed in the main chat or Slack. Apply only when the
-   trusted runtime supplies that exact ID. After a stale-content result, read
-   again and discuss a new proposal; never retry old content.
+   trusted runtime supplies that exact ID as the entire message, with no other
+   words or punctuation. Text before or after the command is not confirmation;
+   explain the required exact command and leave the proposal pending. After a
+   stale-content result, read again and discuss a new proposal; never retry old
+   content.
    If the owner declines, close it only after `Reject policy proposal:
    <proposal_id>` is present in the trusted turn.
 5. A saved rule marked `approved: yes` is immediately eligible for policy QA.

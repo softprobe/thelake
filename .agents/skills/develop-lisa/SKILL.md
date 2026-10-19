@@ -78,8 +78,11 @@ must be verified through `OpenHandsBackend`'s configured skill directory.
   for quality metrics. Use `run-lisa-evaluation-dogfood` for the scheduled
   conversation-to-score workflow.
 - Make the smallest change that preserves the production service path. Keep
-  provider adapters in `lisa/evaluation/`, orchestration in
-  `lisa/services/evaluations.py`, and persistence behind Lisa repositories.
+  provider adapters in `lisa/src/lisa/evaluation/` (trajectory, triage, judge,
+  scores only), orchestration in `lisa/services/evaluations.py`, and persistence
+  behind Lisa repositories. Offline dataset loaders and benchmark runners belong
+  in `lisa/benchmarks/lisa_benchmarks/` — never under the installable runtime
+  package. Runtime code must not import `lisa_benchmarks`.
 - For behavior changes, add tests at the affected service boundary and the
   relevant provider or API contract. Run the focused Lisa tests; use the
   repository's `run-thelake-tests` skill when TheLake integration is affected.

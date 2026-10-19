@@ -1,6 +1,14 @@
-"""Run the labeled dataset through Lisa's production policy and evaluation services."""
+"""Run Lisa's labeled policy-evaluation dataset through the production path."""
 
-from lisa.evaluation.dataset_benchmark import main
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Offline harness lives outside the installable runtime package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
+
+from lisa_benchmarks.dataset_benchmark import main
 
 if __name__ == "__main__":
     main()

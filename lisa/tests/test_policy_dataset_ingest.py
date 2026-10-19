@@ -5,23 +5,23 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-
-from lisa.context import WorkspaceContext
-from lisa.evaluation.dataset_benchmark import (
+from lisa_benchmarks.dataset import load_dataset
+from lisa_benchmarks.dataset_benchmark import (
     _add_catalog_to_policy_management,
     _configure_quickstart_environment,
     _dispose_quickstart_stack,
     _ensure_sessions_absent,
     _quickstart_cleanup_target,
-    evaluate,
     _recorded_triage_question_count,
     _trajectory_semantics,
     _wait_for_session,
+    evaluate,
 )
-from lisa.evaluation.policy_dataset_ingest import build_otlp_trace_export
-from lisa.evaluation.dataset import load_dataset
-from lisa.evaluation.trajectory import build_trajectory_events
+from lisa_benchmarks.policy_dataset_ingest import build_otlp_trace_export
+
 from lisa.bootstrap import build_services
+from lisa.context import WorkspaceContext
+from lisa.evaluation.trajectory import build_trajectory_events
 
 
 def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path, monkeypatch):
@@ -64,7 +64,7 @@ def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path
         )
         return subprocess.CompletedProcess(command, 0, output, "")
 
-    monkeypatch.setattr("lisa.evaluation.dataset_benchmark.subprocess.run", run)
+    monkeypatch.setattr("lisa_benchmarks.dataset_benchmark.subprocess.run", run)
 
     _dispose_quickstart_stack(
         _quickstart_cleanup_target(compose_env, tmp_path),
@@ -293,7 +293,7 @@ def test_otlp_export_reconstructs_expected_session_service_events():
 
 
 def test_provider_errors_abort_instead_of_scoring_as_misses():
-    from lisa.evaluation.dataset_benchmark import _validate_evaluation_result
+    from lisa_benchmarks.dataset_benchmark import _validate_evaluation_result
 
     with pytest.raises(RuntimeError, match="Lisa production evaluation failed"):
         _validate_evaluation_result(
@@ -408,7 +408,7 @@ def test_wait_for_session_retries_async_summary_not_found(monkeypatch):
                 raise RuntimeError("TheLake API request failed (404): not found")
             return {"session_id": session_id, "spans": [{}, {}]}
 
-    monkeypatch.setattr("lisa.evaluation.dataset_benchmark.time.sleep", lambda _: None)
+    monkeypatch.setattr("lisa_benchmarks.dataset_benchmark.time.sleep", lambda _: None)
     services = SimpleNamespace(sessions=Sessions())
 
     detail = _wait_for_session(services, "session-eventually-indexed", expected_spans=2)
@@ -440,7 +440,8 @@ def test_dataset_preflight_propagates_non_not_found_errors():
 def test_production_runner_ingests_and_evaluates_the_canonical_session_id(
     tmp_path, monkeypatch, lisa_test_context
 ):
-    from lisa.evaluation import dataset_benchmark
+    from lisa_benchmarks import dataset_benchmark
+
     from lisa.evaluation.policy_triage import OpenAIPolicyTriager
     from lisa.thelake_client import TheLakeClient
 

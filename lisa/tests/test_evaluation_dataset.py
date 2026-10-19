@@ -8,8 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
-
-from lisa.evaluation.dataset import load_dataset
+from lisa_benchmarks.dataset import load_dataset
 
 ROOT = Path(__file__).resolve().parents[1] / "datasets/policy_evaluation"
 SAMPLE_SPEC = importlib.util.spec_from_file_location(
@@ -123,7 +122,7 @@ def test_rejects_invalid_dataset_records(tmp_path, kind, change):
 def test_rejects_lineage_crossing_splits(tmp_path):
     path = write_dataset(tmp_path)
     manifest = json.loads(path.read_text())
-    manifest["batches"].append({**manifest["batches"][0], "split": "test"})
+    manifest["batches"].append({**manifest["batches"][0], "split": "benchmark"})
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="lineage"):
         load_dataset(path)
@@ -224,9 +223,9 @@ def test_annotation_identity_is_the_session_policy_pair():
 
 def test_sample_manifest_preserves_exact_session_policy_pairs(tmp_path):
     data = load_dataset()
-    selected = SAMPLE.choose_pairs(data, count=10, split="test", seed=17)
+    selected = SAMPLE.choose_pairs(data, count=10, split="benchmark", seed=17)
     path = SAMPLE.write_manifest(
-        data, selected, output_root=tmp_path / "sample", split="test", seed=17
+        data, selected, output_root=tmp_path / "sample", split="benchmark", seed=17
     )
     sample = load_dataset(path)
     pairs = sample.pairs(adjudicated_only=True)

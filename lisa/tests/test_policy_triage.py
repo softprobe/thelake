@@ -3,9 +3,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from lisa_benchmarks.dataset import load_dataset
 
 from lisa.context import WorkspaceContext
-from lisa.evaluation.dataset import load_dataset
 from lisa.evaluation.policy_triage import OpenAIPolicyTriager
 from lisa.models.policies import PolicyRule
 from lisa.repositories.evaluation_artifacts import EvaluationArtifactRepository

@@ -15,17 +15,17 @@ before a live run.
 
 Live provider calls require an explicit user request because they may incur
 charges. Check that model credentials are already available in the process
-environment; never print or copy their values. Run the frozen test split by
+environment; never print or copy their values. Run the frozen benchmark split by
 default:
 
 ```sh
 uv run --project lisa python lisa/scripts/evaluate_activity_dataset.py \
-  --live --split test
+  --live --split benchmark
 ```
 
 Use `--split development` for prompt iteration. Use `--split all` only for a
-complete report after development is finished. Do not tune against the test
-split and then present it as an independent result.
+complete report after development is finished. Do not tune against the
+benchmark split and then present it as an independent result.
 
 The runner validates the manifest digest, starts a run-owned Postgres service
 through `scripts/test_stack.py`, and provisions an isolated Lisa database and

@@ -1,4 +1,7 @@
-"""Evaluation inputs and sparse, reviewed session-policy annotations.
+"""Labeled policy-evaluation dataset inputs and annotations.
+
+Offline harness only — see ``lisa_benchmarks`` package docs. Do not relocate
+into ``lisa.evaluation``.
 
 See ``docs/architecture/lisa-terms.md`` for canonical runtime identity. The
 dataset stores trajectories by ``session_id`` and annotations by
@@ -15,11 +18,11 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from .contracts import EvaluationRequest, PolicySpec, StrictModel, Trajectory
+from lisa.evaluation.contracts import EvaluationRequest, PolicySpec, StrictModel, Trajectory
 
 Outcome = Literal["violation", "compliant", "not_applicable", "insufficient_evidence"]
 DEFAULT_MANIFEST = (
-    Path(__file__).resolve().parents[3] / "datasets/policy_evaluation/manifests/evaluation.json"
+    Path(__file__).resolve().parents[2] / "datasets/policy_evaluation/manifests/evaluation.json"
 )
 
 
@@ -71,7 +74,8 @@ class Annotation(StrictModel):
 class Batch(StrictModel):
     session_id: str = Field(min_length=1, max_length=256)
     policy_ids: list[str] = Field(min_length=1)
-    split: Literal["development", "test"]
+    # Agentic held-out split is "benchmark", never "test" (reserved for pytest).
+    split: Literal["development", "benchmark"]
 
 
 class Manifest(StrictModel):

@@ -5,9 +5,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from lisa_benchmarks.dataset import load_dataset
 from test_policy_triage import FakeDecisionsClient
 
-from lisa.evaluation.dataset import load_dataset
 from lisa.evaluation.policy_triage import OpenAIPolicyTriager
 
 spec = importlib.util.spec_from_file_location(

@@ -1,4 +1,8 @@
-"""Versioned task dataset for Lisa's activity-management agent benchmark."""
+"""Versioned task dataset for Lisa's activity-management agent benchmark.
+
+Offline harness only — see ``lisa_benchmarks`` package docs. Do not relocate
+into ``lisa.evaluation``.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +13,9 @@ from typing import Literal
 
 from pydantic import Field
 
-from .contracts import StrictModel
+from lisa.evaluation.contracts import StrictModel
 
-DATASET_ROOT = Path(__file__).resolve().parents[3] / "datasets/activity_management"
+DATASET_ROOT = Path(__file__).resolve().parents[2] / "datasets/activity_management"
 DEFAULT_MANIFEST = DATASET_ROOT / "manifests/benchmark.json"
 
 
@@ -63,7 +67,8 @@ class ActivityLabels(StrictModel):
 class ActivityBenchmarkCase(StrictModel):
     case_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]+$")
     category: Literal["create", "update", "policy", "followup", "continuity"]
-    split: Literal["development", "test"]
+    # Agentic held-out split is "benchmark", never "test" (reserved for pytest).
+    split: Literal["development", "benchmark"]
     turns: list[ActivityTurn] = Field(min_length=1, max_length=12)
     expected: ActivityLabels
 

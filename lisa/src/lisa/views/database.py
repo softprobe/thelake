@@ -1,7 +1,12 @@
 """Tool-facing description of Lisa's read-only operational database."""
 
-LISA_DATABASE_SCHEMA = """Lisa's operational database is read-only through lisa_db. Query the
-approved lifecycle views and the Lisa-owned policies table listed below:
+LISA_DATABASE_SCHEMA = """Use lisa_db only when the user explicitly asks for
+read-only database diagnostics. For activity work, use Lisa's activity tools;
+for policy work, use read_policy, list_policies, and the policy proposal tools.
+Do not query lisa_db to find, create, update, or inspect activities or policies.
+
+When explicit database diagnostics are requested, these approved relations and
+columns are available:
 
 - lisa.readable_activities: id, kind, parent_id, status, title, summary, source,
   created_at, started_at, updated_at, finished_at
@@ -34,13 +39,9 @@ approved lifecycle views and the Lisa-owned policies table listed below:
 - lisa.policies: id (text), scope, target_agent_name, name, criteria, approved,
   created_at, updated_at, archived_at
 
-Use these views to find activities and inspect their status, event timeline,
-context, and any evaluation runs linked to the activity. Activity events record
-Lisa's general actions; the evaluation views contain judge runs, while
-readable_evaluation_triage contains Lisa's durable session-policy routing cache. Keep queries
-bounded and name columns explicitly. Use TheLake session tools for telemetry evidence. Lisa's database
-stores Lisa activity history and outcomes, not the telemetry warehouse. Use lisa.policies
-to inspect policy IDs, approval, criteria, and scope. Policy changes still go
-through owner-confirmed tools; the SQL role is read-only. Other Lisa base tables
-and hidden columns are not exposed.
+Lisa's activity tables store activity history and outcomes, not workspace
+session telemetry. Keep diagnostic queries bounded and name columns explicitly.
+Use TheLake session tools when the user asks for telemetry evidence. Policy
+changes still go through owner-confirmed tools; the SQL role is read-only. Other
+Lisa base tables and hidden columns are not exposed.
 """

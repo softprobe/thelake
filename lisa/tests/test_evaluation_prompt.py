@@ -5,11 +5,11 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
+from lisa_benchmarks.dataset import load_dataset
 from test_policy_triage import FakeDecisionsClient
 
 from lisa.evaluation import evaluator
 from lisa.evaluation.contracts import EvaluationRequest
-from lisa.evaluation.dataset import load_dataset
 from lisa.evaluation.policy_triage import OpenAIPolicyTriager
 from lisa.evaluation.prompt import format_trajectory_for_llm
 from lisa.models.policies import PolicyRule

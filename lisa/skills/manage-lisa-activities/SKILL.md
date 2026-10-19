@@ -10,8 +10,25 @@ across the main chat and separate Slack conversations.
 
 ## Find or create work
 
+- For activity-only requests, use the activity tools below. Do not inspect
+  sessions or query `lisa_db` unless the user also asks about workspace
+  telemetry or agent behavior.
 - For status, history, or continuation requests, use `find_activity` with a short
   description first, then `get_activity_thread` for the matching timeline.
+- Repeat that lookup for every later continuation, including another turn in
+  the same conversation. Conversation memory does not replace checking the
+  current activity record.
+- Route by the requested outcome. A request to track or continue an
+  investigation remains activity work even when it concerns an agent or
+  suspected behavior; it does not authorize session or evaluation searches.
+- For a continuation, read the matching activity thread after finding it and
+  before changing it. Do not list recent activities after a matching record has
+  already been found.
+- When `find_activity` returns a matching open record, continue with that
+  record's ID. Do not call `create_activity` for work that is already tracked.
+- For a progress update, use only the activity lookup, thread, and update tools
+  needed to make and verify that change. Do not inspect policies, sessions,
+  evaluations, or follow-ups unless the user asks for them.
 - Before starting substantial work you own, search open activities. Resume a
   matching activity instead of creating a duplicate.
 - Create an activity for meaningful investigation, multi-step work, or agreed

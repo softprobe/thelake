@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-from lisa.evaluation.dataset import DEFAULT_MANIFEST, load_dataset
+# Offline harness lives outside the installable runtime package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
+
+from lisa_benchmarks.dataset import DEFAULT_MANIFEST, load_dataset
+
 from lisa.evaluation.judge import run_evaluation
 from lisa.evaluation.policy_triage import OpenAIPolicyTriager
 from lisa.models.policies import PolicyRule
@@ -194,7 +199,7 @@ def run(data, triager=None, judge=None, *, split=None, mode="pipeline"):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--split", choices=["development", "test"])
+    parser.add_argument("--split", choices=["development", "benchmark"])
     parser.add_argument("--mode", choices=["triage", "judge", "pipeline"], default="pipeline")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--live", action="store_true", help="Allow paid provider calls")

@@ -1,5 +1,8 @@
 """Quality harness: score labeled dataset pairs through Lisa's production path.
 
+Offline harness only — see ``lisa_benchmarks`` package docs. Do not relocate
+into ``lisa.evaluation``.
+
 Goal
 ----
 Measure triage/judge quality on adjudicated ``(session_id, policy_id)`` pairs.
@@ -84,11 +87,11 @@ from uuid import uuid4
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
-from lisa.evaluation.dataset import Dataset, load_dataset
-from lisa.evaluation.policy_dataset_ingest import build_otlp_trace_export
 from lisa.models.policies import PolicyRecord
 from lisa.security import redact_evidence
 from lisa.services.policies import PolicyService
+from lisa_benchmarks.dataset import Dataset, load_dataset
+from lisa_benchmarks.policy_dataset_ingest import build_otlp_trace_export
 
 
 def _render_policy_markdown(records: list[PolicyRecord]) -> str:
@@ -442,7 +445,7 @@ def _configure_quickstart_environment(
 ) -> None:
     """Read local quickstart connection settings without printing credentials."""
     values = _read_environment_file(path)
-    _quickstart_cleanup_target(path, repository_root or Path(__file__).resolve().parents[4])
+    _quickstart_cleanup_target(path, repository_root or Path(__file__).resolve().parents[3])
     workspace_id = values.get("THELAKE_DEFAULT_WORKSPACE_ID")
     database_port = values.get("THELAKE_QUICKSTART_DB_PORT")
     api_port = values.get("THELAKE_QUICKSTART_PORT")
@@ -724,7 +727,7 @@ def main() -> None:
         parser.error("--live is required to authorize provider calls")
     # Setup: bind process env to the disposable quickstart stack + isolated data dir.
     data_dir = args.data_dir or args.output.parent / f".{args.output.stem}-lisa-data"
-    repository_root = Path(__file__).resolve().parents[4]
+    repository_root = Path(__file__).resolve().parents[3]
     cleanup_target = _quickstart_cleanup_target(args.quickstart_env_file, repository_root)
     for retained_path in (args.output.resolve(), data_dir.resolve()):
         if retained_path == cleanup_target.lake_data or cleanup_target.lake_data in retained_path.parents:

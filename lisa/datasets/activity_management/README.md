@@ -12,10 +12,10 @@ duplicate prevention, ambiguity, evidence-backed completion, owner boundaries,
 policy proposal/approval/rejection, exact confirmation boundaries, and
 follow-up proposal/approval/deduplication. State labels can inspect activity
 timeline text and follow-up count, event trigger, and prompt fields. Development
-and test splits are disjoint by case. Use development cases for tuning and
-reserve test cases for final measurement. The dataset is author-curated; it is
-not human-adjudicated and does not estimate production prevalence. The test
-split is a small benchmark, so report raw case and check counts with all rates.
+and benchmark splits are disjoint by case. Use development cases for tuning and
+reserve benchmark cases for final measurement. The dataset is author-curated; it
+is not human-adjudicated and does not estimate production prevalence. The
+benchmark split is small, so report raw case and check counts with all rates.
 
 Every case currently starts with a user turn. Slack cases simulate conversation
 context only. This dataset does not measure scheduled QA, autonomous discovery,
@@ -24,8 +24,9 @@ runner that invokes the real scheduled services and checks isolated telemetry
 and delivery receipts before they can be claimed as benchmark coverage.
 
 Load and validate the frozen release with
-`lisa.evaluation.activity_dataset.load_activity_dataset()`. Run it through
-Lisa's real agent runtime using
+`lisa_benchmarks.activity_dataset.load_activity_dataset()` (offline harness under
+`lisa/benchmarks/`, not `lisa.evaluation`). Run it through Lisa's real agent
+runtime using
 [`docs/how-to/lisa-activity-evaluation.md`](../../../docs/how-to/lisa-activity-evaluation.md).
 Expected labels are used only by the benchmark scorer, never included in Lisa's
 conversation or MCP context.

@@ -49,28 +49,53 @@ These requirements always apply to design, implementation, refactoring, and revi
    removes run-owned containers, volumes, networks, and scratch data after the
    test. Operator workflows such as `make setup` and `make grafana-up` remain
    separate. See [`docs/how-to/test-environments.md`](docs/how-to/test-environments.md).
+8. **Clean cutoffs.** Treat a replacement implementation as a clean cutoff:
+   assume the prior implementation and its data formats never existed. Do not
+   add database migrations, compatibility branches, dual-read/write paths,
+   old-format parsers, data preservation during schema recreation, backfills,
+   fallback behavior, or regression tests whose purpose is to keep the prior
+   implementation working. Replace the schema and contracts directly, and
+   update their callers, docs, and tests together. Add backward compatibility
+   only when the user explicitly asks for it.
+9. **Actually run the relevant tests and evaluations.** Changing code without
+   executing the appropriate checks is not allowed. After every change, run the
+   relevant unit, integration, end-to-end, and labeled evaluation suites that
+   cover the touched behavior; report what ran and the outcomes. Keep lasting
+   regression coverage in the existing test module for the same component and
+   contract; create a new test module only for a distinct subsystem or test
+   layer. Do not add one-off verification tests or scripts to the tracked
+   codebase. When a temporary script is the clearest way to verify a change,
+   put it in `/tmp` or another excluded location. Use `./tmp` only when Git
+   confirms that path is ignored. Run the script and remove it when finished.
+10. **Real agent execution validation.** For any change to an agent's prompt,
+    skills, tools, hooks, routing, scheduling, or workflow, validate the actual
+    consumer through a real end-to-end execution. Run the relevant labeled
+    agent evaluation with its configured model and runtime; unit tests and
+    mocked integration tests supplement this check and never replace it. Use
+    the real production entrypoint for the behavior under evaluation, such as a
+    scheduled service for scheduled behavior. Keep all state transient and
+    run-owned under the automated-test rules above.
+    Before declaring model credentials unavailable, inspect the repository's
+    documented environment sources, including the repository-root `.env` when
+    present, and the current process environment. A credential in `.env` counts
+    as configured even when the shell did not export it. Load that file through
+    the project's supported dotenv/configuration mechanism before checking or
+    running the entrypoint. Check only whether required values are present; never
+    print, log, copy into reports, or commit secret values. Do not ask the user
+    to provide a credential until these sources have been checked. If no
+    configured credentials exist, report that the real execution could not run
+    and make no agent-performance claim.
+    A real agent execution means invoking the actual configured model and
+    runtime with a fresh run-owned workspace and observing its tool calls and
+    resulting state. Unit tests, mocks, canned transcripts, replayed traces, or
+    an offline scorer are not substitutes for that execution.
+    For before/after performance claims, capture a baseline before changing
+    agent behavior and compare it with the same pinned evaluation cases, model,
+    and runtime. If no comparable baseline exists, report current results
+    without attributing a measured improvement to the changes.
 
 Prefer shared abstractions that remove duplication over parallel implementations.
-Especially enforce rules 1, 2, 4, and 6.
-
-## Clean cutoffs
-
-Treat a replacement implementation as a clean cutoff: assume the prior
-implementation and its data formats never existed. Do not add database
-migrations, compatibility branches, dual-read/write paths, old-format parsers,
-data preservation during schema recreation, backfills, fallback behavior, or
-regression tests whose purpose is to keep the prior implementation working.
-Replace the schema and contracts directly, and update their callers, docs, and
-tests together. Add backward compatibility only when the user explicitly asks
-for it.
-
-Verify every change with appropriate existing tests or checks. Keep lasting
-regression coverage in the existing test module for the same component and
-contract; create a new test module only for a distinct subsystem or test layer.
-Do not add one-off verification tests or scripts to the tracked codebase. When
-a temporary script is the clearest way to verify a change, put it in `/tmp` or
-another excluded location. Use `./tmp` only when Git confirms that path is
-ignored. Run the script and remove it when finished.
+Especially enforce rules 1, 2, 4, 6, 8, 9, and 10.
 
 # SQL safety invariants
 

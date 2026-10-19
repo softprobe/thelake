@@ -5,14 +5,14 @@ The activity agent benchmark is the labeled dataset in
 Each case defines a sequence of main-chat and Slack-context user turns, tool
 actions that must or must not occur, labeled final activity/policy/follow-up
 state, and reply checks. The manifest pins the dataset bytes and the runner
-reports results by development/test split and behavior category.
+reports results by development/benchmark split and behavior category.
 
 Run the benchmark explicitly because every turn invokes Lisa's configured model
 and may incur provider charges:
 
 ```sh
 uv run --project lisa python lisa/scripts/evaluate_activity_dataset.py \
-  --live --split test
+  --live --split benchmark
 ```
 
 Provide `GOOGLE_API_KEY` or `GEMINI_API_KEY`, or `LISA_BASE_URL` and
@@ -30,8 +30,8 @@ and exact per-turn call counts. Its separate communication rubric checks labeled
 phrases that must or must not appear in a reply; it is lexical, not a semantic
 quality judgment. These authored labels are a curated behavioral benchmark,
 not a human-adjudicated production sample or a measure of production
-prevalence. Use development cases for iteration and reserve the test split for
-final measurement. Inspect per-case evidence and raw support counts; do not rely
+prevalence. Use development cases for iteration and reserve the benchmark split
+for final measurement. Inspect per-case evidence and raw support counts; do not rely
 on one aggregate score. Slack cases provide channel and thread context to
 Lisa's real runtime but do not exercise scheduled QA, follow-up workers, Slack
 event delivery, or message posting.

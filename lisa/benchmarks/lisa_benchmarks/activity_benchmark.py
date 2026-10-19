@@ -1,4 +1,8 @@
-"""Run the labeled activity task benchmark through Lisa's real agent runtime."""
+"""Run the labeled activity task benchmark through Lisa's real agent runtime.
+
+Offline harness only — see ``lisa_benchmarks`` package docs. Do not relocate
+into ``lisa.evaluation``.
+"""
 
 from __future__ import annotations
 
@@ -18,14 +22,14 @@ from uuid import uuid4
 import psycopg
 from psycopg import sql
 
-from .activity_dataset import (
+from lisa_benchmarks.activity_dataset import (
     DEFAULT_MANIFEST,
     ActivityBenchmarkCase,
     ActivityTurn,
     load_activity_dataset,
 )
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[3]
 SKILLS = ROOT / "lisa" / "skills"
 TEST_STACK = ROOT / "scripts" / "test_stack.py"
 COMPOSE = ROOT / "tests" / "compose.test.yaml"
@@ -93,6 +97,20 @@ def _new_database(admin_dsn: str, base, workspace: str, case_id: str):
 def _interpolate(text: str, values: dict[str, str]) -> str:
     template = re.sub(r"\$(proposal_id|followup_id)", r"{\1}", text)
     return template.format_map({key: value for key, value in values.items()})
+
+
+def _update_substitutions(services, substitutions: dict[str, str]) -> None:
+    proposals = services.activity_store.list_policy_proposals()
+    if proposals:
+        substitutions["proposal_id"] = str(proposals[0]["id"])
+    activities = services.activity_store.list_activity_feed(limit=100)
+    followups = [
+        followup
+        for activity in activities
+        for followup in services.activity_store.list_activity_followups(str(activity["id"]))
+    ]
+    if followups:
+        substitutions["followup_id"] = str(followups[0]["id"])
 
 
 def _score_state(services, expected: dict) -> list[dict]:
@@ -368,18 +386,8 @@ def _run_case(case: ActivityBenchmarkCase, connection_info, artifact_dir: Path) 
                 slack_thread_ts=thread,
             )
         )
+        _update_substitutions(services, substitutions)
         turns.append(_score_turn(turn, result, substitutions, index))
-        proposals = services.activity_store.list_policy_proposals()
-        if proposals:
-            substitutions["proposal_id"] = str(proposals[0]["id"])
-        activities = services.activity_store.list_activity_feed(limit=100)
-        followups = [
-            followup
-            for activity in activities
-            for followup in services.activity_store.list_activity_followups(str(activity["id"]))
-        ]
-        if followups:
-            substitutions["followup_id"] = str(followups[0]["id"])
     state_checks = _score_state(services, case.expected.model_dump(exclude_unset=True))
     checks = [*state_checks, *(item for turn in turns for item in turn["tool_checks"])]
     communication = [item for turn in turns for item in turn["communication_checks"]]
@@ -541,7 +549,9 @@ def run_benchmark(manifest_path: Path, split: str, output: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=None)
-    parser.add_argument("--split", choices=("development", "test", "all"), default="test")
+    parser.add_argument(
+        "--split", choices=("development", "benchmark", "all"), default="benchmark"
+    )
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument(
         "--live", action="store_true", help="Confirm real model calls and provider charges"

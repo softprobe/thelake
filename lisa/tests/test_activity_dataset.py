@@ -6,9 +6,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from lisa_benchmarks.activity_benchmark import (
+    _interpolate,
+    _rate,
+    _score_state,
+    _score_turn,
+    _update_substitutions,
+)
+from lisa_benchmarks.activity_dataset import ActivityLabels, ActivityTurn, load_activity_dataset
 
-from lisa.evaluation.activity_benchmark import _interpolate, _rate, _score_state, _score_turn
-from lisa.evaluation.activity_dataset import ActivityLabels, ActivityTurn, load_activity_dataset
+from lisa.backends.openhands import LISA_SYSTEM_PROMPT
+from lisa.views.database import LISA_DATABASE_SCHEMA
 
 DATASET = Path(__file__).resolve().parents[1] / "datasets/activity_management"
 
@@ -18,7 +26,7 @@ def test_activity_benchmark_release_has_frozen_cases_and_both_splits():
 
     assert manifest.case_count == len(cases) == 16
     assert digest
-    assert {case.split for case in cases} == {"development", "test"}
+    assert {case.split for case in cases} == {"development", "benchmark"}
     assert {case.category for case in cases} >= {
         "create",
         "update",
@@ -92,9 +100,62 @@ def test_activity_benchmark_checks_tool_order_and_exact_call_count():
     )["passed"]
 
 
+def test_activity_benchmark_resolves_new_proposal_id_before_scoring_same_turn():
+    services = SimpleNamespace(
+        activity_store=SimpleNamespace(
+            list_policy_proposals=lambda: [{"id": "proposal-123"}],
+            list_activity_feed=lambda **_: [],
+            list_activity_followups=lambda _: [],
+        )
+    )
+    substitutions = {}
+
+    _update_substitutions(services, substitutions)
+    scored = _score_turn(
+        ActivityTurn(
+            chat="main",
+            text="Create a proposal",
+            reply_must_include=["$proposal_id"],
+        ),
+        {
+            "activities": [],
+            "messages": [{"role": "assistant", "text": "Proposal ID: proposal-123"}],
+        },
+        substitutions,
+        0,
+    )
+
+    assert substitutions == {"proposal_id": "proposal-123"}
+    assert all(check["passed"] for check in scored["communication_checks"])
+
+
 def test_activity_benchmark_rate_preserves_empty_denominator():
     assert _rate([]) is None
     assert _rate([{"passed": True}, {"passed": False}]) == 0.5
+
+
+def test_activity_workflow_uses_activity_tools_without_database_or_session_search():
+    prompt = " ".join(LISA_SYSTEM_PROMPT.casefold().split())
+
+    assert "activity management tasks, use the activity tools" in prompt
+    assert "do not query lisa_db or search sessions" in prompt
+    assert "continuation in a later turn" in prompt
+    assert "reuse that activity id" in prompt
+    assert "do not call create_activity or list_recent_activities" in prompt
+    assert "route by the user's requested outcome" in prompt
+    assert "call get_activity_thread next" in prompt
+    assert "entire owner message" in prompt
+    assert "use list_policies and read_policy" in prompt
+    database_schema = " ".join(LISA_DATABASE_SCHEMA.casefold().split())
+    assert "only when the user explicitly asks" in database_schema
+    assert "do not query lisa_db to find, create, update, or inspect activities" in database_schema
+
+    policy_skill = (
+        Path(__file__).resolve().parents[1] / "skills/learn-agent-policy/SKILL.md"
+    ).read_text()
+    assert "pass that" in policy_skill
+    assert "exact text rather than an empty string" in policy_skill
+    assert "without an extra verification query" in policy_skill
 
 
 def test_activity_labels_cover_timeline_evidence_and_exact_followup_contract():

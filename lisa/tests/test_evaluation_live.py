@@ -5,9 +5,9 @@ from __future__ import annotations
 import os
 
 import pytest
+from lisa_benchmarks.dataset import load_dataset
 
 from lisa.evaluation.contracts import EvaluationRequest
-from lisa.evaluation.dataset import load_dataset
 from lisa.evaluation.judge import run_evaluation
 
 DATA = load_dataset()

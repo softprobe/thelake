@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -21,8 +22,11 @@ from pathlib import Path
 
 from pydantic import Field, StrictBool, model_validator
 
+# Offline harness lives outside the installable runtime package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "benchmarks"))
+
 from lisa.evaluation.contracts import StrictModel
-from lisa.evaluation.dataset import DEFAULT_MANIFEST, Annotation, Outcome, load_dataset
+from lisa_benchmarks.dataset import DEFAULT_MANIFEST, Annotation, Outcome, load_dataset
 
 MODEL = "gemini-4-argon"
 ROLES = {

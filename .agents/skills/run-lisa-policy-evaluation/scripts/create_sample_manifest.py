@@ -7,10 +7,15 @@ import hashlib
 import json
 import random
 import shutil
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from lisa.evaluation.dataset import DEFAULT_MANIFEST, load_dataset
+# Offline harness lives outside the installable runtime package.
+_REPO = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(_REPO / "lisa" / "benchmarks"))
+
+from lisa_benchmarks.dataset import DEFAULT_MANIFEST, load_dataset
 
 OUTCOMES = ("violation", "compliant", "not_applicable", "insufficient_evidence")
 
@@ -144,7 +149,7 @@ def write_manifest(data, pairs, *, output_root: Path, split: str, seed: int):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--count", type=int, default=16, choices=range(10, 21))
-    parser.add_argument("--split", choices=("development", "test"), default="test")
+    parser.add_argument("--split", choices=("development", "benchmark"), default="benchmark")
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--output-root", type=Path, required=True)
     args = parser.parse_args()
