@@ -48,13 +48,17 @@ destination; those per-check bindings take precedence over the workspace
 default. This default also allows checks created before Slack was configured to
 send alerts without editing the policy text.
 
+Set `LISA_SLACK_ACTIVITY_CHANNEL_ID` and optionally
+`LISA_SLACK_ACTIVITY_THREAD_TS` to route Lisa's proactive activity updates into
+one configured Lisa thread.
+
 ## Talk with Lisa
 
 Mention the bot in a channel or reply in a supported thread. Lisa responds in
 the same thread and keeps multi-turn context there. She can explain existing
 policy and session trajectories, propose policy updates, and create behavior
-policies. Lisa proposes the named section with `approved: yes/no`; the owner
-sends `Confirm policy rule: <exact heading>` before Lisa saves it. Approved policy
+policies. Lisa stores named policy proposals linked to activities; the owner
+sends `Confirm policy proposal: <proposal_id>` before Lisa applies one. Approved policy
 is eligible for QA immediately. There is no separate draft or activation step.
 
 

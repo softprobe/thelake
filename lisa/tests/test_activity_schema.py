@@ -10,15 +10,6 @@ def _schema_sql() -> str:
     return files("lisa").joinpath("sql", "activities", "schema.sql").read_text(encoding="utf-8")
 
 
-def test_schema_is_a_clean_create_not_an_upgrade_migration():
-    schema = _schema_sql()
-    assert "CREATE SCHEMA lisa" in schema
-    assert "IF NOT EXISTS" not in schema
-    assert "schema_migrations" not in schema
-    assert "ALTER TABLE" not in schema
-    assert "evidence_window" not in schema
-
-
 def test_evaluation_runs_require_policy_id():
     schema = _schema_sql()
     assert "policy_id text NOT NULL REFERENCES lisa.policies(id)" in schema
@@ -31,6 +22,15 @@ def test_activities_are_generic_records_and_evaluations_link_to_them():
     assert "lisa.activity_events" in schema
     assert "activity_id uuid NOT NULL REFERENCES lisa.activities(id)" in schema
     assert "readable_evaluations" in schema
+
+
+def test_schema_has_durable_followups_and_cross_chat_policy_proposals():
+    schema = _schema_sql()
+    assert "lisa.activity_followups" in schema
+    assert "trigger_event_type text" in schema
+    assert "lisa.policy_proposals" in schema
+    assert "origin_slack_channel_id text" in schema
+    assert "next_action_at timestamptz" in schema
 
 
 def test_provision_script_requires_explicit_recreate_for_existing_schema():

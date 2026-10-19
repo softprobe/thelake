@@ -1,4 +1,4 @@
-"""Conversation identity, turn provenance, migration, and serialization rules."""
+"""Conversation identity, turn provenance, and serialization rules."""
 
 from __future__ import annotations
 
@@ -10,23 +10,6 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ..repositories.conversations import ConversationNotFound, FileConversationRepository
-
-
-def prepare_main_thread(item: dict[str, Any]) -> dict[str, Any]:
-    """Normalize old scheduled transcripts without exposing their internal prompts."""
-    if item.get("event_source") == "schedule":
-        for message in item.get("messages", []):
-            message["turn_source"] = "scheduled"
-            if message.get("role") == "user":
-                message["hidden"] = True
-            message.pop("sequence", None)
-        for activity in item.get("activities", []):
-            activity.pop("sequence", None)
-            activity["turn_source"] = "scheduled"
-        item["transcript_only_migration"] = True
-    item["title"] = "Lisa"
-    item.pop("event_source", None)
-    return item
 
 
 def tag_turn(
@@ -51,23 +34,6 @@ def tag_turn(
     for activity in activities:
         activity["turn_source"] = turn_source
     return messages, activities, hidden_message_ids
-
-
-def merge_transcript_history(
-    previous_messages: list[dict[str, Any]], current_messages: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Keep migrated records that OpenHands cannot reload as conversation state."""
-    merged: list[dict[str, Any]] = []
-    positions: dict[str, int] = {}
-    for message in [*previous_messages, *current_messages]:
-        message_id = str(message.get("id", ""))
-        if message_id and message_id in positions:
-            merged[positions[message_id]] = message
-        else:
-            if message_id:
-                positions[message_id] = len(merged)
-            merged.append(message)
-    return merged
 
 
 async def run_turn_without_releasing_lock_early(run_turn: Callable, **kwargs: Any):
@@ -143,6 +109,13 @@ class ConversationService:
         *,
         run_turn: Callable,
         confirmed_policy_title: str | None,
+        turn_source: str = "web",
+        actor_id: str | None = None,
+        slack_channel_id: str | None = None,
+        slack_thread_ts: str | None = None,
+        confirmed_policy_proposal_id: str | None = None,
+        rejected_policy_proposal_id: str | None = None,
+        confirmed_followup_id: str | None = None,
     ) -> dict[str, Any]:
         directory = self.repository.conversation_directory(workspace_id, conversation_id)
         metadata = self.repository.load_metadata(directory, workspace_id)
@@ -156,8 +129,14 @@ class ConversationService:
                     directory=str(directory),
                     workspace_id=workspace_id,
                     text=text,
-                    turn_source="web",
+                    turn_source=turn_source,
+                    actor_id=actor_id,
+                    slack_channel_id=slack_channel_id,
+                    slack_thread_ts=slack_thread_ts,
                     confirmed_policy_title=confirmed_policy_title,
+                    confirmed_policy_proposal_id=confirmed_policy_proposal_id,
+                    rejected_policy_proposal_id=rejected_policy_proposal_id,
+                    confirmed_followup_id=confirmed_followup_id,
                 )
             except RuntimeError as error:
                 raise ConversationTurnError(503, str(error)) from error
@@ -171,12 +150,10 @@ class ConversationService:
                 if message.get("hidden") and message.get("id")
             }
             messages, activities, hidden_ids = tag_turn(
-                turn.messages, turn.activities, previous_messages, "web", hidden_ids
+                turn.messages, turn.activities, previous_messages, turn_source, hidden_ids
             )
             for message in messages:
                 message["hidden"] = message.get("id") in hidden_ids
-            if metadata.get("transcript_only_migration"):
-                messages = merge_transcript_history(previous_messages, messages)
             now = datetime.now(UTC).isoformat()
             metadata["updated_at"] = now
             metadata["provider_consent_at"] = now
@@ -190,56 +167,31 @@ class ConversationService:
             }
 
     async def main_conversation(self, workspace_id: str) -> dict[str, Any]:
-        """Return Lisa's one durable workspace conversation, migrating an old chat if present."""
+        """Return Lisa's durable workspace conversation, creating it when absent."""
         normalized = str(UUID(workspace_id))
         root = self.repository.ensure_workspace(normalized)
         async with self.repository.lock_for(root / "main-thread.lock"):
             marker = self.repository.main_thread_marker(normalized)
-            marked_item = None
+            conversation_id = str(
+                uuid5(NAMESPACE_URL, f"lisa:workspace-conversation:{UUID(normalized)}")
+            )
             try:
-                conversation_id = self.repository.read_main_thread_id(marker)
-                marked_item = self.repository.load_metadata(
-                    self.repository.conversation_directory(normalized, conversation_id),
-                    normalized,
+                marked_id = self.repository.read_main_thread_id(marker)
+            except ConversationNotFound:
+                marked_id = None
+            if marked_id == conversation_id:
+                try:
+                    item = self.repository.load_metadata(
+                        self.repository.conversation_directory(normalized, conversation_id), normalized
+                    )
+                    return self._transcript(item)
+                except ConversationNotFound:
+                    pass
+            try:
+                item = self.repository.load_metadata(
+                    self.repository.conversation_directory(normalized, conversation_id), normalized
                 )
             except ConversationNotFound:
-                pass
-            if marked_item and (marked_item.get("messages") or marked_item.get("activities")):
-                item = prepare_main_thread(marked_item)
-                self.repository.save_metadata(
-                    self.repository.conversation_directory(normalized, item["conversation_id"]),
-                    item,
-                )
-                return self._transcript(item)
-
-            web_candidates: list[dict[str, Any]] = []
-            scheduled_candidates: list[dict[str, Any]] = []
-            for path in self.repository.conversation_directories(normalized):
-                try:
-                    item = self.repository.load_metadata(path, normalized)
-                except ConversationNotFound:
-                    continue
-                if item.get("event_source") == "schedule":
-                    scheduled_candidates.append(item)
-                elif not item.get("event_source"):
-                    web_candidates.append(item)
-            has_history = lambda item: bool(item.get("messages") or item.get("activities"))
-            web_candidates.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
-            scheduled_candidates.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
-            if any(has_history(item) for item in web_candidates):
-                item = next(item for item in web_candidates if has_history(item))
-            elif any(has_history(item) for item in scheduled_candidates):
-                item = next(item for item in scheduled_candidates if has_history(item))
-            elif web_candidates:
-                item = web_candidates[0]
-            elif marked_item:
-                item = marked_item
-            else:
-                item = {}
-            if item:
-                conversation_id = str(UUID(item["conversation_id"]))
-            else:
-                conversation_id = str(uuid5(NAMESPACE_URL, f"lisa:main:{UUID(normalized)}"))
                 now = datetime.now(UTC).isoformat()
                 item = {
                     "conversation_id": conversation_id,
@@ -248,7 +200,6 @@ class ConversationService:
                     "created_at": now,
                     "updated_at": now,
                 }
-            item = prepare_main_thread(item)
             self.repository.save_metadata(
                 self.repository.conversation_directory(normalized, conversation_id), item
             )
@@ -328,8 +279,6 @@ class ScheduledQAService:
             )
             for message in messages:
                 message["hidden"] = message.get("id") in hidden_ids
-            if metadata.get("transcript_only_migration"):
-                messages = merge_transcript_history(previous_messages, messages)
             metadata["updated_at"] = datetime.now(UTC).isoformat()
             metadata["messages"] = messages
             metadata["activities"] = [*metadata.get("activities", []), *activities][-100:]

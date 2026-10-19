@@ -67,3 +67,28 @@ def test_failure_notification_routes_and_deduplicates(monkeypatch, lisa_test_con
     assert "session-1" in requests[0][0]["text"]
     assert repeated_result == {"status": "already_sent", "session_id": "session-1"}
     assert len(requests) == 1
+
+
+def test_activity_followup_update_uses_the_configured_lisa_thread(monkeypatch, lisa_test_context):
+    import json
+
+    services = build_services(lisa_test_context(
+        slack_token="test-bot-token", activity_slack_channel="C-ACTIVITY",
+        activity_slack_thread="1710000000.000001",
+    ))
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append((json.loads(request.data), timeout))
+        return io.BytesIO(json.dumps({"ok": True, "ts": "1710000000.000002"}).encode())
+
+    monkeypatch.setattr(thelake_client.urllib.request, "urlopen", fake_urlopen)
+    result = services.notifier.notify_activity_update(
+        "12345678-1234-4234-8234-123456789abc",
+        {"title": "Review refund session"},
+        "Lisa reviewed the next session.",
+    )
+    assert result["status"] == "sent"
+    assert requests[0][0]["channel"] == "C-ACTIVITY"
+    assert requests[0][0]["thread_ts"] == "1710000000.000001"
+    assert requests[0][0]["client_msg_id"] == "12345678-1234-4234-8234-123456789abc"

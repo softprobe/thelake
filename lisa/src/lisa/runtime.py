@@ -6,6 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol
+from uuid import UUID
 
 
 @dataclass(frozen=True)
@@ -25,7 +26,11 @@ class AgentBackend(Protocol):
         workspace_id: str,
         text: str,
         turn_source: str = "web",
+        actor_id: str | None = None,
         confirmed_policy_title: str | None = None,
+        confirmed_policy_proposal_id: str | None = None,
+        rejected_policy_proposal_id: str | None = None,
+        confirmed_followup_id: str | None = None,
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
     ) -> AgentTurn: ...
@@ -65,6 +70,46 @@ def confirmed_policy_title(user_text: str) -> str | None:
     text = _owner_command_text(user_text)
     match = re.fullmatch(r"\s*confirm policy rule:\s*(.{1,200}?)\s*", text, re.IGNORECASE)
     return match.group(1).strip() if match else None
+
+
+def confirmed_policy_proposal_id(user_text: str) -> str | None:
+    """Accept an exact proposal-ID confirmation from an owner conversation."""
+    text = _owner_command_text(user_text)
+    match = re.fullmatch(
+        r"\s*confirm policy proposal:\s*([0-9a-f-]{36})\s*", text, re.IGNORECASE
+    )
+    if not match:
+        return None
+    try:
+        return str(UUID(match.group(1)))
+    except ValueError:
+        return None
+
+
+def rejected_policy_proposal_id(user_text: str) -> str | None:
+    """Accept an exact rejection of one proposal in an owner conversation."""
+    text = _owner_command_text(user_text)
+    match = re.fullmatch(
+        r"\s*reject policy proposal:\s*([0-9a-f-]{36})\s*", text, re.IGNORECASE
+    )
+    if not match:
+        return None
+    try:
+        return str(UUID(match.group(1)))
+    except ValueError:
+        return None
+
+
+def confirmed_followup_id(user_text: str) -> str | None:
+    """Accept an exact follow-up ID confirmation from an owner conversation."""
+    text = _owner_command_text(user_text)
+    match = re.fullmatch(r"\s*confirm follow-up:\s*([0-9a-f-]{36})\s*", text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return str(UUID(match.group(1)))
+    except ValueError:
+        return None
 
 
 def _owner_command_text(user_text: str) -> str:

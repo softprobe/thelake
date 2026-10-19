@@ -5,8 +5,9 @@ description: Maintain named business rules and explicit approval in Lisa's polic
 
 # Learn agent policy
 
-Postgres `lisa.policies` is the source of truth. Use `list_policies`, `read_policy`, and
-`update_policy`; do not create a separate evaluator definition or activation record.
+Postgres `lisa.policies` is the source of truth. Use `list_policies`, `read_policy`,
+and the durable policy proposal tools; do not create a separate evaluator
+definition or activation record.
 
 ## Format
 
@@ -38,12 +39,15 @@ are needed later, they belong with the rule; do not add them speculatively.
 2. Choose workspace scope for shared rules or agent scope for one exact agent name
    established from the owner's request or captured root trace. Agent rules shadow
    workspace rules of the same title even when marked `approved: no`.
-3. Show the exact named section, including its approval value, requirements, and
-   sources. Ask for `Confirm policy rule: <exact heading>` before saving any change.
-   The trusted controller passes that confirmation; tool arguments cannot grant it.
-4. Save with `update_policy` and the content returned by `read_policy` as
-   `expected_content`. Change only the exact confirmed section. After a conflict,
-   read again and explain any conflicting edit before retrying.
+3. Check `list_pending_policy_proposals` across conversations. Show the exact
+   named section, approval value, requirements, and sources. Create one linked
+   proposal using the content returned by `read_policy` as `expected_content`.
+4. Ask the owner to send `Confirm policy proposal: <proposal_id>`. The same
+   proposal may be confirmed in the main chat or Slack. Apply only when the
+   trusted runtime supplies that exact ID. After a stale-content result, read
+   again and discuss a new proposal; never retry old content.
+   If the owner declines, close it only after `Reject policy proposal:
+   <proposal_id>` is present in the trusted turn.
 5. A saved rule marked `approved: yes` is immediately eligible for policy QA.
    There is no second creation or activation step. Set `approved: no` to stop future
    evaluations, with the same exact owner confirmation. Scheduled QA cannot edit

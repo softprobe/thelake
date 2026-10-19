@@ -17,6 +17,8 @@ GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_runtime_work_threads TO {w
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_carrier_user_messages TO {writer};
 GRANT SELECT ON lisa.readable_activity_monitor_links TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.approval_requests TO {writer};
+GRANT SELECT, INSERT, UPDATE ON lisa.activity_followups TO {writer};
+GRANT SELECT, INSERT, UPDATE ON lisa.policy_proposals TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.score_outbox TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.policies TO {writer};
 GRANT USAGE, SELECT ON SEQUENCE lisa.policy_paragraph_id_seq TO {writer};
@@ -29,6 +31,8 @@ GRANT SELECT ON lisa.readable_activity_monitor_thread_actions TO {reader};
 GRANT SELECT ON lisa.readable_activity_monitor_links TO {reader};
 GRANT SELECT ON lisa.readable_activity_context TO {reader};
 GRANT SELECT ON lisa.readable_approvals TO {reader};
+GRANT SELECT ON lisa.readable_activity_followups TO {reader};
+GRANT SELECT ON lisa.readable_policy_proposals TO {reader};
 GRANT SELECT ON lisa.readable_evaluations TO {reader};
 GRANT SELECT ON lisa.readable_evaluation_triage TO {reader};
 GRANT SELECT (id, scope, target_agent_name, name, criteria, approved,

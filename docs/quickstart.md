@@ -43,9 +43,10 @@ In Explorer, open Lisa's chat and send:
 
 > Propose a policy named "Refund eligibility before refund" for `quickstart-refund-agent`: check refund eligibility and wait for the result before issuing a refund. Show the readable policy section with `approved: yes`; do not save it yet.
 
-Review Lisa's proposal, then send:
+Review Lisa's durable proposal and its ID, then send the exact command Lisa
+provides:
 
-> Confirm policy rule: Refund eligibility before refund
+> Confirm policy proposal: <proposal_id>
 
 Lisa saves the approved rule in the policy database. It is eligible for her
 next scheduled QA cycle immediately; there is no separate activation step.

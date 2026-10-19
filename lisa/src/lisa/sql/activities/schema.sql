@@ -1,4 +1,4 @@
--- Lisa operational schema. One clean definition; no upgrade migrations.
+-- Lisa operational schema, recreated as one complete definition.
 -- Applied only after DROP SCHEMA lisa CASCADE (see provision_lisa.py).
 
 CREATE SCHEMA lisa;
@@ -20,6 +20,13 @@ CREATE TABLE lisa.activities (
     title text NOT NULL,
     summary text,
     source text NOT NULL,
+    next_action text,
+    next_action_at timestamptz,
+    origin_conversation_id text,
+    origin_slack_channel_id text,
+    origin_slack_thread_ts text,
+    slack_channel_id text,
+    slack_thread_ts text,
     context_path text,
     lease_owner text,
     lease_expires_at timestamptz,
@@ -36,6 +43,8 @@ CREATE TABLE lisa.activities (
 
 CREATE INDEX activities_status_updated_idx
     ON lisa.activities(status, updated_at DESC);
+CREATE INDEX activities_next_action_idx
+    ON lisa.activities(next_action_at) WHERE next_action_at IS NOT NULL;
 CREATE INDEX activities_parent_idx
     ON lisa.activities(parent_id) WHERE parent_id IS NOT NULL;
 
@@ -197,6 +206,53 @@ CREATE TABLE lisa.approval_requests (
     consumed_at timestamptz
 );
 
+CREATE TABLE lisa.activity_followups (
+    id uuid PRIMARY KEY,
+    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    due_at timestamptz,
+    trigger_event_type text,
+    prompt text NOT NULL,
+    status text NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'claimed', 'completed', 'cancelled')),
+    requested_by text NOT NULL,
+    requested_at timestamptz NOT NULL DEFAULT now(),
+    approved_at timestamptz,
+    claimed_at timestamptz,
+    completed_at timestamptz,
+    CHECK ((due_at IS NOT NULL) <> (trigger_event_type IS NOT NULL)),
+    UNIQUE (activity_id, due_at)
+);
+CREATE INDEX activity_followups_due_idx
+    ON lisa.activity_followups(due_at) WHERE status = 'approved';
+CREATE UNIQUE INDEX activity_followups_event_idx
+    ON lisa.activity_followups(activity_id, trigger_event_type)
+    WHERE trigger_event_type IS NOT NULL;
+
+CREATE TABLE lisa.policy_proposals (
+    id uuid PRIMARY KEY,
+    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    scope text NOT NULL CHECK (scope IN ('workspace', 'agent')),
+    target_agent_name text NOT NULL DEFAULT '',
+    policy_name text NOT NULL,
+    expected_content text NOT NULL,
+    proposed_content text NOT NULL,
+    status text NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'applying', 'approved', 'rejected', 'stale', 'applied')),
+    applying_at timestamptz,
+    created_by_conversation text NOT NULL,
+    resolved_by_conversation text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    resolved_at timestamptz,
+    applied_at timestamptz,
+    CHECK ((scope = 'workspace' AND target_agent_name = '') OR
+           (scope = 'agent' AND target_agent_name <> ''))
+);
+CREATE INDEX policy_proposals_pending_idx
+    ON lisa.policy_proposals(created_at DESC) WHERE status = 'pending';
+CREATE UNIQUE INDEX policy_proposals_one_pending_rule_idx
+    ON lisa.policy_proposals(scope, target_agent_name, policy_name)
+    WHERE status = 'pending';
+
 CREATE TABLE lisa.score_outbox (
     id uuid PRIMARY KEY,
     evaluation_id uuid NOT NULL REFERENCES lisa.evaluation_runs(id) ON DELETE CASCADE,
@@ -223,7 +279,10 @@ CREATE VIEW lisa.readable_activity_feed AS
 SELECT a.id AS activity_id, f.activity_type, f.is_goal, f.message_id,
        f.subtitle, f.status_title, f.task_label, f.agent_id, f.details,
        a.kind, a.status, a.title, a.summary, a.source,
-       a.created_at, a.started_at, a.updated_at, a.finished_at
+       a.created_at, a.started_at, a.updated_at, a.finished_at,
+       a.next_action, a.next_action_at, a.origin_conversation_id,
+       a.origin_slack_channel_id, a.origin_slack_thread_ts,
+       a.slack_channel_id, a.slack_thread_ts
 FROM lisa.activities AS a
 JOIN lisa.activity_feed_entries AS f ON f.activity_id = a.id;
 
@@ -260,6 +319,17 @@ CREATE VIEW lisa.readable_approvals AS
 SELECT id, activity_id, scope, status, request_summary,
        requested_at, expires_at, resolved_at, resolved_by, decision_ref
 FROM lisa.approval_requests;
+
+CREATE VIEW lisa.readable_activity_followups AS
+SELECT id, activity_id, due_at, trigger_event_type, prompt, status, requested_by,
+       requested_at, approved_at, completed_at
+FROM lisa.activity_followups;
+
+CREATE VIEW lisa.readable_policy_proposals AS
+SELECT id, activity_id, scope, target_agent_name, policy_name, expected_content,
+       proposed_content, status, created_by_conversation, resolved_by_conversation,
+       created_at, resolved_at, applied_at
+FROM lisa.policy_proposals;
 
 CREATE VIEW lisa.readable_evaluations AS
 SELECT activity_id, session_id, policy_id, id AS evaluation_id,

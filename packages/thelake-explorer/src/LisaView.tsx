@@ -11,7 +11,7 @@ import {
   type ThreadMessageLike,
   type ToolCallMessagePartProps,
 } from "@assistant-ui/react";
-import type { ExplorerApi, LisaActivity, LisaConversation, LisaMessage } from "./client";
+import type { ExplorerApi, LisaActivity, LisaActivityDetail, LisaConversation, LisaFeedEntry, LisaMessage } from "./client";
 import { LisaMessageContent } from "./LisaMessageContent";
 import { lisaTimeline, toolActionLabel } from "./LisaTimeline";
 import "./LisaView.css";
@@ -94,12 +94,40 @@ export function LisaView({ api }: { api: ExplorerApi }) {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
+  const [view, setView] = useState<"chat" | "activities">("chat");
+  const [feed, setFeed] = useState<LisaFeedEntry[]>([]);
+  const [selectedActivity, setSelectedActivity] = useState<LisaActivityDetail>();
+  const [feedLoading, setFeedLoading] = useState(false);
+  const [feedError, setFeedError] = useState<string>();
   const loadedConversations = useRef(new Set<string>());
   const active = conversations.find((conversation) => conversation.conversation_id === activeId);
   const runtimeMessages = useMemo(
     () => lisaTimeline(active?.messages ?? [], active?.activities ?? [], sending),
     [active?.messages, active?.activities, sending],
   );
+
+  const refreshFeed = useCallback(async () => {
+    setFeedLoading(true);
+    setFeedError(undefined);
+    try {
+      setFeed(await api.listLisaActivities({ limit: 100 }));
+    } catch (cause) {
+      setFeedError(`Lisa activity feed could not load: ${String(cause)}`);
+    } finally {
+      setFeedLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => { void refreshFeed(); }, [refreshFeed]);
+
+  const openActivity = useCallback(async (activityId: string) => {
+    try {
+      setSelectedActivity(await api.getLisaActivity(activityId));
+      setFeedError(undefined);
+    } catch (cause) {
+      setFeedError(`Could not load activity: ${String(cause)}`);
+    }
+  }, [api]);
 
   const refresh = useCallback(async () => {
     try {
@@ -211,10 +239,37 @@ export function LisaView({ api }: { api: ExplorerApi }) {
         <header className="tle-lisa-header">
           <div><h2>Lisa</h2><span>Your workspace agent · reviews approved policies and agent behavior</span></div>
           <div className="tle-lisa-header-actions">
-            <button onClick={() => void refresh()} disabled={loading}>Refresh</button>
+            <button aria-pressed={view === "chat"} onClick={() => setView("chat")}>Chat</button>
+            <button aria-pressed={view === "activities"} onClick={() => { setView("activities"); void refreshFeed(); }}>Activities</button>
+            {view === "chat" ? <button onClick={() => void refresh()} disabled={loading}>Refresh</button> : <button onClick={() => void refreshFeed()} disabled={feedLoading}>Refresh</button>}
           </div>
         </header>
-        <AssistantRuntimeProvider runtime={runtime}>
+        {view === "activities" ? <div className="tle-lisa-activity-feed">
+          <div className="tle-lisa-activity-list" aria-label="Lisa activities">
+            {feedLoading && <p>Loading activities…</p>}
+            {!feedLoading && feed.length === 0 && <p>No activities yet.</p>}
+            {feed.map((item) => <button key={item.id} className={`tle-lisa-activity-card ${selectedActivity?.activity.id === item.id ? "selected" : ""}`} onClick={() => void openActivity(item.id)}>
+              <span className="tle-lisa-activity-card-title">{item.title}</span>
+              <span className={`tle-lisa-activity-status status-${item.status}`}>{item.status_title || item.status}</span>
+              {(item.subtitle || item.summary) && <span className="tle-lisa-activity-subtitle">{item.subtitle || item.summary}</span>}
+              {item.next_action && <span className="tle-lisa-activity-next">Next: {item.next_action}</span>}
+              <time>{new Date(item.updated_at || item.created_at).toLocaleString()}</time>
+            </button>)}
+          </div>
+          <article className="tle-lisa-activity-detail" aria-label="Activity details">
+            {!selectedActivity && <p>Select an activity to inspect its progress and timeline.</p>}
+            {selectedActivity && <>
+              <h3>{selectedActivity.activity.title}</h3>
+              <p className="tle-lisa-activity-status">{selectedActivity.activity.status_title || selectedActivity.activity.status}</p>
+              {selectedActivity.activity.summary && <p>{selectedActivity.activity.summary}</p>}
+              {selectedActivity.activity.origin_conversation_id && <p>Origin conversation: <code>{selectedActivity.activity.origin_conversation_id}</code>{selectedActivity.activity.origin_slack_channel_id && ` · Slack ${selectedActivity.activity.origin_slack_channel_id} / ${selectedActivity.activity.origin_slack_thread_ts || "thread"}`}</p>}
+              {selectedActivity.activity.next_action && <p><b>Next:</b> {selectedActivity.activity.next_action}{selectedActivity.activity.next_action_at ? ` · ${new Date(selectedActivity.activity.next_action_at).toLocaleString()}` : ""}</p>}
+              <h4>Timeline</h4>
+              <ol className="tle-lisa-activity-timeline">{selectedActivity.actions.map((action) => <li key={action.seq}><b>{action.title}</b>{action.summary && <p>{action.summary}</p>}<time>{new Date(action.created_at).toLocaleString()}</time></li>)}</ol>
+            </>}
+          </article>
+          {feedError && <p className="tle-lisa-error" role="alert">{feedError}</p>}
+        </div> : <AssistantRuntimeProvider runtime={runtime}>
           <ThreadPrimitive.Root className="tle-lisa-thread-root" aria-label="Chat messages">
             <ThreadPrimitive.Viewport className="tle-lisa-transcript" autoScroll role="log" aria-live="polite" aria-relevant="additions text" aria-label="Lisa conversation">
               {active?.event_error && <p className="tle-lisa-error" role="alert">Investigation incomplete: {active.event_error}</p>}
@@ -234,7 +289,7 @@ export function LisaView({ api }: { api: ExplorerApi }) {
               <ComposerPrimitive.Send className="tle-lisa-send" disabled={!active || loading || sending}>{sending ? "Working…" : "Send"}</ComposerPrimitive.Send>
             </ComposerPrimitive.Root>
           </ThreadPrimitive.Root>
-        </AssistantRuntimeProvider>
+        </AssistantRuntimeProvider>}
       </section>
     </section>
   );

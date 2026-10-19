@@ -33,6 +33,25 @@ describe("ExplorerApi", () => {
     expect(reply.activities[0]?.label).toContain("sessions");
   });
 
+  it("queries Lisa's activity feed and detail through authenticated endpoints", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify(calls.length === 1 ? [] : { activity: {}, thread: {}, actions: [] }), { status: 200 });
+    };
+    const api = new ExplorerApi({
+      apiBasePath: "/v1",
+      lisaApiBasePath: "http://lisa.local/v1",
+      auth: { headers: () => ({ "X-Softprobe-Assertion": "signed" }) },
+      fetch: fetcher as typeof fetch,
+    });
+    await api.listLisaActivities({ limit: 50, query: "refund", openOnly: true });
+    await api.getLisaActivity("activity-1");
+    expect(calls[0].url).toBe("http://lisa.local/v1/activities?limit=50&query=refund&open_only=true");
+    expect(calls[1].url).toBe("http://lisa.local/v1/activities/activity-1");
+    expect(calls[0].init?.headers).toMatchObject({ "X-Softprobe-Assertion": "signed" });
+  });
+
   it("uses the configured API prefix and auth provider headers", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ items: [] }), { status: 200 }));
     const api = new ExplorerApi({ apiBasePath: "/api/thelake/v1/", auth: { headers: () => ({ Authorization: "Bearer test" }) }, fetch: fetcher as typeof fetch });

@@ -34,10 +34,12 @@ below the heading, and the requirements/source context. Missing approval means n
 An unapproved agent rule also suppresses an approved workspace rule of the same
 name. Approval examples inside prose or code fences do not enable a rule.
 
-Lisa proposes the exact section and waits for the owner's standalone command
-`Confirm policy rule: <exact heading>` before saving a change, including changing
-approval. This trusted context is supplied by the chat controller, not a model
-argument. Saving with `approved: yes` is the only approval step needed for QA.
+Lisa stores the exact proposed section, expected current content, scope, and
+activity link as a pending policy proposal. The owner confirms it with the
+standalone command `Confirm policy proposal: <proposal_id>` in the main chat or
+a Slack thread. This trusted ID is supplied by the chat controller, not a model
+argument. Lisa applies the proposal only if the stored current policy still
+matches. Saving with `approved: yes` is the only approval step needed for QA.
 There is no separate evaluator definition, draft registry, version, activation,
 or per-check score threshold. Future optional settings belong with the rule.
 

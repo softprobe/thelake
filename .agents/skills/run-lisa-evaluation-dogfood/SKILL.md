@@ -18,6 +18,13 @@ call Lisa.
 - For evaluator behavior without provider calls, run the fixture tests in
   `lisa`. `test_evaluation_prompt.py` verifies all canonical evaluation trajectories
   and their exact selector/judge inputs; mocked responses do not prove quality.
+- For dataset-based activity agent quality, use `run-lisa-activity-evaluation`.
+  Its labeled task benchmark runs through Lisa's real conversation and MCP
+  runtime, scoring state, tool events, and reply checks. Slack-context cases do
+  not verify Slack delivery.
+- `test_activity_management_integration.py` contains model-backed integration
+  tests for selected activity workflows. It is software testing, not a dataset
+  or benchmark and must not be reported as agent quality.
 - For labeled model quality, use `run-lisa-policy-evaluation`. It must load the
   complete dataset policy catalog through Lisa's policy-management service into
   a disposable PostgreSQL workspace, ingest trajectories into TheLake, and

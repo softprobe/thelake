@@ -6,8 +6,9 @@ did through a general event timeline and optional context. An activity may
 link to one or more evaluation runs, but its identity is independent of those
 runs and of any session or policy.
 
-Lisa's main conversation remains the communication channel. Postgres stores
-activity status, events, evaluation results, and score delivery state. Larger
+The main chat and each Slack thread remain separate communication channels.
+Postgres stores shared activity status, events, proposals, evaluation results,
+and score delivery state. Larger
 inputs and rendered context live under
 `<LISA_DATA_DIR>/activities/<activity-id>/`. The database is authoritative for
 identity and state; files are private artifacts referenced by the activity.
@@ -29,6 +30,8 @@ failed attempt is recorded there without creating a cache entry.
 | `lisa.score_outbox` | Exact pending score payload for one evaluation result | `id`; unique `idempotency_key`; references `evaluation_id` |
 | `lisa.activity_events` | Ordered timeline of Lisa's actions and outcomes | `(activity_id, seq)` |
 | `lisa.activity_context` | Inspectable activity inputs and checkpoints | `id`; ordered by `(activity_id, seq)` |
+| `lisa.activity_followups` | Owner-approved due-time or event-triggered continuation | `id`; one-shot claimed status |
+| `lisa.policy_proposals` | Exact cross-chat policy proposal and compare-before-write content | `id`; pending proposal per scope and rule |
 
 The same deduplicated evaluation result may be returned during a later activity
 without creating another judge result or score; that activity records the reuse
@@ -55,19 +58,43 @@ threads. Activity events are mirrored into monitor actions in the same database
 transaction; terminal Lisa states map to feed statuses `success`, `error`, or
 `stopped`, while queued/running map to `pending` and waiting states to `blocked`.
 
-The MCP tools `create_activity`, `update_activity`, `complete_activity`,
-`list_recent_activities`, `get_activity_thread`, `set_activity_section`, and
-`link_activity_reference` expose the agent contract. Lisa's packaged
+The MCP tools expose activity search, filtered feed queries, progress and next
+action updates, sections, linked references, and completion. Lisa's packaged
 `manage-lisa-activities` skill defines when she finds, creates, updates, and
 completes records; the runtime system prompt directs her to it for substantial
 multi-step work. `evaluate_session` owns its own activity lifecycle.
-`complete_activity` can finish only queued non-evaluation activities that have
+`complete_activity` can finish open non-evaluation activities that have
 no linked evaluation run. The kind check protects the interval before an
 evaluation run exists; evaluator-managed lifecycles are completed by
 `EvaluationService`.
-The read-only `lisa_db` resource documents matching views. There is no Lisa
-frontend renderer in this repository; these tools and views are its published
-feed/thread API contract. Presentation updates cannot set lifecycle status.
+The read-only `lisa_db` resource documents matching views. Explorer renders the
+user-facing activity feed; MCP and database views are Lisa's inspection
+surfaces. Presentation updates cannot set lifecycle status.
+
+The main chat and each Slack thread keep independent transcripts but share
+activity IDs. Explorer exposes the workspace feed and activity timeline through
+authenticated `/v1/activities` endpoints.
+
+`activity_followups` stores owner-confirmed one-time follow-up requests. Lisa may
+suggest a due check, but the pending record does not run until the owner confirms
+`Confirm follow-up: <id>` in either chat. The scheduler claims due rows with
+`FOR UPDATE SKIP LOCKED`, resumes the linked activity through the persistent
+main conversation, and posts the result to `LISA_SLACK_ACTIVITY_CHANNEL_ID` and
+optional `LISA_SLACK_ACTIVITY_THREAD_TS`. Failed turns release their claim for
+retry. Scheduled turns cannot write policy.
+
+`policy_proposals` stores the exact proposed policy content, expected current
+content, scope, and activity link. Either owner chat can confirm the same
+proposal with `Confirm policy proposal: <id>`. Lisa applies it through
+`PolicyService`'s compare-before-write path; stale proposals are marked stale.
+Policy updates are exposed through proposal creation and application tools, not
+direct content replacement.
+
+Owner confirmation checks both the exact command and the authenticated actor.
+Configure `LISA_OWNER_USER_IDS` with comma-separated identity subjects; web
+turns use the signed assertion subject and Slack turns use the Slack user ID.
+Workspace and channel access alone do not authorize policy or follow-up
+approval. Configure matching identifiers for each channel the owner uses.
 
 ## Triage and retry behavior
 

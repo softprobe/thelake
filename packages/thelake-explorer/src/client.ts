@@ -87,6 +87,31 @@ export type LisaTurn = {
   activities: LisaActivity[];
 };
 
+export type LisaFeedEntry = {
+  id: string;
+  activity_key: string;
+  title: string;
+  kind: string;
+  status: string;
+  summary?: string | null;
+  subtitle?: string | null;
+  status_title?: string | null;
+  next_action?: string | null;
+  next_action_at?: string | null;
+  origin_conversation_id?: string | null;
+  origin_slack_channel_id?: string | null;
+  origin_slack_thread_ts?: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string | null;
+};
+
+export type LisaActivityDetail = {
+  activity: LisaFeedEntry;
+  thread: { name: string; status: string; status_title?: string | null; finish_message?: string | null };
+  actions: Array<{ seq: number; event_type: string; title: string; summary?: string | null; created_at: string }>;
+};
+
 export class ExplorerApi {
   constructor(readonly config: ExplorerConfig) {}
 
@@ -185,6 +210,21 @@ export class ExplorerApi {
       // Sending a message is the user's affirmative action to proceed.
       body: JSON.stringify({ text, consent: true }),
     });
+  }
+
+  listLisaActivities(params: { limit?: number; status?: string; query?: string; openOnly?: boolean; dueOnly?: boolean } = {}): Promise<LisaFeedEntry[]> {
+    if (!this.config.lisaApiBasePath) throw new Error("Lisa's direct API URL is not configured");
+    const query = new URLSearchParams();
+    if (params.limit != null) query.set("limit", String(params.limit));
+    if (params.status) query.set("status", params.status);
+    if (params.query) query.set("query", params.query);
+    if (params.openOnly) query.set("open_only", "true");
+    if (params.dueOnly) query.set("due_only", "true");
+    return this.requestLisa(`/activities?${query.toString()}`);
+  }
+
+  getLisaActivity(activityId: string): Promise<LisaActivityDetail> {
+    return this.requestLisa(`/activities/${encodeURIComponent(activityId)}`);
   }
 
 

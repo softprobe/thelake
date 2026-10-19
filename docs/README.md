@@ -19,6 +19,7 @@ Concepts and runtime design (read for understanding, not step-by-step).
 - [Product goals](architecture/goals.md)
 - [Lisa: proactive agent QA engineer](architecture/lisa-qa.md) — product vision, workspace agent model, learning, online QA, and issue ownership
 - [Lisa activities](architecture/lisa-activities.md) — user-inspectable Lisa actions and their evaluation-pair records
+- [Lisa activity agent benchmark](how-to/lisa-activity-evaluation.md) — labeled task dataset and real-runtime benchmark for activity ownership, cross-chat policy approval, and follow-up confirmation
 - [Lisa evaluation terms](architecture/lisa-terms.md) — canonical meaning of sessions, trajectories, policies, activities, and evaluation-pair IDs
 - [Workspace identity](architecture/workspace-identity.md) — `workspace_id` and physical scopes
 - [SQL and schema](architecture/sql-and-schema.md) — tables, one-clock rules

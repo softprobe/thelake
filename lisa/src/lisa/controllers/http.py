@@ -24,7 +24,10 @@ from lisa.repositories.conversations import (
     ConversationNotFound,
 )
 from lisa.runtime import (
+    confirmed_followup_id,
+    confirmed_policy_proposal_id,
     confirmed_policy_title,
+    rejected_policy_proposal_id,
     run_turn,
 )
 from lisa.security import redact_text
@@ -109,6 +112,16 @@ def user_workspace(request: Request) -> str:
     return workspace_id
 
 
+def _user_actor_id(request: Request) -> str:
+    if os.getenv("LISA_LOCAL_ANONYMOUS") == "1":
+        return os.getenv("LISA_LOCAL_ACTOR_ID", "local").strip()
+    try:
+        token = request.headers["x-softprobe-assertion"]
+        return str(json.loads(_decode_assertion_part(token.split(".")[1])).get("sub", "")).strip()
+    except (KeyError, IndexError, ValueError, json.JSONDecodeError):
+        raise HTTPException(status_code=401, detail="Workspace authentication required")
+
+
 @router.get("/health")
 async def health() -> dict[str, bool]:
     base_url = os.getenv("LISA_BASE_URL")
@@ -179,8 +192,47 @@ async def user_send_message(
             workspace_id=workspace_id, text=message.text, consent=message.consent
         ),
         services=services,
+        actor_id=_user_actor_id(request),
     )
     return browser_conversation(result)
+
+
+@router.get("/v1/activities")
+async def user_list_activities(
+    request: Request,
+    limit: int = 50,
+    status: str | None = None,
+    query: str | None = None,
+    open_only: bool = False,
+    due_only: bool = False,
+) -> list[dict[str, Any]]:
+    user_workspace(request)
+    store = _services(request).activity_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="Lisa activity storage is not configured")
+    try:
+        return store.list_activity_feed(
+            limit=limit, status=status, query=query,
+            open_only=open_only, due_only=due_only,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/v1/activities/{activity_id}")
+async def user_get_activity(activity_id: str, request: Request) -> dict[str, Any]:
+    user_workspace(request)
+    store = _services(request).activity_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="Lisa activity storage is not configured")
+    try:
+        activity_id = str(UUID(activity_id))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid activity ID") from error
+    result = store.get_activity_thread(activity_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    return result
 
 
 def _slack_signature_valid(secret: str, timestamp: str, signature: str, body: bytes) -> bool:
@@ -263,6 +315,7 @@ async def slack_events(
                 "event_id": event_id,
                 "channel_id": channel_id,
                 "thread_ts": thread_ts,
+                "actor_id": user_id,
                 "text": redact_text(text),
                 "created_at": datetime.now(UTC).isoformat(),
             }
@@ -349,6 +402,7 @@ async def send_message(
     conversation_id: str,
     request: SendMessage,
     services: WorkspaceServices = Depends(_services),
+    actor_id: str = "",
 ) -> dict[str, Any]:
     if not request.consent:
         raise HTTPException(status_code=403, detail="Provider data consent is required")
@@ -361,7 +415,11 @@ async def send_message(
             request.workspace_id,
             text,
             run_turn=run_turn,
+            actor_id=actor_id,
             confirmed_policy_title=confirmed_policy_title(text),
+            confirmed_policy_proposal_id=confirmed_policy_proposal_id(text),
+            rejected_policy_proposal_id=rejected_policy_proposal_id(text),
+            confirmed_followup_id=confirmed_followup_id(text),
         )
     except ConversationTurnError as error:
         raise HTTPException(status_code=error.status_code, detail=str(error)) from error

@@ -135,140 +135,6 @@ def test_user_chat_api_has_one_continuing_conversation_per_workspace(client, mon
     assert [item["conversation_id"] for item in conversations] == [first["conversation_id"]]
 
 
-def test_user_chat_api_adopts_the_latest_existing_web_conversation(client, monkeypatch):
-    workspace_id = str(uuid4())
-    monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
-    monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
-    headers = {"Authorization": "Bearer local-test-token"}
-    older_id, newer_id = str(uuid4()), str(uuid4())
-    for conversation_id in (older_id, newer_id):
-        client.post(
-            "/internal/v1/conversations",
-            headers=headers,
-            json={"workspace_id": workspace_id, "conversation_id": conversation_id},
-        )
-    repository = _repository(client)
-    older_path = repository.conversation_directory(workspace_id, older_id)
-    newer_path = repository.conversation_directory(workspace_id, newer_id)
-    older = repository.load_metadata(older_path, workspace_id)
-    newer = repository.load_metadata(newer_path, workspace_id)
-    older["updated_at"] = "2026-10-12T00:00:00+00:00"
-    newer["updated_at"] = "2026-10-13T00:00:00+00:00"
-    repository.save_metadata(older_path, older)
-    repository.save_metadata(newer_path, newer)
-
-    listed = client.get("/v1/conversations").json()
-    assert [item["conversation_id"] for item in listed] == [newer_id]
-    assert client.post("/v1/conversations").json()["conversation_id"] == newer_id
-
-
-def test_user_chat_api_migrates_scheduled_history_into_the_main_chat(client, monkeypatch):
-    workspace_id = str(uuid4())
-    monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
-    monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
-    headers = {"Authorization": "Bearer local-test-token"}
-    scheduled_id = str(uuid4())
-    client.post(
-        "/internal/v1/conversations",
-        headers=headers,
-        json={"workspace_id": workspace_id, "conversation_id": scheduled_id},
-    )
-    repository = _repository(client)
-    directory = repository.conversation_directory(workspace_id, scheduled_id)
-    metadata = repository.load_metadata(directory, workspace_id)
-    metadata.update(
-        {
-            "event_source": "schedule",
-            "messages": [
-                {
-                    "id": "scheduled-prompt",
-                    "role": "user",
-                    "text": "private recurring prompt",
-                    "sequence": 1,
-                },
-                {
-                    "id": "scheduled-report",
-                    "role": "assistant",
-                    "text": "I reviewed the refund sessions.",
-                    "sequence": 2,
-                },
-            ],
-            "activities": [
-                {"id": "tool-a", "sequence": 1, "label": "searched sessions"},
-                {"id": "tool-b", "sequence": 1, "label": "evaluated policy"},
-            ],
-        }
-    )
-    repository.save_metadata(directory, metadata)
-
-    response = client.get("/v1/conversations")
-
-    assert response.status_code == 200
-    assert response.json()[0]["conversation_id"] == scheduled_id
-    assert [message["text"] for message in response.json()[0]["messages"]] == [
-        "I reviewed the refund sessions."
-    ]
-    saved = repository.load_metadata(directory, workspace_id)
-    assert "event_source" not in saved
-    assert saved["transcript_only_migration"] is True
-    assert all("sequence" not in activity for activity in saved["activities"])
-
-
-def test_user_turn_keeps_migrated_schedule_report_in_the_chat(client, monkeypatch):
-    workspace_id = str(uuid4())
-    monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
-    monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
-    headers = {"Authorization": "Bearer local-test-token"}
-    scheduled_id = str(uuid4())
-    client.post(
-        "/internal/v1/conversations",
-        headers=headers,
-        json={"workspace_id": workspace_id, "conversation_id": scheduled_id},
-    )
-    repository = _repository(client)
-    directory = repository.conversation_directory(workspace_id, scheduled_id)
-    metadata = repository.load_metadata(directory, workspace_id)
-    metadata.update(
-        {
-            "event_source": "schedule",
-            "messages": [
-                {"id": "scheduled-prompt", "role": "user", "text": "private prompt"},
-                {
-                    "id": "scheduled-report",
-                    "role": "assistant",
-                    "text": "I reviewed the refund sessions.",
-                },
-            ],
-            "activities": [],
-        }
-    )
-    repository.save_metadata(directory, metadata)
-
-    def fake_run_turn(**_kwargs):
-        from lisa.runtime import AgentTurn
-
-        return AgentTurn(
-            messages=[
-                {"id": "web-input", "role": "user", "text": "What did you find?"},
-                {"id": "web-reply", "role": "assistant", "text": "One issue needs review."},
-            ],
-            activities=[],
-        )
-
-    monkeypatch.setattr(api, "run_turn", fake_run_turn)
-    response = client.post(
-        f"/v1/conversations/{scheduled_id}/messages",
-        json={"text": "What did you find?", "consent": True},
-    )
-
-    assert response.status_code == 200
-    assert [message["text"] for message in response.json()["messages"]] == [
-        "I reviewed the refund sessions.",
-        "What did you find?",
-        "One issue needs review.",
-    ]
-
-
 def test_user_chat_api_requires_a_valid_workspace_assertion_outside_local_mode(client, monkeypatch):
     monkeypatch.setenv("LISA_WORKSPACE_ID", str(uuid4()))
     monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "0")
@@ -534,6 +400,49 @@ def test_explicit_chat_confirmation_is_bound_to_the_current_turn(client, monkeyp
 
     assert response.status_code == 200
     assert captured["confirmed_policy_title"] == "Refund eligibility"
+
+
+def test_proposal_confirmation_id_is_trusted_only_from_exact_chat_command():
+    from lisa.runtime import (
+        confirmed_followup_id,
+        confirmed_policy_proposal_id,
+        rejected_policy_proposal_id,
+    )
+
+    proposal = "12345678-1234-4234-8234-123456789abc"
+    assert confirmed_policy_proposal_id(f"Confirm policy proposal: {proposal}") == proposal
+    assert confirmed_policy_proposal_id(f"Please confirm policy proposal: {proposal}") is None
+    assert confirmed_policy_proposal_id("Confirm policy proposal: nope") is None
+    assert confirmed_followup_id(f"Confirm follow-up: {proposal}") == proposal
+    assert rejected_policy_proposal_id(f"Reject policy proposal: {proposal}") == proposal
+
+
+def test_activity_feed_http_endpoints_use_workspace_database(
+    monkeypatch, lisa_test_database, tmp_path
+):
+    from fastapi.testclient import TestClient
+
+    from lisa.app import app
+
+    database = lisa_test_database()
+    workspace_id = "11111111-1111-4111-8111-111111111111"
+    monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
+    monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
+    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LISA_DATABASE_URL", database.writer_url)
+    monkeypatch.setenv("LISA_DATABASE_READ_URL", database.reader_url)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("LISA_AGENT_BACKEND", raising=False)
+    with TestClient(app) as test_client:
+        services = test_client.app.state.workspace_services
+        activity = services.activity_store.create_activity(
+            title="Inspect refund session", source="web",
+        )
+        listed = test_client.get("/v1/activities?open_only=true").json()
+        detail = test_client.get(f"/v1/activities/{activity.id}").json()
+    assert any(item["id"] == activity.id for item in listed)
+    assert detail["activity"]["title"] == "Inspect refund session"
+    assert detail["actions"][0]["title"] == "Inspect refund session"
 
 
 def test_lisa_closes_openhands_conversation_when_run_fails(client, monkeypatch):

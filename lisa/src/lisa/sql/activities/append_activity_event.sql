@@ -4,7 +4,6 @@ WITH allocated AS (
         updated_at = now(),
         version = version + 1
     WHERE id = %(activity_id)s
-      AND status IN ('queued', 'running')
     RETURNING next_event_seq - 1 AS seq
 ), inserted AS (
 INSERT INTO lisa.activity_events(activity_id, seq, event_type, title, summary, actor)

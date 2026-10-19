@@ -183,6 +183,116 @@ def test_activity_update_and_sections_are_visible_in_thread(store):
     ]
 
 
+def test_activity_progress_search_and_next_action_are_durable(store):
+    activity = store.create_activity(
+        title="Investigate refund workflow", source="web",
+        next_action="Inspect the latest session", origin_conversation_id="conversation-1",
+        origin_slack_channel_id="C123", origin_slack_thread_ts="123.45",
+    )
+    store.update_activity_progress(
+        activity.id, status="running", summary="Found the matching session.",
+        next_action="Check the policy result", next_action_at="2026-10-20T10:00:00+00:00",
+    )
+    rows = store.list_activity_feed(query="refund", open_only=True, limit=10)
+    assert len(rows) == 1
+    assert rows[0]["next_action"] == "Check the policy result"
+    detail = store.get_activity_thread(activity.id)
+    assert detail["actions"][-1]["summary"] == "Found the matching session."
+    assert detail["activity"]["origin_slack_channel_id"] == "C123"
+    assert store.complete_agent_activity(activity.id, "Finished.", status="succeeded")
+    assert store.list_activity_feed(open_only=True, limit=10) == []
+
+
+def test_progress_cannot_change_evaluator_or_leased_activity(store):
+    from lisa.repositories.activities import _sql
+
+    evaluator = store.create_activity(title="Evaluate policy", source="evaluator", kind="policy_evaluation")
+    with pytest.raises(ValueError, match="already complete"):
+        store.update_activity_progress(
+            evaluator.id, status="waiting", summary="Not permitted",
+        )
+    leased = store.create_activity(title="Claimed work", source="worker")
+    with store._connect() as connection, connection.transaction():
+        connection.execute(_sql("claim_activity.sql"), {
+            "activity_id": leased.id, "owner": "worker-1", "lease_seconds": 300,
+        })
+    with pytest.raises(ValueError, match="already complete"):
+        store.update_activity_progress(leased.id, status="waiting", summary="Not permitted")
+
+
+def test_activity_followup_requires_approval_and_claims_once(store):
+    activity = store.create_activity(title="Review next session", source="web")
+    followup_id = store.create_activity_followup(
+        activity_id=activity.id, due_at="2000-01-01T00:00:00+00:00",
+        trigger_event_type=None, prompt="Review the next matching session.", requested_by="web",
+    )
+    assert store.claim_due_activity_followups() == []
+    assert store.approve_activity_followup(followup_id)
+    claimed = store.claim_due_activity_followups()
+    assert len(claimed) == 1 and str(claimed[0]["id"]) == followup_id
+    assert store.claim_due_activity_followups() == []
+    store.finish_activity_followup(followup_id)
+
+
+def test_open_followup_keeps_parent_open_until_execution_starts(store):
+    activity = store.create_activity(title="Review next session", source="web")
+    followup_id = store.create_activity_followup(
+        activity_id=activity.id, due_at="2000-01-01T00:00:00+00:00",
+        trigger_event_type=None, prompt="Review the next matching session.", requested_by="web",
+    )
+    assert not store.complete_agent_activity(activity.id, "Done.", status="succeeded")
+    store.approve_activity_followup(followup_id)
+    assert not store.complete_agent_activity(activity.id, "Done.", status="succeeded")
+    store.claim_due_activity_followups()
+    assert not store.complete_agent_activity(activity.id, "Done.", status="succeeded")
+    store.finish_activity_followup(followup_id)
+    assert store.complete_agent_activity(activity.id, "Follow-up completed.", status="succeeded")
+
+
+def test_event_triggered_followup_waits_for_matching_activity_event(store):
+    activity = store.create_activity(title="Wait for approval result", source="web")
+    followup_id = store.create_activity_followup(
+        activity_id=activity.id, due_at=None, trigger_event_type="approval_received",
+        prompt="Review the approval outcome.", requested_by="web",
+    )
+    store.approve_activity_followup(followup_id)
+    assert store.claim_due_activity_followups() == []
+    store.record_activity_event(activity.id, "approval_received", title="Approval received")
+    claimed = store.claim_due_activity_followups()
+    assert len(claimed) == 1 and str(claimed[0]["id"]) == followup_id
+
+
+def test_policy_proposal_is_shared_and_resolved_by_another_conversation(store):
+    activity = store.create_activity(title="Update refund policy", source="web")
+    proposal_id = store.create_policy_proposal(
+        activity_id=activity.id, scope="workspace", target_agent_name="",
+        policy_name="Refund eligibility", expected_content="No policy exists yet.",
+        proposed_content="## Refund eligibility\napproved: no\n\nCheck eligibility.",
+        created_by_conversation="main-chat",
+    )
+    pending = store.get_policy_proposal(proposal_id)
+    assert pending["created_by_conversation"] == "main-chat"
+    assert str(store.claim_policy_proposal(proposal_id)["id"]) == proposal_id
+    assert store.resolve_policy_proposal(
+        proposal_id, status="applied", conversation_id="slack-thread",
+    )
+    assert store.get_policy_proposal(proposal_id) is None
+    assert store.get_activity_thread(activity.id)["actions"][-1]["title"] == "Policy proposal applied"
+
+
+def test_policy_proposal_redacts_credentials_before_persistence(store):
+    activity = store.create_activity(title="Review credentials", source="web")
+    proposal_id = store.create_policy_proposal(
+        activity_id=activity.id, scope="workspace", target_agent_name="",
+        policy_name="Credential handling", expected_content="No policy exists yet.",
+        proposed_content="## Credential handling\napproved: no\n\napi_key=sk-12345678901234567890",
+        created_by_conversation="main-chat",
+    )
+    proposal = store.get_policy_proposal(proposal_id)
+    assert "sk-12345678901234567890" not in proposal["proposed_content"]
+    assert "[REDACTED]" in proposal["proposed_content"]
+
+
 def test_agent_owned_activity_can_be_completed_once(store):
     activity = store.create_activity(title="Prepare report", source="mcp")
 

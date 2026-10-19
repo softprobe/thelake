@@ -51,6 +51,19 @@ async def lifespan(_app: FastAPI):
             misfire_grace_time=900,
             replace_existing=True,
         )
+        if services.activity_store is not None:
+            qa_scheduler.add_job(
+                _run_activity_followups,
+                trigger="interval",
+                seconds=15,
+                args=[services, workspace_id],
+                id="lisa-activity-followups",
+                name="Lisa approved activity follow-ups",
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=900,
+                replace_existing=True,
+            )
         qa_scheduler.start()
         logger.info(
             "Registered cron job '%s' with schedule '%s' UTC; next run at %s",
@@ -87,6 +100,53 @@ async def _run_scheduled_qa(services: WorkspaceServices, workspace_id: str) -> N
         )
     except Exception:
         logger.exception("Cron job 'Lisa scheduled QA' failed")
+
+
+async def _run_activity_followups(services: WorkspaceServices, workspace_id: str) -> None:
+    store = services.activity_store
+    if store is None:
+        return
+    for followup in store.claim_due_activity_followups():
+        followup_id = str(followup["id"])
+        try:
+            activity_id = str(followup["activity_id"])
+            activity = store.get_activity_thread(activity_id)
+            if activity is None:
+                store.finish_activity_followup(followup_id)
+                continue
+            main = await services.conversations.main_conversation(workspace_id)
+            prompt = (
+                f"Resume Lisa activity {activity_id}. An owner approved this follow-up. "
+                f"Follow-up request: {followup['prompt']}\n"
+                "Treat this request as the next step on the linked activity, inspect its "
+                "timeline first, and update the activity with your progress and outcome."
+            )
+            turn = await services.conversations.run_user_turn(
+                main["conversation_id"], workspace_id, prompt,
+                run_turn=run_turn, confirmed_policy_title=None, turn_source="scheduled",
+            )
+            summary = next(
+                (message.get("text", "") for message in reversed(turn["messages"])
+                 if message.get("role") == "assistant"),
+                "Lisa completed the scheduled follow-up.",
+            )
+            delivery = services.notifier.notify_activity_update(
+                followup_id, activity["activity"], summary,
+            )
+            store.record_activity_event(
+                activity_id, "followup_completed", title="Scheduled follow-up completed",
+                summary=summary[:4000],
+            )
+            if delivery.get("status") == "failed":
+                store.record_activity_event(
+                    activity_id, "notification_failed", title="Slack update failed",
+                    summary=str(delivery.get("reason", "Slack delivery failed"))[:1000],
+                )
+            store.finish_activity_followup(followup_id)
+            store.complete_agent_activity(activity_id, summary, status="succeeded")
+        except Exception:
+            logger.exception("Lisa approved activity follow-up failed")
+            store.release_activity_followup(followup_id)
 
 
 app = FastAPI(title="Lisa Agent Runtime", version="0.1.0", lifespan=lifespan)

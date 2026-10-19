@@ -20,6 +20,7 @@ from ..models.activities import (
     EvaluationRun,
     ScoreOutboxItem,
 )
+from ..security import redact_text
 
 
 class DeploymentBindingError(RuntimeError):
@@ -59,6 +60,10 @@ class PostgresActivityStore:
         is_goal: bool = False, message_id: str | None = None, subtitle: str | None = None,
         task_label: str | None = None, agent_id: str | None = None,
         details: dict[str, Any] | None = None, parent_id: str | None = None,
+        next_action: str | None = None, next_action_at: str | None = None,
+        origin_conversation_id: str | None = None, slack_channel_id: str | None = None,
+        slack_thread_ts: str | None = None, origin_slack_channel_id: str | None = None,
+        origin_slack_thread_ts: str | None = None,
     ) -> Activity:
         if not kind.strip():
             raise ValueError("Activity kind must not be empty")
@@ -69,7 +74,13 @@ class PostgresActivityStore:
                 _sql("create_activity.sql"),
                 {"id": activity_id, "kind": kind, "title": title,
                  "source": source, "context_path": context_path,
-                 "parent_id": parent_id},
+                 "parent_id": parent_id, "next_action": next_action,
+                 "next_action_at": next_action_at,
+                 "origin_conversation_id": origin_conversation_id,
+                 "origin_slack_channel_id": origin_slack_channel_id,
+                 "origin_slack_thread_ts": origin_slack_thread_ts,
+                 "slack_channel_id": slack_channel_id,
+                 "slack_thread_ts": slack_thread_ts},
             )
             self._append_activity_event(
                 connection, activity_id, "accepted", title, None, "lisa"
@@ -98,18 +109,26 @@ class PostgresActivityStore:
 
     def list_activity_feed(
         self, *, limit: int = 50, is_goal: bool | None = None,
-        activity_type: str | None = None,
+        activity_type: str | None = None, status: str | None = None,
+        query: str | None = None, due_only: bool = False, open_only: bool = False,
     ) -> list[dict[str, Any]]:
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
         with self._connect() as connection:
             rows = connection.execute(_sql("list_activity_feed.sql"), {
                 "limit": limit, "is_goal": is_goal, "activity_type": activity_type,
+                "status": status, "query": query.strip() or None if query else None,
+                "due_only": due_only, "open_only": open_only,
             }).fetchall()
         return [self._activity_feed_row(row) for row in rows]
 
     def get_activity_thread(self, activity_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
+            feed = connection.execute(_sql("get_activity_feed_entry.sql"), {
+                "activity_id": activity_id,
+            }).fetchone()
+            if feed is None:
+                return None
             row = connection.execute(_sql("get_activity_thread.sql"), {
                 "activity_id": activity_id,
             }).fetchone()
@@ -130,7 +149,7 @@ class PostgresActivityStore:
                   "status_title": row["status_title"],
                   "details_json": row["thread_details"],
                   "finish_message": row["summary"] if row["finished_at"] else None}
-        return {"thread": thread,
+        return {"activity": self._activity_feed_row(feed), "thread": thread,
                 "actions": [{**dict(action), "status": self._presentation_status(action["status"])}
                             for action in actions],
                 "sections": [{"activity_thread_id": str(section["activity_id"]),
@@ -237,6 +256,155 @@ class PostgresActivityStore:
             ).fetchone()
         return bool(row and row["found"])
 
+    def update_activity_progress(
+        self, activity_id: str, *, status: str, summary: str,
+        next_action: str | None = None, next_action_at: str | None = None,
+    ) -> None:
+        if status not in {"queued", "running", "waiting"}:
+            raise ValueError("Progress status must be queued, running, or waiting")
+        with self._connect() as connection, connection.transaction():
+            row = connection.execute(_sql("update_activity_progress.sql"), {
+                "activity_id": activity_id, "status": status,
+                "next_action": next_action, "next_action_at": next_action_at,
+            }).fetchone()
+            if row is None:
+                raise ValueError("Activity does not exist or is already complete")
+            self._append_activity_event(
+                connection, activity_id, "progress", row["title"], summary, "lisa"
+            )
+
+    def create_activity_followup(
+        self, *, activity_id: str, due_at: str | None, trigger_event_type: str | None,
+        prompt: str, requested_by: str,
+    ) -> str:
+        followup_id = str(uuid4())
+        with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("lock_activity_for_update.sql"), {
+                "activity_id": activity_id,
+            })
+            row = connection.execute(_sql("create_activity_followup.sql"), {
+                "id": followup_id, "activity_id": activity_id,
+                "due_at": due_at, "trigger_event_type": trigger_event_type,
+                "prompt": prompt, "requested_by": requested_by,
+            }).fetchone()
+            if row is None:
+                raise ValueError("Activity does not exist or is already complete")
+        return followup_id
+
+    def approve_activity_followup(self, followup_id: str) -> bool:
+        with self._connect() as connection, connection.transaction():
+            row = connection.execute(_sql("approve_activity_followup.sql"), {
+                "id": followup_id,
+            }).fetchone()
+            if row is not None:
+                self._append_activity_event(
+                    connection, str(row["activity_id"]), "followup_approved",
+                    "Follow-up approved", f"Follow-up {followup_id} was approved by the owner.", "owner",
+                )
+        return row is not None
+
+    def list_activity_followups(
+        self, activity_id: str, limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        with self._connect() as connection:
+            rows = connection.execute(_sql("list_activity_followups.sql"), {
+                "activity_id": activity_id, "limit": limit,
+            }).fetchall()
+        return [dict(row) for row in rows]
+
+    def claim_due_activity_followups(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("cancel_terminal_activity_followups.sql"))
+            rows = connection.execute(_sql("claim_due_activity_followups.sql"), {
+                "limit": limit,
+            }).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_activity_followup(self, followup_id: str) -> None:
+        with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("finish_activity_followup.sql"), {"id": followup_id})
+
+    def release_activity_followup(self, followup_id: str) -> None:
+        with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("release_activity_followup.sql"), {"id": followup_id})
+
+    def create_policy_proposal(
+        self, *, activity_id: str, scope: str, target_agent_name: str,
+        policy_name: str, expected_content: str, proposed_content: str,
+        created_by_conversation: str,
+    ) -> str:
+        expected_content = redact_text(expected_content)
+        proposed_content = redact_text(proposed_content)
+        proposal_id = str(uuid4())
+        with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("lock_activity_for_update.sql"), {
+                "activity_id": activity_id,
+            })
+            row = connection.execute(_sql("create_policy_proposal.sql"), {
+                "id": proposal_id, "activity_id": activity_id, "scope": scope,
+                "target_agent_name": target_agent_name, "policy_name": policy_name,
+                "expected_content": expected_content, "proposed_content": proposed_content,
+                "created_by_conversation": created_by_conversation,
+            }).fetchone()
+            if row is None:
+                raise ValueError("Activity does not exist or is already complete")
+            self._append_activity_event(
+                connection, activity_id, "policy_proposed", "Policy change proposed",
+                f"Proposed policy change: {policy_name} ({proposal_id}).", "lisa",
+            )
+        return proposal_id
+
+    def claim_policy_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection, connection.transaction():
+            row = connection.execute(_sql("claim_policy_proposal.sql"), {
+                "id": proposal_id,
+            }).fetchone()
+        return dict(row) if row else None
+
+    def release_policy_proposal(self, proposal_id: str) -> None:
+        with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("release_policy_proposal.sql"), {"id": proposal_id})
+
+    def get_policy_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(_sql("get_policy_proposal.sql"), {
+                "id": proposal_id,
+            }).fetchone()
+        return dict(row) if row else None
+
+    def list_policy_proposals(self, limit: int = 50) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        with self._connect() as connection:
+            rows = connection.execute(_sql("list_policy_proposals.sql"), {
+                "limit": limit,
+            }).fetchall()
+        return [dict(row) for row in rows]
+
+    def resolve_policy_proposal(
+        self, proposal_id: str, *, status: str, conversation_id: str,
+    ) -> bool:
+        if status not in {"applied", "rejected", "stale"}:
+            raise ValueError("Unsupported policy proposal resolution")
+        with self._connect() as connection, connection.transaction():
+            row = connection.execute(_sql("resolve_policy_proposal.sql"), {
+                "id": proposal_id, "status": status,
+                "conversation_id": conversation_id,
+            }).fetchone()
+            if row is not None:
+                title = {
+                    "applied": "Policy proposal applied",
+                    "rejected": "Policy proposal rejected",
+                    "stale": "Policy proposal became stale",
+                }[status]
+                self._append_activity_event(
+                    connection, str(row["activity_id"]), status, title,
+                    f"Policy proposal {proposal_id} was {status}.", "owner",
+                )
+        return row is not None
+
     def create_evaluation(
         self,
         *,
@@ -269,7 +437,10 @@ class PostgresActivityStore:
                         _sql("create_activity.sql"),
                         {"id": activity_id, "kind": "policy_evaluation", "title": title,
                          "source": source, "context_path": context_path,
-                         "parent_id": None},
+                         "parent_id": None, "next_action": None,
+                         "next_action_at": None, "origin_conversation_id": None,
+                         "origin_slack_channel_id": None, "origin_slack_thread_ts": None,
+                         "slack_channel_id": None, "slack_thread_ts": None},
                     )
                 connection.execute(
                     _sql("create_evaluation.sql"),
@@ -456,6 +627,9 @@ class PostgresActivityStore:
         if status not in {"succeeded", "failed", "cancelled"}:
             raise ValueError("Activity must finish with a terminal status")
         with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("lock_activity_for_update.sql"), {
+                "activity_id": activity_id,
+            })
             finished = connection.execute(
                 _sql("finish_unclaimed_activity.sql"),
                 {
@@ -477,6 +651,9 @@ class PostgresActivityStore:
         if status not in {"succeeded", "failed", "cancelled"}:
             raise ValueError("Activity must finish with a terminal status")
         with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("lock_activity_for_update.sql"), {
+                "activity_id": activity_id,
+            })
             finished = connection.execute(
                 _sql("complete_agent_activity.sql"),
                 {
@@ -610,7 +787,7 @@ class PostgresActivityStore:
         summary: str | None = None,
         actor: str = "lisa",
     ) -> int:
-        """Append a user-inspectable event to a queued activity."""
+        """Append a user-inspectable event to an open activity."""
         if not event_type.strip() or not title.strip() or not actor.strip():
             raise ValueError("Activity events require an event type, title, and actor")
         with self._connect() as connection, connection.transaction():

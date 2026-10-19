@@ -31,9 +31,11 @@ metadata is rejected. The approval line is excluded from the judge's criteria.
 ## Save and approve a rule
 
 Ask Lisa to propose the exact rule for the intended workspace or agent. Review
-its text and approval value, then send `Confirm policy rule: <exact heading>`.
-Lisa uses `update_policy` to save that section. The same confirmation is required
-for text edits, approval changes, and removal; the model cannot approve itself.
+its text and approval value. Lisa stores a durable proposal linked to the
+activity, then asks the owner to send `Confirm policy proposal: <proposal_id>`.
+The same proposal can be confirmed in the main chat or Slack, and applies only
+when the expected current policy still matches. The same confirmation is
+required for text edits, approval changes, and removal; the model cannot approve itself.
 A saved rule with `approved: yes` is eligible immediately. There is no separate
 behavior-check draft, evaluator registry, or activation step.
 

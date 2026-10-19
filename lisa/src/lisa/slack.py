@@ -11,13 +11,16 @@ class SlackClient:
         self.token = token
 
     def post_message(
-        self, channel: str, text: str, thread_ts: str | None = None, *, timeout: int = 10
+        self, channel: str, text: str, thread_ts: str | None = None, *,
+        timeout: int = 10, client_msg_id: str | None = None,
     ) -> dict:
         if not self.token:
             raise RuntimeError("Lisa Slack bot token is not configured")
         payload = {"channel": channel, "text": text}
         if thread_ts:
             payload["thread_ts"] = thread_ts
+        if client_msg_id:
+            payload["client_msg_id"] = client_msg_id
         request = urllib.request.Request(
             "https://slack.com/api/chat.postMessage",
             data=json.dumps(payload).encode("utf-8"),

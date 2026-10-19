@@ -170,7 +170,8 @@ not run shell commands or access a connected Git repository.
   without a separate checkbox. Lisa masks common credential patterns; general
   personal data is not redacted.
 - Ask Lisa to propose a named policy section with `approved: yes/no`.
-  Review it and send `Confirm policy rule: <exact heading>` to save the change.
+  Review the durable proposal and send `Confirm policy proposal: <proposal_id>`
+  to apply it. The same proposal can be confirmed from the main chat or Slack.
   Approved rules are eligible immediately; there is no separate activation UI.
   Lisa's schedule reads policy and bounded session detail, builds a compact
   trajectory, then sends every approved candidate policy to OpenAI Decisions.

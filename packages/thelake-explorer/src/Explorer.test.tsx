@@ -17,6 +17,7 @@ describe("ThelakeExplorer", () => {
     expect(html).not.toContain('type="checkbox"');
     expect(html).toContain("Messages and recent workspace evidence are sent to your configured model provider");
     expect(html).toContain('aria-label="Chat with Lisa"');
+    expect(html).toContain("Activities");
     expect(html).not.toContain("New conversation");
     expect(html).not.toContain("Delete Lisa conversation");
     expect(html).not.toContain("Activate");

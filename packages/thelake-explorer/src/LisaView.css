@@ -21,6 +21,7 @@
 .tle-lisa-header-actions { gap: 8px; }
 .tle-lisa-header button { padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #344054; cursor: pointer; }
 .tle-lisa-header button:disabled { opacity: .5; cursor: not-allowed; }
+.tle-lisa-header button[aria-pressed="true"] { border-color: #315ee8; background: #eff4ff; color: #2448b8; }
 
 .tle-lisa-thread-root { display: grid; grid-template-rows: minmax(0, 1fr) auto auto; min-width: 0; min-height: 0; }
 .tle-lisa-transcript { display: flex; flex-direction: column; gap: 14px; overflow: auto; padding: 24px max(24px, calc((100% - 820px) / 2)); scroll-behavior: smooth; }
@@ -65,6 +66,20 @@
 .tle-lisa-markdown td { padding: 6px 9px; border: 1px solid #d0d5dd; text-align: left; }
 .tle-lisa-markdown a { color: #315ee8; text-decoration: underline; }
 
+.tle-lisa-activity-feed { display: grid; grid-template-columns: minmax(240px, 34%) minmax(0, 1fr); min-height: 0; overflow: hidden; }
+.tle-lisa-activity-list { display: flex; flex-direction: column; gap: 8px; overflow: auto; padding: 14px; border-right: 1px solid #e1e5ea; }
+.tle-lisa-activity-card { display: grid; gap: 5px; padding: 12px; border: 1px solid #e1e5ea; border-radius: 8px; background: #fff; color: #344054; text-align: left; cursor: pointer; }
+.tle-lisa-activity-card.selected { border-color: #315ee8; background: #f7f9ff; }
+.tle-lisa-activity-card-title { font-weight: 600; }
+.tle-lisa-activity-status { width: fit-content; padding: 2px 7px; border-radius: 10px; background: #eef2f6; color: #475467; font-size: 11px; }
+.tle-lisa-activity-subtitle, .tle-lisa-activity-next { color: #667085; font-size: 12px; }
+.tle-lisa-activity-card time, .tle-lisa-activity-timeline time { color: #98a2b3; font-size: 11px; }
+.tle-lisa-activity-detail { overflow: auto; padding: 22px 28px; color: #344054; }
+.tle-lisa-activity-detail h3 { margin-top: 0; color: #101828; }
+.tle-lisa-activity-detail h4 { margin: 24px 0 8px; }
+.tle-lisa-activity-timeline { display: grid; gap: 12px; padding-left: 20px; }
+.tle-lisa-activity-timeline li p { margin: 4px 0; }
+
 @media (max-width: 760px) {
   .tle-lisa-header { padding: 0 12px; }
   .tle-lisa-header span { display: none; }
@@ -73,4 +88,7 @@
   .tle-lisa-composer { grid-template-columns: minmax(0, 1fr) auto; padding: 10px; }
   .tle-lisa-disclosure { grid-column: 1 / -1; }
   .tle-lisa-send { justify-self: end; }
+  .tle-lisa-activity-feed { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(170px, 42%) minmax(0, 1fr); }
+  .tle-lisa-activity-list { flex-direction: row; border-right: 0; border-bottom: 1px solid #e1e5ea; }
+  .tle-lisa-activity-card { min-width: 220px; }
 }

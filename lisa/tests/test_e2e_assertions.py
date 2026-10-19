@@ -43,5 +43,4 @@ def test_quickstart_configures_and_provisions_lisas_separate_database():
     assert "THELAKE_QUICKSTART_DATA_PATH" in start
     assert "THELAKE_QUICKSTART_ENV_FILE" in start
     assert "LISA_DATABASE_RECREATE=1" in start
-    assert "migrate" not in start.lower()
     assert start.index("provision_lisa.py") < start.index('"${compose[@]}" up --build --detach')

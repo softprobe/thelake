@@ -95,7 +95,9 @@ class PolicyService:
                 raise ValueError("Each named policy rule must have readable Markdown content")
         return parsed
 
-    def check_changes(self, content: str, current: str) -> None:
+    def check_changes(
+        self, content: str, current: str, confirmed_title: str | None = None,
+    ) -> None:
         before = self.rules(current)
         after = self.rules(content)
         changed_titles = {
@@ -105,7 +107,7 @@ class PolicyService:
             return
         if self.context.turn_source not in {"web", "slack"}:
             raise ValueError("Only an owner conversation can save policy changes")
-        confirmed_title = self.context.confirmed_policy_title
+        confirmed_title = confirmed_title or self.context.confirmed_policy_title
         if not confirmed_title:
             raise ValueError(
                 "Propose the named policy in chat and wait for the owner's explicit confirmation"
@@ -141,6 +143,7 @@ class PolicyService:
         expected_content: str,
         scope: str = "workspace",
         agent_name: str = "",
+        confirmed_title: str | None = None,
     ) -> int:
         """Replace a policy scope and return the number of saved rules."""
         content = redact_text(content)
@@ -166,7 +169,7 @@ class PolicyService:
             "slack",
         }:
             raise ValueError("Only an owner conversation can save policy changes")
-        self.check_changes(content, expected_content)
+        self.check_changes(content, expected_content, confirmed_title)
         expected_rules = [
             {"name": rule.name, "criteria": rule.criteria, "approved": rule.approved}
             for rule in expected_parsed.values()

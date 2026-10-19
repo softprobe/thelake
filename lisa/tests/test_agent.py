@@ -99,6 +99,8 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
     monkeypatch.setenv("GOOGLE_API_KEY", "judge-test-key")
     monkeypatch.setenv("LISA_SLACK_BOT_TOKEN", "slack-test-token")
     monkeypatch.setenv("LISA_SLACK_CHANNEL_ID", "channel-test")
+    monkeypatch.setenv("LISA_SLACK_ACTIVITY_CHANNEL_ID", "activity-channel-test")
+    monkeypatch.setenv("LISA_SLACK_ACTIVITY_THREAD_TS", "12345.67")
     monkeypatch.setenv("LISA_DATABASE_READ_URL", "postgresql://reader:test@postgres/lisa")
     configured_skill_dir = (
         Path(__file__).parents[1] / "skills"
@@ -129,6 +131,8 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
     assert lisa_mcp.env["GOOGLE_API_KEY"].get_secret_value() == "judge-test-key"
     assert lisa_mcp.env["LISA_SLACK_BOT_TOKEN"].get_secret_value() == "slack-test-token"
     assert lisa_mcp.env["LISA_SLACK_CHANNEL_ID"].get_secret_value() == "channel-test"
+    assert lisa_mcp.env["LISA_SLACK_ACTIVITY_CHANNEL_ID"].get_secret_value() == "activity-channel-test"
+    assert lisa_mcp.env["LISA_SLACK_ACTIVITY_THREAD_TS"].get_secret_value() == "12345.67"
     assert "lisa.readable_activities" in captured["system_prompt"]
     assert "readable_activity_events: activity_id, seq, event_type" in captured["system_prompt"]
     skill_names = {skill.name for skill in captured["agent_context"].skills}
@@ -138,7 +142,13 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
         "investigate-evaluator-failure",
         "manage-lisa-activities",
     } <= skill_names
-    assert "complete_activity" in captured["system_prompt"]
+    assert "find or create one durable" in captured["system_prompt"]
+    assert "Confirm policy proposal" in captured["system_prompt"]
+    assert any(
+        "find_activity" in skill.content
+        for skill in captured["agent_context"].skills
+        if skill.name == "manage-lisa-activities"
+    )
 
 
 def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(monkeypatch, lisa_test_context):
@@ -163,7 +173,10 @@ def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(monkeypatch, lisa_t
     assert {
         "list_policies",
         "read_policy",
-        "update_policy",
+        "create_policy_proposal",
+        "list_activity_followups",
+        "apply_policy_proposal",
+        "list_pending_policy_proposals",
         "search_sessions",
         "evaluate_session",
         "notify_evaluation_failure",
@@ -172,7 +185,7 @@ def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(monkeypatch, lisa_t
     assert "activate_evaluation" not in tools
     assert "sample_agent_sessions" not in tools
     assert "select_policies_for_session" not in tools
-    assert "confirmed_rule_title" not in tools["update_policy"].inputSchema["properties"]
+    assert "update_policy" not in tools
     assert "openhands" not in Path(create_server.__code__.co_filename).read_text(encoding="utf-8").lower()
 
 

@@ -13,7 +13,13 @@ from .repositories.lisa_database import LisaDatabaseReader
 from .repositories.notifications import NotificationReceiptRepository
 from .repositories.policies import InMemoryPolicyRepository, PostgresPolicyRepository
 from .repositories.slack_events import SlackEventRepository
-from .runtime import confirmed_policy_title, run_turn
+from .runtime import (
+    confirmed_followup_id,
+    confirmed_policy_proposal_id,
+    confirmed_policy_title,
+    rejected_policy_proposal_id,
+    run_turn,
+)
 from .services.conversations import ConversationService, ScheduledQAService
 from .services.database_inspection import DatabaseInspectionService
 from .services.evaluations import EvaluationService
@@ -61,6 +67,9 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         SlackClient(context.slack_token),
         run_turn,
         confirmed_policy_title,
+        confirmed_policy_proposal_id,
+        rejected_policy_proposal_id,
+        confirmed_followup_id,
     )
     scheduled_qa = ScheduledQAService(conversation_repository, conversations)
     if context.database_url:

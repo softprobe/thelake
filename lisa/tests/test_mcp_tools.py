@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,75 @@ def test_mcp_activity_tools_find_and_complete_owned_work(lisa_test_context):
     assert completed.data["completed"] is True
     assert thread.data["thread"]["status"] == "success"
     assert thread.data["thread"]["finish_message"] == "No issue found."
+
+
+def test_policy_proposal_can_be_created_in_main_and_confirmed_in_slack(lisa_test_context):
+    context = lisa_test_context(
+        turn_source="web", conversation_id="main-chat", actor_id="owner-1",
+        owner_user_ids=frozenset({"owner-1"}),
+    )
+    services = build_services(context)
+
+    async def create():
+        async with Client(create_server(services)) as client:
+            activity = await client.call_tool("create_activity", {
+                "title": "Update refund policy", "activity_type": "policy", "source": "web",
+            })
+            result = await client.call_tool("create_policy_proposal", {
+                "activity_id": activity.data["activity_id"],
+                "scope": "workspace",
+                "expected_content": "No policy exists yet.",
+                "proposed_content": "## Refund eligibility\napproved: no\n\nCheck eligibility.",
+            })
+            rejected = await client.call_tool("create_policy_proposal", {
+                "activity_id": activity.data["activity_id"],
+                "scope": "workspace",
+                "expected_content": "No policy exists yet.",
+                "proposed_content": "## Chargeback review\napproved: no\n\nReview chargebacks.",
+            })
+            return result.data["proposal_id"], rejected.data["proposal_id"], activity.data["activity_id"]
+
+    proposal_id, rejected_id, activity_id = asyncio.run(create())
+    slack_services = build_services(replace(
+        context, turn_source="slack", conversation_id="slack-thread",
+        confirmed_policy_proposal_id=proposal_id,
+    ))
+
+    async def apply():
+        async with Client(create_server(slack_services)) as client:
+            return await client.call_tool("apply_policy_proposal", {"proposal_id": proposal_id})
+
+    result = asyncio.run(apply())
+    assert not result.is_error
+    assert result.data["status"] == "applied"
+
+    outsider_services = build_services(replace(
+        context, turn_source="slack", actor_id="channel-member",
+        confirmed_policy_proposal_id=rejected_id,
+    ))
+    async def unauthorized_reject():
+        async with Client(create_server(outsider_services)) as client:
+            return await client.call_tool("reject_policy_proposal", {"proposal_id": rejected_id})
+    with pytest.raises(Exception, match="authorized Lisa owner identity"):
+        asyncio.run(unauthorized_reject())
+
+    slack_services = build_services(replace(
+        context, turn_source="slack", conversation_id="slack-thread",
+        rejected_policy_proposal_id=rejected_id,
+    ))
+
+    async def reject():
+        async with Client(create_server(slack_services)) as client:
+            return await client.call_tool("reject_policy_proposal", {"proposal_id": rejected_id})
+
+    rejected = asyncio.run(reject())
+    assert not rejected.is_error
+    assert rejected.data["status"] == "rejected"
+    assert any(
+        record.name == "Refund eligibility"
+        for record in slack_services.policy_service.read_policy_records()
+    )
+    assert slack_services.activity_store.get_activity_thread(activity_id)["actions"][-1]["title"] == "Policy proposal rejected"
 
 
 def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, lisa_test_context):
@@ -202,12 +272,20 @@ def test_context_captures_workspace_and_approvals_once(monkeypatch, lisa_test_da
     assert "private-slack-token" not in repr(context)
 
 
-def test_stdio_entrypoint_reads_and_updates_workspace_policy(tmp_path, lisa_test_context):
+def test_stdio_entrypoint_reads_and_applies_workspace_policy_proposal(tmp_path, lisa_test_context):
     import sys
 
-    context = lisa_test_context(
-        data_dir=tmp_path,
-        confirmed_policy_title="Rule",
+    context = lisa_test_context(data_dir=tmp_path)
+    context = replace(
+        context, actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+    )
+    activity_store = build_services(context).activity_store
+    activity = activity_store.create_activity(title="Update rule", source="web")
+    proposal_id = activity_store.create_policy_proposal(
+        activity_id=activity.id, scope="workspace", target_agent_name="",
+        policy_name="Rule", expected_content="No policy exists yet.",
+        proposed_content="## Rule\napproved: yes\n\nApproved policy",
+        created_by_conversation="main-chat",
     )
 
     config = {
@@ -221,7 +299,10 @@ def test_stdio_entrypoint_reads_and_updates_workspace_policy(tmp_path, lisa_test
                     "LISA_DATABASE_URL": context.database_url,
                     "LISA_DATABASE_READ_URL": context.database_read_url,
                     "LISA_TURN_SOURCE": "web",
-                    "LISA_CONFIRMED_POLICY_TITLE": "Rule",
+                    "LISA_ACTOR_ID": "owner-1",
+                    "LISA_OWNER_USER_IDS": "owner-1",
+                        "LISA_CONFIRMED_POLICY_PROPOSAL_ID": proposal_id,
+                        "LISA_CONVERSATION_ID": "main-chat",
                 },
             }
         }
@@ -231,13 +312,7 @@ def test_stdio_entrypoint_reads_and_updates_workspace_policy(tmp_path, lisa_test
         async with Client(config) as client:
             first = await client.call_tool("read_policy", {})
             assert first.data == "No policy exists yet."
-            saved = await client.call_tool(
-                "update_policy",
-                {
-                    "content": "## Rule\napproved: yes\n\nApproved policy",
-                    "expected_content": first.data,
-                },
-            )
+            saved = await client.call_tool("apply_policy_proposal", {"proposal_id": proposal_id})
             assert not saved.is_error
             read = await client.call_tool("read_policy", {})
             assert read.data == (
