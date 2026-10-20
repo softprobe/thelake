@@ -76,8 +76,8 @@ Production-path evaluations load the full policy catalog through Lisa's
 `PolicyService` and its PostgreSQL repository. Dataset annotations provide
 scoring truth only.
 
-Load with `lisa_benchmarks.dataset.load_dataset()` (offline harness under
-`lisa/benchmarks/`, not `lisa.evaluation`). Run and interpret results using
+Load with `datasets.policy_dataset.load_dataset()` (offline harness under
+`lisa/benchmark/`, not `lisa.evaluation`). Run and interpret results using
 [the evaluation guide](../../../docs/how-to/policy-triage-evaluation.md).
 No model predictions are stored in these dataset files. Generate candidate
 annotations with the [synthesis tool](synthesize/README.md).

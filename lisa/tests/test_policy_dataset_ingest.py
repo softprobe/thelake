@@ -5,19 +5,21 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from lisa_benchmarks.dataset import load_dataset
-from lisa_benchmarks.dataset_benchmark import (
+from datasets.policy_dataset import load_dataset
+from conftest import (
+    configure_lisa_quickstart,
+    dispose_lisa_quickstart,
+    lisa_quickstart_target,
+)
+from benchmark.policy_runner import (
     _add_catalog_to_policy_management,
-    _configure_quickstart_environment,
-    _dispose_quickstart_stack,
     _ensure_sessions_absent,
-    _quickstart_cleanup_target,
     _recorded_triage_question_count,
     _trajectory_semantics,
     _wait_for_session,
     evaluate,
 )
-from lisa_benchmarks.policy_dataset_ingest import build_otlp_trace_export
+from benchmark.policy_ingest import build_otlp_trace_export
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
@@ -64,11 +66,10 @@ def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path
         )
         return subprocess.CompletedProcess(command, 0, output, "")
 
-    monkeypatch.setattr("lisa_benchmarks.dataset_benchmark.subprocess.run", run)
+    monkeypatch.setattr("conftest.subprocess.run", run)
 
-    _dispose_quickstart_stack(
-        _quickstart_cleanup_target(compose_env, tmp_path),
-        compose_env,
+    dispose_lisa_quickstart(
+        lisa_quickstart_target(compose_env, tmp_path),
         tmp_path,
         report_path=report_path,
         data_dir=llm_data,
@@ -96,9 +97,8 @@ def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path
     # If any Compose resource is not labeled as belonging to this run, cleanup
     # must refuse before `compose down` or deleting local data/metadata.
     with pytest.raises(RuntimeError, match="not owned"):
-        _dispose_quickstart_stack(
-            _quickstart_cleanup_target(other_env, tmp_path),
-            other_env,
+        dispose_lisa_quickstart(
+            lisa_quickstart_target(other_env, tmp_path),
             tmp_path,
             report_path=report_path,
             data_dir=llm_data,
@@ -123,7 +123,7 @@ def test_quickstart_cleanup_rejects_symlinked_repository_paths(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="symlinked quickstart directory"):
-        _quickstart_cleanup_target(env_file, repository)
+        lisa_quickstart_target(env_file, repository)
 
 
 def test_build_otlp_trace_export_keeps_trajectory_order_and_pairs_tool_events():
@@ -293,7 +293,7 @@ def test_otlp_export_reconstructs_expected_session_service_events():
 
 
 def test_provider_errors_abort_instead_of_scoring_as_misses():
-    from lisa_benchmarks.dataset_benchmark import _validate_evaluation_result
+    from benchmark.policy_runner import _validate_evaluation_result
 
     with pytest.raises(RuntimeError, match="Lisa production evaluation failed"):
         _validate_evaluation_result(
@@ -389,7 +389,7 @@ LISA_THELAKE_TOKEN=local-token
     monkeypatch.setenv("LISA_DATABASE_URL", "postgresql://unrelated")
     monkeypatch.setenv("LISA_THELAKE_API_URL", "http://unrelated")
 
-    _configure_quickstart_environment(env_file, data_dir, repository_root=tmp_path)
+    configure_lisa_quickstart(env_file, data_dir, repository_root=tmp_path)
 
     assert os.environ["LISA_WORKSPACE_ID"] == "22222222-2222-4222-8222-222222222222"
     assert "127.0.0.1:55440/lisa" in os.environ["LISA_DATABASE_URL"]
@@ -408,7 +408,7 @@ def test_wait_for_session_retries_async_summary_not_found(monkeypatch):
                 raise RuntimeError("TheLake API request failed (404): not found")
             return {"session_id": session_id, "spans": [{}, {}]}
 
-    monkeypatch.setattr("lisa_benchmarks.dataset_benchmark.time.sleep", lambda _: None)
+    monkeypatch.setattr("benchmark.policy_runner.time.sleep", lambda _: None)
     services = SimpleNamespace(sessions=Sessions())
 
     detail = _wait_for_session(services, "session-eventually-indexed", expected_spans=2)
@@ -440,7 +440,7 @@ def test_dataset_preflight_propagates_non_not_found_errors():
 def test_production_runner_ingests_and_evaluates_the_canonical_session_id(
     tmp_path, monkeypatch, lisa_test_context
 ):
-    from lisa_benchmarks import dataset_benchmark
+    import benchmark.policy_runner as dataset_benchmark
 
     from lisa.evaluation.policy_triage import OpenAIPolicyTriager
     from lisa.thelake_client import TheLakeClient

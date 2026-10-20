@@ -27,16 +27,15 @@ Use `--split development` for prompt iteration. Use `--split all` only for a
 complete report after development is finished. Do not tune against the
 benchmark split and then present it as an independent result.
 
-The runner validates the manifest digest, starts a run-owned Postgres service
-through `scripts/test_stack.py`, and provisions an isolated Lisa database and
-conversation directory for every case. It drives Lisa's OpenHands conversation
-backend and registered MCP tools with the case's main-chat or Slack-context
-turns, then scores actual tool events (including required order and exact call
-counts), activity timeline text, follow-up fields, database state, and labeled
-reply checks.
-The runner removes its transient Compose resources and stores the report,
-redacted stack logs, and local model recordings beneath
-`target/test-artifacts/lisa-activity-benchmark/<run-id>/`.
+The runner validates the manifest digest, then uses
+[`lisa/conftest.py`](../../../lisa/conftest.py) to start a run-owned Postgres
+service and provision an isolated Lisa database plus conversation directory for
+every case. It drives Lisa's OpenHands conversation backend and registered MCP
+tools with the case's main-chat or Slack-context turns, then scores actual tool
+events (including required order and exact call counts), activity timeline text,
+follow-up fields, database state, and labeled reply checks. Teardown also goes
+through `conftest`; reports, redacted stack logs, and local model recordings stay
+under `target/test-artifacts/lisa-activity-benchmark/<run-id>/`.
 
 Report the dataset and case digests, split, model/runtime configuration, case
 support, per-category pass counts, state/tool/communication scores, and failures.

@@ -1,7 +1,6 @@
 """Labeled policy-evaluation dataset inputs and annotations.
 
-Offline harness only — see ``lisa_benchmarks`` package docs. Do not relocate
-into ``lisa.evaluation``.
+Offline harness only — see ``datasets`` package docs. Tied to labeled resources; runners live in ``lisa/benchmark``.
 
 See ``docs/architecture/lisa-terms.md`` for canonical runtime identity. The
 dataset stores trajectories by ``session_id`` and annotations by
@@ -22,7 +21,7 @@ from lisa.evaluation.contracts import EvaluationRequest, PolicySpec, StrictModel
 
 Outcome = Literal["violation", "compliant", "not_applicable", "insufficient_evidence"]
 DEFAULT_MANIFEST = (
-    Path(__file__).resolve().parents[2] / "datasets/policy_evaluation/manifests/evaluation.json"
+    Path(__file__).resolve().parent / "policy_evaluation/manifests/evaluation.json"
 )
 
 

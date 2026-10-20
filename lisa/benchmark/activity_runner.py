@@ -1,97 +1,39 @@
 """Run the labeled activity task benchmark through Lisa's real agent runtime.
 
-Offline harness only — see ``lisa_benchmarks`` package docs. Do not relocate
-into ``lisa.evaluation``.
+Offline harness only — see ``benchmark`` package docs. Do not relocate into
+``lisa.evaluation``.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.util
 import json
 import os
 import re
 import subprocess
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote, urlparse, urlunparse
 from uuid import uuid4
 
-import psycopg
-from psycopg import sql
-
-from lisa_benchmarks.activity_dataset import (
+from conftest import (
+    LisaTestDatabase,
+    create_lisa_test_database,
+    start_lisa_postgres,
+    stop_lisa_postgres,
+)
+from datasets.activity_dataset import (
     DEFAULT_MANIFEST,
     ActivityBenchmarkCase,
     ActivityTurn,
     load_activity_dataset,
 )
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[2]
 SKILLS = ROOT / "lisa" / "skills"
-TEST_STACK = ROOT / "scripts" / "test_stack.py"
-COMPOSE = ROOT / "tests" / "compose.test.yaml"
 ARTIFACTS = ROOT / "target" / "test-artifacts" / "lisa-activity-benchmark"
 OWNER = "activity-benchmark-owner"
 OUTSIDER = "activity-benchmark-outsider"
-MUTATING_TOOLS = {
-    "create_activity",
-    "update_activity",
-    "set_activity_progress",
-    "complete_activity",
-    "propose_activity_followup",
-    "approve_activity_followup",
-    "create_policy_proposal",
-    "apply_policy_proposal",
-    "reject_policy_proposal",
-}
-
-
-def _runtime_dsn(base, database: str, role: str, password: str) -> str:
-    host = f"[{base.hostname}]" if base.hostname and ":" in base.hostname else base.hostname
-    authority = f"{quote(role, safe='')}:{quote(password, safe='')}@{host}"
-    if base.port:
-        authority += f":{base.port}"
-    return urlunparse(base._replace(netloc=authority, path=f"/{database}"))
-
-
-def _provision_schema(dsn: str, workspace: str, writer: str, reader: str) -> None:
-    path = ROOT / "lisa" / "scripts" / "provision_lisa.py"
-    spec = importlib.util.spec_from_file_location("lisa_activity_benchmark_provision", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Could not load Lisa's database provisioner")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    module.provision(dsn, workspace, writer_role=writer, reader_role=reader, recreate=True)
-
-
-def _new_database(admin_dsn: str, base, workspace: str, case_id: str):
-    suffix = uuid4().hex[:12]
-    database = f"lisa_eval_{suffix}"
-    writer, reader = f"lew_{suffix}", f"ler_{suffix}"
-    writer_password, reader_password = uuid4().hex, uuid4().hex
-    with psycopg.connect(admin_dsn, autocommit=True) as connection:
-        connection.execute(
-            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
-                sql.Identifier(writer), sql.Literal(writer_password)
-            )
-        )
-        connection.execute(
-            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
-                sql.Identifier(reader), sql.Literal(reader_password)
-            )
-        )
-        connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
-    database_dsn = urlunparse(base._replace(path=f"/{database}"))
-    _provision_schema(database_dsn, workspace, writer, reader)
-    return (
-        _runtime_dsn(base, database, writer, writer_password),
-        _runtime_dsn(base, database, reader, reader_password),
-        workspace,
-    )
 
 
 def _interpolate(text: str, values: dict[str, str]) -> str:
@@ -316,7 +258,12 @@ def _score_turn(
     }
 
 
-def _run_case(case: ActivityBenchmarkCase, connection_info, artifact_dir: Path) -> dict:
+def _run_case(
+    case: ActivityBenchmarkCase,
+    database: LisaTestDatabase,
+    workspace: str,
+    artifact_dir: Path,
+) -> dict:
     from lisa.backends.openhands import OpenHandsBackend
     from lisa.bootstrap import build_services
     from lisa.context import WorkspaceContext
@@ -329,7 +276,7 @@ def _run_case(case: ActivityBenchmarkCase, connection_info, artifact_dir: Path) 
     )
     from lisa.services.conversations import ConversationService
 
-    writer_url, reader_url, workspace = connection_info
+    writer_url, reader_url = database.writer_url, database.reader_url
     data_dir = artifact_dir / "workspaces" / case.case_id
     os.environ.update(
         {
@@ -414,27 +361,6 @@ def _rate(checks: list[dict]) -> float | None:
     return None if not checks else round(sum(item["passed"] for item in checks) / len(checks), 4)
 
 
-def _run_stack(artifact_dir: Path) -> dict:
-    command = [
-        sys.executable,
-        str(TEST_STACK),
-        "start-compose",
-        "--suite",
-        "lisa-activity-benchmark",
-        "--compose-file",
-        str(COMPOSE),
-        "--service",
-        "lisa-postgres",
-        "--published-port",
-        "lisa-postgres:5432",
-        "--artifact-dir",
-        str(artifact_dir),
-        "--wait",
-    ]
-    result = subprocess.run(command, cwd=ROOT, check=True, capture_output=True, text=True)
-    return json.loads(result.stdout)
-
-
 def run_benchmark(manifest_path: Path, split: str, output: Path) -> dict:
     manifest, cases, manifest_digest = load_activity_dataset(manifest_path)
     selected = [case for case in cases if split == "all" or case.split == split]
@@ -442,18 +368,15 @@ def run_benchmark(manifest_path: Path, split: str, output: Path) -> dict:
         raise ValueError(f"No activity benchmark cases for split {split!r}")
     artifact_dir = output.parent
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    stack = _run_stack(artifact_dir)
-    port = stack["ports"]["lisa-postgres:5432"][0].rsplit(":", 1)[1]
-    admin_url = f"postgresql://lisa_test:lisa_test@127.0.0.1:{port}/postgres"
-    base = urlparse(admin_url)
+    stack = start_lisa_postgres(suite="lisa-activity-benchmark", artifact_dir=artifact_dir)
     case_results = []
     runtime_failures = []
     try:
         for case in selected:
             workspace = str(uuid4())
-            database = _new_database(admin_url, base, workspace, case.case_id)
+            database = create_lisa_test_database(stack.server_url, workspace)
             try:
-                case_results.append(_run_case(case, database, artifact_dir))
+                case_results.append(_run_case(case, database, workspace, artifact_dir))
             except Exception as error:  # noqa: BLE001 - Save provider/runtime failures to the report.
                 runtime_failures.append(
                     {"case_id": case.case_id, "error_type": type(error).__name__}
@@ -474,13 +397,7 @@ def run_benchmark(manifest_path: Path, split: str, output: Path) -> dict:
                 )
                 break
     finally:
-        subprocess.run(
-            [sys.executable, str(TEST_STACK), "stop", "--state-file", stack["state_file"]],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        stop_lisa_postgres(stack)
     checks = [
         item
         for case in case_results

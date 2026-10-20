@@ -24,8 +24,8 @@ runner that invokes the real scheduled services and checks isolated telemetry
 and delivery receipts before they can be claimed as benchmark coverage.
 
 Load and validate the frozen release with
-`lisa_benchmarks.activity_dataset.load_activity_dataset()` (offline harness under
-`lisa/benchmarks/`, not `lisa.evaluation`). Run it through Lisa's real agent
+`datasets.activity_dataset.load_activity_dataset()` (offline harness under
+`lisa/benchmark/`, not `lisa.evaluation`). Run it through Lisa's real agent
 runtime using
 [`docs/how-to/lisa-activity-evaluation.md`](../../../docs/how-to/lisa-activity-evaluation.md).
 Expected labels are used only by the benchmark scorer, never included in Lisa's

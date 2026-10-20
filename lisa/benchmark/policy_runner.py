@@ -1,7 +1,7 @@
 """Quality harness: score labeled dataset pairs through Lisa's production path.
 
-Offline harness only — see ``lisa_benchmarks`` package docs. Do not relocate
-into ``lisa.evaluation``.
+Offline harness only — see ``benchmark`` package docs. Do not relocate into
+``lisa.evaluation``.
 
 Goal
 ----
@@ -49,7 +49,7 @@ Outputs
 
 Lifecycle (local disposable workspace only)
 -------------------------------------------
-1. Setup (``main`` → ``_configure_quickstart_environment`` → ``evaluate``):
+1. Setup (``main`` → ``conftest.configure_lisa_quickstart`` → ``evaluate``):
    - Point Lisa at the local quickstart DB/API; record LLM calls under ``--data-dir``.
    - Refuse remote hosts; require ``--live`` and ``LISA_LLM_TRACE_ENABLED``.
    - Mint a unique agent name; refuse if any fixture ``session_id`` already exists.
@@ -63,9 +63,10 @@ Lifecycle (local disposable workspace only)
      per session; join decisions/verdicts to adjudicated labels; write the JSON report.
 
 3. Cleanup:
-   - When the CLI exits, it removes the run-owned Compose project and its
-     volumes, then deletes that run's DuckLake data directory, including ingested
-     sessions and Lisa's seeded policies. It refuses to clean other resources.
+   - When the CLI exits, ``conftest.dispose_lisa_quickstart`` removes the run-owned
+     Compose project and its volumes, then deletes that run's DuckLake data
+     directory, including ingested sessions and Lisa's seeded policies. It refuses
+     to clean other resources.
    - The report and ``--data-dir`` LLM traces remain on disk; ``evaluate`` closes
      the triage HTTP client. Programmatic callers own their disposable resources.
 """
@@ -75,23 +76,26 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+from conftest import (
+    configure_lisa_quickstart,
+    dispose_lisa_quickstart,
+    lisa_quickstart_target,
+)
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
 from lisa.models.policies import PolicyRecord
 from lisa.security import redact_evidence
 from lisa.services.policies import PolicyService
-from lisa_benchmarks.dataset import Dataset, load_dataset
-from lisa_benchmarks.policy_dataset_ingest import build_otlp_trace_export
+from datasets.policy_dataset import Dataset, load_dataset
+from benchmark.policy_ingest import build_otlp_trace_export
 
 
 def _render_policy_markdown(records: list[PolicyRecord]) -> str:
@@ -315,162 +319,6 @@ def _validate_evaluation_result(result: dict, session_id: str) -> None:
         raise RuntimeError(
             f"Lisa production evaluation failed for {session_id} ({', '.join(statuses) or result.get('status')})"
         )
-
-
-def _read_environment_file(path: Path) -> dict[str, str]:
-    values = {}
-    if not path.is_file():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        values[key.strip()] = value
-    return values
-
-
-@dataclass(frozen=True)
-class _QuickstartCleanupTarget:
-    project_name: str
-    instance_id: str
-    lake_data: Path
-
-
-def _quickstart_cleanup_target(path: Path, repository_root: Path) -> _QuickstartCleanupTarget:
-    repository_root = repository_root.resolve(strict=True)
-    warehouse_root = repository_root / "warehouse"
-    quickstart_root = warehouse_root / "quickstart"
-    if warehouse_root.is_symlink() or quickstart_root.is_symlink():
-        raise RuntimeError("Refusing cleanup through a symlinked quickstart directory")
-    data_root = quickstart_root.resolve(strict=True)
-    if data_root != quickstart_root or repository_root not in data_root.parents:
-        raise RuntimeError("Quickstart cleanup data path must remain inside the repository")
-    values = _read_environment_file(path)
-    project_name = values.get("THELAKE_QUICKSTART_PROJECT_NAME", "")
-    instance_id = values.get("THELAKE_QUICKSTART_INSTANCE_ID", "")
-    data_path = values.get("THELAKE_QUICKSTART_DATA_PATH", "")
-    relative_data_path = Path(data_path)
-    raw_lake_data = repository_root / relative_data_path
-    lake_data = raw_lake_data.resolve()
-    if (
-        not project_name.startswith("lisa-policy-eval-")
-        or not instance_id
-        or path.is_symlink()
-        or path.resolve().parent != data_root
-        or path.stem != project_name
-        or relative_data_path.is_absolute()
-        or relative_data_path.parts != ("warehouse", "quickstart", project_name)
-        or not relative_data_path.name.startswith("lisa-policy-eval-")
-        or lake_data.parent != data_root
-        or relative_data_path.name != project_name
-    ):
-        raise RuntimeError("Cleanup requires a run-owned Lisa policy evaluation stack and data path")
-    if raw_lake_data.is_symlink():
-        raise RuntimeError("Refusing to remove a symlinked quickstart data directory")
-    return _QuickstartCleanupTarget(project_name, instance_id, lake_data)
-
-
-def _dispose_quickstart_stack(
-    target: _QuickstartCleanupTarget,
-    compose_env_file: Path,
-    repository_root: Path,
-    *,
-    report_path: Path,
-    data_dir: Path,
-) -> None:
-    """Remove only this evaluation's disposable stack and DuckLake data."""
-    for retained_path in (report_path.resolve(), data_dir.resolve()):
-        if retained_path == target.lake_data or target.lake_data in retained_path.parents:
-            raise RuntimeError("Keep the evaluation report and LLM traces outside disposable lake data")
-
-    for resource, options in (
-        ("container", ["ps", "--all", "--quiet"]),
-        ("volume", ["volume", "ls", "--quiet"]),
-        ("network", ["network", "ls", "--quiet"]),
-    ):
-        project_filter = f"label=com.docker.compose.project={target.project_name}"
-        owner_filter = f"label=io.arex.lisa.quickstart-instance={target.instance_id}"
-        project_resources = subprocess.run(
-            ["docker", *options, "--filter", project_filter],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-        owned_resources = subprocess.run(
-            ["docker", *options, "--filter", project_filter, "--filter", owner_filter],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-        if set(project_resources) != set(owned_resources):
-            raise RuntimeError(f"Refusing to remove {resource}s not owned by this evaluation run")
-
-    command = [
-        "docker",
-        "compose",
-        "--env-file",
-        str(repository_root / ".env"),
-        "--env-file",
-        str(compose_env_file.resolve()),
-        "--project-name",
-        target.project_name,
-        "--file",
-        str(repository_root / "examples" / "quickstart" / "compose.yaml"),
-        "down",
-        "--volumes",
-        "--remove-orphans",
-    ]
-    try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise RuntimeError("Failed to remove the disposable Lisa policy evaluation stack") from error
-    if target.lake_data.exists():
-        shutil.rmtree(target.lake_data)
-    compose_env_file.unlink(missing_ok=True)
-    for suffix in (".yaml", ".api_url", ".lisa_api_url"):
-        metadata_file = repository_root / "warehouse" / "quickstart" / f"{target.project_name}{suffix}"
-        if metadata_file.is_symlink():
-            raise RuntimeError("Refusing to remove symlinked quickstart metadata")
-        metadata_file.unlink(missing_ok=True)
-
-
-def _configure_quickstart_environment(
-    path: Path,
-    data_dir: Path,
-    repository_root: Path | None = None,
-) -> None:
-    """Read local quickstart connection settings without printing credentials."""
-    values = _read_environment_file(path)
-    _quickstart_cleanup_target(path, repository_root or Path(__file__).resolve().parents[3])
-    workspace_id = values.get("THELAKE_DEFAULT_WORKSPACE_ID")
-    database_port = values.get("THELAKE_QUICKSTART_DB_PORT")
-    api_port = values.get("THELAKE_QUICKSTART_PORT")
-    writer_password = values.get("LISA_DATABASE_WRITER_PASSWORD")
-    reader_password = values.get("LISA_DATABASE_READER_PASSWORD")
-    service_token = values.get("LISA_THELAKE_TOKEN")
-    if not all(
-        (workspace_id, database_port, api_port, writer_password, reader_password, service_token)
-    ):
-        raise RuntimeError("Quickstart connection metadata is incomplete; start an isolated stack")
-    os.environ["LISA_WORKSPACE_ID"] = workspace_id
-    safe_writer_password = quote(writer_password, safe="")
-    os.environ["LISA_DATABASE_URL"] = (
-        f"postgresql://lisa_writer:{safe_writer_password}@127.0.0.1:{database_port}/lisa"
-    )
-    safe_reader_password = quote(reader_password, safe="")
-    os.environ["LISA_DATABASE_READ_URL"] = (
-        f"postgresql://lisa_reader:{safe_reader_password}@127.0.0.1:{database_port}/lisa"
-    )
-    os.environ["LISA_THELAKE_API_URL"] = f"http://127.0.0.1:{api_port}"
-    os.environ["LISA_THELAKE_TOKEN"] = service_token
-    # This runner must never put policy call recordings in a user's Lisa home.
-    os.environ["LISA_DATA_DIR"] = str(data_dir.resolve())
-    os.environ["LISA_LLM_TRACE_ENABLED"] = "1"
-    os.environ["SOFTPROBE_PUBLIC_KEY"] = "quickstart-local"
 
 
 def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
@@ -727,20 +575,19 @@ def main() -> None:
         parser.error("--live is required to authorize provider calls")
     # Setup: bind process env to the disposable quickstart stack + isolated data dir.
     data_dir = args.data_dir or args.output.parent / f".{args.output.stem}-lisa-data"
-    repository_root = Path(__file__).resolve().parents[3]
-    cleanup_target = _quickstart_cleanup_target(args.quickstart_env_file, repository_root)
+    repository_root = Path(__file__).resolve().parents[2]
+    cleanup_target = lisa_quickstart_target(args.quickstart_env_file, repository_root)
     for retained_path in (args.output.resolve(), data_dir.resolve()):
         if retained_path == cleanup_target.lake_data or cleanup_target.lake_data in retained_path.parents:
             parser.error("--output and --data-dir must be outside the disposable quickstart data path")
     try:
-        _configure_quickstart_environment(args.quickstart_env_file, data_dir.resolve())
+        configure_lisa_quickstart(args.quickstart_env_file, data_dir.resolve(), repository_root)
         report = evaluate(
             load_dataset(args.manifest), load_dataset(args.catalog_manifest), args.output
         )
     finally:
-        _dispose_quickstart_stack(
+        dispose_lisa_quickstart(
             cleanup_target,
-            args.quickstart_env_file,
             repository_root,
             report_path=args.output,
             data_dir=data_dir,

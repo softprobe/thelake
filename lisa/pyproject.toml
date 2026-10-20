@@ -29,8 +29,8 @@ where = ["src"]
 lisa = ["sql/**/*.sql"]
 
 [tool.pytest.ini_options]
-# ``benchmarks`` is offline harness only — never merge it into ``src/lisa``.
-pythonpath = ["src", "benchmarks"]
+# Java-style: src = main, tests = all UTs, datasets = resources, benchmark = runners.
+pythonpath = ["src", ".", "tests"]
 testpaths = ["tests"]
 
 [tool.ruff]

@@ -13,9 +13,9 @@ from pathlib import Path
 
 # Offline harness lives outside the installable runtime package.
 _REPO = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(_REPO / "lisa" / "benchmarks"))
+sys.path.insert(0, str(_REPO / "lisa"))
 
-from lisa_benchmarks.dataset import DEFAULT_MANIFEST, load_dataset
+from datasets.policy_dataset import DEFAULT_MANIFEST, load_dataset
 
 OUTCOMES = ("violation", "compliant", "not_applicable", "insufficient_evidence")
 

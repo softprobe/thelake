@@ -1,7 +1,7 @@
 """Build OTLP fixtures from the labeled policy-evaluation trajectories.
 
-Offline harness only — see ``lisa_benchmarks`` package docs. Do not relocate
-into ``lisa.evaluation``.
+Offline harness only — see ``benchmark`` package docs. Do not relocate into
+``lisa.evaluation``.
 """
 
 from __future__ import annotations

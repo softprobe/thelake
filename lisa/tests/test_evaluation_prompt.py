@@ -5,8 +5,8 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
-from lisa_benchmarks.dataset import load_dataset
-from test_policy_triage import FakeDecisionsClient
+from datasets.policy_dataset import load_dataset
+from tests.policy_fakes import FakeDecisionsClient
 
 from lisa.evaluation import evaluator
 from lisa.evaluation.contracts import EvaluationRequest

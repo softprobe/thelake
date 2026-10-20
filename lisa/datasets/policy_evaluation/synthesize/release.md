@@ -1,6 +1,6 @@
 # Official annotation release — 2026-10-17
 
-Use the canonical [Lisa evaluation terms](../../../../docs/architecture/lisa-terms.md)
+Use the canonical [Lisa evaluation terms](../../../docs/architecture/lisa-terms.md)
 when reading session-policy pairs in this release review.
 
 The default `manifests/evaluation.json` selects exactly the 202 rows in
@@ -94,13 +94,11 @@ final counts, review provenance and split/lineage consistency. The evaluation
 harness retains incomplete-capture gates; 16 selected pairs are capture-gated,
 rather than silently scored as negatives.
 
-Post-publication verification: focused dataset, synthesis, benchmark, policy
-triage and policy-ingest tests pass. This is not a paid Lisa prediction
- evaluation. The production-path runner loads the complete policy catalog
-through Lisa's policy-management service into a disposable PostgreSQL workspace,
-ingests sessions into TheLake, and invokes Lisa's `EvaluationService`.
-`lisa/scripts/evaluate_policies.py` is a manifest-fed triager harness for prompt
-calibration only; its metrics do not establish Lisa production quality.
+Post-publication verification: focused dataset, synthesis, policy triage and
+policy-ingest tests pass. This is not a paid Lisa prediction evaluation. The
+production-path runner loads the complete policy catalog through Lisa's
+policy-management service into a disposable PostgreSQL workspace, ingests
+sessions into TheLake, and invokes Lisa's `EvaluationService`.
 
 ## Limits for later evaluation
 
@@ -121,6 +119,4 @@ For production-path Lisa evaluation, use the `run-lisa-policy-evaluation` skill
 and `lisa/scripts/evaluate_policy_dataset.py`. That runner loads this complete
 policy catalog through Lisa's policy-management service into a disposable
 PostgreSQL workspace, ingests trajectories into TheLake, and invokes Lisa's
-`EvaluationService`. `lisa/scripts/evaluate_policies.py` is a manifest-fed
-triager harness for prompt calibration only; its metrics do not establish Lisa
-production quality.
+`EvaluationService`.

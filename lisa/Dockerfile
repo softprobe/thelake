@@ -7,8 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY lisa/pyproject.toml ./pyproject.toml
-# Runtime package only. Never COPY lisa/benchmarks — offline harness must stay
-# out of the service image (see lisa/benchmarks/README.md).
+# Runtime package only. Never COPY lisa/benchmark or lisa/datasets into the image.
 COPY lisa/src ./src
 COPY lisa/skills ./skills
 RUN pip install --no-cache-dir '.[openhands]'

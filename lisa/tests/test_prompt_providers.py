@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from policy_cases import evaluation_request
 from test_llm_recording import context, records
-from test_policy_triage import (
+from tests.policy_fakes import (
     FakeDecisionsClient,
     FakePolicyStore,
     FakeSessionClient,

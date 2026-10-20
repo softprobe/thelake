@@ -6,9 +6,9 @@ import sys
 from pathlib import Path
 
 # Offline harness lives outside the installable runtime package.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lisa_benchmarks.dataset_benchmark import main
+from benchmark.policy_runner import main
 
 if __name__ == "__main__":
     main()

@@ -42,10 +42,9 @@ distinction between a session ID, its derived trajectory, and a policy ID.
   negatives, and judge outcomes separately.
 
 If no disposable Lisa PostgreSQL database and local TheLake session workspace are
-available, stop the live quality run and report the missing prerequisite. A
-manifest-driven call to `lisa/scripts/evaluate_policies.py` may be used for
-prompt calibration or fixture validation, but label it as a harness-only
-diagnostic; it does not measure production policy selection.
+available, stop the live quality run and report the missing prerequisite. Do not
+substitute a direct triager/judge call on manifest `policy_ids`; that bypasses
+Lisa's approved-catalog and session path and is not a quality measurement.
 
 ## Run procedure
 
@@ -107,14 +106,13 @@ The runner reads the generated quickstart connection metadata without printing
 credentials and puts Lisa's request recordings in a separate directory under
 `/tmp`. The quickstart script stores run-specific Compose, config, and endpoint
 metadata under `warehouse/quickstart`; it refuses to reuse existing run files.
-Preserve and restore any pre-existing `.env` changes after the run. The
-production evaluator automatically removes this
-run's Compose project, its volumes, and its DuckLake data directory after it
-writes the report or exits with an error. It retains the report when produced
-and the LLM request recordings. Do not start evaluation against a developer's
-existing quickstart. The separate `lisa/scripts/evaluate_policies.py`
-accepts pair manifests directly and remains a harness-only prompt diagnostic;
-never report its metrics as production policy-selection quality.
+Preserve and restore any pre-existing `.env` changes after the run. Env bind and
+teardown go only through [`lisa/conftest.py`](../../../lisa/conftest.py)
+(`configure_lisa_quickstart` / `dispose_lisa_quickstart`): the evaluator removes
+this run's Compose project, volumes, and DuckLake data directory after it writes
+the report or exits with an error. It retains the report when produced and the
+LLM request recordings. Do not start evaluation against a developer's existing
+quickstart.
 
 Live provider calls may incur charges. Run them only when explicitly requested.
 

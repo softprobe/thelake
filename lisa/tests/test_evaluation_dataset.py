@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
-from lisa_benchmarks.dataset import load_dataset
+from datasets.policy_dataset import load_dataset
 
 ROOT = Path(__file__).resolve().parents[1] / "datasets/policy_evaluation"
 SAMPLE_SPEC = importlib.util.spec_from_file_location(

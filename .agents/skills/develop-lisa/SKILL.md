@@ -61,17 +61,22 @@ must be verified through `OpenHandsBackend`'s configured skill directory.
 
 ## Activity and verification
 
-- Lisa tests follow the repository-wide transient-resource rule in `AGENTS.md`.
-  They use a disposable Postgres database per test through
-  [`lisa/tests/conftest.py`](../../../lisa/tests/conftest.py). It starts the
-  `lisa-postgres` service in the shared transient test Compose stack and creates
-  an isolated database and writer/reader roles for each test. Removing the
-  container at session teardown removes all test databases and roles; no
-  external database URL is supported. Use transient Lisa databases and
-  TheLake workspaces for all automated tests; never connect to or mutate a
-  developer's running instance. Use these fixtures for database-backed
-  behavior, and stub external service calls when the test does not need a real
-  TheLake server.
+- Lisa tests and live evaluation harnesses follow the repository-wide
+  transient-resource rule in `AGENTS.md`. **All** disposable environment
+  setup/teardown lives in [`lisa/conftest.py`](../../../lisa/conftest.py)
+  (`start_lisa_postgres` / `stop_lisa_postgres`, `create_lisa_test_database`,
+  `provision_lisa_schema`, `configure_lisa_quickstart` /
+  `dispose_lisa_quickstart`). Pytest fixtures re-export those helpers;
+  `lisa/benchmark/` runners must import them and must not own Compose,
+  database, role, schema, or quickstart lifecycle. One Postgres container may
+  be reused for a whole pytest session or benchmark run, but every tracked
+  stack must be stopped when the session/process ends (fixture teardown,
+  `pytest_sessionfinish`, and `atexit`) so interrupted runs do not leave
+  orphan containers. Removing the container removes all test databases and
+  roles; no external database URL is supported. Use transient Lisa databases
+  and TheLake workspaces for all automated tests; never connect to or mutate a
+  developer's running instance. Stub external service calls when the test
+  does not need a real TheLake server.
 - Read [`docs/how-to/policy-memory.md`](../../../docs/how-to/policy-memory.md)
   for policy semantics and
   [`docs/how-to/policy-triage-evaluation.md`](../../../docs/how-to/policy-triage-evaluation.md)
@@ -80,15 +85,16 @@ must be verified through `OpenHandsBackend`'s configured skill directory.
 - Make the smallest change that preserves the production service path. Keep
   provider adapters in `lisa/src/lisa/evaluation/` (trajectory, triage, judge,
   scores only), orchestration in `lisa/services/evaluations.py`, and persistence
-  behind Lisa repositories. Offline dataset loaders and benchmark runners belong
-  in `lisa/benchmarks/lisa_benchmarks/` — never under the installable runtime
-  package. Runtime code must not import `lisa_benchmarks`.
+  behind Lisa repositories.   Java-style layout: `src/lisa` (main), `tests` (all UTs), `datasets` (labeled
+  resources + loaders), `benchmark` (live runners only). Runtime code must not
+  import `benchmark` or `datasets`; tests may import them to unit-test
+  loaders/scorers/runners.
 - For behavior changes, add tests at the affected service boundary and the
   relevant provider or API contract. Run the focused Lisa tests; use the
   repository's `run-thelake-tests` skill when TheLake integration is affected.
 - Update Lisa architecture/how-to docs and the relevant `.agents/skills/` when
   policy storage, triage outcomes, escalation, score semantics, or evaluation
-  setup changes. Treat code as authoritative and do not describe harness-only
-  diagnostics as production quality evidence.
+  setup changes. Treat code as authoritative; the only labeled policy quality
+  path is `EvaluationService` via `evaluate_policy_dataset.py`.
 - Review the diff for public-repository disclosure, accidental dataset or
   credential changes, and claims that no longer match runtime behavior.

@@ -1,7 +1,7 @@
 # Synthesize pair annotations
 
 For canonical session, trajectory, policy, and pair terminology, see the
-[Lisa evaluation terms](../../../../docs/architecture/lisa-terms.md).
+[Lisa evaluation terms](../../../docs/architecture/lisa-terms.md).
 
 `annotate.py` creates candidate annotations for explicitly listed session-policy
 pairs. It uses Gemini 4 Argon through Google REST with Application Default

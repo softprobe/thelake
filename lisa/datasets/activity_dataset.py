@@ -1,7 +1,6 @@
 """Versioned task dataset for Lisa's activity-management agent benchmark.
 
-Offline harness only — see ``lisa_benchmarks`` package docs. Do not relocate
-into ``lisa.evaluation``.
+Offline harness only — see ``datasets`` package docs. Tied to labeled resources; runners live in ``lisa/benchmark``.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from pydantic import Field
 
 from lisa.evaluation.contracts import StrictModel
 
-DATASET_ROOT = Path(__file__).resolve().parents[2] / "datasets/activity_management"
+DATASET_ROOT = Path(__file__).resolve().parent / "activity_management"
 DEFAULT_MANIFEST = DATASET_ROOT / "manifests/benchmark.json"
 
 

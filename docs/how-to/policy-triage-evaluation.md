@@ -19,34 +19,13 @@ for annotation provenance and limitations.
 ```sh
 lisa/.venv/bin/python -m pytest -q \
   lisa/tests/test_evaluation_dataset.py \
-  lisa/tests/test_evaluation_benchmark.py \
+  lisa/tests/test_policy_evaluation_metrics.py \
   lisa/tests/test_evaluation_prompt.py
 ```
 
-Checks cover record integrity, sparse annotations, input isolation, metric
-arithmetic and provider wiring. Mocked results do not establish model quality.
-
-## Pair-harness calibration
-
-`lisa/scripts/evaluate_policies.py` calls the triager directly with each
-manifest batch's `policy_ids`. It is useful for prompt calibration, but it
-does **not** measure production selection when the batch contains only the
-annotated policies. Do not report its recall as Lisa production quality.
-
-With credentials provisioned, use it only for an explicitly requested
-harness diagnostic:
-
-```sh
-lisa/.venv/bin/python lisa/scripts/evaluate_policies.py \
-  --live --mode pipeline --split development \
-  --output /tmp/policy-evaluation.json
-```
-
-`--mode triage` uses Decisions only. `--mode judge` evaluates the presented
-catalog directly with Gemini as a harness-only diagnostic; it bypasses Lisa's
-production policy lookup and Decisions triage. `--mode pipeline` runs Decisions
-then Gemini on suspected violations and uncertain evidence. Select another
-frozen catalog with `--manifest`; omit `--split` to run all manifest batches.
+Checks cover record integrity, sparse annotations, input isolation, production
+metric arithmetic and provider wiring. Mocked results do not establish model
+quality.
 
 ## Production-path evaluation
 
@@ -115,10 +94,10 @@ the policies explicitly permit approval granted before the conversation.
 - Workload: escalation rate and judge count across the whole eligible presented
   catalog, including unreviewed pairs. These are call-volume measures, not costs.
 
-Zero denominators return null. Judge-only mode does not report triage metrics.
-Accuracy can be dominated by unrelated negatives; always inspect raw support,
-missed violations and annotation coverage. Sparse annotation accuracy describes
-the adjudicated subset, not the full catalog or production prevalence.
+Zero denominators return null. Accuracy can be dominated by unrelated negatives;
+always inspect raw support, missed violations and annotation coverage. Sparse
+annotation accuracy describes the adjudicated subset, not the full catalog or
+production prevalence.
 
 ## Production-quality evaluation
 

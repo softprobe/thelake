@@ -6,14 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from lisa_benchmarks.activity_benchmark import (
+from benchmark.activity_runner import (
     _interpolate,
     _rate,
     _score_state,
     _score_turn,
     _update_substitutions,
 )
-from lisa_benchmarks.activity_dataset import ActivityLabels, ActivityTurn, load_activity_dataset
+from datasets.activity_dataset import ActivityLabels, ActivityTurn, load_activity_dataset
 
 from lisa.backends.openhands import LISA_SYSTEM_PROMPT
 from lisa.views.database import LISA_DATABASE_SCHEMA

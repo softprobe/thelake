@@ -1,6 +1,6 @@
 # Curated-pair live verification
 
-Use the canonical [Lisa evaluation terms](../../../../docs/architecture/lisa-terms.md)
+Use the canonical [Lisa evaluation terms](../../../docs/architecture/lisa-terms.md)
 for session, trajectory, policy, and evaluation-pair terminology.
 
 Verified on 2026-10-17 against the first nine rows of `golden_pairs.jsonl`.

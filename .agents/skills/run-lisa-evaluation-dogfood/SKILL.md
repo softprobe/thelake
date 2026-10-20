@@ -28,12 +28,9 @@ call Lisa.
 - For labeled model quality, use `run-lisa-policy-evaluation`. It must load the
   complete dataset policy catalog through Lisa's policy-management service into
   a disposable PostgreSQL workspace, ingest trajectories into TheLake, and
-  call Lisa's production `EvaluationService`. A manifest-only triager run or a
-  test that injects policies/trajectories is calibration, not production
-  quality evidence.
-- `test_evaluation_live.py` is harness calibration. Its direct
-  `OpenAIPolicyTriager` and injected session fixtures do not measure Lisa's
-  production policy lookup or end-to-end session path.
+  call Lisa's production `EvaluationService`. Do not call the triager/judge on
+  manifest `policy_ids` or inject policies/trajectories and treat that as
+  production quality evidence.
 - For the real scheduled agent-to-issue path, use a quickstart E2E with an
   isolated, run-owned stack and workspace; it makes paid OpenAI Decisions and
   Gemini calls. It must not reuse a developer's running stack or workspace.

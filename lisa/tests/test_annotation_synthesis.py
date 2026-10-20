@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from lisa_benchmarks.dataset import Annotation, load_dataset
+from datasets.policy_dataset import Annotation, load_dataset
 
 DIRECTORY = Path(__file__).resolve().parents[1] / "datasets/policy_evaluation/synthesize"
 spec = importlib.util.spec_from_file_location("annotation_synthesis", DIRECTORY / "annotate.py")

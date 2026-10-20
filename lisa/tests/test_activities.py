@@ -86,7 +86,7 @@ def test_provision_binds_one_database_to_its_workspace(store: PostgresActivitySt
 
 
 def test_schema_recreation_starts_with_empty_policy_catalog(store, lisa_test_db):
-    from sql_cases import provision_lisa_schema
+    from conftest import provision_lisa_schema
 
     store.create_activity(title="Temporary activity", source="test")
     repository = PostgresPolicyRepository(store.dsn, WORKSPACE_ID)

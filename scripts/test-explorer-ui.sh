@@ -86,13 +86,6 @@ TMP_DIR="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["scratch_d
 E2E_DB_PORT="$(python3 -c 'import json,sys; s=json.loads(sys.argv[1]); k=s["services"][0]+":5432"; print(s["ports"][k][0].rsplit(":",1)[1])' "$stack_json")"
 mkdir -p "$TMP_DIR/warehouse"
 
-if [[ "$ONLINE_E2E" == "1" ]]; then
-  echo "==> Starting isolated Postgres for Lisa's local Gemini evaluator..."
-  echo "==> Calibrating Lisa's local evaluator with paired policy cases..."
-  LISA_RUN_EVALUATION_LIVE=1 uv run --project "$ROOT/lisa" --extra test pytest -q \
-    "$ROOT/lisa/tests/test_evaluation_live.py" -k "pair_judge_calibration and connected_itinerary"
-fi
-
 cat > "$TMP_DIR/config.yaml" <<EOF
 server:
   host: 127.0.0.1

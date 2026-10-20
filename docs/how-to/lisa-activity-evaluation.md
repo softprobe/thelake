@@ -17,11 +17,12 @@ uv run --project lisa python lisa/scripts/evaluate_activity_dataset.py \
 
 Provide `GOOGLE_API_KEY` or `GEMINI_API_KEY`, or `LISA_BASE_URL` and
 `LISA_API_KEY`, in the process environment. The runner uses the actual OpenHands
-conversation backend and Lisa MCP tools. It starts an isolated Postgres service
-through `scripts/test_stack.py`, provisions a separate Lisa database for each
-case, stores conversation/model recordings in the run-owned artifact directory,
-and removes the transient service at exit. Reports and captured logs are kept
-under `target/test-artifacts/lisa-activity-benchmark/<run-id>/`.
+conversation backend and Lisa MCP tools. Disposable Postgres and per-case Lisa
+databases come only from [`lisa/conftest.py`](../../lisa/conftest.py)
+(`start_lisa_postgres` / `create_lisa_test_database` / `stop_lisa_postgres`).
+Conversation/model recordings stay in the run-owned artifact directory; the
+transient service is removed at exit. Reports and captured logs are kept under
+`target/test-artifacts/lisa-activity-benchmark/<run-id>/`.
 
 The runner deterministically scores database state and required/forbidden tool
 actions. State checks include activity timeline evidence and follow-up count,

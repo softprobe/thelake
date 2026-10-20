@@ -18,6 +18,16 @@ resources through shared fixtures/setup and tear them down automatically,
 including on failure. Stub external services when live behavior is not part of
 the test.
 
+For Lisa specifically, **all** disposable environment setup and teardown lives in
+[`lisa/conftest.py`](../../lisa/conftest.py): Postgres via `test_stack.py`,
+per-run Lisa databases/roles/schema, and policy-evaluation quickstart bind /
+dispose. Pytest fixtures and `lisa/benchmark/` runners must call those helpers;
+they must not own Compose, database, or quickstart lifecycle themselves.
+Reuse one Postgres container for a pytest session or benchmark run is fine;
+when the session or process ends, `conftest` must stop every tracked stack
+(fixture `finally`, `pytest_sessionfinish`, and `atexit`) so no orphan
+containers remain. Diagnostic artifacts under `target/test-artifacts/` are kept.
+
 ## Automated test environments
 
 Automated tests that need Docker use one lifecycle owner:
@@ -113,7 +123,7 @@ state. Unit tests, mocks, canned transcripts, replayed traces, or an offline
 scorer are not substitutes for that execution.
 
 Offline Lisa dataset loaders and benchmark runners live under
-[`lisa/benchmarks/`](../../lisa/benchmarks/README.md), not the installable
+[`lisa/benchmark/`](../../lisa/benchmark/README.md), not the installable
 runtime package. Agentic held-out splits use the name `benchmark`, not `test`
 (`test` means traditional software unit/integration tests only).
 

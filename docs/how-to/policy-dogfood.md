@@ -51,52 +51,24 @@ All examples use the [shared evaluation dataset](../../lisa/datasets/policy_eval
 Itinerary controls include disclosure before confirmation, cancellation with a
 late warning, and incomplete capture. Check each pair's review status in the
 shared dataset and use only `adjudicated` rows as quality labels. The release is
-AI-adjudicated rather than human-reviewed. The harness test calls the Gemini
-judge directly for calibration and does not exercise Decisions routing. Run
-those explicit checks with paid Gemini calls:
-
-```bash
-LISA_RUN_EVALUATION_LIVE=1 uv run --project lisa --extra test pytest -q \
-  lisa/tests/test_evaluation_live.py \
-  -k "pair_judge_calibration and connected_itinerary"
-```
+AI-adjudicated rather than human-reviewed.
 
 Check the shared data and provider wiring without provider calls:
 
 ```bash
 uv run --project lisa --extra test pytest -q \
-  lisa/tests/test_evaluation_dataset.py lisa/tests/test_evaluation_prompt.py
+  lisa/tests/test_evaluation_dataset.py \
+  lisa/tests/test_evaluation_prompt.py
 ```
 
 The dataset also contains ten STATE-Bench trajectories. Only each authored target
-pair is annotated; other catalog pairs remain unreviewed. All provider formatting
-and calibration tests resolve the same canonical trajectory and policy records.
+pair is annotated; other catalog pairs remain unreviewed.
 
-For live judge calibration and the MCP selection-to-score path, load the known
-local `.env` inside the test process, preserving existing exports and never
-printing secrets. This invokes paid Gemini and OpenAI calls:
-
-```bash
-uv run --project lisa --extra test python - <<'PYCODE'
-import os
-from dotenv import load_dotenv
-import pytest
-
-load_dotenv(".env", override=False)
-os.environ["LISA_RUN_EVALUATION_LIVE"] = "1"
-raise SystemExit(pytest.main(["lisa/tests/test_evaluation_live.py", "-v", "-rs"]))
-PYCODE
-```
-
-Judge calibration compares explicit annotations. The MCP subset test injects
-both the annotated policy subset and a fixture trajectory, so it checks tool
-wiring and citations only; it does not
-measure candidate discovery from Lisa's PostgreSQL catalog or production
-session retrieval. Skipped tests do not establish quality. For labeled quality,
-use the [production-path evaluation skill](../../.agents/skills/run-lisa-policy-evaluation/SKILL.md),
+For labeled production-path quality, use the
+[production-path evaluation skill](../../.agents/skills/run-lisa-policy-evaluation/SKILL.md),
 which loads the full policy catalog through Lisa's policy-management service and
-calls `EvaluationService` against TheLake sessions. See [the evaluation guide](policy-triage-evaluation.md)
-for metrics and limits.
+calls `EvaluationService` against TheLake sessions. Metrics and limits:
+[the evaluation guide](policy-triage-evaluation.md).
 
 ## 3. Verify Lisa's scheduled QA cycle
 
