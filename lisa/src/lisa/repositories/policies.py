@@ -13,7 +13,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import dict_row
 
-from ..models.policies import PolicyRecord, policy_id
+from ..models.policies import PolicyRecord, policy_id, policy_id_sort_key
 
 
 def _sql(name: str) -> str:
@@ -58,6 +58,18 @@ class InMemoryPolicyRepository:
                 for row in rows.values()
                 if row.archived_at is None
             ]
+
+    def list_all_page(self, *, limit: int, offset: int) -> list[PolicyRecord]:
+        if not 1 <= limit <= 101 or not 0 <= offset <= 10_000:
+            raise ValueError("Policy page limit must be 1–101 and offset must be between 0 and 10000")
+        with self._lock:
+            rows = [
+                row
+                for records in self._records.values()
+                for row in records.values()
+                if row.archived_at is None
+            ]
+            return sorted(rows, key=lambda row: policy_id_sort_key(row.id))[offset : offset + limit]
 
     def list_all_history(self) -> list[PolicyRecord]:
         with self._lock:
@@ -161,6 +173,15 @@ class PostgresPolicyRepository:
     def list_all(self) -> list[PolicyRecord]:
         with self._connect() as connection:
             rows = connection.execute(_sql("list_all_policies.sql")).fetchall()
+        return [self._record(row) for row in rows]
+
+    def list_all_page(self, *, limit: int, offset: int) -> list[PolicyRecord]:
+        if not 1 <= limit <= 101 or not 0 <= offset <= 10_000:
+            raise ValueError("Policy page limit must be 1–101 and offset must be between 0 and 10000")
+        with self._connect() as connection:
+            rows = connection.execute(
+                _sql("list_all_policies_page.sql"), {"limit": limit, "offset": offset}
+            ).fetchall()
         return [self._record(row) for row in rows]
 
     def list_all_history(self) -> list[PolicyRecord]:

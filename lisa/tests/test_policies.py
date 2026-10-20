@@ -4,6 +4,7 @@ import pytest
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
+from lisa.models.policies import PolicyRecord
 from lisa.repositories.policies import InMemoryPolicyRepository
 from lisa.services.policies import PolicyService
 from policy_cases import list_policies, read_policy
@@ -99,6 +100,28 @@ def test_policy_ids_use_paragraph_style_ordinals(policy_database):
 
     rendered = render_policy_records(saved, "workspace")
     assert rendered.index("## P1.1 | Rule 1") < rendered.index("## P1.10 | Rule 10")
+
+
+def test_policy_page_at_maximum_offset_has_no_unreachable_successor():
+    class Repository:
+        def list_all_page(self, *, limit, offset):
+            assert limit == 101
+            assert offset == 10_000
+            return [
+                PolicyRecord(
+                    id=f"P1.{number}", scope="workspace", target_agent_name=None,
+                    name=f"Rule {number}", criteria=f"Rule {number}.", approved=True,
+                )
+                for number in range(10_001, 10_102)
+            ]
+
+    service = PolicyService(
+        WorkspaceContext.from_environment(), Repository()
+    )
+    page, next_offset = service.list_policy_records_page(offset=10_000)
+
+    assert len(page) == 100
+    assert next_offset is None
 
 
 def test_policy_listing_explains_agent_specific_scope(monkeypatch, policy_database):

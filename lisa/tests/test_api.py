@@ -438,11 +438,63 @@ def test_activity_feed_http_endpoints_use_workspace_database(
         activity = services.activity_store.create_activity(
             title="Inspect refund session", source="web",
         )
+        evaluation = services.activity_store.create_activity(
+            title="Evaluate refund session", source="web",
+            kind="policy_evaluation",
+        )
         listed = test_client.get("/v1/activities?open_only=true").json()
+        evaluations = test_client.get(
+            "/v1/activities?activity_type=policy_evaluation"
+        ).json()
         detail = test_client.get(f"/v1/activities/{activity.id}").json()
     assert any(item["id"] == activity.id for item in listed)
+    assert [item["id"] for item in evaluations] == [evaluation.id]
     assert detail["activity"]["title"] == "Inspect refund session"
     assert detail["actions"][0]["title"] == "Inspect refund session"
+
+
+def test_user_policy_list_is_authenticated_and_bounded(
+    lisa_test_database, monkeypatch, tmp_path
+):
+    from fastapi.testclient import TestClient
+
+    from lisa.app import app
+
+    workspace_id = "11111111-1111-4111-8111-111111111111"
+    database = lisa_test_database(workspace_id)
+    monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
+    monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
+    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LISA_DATABASE_URL", database.writer_url)
+    with TestClient(app) as test_client:
+        repository = test_client.app.state.workspace_services.policy_service.repository
+        repository.replace_scope(
+            "workspace",
+            "",
+            [],
+            [
+                {
+                    "name": f"Rule {index:03}",
+                    "criteria": "Check the required evidence first.",
+                    "approved": index % 2 == 0,
+                }
+                for index in range(1, 102)
+            ],
+        )
+
+        response = test_client.get("/v1/policies?limit=100&offset=0")
+        final_page = test_client.get("/v1/policies?limit=100&offset=100")
+        assert response.status_code == 200
+        assert len(response.json()["items"]) == 100
+        assert response.json()["next_offset"] == 100
+        assert response.json()["items"][0]["name"] == "Rule 001"
+        assert final_page.status_code == 200
+        assert len(final_page.json()["items"]) == 1
+        assert final_page.json()["next_offset"] is None
+        assert test_client.get("/v1/policies?offset=10001").status_code == 400
+
+        monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "0")
+        assert test_client.get("/v1/policies").status_code == 401
 
 
 def test_lisa_closes_openhands_conversation_when_run_fails(client, monkeypatch):

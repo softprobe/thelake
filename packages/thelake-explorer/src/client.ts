@@ -112,6 +112,21 @@ export type LisaActivityDetail = {
   actions: Array<{ seq: number; event_type: string; title: string; summary?: string | null; created_at: string }>;
 };
 
+export type LisaPolicyRecord = {
+  id: string;
+  scope: string;
+  target_agent_name?: string | null;
+  name: string;
+  criteria: string;
+  approved: boolean;
+  updated_at?: string | null;
+};
+
+export type LisaPolicyPage = {
+  items: LisaPolicyRecord[];
+  next_offset: number | null;
+};
+
 export class ExplorerApi {
   constructor(readonly config: ExplorerConfig) {}
 
@@ -212,15 +227,23 @@ export class ExplorerApi {
     });
   }
 
-  listLisaActivities(params: { limit?: number; status?: string; query?: string; openOnly?: boolean; dueOnly?: boolean } = {}): Promise<LisaFeedEntry[]> {
+  listLisaActivities(params: { limit?: number; activityType?: string; status?: string; query?: string; openOnly?: boolean; dueOnly?: boolean } = {}): Promise<LisaFeedEntry[]> {
     if (!this.config.lisaApiBasePath) throw new Error("Lisa's direct API URL is not configured");
     const query = new URLSearchParams();
     if (params.limit != null) query.set("limit", String(params.limit));
+    if (params.activityType) query.set("activity_type", params.activityType);
     if (params.status) query.set("status", params.status);
     if (params.query) query.set("query", params.query);
     if (params.openOnly) query.set("open_only", "true");
     if (params.dueOnly) query.set("due_only", "true");
     return this.requestLisa(`/activities?${query.toString()}`);
+  }
+
+  listLisaPolicies(params: { limit?: number; offset?: number } = {}): Promise<LisaPolicyPage> {
+    const query = new URLSearchParams();
+    if (params.limit != null) query.set("limit", String(params.limit));
+    if (params.offset != null) query.set("offset", String(params.offset));
+    return this.requestLisa(`/policies?${query.toString()}`);
   }
 
   getLisaActivity(activityId: string): Promise<LisaActivityDetail> {

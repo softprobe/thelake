@@ -45,11 +45,30 @@ describe("ExplorerApi", () => {
       auth: { headers: () => ({ "X-Softprobe-Assertion": "signed" }) },
       fetch: fetcher as typeof fetch,
     });
-    await api.listLisaActivities({ limit: 50, query: "refund", openOnly: true });
+    await api.listLisaActivities({ limit: 50, query: "refund", openOnly: true, activityType: "policy_evaluation" });
     await api.getLisaActivity("activity-1");
-    expect(calls[0].url).toBe("http://lisa.local/v1/activities?limit=50&query=refund&open_only=true");
+    expect(calls[0].url).toBe("http://lisa.local/v1/activities?limit=50&activity_type=policy_evaluation&query=refund&open_only=true");
     expect(calls[1].url).toBe("http://lisa.local/v1/activities/activity-1");
     expect(calls[0].init?.headers).toMatchObject({ "X-Softprobe-Assertion": "signed" });
+  });
+
+  it("reads Lisa's bounded rules page through the authenticated, read-only endpoint", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      items: [{ id: "P1.1", scope: "workspace", name: "Refund eligibility", criteria: "Check first", approved: true }],
+      next_offset: 100,
+    }), { status: 200 }));
+    const api = new ExplorerApi({
+      apiBasePath: "/v1",
+      lisaApiBasePath: "http://lisa.local/v1",
+      auth: { headers: () => ({ "X-Softprobe-Assertion": "signed" }) },
+      fetch: fetcher as typeof fetch,
+    });
+    const policies = await api.listLisaPolicies({ limit: 100, offset: 0 });
+
+    expect(fetcher.mock.calls[0][0]).toBe("http://lisa.local/v1/policies?limit=100&offset=0");
+    expect(fetcher.mock.calls[0][1]?.headers).toMatchObject({ "X-Softprobe-Assertion": "signed" });
+    expect(policies.items[0]).toMatchObject({ id: "P1.1", approved: true });
+    expect(policies.next_offset).toBe(100);
   });
 
   it("uses the configured API prefix and auth provider headers", async () => {

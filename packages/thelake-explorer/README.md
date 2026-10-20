@@ -72,4 +72,9 @@ npm test
   inspector, human verdict scores (`human_verdict`).
 - **Behavior checks** — create/activate natural-language evaluators for an
   agent. Lisa runs active checks on her schedule; configure the runner in
-  Lisa's environment. See
+  Lisa's environment.
+- **Lisa** — persistent chat with an adjacent panel for Activities, Rules,
+  Triage / judges, and Identity. Rules and evaluation history are read-only in
+  the panel; policy changes go through Lisa's owner-confirmed chat workflow.
+  Standalone `SOUL.md` and `MEMORY.md` files are not configured yet. See the
+  [Explorer guide](../../docs/how-to/explorer.md#lisa).

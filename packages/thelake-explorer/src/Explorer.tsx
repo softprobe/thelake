@@ -153,7 +153,7 @@ export function ThelakeExplorer({
         {selected && !showChat && <button onClick={goBack}>Sessions</button>}
       </header>
       {error && <div role="alert" className="tle-error">{error}</div>}
-      {showChat ? <LisaView key={config.chatStorageKey ?? "workspace-unspecified"} api={api} /> : <div className="tle-layout">
+      {showChat ? <LisaView key={config.chatStorageKey ?? "workspace-unspecified"} api={api} onShowSessions={() => { setShowChat(false); setSelected(undefined); }} /> : <div className="tle-layout">
         <aside aria-label="Sessions">
           <div className="tle-list-tools">
             <h2>Sessions</h2>

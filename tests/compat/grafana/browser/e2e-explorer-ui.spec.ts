@@ -158,7 +158,134 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   expect(alphaSummary.models).toContain('gpt-e2e');
   expect(alphaSummary.total_tokens).toBe(18);
 
+  await page.addInitScript(() => {
+    Object.defineProperty(window, '__LISA_API_BASE_PATH__', { value: '/lisa/v1' });
+  });
+  let activityFeedRequests = 0;
+  await page.route('**/lisa/v1/**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/lisa/v1/conversations') {
+      await route.fulfill({ json: [{ conversation_id: 'lisa-ui-seed', title: 'Lisa demo', messages: [], activities: [] }] });
+      return;
+    }
+    if (url.pathname === '/lisa/v1/conversations/lisa-ui-seed') {
+      await route.fulfill({ json: { conversation_id: 'lisa-ui-seed', title: 'Lisa demo', messages: [], activities: [] } });
+      return;
+    }
+    if (url.pathname === '/lisa/v1/activities') {
+      const evaluation = url.searchParams.get('activity_type') === 'policy_evaluation';
+      if (!evaluation && ++activityFeedRequests === 3) {
+        await route.fulfill({ status: 503, json: { detail: 'Temporary preview feed error' } });
+        return;
+      }
+      if (!evaluation) await new Promise((resolve) => setTimeout(resolve, 800));
+      await route.fulfill({ json: evaluation ? [{
+        id: 'evaluation-seed', title: 'Evaluation from the policy dataset', kind: 'policy_evaluation',
+        status: 'success', status_title: 'Evaluation complete', summary: 'Triage escalated this case to the judge.',
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      }] : [{
+        id: 'activity-seed', title: 'Review a seeded activity', kind: 'action',
+        status: 'pending', status_title: 'In progress', summary: 'Activity fixture for the Lisa panel.',
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      }] });
+      return;
+    }
+    if (url.pathname === '/lisa/v1/activities/activity-seed') {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      const createdAt = new Date().toISOString();
+      await route.fulfill({ json: {
+        activity: { id: 'activity-seed', title: 'Review a seeded activity', status: 'pending', status_title: 'In progress', summary: 'Activity fixture for the Lisa panel.' },
+        thread: { name: 'Review a seeded activity', status: 'pending' }, actions: [
+          { seq: 1, event_type: 'activity.started', title: 'Started', summary: 'Lisa began reviewing the fixture.', created_at: createdAt },
+          { seq: 2, event_type: 'activity.updated', title: 'Checked workspace evidence', summary: 'The activity detail shows the selected timeline step.', created_at: createdAt },
+        ],
+      } });
+      return;
+    }
+    if (url.pathname === '/lisa/v1/policies') {
+      await route.fulfill({ json: { items: [{
+        id: 'P1.1', scope: 'workspace', name: 'Refund eligibility before refund',
+        criteria: 'Check refund eligibility before issuing a refund.', approved: true,
+      }], next_offset: null } });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { detail: 'Unknown Lisa UI test route' } });
+  });
+
   await page.goto('/explorer/');
+  const lisaChat = page.getByRole('log', { name: 'Lisa conversation' });
+  await expect(lisaChat).toBeVisible();
+  for (const tab of ['Activities', 'Rules', 'Triage / judges', 'Identity']) {
+    await expect(page.getByRole('tab', { name: tab })).toBeVisible();
+  }
+  const activityTab = page.getByRole('tab', { name: 'Activities' });
+  await activityTab.focus();
+  await activityTab.press('ArrowRight');
+  await expect(page.getByRole('tab', { name: 'Rules' })).toBeFocused();
+  await expect(page.getByRole('tab', { name: 'Rules' })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: 'Rules' }).press('End');
+  await expect(page.getByRole('tab', { name: 'Identity' })).toBeFocused();
+  await expect(page.getByRole('tab', { name: 'Identity' })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: 'Identity' }).press('ArrowLeft');
+  await expect(page.getByRole('tab', { name: 'Triage / judges' })).toBeFocused();
+  await expect(page.getByRole('tab', { name: 'Triage / judges' })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: 'Triage / judges' }).click();
+  await expect(page.getByRole('button', { name: /Evaluation from the policy dataset/ })).toBeVisible();
+  await page.waitForTimeout(900);
+  await expect(page.getByRole('button', { name: /Evaluation from the policy dataset/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Review a seeded activity/ })).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Activities' }).click();
+  await expect(page.getByRole('button', { name: /Review a seeded activity/ })).toBeVisible();
+  const detailRequest = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith('/activities/activity-seed'));
+  await page.getByRole('button', { name: /Review a seeded activity/ }).click();
+  await detailRequest;
+  await page.getByRole('tab', { name: 'Triage / judges' }).click();
+  await page.waitForTimeout(900);
+  await expect(page.getByRole('dialog', { name: 'Review a seeded activity' })).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Activities' }).click();
+  await expect(page.getByRole('alert')).toContainText('activity feed could not load');
+  await page.getByRole('tab', { name: 'Activities' }).click();
+  await expect(page.getByText('Loading activities…')).toBeVisible();
+  await expect(page.getByText('Loading activities…')).toHaveCount(0);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.getByRole('button', { name: /Review a seeded activity/ }).click();
+  const activityDialog = page.getByRole('dialog', { name: 'Review a seeded activity' });
+  await expect(activityDialog).toBeVisible();
+  await expect(activityDialog.getByRole('heading', { name: 'Summary' })).toBeVisible();
+  await expect(activityDialog.getByText('Activity fixture for the Lisa panel.')).toBeVisible();
+  await expect(activityDialog.locator('[aria-current="step"]')).toHaveCount(0);
+  await expect(activityDialog.locator('.tle-lisa-activity-step.latest')).toHaveCount(1);
+  await activityDialog.getByRole('button', { name: 'Checked workspace evidence' }).click();
+  await expect(activityDialog.getByRole('heading', { name: 'Checked workspace evidence' })).toBeVisible();
+  await expect(activityDialog.getByRole('button', { name: 'Checked workspace evidence' })).toHaveAttribute('aria-current', 'step');
+  await activityDialog.getByRole('button', { name: 'Started' }).click();
+  await expect(activityDialog.getByRole('heading', { name: 'Started' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(activityDialog).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Review a seeded activity/ })).toBeFocused();
+  await page.getByRole('tab', { name: 'Rules' }).click();
+  await expect(page.getByText('Refund eligibility before refund', { exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Identity' }).click();
+  await expect(page.getByText('SOUL.md', { exact: true })).toBeVisible();
+  const chatPanel = page.locator('.tle-lisa-main');
+  const panelOpenWidth = (await chatPanel.boundingBox())!.width;
+  await page.getByRole('button', { name: 'Close workspace panel' }).click();
+  await expect(page.getByRole('complementary', { name: 'Lisa workspace panel' })).toHaveCount(0);
+  await expect.poll(async () => (await chatPanel.boundingBox())!.width).toBeGreaterThan(panelOpenWidth + 300);
+  await page.getByRole('button', { name: 'Show workspace panel' }).click();
+  await expect(page.getByRole('complementary', { name: 'Lisa workspace panel' })).toBeVisible();
+  await expect.poll(async () => (await chatPanel.boundingBox())!.width).toBe(panelOpenWidth);
+  await expect(page.getByText('MEMORY.md', { exact: true })).toBeVisible();
+  await expect(lisaChat).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Close workspace panel' }).click();
+  await expect.poll(async () => (await chatPanel.boundingBox())!.height).toBeGreaterThan(800);
+  await expect(page.locator('.tle-lisa-rail')).toHaveCSS('grid-row-end', '2');
+  await page.getByRole('button', { name: 'Show workspace panel' }).click();
+  await expect.poll(async () => (await chatPanel.boundingBox())!.height).toBeLessThan(600);
+  await page.setViewportSize({ width: 1280, height: 900 });
+
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
 

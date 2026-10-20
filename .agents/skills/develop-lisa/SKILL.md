@@ -16,6 +16,24 @@ Lisa's packaged runtime skills live in [`lisa/skills/`](../../../lisa/skills/)
 and are copied into the Lisa image by `lisa/Dockerfile`; changes to those skills
 must be verified through `OpenHandsBackend`'s configured skill directory.
 
+The Explorer Lisa view keeps chat visible beside Activities, Rules,
+Triage / judges, and Identity tabs. Selecting an activity opens a keyboard-
+dismissible detail dialog that opens on the activity summary; selecting a
+timeline event opens its detail.
+Keep the shell aligned to Muse's visible layout: 72px navigation rail, 360px
+right panel, and centered 960×700px activity dialog at the 1610×1505 desktop
+reference viewport. Reuse the profile, segmented tabs, activity rows, modal,
+timeline, and typography treatment; put Lisa-specific data inside those slots.
+Check the rendered page against Muse at the same viewport and device scale.
+Browser routes must reuse the authenticated
+workspace binding and expose only bounded, purpose-built projections. Rules are
+read-only in the panel; policy changes still use the exact-owner-confirmation
+proposal flow. Evaluation activity timelines distinguish routing decisions,
+judge verdicts, and failures. The current runtime identity is configured by
+`LISA_SYSTEM_PROMPT` and packaged skills; do not present `SOUL.md` or
+`MEMORY.md` as existing editable files until Lisa has a canonical source and
+authorization contract for them.
+
 ## Source of truth and flow
 
 - Use [Lisa evaluation terms](../../../docs/architecture/lisa-terms.md):

@@ -127,6 +127,22 @@ class PolicyService:
         """Return active policy rows; the controller chooses their presentation."""
         return sorted(self.repository.list_all(), key=lambda row: policy_id_sort_key(row.id))
 
+    def list_policy_records_page(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> tuple[list[PolicyRecord], int | None]:
+        """Return one bounded page and the offset of its successor, if present."""
+        if not 1 <= limit <= 100 or not 0 <= offset <= 10_000:
+            raise ValueError("Policy page limit must be 1–100 and offset must be between 0 and 10000")
+        rows = self.repository.list_all_page(limit=limit + 1, offset=offset)
+        page = rows[:limit]
+        candidate_offset = offset + limit
+        next_offset = (
+            candidate_offset
+            if len(rows) > limit and candidate_offset <= 10_000
+            else None
+        )
+        return page, next_offset
+
     def read_policy_records(
         self, scope: str = "workspace", agent_name: str = ""
     ) -> list[PolicyRecord]:

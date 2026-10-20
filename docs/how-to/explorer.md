@@ -165,6 +165,26 @@ workspace and agent policy records, bounded session-detail search,
 explicitly approved policy rules, and scheduled policy evaluation. She does
 not run shell commands or access a connected Git repository.
 
+Lisa's Explorer keeps the conversation visible beside a workspace panel with
+Activities, Rules, Triage / judges, and Identity tabs. Activities reuse Lisa's
+authenticated activity feed. Selecting an activity opens a detail dialog with
+its ordered timeline and an activity summary; selecting a timeline step opens
+that step's detail. Escape or the close
+button returns focus to the activity row. Rules are a read-only view of the
+policy catalog; propose and apply changes through Lisa's chat proposal flow,
+which requires the owner's exact confirmation. Triage / judges shows
+evaluation activities and their recorded timelines; triage routing is not a
+pass/fail verdict. The Identity tab identifies the current runtime prompt and
+distinguishes conversation context from durable policy and activity records.
+Lisa does not yet have standalone `SOUL.md` or `MEMORY.md` documents.
+
+The Lisa shell follows Muse's visible chat layout: 72px navigation rail,
+360px right panel, centered activity dialog, and the same profile, segmented
+tab, activity-row, and timeline treatment at the 1610×1505 desktop reference
+viewport. Keep Lisa-specific panel content inside those existing visual slots;
+do not add a separate style system. Review the Lisa and Muse pages at the same
+viewport and device scale when changing this layout.
+
   - Explorer discloses beside the composer that messages and recent workspace
   telemetry go to the configured model provider. Sending a message proceeds
   without a separate checkbox. Lisa masks common credential patterns; general

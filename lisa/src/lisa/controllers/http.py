@@ -201,6 +201,7 @@ async def user_send_message(
 async def user_list_activities(
     request: Request,
     limit: int = 50,
+    activity_type: str | None = None,
     status: str | None = None,
     query: str | None = None,
     open_only: bool = False,
@@ -212,7 +213,7 @@ async def user_list_activities(
         raise HTTPException(status_code=503, detail="Lisa activity storage is not configured")
     try:
         return store.list_activity_feed(
-            limit=limit, status=status, query=query,
+            limit=limit, activity_type=activity_type, status=status, query=query,
             open_only=open_only, due_only=due_only,
         )
     except ValueError as error:
@@ -233,6 +234,35 @@ async def user_get_activity(activity_id: str, request: Request) -> dict[str, Any
     if result is None:
         raise HTTPException(status_code=404, detail="Activity not found")
     return result
+
+
+@router.get("/v1/policies")
+async def user_list_policies(
+    request: Request, limit: int = 100, offset: int = 0
+) -> dict[str, Any]:
+    """Return a bounded page from the read-only policy projection."""
+    user_workspace(request)
+    try:
+        records, next_offset = _services(request).policy_service.list_policy_records_page(
+            limit=limit, offset=offset
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "scope": row.scope,
+                "target_agent_name": row.target_agent_name,
+                "name": row.name,
+                "criteria": row.criteria,
+                "approved": row.approved,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+            for row in records
+        ],
+        "next_offset": next_offset,
+    }
 
 
 def _slack_signature_valid(secret: str, timestamp: str, signature: str, body: bytes) -> bool:
