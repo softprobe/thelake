@@ -28,6 +28,8 @@ class ActivityTurn(StrictModel):
     forbid_tools: list[str] = Field(default_factory=list)
     tool_order: list[str] = Field(default_factory=list)
     tool_call_counts: dict[str, int] = Field(default_factory=dict)
+    tool_arguments_must_include: list[str] = Field(default_factory=list)
+    tool_queries_must_filter_sessions: list[str] = Field(default_factory=list)
     reply_must_include: list[str] = Field(default_factory=list)
     reply_must_not_include: list[str] = Field(default_factory=list)
 
@@ -63,13 +65,23 @@ class ActivityLabels(StrictModel):
     policy_text_contains: list[str] = Field(default_factory=list)
 
 
+class HistoricalEvaluationSeed(StrictModel):
+    session_id: str = Field(min_length=1)
+    policy_name: str = Field(min_length=1)
+    triage_decision: Literal[
+        "suspected_violation", "no_violation_found", "insufficient_evidence"
+    ] | None = None
+    verdict: Literal["pass", "fail", "uncertain", "insufficient_evidence"] | None = None
+
+
 class ActivityBenchmarkCase(StrictModel):
     case_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]+$")
-    category: Literal["create", "update", "policy", "followup", "continuity"]
+    category: Literal["create", "update", "policy", "followup", "continuity", "evaluation"]
     # Agentic held-out split is "benchmark", never "test" (reserved for pytest).
     split: Literal["development", "benchmark"]
     turns: list[ActivityTurn] = Field(min_length=1, max_length=12)
     expected: ActivityLabels
+    historical_evaluations: list[HistoricalEvaluationSeed] = Field(default_factory=list)
 
 
 class ActivityBenchmarkManifest(StrictModel):

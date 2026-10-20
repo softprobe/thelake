@@ -24,7 +24,7 @@ DATASET = Path(__file__).resolve().parents[1] / "datasets/activity_management"
 def test_activity_benchmark_release_has_frozen_cases_and_both_splits():
     manifest, cases, digest = load_activity_dataset(DATASET / "manifests/benchmark.json")
 
-    assert manifest.case_count == len(cases) == 16
+    assert manifest.case_count == len(cases) == 19
     assert digest
     assert {case.split for case in cases} == {"development", "benchmark"}
     assert {case.category for case in cases} >= {
@@ -33,8 +33,12 @@ def test_activity_benchmark_release_has_frozen_cases_and_both_splits():
         "continuity",
         "policy",
         "followup",
+        "evaluation",
     }
     assert len({case.case_id for case in cases}) == len(cases)
+    history_cases = [case for case in cases if case.category == "evaluation"]
+    assert len(history_cases) == 3
+    assert all(case.historical_evaluations for case in history_cases)
 
 
 def test_activity_benchmark_rejects_changed_case_bytes(tmp_path):
@@ -60,7 +64,10 @@ def test_activity_benchmark_score_checks_real_tool_trace_and_reply_rubric():
     )
     result = {
         "activities": [
-            {"kind": "tool", "tool_name": "apply_policy_proposal"},
+            {
+                "kind": "tool",
+                "tool_name": "apply_policy_proposal",
+            },
             {"kind": "tool", "tool_name": "list_pending_policy_proposals"},
         ],
         "messages": [{"role": "assistant", "text": "Applied proposal abc for the refund rule."}],
@@ -70,6 +77,61 @@ def test_activity_benchmark_score_checks_real_tool_trace_and_reply_rubric():
 
     assert all(item["passed"] for item in scored["tool_checks"] + scored["communication_checks"])
     assert _interpolate("Confirm {proposal_id}", {"proposal_id": "abc"}) == "Confirm abc"
+
+
+def test_activity_benchmark_checks_database_tool_arguments():
+    turn = ActivityTurn(
+        chat="main",
+        text="Find a historical result",
+        require_tools=["lisa_db"],
+        tool_arguments_must_include=["readable_evaluations", "session_id", "session-1"],
+    )
+    result = {
+        "activities": [
+            {
+                "kind": "tool",
+                "tool_name": "lisa_db",
+                "arguments": {"query": "SELECT verdict FROM readable_evaluations WHERE session_id='session-1'"},
+            }
+        ],
+        "messages": [{"role": "assistant", "text": "The result is fail."}],
+    }
+    scored = _score_turn(turn, result, {}, 1)
+    assert all(check["passed"] for check in scored["tool_checks"])
+
+    result["activities"][0]["arguments"]["query"] = "SELECT verdict FROM readable_evaluations"
+    scored = _score_turn(turn, result, {}, 1)
+    assert not next(
+        check
+        for check in scored["tool_checks"]
+        if check["check"] == "tool_arguments_contain:session-1"
+    )["passed"]
+
+
+def test_activity_benchmark_requires_session_id_in_sql_filter():
+    turn = ActivityTurn(
+        chat="main",
+        text="Find a historical result",
+        tool_queries_must_filter_sessions=["session-1"],
+    )
+    result = {
+        "activities": [
+            {
+                "kind": "tool",
+                "tool_name": "lisa_db",
+                "arguments": {"query": "SELECT verdict FROM readable_evaluations WHERE session_id = 'session-1'"},
+            }
+        ],
+        "messages": [],
+    }
+    scored = _score_turn(turn, result, {}, 1)
+    assert any(check["passed"] for check in scored["tool_checks"] if check["check"] == "session_filter:session-1")
+
+    result["activities"][0]["arguments"]["query"] = "SELECT verdict FROM readable_evaluations -- session-1"
+    scored = _score_turn(turn, result, {}, 1)
+    assert not next(
+        check for check in scored["tool_checks"] if check["check"] == "session_filter:session-1"
+    )["passed"]
 
 
 def test_activity_benchmark_checks_tool_order_and_exact_call_count():
@@ -147,7 +209,7 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "entire owner message" in prompt
     assert "use list_policies and read_policy" in prompt
     database_schema = " ".join(LISA_DATABASE_SCHEMA.casefold().split())
-    assert "only when the user explicitly asks" in database_schema
+    assert "retrieve lisa's recorded evaluation history" in database_schema
     assert "do not query lisa_db to find, create, update, or inspect activities" in database_schema
 
     policy_skill = (

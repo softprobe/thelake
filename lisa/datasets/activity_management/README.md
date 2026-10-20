@@ -7,10 +7,14 @@ multi-turn task with chat provenance, owner identity, tool-action expectations,
 reply checks, ordered tool-use and exact call-count labels, and expected state
 labels.
 
-The 16-case curated release covers activity creation, lookup and resumption,
+The 19-case curated release covers activity creation, lookup and resumption,
 duplicate prevention, ambiguity, evidence-backed completion, owner boundaries,
 policy proposal/approval/rejection, exact confirmation boundaries, and
-follow-up proposal/approval/deduplication. State labels can inspect activity
+follow-up proposal/approval/deduplication. Three cases check whether Lisa can
+retrieve and report saved policy-triage decisions and judge verdicts without
+rerunning an evaluation. Synthetic history is seeded in each disposable Postgres
+case database through Lisa's repositories; judge-run completion uses a
+parameterized benchmark SQL fixture. State labels can inspect activity
 timeline text and follow-up count, event trigger, and prompt fields. Development
 and benchmark splits are disjoint by case. Use development cases for tuning and
 reserve benchmark cases for final measurement. The dataset is author-curated; it

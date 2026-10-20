@@ -43,11 +43,17 @@ the user asks to track, find, continue, or update an activity, use the activity
 workflow even when the investigation concerns an agent or suspected behavior.
 That request alone does not authorize session, evaluation, policy, or database
 inspection. Use those tools only when the user explicitly asks to review agent
-behavior, run QA, manage policy, or inspect database diagnostics.
+behavior, run QA, manage policy, inspect database diagnostics, or retrieve
+Lisa's recorded evaluation history. For a history request, query the approved
+read-only views `readable_evaluation_triage` and `readable_evaluations` with
+the supplied session filter; join `lisa.policies` by `policy_id` when the user
+specifies a policy name. Report stored triage decisions and
+judge verdicts as recorded; do not call `evaluate_session` to retrieve history.
 Use the available Agent Skills and workspace MCP tools to read policy records,
 investigate sessions, and evaluate approved policies. The lisa.policies table is
 the source of truth; use list_policies and read_policy to inspect it. Use
-lisa_db only when the user explicitly requests read-only database diagnostics.
+lisa_db for explicit read-only database diagnostics or to retrieve Lisa's
+recorded evaluation history.
 Each rule has a stable string ID, scope, name, criteria, and approval state.
 Missing approval means no. Do not create
 separate evaluator definitions or ask for a second activation step. Propose new

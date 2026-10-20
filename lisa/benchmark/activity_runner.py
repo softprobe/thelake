@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 import os
 import re
@@ -15,6 +16,8 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
+
+import psycopg
 
 from conftest import (
     LisaTestDatabase,
@@ -229,6 +232,34 @@ def _score_turn(
                 "actual": actual_count,
             }
         )
+    arguments = json.dumps([item.get("arguments", {}) for item in calls], ensure_ascii=False)
+    for phrase in turn.tool_arguments_must_include:
+        action_checks.append(
+            {
+                "check": f"tool_arguments_contain:{phrase}",
+                "passed": phrase.casefold() in arguments.casefold(),
+            }
+        )
+    database_queries = [
+        str(value)
+        for call in calls
+        if call.get("tool_name") == "lisa_db"
+        for value in call.get("arguments", {}).values()
+        if isinstance(value, str)
+    ]
+    for session_id in turn.tool_queries_must_filter_sessions:
+        filter_pattern = re.compile(
+            r"\bwhere\b.*?\bsession_id\s*=\s*(['\"]?)"
+            + re.escape(session_id)
+            + r"\1(?=\W|$)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        action_checks.append(
+            {
+                "check": f"session_filter:{session_id}",
+                "passed": any(filter_pattern.search(query) for query in database_queries),
+            }
+        )
     reply_checks = []
     for phrase in turn.reply_must_include:
         resolved = _interpolate(phrase, substitutions)
@@ -256,6 +287,59 @@ def _score_turn(
         "reply": reply,
         "communication_checks": reply_checks,
     }
+
+
+def _seed_historical_evaluations(services, case: ActivityBenchmarkCase) -> None:
+    """Seed labeled history via Lisa repositories and a benchmark-only SQL fixture."""
+    if not case.historical_evaluations:
+        return
+    policy_names = sorted({item.policy_name for item in case.historical_evaluations})
+    markdown = "\n\n".join(
+        f"## {name}\napproved: yes\n\nBenchmark fixture policy for historical lookup."
+        for name in policy_names
+    )
+    services.policy_service.update_policy(
+        markdown,
+        "No policy exists yet.",
+        confirmed_title=policy_names[0],
+    )
+    policies = {
+        rule.name: rule for rule in services.policy_service.approved_rules("historical-agent")
+    }
+    for item in case.historical_evaluations:
+        policy = policies[item.policy_name]
+        if item.triage_decision:
+            services.activity_store.record_policy_triage_decisions(
+                item.session_id,
+                [{"id": policy.id, "decision": item.triage_decision}],
+            )
+        if item.verdict:
+            activity = services.activity_store.create_activity(
+                title=f"Historical evaluation {item.session_id}",
+                source="benchmark",
+                kind="policy_evaluation",
+            )
+            score_id = f"history-{uuid4()}"
+            run = services.activity_store.create_evaluation(
+                title=f"Historical evaluation {item.session_id}",
+                source="benchmark",
+                target_agent_name="historical-agent",
+                session_id=item.session_id,
+                policy_name=policy.name,
+                policy_id=policy.id,
+                policy_hash=sha256(policy.criteria.encode()).hexdigest(),
+                judge_config={"judge_model": "benchmark-fixture"},
+                request_key=str(uuid4()),
+                activity_id=activity.id,
+            )
+            fixture_sql = (Path(__file__).parent / "sql" / "complete_historical_evaluation.sql").read_text()
+            with psycopg.connect(services.context.database_url) as connection:
+                result = connection.execute(
+                    fixture_sql,
+                    {"evaluation_id": run.id, "verdict": item.verdict, "score_id": score_id},
+                )
+                if result.rowcount != 1:
+                    raise RuntimeError("Could not seed historical judge verdict")
 
 
 def _run_case(
@@ -299,6 +383,7 @@ def _run_case(
         actor_id=OWNER,
     )
     services = build_services(context)
+    _seed_historical_evaluations(services, case)
     conversations = ConversationService(FileConversationRepository(data_dir))
     main = asyncio.run(conversations.main_conversation(workspace))
     chat_ids = {"main": main["conversation_id"]}

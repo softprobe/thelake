@@ -37,6 +37,13 @@ on one aggregate score. Slack cases provide channel and thread context to
 Lisa's real runtime but do not exercise scheduled QA, follow-up workers, Slack
 event delivery, or message posting.
 
+The activity dataset also includes three historical-evaluation lookup cases.
+The runner seeds their synthetic triage and judge records into each disposable
+Postgres database through Lisa's repositories and a parameterized benchmark SQL
+fixture for completed judge rows, then scores Lisa's actual MCP
+queries and replies. The cases verify historical lookup; they do not call the
+judge or triage provider while seeding.
+
 ## Integration tests
 
 `lisa/tests/test_activity_management_integration.py` contains three opt-in

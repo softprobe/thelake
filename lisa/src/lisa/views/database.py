@@ -1,9 +1,11 @@
 """Tool-facing description of Lisa's read-only operational database."""
 
-LISA_DATABASE_SCHEMA = """Use lisa_db only when the user explicitly asks for
-read-only database diagnostics. For activity work, use Lisa's activity tools;
+LISA_DATABASE_SCHEMA = """Use lisa_db for explicit read-only database diagnostics
+or to retrieve Lisa's recorded evaluation history. For activity work, use Lisa's activity tools;
 for policy work, use read_policy, list_policies, and the policy proposal tools.
-Do not query lisa_db to find, create, update, or inspect activities or policies.
+Do not query lisa_db to find, create, update, or inspect activities. For a
+historical triage lookup by policy name, join lisa.policies on policy_id and
+filter by its name.
 
 When explicit database diagnostics are requested, these approved relations and
 columns are available:
@@ -13,6 +15,8 @@ columns are available:
 - lisa.readable_evaluations: activity_id, policy_id, target_agent_name, session_id,
   policy_name, evaluation_id, verdict, score_id, started_at, finished_at. These
   rows are Lisa's actual judge runs and link to an activity by activity_id.
+- lisa.readable_evaluation_triage: session_id, policy_id, decision, created_at.
+  Join to lisa.policies when the user specifies a policy name.
 - lisa.readable_activity_events: activity_id, seq, event_type, title, summary,
   actor, created_at
 - lisa.readable_activity_feed: activity_id, activity_type, is_goal, message_id,
@@ -28,7 +32,6 @@ columns are available:
   reference_id. Types are agent, message, runtime_work, and carrier_message.
 - lisa.readable_activity_context: id, activity_id, seq, kind, source_ref,
   content_hash, created_at
-- lisa.readable_evaluation_triage: session_id, policy_id, decision, created_at
 - lisa.readable_approvals: id, activity_id, scope, status, request_summary,
   requested_at, expires_at, resolved_at, resolved_by, decision_ref
 - lisa.readable_activity_followups: id, activity_id, due_at, trigger_event_type, prompt, status,
