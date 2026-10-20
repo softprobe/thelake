@@ -119,7 +119,7 @@ def test_activity_benchmark_requires_session_id_in_sql_filter():
             {
                 "kind": "tool",
                 "tool_name": "lisa_db",
-                "arguments": {"query": "SELECT verdict FROM readable_evaluations WHERE session_id = 'session-1'"},
+                "arguments": "SELECT verdict FROM readable_evaluations WHERE session_id = 'session-1'",
             }
         ],
         "messages": [],
@@ -127,7 +127,7 @@ def test_activity_benchmark_requires_session_id_in_sql_filter():
     scored = _score_turn(turn, result, {}, 1)
     assert any(check["passed"] for check in scored["tool_checks"] if check["check"] == "session_filter:session-1")
 
-    result["activities"][0]["arguments"]["query"] = "SELECT verdict FROM readable_evaluations -- session-1"
+    result["activities"][0]["arguments"] = "SELECT verdict FROM readable_evaluations -- session-1"
     scored = _score_turn(turn, result, {}, 1)
     assert not next(
         check for check in scored["tool_checks"] if check["check"] == "session_filter:session-1"

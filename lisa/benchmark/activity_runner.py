@@ -240,13 +240,15 @@ def _score_turn(
                 "passed": phrase.casefold() in arguments.casefold(),
             }
         )
-    database_queries = [
-        str(value)
-        for call in calls
-        if call.get("tool_name") == "lisa_db"
-        for value in call.get("arguments", {}).values()
-        if isinstance(value, str)
-    ]
+    database_queries = []
+    for call in calls:
+        if call.get("tool_name") != "lisa_db":
+            continue
+        arguments = call.get("arguments", {})
+        if isinstance(arguments, str):
+            database_queries.append(arguments)
+        elif isinstance(arguments, dict):
+            database_queries.extend(value for value in arguments.values() if isinstance(value, str))
     for session_id in turn.tool_queries_must_filter_sessions:
         filter_pattern = re.compile(
             r"\bwhere\b.*?\bsession_id\s*=\s*(['\"]?)"
