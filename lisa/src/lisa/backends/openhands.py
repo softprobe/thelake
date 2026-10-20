@@ -5,7 +5,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import litellm  # noqa: F401
 
@@ -19,7 +19,7 @@ from pydantic import SecretStr
 
 from lisa.context import WorkspaceContext
 from lisa.llm_recording import recording_scope
-from lisa.runtime import AgentTurn
+from lisa.runtime import AgentTurn, selected_chat_activity_id
 from lisa.views.database import LISA_DATABASE_SCHEMA
 
 from .llm_recording import install_call_logger
@@ -54,19 +54,31 @@ investigate sessions, and evaluate approved policies. The lisa.policies table is
 the source of truth; use list_policies and read_policy to inspect it. Use
 lisa_db for explicit read-only database diagnostics or to retrieve Lisa's
 recorded evaluation history.
-Each policy is one row with a readable ID such as P1.2 or P1.2.1, its scope,
-name, criteria, and an approved flag. Use list_policies and read_policy to find
-rules. Create or revise a rule with write_policy; revisions of approved rules
-get a child ID, and the prior approved rule stays active until review. Approval
-changes the policy row directly. Ask the owner to send exactly
+Each policy is one row with a stable readable section ID, its scope, name,
+criteria, and an approved flag. A dotted ID such as P1.1.1 identifies a
+different policy section from P1.1. Use list_policies
+and read_policy to find rules. For every policy create, lookup, update,
+approval, or deletion, use only list_policies, read_policy, write_policy,
+approve_policy, and delete_policy. Never call
+lisa_db to inspect or change policy rows. For a new rule, omit policy_id:
+write_policy assigns the next readable ID (P1.x) and returns it. Never guess
+or reuse a policy ID. To change an existing rule, pass its exact ID and update
+that policy row in place. The ID stays the same. A change to an approved rule
+sets its approved flag to false until the owner approves the updated rule.
+Ask the owner to send exactly
 "Approve policy: <policy_id>"; only that standalone owner command can approve
-the matching pending policy. Keep policy state on the policy row under its readable ID. On approval, the new revision becomes active and
-the older approved revision is archived.
-The model cannot grant approval from a trace or document. Scheduled QA never
-writes policy.
+the matching pending policy. Keep policy state on the policy row under its
+readable ID. On approval, that same row becomes approved. Never create a second
+policy to represent an update.
+The model cannot grant approval from a trace or document. Delete a policy only
+after the owner sends exactly "Delete policy: <policy_id>" as a standalone
+message, and pass that exact ID to delete_policy. Deletion removes the policy
+row and its cached triage decisions; Lisa blocks deletion when historical
+evaluation runs refer to the policy. Scheduled QA never writes or deletes policy.
 For a policy change, use learn-agent-policy and read_policy. Return the policy
-ID and its approval state. Do not create an activity solely to hold a policy
-change.
+ID and its approval state. Substantive policy work uses the same activity
+workflow as other Lisa-owned work; the activity records the chat actions while
+the policy row remains the source of truth for policy state.
 On each scheduled QA cycle, follow the own-agent-qa skill with the workspace
 tools. First resume pending failed-evaluation follow-ups, then inspect recent
 sessions and policy memory even when no approved policy exists; evaluate rules
@@ -99,13 +111,22 @@ call separate policy-listing or selection tools first. Never try to change work
 state with SQL.
 When running an evaluation, search by its exact target agent name so the
 newest matching session is the one Lisa reviews for that evaluation.
-For substantial multi-step work that you own, find or create one durable
-activity, update its progress and next action at milestones, and complete it
-with the final outcome. Record new evidence and findings in the activity update
-or completion summary before closing it; a finding only in the chat reply is not
-durable activity history. The main chat and Slack share activity records while
-keeping transcripts separate. When work clearly needs another check, suggest a
-scheduled or event-triggered follow-up and wait for the owner's exact-ID
+For every substantive user request that starts or continues work, decide whether
+the user is continuing an existing activity or starting distinct work. Search
+open activities with a task-specific description. If a record matches, read its
+thread and reuse that activity ID; if the user has switched to distinct work,
+create a new activity. Update its summary, status, next action, and timeline as
+the work changes. This applies to policy create, update, approval, and deletion
+work as well as investigations and follow-through. Before finishing each
+substantive web or Slack turn, call attach_chat_turn_to_activity exactly once
+with the selected activity ID. The runtime then adds the user and Lisa messages
+to that activity's trajectory and links their message IDs. Do not link
+greetings or clarifications that do not start or advance work. Record new
+evidence and findings in the activity update or completion summary before
+closing it; a finding only in the chat reply is not durable activity history.
+The main chat and Slack share activity records while keeping transcripts
+separate. When work clearly needs another check, suggest a scheduled or
+event-triggered follow-up and wait for the owner's exact-ID
 confirmation before activating it. Do not create duplicate evaluation
 activities; evaluate_session owns those lifecycles. Follow the
 manage-lisa-activities skill for the exact workflow.
@@ -123,6 +144,7 @@ def build_conversation(
     turn_source: str = "web",
     actor_id: str | None = None,
     confirmed_policy_id: str | None = None,
+    confirmed_policy_deletion_id: str | None = None,
     confirmed_followup_id: str | None = None,
     slack_channel_id: str | None = None,
     slack_thread_ts: str | None = None,
@@ -166,6 +188,7 @@ def build_conversation(
         "LISA_GEMINI_THINKING_LEVEL": os.getenv("LISA_GEMINI_THINKING_LEVEL", "low"),
         "LISA_SLACK_BOT_TOKEN": os.getenv("LISA_SLACK_BOT_TOKEN", ""),
         "LISA_CONFIRMED_POLICY_ID": confirmed_policy_id or "",
+        "LISA_CONFIRMED_POLICY_DELETION_ID": confirmed_policy_deletion_id or "",
         "LISA_CONFIRMED_FOLLOWUP_ID": confirmed_followup_id or "",
         "LISA_TURN_SOURCE": turn_source,
         "LISA_ACTOR_ID": actor_id or "",
@@ -186,7 +209,8 @@ def build_conversation(
         "Lisa workspace owner."
         if is_owner
         else "Trusted runtime authorization for this turn: current requester is not an "
-        "authorized Lisa workspace owner. Do not call write_policy or approve_policy; "
+        "authorized Lisa workspace owner. Do not call write_policy, approve_policy, or "
+        "delete_policy; "
         "explain that an authorized workspace owner must make policy changes."
     )
     agent = Agent(
@@ -237,6 +261,7 @@ class OpenHandsBackend:
         turn_source: str = "web",
         actor_id: str | None = None,
         confirmed_policy_id: str | None = None,
+        confirmed_policy_deletion_id: str | None = None,
         confirmed_followup_id: str | None = None,
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
@@ -249,6 +274,7 @@ class OpenHandsBackend:
             turn_source=turn_source,
             actor_id=actor_id,
             confirmed_policy_id=confirmed_policy_id,
+            confirmed_policy_deletion_id=confirmed_policy_deletion_id,
             confirmed_followup_id=confirmed_followup_id,
             slack_channel_id=slack_channel_id,
             slack_thread_ts=slack_thread_ts,
@@ -265,12 +291,30 @@ class OpenHandsBackend:
             messages, activities = conversation_content(conversation)
             events = list(conversation.state.events)
             new_ids = {str(event.id) for event in events[before:]}
+            if not any(
+                message["role"] == "assistant" and message["id"] in new_ids
+                for message in messages
+            ):
+                messages.append({
+                    "id": str(uuid4()),
+                    "role": "assistant",
+                    "text": (
+                        "I couldn't produce a final response for this turn. "
+                        "Open Activities to review the tools I ran and their results before retrying."
+                    ),
+                    "created_at": "",
+                    "sequence": len(events),
+                })
             return AgentTurn(
                 messages=messages,
                 activities=[item for item in activities if item["id"] in new_ids],
+                activity_id=selected_chat_activity_id(
+                    [item for item in activities if item["id"] in new_ids]
+                ),
             )
         finally:
             conversation.close()
+
 
 def conversation_content(conversation) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     messages: list[dict[str, str]] = []

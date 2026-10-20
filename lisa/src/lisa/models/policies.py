@@ -15,7 +15,7 @@ POLICY_ID_PATTERN = re.compile(r"P1\.([1-9][0-9]*)(?:\.([1-9][0-9]*))?")
 
 @dataclass(frozen=True)
 class PolicyRecord:
-    """Persisted policy row, including lifecycle timestamps."""
+    """One current policy row, identified by its readable section ID."""
 
     id: str
     scope: str
@@ -25,7 +25,6 @@ class PolicyRecord:
     approved: bool
     created_at: datetime | None = None
     updated_at: datetime | None = None
-    archived_at: datetime | None = None
 
 
 @dataclass(frozen=True)

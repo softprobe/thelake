@@ -26,7 +26,9 @@ transient service is removed at exit. Reports and captured logs are kept under
 
 The runner deterministically scores database state and required/forbidden tool
 actions. State checks include activity timeline evidence and follow-up count,
-event type, and prompt text. Tool checks can require ordered tool subsequences
+event type, and prompt text. Turns labeled as substantive also verify that the
+selected activity links all newly recorded chat messages and runtime events.
+Tool checks can require ordered tool subsequences
 and exact per-turn call counts. Its separate communication rubric checks labeled
 phrases that must or must not appear in a reply; it is lexical, not a semantic
 quality judgment. These authored labels are a curated behavioral benchmark,

@@ -155,7 +155,7 @@ def test_policy_authority_is_explicit_in_the_turn_prompt(monkeypatch, tmp_path):
 
     prompt = captured["agent"]["system_prompt"]
     assert "current requester is not an authorized Lisa workspace owner" in prompt
-    assert "Do not call write_policy or approve_policy" in prompt
+    assert "Do not call write_policy, approve_policy, or delete_policy" in prompt
     assert "guest-user" not in prompt
 
 
@@ -173,20 +173,22 @@ def test_owner_policy_authority_is_explicit_without_disclosing_identity(monkeypa
     prompt = captured["agent"]["system_prompt"]
     assert "current requester is an authorized Lisa workspace owner" in prompt
     assert "workspace-owner" not in prompt
+    mcp_env = captured["agent"]["mcp_config"]["lisa"].env
+    assert mcp_env["LISA_ACTOR_ID"].get_secret_value() == "workspace-owner"
+    assert mcp_env["LISA_TURN_SOURCE"].get_secret_value() == "web"
+    assert mcp_env["LISA_OWNER_USER_IDS"].get_secret_value() == "workspace-owner"
 
 
-def test_decisions_api_key_is_forwarded_without_obsolete_selection_cutoff(monkeypatch, tmp_path):
+def test_decisions_api_key_and_thinking_level_are_forwarded(monkeypatch, tmp_path):
     captured = configure_openhands(monkeypatch)
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
     monkeypatch.setenv("OPENAI_API_KEY", "decisions-test-key")
-    monkeypatch.setenv("LISA_POLICY_SELECTION_MIN_CONFIDENCE", "0.91")
     monkeypatch.setenv("LISA_GEMINI_THINKING_LEVEL", "medium")
 
     agent.build_conversation(str(uuid4()), str(tmp_path), workspace_id=str(uuid4()))
 
     configured = captured["agent"]["mcp_config"]["lisa"].env["OPENAI_API_KEY"]
     assert configured.get_secret_value() == "decisions-test-key"
-    assert "LISA_POLICY_SELECTION_MIN_CONFIDENCE" not in captured["agent"]["mcp_config"]["lisa"].env
     thinking_level = captured["agent"]["mcp_config"]["lisa"].env[
         "LISA_GEMINI_THINKING_LEVEL"
     ]

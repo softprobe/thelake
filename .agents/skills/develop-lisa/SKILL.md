@@ -12,6 +12,12 @@ Use [`docs/architecture/lisa-activities.md`](../../../docs/architecture/lisa-act
 for Lisa's generic, user-inspectable activity and its links to evaluation runs.
 Use [`lisa-activities`](../lisa-activities/SKILL.md) for the feed and monitor MCP
 tool contract, including thread sections and linked references.
+Substantive web and Slack chat turns must select or create one activity; the
+runtime records redacted messages and tool calls/results in sequence, links
+their source IDs, and refreshes the Lisa feed and open detail view. Attaching
+chat content to shared activities requires a web or Slack turn from an actor in
+`LISA_OWNER_USER_IDS`. Verify the web and actual Slack receipt paths plus the
+real runtime benchmark when changing this behavior.
 Lisa's packaged runtime skills live in [`lisa/skills/`](../../../lisa/skills/)
 and are copied into the Lisa image by `lisa/Dockerfile`; changes to those skills
 must be verified through `OpenHandsBackend`'s configured skill directory.

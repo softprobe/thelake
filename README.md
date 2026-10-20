@@ -229,12 +229,12 @@ Check eligibility and explain the result before issuing a refund.
 Wait for customer confirmation before submitting an eligible refund.
 ```
 
-Lisa stores each policy as one row with a readable `P1.x` ID and an approval
-column. Updating an approved policy creates a pending child revision such as
-`P1.2.1`; the approved version stays active until the owner sends the exact
-standalone command `Approve policy: P1.2.1`. Approval updates that row and
-archives the prior revision. Only `approved: yes` policies are evaluated; no
-separate proposal object or identifier is used.
+Lisa stores each policy as one row with a readable section ID and an approval
+column. Every ID, including `P1.2.1`, names an independent policy section.
+Updating a policy requires its exact ID and changes that same row. If an
+approved policy changes, its approval becomes false until the owner sends the
+exact standalone command `Approve policy: <policy_id>`. Only approved policies
+are evaluated.
 
 Configure Lisa with `LISA_WORKSPACE_ID`, `LISA_QA_CRON`, an OpenAI API key for
 Decisions triage, and Gemini credentials for judging escalated policies.

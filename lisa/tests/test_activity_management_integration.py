@@ -13,7 +13,7 @@ import pytest
 from lisa.backends.openhands import OpenHandsBackend
 from lisa.bootstrap import build_services
 from lisa.repositories.conversations import FileConversationRepository
-from lisa.runtime import confirmed_followup_id, confirmed_policy_id
+from lisa.runtime import confirmed_followup_id, confirmed_policy_deletion_id, confirmed_policy_id
 from lisa.services.conversations import ConversationService
 
 LIVE_ENABLED = os.getenv("LISA_RUN_ACTIVITY_MANAGEMENT_INTEGRATION") == "1"
@@ -49,9 +49,13 @@ def _conversation_harness(lisa_test_context, monkeypatch, tmp_path):
         "LISA_SKILL_DIR": str(Path(__file__).parents[1] / "skills"),
     }.items():
         monkeypatch.setenv(name, value)
-    conversations = ConversationService(FileConversationRepository(data_dir))
+    services = build_services(context)
+    conversations = ConversationService(
+        FileConversationRepository(data_dir), activity_store=services.activity_store,
+        owner_user_ids=context.owner_user_ids,
+    )
     main = asyncio.run(conversations.main_conversation(context.workspace))
-    return context, conversations, main["conversation_id"], build_services(context)
+    return context, conversations, main["conversation_id"], services
 
 
 def _turn(conversations, context, conversation_id, text, *, source="web", channel=None):
@@ -62,6 +66,7 @@ def _turn(conversations, context, conversation_id, text, *, source="web", channe
             text,
             run_turn=OpenHandsBackend().run_turn,
             confirmed_policy_id=confirmed_policy_id(text),
+            confirmed_policy_deletion_id=confirmed_policy_deletion_id(text),
             confirmed_followup_id=confirmed_followup_id(text),
             turn_source=source,
             actor_id="activity-eval-owner",
@@ -112,7 +117,7 @@ def test_runtime_resumes_one_activity_from_a_separate_slack_thread(
     assert after[0]["next_action"], "The resumed activity has no next action"
 
 
-def test_runtime_creates_finds_approves_and_revises_policy_by_readable_id(
+def test_runtime_creates_finds_approves_and_updates_policy_in_place(
     lisa_test_context, monkeypatch, tmp_path
 ):
     context, conversations, main_id, services = _conversation_harness(
@@ -133,10 +138,21 @@ def test_runtime_creates_finds_approves_and_revises_policy_by_readable_id(
         conversations, context, main_id,
         f"Update policy {pending[0].id} to also require recording the refund reason.",
     )
-    revisions = services.policy_service.read_policy_records()
-    child = next(row for row in revisions if row.id.startswith(pending[0].id + "."))
-    assert child.id.count(".") == 2 and not child.approved
-    assert next(row for row in revisions if row.id == pending[0].id).approved
+    updated = services.policy_service.read_policy_records()
+    assert len(updated) == 1
+    assert updated[0].id == pending[0].id
+    assert updated[0].approved is False
+    assert "recording the refund reason" in updated[0].criteria
+    activities = services.activity_store.list_activity_feed(limit=20)
+    assert len(activities) == 1, f"Expected policy discussion to share one activity: {activities}"
+    detail = services.activity_store.get_activity_thread(str(activities[0]["id"]))
+    chat_events = [
+        action for action in detail["actions"]
+        if action["event_type"] in {"chat.user", "chat.assistant"}
+    ]
+    assert len(chat_events) >= 8, "Policy chat turns were not recorded in the activity trajectory"
+    assert any("Create a policy" in action["summary"] for action in chat_events)
+    assert any("Approve policy" in action["summary"] for action in chat_events)
 
 
 def test_runtime_waits_for_exact_confirmation_before_activating_followup(

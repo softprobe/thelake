@@ -85,8 +85,7 @@ class EvaluationService:
     ) -> tuple[dict, dict | None]:
         """Triage approved policies for a session and return its compact trajectory.
 
-        Returns ``(triage, trajectory)``. The triage result keeps its established
-        public field names for compatibility; ``trajectory`` is built from session
+        Returns ``(triage, trajectory)``. ``trajectory`` is built from session
         detail when available, else ``None``.
 
         ``session_detail`` is the raw TheLake session GET; ``trajectory`` is the
@@ -621,7 +620,7 @@ class EvaluationService:
                 "activity_id": activity_id or existing.activity_id,
                 "evaluation_id": existing.id,
             }
-        # The no-Postgres development adapter keeps its previous score-history fallback.
+        # Without an activity ledger, a stored TheLake score is the completed result.
         completed = (
             successful_policy_score(scores, policy, trace_id)
             if not self.activities

@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { ThelakeExplorer } from "./Explorer";
+import "./standalone.css";
 import "./style.css";
 
 const root = document.getElementById("root");

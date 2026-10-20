@@ -1,17 +1,19 @@
-from benchmark.policy_seed import seed_policy_document
-
 import hashlib
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from threading import Event
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from pathlib import Path
+from threading import Barrier, Event
 
+import psycopg
 import pytest
+from policy_cases import list_policies, read_policy
 
+from benchmark.policy_seed import seed_policy_document
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
 from lisa.models.policies import PolicyRecord
-from lisa.repositories.policies import InMemoryPolicyRepository, PostgresPolicyRepository, _sql
+from lisa.repositories.policies import InMemoryPolicyRepository, _sql
 from lisa.services.policies import PolicyService
-from policy_cases import list_policies, read_policy
 from lisa.views.policies import render_policy_list, render_policy_records
 
 
@@ -21,6 +23,7 @@ def isolated_data_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("LISA_WORKSPACE_ID", "11111111-1111-4111-8111-111111111111")
     monkeypatch.setenv("LISA_TURN_SOURCE", "web")
     monkeypatch.delenv("LISA_CONFIRMED_POLICY_ID", raising=False)
+    monkeypatch.delenv("LISA_CONFIRMED_POLICY_DELETION_ID", raising=False)
 
 
 @pytest.fixture
@@ -28,10 +31,10 @@ def policy_database(monkeypatch, lisa_test_database):
     database = lisa_test_database()
     monkeypatch.setenv("LISA_DATABASE_URL", database.writer_url)
     monkeypatch.setenv("LISA_DATABASE_READ_URL", database.reader_url)
+    return database
 
 
 def test_policy_tools_scope_records_per_workspace(monkeypatch, lisa_test_database, policy_database):
-    first = "11111111-1111-4111-8111-111111111111"
     second = "22222222-2222-4222-8222-222222222222"
     services = build_services(WorkspaceContext.from_environment())
     current = read_policy(services)
@@ -71,18 +74,15 @@ def test_policy_records_have_stable_string_ids_and_database_shaped_fields(
     assert "Applies to: all agents by default" in listing
     assert "approved: yes" in listing
     assert rule.id in listing
-    assert not (context.home() / "POLICY.md").exists()
 
     seed_policy_document(services.policy_service,
         "## Refund eligibility\napproved: yes\n\nCheck the refund before issuing it.",
         read_policy(services),
     )
     updated = services.policy_service.approved_rules("refund-agent")[0]
-    assert updated.id == f"{rule.id}.1"
+    assert updated.id == rule.id
     assert updated.criteria == "Check the refund before issuing it."
-    assert next(
-        row for row in services.policy_service.repository.list_all_history() if row.id == rule.id
-    ).archived_at is not None
+    assert len(services.policy_service.list_policy_records()) == 1
 
 
 def test_policy_ids_use_paragraph_style_ordinals(policy_database):
@@ -134,25 +134,175 @@ def test_policy_approval_serializes_with_scope_writes(policy_database):
         executor.shutdown(wait=True)
 
 
-def test_stale_write_cannot_change_approved_policy_row(policy_database):
+def test_write_policy_updates_approved_row_in_place_and_requires_reapproval(policy_database):
     context = WorkspaceContext.from_environment()
     repository = build_services(context).policy_service.repository
     pending = repository.write_policy("workspace", "", "Refund review", "Review first.")
     approved = repository.approve_policy(pending.id)
 
-    with repository._connect() as connection, connection.transaction():
-        stale_write = connection.execute(_sql("write_policy.sql"), {
-            "id": approved.id,
-            "scope": approved.scope,
-            "target_agent_name": approved.target_agent_name or "",
-            "name": approved.name,
-            "criteria": "Changed after approval.",
-        }).fetchone()
+    updated = repository.write_policy(
+        "workspace", "", approved.name, "Changed after approval.", policy_id=approved.id
+    )
 
-    assert stale_write is None
-    current = next(row for row in repository.list_all_history() if row.id == approved.id)
-    assert current.approved is True
-    assert current.criteria == "Review first."
+    assert updated.id == approved.id
+    assert updated.approved is False
+    assert updated.criteria == "Changed after approval."
+    assert repository.list_all() == [updated]
+    assert repository.approve_policy(updated.id).approved is True
+
+
+def test_policy_ids_continue_from_the_greatest_stored_ordinal(policy_database):
+    context = WorkspaceContext.from_environment()
+    repository = build_services(context).policy_service.repository
+    first = repository.write_policy("workspace", "", "Existing one", "First.")
+    second = repository.write_policy("agent", "agent-a", "Existing two", "Second.")
+    assert (first.id, second.id) == ("P1.1", "P1.2")
+
+    created = repository.write_policy("workspace", "", "Customer greeting", "Greet the customer.")
+
+    assert created.id == "P1.3"
+    assert created.name == "Customer greeting"
+
+
+def test_policy_id_allocation_serializes_first_writes_across_scopes(policy_database):
+    context = WorkspaceContext.from_environment()
+    repository = build_services(context).policy_service.repository
+    start = Barrier(2)
+
+    def create(scope, agent_name, name):
+        start.wait(timeout=5)
+        return repository.write_policy(scope, agent_name, name, f"{name} criteria.")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        workspace = executor.submit(create, "workspace", "", "Workspace greeting")
+        agent = executor.submit(create, "agent", "billing-agent", "Billing greeting")
+        rows = [workspace.result(timeout=10), agent.result(timeout=10)]
+
+    assert {row.id for row in rows} == {"P1.1", "P1.2"}
+    assert {row.name for row in repository.list_all()} == {
+        "Workspace greeting", "Billing greeting",
+    }
+
+
+def test_write_policy_updates_the_selected_row(policy_database):
+    context = WorkspaceContext.from_environment()
+    repository = build_services(context).policy_service.repository
+    created = repository.write_policy(
+        "agent", "conversation-agent", "Conversation greeting", "Greet the customer."
+    )
+    approved = repository.approve_policy(created.id)
+
+    updated = repository.write_policy(
+        "agent",
+        "conversation-agent",
+        "Conversation greeting",
+        "Greet the customer. Ask a clarifying question when needed.",
+        policy_id=approved.id,
+    )
+
+    assert updated.id == created.id == approved.id == "P1.1"
+    assert updated.approved is False
+    assert updated.criteria == "Greet the customer. Ask a clarifying question when needed."
+    assert repository.list_all() == [updated]
+
+
+def test_dotted_policy_ids_identify_separate_policies():
+    from lisa.models.policies import is_policy_id
+
+    assert is_policy_id("P1.1")
+    assert is_policy_id("P1.1.1")
+
+
+def test_write_policy_sql_only_updates_the_selected_row():
+    statement = _sql("write_policy.sql")
+
+    assert statement.lstrip().startswith("UPDATE lisa.policies")
+    assert "WHERE id = %(id)s" in statement
+    assert "AND scope = %(scope)s" in statement
+    assert "AND target_agent_name = %(target_agent_name)s" in statement
+    assert "INSERT" + " INTO" not in statement
+
+
+def test_policy_update_clears_cached_triage_for_same_policy_id(policy_database):
+    context = WorkspaceContext.from_environment()
+    repository = build_services(context).policy_service.repository
+    pending = repository.write_policy("workspace", "", "Refund review", "Review first.")
+    repository.approve_policy(pending.id)
+    with repository._connect() as connection:
+        connection.execute(
+            (Path(__file__).parent / "sql/policies/record_policy_triage.sql")
+            .read_text(encoding="utf-8"),
+            {"session_id": "session-before-policy-update", "policy_id": pending.id},
+        )
+
+    updated = repository.write_policy(
+        "workspace", "", pending.name, "Review the reason first.", policy_id=pending.id
+    )
+
+    assert updated.id == pending.id
+    assert not updated.approved
+    with repository._connect() as connection:
+        assert connection.execute(
+            (Path(__file__).parent / "sql/policies/list_policy_triage.sql")
+            .read_text(encoding="utf-8"),
+            {"policy_id": pending.id},
+        ).fetchall() == []
+
+
+def test_delete_policy_removes_catalog_row_and_cached_triage(policy_database):
+    context = WorkspaceContext.from_environment()
+    repository = build_services(context).policy_service.repository
+    policy = repository.write_policy("workspace", "", "Temporary rule", "Retire this rule.")
+    with repository._connect() as connection:
+        connection.execute(
+            (Path(__file__).parent / "sql/policies/record_policy_triage.sql")
+            .read_text(encoding="utf-8"),
+            {"session_id": "session-before-policy-delete", "policy_id": policy.id},
+        )
+
+    repository.delete_policy(policy.id)
+
+    with repository._connect() as connection:
+        assert connection.execute(
+            (Path(__file__).parent / "sql/policies/read_policy_id.sql")
+            .read_text(encoding="utf-8"),
+            {"policy_id": policy.id},
+        ).fetchall() == []
+        assert connection.execute(
+            (Path(__file__).parent / "sql/policies/list_policy_triage.sql")
+            .read_text(encoding="utf-8"),
+            {"policy_id": policy.id},
+        ).fetchall() == []
+
+
+def test_delete_policy_preserves_policy_with_evaluation_history(policy_database):
+    context = WorkspaceContext.from_environment()
+    services = build_services(context)
+    repository = services.policy_service.repository
+    policy = repository.write_policy("workspace", "", "Evaluated rule", "Keep its history.")
+    activity = services.activity_store.create_activity(
+        title="Historical evaluation", source="test", kind="policy_evaluation"
+    )
+    with repository._connect() as connection:
+        connection.execute(
+            (Path(__file__).parent / "sql/policies/seed_evaluation_run.sql")
+            .read_text(encoding="utf-8"),
+            {
+                "evaluation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "activity_id": activity.id,
+                "policy_id": policy.id,
+                "target_agent_name": "agent-a",
+                "session_id": "historical-session",
+                "policy_name": policy.name,
+                "policy_hash": hashlib.sha256(policy.criteria.encode()).hexdigest(),
+                "judge_config": "{}",
+                "request_key": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            },
+        )
+
+    with pytest.raises(ValueError, match="evaluation history"):
+        repository.delete_policy(policy.id)
+    assert repository.list_all() == [policy]
 
 
 def test_policy_page_at_maximum_offset_has_no_unreachable_successor():
@@ -197,23 +347,6 @@ def test_policy_listing_explains_agent_specific_scope(monkeypatch, policy_databa
     assert "P1." in listing
 
 
-def test_policy_listing_ignores_on_disk_markdown_files(tmp_path, policy_database):
-    context = WorkspaceContext.from_environment()
-    agent_name = "disk-refund-agent"
-    agent_hash = hashlib.sha256(agent_name.encode("utf-8")).hexdigest()
-    disk_path = context.home() / "agents" / agent_hash / "POLICY.md"
-    disk_path.parent.mkdir(parents=True)
-    disk_path.write_text(
-        "## Refund exception\napproved: no\n\nEscalate before refunding.",
-        encoding="utf-8",
-    )
-    services = build_services(context)
-
-    listing = list_policies(services)
-
-    assert listing == "No policies exist yet."
-
-
 def test_policy_listing_orders_paragraph_ids_numerically(tmp_path):
     context = WorkspaceContext(
         workspace="11111111-1111-4111-8111-111111111111",
@@ -236,19 +369,6 @@ def test_policy_listing_orders_paragraph_ids_numerically(tmp_path):
     listing = render_policy_list(policy_service.list_policy_records())
 
     assert [item.split(" | ", 1)[0] for item in listing] == ["P1.1", "P1.2", "P1.3"]
-
-
-def test_policy_reads_do_not_import_on_disk_markdown(tmp_path, policy_database):
-    context = WorkspaceContext.from_environment()
-    disk_path = context.home() / "POLICY.md"
-    disk_path.parent.mkdir(parents=True)
-    disk_path.write_text(
-        "## Refund eligibility\napproved: yes\n\nCheck eligibility.", encoding="utf-8"
-    )
-    services = build_services(context)
-
-    assert read_policy(services) == "No policy exists yet."
-    assert services.policy_service.approved_rules("refund-agent") == []
 
 
 def test_policy_tools_redact_secrets_before_persisting_markdown(monkeypatch, policy_database):

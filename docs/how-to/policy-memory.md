@@ -29,28 +29,42 @@ the owner approves a pending row by its readable ID. Mentioning approval in
 criteria or code examples does not enable a policy. Only rows whose `approved`
 column is true are evaluated.
 
-## Create, revise, and approve a rule
+## Create, update, and approve a rule
 
 Ask Lisa to create a rule in workspace or exact agent scope. Lisa writes an
-unapproved row to `lisa.policies` and returns its readable ID (`P1.x`). Updating
-an approved rule creates a child revision (`P1.x.x`) with `approved: no`; the
-current approved row remains active while the owner reviews the revision.
-Updating that pending revision keeps the same ID. `list_policies` and
-`read_policy` show both active and pending rows with their IDs and approval
-state.
+unapproved row to `lisa.policies` and returns its readable ID (`P1.x`). Each
+ID is one policy section; for example, `P1.1` and `P1.1.1` are independent
+policies. To change a rule, Lisa must identify and pass that rule's exact ID to
+`write_policy`. The tool updates that same database row, preserving its ID and
+creation time. It must not create a second row for the changed policy. If the
+row was approved, changing its name or criteria sets `approved: no` on that row
+until its owner approves the same ID again. `list_policies` and `read_policy`
+show the current rows and approval state.
 
-Approve the exact revision by sending `Approve policy: P1.x.x` as a standalone
+Approve the exact policy by sending `Approve policy: P1.x` as a standalone
 message. The authenticated owner check and exact-ID check are enforced by the
-runtime. Lisa sets that row's `approved` value to true and archives the previous
-approved row for the same rule. There is no separate proposal object or ID.
-Scheduled Lisa can read and evaluate but cannot create, revise, or approve
-policy. Policy rows and evaluation history live in Postgres; old evaluator
-records do not grant approval.
+runtime. Lisa sets that same row's `approved` value to true. Scheduled Lisa can read
+and evaluate but cannot create, update, approve, or delete policy. Policy rows and
+evaluation history live in Postgres. Updating a policy invalidates its cached
+triage decisions; saved evaluation results retain the criteria snapshot used
+when they were produced.
+
+To delete a policy, identify its exact ID from `list_policies` or `read_policy`,
+then send `Delete policy: P1.x` as a standalone owner message. Lisa removes the
+policy row and its cached triage decisions. If a saved evaluation run refers to
+the policy, deletion is refused so its history remains intact. Scheduled QA
+cannot delete policies. Substantive policy work is also recorded in Lisa's
+activity workflow; the activity captures chat actions while the policy row
+remains the source of truth for policy state.
 
 Only an approved agent rule overrides an approved workspace rule with the same
-name. A pending agent revision leaves the currently effective policy in place.
+name.
 `evaluate_session` resolves the approved candidate set for the exact agent
 internally; it does not accept a caller-supplied policy list.
+
+New policy IDs are allocated by reading the greatest numeric ID in
+`lisa.policies` while holding a transaction advisory lock shared across policy
+scopes. This keeps IDs unique across workspace and agent rules.
 
 ## Execution and findings
 

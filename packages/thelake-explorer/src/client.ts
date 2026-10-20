@@ -10,6 +10,10 @@ export type ExplorerConfig = {
   auth?: AuthProvider;
   /** Optional workspace-scoped browser key for chat history persistence. */
   chatStorageKey?: string;
+  /** Optional label supplied by the embedding workspace. */
+  workspaceName?: string;
+  /** Optional connection status supplied by the embedding host. */
+  workspaceStatus?: string;
   fetch?: typeof fetch;
 };
 
@@ -28,7 +32,7 @@ export type TraceSummary = {
 
 export type Observation = {
   trace_id: string; span_id: string; parent_span_id?: string | null; session_id?: string | null;
-  name: string; observation_type: string; start_time: string; end_time?: string | null;
+  name: string; span_type: string; start_time: string; end_time?: string | null;
   status_code?: string | null; model_name?: string | null; input_tokens?: number | null;
   output_tokens?: number | null; total_tokens?: number | null; total_cost?: number | null;
   input?: unknown; output?: unknown; attributes?: Record<string, unknown>;
@@ -164,8 +168,9 @@ export class ExplorerApi {
 
   async getSession(sessionId: string, signal?: AbortSignal): Promise<SessionDetail> {
     const path = `/sessions/${encodeURIComponent(sessionId)}`;
-    const query = new URLSearchParams({ limit: "200" });
-    const result = await this.request<SessionDetail>(`${path}?${query}`, { signal });
+    // Session detail has no cursor contract; omitting `limit` returns the full
+    // session. An explicit limit silently truncates long sessions.
+    const result = await this.request<SessionDetail>(path, { signal });
     const scores = result.scores ?? [];
     return {
       ...result,

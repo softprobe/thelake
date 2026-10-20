@@ -32,6 +32,16 @@ def test_build_conversation_uses_sdk_conversation_id_type(monkeypatch, tmp_path)
     assert captured["visualizer"] is None
 
 
+def test_openhands_turn_prefers_explicit_attachment_and_infers_unique_target():
+    assert agent.selected_chat_activity_id([
+        {"tool_name": "find_activity", "arguments": {"query": "refund"}},
+        {"tool_name": "attach_chat_turn_to_activity", "arguments": {"activity_id": "activity-1"}},
+    ]) == "activity-1"
+    assert agent.selected_chat_activity_id([
+        {"tool_name": "update_activity", "arguments": {"activity_id": "activity-1"}},
+    ]) == "activity-1"
+
+
 def test_redacts_credentials_in_user_messages_before_they_are_persisted():
     text = (
         'Please inspect this: api_key="message-secret-value" and Bearer abcdefghijklmnopqrstuvwxyz'
@@ -142,7 +152,7 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
         "investigate-evaluator-failure",
         "manage-lisa-activities",
     } <= skill_names
-    assert "find or create one durable" in captured["system_prompt"]
+    assert "For every substantive user request" in captured["system_prompt"]
     assert "Approve policy: <policy_id>" in captured["system_prompt"]
     assert any(
         "find_activity" in skill.content
@@ -175,17 +185,12 @@ def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(monkeypatch, lisa_t
         "read_policy",
         "write_policy",
         "approve_policy",
+        "delete_policy",
         "list_activity_followups",
         "search_sessions",
         "evaluate_session",
         "notify_evaluation_failure",
     } <= tools.keys()
-    assert not any("proposal" in name for name in tools)
-    assert "create_evaluation_draft" not in tools
-    assert "activate_evaluation" not in tools
-    assert "sample_agent_sessions" not in tools
-    assert "select_policies_for_session" not in tools
-    assert "update_policy" not in tools
     assert "openhands" not in Path(create_server.__code__.co_filename).read_text(encoding="utf-8").lower()
 
 

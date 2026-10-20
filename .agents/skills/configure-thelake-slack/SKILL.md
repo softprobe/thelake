@@ -33,11 +33,12 @@ For Lisa's session and policy terminology, see
 In an approved test channel/thread, use the documented command:
 
 ```text
-@Lisa Propose an agent POLICY.md rule named "Refund eligibility" for support-agent:
-check eligibility before issuing a refund. Show approved: yes, but do not save yet.
+@Lisa Create an agent policy named "Refund eligibility" for support-agent:
+check eligibility before issuing a refund.
 ```
 
-Review the section, then send `@Lisa Approve policy: P1.2.1`.
+Review the returned policy ID, then send `@Lisa Approve policy: <that ID>` as a
+standalone message.
 
 
 The target name must match the authenticated agent name on the root trace.

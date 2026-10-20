@@ -83,9 +83,8 @@ selected final judgment. Request hashes identify private raw provider artifacts.
 The release uses the canonical IDs directly: session IDs are `S001` through
 `S048`, policy IDs are document section IDs `P1.1` through `P1.18`, and each
 annotation is keyed by `(session_id, policy_id)`. The dataset stores one selected
-judgment per labeled pair; annotation IDs and revision suffixes are not used.
-The migration preserved the selected 202 labels, review histories, evidence,
-splits and policy membership while removing superseded annotation rows.
+judgment per labeled pair: 202 labels, with review histories, evidence,
+splits, and policy membership.
 
 Current file SHA-256 values are recorded in `manifests/evaluation.json` and
 verified by the dataset loader. The golden pair file contains the same 202

@@ -92,3 +92,14 @@ class PolicyService:
         if self.context.confirmed_policy_id != policy_id:
             raise ValueError(f"The owner must send exactly: Approve policy: {policy_id}")
         return self.repository.approve_policy(policy_id)
+
+    def delete_policy(self, policy_id: str) -> None:
+        if self.context.turn_source not in {"web", "slack"}:
+            raise ValueError("Only an owner conversation can delete policies")
+        if not self.context.actor_id or self.context.actor_id not in self.context.owner_user_ids:
+            raise ValueError("This action requires an authorized Lisa owner identity")
+        if not is_policy_id(policy_id):
+            raise ValueError("Use a human-readable policy ID such as P1.2 or P1.2.1")
+        if self.context.confirmed_policy_deletion_id != policy_id:
+            raise ValueError(f"The owner must send exactly: Delete policy: {policy_id}")
+        self.repository.delete_policy(policy_id)

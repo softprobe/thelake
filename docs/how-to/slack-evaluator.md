@@ -57,10 +57,10 @@ one configured Lisa thread.
 Mention the bot in a channel or reply in a supported thread. Lisa responds in
 the same thread and keeps multi-turn context there. She can explain existing
 policy and session trajectories, propose policy updates, and create behavior
-policies. Lisa writes policy revisions directly to `lisa.policies` using readable
-IDs such as `P1.2.1`; the owner sends `Approve policy: <policy_id>` as a standalone
-message. Approved policy
-is eligible for QA immediately. There is no separate draft or activation step.
+policies. Lisa writes policies directly to `lisa.policies` using readable IDs
+such as `P1.2`. Updates require the exact policy ID and change the same row. The
+owner sends `Approve policy: <policy_id>` as a standalone message. Approved policy
+is eligible for QA immediately.
 
 
 Lisa schedules evaluation independently of Slack. Slack is a conversation and

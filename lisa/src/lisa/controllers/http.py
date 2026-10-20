@@ -25,6 +25,7 @@ from lisa.repositories.conversations import (
 )
 from lisa.runtime import (
     confirmed_followup_id,
+    confirmed_policy_deletion_id,
     confirmed_policy_id,
     run_turn,
 )
@@ -444,6 +445,7 @@ async def send_message(
             run_turn=run_turn,
             actor_id=actor_id,
             confirmed_policy_id=confirmed_policy_id(text),
+            confirmed_policy_deletion_id=confirmed_policy_deletion_id(text),
             confirmed_followup_id=confirmed_followup_id(text),
         )
     except ConversationTurnError as error:

@@ -6,15 +6,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from benchmark.activity_runner import (
     _interpolate,
     _rate,
     _score_state,
+    _score_trajectory_links,
     _score_turn,
     _update_substitutions,
 )
 from datasets.activity_dataset import ActivityLabels, ActivityTurn, load_activity_dataset
-
 from lisa.backends.openhands import LISA_SYSTEM_PROMPT
 from lisa.views.database import LISA_DATABASE_SCHEMA
 
@@ -24,7 +25,7 @@ DATASET = Path(__file__).resolve().parents[1] / "datasets/activity_management"
 def test_activity_benchmark_release_has_frozen_cases_and_both_splits():
     manifest, cases, digest = load_activity_dataset(DATASET / "manifests/benchmark.json")
 
-    assert manifest.case_count == len(cases) == 15
+    assert manifest.case_count == len(cases) == 17
     assert digest
     assert {case.split for case in cases} == {"development", "benchmark"}
     assert {case.category for case in cases} >= {
@@ -39,6 +40,42 @@ def test_activity_benchmark_release_has_frozen_cases_and_both_splits():
     history_cases = [case for case in cases if case.category == "evaluation"]
     assert len(history_cases) == 3
     assert all(case.historical_evaluations for case in history_cases)
+
+
+def test_activity_benchmark_covers_policy_creation_approval_and_in_place_update():
+    _, cases, _ = load_activity_dataset(DATASET / "manifests/benchmark.json")
+    case = next(case for case in cases if case.case_id == "create_approve_and_update_policy_in_place")
+
+    assert case.category == "policy"
+    assert case.split == "benchmark"
+    assert [turn.require_tools for turn in case.turns] == [
+        ["write_policy", "attach_chat_turn_to_activity"],
+        ["approve_policy", "attach_chat_turn_to_activity"],
+        ["write_policy", "attach_chat_turn_to_activity"],
+    ]
+    assert "Approve policy: {policy_id}" == case.turns[1].text
+    assert "{policy_id}" in case.turns[2].text
+    assert case.turns[2].tool_arguments_must_include == ["P1.1", "Refund Approval Guard"]
+    assert case.turns[2].reply_must_include == ["P1.1", "approved: no"]
+    assert case.expected.policy_count == 1
+    assert case.expected.pending_policy_count == 1
+    assert case.expected.activity_count == 1
+
+
+def test_activity_benchmark_deletes_existing_policy_and_checks_database_absence():
+    _, cases, _ = load_activity_dataset(DATASET / "manifests/benchmark.json")
+    case = next(case for case in cases if case.case_id == "delete_existing_policy")
+
+    assert case.category == "policy"
+    assert case.split == "benchmark"
+    assert [turn.require_tools for turn in case.turns] == [
+        ["write_policy", "attach_chat_turn_to_activity"],
+        ["delete_policy", "attach_chat_turn_to_activity"],
+    ]
+    assert case.turns[1].text == "Delete policy: {policy_id}"
+    assert case.expected.activity_count == 2
+    assert case.expected.policy_count == 0
+    assert case.expected.deleted_policy_ids == ["$policy_id"]
 
 
 def test_activity_benchmark_rejects_changed_case_bytes(tmp_path):
@@ -67,6 +104,25 @@ def test_activity_benchmark_score_checks_real_policy_approval_trace_and_reply_ru
     scored = _score_turn(turn, result, {"policy_id": "P1.1"}, 1)
     assert all(item["passed"] for item in scored["tool_checks"] + scored["communication_checks"])
     assert _interpolate("Approve policy: {policy_id}", {"policy_id": "P1.1"}) == "Approve policy: P1.1"
+
+
+def test_activity_benchmark_interpolates_dynamic_policy_ids_in_tool_arguments():
+    turn = ActivityTurn(
+        chat="slack", text="Delete policy: {policy_id}",
+        require_tools=["delete_policy", "attach_chat_turn_to_activity"],
+        tool_arguments_must_include=["$policy_id"],
+    )
+    result = {
+        "activities": [
+            {"kind": "tool", "tool_name": "delete_policy", "arguments": {"policy_id": "P1.1"}},
+            {"kind": "tool", "tool_name": "attach_chat_turn_to_activity", "arguments": {"activity_id": "activity-1"}},
+        ],
+        "messages": [],
+    }
+
+    scored = _score_turn(turn, result, {"policy_id": "P1.1"}, 1)
+
+    assert all(item["passed"] for item in scored["tool_checks"])
 
 def test_activity_benchmark_checks_database_tool_arguments():
     turn = ActivityTurn(
@@ -151,6 +207,37 @@ def test_activity_benchmark_checks_tool_order_and_exact_call_count():
     )["passed"]
 
 
+def test_activity_benchmark_requires_selected_chat_and_runtime_events_to_be_linked():
+    class ActivityStore:
+        def __init__(self, references):
+            self.references = references
+
+        def get_activity_thread(self, activity_id):
+            assert activity_id == "activity-1"
+            return {"references": self.references}
+
+    result = {
+        "messages": [
+            {"id": "old-user", "role": "user"},
+            {"id": "new-user", "role": "user"},
+            {"id": "new-assistant", "role": "assistant"},
+        ],
+        "activities": [
+            {"id": "tool-1", "tool_name": "write_policy"},
+            {"id": "attach-1", "tool_name": "attach_chat_turn_to_activity", "arguments": {"activity_id": "activity-1"}},
+        ],
+    }
+    linked = [
+        {"reference_type": "message", "reference_id": "new-user"},
+        {"reference_type": "message", "reference_id": "new-assistant"},
+        {"reference_type": "runtime_event", "reference_id": "tool-1"},
+    ]
+    assert _score_trajectory_links(ActivityStore(linked), result, {"old-user"})["passed"]
+    missing = _score_trajectory_links(ActivityStore(linked[:2]), result, {"old-user"})
+    assert not missing["passed"]
+    assert missing["missing_references"] == [("runtime_event", "tool-1")]
+
+
 def test_activity_benchmark_resolves_new_policy_id_before_scoring_same_turn():
     from lisa.models.policies import PolicyRecord
 
@@ -189,17 +276,31 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "call get_activity_thread next" in prompt
     assert "entire owner message" in prompt or "only that standalone owner command" in prompt
     assert "use list_policies and read_policy" in prompt
+    assert "never call lisa_db to inspect or change policy rows" in prompt
+    assert "omit policy_id" in prompt
+    assert "assigns the next readable id" in prompt
+    assert "never guess or reuse a policy id" in prompt
     database_schema = " ".join(LISA_DATABASE_SCHEMA.casefold().split())
     assert "retrieve lisa's recorded evaluation history" in database_schema
     assert "do not query lisa_db to find, create, update, or inspect activities" in database_schema
+    assert "delete_policy" in database_schema
 
-    policy_skill = (
+    policy_skill = " ".join((
         Path(__file__).resolve().parents[1] / "skills/learn-agent-policy/SKILL.md"
-    ).read_text()
+    ).read_text().split())
     assert "write_policy" in policy_skill
+    assert "delete_policy" in policy_skill
+    assert "Delete policy: <policy_id>" in policy_skill
+    assert "refuses deletion" in policy_skill
     assert "Approve policy: <policy_id>" in policy_skill
-    assert "child revision" in policy_skill
-    assert "the approved parent stays active" in policy_skill
+    assert "update the existing row in place" in policy_skill
+    assert "Keep the same policy ID" in policy_skill
+    assert "updates that same row" in policy_skill
+    assert "P1.1` and `P1.1.1` are different" in policy_skill
+    assert "omit `policy_id`" in policy_skill
+    assert "allocates and returns the next" in policy_skill
+    assert "do not call `write_policy`, `approve_policy`, or `delete_policy`" in policy_skill
+    assert "Do not use `lisa_db` for normal policy work." in policy_skill
 
 
 def test_activity_labels_cover_timeline_evidence_and_exact_followup_contract():

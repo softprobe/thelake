@@ -232,6 +232,7 @@ class PostgresActivityStore:
             "agent": "link_agent_thread.sql",
             "message": "link_message_thread.sql",
             "runtime_work": "link_runtime_work_thread.sql",
+            "runtime_event": "link_runtime_event_thread.sql",
             "carrier_message": "link_carrier_message_thread.sql",
         }
         statement = sql_by_type.get(reference_type)
@@ -248,6 +249,70 @@ class PostgresActivityStore:
             connection.execute(_sql(statement), {
                 "activity_id": activity_id, "external_id": external_id,
             })
+
+    def record_conversation_trajectory(
+        self, activity_id: str, messages: list[dict[str, Any]],
+        runtime_events: list[dict[str, Any]],
+    ) -> int:
+        """Append an idempotent, redacted chat and tool trace to an activity."""
+        recorded = 0
+        with self._connect() as connection, connection.transaction():
+            timeline = [
+                {**item, "timeline_kind": "message"} for item in messages
+            ] + [
+                {**item, "timeline_kind": "runtime"} for item in runtime_events
+            ]
+            timeline.sort(key=lambda item: item.get("sequence", 0))
+            for item in timeline:
+                item_id = str(item.get("id", "")).strip()
+                if not item_id:
+                    continue
+                if item["timeline_kind"] == "message":
+                    role = item.get("role")
+                    text = item.get("text")
+                    if role not in {"user", "assistant"} or not isinstance(text, str):
+                        continue
+                    body = redact_text(text)[:12_000]
+                    if not body:
+                        continue
+                    inserted = connection.execute(_sql("link_message_thread.sql"), {
+                        "activity_id": activity_id, "external_id": item_id,
+                    }).rowcount
+                    if not inserted:
+                        continue
+                    speaker = "You" if role == "user" else "Lisa"
+                    preview = " ".join(body.split())[:96]
+                    self._append_activity_event(
+                        connection, activity_id,
+                        "chat.user" if role == "user" else "chat.assistant",
+                        f"{speaker}: {preview}" if role == "user" else "Lisa replied",
+                        body, "user" if role == "user" else "lisa",
+                    )
+                    recorded += 1
+                    continue
+
+                if item.get("tool_name") == "attach_chat_turn_to_activity":
+                    continue
+                inserted = connection.execute(_sql("link_runtime_event_thread.sql"), {
+                    "activity_id": activity_id, "external_id": item_id,
+                }).rowcount
+                if not inserted:
+                    continue
+                name = str(item.get("tool_name", "tool"))[:120]
+                if item.get("kind") == "tool":
+                    arguments = json.dumps(item.get("arguments", {}), ensure_ascii=False)
+                    summary = redact_text(arguments)[:12_000]
+                    event_type, title, actor = "runtime.tool", f"Lisa used {name}", "lisa"
+                else:
+                    summary = redact_text(str(item.get("detail", "")))[:12_000]
+                    if not summary:
+                        summary = "Tool returned no additional detail."
+                    event_type, title, actor = "runtime.result", f"{name} returned evidence", "lisa"
+                self._append_activity_event(
+                    connection, activity_id, event_type, title, summary, actor,
+                )
+                recorded += 1
+        return recorded
 
     def activity_exists(self, activity_id: str) -> bool:
         with self._connect() as connection:

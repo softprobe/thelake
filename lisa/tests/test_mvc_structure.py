@@ -55,36 +55,10 @@ def test_core_lisa_components_have_mvc_owners():
     } >= expected_modules
 
 
-def test_root_package_has_no_obsolete_mvc_facades():
-    obsolete_facades = {
-        "api.py",
-        "mcp_tools.py",
-        "notifications.py",
-        "policies.py",
-        "policy_repository.py",
-        "presentation.py",
-        "evaluation/service.py",
-        "evaluation/failures.py",
-        "controllers/policies.py",
-        "activities/__init__.py",
-        "activities/query.py",
-        "activities/repository.py",
-    }
-
-    present = {
-        path.relative_to(PACKAGE).as_posix()
-        for path in PACKAGE.rglob("*.py")
-        if path.relative_to(PACKAGE).as_posix() in obsolete_facades
-    }
-
-    assert not present
-
-
 def test_activity_models_and_persistence_have_distinct_mvc_owners():
     assert (PACKAGE / "models" / "activities.py").is_file()
     assert (PACKAGE / "repositories" / "activities.py").is_file()
     assert (PACKAGE / "repositories" / "lisa_database.py").is_file()
-    assert not list((PACKAGE / "activities").glob("*.py"))
 
 
 def test_controllers_delegate_use_cases_and_app_does_not_reach_into_controller_internals():

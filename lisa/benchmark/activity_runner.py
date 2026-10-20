@@ -6,21 +6,20 @@ Offline harness only — see ``benchmark`` package docs. Do not relocate into
 
 from __future__ import annotations
 
-from benchmark.policy_seed import seed_policy_document
-
 import argparse
 import asyncio
-from hashlib import sha256
 import json
 import os
 import re
 import subprocess
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
 import psycopg
 
+from benchmark.policy_seed import seed_policy_document
 from conftest import (
     LisaTestDatabase,
     create_lisa_test_database,
@@ -60,7 +59,9 @@ def _update_substitutions(services, substitutions: dict[str, str]) -> None:
         substitutions["followup_id"] = str(followups[0]["id"])
 
 
-def _score_state(services, expected: dict) -> list[dict]:
+def _score_state(
+    services, expected: dict, substitutions: dict[str, str] | None = None
+) -> list[dict]:
     feed = services.activity_store.list_activity_feed(limit=100)
     checks: list[dict] = []
     wanted_count = expected["activity_count"]
@@ -192,7 +193,53 @@ def _score_state(services, expected: dict) -> list[dict]:
                 "passed": phrase.casefold() in policy_text,
             }
         )
+    for template in expected.get("deleted_policy_ids", []):
+        policy_id = _interpolate(template, substitutions or {})
+        query = (Path(__file__).parent / "sql" / "policy_exists.sql").read_text(encoding="utf-8")
+        with psycopg.connect(services.context.database_url) as connection:
+            row = connection.execute(query, {"policy_id": policy_id}).fetchone()
+        exists = bool(row[0])
+        checks.append(
+            {
+                "check": f"policy_absent_from_database:{policy_id}",
+                "passed": not exists,
+                "expected": "no lisa.policies row",
+                "actual": "present" if exists else "absent",
+            }
+        )
     return checks
+
+
+def _score_trajectory_links(activity_store, result: dict, previous_message_ids: set[str]) -> dict:
+    """Check that every new chat and runtime ID appears in Lisa's activity links."""
+    from lisa.runtime import selected_chat_activity_id
+
+    activity_id = selected_chat_activity_id(result["activities"])
+    detail = activity_store.get_activity_thread(activity_id) if activity_id else None
+    references = {
+        (item["reference_type"], item["reference_id"])
+        for item in (detail or {}).get("references", [])
+    }
+    message_ids = {
+        str(message.get("id")) for message in result["messages"]
+        if str(message.get("id")) not in previous_message_ids
+        and message.get("role") in {"user", "assistant"}
+    }
+    runtime_ids = {
+        str(item.get("id")) for item in result["activities"]
+        if item.get("id") and item.get("tool_name") != "attach_chat_turn_to_activity"
+    }
+    expected = {
+        *(('message', item_id) for item_id in message_ids),
+        *(('runtime_event', item_id) for item_id in runtime_ids),
+    }
+    missing = sorted(expected - references)
+    return {
+        "check": "activity_trajectory_links",
+        "passed": bool(activity_id) and not missing,
+        "activity_id": activity_id,
+        "missing_references": missing,
+    }
 
 
 def _score_turn(
@@ -234,7 +281,8 @@ def _score_turn(
             }
         )
     arguments = json.dumps([item.get("arguments", {}) for item in calls], ensure_ascii=False)
-    for phrase in turn.tool_arguments_must_include:
+    for template in turn.tool_arguments_must_include:
+        phrase = _interpolate(template, substitutions)
         action_checks.append(
             {
                 "check": f"tool_arguments_contain:{phrase}",
@@ -353,12 +401,11 @@ def _run_case(
     from lisa.backends.openhands import OpenHandsBackend
     from lisa.bootstrap import build_services
     from lisa.context import WorkspaceContext
-    from lisa.repositories.conversations import FileConversationRepository
     from lisa.runtime import (
         confirmed_followup_id,
+        confirmed_policy_deletion_id,
         confirmed_policy_id,
     )
-    from lisa.services.conversations import ConversationService
 
     writer_url, reader_url = database.writer_url, database.reader_url
     data_dir = artifact_dir / "workspaces" / case.case_id
@@ -384,7 +431,7 @@ def _run_case(
     )
     services = build_services(context)
     _seed_historical_evaluations(services, case)
-    conversations = ConversationService(FileConversationRepository(data_dir))
+    conversations = services.conversations
     main = asyncio.run(conversations.main_conversation(workspace))
     chat_ids = {"main": main["conversation_id"]}
     substitutions: dict[str, str] = {}
@@ -402,6 +449,10 @@ def _run_case(
             conversation_id = chat_ids[key]
             source, channel, thread = "slack", turn.channel, turn.thread
         text = _interpolate(turn.text, substitutions)
+        previous_message_ids = {
+            str(message.get("id"))
+            for message in conversations.get_conversation(workspace, conversation_id).get("messages", [])
+        }
         result = asyncio.run(
             conversations.run_user_turn(
                 conversation_id,
@@ -409,6 +460,7 @@ def _run_case(
                 text,
                 run_turn=OpenHandsBackend().run_turn,
                 confirmed_policy_id=confirmed_policy_id(text),
+                confirmed_policy_deletion_id=confirmed_policy_deletion_id(text),
                 confirmed_followup_id=confirmed_followup_id(text),
                 turn_source=source,
                 actor_id=OWNER if turn.actor == "owner" else OUTSIDER,
@@ -416,9 +468,20 @@ def _run_case(
                 slack_thread_ts=thread,
             )
         )
+        if "attach_chat_turn_to_activity" in turn.require_tools:
+            turns_check = _score_trajectory_links(
+                services.activity_store, result, previous_message_ids,
+            )
+        else:
+            turns_check = None
         _update_substitutions(services, substitutions)
-        turns.append(_score_turn(turn, result, substitutions, index))
-    state_checks = _score_state(services, case.expected.model_dump(exclude_unset=True))
+        scored_turn = _score_turn(turn, result, substitutions, index)
+        if turns_check is not None:
+            scored_turn["tool_checks"].append(turns_check)
+        turns.append(scored_turn)
+    state_checks = _score_state(
+        services, case.expected.model_dump(exclude_unset=True), substitutions
+    )
     checks = [*state_checks, *(item for turn in turns for item in turn["tool_checks"])]
     communication = [item for turn in turns for item in turn["communication_checks"]]
     checks.extend(communication)

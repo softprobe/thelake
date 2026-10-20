@@ -8,7 +8,16 @@ runs and of any session or policy.
 
 The main chat and each Slack thread remain separate communication channels.
 Postgres stores shared activity status, events, evaluation results,
-and score delivery state. Larger
+and score delivery state. For each substantive web or Slack turn, Lisa decides
+whether the request continues an open activity or starts distinct work. She
+looks up and reads a matching activity before continuing it, creates an activity
+when work is new, and explicitly attaches the chat turn to the selected record.
+The conversation service then records the turn's user and assistant messages as
+ordered activity events and links their message IDs. Message text is redacted
+before storage, and duplicate message IDs do not add duplicate events. Greetings
+and clarifications that do not start or advance work are not attached. The
+activity's user-visible trajectory therefore includes the chat that started or
+changed the work alongside tool actions, evidence, and lifecycle events. Larger
 inputs and rendered context live under
 `<LISA_DATA_DIR>/activities/<activity-id>/`. The database is authoritative for
 identity and state; files are private artifacts referenced by the activity.
@@ -83,12 +92,15 @@ optional `LISA_SLACK_ACTIVITY_THREAD_TS`. Failed turns release their claim for
 retry. Scheduled turns cannot write policy.
 
 Policy lifecycle state lives in `lisa.policies`: readable policy IDs, criteria,
-approval state, and archival timestamps are the complete source of truth. A
-content revision gets a child ID (for example `P1.2.1`) so pair-keyed triage
-cache entries cannot be reused for changed criteria. The previous approved row
-stays active until the owner sends `Approve policy: <policy_id>` as an exact
-standalone command. Lisa then approves the new row and archives the previous
-approved row. Policy lifecycle state remains on the policy row, without an activity link.
+and approval state are the complete source of truth. A policy record has no
+activity foreign key; substantive policy chat and actions can be recorded in a
+generic activity timeline. A policy update keeps its policy ID and row in place.
+Changed criteria invalidate
+that policy's cached triage decisions, while stored evaluation outputs retain
+the criteria used for their original judgment. If an approved policy changes,
+its `approved` value becomes false until the owner sends
+`Approve policy: <policy_id>` as an exact standalone command. Lisa approves the
+same row. Policy lifecycle state remains on the policy row.
 
 Owner confirmation checks both the exact command and the authenticated actor.
 Configure `LISA_OWNER_USER_IDS` with comma-separated identity subjects; web
@@ -114,6 +126,26 @@ Each escalated pair retains its existing evaluation request identity and score
 outbox. A pending score is retried from its stored payload and idempotency key;
 Lisa does not judge again after the outbox payload exists. The activity finishes
 after its evaluation runs have terminal results and acknowledged score writes.
+
+## Chat activity trajectory
+
+For each substantive web or Slack turn, Lisa checks for a matching open
+activity, reads its thread before resuming, or creates a new activity when the
+user has switched work. Lisa should explicitly attach the turn to the selected
+activity. As a runtime safeguard, Lisa also infers a target when the turn has
+exactly one unambiguous activity ID in its activity-tool results or arguments.
+Conflicting targets are left unattached unless Lisa explicitly
+selects one. The runtime appends redacted user and assistant messages, tool
+calls, and tool results in their original order. Message and runtime event IDs
+are linked to the activity, so retries do not duplicate timeline entries.
+Missing or unauthorized targets do not fail the chat turn. Greetings and
+clarifications that do not advance work are left out. The Lisa activity feed
+refreshes after each successful chat turn, and the activity detail dialog
+shows each stored chat and tool event.
+Only web or Slack turns from an actor listed in `LISA_OWNER_USER_IDS` may attach
+chat content to the shared workspace activity feed. The MCP tool enforces both
+the turn source and owner identity before it allows the runtime to persist
+those messages and events.
 
 ## Scope and storage
 

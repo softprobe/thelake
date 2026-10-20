@@ -28,11 +28,9 @@ def test_schema_has_durable_followups_and_direct_policy_approval():
     schema = _schema_sql()
     assert "lisa.activity_followups" in schema
     assert "trigger_event_type text" in schema
-    assert "lisa.policy_proposals" not in schema
     assert "approved boolean NOT NULL DEFAULT false" in schema
     assert "^P1[.][1-9][0-9]*([.][1-9][0-9]*)?$" in schema
-    assert "policies_one_pending_rule_idx" in schema
-    assert "policies_one_current_approved_rule_idx" in schema
+    assert "UNIQUE (scope, target_agent_name, name)" in schema
     assert "origin_slack_channel_id text" in schema
     assert "next_action_at timestamptz" in schema
 

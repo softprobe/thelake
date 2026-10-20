@@ -1,5 +1,3 @@
-from benchmark.policy_seed import seed_policy_document
-
 import asyncio
 import json
 import re
@@ -10,6 +8,7 @@ import pytest
 from fastmcp import Client
 from policy_cases import read_policy
 
+from benchmark.policy_seed import seed_policy_document
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
 from lisa.mcp_app import create_server
@@ -39,7 +38,10 @@ def test_mcp_public_policy_contract(lisa_test_context):
 
 
 def test_mcp_activity_tools_find_and_complete_owned_work(lisa_test_context):
-    services = build_services(lisa_test_context())
+    context = lisa_test_context(
+        turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+    )
+    services = build_services(context)
     assert services.activity_store is not None
 
     async def workflow():
@@ -51,6 +53,9 @@ def test_mcp_activity_tools_find_and_complete_owned_work(lisa_test_context):
             activity_id = created.data["activity_id"]
             recent = await client.call_tool("list_recent_activities", {"limit": 10})
             assert any(item["activity_key"] == activity_id for item in recent.data)
+            attached = await client.call_tool(
+                "attach_chat_turn_to_activity", {"activity_id": activity_id},
+            )
             updated = await client.call_tool(
                 "update_activity",
                 {
@@ -64,13 +69,36 @@ def test_mcp_activity_tools_find_and_complete_owned_work(lisa_test_context):
                 {"activity_id": activity_id, "status": "success", "summary": "No issue found."},
             )
             thread = await client.call_tool("get_activity_thread", {"activity_id": activity_id})
-            return updated, completed, thread
+            return activity_id, attached, updated, completed, thread
 
-    updated, completed, thread = asyncio.run(workflow())
+    activity_id, attached, updated, completed, thread = asyncio.run(workflow())
+    assert attached.data == {"activity_id": activity_id, "attached": True}
     assert not updated.is_error
     assert completed.data["completed"] is True
     assert thread.data["thread"]["status"] == "success"
     assert thread.data["thread"]["finish_message"] == "No issue found."
+
+
+def test_activity_chat_attachment_rejects_non_owner(lisa_test_context):
+    context = lisa_test_context(
+        turn_source="web", actor_id="outsider", owner_user_ids=frozenset({"owner-1"}),
+    )
+    services = build_services(context)
+    activity = services.activity_store.create_activity(
+        title="Private conversation", source="web",
+    )
+
+    async def attach():
+        async with Client(create_server(services)) as client:
+            return await client.call_tool(
+                "attach_chat_turn_to_activity",
+                {"activity_id": activity.id},
+                raise_on_error=False,
+            )
+
+    result = asyncio.run(attach())
+    assert result.is_error
+    assert "authorized Lisa owner identity" in str(result.content)
 
 
 def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
@@ -82,8 +110,7 @@ def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
     async def create_and_find():
         async with Client(create_server(services)) as client:
             tools = {tool.name for tool in await client.list_tools()}
-            assert {"write_policy", "approve_policy", "list_policies", "read_policy"} <= tools
-            assert not any("proposal" in name for name in tools)
+            assert {"write_policy", "approve_policy", "delete_policy", "list_policies", "read_policy"} <= tools
             created = await client.call_tool("write_policy", {
                 "scope": "agent",
                 "agent_name": "billing-agent",
@@ -92,7 +119,7 @@ def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
             })
             assert not created.is_error
             policy_id = created.data["policy_id"]
-            assert re.fullmatch(r"P[1-9][0-9]*(?:\.[1-9][0-9]*){1,2}", policy_id)
+            assert re.fullmatch(r"P1\.[1-9][0-9]*", policy_id)
             assert created.data["approved"] is False
             found = await client.call_tool("read_policy", {
                 "scope": "agent", "agent_name": "billing-agent",
@@ -129,22 +156,57 @@ def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
 
     updated = asyncio.run(update())
     assert not updated.is_error
-    revision_id = updated.data["policy_id"]
-    assert revision_id == f"{policy_id}.1"
+    updated_id = updated.data["policy_id"]
+    assert updated_id == policy_id
     assert updated.data["approved"] is False
     rows = services.policy_service.read_policy_records("agent", "billing-agent")
-    assert [(row.id, row.approved) for row in rows] == [(policy_id, True), (revision_id, False)]
-    assert [row.id for row in services.policy_service.approved_rules("billing-agent")] == [policy_id]
-    revision_services = build_services(replace(context, confirmed_policy_id=revision_id))
-    async def approve_revision():
-        async with Client(create_server(revision_services)) as client:
-            return await client.call_tool("approve_policy", {"policy_id": revision_id})
-    revised = asyncio.run(approve_revision())
-    assert revised.data["approved"] is True
-    history = revision_services.policy_service.repository.list_scope_history("agent", "billing-agent")
-    assert {row.id: row.approved for row in history} == {policy_id: True, revision_id: True}
-    assert next(row for row in history if row.id == policy_id).archived_at is not None
-    assert [row.id for row in revision_services.policy_service.approved_rules("billing-agent")] == [revision_id]
+    assert [(row.id, row.approved) for row in rows] == [(policy_id, False)]
+    assert rows[0].criteria == "Record and verify the reason before changing billing details."
+    assert services.policy_service.approved_rules("billing-agent") == []
+
+    async def approve_updated_policy():
+        async with Client(create_server(approved_services)) as client:
+            return await client.call_tool("approve_policy", {"policy_id": policy_id})
+
+    reapproved = asyncio.run(approve_updated_policy())
+    assert reapproved.data["policy_id"] == policy_id
+    assert reapproved.data["approved"] is True
+    assert [row.id for row in approved_services.policy_service.approved_rules("billing-agent")] == [policy_id]
+
+
+def test_delete_policy_requires_exact_owner_confirmation(lisa_test_context):
+    context = lisa_test_context(
+        turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+    )
+    services = build_services(context)
+    record = services.policy_service.write_policy(
+        scope="workspace", agent_name="", name="Retired rule", criteria="Do not use it."
+    )
+
+    async def delete(confirmed_policy_deletion_id):
+        configured = build_services(replace(
+            context, confirmed_policy_deletion_id=confirmed_policy_deletion_id
+        ))
+        async with Client(create_server(configured)) as client:
+            return await client.call_tool("delete_policy", {"policy_id": record.id})
+
+    with pytest.raises(ValueError, match="Delete policy"):
+        services.policy_service.delete_policy(record.id)
+    assert services.policy_service.list_policy_records() == [record]
+
+    outsider = build_services(replace(
+        context,
+        actor_id="outsider",
+        confirmed_policy_deletion_id=record.id,
+    ))
+    with pytest.raises(ValueError, match="authorized Lisa owner"):
+        outsider.policy_service.delete_policy(record.id)
+    assert services.policy_service.list_policy_records() == [record]
+
+    deleted = asyncio.run(delete(record.id))
+    assert not deleted.is_error
+    assert deleted.data == {"policy_id": record.id, "deleted": True}
+    assert services.policy_service.list_policy_records() == []
 
 
 def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, lisa_test_context):

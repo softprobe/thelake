@@ -1,42 +1,34 @@
 ---
 name: use-thelake-explorer
-description: Use or develop Explorer for sessions, traces, scores, and its scripted behavior-check setup flow; the composer is not a conversational AI.
+description: Use or develop TheLake's session and trace browser; Lisa is a separate chat app.
 ---
 
 # Use TheLake Explorer
 
 Read `docs/how-to/explorer.md`; for local setup, follow
-`docs/how-to/local-development.md`. Explorer is served by TheLake at `/explorer/` and can
-also be embedded as a React package. Lisa is a separate app at `/lisa/`; use its
-chat for policy-management requests, not Explorer's session browser.
-
-## Behavior-check wizard
-
-The UI labels this area **Chat**, but `ChatView` is a scripted wizard and
-results inbox, not a conversational AI agent. Assistant prompts are hardcoded;
-the composer does not call an LLM or interpret free-form follow-ups. It stores
-criteria and agent name in browser state, creates/activates an evaluator via
-TheLake's API, and polls for that evaluator's scores every 10 seconds. Gemini
-is used by the separate online evaluation runner to judge matching traces,
-not to power this UI.
+`docs/how-to/local-development.md`. Explorer is served by TheLake at
+`/explorer/` and can also be embedded as a React package. Lisa is a separate
+app at `/lisa/`; use its chat for policy-management requests, not Explorer's
+session browser.
 
 ## User workflows
 
-- **Sessions:** select a time range, open a session, inspect its traces/spans,
-  attributes, events, and scores, then follow evidence links.
+- **Sessions:** use the full-width session list to filter by time range and
+  agent. Open a session to inspect its span navigation,
+  trajectory, input/output, attributes, events, and scores. Session URLs preserve
+  selection across reloads and browser back/forward navigation.
 - **Human review:** record `correct`, `wrong`, or `unsure` on the focused span.
-- **Behavior checks:** enter a behavior in the wizard, specify the exact agent
-  name from its root trace, review the drafted criteria and data notice, then
-  activate only when the online evaluation runner is configured and approved.
 - **Debug a missing session:** verify time range and workspace first; session
   summaries can lag trace commit briefly. Compare the authenticated workspace
   with the one receiving telemetry.
 
-Chat history is held in browser memory by default; embedded hosts can enable
-workspace-scoped browser persistence. Evaluators and scores are stored by
-TheLake. Activating a check sends captured conversation/tool evidence to the
-configured evaluation runner/provider; review the data handling notice and
-trace payload sensitivity before activation.
+The session browser follows the `sp-llm/apps/explorer` session table and
+two-pane detail hierarchy, adapted to TheLake's `/v1` API. Its left pane shows
+the span tree and its right pane shows the selected span. The React package
+scopes styles to its root and takes workspace identity from host configuration.
+The source Finding column stays unavailable until TheLake supports findings.
+Lisa's `/lisa/` route is a separate app; use Lisa's chat for policy management
+and behavior-check setup.
 
 ## Local development
 

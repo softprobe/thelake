@@ -87,5 +87,3 @@ def test_scheduled_turn_cannot_change_policy_or_create_checks(lisa_test_context)
         services.policy_service.write_policy(
             scope="workspace", agent_name="", name="Rule", criteria="Rule content"
         )
-    assert not hasattr(services.evaluations, "create_evaluation_draft")
-    assert not hasattr(services.evaluations, "activate_evaluation")

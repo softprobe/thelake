@@ -135,6 +135,31 @@ def test_user_chat_api_has_one_continuing_conversation_per_workspace(client, mon
     assert [item["conversation_id"] for item in conversations] == [first["conversation_id"]]
 
 
+def test_user_chat_turn_passes_local_owner_identity_to_runtime(client, monkeypatch):
+    from lisa.runtime import AgentTurn
+
+    workspace_id = str(uuid4())
+    monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
+    monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
+    monkeypatch.setenv("LISA_LOCAL_ACTOR_ID", "e2e-owner")
+    captured = {}
+
+    def fake_run_turn(**kwargs):
+        captured.update(kwargs)
+        return AgentTurn(messages=[{"id": "assistant-1", "role": "assistant", "text": "Done."}], activities=[])
+
+    monkeypatch.setattr(api, "run_turn", fake_run_turn)
+    conversation_id = client.post("/v1/conversations").json()["conversation_id"]
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        json={"text": "Create a policy", "consent": True},
+    )
+
+    assert response.status_code == 200
+    assert captured["actor_id"] == "e2e-owner"
+    assert captured["turn_source"] == "web"
+
+
 def test_user_chat_api_requires_a_valid_workspace_assertion_outside_local_mode(client, monkeypatch):
     monkeypatch.setenv("LISA_WORKSPACE_ID", str(uuid4()))
     monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "0")
@@ -403,13 +428,17 @@ def test_explicit_chat_confirmation_is_bound_to_the_current_turn(client, monkeyp
 
 
 def test_policy_approval_requires_exact_readable_policy_command():
-    from lisa.runtime import confirmed_followup_id, confirmed_policy_id
+    from lisa.runtime import confirmed_followup_id, confirmed_policy_deletion_id, confirmed_policy_id
 
     assert confirmed_policy_id("Approve policy: P1.2") == "P1.2"
     assert confirmed_policy_id("Approve policy: P1.2.1") == "P1.2.1"
     assert confirmed_policy_id("Please approve policy: P1.2") is None
     assert confirmed_policy_id("Approve policy: P1.2, thanks") is None
     assert confirmed_policy_id("Approve policy: 12345678-1234-4234-8234-123456789abc") is None
+    assert confirmed_policy_deletion_id("Delete policy: P1.2") == "P1.2"
+    assert confirmed_policy_deletion_id("<@U123> Delete policy: P1.2.1") == "P1.2.1"
+    assert confirmed_policy_deletion_id("Please delete policy: P1.2") is None
+    assert confirmed_policy_deletion_id("Delete policy: P1.2 after review") is None
     assert confirmed_followup_id("Confirm follow-up: 12345678-1234-4234-8234-123456789abc")
 
 def test_activity_feed_http_endpoints_use_workspace_database(
@@ -572,7 +601,6 @@ def test_scheduled_cycle_runs_from_lisa_and_persists_its_turn(client, monkeypatc
     assert captured["workspace_id"] == workspace_id
     assert "own-agent-qa" in captured["text"]
     assert "workspace tools" in captured["text"]
-    assert "sample_agent_sessions" not in captured["text"]
     assert captured["conversation_id"] == result["conversation_id"]
     assert Path(captured["directory"]).exists()
     assert result["messages"][0]["turn_source"] == "scheduled"

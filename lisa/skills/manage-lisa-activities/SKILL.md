@@ -35,6 +35,20 @@ across the main chat and separate Slack conversations.
   follow-through. Give it a concrete title, accurate type/source, and useful
   context. The same activity is visible from either chat; transcripts stay
   separate.
+- For every substantive user request that starts or continues work, classify it
+  as a continuation or a new activity. This includes meaningful policy create,
+  update, approval, and deletion requests. Find and inspect a matching open
+  activity before continuing it; create a distinct activity when the user has
+  switched tasks. A policy record remains authoritative for policy state, while
+  its chat and actions can be recorded on an activity.
+- Before finishing each substantive web or Slack turn, call
+  `attach_chat_turn_to_activity` exactly once with the selected activity ID.
+  Lisa's runtime records redacted user and assistant messages, tool calls, and
+  tool results as ordered activity events, then links their message and runtime
+  event IDs. Only actors listed in `LISA_OWNER_USER_IDS` may attach chat turns
+  to the workspace-shared activity feed. The activity feed refreshes after the
+  chat turn. Do not attach greetings or clarifications that do not start or
+  advance work.
 - `evaluate_session` owns its evaluation activity. Do not create another record
   for that evaluation.
 

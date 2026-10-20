@@ -5,12 +5,13 @@
 manifest deliberately whenever cases change. Each case is an ordered,
 multi-turn task with chat provenance, owner identity, tool-action expectations,
 reply checks, ordered tool-use and exact call-count labels, and expected state
-labels.
+labels. Substantive activity and policy turns also require the selected
+activity's timeline to link each new chat message and runtime event.
 
-The 15-case curated release covers activity creation, lookup and resumption,
+The 17-case curated release covers activity creation, lookup and resumption,
 duplicate prevention, ambiguity, evidence-backed completion, owner boundaries,
-policy creation, lookup, exact-ID approval, revision, and follow-up
-proposal/approval/deduplication. Three cases check whether Lisa can
+policy creation, lookup, exact-ID approval, in-place update, confirmed deletion,
+and follow-up proposal/approval/deduplication. Three cases check whether Lisa can
 retrieve and report saved policy-triage decisions and judge verdicts without
 rerunning an evaluation. Synthetic history is seeded in each disposable Postgres
 case database through Lisa's repositories; judge-run completion uses a

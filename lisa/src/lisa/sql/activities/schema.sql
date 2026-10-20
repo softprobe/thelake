@@ -3,8 +3,6 @@
 
 CREATE SCHEMA lisa;
 
-CREATE SEQUENCE lisa.policy_id_seq;
-
 CREATE TABLE lisa.deployment (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     workspace_fingerprint text NOT NULL,
@@ -57,22 +55,15 @@ CREATE TABLE lisa.policies (
     approved boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    archived_at timestamptz,
     CHECK (
         (scope = 'workspace' AND target_agent_name = '') OR
         (scope = 'agent' AND target_agent_name <> '')
-    )
+    ),
+    UNIQUE (scope, target_agent_name, name)
 );
 
 CREATE INDEX policies_scope_agent_approved_idx
-    ON lisa.policies(scope, target_agent_name, approved)
-    WHERE archived_at IS NULL;
-CREATE UNIQUE INDEX policies_one_current_approved_rule_idx
-    ON lisa.policies(scope, target_agent_name, name)
-    WHERE approved AND archived_at IS NULL;
-CREATE UNIQUE INDEX policies_one_pending_rule_idx
-    ON lisa.policies(scope, target_agent_name, name)
-    WHERE NOT approved AND archived_at IS NULL;
+    ON lisa.policies(scope, target_agent_name, approved);
 
 CREATE TABLE lisa.evaluation_runs (
     id uuid PRIMARY KEY,
@@ -176,6 +167,11 @@ CREATE TABLE lisa.activity_monitor_runtime_work_threads (
     runtime_work_id text NOT NULL,
     activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
     PRIMARY KEY (runtime_work_id, activity_id)
+);
+CREATE TABLE lisa.activity_monitor_runtime_event_threads (
+    runtime_event_id text NOT NULL,
+    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    PRIMARY KEY (runtime_event_id, activity_id)
 );
 CREATE TABLE lisa.activity_monitor_carrier_user_messages (
     carrier_message_id text NOT NULL,
@@ -287,6 +283,9 @@ FROM lisa.activity_monitor_message_threads
 UNION ALL
 SELECT activity_id, 'runtime_work'::text, runtime_work_id
 FROM lisa.activity_monitor_runtime_work_threads
+UNION ALL
+SELECT activity_id, 'runtime_event'::text, runtime_event_id
+FROM lisa.activity_monitor_runtime_event_threads
 UNION ALL
 SELECT activity_id, 'carrier_message'::text, carrier_message_id
 FROM lisa.activity_monitor_carrier_user_messages;

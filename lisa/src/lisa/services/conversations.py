@@ -53,8 +53,13 @@ async def run_turn_without_releasing_lock_early(run_turn: Callable, **kwargs: An
 
 
 class ConversationService:
-    def __init__(self, repository: FileConversationRepository):
+    def __init__(
+        self, repository: FileConversationRepository, activity_store=None,
+        owner_user_ids: frozenset[str] = frozenset(),
+    ):
         self.repository = repository
+        self.activity_store = activity_store
+        self.owner_user_ids = owner_user_ids
 
     def list_conversations(self, workspace_id: str) -> list[dict[str, Any]]:
         records = []
@@ -113,6 +118,7 @@ class ConversationService:
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
         confirmed_policy_id: str | None = None,
+        confirmed_policy_deletion_id: str | None = None,
         confirmed_followup_id: str | None = None,
     ) -> dict[str, Any]:
         directory = self.repository.conversation_directory(workspace_id, conversation_id)
@@ -132,12 +138,36 @@ class ConversationService:
                     slack_channel_id=slack_channel_id,
                     slack_thread_ts=slack_thread_ts,
                     confirmed_policy_id=confirmed_policy_id,
+                    confirmed_policy_deletion_id=confirmed_policy_deletion_id,
                     confirmed_followup_id=confirmed_followup_id,
                 )
             except RuntimeError as error:
                 raise ConversationTurnError(503, str(error)) from error
             except Exception as error:
                 raise ConversationTurnError(502, "Lisa could not complete this turn") from error
+            if (
+                self.activity_store is not None
+                and turn.activity_id
+                and turn_source in {"web", "slack"}
+                and actor_id in self.owner_user_ids
+                and self.activity_store.activity_exists(turn.activity_id)
+            ):
+                previous_ids = {str(message.get("id")) for message in previous_messages}
+                new_messages = [
+                    {
+                        "id": str(message.get("id", "")),
+                        "role": message.get("role"),
+                        "text": message.get("text"),
+                        "sequence": message.get("sequence", 0),
+                    }
+                    for message in turn.messages
+                    if str(message.get("id")) not in previous_ids
+                    and message.get("role") in {"user", "assistant"}
+                ]
+                if new_messages or turn.activities:
+                    self.activity_store.record_conversation_trajectory(
+                        turn.activity_id, new_messages, turn.activities,
+                    )
             if metadata["title"] == "Lisa conversation":
                 metadata["title"] = "Lisa"
             hidden_ids = {

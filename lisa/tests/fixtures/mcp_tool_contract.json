@@ -40,6 +40,26 @@
     }
   },
   {
+    "name": "attach_chat_turn_to_activity",
+    "description": "Link this web or Slack chat turn to the activity Lisa selected.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "activity_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "activity_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    }
+  },
+  {
     "name": "complete_activity",
     "description": "Finish a queued Lisa activity with its outcome and final summary.",
     "inputSchema": {
@@ -183,6 +203,26 @@
         "title",
         "activity_type",
         "source"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    }
+  },
+  {
+    "name": "delete_policy",
+    "description": "Delete a policy only after its exact ID is confirmed by an authorized owner.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "policy_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_id"
       ],
       "type": "object"
     },
@@ -1248,7 +1288,7 @@
   },
   {
     "name": "write_policy",
-    "description": "Create a policy or write a readable revision such as P1.2.1.",
+    "description": "Create a policy or update the existing row selected by its readable ID.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

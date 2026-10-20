@@ -9,6 +9,21 @@ Explorer is the self-hosted session and trace UI for thelake. Source lives in
 embeds its SPA into the binary; thelake serves it at `/explorer/`. Lisa is a
 separate app served at `/lisa/` from its own embedded SPA bundle and chat shell.
 
+The session browser follows the `sp-llm/apps/explorer` session area: the same
+Softprobe navigation, top bar, session table hierarchy, and two-pane detail
+view with the trajectory on the left and selected span details on the right.
+The list keeps the source Session, Agent, Date, Activity, Finding, and open-row
+columns; Finding is shown as unavailable until TheLake has a findings API. It
+uses TheLake's `/v1` API and exposes only features backed by those endpoints.
+Session detail includes trace/span metadata, input and output, attributes,
+events, scores, and human verdict controls. Trajectory derives user prompts and
+LLM calls from span data; Trace preserves the raw span hierarchy. Evidence
+explains that finding data is not available from TheLake yet. Session selection
+is reflected in the URL and works
+with refresh and browser history. The Lisa link opens Lisa's independent app.
+The React package scopes its styles to the Explorer root; standalone document
+styles live in the standalone entry.
+
 For the complete local Explorer and Lisa environment, use
 [Local Lisa development](local-development.md). It uses one root Compose stack
 and provisions durable policy storage for Lisa.
@@ -177,8 +192,9 @@ authenticated activity feed. Selecting an activity opens a detail dialog with
 its ordered timeline and an activity summary; selecting a timeline step opens
 that step's detail. Escape or the close
 button returns focus to the activity row. Rules are a read-only view of the
-policy catalog; create and revise policies through Lisa's chat. Approved
-revisions remain active until the owner approves the new readable policy ID. Triage / judges shows
+policy catalog; create and update policies through Lisa's chat. Updates keep the
+same readable policy ID and row. Changing an approved policy makes that same
+row unapproved until its owner approves the same ID. Triage / judges shows
 evaluation activities and their recorded timelines; triage routing is not a
 pass/fail verdict. The Identity tab identifies the current runtime prompt and
 distinguishes conversation context from durable policy and activity records.
@@ -195,10 +211,10 @@ viewport and device scale when changing this layout.
   telemetry go to the configured model provider. Sending a message proceeds
   without a separate checkbox. Lisa masks common credential patterns; general
   personal data is not redacted.
-- Ask Lisa to create or revise a named policy with criteria. She returns a
+- Ask Lisa to create a new policy or update an existing policy by its exact ID. She returns a
   readable policy ID and approval state. Send `Approve policy: <policy_id>` as
-  a standalone owner message to approve that revision from chat.
-  Approved rules are eligible immediately; there is no separate activation UI.
+  a standalone owner message to approve that policy from chat.
+  Approved rules are eligible immediately.
   Lisa's schedule reads policy and bounded session detail, builds a compact
   trajectory, then sends every approved candidate policy to OpenAI Decisions.
   Decisions classifies each policy as `suspected_violation`,
@@ -245,6 +261,8 @@ import "@softprobe/thelake-explorer/style.css";
 |---------------|---------|
 | `config.apiBasePath` | API root (no trailing slash required) |
 | `config.auth.headers` | Optional per-request auth headers |
+| `config.workspaceName` | Optional embedding-provided workspace label (defaults to “Workspace”) |
+| `config.workspaceStatus` | Optional embedding-provided connection label (defaults to “Connected”) |
 | `config.fetch` | Optional custom `fetch` |
 | `className` | Optional CSS class on the root |
 | `pageSize` | Session list page size (default 50) |

@@ -295,43 +295,60 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
 
   const range = page.getByRole('combobox', { name: 'Session time range' });
+  const sessionLink = (sessionId: string) => page.locator(`a[href="?session=${sessionId}"]`);
   await range.selectOption('1');
-  await expect(page.getByRole('button', { name: new RegExp(sessions.alpha) })).toBeVisible();
-  await expect(page.getByRole('button', { name: new RegExp(sessions.beta) })).toBeVisible();
-  await expect(page.getByRole('button', { name: new RegExp(sessions.old) })).toHaveCount(0);
+  await expect(sessionLink(sessions.alpha)).toBeVisible();
+  await expect(sessionLink(sessions.beta)).toBeVisible();
+  await expect(sessionLink(sessions.old)).toHaveCount(0);
   await range.selectOption('7');
-  await expect(page.getByRole('button', { name: new RegExp(sessions.old) })).toBeVisible();
+  await expect(sessionLink(sessions.old)).toBeVisible();
 
-  const sessionFilter = page.getByRole('textbox', { name: 'Filter sessions' });
-  await sessionFilter.fill(sessions.alpha);
-  await expect(page.getByRole('button', { name: new RegExp(sessions.alpha) })).toBeVisible();
-  await expect(page.getByRole('button', { name: new RegExp(sessions.beta) })).toHaveCount(0);
-  await sessionFilter.fill('');
+  await page.getByRole('button', { name: 'Filter' }).click();
+  const agentFilter = page.getByRole('combobox', { name: 'Filter Sessions by Agent' });
+  await agentFilter.selectOption({ label: 'agent-beta-e2e' });
+  await expect(sessionLink(sessions.beta)).toBeVisible();
+  await expect(sessionLink(sessions.alpha)).toHaveCount(0);
+  await expect(sessionLink(sessions.old)).toHaveCount(0);
 
-  const agentFilter = page.getByRole('textbox', { name: 'Filter by agent' });
-  await agentFilter.fill('agent-beta-e2e');
-  await expect(page.getByRole('button', { name: new RegExp(sessions.beta) })).toBeVisible();
-  await expect(page.getByRole('button', { name: new RegExp(sessions.alpha) })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: new RegExp(sessions.old) })).toHaveCount(0);
-
-  await agentFilter.fill('');
-  const alphaButton = page.getByRole('button', { name: new RegExp(sessions.alpha) });
-  await expect(alphaButton).toContainText('3 spans · 0 errors');
-  await expect(alphaButton).toContainText('gpt-e2e');
-  await alphaButton.click();
+  await page.getByRole('button', { name: 'Clear' }).click();
+  const alphaLink = sessionLink(sessions.alpha);
+  const alphaRow = page.locator('tr').filter({ has: alphaLink });
+  await expect(alphaRow.getByRole('cell').nth(3)).toContainText('3 nodes');
+  await expect(alphaRow.getByRole('cell').nth(4)).toHaveText('—');
+  await expect(page.getByRole('columnheader', { name: 'FINDING' })).toBeVisible();
+  await alphaLink.click();
 
   await expect(page.getByRole('heading', { name: `Session ${sessions.alpha}` })).toBeVisible();
-  await expect(page.getByRole('heading', { name: /Trace [a-f0-9]+/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: /lookup_customer/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: /reasoning/ })).toBeVisible();
-  await page.getByRole('button', { name: /lookup_customer/ }).click();
-  await expect(page.locator('.tle-payload').getByText('{"customer_id":"cust-e2e-42"}', { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`session=${sessions.alpha}`));
+  await page.goBack();
+  await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
+  await page.goForward();
+  await expect(page.getByRole('heading', { name: `Session ${sessions.alpha}` })).toBeVisible();
+  await openDetails(page, 'Session details');
+  await expect(page.getByText('Trace ID', { exact: true })).toBeVisible();
+  const spanTimeline = page.getByRole('region', { name: 'Session traces and spans' });
+  await expect(page.getByRole('tab', { name: 'Trajectory' })).toHaveAttribute('aria-selected', 'true');
+  await expect(spanTimeline.getByRole('button', { name: /lookup_customer/ })).toBeVisible();
+  await expect(spanTimeline.locator('.trajectory-node-select').filter({ hasText: 'LLM call' })).toBeVisible();
+  await expect(spanTimeline.getByText('Decide which plan applies to this customer')).toBeVisible();
+  await page.getByRole('tab', { name: 'Trace' }).click();
+  await expect(page.getByRole('tab', { name: 'Trace' })).toHaveAttribute('aria-selected', 'true');
+  await expect(spanTimeline.getByRole('button', { name: /reasoning/ })).toBeVisible();
+  await page.getByRole('tab', { name: 'Evidence' }).click();
+  await expect(page.getByRole('tab', { name: 'Evidence' })).toHaveAttribute('aria-selected', 'true');
+  await expect(spanTimeline.getByText('Finding evidence is unavailable')).toBeVisible();
+  await page.getByRole('tab', { name: 'Trajectory' }).click();
+  await spanTimeline.getByRole('textbox', { name: 'Search spans' }).fill('lookup_customer');
+  await expect(spanTimeline.getByRole('button', { name: /reasoning/ })).toHaveCount(0);
+  await spanTimeline.getByRole('textbox', { name: 'Search spans' }).fill('');
+  await spanTimeline.getByRole('button', { name: /lookup_customer/ }).click();
+  await expect(page.locator('.payload-grid').getByText('{"customer_id":"cust-e2e-42"}', { exact: true })).toBeVisible();
   await openDetails(page, 'Attributes and events');
   await expect(page.getByText('tool.started')).toBeVisible();
-  await page.getByRole('button', { name: /reasoning/ }).click();
+  await spanTimeline.locator('.trajectory-node-select').filter({ hasText: 'LLM call' }).click();
   await openDetails(page, 'Attributes and events');
   await expect(page.getByText('Matched the active subscription.')).toBeVisible();
-  await expect(page.locator('.tle-payload').getByText('The customer is on the pro plan.', { exact: true })).toBeVisible();
+  await expect(page.locator('.payload-grid').getByText('The customer is on the pro plan.', { exact: true })).toBeVisible();
 });
 
 test('approved policy in Lisa chat judges a live agent and stores the policy criteria', async ({ page, request }) => {
@@ -344,6 +361,7 @@ test('approved policy in Lisa chat judges a live agent and stores the policy cri
   await expect(page.getByRole('button', { name: 'Activate', exact: true })).toHaveCount(0);
   await expect(page.getByText('Connected', { exact: true })).toBeVisible();
   await expect(page.getByText(/Messages and recent workspace evidence are sent to your configured model provider/)).toBeVisible();
+  await expect(page.getByText('No activities yet.')).toBeVisible();
   const composer = page.getByRole('textbox', { name: 'Message Lisa' });
   await expect(composer).toBeEnabled({ timeout: 30_000 });
 
@@ -366,6 +384,18 @@ test('approved policy in Lisa chat judges a live agent and stores the policy cri
   const transcript = await page.getByRole('log', { name: 'Lisa conversation' }).innerText();
   const policyId = transcript.match(/\bP1\.\d+(?:\.\d+)?\b/)?.[0];
   expect(policyId).toBeTruthy();
+  await expect(page.locator('.tle-lisa-activity-card').first()).toBeVisible({ timeout: 30_000 });
+  const activityDialog = page.locator('.tle-lisa-activity-dialog');
+  await page.locator('.tle-lisa-activity-card').first().click();
+  await expect(activityDialog).toBeVisible();
+  const activityTimeline = activityDialog.getByRole('navigation', { name: 'Activity timeline' });
+  await activityTimeline.getByRole('button', { name: /You: Create an unapproved agent policy/ }).click();
+  await expect(activityDialog.locator('.tle-lisa-activity-dialog-summary p').first())
+    .toContainText(/Create an unapproved agent policy/);
+  await activityTimeline.getByRole('button', { name: /Lisa used write_policy/ }).click();
+  await expect(activityDialog.locator('.tle-lisa-activity-dialog-summary p').first())
+    .toContainText(policyName);
+  await activityDialog.getByRole('button', { name: 'Close activity details' }).click();
 
   await send(`Find the policy named "${policyName}" for "${agentName}". ` +
     'Use list_policies and read_policy, and report its readable ID, criteria, and approval state.');
@@ -375,22 +405,32 @@ test('approved policy in Lisa chat judges a live agent and stores the policy cri
 
   await send(`Approve policy: ${policyId}`);
   await expect(page.locator('.tle-lisa-tool summary').filter({ hasText: 'Approve policy' })).toBeVisible();
+  await expect(page.locator('.tle-lisa-activity-card').first()).toBeVisible({ timeout: 30_000 });
 
   await send(`Update the approved policy ${policyId} named "${policyName}" for "${agentName}". ` +
     'Add the requirement to record the customer\'s explicit confirmation before issuing a refund. ' +
-    'Use write_policy so this is a new readable revision awaiting approval, then show its ID.');
-  const revisionId = `${policyId}.1`;
-  await expect(page.getByRole('log', { name: 'Lisa conversation' })).toContainText(revisionId, { timeout: 240_000 });
+    'Use write_policy to update this policy in place, leave it unapproved, and show its unchanged ID.');
+  await expect(page.getByRole('log', { name: 'Lisa conversation' })).toContainText(policyId!, { timeout: 240_000 });
+  await expect(page.locator('.tle-lisa-activity-card').first()).toBeVisible({ timeout: 30_000 });
+  await page.locator('.tle-lisa-activity-card').first().click();
+  await expect(activityDialog).toBeVisible();
+  const updateTimeline = activityDialog.getByRole('navigation', { name: 'Activity timeline' });
+  await updateTimeline.getByRole('button', { name: /You: Update the approved policy/ }).click();
+  await expect(activityDialog.locator('.tle-lisa-activity-dialog-summary p').first())
+    .toContainText(/Update the approved policy/);
+  await updateTimeline.getByRole('button', { name: /Lisa used write_policy/ }).click();
+  await expect(activityDialog.locator('.tle-lisa-activity-dialog-summary p').first())
+    .toContainText(policyId!);
+  await activityDialog.getByRole('button', { name: 'Close activity details' }).click();
   await send(`Find the policy named "${policyName}" for "${agentName}" again. ` +
-    'Use list_policies and read_policy, and report the approved active ID and pending revision ID.');
+    'Use list_policies and read_policy, and report its exact ID and approval state.');
   policyTranscript = await page.getByRole('log', { name: 'Lisa conversation' }).innerText();
   expect(policyTranscript).toContain(policyId!);
-  expect(policyTranscript).toContain(revisionId);
-  expect(policyTranscript).toMatch(/approved: yes|approved\s+active/i);
-  expect(policyTranscript).toMatch(/approved: no|pending revision/i);
+  expect(policyTranscript).toMatch(/approved: no|not approved/i);
 
-  await send(`Approve policy: ${revisionId}`);
+  await send(`Approve policy: ${policyId}`);
   await expect(page.locator('.tle-lisa-tool summary').filter({ hasText: 'Approve policy' })).toHaveCount(2);
+  await expect(page.locator('.tle-lisa-activity-card').first()).toBeVisible({ timeout: 30_000 });
 
   const sessionId = runRefundAgent(agentName);
   type PolicyScore = { name: string; source?: string; string_value?: string; comment?: string;
@@ -404,7 +444,7 @@ test('approved policy in Lisa chat judges a live agent and stores the policy cri
   }, { timeout: 240_000, intervals: [1_000, 2_000, 4_000] }).toBe('fail');
   const failure = scores.find((score) => score.name === policyName && score.string_value === 'fail')!;
   expect(failure.config_id).toBeNull();
-  expect(failure.metadata?.policy_id).toBe(revisionId);
+  expect(failure.metadata?.policy_id).toBe(policyId);
   expect(failure.metadata?.criteria).toMatch(/eligib/i);
   expect(failure.comment).toMatch(/eligib/i);
   expect(JSON.parse(failure.metadata?.references ?? '[]')).not.toHaveLength(0);

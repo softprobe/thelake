@@ -88,8 +88,9 @@ def main() -> int:
                     "LISA_LOCAL_ACTOR_ID": "e2e-owner",
                     "LISA_OWNER_USER_IDS": "e2e-owner",
                     "LISA_CORS_ORIGINS": f"http://127.0.0.1:{lake_port}",
-                    "LISA_QA_ENABLED": "1",
-                    "LISA_QA_CRON": "* * * * *",
+                    # The browser scenario exercises user initiated chat. Keep
+                    # scheduled QA out of its shared conversation transcript.
+                    "LISA_QA_ENABLED": "0",
                     "LISA_SLACK_BOT_TOKEN": "",
                     "LISA_SLACK_CHANNEL_ID": "",
                 }

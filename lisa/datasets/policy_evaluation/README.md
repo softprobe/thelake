@@ -20,7 +20,7 @@ provenance, not a different format. API contract snapshots remain under
 IDs are readable strings: for example `S017` and `P1.2`. A policy ID follows
 its policy document section. Changing dataset contents means updating the file
 and its manifest SHA-256 digest deliberately. Annotation identity is the pair
-it labels; there are no separate annotation IDs or revision suffixes.
+it labels.
 
 ## Annotations
 

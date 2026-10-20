@@ -4,7 +4,7 @@ GRANT USAGE ON SCHEMA lisa TO {writer}, {reader};
 
 GRANT SELECT, INSERT, UPDATE ON lisa.activities TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.evaluation_runs TO {writer};
-GRANT SELECT, INSERT ON lisa.evaluation_triage TO {writer};
+GRANT SELECT, INSERT, DELETE ON lisa.evaluation_triage TO {writer};
 GRANT SELECT, INSERT ON lisa.activity_events TO {writer};
 GRANT SELECT, INSERT ON lisa.activity_context TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_feed_entries TO {writer};
@@ -14,13 +14,13 @@ GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_thread_actions TO {writer}
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_agent_threads TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_message_threads TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_runtime_work_threads TO {writer};
+GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_runtime_event_threads TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_carrier_user_messages TO {writer};
 GRANT SELECT ON lisa.readable_activity_monitor_links TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.approval_requests TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_followups TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.score_outbox TO {writer};
-GRANT SELECT, INSERT, UPDATE ON lisa.policies TO {writer};
-GRANT USAGE, SELECT ON SEQUENCE lisa.policy_id_seq TO {writer};
+GRANT SELECT, INSERT, UPDATE, DELETE ON lisa.policies TO {writer};
 GRANT SELECT ON lisa.deployment TO {writer};
 GRANT SELECT ON lisa.readable_activities TO {reader};
 GRANT SELECT ON lisa.readable_activity_events TO {reader};
@@ -34,5 +34,5 @@ GRANT SELECT ON lisa.readable_activity_followups TO {reader};
 GRANT SELECT ON lisa.readable_evaluations TO {reader};
 GRANT SELECT ON lisa.readable_evaluation_triage TO {reader};
 GRANT SELECT (id, scope, target_agent_name, name, criteria, approved,
-              created_at, updated_at, archived_at) ON lisa.policies TO {reader};
+              created_at, updated_at) ON lisa.policies TO {reader};
 GRANT SELECT ON lisa.readable_deployment TO {reader};

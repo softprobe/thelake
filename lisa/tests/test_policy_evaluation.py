@@ -27,7 +27,7 @@ def test_only_explicitly_approved_rules_can_run(services, monkeypatch, approval)
         services.evaluations._evaluate_session("agent", "Rule", "session")
 
 
-def test_pending_agent_revision_does_not_pause_workspace_policy(services):
+def test_unapproved_agent_policy_does_not_pause_workspace_policy(services):
     save_rule(services)
     save_rule(services, "no", scope="agent")
     assert services.policy_service.approved_rules("agent")[0].scope == "workspace"
@@ -47,7 +47,7 @@ def test_approval_in_prose_or_code_is_not_metadata(services):
     assert services.policy_service.approved_rules("agent") == []
 
 
-def test_run_stores_policy_id_without_a_registry(services, monkeypatch):
+def test_run_stores_policy_id_on_the_score(services, monkeypatch):
     save_rule(services)
     calls, judged = [], []
     scores = []

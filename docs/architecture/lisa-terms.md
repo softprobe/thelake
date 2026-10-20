@@ -11,7 +11,7 @@ the same session and policy IDs as the runtime contract.
 | **Session** | One user-facing conversation or job in TheLake, identified by `session_id`. The value is a string resolved from session telemetry; TheLake does not require UUIDs or a particular length. If no explicit session ID is present, TheLake may fall back to `trace_id` for correlation, which does not make it an explicit product session. | `S017` |
 | **Trajectory** | The ordered user, assistant, context, and tool events Lisa projects from a session's spans for triage and judging. It is data derived from a session, not a second object with its own ID. | Session `S017` projects to a trajectory; Lisa still identifies the input as `S017`. |
 | **Trace** | A group of spans within a session that share a `trace_id`. A session can contain more than one trace. Trace IDs are evidence references, not the evaluation input's ID. | `trace-8` belongs to session `S017`. |
-| **Policy** | One rule record in Lisa's policy catalog. Its readable `policy_id` is the section ID used in Lisa, such as `P1.2`; a revised rule gets a child ID such as `P1.2.1`. Approval determines whether Lisa may evaluate it. | `P1.2` — “Confirm before issuing a refund.” |
+| **Policy** | One rule record in Lisa's policy catalog. Its readable `policy_id` is the section ID used in Lisa, such as `P1.2` or `P1.2.1`; each ID is a distinct policy. Updates keep the same ID and row. Approval determines whether Lisa may evaluate it. | `P1.2` — “Confirm before issuing a refund.” |
 | **Annotation** | One dataset judgment for a session-policy pair. It has no separate identifier. | (`S017`, `P1.2`) is labeled `violation`. |
 | **Runtime evaluation pair** | The unit Lisa evaluates: `(session_id, policy_id)`. | (`S017`, `P1.2`) |
 | **Dataset pair** | The same pair key used for evaluation: `(session_id, policy_id)`. | (`S017`, `P1.2`) |
@@ -19,7 +19,7 @@ the same session and policy IDs as the runtime contract.
 
 Use `session_id` for the runtime evaluation input's ID. Do not introduce
 `trajectory_id` for the same session. Use `policy_id` for the policy's readable
-document section ID. Assign revised criteria a new readable ID so the
+document section ID. Keep the readable ID when updating a policy so the
 `(session_id, policy_id)` triage cache cannot apply an old decision to changed
 criteria. An activity ID identifies a Lisa action; it is not the
 runtime evaluation pair ID. Evidence hashes may detect changed

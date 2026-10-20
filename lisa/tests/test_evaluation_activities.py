@@ -895,7 +895,15 @@ def test_tracked_retry_releases_lease_when_policy_is_removed_after_interrupt(
         {"name": row.name, "criteria": row.criteria, "approved": row.approved}
         for row in current
     ]
-    policy_repository.seed_scope("workspace", "", expected, [])
+    policy_repository.seed_scope(
+        "workspace",
+        "",
+        expected,
+        [
+            {"name": row["name"], "criteria": row["criteria"], "approved": False}
+            for row in expected
+        ],
+    )
     with pytest.raises(ValueError, match="No approved policy"):
         services.evaluations._evaluate_session("agent", "Rule", session_id)
     run = store.get_evaluation(created[0].id)

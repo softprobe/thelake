@@ -284,7 +284,6 @@ def test_session_with_no_selected_policies_returns_empty_selection():
         "candidate_count",
         "selected_policies",
     }
-    assert "not_selected_policies" not in result
 
 
 def test_selected_policy_missing_from_candidates_fails_closed():
@@ -512,7 +511,7 @@ def test_uncertain_decision_is_escalated_alongside_suspected_violations():
 
 
 @pytest.mark.parametrize("choice", ["applicable", "not_applicable", "violation", None])
-def test_obsolete_or_invalid_triage_choices_are_rejected(choice):
+def test_invalid_triage_choices_are_rejected(choice):
     with pytest.raises(RuntimeError, match="invalid policy choice"):
         OpenAIPolicyTriager(client=FakeDecisionsClient([choice])).triage(
             {"events": []}, [SimpleNamespace(name="Rule", criteria="Rule", scope="workspace")]

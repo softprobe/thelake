@@ -19,8 +19,7 @@ The `lisa.policies` table is the single source of truth. Each record has a
 stable string ID, scope, target agent, name, criteria, approval, and timestamps.
 Workspace rules apply across the workspace; an agent's own rule overrides a
 shared rule of the same name. Lisa's typed tools present and accept readable
-Markdown. The database is the only policy source; files from earlier setups
-are not read or listed.
+Markdown. The database is the only policy source.
 
 ```md
 ## Check eligibility before issuing a refund
@@ -33,19 +32,24 @@ Wait for customer confirmation before submitting an eligible refund.
 Lisa's readable policy view shows a human-readable title, its readable ID, and
 an `approved: yes/no` line from the row's approval column alongside the
 requirements/source context. Only an approved agent rule shadows an approved
-workspace rule of the same name; a pending revision leaves the active rule in
-effect. Approval examples inside prose or code fences do not enable a rule.
+workspace rule of the same name. Approval examples inside prose or code fences
+do not enable a rule.
 
 Lisa stores policies directly in `lisa.policies`. A new rule is an unapproved
-row with a readable ID such as `P1.2`. Revising an approved rule creates a
-child row such as `P1.2.1`; the approved parent stays active until the owner
-sends the exact standalone command `Approve policy: P1.2.1`. The authenticated
-owner and exact policy ID are supplied by the chat runtime. Approval sets the
-row's `approved` column and archives the prior approved revision. The policy row is the lifecycle record. Scheduled turns cannot write or
-approve policy.
+row with a readable ID such as `P1.2`. Each ID, including `P1.2.1`, identifies
+an independent policy section. Updating an existing rule requires its exact ID
+and changes that same row.
+Changing an approved rule sets that row's `approved` column to false until the
+owner sends the exact standalone command `Approve policy: P1.2`. The
+authenticated owner and exact policy ID are supplied by the chat runtime.
+An owner can delete a rule with the exact standalone command
+`Delete policy: P1.2`. Deletion removes the policy row and cached triage
+decisions, but Lisa refuses when saved evaluation runs refer to that policy so
+historical results remain intact. Scheduled turns cannot write, approve, or
+delete policy.
 
 Traces show behavior, not business intent. Lisa never silently converts observed
-behavior into approved policy. Unapproved policy revisions can be discussed in reports,
+behavior into approved policy. Unapproved policies can be discussed in reports,
 but cannot drive policy verdicts. Scheduled turns cannot write policy.
 
 ## Evaluation terms

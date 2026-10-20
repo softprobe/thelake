@@ -246,6 +246,18 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
     setShowActionDetail(false);
   }, []);
 
+  const refreshActivityDetail = useCallback(async (activityId: string) => {
+    const requestId = activityDetailRequestId.current;
+    try {
+      const detail = await api.getLisaActivity(activityId);
+      if (requestId !== activityDetailRequestId.current) return;
+      setSelectedActivity(detail);
+      if (!showActionDetail) setSelectedActionSeq(detail.actions.at(-1)?.seq);
+    } catch {
+      // Keep the last rendered detail visible; the next open retries the request.
+    }
+  }, [api, showActionDetail]);
+
   useEffect(() => {
     if (!selectedActivity) return;
     const dialog = activityDialogRef.current;
@@ -370,6 +382,9 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
           updated_at: new Date().toISOString(),
         }
         : item));
+      void refreshFeed();
+      void refreshFeed("policy_evaluation");
+      if (selectedActivity) void refreshActivityDetail(selectedActivity.activity.id);
     } catch (cause) {
       setApiConnected(false);
       setConversations((current) => current.map((item) => item.conversation_id === conversationId
@@ -379,7 +394,7 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
     } finally {
       setSending(false);
     }
-  }, [active, api, sending]);
+  }, [active, api, refreshActivityDetail, refreshFeed, selectedActivity, sending]);
 
   const runtime = useExternalStoreRuntime({
     messages: runtimeMessages,
@@ -509,7 +524,7 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
               <small>{policy.scope === "agent" ? `Agent · ${policy.target_agent_name || "unnamed"}` : "Workspace"} · {policy.id}</small>
             </article>)}
             {nextPolicyOffset !== null && <button className="tle-lisa-load-more" onClick={() => void refreshPolicies(nextPolicyOffset, true)} disabled={policiesLoading}>Load more rules</button>}
-            <p className="tle-lisa-panel-note">Create and revise policies in Lisa chat. Approve a pending revision with its exact readable policy ID.</p>
+            <p className="tle-lisa-panel-note">Create and update policies in Lisa chat. Approve an updated policy with its unchanged readable policy ID.</p>
           </>}
           {activePanel === "identity" && <div className="tle-lisa-identity">
             <div className="tle-lisa-identity-intro"><LisaIcon name="identity" size={18} /><div><h3>Identity & memory</h3><p>How Lisa is configured in this workspace</p></div></div>

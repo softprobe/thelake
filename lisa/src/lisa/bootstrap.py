@@ -15,6 +15,7 @@ from .repositories.policies import InMemoryPolicyRepository, PostgresPolicyRepos
 from .repositories.slack_events import SlackEventRepository
 from .runtime import (
     confirmed_followup_id,
+    confirmed_policy_deletion_id,
     confirmed_policy_id,
     run_turn,
 )
@@ -55,10 +56,21 @@ class WorkspaceServices:
 def build_services(context: WorkspaceContext) -> WorkspaceServices:
     client = TheLakeClient(context)
     conversation_repository = FileConversationRepository(context.data_dir)
-    conversations = ConversationService(conversation_repository)
+    activities = (
+        PostgresActivityStore(context.database_url, context.workspace_id())
+        if context.database_url
+        else None
+    )
+    conversations = ConversationService(
+        conversation_repository,
+        activity_store=activities,
+        owner_user_ids=context.owner_user_ids,
+    )
     slack_event_service = SlackEventService(
         conversation_repository,
         SlackEventRepository(conversation_repository),
+        activity_store=activities,
+        owner_user_ids=context.owner_user_ids,
     )
     slack_worker = SlackEventWorker(
         slack_event_service,
@@ -66,6 +78,7 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         run_turn,
         confirmed_policy_id,
         confirmed_followup_id,
+        confirmed_policy_deletion_id,
     )
     scheduled_qa = ScheduledQAService(conversation_repository, conversations)
     if context.database_url:
@@ -86,11 +99,6 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         context,
         SlackClient(context.slack_token),
         repository=NotificationReceiptRepository(context),
-    )
-    activities = (
-        PostgresActivityStore(context.database_url, context.workspace_id())
-        if context.database_url
-        else None
     )
     database_reader = (
         LisaDatabaseReader(context.database_read_url, context.workspace_id())

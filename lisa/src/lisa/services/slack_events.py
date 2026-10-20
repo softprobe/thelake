@@ -11,7 +11,9 @@ from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ..repositories.conversations import FileConversationRepository
+from ..repositories.activities import PostgresActivityStore
 from ..repositories.slack_events import SlackEventRepository
+from ..runtime import selected_chat_activity_id
 from ..security import redact_text
 from ..slack import SlackClient
 
@@ -23,9 +25,13 @@ class SlackEventService:
         self,
         conversations: FileConversationRepository,
         events: SlackEventRepository,
+        activity_store: PostgresActivityStore | None = None,
+        owner_user_ids: frozenset[str] = frozenset(),
     ):
         self.conversations = conversations
         self.events = events
+        self.activity_store = activity_store
+        self.owner_user_ids = owner_user_ids
 
     def recover_interrupted(self, workspace_id: str) -> None:
         for path in self.events.pending_paths(workspace_id):
@@ -61,6 +67,7 @@ class SlackEventService:
         run_turn: Callable,
         confirm_policy_id: Callable[[str], str | None],
         post_reply: Callable[[str, str, str], None],
+        confirm_policy_deletion_id: Callable[[str], str | None] | None = None,
         confirm_followup_id: Callable[[str], str | None] | None = None,
     ) -> None:
         async with self.conversations.lock_for(path):
@@ -109,10 +116,37 @@ class SlackEventService:
                         turn_source="slack",
                         actor_id=str(receipt.get("actor_id", "")),
                         confirmed_policy_id=confirm_policy_id(receipt["text"]),
+                        confirmed_policy_deletion_id=(confirm_policy_deletion_id or (lambda _text: None))(receipt["text"]),
                         confirmed_followup_id=(confirm_followup_id or (lambda _text: None))(receipt["text"]),
                         slack_channel_id=channel_id,
                         slack_thread_ts=thread_ts,
                     )
+                    activity_id = turn.activity_id or selected_chat_activity_id(turn.activities)
+                    is_owner = str(receipt.get("actor_id", "")) in self.owner_user_ids
+                    if (
+                        is_owner
+                        and self.activity_store is not None
+                        and activity_id
+                        and self.activity_store.activity_exists(activity_id)
+                    ):
+                        previous_ids = {
+                            str(message.get("id"))
+                            for message in metadata.get("messages", [])
+                        }
+                        new_messages = [
+                            {
+                                "id": str(message.get("id", "")),
+                                "role": message.get("role"),
+                                "text": message.get("text"),
+                                "sequence": message.get("sequence", 0),
+                            }
+                            for message in turn.messages
+                            if str(message.get("id")) not in previous_ids
+                            and message.get("role") in {"user", "assistant"}
+                        ]
+                        self.activity_store.record_conversation_trajectory(
+                            activity_id, new_messages, turn.activities,
+                        )
                     latest_reply = next(
                         (
                             message.get("text", "")
@@ -149,12 +183,14 @@ class SlackEventWorker:
         run_turn: Callable,
         confirm_policy_id: Callable[[str], str | None],
         confirm_followup_id: Callable[[str], str | None] | None = None,
+        confirm_policy_deletion_id: Callable[[str], str | None] | None = None,
     ):
         self.events = events
         self.slack = slack
         self.run_turn = run_turn
         self.confirm_policy_id = confirm_policy_id
         self.confirm_followup_id = confirm_followup_id or (lambda _text: None)
+        self.confirm_policy_deletion_id = confirm_policy_deletion_id or (lambda _text: None)
         self._tasks: dict[str, asyncio.Task] = {}
 
     async def run_forever(self, workspace_id: str, interval: float = 1.0) -> None:
@@ -176,6 +212,7 @@ class SlackEventWorker:
             run_turn=self.run_turn,
             confirm_policy_id=self.confirm_policy_id,
             confirm_followup_id=self.confirm_followup_id,
+            confirm_policy_deletion_id=self.confirm_policy_deletion_id,
             post_reply=lambda channel, thread, text: self.slack.post_message(
                 channel, text, thread, timeout=15
             ),

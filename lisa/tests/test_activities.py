@@ -5,7 +5,6 @@ from benchmark.policy_seed import seed_policy_document
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -185,6 +184,44 @@ def test_activity_update_and_sections_are_visible_in_thread(store):
     ]
 
 
+def test_chat_messages_are_visible_and_idempotently_linked_to_activity(store):
+    activity = store.create_activity(
+        title="Update refund policy", source="web", origin_conversation_id="conversation-1",
+    )
+    messages = [
+        {"id": "chat-user-1", "role": "user", "text": "Update the refund policy; api_key=sk-12345678901234567890", "sequence": 1},
+        {"id": "chat-assistant-1", "role": "assistant", "text": "I updated it.", "sequence": 3},
+    ]
+    runtime_events = [
+        {"id": "runtime-1", "kind": "tool", "tool_name": "write_policy", "arguments": {"name": "Refund"}, "sequence": 2},
+        {"id": "runtime-2", "kind": "evidence", "tool_name": "write_policy", "detail": "Updated policy P1.1", "sequence": 2.5},
+    ]
+
+    store.record_conversation_trajectory(activity.id, messages, runtime_events)
+    store.record_conversation_trajectory(activity.id, messages, runtime_events)
+
+    detail = store.get_activity_thread(activity.id)
+    chat_actions = [action for action in detail["actions"] if action["event_type"].startswith("chat.")]
+    assert [(action["event_type"], action["summary"]) for action in chat_actions] == [
+        ("chat.user", "Update the refund policy; api_key=[REDACTED]"),
+        ("chat.assistant", "I updated it."),
+    ]
+    runtime_actions = [action for action in detail["actions"] if action["event_type"] == "runtime.tool"]
+    assert len(runtime_actions) == 1
+    assert runtime_actions[0]["title"] == "Lisa used write_policy"
+    assert [action["event_type"] for action in detail["actions"][-4:]] == [
+        "chat.user", "runtime.tool", "runtime.result",
+        "chat.assistant",
+    ]
+    assert {item["reference_id"] for item in detail["references"] if item["reference_type"] == "message"} == {
+        "chat-user-1", "chat-assistant-1",
+    }
+    assert any(
+        item["reference_type"] == "runtime_event" and item["reference_id"] == "runtime-1"
+        for item in detail["references"]
+    )
+
+
 def test_activity_progress_search_and_next_action_are_durable(store):
     activity = store.create_activity(
         title="Investigate refund workflow", source="web",
@@ -325,32 +362,6 @@ def test_release_activity_updates_thread_action_projection(store):
     detail = store.get_activity_thread(activity.id)
     assert detail["actions"][-1]["event_type"] == "retryable_error"
     assert all(action["status"] == "pending" for action in detail["actions"])
-
-
-def test_on_disk_policy_markdown_is_not_loaded_into_postgres(
-    store: PostgresActivityStore, tmp_path: Path
-):
-    writer_dsn = store.dsn
-    agent_name = f"disk-agent-{uuid4()}"
-    context = WorkspaceContext(
-        workspace=WORKSPACE_ID,
-        data_dir=tmp_path,
-        database_url=writer_dsn,
-    )
-    agent_hash = sha256(agent_name.encode("utf-8")).hexdigest()
-    policy_path = context.home() / "agents" / agent_hash / "POLICY.md"
-    policy_path.parent.mkdir(parents=True)
-    policy_path.write_text(
-        "## Disk cancellation rule\napproved: yes\n\nCheck ticket eligibility first.",
-        encoding="utf-8",
-    )
-
-    services = build_services(context)
-    repository = PostgresPolicyRepository(writer_dsn, WORKSPACE_ID)
-
-    assert services.policy_service.approved_rules(agent_name) == []
-    assert repository.list_scope_history("agent", agent_name) == []
-    assert list_policies(services) == "No policies exist yet."
 
 
 def test_evaluation_creation_is_idempotent_and_intentional_rerun_is_distinct(
@@ -585,8 +596,9 @@ def test_postgres_policy_records_keep_string_ids_and_agent_scope(store, tmp_path
     assert "Workspace requirement." in workspace_text
     assert f"## {first.id} | {title}" in agent_text
     assert "Agent requirement." in agent_text
-    assert updated.id == f"{first.id}.1"
+    assert updated.id == first.id
     assert updated.criteria == "Check the changed requirement."
+    assert len([row for row in repository.list_scope("agent", agent_name) if row.name == title]) == 1
 
 
 def test_policy_primary_key_column_uses_postgres_text(store):

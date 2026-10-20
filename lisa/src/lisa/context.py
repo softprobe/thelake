@@ -21,6 +21,7 @@ class WorkspaceContext:
     actor_id: str = ""
     owner_user_ids: frozenset[str] = frozenset()
     confirmed_policy_id: str = ""
+    confirmed_policy_deletion_id: str = ""
     confirmed_followup_id: str = ""
     conversation_id: str = ""
     slack_token: str = field(default="", repr=False)
@@ -45,6 +46,7 @@ class WorkspaceContext:
                 if item.strip()
             ),
             confirmed_policy_id=os.getenv("LISA_CONFIRMED_POLICY_ID", "").strip(),
+            confirmed_policy_deletion_id=os.getenv("LISA_CONFIRMED_POLICY_DELETION_ID", "").strip(),
             confirmed_followup_id=os.getenv("LISA_CONFIRMED_FOLLOWUP_ID", "").strip(),
             conversation_id=os.getenv("LISA_CONVERSATION_ID", "").strip(),
             slack_token=os.getenv("LISA_SLACK_BOT_TOKEN", ""),

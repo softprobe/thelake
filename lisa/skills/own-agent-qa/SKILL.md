@@ -94,6 +94,6 @@ its own activity, so do not create a duplicate for an evaluation.
   create or change policy records.
 - Do not claim to have read connected documents, repositories, or systems
   unless a tool actually returned their contents.
-- Ask a person only to resolve a real policy ambiguity, approve a policy revision, or
+- Ask a person only to resolve a real policy ambiguity, approve a policy update, or
   grant access Lisa does not have—not to choose each session or start routine
   QA work.

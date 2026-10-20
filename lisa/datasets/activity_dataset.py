@@ -63,6 +63,7 @@ class ActivityLabels(StrictModel):
     pending_policy_count: int | None = None
     policy_count: int | None = None
     policy_text_contains: list[str] = Field(default_factory=list)
+    deleted_policy_ids: list[str] = Field(default_factory=list)
 
 
 class HistoricalEvaluationSeed(StrictModel):

@@ -242,7 +242,7 @@ def test_backend_worker_establishes_recording_scope(provider, tmp_path, monkeypa
 
     monkeypatch.setattr(openhands, "build_conversation", lambda *args, **kwargs: Conversation())
     monkeypatch.setattr(openhands, "conversation_content", lambda _: ([], []))
-    asyncio.run(
+    result = asyncio.run(
         run_turn_without_releasing_lock_early(
             openhands.OpenHandsBackend().run_turn,
             conversation_id="worker-chat",
@@ -251,6 +251,8 @@ def test_backend_worker_establishes_recording_scope(provider, tmp_path, monkeypa
             text="hello",
         )
     )
+    assert result.messages[-1]["role"] == "assistant"
+    assert "Open Activities" in result.messages[-1]["text"]
     (rows,) = completed_records(ctx, 1)
     assert rows[0]["correlation"]["conversation_id"] == "worker-chat"
     assert closed == [True]

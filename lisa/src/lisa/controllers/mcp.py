@@ -9,7 +9,7 @@ from pydantic import Field
 
 from ..bootstrap import WorkspaceServices
 from ..llm_recording import recording_maintenance
-from ..security import redact_evidence, redact_text
+from ..security import redact_evidence
 from ..views.database import LISA_DATABASE_SCHEMA
 from ..views.failures import render_pending_failures
 from ..views.mcp import McpSessionSearchResponse, McpSessionTrajectory
@@ -156,6 +156,18 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         )
 
     @server.tool()
+    def attach_chat_turn_to_activity(activity_id: str) -> dict[str, Any]:
+        """Link this web or Slack chat turn to the activity Lisa selected."""
+        if services.activity_store is None:
+            raise RuntimeError("Lisa activity storage is not configured")
+        if services.context.turn_source not in {"web", "slack"}:
+            raise ValueError("Only workspace owners can link chat turns to activities")
+        require_owner()
+        if not services.activity_store.activity_exists(activity_id):
+            raise ValueError("Activity does not exist")
+        return {"activity_id": activity_id, "attached": True}
+
+    @server.tool()
     def propose_activity_followup(
         activity_id: str, prompt: str, due_at: str | None = None,
         trigger_event_type: str | None = None,
@@ -217,7 +229,7 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         scope: Literal["workspace", "agent"], name: str, criteria: str,
         agent_name: str = "", policy_id: str | None = None,
     ) -> dict[str, Any]:
-        """Create a policy or write a readable revision such as P1.2.1."""
+        """Create a policy or update the existing row selected by its readable ID."""
         record = services.policy_service.write_policy(
             scope=scope, agent_name=agent_name, name=name, criteria=criteria,
             policy_id=policy_id,
@@ -234,6 +246,12 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         """
         record = services.policy_service.approve_policy(policy_id)
         return {"policy_id": record.id, "name": record.name, "approved": record.approved}
+
+    @server.tool()
+    def delete_policy(policy_id: str) -> dict[str, Any]:
+        """Delete a policy only after its exact ID is confirmed by an authorized owner."""
+        services.policy_service.delete_policy(policy_id)
+        return {"policy_id": policy_id, "deleted": True}
 
     @server.tool()
     def get_activity_thread(activity_id: str) -> dict[str, Any] | None:
