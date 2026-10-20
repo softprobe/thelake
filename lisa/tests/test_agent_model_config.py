@@ -78,14 +78,11 @@ def test_backend_adapter_returns_common_messages_and_activities(monkeypatch, tmp
 
 
 def test_policy_confirmation_is_extracted_only_from_explicit_owner_command():
-    from lisa.runtime import confirmed_policy_title
+    from lisa.runtime import confirmed_policy_id
 
-    assert (
-        confirmed_policy_title("Confirm policy rule: Check eligibility first")
-        == "Check eligibility first"
-    )
-    assert confirmed_policy_title("I agree, that seems right") is None
-    assert confirmed_policy_title("The customer wrote: confirm policy rule: X") is None
+    assert confirmed_policy_id("Approve policy: P1.2") == "P1.2"
+    assert confirmed_policy_id("I agree, that seems right") is None
+    assert confirmed_policy_id("The customer wrote: Approve policy: P1.2") is None
 
 
 def test_local_model_uses_explicit_endpoint_and_never_falls_back_to_gemini(monkeypatch, tmp_path):
@@ -143,6 +140,39 @@ def test_gemini_default_remains_available_without_custom_endpoint(monkeypatch, t
         "base_url": None,
         "usage_id": "lisa",
     }
+
+
+def test_policy_authority_is_explicit_in_the_turn_prompt(monkeypatch, tmp_path):
+    captured = configure_openhands(monkeypatch)
+    monkeypatch.setenv("GOOGLE_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("LISA_OWNER_USER_IDS", "workspace-owner")
+    monkeypatch.delenv("LISA_BASE_URL", raising=False)
+
+    agent.build_conversation(
+        str(uuid4()), str(tmp_path), workspace_id=str(uuid4()),
+        turn_source="slack", actor_id="guest-user",
+    )
+
+    prompt = captured["agent"]["system_prompt"]
+    assert "current requester is not an authorized Lisa workspace owner" in prompt
+    assert "Do not call write_policy or approve_policy" in prompt
+    assert "guest-user" not in prompt
+
+
+def test_owner_policy_authority_is_explicit_without_disclosing_identity(monkeypatch, tmp_path):
+    captured = configure_openhands(monkeypatch)
+    monkeypatch.setenv("GOOGLE_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("LISA_OWNER_USER_IDS", "workspace-owner")
+    monkeypatch.delenv("LISA_BASE_URL", raising=False)
+
+    agent.build_conversation(
+        str(uuid4()), str(tmp_path), workspace_id=str(uuid4()),
+        turn_source="web", actor_id="workspace-owner",
+    )
+
+    prompt = captured["agent"]["system_prompt"]
+    assert "current requester is an authorized Lisa workspace owner" in prompt
+    assert "workspace-owner" not in prompt
 
 
 def test_decisions_api_key_is_forwarded_without_obsolete_selection_cutoff(monkeypatch, tmp_path):

@@ -53,7 +53,8 @@ Lifecycle (local disposable workspace only)
    - Point Lisa at the local dogfood DB/API; record LLM calls under ``--data-dir``.
    - Refuse remote hosts; require ``--live`` and ``LISA_LLM_TRACE_ENABLED``.
    - Mint a unique agent name; refuse if any fixture ``session_id`` already exists.
-   - Seed the full approved policy catalog for that agent via ``PolicyService``.
+   - Seed the full approved policy catalog for that agent through the
+     benchmark-only seed helper in this run-owned database.
 
 2. Execute (``evaluate``):
    - For each complete fixture session: ingest OTLP under the dataset ``session_id``,
@@ -73,11 +74,12 @@ Lifecycle (local disposable workspace only)
 
 from __future__ import annotations
 
+from benchmark.policy_seed import seed_policy_document
+
 import argparse
 import json
 import os
 import time
-from dataclasses import replace
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -93,7 +95,6 @@ from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
 from lisa.models.policies import PolicyRecord
 from lisa.security import redact_evidence
-from lisa.services.policies import PolicyService
 from datasets.policy_dataset import Dataset, load_dataset
 from benchmark.policy_ingest import build_otlp_trace_export
 
@@ -106,17 +107,23 @@ def _render_policy_markdown(records: list[PolicyRecord]) -> str:
 
 
 def _add_catalog_to_policy_management(
-    context: WorkspaceContext,
-    policy_service: PolicyService,
+    policy_service,
     catalog: Dataset,
     target_agent_name: str,
 ) -> dict[str, str]:
-    """Approve catalog rules via Lisa's owner-gated PolicyService API."""
+    """Seed a disposable benchmark database from a contiguous readable-ID catalog."""
     catalog_names = [item.policy.name.casefold() for item in catalog.policies.values()]
     if len(catalog_names) != len(set(catalog_names)):
         raise ValueError("Lisa's policy catalog must have unique policy names")
     if any(not item.policy.approved for item in catalog.policies.values()):
         raise ValueError("Every policy in the production evaluation catalog must be approved")
+    expected_catalog_ids = [f"P1.{index}" for index in range(1, len(catalog.policies) + 1)]
+    actual_catalog_ids = sorted(
+        (item.policy_id for item in catalog.policies.values()),
+        key=lambda identifier: int(identifier.split(".")[1]),
+    )
+    if actual_catalog_ids != expected_catalog_ids:
+        raise ValueError("Benchmark catalog policy IDs must be contiguous P1.1 through P1.n")
 
     for policy in sorted(
         catalog.policies.values(), key=lambda item: int(item.policy_id.split(".")[1])
@@ -133,15 +140,9 @@ def _add_catalog_to_policy_management(
             approved=policy.policy.approved,
         )
         content = _render_policy_markdown(list(rules.values()))
-        managed = PolicyService(
-            replace(
-                context,
-                turn_source="web",
-                confirmed_policy_title=policy.policy.name,
-            ),
-            policy_service.repository,
+        seed_policy_document(
+            policy_service, content, expected, scope="agent", agent_name=target_agent_name
         )
-        managed.update_policy(content, expected, scope="agent", agent_name=target_agent_name)
 
     loaded = policy_service.approved_rules(target_agent_name)
     expected_ids = {item.policy.name: item.policy_id for item in catalog.policies.values()}
@@ -385,9 +386,7 @@ def _evaluate_with_services(
     # Fixture session_ids are ingested as-is; refuse if they already exist so we
     # never append spans onto prior harness evidence.
     _ensure_sessions_absent(services, ingest_session_ids)
-    policy_ids = _add_catalog_to_policy_management(
-        context, services.policy_service, catalog, agent_name
-    )
+    policy_ids = _add_catalog_to_policy_management(services.policy_service, catalog, agent_name)
 
     # --- Execute phase A: ingest each complete session and verify reconstruction ---
     ingest_token = os.getenv("SOFTPROBE_PUBLIC_KEY", "dogfood-local")

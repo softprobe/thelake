@@ -30,22 +30,22 @@ Check eligibility and explain the result before issuing a refund.
 Wait for customer confirmation before submitting an eligible refund.
 ```
 
-Each section has a human-readable title, one `approved: yes/no` line immediately
-below the heading, and the requirements/source context. Missing approval means no.
-An unapproved agent rule also suppresses an approved workspace rule of the same
-name. Approval examples inside prose or code fences do not enable a rule.
+Lisa's readable policy view shows a human-readable title, its readable ID, and
+an `approved: yes/no` line from the row's approval column alongside the
+requirements/source context. Only an approved agent rule shadows an approved
+workspace rule of the same name; a pending revision leaves the active rule in
+effect. Approval examples inside prose or code fences do not enable a rule.
 
-Lisa stores the exact proposed section, expected current content, scope, and
-activity link as a pending policy proposal. The owner confirms it with the
-standalone command `Confirm policy proposal: <proposal_id>` in the main chat or
-a Slack thread. This trusted ID is supplied by the chat controller, not a model
-argument. Lisa applies the proposal only if the stored current policy still
-matches. Saving with `approved: yes` is the only approval step needed for QA.
-There is no separate evaluator definition, draft registry, version, activation,
-or per-check score threshold. Future optional settings belong with the rule.
+Lisa stores policies directly in `lisa.policies`. A new rule is an unapproved
+row with a readable ID such as `P1.2`. Revising an approved rule creates a
+child row such as `P1.2.1`; the approved parent stays active until the owner
+sends the exact standalone command `Approve policy: P1.2.1`. The authenticated
+owner and exact policy ID are supplied by the chat runtime. Approval sets the
+row's `approved` column and archives the prior approved revision. The policy row is the lifecycle record. Scheduled turns cannot write or
+approve policy.
 
 Traces show behavior, not business intent. Lisa never silently converts observed
-behavior into approved policy. Unapproved proposals can be discussed in reports,
+behavior into approved policy. Unapproved policy revisions can be discussed in reports,
 but cannot drive policy verdicts. Scheduled turns cannot write policy.
 
 ## Evaluation terms
@@ -114,7 +114,7 @@ context retrieval or investigation tools to Gemini. She prioritizes
 consequential business risks, tool errors, incomplete outcomes, and unusual
 repeated behavior. Ordinary discovery
 can suggest new rules, but cannot establish approval. The previous bounded report
-helps avoid repeating unchanged proposals every cycle.
+helps avoid repeating unchanged policy suggestions every cycle.
 
 The current schedule is a bounded sampling cap, not continuous lossless coverage.
 TheLake's recent session list is bounded to seven days and 25 sessions. Lisa

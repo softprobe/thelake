@@ -56,3 +56,22 @@ def test_disabling_scheduled_qa_keeps_slack_event_worker(monkeypatch):
     asyncio.run(exercise_lifespan())
     assert stopped == [True]
 
+
+def test_scheduled_qa_uses_service_contract_without_policy_confirmation(monkeypatch):
+    calls = []
+
+    class ScheduledQA:
+        async def run_cycle(self, workspace_id, *, run_turn):
+            calls.append((workspace_id, run_turn))
+            return {"conversation_id": "conversation-1"}
+
+    async def fake_run_turn(**_kwargs):
+        raise AssertionError("scheduled QA runner is passed through, not executed here")
+
+    monkeypatch.setattr(app, "run_turn", fake_run_turn)
+    services = SimpleNamespace(scheduled_qa=ScheduledQA())
+
+    asyncio.run(app._run_scheduled_qa(services, "workspace-1"))
+
+    assert calls == [("workspace-1", fake_run_turn)]
+

@@ -9,7 +9,7 @@ rule applies across the workspace; an agent rule applies to one exact agent
 name. Each rule has a stable string ID, criteria, approval state, and timestamps.
 `list_policies` lists active rules across scopes. `read_policy` reads workspace
 rules by default; pass the exact agent name with agent scope to read that
-agent's rules. Its headings include the same paragraph-style ID shown in the
+agent's rules. Its headings include the same readable ID shown in the
 list. The tools present rules as readable Markdown, while Postgres remains the
 only source of truth.
 
@@ -23,32 +23,34 @@ Check refund eligibility and explain the result before issuing a refund.
 Wait for customer confirmation before submitting an eligible refund.
 ```
 
-Put exactly one `approved: yes/no` line immediately below each rule's `##` heading.
-Rules marked no, or missing approval, are not evaluated. Approval mentioned in
-prose or code examples does not enable a rule. Invalid or duplicate approval
-metadata is rejected. The approval line is excluded from the judge's criteria.
+The `approved: yes/no` line displays the policy row's `approved` column; it is
+not part of stored criteria. Lisa's write tool accepts a name and criteria, and
+the owner approves a pending row by its readable ID. Mentioning approval in
+criteria or code examples does not enable a policy. Only rows whose `approved`
+column is true are evaluated.
 
-## Save and approve a rule
+## Create, revise, and approve a rule
 
-Ask Lisa to propose the exact rule for the intended workspace or agent. Review
-its text and approval value. Lisa stores a durable proposal linked to the
-activity, then asks the owner to send `Confirm policy proposal: <proposal_id>`.
-The same proposal can be confirmed in the main chat or Slack, and applies only
-when the expected current policy still matches. The same confirmation is
-required for text edits, approval changes, and removal; the model cannot approve itself.
-A saved rule with `approved: yes` is eligible immediately. There is no separate
-behavior-check draft, evaluator registry, or activation step.
+Ask Lisa to create a rule in workspace or exact agent scope. Lisa writes an
+unapproved row to `lisa.policies` and returns its readable ID (`P1.x`). Updating
+an approved rule creates a child revision (`P1.x.x`) with `approved: no`; the
+current approved row remains active while the owner reviews the revision.
+Updating that pending revision keeps the same ID. `list_policies` and
+`read_policy` show both active and pending rows with their IDs and approval
+state.
 
-To pause future evaluation, ask Lisa to change the rule to `approved: no` and
-confirm the named change. Scheduled Lisa can read and evaluate but cannot edit
-policy or approval. Lisa reads policy text only from Postgres; leftover files
-from earlier setups are not imported or listed. Old evaluator records do not
-grant approval to a policy.
+Approve the exact revision by sending `Approve policy: P1.x.x` as a standalone
+message. The authenticated owner check and exact-ID check are enforced by the
+runtime. Lisa sets that row's `approved` value to true and archives the previous
+approved row for the same rule. There is no separate proposal object or ID.
+Scheduled Lisa can read and evaluate but cannot create, revise, or approve
+policy. Policy rows and evaluation history live in Postgres; old evaluator
+records do not grant approval.
 
-An agent section overrides the workspace section of the same title, including
-when the agent section is unapproved. `evaluate_session` resolves the effective
-approved candidate set for the exact agent internally. It does not accept a
-caller-supplied policy list.
+Only an approved agent rule overrides an approved workspace rule with the same
+name. A pending agent revision leaves the currently effective policy in place.
+`evaluate_session` resolves the approved candidate set for the exact agent
+internally; it does not accept a caller-supplied policy list.
 
 ## Execution and findings
 
@@ -84,9 +86,10 @@ failure records preserve delivery destination across restart.
 
 The standard MCP tools are exposed from
 `lisa/src/lisa/controllers/mcp.py` and composed through
-`bootstrap.py`. `services/policies.py` parses and validates rules;
-`repositories/policies.py` persists records with a Postgres transaction and
-compare-and-swap lock. `services/evaluations.py` resolves approved candidates,
+`bootstrap.py`. `services/policies.py` validates owner writes and exact-ID
+approval; `repositories/policies.py` persists records with a Postgres
+transaction and scope lock. Benchmark catalog seeding lives separately under
+`lisa/benchmark`. `services/evaluations.py` resolves approved candidates,
 calls `evaluation/policy_triage.py`, judges escalations, and stores scores. The
 tool package is independent of OpenHands; the backend supplies trusted
 workspace credentials and owner-confirmation context when launching it.

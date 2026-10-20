@@ -6,6 +6,8 @@ Offline harness only — see ``benchmark`` package docs. Do not relocate into
 
 from __future__ import annotations
 
+from benchmark.policy_seed import seed_policy_document
+
 import argparse
 import asyncio
 from hashlib import sha256
@@ -40,14 +42,14 @@ OUTSIDER = "activity-benchmark-outsider"
 
 
 def _interpolate(text: str, values: dict[str, str]) -> str:
-    template = re.sub(r"\$(proposal_id|followup_id)", r"{\1}", text)
+    template = re.sub(r"\$(policy_id|followup_id)", r"{\1}", text)
     return template.format_map({key: value for key, value in values.items()})
 
 
 def _update_substitutions(services, substitutions: dict[str, str]) -> None:
-    proposals = services.activity_store.list_policy_proposals()
-    if proposals:
-        substitutions["proposal_id"] = str(proposals[0]["id"])
+    pending = [row for row in services.policy_service.list_policy_records() if not row.approved]
+    if pending:
+        substitutions["policy_id"] = str(pending[0].id)
     activities = services.activity_store.list_activity_feed(limit=100)
     followups = [
         followup
@@ -146,34 +148,33 @@ def _score_state(services, expected: dict) -> list[dict]:
                 "actual_count": len(followups),
             }
         )
-    proposals = services.activity_store.list_policy_proposals()
-    if "pending_proposal_count" in expected:
+    records = services.policy_service.list_policy_records()
+    if "pending_policy_count" in expected:
         checks.append(
             {
-                "check": "pending_proposal_count",
-                "passed": len(proposals) == expected["pending_proposal_count"],
-                "expected": expected["pending_proposal_count"],
-                "actual": len(proposals),
+                "check": "pending_policy_count",
+                "passed": sum(not item.approved for item in records) == expected["pending_policy_count"],
+                "expected": expected["pending_policy_count"],
+                "actual": sum(not item.approved for item in records),
             }
         )
-    for label in expected.get("proposals", []):
+    for label in expected.get("policies", []):
         ok = any(
-            label["policy_name_contains"].casefold() in item["policy_name"].casefold()
-            and item["status"] == label["status"]
-            for item in proposals
+            label["name_contains"].casefold() in item.name.casefold()
+            and item.approved is label["approved"]
+            for item in records
         )
         checks.append(
             {
-                "check": f"proposal:{label['policy_name_contains']}:{label['status']}",
+                "check": f"policy:{label['name_contains']}:{label['approved']}",
                 "passed": ok,
-                "actual_statuses": [
-                    item["status"]
-                    for item in proposals
-                    if label["policy_name_contains"].casefold() in item["policy_name"].casefold()
+                "actual": [
+                    {"id": item.id, "approved": item.approved}
+                    for item in records
+                    if label["name_contains"].casefold() in item.name.casefold()
                 ],
             }
         )
-    records = services.policy_service.read_policy_records()
     if "policy_count" in expected:
         checks.append(
             {
@@ -300,10 +301,9 @@ def _seed_historical_evaluations(services, case: ActivityBenchmarkCase) -> None:
         f"## {name}\napproved: yes\n\nBenchmark fixture policy for historical lookup."
         for name in policy_names
     )
-    services.policy_service.update_policy(
+    seed_policy_document(services.policy_service,
         markdown,
         "No policy exists yet.",
-        confirmed_title=policy_names[0],
     )
     policies = {
         rule.name: rule for rule in services.policy_service.approved_rules("historical-agent")
@@ -356,9 +356,7 @@ def _run_case(
     from lisa.repositories.conversations import FileConversationRepository
     from lisa.runtime import (
         confirmed_followup_id,
-        confirmed_policy_proposal_id,
-        confirmed_policy_title,
-        rejected_policy_proposal_id,
+        confirmed_policy_id,
     )
     from lisa.services.conversations import ConversationService
 
@@ -410,9 +408,7 @@ def _run_case(
                 workspace,
                 text,
                 run_turn=OpenHandsBackend().run_turn,
-                confirmed_policy_title=confirmed_policy_title(text),
-                confirmed_policy_proposal_id=confirmed_policy_proposal_id(text),
-                rejected_policy_proposal_id=rejected_policy_proposal_id(text),
+                confirmed_policy_id=confirmed_policy_id(text),
                 confirmed_followup_id=confirmed_followup_id(text),
                 turn_source=source,
                 actor_id=OWNER if turn.actor == "owner" else OUTSIDER,

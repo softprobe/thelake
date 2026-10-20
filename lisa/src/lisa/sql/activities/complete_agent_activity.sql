@@ -16,11 +16,6 @@ WITH finished AS (
           WHERE followup.activity_id = activity.id
             AND followup.status IN ('pending', 'approved', 'claimed')
       )
-      AND NOT EXISTS (
-          SELECT 1 FROM lisa.policy_proposals AS proposal
-          WHERE proposal.activity_id = activity.id
-            AND proposal.status IN ('pending', 'applying')
-      )
     RETURNING activity.id, activity.next_event_seq - 1 AS seq
 )
 INSERT INTO lisa.activity_events(activity_id, seq, event_type, title, summary, actor)

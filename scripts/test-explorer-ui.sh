@@ -46,7 +46,7 @@ PORT_FILE=""
 PORT=""
 BACKEND=""
 LISA_PORT=""
-LISA_TOKEN=""
+LISA_TOKEN="${LISA_TOKEN:-}"
 
 cleanup() {
   local status=$?
@@ -138,8 +138,12 @@ service_args=(
   --lisa-token "$LISA_TOKEN"
   --lisa-data-dir "$TMP_DIR/lisa-workspaces"
 )
-if [[ "$ONLINE_E2E" == "1" ]]; then service_args+=(--online); fi
-RUST_LOG="${RUST_LOG:-info}" python3 scripts/run-explorer-e2e-services.py "${service_args[@]}" &
+SERVICE_PYTHON=python3
+if [[ "$ONLINE_E2E" == "1" ]]; then
+  service_args+=(--online --lisa-postgres-url "postgresql://ducklake:ducklake@127.0.0.1:$E2E_DB_PORT/ducklake")
+  SERVICE_PYTHON="$ROOT/lisa/.venv/bin/python"
+fi
+RUST_LOG="${RUST_LOG:-info}" "$SERVICE_PYTHON" scripts/run-explorer-e2e-services.py "${service_args[@]}" &
 SERVER_PID=$!
 
 for _ in $(seq 1 30); do
@@ -158,6 +162,8 @@ PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["thelake
 BACKEND="http://127.0.0.1:$PORT"
 if [[ "$ONLINE_E2E" == "1" ]]; then
   LISA_PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lisa"])' "$PORT_FILE")"
+  export THELAKE_E2E_COMPOSE_PROJECT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["project_name"])' "$stack_json")"
+  export THELAKE_E2E_LAKE_PORT="$PORT"
 fi
 
 ready=0

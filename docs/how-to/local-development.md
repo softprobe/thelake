@@ -21,9 +21,11 @@ writer and reader roles, and workspace binding. `make dev-up` generates missing
 local tokens and database passwords in `.env` without replacing values already
 there. Keep `.env` private.
 
-Open the Explorer URL printed by `make dev-up`, then select **Lisa** to chat.
-The local anonymous identity is `local`, and the dev stack configures it as a
-Lisa owner so you can exercise policy proposal confirmations through chat.
+Open Explorer at `http://127.0.0.1:8090/explorer/` to browse sessions and
+traces. Open Lisa at `http://127.0.0.1:8090/lisa/` to chat, inspect activities,
+rules, triage, and identity. They are separate apps on the same local TheLake
+host. The local anonymous identity is `local`, and the dev stack configures it
+as a Lisa owner so you can exercise readable policy creation and approval through chat.
 The UI, API, and local Postgres ports bind to loopback. The default Postgres
 port is `55432` and Lisa's API port is `18083`, so they can coexist with older
 local stacks that used the standard Postgres port or Lisa port `18082`. These

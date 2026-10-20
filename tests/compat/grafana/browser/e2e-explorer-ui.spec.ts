@@ -78,6 +78,7 @@ function runRefundAgent(agentName: string): string {
 
 test('live thelake ingest, reducer, session filters, and trace detail render in Explorer', async ({ page, request }) => {
   test.setTimeout(120_000);
+  page.on('pageerror', (error) => console.error(`Browser page error: ${error.stack ?? error.message}`));
   const sessions = {
     alpha: `explorer-e2e-alpha-${suffix}`,
     beta: `explorer-e2e-beta-${suffix}`,
@@ -213,6 +214,10 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   });
 
   await page.goto('/explorer/');
+  await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Lisa' })).toHaveAttribute('href', '/lisa/');
+
+  await page.goto(`${backend}/lisa/`);
   const lisaChat = page.getByRole('log', { name: 'Lisa conversation' });
   await expect(lisaChat).toBeVisible();
   for (const tab of ['Activities', 'Rules', 'Triage / judges', 'Identity']) {
@@ -331,26 +336,61 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
 
 test('approved policy in Lisa chat judges a live agent and stores the policy criteria', async ({ page, request }) => {
   test.skip(process.env.THELAKE_EXPLORER_E2E_ONLINE !== '1', 'requires the real policy QA stack');
-  test.setTimeout(300_000);
+  test.setTimeout(900_000);
   const agentName = `refund-agent-e2e-${suffix}`;
   const policyName = `Refund eligibility ${suffix}`;
-  await page.goto(`${backend}/explorer/`);
-  await expect(page.getByRole('region', { name: 'Lisa conversation' })).toBeVisible();
+  await page.goto(`${backend}/lisa/`);
+  await expect(page.getByRole('log', { name: 'Lisa conversation' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Activate', exact: true })).toHaveCount(0);
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Messages and recent workspace evidence are sent to your configured model provider/)).toBeVisible();
   const composer = page.getByRole('textbox', { name: 'Message Lisa' });
-  await page.getByRole('checkbox', { name: /Send my message and recent workspace telemetry/ }).check();
   await expect(composer).toBeEnabled({ timeout: 30_000 });
 
   const send = async (text: string) => {
     await composer.fill(text);
+    const responsePromise = page.waitForResponse((response) =>
+      response.request().method() === 'POST' && /\/v1\/conversations\/[^/]+\/messages$/.test(response.url()),
+      { timeout: 240_000 },
+    );
     await page.getByRole('button', { name: 'Send', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled({ timeout: 150_000 });
+    const response = await responsePromise;
+    expect(response.ok()).toBeTruthy();
+    await response.finished();
+    await expect(page.locator('.tle-lisa-working')).toHaveCount(0, { timeout: 30_000 });
+    await expect(composer).toHaveValue('');
   };
-  await send(`Propose an agent POLICY.md rule named "${policyName}" for "${agentName}": ` +
+  await send(`Create an unapproved agent policy named "${policyName}" for "${agentName}": ` +
     'check refund eligibility and wait for the result before issuing a refund. ' +
-    'Show approved: yes for me to review; do not save yet.');
-  await send(`Confirm policy rule: ${policyName}`);
-  await expect(page.locator('.tle-lisa-tool summary').filter({ hasText: 'Lisa used update_policy' })).toBeVisible();
+    'Use write_policy and show me its readable policy ID. Do not approve it yet.');
+  const transcript = await page.getByRole('log', { name: 'Lisa conversation' }).innerText();
+  const policyId = transcript.match(/\bP1\.\d+(?:\.\d+)?\b/)?.[0];
+  expect(policyId).toBeTruthy();
+
+  await send(`Find the policy named "${policyName}" for "${agentName}". ` +
+    'Use list_policies and read_policy, and report its readable ID, criteria, and approval state.');
+  let policyTranscript = await page.getByRole('log', { name: 'Lisa conversation' }).innerText();
+  expect(policyTranscript).toContain(policyId!);
+  expect(policyTranscript).toMatch(/approved: no|not approved/i);
+
+  await send(`Approve policy: ${policyId}`);
+  await expect(page.locator('.tle-lisa-tool summary').filter({ hasText: 'Approve policy' })).toBeVisible();
+
+  await send(`Update the approved policy ${policyId} named "${policyName}" for "${agentName}". ` +
+    'Add the requirement to record the customer\'s explicit confirmation before issuing a refund. ' +
+    'Use write_policy so this is a new readable revision awaiting approval, then show its ID.');
+  const revisionId = `${policyId}.1`;
+  await expect(page.getByRole('log', { name: 'Lisa conversation' })).toContainText(revisionId, { timeout: 240_000 });
+  await send(`Find the policy named "${policyName}" for "${agentName}" again. ` +
+    'Use list_policies and read_policy, and report the approved active ID and pending revision ID.');
+  policyTranscript = await page.getByRole('log', { name: 'Lisa conversation' }).innerText();
+  expect(policyTranscript).toContain(policyId!);
+  expect(policyTranscript).toContain(revisionId);
+  expect(policyTranscript).toMatch(/approved: yes|approved\s+active/i);
+  expect(policyTranscript).toMatch(/approved: no|pending revision/i);
+
+  await send(`Approve policy: ${revisionId}`);
+  await expect(page.locator('.tle-lisa-tool summary').filter({ hasText: 'Approve policy' })).toHaveCount(2);
 
   const sessionId = runRefundAgent(agentName);
   type PolicyScore = { name: string; source?: string; string_value?: string; comment?: string;
@@ -361,10 +401,10 @@ test('approved policy in Lisa chat judges a live agent and stores the policy cri
     if (!response.ok()) return undefined;
     scores = (await response.json()).scores ?? [];
     return scores.find((score) => score.name === policyName && score.source === 'evaluator')?.string_value;
-  }, { timeout: 150_000, intervals: [1_000, 2_000, 4_000] }).toBe('fail');
+  }, { timeout: 240_000, intervals: [1_000, 2_000, 4_000] }).toBe('fail');
   const failure = scores.find((score) => score.name === policyName && score.string_value === 'fail')!;
   expect(failure.config_id).toBeNull();
-  expect(failure.metadata?.policy_id).toMatch(/^P1\.\d+$/);
+  expect(failure.metadata?.policy_id).toBe(revisionId);
   expect(failure.metadata?.criteria).toMatch(/eligib/i);
   expect(failure.comment).toMatch(/eligib/i);
   expect(JSON.parse(failure.metadata?.references ?? '[]')).not.toHaveLength(0);

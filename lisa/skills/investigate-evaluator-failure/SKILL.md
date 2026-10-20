@@ -23,13 +23,13 @@ investigation immediately.
    session, evidence, likely customer or business impact, confidence, and the
    next practical action. Do not propose a code fix without repository access
    and an explicit request.
-5. If the failure suggests a missing business rule, present a named proposal in
+5. If the failure suggests a missing business rule, describe a possible named policy change in
    the report with the trace evidence and the unresolved business question. Do
    not save it to the policy table: a failed trace cannot establish business intent
    by itself. Ask the owner to approve or correct the proposed wording.
-6. Do not create an evaluation from the failure event. If the owner approves
-   the proposed rule, record `approved: yes` under its heading through the
-   owner-confirmed policy tool. Lisa evaluates approved policy rules automatically.
+6. Do not create an evaluation from the failure event. If the owner confirms the intended rule, create it through `write_policy` and
+   approve its readable ID only after the exact owner command. Lisa evaluates
+   approved policy rows automatically.
 
 Policy headings are human-readable names. Do not expose internal IDs in the
 report.

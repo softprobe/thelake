@@ -30,9 +30,11 @@ quality.
 ## Production-path evaluation
 
 Production quality runs must call Lisa's `EvaluationService` with the full
-approved catalog loaded into Lisa's PostgreSQL policy database through
-`PolicyService`. A manifest's sparse pair list is scoring truth, never the
-candidate-policy source. The runner below uses a unique evaluation agent scope,
+approved catalog loaded into Lisa's PostgreSQL policy database. The disposable
+benchmark harness seeds that isolated catalog directly; live policy changes
+still go through Lisa's owner-gated `write_policy` and `approve_policy` tools.
+A manifest's sparse pair list is scoring truth, never the candidate-policy
+source. The runner below uses a unique evaluation agent scope,
 reads approved candidates back from PostgreSQL, ingests dataset trajectories
 into local TheLake, and calls the production `EvaluationService.evaluate_session`
 through its normal session and policy services:

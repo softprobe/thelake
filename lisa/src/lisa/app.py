@@ -18,7 +18,7 @@ from .controllers.http import (
     router as http_router,
 )
 from .llm_recording import recording_maintenance
-from .runtime import confirmed_policy_title, initialize_backend, run_turn
+from .runtime import initialize_backend, run_turn
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,6 @@ async def _run_scheduled_qa(services: WorkspaceServices, workspace_id: str) -> N
         result = await services.scheduled_qa.run_cycle(
             str(workspace_id),
             run_turn=run_turn,
-            confirm_policy_title=confirmed_policy_title,
         )
         logger.info(
             "Cron job 'Lisa scheduled QA' completed for conversation %s",
@@ -145,7 +144,7 @@ async def _run_activity_followups(services: WorkspaceServices, workspace_id: str
             )
             turn = await services.conversations.run_user_turn(
                 main["conversation_id"], workspace_id, prompt,
-                run_turn=run_turn, confirmed_policy_title=None, turn_source="scheduled",
+                run_turn=run_turn, confirmed_policy_id=None, turn_source="scheduled",
             )
             summary = next(
                 (message.get("text", "") for message in reversed(turn["messages"])

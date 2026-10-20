@@ -75,9 +75,11 @@ cp .env.example .env
 make dev-up
 ```
 
-Open the Explorer URL printed by `make dev-up` and select Lisa. The stack
-provisions Lisa's durable PostgreSQL policy database. Scheduled QA is disabled
-by default in this local environment; set `LISA_QA_ENABLED=1` to opt in.
+Open Explorer at `http://127.0.0.1:8090/explorer/` or Lisa at
+`http://127.0.0.1:8090/lisa/`. They are separate apps served by the same local
+TheLake host. The stack provisions Lisa's durable PostgreSQL policy database.
+Scheduled QA is disabled by default in this local environment; set
+`LISA_QA_ENABLED=1` to opt in.
 
 Stop the services without removing their data:
 
@@ -220,17 +222,19 @@ PostgreSQL policy catalog. Markdown is the readable policy format, not the
 runtime source of truth:
 
 ```md
-## Check eligibility before issuing a refund
+## P1.2 | Check eligibility before issuing a refund
 approved: yes
 
 Check eligibility and explain the result before issuing a refund.
 Wait for customer confirmation before submitting an eligible refund.
 ```
 
-Lisa proposes a section and saves it after the owner's exact command
-`Confirm policy rule: <exact heading>`. The approval line is the only enablement
-step: `approved: yes` permits evaluation; `approved: no` or missing approval does
-not. There is no separate evaluator registry or creation/activation workflow.
+Lisa stores each policy as one row with a readable `P1.x` ID and an approval
+column. Updating an approved policy creates a pending child revision such as
+`P1.2.1`; the approved version stays active until the owner sends the exact
+standalone command `Approve policy: P1.2.1`. Approval updates that row and
+archives the prior revision. Only `approved: yes` policies are evaluated; no
+separate proposal object or identifier is used.
 
 Configure Lisa with `LISA_WORKSPACE_ID`, `LISA_QA_CRON`, an OpenAI API key for
 Decisions triage, and Gemini credentials for judging escalated policies.

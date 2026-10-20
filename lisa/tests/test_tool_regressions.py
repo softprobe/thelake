@@ -1,3 +1,5 @@
+from benchmark.policy_seed import seed_policy_document
+
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
@@ -37,8 +39,8 @@ def test_locally_bounded_evidence_is_never_marked_complete(monkeypatch, spans, l
     def post(path, body, **kwargs):
         return ({}, 201)
 
-    services = build_services(lisa_test_context(confirmed_policy_title="Rule"))
-    services.policy_service.update_policy("## Rule\napproved: yes\n\nFollow the rule.", "")
+    services = build_services(lisa_test_context(confirmed_policy_id="Rule"))
+    seed_policy_document(services.policy_service, "## Rule\napproved: yes\n\nFollow the rule.", "")
     monkeypatch.setattr(services.client, "get", get)
     monkeypatch.setattr(services.client, "post", post)
     monkeypatch.setattr(
@@ -62,14 +64,14 @@ def _write_policy(start, text, context):
     services = build_services(context)
     start.wait()
     try:
-        services.policy_service.update_policy(f"## Rule\n\n{text}", "")
+        seed_policy_document(services.policy_service, f"## Rule\n\n{text}", "")
         return "saved"
     except ValueError:
         return "conflict"
 
 
 def test_policy_compare_and_swap_serializes_concurrent_writers(lisa_test_context):
-    context = lisa_test_context(confirmed_policy_title="Rule")
+    context = lisa_test_context(confirmed_policy_id="Rule")
     start = Barrier(2)
     with ThreadPoolExecutor(max_workers=2) as workers:
         outcomes = list(

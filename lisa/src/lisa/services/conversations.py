@@ -108,13 +108,11 @@ class ConversationService:
         text: str,
         *,
         run_turn: Callable,
-        confirmed_policy_title: str | None,
         turn_source: str = "web",
         actor_id: str | None = None,
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
-        confirmed_policy_proposal_id: str | None = None,
-        rejected_policy_proposal_id: str | None = None,
+        confirmed_policy_id: str | None = None,
         confirmed_followup_id: str | None = None,
     ) -> dict[str, Any]:
         directory = self.repository.conversation_directory(workspace_id, conversation_id)
@@ -133,9 +131,7 @@ class ConversationService:
                     actor_id=actor_id,
                     slack_channel_id=slack_channel_id,
                     slack_thread_ts=slack_thread_ts,
-                    confirmed_policy_title=confirmed_policy_title,
-                    confirmed_policy_proposal_id=confirmed_policy_proposal_id,
-                    rejected_policy_proposal_id=rejected_policy_proposal_id,
+                    confirmed_policy_id=confirmed_policy_id,
                     confirmed_followup_id=confirmed_followup_id,
                 )
             except RuntimeError as error:
@@ -215,7 +211,7 @@ class ConversationService:
         }
 
 
-SCHEDULED_PROMPT = """This scheduled turn is Lisa's QA work in her ongoing workspace conversation. Follow the own-agent-qa skill using workspace tools. Resume pending failures, inspect recent sessions, and evaluate relevant policy table records marked approved: yes. Rules marked approved: no or missing approval are proposals, not enforceable business requirements. Use recent QA updates in this conversation to avoid repeating unchanged proposals. Do not ask the owner to approve routine QA work. Do not create or change policy during a scheduled turn. Report evidenced risks, uncertainty, and coverage limits. Never claim unevaluated sessions passed."""
+SCHEDULED_PROMPT = """This scheduled turn is Lisa's QA work in her ongoing workspace conversation. Follow the own-agent-qa skill using workspace tools. Resume pending failures, inspect recent sessions, and evaluate relevant policy table records marked approved: yes. Rules marked approved: no or missing approval are not enforceable business requirements. Use recent QA updates in this conversation to avoid repeating unchanged policy suggestions. Do not ask the owner to approve routine QA work. Do not create or change policy during a scheduled turn. Report evidenced risks, uncertainty, and coverage limits. Never claim unevaluated sessions passed."""
 
 
 class ScheduledQAError(RuntimeError):
@@ -244,7 +240,6 @@ class ScheduledQAService:
         workspace_id: str,
         *,
         run_turn: Callable,
-        confirm_policy_title: Callable[[str], str | None],
     ) -> dict[str, Any]:
         try:
             normalized = str(UUID(workspace_id))

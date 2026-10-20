@@ -2,7 +2,7 @@
 
 LISA_DATABASE_SCHEMA = """Use lisa_db for explicit read-only database diagnostics
 or to retrieve Lisa's recorded evaluation history. For activity work, use Lisa's activity tools;
-for policy work, use read_policy, list_policies, and the policy proposal tools.
+for policy work, use read_policy, list_policies, write_policy, and approve_policy.
 Do not query lisa_db to find, create, update, or inspect activities. For a
 historical triage lookup by policy name, join lisa.policies on policy_id and
 filter by its name.
@@ -36,9 +36,6 @@ columns are available:
   requested_at, expires_at, resolved_at, resolved_by, decision_ref
 - lisa.readable_activity_followups: id, activity_id, due_at, trigger_event_type, prompt, status,
   requested_by, requested_at, approved_at, completed_at
-- lisa.readable_policy_proposals: id, activity_id, scope, target_agent_name,
-  policy_name, expected_content, proposed_content, status,
-  created_by_conversation, resolved_by_conversation, created_at, resolved_at, applied_at
 - lisa.policies: id (text), scope, target_agent_name, name, criteria, approved,
   created_at, updated_at, archived_at
 

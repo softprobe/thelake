@@ -143,7 +143,7 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
         "manage-lisa-activities",
     } <= skill_names
     assert "find or create one durable" in captured["system_prompt"]
-    assert "Confirm policy proposal" in captured["system_prompt"]
+    assert "Approve policy: <policy_id>" in captured["system_prompt"]
     assert any(
         "find_activity" in skill.content
         for skill in captured["agent_context"].skills
@@ -173,14 +173,14 @@ def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(monkeypatch, lisa_t
     assert {
         "list_policies",
         "read_policy",
-        "create_policy_proposal",
+        "write_policy",
+        "approve_policy",
         "list_activity_followups",
-        "apply_policy_proposal",
-        "list_pending_policy_proposals",
         "search_sessions",
         "evaluate_session",
         "notify_evaluation_failure",
     } <= tools.keys()
+    assert not any("proposal" in name for name in tools)
     assert "create_evaluation_draft" not in tools
     assert "activate_evaluation" not in tools
     assert "sample_agent_sessions" not in tools

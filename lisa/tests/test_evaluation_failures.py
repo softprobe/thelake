@@ -1,3 +1,5 @@
+from benchmark.policy_seed import seed_policy_document
+
 from dataclasses import replace
 
 import pytest
@@ -10,7 +12,7 @@ from lisa.bootstrap import build_services
 def test_failure_recovery_survives_interrupted_score_write(
     monkeypatch, accepted_before_interruption, lisa_test_context
 ):
-    context = lisa_test_context(confirmed_policy_title="Rule")
+    context = lisa_test_context(confirmed_policy_id="Rule")
     services = build_services(context)
     save_rule(services)
     scores = []
@@ -74,9 +76,16 @@ def test_failure_recovery_survives_interrupted_score_write(
 
 
 def test_scheduled_turn_cannot_change_policy_or_create_checks(lisa_test_context):
-    context = lisa_test_context(confirmed_policy_title="Rule")
+    context = lisa_test_context(
+        turn_source="scheduled",
+        actor_id="owner-1",
+        owner_user_ids=frozenset({"owner-1"}),
+        confirmed_policy_id="P1.1",
+    )
     services = build_services(replace(context, turn_source="scheduled"))
     with pytest.raises(ValueError, match="owner conversation"):
-        services.policy_service.update_policy("## Rule\n\nRule content", "")
+        services.policy_service.write_policy(
+            scope="workspace", agent_name="", name="Rule", criteria="Rule content"
+        )
     assert not hasattr(services.evaluations, "create_evaluation_draft")
     assert not hasattr(services.evaluations, "activate_evaluation")

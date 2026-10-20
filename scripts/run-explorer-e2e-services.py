@@ -30,6 +30,7 @@ def main() -> int:
     parser.add_argument("--config-file", type=Path, required=True)
     parser.add_argument("--workspace-id", required=True)
     parser.add_argument("--lisa-token", default="")
+    parser.add_argument("--lisa-postgres-url")
     parser.add_argument("--lisa-data-dir", type=Path, default=Path(""))
     parser.add_argument("--online", action="store_true")
     args = parser.parse_args()
@@ -66,14 +67,28 @@ def main() -> int:
         )
         processes.append(lake)
         if lisa_socket:
+            if not args.lisa_postgres_url:
+                raise RuntimeError("online Explorer E2E requires its disposable Lisa PostgreSQL URL")
+            lisa_root = Path(__file__).resolve().parents[1] / "lisa"
+            sys.path.insert(0, str(lisa_root))
+            from conftest import create_lisa_test_database
+
+            database = create_lisa_test_database(args.lisa_postgres_url, args.workspace_id)
             lisa_env = os.environ.copy()
             lisa_env.update(
                 {
                     "LISA_WORKSPACE_ID": args.workspace_id,
                     "LISA_DATA_DIR": str(args.lisa_data_dir),
+                    # This database and owner identity belong to this isolated browser run.
+                    "LISA_DATABASE_URL": database.writer_url,
+                    "LISA_DATABASE_READ_URL": database.reader_url,
                     "LISA_THELAKE_API_URL": f"http://127.0.0.1:{lake_port}",
                     "LISA_THELAKE_TOKEN": args.lisa_token,
                     "LISA_LOCAL_ANONYMOUS": "1",
+                    "LISA_LOCAL_ACTOR_ID": "e2e-owner",
+                    "LISA_OWNER_USER_IDS": "e2e-owner",
+                    "LISA_CORS_ORIGINS": f"http://127.0.0.1:{lake_port}",
+                    "LISA_QA_ENABLED": "1",
                     "LISA_QA_CRON": "* * * * *",
                     "LISA_SLACK_BOT_TOKEN": "",
                     "LISA_SLACK_CHANNEL_ID": "",

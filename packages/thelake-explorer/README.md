@@ -62,6 +62,7 @@ THELAKE_API_PROXY=http://127.0.0.1:8090 npm run dev:spa
 
 ```bash
 npm run build:embedded   # → embedded/ for binary embed
+npm run build:lisa-embedded # → lisa-embedded/ for binary embed
 npm run build            # library dist/ + embedded SPA
 npm test
 ```
@@ -73,8 +74,9 @@ npm test
 - **Behavior checks** — create/activate natural-language evaluators for an
   agent. Lisa runs active checks on her schedule; configure the runner in
   Lisa's environment.
-- **Lisa** — persistent chat with an adjacent panel for Activities, Rules,
-  Triage / judges, and Identity. Rules and evaluation history are read-only in
-  the panel; policy changes go through Lisa's owner-confirmed chat workflow.
-  Standalone `SOUL.md` and `MEMORY.md` files are not configured yet. See the
-  [Explorer guide](../../docs/how-to/explorer.md#lisa).
+- **Lisa** — a separate workspace app served at `/lisa/`, with persistent chat
+  and an adjacent panel for Activities, Rules, Triage / judges, and Identity.
+  Rules and evaluation history are read-only in the panel; policy changes go
+  through Lisa's owner-confirmed chat workflow. Standalone `SOUL.md` and
+  `MEMORY.md` files are not configured yet. See the
+  [local development guide](../../docs/how-to/local-development.md).

@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
+POLICY_ID_PATTERN = re.compile(r"P1\.([1-9][0-9]*)(?:\.([1-9][0-9]*))?")
+
 
 @dataclass(frozen=True)
 class PolicyRecord:
@@ -38,11 +40,16 @@ class PolicyRule:
 
 
 def policy_id(ordinal: int) -> str:
-    """Format a stable policy paragraph reference from its database ordinal."""
+    """Format a stable human-readable policy ID from its database ordinal."""
     return f"P1.{ordinal}"
 
 
-def policy_id_sort_key(identifier: str) -> tuple[int, int | str]:
-    """Sort paragraph references numerically, then place other IDs afterward."""
-    match = re.fullmatch(r"P1\.([1-9][0-9]*)", identifier)
-    return (0, int(match.group(1))) if match else (1, identifier)
+def is_policy_id(identifier: str) -> bool:
+    """Return whether an identifier is a supported readable policy reference."""
+    return POLICY_ID_PATTERN.fullmatch(identifier) is not None
+
+
+def policy_id_sort_key(identifier: str) -> tuple[int, int | str, int]:
+    """Sort policy IDs numerically, then place other IDs afterward."""
+    match = POLICY_ID_PATTERN.fullmatch(identifier)
+    return (0, int(match.group(1)), int(match.group(2) or 0)) if match else (1, identifier, 0)

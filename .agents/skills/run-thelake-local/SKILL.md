@@ -29,6 +29,8 @@ For local Explorer and Lisa chat, use `docs/how-to/local-development.md` and
 `make dev-up`. It provisions Lisa's policy database on the existing local
 Postgres service and starts TheLake and Lisa together. The local stack disables
 scheduled QA by default; enabling it can incur provider charges.
+Explorer is served at `/explorer/`; Lisa is a separate app at `/lisa/` on the
+same TheLake host.
 
 ## Explorer development
 

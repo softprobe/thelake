@@ -13,7 +13,7 @@ import pytest
 from lisa.backends.openhands import OpenHandsBackend
 from lisa.bootstrap import build_services
 from lisa.repositories.conversations import FileConversationRepository
-from lisa.runtime import confirmed_followup_id, confirmed_policy_proposal_id
+from lisa.runtime import confirmed_followup_id, confirmed_policy_id
 from lisa.services.conversations import ConversationService
 
 LIVE_ENABLED = os.getenv("LISA_RUN_ACTIVITY_MANAGEMENT_INTEGRATION") == "1"
@@ -55,20 +55,13 @@ def _conversation_harness(lisa_test_context, monkeypatch, tmp_path):
 
 
 def _turn(conversations, context, conversation_id, text, *, source="web", channel=None):
-    from lisa.runtime import (
-        confirmed_policy_title,
-        rejected_policy_proposal_id,
-    )
-
     return asyncio.run(
         conversations.run_user_turn(
             conversation_id,
             context.workspace,
             text,
             run_turn=OpenHandsBackend().run_turn,
-            confirmed_policy_title=confirmed_policy_title(text),
-            confirmed_policy_proposal_id=confirmed_policy_proposal_id(text),
-            rejected_policy_proposal_id=rejected_policy_proposal_id(text),
+            confirmed_policy_id=confirmed_policy_id(text),
             confirmed_followup_id=confirmed_followup_id(text),
             turn_source=source,
             actor_id="activity-eval-owner",
@@ -119,39 +112,31 @@ def test_runtime_resumes_one_activity_from_a_separate_slack_thread(
     assert after[0]["next_action"], "The resumed activity has no next action"
 
 
-def test_runtime_proposes_policy_in_main_chat_and_applies_exact_slack_confirmation(
+def test_runtime_creates_finds_approves_and_revises_policy_by_readable_id(
     lisa_test_context, monkeypatch, tmp_path
 ):
     context, conversations, main_id, services = _conversation_harness(
         lisa_test_context, monkeypatch, tmp_path
     )
     _turn(
-        conversations,
-        context,
-        main_id,
-        "We need a policy that requires approval before a refund over $500. Read the current "
-        "workspace policy and prepare one named rule proposal. Show me the exact proposal ID; "
-        "do not apply it yet.",
+        conversations, context, main_id,
+        "Create a policy requiring owner review before a refund over $500. Show the readable policy ID.",
     )
-    proposals = services.activity_store.list_policy_proposals()
-    assert len(proposals) == 1 and proposals[0]["status"] == "pending", proposals
-    assert services.policy_service.read_policy_records() == []
-
-    slack_id = str(uuid4())
-    conversations.create_conversation(context.workspace, slack_id)
+    pending = services.policy_service.read_policy_records()
+    assert len(pending) == 1 and pending[0].id.startswith("P1.")
+    assert pending[0].approved is False
+    _turn(conversations, context, main_id, "Find the refund policy and tell me its ID and approval state.")
+    _turn(conversations, context, main_id, f"Approve policy: {pending[0].id}")
+    approved = services.policy_service.read_policy_records()
+    assert approved[0].id == pending[0].id and approved[0].approved is True
     _turn(
-        conversations,
-        context,
-        slack_id,
-        f"Confirm policy proposal: {proposals[0]['id']}",
-        source="slack",
-        channel="C_ACTIVITY_EVAL",
+        conversations, context, main_id,
+        f"Update policy {pending[0].id} to also require recording the refund reason.",
     )
-    saved = services.policy_service.read_policy_records()
-    assert len(saved) == 1
-    assert saved[0].approved is False
-    assert "500" in saved[0].criteria
-    assert services.activity_store.get_policy_proposal(str(proposals[0]["id"])) is None
+    revisions = services.policy_service.read_policy_records()
+    child = next(row for row in revisions if row.id.startswith(pending[0].id + "."))
+    assert child.id.count(".") == 2 and not child.approved
+    assert next(row for row in revisions if row.id == pending[0].id).approved
 
 
 def test_runtime_waits_for_exact_confirmation_before_activating_followup(

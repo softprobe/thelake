@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from benchmark.policy_seed import seed_policy_document
+
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -68,7 +70,7 @@ def _test_policy_id(store: PostgresActivityStore) -> str:
             "approved": True,
         }
     )
-    saved = repository.replace_scope(
+    saved = repository.seed_scope(
         "agent",
         agent_name,
         [
@@ -90,7 +92,7 @@ def test_schema_recreation_starts_with_empty_policy_catalog(store, lisa_test_db)
 
     store.create_activity(title="Temporary activity", source="test")
     repository = PostgresPolicyRepository(store.dsn, WORKSPACE_ID)
-    created = repository.replace_scope(
+    created = repository.seed_scope(
         "workspace",
         "",
         [],
@@ -260,37 +262,6 @@ def test_event_triggered_followup_waits_for_matching_activity_event(store):
     store.record_activity_event(activity.id, "approval_received", title="Approval received")
     claimed = store.claim_due_activity_followups()
     assert len(claimed) == 1 and str(claimed[0]["id"]) == followup_id
-
-
-def test_policy_proposal_is_shared_and_resolved_by_another_conversation(store):
-    activity = store.create_activity(title="Update refund policy", source="web")
-    proposal_id = store.create_policy_proposal(
-        activity_id=activity.id, scope="workspace", target_agent_name="",
-        policy_name="Refund eligibility", expected_content="No policy exists yet.",
-        proposed_content="## Refund eligibility\napproved: no\n\nCheck eligibility.",
-        created_by_conversation="main-chat",
-    )
-    pending = store.get_policy_proposal(proposal_id)
-    assert pending["created_by_conversation"] == "main-chat"
-    assert str(store.claim_policy_proposal(proposal_id)["id"]) == proposal_id
-    assert store.resolve_policy_proposal(
-        proposal_id, status="applied", conversation_id="slack-thread",
-    )
-    assert store.get_policy_proposal(proposal_id) is None
-    assert store.get_activity_thread(activity.id)["actions"][-1]["title"] == "Policy proposal applied"
-
-
-def test_policy_proposal_redacts_credentials_before_persistence(store):
-    activity = store.create_activity(title="Review credentials", source="web")
-    proposal_id = store.create_policy_proposal(
-        activity_id=activity.id, scope="workspace", target_agent_name="",
-        policy_name="Credential handling", expected_content="No policy exists yet.",
-        proposed_content="## Credential handling\napproved: no\n\napi_key=sk-12345678901234567890",
-        created_by_conversation="main-chat",
-    )
-    proposal = store.get_policy_proposal(proposal_id)
-    assert "sk-12345678901234567890" not in proposal["proposed_content"]
-    assert "[REDACTED]" in proposal["proposed_content"]
 
 
 def test_agent_owned_activity_can_be_completed_once(store):
@@ -568,11 +539,11 @@ def test_postgres_policy_records_keep_string_ids_and_agent_scope(store, tmp_path
             workspace=WORKSPACE_ID,
             data_dir=tmp_path,
             database_url=store.dsn,
-            confirmed_policy_title=title,
+            confirmed_policy_id=title,
         ),
         repository=repository,
     )
-    policies.update_policy(
+    seed_policy_document(policies,
         f"## {title}\napproved: yes\n\nWorkspace requirement.",
         "",
         "workspace",
@@ -581,7 +552,7 @@ def test_postgres_policy_records_keep_string_ids_and_agent_scope(store, tmp_path
     workspace_rule = next(
         rule for rule in policies.approved_rules(agent_name) if rule.name == title
     )
-    policies.update_policy(
+    seed_policy_document(policies,
         f"## {title}\napproved: yes\n\nAgent requirement.",
         "",
         "agent",
@@ -592,7 +563,7 @@ def test_postgres_policy_records_keep_string_ids_and_agent_scope(store, tmp_path
     listing = list_policies(services)
     workspace_text = read_policy(services)
     agent_text = read_policy(services, "agent", agent_name)
-    policies.update_policy(
+    seed_policy_document(policies,
         f"## {title}\napproved: yes\n\nCheck the changed requirement.",
         read_policy(services, "agent", agent_name),
         "agent",
@@ -614,7 +585,7 @@ def test_postgres_policy_records_keep_string_ids_and_agent_scope(store, tmp_path
     assert "Workspace requirement." in workspace_text
     assert f"## {first.id} | {title}" in agent_text
     assert "Agent requirement." in agent_text
-    assert updated.id == first.id
+    assert updated.id == f"{first.id}.1"
     assert updated.criteria == "Check the changed requirement."
 
 
@@ -724,7 +695,7 @@ def test_activity_records_generic_events_and_multiple_evaluations(store: Postgre
     policy_ids = [_test_policy_id(store)]
     policy_repo = PostgresPolicyRepository(store.dsn, WORKSPACE_ID)
     current = policy_repo.list_scope("agent", "dogfood-refund-agent")
-    saved = policy_repo.replace_scope(
+    saved = policy_repo.seed_scope(
         "agent",
         "dogfood-refund-agent",
         [{"name": item.name, "criteria": item.criteria, "approved": item.approved}

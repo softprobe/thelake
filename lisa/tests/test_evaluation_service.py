@@ -18,7 +18,7 @@ from lisa.services import evaluations as evaluations_module
 def services(lisa_test_context):
     services = build_services(
         lisa_test_context(
-            confirmed_policy_title="Rule",
+            confirmed_policy_id="Rule",
             slack_channel="original-channel",
             slack_thread="original-thread",
         )

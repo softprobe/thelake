@@ -1,25 +1,6 @@
 [
   {
-    "description": "Apply a pending proposal only after its exact ID is confirmed this turn.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "proposal_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "proposal_id"
-      ],
-      "type": "object"
-    },
-    "name": "apply_policy_proposal",
-    "outputSchema": {
-      "additionalProperties": true,
-      "type": "object"
-    }
-  },
-  {
+    "name": "approve_activity_followup",
     "description": "Approve this follow-up only when its exact ID was confirmed this turn.",
     "inputSchema": {
       "additionalProperties": false,
@@ -33,13 +14,33 @@
       ],
       "type": "object"
     },
-    "name": "approve_activity_followup",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
+    "name": "approve_policy",
+    "description": "Approve a policy only after its exact ID is confirmed by an authorized owner.\n\nBefore calling, verify the current actor is an owner and the exact readable ID exists\nas a policy. If the actor is not an owner or the policy is unknown, explain why and\ndo not call this tool. If it is already approved, report that state without a call.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "policy_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    }
+  },
+  {
+    "name": "complete_activity",
     "description": "Finish a queued Lisa activity with its outcome and final summary.",
     "inputSchema": {
       "additionalProperties": false,
@@ -66,13 +67,13 @@
       ],
       "type": "object"
     },
-    "name": "complete_activity",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
+    "name": "complete_evaluation_failure_followup",
     "description": "Clear a pending failure after Lisa investigated and reported it.",
     "inputSchema": {
       "additionalProperties": false,
@@ -86,68 +87,22 @@
       ],
       "type": "object"
     },
-    "name": "complete_evaluation_failure_followup",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
+    "name": "create_activity",
     "description": "Create a Lisa activity and its feed card and monitor thread.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "activity_type": {
+        "title": {
           "type": "string"
         },
-        "agent_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "details": {
-          "anyOf": [
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "is_goal": {
-          "default": false,
-          "type": "boolean"
-        },
-        "message_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "parent_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "activity_type": {
+          "type": "string"
         },
         "source": {
           "type": "string"
@@ -174,8 +129,54 @@
           ],
           "default": null
         },
-        "title": {
-          "type": "string"
+        "is_goal": {
+          "default": false,
+          "type": "boolean"
+        },
+        "agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "details": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -185,61 +186,21 @@
       ],
       "type": "object"
     },
-    "name": "create_activity",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
-    "description": "Store one named policy change for explicit approval in either chat.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "activity_id": {
-          "type": "string"
-        },
-        "agent_name": {
-          "default": "",
-          "type": "string"
-        },
-        "expected_content": {
-          "type": "string"
-        },
-        "proposed_content": {
-          "type": "string"
-        },
-        "scope": {
-          "enum": [
-            "workspace",
-            "agent"
-          ],
-          "type": "string"
-        }
-      },
-      "required": [
-        "activity_id",
-        "scope",
-        "proposed_content",
-        "expected_content"
-      ],
-      "type": "object"
-    },
-    "name": "create_policy_proposal",
-    "outputSchema": {
-      "additionalProperties": true,
-      "type": "object"
-    }
-  },
-  {
+    "name": "evaluate_session",
     "description": "Triage approved policies for suspected violations and judge escalated policies.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "session_id": {
+        "target_agent_name": {
           "type": "string"
         },
-        "target_agent_name": {
+        "session_id": {
           "type": "string"
         }
       },
@@ -249,27 +210,27 @@
       ],
       "type": "object"
     },
-    "name": "evaluate_session",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
+    "name": "find_activity",
     "description": "Find matching activity records before starting or resuming work.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "limit": {
-          "default": 20,
-          "type": "integer"
+        "query": {
+          "type": "string"
         },
         "open_only": {
           "default": true,
           "type": "boolean"
         },
-        "query": {
-          "type": "string"
+        "limit": {
+          "default": 20,
+          "type": "integer"
         }
       },
       "required": [
@@ -277,7 +238,6 @@
       ],
       "type": "object"
     },
-    "name": "find_activity",
     "outputSchema": {
       "properties": {
         "result": {
@@ -296,6 +256,7 @@
     }
   },
   {
+    "name": "get_activity_thread",
     "description": "Read one activity monitor thread, including its sections and actions.",
     "inputSchema": {
       "additionalProperties": false,
@@ -309,7 +270,6 @@
       ],
       "type": "object"
     },
-    "name": "get_activity_thread",
     "outputSchema": {
       "properties": {
         "result": {
@@ -332,6 +292,7 @@
     }
   },
   {
+    "name": "get_session",
     "description": "Read one session as a compact user/tool/assistant trajectory.",
     "inputSchema": {
       "additionalProperties": false,
@@ -345,24 +306,35 @@
       ],
       "type": "object"
     },
-    "name": "get_session",
     "outputSchema": {
       "additionalProperties": false,
       "properties": {
+        "session_id": {
+          "type": "string"
+        },
         "agent_names": {
           "items": {
             "type": "string"
           },
           "type": "array"
         },
-        "complete": {
-          "type": "boolean"
+        "trace_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "events": {
           "items": {
             "additionalProperties": false,
             "properties": {
-              "call_id": {
+              "sequence": {
+                "type": "integer"
+              },
+              "span_id": {
+                "type": "string"
+              },
+              "parent_span_id": {
                 "anyOf": [
                   {
                     "type": "string"
@@ -373,16 +345,8 @@
                 ],
                 "default": null
               },
-              "content": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null
+              "timestamp": {
+                "type": "string"
               },
               "kind": {
                 "enum": [
@@ -404,7 +368,29 @@
                 ],
                 "default": null
               },
-              "parent_span_id": {
+              "call_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "content": {
                 "anyOf": [
                   {
                     "type": "string"
@@ -423,26 +409,6 @@
                   }
                 ],
                 "default": null
-              },
-              "sequence": {
-                "type": "integer"
-              },
-              "span_id": {
-                "type": "string"
-              },
-              "status": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null
-              },
-              "timestamp": {
-                "type": "string"
               }
             },
             "required": [
@@ -455,17 +421,8 @@
           },
           "type": "array"
         },
-        "limitations": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "message_order_certain": {
+        "complete": {
           "type": "boolean"
-        },
-        "session_id": {
-          "type": "string"
         },
         "tool_events_captured": {
           "type": "boolean"
@@ -473,7 +430,10 @@
         "tool_order_certain": {
           "type": "boolean"
         },
-        "trace_ids": {
+        "message_order_certain": {
+          "type": "boolean"
+        },
+        "limitations": {
           "items": {
             "type": "string"
           },
@@ -495,14 +455,12 @@
     }
   },
   {
+    "name": "link_activity_reference",
     "description": "Link an agent, message, runtime work item, or carrier message to a thread.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "activity_id": {
-          "type": "string"
-        },
-        "external_id": {
           "type": "string"
         },
         "reference_type": {
@@ -513,6 +471,9 @@
             "carrier_message"
           ],
           "type": "string"
+        },
+        "external_id": {
+          "type": "string"
         }
       },
       "required": [
@@ -522,13 +483,13 @@
       ],
       "type": "object"
     },
-    "name": "link_activity_reference",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
+    "name": "lisa_db",
     "description": "Run one bounded, read-only SELECT against Lisa's approved views and policy table.",
     "inputSchema": {
       "additionalProperties": false,
@@ -544,13 +505,13 @@
       ],
       "type": "object"
     },
-    "name": "lisa_db",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
+    "name": "list_activity_followups",
     "description": "Inspect pending and completed follow-ups linked to one activity.",
     "inputSchema": {
       "additionalProperties": false,
@@ -568,7 +529,6 @@
       ],
       "type": "object"
     },
-    "name": "list_activity_followups",
     "outputSchema": {
       "properties": {
         "result": {
@@ -587,13 +547,13 @@
     }
   },
   {
+    "name": "list_pending_evaluation_failures",
     "description": "List stored evaluation failures that still need Lisa's follow-up.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {},
       "type": "object"
     },
-    "name": "list_pending_evaluation_failures",
     "outputSchema": {
       "properties": {
         "result": {
@@ -619,43 +579,13 @@
     }
   },
   {
-    "description": "Find pending policy changes created in any Lisa conversation.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "limit": {
-          "default": 50,
-          "type": "integer"
-        }
-      },
-      "type": "object"
-    },
-    "name": "list_pending_policy_proposals",
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "type": "object",
-      "x-fastmcp-wrap-result": true
-    }
-  },
-  {
+    "name": "list_policies",
     "description": "List active policies across scopes with IDs and applicability.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {},
       "type": "object"
     },
-    "name": "list_policies",
     "outputSchema": {
       "properties": {
         "result": {
@@ -680,24 +610,14 @@
     }
   },
   {
+    "name": "list_recent_activities",
     "description": "List recent feed cards, optionally filtered by goal or activity type.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "activity_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "due_only": {
-          "default": false,
-          "type": "boolean"
+        "limit": {
+          "default": 50,
+          "type": "integer"
         },
         "is_goal": {
           "anyOf": [
@@ -710,15 +630,7 @@
           ],
           "default": null
         },
-        "limit": {
-          "default": 50,
-          "type": "integer"
-        },
-        "open_only": {
-          "default": false,
-          "type": "boolean"
-        },
-        "query": {
+        "activity_type": {
           "anyOf": [
             {
               "type": "string"
@@ -739,11 +651,29 @@
             }
           ],
           "default": null
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "open_only": {
+          "default": false,
+          "type": "boolean"
+        },
+        "due_only": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "type": "object"
     },
-    "name": "list_recent_activities",
     "outputSchema": {
       "properties": {
         "result": {
@@ -762,12 +692,12 @@
     }
   },
   {
+    "name": "notify_evaluation_failure",
     "description": "Notify Slack only after Lisa reviews a stored policy failure.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "failure_key": {
-          "default": "",
+        "target_agent_name": {
           "type": "string"
         },
         "name": {
@@ -776,7 +706,8 @@
         "session_id": {
           "type": "string"
         },
-        "target_agent_name": {
+        "failure_key": {
+          "default": "",
           "type": "string"
         }
       },
@@ -787,18 +718,21 @@
       ],
       "type": "object"
     },
-    "name": "notify_evaluation_failure",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
+    "name": "propose_activity_followup",
     "description": "Suggest a durable follow-up; it runs only after owner confirmation.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "activity_id": {
+          "type": "string"
+        },
+        "prompt": {
           "type": "string"
         },
         "due_at": {
@@ -811,9 +745,6 @@
             }
           ],
           "default": null
-        },
-        "prompt": {
-          "type": "string"
         },
         "trigger_event_type": {
           "anyOf": [
@@ -833,29 +764,28 @@
       ],
       "type": "object"
     },
-    "name": "propose_activity_followup",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
+    "name": "read_policy",
     "description": "Read workspace policy by default, or one agent's rules by exact name.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "agent_name": {
-          "default": "",
-          "type": "string"
-        },
         "scope": {
           "default": "workspace",
+          "type": "string"
+        },
+        "agent_name": {
+          "default": "",
           "type": "string"
         }
       },
       "type": "object"
     },
-    "name": "read_policy",
     "outputSchema": {
       "properties": {
         "result": {
@@ -870,53 +800,23 @@
     }
   },
   {
-    "description": "Reject a proposal only when its exact ID was declined this turn.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "proposal_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "proposal_id"
-      ],
-      "type": "object"
-    },
-    "name": "reject_policy_proposal",
-    "outputSchema": {
-      "additionalProperties": true,
-      "type": "object"
-    }
-  },
-  {
+    "name": "search_sessions",
     "description": "Search session summaries using the same filters and page shape as TheLake's session API.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "agent_name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "cursor": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "to": {
           "anyOf": [
             {
               "type": "string"
@@ -938,9 +838,16 @@
           ],
           "default": null
         },
-        "limit": {
-          "default": 50,
-          "type": "integer"
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "model_name": {
           "anyOf": [
@@ -953,13 +860,20 @@
           ],
           "default": null
         },
-        "order": {
-          "default": "desc",
-          "enum": [
-            "asc",
-            "desc"
+        "agent_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "type": "string"
+          "default": null
+        },
+        "roots_only": {
+          "default": true,
+          "type": "boolean"
         },
         "order_by": {
           "default": "start_time",
@@ -972,22 +886,19 @@
           ],
           "type": "string"
         },
-        "roots_only": {
-          "default": true,
-          "type": "boolean"
-        },
-        "to": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
+        "order": {
+          "default": "desc",
+          "enum": [
+            "asc",
+            "desc"
           ],
-          "default": null
+          "type": "string"
         },
-        "user_id": {
+        "limit": {
+          "default": 50,
+          "type": "integer"
+        },
+        "cursor": {
           "anyOf": [
             {
               "type": "string"
@@ -1001,27 +912,18 @@
       },
       "type": "object"
     },
-    "name": "search_sessions",
     "outputSchema": {
       "additionalProperties": false,
       "properties": {
-        "cursor_supported": {
-          "type": "boolean"
-        },
         "items": {
           "items": {
             "additionalProperties": false,
             "properties": {
-              "agent_name": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null
+              "session_id": {
+                "type": "string"
+              },
+              "start_time": {
+                "type": "string"
               },
               "end_time": {
                 "anyOf": [
@@ -1033,6 +935,12 @@
                   }
                 ],
                 "default": null
+              },
+              "trace_count": {
+                "type": "integer"
+              },
+              "span_count": {
+                "type": "integer"
               },
               "error_count": {
                 "type": "integer"
@@ -1048,36 +956,10 @@
                 ],
                 "default": null
               },
-              "models": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
               "output_tokens": {
                 "anyOf": [
                   {
                     "type": "integer"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null
-              },
-              "session_id": {
-                "type": "string"
-              },
-              "span_count": {
-                "type": "integer"
-              },
-              "start_time": {
-                "type": "string"
-              },
-              "total_cost": {
-                "anyOf": [
-                  {
-                    "type": "number"
                   },
                   {
                     "type": "null"
@@ -1096,10 +978,35 @@
                 ],
                 "default": null
               },
-              "trace_count": {
-                "type": "integer"
+              "total_cost": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "agent_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               },
               "user_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "models": {
                 "items": {
                   "type": "string"
                 },
@@ -1127,6 +1034,9 @@
             }
           ],
           "default": null
+        },
+        "cursor_supported": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -1137,11 +1047,23 @@
     }
   },
   {
+    "name": "set_activity_progress",
     "description": "Record the current work state, next action, and optional due time.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "activity_id": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "waiting"
+          ],
+          "type": "string"
+        },
+        "summary": {
           "type": "string"
         },
         "next_action": {
@@ -1165,17 +1087,6 @@
             }
           ],
           "default": null
-        },
-        "status": {
-          "enum": [
-            "queued",
-            "running",
-            "waiting"
-          ],
-          "type": "string"
-        },
-        "summary": {
-          "type": "string"
         }
       },
       "required": [
@@ -1185,13 +1096,13 @@
       ],
       "type": "object"
     },
-    "name": "set_activity_progress",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
+    "name": "set_activity_section",
     "description": "Create or update the activity's monitor section.",
     "inputSchema": {
       "additionalProperties": false,
@@ -1202,17 +1113,17 @@
         "section_key": {
           "type": "string"
         },
-        "section_order": {
-          "default": 0,
-          "type": "integer"
+        "title": {
+          "default": "",
+          "type": "string"
         },
         "status": {
           "default": "pending",
           "type": "string"
         },
-        "title": {
-          "default": "",
-          "type": "string"
+        "section_order": {
+          "default": 0,
+          "type": "integer"
         }
       },
       "required": [
@@ -1221,13 +1132,13 @@
       ],
       "type": "object"
     },
-    "name": "set_activity_section",
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
     }
   },
   {
+    "name": "update_activity",
     "description": "Update an activity card and optionally append a visible timeline action.",
     "inputSchema": {
       "additionalProperties": false,
@@ -1235,52 +1146,7 @@
         "activity_id": {
           "type": "string"
         },
-        "details": {
-          "anyOf": [
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "event_summary": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "event_title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "event_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "status_title": {
+        "title": {
           "anyOf": [
             {
               "type": "string"
@@ -1302,6 +1168,17 @@
           ],
           "default": null
         },
+        "status_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "task_label": {
           "anyOf": [
             {
@@ -1313,7 +1190,41 @@
           ],
           "default": null
         },
-        "title": {
+        "details": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "event_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "event_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "event_summary": {
           "anyOf": [
             {
               "type": "string"
@@ -1330,7 +1241,53 @@
       ],
       "type": "object"
     },
-    "name": "update_activity",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    }
+  },
+  {
+    "name": "write_policy",
+    "description": "Create a policy or write a readable revision such as P1.2.1.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "enum": [
+            "workspace",
+            "agent"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "criteria": {
+          "type": "string"
+        },
+        "agent_name": {
+          "default": "",
+          "type": "string"
+        },
+        "policy_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "criteria"
+      ],
+      "type": "object"
+    },
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"

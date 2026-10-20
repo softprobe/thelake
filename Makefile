@@ -179,6 +179,7 @@ doctor: ensure-cache
 # ---- build ----
 EXPLORER_DIR := $(CURDIR)/packages/thelake-explorer
 EXPLORER_EMBEDDED := $(EXPLORER_DIR)/embedded
+LISA_EMBEDDED := $(EXPLORER_DIR)/lisa-embedded
 
 explorer-deps:
 	@if [ "$${IN_LINUX_BUILDER:-0}" = "1" ]; then \
@@ -193,6 +194,11 @@ explorer-assets: explorer-deps
 	else \
 		npm --prefix "$(EXPLORER_DIR)" run build:embedded; \
 	fi
+	@if [ "$${IN_LINUX_BUILDER:-0}" = "1" ]; then \
+		test -f "$(LISA_EMBEDDED)/index.html" || { echo "Lisa assets must be built on the host before entering the Linux builder" >&2; exit 1; }; \
+	else \
+		npm --prefix "$(EXPLORER_DIR)" run build:lisa-embedded; \
+	fi
 
 build: ensure-cache explorer-assets
 	cargo build --locked
@@ -204,15 +210,16 @@ contracts-test:
 run: build
 	cargo run --locked --bin thelake
 
-# Full local Explorer + Lisa environment. Local credentials are generated once
-# in the ignored .env; Compose keeps the Postgres and Lisa home volumes on stop.
+# Full local Explorer + Lisa environment. The apps use separate routes.
+# Local credentials are generated once in the ignored .env; Compose keeps the
+# Postgres and Lisa home volumes on stop.
 dev-up:
 	python3 scripts/dev_env.py init --env-file .env --require-model
-	$(MAKE) --no-print-directory _ensure-dist
+	$(MAKE) --no-print-directory _ensure-dev-dist
 	$(COMPOSE) --profile lisa up --detach ducklake-postgres minio auth-mock
 	$(MAKE) --no-print-directory _minio-bucket
 	$(COMPOSE) --profile lisa up --detach --build otlp-backend lisa
-	@echo "Open Explorer at the host address shown below and select Lisa."
+	@echo "Explorer: use the host address shown below with /explorer/. Lisa: use the same host with /lisa/."
 	@$(COMPOSE) --profile lisa port otlp-backend 8090
 	@$(COMPOSE) --profile lisa port lisa 8082
 
@@ -262,6 +269,17 @@ _ensure-dist:
 	@if [ ! -f "$(DIST_DIR)/libduckdb.so" ]; then \
 		echo "dist/ lacks libduckdb.so — TARGET_PLATFORM=linux/amd64 build-release..."; \
 		TARGET_PLATFORM=linux/amd64 $(MAKE) build-release; \
+	fi
+
+# Refresh the local dev binary when app source or build inputs are newer. Assets
+# are embedded by build-release, so checking them with the binary keeps `/lisa/`
+# and `/explorer/` current without forcing a clean Linux release build each run.
+_ensure-dev-dist:
+	@if [ ! -x "$(DIST_DIR)/thelake" ] || \
+		find src proto packages/thelake-explorer/src packages/thelake-explorer/lisa Cargo.toml Cargo.lock build.rs config.yaml packages/thelake-explorer/index.html packages/thelake-explorer/package.json packages/thelake-explorer/package-lock.json packages/thelake-explorer/vite.config.ts packages/thelake-explorer/vite.spa.config.ts packages/thelake-explorer/vite.lisa.config.ts -type f -newer "$(DIST_DIR)/thelake" -print -quit 2>/dev/null | grep -q .; then \
+		TARGET_PLATFORM=linux/amd64 $(MAKE) build-release; \
+	else \
+		$(MAKE) _ensure-dist; \
 	fi
 
 package: _ensure-dist

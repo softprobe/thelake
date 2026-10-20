@@ -7,7 +7,8 @@ description: Use or develop Explorer for sessions, traces, scores, and its scrip
 
 Read `docs/how-to/explorer.md`; for local setup, follow
 `docs/how-to/local-development.md`. Explorer is served by TheLake at `/explorer/` and can
-also be embedded as a React package.
+also be embedded as a React package. Lisa is a separate app at `/lisa/`; use its
+chat for policy-management requests, not Explorer's session browser.
 
 ## Behavior-check wizard
 

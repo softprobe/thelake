@@ -88,19 +88,16 @@ class DogfoodDemoTest(unittest.TestCase):
     def test_demo_saves_policy_only_after_exact_owner_confirmation(self, lisa_request):
         import json
         lisa_request.side_effect = [
-            {"conversation_id": "conversation-1"}, {"activities": []},
-            {"activities": [{"tool_name": "update_policy", "arguments": json.dumps({
-                "scope": "agent", "agent_name": "dogfood-refund-agent",
-                "content": "## Dogfood rule\napproved: yes\n\nCheck eligibility.",
-            })}]},
+            {"conversation_id": "conversation-1"},
+            {"messages": [{"role": "assistant", "text": "Created P1.7. Show `Approve policy: P1.7` to approve."}]},
+            {"activities": [{"tool_name": "approve_policy", "arguments": json.dumps({"policy_id": "P1.7"})}]},
         ]
-        conversation_id, _turn = e2e.ask_lisa_to_approve_policy("http://lisa/v1", "Dogfood rule")
+        conversation_id, _turn = e2e.ask_lisa_to_approve_policy("http://lisa/v1", "token", "Dogfood rule")
         self.assertEqual(conversation_id, "conversation-1")
-        proposal_prompt = lisa_request.call_args_list[1].args[3]["text"]
-        self.assertIn("Do not save it yet", proposal_prompt)
-        self.assertIn("scope=agent", proposal_prompt)
-        self.assertIn("agent_name=dogfood-refund-agent", proposal_prompt)
-        self.assertEqual(lisa_request.call_args_list[2].args[3]["text"], "Confirm policy rule: Dogfood rule")
+        create_prompt = lisa_request.call_args_list[1].args[3]["text"]
+        self.assertIn("Use write_policy", create_prompt)
+        self.assertIn("Do not approve it yet", create_prompt)
+        self.assertEqual(lisa_request.call_args_list[2].args[3]["text"], "Approve policy: P1.7")
         self.assertTrue(lisa_request.call_args_list[2].args[3]["consent"])
 
 

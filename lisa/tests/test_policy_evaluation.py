@@ -1,3 +1,5 @@
+from benchmark.policy_seed import seed_policy_document
+
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -10,13 +12,13 @@ from lisa.evaluation import evaluator
 
 @pytest.fixture
 def services(lisa_test_context):
-    return build_services(lisa_test_context(confirmed_policy_title="Rule"))
+    return build_services(lisa_test_context(confirmed_policy_id="Rule"))
 
 
 @pytest.mark.parametrize("approval", ["no", "missing"])
 def test_only_explicitly_approved_rules_can_run(services, monkeypatch, approval):
     if approval == "missing":
-        services.policy_service.update_policy("## Rule\n\nCheck eligibility.", "")
+        seed_policy_document(services.policy_service, "## Rule\n\nCheck eligibility.", "")
     else:
         save_rule(services, approval)
     monkeypatch.setattr(services.client, "post", lambda *a, **k: pytest.fail("No API call allowed"))
@@ -25,34 +27,24 @@ def test_only_explicitly_approved_rules_can_run(services, monkeypatch, approval)
         services.evaluations._evaluate_session("agent", "Rule", "session")
 
 
-def test_agent_override_is_applied_before_approval_filter(services):
+def test_pending_agent_revision_does_not_pause_workspace_policy(services):
     save_rule(services)
     save_rule(services, "no", scope="agent")
-    assert services.policy_service.approved_rules("agent") == []
+    assert services.policy_service.approved_rules("agent")[0].scope == "workspace"
     assert services.policy_service.approved_rules("other-agent")[0].name == "Rule"
 
 
 @pytest.mark.parametrize("header", ["approved: maybe", "approved: yes\napproved: no"])
 def test_malformed_or_duplicate_approval_is_rejected(services, header):
     with pytest.raises(ValueError, match="approved"):
-        services.policy_service.update_policy(f"## Rule\n{header}\n\nCheck eligibility.", "")
+        seed_policy_document(services.policy_service, f"## Rule\n{header}\n\nCheck eligibility.", "")
 
 
 def test_approval_in_prose_or_code_is_not_metadata(services):
-    services.policy_service.update_policy(
+    seed_policy_document(services.policy_service,
         "## Rule\n\nExample:\n```md\napproved: yes\n## Nested heading\n```", ""
     )
     assert services.policy_service.approved_rules("agent") == []
-
-
-def test_approval_changes_require_owner_confirmation(services):
-    save_rule(services, "no")
-    unconfirmed = build_services(replace(services.context, confirmed_policy_title=""))
-    with pytest.raises(ValueError, match="confirmation"):
-        save_rule(unconfirmed)
-    scheduled = build_services(replace(services.context, turn_source="scheduled"))
-    with pytest.raises(ValueError, match="owner conversation"):
-        save_rule(scheduled)
 
 
 def test_run_stores_policy_id_without_a_registry(services, monkeypatch):

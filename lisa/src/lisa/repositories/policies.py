@@ -20,6 +20,17 @@ def _sql(name: str) -> str:
     return files("lisa").joinpath("sql", "policies", name).read_text(encoding="utf-8")
 
 
+def _next_revision_id(records: list[PolicyRecord], identifier: str) -> str:
+    """Allocate the next readable revision within a policy's P1.x family."""
+    family = ".".join(identifier.split(".")[:2])
+    revisions = [
+        int(row.id.rsplit(".", 1)[-1])
+        for row in records
+        if row.id.startswith(family + ".") and row.id != family
+    ]
+    return f"{family}.{max(revisions, default=0) + 1}"
+
+
 class InMemoryPolicyRepository:
     """Process-local fallback used only when a deployment has no database configured."""
 
@@ -46,9 +57,25 @@ class InMemoryPolicyRepository:
         with self._lock:
             workspace = self._records.get(("workspace", ""), {})
             agent = self._records.get(("agent", target_agent_name), {})
-            overlaid = {row.name: row for row in workspace.values() if row.archived_at is None}
-            overlaid.update({row.name: row for row in agent.values() if row.archived_at is None})
-            return [row for row in overlaid.values() if row.approved]
+
+            def effective(rows):
+                grouped: dict[str, list[PolicyRecord]] = {}
+                for row in rows.values():
+                    if row.archived_at is None and row.approved:
+                        grouped.setdefault(row.name, []).append(row)
+                return {
+                    name: max(
+                        items,
+                        key=lambda row: (
+                            row.updated_at or row.created_at or datetime.min.replace(tzinfo=UTC),
+                            row.id,
+                        ),
+                    )
+                    for name, items in grouped.items()
+                }
+            overlaid = effective(workspace)
+            overlaid.update(effective(agent))
+            return list(overlaid.values())
 
     def list_all(self) -> list[PolicyRecord]:
         with self._lock:
@@ -75,7 +102,7 @@ class InMemoryPolicyRepository:
         with self._lock:
             return [row for rows in self._records.values() for row in rows.values()]
 
-    def replace_scope(
+    def seed_scope(
         self,
         scope: str,
         target_agent_name: str,
@@ -84,26 +111,36 @@ class InMemoryPolicyRepository:
     ) -> list[PolicyRecord]:
         key = self._key(scope, target_agent_name)
         with self._lock:
-            current = list(self._records.get(key, {}).values())
-            current = [row for row in current if row.archived_at is None]
+            records = self._records.setdefault(key, {})
+            current = [row for row in records.values() if row.archived_at is None]
             if _policy_values(current) != _policy_values(expected_rules):
                 raise ValueError("Policy changed since it was read; read it again before updating")
-            previous = {row.name: row for row in self._records.get(key, {}).values()}
-            next_records = {
-                row.name: row for row in previous.values() if row.archived_at is not None
-            }
             archived_at = datetime.now(UTC)
             incoming_names = {item["name"] for item in incoming}
             for row in current:
                 if row.name not in incoming_names:
-                    next_records[row.name] = replace(row, archived_at=archived_at)
+                    records[row.id] = replace(row, archived_at=archived_at)
             for item in incoming:
-                old = previous.get(item["name"])
+                old = next((row for row in current if row.name == item["name"]), None)
+                if old and (old.criteria, old.approved) == (item["criteria"], item["approved"]):
+                    continue
                 if old is None:
                     identifier = policy_id(self._next_policy_ordinal)
                     self._next_policy_ordinal += 1
-                else:
+                elif not old.approved:
                     identifier = old.id
+                else:
+                    identifier = _next_revision_id(list(records.values()), old.id)
+                    if item["approved"]:
+                        records[old.id] = replace(old, archived_at=archived_at)
+                if old and not old.approved and item["approved"]:
+                    for existing_id, existing in list(records.items()):
+                        if (
+                            existing.name == old.name
+                            and existing.approved
+                            and existing.archived_at is None
+                        ):
+                            records[existing_id] = replace(existing, archived_at=archived_at)
                 row = PolicyRecord(
                     id=identifier,
                     scope=scope,
@@ -112,9 +149,54 @@ class InMemoryPolicyRepository:
                     criteria=item["criteria"],
                     approved=item["approved"],
                 )
-                next_records[row.name] = row
-            self._records[key] = next_records
-            return list(next_records.values())
+                records[identifier] = row
+            return [row for row in records.values() if row.archived_at is None]
+
+    def write_policy(self, scope: str, target_agent_name: str, name: str, criteria: str,
+                     policy_id: str | None = None) -> PolicyRecord:
+        key = self._key(scope, target_agent_name)
+        with self._lock:
+            records = self._records.setdefault(key, {})
+            active = [row for row in records.values() if row.archived_at is None and row.name == name]
+            pending = next((row for row in active if not row.approved), None)
+            approved = next((row for row in active if row.approved), None)
+            if policy_id is not None:
+                selected = records.get(policy_id)
+                if selected is None or selected.archived_at is not None or selected.name != name:
+                    raise ValueError("Policy ID was not found in this scope")
+                if not selected.approved:
+                    identifier = selected.id
+                elif pending is not None:
+                    identifier = pending.id
+                else:
+                    identifier = _next_revision_id(list(records.values()), selected.id)
+            elif pending is not None:
+                identifier = pending.id
+            elif approved is not None:
+                identifier = _next_revision_id(list(records.values()), approved.id)
+            else:
+                identifier = f"P1.{self._next_policy_ordinal}"
+                self._next_policy_ordinal += 1
+            row = PolicyRecord(identifier, scope, target_agent_name or None, name, criteria, False)
+            records[identifier] = row
+            return row
+
+    def approve_policy(self, identifier: str) -> PolicyRecord:
+        with self._lock:
+            for records in self._records.values():
+                selected = records.get(identifier)
+                if selected is None or selected.archived_at is not None:
+                    continue
+                if selected.approved:
+                    return selected
+                now = datetime.now(UTC)
+                for policy_id, row in list(records.items()):
+                    if row.name == selected.name and row.approved and row.archived_at is None:
+                        records[policy_id] = replace(row, archived_at=now)
+                approved = replace(selected, approved=True)
+                records[identifier] = approved
+                return approved
+        raise ValueError("Policy ID was not found or is archived")
 
 
 class PostgresPolicyRepository:
@@ -189,7 +271,7 @@ class PostgresPolicyRepository:
             rows = connection.execute(_sql("list_all_policy_history.sql")).fetchall()
         return [self._record(row) for row in rows]
 
-    def replace_scope(
+    def seed_scope(
         self,
         scope: str,
         target_agent_name: str,
@@ -206,6 +288,11 @@ class PostgresPolicyRepository:
             current = [self._record(row) for row in rows]
             if _policy_values(current) != _policy_values(expected_rules):
                 raise ValueError("Policy changed since it was read; read it again before updating")
+            history_rows = connection.execute(
+                _sql("list_policy_scope_history.sql"),
+                {"scope": scope, "target_agent_name": target_agent_name or ""},
+            ).fetchall()
+            history = [self._record(row) for row in history_rows]
             incoming_names = [item["name"] for item in incoming]
             connection.execute(
                 _sql("archive_removed_policies.sql"),
@@ -215,10 +302,36 @@ class PostgresPolicyRepository:
                     "names": incoming_names,
                 },
             )
+            current_by_name = {item.name: item for item in current}
             for item in incoming:
+                old = current_by_name.get(item["name"])
+                if old and (old.criteria, old.approved) == (item["criteria"], item["approved"]):
+                    continue
+                if old is None:
+                    ordinal = connection.execute(_sql("next_policy_ordinal.sql")).fetchone()["ordinal"]
+                    identifier = policy_id(ordinal)
+                elif not old.approved:
+                    identifier = old.id
+                else:
+                    identifier = _next_revision_id(history, old.id)
+                    if item["approved"]:
+                        connection.execute(_sql("archive_approved_policy.sql"), {
+                            "scope": scope,
+                            "target_agent_name": target_agent_name or "",
+                            "name": item["name"],
+                            "id": identifier,
+                        })
+                if old and not old.approved and item["approved"]:
+                    connection.execute(_sql("archive_approved_policy.sql"), {
+                        "scope": scope,
+                        "target_agent_name": target_agent_name or "",
+                        "name": item["name"],
+                        "id": identifier,
+                    })
                 connection.execute(
                     _sql("save_policy.sql"),
                     {
+                        "id": identifier,
                         "scope": scope,
                         "target_agent_name": target_agent_name or "",
                         "name": item["name"],
@@ -231,6 +344,65 @@ class PostgresPolicyRepository:
                 {"scope": scope, "target_agent_name": target_agent_name or ""},
             ).fetchall()
         return [self._record(row) for row in saved]
+
+    def write_policy(self, scope: str, target_agent_name: str, name: str, criteria: str,
+                     policy_id: str | None = None) -> PolicyRecord:
+        lock_key = f"{scope}:{target_agent_name if scope == 'agent' else ''}"
+        with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("lock_policy_scope.sql"), {"lock_key": lock_key})
+            rows = connection.execute(_sql("list_policy_scope_history.sql"), {
+                "scope": scope, "target_agent_name": target_agent_name or "",
+            }).fetchall()
+            history = [self._record(row) for row in rows]
+            active = [row for row in history if row.archived_at is None and row.name == name]
+            pending = next((row for row in active if not row.approved), None)
+            approved = next((row for row in active if row.approved), None)
+            if policy_id is not None:
+                selected = next((row for row in history if row.id == policy_id and row.archived_at is None), None)
+                if selected is None or selected.name != name:
+                    raise ValueError("Policy ID was not found in this scope")
+                if not selected.approved:
+                    identifier = selected.id
+                elif pending is not None:
+                    identifier = pending.id
+                else:
+                    identifier = _next_revision_id(history, selected.id)
+            elif pending is not None:
+                identifier = pending.id
+            elif approved is not None:
+                identifier = _next_revision_id(history, approved.id)
+            else:
+                ordinal = connection.execute(_sql("next_policy_ordinal.sql")).fetchone()["ordinal"]
+                identifier = f"P1.{ordinal}"
+            row = connection.execute(_sql("write_policy.sql"), {
+                "id": identifier, "scope": scope,
+                "target_agent_name": target_agent_name or "", "name": name,
+                "criteria": criteria,
+            }).fetchone()
+            if row is None:
+                raise ValueError("Policy changed while writing; read it again before updating")
+        return self._record(row)
+
+    def approve_policy(self, identifier: str) -> PolicyRecord:
+        with self._connect() as connection, connection.transaction():
+            selected = connection.execute(_sql("get_policy_by_id.sql"), {"id": identifier}).fetchone()
+            if selected is None or selected["archived_at"] is not None:
+                raise ValueError("Policy ID was not found or is archived")
+            lock_key = f"{selected['scope']}:{selected['target_agent_name'] if selected['scope'] == 'agent' else ''}"
+            connection.execute(_sql("lock_policy_scope.sql"), {"lock_key": lock_key})
+            selected = connection.execute(_sql("get_policy_by_id.sql"), {"id": identifier}).fetchone()
+            if selected is None or selected["archived_at"] is not None:
+                raise ValueError("Policy ID was not found or is archived")
+            if not selected["approved"]:
+                connection.execute(_sql("archive_approved_policy.sql"), {
+                    "scope": selected["scope"],
+                    "target_agent_name": selected["target_agent_name"],
+                    "name": selected["name"], "id": identifier,
+                })
+                selected = connection.execute(_sql("approve_policy.sql"), {"id": identifier}).fetchone()
+                if selected is None:
+                    raise ValueError("Policy changed while approving; read it again before retrying")
+        return self._record(selected)
 
 
 def _policy_values(

@@ -50,17 +50,17 @@ class FollowupExpectation(StrictModel):
     prompt_contains: list[str] = Field(default_factory=list)
 
 
-class ProposalExpectation(StrictModel):
-    policy_name_contains: str
-    status: Literal["pending"]
+class PolicyExpectation(StrictModel):
+    name_contains: str
+    approved: bool
 
 
 class ActivityLabels(StrictModel):
     activity_count: int
     activities: list[ActivityExpectation] = Field(default_factory=list)
     followups: list[FollowupExpectation] = Field(default_factory=list)
-    proposals: list[ProposalExpectation] = Field(default_factory=list)
-    pending_proposal_count: int | None = None
+    policies: list[PolicyExpectation] = Field(default_factory=list)
+    pending_policy_count: int | None = None
     policy_count: int | None = None
     policy_text_contains: list[str] = Field(default_factory=list)
 

@@ -6,17 +6,18 @@ trajectory is derived from a session and has no separate ID.
 
 Explorer is the self-hosted session and trace UI for thelake. Source lives in
 [`packages/thelake-explorer`](../../packages/thelake-explorer/). `make build`
-embeds the SPA into the binary; thelake serves it at `/explorer/`.
+embeds its SPA into the binary; thelake serves it at `/explorer/`. Lisa is a
+separate app served at `/lisa/` from its own embedded SPA bundle and chat shell.
 
-For the complete local Explorer + Lisa chat environment, use
-[Local Lisa development](local-development.md). It uses the root Compose stack
-and provisions durable policy storage.
+For the complete local Explorer and Lisa environment, use
+[Local Lisa development](local-development.md). It uses one root Compose stack
+and provisions durable policy storage for Lisa.
 
 ## Prerequisites
 
 ```bash
 make setup    # Postgres (DuckLake catalog) + MinIO
-make build    # embeds packages/thelake-explorer/embedded/ into the binary
+make build    # builds and embeds Explorer and Lisa SPAs into the binary
 ```
 
 ## Open the UI (local)
@@ -154,7 +155,7 @@ mismatched `data_path` fails attach / readiness.
 - Record a human verdict (`correct` / `wrong` / `unsure`) as a categorical
   score named `human_verdict` on the focused span.
 
-### Lisa
+### Lisa app
 
 **Lisa** is a model-backed workspace QA agent running in the `lisa`
 container. The current backend adapter uses the OpenHands SDK. Its reusable
@@ -165,14 +166,19 @@ workspace and agent policy records, bounded session-detail search,
 explicitly approved policy rules, and scheduled policy evaluation. She does
 not run shell commands or access a connected Git repository.
 
-Lisa's Explorer keeps the conversation visible beside a workspace panel with
+Lisa's app has its own route at `/lisa/` and its own compiled entry point.
+Explorer remains the session and trace browser at `/explorer/`; the two apps
+share the TheLake host and API deployment but load independent front-end
+bundles.
+
+Lisa's app keeps the conversation visible beside a workspace panel with
 Activities, Rules, Triage / judges, and Identity tabs. Activities reuse Lisa's
 authenticated activity feed. Selecting an activity opens a detail dialog with
 its ordered timeline and an activity summary; selecting a timeline step opens
 that step's detail. Escape or the close
 button returns focus to the activity row. Rules are a read-only view of the
-policy catalog; propose and apply changes through Lisa's chat proposal flow,
-which requires the owner's exact confirmation. Triage / judges shows
+policy catalog; create and revise policies through Lisa's chat. Approved
+revisions remain active until the owner approves the new readable policy ID. Triage / judges shows
 evaluation activities and their recorded timelines; triage routing is not a
 pass/fail verdict. The Identity tab identifies the current runtime prompt and
 distinguishes conversation context from durable policy and activity records.
@@ -189,9 +195,9 @@ viewport and device scale when changing this layout.
   telemetry go to the configured model provider. Sending a message proceeds
   without a separate checkbox. Lisa masks common credential patterns; general
   personal data is not redacted.
-- Ask Lisa to propose a named policy section with `approved: yes/no`.
-  Review the durable proposal and send `Confirm policy proposal: <proposal_id>`
-  to apply it. The same proposal can be confirmed from the main chat or Slack.
+- Ask Lisa to create or revise a named policy with criteria. She returns a
+  readable policy ID and approval state. Send `Approve policy: <policy_id>` as
+  a standalone owner message to approve that revision from chat.
   Approved rules are eligible immediately; there is no separate activation UI.
   Lisa's schedule reads policy and bounded session detail, builds a compact
   trajectory, then sends every approved candidate policy to OpenAI Decisions.
@@ -208,7 +214,8 @@ viewport and device scale when changing this layout.
   not yet a separate VM per workspace or a multi-replica durable store. Delete
   a conversation from its header to remove its persisted OpenHands state.
 - Lisa uses the `GOOGLE_API_KEY` or `GEMINI_API_KEY` and `LISA_MODEL` settings
-  in the Lisa container. Explorer connects directly to Lisa using `LISA_PUBLIC_URL`. Lisa reads TheLake
+  in the Lisa container. The separate `/lisa/` app connects directly to Lisa
+  using `LISA_PUBLIC_URL`. Lisa reads TheLake
   using `LISA_THELAKE_API_URL` and `LISA_THELAKE_TOKEN`.
 - Lisa's evaluation flow uses `OPENAI_API_KEY` for Decisions triage, and
   `GOOGLE_API_KEY` or `GEMINI_API_KEY` plus optional `GEMINI_MODEL_NAME` for the
@@ -282,8 +289,9 @@ starts TheLake and Lisa together and provisions Lisa's durable database:
 make dev-up
 ```
 
-Open Explorer → **Lisa** to chat, create and confirm policies, and inspect
-activities. Rule text and approval live in Lisa's PostgreSQL policy table;
+Open [Lisa at `/lisa/`](http://127.0.0.1:8090/lisa/) to chat, create and
+confirm policies, and inspect activities. The Explorer session app remains at
+`/explorer/`. Rule text and approval live in Lisa's PostgreSQL policy table;
 missing approval means no. Scheduled QA is opt-in in local development; set
 `LISA_QA_ENABLED=1` when you want model-backed scheduled evaluation.
 

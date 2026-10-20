@@ -196,51 +196,41 @@ def lisa_request(
         return json.loads(response.read())
 
 
-def ask_lisa_to_approve_policy(lisa_url: str, policy_name: str) -> tuple[str, dict]:
-    conversation = lisa_request(lisa_url, None, "/v1/conversations", {})
+def ask_lisa_to_approve_policy(
+    lisa_url: str, token: str, workspace_id: str, policy_name: str
+) -> tuple[str, dict]:
+    conversation = lisa_request(
+        lisa_url, token, "/internal/v1/conversations", {"workspace_id": workspace_id}
+    )
     conversation_id = conversation["conversation_id"]
-    path = f"/v1/conversations/{conversation_id}/messages"
-    lisa_request(
-        lisa_url,
-        None,
-        path,
+    path = f"/internal/v1/conversations/{conversation_id}/messages"
+    prepared = lisa_request(
+        lisa_url, token, path,
         {
             "text": (
-                f"Propose an agent POLICY.md rule named '{policy_name}' for '{AGENT_NAME}': "
+                f"Create an unapproved agent policy named '{policy_name}' for '{AGENT_NAME}': "
                 "check refund eligibility and wait for the result before issuing a refund. "
-                f"Read and save it with scope=agent and agent_name={AGENT_NAME}. "
-                "When updating, use the raw Markdown returned by read_policy as expected_content, "
-                "without any tool-display wrapper. Show the exact section with approved: yes "
-                "for me to confirm. Do not save it yet."
+                "Use write_policy and show me the readable policy ID. Do not approve it yet."
             ),
             "consent": True,
         },
     )
-    turn = lisa_request(
-        lisa_url,
-        None,
-        path,
-        {
-            "text": f"Confirm policy rule: {policy_name}",
-            "consent": True,
-        },
+    visible_text = "\n".join(
+        str(message.get("text", "")) for message in prepared.get("messages", [])
+        if message.get("role") == "assistant"
     )
-    saved = [
-        item
-        for item in turn.get("activities", [])
-        if item.get("tool_name") == "update_policy"
-    ]
-    if not any(
-        (args := json.loads(item.get("arguments") or "{}")).get("agent_name")
-        == AGENT_NAME
-        and args.get("scope") == "agent"
-        and f"## {policy_name}\napproved: yes" in args.get("content", "")
-        for item in saved
-    ):
-        raise RuntimeError(
-            "Lisa did not save the owner-approved policy through her tools."
-        )
-    return conversation_id, turn
+    policy_id_match = re.search(r"\bP1\.[1-9][0-9]*(?:\.[1-9][0-9]*)?\b", visible_text)
+    if not policy_id_match:
+        raise RuntimeError("Lisa did not return the readable policy ID for the pending rule.")
+    policy_id = policy_id_match.group(0)
+    approved = lisa_request(
+        lisa_url, token, path,
+        {"text": f"Approve policy: {policy_id}", "consent": True},
+    )
+    saved = [item for item in approved.get("activities", []) if item.get("tool_name") == "approve_policy"]
+    if not any(json.loads(item.get("arguments") or "{}").get("policy_id") == policy_id for item in saved):
+        raise RuntimeError("Lisa did not approve the exact readable policy ID through her tools.")
+    return conversation_id, approved
 
 
 def wait_for_lisa_ready(lisa_url: str, timeout_seconds: int = 90) -> None:
@@ -320,7 +310,9 @@ def main() -> int:
         evaluator_name = EVALUATOR_NAME
         wait_for_thelake_ready(api_url)
         wait_for_lisa_ready(lisa_url)
-        conversation_id, _turn = ask_lisa_to_approve_policy(lisa_url, evaluator_name)
+        conversation_id, _turn = ask_lisa_to_approve_policy(
+            lisa_url, lisa_token, workspace_id, evaluator_name
+        )
         print(f"Lisa saved approved policy: {evaluator_name}")
         conversation_id = str(
             uuid5(NAMESPACE_URL, f"thelake:{workspace_id}:scheduled-agent-qa")

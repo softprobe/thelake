@@ -213,120 +213,27 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         return services.activity_store.list_activity_followups(activity_id, limit=limit)
 
     @server.tool()
-    def create_policy_proposal(
-        activity_id: str, scope: Literal["workspace", "agent"],
-        proposed_content: str, expected_content: str,
-        agent_name: str = "",
+    def write_policy(
+        scope: Literal["workspace", "agent"], name: str, criteria: str,
+        agent_name: str = "", policy_id: str | None = None,
     ) -> dict[str, Any]:
-        """Store one named policy change for explicit approval in either chat."""
-        if services.activity_store is None:
-            raise RuntimeError("Lisa activity storage is not configured")
-        if services.context.turn_source not in {"web", "slack"}:
-            raise ValueError("Policy proposals can only be made in an owner conversation")
-        proposed_content = redact_text(proposed_content)
-        expected_content = redact_text(expected_content)
-        current = services.policy_service.rules(expected_content)
-        proposed = services.policy_service.rules(proposed_content)
-        changed = {name for name in current.keys() | proposed.keys()
-                   if current.get(name) != proposed.get(name)}
-        if len(changed) != 1:
-            raise ValueError("A policy proposal must change exactly one named rule")
-        policy_name = next(iter(changed))
-        if len(proposed_content) > 20_000 or not proposed_content.strip():
-            raise ValueError("Proposed policy must contain 1 to 20000 characters")
-        target_agent = services.policy_service._scope(scope, agent_name)
-        current_records = services.policy_service.read_policy_records(scope, agent_name)
-        actual_content = render_policy_records(current_records, scope)
-        if actual_content != expected_content:
-            raise ValueError("Policy changed since it was read; read it again before proposing")
-        services.policy_service._validate_policy_markdown(proposed_content)
-        proposal_id = services.activity_store.create_policy_proposal(
-            activity_id=activity_id, scope=scope, target_agent_name=target_agent,
-            policy_name=policy_name, expected_content=expected_content,
-            proposed_content=proposed_content,
-            created_by_conversation=services.context.conversation_id,
+        """Create a policy or write a readable revision such as P1.2.1."""
+        record = services.policy_service.write_policy(
+            scope=scope, agent_name=agent_name, name=name, criteria=criteria,
+            policy_id=policy_id,
         )
-        services.activity_store.update_activity_progress(
-            activity_id, status="waiting",
-            summary=f"Waiting for owner confirmation of policy proposal {proposal_id}.",
-            next_action="Review and confirm or decline the policy proposal",
-        )
-        return {"proposal_id": proposal_id, "policy_name": policy_name, "status": "pending"}
+        return {"policy_id": record.id, "name": record.name, "approved": record.approved}
 
     @server.tool()
-    def list_pending_policy_proposals(limit: int = 50) -> list[dict[str, Any]]:
-        """Find pending policy changes created in any Lisa conversation."""
-        if services.activity_store is None:
-            raise RuntimeError("Lisa activity storage is not configured")
-        return services.activity_store.list_policy_proposals(limit=limit)
+    def approve_policy(policy_id: str) -> dict[str, Any]:
+        """Approve a policy only after its exact ID is confirmed by an authorized owner.
 
-    @server.tool()
-    def apply_policy_proposal(proposal_id: str) -> dict[str, Any]:
-        """Apply a pending proposal only after its exact ID is confirmed this turn."""
-        if services.activity_store is None:
-            raise RuntimeError("Lisa activity storage is not configured")
-        if services.context.turn_source not in {"web", "slack"}:
-            raise ValueError("Only an owner conversation can apply a policy proposal")
-        require_owner()
-        if services.context.confirmed_policy_proposal_id != proposal_id:
-            raise ValueError("The owner must confirm this exact proposal ID in chat")
-        proposal = services.activity_store.claim_policy_proposal(proposal_id)
-        if proposal is None:
-            raise ValueError("Policy proposal was not found or is no longer pending")
-        current_records = services.policy_service.read_policy_records(
-            proposal["scope"], proposal["target_agent_name"],
-        )
-        current_content = render_policy_records(current_records, proposal["scope"])
-        if current_content == proposal["proposed_content"]:
-            services.activity_store.resolve_policy_proposal(
-                proposal_id, status="applied",
-                conversation_id=services.context.conversation_id,
-            )
-            return {"proposal_id": proposal_id, "status": "applied", "saved_rules": len(current_records)}
-        if current_content != proposal["expected_content"]:
-            services.activity_store.resolve_policy_proposal(
-                proposal_id, status="stale",
-                conversation_id=services.context.conversation_id,
-            )
-            raise ValueError("Policy changed since it was read; read it again before updating")
-        try:
-            count = services.policy_service.update_policy(
-                proposal["proposed_content"], proposal["expected_content"],
-                proposal["scope"], proposal["target_agent_name"],
-                confirmed_title=proposal["policy_name"],
-            )
-        except ValueError as error:
-            if "changed since it was read" in str(error):
-                services.activity_store.resolve_policy_proposal(
-                    proposal_id, status="stale",
-                    conversation_id=services.context.conversation_id,
-                )
-            else:
-                services.activity_store.release_policy_proposal(proposal_id)
-            raise
-        if not services.activity_store.resolve_policy_proposal(
-            proposal_id, status="applied",
-            conversation_id=services.context.conversation_id,
-        ):
-            raise ValueError("Policy proposal could not be finalized")
-        return {"proposal_id": proposal_id, "status": "applied", "saved_rules": count}
-
-    @server.tool()
-    def reject_policy_proposal(proposal_id: str) -> dict[str, Any]:
-        """Reject a proposal only when its exact ID was declined this turn."""
-        if services.activity_store is None:
-            raise RuntimeError("Lisa activity storage is not configured")
-        if services.context.turn_source not in {"web", "slack"}:
-            raise ValueError("Only an owner conversation can reject a policy proposal")
-        require_owner()
-        if services.context.rejected_policy_proposal_id != proposal_id:
-            raise ValueError("The owner must reject this exact proposal ID in chat")
-        if not services.activity_store.resolve_policy_proposal(
-            proposal_id, status="rejected",
-            conversation_id=services.context.conversation_id,
-        ):
-            raise ValueError("Policy proposal was not found or is no longer pending")
-        return {"proposal_id": proposal_id, "status": "rejected"}
+        Before calling, verify the current actor is an owner and the exact readable ID exists
+        as a policy. If the actor is not an owner or the policy is unknown, explain why and
+        do not call this tool. If it is already approved, report that state without a call.
+        """
+        record = services.policy_service.approve_policy(policy_id)
+        return {"policy_id": record.id, "name": record.name, "approved": record.approved}
 
     @server.tool()
     def get_activity_thread(activity_id: str) -> dict[str, Any] | None:

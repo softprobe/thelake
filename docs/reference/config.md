@@ -122,7 +122,7 @@ customer DuckLake.
 | `LISA_LOCAL_ANONYMOUS` | `1` enables unauthenticated Lisa chat for the loopback-only local developer stack. Leave disabled in a shared deployment. |
 | `LISA_CORS_ORIGINS` | Comma-separated browser origins allowed to call Lisa directly. |
 | `SOFTPROBE_ASSERTION_HMAC_SECRET` | Shared edge assertion key Lisa uses to verify workspace-scoped browser requests. |
-| `LISA_PUBLIC_URL` | Browser-reachable Lisa API base URL injected into Explorer. Lisa chat connects directly to this service. |
+| `LISA_PUBLIC_URL` | Browser-reachable Lisa API base URL injected into the standalone `/lisa/` app. |
 | `OPENAI_API_KEY` | API key for Lisa's first-stage policy triage through OpenAI Decisions. The Gemini judge evaluates only policies triage escalates. |
 | `GEMINI_MODEL_NAME` | Gemini model used by Lisa's categorical policy judge (defaults to `gemini-3.8-flash`). |
 | `LISA_GEMINI_THINKING_LEVEL` | Gemini judge reasoning: `low`, `medium`, or `high`; defaults to `low` to reduce reasoning-token cost. Gemini 2.5 uses thinking budgets of 512, 1,024, and 2,048 tokens for these settings. No hard output-token cap is applied, so the model can finish its structured response. |

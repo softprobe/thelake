@@ -59,10 +59,8 @@ class SlackEventService:
         path: Path,
         *,
         run_turn: Callable,
-        confirm_policy_title: Callable[[str], str | None],
+        confirm_policy_id: Callable[[str], str | None],
         post_reply: Callable[[str, str, str], None],
-        confirm_policy_proposal_id: Callable[[str], str | None] | None = None,
-        reject_policy_proposal_id: Callable[[str], str | None] | None = None,
         confirm_followup_id: Callable[[str], str | None] | None = None,
     ) -> None:
         async with self.conversations.lock_for(path):
@@ -110,9 +108,7 @@ class SlackEventService:
                         text=receipt["text"],
                         turn_source="slack",
                         actor_id=str(receipt.get("actor_id", "")),
-                        confirmed_policy_title=confirm_policy_title(receipt["text"]),
-                        confirmed_policy_proposal_id=(confirm_policy_proposal_id or (lambda _text: None))(receipt["text"]),
-                        rejected_policy_proposal_id=(reject_policy_proposal_id or (lambda _text: None))(receipt["text"]),
+                        confirmed_policy_id=confirm_policy_id(receipt["text"]),
                         confirmed_followup_id=(confirm_followup_id or (lambda _text: None))(receipt["text"]),
                         slack_channel_id=channel_id,
                         slack_thread_ts=thread_ts,
@@ -151,17 +147,13 @@ class SlackEventWorker:
         events: SlackEventService,
         slack: SlackClient,
         run_turn: Callable,
-        confirm_policy_title: Callable[[str], str | None],
-        confirm_policy_proposal_id: Callable[[str], str | None] | None = None,
-        reject_policy_proposal_id: Callable[[str], str | None] | None = None,
+        confirm_policy_id: Callable[[str], str | None],
         confirm_followup_id: Callable[[str], str | None] | None = None,
     ):
         self.events = events
         self.slack = slack
         self.run_turn = run_turn
-        self.confirm_policy_title = confirm_policy_title
-        self.confirm_policy_proposal_id = confirm_policy_proposal_id or (lambda _text: None)
-        self.reject_policy_proposal_id = reject_policy_proposal_id or (lambda _text: None)
+        self.confirm_policy_id = confirm_policy_id
         self.confirm_followup_id = confirm_followup_id or (lambda _text: None)
         self._tasks: dict[str, asyncio.Task] = {}
 
@@ -182,9 +174,7 @@ class SlackEventWorker:
         await self.events.process(
             path,
             run_turn=self.run_turn,
-            confirm_policy_title=self.confirm_policy_title,
-            confirm_policy_proposal_id=self.confirm_policy_proposal_id,
-            reject_policy_proposal_id=self.reject_policy_proposal_id,
+            confirm_policy_id=self.confirm_policy_id,
             confirm_followup_id=self.confirm_followup_id,
             post_reply=lambda channel, thread, text: self.slack.post_message(
                 channel, text, thread, timeout=15

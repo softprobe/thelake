@@ -1,5 +1,8 @@
+from benchmark.policy_seed import seed_policy_document
+
 import asyncio
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -70,73 +73,78 @@ def test_mcp_activity_tools_find_and_complete_owned_work(lisa_test_context):
     assert thread.data["thread"]["finish_message"] == "No issue found."
 
 
-def test_policy_proposal_can_be_created_in_main_and_confirmed_in_slack(lisa_test_context):
+def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
     context = lisa_test_context(
-        turn_source="web", conversation_id="main-chat", actor_id="owner-1",
-        owner_user_ids=frozenset({"owner-1"}),
+        turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
     )
     services = build_services(context)
 
-    async def create():
+    async def create_and_find():
         async with Client(create_server(services)) as client:
-            activity = await client.call_tool("create_activity", {
-                "title": "Update refund policy", "activity_type": "policy", "source": "web",
+            tools = {tool.name for tool in await client.list_tools()}
+            assert {"write_policy", "approve_policy", "list_policies", "read_policy"} <= tools
+            assert not any("proposal" in name for name in tools)
+            created = await client.call_tool("write_policy", {
+                "scope": "agent",
+                "agent_name": "billing-agent",
+                "name": "Billing changes",
+                "criteria": "Record the reason before changing billing details.",
             })
-            result = await client.call_tool("create_policy_proposal", {
-                "activity_id": activity.data["activity_id"],
-                "scope": "workspace",
-                "expected_content": "No policy exists yet.",
-                "proposed_content": "## Refund eligibility\napproved: no\n\nCheck eligibility.",
+            assert not created.is_error
+            policy_id = created.data["policy_id"]
+            assert re.fullmatch(r"P[1-9][0-9]*(?:\.[1-9][0-9]*){1,2}", policy_id)
+            assert created.data["approved"] is False
+            found = await client.call_tool("read_policy", {
+                "scope": "agent", "agent_name": "billing-agent",
             })
-            rejected = await client.call_tool("create_policy_proposal", {
-                "activity_id": activity.data["activity_id"],
-                "scope": "workspace",
-                "expected_content": "No policy exists yet.",
-                "proposed_content": "## Chargeback review\napproved: no\n\nReview chargebacks.",
+            assert policy_id in found.data
+            assert "approved: no" in found.data
+            assert "Record the reason before changing billing details." in found.data
+            return policy_id
+
+    policy_id = asyncio.run(create_and_find())
+    approved_services = build_services(replace(context, confirmed_policy_id=policy_id))
+
+    async def approve():
+        async with Client(create_server(approved_services)) as client:
+            return await client.call_tool("approve_policy", {"policy_id": policy_id})
+
+    approved = asyncio.run(approve())
+    assert not approved.is_error
+    assert approved.data["policy_id"] == policy_id
+    assert approved.data["approved"] is True
+    assert approved_services.policy_service.read_policy_records(
+        "agent", "billing-agent",
+    )[0].approved is True
+
+    async def update():
+        async with Client(create_server(services)) as client:
+            return await client.call_tool("write_policy", {
+                "scope": "agent",
+                "agent_name": "billing-agent",
+                "policy_id": policy_id,
+                "name": "Billing changes",
+                "criteria": "Record and verify the reason before changing billing details.",
             })
-            return result.data["proposal_id"], rejected.data["proposal_id"], activity.data["activity_id"]
 
-    proposal_id, rejected_id, activity_id = asyncio.run(create())
-    slack_services = build_services(replace(
-        context, turn_source="slack", conversation_id="slack-thread",
-        confirmed_policy_proposal_id=proposal_id,
-    ))
-
-    async def apply():
-        async with Client(create_server(slack_services)) as client:
-            return await client.call_tool("apply_policy_proposal", {"proposal_id": proposal_id})
-
-    result = asyncio.run(apply())
-    assert not result.is_error
-    assert result.data["status"] == "applied"
-
-    outsider_services = build_services(replace(
-        context, turn_source="slack", actor_id="channel-member",
-        confirmed_policy_proposal_id=rejected_id,
-    ))
-    async def unauthorized_reject():
-        async with Client(create_server(outsider_services)) as client:
-            return await client.call_tool("reject_policy_proposal", {"proposal_id": rejected_id})
-    with pytest.raises(Exception, match="authorized Lisa owner identity"):
-        asyncio.run(unauthorized_reject())
-
-    slack_services = build_services(replace(
-        context, turn_source="slack", conversation_id="slack-thread",
-        rejected_policy_proposal_id=rejected_id,
-    ))
-
-    async def reject():
-        async with Client(create_server(slack_services)) as client:
-            return await client.call_tool("reject_policy_proposal", {"proposal_id": rejected_id})
-
-    rejected = asyncio.run(reject())
-    assert not rejected.is_error
-    assert rejected.data["status"] == "rejected"
-    assert any(
-        record.name == "Refund eligibility"
-        for record in slack_services.policy_service.read_policy_records()
-    )
-    assert slack_services.activity_store.get_activity_thread(activity_id)["actions"][-1]["title"] == "Policy proposal rejected"
+    updated = asyncio.run(update())
+    assert not updated.is_error
+    revision_id = updated.data["policy_id"]
+    assert revision_id == f"{policy_id}.1"
+    assert updated.data["approved"] is False
+    rows = services.policy_service.read_policy_records("agent", "billing-agent")
+    assert [(row.id, row.approved) for row in rows] == [(policy_id, True), (revision_id, False)]
+    assert [row.id for row in services.policy_service.approved_rules("billing-agent")] == [policy_id]
+    revision_services = build_services(replace(context, confirmed_policy_id=revision_id))
+    async def approve_revision():
+        async with Client(create_server(revision_services)) as client:
+            return await client.call_tool("approve_policy", {"policy_id": revision_id})
+    revised = asyncio.run(approve_revision())
+    assert revised.data["approved"] is True
+    history = revision_services.policy_service.repository.list_scope_history("agent", "billing-agent")
+    assert {row.id: row.approved for row in history} == {policy_id: True, revision_id: True}
+    assert next(row for row in history if row.id == policy_id).archived_at is not None
+    assert [row.id for row in revision_services.policy_service.approved_rules("billing-agent")] == [revision_id]
 
 
 def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, lisa_test_context):
@@ -255,7 +263,7 @@ def test_mcp_get_session_returns_the_evaluators_compact_trajectory(monkeypatch, 
 
 def test_context_captures_workspace_and_approvals_once(monkeypatch, lisa_test_database):
     monkeypatch.setenv("LISA_WORKSPACE_ID", "11111111-1111-4111-8111-111111111111")
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_TITLE", "Rule")
+    monkeypatch.setenv("LISA_CONFIRMED_POLICY_ID", "Rule")
     monkeypatch.setenv("LISA_THELAKE_TOKEN", "private-lake-token")
     monkeypatch.setenv("LISA_SLACK_BOT_TOKEN", "private-slack-token")
     database = lisa_test_database()
@@ -263,70 +271,13 @@ def test_context_captures_workspace_and_approvals_once(monkeypatch, lisa_test_da
     monkeypatch.setenv("LISA_DATABASE_READ_URL", database.reader_url)
     context = WorkspaceContext.from_environment()
     monkeypatch.setenv("LISA_WORKSPACE_ID", "22222222-2222-4222-8222-222222222222")
-    monkeypatch.delenv("LISA_CONFIRMED_POLICY_TITLE")
+    monkeypatch.delenv("LISA_CONFIRMED_POLICY_ID")
     services = build_services(context)
-    services.policy_service.update_policy("## Rule\n\nConfirmed rule", "")
+    seed_policy_document(services.policy_service, "## Rule\n\nConfirmed rule", "")
     assert context.workspace_id() == "11111111-1111-4111-8111-111111111111"
     assert "## P1.1 | Rule\napproved: no\n\nConfirmed rule" in read_policy(services)
     assert "private-lake-token" not in repr(context)
     assert "private-slack-token" not in repr(context)
-
-
-def test_stdio_entrypoint_reads_and_applies_workspace_policy_proposal(tmp_path, lisa_test_context):
-    import sys
-
-    context = lisa_test_context(data_dir=tmp_path)
-    context = replace(
-        context, actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
-    )
-    activity_store = build_services(context).activity_store
-    activity = activity_store.create_activity(title="Update rule", source="web")
-    proposal_id = activity_store.create_policy_proposal(
-        activity_id=activity.id, scope="workspace", target_agent_name="",
-        policy_name="Rule", expected_content="No policy exists yet.",
-        proposed_content="## Rule\napproved: yes\n\nApproved policy",
-        created_by_conversation="main-chat",
-    )
-
-    config = {
-        "mcpServers": {
-            "lisa": {
-                "command": sys.executable,
-                "args": ["-m", "lisa.mcp_app"],
-                "env": {
-                    "LISA_WORKSPACE_ID": context.workspace,
-                    "LISA_DATA_DIR": str(context.data_dir),
-                    "LISA_DATABASE_URL": context.database_url,
-                    "LISA_DATABASE_READ_URL": context.database_read_url,
-                    "LISA_TURN_SOURCE": "web",
-                    "LISA_ACTOR_ID": "owner-1",
-                    "LISA_OWNER_USER_IDS": "owner-1",
-                        "LISA_CONFIRMED_POLICY_PROPOSAL_ID": proposal_id,
-                        "LISA_CONVERSATION_ID": "main-chat",
-                },
-            }
-        }
-    }
-
-    async def roundtrip():
-        async with Client(config) as client:
-            first = await client.call_tool("read_policy", {})
-            assert first.data == "No policy exists yet."
-            saved = await client.call_tool("apply_policy_proposal", {"proposal_id": proposal_id})
-            assert not saved.is_error
-            read = await client.call_tool("read_policy", {})
-            assert read.data == (
-                "# Workspace policies\n\n## P1.1 | Rule\napproved: yes\n\nApproved policy\n"
-            )
-            tools = {tool.name: tool for tool in await client.list_tools()}
-            assert tools["evaluate_session"].inputSchema["required"] == [
-                "target_agent_name",
-                "session_id",
-            ]
-            assert "select_policies_for_session" not in tools
-            assert "list_approved_policies" not in tools
-
-    asyncio.run(roundtrip())
 
 
 def test_lisa_database_tool_and_schema_resource_are_exposed(lisa_test_context):

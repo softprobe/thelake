@@ -24,7 +24,7 @@ DATASET = Path(__file__).resolve().parents[1] / "datasets/activity_management"
 def test_activity_benchmark_release_has_frozen_cases_and_both_splits():
     manifest, cases, digest = load_activity_dataset(DATASET / "manifests/benchmark.json")
 
-    assert manifest.case_count == len(cases) == 19
+    assert manifest.case_count == len(cases) == 15
     assert digest
     assert {case.split for case in cases} == {"development", "benchmark"}
     assert {case.category for case in cases} >= {
@@ -53,31 +53,20 @@ def test_activity_benchmark_rejects_changed_case_bytes(tmp_path):
         load_activity_dataset(copied / "manifests/benchmark.json")
 
 
-def test_activity_benchmark_score_checks_real_tool_trace_and_reply_rubric():
+def test_activity_benchmark_score_checks_real_policy_approval_trace_and_reply_rubric():
     turn = ActivityTurn(
-        chat="slack",
-        text="Confirm {proposal_id}",
-        require_tools=["apply_policy_proposal"],
-        forbid_tools=["create_policy_proposal"],
-        reply_must_include=["$proposal_id", "refund"],
+        chat="slack", text="Approve policy: {policy_id}",
+        require_tools=["approve_policy"], forbid_tools=["write_policy"],
+        reply_must_include=["$policy_id", "refund"],
         reply_must_not_include=["I already changed it"],
     )
     result = {
-        "activities": [
-            {
-                "kind": "tool",
-                "tool_name": "apply_policy_proposal",
-            },
-            {"kind": "tool", "tool_name": "list_pending_policy_proposals"},
-        ],
-        "messages": [{"role": "assistant", "text": "Applied proposal abc for the refund rule."}],
+        "activities": [{"kind": "tool", "tool_name": "approve_policy"}],
+        "messages": [{"role": "assistant", "text": "Approved P1.1 for the refund rule."}],
     }
-
-    scored = _score_turn(turn, result, {"proposal_id": "abc"}, 1)
-
+    scored = _score_turn(turn, result, {"policy_id": "P1.1"}, 1)
     assert all(item["passed"] for item in scored["tool_checks"] + scored["communication_checks"])
-    assert _interpolate("Confirm {proposal_id}", {"proposal_id": "abc"}) == "Confirm abc"
-
+    assert _interpolate("Approve policy: {policy_id}", {"policy_id": "P1.1"}) == "Approve policy: P1.1"
 
 def test_activity_benchmark_checks_database_tool_arguments():
     turn = ActivityTurn(
@@ -162,34 +151,26 @@ def test_activity_benchmark_checks_tool_order_and_exact_call_count():
     )["passed"]
 
 
-def test_activity_benchmark_resolves_new_proposal_id_before_scoring_same_turn():
+def test_activity_benchmark_resolves_new_policy_id_before_scoring_same_turn():
+    from lisa.models.policies import PolicyRecord
+
     services = SimpleNamespace(
+        policy_service=SimpleNamespace(
+            list_policy_records=lambda: [PolicyRecord("P1.3", "workspace", None, "Refund", "Review", False)]
+        ),
         activity_store=SimpleNamespace(
-            list_policy_proposals=lambda: [{"id": "proposal-123"}],
-            list_activity_feed=lambda **_: [],
-            list_activity_followups=lambda _: [],
-        )
+            list_activity_feed=lambda **_: [], list_activity_followups=lambda _: [],
+        ),
     )
     substitutions = {}
-
     _update_substitutions(services, substitutions)
     scored = _score_turn(
-        ActivityTurn(
-            chat="main",
-            text="Create a proposal",
-            reply_must_include=["$proposal_id"],
-        ),
-        {
-            "activities": [],
-            "messages": [{"role": "assistant", "text": "Proposal ID: proposal-123"}],
-        },
-        substitutions,
-        0,
+        ActivityTurn(chat="main", text="Create policy", reply_must_include=["$policy_id"]),
+        {"activities": [], "messages": [{"role": "assistant", "text": "Policy ID: P1.3"}]},
+        substitutions, 0,
     )
-
-    assert substitutions == {"proposal_id": "proposal-123"}
+    assert substitutions == {"policy_id": "P1.3"}
     assert all(check["passed"] for check in scored["communication_checks"])
-
 
 def test_activity_benchmark_rate_preserves_empty_denominator():
     assert _rate([]) is None
@@ -206,7 +187,7 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "do not call create_activity or list_recent_activities" in prompt
     assert "route by the user's requested outcome" in prompt
     assert "call get_activity_thread next" in prompt
-    assert "entire owner message" in prompt
+    assert "entire owner message" in prompt or "only that standalone owner command" in prompt
     assert "use list_policies and read_policy" in prompt
     database_schema = " ".join(LISA_DATABASE_SCHEMA.casefold().split())
     assert "retrieve lisa's recorded evaluation history" in database_schema
@@ -215,9 +196,10 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     policy_skill = (
         Path(__file__).resolve().parents[1] / "skills/learn-agent-policy/SKILL.md"
     ).read_text()
-    assert "pass that" in policy_skill
-    assert "exact text rather than an empty string" in policy_skill
-    assert "without an extra verification query" in policy_skill
+    assert "write_policy" in policy_skill
+    assert "Approve policy: <policy_id>" in policy_skill
+    assert "child revision" in policy_skill
+    assert "the approved parent stays active" in policy_skill
 
 
 def test_activity_labels_cover_timeline_evidence_and_exact_followup_contract():
@@ -262,9 +244,8 @@ def test_activity_labels_cover_timeline_evidence_and_exact_followup_contract():
                     "prompt": "Review deployment health once",
                 }
             ],
-            list_policy_proposals=lambda **_: [],
         ),
-        policy_service=SimpleNamespace(read_policy_records=list),
+        policy_service=SimpleNamespace(read_policy_records=list, list_policy_records=list),
     )
 
     checks = _score_state(services, labels.model_dump(exclude_unset=True))

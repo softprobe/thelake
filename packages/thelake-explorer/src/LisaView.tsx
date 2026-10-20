@@ -509,7 +509,7 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
               <small>{policy.scope === "agent" ? `Agent · ${policy.target_agent_name || "unnamed"}` : "Workspace"} · {policy.id}</small>
             </article>)}
             {nextPolicyOffset !== null && <button className="tle-lisa-load-more" onClick={() => void refreshPolicies(nextPolicyOffset, true)} disabled={policiesLoading}>Load more rules</button>}
-            <p className="tle-lisa-panel-note">Rules are read-only here. Lisa can propose changes in chat; applying a proposal requires the owner's exact confirmation.</p>
+            <p className="tle-lisa-panel-note">Create and revise policies in Lisa chat. Approve a pending revision with its exact readable policy ID.</p>
           </>}
           {activePanel === "identity" && <div className="tle-lisa-identity">
             <div className="tle-lisa-identity-intro"><LisaIcon name="identity" size={18} /><div><h3>Identity & memory</h3><p>How Lisa is configured in this workspace</p></div></div>

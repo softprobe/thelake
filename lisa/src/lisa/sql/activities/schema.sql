@@ -3,7 +3,7 @@
 
 CREATE SCHEMA lisa;
 
-CREATE SEQUENCE lisa.policy_paragraph_id_seq;
+CREATE SEQUENCE lisa.policy_id_seq;
 
 CREATE TABLE lisa.deployment (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
@@ -49,7 +49,7 @@ CREATE INDEX activities_parent_idx
     ON lisa.activities(parent_id) WHERE parent_id IS NOT NULL;
 
 CREATE TABLE lisa.policies (
-    id text PRIMARY KEY CHECK (id ~ '^P1[.][1-9][0-9]*$'),
+    id text PRIMARY KEY CHECK (id ~ '^P1[.][1-9][0-9]*([.][1-9][0-9]*)?$'),
     scope text NOT NULL CHECK (scope IN ('workspace', 'agent')),
     target_agent_name text NOT NULL DEFAULT '',
     name text NOT NULL,
@@ -61,13 +61,18 @@ CREATE TABLE lisa.policies (
     CHECK (
         (scope = 'workspace' AND target_agent_name = '') OR
         (scope = 'agent' AND target_agent_name <> '')
-    ),
-    UNIQUE (scope, target_agent_name, name)
+    )
 );
 
 CREATE INDEX policies_scope_agent_approved_idx
     ON lisa.policies(scope, target_agent_name, approved)
     WHERE archived_at IS NULL;
+CREATE UNIQUE INDEX policies_one_current_approved_rule_idx
+    ON lisa.policies(scope, target_agent_name, name)
+    WHERE approved AND archived_at IS NULL;
+CREATE UNIQUE INDEX policies_one_pending_rule_idx
+    ON lisa.policies(scope, target_agent_name, name)
+    WHERE NOT approved AND archived_at IS NULL;
 
 CREATE TABLE lisa.evaluation_runs (
     id uuid PRIMARY KEY,
@@ -228,31 +233,6 @@ CREATE UNIQUE INDEX activity_followups_event_idx
     ON lisa.activity_followups(activity_id, trigger_event_type)
     WHERE trigger_event_type IS NOT NULL;
 
-CREATE TABLE lisa.policy_proposals (
-    id uuid PRIMARY KEY,
-    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
-    scope text NOT NULL CHECK (scope IN ('workspace', 'agent')),
-    target_agent_name text NOT NULL DEFAULT '',
-    policy_name text NOT NULL,
-    expected_content text NOT NULL,
-    proposed_content text NOT NULL,
-    status text NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'applying', 'approved', 'rejected', 'stale', 'applied')),
-    applying_at timestamptz,
-    created_by_conversation text NOT NULL,
-    resolved_by_conversation text,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    resolved_at timestamptz,
-    applied_at timestamptz,
-    CHECK ((scope = 'workspace' AND target_agent_name = '') OR
-           (scope = 'agent' AND target_agent_name <> ''))
-);
-CREATE INDEX policy_proposals_pending_idx
-    ON lisa.policy_proposals(created_at DESC) WHERE status = 'pending';
-CREATE UNIQUE INDEX policy_proposals_one_pending_rule_idx
-    ON lisa.policy_proposals(scope, target_agent_name, policy_name)
-    WHERE status = 'pending';
-
 CREATE TABLE lisa.score_outbox (
     id uuid PRIMARY KEY,
     evaluation_id uuid NOT NULL REFERENCES lisa.evaluation_runs(id) ON DELETE CASCADE,
@@ -324,12 +304,6 @@ CREATE VIEW lisa.readable_activity_followups AS
 SELECT id, activity_id, due_at, trigger_event_type, prompt, status, requested_by,
        requested_at, approved_at, completed_at
 FROM lisa.activity_followups;
-
-CREATE VIEW lisa.readable_policy_proposals AS
-SELECT id, activity_id, scope, target_agent_name, policy_name, expected_content,
-       proposed_content, status, created_by_conversation, resolved_by_conversation,
-       created_at, resolved_at, applied_at
-FROM lisa.policy_proposals;
 
 CREATE VIEW lisa.readable_evaluations AS
 SELECT activity_id, session_id, policy_id, id AS evaluation_id,

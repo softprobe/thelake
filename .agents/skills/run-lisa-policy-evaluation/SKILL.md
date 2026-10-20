@@ -20,13 +20,15 @@ distinction between a session ID, its derived trajectory, and a policy ID.
   production MCP/API entry point that calls it). It must retrieve approved
   candidate rules through `PolicyService` backed by Lisa's PostgreSQL policy
   repository, then invoke the production triager and judge.
-- Load the dataset's complete policy catalog into a disposable evaluation
-  Lisa workspace through Lisa's policy-management service/API, with approved
-  status for the test target agent. Do not seed the policy table with SQL or
-  pass `PolicyRule` instances from the dataset directly to evaluation. The
-  evaluation run must own its transient database and workspace and clean them
-  up automatically. Never reuse or modify a developer's running instance or
-  pre-existing workspace data.
+- Load the dataset's complete policy catalog into the disposable evaluation
+  database with the benchmark-only `lisa/benchmark/policy_seed.py` helper,
+  marking the test target agent's rows approved. This helper exists only to
+  load a complete labeled-evaluation catalog; live policy changes still use
+  Lisa's owner-gated `write_policy` and `approve_policy` tools. Keep policy
+  state in `lisa.policies` and use `PolicyService` when evaluating sessions.
+  The evaluation run must own its transient database and workspace and clean
+  them up automatically. Never reuse or modify a developer's running instance
+  or pre-existing workspace data.
 - Store each dataset trajectory as a test session in the configured local
   TheLake instance and have `EvaluationService` fetch it through the normal
   `SessionService`/TheLake path. Do not inject a prebuilt trajectory into
@@ -55,11 +57,11 @@ Lisa's approved-catalog and session path and is not a quality measurement.
    directory and workspace. Pass `LISA_LLM_TRACE_ENABLED=1` so the real provider
    request/response records are retained. Never reuse a non-disposable policy
    database or write fixture policies into a user's workspace.
-3. Load the full release policy catalog using Lisa's `PolicyService.update_policy`
-   in a unique agent scope. This preserves approval checks and writes through
-   Lisa's PostgreSQL repository. Verify by reading it back through
-  `PolicyService.approved_rules(target_agent_name)`; count, names, and policy IDs
-  must match the full catalog, not the sample's annotated policy subset.
+3. Load the full release catalog using the benchmark-only policy seed helper
+   into the run-owned PostgreSQL database and unique agent scope. Verify by
+   reading it back through `PolicyService.approved_rules(target_agent_name)`;
+   count, names, and readable policy IDs must match the full catalog, not the
+   sample's annotated policy subset.
 4. Ingest selected dataset trajectories into local TheLake as sessions,
    preserving event and tool-call semantics and the exact dataset `session_id`.
    Before catalog writes or ingestion, confirm each complete fixture session ID
@@ -79,10 +81,10 @@ Lisa's approved-catalog and session path and is not a quality measurement.
    candidate counts, session/trace IDs, models, and report path. Never expose
    secrets or full sensitive traces.
 
-Run the production evaluator from the repository root after the isolated stack
-is ready. Choose a fresh run suffix and UUID for every run. Start dogfood
-with a new Compose project, data directory, and workspace so the policy DB and
-workspace are disposable. Write the report outside the repository:
+Run the production evaluator from the repository root against a fresh local
+dogfood Compose project, data directory, and workspace so the policy database
+and session workspace are disposable. Choose a fresh run suffix and UUID for
+every run. Write the report outside the repository:
 
 ```bash
 THELAKE_DOGFOOD_PROJECT_NAME=lisa-policy-eval-<run-id> \

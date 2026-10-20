@@ -63,11 +63,6 @@ VIEW_COLUMNS = {
         "id", "activity_id", "due_at", "trigger_event_type", "prompt", "status", "requested_by",
         "requested_at", "approved_at", "completed_at",
     },
-    "readable_policy_proposals": {
-        "id", "activity_id", "scope", "target_agent_name", "policy_name",
-        "expected_content", "proposed_content", "status", "created_by_conversation",
-        "resolved_by_conversation", "created_at", "resolved_at", "applied_at",
-    },
     "policies": {
         "id", "scope", "target_agent_name", "name", "criteria", "approved",
         "created_at", "updated_at", "archived_at",

@@ -25,9 +25,7 @@ from lisa.repositories.conversations import (
 )
 from lisa.runtime import (
     confirmed_followup_id,
-    confirmed_policy_proposal_id,
-    confirmed_policy_title,
-    rejected_policy_proposal_id,
+    confirmed_policy_id,
     run_turn,
 )
 from lisa.security import redact_text
@@ -363,7 +361,6 @@ async def scheduled_cycle(
         return await services.scheduled_qa.run_cycle(
             request.workspace_id,
             run_turn=run_turn,
-            confirm_policy_title=confirmed_policy_title,
         )
     except ScheduledQAError as error:
         if error.status_code >= 500:
@@ -446,9 +443,7 @@ async def send_message(
             text,
             run_turn=run_turn,
             actor_id=actor_id,
-            confirmed_policy_title=confirmed_policy_title(text),
-            confirmed_policy_proposal_id=confirmed_policy_proposal_id(text),
-            rejected_policy_proposal_id=rejected_policy_proposal_id(text),
+            confirmed_policy_id=confirmed_policy_id(text),
             confirmed_followup_id=confirmed_followup_id(text),
         )
     except ConversationTurnError as error:

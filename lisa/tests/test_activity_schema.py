@@ -24,11 +24,15 @@ def test_activities_are_generic_records_and_evaluations_link_to_them():
     assert "readable_evaluations" in schema
 
 
-def test_schema_has_durable_followups_and_cross_chat_policy_proposals():
+def test_schema_has_durable_followups_and_direct_policy_approval():
     schema = _schema_sql()
     assert "lisa.activity_followups" in schema
     assert "trigger_event_type text" in schema
-    assert "lisa.policy_proposals" in schema
+    assert "lisa.policy_proposals" not in schema
+    assert "approved boolean NOT NULL DEFAULT false" in schema
+    assert "^P1[.][1-9][0-9]*([.][1-9][0-9]*)?$" in schema
+    assert "policies_one_pending_rule_idx" in schema
+    assert "policies_one_current_approved_rule_idx" in schema
     assert "origin_slack_channel_id text" in schema
     assert "next_action_at timestamptz" in schema
 
@@ -53,8 +57,9 @@ def test_database_creation_uses_the_provisioning_connection_owner():
     assert statement == "CREATE DATABASE lisa"
 
 
-def test_policy_insert_escapes_postgres_format_percent_for_psycopg():
+def test_policy_insert_uses_the_caller_allocated_readable_id():
     statement = (
         files("lisa").joinpath("sql", "policies", "save_policy.sql").read_text(encoding="utf-8")
     )
-    assert "format('P1.%%s', nextval" in statement
+    assert "VALUES (%(id)s" in statement
+    assert "format('P1." not in statement

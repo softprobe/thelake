@@ -28,7 +28,7 @@ Check the rendered page against Muse at the same viewport and device scale.
 Browser routes must reuse the authenticated
 workspace binding and expose only bounded, purpose-built projections. Rules are
 read-only in the panel; policy changes still use the exact-owner-confirmation
-proposal flow. Evaluation activity timelines distinguish routing decisions,
+approval flow. Evaluation activity timelines distinguish routing decisions,
 judge verdicts, and failures. The current runtime identity is configured by
 `LISA_SYSTEM_PROMPT` and packaged skills; do not present `SOUL.md` or
 `MEMORY.md` as existing editable files until Lisa has a canonical source and

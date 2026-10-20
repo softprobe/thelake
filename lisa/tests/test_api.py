@@ -232,7 +232,7 @@ def test_slack_event_is_processed_by_lisa_in_its_original_thread(client, monkeyp
         services.slack_event_service,
         FakeSlackClient(),
         fake_run_turn,
-        api.confirmed_policy_title,
+        api.confirmed_policy_id,
     )
     asyncio.run(worker._process(receipt_path))
 
@@ -310,7 +310,7 @@ def test_lisa_saves_agent_reply_after_openhands_run(client, monkeypatch):
     assert "chat-secret-value" not in captured["text"]
     assert "[REDACTED]" in captured["text"]
     assert captured["workspace_id"] == workspace_id
-    assert captured["confirmed_policy_title"] is None
+    assert captured["confirmed_policy_id"] is None
 
 
 def test_cancelled_chat_waits_for_openhands_and_persists_its_turn(client, monkeypatch):
@@ -345,7 +345,7 @@ def test_cancelled_chat_waits_for_openhands_and_persists_its_turn(client, monkey
                 workspace_id,
                 "Continue",
                 run_turn=api.run_turn,
-                confirmed_policy_title=None,
+                confirmed_policy_id=None,
             )
         )
         assert await asyncio.to_thread(started.wait, 2)
@@ -393,29 +393,24 @@ def test_explicit_chat_confirmation_is_bound_to_the_current_turn(client, monkeyp
         headers=headers,
         json={
             "workspace_id": workspace_id,
-            "text": "Confirm policy rule: Refund eligibility",
+            "text": "Approve policy: P1.2.1",
             "consent": True,
         },
     )
 
     assert response.status_code == 200
-    assert captured["confirmed_policy_title"] == "Refund eligibility"
+    assert captured["confirmed_policy_id"] == "P1.2.1"
 
 
-def test_proposal_confirmation_id_is_trusted_only_from_exact_chat_command():
-    from lisa.runtime import (
-        confirmed_followup_id,
-        confirmed_policy_proposal_id,
-        rejected_policy_proposal_id,
-    )
+def test_policy_approval_requires_exact_readable_policy_command():
+    from lisa.runtime import confirmed_followup_id, confirmed_policy_id
 
-    proposal = "12345678-1234-4234-8234-123456789abc"
-    assert confirmed_policy_proposal_id(f"Confirm policy proposal: {proposal}") == proposal
-    assert confirmed_policy_proposal_id(f"Please confirm policy proposal: {proposal}") is None
-    assert confirmed_policy_proposal_id("Confirm policy proposal: nope") is None
-    assert confirmed_followup_id(f"Confirm follow-up: {proposal}") == proposal
-    assert rejected_policy_proposal_id(f"Reject policy proposal: {proposal}") == proposal
-
+    assert confirmed_policy_id("Approve policy: P1.2") == "P1.2"
+    assert confirmed_policy_id("Approve policy: P1.2.1") == "P1.2.1"
+    assert confirmed_policy_id("Please approve policy: P1.2") is None
+    assert confirmed_policy_id("Approve policy: P1.2, thanks") is None
+    assert confirmed_policy_id("Approve policy: 12345678-1234-4234-8234-123456789abc") is None
+    assert confirmed_followup_id("Confirm follow-up: 12345678-1234-4234-8234-123456789abc")
 
 def test_activity_feed_http_endpoints_use_workspace_database(
     monkeypatch, lisa_test_database, tmp_path
@@ -468,7 +463,7 @@ def test_user_policy_list_is_authenticated_and_bounded(
     monkeypatch.setenv("LISA_DATABASE_URL", database.writer_url)
     with TestClient(app) as test_client:
         repository = test_client.app.state.workspace_services.policy_service.repository
-        repository.replace_scope(
+        repository.seed_scope(
             "workspace",
             "",
             [],
@@ -570,7 +565,6 @@ def test_scheduled_cycle_runs_from_lisa_and_persists_its_turn(client, monkeypatc
         services.scheduled_qa.run_cycle(
             workspace_id,
             run_turn=api.run_turn,
-            confirm_policy_title=api.confirmed_policy_title,
         )
     )
 

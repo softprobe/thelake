@@ -40,7 +40,7 @@ def test_pending_score_accepts_stale_payload_policy_id():
             score_payload={
                 "name": "Rule",
                 "metadata": {
-                    "policy_id": "pol_00000000-0000-0000-0000-000000000003",
+                    "policy_id": "P1.9",
                     "target_agent_name": "agent",
                 },
             },
@@ -56,7 +56,7 @@ def test_pending_score_accepts_stale_payload_policy_id():
 
 @pytest.fixture
 def evaluation_services(lisa_test_context, monkeypatch: pytest.MonkeyPatch):
-    context = lisa_test_context(WORKSPACE_ID, confirmed_policy_title="Rule")
+    context = lisa_test_context(WORKSPACE_ID, confirmed_policy_id="Rule")
     services = build_services(context)
     save_rule(services)
     monkeypatch.setattr(services.client, "get", lambda _: session_detail())
@@ -289,7 +289,7 @@ def test_one_inspectable_activity_records_triage_and_links_multiple_evaluations(
     services = evaluation_services
     repository = PostgresPolicyRepository(services.context.database_url, WORKSPACE_ID)
     current = repository.list_scope("workspace", "")
-    repository.replace_scope(
+    repository.seed_scope(
         "workspace",
         "",
         [{"name": rule.name, "criteria": rule.criteria, "approved": rule.approved}
@@ -348,7 +348,7 @@ def test_multi_policy_retry_finishes_the_activity_that_owns_the_run(evaluation_s
     services = evaluation_services
     repository = PostgresPolicyRepository(services.context.database_url, WORKSPACE_ID)
     current = repository.list_scope("workspace", "")
-    repository.replace_scope(
+    repository.seed_scope(
         "workspace",
         "",
         [{"name": rule.name, "criteria": rule.criteria, "approved": rule.approved}
@@ -712,7 +712,7 @@ def _tracked_service_with_saved_inputs(tmp_path, *, approved_rules):
     context = WorkspaceContext(
         workspace=WORKSPACE_ID,
         data_dir=tmp_path,
-        confirmed_policy_title="Rule",
+        confirmed_policy_id="Rule",
     )
     activity_id = str(uuid4())
     evaluation_id = str(uuid4())
@@ -857,7 +857,7 @@ def test_tracked_retry_judges_live_criteria_after_interrupt_before_outbox(
     assert store.get_context_item_for_activity(run.activity_id, f"evaluation_inputs_{run.policy_id}") is not None
 
 
-def test_tracked_retry_releases_lease_when_policy_is_unapproved_after_interrupt(
+def test_tracked_retry_releases_lease_when_policy_is_removed_after_interrupt(
     evaluation_services, monkeypatch
 ):
     services = evaluation_services
@@ -889,7 +889,13 @@ def test_tracked_retry_releases_lease_when_policy_is_unapproved_after_interrupt(
     assert run is not None
     assert run.status != "running"
 
-    save_rule(services, approved="no")
+    policy_repository = services.policy_service.repository
+    current = policy_repository.list_scope("workspace")
+    expected = [
+        {"name": row.name, "criteria": row.criteria, "approved": row.approved}
+        for row in current
+    ]
+    policy_repository.seed_scope("workspace", "", expected, [])
     with pytest.raises(ValueError, match="No approved policy"):
         services.evaluations._evaluate_session("agent", "Rule", session_id)
     run = store.get_evaluation(created[0].id)

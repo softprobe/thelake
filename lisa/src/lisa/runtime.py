@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
 
+from .models.policies import is_policy_id
+
 
 @dataclass(frozen=True)
 class AgentTurn:
@@ -27,9 +29,7 @@ class AgentBackend(Protocol):
         text: str,
         turn_source: str = "web",
         actor_id: str | None = None,
-        confirmed_policy_title: str | None = None,
-        confirmed_policy_proposal_id: str | None = None,
-        rejected_policy_proposal_id: str | None = None,
+        confirmed_policy_id: str | None = None,
         confirmed_followup_id: str | None = None,
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
@@ -65,39 +65,12 @@ def run_turn(**kwargs: Any) -> AgentTurn:
     return get_backend().run_turn(**kwargs)
 
 
-def confirmed_policy_title(user_text: str) -> str | None:
-    """Accept an owner confirmation only as an exact, standalone chat command."""
+def confirmed_policy_id(user_text: str) -> str | None:
+    """Accept approval only as an exact, standalone human-readable policy command."""
     text = _owner_command_text(user_text)
-    match = re.fullmatch(r"\s*confirm policy rule:\s*(.{1,200}?)\s*", text, re.IGNORECASE)
-    return match.group(1).strip() if match else None
-
-
-def confirmed_policy_proposal_id(user_text: str) -> str | None:
-    """Accept an exact proposal-ID confirmation from an owner conversation."""
-    text = _owner_command_text(user_text)
-    match = re.fullmatch(
-        r"\s*confirm policy proposal:\s*([0-9a-f-]{36})\s*", text, re.IGNORECASE
-    )
-    if not match:
-        return None
-    try:
-        return str(UUID(match.group(1)))
-    except ValueError:
-        return None
-
-
-def rejected_policy_proposal_id(user_text: str) -> str | None:
-    """Accept an exact rejection of one proposal in an owner conversation."""
-    text = _owner_command_text(user_text)
-    match = re.fullmatch(
-        r"\s*reject policy proposal:\s*([0-9a-f-]{36})\s*", text, re.IGNORECASE
-    )
-    if not match:
-        return None
-    try:
-        return str(UUID(match.group(1)))
-    except ValueError:
-        return None
+    match = re.fullmatch(r"\s*approve policy:\s*(P1\.[1-9][0-9]*(?:\.[1-9][0-9]*)?)\s*", text, re.IGNORECASE)
+    identifier = match.group(1) if match else None
+    return identifier if identifier and is_policy_id(identifier) else None
 
 
 def confirmed_followup_id(user_text: str) -> str | None:

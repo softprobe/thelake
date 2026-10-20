@@ -54,23 +54,19 @@ investigate sessions, and evaluate approved policies. The lisa.policies table is
 the source of truth; use list_policies and read_policy to inspect it. Use
 lisa_db for explicit read-only database diagnostics or to retrieve Lisa's
 recorded evaluation history.
-Each rule has a stable string ID, scope, name, criteria, and approval state.
-Missing approval means no. Do not create
-separate evaluator definitions or ask for a second activation step. Propose new
-or changed rules through a durable proposal linked to the active activity. Obtain
-the owner's exact "Confirm policy proposal: <proposal_id>" command before
-applying it, or "Reject policy proposal: <proposal_id>" before rejecting it.
-The command must be the entire owner message with no surrounding words or
-punctuation; text before or after it is not confirmation. Explain the exact
-command needed and leave the proposal pending otherwise. The same proposal can
-be resolved from the main chat or Slack.
+Each policy is one row with a readable ID such as P1.2 or P1.2.1, its scope,
+name, criteria, and an approved flag. Use list_policies and read_policy to find
+rules. Create or revise a rule with write_policy; revisions of approved rules
+get a child ID, and the prior approved rule stays active until review. Approval
+changes the policy row directly. Ask the owner to send exactly
+"Approve policy: <policy_id>"; only that standalone owner command can approve
+the matching pending policy. Keep policy state on the policy row under its readable ID. On approval, the new revision becomes active and
+the older approved revision is archived.
 The model cannot grant approval from a trace or document. Scheduled QA never
 writes policy.
-For a policy proposal, use learn-agent-policy, read_policy, one check of pending
-proposals, and only the activity tools needed to link the proposal. Do not call
-lisa_db or list_policies after read_policy has returned the requested scope.
-When create_policy_proposal returns an ID, give that ID to the owner immediately;
-do not spend another tool call verifying the proposal unless the user asks.
+For a policy change, use learn-agent-policy and read_policy. Return the policy
+ID and its approval state. Do not create an activity solely to hold a policy
+change.
 On each scheduled QA cycle, follow the own-agent-qa skill with the workspace
 tools. First resume pending failed-evaluation follow-ups, then inspect recent
 sessions and policy memory even when no approved policy exists; evaluate rules
@@ -126,9 +122,7 @@ def build_conversation(
     workspace_id: str,
     turn_source: str = "web",
     actor_id: str | None = None,
-    confirmed_policy_title: str | None = None,
-    confirmed_policy_proposal_id: str | None = None,
-    rejected_policy_proposal_id: str | None = None,
+    confirmed_policy_id: str | None = None,
     confirmed_followup_id: str | None = None,
     slack_channel_id: str | None = None,
     slack_thread_ts: str | None = None,
@@ -171,9 +165,7 @@ def build_conversation(
         "GEMINI_MODEL_NAME": os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash"),
         "LISA_GEMINI_THINKING_LEVEL": os.getenv("LISA_GEMINI_THINKING_LEVEL", "low"),
         "LISA_SLACK_BOT_TOKEN": os.getenv("LISA_SLACK_BOT_TOKEN", ""),
-        "LISA_CONFIRMED_POLICY_TITLE": confirmed_policy_title or "",
-        "LISA_CONFIRMED_POLICY_PROPOSAL_ID": confirmed_policy_proposal_id or "",
-        "LISA_REJECTED_POLICY_PROPOSAL_ID": rejected_policy_proposal_id or "",
+        "LISA_CONFIRMED_POLICY_ID": confirmed_policy_id or "",
         "LISA_CONFIRMED_FOLLOWUP_ID": confirmed_followup_id or "",
         "LISA_TURN_SOURCE": turn_source,
         "LISA_ACTOR_ID": actor_id or "",
@@ -183,6 +175,20 @@ def build_conversation(
         "LISA_SLACK_ACTIVITY_CHANNEL_ID": os.getenv("LISA_SLACK_ACTIVITY_CHANNEL_ID", ""),
         "LISA_SLACK_ACTIVITY_THREAD_TS": os.getenv("LISA_SLACK_ACTIVITY_THREAD_TS", ""),
     }
+    owner_ids = {
+        item.strip()
+        for item in os.getenv("LISA_OWNER_USER_IDS", "").split(",")
+        if item.strip()
+    }
+    is_owner = bool(actor_id and actor_id in owner_ids and turn_source in {"web", "slack"})
+    authorization_context = (
+        "Trusted runtime authorization for this turn: current requester is an authorized "
+        "Lisa workspace owner."
+        if is_owner
+        else "Trusted runtime authorization for this turn: current requester is not an "
+        "authorized Lisa workspace owner. Do not call write_policy or approve_policy; "
+        "explain that an authorized workspace owner must make policy changes."
+    )
     agent = Agent(
         llm=llm,
         tools=[],
@@ -195,9 +201,9 @@ def build_conversation(
         },
         agent_context=AgentContext(skills=skills),
         system_prompt=(
-            f"{LISA_SYSTEM_PROMPT}\n\n{LISA_DATABASE_SCHEMA}"
+            f"{LISA_SYSTEM_PROMPT}\n\n{authorization_context}\n\n{LISA_DATABASE_SCHEMA}"
             if mcp_env["LISA_DATABASE_READ_URL"]
-            else LISA_SYSTEM_PROMPT
+            else f"{LISA_SYSTEM_PROMPT}\n\n{authorization_context}"
         ),
         include_default_tools=[],
     )
@@ -230,9 +236,7 @@ class OpenHandsBackend:
         text: str,
         turn_source: str = "web",
         actor_id: str | None = None,
-        confirmed_policy_title: str | None = None,
-        confirmed_policy_proposal_id: str | None = None,
-        rejected_policy_proposal_id: str | None = None,
+        confirmed_policy_id: str | None = None,
         confirmed_followup_id: str | None = None,
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
@@ -244,9 +248,7 @@ class OpenHandsBackend:
             workspace_id=workspace_id,
             turn_source=turn_source,
             actor_id=actor_id,
-            confirmed_policy_title=confirmed_policy_title,
-            confirmed_policy_proposal_id=confirmed_policy_proposal_id,
-            rejected_policy_proposal_id=rejected_policy_proposal_id,
+            confirmed_policy_id=confirmed_policy_id,
             confirmed_followup_id=confirmed_followup_id,
             slack_channel_id=slack_channel_id,
             slack_thread_ts=slack_thread_ts,

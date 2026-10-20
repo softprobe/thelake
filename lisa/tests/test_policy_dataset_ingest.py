@@ -314,7 +314,7 @@ def test_provider_errors_abort_instead_of_scoring_as_misses():
         )
 
 
-def test_catalog_seed_uses_lisas_policy_management_service(lisa_test_context):
+def test_catalog_seed_uses_readable_ids_in_isolated_catalog(lisa_test_context):
     context = lisa_test_context()
     service = build_services(context).policy_service
     catalog = SimpleNamespace(
@@ -334,9 +334,7 @@ def test_catalog_seed_uses_lisas_policy_management_service(lisa_test_context):
         }
     )
 
-    persisted_ids = _add_catalog_to_policy_management(
-        context, service, catalog, "lisa-policy-eval-agent"
-    )
+    persisted_ids = _add_catalog_to_policy_management(service, catalog, "lisa-policy-eval-agent")
 
     loaded = service.approved_rules("lisa-policy-eval-agent")
     assert {rule.name for rule in loaded} == {"Cancellation inspection", "Refund eligibility"}

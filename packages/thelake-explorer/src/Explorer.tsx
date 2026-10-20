@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { ExplorerApi, type ExplorerConfig, type Observation, type SessionSummary } from "./client";
-import { LisaView } from "./LisaView";
 import "./style.css";
 
 export type ThelakeExplorerProps = {
@@ -10,6 +9,7 @@ export type ThelakeExplorerProps = {
   initialSessionId?: string;
   onSessionOpen?: (sessionId: string) => void;
   onBack?: () => void;
+  lisaHref?: string;
 };
 
 function spanDepth(observation: Observation, byId: Map<string, Observation>): number {
@@ -36,6 +36,7 @@ export function ThelakeExplorer({
   initialSessionId,
   onSessionOpen,
   onBack,
+  lisaHref,
 }: ThelakeExplorerProps) {
   const api = useMemo(() => new ExplorerApi(config), [config]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -50,7 +51,6 @@ export function ThelakeExplorer({
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [showChat, setShowChat] = useState(!initialSessionId);
   const [error, setError] = useState<string>();
 
   useEffect(() => setSelected(initialSessionId), [initialSessionId]);
@@ -146,14 +146,14 @@ export function ThelakeExplorer({
     <main className={`thelake-explorer ${className ?? ""}`}>
       <header>
         <div><strong>theLake</strong><small>Investigate agent behavior</small></div>
-        <nav aria-label="Main navigation">
-          <button aria-pressed={showChat} onClick={() => setShowChat(true)}>Lisa</button>
-          <button aria-pressed={!showChat} onClick={() => { setShowChat(false); setSelected(undefined); }}>Sessions</button>
-        </nav>
-        {selected && !showChat && <button onClick={goBack}>Sessions</button>}
+        {lisaHref && <nav aria-label="Applications">
+          <span aria-current="page">Sessions</span>
+          <a href={lisaHref}>Lisa</a>
+        </nav>}
+        {selected && <button onClick={goBack}>Sessions</button>}
       </header>
       {error && <div role="alert" className="tle-error">{error}</div>}
-      {showChat ? <LisaView key={config.chatStorageKey ?? "workspace-unspecified"} api={api} onShowSessions={() => { setShowChat(false); setSelected(undefined); }} /> : <div className="tle-layout">
+      <div className="tle-layout">
         <aside aria-label="Sessions">
           <div className="tle-list-tools">
             <h2>Sessions</h2>
@@ -200,7 +200,7 @@ export function ThelakeExplorer({
             <div className="tle-score">{(["correct", "wrong", "unsure"] as const).map((verdict) => <button key={verdict} disabled={saving} onClick={() => void saveVerdict(verdict)}>{saving ? "Saving…" : verdict}</button>)}</div>
           </article>}
         </section>
-      </div>}
+      </div>
     </main>
   );
 }

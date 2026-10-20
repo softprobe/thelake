@@ -1,5 +1,7 @@
 """Shared policy/session-detail fixtures for the approval and execution contracts."""
 
+from benchmark.policy_seed import seed_policy_document
+
 from lisa.evaluation.contracts import EvaluationRequest
 from lisa.views.policies import render_policy_list, render_policy_records
 
@@ -19,7 +21,7 @@ def save_rule(
     store = services.policy_service
     agent = "agent" if scope == "agent" else ""
     current = read_policy(services, scope, agent)
-    store.update_policy(f"## Rule\napproved: {approved}\n\n{text}", current, scope, agent)
+    seed_policy_document(store, f"## Rule\napproved: {approved}\n\n{text}", current, scope, agent)
 
 
 def session_detail():

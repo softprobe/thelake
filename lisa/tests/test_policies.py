@@ -1,11 +1,15 @@
+from benchmark.policy_seed import seed_policy_document
+
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from threading import Event
 
 import pytest
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
 from lisa.models.policies import PolicyRecord
-from lisa.repositories.policies import InMemoryPolicyRepository
+from lisa.repositories.policies import InMemoryPolicyRepository, PostgresPolicyRepository, _sql
 from lisa.services.policies import PolicyService
 from policy_cases import list_policies, read_policy
 from lisa.views.policies import render_policy_list, render_policy_records
@@ -16,7 +20,7 @@ def isolated_data_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("LISA_WORKSPACE_ID", "11111111-1111-4111-8111-111111111111")
     monkeypatch.setenv("LISA_TURN_SOURCE", "web")
-    monkeypatch.delenv("LISA_CONFIRMED_POLICY_TITLE", raising=False)
+    monkeypatch.delenv("LISA_CONFIRMED_POLICY_ID", raising=False)
 
 
 @pytest.fixture
@@ -32,10 +36,10 @@ def test_policy_tools_scope_records_per_workspace(monkeypatch, lisa_test_databas
     services = build_services(WorkspaceContext.from_environment())
     current = read_policy(services)
     draft = "# Workspace policy\n\n## Refund Eligibility Policy\n\nCheck eligibility before refunding.\n"
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_TITLE", "Refund Eligibility Policy")
+    monkeypatch.setenv("LISA_CONFIRMED_POLICY_ID", "Refund Eligibility Policy")
     services = build_services(WorkspaceContext.from_environment())
 
-    services.policy_service.update_policy(draft, current)
+    seed_policy_document(services.policy_service, draft, current)
 
     saved = read_policy(services)
     assert "# Workspace policies" in saved
@@ -53,10 +57,10 @@ def test_policy_tools_scope_records_per_workspace(monkeypatch, lisa_test_databas
 def test_policy_records_have_stable_string_ids_and_database_shaped_fields(
     monkeypatch, policy_database
 ):
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_TITLE", "Refund eligibility")
+    monkeypatch.setenv("LISA_CONFIRMED_POLICY_ID", "Refund eligibility")
     context = WorkspaceContext.from_environment()
     services = build_services(context)
-    services.policy_service.update_policy(
+    seed_policy_document(services.policy_service,
         "## Refund eligibility\napproved: yes\n\nCheck eligibility before refunding.", ""
     )
     rule = services.policy_service.approved_rules("refund-agent")[0]
@@ -69,13 +73,16 @@ def test_policy_records_have_stable_string_ids_and_database_shaped_fields(
     assert rule.id in listing
     assert not (context.home() / "POLICY.md").exists()
 
-    services.policy_service.update_policy(
+    seed_policy_document(services.policy_service,
         "## Refund eligibility\napproved: yes\n\nCheck the refund before issuing it.",
         read_policy(services),
     )
     updated = services.policy_service.approved_rules("refund-agent")[0]
-    assert updated.id == rule.id
+    assert updated.id == f"{rule.id}.1"
     assert updated.criteria == "Check the refund before issuing it."
+    assert next(
+        row for row in services.policy_service.repository.list_all_history() if row.id == rule.id
+    ).archived_at is not None
 
 
 def test_policy_ids_use_paragraph_style_ordinals(policy_database):
@@ -86,7 +93,7 @@ def test_policy_ids_use_paragraph_style_ordinals(policy_database):
         for number in range(1, 11)
     ]
 
-    saved = repository.replace_scope(
+    saved = repository.seed_scope(
         "workspace",
         "",
         [],
@@ -100,6 +107,52 @@ def test_policy_ids_use_paragraph_style_ordinals(policy_database):
 
     rendered = render_policy_records(saved, "workspace")
     assert rendered.index("## P1.1 | Rule 1") < rendered.index("## P1.10 | Rule 10")
+
+
+def test_policy_approval_serializes_with_scope_writes(policy_database):
+    context = WorkspaceContext.from_environment()
+    repository = build_services(context).policy_service.repository
+    pending = repository.write_policy("workspace", "", "Refund review", "Review first.")
+    executor = ThreadPoolExecutor(max_workers=1)
+    approval_started = Event()
+
+    try:
+        with repository._connect() as lock_connection:
+            lock_connection.execute(
+                _sql("lock_policy_scope.sql"), {"lock_key": "workspace:"}
+            )
+            def approve():
+                approval_started.set()
+                return repository.approve_policy(pending.id)
+
+            approval = executor.submit(approve)
+            assert approval_started.wait(timeout=5)
+            with pytest.raises(FutureTimeoutError):
+                approval.result(timeout=0.1)
+        assert approval.result(timeout=5).approved
+    finally:
+        executor.shutdown(wait=True)
+
+
+def test_stale_write_cannot_change_approved_policy_row(policy_database):
+    context = WorkspaceContext.from_environment()
+    repository = build_services(context).policy_service.repository
+    pending = repository.write_policy("workspace", "", "Refund review", "Review first.")
+    approved = repository.approve_policy(pending.id)
+
+    with repository._connect() as connection, connection.transaction():
+        stale_write = connection.execute(_sql("write_policy.sql"), {
+            "id": approved.id,
+            "scope": approved.scope,
+            "target_agent_name": approved.target_agent_name or "",
+            "name": approved.name,
+            "criteria": "Changed after approval.",
+        }).fetchone()
+
+    assert stale_write is None
+    current = next(row for row in repository.list_all_history() if row.id == approved.id)
+    assert current.approved is True
+    assert current.criteria == "Review first."
 
 
 def test_policy_page_at_maximum_offset_has_no_unreachable_successor():
@@ -125,10 +178,10 @@ def test_policy_page_at_maximum_offset_has_no_unreachable_successor():
 
 
 def test_policy_listing_explains_agent_specific_scope(monkeypatch, policy_database):
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_TITLE", "Refund eligibility")
+    monkeypatch.setenv("LISA_CONFIRMED_POLICY_ID", "Refund eligibility")
     context = WorkspaceContext.from_environment()
     services = build_services(context)
-    services.policy_service.update_policy(
+    seed_policy_document(services.policy_service,
         "## Refund eligibility\napproved: no\n\nDo not issue the refund.",
         "No policy exists yet.",
         scope="agent",
@@ -141,7 +194,7 @@ def test_policy_listing_explains_agent_specific_scope(monkeypatch, policy_databa
     assert "P1.1 | Refund eligibility" in listing
     assert "Applies to: dogfood-refund-agent only" in listing
     assert "approved: no" in listing
-    assert "pol_" not in listing
+    assert "P1." in listing
 
 
 def test_policy_listing_ignores_on_disk_markdown_files(tmp_path, policy_database):
@@ -167,7 +220,7 @@ def test_policy_listing_orders_paragraph_ids_numerically(tmp_path):
         data_dir=tmp_path,
     )
     repository = InMemoryPolicyRepository()
-    repository.replace_scope(
+    repository.seed_scope(
         "workspace",
         "",
         [],
@@ -198,50 +251,15 @@ def test_policy_reads_do_not_import_on_disk_markdown(tmp_path, policy_database):
     assert services.policy_service.approved_rules("refund-agent") == []
 
 
-def test_policy_update_requires_owner_confirmation_to_add_rule(monkeypatch, policy_database):
-
-    draft = "# Workspace policy\n\n## Refund eligibility\n\nCheck eligibility before refunding.\n"
-
-    with pytest.raises(ValueError, match="explicit confirmation"):
-        services = build_services(WorkspaceContext.from_environment())
-        services.policy_service.update_policy(draft, "")
-
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_TITLE", "Refund eligibility")
-    services = build_services(WorkspaceContext.from_environment())
-    services.policy_service.update_policy(draft, "")
-
-
-def test_policy_update_requires_confirmation_to_change_a_confirmed_rule(
-    monkeypatch, policy_database
-):
-    current = "# Workspace policy\n\n## Refund eligibility\n\nCheck eligibility before refunding.\n"
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_TITLE", "Refund eligibility")
-    services = build_services(WorkspaceContext.from_environment())
-    services.policy_service.update_policy(current, "")
-
-    current = read_policy(services)
-    changed = current.replace(
-        "Check eligibility before refunding", "Check the ticket before refunding"
-    )
-    monkeypatch.delenv("LISA_CONFIRMED_POLICY_TITLE")
-    services = build_services(WorkspaceContext.from_environment())
-    with pytest.raises(ValueError, match="explicit confirmation"):
-        services.policy_service.update_policy(changed, current)
-
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_TITLE", "Refund eligibility")
-    services = build_services(WorkspaceContext.from_environment())
-    services.policy_service.update_policy(changed, current)
-
-
 def test_policy_tools_redact_secrets_before_persisting_markdown(monkeypatch, policy_database):
 
     services = build_services(WorkspaceContext.from_environment())
     current = read_policy(services)
     draft = '# Workspace policy\n\n## Support credential\n\nKeep credential data private. api_key="policy-secret-value"\n'
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_TITLE", "Support credential")
+    monkeypatch.setenv("LISA_CONFIRMED_POLICY_ID", "Support credential")
     services = build_services(WorkspaceContext.from_environment())
 
-    services.policy_service.update_policy(draft, current)
+    seed_policy_document(services.policy_service, draft, current)
     saved = read_policy(services)
 
     assert "policy-secret-value" not in saved
@@ -251,7 +269,7 @@ def test_policy_tools_redact_secrets_before_persisting_markdown(monkeypatch, pol
 def test_policy_update_rejects_empty_rule_markdown(policy_database):
     with pytest.raises(ValueError, match="readable Markdown"):
         services = build_services(WorkspaceContext.from_environment())
-        services.policy_service.update_policy(
+        seed_policy_document(services.policy_service,
             "# Workspace policy\n\n## Inferred rule\n\n",
             "",
         )

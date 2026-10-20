@@ -7,10 +7,10 @@ multi-turn task with chat provenance, owner identity, tool-action expectations,
 reply checks, ordered tool-use and exact call-count labels, and expected state
 labels.
 
-The 19-case curated release covers activity creation, lookup and resumption,
+The 15-case curated release covers activity creation, lookup and resumption,
 duplicate prevention, ambiguity, evidence-backed completion, owner boundaries,
-policy proposal/approval/rejection, exact confirmation boundaries, and
-follow-up proposal/approval/deduplication. Three cases check whether Lisa can
+policy creation, lookup, exact-ID approval, revision, and follow-up
+proposal/approval/deduplication. Three cases check whether Lisa can
 retrieve and report saved policy-triage decisions and judge verdicts without
 rerunning an evaluation. Synthetic history is seeded in each disposable Postgres
 case database through Lisa's repositories; judge-run completion uses a
