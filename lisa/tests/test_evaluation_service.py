@@ -1,4 +1,7 @@
 import json
+import threading
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from policy_cases import session_detail, save_rule
@@ -7,6 +10,8 @@ from lisa.bootstrap import build_services
 from lisa.evaluation.contracts import EvaluationRequest
 from lisa.evaluation.scores import evaluation_run_identity
 from lisa.evaluation.trajectory import build_trajectory_events
+from lisa.models.activities import ActivityClaim
+from lisa.services import evaluations as evaluations_module
 
 
 @pytest.fixture
@@ -58,6 +63,40 @@ def test_evaluation_run_identity_tracks_evidence_and_evaluator_versions():
         triage_model="triage-v1",
         judge_model="judge-v2",
     ) != first
+
+
+@pytest.mark.parametrize("raise_error", [False, True])
+def test_lease_heartbeat_stops_when_lease_scope_exits(monkeypatch, raise_error):
+    real_thread = threading.Thread
+    threads = []
+
+    def tracking_thread(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(evaluations_module.threading, "Thread", tracking_thread)
+    service = evaluations_module.EvaluationService.__new__(evaluations_module.EvaluationService)
+    service.activities = SimpleNamespace(renew_lease=lambda *args, **kwargs: None)
+    claim = ActivityClaim(
+        activity_id="activity-1",
+        owner="lisa-evaluation",
+        fencing_token=1,
+        lease_expires_at=datetime.now(UTC),
+    )
+
+    if raise_error:
+        with pytest.raises(RuntimeError, match="operation failed"):
+            with service._lease_heartbeat("activity-1", "lisa-evaluation", claim):
+                assert len(threads) == 1
+                assert threads[0].is_alive()
+                raise RuntimeError("operation failed")
+    else:
+        with service._lease_heartbeat("activity-1", "lisa-evaluation", claim):
+            assert len(threads) == 1
+            assert threads[0].is_alive()
+
+    assert not threads[0].is_alive()
 
 
 def test_missing_span_timestamps_build_a_deterministic_trajectory():

@@ -15,8 +15,10 @@ import json
 import logging
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from hashlib import sha256
+from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -489,7 +491,16 @@ class EvaluationService:
                 "activity_id": activity.activity_id,
                 "evaluation_id": activity.id,
             }
-        self._start_lease_heartbeat(activity.activity_id, owner, claim)
+        with self._lease_heartbeat(activity.activity_id, owner, claim):
+            return self._recover_pending_score_claimed(activity, outbox, owner, claim)
+
+    def _recover_pending_score_claimed(
+        self,
+        activity: EvaluationRun,
+        outbox: ScoreOutboxItem,
+        owner: str,
+        claim: ActivityClaim,
+    ) -> dict:
         payload = outbox.score_payload
         result = self._result_from_score_payload(payload)
         metadata = payload.get("metadata") or {}
@@ -797,7 +808,44 @@ class EvaluationService:
                 "activity_id": activity_id,
                 "evaluation_id": evaluation.id,
             }
-        self._start_lease_heartbeat(activity_id, owner, claim)
+        with self._lease_heartbeat(activity_id, owner, claim):
+            return self._evaluate_tracked_claimed(
+                policy,
+                session_id,
+                trace_id,
+                spans,
+                trajectory,
+                run_id,
+                evaluation,
+                outbox,
+                selection,
+                requested_activity_id,
+                defer_activity_finish,
+                activity_id,
+                owner,
+                claim,
+                run_dir,
+            )
+
+    def _evaluate_tracked_claimed(
+        self,
+        policy: dict,
+        session_id: str,
+        trace_id: str,
+        spans: list,
+        trajectory: dict,
+        run_id: str,
+        evaluation: EvaluationRun,
+        outbox,
+        selection: dict | None,
+        requested_activity_id: str | None,
+        defer_activity_finish: bool,
+        activity_id: str,
+        owner: str,
+        claim: ActivityClaim,
+        run_dir: Path,
+    ) -> dict:
+        assert self.activities is not None
 
         context_kind = f"evaluation_inputs_{policy['policy_id']}"
         saved = self.activities.get_context_item_for_activity(activity_id, context_kind)
@@ -1006,8 +1054,11 @@ class EvaluationService:
                 # The lease may have expired; recovery can reclaim it by fencing token.
                 return
 
-    def _start_lease_heartbeat(self, activity_id: str, owner: str, claim: ActivityClaim) -> None:
-        """Keep long provider calls fenced; a stale worker still cannot commit."""
+    @contextmanager
+    def _lease_heartbeat(
+        self, activity_id: str, owner: str, claim: ActivityClaim
+    ) -> Iterator[None]:
+        """Renew a claimed lease while its operation runs, then stop the worker."""
         assert self.activities is not None
         stop = threading.Event()
 
@@ -1026,11 +1077,17 @@ class EvaluationService:
                 if current is None:
                     return
 
-        threading.Thread(
+        thread = threading.Thread(
             target=renew,
             name=f"lisa-evaluation-lease-{activity_id}",
             daemon=True,
-        ).start()
+        )
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join()
 
     def _session_detail(self, session_id: str) -> dict:
         return self.sessions.detail(session_id)
