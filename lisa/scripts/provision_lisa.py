@@ -3,7 +3,7 @@
 Not part of the agent runtime. Give Lisa only writer/reader URLs afterward.
 
 When ``LISA_DATABASE_WRITER_PASSWORD`` and ``LISA_DATABASE_READER_PASSWORD`` are
-set, this also creates the ``lisa`` database and those roles (quickstart /
+set, this also creates the ``lisa`` database and those roles (dogfood /
 local bootstrap). Schema shape changes require ``LISA_DATABASE_RECREATE=1``.
 """
 

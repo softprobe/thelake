@@ -8,9 +8,9 @@ Explorer is the self-hosted session and trace UI for thelake. Source lives in
 [`packages/thelake-explorer`](../../packages/thelake-explorer/). `make build`
 embeds the SPA into the binary; thelake serves it at `/explorer/`.
 
-For a fast first run with Lisa, a live sample agent, and a detected evaluation
-result in Explorer, see
-the [5-minute quickstart](../quickstart.md).
+For the complete local Explorer + Lisa chat environment, use
+[Local Lisa development](local-development.md). It uses the root Compose stack
+and provisions durable policy storage.
 
 ## Prerequisites
 
@@ -275,22 +275,17 @@ before entering the container (`IN_LINUX_BUILDER=1` does not run `npm`).
 
 ## Behavior evaluation
 
-Lisa runs the evaluator in her own MCP tool process. Compose passes the Gemini
-key to Lisa; no evaluator service URL, token, or extra container is needed:
+Lisa runs the evaluator in her own MCP tool process. The local Compose stack
+starts TheLake and Lisa together and provisions Lisa's durable database:
 
 ```bash
-export GOOGLE_API_KEY=your-key
-docker compose --profile lisa up --build
+make dev-up
 ```
 
-For a host-native `make run`, run Lisa with the same Gemini and TheLake
-credentials. The OpenHands MCP subprocess receives only the credentials needed
-to call Gemini and TheLake.
-
-Then open Explorer → **Lisa** to ask questions about recent sessions and their
-trajectories. Rule text and approval live in the Lisa Postgres policy table; missing approval means no. Lisa
-selects matching sessions on her schedule and writes evaluation scores to
-Sessions.
+Open Explorer → **Lisa** to chat, create and confirm policies, and inspect
+activities. Rule text and approval live in Lisa's PostgreSQL policy table;
+missing approval means no. Scheduled QA is opt-in in local development; set
+`LISA_QA_ENABLED=1` when you want model-backed scheduled evaluation.
 
 ## Verify
 

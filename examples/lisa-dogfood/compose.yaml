@@ -2,13 +2,13 @@ services:
   postgres:
     image: postgres:18
     labels:
-      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
+      io.arex.lisa.dogfood-instance: ${THELAKE_DOGFOOD_INSTANCE_ID:?dogfood script must set an instance ID}
     environment:
       POSTGRES_USER: ducklake
       POSTGRES_PASSWORD: ducklake
       POSTGRES_DB: ducklake
     ports:
-      - "127.0.0.1:${THELAKE_QUICKSTART_DB_PORT:-55432}:5432"
+      - "127.0.0.1:${THELAKE_DOGFOOD_DB_PORT:-55432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ducklake -d ducklake"]
       interval: 2s
@@ -22,12 +22,12 @@ services:
       context: ../..
       dockerfile: lisa/Dockerfile
     labels:
-      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
+      io.arex.lisa.dogfood-instance: ${THELAKE_DOGFOOD_INSTANCE_ID:?dogfood script must set an instance ID}
     environment:
-      LISA_THELAKE_TOKEN: ${LISA_THELAKE_TOKEN:?quickstart script must set a Lisa service token}
-      LISA_THELAKE_API_URL: http://host.docker.internal:${THELAKE_QUICKSTART_PORT:-8090}
+      LISA_THELAKE_TOKEN: ${LISA_THELAKE_TOKEN:?dogfood script must set a Lisa service token}
+      LISA_THELAKE_API_URL: http://host.docker.internal:${THELAKE_DOGFOOD_PORT:-8090}
       LISA_SKILL_DIR: /app/skills
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-${GEMINI_API_KEY:?Set GOOGLE_API_KEY or GEMINI_API_KEY before starting the quickstart}}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-${GEMINI_API_KEY:?Set GOOGLE_API_KEY or GEMINI_API_KEY before starting the dogfood}}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LISA_LLM_TRACE_ENABLED: ${LISA_LLM_TRACE_ENABLED:-0}
       LISA_GEMINI_THINKING_LEVEL: ${LISA_GEMINI_THINKING_LEVEL:-low}
@@ -38,7 +38,7 @@ services:
       LISA_DATABASE_READ_URL: postgresql://lisa_reader:${LISA_DATABASE_READER_PASSWORD}@postgres:5432/lisa
       LISA_QA_CRON: ${LISA_QA_CRON:-0 * * * *}
       LISA_LOCAL_ANONYMOUS: ${LISA_LOCAL_ANONYMOUS:-1}
-      LISA_CORS_ORIGINS: http://127.0.0.1:${THELAKE_QUICKSTART_PORT:-8090},http://localhost:${THELAKE_QUICKSTART_PORT:-8090}
+      LISA_CORS_ORIGINS: http://127.0.0.1:${THELAKE_DOGFOOD_PORT:-8090},http://localhost:${THELAKE_DOGFOOD_PORT:-8090}
       GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-3.8-flash}
       LISA_SLACK_BOT_TOKEN: ${LISA_SLACK_BOT_TOKEN:-}
       LISA_SLACK_SIGNING_SECRET: ${LISA_SLACK_SIGNING_SECRET:-}
@@ -51,15 +51,15 @@ services:
       LISA_OWNER_USER_IDS: ${LISA_OWNER_USER_IDS:-}
       LISA_SLACK_ACTIVITY_THREAD_TS: ${LISA_SLACK_ACTIVITY_THREAD_TS:-}
     ports:
-      - "127.0.0.1:${THELAKE_QUICKSTART_LISA_PORT:-18082}:8082"
+      - "127.0.0.1:${THELAKE_DOGFOOD_LISA_PORT:-18082}:8082"
     volumes:
       - lisa-data:/var/lib/lisa
 
   refund-agent:
     profiles: [demo-agent]
     labels:
-      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
-    network_mode: ${THELAKE_QUICKSTART_AGENT_NETWORK:-bridge}
+      io.arex.lisa.dogfood-instance: ${THELAKE_DOGFOOD_INSTANCE_ID:?dogfood script must set an instance ID}
+    network_mode: ${THELAKE_DOGFOOD_AGENT_NETWORK:-bridge}
     build:
       context: ./agent
     environment:
@@ -69,12 +69,12 @@ services:
 volumes:
   postgres-data:
     labels:
-      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
+      io.arex.lisa.dogfood-instance: ${THELAKE_DOGFOOD_INSTANCE_ID:?dogfood script must set an instance ID}
   lisa-data:
     labels:
-      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
+      io.arex.lisa.dogfood-instance: ${THELAKE_DOGFOOD_INSTANCE_ID:?dogfood script must set an instance ID}
 
 networks:
   default:
     labels:
-      io.arex.lisa.quickstart-instance: ${THELAKE_QUICKSTART_INSTANCE_ID:?quickstart script must set an instance ID}
+      io.arex.lisa.dogfood-instance: ${THELAKE_DOGFOOD_INSTANCE_ID:?dogfood script must set an instance ID}

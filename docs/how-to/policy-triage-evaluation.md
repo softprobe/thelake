@@ -40,12 +40,12 @@ through its normal session and policy services:
 ```bash
 LISA_LLM_TRACE_ENABLED=1 uv run --project lisa --env-file .env \
   python lisa/scripts/evaluate_policy_dataset.py --live \
-  --quickstart-env-file warehouse/quickstart/lisa-policy-eval-<run-id>.env \
+  --dogfood-env-file warehouse/dogfood/lisa-policy-eval-<run-id>.env \
   --manifest /tmp/policy-sample/manifests/sample.json \
   --output /tmp/policy-sample/production-report.json
 ```
 
-Start the runner against a fresh local quickstart Compose project and workspace;
+Start the runner against a fresh local dogfood Compose project and workspace;
 do not use a user's existing Lisa database. The runner also checks that each
 complete dataset `session_id` is absent before seeding policies or ingesting;
 it stops if a session already exists, so repeated runs cannot append spans to

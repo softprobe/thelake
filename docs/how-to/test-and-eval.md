@@ -20,9 +20,9 @@ the test.
 
 For Lisa specifically, **all** disposable environment setup and teardown lives in
 [`lisa/conftest.py`](../../lisa/conftest.py): Postgres via `test_stack.py`,
-per-run Lisa databases/roles/schema, and policy-evaluation quickstart bind /
+per-run Lisa databases/roles/schema, and policy-evaluation dogfood bind /
 dispose. Pytest fixtures and `lisa/benchmark/` runners must call those helpers;
-they must not own Compose, database, or quickstart lifecycle themselves.
+they must not own Compose, database, or dogfood lifecycle themselves.
 Reuse one Postgres container for a pytest session or benchmark run is fine;
 when the session or process ends, `conftest` must stop every tracked stack
 (fixture `finally`, `pytest_sessionfinish`, and `atexit`) so no orphan
@@ -41,7 +41,7 @@ Compose files describe service topology and test-only settings. Do not call
 `docker compose up/down`, `docker run`, or `docker rm` from test fixtures or
 harnesses. Start and stop through the shared script so a failed test cannot
 reuse or remove a developer's stack. Developer commands such as `make setup`,
-`make grafana-up`, and the quickstart are separate operator workflows and are
+`make grafana-up`, and the dogfood are separate operator workflows and are
 not automated-test infrastructure.
 
 ### Use from a test harness

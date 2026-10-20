@@ -74,7 +74,7 @@ class RefundAgentSdkContractTests(unittest.TestCase):
         fake_softprobe.openai = fake_openai
 
         spec = importlib.util.spec_from_file_location(
-            "quickstart_refund_agent_under_test", AGENT_DIR / "refund_agent.py"
+            "dogfood_refund_agent_under_test", AGENT_DIR / "refund_agent.py"
         )
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
@@ -109,7 +109,7 @@ class RefundAgentSdkContractTests(unittest.TestCase):
             patch.object(module, "create_gemini_openai_client", return_value=client),
             patch.object(module, "observe_openai", return_value=client),
         ):
-            module.run_agent("quickstart-refund-agent", "http://localhost:8090", "gemini-test")
+            module.run_agent("dogfood-refund-agent", "http://localhost:8090", "gemini-test")
 
         completions.create.assert_called_once()
         agent.update.assert_called_once_with(

@@ -5,6 +5,7 @@ Sends traces to the OTLP backend via HTTP/Protobuf.
 """
 
 import logging
+import os
 import random
 import time
 import uuid
@@ -23,7 +24,7 @@ from opentelemetry.semconv.resource import ResourceAttributes
 from opentelemetry.trace import Status, StatusCode
 
 # Configuration
-OTLP_ENDPOINT = "http://localhost:4317"
+OTLP_ENDPOINT = os.environ.get("OTLP_ENDPOINT", "http://localhost:8090")
 SERVICE_NAME = "demo-service"
 PARALLEL_SESSIONS = 5
 REQUESTS_PER_SESSION = 10

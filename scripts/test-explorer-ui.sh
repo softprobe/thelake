@@ -19,10 +19,10 @@ if [[ "$ONLINE_E2E" == "1" ]]; then
   docker info >/dev/null 2>&1 || { echo "ERROR: Start Docker before online evaluation E2E." >&2; exit 1; }
   LISA_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   export LISA_THELAKE_TOKEN="$LISA_TOKEN"
-  export THELAKE_QUICKSTART_INSTANCE_ID="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
-  export THELAKE_QUICKSTART_DB_PORT=0
+  export THELAKE_DOGFOOD_INSTANCE_ID="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+  export THELAKE_DOGFOOD_DB_PORT=0
   if [[ "$(uname -s)" == "Linux" ]]; then
-    export THELAKE_QUICKSTART_AGENT_NETWORK=host
+    export THELAKE_DOGFOOD_AGENT_NETWORK=host
   fi
 fi
 
@@ -66,7 +66,7 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "$ONLINE_E2E" == "1" ]]; then
-  COMPOSE_FILE="$ROOT/examples/quickstart/compose.yaml"
+  COMPOSE_FILE="$ROOT/examples/lisa-dogfood/compose.yaml"
   POSTGRES_SERVICE="postgres"
   STACK_SUITE="explorer-online"
 else

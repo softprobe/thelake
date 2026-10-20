@@ -10,6 +10,7 @@ COPY lisa/pyproject.toml ./pyproject.toml
 # Runtime package only. Never COPY lisa/benchmark or lisa/datasets into the image.
 COPY lisa/src ./src
 COPY lisa/skills ./skills
+COPY lisa/scripts/provision_lisa.py ./provision_lisa.py
 RUN pip install --no-cache-dir '.[openhands]'
 
 RUN useradd --system --uid 10002 --create-home lisa && \

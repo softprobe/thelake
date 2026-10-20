@@ -9,8 +9,9 @@ A user conversation or Lisa's own schedule starts work.
 
 Lisa is one continuing agent identity per workspace. Her conversation, policy
 records, credentials, telemetry access, and pending follow-ups are isolated by
-workspace. The local Compose stack runs one workspace and persists Lisa's home
-in the `lisa-data` volume. Multi-workspace deployments run scoped Lisa runtimes.
+workspace. The local developer stack runs one workspace and persists Lisa's
+home in the `lisa-data` volume. Multi-workspace deployments run scoped Lisa
+runtimes.
 
 ## Business policy is stored in Postgres
 
@@ -84,10 +85,12 @@ can be launched by another backend with the same trusted workspace context.
 
 ## Scheduled review
 
-One process-local APScheduler job, `Lisa scheduled QA`, runs a five-field UTC cron
-from `LISA_QA_CRON`, default `0 * * * *` (hourly at minute 0). It does not run on
-startup. The quickstart uses this hourly default; the dogfood E2E can temporarily
-override it to `*/5 * * * *` to keep its wait within the test timeout. Each firing
+One process-local APScheduler job, `Lisa scheduled QA`, runs when
+`LISA_QA_ENABLED` is enabled and a workspace is configured. It uses the
+five-field UTC cron in `LISA_QA_CRON`, default `0 * * * *` (hourly at minute
+0), and does not run on startup. The local developer stack disables scheduled
+QA by default so chat and policy management do not trigger unattended model
+calls. Dogfood enables it in its isolated run-owned environment. Each firing
 starts a fresh model turn using `own-agent-qa`.
 Run one scheduler process per workspace; multiple replicas can each fire a turn.
 

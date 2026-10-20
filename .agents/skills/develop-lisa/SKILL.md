@@ -83,10 +83,10 @@ authorization contract for them.
   transient-resource rule in `AGENTS.md`. **All** disposable environment
   setup/teardown lives in [`lisa/conftest.py`](../../../lisa/conftest.py)
   (`start_lisa_postgres` / `stop_lisa_postgres`, `create_lisa_test_database`,
-  `provision_lisa_schema`, `configure_lisa_quickstart` /
-  `dispose_lisa_quickstart`). Pytest fixtures re-export those helpers;
+  `provision_lisa_schema`, `configure_lisa_dogfood` /
+  `dispose_lisa_dogfood`). Pytest fixtures re-export those helpers;
   `lisa/benchmark/` runners must import them and must not own Compose,
-  database, role, schema, or quickstart lifecycle. One Postgres container may
+  database, role, schema, or dogfood lifecycle. One Postgres container may
   be reused for a whole pytest session or benchmark run, but every tracked
   stack must be stopped when the session/process ends (fixture teardown,
   `pytest_sessionfinish`, and `atexit`) so interrupted runs do not leave

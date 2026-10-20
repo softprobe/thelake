@@ -60,7 +60,7 @@ async function openDetails(page: import('@playwright/test').Page, label: string)
 }
 
 function runRefundAgent(agentName: string): string {
-  const composeFile = resolve(process.cwd(), '../../../../examples/quickstart/compose.yaml');
+  const composeFile = resolve(process.cwd(), '../../../../examples/lisa-dogfood/compose.yaml');
   const project = process.env.THELAKE_E2E_COMPOSE_PROJECT;
   const lakePort = process.env.THELAKE_E2E_LAKE_PORT;
   expect(project, 'online E2E compose project must be configured').toBeTruthy();

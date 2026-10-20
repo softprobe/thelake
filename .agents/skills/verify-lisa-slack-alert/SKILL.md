@@ -34,7 +34,7 @@ TheLake stores traces and scores; it does not run or notify Lisa.
    request. Do not prompt Lisa or call her scheduled-cycle endpoint.
 2. Ensure an active behavior check applies to the sample agent. Prefer a check
    without `slack_channel_id` to verify the workspace default route.
-3. Run the deliberately flawed quickstart refund agent and record its session
+3. Run the deliberately flawed dogfood refund agent and record its session
    ID. It only simulates a refund tool; it does not contact a payment system.
 4. Wait for Lisa's normal schedule. Verify that she selects the new session,
    stores a failing evaluator score, and reports the evidence in her scheduled

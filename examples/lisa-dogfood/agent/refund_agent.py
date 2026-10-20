@@ -18,7 +18,7 @@ def run_agent(agent_name: str, api_url: str, model_name: str) -> str:
     print(f"agent={agent_name} session_id={session_id}", flush=True)
     user_prompt = "Please refund ticket DEMO-42."
     telemetry = SoftprobeClient(
-        public_key=os.getenv("SOFTPROBE_PUBLIC_KEY", "quickstart-local"),
+        public_key=os.getenv("SOFTPROBE_PUBLIC_KEY", "dogfood-local"),
         base_url=api_url,
         service_name=agent_name,
     )

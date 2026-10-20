@@ -25,12 +25,12 @@ def test_lisa_has_one_name_for_project_package_and_runtime():
 
 def test_compose_uses_the_lisa_service_name():
     root_compose = (REPOSITORY / "docker-compose.yml").read_text(encoding="utf-8")
-    quickstart_compose = (REPOSITORY / "examples" / "quickstart" / "compose.yaml").read_text(
+    dogfood_compose = (REPOSITORY / "examples" / "lisa-dogfood" / "compose.yaml").read_text(
         encoding="utf-8"
     )
 
     assert "  lisa:" in root_compose
-    assert "  lisa:" in quickstart_compose
+    assert "  lisa:" in dogfood_compose
 
 
 def test_documentation_pages_use_lowercase_kebab_case():

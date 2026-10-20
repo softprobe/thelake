@@ -132,14 +132,14 @@ def test_policy_listing_explains_agent_specific_scope(monkeypatch, policy_databa
         "## Refund eligibility\napproved: no\n\nDo not issue the refund.",
         "No policy exists yet.",
         scope="agent",
-        agent_name="quickstart-refund-agent",
+        agent_name="dogfood-refund-agent",
     )
 
     listing = list_policies(services)[0]
 
     assert "Refund eligibility" in listing
     assert "P1.1 | Refund eligibility" in listing
-    assert "Applies to: quickstart-refund-agent only" in listing
+    assert "Applies to: dogfood-refund-agent only" in listing
     assert "approved: no" in listing
     assert "pol_" not in listing
 

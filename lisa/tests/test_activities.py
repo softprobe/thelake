@@ -40,7 +40,7 @@ def _create_evaluation(store: PostgresActivityStore, request_key: str | None = N
     return store.create_evaluation(
         title="Check refund eligibility",
         source="test",
-        target_agent_name="quickstart-refund-agent",
+        target_agent_name="dogfood-refund-agent",
         session_id=f"session-{uuid4()}",
         policy_name="refund eligibility",
         policy_id=policy_id,
@@ -52,7 +52,7 @@ def _create_evaluation(store: PostgresActivityStore, request_key: str | None = N
 
 def _test_policy_id(store: PostgresActivityStore) -> str:
     repository = PostgresPolicyRepository(store.dsn, WORKSPACE_ID)
-    agent_name = "quickstart-refund-agent"
+    agent_name = "dogfood-refund-agent"
     policies = repository.list_scope("agent", agent_name)
     existing = next((item for item in policies if item.name == "refund eligibility"), None)
     if existing:
@@ -390,7 +390,7 @@ def test_evaluation_creation_is_idempotent_and_intentional_rerun_is_distinct(
     retry = store.create_evaluation(
         title="Check refund eligibility",
         source="test",
-        target_agent_name="quickstart-refund-agent",
+        target_agent_name="dogfood-refund-agent",
         session_id=first.session_id,
         policy_name="refund eligibility",
         policy_id=first.policy_id,
@@ -401,7 +401,7 @@ def test_evaluation_creation_is_idempotent_and_intentional_rerun_is_distinct(
     rerun = store.create_evaluation(
         title="Check refund eligibility again",
         source="test",
-        target_agent_name="quickstart-refund-agent",
+        target_agent_name="dogfood-refund-agent",
         session_id=first.session_id,
         policy_name="refund eligibility",
         policy_id=first.policy_id,
@@ -441,7 +441,7 @@ def test_concurrent_retries_create_one_evaluation(store: PostgresActivityStore):
         return store.create_evaluation(
             title="Concurrent evaluation",
             source="test",
-            target_agent_name="quickstart-refund-agent",
+            target_agent_name="dogfood-refund-agent",
             session_id=session_id,
             policy_name="refund eligibility",
             policy_id=policy_id,
@@ -723,10 +723,10 @@ def test_activity_records_generic_events_and_multiple_evaluations(store: Postgre
     activity = store.create_activity(title="Evaluate session", source="test")
     policy_ids = [_test_policy_id(store)]
     policy_repo = PostgresPolicyRepository(store.dsn, WORKSPACE_ID)
-    current = policy_repo.list_scope("agent", "quickstart-refund-agent")
+    current = policy_repo.list_scope("agent", "dogfood-refund-agent")
     saved = policy_repo.replace_scope(
         "agent",
-        "quickstart-refund-agent",
+        "dogfood-refund-agent",
         [{"name": item.name, "criteria": item.criteria, "approved": item.approved}
          for item in current],
         [{"name": item.name, "criteria": item.criteria, "approved": item.approved}
@@ -740,7 +740,7 @@ def test_activity_records_generic_events_and_multiple_evaluations(store: Postgre
             activity_id=activity.id,
             title="Evaluate session",
             source="test",
-            target_agent_name="quickstart-refund-agent",
+            target_agent_name="dogfood-refund-agent",
             session_id="same-session",
             policy_name="Rule",
             policy_id=policy_id,

@@ -5,8 +5,8 @@ description: Use or develop Explorer for sessions, traces, scores, and its scrip
 
 # Use TheLake Explorer
 
-Read `docs/how-to/explorer.md`; for a first-time product walkthrough, follow
-`docs/quickstart.md`. Explorer is served by TheLake at `/explorer/` and can
+Read `docs/how-to/explorer.md`; for local setup, follow
+`docs/how-to/local-development.md`. Explorer is served by TheLake at `/explorer/` and can
 also be embedded as a React package.
 
 ## Behavior-check wizard

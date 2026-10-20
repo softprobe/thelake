@@ -29,7 +29,7 @@ Concepts and runtime design (read for understanding, not step-by-step).
 
 ## How-to
 
-- [5-minute quickstart](quickstart.md) — create a check in chat, run a Gemini sample agent, and inspect the result
+- [Local Lisa development](how-to/local-development.md) — run Explorer, TheLake, and Lisa from the standard development stack
 - [Instrument applications](how-to/instrumentation.md)
 - [Use Explorer](how-to/explorer.md) — browser chat and session/trace UI at `/explorer/`
 - [Tests and evaluations](how-to/test-and-eval.md) — TDD/coverage, transient Docker stacks, suite execution, real agent validation

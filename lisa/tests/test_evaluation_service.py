@@ -224,7 +224,7 @@ def test_real_refund_trace_becomes_a_compact_judgment_trajectory(services, monke
             "trace_id": "trace",
             "start_time": "2026-10-12T03:30:09.069094258Z",
             "end_time": "2026-10-12T03:30:09.918654341Z",
-            "name": "quickstart-refund-agent",
+            "name": "dogfood-refund-agent",
             "attributes": {
                 "sp.input": json.dumps(
                     [{"role": "user", "content": "Please refund ticket DEMO-42."}]

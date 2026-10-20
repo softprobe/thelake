@@ -1663,6 +1663,52 @@ wheels = [
 ]
 
 [[package]]
+name = "lisa"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "apscheduler" },
+    { name = "fastapi" },
+    { name = "fastmcp" },
+    { name = "google-genai" },
+    { name = "httpx" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "sqlglot" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+openhands = [
+    { name = "litellm" },
+    { name = "openhands-sdk" },
+]
+test = [
+    { name = "httpx" },
+    { name = "litellm" },
+    { name = "openhands-sdk" },
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "apscheduler", specifier = ">=3.11,<4" },
+    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "fastmcp", specifier = ">=3.4,<4" },
+    { name = "google-genai", specifier = ">=1,<2" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27,<1" },
+    { name = "litellm", marker = "extra == 'openhands'", specifier = "==1.103.4" },
+    { name = "litellm", marker = "extra == 'test'", specifier = "==1.103.4" },
+    { name = "openhands-sdk", marker = "extra == 'openhands'", specifier = "==1.54.0" },
+    { name = "openhands-sdk", marker = "extra == 'test'", specifier = "==1.54.0" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8,<9" },
+    { name = "sqlglot", specifier = ">=26,<31" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
+]
+provides-extras = ["openhands", "test"]
+
+[[package]]
 name = "litellm"
 version = "1.103.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3484,48 +3530,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926 },
 ]
-
-[[package]]
-name = "lisa"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "apscheduler" },
-    { name = "fastapi" },
-    { name = "fastmcp" },
-    { name = "google-genai" },
-    { name = "httpx" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "sqlglot" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-openhands = [
-    { name = "openhands-sdk" },
-]
-test = [
-    { name = "httpx" },
-    { name = "openhands-sdk" },
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "apscheduler", specifier = ">=3.11,<4" },
-    { name = "fastapi", specifier = ">=0.115,<1" },
-    { name = "fastmcp", specifier = ">=3.4,<4" },
-    { name = "google-genai", specifier = ">=1,<2" },
-    { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27,<1" },
-    { name = "openhands-sdk", marker = "extra == 'openhands'", specifier = "==1.54.0" },
-    { name = "openhands-sdk", marker = "extra == 'test'", specifier = "==1.54.0" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8,<9" },
-    { name = "sqlglot", specifier = ">=26,<31" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
-]
-provides-extras = ["openhands", "test"]
 
 [[package]]
 name = "tiktoken"

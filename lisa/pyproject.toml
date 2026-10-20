@@ -19,8 +19,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-openhands = ["openhands-sdk==1.54.0"]
-test = ["httpx>=0.27,<1", "openhands-sdk==1.54.0", "pytest>=8,<9"]
+openhands = ["openhands-sdk==1.54.0", "litellm==1.103.4"]
+test = ["httpx>=0.27,<1", "openhands-sdk==1.54.0", "litellm==1.103.4", "pytest>=8,<9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

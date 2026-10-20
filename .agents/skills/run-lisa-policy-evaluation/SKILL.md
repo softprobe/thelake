@@ -51,7 +51,7 @@ Lisa's approved-catalog and session path and is not a quality measurement.
 1. Read `docs/how-to/policy-triage-evaluation.md`, the dataset README, and the
    current release notes. Use the skill to create a reproducible 10–20 pair
    sample if requested. Keep the canonical data immutable.
-2. Start an isolated local quickstart stack using a new Compose project, data
+2. Start an isolated local dogfood stack using a new Compose project, data
    directory and workspace. Pass `LISA_LLM_TRACE_ENABLED=1` so the real provider
    request/response records are retained. Never reuse a non-disposable policy
    database or write fixture policies into a user's workspace.
@@ -80,17 +80,17 @@ Lisa's approved-catalog and session path and is not a quality measurement.
    secrets or full sensitive traces.
 
 Run the production evaluator from the repository root after the isolated stack
-is ready. Choose a fresh run suffix and UUID for every run. Start quickstart
+is ready. Choose a fresh run suffix and UUID for every run. Start dogfood
 with a new Compose project, data directory, and workspace so the policy DB and
 workspace are disposable. Write the report outside the repository:
 
 ```bash
-THELAKE_QUICKSTART_PROJECT_NAME=lisa-policy-eval-<run-id> \
-THELAKE_QUICKSTART_ENV_FILE=warehouse/quickstart/lisa-policy-eval-<run-id>.env \
-THELAKE_QUICKSTART_DATA_PATH=./warehouse/quickstart/lisa-policy-eval-<run-id> \
+THELAKE_DOGFOOD_PROJECT_NAME=lisa-policy-eval-<run-id> \
+THELAKE_DOGFOOD_ENV_FILE=warehouse/dogfood/lisa-policy-eval-<run-id>.env \
+THELAKE_DOGFOOD_DATA_PATH=./warehouse/dogfood/lisa-policy-eval-<run-id> \
 THELAKE_DEFAULT_WORKSPACE_ID=<fresh-uuid> \
 LISA_LLM_TRACE_ENABLED=1 LISA_QA_CRON="0 0 * * *" \
-bash examples/quickstart/start.sh
+bash examples/lisa-dogfood/start.sh
 ```
 
 Leave that process running while evaluating. In another shell:
@@ -98,21 +98,21 @@ Leave that process running while evaluating. In another shell:
 ```bash
 LISA_LLM_TRACE_ENABLED=1 uv run --project lisa --env-file .env \
   python lisa/scripts/evaluate_policy_dataset.py --live \
-  --quickstart-env-file warehouse/quickstart/lisa-policy-eval-<run-id>.env \
+  --dogfood-env-file warehouse/dogfood/lisa-policy-eval-<run-id>.env \
   --manifest <sample-manifest> --output /tmp/lisa-policy-eval-<run-id>/report.json
 ```
 
-The runner reads the generated quickstart connection metadata without printing
+The runner reads the generated dogfood connection metadata without printing
 credentials and puts Lisa's request recordings in a separate directory under
-`/tmp`. The quickstart script stores run-specific Compose, config, and endpoint
-metadata under `warehouse/quickstart`; it refuses to reuse existing run files.
+`/tmp`. The dogfood script stores run-specific Compose, config, and endpoint
+metadata under `warehouse/dogfood`; it refuses to reuse existing run files.
 Preserve and restore any pre-existing `.env` changes after the run. Env bind and
 teardown go only through [`lisa/conftest.py`](../../../lisa/conftest.py)
-(`configure_lisa_quickstart` / `dispose_lisa_quickstart`): the evaluator removes
+(`configure_lisa_dogfood` / `dispose_lisa_dogfood`): the evaluator removes
 this run's Compose project, volumes, and DuckLake data directory after it writes
 the report or exits with an error. It retains the report when produced and the
 LLM request recordings. Do not start evaluation against a developer's existing
-quickstart.
+dogfood.
 
 Live provider calls may incur charges. Run them only when explicitly requested.
 

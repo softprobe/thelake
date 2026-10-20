@@ -32,9 +32,8 @@ Product goals: [`docs/architecture/goals.md`](docs/architecture/goals.md).
 Architecture: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 Full index: [`docs/README.md`](docs/README.md).
 
-New here? Try the [5-minute quickstart](docs/quickstart.md) to describe a
-behavior check in chat, run a Gemini-powered sample agent, and see a real
-evaluation failure. First builds can take longer.
+For the full local Explorer and Lisa chat environment, see
+[Local Lisa development](docs/how-to/local-development.md).
 
 ## Architecture
 
@@ -68,11 +67,26 @@ Prerequisites:
 - Docker and Docker Compose
 - a dynamic DuckDB library (`DUCKDB_DOWNLOAD_LIB=1` lets the build fetch it)
 
-Start MinIO and DuckLake PostgreSQL:
+Start the complete Explorer + TheLake + Lisa environment:
 
 ```bash
-make setup
+cp .env.example .env
+# Set GEMINI_API_KEY or GOOGLE_API_KEY in .env.
+make dev-up
 ```
+
+Open the Explorer URL printed by `make dev-up` and select Lisa. The stack
+provisions Lisa's durable PostgreSQL policy database. Scheduled QA is disabled
+by default in this local environment; set `LISA_QA_ENABLED=1` to opt in.
+
+Stop the services without removing their data:
+
+```bash
+make dev-down
+```
+
+For a host-native TheLake process while editing Rust, use the backend-only
+workflow below; it does not start Lisa.
 
 Build and run checks (cargo cache under `~/.cache/thelake`):
 
@@ -84,7 +98,7 @@ make test-e2e      # starts and removes its own transient test stack
 make ci            # fmt + lint + test + test-e2e
 ```
 
-Stop local infrastructure:
+Stop host-native local infrastructure:
 
 ```bash
 make teardown

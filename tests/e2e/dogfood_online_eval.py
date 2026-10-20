@@ -14,16 +14,18 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "examples/quickstart"))
+sys.path.insert(0, str(ROOT / "examples/lisa-dogfood"))
+sys.path.insert(0, str(ROOT / "lisa"))
 from evaluator import (
     AGENT_NAME,
     EVALUATOR_NAME,
     TheLakeApiError,
     request_json,
 )
+from conftest import configure_lisa_dogfood, dispose_lisa_dogfood
 
 
 def refund_evaluation_result(session: dict, evaluator_name: str) -> dict | None:
@@ -47,8 +49,7 @@ def lisa_report_describes_failure(reply: str, session_id: str) -> bool:
     )
 
 
-def run_sample_agent(api_url: str) -> str:
-    compose_env = ROOT / "warehouse/quickstart/compose.env"
+def run_sample_agent(api_url: str, compose_env: Path, project_name: str) -> str:
     command = [
         "docker",
         "compose",
@@ -57,9 +58,9 @@ def run_sample_agent(api_url: str) -> str:
         "--env-file",
         str(compose_env.relative_to(ROOT)),
         "--project-name",
-        "thelake-quickstart",
+        project_name,
         "--file",
-        "examples/quickstart/compose.yaml",
+        "examples/lisa-dogfood/compose.yaml",
         "run",
         "--rm",
         "refund-agent",
@@ -69,7 +70,7 @@ def run_sample_agent(api_url: str) -> str:
     env = os.environ.copy()
     parsed_url = urlsplit(api_url)
     if platform.system() == "Linux":
-        env["THELAKE_QUICKSTART_AGENT_NETWORK"] = "host"
+        env["THELAKE_DOGFOOD_AGENT_NETWORK"] = "host"
         agent_host = parsed_url.hostname or "127.0.0.1"
     else:
         agent_host = "host.docker.internal"
@@ -256,85 +257,143 @@ def wait_for_lisa_ready(lisa_url: str, timeout_seconds: int = 90) -> None:
     raise TimeoutError(f"Lisa did not become ready within {timeout_seconds} seconds.")
 
 
-def read_compose_value(key: str) -> str:
-    path = ROOT / "warehouse/quickstart/compose.env"
+def wait_for_thelake_ready(api_url: str, timeout_seconds: int = 90) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            result = request_json(f"{api_url}/health")
+        except (OSError, URLError, TheLakeApiError):
+            time.sleep(1)
+            continue
+        if result.get("status") == "ok":
+            return
+        time.sleep(1)
+    raise TimeoutError(f"TheLake did not become ready within {timeout_seconds} seconds.")
+
+
+def read_compose_value(path: Path, key: str) -> str:
     for line in path.read_text(encoding="utf-8").splitlines():
         name, separator, value = line.partition("=")
         if separator and name == key:
             return value
-    raise RuntimeError(f"{key} is missing from quickstart compose.env")
+    raise RuntimeError(f"{key} is missing from dogfood compose.env")
 
 
 def main() -> int:
-    api_file = ROOT / "warehouse/quickstart/api_url"
-    if not api_file.exists():
-        raise RuntimeError(
-            "Start the quickstart first with bash examples/quickstart/start.sh."
+    run_name = f"lisa-policy-eval-online-{uuid4().hex[:12]}"
+    compose_env = ROOT / "warehouse/dogfood" / f"{run_name}.env"
+    api_file = ROOT / "warehouse/dogfood" / f"{run_name}.api_url"
+    lisa_api_file = ROOT / "warehouse/dogfood" / f"{run_name}.lisa_api_url"
+    data_path = ROOT / "warehouse/dogfood" / run_name
+    artifacts = ROOT / "target/test-artifacts/dogfood-online-eval" / run_name
+    artifacts.mkdir(parents=True, exist_ok=False)
+    startup_log = (artifacts / "startup.log").open("w", encoding="utf-8")
+    startup = None
+    target = None
+    try:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "THELAKE_DOGFOOD_PROJECT_NAME": run_name,
+                "THELAKE_DOGFOOD_ENV_FILE": str(compose_env.relative_to(ROOT)),
+                "THELAKE_DOGFOOD_DATA_PATH": str(data_path.relative_to(ROOT)),
+                "THELAKE_DEFAULT_WORKSPACE_ID": str(uuid4()),
+                "LISA_LLM_TRACE_ENABLED": "1",
+                "LISA_QA_CRON": "*/5 * * * *",
+            }
         )
-    api_url = api_file.read_text(encoding="utf-8").strip().rstrip("/")
-    lisa_url = (
-        (ROOT / "warehouse/quickstart/lisa_api_url")
-        .read_text(encoding="utf-8")
-        .strip()
-        .rstrip("/")
-    )
-    workspace_id = read_compose_value("THELAKE_DEFAULT_WORKSPACE_ID")
-    lisa_token = read_compose_value("LISA_THELAKE_TOKEN")
-    evaluator_name = EVALUATOR_NAME
-    wait_for_lisa_ready(lisa_url)
-    conversation_id, _turn = ask_lisa_to_approve_policy(lisa_url, evaluator_name)
-    print(f"Lisa saved approved policy: {evaluator_name}")
-    conversation_id = str(
-        uuid5(NAMESPACE_URL, f"thelake:{workspace_id}:scheduled-agent-qa")
-    )
-    conversation = lisa_request(
-        lisa_url,
-        lisa_token,
-        "/internal/v1/conversations",
-        {"workspace_id": workspace_id, "conversation_id": conversation_id},
-    )
-    previous_updated_at = conversation.get("updated_at", "")
-    print(
-        "Running the deliberately flawed refund agent and sending its trace to TheLake..."
-    )
-    session_id = run_sample_agent(api_url)
-    print(f"Lisa will evaluate session {session_id} on her next scheduled cycle...")
-    result = wait_for_evaluation(api_url, session_id, evaluator_name)
-    status = result.get("string_value", "unknown")
-    comment = result.get("comment") or "No evaluator explanation was recorded."
-    if status == "error":
-        print(f"Online evaluation could not run: {comment}")
-        print(
-            f"Open Explorer and view session {session_id} to inspect the trace and evaluator error."
+        startup = subprocess.Popen(
+            ["bash", "examples/lisa-dogfood/start.sh"],
+            cwd=ROOT,
+            env=environment,
+            stdout=startup_log,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
-        return 1
-    print(f"\nLisa found: {status.upper()} — {comment}")
-    print(
-        f"Open Explorer and view session {session_id} to inspect the trace and evidence."
-    )
-    if status != "fail":
-        print(
-            "The walkthrough expected a failure; inspect this evaluator result before continuing."
+        wait_for_path(api_file, startup, startup_log)
+        wait_for_path(lisa_api_file, startup, startup_log)
+        api_url = api_file.read_text(encoding="utf-8").strip().rstrip("/")
+        lisa_url = lisa_api_file.read_text(encoding="utf-8").strip().rstrip("/")
+        workspace_id = read_compose_value(compose_env, "THELAKE_DEFAULT_WORKSPACE_ID")
+        lisa_token = read_compose_value(compose_env, "LISA_THELAKE_TOKEN")
+        target = configure_lisa_dogfood(compose_env, artifacts / "lisa-data", ROOT)
+        evaluator_name = EVALUATOR_NAME
+        wait_for_thelake_ready(api_url)
+        wait_for_lisa_ready(lisa_url)
+        conversation_id, _turn = ask_lisa_to_approve_policy(lisa_url, evaluator_name)
+        print(f"Lisa saved approved policy: {evaluator_name}")
+        conversation_id = str(
+            uuid5(NAMESPACE_URL, f"thelake:{workspace_id}:scheduled-agent-qa")
         )
-        return 1
-    report = wait_for_lisa_report(
-        lisa_url,
-        lisa_token,
-        workspace_id,
-        conversation_id,
-        session_id,
-        evaluator_name,
-        previous_updated_at,
-    )
-    print("Lisa evaluated the captured session and stored the result in TheLake.")
-    print(f"Lisa report: {report['reply']}")
-    print(f"Open Lisa in Explorer to continue the conversation: {api_url}/explorer/")
-    return 0
+        conversation = lisa_request(
+            lisa_url,
+            lisa_token,
+            "/internal/v1/conversations",
+            {"workspace_id": workspace_id, "conversation_id": conversation_id},
+        )
+        previous_updated_at = conversation.get("updated_at", "")
+        print("Running the deliberately flawed refund agent and sending its trace to TheLake...")
+        session_id = run_sample_agent(api_url, compose_env, run_name)
+        print(f"Lisa will evaluate session {session_id} on her next scheduled cycle...")
+        result = wait_for_evaluation(api_url, session_id, evaluator_name)
+        status = result.get("string_value", "unknown")
+        comment = result.get("comment") or "No evaluator explanation was recorded."
+        if status == "error":
+            print(f"Online evaluation could not run: {comment}")
+            return 1
+        print(f"\nLisa found: {status.upper()} — {comment}")
+        if status != "fail":
+            print("The walkthrough expected a failure; inspect this evaluator result before continuing.")
+            return 1
+        report = wait_for_lisa_report(
+            lisa_url,
+            lisa_token,
+            workspace_id,
+            conversation_id,
+            session_id,
+            evaluator_name,
+            previous_updated_at,
+        )
+        (artifacts / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+        print("Lisa evaluated the captured session and stored the result in TheLake.")
+        print(f"Lisa report: {report['reply']}")
+        return 0
+    finally:
+        if startup is not None and startup.poll() is None:
+            startup.terminate()
+            try:
+                startup.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                startup.kill()
+                startup.wait(timeout=5)
+        startup_log.close()
+        if compose_env.is_file():
+            if target is None:
+                target = configure_lisa_dogfood(compose_env, artifacts / "lisa-data", ROOT)
+            dispose_lisa_dogfood(
+                target,
+                ROOT,
+                report_path=artifacts / "report.json",
+                data_dir=artifacts / "lisa-data",
+            )
+
+
+def wait_for_path(path: Path, process: subprocess.Popen, log) -> None:
+    deadline = time.monotonic() + 360
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return
+        if process.poll() is not None:
+            log.flush()
+            tail = Path(log.name).read_text(encoding="utf-8", errors="replace")[-3000:]
+            raise RuntimeError(f"Dogfood startup exited with status {process.returncode}:\n{tail}")
+        time.sleep(1)
+    raise TimeoutError(f"Dogfood startup did not create {path.name} within 360 seconds.")
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (OSError, RuntimeError, TimeoutError) as error:
-        print(f"Quickstart demo failed: {error}", file=sys.stderr)
+        print(f"Dogfood demo failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error

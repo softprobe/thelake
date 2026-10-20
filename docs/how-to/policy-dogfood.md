@@ -70,21 +70,22 @@ which loads the full policy catalog through Lisa's policy-management service and
 calls `EvaluationService` against TheLake sessions. Metrics and limits:
 [the evaluation guide](policy-triage-evaluation.md).
 
-## 3. Verify Lisa's scheduled QA cycle
+## 3. Scheduled online QA status
 
-Start the quickstart with the five-minute cron shown in [the quickstart](../quickstart.md), then run:
+The scheduled-path driver is not ready to run: it currently reuses a persistent
+Dogfood Compose project and data directory instead of provisioning a fresh,
+run-owned stack. Do not run `tests/e2e/dogfood_online_eval.py` or use
+`examples/lisa-dogfood/start.sh` as a development environment. It requires a
+fresh `lisa-policy-eval-*` project so every Dogfood run has disposable state.
+The interactive developer environment is documented in
+[Local Lisa development](local-development.md).
 
-```bash
-python3 tests/e2e/quickstart_online_eval.py
-```
-
-The driver saves an explicitly owner-approved policy, runs the deliberately
-flawed Gemini agent, waits for Lisa's configured schedule to pick up its trace,
-and verifies the persisted failure score plus Lisa's report. It makes provider
-calls and may incur Gemini and OpenAI charges. The scheduled path sends the
-complete approved policy catalog through Decisions triage and asks Gemini to
-judge escalations. The test agent only simulates a local refund tool;
-it does not connect to a payment system.
+Before enabling this live QA path, update its harness to create and clean up a
+transient Docker project, database, workspace, and data directory. The driver
+will make Gemini and OpenAI calls and may incur provider charges. Its scenario
+approves a policy, runs a deliberately flawed Gemini agent, and checks Lisa's
+scheduled evaluation and report; the sample agent only simulates a local refund
+tool and never connects to a payment system.
 
 ## Interpreting the result
 

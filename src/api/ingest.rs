@@ -414,8 +414,8 @@ mod agent_identity_tests {
     #[test]
     fn service_name_identifies_local_agents_without_authenticated_identity() {
         assert_eq!(
-            effective_agent_name(None, None, Some("quickstart-refund-agent")),
-            Some("quickstart-refund-agent".into())
+            effective_agent_name(None, None, Some("dogfood-refund-agent")),
+            Some("dogfood-refund-agent".into())
         );
         assert_eq!(effective_agent_name(None, None, Some("  ")), None);
     }

@@ -108,16 +108,18 @@ customer DuckLake.
 | `SOFTPROBE_ADMIN_API_KEY` | Bearer for `POST /v1/workspaces` |
 | `SOFTPROBE_LOCAL_ANONYMOUS` | Local single-workspace mode (see root README) |
 | `THELAKE_DEFAULT_WORKSPACE_ID` | Workspace UUID used with local anonymous mode |
-| `LISA_WORKSPACE_ID` | Workspace scope for this Lisa runtime. Configure one Lisa runtime per workspace; leave unset to disable scheduled QA. The local Compose quickstart runs one workspace. |
+| `LISA_WORKSPACE_ID` | Workspace scope for this Lisa runtime. Configure one Lisa runtime per workspace; the local developer stack uses `THELAKE_DEFAULT_WORKSPACE_ID`. |
 | `LISA_DATABASE_URL` | PostgreSQL URL for Lisa's runtime activity and policy writer. Use a dedicated `lisa_writer` role; this database stores activity and policy state and is separate from TheLake's DuckLake catalog. |
 | `LISA_DATABASE_READ_URL` | PostgreSQL URL for Lisa's read-only `lisa_db` tool. Use a dedicated `lisa_reader` role that can read curated `lisa.readable_*` views and approved columns from `lisa.policies`. |
 | `LISA_DATABASE_PROVISION_URL` | Deployment-only PostgreSQL URL used by `lisa/scripts/provision_lisa.py`; never provide this credential to Lisa's runtime. |
-| `LISA_DATABASE_WRITER_PASSWORD` / `LISA_DATABASE_READER_PASSWORD` | When both are set, the provision script also creates the `lisa` database and writer/reader roles (local/quickstart bootstrap). |
+| `LISA_DATABASE_WRITER_PASSWORD` / `LISA_DATABASE_READER_PASSWORD` | When both are set, the provision script also creates the `lisa` database and writer/reader roles. `make dev-up` generates these values in the ignored local `.env`. |
 | `LISA_DATABASE_RECREATE` | Set to `1` to `DROP SCHEMA lisa CASCADE` and provision a fresh schema. Required when the schema shape changes; without it, an already-bound database is left untouched. |
 | `LISA_DATABASE_WRITER_ROLE` / `LISA_DATABASE_READER_ROLE` | Optional database role names to grant during schema provisioning; defaults are `lisa_writer` and `lisa_reader`. |
 | `LISA_LLM_TRACE_ENABLED` | Opt-in local recording of Lisa chat, policy-triage, and judge calls; defaults off. `1`, `true`, or `yes` enables redacted per-call JSONL files under the workspace home’s `llm-calls/`. Records expire after 30 days; cleanup runs at startup and hourly while HTTP/MCP is running. Existing OpenHands conversation state has separate persistence. |
 | `LISA_QA_CRON` | Five-field UTC cron expression for the `Lisa scheduled QA` job; defaults to `0 * * * *` (hourly at minute 0). Lisa does not run a cycle on startup. |
-| `LISA_LOCAL_ANONYMOUS` | `1` enables unauthenticated Lisa chat for the localhost quickstart only. Leave disabled in a shared deployment. |
+| `LISA_QA_ENABLED` | `0` disables scheduled QA while leaving chat, policy tools, and owner-approved activity follow-ups available. Defaults to `1`; local development sets it to `0` so scheduled model work is opt-in. |
+| `LISA_ACTIVITY_FOLLOWUPS_ENABLED` | `0` disables owner-approved activity follow-ups. This is independent of scheduled QA and defaults to `1`; local development keeps it enabled. |
+| `LISA_LOCAL_ANONYMOUS` | `1` enables unauthenticated Lisa chat for the loopback-only local developer stack. Leave disabled in a shared deployment. |
 | `LISA_CORS_ORIGINS` | Comma-separated browser origins allowed to call Lisa directly. |
 | `SOFTPROBE_ASSERTION_HMAC_SECRET` | Shared edge assertion key Lisa uses to verify workspace-scoped browser requests. |
 | `LISA_PUBLIC_URL` | Browser-reachable Lisa API base URL injected into Explorer. Lisa chat connects directly to this service. |

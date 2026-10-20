@@ -7,9 +7,9 @@ from types import SimpleNamespace
 import pytest
 from datasets.policy_dataset import load_dataset
 from conftest import (
-    configure_lisa_quickstart,
-    dispose_lisa_quickstart,
-    lisa_quickstart_target,
+    configure_lisa_dogfood,
+    dispose_lisa_dogfood,
+    lisa_dogfood_target,
 )
 from benchmark.policy_runner import (
     _add_catalog_to_policy_management,
@@ -26,13 +26,13 @@ from lisa.context import WorkspaceContext
 from lisa.evaluation.trajectory import build_trajectory_events
 
 
-def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path, monkeypatch):
+def test_dispose_dogfood_stack_removes_run_data_and_keeps_llm_traces(tmp_path, monkeypatch):
     """The CLI cleanup deletes run-owned stack/data but preserves useful results."""
     # Model one completed evaluation: Lake files are disposable, but the report
     # and provider recordings are the evidence developers need to inspect later.
-    compose_env = tmp_path / "warehouse" / "quickstart" / "lisa-policy-eval-run-1.env"
+    compose_env = tmp_path / "warehouse" / "dogfood" / "lisa-policy-eval-run-1.env"
     compose_env.parent.mkdir(parents=True)
-    lake_data = tmp_path / "warehouse" / "quickstart" / "lisa-policy-eval-run-1"
+    lake_data = tmp_path / "warehouse" / "dogfood" / "lisa-policy-eval-run-1"
     lake_data.mkdir(parents=True)
     (lake_data / "trace.parquet").write_text("fixture", encoding="utf-8")
     llm_data = tmp_path / "llm-calls"
@@ -41,9 +41,9 @@ def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path
     report_path = tmp_path / "report.json"
     report_path.write_text("{}\n", encoding="utf-8")
     compose_env.write_text(
-        "THELAKE_QUICKSTART_PROJECT_NAME=lisa-policy-eval-run-1\n"
-        "THELAKE_QUICKSTART_INSTANCE_ID=run-token-1\n"
-        "THELAKE_QUICKSTART_DATA_PATH=./warehouse/quickstart/lisa-policy-eval-run-1\n",
+        "THELAKE_DOGFOOD_PROJECT_NAME=lisa-policy-eval-run-1\n"
+        "THELAKE_DOGFOOD_INSTANCE_ID=run-token-1\n"
+        "THELAKE_DOGFOOD_DATA_PATH=./warehouse/dogfood/lisa-policy-eval-run-1\n",
         encoding="utf-8",
     )
     commands = []
@@ -57,7 +57,7 @@ def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path
             str(item).startswith("label=com.docker.compose.project=") for item in command
         )
         has_owner_filter = any(
-            str(item).startswith("label=io.arex.lisa.quickstart-instance=") for item in command
+            str(item).startswith("label=io.arex.lisa.dogfood-instance=") for item in command
         )
         output = (
             "resource-id\n"
@@ -68,8 +68,8 @@ def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path
 
     monkeypatch.setattr("conftest.subprocess.run", run)
 
-    dispose_lisa_quickstart(
-        lisa_quickstart_target(compose_env, tmp_path),
+    dispose_lisa_dogfood(
+        lisa_dogfood_target(compose_env, tmp_path),
         tmp_path,
         report_path=report_path,
         data_dir=llm_data,
@@ -88,17 +88,17 @@ def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path
     other_data = lake_data.parent / "lisa-policy-eval-run-2"
     other_data.mkdir()
     other_env.write_text(
-        "THELAKE_QUICKSTART_PROJECT_NAME=lisa-policy-eval-run-2\n"
-        "THELAKE_QUICKSTART_INSTANCE_ID=run-token-2\n"
-        "THELAKE_QUICKSTART_DATA_PATH=./warehouse/quickstart/lisa-policy-eval-run-2\n",
+        "THELAKE_DOGFOOD_PROJECT_NAME=lisa-policy-eval-run-2\n"
+        "THELAKE_DOGFOOD_INSTANCE_ID=run-token-2\n"
+        "THELAKE_DOGFOOD_DATA_PATH=./warehouse/dogfood/lisa-policy-eval-run-2\n",
         encoding="utf-8",
     )
     owned_resources = False
     # If any Compose resource is not labeled as belonging to this run, cleanup
     # must refuse before `compose down` or deleting local data/metadata.
     with pytest.raises(RuntimeError, match="not owned"):
-        dispose_lisa_quickstart(
-            lisa_quickstart_target(other_env, tmp_path),
+        dispose_lisa_dogfood(
+            lisa_dogfood_target(other_env, tmp_path),
             tmp_path,
             report_path=report_path,
             data_dir=llm_data,
@@ -108,22 +108,22 @@ def test_dispose_quickstart_stack_removes_run_data_and_keeps_llm_traces(tmp_path
     assert sum(command[-3:-2] == ["down"] for command, _ in commands) == 1
 
 
-def test_quickstart_cleanup_rejects_symlinked_repository_paths(tmp_path):
+def test_dogfood_cleanup_rejects_symlinked_repository_paths(tmp_path):
     repository = tmp_path / "repository"
     external = tmp_path / "external"
     repository.mkdir()
-    (external / "quickstart").mkdir(parents=True)
+    (external / "dogfood").mkdir(parents=True)
     (repository / "warehouse").symlink_to(external, target_is_directory=True)
-    env_file = external / "quickstart" / "lisa-policy-eval-run.env"
+    env_file = external / "dogfood" / "lisa-policy-eval-run.env"
     env_file.write_text(
-        "THELAKE_QUICKSTART_PROJECT_NAME=lisa-policy-eval-run\n"
-        "THELAKE_QUICKSTART_INSTANCE_ID=run-token\n"
-        "THELAKE_QUICKSTART_DATA_PATH=./warehouse/quickstart/lisa-policy-eval-run\n",
+        "THELAKE_DOGFOOD_PROJECT_NAME=lisa-policy-eval-run\n"
+        "THELAKE_DOGFOOD_INSTANCE_ID=run-token\n"
+        "THELAKE_DOGFOOD_DATA_PATH=./warehouse/dogfood/lisa-policy-eval-run\n",
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="symlinked quickstart directory"):
-        lisa_quickstart_target(env_file, repository)
+    with pytest.raises(RuntimeError, match="symlinked dogfood directory"):
+        lisa_dogfood_target(env_file, repository)
 
 
 def test_build_otlp_trace_export_keeps_trajectory_order_and_pairs_tool_events():
@@ -368,16 +368,16 @@ def test_candidate_count_is_read_from_lisas_recorded_decisions_request(tmp_path)
     assert _recorded_triage_question_count(recording_root, "session-1") == 2
 
 
-def test_quickstart_metadata_overrides_inherited_workspace_settings(tmp_path, monkeypatch):
-    env_file = tmp_path / "warehouse" / "quickstart" / "lisa-policy-eval-config-test.env"
+def test_dogfood_metadata_overrides_inherited_workspace_settings(tmp_path, monkeypatch):
+    env_file = tmp_path / "warehouse" / "dogfood" / "lisa-policy-eval-config-test.env"
     env_file.parent.mkdir(parents=True)
     env_file.write_text(
         """THELAKE_DEFAULT_WORKSPACE_ID=22222222-2222-4222-8222-222222222222
-THELAKE_QUICKSTART_DB_PORT=55440
-THELAKE_QUICKSTART_PORT=8099
-THELAKE_QUICKSTART_PROJECT_NAME=lisa-policy-eval-config-test
-THELAKE_QUICKSTART_INSTANCE_ID=0123456789abcdef0123456789abcdef
-THELAKE_QUICKSTART_DATA_PATH=./warehouse/quickstart/lisa-policy-eval-config-test
+THELAKE_DOGFOOD_DB_PORT=55440
+THELAKE_DOGFOOD_PORT=8099
+THELAKE_DOGFOOD_PROJECT_NAME=lisa-policy-eval-config-test
+THELAKE_DOGFOOD_INSTANCE_ID=0123456789abcdef0123456789abcdef
+THELAKE_DOGFOOD_DATA_PATH=./warehouse/dogfood/lisa-policy-eval-config-test
 LISA_DATABASE_WRITER_PASSWORD=writer-secret
 LISA_DATABASE_READER_PASSWORD=reader-secret
 LISA_THELAKE_TOKEN=local-token
@@ -389,7 +389,7 @@ LISA_THELAKE_TOKEN=local-token
     monkeypatch.setenv("LISA_DATABASE_URL", "postgresql://unrelated")
     monkeypatch.setenv("LISA_THELAKE_API_URL", "http://unrelated")
 
-    configure_lisa_quickstart(env_file, data_dir, repository_root=tmp_path)
+    configure_lisa_dogfood(env_file, data_dir, repository_root=tmp_path)
 
     assert os.environ["LISA_WORKSPACE_ID"] == "22222222-2222-4222-8222-222222222222"
     assert "127.0.0.1:55440/lisa" in os.environ["LISA_DATABASE_URL"]

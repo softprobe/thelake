@@ -2,7 +2,7 @@
 
 Pytest fixtures, activity benchmarks, and policy-evaluation harnesses must use
 these helpers. Do not start/stop Compose, create Lisa databases/roles, provision
-schemas, or bind/dispose quickstart stacks anywhere else.
+schemas, or bind/dispose dogfood stacks anywhere else.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ class LisaPostgresStack:
 
 
 @dataclass(frozen=True)
-class LisaQuickstartTarget:
+class LisaDogfoodTarget:
     project_name: str
     instance_id: str
     lake_data: Path
@@ -232,20 +232,20 @@ def create_lisa_test_database(
     )
 
 
-def lisa_quickstart_target(path: Path, repository_root: Path) -> LisaQuickstartTarget:
-    """Validate a run-owned quickstart env file and resolve its disposable data path."""
+def lisa_dogfood_target(path: Path, repository_root: Path) -> LisaDogfoodTarget:
+    """Validate a run-owned dogfood env file and resolve its disposable data path."""
     repository_root = repository_root.resolve(strict=True)
     warehouse_root = repository_root / "warehouse"
-    quickstart_root = warehouse_root / "quickstart"
-    if warehouse_root.is_symlink() or quickstart_root.is_symlink():
-        raise RuntimeError("Refusing cleanup through a symlinked quickstart directory")
-    data_root = quickstart_root.resolve(strict=True)
-    if data_root != quickstart_root or repository_root not in data_root.parents:
-        raise RuntimeError("Quickstart cleanup data path must remain inside the repository")
+    dogfood_root = warehouse_root / "dogfood"
+    if warehouse_root.is_symlink() or dogfood_root.is_symlink():
+        raise RuntimeError("Refusing cleanup through a symlinked dogfood directory")
+    data_root = dogfood_root.resolve(strict=True)
+    if data_root != dogfood_root or repository_root not in data_root.parents:
+        raise RuntimeError("Dogfood cleanup data path must remain inside the repository")
     values = _read_environment_file(path)
-    project_name = values.get("THELAKE_QUICKSTART_PROJECT_NAME", "")
-    instance_id = values.get("THELAKE_QUICKSTART_INSTANCE_ID", "")
-    data_path = values.get("THELAKE_QUICKSTART_DATA_PATH", "")
+    project_name = values.get("THELAKE_DOGFOOD_PROJECT_NAME", "")
+    instance_id = values.get("THELAKE_DOGFOOD_INSTANCE_ID", "")
+    data_path = values.get("THELAKE_DOGFOOD_DATA_PATH", "")
     relative_data_path = Path(data_path)
     raw_lake_data = repository_root / relative_data_path
     lake_data = raw_lake_data.resolve()
@@ -256,36 +256,36 @@ def lisa_quickstart_target(path: Path, repository_root: Path) -> LisaQuickstartT
         or path.resolve().parent != data_root
         or path.stem != project_name
         or relative_data_path.is_absolute()
-        or relative_data_path.parts != ("warehouse", "quickstart", project_name)
+        or relative_data_path.parts != ("warehouse", "dogfood", project_name)
         or not relative_data_path.name.startswith("lisa-policy-eval-")
         or lake_data.parent != data_root
         or relative_data_path.name != project_name
     ):
         raise RuntimeError("Cleanup requires a run-owned Lisa policy evaluation stack and data path")
     if raw_lake_data.is_symlink():
-        raise RuntimeError("Refusing to remove a symlinked quickstart data directory")
-    return LisaQuickstartTarget(project_name, instance_id, lake_data, path)
+        raise RuntimeError("Refusing to remove a symlinked dogfood data directory")
+    return LisaDogfoodTarget(project_name, instance_id, lake_data, path)
 
 
-def configure_lisa_quickstart(
+def configure_lisa_dogfood(
     path: Path,
     data_dir: Path,
     repository_root: Path | None = None,
-) -> LisaQuickstartTarget:
-    """Bind process env to a local quickstart stack without printing credentials."""
+) -> LisaDogfoodTarget:
+    """Bind process env to a local dogfood stack without printing credentials."""
     root = repository_root or REPOSITORY_ROOT
-    target = lisa_quickstart_target(path, root)
+    target = lisa_dogfood_target(path, root)
     values = _read_environment_file(path)
     workspace_id = values.get("THELAKE_DEFAULT_WORKSPACE_ID")
-    database_port = values.get("THELAKE_QUICKSTART_DB_PORT")
-    api_port = values.get("THELAKE_QUICKSTART_PORT")
+    database_port = values.get("THELAKE_DOGFOOD_DB_PORT")
+    api_port = values.get("THELAKE_DOGFOOD_PORT")
     writer_password = values.get("LISA_DATABASE_WRITER_PASSWORD")
     reader_password = values.get("LISA_DATABASE_READER_PASSWORD")
     service_token = values.get("LISA_THELAKE_TOKEN")
     if not all(
         (workspace_id, database_port, api_port, writer_password, reader_password, service_token)
     ):
-        raise RuntimeError("Quickstart connection metadata is incomplete; start an isolated stack")
+        raise RuntimeError("Dogfood connection metadata is incomplete; start an isolated stack")
     os.environ["LISA_WORKSPACE_ID"] = workspace_id
     safe_writer_password = quote(writer_password, safe="")
     os.environ["LISA_DATABASE_URL"] = (
@@ -299,12 +299,12 @@ def configure_lisa_quickstart(
     os.environ["LISA_THELAKE_TOKEN"] = service_token
     os.environ["LISA_DATA_DIR"] = str(data_dir.resolve())
     os.environ["LISA_LLM_TRACE_ENABLED"] = "1"
-    os.environ["SOFTPROBE_PUBLIC_KEY"] = "quickstart-local"
+    os.environ["SOFTPROBE_PUBLIC_KEY"] = "dogfood-local"
     return target
 
 
-def dispose_lisa_quickstart(
-    target: LisaQuickstartTarget,
+def dispose_lisa_dogfood(
+    target: LisaDogfoodTarget,
     repository_root: Path,
     *,
     report_path: Path,
@@ -323,7 +323,7 @@ def dispose_lisa_quickstart(
         ("network", ["network", "ls", "--quiet"]),
     ):
         project_filter = f"label=com.docker.compose.project={target.project_name}"
-        owner_filter = f"label=io.arex.lisa.quickstart-instance={target.instance_id}"
+        owner_filter = f"label=io.arex.lisa.dogfood-instance={target.instance_id}"
         project_resources = subprocess.run(
             ["docker", *options, "--filter", project_filter],
             check=True,
@@ -349,7 +349,7 @@ def dispose_lisa_quickstart(
         "--project-name",
         target.project_name,
         "--file",
-        str(repository_root / "examples" / "quickstart" / "compose.yaml"),
+        str(repository_root / "examples" / "lisa-dogfood" / "compose.yaml"),
         "down",
         "--volumes",
         "--remove-orphans",
@@ -362,9 +362,9 @@ def dispose_lisa_quickstart(
         shutil.rmtree(target.lake_data)
     target.env_file.unlink(missing_ok=True)
     for suffix in (".yaml", ".api_url", ".lisa_api_url"):
-        metadata_file = repository_root / "warehouse" / "quickstart" / f"{target.project_name}{suffix}"
+        metadata_file = repository_root / "warehouse" / "dogfood" / f"{target.project_name}{suffix}"
         if metadata_file.is_symlink():
-            raise RuntimeError("Refusing to remove symlinked quickstart metadata")
+            raise RuntimeError("Refusing to remove symlinked dogfood metadata")
         metadata_file.unlink(missing_ok=True)
 
 

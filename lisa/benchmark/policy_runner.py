@@ -19,7 +19,7 @@ CLI / ``main``:
   approved catalog written into Postgres (catalog). May be larger than the
   labeled subset in ``--manifest``.
 - ``--output``: path for the JSON report written at the end.
-- ``--quickstart-env-file``: local Compose env with DB/API ports, workspace ID,
+- ``--dogfood-env-file``: local Compose env with DB/API ports, workspace ID,
   Lisa DB passwords, and TheLake token (no credentials printed).
 - ``--data-dir``: directory for Lisa home / recorded LLM calls (defaults beside
   ``--output``).
@@ -43,14 +43,14 @@ Outputs
   - digests, agent name, workspace id, approved policy id map.
 - Stdout: ``metrics`` JSON only (CLI).
 - During the CLI run: TheLake sessions under fixture ``session_id``s and Lisa
-  Postgres policies in the isolated quickstart stack. The CLI removes these with
+  Postgres policies in the isolated dogfood stack. The CLI removes these with
   the stack when the run exits, including on failure. LLM call traces under
   ``--data-dir`` are retained; a report is retained when evaluation produces one.
 
 Lifecycle (local disposable workspace only)
 -------------------------------------------
-1. Setup (``main`` → ``conftest.configure_lisa_quickstart`` → ``evaluate``):
-   - Point Lisa at the local quickstart DB/API; record LLM calls under ``--data-dir``.
+1. Setup (``main`` → ``conftest.configure_lisa_dogfood`` → ``evaluate``):
+   - Point Lisa at the local dogfood DB/API; record LLM calls under ``--data-dir``.
    - Refuse remote hosts; require ``--live`` and ``LISA_LLM_TRACE_ENABLED``.
    - Mint a unique agent name; refuse if any fixture ``session_id`` already exists.
    - Seed the full approved policy catalog for that agent via ``PolicyService``.
@@ -63,7 +63,7 @@ Lifecycle (local disposable workspace only)
      per session; join decisions/verdicts to adjudicated labels; write the JSON report.
 
 3. Cleanup:
-   - When the CLI exits, ``conftest.dispose_lisa_quickstart`` removes the run-owned
+   - When the CLI exits, ``conftest.dispose_lisa_dogfood`` removes the run-owned
      Compose project and its volumes, then deletes that run's DuckLake data
      directory, including ingested sessions and Lisa's seeded policies. It refuses
      to clean other resources.
@@ -85,9 +85,9 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from conftest import (
-    configure_lisa_quickstart,
-    dispose_lisa_quickstart,
-    lisa_quickstart_target,
+    configure_lisa_dogfood,
+    dispose_lisa_dogfood,
+    lisa_dogfood_target,
 )
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
@@ -390,7 +390,7 @@ def _evaluate_with_services(
     )
 
     # --- Execute phase A: ingest each complete session and verify reconstruction ---
-    ingest_token = os.getenv("SOFTPROBE_PUBLIC_KEY", "quickstart-local")
+    ingest_token = os.getenv("SOFTPROBE_PUBLIC_KEY", "dogfood-local")
     rows = []
     sessions = []
     prepared = []
@@ -533,10 +533,10 @@ def _evaluate_with_services(
 
 
 def main() -> None:
-    """CLI entry: wire quickstart env, load manifests, run ``evaluate``, print metrics.
+    """CLI entry: wire dogfood env, load manifests, run ``evaluate``, print metrics.
 
     Inputs: ``--manifest`` (score), ``--catalog-manifest`` (seed policies),
-    ``--output`` (report path), ``--quickstart-env-file``, ``--data-dir``, ``--live``.
+    ``--output`` (report path), ``--dogfood-env-file``, ``--data-dir``, ``--live``.
     Outputs: report file at ``--output``; ``metrics`` JSON on stdout.
     """
     parser = argparse.ArgumentParser(description=__doc__)
@@ -559,10 +559,10 @@ def main() -> None:
         help="Output: JSON report path (rows, sessions, metrics)",
     )
     parser.add_argument(
-        "--quickstart-env-file",
+        "--dogfood-env-file",
         type=Path,
-        default=Path("warehouse/quickstart/compose.env"),
-        help="Input: local DB/API connection metadata created by quickstart",
+        default=Path("warehouse/dogfood/compose.env"),
+        help="Input: local DB/API connection metadata created by dogfood",
     )
     parser.add_argument(
         "--data-dir",
@@ -573,20 +573,20 @@ def main() -> None:
     args = parser.parse_args()
     if not args.live:
         parser.error("--live is required to authorize provider calls")
-    # Setup: bind process env to the disposable quickstart stack + isolated data dir.
+    # Setup: bind process env to the disposable dogfood stack + isolated data dir.
     data_dir = args.data_dir or args.output.parent / f".{args.output.stem}-lisa-data"
     repository_root = Path(__file__).resolve().parents[2]
-    cleanup_target = lisa_quickstart_target(args.quickstart_env_file, repository_root)
+    cleanup_target = lisa_dogfood_target(args.dogfood_env_file, repository_root)
     for retained_path in (args.output.resolve(), data_dir.resolve()):
         if retained_path == cleanup_target.lake_data or cleanup_target.lake_data in retained_path.parents:
-            parser.error("--output and --data-dir must be outside the disposable quickstart data path")
+            parser.error("--output and --data-dir must be outside the disposable dogfood data path")
     try:
-        configure_lisa_quickstart(args.quickstart_env_file, data_dir.resolve(), repository_root)
+        configure_lisa_dogfood(args.dogfood_env_file, data_dir.resolve(), repository_root)
         report = evaluate(
             load_dataset(args.manifest), load_dataset(args.catalog_manifest), args.output
         )
     finally:
-        dispose_lisa_quickstart(
+        dispose_lisa_dogfood(
             cleanup_target,
             repository_root,
             report_path=args.output,

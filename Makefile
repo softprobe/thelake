@@ -18,7 +18,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run \
+.PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run dev-up dev-down \
 	clean clean-cache build build-release package publish test-publish-tags \
 	contracts-test lint check-sql-guardrails fmt check-fmt \
 	test _test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff _test-lease-pg \
@@ -149,6 +149,7 @@ help:
 	@echo "Test:     test | test-e2e | test-perf"
 	@echo "Gates:    ci | release"
 	@echo "Infra:    setup | teardown | doctor"
+	@echo "Local UI: dev-up | dev-down  (TheLake + Lisa + durable Lisa policies)"
 	@echo "Stress:   stress BACKEND=local|r2|gcs"
 	@echo "LLM bench: seed-lake | bench-llm-seeded | test-perf-helpers"
 	@echo "Extras:   duckdb-shell | demo-session | drop-tables | generate-telemetry | test-deploy | telemetrygen"
@@ -203,6 +204,21 @@ contracts-test:
 run: build
 	cargo run --locked --bin thelake
 
+# Full local Explorer + Lisa environment. Local credentials are generated once
+# in the ignored .env; Compose keeps the Postgres and Lisa home volumes on stop.
+dev-up:
+	python3 scripts/dev_env.py init --env-file .env --require-model
+	$(MAKE) --no-print-directory _ensure-dist
+	$(COMPOSE) --profile lisa up --detach ducklake-postgres minio auth-mock
+	$(MAKE) --no-print-directory _minio-bucket
+	$(COMPOSE) --profile lisa up --detach --build otlp-backend lisa
+	@echo "Open Explorer at the host address shown below and select Lisa."
+	@$(COMPOSE) --profile lisa port otlp-backend 8090
+	@$(COMPOSE) --profile lisa port lisa 8082
+
+dev-down:
+	$(COMPOSE) --profile lisa stop lisa otlp-backend
+
 # Host release → dist/. On non-linux/amd64, TARGET_PLATFORM=linux/amd64 re-enters via docker.
 build-release: ensure-cache explorer-assets
 	@set -euo pipefail; \
@@ -225,11 +241,7 @@ build-release: ensure-cache explorer-assets
 	mkdir -p "$(DIST_DIR)"; \
 	bin="$(CARGO_TARGET_DIR)/release/thelake"; \
 	test -x "$$bin"; \
-	duckdb_so=$$(find "$(CARGO_TARGET_DIR)/duckdb-download" -type f -name 'libduckdb.so*' -print -quit 2>/dev/null || true); \
-	if [ -z "$$duckdb_so" ]; then \
-		duckdb_so=$$(find "$(CARGO_TARGET_DIR)/duckdb-download" -type f -name 'libduckdb.dylib*' -print -quit 2>/dev/null || true); \
-	fi; \
-	test -n "$$duckdb_so"; \
+	duckdb_so=$$(python3 scripts/find_duckdb_library.py Cargo.lock "$(CARGO_TARGET_DIR)/duckdb-download"); \
 	sh scripts/assert-duckdb-version.sh Cargo.lock "$$duckdb_so"; \
 	cp -f "$$bin" "$(DIST_DIR)/thelake"; \
 	rm -f "$(DIST_DIR)/libduckdb.so" "$(DIST_DIR)/libduckdb.dylib"; \
@@ -398,7 +410,8 @@ test: ensure-cache ducklake-extension explorer-assets
 
 _test: ensure-cache ducklake-extension explorer-assets
 	bash tests/scripts/ducklake_extension_download_test.sh
-	python3 -m unittest examples/quickstart/agent/test_refund_agent_sdk.py
+	python3 -m unittest examples/lisa-dogfood/agent/test_refund_agent_sdk.py
+	python3 -m unittest tests/find_duckdb_library_test.py
 	@echo "unit + lightweight tests (isolated test stack)..."
 	cargo test $(CARGO_PROFILE_FLAG) --lib --test tests --test compatibility -- --test-threads=1
 	npm --prefix "$(EXPLORER_DIR)" test

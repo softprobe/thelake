@@ -120,7 +120,7 @@ pub async fn create_router(
             .workspaces
             .workspace_for("")
             .await
-            .map_err(|error| anyhow::anyhow!("shared DuckLake startup gate: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("shared DuckLake startup gate: {error:#}"))?;
         state
             .workspaces
             .maintenance_engine()

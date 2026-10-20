@@ -23,6 +23,18 @@ from .runtime import confirmed_policy_title, initialize_backend, run_turn
 logger = logging.getLogger(__name__)
 
 
+def qa_enabled() -> bool:
+    """Whether the scheduled QA cycle may call models."""
+    return os.getenv("LISA_QA_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def activity_followups_enabled() -> bool:
+    """Whether owner-approved activity follow-ups may call models."""
+    return os.getenv("LISA_ACTIVITY_FOLLOWUPS_ENABLED", "1").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     initialize_backend()
@@ -32,45 +44,55 @@ async def lifespan(_app: FastAPI):
     qa_scheduler = None
     slack_worker_task = None
     if workspace_id:
-        cron_schedule = os.getenv("LISA_QA_CRON", "0 * * * *").strip()
-        try:
-            trigger = CronTrigger.from_crontab(cron_schedule, timezone="UTC")
-        except ValueError as error:
-            raise RuntimeError(
-                "LISA_QA_CRON must be a valid five-field UTC cron expression"
-            ) from error
-        qa_scheduler = AsyncIOScheduler(timezone="UTC")
-        job = qa_scheduler.add_job(
-            _run_scheduled_qa,
-            trigger=trigger,
-            args=[services, workspace_id],
-            id="lisa-scheduled-qa",
-            name="Lisa scheduled QA",
-            coalesce=True,
-            max_instances=1,
-            misfire_grace_time=900,
-            replace_existing=True,
-        )
-        if services.activity_store is not None:
-            qa_scheduler.add_job(
-                _run_activity_followups,
-                trigger="interval",
-                seconds=15,
-                args=[services, workspace_id],
-                id="lisa-activity-followups",
-                name="Lisa approved activity follow-ups",
-                coalesce=True,
-                max_instances=1,
-                misfire_grace_time=900,
-                replace_existing=True,
+        qa_jobs = []
+        if qa_enabled():
+            cron_schedule = os.getenv("LISA_QA_CRON", "0 * * * *").strip()
+            try:
+                trigger = CronTrigger.from_crontab(cron_schedule, timezone="UTC")
+            except ValueError as error:
+                raise RuntimeError(
+                    "LISA_QA_CRON must be a valid five-field UTC cron expression"
+                ) from error
+            qa_jobs.append(
+                {
+                    "func": _run_scheduled_qa,
+                    "trigger": trigger,
+                    "args": [services, workspace_id],
+                    "id": "lisa-scheduled-qa",
+                    "name": "Lisa scheduled QA",
+                    "coalesce": True,
+                    "max_instances": 1,
+                    "misfire_grace_time": 900,
+                    "replace_existing": True,
+                }
             )
-        qa_scheduler.start()
-        logger.info(
-            "Registered cron job '%s' with schedule '%s' UTC; next run at %s",
-            job.name,
-            cron_schedule,
-            job.next_run_time,
-        )
+        else:
+            logger.info("Scheduled QA is disabled")
+        if services.activity_store is not None and activity_followups_enabled():
+            qa_jobs.append(
+                {
+                    "func": _run_activity_followups,
+                    "trigger": "interval",
+                    "seconds": 15,
+                    "args": [services, workspace_id],
+                    "id": "lisa-activity-followups",
+                    "name": "Lisa approved activity follow-ups",
+                    "coalesce": True,
+                    "max_instances": 1,
+                    "misfire_grace_time": 900,
+                    "replace_existing": True,
+                }
+            )
+        if qa_jobs:
+            qa_scheduler = AsyncIOScheduler(timezone="UTC")
+            jobs = [qa_scheduler.add_job(**job) for job in qa_jobs]
+            qa_scheduler.start()
+            for job in jobs:
+                logger.info(
+                    "Registered job '%s'; next run at %s", job.name, job.next_run_time
+                )
+        # Slack events are user-triggered work and remain available when
+        # unattended scheduled QA is disabled.
         slack_worker_task = asyncio.create_task(
             services.slack_worker.run_forever(workspace_id)
         )

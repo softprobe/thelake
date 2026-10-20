@@ -31,13 +31,11 @@ call Lisa.
   call Lisa's production `EvaluationService`. Do not call the triager/judge on
   manifest `policy_ids` or inject policies/trajectories and treat that as
   production quality evidence.
-- For the real scheduled agent-to-issue path, use a quickstart E2E with an
+- For the real scheduled agent-to-issue path, use a dogfood E2E with an
   isolated, run-owned stack and workspace; it makes paid OpenAI Decisions and
   Gemini calls. It must not reuse a developer's running stack or workspace.
-  The current `tests/e2e/quickstart_online_eval.py` targets the shared
-  `thelake-quickstart` project, so do not run it until that harness provisions
-  and cleans up its own transient stack. Decisions triages all approved
-  policies; Gemini judges only escalations.
+  `tests/e2e/dogfood_online_eval.py` provisions and cleans up its own transient
+  stack. Decisions triages all approved policies; Gemini judges only escalations.
 - For Markdown policy learning or review, use
   `lisa/skills/learn-agent-policy/SKILL.md` and
   `lisa/skills/review-agent-policy/SKILL.md`.
@@ -66,33 +64,30 @@ Before a live run:
    exports alone do not establish that credentials are unavailable. Do not
    search unrelated files or copy credentials into scripts, reports, or commands.
 4. Preserve the working tree and existing local services. If the scheduled-
-   path harness cannot provision and clean up an isolated quickstart project
+   path harness cannot provision and clean up an isolated dogfood project
    with a transient database and workspace, stop and report that prerequisite;
    never point it at an existing local service.
 
 ## Run the live path
 
-Do not run the scheduled-path command below until its harness has been updated
-to own a transient quickstart stack and workspace. The current implementation
-uses the shared `thelake-quickstart` project and does not satisfy that rule.
-
 Provision the model key through the approved local secret mechanism. Do not put
 the value in a command, history, file, or report. From the repository root:
 
 ```bash
-python3 tests/e2e/quickstart_online_eval.py
+python3 tests/e2e/dogfood_online_eval.py
 ```
 
-The scenario saves an explicitly approved refund policy, runs the
-deliberately flawed sample agent, waits for Lisa's autonomous schedule, and
-verifies the trace-linked failure score and Lisa's report. It does not prove
+The scenario starts a fresh `lisa-policy-eval-*` project, saves an explicitly
+approved refund policy, runs the deliberately flawed sample agent, waits for
+Lisa's autonomous schedule, verifies the trace-linked failure score and Lisa's
+report, then removes its own stack and data. It does not prove
 policy-memory learning or policy review and approval.
 
 One Lisa runtime is scoped to one workspace. Its `Lisa scheduled QA` cron job
 defaults to hourly at minute 0 UTC and does not run on startup. Only when running
-this time-bounded E2E, start the quickstart with a temporary five-minute cron so
+this time-bounded E2E, start the dogfood with a temporary five-minute cron so
 the test does not wait up to an hour:
-`LISA_QA_CRON="*/5 * * * *" bash examples/quickstart/start.sh`. The E2E waits
+`LISA_QA_CRON="*/5 * * * *" bash examples/lisa-dogfood/start.sh`. The E2E waits
 for the next scheduled cycle; it does not call the cycle endpoint directly.
 
 ## Pass criteria

@@ -1,4 +1,4 @@
-"""Shared API helpers for the quickstart policy QA walkthrough."""
+"""Shared API helpers for the dogfood policy QA walkthrough."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 
 
 EVALUATOR_NAME = "Refund eligibility before refund"
-AGENT_NAME = "quickstart-refund-agent"
+AGENT_NAME = "dogfood-refund-agent"
 
 
 class TheLakeApiError(RuntimeError):

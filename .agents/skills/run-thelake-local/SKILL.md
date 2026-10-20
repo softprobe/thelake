@@ -1,6 +1,6 @@
 ---
 name: run-thelake-local
-description: Set up and run TheLake locally with its PostgreSQL DuckLake catalog, object storage, Explorer, or the isolated quickstart stack.
+description: Set up and run TheLake locally with its PostgreSQL DuckLake catalog, object storage, Explorer, and Lisa.
 ---
 
 # Run TheLake locally
@@ -25,12 +25,10 @@ is the DuckLake catalog; telemetry files use the configured `data_path`.
 volumes or local warehouse data; do not use destructive cleanup to fix a
 startup problem.
 
-To run a browser-first demo without Slack setup or a developer-managed
-workspace, use `docs/quickstart.md` and `bash examples/quickstart/start.sh`.
-The quickstart uses an isolated local database and runner, asks before sending
-captured evidence to Gemini, and may incur provider charges. Provision API keys
-through the local approved secret mechanism; do not put their values in chat,
-commands, files, or reports.
+For local Explorer and Lisa chat, use `docs/how-to/local-development.md` and
+`make dev-up`. It provisions Lisa's policy database on the existing local
+Postgres service and starts TheLake and Lisa together. The local stack disables
+scheduled QA by default; enabling it can incur provider charges.
 
 ## Explorer development
 

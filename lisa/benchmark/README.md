@@ -58,16 +58,16 @@ uv run --project lisa --env-file .env \
 
 ## Policy production-path benchmark
 
-### 1. Start disposable quickstart (leave running)
+### 1. Start disposable dogfood (leave running)
 
 ```sh
 RUN_ID=20261019-a1
-THELAKE_QUICKSTART_PROJECT_NAME=lisa-policy-eval-$RUN_ID \
-THELAKE_QUICKSTART_ENV_FILE=warehouse/quickstart/lisa-policy-eval-$RUN_ID.env \
-THELAKE_QUICKSTART_DATA_PATH=./warehouse/quickstart/lisa-policy-eval-$RUN_ID \
+THELAKE_DOGFOOD_PROJECT_NAME=lisa-policy-eval-$RUN_ID \
+THELAKE_DOGFOOD_ENV_FILE=warehouse/dogfood/lisa-policy-eval-$RUN_ID.env \
+THELAKE_DOGFOOD_DATA_PATH=./warehouse/dogfood/lisa-policy-eval-$RUN_ID \
 THELAKE_DEFAULT_WORKSPACE_ID=$(uuidgen | tr '[:upper:]' '[:lower:]') \
 LISA_LLM_TRACE_ENABLED=1 \
-bash examples/quickstart/start.sh
+bash examples/lisa-dogfood/start.sh
 ```
 
 ### 2. Evaluate (second shell)
@@ -76,7 +76,7 @@ bash examples/quickstart/start.sh
 RUN_ID=20261019-a1
 LISA_LLM_TRACE_ENABLED=1 uv run --project lisa --env-file .env \
   python lisa/scripts/evaluate_policy_dataset.py --live \
-  --quickstart-env-file warehouse/quickstart/lisa-policy-eval-$RUN_ID.env \
+  --dogfood-env-file warehouse/dogfood/lisa-policy-eval-$RUN_ID.env \
   --manifest lisa/datasets/policy_evaluation/manifests/evaluation.json \
   --output /tmp/lisa-policy-eval-$RUN_ID/report.json
 ```
