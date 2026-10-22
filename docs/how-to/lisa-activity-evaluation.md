@@ -37,8 +37,9 @@ transient service is removed at exit. Reports and captured logs are kept under
 The runner deterministically scores database state and required/forbidden tool
 actions, rejects unexpected tool errors, and supports explicitly labeled
 expected failures. Its policy-catalog case verifies Lisa uses the actual
-`lisa.policies` columns and does not invent `archived_at`. State checks include
-activity timeline evidence.
+`lisa.policies` columns and does not invent `archived_at`; a database case
+checks that the two event views accept `reference_type` and `reference_id`.
+State checks include activity timeline evidence.
 Turns labeled as substantive also verify that the
 selected activity links all newly recorded chat messages and runtime events.
 Tool checks can require ordered tool subsequences

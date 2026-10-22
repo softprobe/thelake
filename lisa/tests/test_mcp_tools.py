@@ -12,6 +12,7 @@ from benchmark.policy_seed import seed_policy_document
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
 from lisa.mcp_app import create_server
+from lisa.views.database import LISA_DATABASE_SCHEMA
 
 
 def test_mcp_public_policy_contract(lisa_test_context):
@@ -443,7 +444,7 @@ def test_lisa_database_tool_and_schema_resource_are_exposed(lisa_test_context):
             tools = await client.list_tools()
             assert any(tool.name == "lisa_db" for tool in tools)
             resource = await client.read_resource("lisa://database/schema")
-            assert "lisa.readable_activities" in str(resource)
+            assert resource[0].text == LISA_DATABASE_SCHEMA
 
     asyncio.run(inspect_server())
 

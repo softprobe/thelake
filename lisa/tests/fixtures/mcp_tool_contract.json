@@ -391,7 +391,7 @@
   },
   {
     "name": "lisa_db",
-    "description": "Run one bounded, read-only SELECT against Lisa's approved views and policy table.",
+    "description": "Run one bounded, read-only SELECT against approved Lisa views and policy columns in the schema resource.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

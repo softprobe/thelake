@@ -74,6 +74,12 @@ authorization contract for them.
   `lisa_db` allowlist/schema resource, and packaged policy skill aligned. Use
   `lisa_db` for explicit read-only catalog diagnostics only; policy workflows
   use the policy tools.
+- The ordered `RELATION_COLUMNS` contract in
+  `lisa/src/lisa/repositories/lisa_database.py` drives both SQL validation and
+  the `lisa_db` schema resource. When changing a readable view, policy columns,
+  or reader grants, update the contract and keep `test_activity_query.py`'s
+  projection/grant drift checks green. `readable_deployment` is granted only
+  for reader connection binding and is intentionally excluded from user queries.
 - Production evaluation enters through `EvaluationService`. It resolves the
   approved effective policy catalog for the exact agent and obtains the
   trajectory through `SessionService` from Lisa's locally persisted pushed OTLP

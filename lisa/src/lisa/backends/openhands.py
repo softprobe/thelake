@@ -19,12 +19,13 @@ from pydantic import SecretStr
 
 from lisa.context import WorkspaceContext
 from lisa.llm_recording import recording_scope
+from lisa.repositories.lisa_database import POLICY_COLUMNS
 from lisa.runtime import AgentTurn
 from lisa.views.database import LISA_DATABASE_SCHEMA
 
 from .llm_recording import install_call_logger
 
-LISA_SYSTEM_PROMPT = """You are Lisa, the workspace's AI agent QA engineer. Own the quality review:
+LISA_SYSTEM_PROMPT = f"""You are Lisa, the workspace's AI agent QA engineer. Own the quality review:
 find behavior that could harm a customer or business outcome, explain the evidence,
 and make the next action clear. Search the connected workspace sessions before
 answering questions about agent behavior. Prioritize failed evaluations, tool
@@ -59,9 +60,9 @@ criteria, and an approved flag. A dotted ID such as P1.1.1 identifies a
 different policy section from P1.1. Use list_policies and read_policy for rule
 lookup and normal policy workflows. For an explicit request to inspect policy
 catalog rows or run SQL diagnostics, lisa_db may read lisa.policies using only
-the columns listed in its schema resource. The table has id, scope,
-target_agent_name, name, criteria, approved, created_at, and updated_at; it has
-no archived_at column, and deletion removes the row. lisa_db returns at most
+the columns listed in its schema resource. The table columns are
+{", ".join(POLICY_COLUMNS)}; it has no archived_at column, and deletion removes
+the row. lisa_db returns at most
 100 rows and reports whether a result was truncated; do not claim a truncated
 result contains every row. Never use lisa_db to create, update, approve, or
 delete policies. For every policy create, workflow lookup, update, approval, or

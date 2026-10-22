@@ -19,6 +19,7 @@ from benchmark.activity_runner import (
 )
 from datasets.activity_dataset import ActivityLabels, ActivityTurn, load_activity_dataset
 from lisa.backends.openhands import LISA_SYSTEM_PROMPT
+from lisa.repositories.lisa_database import POLICY_COLUMNS
 from lisa.views.database import LISA_DATABASE_SCHEMA
 
 DATASET = Path(__file__).resolve().parents[1] / "datasets/activity_management"
@@ -36,7 +37,7 @@ def _feed_row(activity_id, title, status="pending"):
 def test_activity_benchmark_release_has_frozen_cases_and_both_splits():
     manifest, cases, digest = load_activity_dataset(DATASET / "manifests/benchmark.json")
 
-    assert manifest.case_count == len(cases) == 31
+    assert manifest.case_count == len(cases) == 32
     tracking_cases = [
         case for case in cases
         if case.split == "benchmark" and case.case_id.startswith("activity_tracking_")
@@ -534,6 +535,7 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "use list_policies and read_policy" in prompt
     assert "for an explicit request to inspect policy catalog rows or run sql diagnostics, lisa_db may read lisa.policies" in prompt
     assert "it has no archived_at column, and deletion removes the row" in prompt
+    assert ", ".join(POLICY_COLUMNS) in prompt
     assert "never use lisa_db to create, update, approve, or delete policies" in prompt
     assert "never call lisa_db to inspect or change policy rows" not in prompt
     assert "same work item, including when it arrives in another chat" in prompt
@@ -550,7 +552,9 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "do not query lisa_db to find, create, update, or inspect activities" in database_schema
     assert "delete_policy" in database_schema
     assert "there is no archived_at column" in database_schema
+    assert ", ".join(POLICY_COLUMNS) in database_schema
     assert "truncated" in database_schema
+    assert "wildcard projections are rejected" in database_schema
 
     policy_skill = " ".join((
         Path(__file__).resolve().parents[1] / "skills/learn-agent-policy/SKILL.md"
@@ -583,6 +587,7 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "do not call `write_policy`, `approve_policy`, or `delete_policy`" in policy_skill
     assert "Do not use `lisa_db` for normal policy work." in policy_skill
     assert "it has no `archived_at`" in policy_skill
+    assert all(column in policy_skill for column in POLICY_COLUMNS)
     assert 'set_activity_progress(status="waiting")' in policy_skill
 
 

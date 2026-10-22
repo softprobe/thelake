@@ -4,9 +4,12 @@ Use the shared [Lisa evaluation terms](../architecture/lisa-terms.md): a
 trajectory is derived from a session and has no separate ID; policy pairs use
 `(session_id, policy_id)`.
 
-Lisa keeps business rules in the `lisa.policies` PostgreSQL table. A workspace
-rule applies across the workspace; an agent rule applies to one exact agent
-name. Each rule has a stable string ID, criteria, approval state, and timestamps.
+Lisa keeps business rules in the `lisa.policies` PostgreSQL table. Its columns
+are `id`, `scope`, `target_agent_name`, `name`, `criteria`, `approved`,
+`created_at`, and `updated_at`; it has no `archived_at` field. Deleting a policy
+removes its row. A workspace rule applies across the workspace; an agent rule
+applies to one exact agent name. Each rule has a stable string ID, criteria,
+approval state, and timestamps.
 `list_policies` lists active rules across scopes. `read_policy` reads workspace
 rules by default; pass the exact agent name with agent scope to read that
 agent's rules. Its headings include the same readable ID shown in the
@@ -112,3 +115,13 @@ transaction and scope lock. Benchmark catalog seeding lives separately under
 calls `evaluation/policy_triage.py`, judges escalations, and stores scores. The
 tool package is independent of OpenHands; the backend supplies trusted
 workspace credentials when launching it.
+
+The read-only `lisa_db` surface is defined by the ordered `RELATION_COLUMNS`
+contract in `lisa/src/lisa/repositories/lisa_database.py`. The query validator
+and agent schema resource use that same contract. Tests compare every listed
+view projection against `lisa/src/lisa/sql/activities/schema.sql` and compare
+the exact reader-role grants, including the restricted policy-column grant,
+so a database change that isn't reflected in the tool contract fails before
+it can ship. The
+`readable_deployment` grant is only used to bind the reader connection and is
+not available to user-authored queries.

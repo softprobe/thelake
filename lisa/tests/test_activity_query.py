@@ -4,9 +4,18 @@ import re
 from pathlib import Path
 
 import pytest
+import sqlglot
+from sqlglot import exp
 from sql_cases import read_sql_case, read_sql_file
 
-from lisa.repositories.lisa_database import VIEW_COLUMNS, validate_read_query
+from lisa.repositories.lisa_database import (
+    INTERNAL_READER_RELATIONS,
+    POLICY_COLUMNS,
+    RELATION_COLUMNS,
+    VIEW_COLUMNS,
+    validate_read_query,
+)
+from lisa.views.database import LISA_DATABASE_SCHEMA
 
 
 @pytest.mark.parametrize(
@@ -46,23 +55,74 @@ def test_read_query_allows_the_policy_table_but_not_other_base_tables():
         validate_read_query(read_sql_file("reject_activity_base_table"))
 
 
+def test_database_allowlist_matches_every_exposed_view_projection():
+    schema_path = Path(__file__).resolve().parents[1] / "src/lisa/sql/activities/schema.sql"
+    schema = schema_path.read_text(encoding="utf-8")
+    declared_views = {
+        statement.this.name: tuple(statement.expression.named_selects)
+        for statement in sqlglot.parse(schema, read="postgres")
+        if isinstance(statement, exp.Create)
+        and statement.args.get("kind") == "VIEW"
+        and statement.this.name not in INTERNAL_READER_RELATIONS
+    }
+
+    assert declared_views == {
+        relation: tuple(columns)
+        for relation, columns in RELATION_COLUMNS.items()
+        if relation != "policies"
+    }
+
+
 def test_policy_database_allowlist_matches_the_actual_table_columns():
     schema_path = Path(__file__).resolve().parents[1] / "src/lisa/sql/activities/schema.sql"
     schema = schema_path.read_text(encoding="utf-8")
-    declaration = re.search(
-        r"CREATE TABLE lisa\.policies\s*\((.*?)\n\);", schema, re.DOTALL
+    declaration = next(
+        statement
+        for statement in sqlglot.parse(schema, read="postgres")
+        if isinstance(statement, exp.Create)
+        and statement.args.get("kind") == "TABLE"
+        and isinstance(statement.this, exp.Schema)
+        and statement.this.this.name == "policies"
     )
-    assert declaration
-    database_columns = {
-        line.strip().split()[0].rstrip(",")
-        for line in declaration.group(1).splitlines()
-        if line.strip()
-        and not line.strip().split()[0].startswith("(")
-        and line.strip().split()[0].rstrip(",") not in {"CHECK", "UNIQUE", "CONSTRAINT", ")"}
-    }
+    database_columns = tuple(
+        column.this.name
+        for column in declaration.this.expressions
+        if isinstance(column, exp.ColumnDef)
+    )
 
-    assert VIEW_COLUMNS["policies"] == database_columns
+    assert POLICY_COLUMNS == RELATION_COLUMNS["policies"]
+    assert database_columns == POLICY_COLUMNS
     assert "archived_at" not in VIEW_COLUMNS["policies"]
+
+
+def test_database_allowlist_matches_reader_role_grants():
+    grant_path = Path(__file__).resolve().parents[1] / "src/lisa/sql/activities/grant_runtime_roles.sql"
+    grants = grant_path.read_text(encoding="utf-8")
+    reader_grants = {
+        " ".join(grant.split())
+        for grant in re.findall(r"(?m)^GRANT\b[^;]*\bTO \{reader\};", grants)
+    }
+    expected_grants = {
+        f"GRANT SELECT ON lisa.{relation} TO {{reader}};"
+        for relation in VIEW_COLUMNS
+        if relation != "policies"
+    }
+    expected_grants.update(
+        {
+            "GRANT SELECT (id, scope, target_agent_name, name, criteria, approved, created_at, updated_at) "
+            "ON lisa.policies TO {reader};",
+            "GRANT SELECT ON lisa.readable_deployment TO {reader};",
+        }
+    )
+
+    assert reader_grants == expected_grants
+
+
+def test_database_schema_resource_lists_the_same_relation_columns_as_validator():
+    for relation, columns in RELATION_COLUMNS.items():
+        assert f"lisa.{relation}:" in LISA_DATABASE_SCHEMA
+        for column in columns:
+            assert re.search(rf"\b{re.escape(column)}\b", LISA_DATABASE_SCHEMA)
 
 
 def test_policy_database_query_rejects_unmodeled_archive_column():
@@ -70,6 +130,20 @@ def test_policy_database_query_rejects_unmodeled_archive_column():
         validate_read_query(
             "SELECT id, archived_at FROM lisa.policies"
         )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT reference_type, reference_id FROM lisa.readable_activity_events",
+        "SELECT reference_type, reference_id FROM lisa.readable_activity_monitor_thread_actions",
+    ],
+)
+def test_read_query_allows_columns_exposed_by_every_activity_event_view(query):
+    sql = validate_read_query(query)
+
+    assert "reference_type" in sql
+    assert "reference_id" in sql
 
 
 @pytest.mark.parametrize(

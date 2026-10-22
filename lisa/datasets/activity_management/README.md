@@ -26,9 +26,10 @@ case database through Lisa's repositories; judge-run completion uses a
 parameterized benchmark SQL fixture that acknowledges the seeded score before
 the evaluation activity is marked successful. A later chat lookup is a new
 request activity, separate from that completed evaluation. State labels can inspect activity
-timeline text. A held-out database case checks that the policy catalog query
-uses supported columns and reports the absence of archive state; all turns are
-also checked for unexpected MCP tool errors. Development
+timeline text. Held-out database cases check that the policy catalog query uses
+supported columns and reports the absence of archive state, and that both
+activity event views accept their reference columns; all turns are also checked
+for unexpected MCP tool errors. Development
 and benchmark splits are disjoint by case. Use development cases for tuning and
 reserve benchmark cases for final measurement. The dataset is author-curated; it
 is not human-adjudicated and does not estimate production prevalence. The

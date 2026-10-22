@@ -45,5 +45,10 @@ under `target/test-artifacts/lisa-activity-benchmark/<run-id>/`.
 Report the dataset and case digests, split, model/runtime configuration, case
 support, per-category pass counts, state/tool/communication scores, and failures.
 Inspect per-case evidence and do not rely on aggregate rates from the small
-curated release. Slack-context cases do not verify Slack delivery. The dataset
-is author-curated, not human-adjudicated or production-representative.
+curated release. Tool checks fail on unexpected MCP errors; expected error
+paths must be labeled on the turn. The policy-catalog case checks the columns
+against Lisa's actual schema and catches unsupported fields such as
+`archived_at`; an activity-view case checks that both event views accept their
+`reference_type` and `reference_id` fields. Slack-context cases do not verify
+Slack delivery. The dataset is author-curated, not human-adjudicated or
+production-representative.
