@@ -1,14 +1,15 @@
 # Local Lisa development
 
 The interactive development environment runs Explorer, TheLake, and Lisa in
-the repository's root Compose project. Lisa uses a PostgreSQL policy and
-activity database on the same local Postgres service as DuckLake. This is the
-only persistent local environment for chatting with Lisa.
+the repository's root Compose project. Lisa and DuckLake use separate
+PostgreSQL services: Lisa's database stores its policies, activities, pushed
+session receipts, and durable evaluation queue. This is the only persistent
+local environment for chatting with Lisa.
 
 ## Start the stack
 
 Copy `.env.example` to `.env`, then set `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
-OpenAI credentials are only needed if you opt into scheduled policy triage.
+OpenAI credentials are needed for policy triage of pushed sessions.
 
 ```bash
 cp .env.example .env
@@ -22,14 +23,13 @@ local tokens and database passwords in `.env` without replacing values already
 there. Keep `.env` private.
 
 Open Explorer at `http://127.0.0.1:8090/explorer/` to browse sessions and
-traces. Open Lisa at `http://127.0.0.1:8090/lisa/` to chat, inspect activities,
-rules, triage, and identity. They are separate apps on the same local TheLake
-host. The local anonymous identity is `local`, and the dev stack configures it
+traces. Open Lisa at `http://127.0.0.1:18083/lisa/` to chat, inspect activities,
+rules, triage, and identity. Lisa's Python service serves its UI and API on its
+own port and owns its own PostgreSQL database. The local anonymous identity is `local`, and the dev stack configures it
 as a Lisa owner so you can exercise readable policy creation and approval through chat.
 The UI, API, and local Postgres ports bind to loopback. The default Postgres
-port is `55432` and Lisa's API port is `18083`, so they can coexist with older
-local stacks that used the standard Postgres port or Lisa port `18082`. These
-ports remain configurable in `.env`. Browser chat uses the fixed local
+port is `55432`, Lisa's PGMQ-enabled Postgres port is `55433`, and Lisa's API
+port is `18083`. These ports remain configurable in `.env`. Browser chat uses the fixed local
 workspace. Policies, activities, conversations, and telemetry persist in the
 Compose volumes and the `warehouse/` data directory across restarts. The
 integrated stack uses its own `softprobe_dev` catalog schema and object-store
@@ -46,13 +46,11 @@ This sends a small batch of sample traces and logs to the local stack. The
 generator defaults to the local OTLP/HTTP endpoint on port `8090` and accepts
 `OTLP_ENDPOINT` when the service uses another address.
 
-Scheduled QA is disabled in this local stack to prevent unattended model calls.
-Set `LISA_QA_ENABLED=1` in `.env` to enable `LISA_QA_CRON`; provider usage may
-incur charges. Owner-approved activity follow-ups remain enabled separately
-through `LISA_ACTIVITY_FOLLOWUPS_ENABLED`.
+Lisa does not run scheduled QA. Evaluation starts when a complete OTLP session
+is pushed to its private-network `POST /internal/v1/session-traces` endpoint.
 
-Stop Lisa and TheLake while preserving local state and shared Postgres, MinIO,
-and auth-mock services:
+Stop Lisa and TheLake while preserving local state, both Postgres services,
+MinIO, and auth-mock:
 
 ```bash
 make dev-down

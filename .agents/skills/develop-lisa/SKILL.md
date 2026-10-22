@@ -1,6 +1,6 @@
 ---
 name: develop-lisa
-description: Implement, debug, or review Lisa service, policy-management, triage, judgment, scheduling, or evaluation changes in TheLake.
+description: Implement, debug, or review Lisa service, policy-management, triage, judgment, or evaluation changes in TheLake.
 ---
 
 # Develop Lisa
@@ -31,8 +31,7 @@ ID after the reply, including a previously waiting activity the owner confirms
 is complete. Partition tool and completion evidence by explicit activity ID;
 historical error strings nested in a successful thread read must not fail the
 current request.
-Approved follow-ups remain waiting while scheduled work is active, and failed
-continuations preserve a prior waiting action. Post-resolution failures affect
+Failed continuations preserve a prior waiting action. Post-resolution failures affect
 only the activity whose work failed. Only owner turns link chat to the shared
 feed.
 Verify web and Slack receipt paths plus the real labeled runtime benchmark when
@@ -52,8 +51,9 @@ timeline, and typography treatment; put Lisa-specific data inside those slots.
 Check the rendered page against Muse at the same viewport and device scale.
 Browser routes must reuse the authenticated
 workspace binding and expose only bounded, purpose-built projections. Rules are
-read-only in the panel; policy changes still use the exact-owner-confirmation
-approval flow. Evaluation activity timelines distinguish routing decisions,
+read-only in the panel. Policy writes, approvals, and deletions require an
+authorized owner on a web or Slack turn, and the policy ID is the tool argument.
+Evaluation activity timelines distinguish routing decisions,
 judge verdicts, and failures. The current runtime identity is configured by
 `LISA_SYSTEM_PROMPT` and packaged skills; do not present `SOUL.md` or
 `MEMORY.md` as existing editable files until Lisa has a canonical source and
@@ -68,9 +68,18 @@ authorization contract for them.
   `PolicyService` and its repository for policy operations; never make a
   quality evaluation by passing annotation-selected policies directly to the
   evaluator.
+- The policy table columns are `id`, `scope`, `target_agent_name`, `name`,
+  `criteria`, `approved`, `created_at`, and `updated_at`; there is no
+  `archived_at` column, and deletion removes the row. Keep the database schema,
+  `lisa_db` allowlist/schema resource, and packaged policy skill aligned. Use
+  `lisa_db` for explicit read-only catalog diagnostics only; policy workflows
+  use the policy tools.
 - Production evaluation enters through `EvaluationService`. It resolves the
   approved effective policy catalog for the exact agent and obtains the
-  trajectory through `SessionService` / TheLake's normal session path.
+  trajectory through `SessionService` from Lisa's locally persisted pushed OTLP
+  evidence. Lisa's Python service serves both its frontend and API; its Docker
+  image builds the frontend bundle. TheLake serves Explorer only and is not a
+  runtime dependency of Lisa.
 - `EvaluationService.evaluate_session` validates the session before the
   no-approved-policies shortcut. For a resolved chat activity, a session lookup
   failure is recorded and completed as an error by the service; the agent must
@@ -78,10 +87,11 @@ authorization contract for them.
 - `EvaluationService` filters candidates through `lisa.evaluation_triage`, keyed
   only by `(session_id, policy_id)`. It sends one Decisions question for each
   candidate pair with no stored triage decision and persists completed decisions
-  before judging. Reuse stored pair decisions on later calls even after
-  telemetry, policy content, or triage configuration changes; new IDs form new
-  pairs. Failed/incomplete provider calls create no row. Concurrent first calls
-  can both reach Decisions; the first persisted result is canonical.
+  before judging. Reuse stored pair decisions on later calls after telemetry or
+  triage configuration changes. A policy edit invalidates cached triage for
+  that policy ID; a new ID forms a new pair. Failed/incomplete provider calls
+  create no row. Concurrent first calls can both reach Decisions; the first
+  persisted result is canonical.
 - `OpenAIPolicyTriager` sends one Decisions question per candidate it receives.
   `suspected_violation` and `insufficient_evidence` escalate to the Gemini
   judge; `no_violation_found` is routing metadata and does not create a pass
@@ -90,8 +100,8 @@ authorization contract for them.
   distinct. Provider or validation errors must not become healthy negatives.
 - For tracked runs, deduplicate through Lisa's Postgres evaluation request
   identity, derived from session, approved policy hash, sanitized trajectory,
-  triage/judge configuration, and pipeline version. TheLake scores are output
-  copies, not the source of truth for whether Lisa already evaluated evidence.
+  triage/judge configuration, and pipeline version. Lisa's Postgres is the
+  source of truth for policies, evaluation results, and activities.
 - Keep triage outcomes in the pair-keyed `lisa.evaluation_triage` table. Record
   Lisa's actions and decisions in the generic activity event timeline; one
   activity may link to multiple evaluation runs through `activity_id`. Link
@@ -106,7 +116,7 @@ authorization contract for them.
 - Dataset annotations supply scoring truth only. Dataset catalog policies may
   seed the disposable test workspace through Lisa's policy-management service,
   but must never be passed directly into evaluation. A production quality run
-  ingests sessions into TheLake and calls `EvaluationService`; see
+  pushes sessions to Lisa and calls `EvaluationService`; see
   [`run-lisa-policy-evaluation`](../run-lisa-policy-evaluation/SKILL.md).
 
 ## Activity and verification
@@ -124,14 +134,15 @@ authorization contract for them.
   `pytest_sessionfinish`, and `atexit`) so interrupted runs do not leave
   orphan containers. Removing the container removes all test databases and
   roles; no external database URL is supported. Use transient Lisa databases
-  and TheLake workspaces for all automated tests; never connect to or mutate a
-  developer's running instance. Stub external service calls when the test
-  does not need a real TheLake server.
+  and temporary agent-workspace directories for all automated tests; never
+  connect to or mutate a developer's running instance. Stub external services
+  unless a test explicitly verifies a real provider integration.
 - Read [`docs/how-to/policy-memory.md`](../../../docs/how-to/policy-memory.md)
   for policy semantics and
   [`docs/how-to/policy-triage-evaluation.md`](../../../docs/how-to/policy-triage-evaluation.md)
-  for quality metrics. Use `run-lisa-evaluation-dogfood` for the scheduled
-  conversation-to-score workflow.
+  for quality metrics. Session QA is triggered by OTLP push into Lisa's private
+  intake endpoint; `run-lisa-evaluation-dogfood` verifies that push-to-evaluate
+  workflow on an isolated Lisa deployment.
 - Make the smallest change that preserves the production service path. Keep
   provider adapters in `lisa/src/lisa/evaluation/` (trajectory, triage, judge,
   scores only), orchestration in `lisa/services/evaluations.py`, and persistence

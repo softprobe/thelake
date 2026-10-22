@@ -1,6 +1,8 @@
 """Tool-facing description of Lisa's read-only operational database."""
 
-LISA_DATABASE_SCHEMA = """Use lisa_db for explicit read-only database diagnostics
+from lisa.repositories.lisa_database import MAX_ROWS, POLICY_COLUMNS
+
+LISA_DATABASE_SCHEMA = f"""Use lisa_db for explicit read-only database diagnostics
 or to retrieve Lisa's recorded evaluation history. For activity work, use Lisa's activity tools;
 for policy work, use read_policy, list_policies, write_policy, approve_policy,
 and delete_policy.
@@ -34,16 +36,15 @@ columns are available:
   carrier_message.
 - lisa.readable_activity_context: id, activity_id, seq, kind, source_ref,
   content_hash, created_at
-- lisa.readable_approvals: id, activity_id, scope, status, request_summary,
-  requested_at, expires_at, resolved_at, resolved_by, decision_ref
-- lisa.readable_activity_followups: id, activity_id, due_at, trigger_event_type, prompt, status,
-  requested_by, requested_at, approved_at, completed_at
-- lisa.policies: id (text), scope, target_agent_name, name, criteria, approved,
-  created_at, updated_at
+- lisa.policies: {", ".join(POLICY_COLUMNS)}. Policy deletion removes the row;
+  there is no archived_at column.
 
 Lisa's activity tables store activity history and outcomes, not workspace
 session telemetry. Keep diagnostic queries bounded and name columns explicitly.
-Use TheLake session tools when the user asks for telemetry evidence. Policy
+Queries return at most {MAX_ROWS} rows and include a ``truncated`` flag; report
+when a result is truncated instead of saying it contains every row.
+Use Lisa's ``search_sessions`` and ``get_session`` tools when the user asks for
+telemetry evidence. Policy
 changes still go through owner-confirmed tools; the SQL role is read-only. Other
 Lisa base tables and hidden columns are not exposed.
 """

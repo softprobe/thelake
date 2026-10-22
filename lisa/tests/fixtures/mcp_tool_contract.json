@@ -1,27 +1,7 @@
 [
   {
-    "name": "approve_activity_followup",
-    "description": "Approve this follow-up only when its exact ID was confirmed this turn.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "followup_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "followup_id"
-      ],
-      "type": "object"
-    },
-    "outputSchema": {
-      "additionalProperties": true,
-      "type": "object"
-    }
-  },
-  {
     "name": "approve_policy",
-    "description": "Approve a policy only after its exact ID is confirmed by an authorized owner.\n\nBefore calling, verify the current actor is an owner and the exact readable ID exists\nas a policy. If the actor is not an owner or the policy is unknown, explain why and\ndo not call this tool. If it is already approved, report that state without a call.",
+    "description": "Approve the policy with this ID for an authorized owner.\n\nThe policy ID argument selects the row. Before calling, verify the current actor is\nan owner and the readable ID exists. If the actor is not an owner or the policy is\nunknown, explain why and do not call this tool. If it is already approved, report\nthat state without a call.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -432,42 +412,6 @@
     }
   },
   {
-    "name": "list_activity_followups",
-    "description": "Inspect pending and completed follow-ups linked to one activity.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "activity_id": {
-          "type": "string"
-        },
-        "limit": {
-          "default": 20,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "activity_id"
-      ],
-      "type": "object"
-    },
-    "outputSchema": {
-      "properties": {
-        "result": {
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "result"
-      ],
-      "type": "object",
-      "x-fastmcp-wrap-result": true
-    }
-  },
-  {
     "name": "list_pending_evaluation_failures",
     "description": "List stored evaluation failures that still need Lisa's follow-up.",
     "inputSchema": {
@@ -645,52 +589,6 @@
     }
   },
   {
-    "name": "propose_activity_followup",
-    "description": "Suggest a durable follow-up; it runs only after owner confirmation.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "activity_id": {
-          "type": "string"
-        },
-        "prompt": {
-          "type": "string"
-        },
-        "due_at": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "trigger_event_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "activity_id",
-        "prompt"
-      ],
-      "type": "object"
-    },
-    "outputSchema": {
-      "additionalProperties": true,
-      "type": "object"
-    }
-  },
-  {
     "name": "read_policy",
     "description": "Read workspace policy by default, or one agent's rules by exact name.",
     "inputSchema": {
@@ -783,7 +681,7 @@
   },
   {
     "name": "search_sessions",
-    "description": "Search session summaries using the same filters and page shape as TheLake's session API.",
+    "description": "Search bounded summaries for sessions stored in Lisa's local evidence store.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -863,8 +761,7 @@
             "start_time",
             "error_count",
             "duration",
-            "total_tokens",
-            "total_cost"
+            "total_tokens"
           ],
           "type": "string"
         },

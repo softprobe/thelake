@@ -12,13 +12,14 @@ command -v cargo >/dev/null 2>&1 || { echo "ERROR: cargo is required for Explore
 command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is required for Explorer UI E2E." >&2; exit 1; }
 ONLINE_E2E="${THELAKE_EXPLORER_E2E_ONLINE:-0}"
 E2E_DB_PORT=""
+LISA_DB_PORT=""
+LISA_POSTGRES_URL=""
 if [[ "$ONLINE_E2E" == "1" ]]; then
   command -v docker >/dev/null 2>&1 || { echo "ERROR: Docker is required for online evaluation E2E." >&2; exit 1; }
   if [[ -z "${GOOGLE_API_KEY:-}" && -n "${GEMINI_API_KEY:-}" ]]; then export GOOGLE_API_KEY="$GEMINI_API_KEY"; fi
   [[ -n "${GOOGLE_API_KEY:-}" ]] || { echo "ERROR: Set GOOGLE_API_KEY (or GEMINI_API_KEY) for live Gemini agent and evaluator calls." >&2; exit 1; }
   docker info >/dev/null 2>&1 || { echo "ERROR: Start Docker before online evaluation E2E." >&2; exit 1; }
-  LISA_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
-  export LISA_THELAKE_TOKEN="$LISA_TOKEN"
+  export LISA_SERVICE_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
   export THELAKE_DOGFOOD_INSTANCE_ID="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
   export THELAKE_DOGFOOD_DB_PORT=0
   if [[ "$(uname -s)" == "Linux" ]]; then
@@ -32,13 +33,14 @@ fi
 if [[ ! -x "$EXPLORER_DIR/node_modules/.bin/vite" ]]; then
   npm --prefix "$EXPLORER_DIR" ci --no-audit
 fi
-
 THELAKE_CACHE_ROOT="${THELAKE_CACHE_ROOT:-$HOME/.cache/thelake}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$THELAKE_CACHE_ROOT/target}"
 TMP_DIR=""
 E2E_STACK_STATE=""
 ARTIFACT_DIR="$ROOT/target/test-artifacts/explorer-ui/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 mkdir -p "$ARTIFACT_DIR"
+export LISA_STATIC_DIR="$ARTIFACT_DIR/lisa-static"
+LISA_FRONTEND_OUT_DIR="$LISA_STATIC_DIR" npm --prefix "$EXPLORER_DIR" run build:lisa-frontend
 WORKSPACE_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 SCHEMA="explorer_e2e_$(python3 -c 'import os; print(os.getpid())')"
 SERVER_PID=""
@@ -46,7 +48,6 @@ PORT_FILE=""
 PORT=""
 BACKEND=""
 LISA_PORT=""
-LISA_TOKEN="${LISA_TOKEN:-}"
 
 cleanup() {
   local status=$?
@@ -69,21 +70,31 @@ if [[ "$ONLINE_E2E" == "1" ]]; then
   COMPOSE_FILE="$ROOT/examples/lisa-dogfood/compose.yaml"
   POSTGRES_SERVICE="postgres"
   STACK_SUITE="explorer-online"
+  STACK_SERVICES=(--service "$POSTGRES_SERVICE" --published-port "$POSTGRES_SERVICE:5432")
 else
   COMPOSE_FILE="$ROOT/tests/compose.test.yaml"
   POSTGRES_SERVICE="explorer-postgres"
   STACK_SUITE="explorer-ui"
+  STACK_SERVICES=(
+    --service "$POSTGRES_SERVICE" --published-port "$POSTGRES_SERVICE:5432"
+    --service lisa-postgres --published-port lisa-postgres:5432
+  )
 fi
 stack_json="$(python3 scripts/test_stack.py start-compose \
   --suite "$STACK_SUITE" \
   --artifact-dir "$ARTIFACT_DIR" \
   --compose-file "$COMPOSE_FILE" \
-  --service "$POSTGRES_SERVICE" \
-  --published-port "$POSTGRES_SERVICE:5432" \
+  "${STACK_SERVICES[@]}" \
   --wait)"
 E2E_STACK_STATE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state_file"])' "$stack_json")"
 TMP_DIR="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["scratch_dir"])' "$stack_json")"
-E2E_DB_PORT="$(python3 -c 'import json,sys; s=json.loads(sys.argv[1]); k=s["services"][0]+":5432"; print(s["ports"][k][0].rsplit(":",1)[1])' "$stack_json")"
+E2E_DB_PORT="$(python3 -c 'import json,sys; s=json.loads(sys.argv[1]); print(s["ports"][sys.argv[2]+":5432"][0].rsplit(":",1)[1])' "$stack_json" "$POSTGRES_SERVICE")"
+if [[ "$ONLINE_E2E" == "1" ]]; then
+  LISA_POSTGRES_URL="postgresql://ducklake:ducklake@127.0.0.1:$E2E_DB_PORT/ducklake"
+else
+  LISA_DB_PORT="$(python3 -c 'import json,sys; s=json.loads(sys.argv[1]); print(s["ports"]["lisa-postgres:5432"][0].rsplit(":",1)[1])' "$stack_json")"
+  LISA_POSTGRES_URL="postgresql://lisa_test:lisa_test@127.0.0.1:$LISA_DB_PORT/postgres"
+fi
 mkdir -p "$TMP_DIR/warehouse"
 
 cat > "$TMP_DIR/config.yaml" <<EOF
@@ -135,14 +146,10 @@ service_args=(
   --thelake-bin "$THELAKE_BIN"
   --config-file "$TMP_DIR/config.yaml"
   --workspace-id "$WORKSPACE_ID"
-  --lisa-token "$LISA_TOKEN"
+  --lisa-postgres-url "$LISA_POSTGRES_URL"
   --lisa-data-dir "$TMP_DIR/lisa-workspaces"
 )
-SERVICE_PYTHON=python3
-if [[ "$ONLINE_E2E" == "1" ]]; then
-  service_args+=(--online --lisa-postgres-url "postgresql://ducklake:ducklake@127.0.0.1:$E2E_DB_PORT/ducklake")
-  SERVICE_PYTHON="$ROOT/lisa/.venv/bin/python"
-fi
+SERVICE_PYTHON="$ROOT/lisa/.venv/bin/python"
 RUST_LOG="${RUST_LOG:-info}" "$SERVICE_PYTHON" scripts/run-explorer-e2e-services.py "${service_args[@]}" &
 SERVER_PID=$!
 
@@ -160,12 +167,8 @@ if [[ ! -s "$PORT_FILE" ]]; then
 fi
 PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["thelake"])' "$PORT_FILE")"
 BACKEND="http://127.0.0.1:$PORT"
-if [[ "$ONLINE_E2E" == "1" ]]; then
-  LISA_PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lisa"])' "$PORT_FILE")"
-  export THELAKE_E2E_COMPOSE_PROJECT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["project_name"])' "$stack_json")"
-  export THELAKE_E2E_LAKE_PORT="$PORT"
-fi
-
+LISA_PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lisa"])' "$PORT_FILE")"
+export THELAKE_LISA_E2E_URL="http://127.0.0.1:$LISA_PORT"
 ready=0
 for _ in $(seq 1 180); do
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -185,25 +188,23 @@ if [[ "$ready" != 1 ]]; then
   exit 1
 fi
 
-if [[ "$ONLINE_E2E" == "1" ]]; then
-  lisa_ready=0
-  for _ in $(seq 1 90); do
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-      cat "$ARTIFACT_DIR/lisa.log" >&2
-      echo "ERROR: Lisa exited before becoming ready." >&2
-      exit 1
-    fi
-    if curl -fsS "http://127.0.0.1:$LISA_PORT/health" >/dev/null 2>&1; then
-      lisa_ready=1
-      break
-    fi
-    sleep 1
-  done
-  if [[ "$lisa_ready" != "1" ]]; then
+LISA_READY=0
+for _ in $(seq 1 90); do
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     cat "$ARTIFACT_DIR/lisa.log" >&2
-    echo "ERROR: Lisa did not become ready." >&2
+    echo "ERROR: Lisa exited before becoming ready." >&2
     exit 1
   fi
+  if curl -fsS "$THELAKE_LISA_E2E_URL/health" >/dev/null 2>&1; then
+    LISA_READY=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$LISA_READY" != "1" ]]; then
+  cat "$ARTIFACT_DIR/lisa.log" >&2
+  echo "ERROR: Lisa did not become ready." >&2
+  exit 1
 fi
 
 export THELAKE_E2E_URL="$BACKEND"

@@ -245,48 +245,7 @@ CREATE TABLE lisa.activity_context (
     UNIQUE (activity_id, seq)
 );
 
--- Reserved generic action-approval record. Current policy approval is stored on
--- lisa.policies.approved; this table has no active workflow writer yet.
-CREATE TABLE lisa.approval_requests (
-    id uuid PRIMARY KEY,
-    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
-    action jsonb NOT NULL,
-    action_hash text NOT NULL,
-    scope text NOT NULL,
-    status text NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'revoked', 'expired', 'consumed')),
-    request_summary text NOT NULL,
-    requested_at timestamptz NOT NULL DEFAULT now(),
-    expires_at timestamptz NOT NULL,
-    resolved_at timestamptz,
-    resolved_by text,
-    decision_ref text,
-    consumed_at timestamptz
-);
-
--- Workspace-approved one-time continuations and scheduled follow-up work.
-CREATE TABLE lisa.activity_followups (
-    id uuid PRIMARY KEY,
-    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
-    due_at timestamptz,
-    trigger_event_type text,
-    prompt text NOT NULL,
-    status text NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'approved', 'claimed', 'completed', 'cancelled')),
-    requested_by text NOT NULL,
-    requested_at timestamptz NOT NULL DEFAULT now(),
-    approved_at timestamptz,
-    claimed_at timestamptz,
-    completed_at timestamptz,
-    CHECK ((due_at IS NOT NULL) <> (trigger_event_type IS NOT NULL)),
-    UNIQUE (activity_id, due_at)
-);
-CREATE INDEX activity_followups_due_idx
-    ON lisa.activity_followups(due_at) WHERE status = 'approved';
-CREATE UNIQUE INDEX activity_followups_event_idx
-    ON lisa.activity_followups(activity_id, trigger_event_type)
-    WHERE trigger_event_type IS NOT NULL;
-
--- Lisa-owned transactional outbox for retrying score delivery to TheLake.
+-- Lisa-owned write-ahead journal for idempotent local result recovery.
 CREATE TABLE lisa.score_outbox (
     id uuid PRIMARY KEY,
     evaluation_id uuid NOT NULL REFERENCES lisa.evaluation_runs(id) ON DELETE CASCADE,
@@ -356,16 +315,6 @@ FROM lisa.activity_monitor_carrier_user_messages;
 CREATE VIEW lisa.readable_activity_context AS
 SELECT id, activity_id, seq, kind, source_ref, content_hash, created_at
 FROM lisa.activity_context;
-
-CREATE VIEW lisa.readable_approvals AS
-SELECT id, activity_id, scope, status, request_summary,
-       requested_at, expires_at, resolved_at, resolved_by, decision_ref
-FROM lisa.approval_requests;
-
-CREATE VIEW lisa.readable_activity_followups AS
-SELECT id, activity_id, due_at, trigger_event_type, prompt, status, requested_by,
-       requested_at, approved_at, completed_at
-FROM lisa.activity_followups;
 
 CREATE VIEW lisa.readable_evaluations AS
 SELECT activity_id, session_id, policy_id, id AS evaluation_id,

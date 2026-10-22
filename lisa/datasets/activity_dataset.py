@@ -30,7 +30,9 @@ class ActivityTurn(StrictModel):
     tool_order: list[str] = Field(default_factory=list)
     tool_call_counts: dict[str, int] = Field(default_factory=dict)
     tool_arguments_must_include: list[str] = Field(default_factory=list)
+    tool_arguments_must_not_include: list[str] = Field(default_factory=list)
     tool_queries_must_filter_sessions: list[str] = Field(default_factory=list)
+    expected_tool_errors: list[str] = Field(default_factory=list)
     reply_must_include: list[str] = Field(default_factory=list)
     reply_must_not_include: list[str] = Field(default_factory=list)
 
@@ -43,14 +45,6 @@ class ActivityExpectation(StrictModel):
     timeline_text_contains: list[str] = Field(default_factory=list)
 
 
-class FollowupExpectation(StrictModel):
-    activity_title_contains: str
-    status: Literal["pending", "approved", "completed", "cancelled"]
-    count: int | None = None
-    trigger_event_type: str | None = None
-    prompt_contains: list[str] = Field(default_factory=list)
-
-
 class PolicyExpectation(StrictModel):
     name_contains: str
     approved: bool
@@ -59,7 +53,6 @@ class PolicyExpectation(StrictModel):
 class ActivityLabels(StrictModel):
     activity_count: int | None = None
     activities: list[ActivityExpectation] = Field(default_factory=list)
-    followups: list[FollowupExpectation] = Field(default_factory=list)
     policies: list[PolicyExpectation] = Field(default_factory=list)
     pending_policy_count: int | None = None
     policy_count: int | None = None
@@ -78,7 +71,7 @@ class HistoricalEvaluationSeed(StrictModel):
 
 class ActivityBenchmarkCase(StrictModel):
     case_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]+$")
-    category: Literal["create", "update", "policy", "followup", "continuity", "evaluation", "request_resolution"]
+    category: Literal["create", "update", "policy", "continuity", "evaluation", "request_resolution", "database"]
     # Agentic held-out split is "benchmark", never "test" (reserved for pytest).
     split: Literal["development", "benchmark"]
     turns: list[ActivityTurn] = Field(min_length=1, max_length=12)

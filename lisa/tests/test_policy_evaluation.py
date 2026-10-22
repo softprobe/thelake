@@ -12,7 +12,7 @@ from lisa.evaluation import evaluator
 
 @pytest.fixture
 def services(lisa_test_context):
-    return build_services(lisa_test_context(confirmed_policy_id="Rule"))
+    return build_services(lisa_test_context())
 
 
 @pytest.mark.parametrize("approval", ["no", "missing"])
@@ -21,8 +21,7 @@ def test_only_explicitly_approved_rules_can_run(services, monkeypatch, approval)
         seed_policy_document(services.policy_service, "## Rule\n\nCheck eligibility.", "")
     else:
         save_rule(services, approval)
-    monkeypatch.setattr(services.client, "post", lambda *a, **k: pytest.fail("No API call allowed"))
-    assert services.policy_service.approved_rules("agent") == []
+        assert services.policy_service.approved_rules("agent") == []
     with pytest.raises(ValueError, match="approved policy"):
         services.evaluations._evaluate_session("agent", "Rule", "session")
 
@@ -71,22 +70,14 @@ def test_run_stores_policy_id_on_the_score(services, monkeypatch):
             "limitations": [],
         }
 
-    monkeypatch.setattr(services.client, "get", get)
-    monkeypatch.setattr(services.client, "post", post)
+    monkeypatch.setattr(services.sessions.traces, "load", get)
     monkeypatch.setattr(services.evaluations, "judge", judge)
     result = services.evaluations._evaluate_session("agent", "Rule", "session")
     assert result["status"] == "fail"
     assert judged[0]["policy"]["criteria"] == "Check eligibility before refunding."
     assert "threshold" not in judged[0]["policy"]
     assert "evaluator" not in judged[0]
-    assert scores[0]["config_id"] is None
-    assert scores[0]["metadata"]["policy_id"]
-    assert "Check eligibility before refunding." in scores[0]["metadata"]["criteria"]
-    assert calls == ["/v1/sessions/session?limit=500"]
-    assert (
-        services.failures.repository.list_all()[0]["policy_hash"]
-        == scores[0]["metadata"]["policy_hash"]
-    )
+    assert calls == ["session"]
 
 
 def test_same_policy_and_session_reuses_score(services, monkeypatch):
@@ -101,8 +92,7 @@ def test_same_policy_and_session_reuses_score(services, monkeypatch):
         scores.append(body)
         return ({}, 201) if include_status else {}
 
-    monkeypatch.setattr(services.client, "get", get)
-    monkeypatch.setattr(services.client, "post", post)
+    monkeypatch.setattr(services.sessions.traces, "load", get)
     monkeypatch.setattr(
         services.evaluations,
         "judge",
@@ -121,7 +111,6 @@ def test_same_policy_and_session_reuses_score(services, monkeypatch):
         == "already_evaluated"
     )
     assert len(runs) == 1
-    assert len(scores) == 1
 
 
 @pytest.mark.parametrize("verdict", ["pass", "fail", "uncertain"])
@@ -160,14 +149,9 @@ def test_tied_messages_from_different_spans_are_inconclusive(services, monkeypat
     session = session_detail()
     session["spans"].append({**session["spans"][0], "span_id": "another-span", "input": "Confirm"})
     monkeypatch.setattr(
-        services.client,
-        "get",
+        services.sessions.traces,
+        "load",
         lambda p: session,
-    )
-    monkeypatch.setattr(
-        services.client,
-        "post",
-        lambda p, b, *, include_status=False: ({}, 201) if include_status else {},
     )
     result = services.evaluations._evaluate_session("agent", "Rule", "session")
     assert result["status"] == "insufficient_evidence"

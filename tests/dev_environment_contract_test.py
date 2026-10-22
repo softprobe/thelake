@@ -16,11 +16,14 @@ def test_standard_dev_stack_starts_thelake_and_lisa_together():
     assert "platform: linux/amd64" in compose
     assert "service_completed_successfully" in compose
     assert "postgresql://lisa_writer:" in compose
-    assert "LISA_QA_ENABLED=${LISA_QA_ENABLED:-0}" in compose
+    assert "LISA_SERVICE_TOKEN" in compose
+    assert "LISA_QA_ENABLED" not in compose
+    assert "LISA_QA_CRON" not in compose
+    assert "LISA_ACTIVITY_FOLLOWUPS_ENABLED" not in compose
     assert "lisa-provision" in compose and "backend_net" in compose
     assert '"127.0.0.1:8080:8080"' in compose
-    assert "LISA_ACTIVITY_FOLLOWUPS_ENABLED=${LISA_ACTIVITY_FOLLOWUPS_ENABLED:-1}" in compose
     assert "LISA_OWNER_USER_IDS=${LISA_OWNER_USER_IDS:-local}" in compose
+    assert "LISA_EXPLORER_URL=${LISA_EXPLORER_URL-http://127.0.0.1:${THELAKE_DEV_PORT:-8090}/explorer/}" in compose
     dev_down = makefile.split("dev-down:", 1)[1].split("\n\n", 1)[0]
     assert "stop lisa otlp-backend" in dev_down
     assert " down" not in dev_down
@@ -63,11 +66,12 @@ def test_dev_environment_init_preserves_existing_keys_and_generates_local_creden
     assert values["GEMINI_API_KEY"] == "local-model-key"
     assert values["CUSTOM_VALUE"] == "keep-me"
     assert values["THELAKE_DEFAULT_WORKSPACE_ID"]
-    assert values["LISA_THELAKE_TOKEN"]
+    assert values["LISA_SERVICE_TOKEN"]
     assert values["LISA_DATABASE_WRITER_PASSWORD"]
     assert values["LISA_DATABASE_READER_PASSWORD"]
-    assert values["LISA_QA_ENABLED"] == "0"
-    assert values["LISA_ACTIVITY_FOLLOWUPS_ENABLED"] == "1"
+    assert "LISA_QA_ENABLED" not in values
+    assert "LISA_QA_CRON" not in values
+    assert "LISA_ACTIVITY_FOLLOWUPS_ENABLED" not in values
     assert values["THELAKE_DEV_POSTGRES_PORT"] == "55432"
     assert values["THELAKE_LISA_PUBLIC_PORT"] == "18083"
     assert values["LISA_OWNER_USER_IDS"] == "local"
@@ -103,7 +107,7 @@ def test_dev_environment_init_derives_browser_urls_from_selected_ports(tmp_path)
         for line in env_file.read_text(encoding="utf-8").splitlines()
         if line and not line.startswith("#") and "=" in line
     )
-    assert values["LISA_PUBLIC_URL"] == "http://127.0.0.1:19082/v1"
+    assert "LISA_PUBLIC_URL" not in values
     assert values["LISA_CORS_ORIGINS"] == "http://127.0.0.1:19090,http://localhost:19090"
 
 
@@ -129,5 +133,12 @@ def test_dev_environment_preserves_existing_port_and_url_settings(tmp_path):
     )
     assert values["THELAKE_DEV_POSTGRES_PORT"] == "5432"
     assert values["THELAKE_LISA_PUBLIC_PORT"] == "18082"
-    assert values["LISA_PUBLIC_URL"] == "http://127.0.0.1:18082/v1"
+    assert "LISA_PUBLIC_URL" not in values
+
+
+def test_thelake_does_not_retain_lisa_service_authentication():
+    auth_source = (ROOT / "src/api/auth.rs").read_text(encoding="utf-8")
+    assert "LISA_THELAKE_TOKEN" not in auth_source
+    assert "lisa_service_auth_for_route" not in auth_source
+    assert "x-thelake-workspace-signature" not in auth_source
 

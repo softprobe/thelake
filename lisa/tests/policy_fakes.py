@@ -60,6 +60,23 @@ class FakeSessionClient:
         self.posts.append((path, payload))
         return ({}, 201) if include_status else {}
 
+    def load(self, session_id):
+        self.get_calls.append(session_id)
+        if self.session_detail.get("session_id") not in (None, session_id):
+            raise FileNotFoundError(session_id)
+        return self.session_detail
+
+    def list_manifests(self):
+        detail = self.session_detail
+        if not detail:
+            return []
+        return [{
+            "session_id": detail.get("session_id", "session-1"),
+            "agent_name": (detail.get("agent_names") or [""])[0],
+            "received_at": "2026-10-21T00:00:00Z",
+            "payload_hash": "test-payload-hash",
+        }]
+
 
 class FakeTriager:
     def __init__(self, selected):
@@ -94,7 +111,6 @@ def make_evaluation_service(**kwargs):
     triager = kwargs.pop("policy_triage", FakeTriager([]))
     sessions = SessionService(client, build_events) if build_events else SessionService(client)
     return EvaluationService(
-        client=client,
         sessions=sessions,
         policy_triage=triager,
         **kwargs,

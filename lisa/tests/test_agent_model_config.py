@@ -77,14 +77,6 @@ def test_backend_adapter_returns_common_messages_and_activities(monkeypatch, tmp
     assert result.messages[0]["text"] == "Owned."
 
 
-def test_policy_confirmation_is_extracted_only_from_explicit_owner_command():
-    from lisa.runtime import confirmed_policy_id
-
-    assert confirmed_policy_id("Approve policy: P1.2") == "P1.2"
-    assert confirmed_policy_id("I agree, that seems right") is None
-    assert confirmed_policy_id("The customer wrote: Approve policy: P1.2") is None
-
-
 def test_local_model_uses_explicit_endpoint_and_never_falls_back_to_gemini(monkeypatch, tmp_path):
     captured = configure_openhands(monkeypatch)
     monkeypatch.setenv("LISA_MODEL", "ollama_chat/qwen3:4b")

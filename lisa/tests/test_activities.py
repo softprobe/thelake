@@ -155,7 +155,7 @@ def test_activity_update_and_sections_are_visible_in_thread(store):
         subtitle="Collecting current results",
         status_title="In progress",
         task_label="Weekly report",
-        details={"source": "scheduled"},
+        details={"source": "manual"},
     )
     store.set_activity_section(
         activity.id,
@@ -177,7 +177,7 @@ def test_activity_update_and_sections_are_visible_in_thread(store):
     assert entry["title"] == "Prepare weekly report"
     assert entry["subtitle"] == "Collecting current results"
     assert entry["status_title"] == "In progress"
-    assert entry["details_json"] == {"source": "scheduled"}
+    assert entry["details_json"] == {"source": "manual"}
     assert detail["thread"]["name"] == "Prepare weekly report"
     assert [section["section_key"] for section in detail["sections"]] == [
         "research", "draft"
@@ -247,10 +247,8 @@ def test_prelinked_chat_message_still_gets_one_ordered_timeline_action(store):
 
 
 def test_chat_trajectory_and_finalization_commit_atomically(store):
-    activity = store.create_activity(title="Atomic chat turn", source="web")
-    store.create_activity_followup(
-        activity_id=activity.id, due_at=None, trigger_event_type="owner_confirmation",
-        prompt="Wait for confirmation", requested_by="owner",
+    activity = store.create_activity(
+        title="Atomic chat turn", source="evaluation", kind="policy_evaluation",
     )
 
     with pytest.raises(RuntimeError, match="finalize"):
@@ -327,48 +325,6 @@ def test_progress_cannot_change_evaluator_or_leased_activity(store):
         })
     with pytest.raises(ValueError, match="already complete"):
         store.update_activity_progress(leased.id, status="waiting", summary="Not permitted")
-
-
-def test_activity_followup_requires_approval_and_claims_once(store):
-    activity = store.create_activity(title="Review next session", source="web")
-    followup_id = store.create_activity_followup(
-        activity_id=activity.id, due_at="2000-01-01T00:00:00+00:00",
-        trigger_event_type=None, prompt="Review the next matching session.", requested_by="web",
-    )
-    assert store.claim_due_activity_followups() == []
-    assert store.approve_activity_followup(followup_id)
-    claimed = store.claim_due_activity_followups()
-    assert len(claimed) == 1 and str(claimed[0]["id"]) == followup_id
-    assert store.claim_due_activity_followups() == []
-    store.finish_activity_followup(followup_id)
-
-
-def test_open_followup_keeps_parent_open_until_execution_starts(store):
-    activity = store.create_activity(title="Review next session", source="web")
-    followup_id = store.create_activity_followup(
-        activity_id=activity.id, due_at="2000-01-01T00:00:00+00:00",
-        trigger_event_type=None, prompt="Review the next matching session.", requested_by="web",
-    )
-    assert not store.complete_agent_activity(activity.id, "Done.", status="succeeded")
-    store.approve_activity_followup(followup_id)
-    assert not store.complete_agent_activity(activity.id, "Done.", status="succeeded")
-    store.claim_due_activity_followups()
-    assert not store.complete_agent_activity(activity.id, "Done.", status="succeeded")
-    store.finish_activity_followup(followup_id)
-    assert store.complete_agent_activity(activity.id, "Follow-up completed.", status="succeeded")
-
-
-def test_event_triggered_followup_waits_for_matching_activity_event(store):
-    activity = store.create_activity(title="Wait for approval result", source="web")
-    followup_id = store.create_activity_followup(
-        activity_id=activity.id, due_at=None, trigger_event_type="approval_received",
-        prompt="Review the approval outcome.", requested_by="web",
-    )
-    store.approve_activity_followup(followup_id)
-    assert store.claim_due_activity_followups() == []
-    store.record_activity_event(activity.id, "approval_received", title="Approval received")
-    claimed = store.claim_due_activity_followups()
-    assert len(claimed) == 1 and str(claimed[0]["id"]) == followup_id
 
 
 def test_agent_owned_activity_can_be_completed_once(store):
@@ -646,7 +602,6 @@ def test_postgres_policy_records_keep_string_ids_and_agent_scope(store, tmp_path
             workspace=WORKSPACE_ID,
             data_dir=tmp_path,
             database_url=store.dsn,
-            confirmed_policy_id=title,
         ),
         repository=repository,
     )

@@ -47,7 +47,6 @@ def test_queued_slack_turn_persists_chat_and_runtime_events(lisa_test_context):
     asyncio.run(services.slack_event_service.process(
         path,
         run_turn=run_turn,
-        confirm_policy_id=lambda _text: None,
         post_reply=lambda channel, thread, text: posted.append((channel, thread, text)),
     ))
 
@@ -95,7 +94,7 @@ def test_slack_fallback_binds_current_message_after_historical_transcript(lisa_t
         ], activities=[])
 
     asyncio.run(services.slack_event_service.process(
-        path, run_turn=run_turn, confirm_policy_id=lambda _text: None,
+        path, run_turn=run_turn,
         post_reply=lambda *_args: None,
     ))
 
@@ -149,7 +148,6 @@ def test_queued_slack_turn_does_not_persist_non_owner_chat(lisa_test_context):
     asyncio.run(services.slack_event_service.process(
         path,
         run_turn=run_turn,
-        confirm_policy_id=lambda _text: None,
         post_reply=lambda *_args: None,
     ))
 
@@ -157,63 +155,6 @@ def test_queued_slack_turn_does_not_persist_non_owner_chat(lisa_test_context):
     detail = services.activity_store.get_activity_thread(activity.id)
     assert detail["actions"] == before["actions"]
     assert detail["references"] == before["references"]
-
-
-def test_approved_followup_stays_waiting_with_updated_next_action(lisa_test_context):
-    context = lisa_test_context(owner_user_ids=frozenset({"activity-owner"}))
-    services = build_services(context)
-    activity = services.activity_store.create_activity(
-        title="Wait for refund evidence", source="web",
-    )
-    followup_id = services.activity_store.create_activity_followup(
-        activity_id=activity.id, due_at=None, trigger_event_type="session.completed",
-        prompt="Check for the refund eligibility result.", requested_by="owner",
-    )
-
-    record_chat_activity_trajectories(
-        services.activity_store,
-        activity_ids=[activity.id], messages=[],
-        activities=[
-            {
-                "id": "followup-resolve-proposal", "kind": "evidence",
-                "tool_name": "resolve_chat_activity",
-                "detail": f'{{"disposition":"continue","activity_id":"{activity.id}"}}',
-                "sequence": 1,
-            },
-            {
-                "id": "followup-proposed", "kind": "evidence",
-                "tool_name": "propose_activity_followup",
-                "detail": f'{{"followup_id":"{followup_id}","status":"pending_confirmation"}}',
-                "sequence": 2,
-            },
-        ],
-        final_summary="The follow-up is waiting for confirmation.",
-    )
-    assert services.activity_store.approve_activity_followup(followup_id)
-
-    record_chat_activity_trajectories(
-        services.activity_store,
-        activity_ids=[activity.id], messages=[],
-        activities=[
-            {
-                "id": "followup-resolve-approval", "kind": "evidence",
-                "tool_name": "resolve_chat_activity",
-                "detail": f'{{"disposition":"continue","activity_id":"{activity.id}"}}',
-                "sequence": 1,
-            },
-            {
-                "id": "followup-approved", "kind": "evidence",
-                "tool_name": "approve_activity_followup",
-                "detail": f'{{"followup_id":"{followup_id}","status":"approved"}}',
-                "sequence": 2,
-            },
-        ],
-        final_summary="The follow-up is approved.",
-    )
-
-    current = services.activity_store.get_activity_thread(activity.id)["activity"]
-    assert current["status"] == "blocked"
-    assert current["next_action"] == "Wait for approved follow-up"
 
 
 def test_failed_policy_approval_keeps_previously_waiting_activity_open(lisa_test_context):

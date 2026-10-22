@@ -12,11 +12,6 @@ WITH finished AS (
           WHERE evaluation.activity_id = activity.id
       )
       AND (activity.lease_owner IS NULL OR activity.lease_expires_at <= now())
-      AND NOT EXISTS (
-          SELECT 1 FROM lisa.activity_followups AS followup
-          WHERE followup.activity_id = activity.id
-            AND followup.status IN ('pending', 'approved', 'claimed')
-      )
     RETURNING activity.id, activity.next_event_seq - 1 AS seq
 )
 INSERT INTO lisa.activity_events(activity_id, seq, event_type, title, summary, actor)

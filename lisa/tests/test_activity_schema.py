@@ -26,10 +26,9 @@ def test_activities_are_generic_records_and_evaluations_link_to_them():
     assert "readable_evaluations" in schema
 
 
-def test_schema_has_durable_followups_and_direct_policy_approval():
+def test_schema_has_direct_policy_approval():
     schema = _schema_sql()
-    assert "lisa.activity_followups" in schema
-    assert "trigger_event_type text" in schema
+    assert "lisa.activity_followups" not in schema
     assert "approved boolean NOT NULL DEFAULT false" in schema
     assert "^P1[.][1-9][0-9]*([.][1-9][0-9]*)?$" in schema
     assert "UNIQUE (scope, target_agent_name, name)" in schema

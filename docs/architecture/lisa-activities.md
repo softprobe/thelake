@@ -7,8 +7,8 @@ link to one or more evaluation runs, but its identity is independent of those
 runs and of any session or policy.
 
 The main chat and each Slack thread remain separate communication channels.
-Postgres stores shared activity status, events, evaluation results,
-and score delivery state. For each distinct user request in a web or Slack turn, Lisa resolves an open
+Lisa's Postgres stores activity status, events, evaluation results,
+and local result-journal state. For each distinct user request in a web or Slack turn, Lisa resolves an open
 matching activity or creates a new one before task-specific work. Independent
 requests in one message receive separate activities. A clearly matching open
 request can continue; task switches, uncertain continuation, and closed work
@@ -27,8 +27,8 @@ identity and state; files are private artifacts referenced by the activity.
 ## Evaluation relationships
 
 `evaluate_session` owns one activity for the action. In chat it reuses the
-active request activity resolved for the turn; scheduled invocations create an
-evaluation activity directly. Its event timeline records the policy triage decisions used by that action, including cached
+active request activity resolved for the turn; pushed session traces and
+explicit evaluation requests create an evaluation activity directly. Its event timeline records the policy triage decisions used by that action, including cached
 negatives. Lisa judges only escalated policies. A no-violation decision
 remains visible in the event timeline and does not create a pass score.
 Decisions provider attempts are linked to the same activity record, and a
@@ -39,15 +39,14 @@ failed attempt is recorded there without creating a cache entry.
 | `lisa.activities` | Inspectable Lisa action and overall lifecycle | `id` |
 | `lisa.evaluation_triage` | Durable pair-only Decisions cache used to filter later calls | `(session_id, policy_id)` |
 | `lisa.evaluation_runs` | Judge result linked to the activity that requested it, deduplicated across actions by request identity | `id`; unique `(policy_hash, session_id, request_key)` |
-| `lisa.score_outbox` | Exact pending score payload for one evaluation result | `id`; unique `idempotency_key`; references `evaluation_id` |
+| `lisa.score_outbox` | Exact locally staged result payload used to recover and finalize one evaluation result | `id`; unique `idempotency_key`; references `evaluation_id` |
 | `lisa.activity_events` | Ordered timeline of Lisa's actions and outcomes | `(activity_id, seq)` |
 | `lisa.activity_context` | Inspectable activity inputs and checkpoints | `id`; ordered by `(activity_id, seq)` |
-| `lisa.activity_followups` | Owner-approved due-time or event-triggered continuation | `id`; one-shot claimed status |
 
 The same deduplicated evaluation result may be returned during a later activity
-without creating another judge result or score; that activity records the reuse
-in its event timeline. Score delivery remains attached to each evaluation
-result, so it can retry its own stored payload and idempotency key.
+without creating another judge result; that activity records the reuse in its
+event timeline. The outbox is Lisa-local result staging and recovery state. It
+does not deliver scores to TheLake or another centralized service.
 
 The read-only `lisa.readable_activities`, `lisa.readable_activity_events`,
 feed, monitor, and link views, `lisa.readable_activity_context`, and
@@ -83,8 +82,8 @@ classified. The kind check protects the interval before an evaluation run
 exists; evaluator-managed lifecycles are completed by `EvaluationService`.
 After a successful owner chat reply, the conversation runtime completes any
 still-open chat request. It leaves work in `waiting` when tool arguments or
-results record an outstanding next action, clarification, policy approval, or
-follow-up confirmation. A `running` progress update with a non-empty
+results record an outstanding next action, clarification, or policy approval.
+A `running` progress update with a non-empty
 `next_action` remains open in the feed with that action; an explicit terminal
 `complete_activity` result closes it.
 An explicit deferred `complete_activity` outcome is applied to the activity ID
@@ -104,47 +103,44 @@ Unclaimed finalization can close queued or resumed waiting work, but only when
 no live worker lease owns it; an active evaluator must finish with its fencing
 token. This preserves one lifecycle owner across chat continuations and worker
 retries.
-The read-only `lisa_db` resource documents matching views. Explorer renders the
-user-facing activity feed; MCP and database views are Lisa's inspection
-surfaces. Presentation updates cannot set lifecycle status.
+The read-only `lisa_db` resource documents matching views. Lisa's own frontend
+renders its activity feed; MCP and database views are Lisa's inspection
+surfaces. TheLake Explorer remains a separate trace-inspection application and
+does not proxy Lisa workspace activity. Presentation updates cannot set
+lifecycle status.
 
 The main chat and each Slack thread keep independent transcripts but share
-activity IDs. Explorer exposes the workspace feed and activity timeline through
-authenticated `/v1/activities` endpoints.
-
-`activity_followups` stores owner-confirmed one-time follow-up requests. Lisa may
-suggest a due check, but the pending record does not run until the owner confirms
-`Confirm follow-up: <id>` in either chat. The scheduler claims due rows with
-`FOR UPDATE SKIP LOCKED`, resumes the linked activity through the persistent
-main conversation, and posts the result to `LISA_SLACK_ACTIVITY_CHANNEL_ID` and
-optional `LISA_SLACK_ACTIVITY_THREAD_TS`. Failed turns release their claim for
-retry. Scheduled turns cannot write policy.
+activity IDs. Lisa serves its own activity and chat APIs from its standalone
+Python service; the Explorer service does not own or expose Lisa activity data.
 
 Policy lifecycle state lives in `lisa.policies`: readable policy IDs, criteria,
-and approval state are the complete source of truth. A policy record has no
-activity foreign key; substantive policy chat and actions can be recorded in a
-generic activity timeline. A policy update keeps its policy ID and row in place.
+and approval state are the complete source of truth. The table has no
+`archived_at` field; deletion removes its row. Explicit database diagnostics may
+read the table through `lisa_db` using its approved columns, while policy
+workflows use the policy tools. A policy record has no activity foreign key;
+substantive policy chat and actions can be recorded in a generic activity
+timeline. A policy update keeps its policy ID and row in place.
 Changed criteria invalidate
 that policy's cached triage decisions, while stored evaluation outputs retain
 the criteria used for their original judgment. If an approved policy changes,
-its `approved` value becomes false until the owner sends
-`Approve policy: <policy_id>` as an exact standalone command. Lisa approves the
+its `approved` value becomes false until an authorized owner asks Lisa to
+approve that same ID. Lisa calls `approve_policy` with that ID and approves the
 same row. Policy lifecycle state remains on the policy row.
 While a policy created or updated by the owner is unapproved, its chat activity
 stays open in `waiting` with owner approval as its next action. A later approval
-continues that activity across web and Slack; extra words leave it waiting.
+continues that activity across web and Slack until the policy is approved.
 Lisa closes the activity after the requested policy workflow reaches its
 terminal state.
 If an approval attempt fails while the activity is already waiting, the
 activity keeps its existing next action instead of being closed as a failed
-chat request. A confirmed follow-up stays blocked with `Wait for approved
-follow-up` until the scheduled work reaches a terminal state.
+chat request.
 
-Owner confirmation checks both the exact command and the authenticated actor.
+Policy approval checks the authenticated owner on a web or Slack turn. The
+policy ID is the `approve_policy` argument.
 Configure `LISA_OWNER_USER_IDS` with comma-separated identity subjects; web
 turns use the signed assertion subject and Slack turns use the Slack user ID.
-Workspace and channel access alone do not authorize policy or follow-up
-approval. Configure matching identifiers for each channel the owner uses.
+Workspace and channel access alone do not authorize policy approval. Configure
+matching identifiers for each channel the owner uses.
 
 ## Triage and retry behavior
 
@@ -160,10 +156,11 @@ model or prompt changes do not invalidate a stored decision for the same pair.
 Failed or incomplete Decisions responses create no cache row. Concurrent first
 calls may both reach Decisions; the first persisted decision is canonical.
 
-Each escalated pair retains its existing evaluation request identity and score
-outbox. A pending score is retried from its stored payload and idempotency key;
-Lisa does not judge again after the outbox payload exists. The activity finishes
-after its evaluation runs have terminal results and acknowledged score writes.
+Each escalated pair retains its existing evaluation request identity and local
+result outbox. A pending result is recovered from its stored payload and
+idempotency key; Lisa does not judge again after the result payload exists. The
+activity finishes after its evaluation runs have terminal results and the local
+result records are acknowledged.
 
 ## Chat activity trajectory
 

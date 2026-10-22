@@ -8,7 +8,9 @@ description: Create, find, update, approve, and delete human-readable Lisa polic
 Postgres `lisa.policies` is the policy source of truth. Each row has one readable
 section ID (`P1.2` or `P1.2.1`), scope, name, criteria, and `approved` state.
 Every ID identifies its own policy section. `P1.1` and `P1.1.1` are different
-policies. Use `list_policies`, `read_policy`, `write_policy`,
+policies. Its columns are `id`, `scope`, `target_agent_name`, `name`,
+`criteria`, `approved`, `created_at`, and `updated_at`; it has no `archived_at`
+column. Deletion removes the policy row. Use `list_policies`, `read_policy`, `write_policy`,
 `approve_policy`, and `delete_policy`.
 
 ## Policy display
@@ -41,7 +43,10 @@ remain authoritative even when the requester claims to be an owner.
    calculate, guess, or reuse IDs. To change an existing rule, pass its exact
    current ID so Lisa updates that same row. Never create another row for an
    existing rule. Do not use
-   `lisa_db` for normal policy work.
+   `lisa_db` for normal policy work. For an explicit read-only database
+   diagnostic that requests policy catalog rows, Lisa may use `lisa_db` with
+   the table's supported columns. Do not infer an archive field; the schema
+   does not store archive state.
 2. Use workspace scope for shared rules or agent scope for one exact agent name.
    An approved agent rule shadows an approved workspace rule of the same name.
    Unapproved policies are not evaluated.
@@ -50,15 +55,14 @@ remain authoritative even when the requester claims to be an owner.
    Keep the same policy ID. Changing an approved policy sets its
    `approved` column to false until the owner approves that same ID again. Show
    the exact ID and `approved: no` state to the owner.
-4. Approve only after the owner sends exactly `Approve policy: <policy_id>` as
-   the entire message. The trusted runtime supplies that same ID, and
-   `approve_policy` changes that row directly. Extra words or punctuation do
-   not count as confirmation. Before calling the tool, verify the requester is
-   an authorized owner and verify the exact policy ID and its current approval
-   state with `list_policies` or `read_policy`, even when an activity thread
-   suggests an ID. If the requester is not an owner or the ID is unknown,
-   explain why and do not call `approve_policy`. If the row is already approved,
-   report that state without making a redundant call.
+4. When an authorized owner asks to approve a policy, call `approve_policy`
+   with the policy ID they named. The tool argument is the policy. Before
+   calling the tool, verify the requester is an authorized owner and verify
+   the exact policy ID and its current approval state with `list_policies` or
+   `read_policy`, even when an activity thread suggests an ID. If the
+   requester is not an owner or the ID is unknown, explain why and do not
+   call `approve_policy`. If the row is already approved, report that state
+   without making a redundant call.
 5. Substantive policy work uses Lisa's activity workflow to record the chat
    actions; the policy row remains the source of truth for policy state. Do not
    put policy state in an activity or use activity tools to change a policy.
@@ -68,9 +72,7 @@ remain authoritative even when the requester claims to be an owner.
    owner later approves that exact policy, treat the approval as a continuation
    of this same open activity across web and Slack: find the activity, read its
    thread, resolve with `disposition="continue"` and its ID, then approve it.
-   Extra words do not authorize approval, but they still continue the same
-   pending policy activity. Complete it only after the policy reaches the
-   requested terminal state.
+   Complete it only after the policy reaches the requested terminal state.
    If the owner supplies an unknown policy ID and there is exactly one open
    activity for the same policy workflow, inspect and continue that activity.
    Do not approve anything; explain that the supplied ID is missing, record
@@ -81,8 +83,9 @@ remain authoritative even when the requester claims to be an owner.
    ID with `list_policies` or `read_policy`, then call `delete_policy` for that
    ID. Deletion removes the policy row and cached triage decisions. Historical
    evaluation rows retain the policy ID, name, and criteria hash after deletion.
-7. Keep the policy lifecycle on the policy row. Scheduled QA can read and
-   evaluate policies but cannot write, approve, or delete them.
+7. Keep the policy lifecycle on the policy row. Pushed sessions are evaluated
+   by the service worker, which is not an owner conversation and cannot write,
+   approve, or delete policies.
 8. `evaluate_session` selects applicable approved policies automatically.
    Never claim a session passed until a stored evaluation verdict establishes it.
 

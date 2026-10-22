@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:18
+    image: ghcr.io/pgmq/pg17-pgmq:v1.10.0
     labels:
       io.arex.lisa.dogfood-instance: ${THELAKE_DOGFOOD_INSTANCE_ID:?dogfood script must set an instance ID}
     environment:
@@ -15,7 +15,7 @@ services:
       timeout: 3s
       retries: 30
     volumes:
-      - postgres-data:/var/lib/postgresql
+      - postgres-data:/var/lib/postgresql/data
 
   lisa:
     build:
@@ -24,8 +24,6 @@ services:
     labels:
       io.arex.lisa.dogfood-instance: ${THELAKE_DOGFOOD_INSTANCE_ID:?dogfood script must set an instance ID}
     environment:
-      LISA_THELAKE_TOKEN: ${LISA_THELAKE_TOKEN:?dogfood script must set a Lisa service token}
-      LISA_THELAKE_API_URL: http://host.docker.internal:${THELAKE_DOGFOOD_PORT:-8090}
       LISA_SKILL_DIR: /app/skills
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-${GEMINI_API_KEY:?Set GOOGLE_API_KEY or GEMINI_API_KEY before starting the dogfood}}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -36,9 +34,9 @@ services:
       LISA_WORKSPACE_ID: ${THELAKE_DEFAULT_WORKSPACE_ID:-550e8400-e29b-41d4-a716-446655440000}
       LISA_DATABASE_URL: postgresql://lisa_writer:${LISA_DATABASE_WRITER_PASSWORD}@postgres:5432/lisa
       LISA_DATABASE_READ_URL: postgresql://lisa_reader:${LISA_DATABASE_READER_PASSWORD}@postgres:5432/lisa
-      LISA_QA_CRON: ${LISA_QA_CRON:-0 * * * *}
+      LISA_SERVICE_TOKEN: ${LISA_SERVICE_TOKEN:?dogfood script must set a Lisa service token}
+      LISA_AGENT_WORKSPACE_ROOT: /var/lib/lisa/agent-workspace
       LISA_LOCAL_ANONYMOUS: ${LISA_LOCAL_ANONYMOUS:-1}
-      LISA_CORS_ORIGINS: http://127.0.0.1:${THELAKE_DOGFOOD_PORT:-8090},http://localhost:${THELAKE_DOGFOOD_PORT:-8090}
       GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-3.8-flash}
       LISA_SLACK_BOT_TOKEN: ${LISA_SLACK_BOT_TOKEN:-}
       LISA_SLACK_SIGNING_SECRET: ${LISA_SLACK_SIGNING_SECRET:-}

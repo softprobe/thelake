@@ -159,13 +159,8 @@ def test_selection_only_limitations_reach_scores_and_public_verdict(
     }
     captured = []
 
-    def post(_path, payload, **_kwargs):
-        captured.append(payload)
-        return {}, 201
-
-    service.client.post = post
-
     def prepare(_id, payload, **_kwargs):
+        captured.append(payload)
         return ScoreOutboxItem(
             id="outbox",
             evaluation_id=activity.id,
@@ -196,7 +191,10 @@ def test_selection_only_limitations_reach_scores_and_public_verdict(
         result = service._evaluate_untracked(*args, selection)
     assert result["status"] == status
     assert limitation in result["limitations"]
-    assert limitation in json.loads(captured[0]["metadata"]["limitations"])
+    if tracked:
+        assert limitation in json.loads(captured[0]["metadata"]["limitations"])
+    else:
+        assert not captured
 
 
 def test_invalid_gemini_output_records_visible_text_without_thinking(tmp_path, monkeypatch):

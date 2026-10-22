@@ -21,9 +21,8 @@ For Lisa's session and policy terminology, see
 - Provide signing secret and bot token to the service through its secret
   manager/environment. Set the Slack team ID and an explicit allowed user or
   channel list.
-- Bind the app to the intended TheLake workspace. The current integration
-  binds one app to one configured workspace; isolated workspaces must already
-  be provisioned.
+- Configure Lisa's workspace identity and Slack connection in Lisa's service.
+  Slack connection state is not managed by TheLake's trace store.
 - Configure the online evaluation runner and provider key if checks should
   evaluate incoming traces. Keep provider and Slack secrets out of docs,
   shell history, logs, and chat.
@@ -37,17 +36,17 @@ In an approved test channel/thread, use the documented command:
 check eligibility before issuing a refund.
 ```
 
-Review the returned policy ID, then send `@Lisa Approve policy: <that ID>` as a
-standalone message.
+Review the returned policy ID, then ask Lisa to approve that ID.
 
 
 The target name must match the authenticated agent name on the root trace.
-Owner-confirmed rules with `approved: yes` are eligible for evaluation immediately. Run a safe sample agent, then check
-score persistence in Explorer/API and the failure reply in the originating
-thread separately. Failed notification attempts remain pending in Lisa's workspace home for retry. Lisa evaluates on her `Lisa scheduled QA` cron schedule, hourly at
-minute 0 UTC by default; she does not run on startup. For a faster controlled
-test, configure a short `LISA_QA_CRON` before starting Lisa, then use
-`verify-lisa-slack-alert`.
+Owner-confirmed rules with `approved: yes` are eligible for evaluation
+immediately. Run a safe sample agent, push its complete OTLP session to Lisa,
+then check the Lisa evaluation activity and failure reply in the originating
+thread separately. Failed notification attempts remain pending in Lisa's
+workspace home for retry. Evaluation begins when Lisa durably accepts a pushed
+session; there is no scheduled trace QA job. For a controlled end-to-end test,
+use `verify-lisa-slack-alert`.
 
 Do not send test messages to customer channels or use rules that trigger real
 business actions.

@@ -1,7 +1,6 @@
 """Expose workspace domain services through the Model Context Protocol."""
 
 from contextlib import asynccontextmanager
-from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
@@ -211,63 +210,6 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         )
 
     @server.tool()
-    def propose_activity_followup(
-        activity_id: str, prompt: str, due_at: str | None = None,
-        trigger_event_type: str | None = None,
-    ) -> dict[str, Any]:
-        """Suggest a durable follow-up; it runs only after owner confirmation."""
-        if services.activity_store is None:
-            raise RuntimeError("Lisa activity storage is not configured")
-        if services.context.turn_source not in {"web", "slack"}:
-            raise ValueError("Follow-ups can only be proposed in an owner conversation")
-        if not prompt.strip() or len(prompt) > 4_000:
-            raise ValueError("Follow-up prompt must contain 1 to 4000 characters")
-        if (due_at is None) == (trigger_event_type is None):
-            raise ValueError("Choose exactly one due_at timestamp or trigger_event_type")
-        parsed_due_at = None
-        if due_at is not None:
-            try:
-                parsed_due_at = datetime.fromisoformat(due_at)
-            except ValueError as error:
-                raise ValueError("due_at must be an ISO 8601 timestamp with a timezone") from error
-            if parsed_due_at.tzinfo is None:
-                raise ValueError("due_at must be an ISO 8601 timestamp with a timezone")
-        if trigger_event_type is not None and not trigger_event_type.strip():
-            raise ValueError("trigger_event_type must not be empty")
-        followup_id = services.activity_store.create_activity_followup(
-            activity_id=activity_id,
-            due_at=parsed_due_at.isoformat() if parsed_due_at else None,
-            trigger_event_type=trigger_event_type.strip() if trigger_event_type else None,
-            prompt=prompt,
-            requested_by=services.context.turn_source,
-        )
-        services.activity_store.update_activity_progress(
-            activity_id, status="waiting",
-            summary=f"Waiting for owner confirmation of follow-up {followup_id}.",
-            next_action="Confirm or decline the suggested follow-up",
-        )
-        return {"followup_id": followup_id, "status": "pending_confirmation"}
-
-    @server.tool()
-    def approve_activity_followup(followup_id: str) -> dict[str, Any]:
-        """Approve this follow-up only when its exact ID was confirmed this turn."""
-        if services.context.turn_source not in {"web", "slack"}:
-            raise ValueError("Only an owner conversation can approve a follow-up")
-        require_owner()
-        if services.context.confirmed_followup_id != followup_id:
-            raise ValueError("The owner must confirm this exact follow-up ID in chat")
-        if not services.activity_store.approve_activity_followup(followup_id):
-            raise ValueError("Follow-up was not found or is no longer pending")
-        return {"followup_id": followup_id, "status": "approved"}
-
-    @server.tool()
-    def list_activity_followups(activity_id: str, limit: int = 20) -> list[dict[str, Any]]:
-        """Inspect pending and completed follow-ups linked to one activity."""
-        if services.activity_store is None:
-            raise RuntimeError("Lisa activity storage is not configured")
-        return services.activity_store.list_activity_followups(activity_id, limit=limit)
-
-    @server.tool()
     def write_policy(
         scope: Literal["workspace", "agent"], name: str, criteria: str,
         agent_name: str = "", policy_id: str | None = None,
@@ -281,11 +223,12 @@ def create_server(services: WorkspaceServices) -> FastMCP:
 
     @server.tool()
     def approve_policy(policy_id: str) -> dict[str, Any]:
-        """Approve a policy only after its exact ID is confirmed by an authorized owner.
+        """Approve the policy with this ID for an authorized owner.
 
-        Before calling, verify the current actor is an owner and the exact readable ID exists
-        as a policy. If the actor is not an owner or the policy is unknown, explain why and
-        do not call this tool. If it is already approved, report that state without a call.
+        The policy ID argument selects the row. Before calling, verify the current actor is
+        an owner and the readable ID exists. If the actor is not an owner or the policy is
+        unknown, explain why and do not call this tool. If it is already approved, report
+        that state without a call.
         """
         record = services.policy_service.approve_policy(policy_id)
         return {"policy_id": record.id, "name": record.name, "approved": record.approved}
@@ -334,7 +277,7 @@ def create_server(services: WorkspaceServices) -> FastMCP:
 
     @server.tool()
     def lisa_db(query: Annotated[str, Field(min_length=1, max_length=5000)]) -> dict[str, Any]:
-        """Run one bounded, read-only SELECT against Lisa's approved views and policy table."""
+        """Run one bounded, read-only SELECT against approved Lisa views and policy columns in the schema resource."""
         return services.database_inspection.query(query)
 
     @server.resource("lisa://database/schema")
@@ -352,13 +295,13 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         agent_name: str | None = None,
         roots_only: bool = True,
         order_by: Literal[
-            "start_time", "error_count", "duration", "total_tokens", "total_cost"
+            "start_time", "error_count", "duration", "total_tokens"
         ] = "start_time",
         order: Literal["asc", "desc"] = "desc",
         limit: int = 50,
         cursor: str | None = None,
     ) -> McpSessionSearchResponse:
-        """Search session summaries using the same filters and page shape as TheLake's session API."""
+        """Search bounded summaries for sessions stored in Lisa's local evidence store."""
         result = services.sessions.search(
             from_time=from_time,
             to_time=to_time,

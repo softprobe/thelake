@@ -7,9 +7,6 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol
-from uuid import UUID
-
-from .models.policies import is_policy_id
 
 
 @dataclass(frozen=True)
@@ -142,9 +139,6 @@ def chat_activity_waiting_state(
     next_action: str | None = None
     pending_policies: set[str] = set()
     unidentified_policy_pending = False
-    pending_followups: set[str] = set()
-    unidentified_followup_pending = False
-    approved_followups: set[str] = set()
     ordered = sorted(activities, key=lambda item: item.get("sequence", 0))
     for item in ordered:
         name = re.sub(
@@ -219,38 +213,7 @@ def chat_activity_waiting_state(
             else:
                 unidentified_policy_pending = False
             next_action = None
-        elif name.endswith("propose_activity_followup"):
-            followup_id = payload.get("followup_id")
-            if payload.get("status") == "pending_confirmation":
-                if isinstance(followup_id, str) and followup_id:
-                    pending_followups.add(followup_id)
-                else:
-                    unidentified_followup_pending = True
-                followup_id = payload.get("followup_id")
-                next_action = (
-                    f"Confirm follow-up: {followup_id}"
-                    if isinstance(followup_id, str) and followup_id
-                    else None
-                )
-        elif name.endswith("approve_activity_followup") and payload.get("status") == "approved":
-            followup_id = payload.get("followup_id")
-            if isinstance(followup_id, str) and followup_id:
-                pending_followups.discard(followup_id)
-                approved_followups.add(followup_id)
-                next_action = "Wait for approved follow-up"
-            else:
-                unidentified_followup_pending = True
-                next_action = "Wait for approved follow-up"
-        elif name.endswith("decline_activity_followup") and payload.get("status") == "declined":
-            followup_id = payload.get("followup_id")
-            if isinstance(followup_id, str):
-                pending_followups.discard(followup_id)
-            else:
-                unidentified_followup_pending = False
-            next_action = None
     waiting = waiting or bool(pending_policies) or unidentified_policy_pending
-    waiting = waiting or bool(pending_followups) or unidentified_followup_pending
-    waiting = waiting or bool(approved_followups)
     if pending_policies and not next_action:
         next_action = f"Approve policy: {sorted(pending_policies)[0]}"
     if waiting and next_action is None:
@@ -413,8 +376,6 @@ class AgentBackend(Protocol):
         text: str,
         turn_source: str = "web",
         actor_id: str | None = None,
-        confirmed_policy_id: str | None = None,
-        confirmed_followup_id: str | None = None,
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
         chat_turn_id: str | None = None,
@@ -448,28 +409,3 @@ def initialize_backend() -> None:
 
 def run_turn(**kwargs: Any) -> AgentTurn:
     return get_backend().run_turn(**kwargs)
-
-
-def confirmed_policy_id(user_text: str) -> str | None:
-    """Accept approval only as an exact, standalone human-readable policy command."""
-    text = _owner_command_text(user_text)
-    match = re.fullmatch(r"\s*approve policy:\s*(P1\.[1-9][0-9]*(?:\.[1-9][0-9]*)?)\s*", text, re.IGNORECASE)
-    identifier = match.group(1) if match else None
-    return identifier if identifier and is_policy_id(identifier) else None
-
-
-def confirmed_followup_id(user_text: str) -> str | None:
-    """Accept an exact follow-up ID confirmation from an owner conversation."""
-    text = _owner_command_text(user_text)
-    match = re.fullmatch(r"\s*confirm follow-up:\s*([0-9a-f-]{36})\s*", text, re.IGNORECASE)
-    if not match:
-        return None
-    try:
-        return str(UUID(match.group(1)))
-    except ValueError:
-        return None
-
-
-def _owner_command_text(user_text: str) -> str:
-    """Remove Slack's leading bot mention while preserving exact-command checks."""
-    return re.sub(r"^\s*<@[A-Z0-9]+>\s*", "", user_text, count=1, flags=re.IGNORECASE)

@@ -29,8 +29,6 @@ from ..evaluation.policy_triage import OpenAIPolicyTriager
 from ..evaluation.scores import (
     EVALUATION_PIPELINE_VERSION,
     evaluation_run_identity,
-    matches_policy_score,
-    successful_policy_score,
 )
 from ..evaluation.trajectory import build_trajectory_events, session_timestamp
 from ..llm_recording import recording_scope
@@ -38,7 +36,6 @@ from ..models.activities import Activity, EvaluationRun, ScoreOutboxItem, Activi
 from ..repositories.evaluation_artifacts import EvaluationArtifactRepository
 from ..repositories.activities import PostgresActivityStore, StaleLeaseError
 from ..security import redact_evidence, redact_text
-from ..thelake_client import TheLakeClient
 from .failures import FailureService
 from .notifications import SlackNotifier
 from .policies import PolicyService
@@ -51,7 +48,6 @@ class EvaluationService:
     def __init__(
         self,
         context: WorkspaceContext,
-        client: TheLakeClient,
         policies: PolicyService,
         failures: FailureService,
         notifier: SlackNotifier,
@@ -65,7 +61,6 @@ class EvaluationService:
         render_context: Callable[[dict], str] | None = None,
     ):
         self.context = context
-        self.client = client
         self.policies = policies
         self.failures = failures
         self.notifier = notifier
@@ -88,8 +83,8 @@ class EvaluationService:
         Returns ``(triage, trajectory)``. ``trajectory`` is built from session
         detail when available, else ``None``.
 
-        ``session_detail`` is the raw TheLake session GET; ``trajectory`` is the
-        compact event list used for triage and final judging.
+        ``session_detail`` is the locally loaded OTLP session projection;
+        ``trajectory`` is the compact event list used for triage and judging.
         """
         rules = self.policies.approved_rules(target_agent_name)
         if not rules:
@@ -235,9 +230,14 @@ class EvaluationService:
         )
 
     def evaluate_session(
-        self, target_agent_name: str, session_id: str, *, activity_id: str | None = None,
+        self,
+        target_agent_name: str,
+        session_id: str,
+        *,
+        activity_id: str | None = None,
+        defer_activity_failure: bool = False,
     ) -> dict:
-        """Investigate suspected violations and unresolved evidence in one session."""
+        """Investigate suspected violations and unresolved evidence in one local session."""
         if self.activities:
             pending = self.activities.find_pending_evaluations_for_session(
                 target_agent_name, session_id
@@ -275,8 +275,12 @@ class EvaluationService:
                     title="Session lookup failed",
                     summary=summary,
                 )
-                activity_finalized = self.activities.finish_activity_without_claim(
-                    activity_id, summary, status="failed",
+                activity_finalized = (
+                    False
+                    if defer_activity_failure
+                    else self.activities.finish_activity_without_claim(
+                        activity_id, summary, status="failed",
+                    )
                 )
                 return {
                     "status": "error",
@@ -335,9 +339,10 @@ class EvaluationService:
                     title="Policy triage failed",
                     summary=f"Policy triage failed with {type(error).__name__}.",
                 )
-                self.activities.finish_activity_without_claim(
-                    activity.id, "Policy triage failed.", status="failed"
-                )
+                if not defer_activity_failure:
+                    self.activities.finish_activity_without_claim(
+                        activity.id, "Policy triage failed.", status="failed"
+                    )
             raise
         selected = selection["selected_policies"]
         if activity:
@@ -593,13 +598,7 @@ class EvaluationService:
                 payload["trace_id"],
                 str(result.get("rationale") or "Policy failed."),
                 payload.get("timestamp"),
-                score_payload=payload,
             )
-        try:
-            _, status_code = self.client.post("/v1/scores", payload, include_status=True)
-        except Exception:
-            self._release_retryable(activity.activity_id, owner, claim, "TheLake score write interrupted")
-            raise
         self.activities.acknowledge_score(
             activity.activity_id,
             activity.id,
@@ -610,14 +609,12 @@ class EvaluationService:
             fencing_token=claim.fencing_token,
             summary=str(payload.get("comment") or payload["string_value"]),
         )
-        if result["status"] == "fail":
-            self.failures.mark_ready(failure_policy, activity.session_id, payload["trace_id"])
         return {
             **result,
             "evaluation_name": payload["name"],
             "session_id": activity.session_id,
             "stored": True,
-            "new_score": status_code == 201,
+            "new_score": False,
             "activity_id": activity.activity_id,
             "evaluation_id": activity.id,
         }
@@ -633,8 +630,8 @@ class EvaluationService:
         activity_id: str | None = None,
         defer_activity_finish: bool = False,
     ) -> dict:
-        # TheLake returns session detail with a bounded span list. Redact secrets before
-        # building the trajectory and before anything can be forwarded to the provider.
+        # The local session service returns bounded span evidence. Redact secrets
+        # before building the trajectory and forwarding anything to a provider.
         session_detail = session_detail_override or self._session_detail(session_id)
         if policy["target_agent_name"] not in session_detail.get("agent_names", []):
             return {
@@ -651,7 +648,6 @@ class EvaluationService:
         trace_id = next(iter(trajectory["trace_ids"]), "")
         if not trace_id:
             return {"status": "insufficient_evidence", "session_id": session_id, "stored": False}
-        scores = session_detail.get("scores", [])
         judge_model = os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash")
         trajectory_hash, run_id, request_key = evaluation_run_identity(
             session_id=session_id,
@@ -674,8 +670,7 @@ class EvaluationService:
             if existing and outbox and outbox.status == "pending"
             else None
         )
-        # Postgres request identity is the dedupe authority. TheLake scores are
-        # reporting copies and may outlive or lag the Lisa evaluation ledger.
+        # Lisa's Postgres request identity is the dedupe authority for local results.
         if existing and existing.status == "succeeded" and not pending:
             if activity_id:
                 self.activities.record_activity_event(
@@ -692,38 +687,6 @@ class EvaluationService:
                 "activity_id": activity_id or existing.activity_id,
                 "evaluation_id": existing.id,
             }
-        # Without an activity ledger, a stored TheLake score is the completed result.
-        completed = (
-            successful_policy_score(scores, policy, trace_id)
-            if not self.activities
-            else None
-        )
-        if completed and not pending:
-            if completed.get("string_value") == "fail":
-                metadata = completed.get("metadata") or {}
-                failure_policy = {
-                    **policy,
-                    "slack_channel_id": metadata.get("slack_channel_id") or None,
-                    "slack_thread_ts": metadata.get("slack_thread_ts") or None,
-                }
-                self.failures.record(
-                    failure_policy,
-                    session_id,
-                    trace_id,
-                    str(completed.get("comment") or "Policy failed."),
-                    completed.get("timestamp"),
-                )
-            result = {
-                "status": "already_evaluated",
-                "verdict": completed.get("string_value"),
-                "rationale": completed.get("comment"),
-                "timestamp": completed.get("timestamp"),
-                "session_id": session_id,
-                "stored": True,
-            }
-            if existing:
-                result["activity_id"] = existing.id
-            return result
         if not trajectory["events"] and not pending:
             return {"status": "insufficient_evidence", "session_id": session_id, "stored": False}
         if self.activities:
@@ -799,18 +762,14 @@ class EvaluationService:
                 trace_id,
                 str(result.get("rationale") or "Policy failed."),
                 timestamp,
-                score_payload=payload,
             )
-        _, status_code = self.client.post("/v1/scores", payload, include_status=True)
-        if result["status"] == "fail":
-            self.failures.mark_ready(policy, session_id, trace_id)
         return {
             **result,
             "limitations": list(dict.fromkeys(limitations)),
             "evaluation_name": policy["name"],
             "session_id": session_id,
             "stored": True,
-            "new_score": status_code == 201,
+            "new_score": False,
         }
 
     def _evaluate_tracked(
@@ -995,7 +954,7 @@ class EvaluationService:
                 self.failures.record(
                     policy, session_id, trace_id,
                     str(result.get("rationale") or "Policy failed."),
-                    payload["timestamp"], score_payload=payload,
+                    payload["timestamp"],
                 )
             outbox = self.activities.prepare_score_outbox(
                 evaluation.id, payload, actor=owner, fencing_token=claim.fencing_token
@@ -1007,14 +966,9 @@ class EvaluationService:
                 self.failures.record(
                     policy, session_id, trace_id,
                     str(result.get("rationale") or "Policy failed."),
-                    payload.get("timestamp"), score_payload=payload,
+                    payload.get("timestamp"),
                 )
 
-        try:
-            _, status_code = self.client.post("/v1/scores", payload, include_status=True)
-        except Exception:
-            self._release_retryable(activity_id, owner, claim, "TheLake score write interrupted")
-            raise
         self.activities.acknowledge_score(
             activity_id, evaluation.id, outbox.id,
             score_id=payload["score_id"], verdict=payload["string_value"], actor=owner,
@@ -1022,13 +976,11 @@ class EvaluationService:
             summary=str(payload.get("comment") or payload["string_value"]),
             auto_finish=not defer_activity_finish,
         )
-        if result["status"] == "fail":
-            self.failures.mark_ready(policy, session_id, trace_id)
         return {
             **result,
             "limitations": self._result_from_score_payload(payload)["limitations"],
             "evaluation_name": policy["name"], "session_id": session_id,
-            "stored": True, "new_score": status_code == 201,
+            "stored": True, "new_score": False,
             "activity_id": activity_id,
             "evaluation_id": evaluation.id,
             "_activity_fencing_token": claim.fencing_token,
@@ -1177,7 +1129,7 @@ class EvaluationService:
     ) -> dict:
         """Notify Slack only after Lisa reviews a stored policy failure."""
         # Stored history, not today's policy row, identifies pending failures.
-        # This also permits finishing old follow-ups after a rule is edited/paused.
+        # This also permits finishing an older pending failure after a rule is edited or paused.
         pending = self.failures.reconcile()
         policy = next(
             (
@@ -1192,29 +1144,10 @@ class EvaluationService:
         )
         if policy is None:
             return {"status": "not_pending", "session_id": session_id}
-        session_detail = self._session_detail(session_id)
-        if target_agent_name not in session_detail.get("agent_names", []):
-            return {"status": "skipped_agent_mismatch", "session_id": session_id}
         trace_id = str(policy.get("trace_id") or "")
-        if not any(
-            str(span.get("trace_id") or "") == trace_id
-            for span in session_detail.get("spans", [])
-        ):
-            return {"status": "trace_not_found", "session_id": session_id}
-        score = next(
-            (
-                score
-                for score in session_detail.get("scores", [])
-                if score.get("string_value") == "fail"
-                and matches_policy_score(score, policy, trace_id)
-            ),
-            None,
-        )
-        if score is None:
-            return {"status": "not_a_stored_failure", "session_id": session_id}
         return self.notifier.notify(
             policy,
-            {"status": "fail", "rationale": score.get("comment", "Policy failed.")},
+            {"status": "fail", "rationale": policy.get("rationale", "Policy failed.")},
             session_id,
             trace_id,
         )

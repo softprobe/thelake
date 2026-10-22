@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "Workspace-scoped Lisa runtime with reusable AgentSkills and MCP tools"
 requires-python = ">=3.12"
 dependencies = [
-  "apscheduler>=3.11,<4",
   "fastapi>=0.115,<1",
   "fastmcp>=3.4,<4",
   "google-genai>=1,<2",

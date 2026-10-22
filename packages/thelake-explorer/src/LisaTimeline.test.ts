@@ -53,17 +53,6 @@ describe("Lisa timeline", () => {
     ]);
   });
 
-  it("hides scheduler instructions and labels Lisa's scheduled update", () => {
-    const messages: LisaMessage[] = [
-      { id: "internal-prompt", role: "user", text: "Internal schedule prompt", hidden: true, turn_source: "scheduled" },
-      { id: "scheduled-report", role: "assistant", text: "One session needs review.", turn_source: "scheduled" },
-    ];
-
-    const timeline = lisaTimeline(messages, []);
-    expect(timeline.map((message) => message.id)).toEqual(["scheduled-report"]);
-    expect(timeline[0].content).toEqual([{ type: "text", text: "Scheduled QA update\n\nOne session needs review." }]);
-  });
-
   it("groups tool events into one ordered activity record with each result paired to its call", () => {
     const messages: LisaMessage[] = [
       { id: "user", role: "user", text: "Review refunds", sequence: 1 },

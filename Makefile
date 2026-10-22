@@ -179,7 +179,6 @@ doctor: ensure-cache
 # ---- build ----
 EXPLORER_DIR := $(CURDIR)/packages/thelake-explorer
 EXPLORER_EMBEDDED := $(EXPLORER_DIR)/embedded
-LISA_EMBEDDED := $(EXPLORER_DIR)/lisa-embedded
 
 explorer-deps:
 	@if [ "$${IN_LINUX_BUILDER:-0}" = "1" ]; then \
@@ -193,11 +192,6 @@ explorer-assets: explorer-deps
 		test -f "$(EXPLORER_EMBEDDED)/index.html" || { echo "Explorer assets must be built on the host before entering the Linux builder" >&2; exit 1; }; \
 	else \
 		npm --prefix "$(EXPLORER_DIR)" run build:embedded; \
-	fi
-	@if [ "$${IN_LINUX_BUILDER:-0}" = "1" ]; then \
-		test -f "$(LISA_EMBEDDED)/index.html" || { echo "Lisa assets must be built on the host before entering the Linux builder" >&2; exit 1; }; \
-	else \
-		npm --prefix "$(EXPLORER_DIR)" run build:lisa-embedded; \
 	fi
 
 build: ensure-cache explorer-assets
@@ -216,15 +210,15 @@ run: build
 dev-up:
 	python3 scripts/dev_env.py init --env-file .env --require-model
 	$(MAKE) --no-print-directory _ensure-dev-dist
-	$(COMPOSE) --profile lisa up --detach ducklake-postgres minio auth-mock
+	$(COMPOSE) --profile lisa up --detach ducklake-postgres lisa-postgres minio auth-mock
 	$(MAKE) --no-print-directory _minio-bucket
 	$(COMPOSE) --profile lisa up --detach --build otlp-backend lisa
-	@echo "Explorer: use the host address shown below with /explorer/. Lisa: use the same host with /lisa/."
+	@echo "Explorer and TheLake API use the first address. Lisa runs independently at the second address with /lisa/."
 	@$(COMPOSE) --profile lisa port otlp-backend 8090
 	@$(COMPOSE) --profile lisa port lisa 8082
 
 dev-down:
-	$(COMPOSE) --profile lisa stop lisa otlp-backend
+	$(COMPOSE) --profile lisa stop lisa otlp-backend lisa-postgres
 
 # Host release → dist/. On non-linux/amd64, TARGET_PLATFORM=linux/amd64 re-enters via docker.
 build-release: ensure-cache explorer-assets
@@ -272,11 +266,11 @@ _ensure-dist:
 	fi
 
 # Refresh the local dev binary when app source or build inputs are newer. Assets
-# are embedded by build-release, so checking them with the binary keeps `/lisa/`
-# and `/explorer/` current without forcing a clean Linux release build each run.
+# are embedded by build-release; Lisa's Python image builds and serves its own
+# frontend, so Lisa source changes do not rebuild the TheLake binary.
 _ensure-dev-dist:
 	@if [ ! -x "$(DIST_DIR)/thelake" ] || \
-		find src proto packages/thelake-explorer/src packages/thelake-explorer/lisa Cargo.toml Cargo.lock build.rs config.yaml packages/thelake-explorer/index.html packages/thelake-explorer/package.json packages/thelake-explorer/package-lock.json packages/thelake-explorer/vite.config.ts packages/thelake-explorer/vite.spa.config.ts packages/thelake-explorer/vite.lisa.config.ts -type f -newer "$(DIST_DIR)/thelake" -print -quit 2>/dev/null | grep -q .; then \
+		find src proto packages/thelake-explorer/src Cargo.toml Cargo.lock build.rs config.yaml packages/thelake-explorer/index.html packages/thelake-explorer/package.json packages/thelake-explorer/package-lock.json packages/thelake-explorer/vite.config.ts packages/thelake-explorer/vite.spa.config.ts -type f -newer "$(DIST_DIR)/thelake" -print -quit 2>/dev/null | grep -q .; then \
 		TARGET_PLATFORM=linux/amd64 $(MAKE) build-release; \
 	else \
 		$(MAKE) _ensure-dist; \

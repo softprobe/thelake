@@ -1,4 +1,4 @@
-"""Build compact session trajectories from TheLake span telemetry.
+"""Build compact session trajectories from locally stored OTLP evidence.
 
 See ``docs/architecture/lisa-terms.md`` for canonical Lisa evaluation terms.
 In particular, a trajectory is a projection of a session and has no separate
@@ -6,8 +6,8 @@ identifier.
 
 Terms used in Lisa evaluation:
 
-- ``session_detail``: raw ``GET /v1/sessions/{id}`` payload (spans, scores,
-  agent names, truncation flags).
+- ``session_detail``: normalized local session bundle (spans, agent names,
+  and evidence completeness flags).
 - ``trajectory``: ordered user/tool/assistant events plus completeness
   flags used for policy triage and judging.
 - ``references``: span citations on a judge verdict (not the trajectory).

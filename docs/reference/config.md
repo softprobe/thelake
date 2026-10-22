@@ -109,20 +109,21 @@ customer DuckLake.
 | `SOFTPROBE_LOCAL_ANONYMOUS` | Local single-workspace mode (see root README) |
 | `THELAKE_DEFAULT_WORKSPACE_ID` | Workspace UUID used with local anonymous mode |
 | `LISA_WORKSPACE_ID` | Workspace scope for this Lisa runtime. Configure one Lisa runtime per workspace; the local developer stack uses `THELAKE_DEFAULT_WORKSPACE_ID`. |
-| `LISA_DATABASE_URL` | PostgreSQL URL for Lisa's runtime activity and policy writer. Use a dedicated `lisa_writer` role; this database stores activity and policy state and is separate from TheLake's DuckLake catalog. |
+| `LISA_EXPLORER_URL` | Browser-facing absolute Explorer URL for Lisa's shared navigation rail. Omit it when this Lisa deployment has no Explorer to link to. |
+| `LISA_AGENT_WORKSPACE_ROOT` | Durable filesystem root shared by Lisa's API and evaluation worker. Complete pushed OTLP sessions are stored in `session_traces/<session_id>/`; defaults to `/var/lib/lisa/agent-workspace`. |
+| `LISA_MAX_SESSION_TRACE_BYTES` | Maximum pushed OTLP JSON body size. Defaults to 16 MiB; accepted values are 1 byte through 64 MiB. The intake endpoint is intended for private-network access. |
+| `LISA_DATABASE_URL` | PostgreSQL URL for Lisa's runtime writer. Use a dedicated `lisa_writer` role; this database stores policy and activity state, pushed-session receipts, and the durable evaluation queue. It is separate from TheLake's DuckLake catalog. |
 | `LISA_DATABASE_READ_URL` | PostgreSQL URL for Lisa's read-only `lisa_db` tool. Use a dedicated `lisa_reader` role that can read curated `lisa.readable_*` views and approved columns from `lisa.policies`. |
 | `LISA_DATABASE_PROVISION_URL` | Deployment-only PostgreSQL URL used by `lisa/scripts/provision_lisa.py`; never provide this credential to Lisa's runtime. |
 | `LISA_DATABASE_WRITER_PASSWORD` / `LISA_DATABASE_READER_PASSWORD` | When both are set, the provision script also creates the `lisa` database and writer/reader roles. `make dev-up` generates these values in the ignored local `.env`. |
 | `LISA_DATABASE_RECREATE` | Set to `1` to `DROP SCHEMA lisa CASCADE` and provision a fresh schema. Required when the schema shape changes; without it, an already-bound database is left untouched. |
 | `LISA_DATABASE_WRITER_ROLE` / `LISA_DATABASE_READER_ROLE` | Optional database role names to grant during schema provisioning; defaults are `lisa_writer` and `lisa_reader`. |
 | `LISA_LLM_TRACE_ENABLED` | Opt-in local recording of Lisa chat, policy-triage, and judge calls; defaults off. `1`, `true`, or `yes` enables redacted per-call JSONL files under the workspace home’s `llm-calls/`. Records expire after 30 days; cleanup runs at startup and hourly while HTTP/MCP is running. Existing OpenHands conversation state has separate persistence. |
-| `LISA_QA_CRON` | Five-field UTC cron expression for the `Lisa scheduled QA` job; defaults to `0 * * * *` (hourly at minute 0). Lisa does not run a cycle on startup. |
-| `LISA_QA_ENABLED` | `0` disables scheduled QA while leaving chat, policy tools, and owner-approved activity follow-ups available. Defaults to `1`; local development sets it to `0` so scheduled model work is opt-in. |
-| `LISA_ACTIVITY_FOLLOWUPS_ENABLED` | `0` disables owner-approved activity follow-ups. This is independent of scheduled QA and defaults to `1`; local development keeps it enabled. |
 | `LISA_LOCAL_ANONYMOUS` | `1` enables unauthenticated Lisa chat for the loopback-only local developer stack. Leave disabled in a shared deployment. |
 | `LISA_CORS_ORIGINS` | Comma-separated browser origins allowed to call Lisa directly. |
 | `SOFTPROBE_ASSERTION_HMAC_SECRET` | Shared edge assertion key Lisa uses to verify workspace-scoped browser requests. |
-| `LISA_PUBLIC_URL` | Browser-reachable Lisa API base URL injected into the standalone `/lisa/` app. |
+| `LISA_SERVICE_TOKEN` | Required bearer credential for Lisa's internal service APIs other than private-network session trace intake. |
+| `LISA_STATIC_DIR` | Lisa frontend bundle directory served by the Python app; defaults to `/app/static` in the container. |
 | `OPENAI_API_KEY` | API key for Lisa's first-stage policy triage through OpenAI Decisions. The Gemini judge evaluates only policies triage escalates. |
 | `GEMINI_MODEL_NAME` | Gemini model used by Lisa's categorical policy judge (defaults to `gemini-3.8-flash`). |
 | `LISA_GEMINI_THINKING_LEVEL` | Gemini judge reasoning: `low`, `medium`, or `high`; defaults to `low` to reduce reasoning-token cost. Gemini 2.5 uses thinking budgets of 512, 1,024, and 2,048 tokens for these settings. No hard output-token cap is applied, so the model can finish its structured response. |

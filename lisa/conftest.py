@@ -59,7 +59,7 @@ class LisaPostgresStack:
 class LisaDogfoodTarget:
     project_name: str
     instance_id: str
-    lake_data: Path
+    agent_data: Path
     env_file: Path
 
 
@@ -247,8 +247,8 @@ def lisa_dogfood_target(path: Path, repository_root: Path) -> LisaDogfoodTarget:
     instance_id = values.get("THELAKE_DOGFOOD_INSTANCE_ID", "")
     data_path = values.get("THELAKE_DOGFOOD_DATA_PATH", "")
     relative_data_path = Path(data_path)
-    raw_lake_data = repository_root / relative_data_path
-    lake_data = raw_lake_data.resolve()
+    raw_agent_data = repository_root / relative_data_path
+    agent_data = raw_agent_data.resolve()
     if (
         not project_name.startswith("lisa-policy-eval-")
         or not instance_id
@@ -258,13 +258,13 @@ def lisa_dogfood_target(path: Path, repository_root: Path) -> LisaDogfoodTarget:
         or relative_data_path.is_absolute()
         or relative_data_path.parts != ("warehouse", "dogfood", project_name)
         or not relative_data_path.name.startswith("lisa-policy-eval-")
-        or lake_data.parent != data_root
+        or agent_data.parent != data_root
         or relative_data_path.name != project_name
     ):
         raise RuntimeError("Cleanup requires a run-owned Lisa policy evaluation stack and data path")
-    if raw_lake_data.is_symlink():
+    if raw_agent_data.is_symlink():
         raise RuntimeError("Refusing to remove a symlinked dogfood data directory")
-    return LisaDogfoodTarget(project_name, instance_id, lake_data, path)
+    return LisaDogfoodTarget(project_name, instance_id, agent_data, path)
 
 
 def configure_lisa_dogfood(
@@ -278,12 +278,11 @@ def configure_lisa_dogfood(
     values = _read_environment_file(path)
     workspace_id = values.get("THELAKE_DEFAULT_WORKSPACE_ID")
     database_port = values.get("THELAKE_DOGFOOD_DB_PORT")
-    api_port = values.get("THELAKE_DOGFOOD_PORT")
     writer_password = values.get("LISA_DATABASE_WRITER_PASSWORD")
     reader_password = values.get("LISA_DATABASE_READER_PASSWORD")
-    service_token = values.get("LISA_THELAKE_TOKEN")
+    service_token = values.get("LISA_SERVICE_TOKEN")
     if not all(
-        (workspace_id, database_port, api_port, writer_password, reader_password, service_token)
+        (workspace_id, database_port, writer_password, reader_password, service_token)
     ):
         raise RuntimeError("Dogfood connection metadata is incomplete; start an isolated stack")
     os.environ["LISA_WORKSPACE_ID"] = workspace_id
@@ -295,11 +294,10 @@ def configure_lisa_dogfood(
     os.environ["LISA_DATABASE_READ_URL"] = (
         f"postgresql://lisa_reader:{safe_reader_password}@127.0.0.1:{database_port}/lisa"
     )
-    os.environ["LISA_THELAKE_API_URL"] = f"http://127.0.0.1:{api_port}"
-    os.environ["LISA_THELAKE_TOKEN"] = service_token
+    os.environ["LISA_SERVICE_TOKEN"] = service_token
     os.environ["LISA_DATA_DIR"] = str(data_dir.resolve())
+    os.environ["LISA_AGENT_WORKSPACE_ROOT"] = str(target.agent_data.resolve())
     os.environ["LISA_LLM_TRACE_ENABLED"] = "1"
-    os.environ["SOFTPROBE_PUBLIC_KEY"] = "dogfood-local"
     return target
 
 
@@ -312,9 +310,9 @@ def dispose_lisa_dogfood(
 ) -> None:
     """Remove only this evaluation's disposable stack and DuckLake data."""
     for retained_path in (report_path.resolve(), data_dir.resolve()):
-        if retained_path == target.lake_data or target.lake_data in retained_path.parents:
+        if retained_path == target.agent_data or target.agent_data in retained_path.parents:
             raise RuntimeError(
-                "Keep the evaluation report and LLM traces outside disposable lake data"
+                "Keep the evaluation report and LLM traces outside disposable Lisa evidence data"
             )
 
     for resource, options in (
@@ -358,8 +356,8 @@ def dispose_lisa_dogfood(
         subprocess.run(command, check=True, capture_output=True, text=True)
     except (OSError, subprocess.CalledProcessError) as error:
         raise RuntimeError("Failed to remove the disposable Lisa policy evaluation stack") from error
-    if target.lake_data.exists():
-        shutil.rmtree(target.lake_data)
+    if target.agent_data.exists():
+        shutil.rmtree(target.agent_data)
     target.env_file.unlink(missing_ok=True)
     for suffix in (".yaml", ".api_url", ".lisa_api_url"):
         metadata_file = repository_root / "warehouse" / "dogfood" / f"{target.project_name}{suffix}"

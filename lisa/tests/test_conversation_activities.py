@@ -387,30 +387,6 @@ def test_explicit_skip_is_distinct_from_missing_disposition():
     assert selected_chat_activity_ids(events) == []
 
 
-def test_scheduled_turn_does_not_attach_internal_prompt_to_chat_activity(tmp_path):
-    workspace_id = "11111111-1111-4111-8111-111111111111"
-    conversation_id = "22222222-2222-4222-8222-222222222222"
-    activities = RecordingActivities()
-    service = ConversationService(
-        FileConversationRepository(tmp_path), activities,
-        owner_user_ids=frozenset({"owner-1"}),
-    )
-    service.create_conversation(workspace_id, conversation_id)
-
-    def run_turn(**_kwargs):
-        return AgentTurn(
-            messages=[{"id": "scheduled-1", "role": "user", "text": "Internal prompt"}],
-            activities=[],
-        )
-
-    asyncio.run(service.run_user_turn(
-        conversation_id, workspace_id, "Internal prompt", run_turn=run_turn,
-        turn_source="scheduled",
-    ))
-
-    assert activities.calls == []
-
-
 def test_non_owner_turn_does_not_copy_chat_into_shared_activity(tmp_path):
     workspace_id = "11111111-1111-4111-8111-111111111111"
     conversation_id = "22222222-2222-4222-8222-222222222222"

@@ -9,8 +9,8 @@ Use this small travel scenario to check three different claims independently:
 2. Decisions triage routes possible violations and unresolved evidence to the
    categorical Gemini judge, which distinguishes compliance from a real
    violation and refuses to pass incomplete trajectories.
-3. Lisa selects a captured session, runs the check, stores the score in
-   TheLake, and reports a failure with its evidence.
+3. Lisa selects a pushed session, runs the check, stores the evaluation in
+   Lisa Postgres, and reports a failure with its evidence.
 
 This separation matters: a good judge result does not prove the learning skill
 found the right rule, and a successful skill run does not prove online trace
@@ -67,25 +67,26 @@ pair is annotated; other catalog pairs remain unreviewed.
 For labeled production-path quality, use the
 [production-path evaluation skill](../../.agents/skills/run-lisa-policy-evaluation/SKILL.md),
 which loads the full policy catalog through Lisa's policy-management service and
-calls `EvaluationService` against TheLake sessions. Metrics and limits:
+calls `EvaluationService` against Lisa's local evidence. Metrics and limits:
 [the evaluation guide](policy-triage-evaluation.md).
 
-## 3. Scheduled online QA status
+## 3. Push-triggered online evaluation
 
-The scheduled-path driver is not ready to run: it currently reuses a persistent
-Dogfood Compose project and data directory instead of provisioning a fresh,
-run-owned stack. Do not run `tests/e2e/dogfood_online_eval.py` or use
-`examples/lisa-dogfood/start.sh` as a development environment. It requires a
-fresh `lisa-policy-eval-*` project so every Dogfood run has disposable state.
-The interactive developer environment is documented in
+Lisa does not schedule trace sampling or depend on TheLake for trace reads.
+The telemetry producer submits a complete OTLP session to Lisa's unauthenticated
+`POST /internal/v1/session-traces` endpoint, which must remain on a private
+network. Lisa atomically writes the session bundle under its configured
+evidence directory, then commits the receipt and evaluation message together
+in its own PGMQ-enabled PostgreSQL database. A successful API response confirms
+durable receipt and queue insertion, not evaluation completion or an atomic
+transaction across the filesystem and database.
+
+For a live evaluation, use the isolated stack and dataset flow in the
+[policy evaluation skill](../../.agents/skills/run-lisa-policy-evaluation/SKILL.md).
+The run makes provider calls and may incur charges. The sample agent only
+simulates a local refund tool and never connects to a payment system. The
+interactive developer environment is documented in
 [Local Lisa development](local-development.md).
-
-Before enabling this live QA path, update its harness to create and clean up a
-transient Docker project, database, workspace, and data directory. The driver
-will make Gemini and OpenAI calls and may incur provider charges. Its scenario
-approves a policy, runs a deliberately flawed Gemini agent, and checks Lisa's
-scheduled evaluation and report; the sample agent only simulates a local refund
-tool and never connects to a payment system.
 
 ## Interpreting the result
 
@@ -94,16 +95,10 @@ judge fixture passes. A useful dogfood run records:
 
 - Whether the learning skill proposed the expected policy and cited its source.
 - Expected and actual verdict for every calibration case.
-- Whether the live application E2E persisted a score for the ingested trace.
-- Whether the issue view showed the failure and linked evidence to the source
-  trace.
-
-The dogfood override fires `Lisa scheduled QA` every five minutes through a
-cron trigger. Normal deployments default to hourly at minute 0 UTC. Each fire
-starts one model turn and evaluates at most one unchecked session; it is not a
-guarantee of complete production coverage. The cron registration is process
-local, and a Lisa restart can miss a scheduled fire. A durable work queue and
-grouped issue records remain part of the product design.
+- Whether the live application E2E persisted its evaluation result in Lisa
+  Postgres for the ingested trace.
+- Whether Lisa's activity shows the failure and links to the locally stored
+  session evidence.
 
 For multi-policy synthetic cases, recall metrics, and production dataset design,
 see [Policy triage evaluation](policy-triage-evaluation.md).

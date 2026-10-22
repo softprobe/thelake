@@ -17,5 +17,15 @@ describe("LisaApp", () => {
     expect(html).toContain("Triage / judges");
     expect(html).toContain("Identity");
     expect(html.match(/role="tab"/g)).toHaveLength(4);
+    expect(html).not.toContain('aria-label="Sessions"');
+  });
+
+  it("shows the shared sessions navigation when Explorer is configured", () => {
+    const html = renderToStaticMarkup(createElement(LisaApp, {
+      config: { apiBasePath: "/v1" },
+      explorerUrl: "https://lake.example/explorer/",
+    }));
+
+    expect(html).toContain('aria-label="Sessions"');
   });
 });

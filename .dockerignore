@@ -1,9 +1,19 @@
-# Packaging-only: only dist/ is required in the build context.
+# TheLake images need dist/; the Lisa image separately builds its UI from the
+# Explorer package sources and the standalone Lisa app entrypoint.
 *
 !dist/
 !dist/**
 !lisa/
 !lisa/**
+!packages/
+!packages/thelake-explorer/
+!packages/thelake-explorer/package.json
+!packages/thelake-explorer/package-lock.json
+!packages/thelake-explorer/vite.lisa.config.ts
+!packages/thelake-explorer/src/
+!packages/thelake-explorer/src/**
+!packages/thelake-explorer/lisa/
+!packages/thelake-explorer/lisa/**
 
 # Keep explicit denies if someone force-includes sources later.
 .git

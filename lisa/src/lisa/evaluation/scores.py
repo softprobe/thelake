@@ -54,21 +54,3 @@ def evaluation_run_identity(
     score_id = sha256(f"lisa-evaluation:{run_digest}".encode("utf-8")).hexdigest()
     request_key = str(uuid5(NAMESPACE_URL, f"lisa-evaluation:{run_digest}"))
     return trajectory_hash, score_id, request_key
-
-
-def matches_policy_score(score: dict, evaluator: dict, trace_id: str) -> bool:
-    if score.get("trace_id") != trace_id or score.get("source") != "evaluator":
-        return False
-    policy_hash = evaluator.get("policy_hash")
-    if not policy_hash:
-        return False
-    return (score.get("metadata") or {}).get("policy_hash") == policy_hash
-
-
-def successful_policy_score(scores: list[dict], evaluator: dict, trace_id: str) -> dict | None:
-    for score in scores:
-        if score.get("string_value") == "error":
-            continue
-        if matches_policy_score(score, evaluator, trace_id):
-            return score
-    return None

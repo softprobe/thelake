@@ -26,23 +26,17 @@ def tag_turn(
     activities: list[dict[str, Any]],
     previous_messages: list[dict[str, Any]],
     turn_source: str,
-    hidden_message_ids: set[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     known_sources = {item.get("id"): item.get("turn_source") for item in previous_messages}
-    previously_hidden = {item.get("id") for item in previous_messages if item.get("hidden")}
     previous_ids = set(known_sources)
     for message in messages:
         if message.get("id") not in previous_ids:
             known_sources[message.get("id")] = turn_source
         source = known_sources.get(message.get("id")) or message.get("turn_source") or "web"
         message["turn_source"] = source
-        if message.get("id") in previously_hidden or (
-            source == "scheduled" and message.get("role") == "user"
-        ):
-            hidden_message_ids.add(str(message.get("id", "")))
     for activity in activities:
         activity["turn_source"] = turn_source
-    return messages, activities, hidden_message_ids
+    return messages, activities
 
 
 async def run_turn_without_releasing_lock_early(run_turn: Callable, **kwargs: Any):
@@ -126,8 +120,6 @@ class ConversationService:
         actor_id: str | None = None,
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
-        confirmed_policy_id: str | None = None,
-        confirmed_followup_id: str | None = None,
     ) -> dict[str, Any]:
         directory = self.repository.conversation_directory(workspace_id, conversation_id)
         metadata = self.repository.load_metadata(directory, workspace_id)
@@ -146,8 +138,6 @@ class ConversationService:
                     actor_id=actor_id,
                     slack_channel_id=slack_channel_id,
                     slack_thread_ts=slack_thread_ts,
-                    confirmed_policy_id=confirmed_policy_id,
-                    confirmed_followup_id=confirmed_followup_id,
                     chat_turn_id=chat_turn_id,
                 )
             except RuntimeError as error:
@@ -220,16 +210,9 @@ class ConversationService:
                     )
             if metadata["title"] == "Lisa conversation":
                 metadata["title"] = "Lisa"
-            hidden_ids = {
-                str(message["id"])
-                for message in previous_messages
-                if message.get("hidden") and message.get("id")
-            }
-            messages, activities, hidden_ids = tag_turn(
-                turn.messages, turn.activities, previous_messages, turn_source, hidden_ids
+            messages, activities = tag_turn(
+                turn.messages, turn.activities, previous_messages, turn_source,
             )
-            for message in messages:
-                message["hidden"] = message.get("id") in hidden_ids
             now = datetime.now(UTC).isoformat()
             metadata["updated_at"] = now
             metadata["provider_consent_at"] = now
@@ -318,75 +301,7 @@ class ConversationService:
         }
 
 
-SCHEDULED_PROMPT = """This scheduled turn is Lisa's QA work in her ongoing workspace conversation. Follow the own-agent-qa skill using workspace tools. Resume pending failures, inspect recent sessions, and evaluate relevant policy table records marked approved: yes. Rules marked approved: no or missing approval are not enforceable business requirements. Use recent QA updates in this conversation to avoid repeating unchanged policy suggestions. Do not ask the owner to approve routine QA work. Do not create or change policy during a scheduled turn. Report evidenced risks, uncertainty, and coverage limits. Never claim unevaluated sessions passed."""
-
-
-class ScheduledQAError(RuntimeError):
-    def __init__(self, status_code: int, message: str):
-        super().__init__(message)
-        self.status_code = status_code
-
-
 class ConversationTurnError(RuntimeError):
     def __init__(self, status_code: int, message: str):
         super().__init__(message)
         self.status_code = status_code
-
-
-class ScheduledQAService:
-    def __init__(
-        self,
-        repository: FileConversationRepository,
-        conversations: ConversationService,
-    ):
-        self.repository = repository
-        self.conversations = conversations
-
-    async def run_cycle(
-        self,
-        workspace_id: str,
-        *,
-        run_turn: Callable,
-    ) -> dict[str, Any]:
-        try:
-            normalized = str(UUID(workspace_id))
-        except ValueError as error:
-            raise ScheduledQAError(400, "Invalid workspace scope") from error
-        main = await self.conversations.main_conversation(normalized)
-        conversation_id = main["conversation_id"]
-        directory = self.repository.conversation_directory(normalized, conversation_id)
-        async with self.repository.lock_for(directory):
-            metadata = self.repository.load_metadata(directory, normalized)
-            previous_messages = metadata.get("messages", [])
-            try:
-                turn = await run_turn_without_releasing_lock_early(
-                    run_turn,
-                    conversation_id=conversation_id,
-                    directory=str(directory),
-                    workspace_id=normalized,
-                    text=SCHEDULED_PROMPT,
-                    turn_source="scheduled",
-                )
-            except RuntimeError as error:
-                raise ScheduledQAError(503, "Lisa could not start scheduled QA") from error
-            except Exception as error:
-                raise ScheduledQAError(502, "Lisa could not complete scheduled QA") from error
-            hidden_ids = {
-                str(message["id"])
-                for message in previous_messages
-                if message.get("hidden") and message.get("id")
-            }
-            messages, activities, hidden_ids = tag_turn(
-                turn.messages, turn.activities, previous_messages, "scheduled", hidden_ids
-            )
-            for message in messages:
-                message["hidden"] = message.get("id") in hidden_ids
-            metadata["updated_at"] = datetime.now(UTC).isoformat()
-            metadata["messages"] = messages
-            metadata["activities"] = [*metadata.get("activities", []), *activities][-100:]
-            self.repository.save_metadata(directory, metadata)
-            return {
-                "conversation_id": conversation_id,
-                "messages": messages,
-                "activities": activities,
-            }

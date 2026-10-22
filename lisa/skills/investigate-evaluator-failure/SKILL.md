@@ -1,12 +1,12 @@
 ---
 name: investigate-evaluator-failure
-description: Investigate a failed behavior check during Lisa's scheduled QA cycle, then report evidence, business impact, and a concrete next action.
+description: Investigate a failed behavior check from a pushed session, then report evidence, business impact, and a concrete next action.
 ---
 
 # Investigate an evaluator failure
 
-Use this skill when an evaluation tool reports `fail` during a scheduled QA
-cycle or a user asks Lisa to investigate a failed check. Take ownership of the
+Use this skill when an evaluation tool reports `fail` for a pushed session or a
+user asks Lisa to investigate a failed check. Take ownership of the
 investigation immediately.
 
 1. Read the evaluator name, exact agent name, session ID, rubric, evaluator

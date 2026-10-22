@@ -39,10 +39,9 @@ def test_locally_bounded_evidence_is_never_marked_complete(monkeypatch, spans, l
     def post(path, body, **kwargs):
         return ({}, 201)
 
-    services = build_services(lisa_test_context(confirmed_policy_id="Rule"))
+    services = build_services(lisa_test_context())
     seed_policy_document(services.policy_service, "## Rule\napproved: yes\n\nFollow the rule.", "")
-    monkeypatch.setattr(services.client, "get", get)
-    monkeypatch.setattr(services.client, "post", post)
+    monkeypatch.setattr(services.sessions.traces, "load", get)
     monkeypatch.setattr(
         services.evaluations,
         "judge",
@@ -71,7 +70,7 @@ def _write_policy(start, text, context):
 
 
 def test_policy_compare_and_swap_serializes_concurrent_writers(lisa_test_context):
-    context = lisa_test_context(confirmed_policy_id="Rule")
+    context = lisa_test_context()
     start = Barrier(2)
     with ThreadPoolExecutor(max_workers=2) as workers:
         outcomes = list(

@@ -1,4 +1,4 @@
-"""Trusted workspace configuration and owner approvals supplied by the runtime."""
+"""Trusted workspace configuration supplied by the runtime."""
 
 from __future__ import annotations
 
@@ -13,15 +13,12 @@ from uuid import UUID
 class WorkspaceContext:
     workspace: str
     data_dir: Path
-    api_url: str = ""
-    api_token: str = field(default="", repr=False)
+    agent_workspace_root: Path = field(default_factory=lambda: Path("/var/lib/lisa/agent-workspace"))
     database_url: str = field(default="", repr=False)
     database_read_url: str = field(default="", repr=False)
     turn_source: str = "web"
     actor_id: str = ""
     owner_user_ids: frozenset[str] = frozenset()
-    confirmed_policy_id: str = ""
-    confirmed_followup_id: str = ""
     conversation_id: str = ""
     chat_turn_id: str = ""
     slack_token: str = field(default="", repr=False)
@@ -35,8 +32,9 @@ class WorkspaceContext:
         return cls(
             workspace=os.getenv("LISA_WORKSPACE_ID", ""),
             data_dir=Path(os.getenv("LISA_DATA_DIR", "/var/lib/lisa/workspaces")).resolve(),
-            api_url=os.getenv("LISA_THELAKE_API_URL", "").rstrip("/"),
-            api_token=os.getenv("LISA_THELAKE_TOKEN", ""),
+            agent_workspace_root=Path(
+                os.getenv("LISA_AGENT_WORKSPACE_ROOT", "/var/lib/lisa/agent-workspace")
+            ).resolve(),
             database_url=os.getenv("LISA_DATABASE_URL", ""),
             database_read_url=os.getenv("LISA_DATABASE_READ_URL", ""),
             turn_source=os.getenv("LISA_TURN_SOURCE", "web"),
@@ -45,8 +43,6 @@ class WorkspaceContext:
                 item.strip() for item in os.getenv("LISA_OWNER_USER_IDS", "").split(",")
                 if item.strip()
             ),
-            confirmed_policy_id=os.getenv("LISA_CONFIRMED_POLICY_ID", "").strip(),
-            confirmed_followup_id=os.getenv("LISA_CONFIRMED_FOLLOWUP_ID", "").strip(),
             conversation_id=os.getenv("LISA_CONVERSATION_ID", "").strip(),
             chat_turn_id=os.getenv("LISA_CHAT_TURN_ID", "").strip(),
             slack_token=os.getenv("LISA_SLACK_BOT_TOKEN", ""),

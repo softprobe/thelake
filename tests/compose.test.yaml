@@ -44,7 +44,7 @@ services:
       - ducklake-test-minio:/data
 
   lisa-postgres:
-    image: postgres:18-alpine
+    image: ghcr.io/pgmq/pg18-pgmq:v1.10.0
     environment:
       POSTGRES_USER: lisa_test
       POSTGRES_PASSWORD: lisa_test

@@ -1,14 +1,6 @@
 """Conversation response projections for Lisa's browser interface."""
 
 
-def browser_conversation(item: dict) -> dict:
-    """Keep internal scheduled prompts out of the browser response."""
-    return {
-        **item,
-        "messages": [message for message in item.get("messages", []) if not message.get("hidden")],
-    }
-
-
 def conversation_summary(item: dict) -> dict:
     """Project stored conversation metadata to the internal list response."""
     fields = (

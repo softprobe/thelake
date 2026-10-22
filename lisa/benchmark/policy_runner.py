@@ -19,8 +19,8 @@ CLI / ``main``:
   approved catalog written into Postgres (catalog). May be larger than the
   labeled subset in ``--manifest``.
 - ``--output``: path for the JSON report written at the end.
-- ``--dogfood-env-file``: local Compose env with DB/API ports, workspace ID,
-  Lisa DB passwords, and TheLake token (no credentials printed).
+- ``--dogfood-env-file``: local Compose env with Lisa's database port, workspace ID,
+  and database passwords (no credentials printed).
 - ``--data-dir``: directory for Lisa home / recorded LLM calls (defaults beside
   ``--output``).
 - ``--live``: required flag; authorizes paid provider calls.
@@ -30,7 +30,7 @@ CLI / ``main``:
 - ``pair_data``: loaded ``--manifest`` (sessions + labels).
 - ``catalog``: loaded ``--catalog-manifest`` (approved policies to seed).
 - ``output_path``: same as ``--output``.
-- Process env: ``LISA_*`` / ``SOFTPROBE_PUBLIC_KEY`` pointing at localhost only.
+- Process env: ``LISA_*`` pointing at localhost only.
 
 Outputs
 -------
@@ -42,7 +42,7 @@ Outputs
   - ``metrics`` / ``per_policy_support``: accuracy-style summaries over non-gated rows.
   - digests, agent name, workspace id, approved policy id map.
 - Stdout: ``metrics`` JSON only (CLI).
-- During the CLI run: TheLake sessions under fixture ``session_id``s and Lisa
+- During the CLI run: Lisa session bundles under fixture ``session_id``s and
   Postgres policies in the isolated dogfood stack. The CLI removes these with
   the stack when the run exits, including on failure. LLM call traces under
   ``--data-dir`` are retained; a report is retained when evaluation produces one.
@@ -50,22 +50,22 @@ Outputs
 Lifecycle (local disposable workspace only)
 -------------------------------------------
 1. Setup (``main`` → ``conftest.configure_lisa_dogfood`` → ``evaluate``):
-   - Point Lisa at the local dogfood DB/API; record LLM calls under ``--data-dir``.
+   - Point Lisa at the local dogfood DB and evidence directory; record LLM calls under ``--data-dir``.
    - Refuse remote hosts; require ``--live`` and ``LISA_LLM_TRACE_ENABLED``.
    - Mint a unique agent name; refuse if any fixture ``session_id`` already exists.
    - Seed the full approved policy catalog for that agent through the
      benchmark-only seed helper in this run-owned database.
 
 2. Execute (``evaluate``):
-   - For each complete fixture session: ingest OTLP under the dataset ``session_id``,
-     wait until TheLake can serve it, and verify ``SessionService`` reconstruction.
+   - For each complete fixture session: persist OTLP under the dataset ``session_id``
+     and verify ``SessionService`` reconstruction.
    - Incomplete/unordered fixtures are capture-gated (listed in report, no providers).
    - After every session reconstructs, call ``EvaluationService.evaluate_session`` once
      per session; join decisions/verdicts to adjudicated labels; write the JSON report.
 
 3. Cleanup:
    - When the CLI exits, ``conftest.dispose_lisa_dogfood`` removes the run-owned
-     Compose project and its volumes, then deletes that run's DuckLake data
+     Compose project and its volumes, then deletes that run's Lisa data
      directory, including ingested sessions and Lisa's seeded policies. It refuses
      to clean other resources.
    - The report and ``--data-dir`` LLM traces remain on disk; ``evaluate`` closes
@@ -79,11 +79,8 @@ from benchmark.policy_seed import seed_policy_document
 import argparse
 import json
 import os
-import time
 from pathlib import Path
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from conftest import (
@@ -94,6 +91,7 @@ from conftest import (
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
 from lisa.models.policies import PolicyRecord
+from lisa.repositories.session_traces import SessionTraceStore
 from lisa.security import redact_evidence
 from datasets.policy_dataset import Dataset, load_dataset
 from benchmark.policy_ingest import build_otlp_trace_export
@@ -154,58 +152,14 @@ def _add_catalog_to_policy_management(
     return loaded_ids
 
 
-def _post_dataset_trace(api_url: str, bearer_token: str, payload: dict) -> dict:
-    request = Request(
-        f"{api_url.rstrip('/')}/v1/traces",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {bearer_token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=30) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        raise RuntimeError(f"TheLake trace ingest failed with HTTP {error.code}") from None
-    except URLError as error:
-        raise RuntimeError(f"TheLake trace ingest failed: {error.reason}") from None
-    if body.get("success") is not True:
-        raise RuntimeError("TheLake did not confirm dataset trace ingestion")
-    return body
-
-
-def _wait_for_session(services, session_id: str, expected_spans: int) -> dict:
-    deadline = time.monotonic() + 30
-    while True:
-        try:
-            detail = services.sessions.detail(session_id)
-        except RuntimeError as error:
-            # Session summaries are reduced asynchronously after trace ingest.
-            # Retry only the API's not-found response while that index catches up.
-            if "(404)" not in str(error):
-                raise
-        else:
-            if len(detail.get("spans", [])) >= expected_spans:
-                return detail
-        if time.monotonic() >= deadline:
-            raise TimeoutError(f"TheLake session {session_id} did not become queryable")
-        time.sleep(0.5)
-
-
 def _ensure_sessions_absent(services, session_ids: list[str]) -> None:
     """Do not append dataset spans to sessions from a prior evaluation run."""
+    existing = {item["session_id"] for item in services.session_traces.list_manifests()}
     for session_id in session_ids:
-        try:
-            services.sessions.detail(session_id)
-        except RuntimeError as error:
-            if "(404)" in str(error):
-                continue
-            raise
-        raise RuntimeError(
-            f"Dataset session {session_id} already exists; use an empty disposable workspace"
-        )
+        if session_id in existing:
+            raise RuntimeError(
+                f"Dataset session {session_id} already exists; use an empty disposable workspace"
+            )
 
 
 def _trajectory_semantics(events: list[dict]) -> list[dict]:
@@ -344,15 +298,8 @@ def evaluate(pair_data: Dataset, catalog: Dataset, output_path: Path) -> dict:
     context = WorkspaceContext.from_environment()
     if not context.database_url:
         raise RuntimeError("Production evaluation requires Lisa's PostgreSQL policy database")
-    if not context.api_url or not context.api_token:
-        raise RuntimeError("Production evaluation requires the configured TheLake session API")
     database_host = urlsplit(context.database_url).hostname
-    api_host = urlsplit(context.api_url).hostname
-    if database_host not in {"localhost", "127.0.0.1", "::1"} or api_host not in {
-        "localhost",
-        "127.0.0.1",
-        "::1",
-    }:
+    if database_host not in {"localhost", "127.0.0.1", "::1"}:
         raise RuntimeError("Dataset evaluation is restricted to a disposable local Lisa workspace")
     os.environ["LISA_DATA_DIR"] = str(context.data_dir.resolve())
     if os.getenv("LISA_LLM_TRACE_ENABLED", "").lower() not in {"1", "true", "yes"}:
@@ -389,7 +336,6 @@ def _evaluate_with_services(
     policy_ids = _add_catalog_to_policy_management(services.policy_service, catalog, agent_name)
 
     # --- Execute phase A: ingest each complete session and verify reconstruction ---
-    ingest_token = os.getenv("SOFTPROBE_PUBLIC_KEY", "dogfood-local")
     rows = []
     sessions = []
     prepared = []
@@ -434,8 +380,10 @@ def _evaluate_with_services(
             trace_id=trace_id,
         )
         span_count = len(payload["resourceSpans"][0]["scopeSpans"][0]["spans"])
-        _post_dataset_trace(context.api_url, ingest_token, payload)
-        detail = _wait_for_session(services, session_id, span_count)
+        stored = services.session_traces.persist(payload)
+        if not stored.created:
+            raise RuntimeError(f"Lisa already has fixture evidence for {session_id}")
+        detail = services.sessions.detail(session_id)
         reconstructed = services.sessions.trajectory(detail)
         if not (
             reconstructed["complete"]
@@ -450,7 +398,7 @@ def _evaluate_with_services(
             redact_evidence(scoped["events"])
         ):
             raise RuntimeError(
-                f"TheLake changed trajectory event semantics for {batch.session_id}"
+                f"Lisa changed trajectory event semantics for {batch.session_id}"
             )
 
         prepared.append((batch, record, session_id, trace_id))
@@ -577,7 +525,10 @@ def main() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     cleanup_target = lisa_dogfood_target(args.dogfood_env_file, repository_root)
     for retained_path in (args.output.resolve(), data_dir.resolve()):
-        if retained_path == cleanup_target.lake_data or cleanup_target.lake_data in retained_path.parents:
+        if (
+            retained_path == cleanup_target.agent_data
+            or cleanup_target.agent_data in retained_path.parents
+        ):
             parser.error("--output and --data-dir must be outside the disposable dogfood data path")
     try:
         configure_lisa_dogfood(args.dogfood_env_file, data_dir.resolve(), repository_root)

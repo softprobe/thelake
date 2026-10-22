@@ -18,6 +18,11 @@ MAX_ROWS = 100
 MAX_RESPONSE_BYTES = 32_000
 STATEMENT_TIMEOUT_MS = 1_500
 
+POLICY_COLUMNS = (
+    "id", "scope", "target_agent_name", "name", "criteria", "approved",
+    "created_at", "updated_at",
+)
+
 VIEW_COLUMNS = {
     "readable_activities": {
         "id", "kind", "parent_id", "status", "title", "summary", "source",
@@ -55,18 +60,7 @@ VIEW_COLUMNS = {
     "readable_activity_context": {
         "id", "activity_id", "seq", "kind", "source_ref", "content_hash", "created_at",
     },
-    "readable_approvals": {
-        "id", "activity_id", "scope", "status", "request_summary", "requested_at",
-        "expires_at", "resolved_at", "resolved_by", "decision_ref",
-    },
-    "readable_activity_followups": {
-        "id", "activity_id", "due_at", "trigger_event_type", "prompt", "status", "requested_by",
-        "requested_at", "approved_at", "completed_at",
-    },
-    "policies": {
-        "id", "scope", "target_agent_name", "name", "criteria", "approved",
-        "created_at", "updated_at",
-    },
+    "policies": set(POLICY_COLUMNS),
 }
 
 ALLOWED_FUNCTIONS = {
@@ -117,9 +111,9 @@ def validate_read_query(query: str) -> str:
         if column.table:
             relation = aliases.get(column.table.lower())
             if relation is None or name not in VIEW_COLUMNS[relation]:
-                raise ValueError(f"Column {column.sql()} is not available from an approved view")
+                raise ValueError(f"Column {column.sql()} is not an approved Lisa column")
         elif name not in available_columns:
-            raise ValueError(f"Column {name} is not available from an approved view")
+            raise ValueError(f"Column {name} is not an approved Lisa column")
 
     for function in tree.find_all(exp.Func):
         name = function.sql_name().lower()

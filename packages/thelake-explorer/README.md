@@ -62,7 +62,7 @@ THELAKE_API_PROXY=http://127.0.0.1:8090 npm run dev:spa
 
 ```bash
 npm run build:embedded   # → embedded/ for binary embed
-npm run build:lisa-embedded # → lisa-embedded/ for binary embed
+npm run build:lisa-frontend # → lisa-dist/ served by Lisa's Python service
 npm run build            # library dist/ + embedded SPA
 npm test
 ```
@@ -72,7 +72,7 @@ npm test
 - **Sessions** — time range, agent/text filters, span tree, input/output
   inspector, human verdict scores (`human_verdict`).
 - **Behavior checks** — create/activate natural-language evaluators for an
-  agent. Lisa runs active checks on her schedule; configure the runner in
+  agent. Lisa evaluates pushed sessions against active checks; configure the runner in
   Lisa's environment.
 - **Lisa** — a separate workspace app served at `/lisa/`, with persistent chat
   and an adjacent panel for Activities, Rules, Triage / judges, and Identity.

@@ -23,21 +23,17 @@ from lisa.models.contracts import (
 from lisa.repositories.conversations import (
     ConversationNotFound,
 )
-from lisa.runtime import (
-    confirmed_followup_id,
-    confirmed_policy_id,
-    run_turn,
-)
+from lisa.repositories.session_traces import SessionTraceConflict
+from lisa.runtime import run_turn
 from lisa.security import redact_text
 from lisa.services.conversations import (
     ConversationTurnError,
-    ScheduledQAError,
 )
-from lisa.views.conversations import browser_conversation, conversation_summary
+from lisa.views.conversations import conversation_summary
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-SERVICE_TOKEN = os.getenv("LISA_THELAKE_TOKEN", "")
+SERVICE_TOKEN = os.getenv("LISA_SERVICE_TOKEN", "")
 
 
 def _services(request: Request) -> WorkspaceServices:
@@ -134,13 +130,60 @@ async def health() -> dict[str, bool]:
     }
 
 
+@router.post("/internal/v1/session-traces", status_code=202)
+async def push_session_traces(request: Request) -> dict[str, str]:
+    """Persist one complete OTLP JSON session and enqueue its policy evaluation."""
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(status_code=415, detail="Expected application/json OTLP JSON")
+    services = _services(request)
+    queue = services.session_evaluation_queue
+    if queue is None:
+        raise HTTPException(status_code=503, detail="Lisa evaluation queue is not configured")
+    try:
+        max_bytes = int(os.getenv("LISA_MAX_SESSION_TRACE_BYTES", str(16 * 1024 * 1024)))
+    except ValueError:
+        raise HTTPException(status_code=503, detail="Lisa trace size limit is misconfigured") from None
+    if not 1 <= max_bytes <= 64 * 1024 * 1024:
+        raise HTTPException(status_code=503, detail="Lisa trace size limit is misconfigured")
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > max_bytes:
+                raise HTTPException(status_code=413, detail="OTLP session bundle is too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length") from None
+    chunks = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail="OTLP session bundle is too large")
+        chunks.append(chunk)
+    try:
+        bundle = json.loads(b"".join(chunks))
+        stored = services.session_traces.persist(bundle)
+    except SessionTraceConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    try:
+        enqueued = queue.send(stored.session_id, stored.agent_name, stored.payload_hash)
+    except Exception as error:
+        logger.exception("Failed to enqueue pushed session for evaluation")
+        raise HTTPException(status_code=503, detail="Lisa could not queue the session evaluation") from error
+    return {
+        "session_id": stored.session_id,
+        "agent_name": stored.agent_name,
+        "status": "queued" if enqueued else "already_queued",
+    }
+
+
 @router.get("/v1/conversations")
 async def user_list_conversations(request: Request) -> list[dict[str, Any]]:
     services = _services(request)
     return [
-        browser_conversation(
-            await services.conversations.main_conversation(user_workspace(request))
-        )
+        await services.conversations.main_conversation(user_workspace(request))
     ]
 
 
@@ -150,9 +193,7 @@ async def user_create_conversation(
 ) -> dict[str, Any]:
     del body
     services = _services(request)
-    return browser_conversation(
-        await services.conversations.main_conversation(user_workspace(request))
-    )
+    return await services.conversations.main_conversation(user_workspace(request))
 
 
 @router.get("/v1/conversations/{conversation_id}")
@@ -162,9 +203,7 @@ async def user_get_conversation(conversation_id: str, request: Request) -> dict[
     main = await services.conversations.main_conversation(workspace_id)
     if str(UUID(conversation_id)) != main["conversation_id"]:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return browser_conversation(
-        services.conversations.get_conversation(workspace_id, conversation_id)
-    )
+    return services.conversations.get_conversation(workspace_id, conversation_id)
 
 
 @router.delete("/v1/conversations/{conversation_id}")
@@ -192,7 +231,7 @@ async def user_send_message(
         services=services,
         actor_id=_user_actor_id(request),
     )
-    return browser_conversation(result)
+    return result
 
 
 @router.get("/v1/activities")
@@ -353,21 +392,6 @@ async def slack_events(
     return {"ok": True}
 
 
-@router.post("/internal/v1/scheduled-cycle", dependencies=[Depends(require_service_token)])
-async def scheduled_cycle(
-    request: WorkspaceRequest, services: WorkspaceServices = Depends(_services)
-) -> dict[str, Any]:
-    try:
-        return await services.scheduled_qa.run_cycle(
-            request.workspace_id,
-            run_turn=run_turn,
-        )
-    except ScheduledQAError as error:
-        if error.status_code >= 500:
-            logger.exception("Lisa scheduled QA cycle failed")
-        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
-
-
 @router.post("/internal/v1/conversations/search", dependencies=[Depends(require_service_token)])
 async def list_conversations(
     request: WorkspaceRequest, services: WorkspaceServices = Depends(_services)
@@ -443,8 +467,6 @@ async def send_message(
             text,
             run_turn=run_turn,
             actor_id=actor_id,
-            confirmed_policy_id=confirmed_policy_id(text),
-            confirmed_followup_id=confirmed_followup_id(text),
         )
     except ConversationTurnError as error:
         raise HTTPException(status_code=error.status_code, detail=str(error)) from error

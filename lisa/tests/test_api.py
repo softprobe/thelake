@@ -9,18 +9,26 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
 
 from lisa.app import app
 from lisa.controllers import http as api
+from lisa.repositories.session_traces import SessionTraceStore
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def client(tmp_path, monkeypatch, lisa_test_database):
+    workspace_id = str(uuid4())
+    database = lisa_test_database(workspace_id)
+    monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
     monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LISA_AGENT_WORKSPACE_ROOT", str(tmp_path / "agent-workspace"))
+    monkeypatch.setenv("LISA_DATABASE_URL", database.writer_url)
+    monkeypatch.setenv("LISA_DATABASE_READ_URL", database.reader_url)
+    monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
     monkeypatch.setattr(api, "SERVICE_TOKEN", "local-test-token")
     with TestClient(app) as test_client:
         yield test_client
@@ -30,11 +38,15 @@ def _repository(client):
     return client.app.state.workspace_services.conversation_repository
 
 
+def _service_headers():
+    return {"Authorization": "Bearer local-test-token"}
+
+
 def test_lisa_conversations_are_scoped_to_workspace(client):
     workspace_a = str(uuid4())
     workspace_b = str(uuid4())
     conversation_id = str(uuid4())
-    headers = {"Authorization": "Bearer local-test-token"}
+    headers = _service_headers()
 
     created = client.post(
         "/internal/v1/conversations",
@@ -70,6 +82,136 @@ def test_lisa_internal_api_requires_service_token(client):
     assert response.status_code == 401
 
 
+def _otlp_session(session_id="pushed-session-1"):
+    return {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": "checkout-agent"}}
+                    ]
+                },
+                "scopeSpans": [
+                    {
+                        "spans": [
+                            {
+                                "traceId": "0123456789abcdef0123456789abcdef",
+                                "spanId": "0123456789abcdef",
+                                "name": "agent turn",
+                                "attributes": [
+                                    {"key": "sp.session.id", "value": {"stringValue": session_id}}
+                                ],
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def test_pushed_session_is_persisted_before_it_is_enqueued(client, tmp_path):
+    class Queue:
+        def __init__(self):
+            self.messages = []
+            self.sessions = set()
+
+        def send(self, session_id, *message):
+            if session_id in self.sessions:
+                return False
+            self.sessions.add(session_id)
+            self.messages.append(message)
+            return True
+
+    services = client.app.state.workspace_services
+    services.session_traces = SessionTraceStore(tmp_path)
+    services.session_evaluation_queue = Queue()
+
+    response = client.post(
+        "/internal/v1/session-traces", json=_otlp_session()
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "session_id": "pushed-session-1",
+        "agent_name": "checkout-agent",
+        "status": "queued",
+    }
+    stored = services.session_traces.load("pushed-session-1")
+    assert stored["span_count"] == 1
+    assert len(services.session_evaluation_queue.messages) == 1
+    duplicate = client.post(
+        "/internal/v1/session-traces", json=_otlp_session()
+    )
+    assert duplicate.status_code == 202
+    assert duplicate.json()["status"] == "already_queued"
+    assert len(services.session_evaluation_queue.messages) == 1
+
+
+def test_pushed_session_runs_through_postgres_queue_and_local_evaluator(client):
+    services = client.app.state.workspace_services
+    response = client.post("/internal/v1/session-traces", json=_otlp_session())
+
+    assert response.status_code == 202
+    activity_id = str(uuid5(
+        NAMESPACE_URL,
+        f"lisa:pushed-session:{services.context.workspace_id()}:pushed-session-1",
+    ))
+    deadline = threading.Event()
+    for _ in range(100):
+        activity = services.activity_store.get_activity_thread(activity_id)
+        if activity and activity["activity"]["status"] in {"success", "error", "stopped"}:
+            break
+        deadline.wait(0.05)
+
+    assert activity is not None
+    assert activity["activity"]["status"] == "success"
+    assert any(
+        event.event_type == "policy_review_completed"
+        for event in services.activity_store.list_events(activity_id)
+    )
+
+
+def test_pushed_session_rejects_oversized_and_malformed_requests(client, monkeypatch):
+    services = client.app.state.workspace_services
+    services.session_evaluation_queue = object()
+    monkeypatch.setenv("LISA_MAX_SESSION_TRACE_BYTES", "32")
+    headers = _service_headers()
+    assert client.post(
+        "/internal/v1/session-traces", headers=headers, json=_otlp_session()
+    ).status_code == 413
+    monkeypatch.setenv("LISA_MAX_SESSION_TRACE_BYTES", "1024")
+    assert client.post(
+        "/internal/v1/session-traces",
+        headers={**headers, "Content-Type": "application/json"},
+        content=b"not json",
+    ).status_code == 400
+    assert client.post(
+        "/internal/v1/session-traces", headers=headers, content=b"{}"
+    ).status_code == 415
+
+
+def test_lisa_python_service_serves_its_frontend_and_client_routes(client, tmp_path, monkeypatch):
+    static_dir = tmp_path / "static"
+    (static_dir / "assets").mkdir(parents=True)
+    (static_dir / "index.html").write_text(
+        '<script>window.__LISA_API_BASE_PATH__="__LISA_API_BASE_PATH__";</script>',
+        encoding="utf-8",
+    )
+    (static_dir / "assets" / "app.js").write_text("console.log('Lisa')", encoding="utf-8")
+    monkeypatch.setenv("LISA_STATIC_DIR", str(static_dir))
+
+    index = client.get("/lisa/")
+    route = client.get("/lisa/activities/activity-1")
+    asset = client.get("/lisa/assets/app.js")
+
+    assert index.status_code == 200
+    assert 'window.__LISA_API_BASE_PATH__="/v1"' in index.text
+    assert route.status_code == 200 and route.text == index.text
+    assert asset.status_code == 200 and "console.log" in asset.text
+    assert client.get("/lisa/assets/missing.js").status_code == 404
+
+
 @pytest.mark.parametrize(
     ("method", "path", "body"),
     [
@@ -84,11 +226,6 @@ def test_lisa_internal_api_requires_service_token(client):
         (
             "post",
             "/internal/v1/conversations/search",
-            {"workspace_id": "11111111-1111-4111-8111-111111111111"},
-        ),
-        (
-            "post",
-            "/internal/v1/scheduled-cycle",
             {"workspace_id": "11111111-1111-4111-8111-111111111111"},
         ),
     ],
@@ -213,7 +350,7 @@ def test_slack_event_is_processed_by_lisa_in_its_original_thread(client, monkeyp
             "user": "user-test",
             "ts": "1710000000.000001",
             "thread_ts": "1710000000.000000",
-            "text": "Review this agent behavior.",
+            "text": "Approve policy: P1.2.1",
         },
     }
     body = json.dumps(event, separators=(",", ":")).encode()
@@ -257,12 +394,13 @@ def test_slack_event_is_processed_by_lisa_in_its_original_thread(client, monkeyp
         services.slack_event_service,
         FakeSlackClient(),
         fake_run_turn,
-        api.confirmed_policy_id,
     )
     asyncio.run(worker._process(receipt_path))
 
     receipt = json.loads(receipt_path.read_text())
     assert receipt["status"] == "complete"
+    assert captured["text"] == "Approve policy: P1.2.1"
+    assert "confirmed_policy_id" not in captured
     assert captured["workspace_id"] == workspace_id
     assert captured["slack_channel_id"] == "channel-test"
     assert captured["slack_thread_ts"] == "1710000000.000000"
@@ -329,13 +467,12 @@ def test_lisa_saves_agent_reply_after_openhands_run(client, monkeypatch):
             "role": "assistant",
             "text": "Found it.",
             "turn_source": "web",
-            "hidden": False,
         }
     ]
     assert "chat-secret-value" not in captured["text"]
     assert "[REDACTED]" in captured["text"]
     assert captured["workspace_id"] == workspace_id
-    assert captured["confirmed_policy_id"] is None
+    assert "confirmed_policy_id" not in captured
 
 
 def test_cancelled_chat_waits_for_openhands_and_persists_its_turn(client, monkeypatch):
@@ -370,7 +507,6 @@ def test_cancelled_chat_waits_for_openhands_and_persists_its_turn(client, monkey
                 workspace_id,
                 "Continue",
                 run_turn=api.run_turn,
-                confirmed_policy_id=None,
             )
         )
         assert await asyncio.to_thread(started.wait, 2)
@@ -395,7 +531,7 @@ def test_cancelled_chat_waits_for_openhands_and_persists_its_turn(client, monkey
     assert saved["messages"][0]["id"] == "cancelled-turn"
 
 
-def test_explicit_chat_confirmation_is_bound_to_the_current_turn(client, monkeypatch):
+def test_chat_message_reaches_the_agent_without_a_bound_policy(client, monkeypatch):
     workspace_id = str(uuid4())
     conversation_id = str(uuid4())
     headers = {"Authorization": "Bearer local-test-token"}
@@ -424,21 +560,8 @@ def test_explicit_chat_confirmation_is_bound_to_the_current_turn(client, monkeyp
     )
 
     assert response.status_code == 200
-    assert captured["confirmed_policy_id"] == "P1.2.1"
-
-
-def test_policy_approval_requires_exact_readable_standalone_form():
-    from lisa.runtime import (
-        confirmed_followup_id,
-        confirmed_policy_id,
-    )
-
-    assert confirmed_policy_id("Approve policy: P1.2") == "P1.2"
-    assert confirmed_policy_id("Approve policy: P1.2.1") == "P1.2.1"
-    assert confirmed_policy_id("Please approve policy: P1.2") is None
-    assert confirmed_policy_id("Approve policy: P1.2, thanks") is None
-    assert confirmed_policy_id("Approve policy: 12345678-1234-4234-8234-123456789abc") is None
-    assert confirmed_followup_id("Confirm follow-up: 12345678-1234-4234-8234-123456789abc")
+    assert captured["text"] == "Approve policy: P1.2.1"
+    assert "confirmed_policy_id" not in captured
 
 def test_activity_feed_http_endpoints_use_workspace_database(
     monkeypatch, lisa_test_database, tmp_path
@@ -574,57 +697,6 @@ def test_lisa_requires_provider_data_consent(client):
     )
 
     assert response.status_code == 422
-
-
-def test_scheduled_cycle_runs_from_lisa_and_persists_its_turn(client, monkeypatch):
-    workspace_id = str(uuid4())
-    monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
-    monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
-    captured = {}
-
-    def fake_run_turn(**kwargs):
-        captured.update(kwargs)
-        Path(kwargs["directory"]).mkdir(parents=True, exist_ok=True)
-        (Path(kwargs["directory"]) / "conversation.json").write_text("temporary")
-        from lisa.runtime import AgentTurn
-
-        return AgentTurn(
-            messages=[
-                {"id": "scheduled-input", "role": "user", "text": kwargs.get("text", "")},
-                {"id": "scheduled-1", "role": "assistant", "text": "No new sample."},
-            ],
-            activities=[{"id": "tool-1", "kind": "tool", "label": "Lisa used search_sessions"}],
-        )
-
-    monkeypatch.setattr(api, "run_turn", fake_run_turn)
-
-    services = client.app.state.workspace_services
-    result = asyncio.run(
-        services.scheduled_qa.run_cycle(
-            workspace_id,
-            run_turn=api.run_turn,
-        )
-    )
-
-    assert result["messages"][1]["text"] == "No new sample."
-    assert captured["workspace_id"] == workspace_id
-    assert "own-agent-qa" in captured["text"]
-    assert "workspace tools" in captured["text"]
-    assert captured["conversation_id"] == result["conversation_id"]
-    assert Path(captured["directory"]).exists()
-    assert result["messages"][0]["turn_source"] == "scheduled"
-    assert result["messages"][0]["hidden"] is True
-    assert result["messages"][1]["hidden"] is False
-    saved = client.get(
-        f"/internal/v1/conversations/{result['conversation_id']}",
-        headers={"Authorization": "Bearer local-test-token"},
-        params={"workspace_id": workspace_id},
-    )
-    assert saved.status_code == 200
-    assert saved.json()["messages"][1]["id"] == "scheduled-1"
-    browser = client.get("/v1/conversations").json()[0]
-    assert all(message["id"] != "scheduled-input" for message in browser["messages"])
-    assert all("Internal schedule prompt" not in message["text"] for message in browser["messages"])
 
 
 def test_lisa_conversation_can_only_be_deleted_by_its_workspace(client):

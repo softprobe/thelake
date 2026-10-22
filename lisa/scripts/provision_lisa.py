@@ -95,12 +95,29 @@ def _apply_schema(
     writer_role: str,
     reader_role: str,
 ) -> None:
+    connection.execute(
+        files("lisa").joinpath("sql", "queue", "create_extension.sql").read_text(
+            encoding="utf-8"
+        )
+    )
     connection.execute(_sql("schema.sql"))
+    connection.execute(
+        files("lisa").joinpath("sql", "queue", "create_session_evaluations.sql").read_text(
+            encoding="utf-8"
+        )
+    )
     grants = pg_sql.SQL(_sql("grant_runtime_roles.sql")).format(
         writer=pg_sql.Identifier(writer_role),
         reader=pg_sql.Identifier(reader_role),
     )
     connection.execute(grants)
+    connection.execute(
+        pg_sql.SQL(
+            files("lisa").joinpath("sql", "queue", "grant_runtime_roles.sql").read_text(
+                encoding="utf-8"
+            )
+        ).format(writer=pg_sql.Identifier(writer_role))
+    )
     connection.execute(
         _sql("bind_deployment.sql"),
         {"workspace_fingerprint": fingerprint},

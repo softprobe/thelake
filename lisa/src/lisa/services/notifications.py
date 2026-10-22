@@ -59,22 +59,3 @@ class SlackNotifier:
         except Exception as error:
             logger.exception("Lisa could not persist Slack notification receipt")
             return {"status": "failed", "reason": redact_text(str(error))}
-
-    def notify_activity_update(self, followup_id: str, activity: dict, summary: str) -> dict:
-        """Post a completed follow-up into the workspace's configured Lisa thread."""
-        channel = self.context.activity_slack_channel
-        thread_ts = self.context.activity_slack_thread or None
-        if not channel:
-            return {"status": "not_configured"}
-        text = (
-            f"*Lisa activity update:* {redact_text(str(activity.get('title', 'Activity')))}\n"
-            f"{redact_text(summary)}"
-        )
-        try:
-            body = self.client.post_message(
-                channel, text, thread_ts, timeout=15, client_msg_id=followup_id,
-            )
-            return {"status": "sent", "channel_id": channel, "message_ts": body.get("ts")}
-        except Exception as error:
-            logger.exception("Lisa activity Slack update failed")
-            return {"status": "failed", "reason": redact_text(str(error))}

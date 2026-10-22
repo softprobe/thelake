@@ -416,7 +416,7 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
         <button aria-label="Tasks" disabled><LisaIcon name="tasks" size={21} /></button>
         <span />
         <button aria-label="Apps" disabled><LisaIcon name="apps" size={21} /></button>
-        <button aria-label="Sessions" onClick={onShowSessions}><LisaIcon name="analytics" size={21} /></button>
+        {onShowSessions && <button aria-label="Sessions" onClick={onShowSessions}><LisaIcon name="analytics" size={21} /></button>}
         <button aria-label="Theme" disabled><LisaIcon name="theme" size={21} /></button>
         <div className="tle-lisa-rail-footer">
           <button aria-label="Download" disabled><LisaIcon name="download" size={21} /></button>

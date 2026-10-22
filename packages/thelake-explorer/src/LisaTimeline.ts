@@ -114,16 +114,14 @@ export function lisaTimeline(
       .filter((activity) => activity.kind === "evidence" && activity.tool_call_id)
       .map((activity) => [activity.tool_call_id!, activity]),
   );
-  const timeline: TimedMessage[] = messages.filter((message) => !message.hidden).map((message, order) => ({
+  const timeline: TimedMessage[] = messages.map((message, order) => ({
     order,
     timestamp: messageTime(message.created_at),
     sequence: message.sequence,
     message: {
       id: message.id,
       role: message.role,
-      content: [{ type: "text", text: message.turn_source === "scheduled" && message.role === "assistant"
-        ? `Scheduled QA update\n\n${message.text}`
-        : message.text }],
+      content: [{ type: "text", text: message.text }],
       createdAt: message.created_at ? new Date(message.created_at) : undefined,
     },
   }));

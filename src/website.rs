@@ -37,10 +37,6 @@ pub fn routes() -> Router {
 #[folder = "packages/thelake-explorer/embedded/"]
 struct ExplorerAssets;
 
-#[derive(Embed)]
-#[folder = "packages/thelake-explorer/lisa-embedded/"]
-struct LisaAssets;
-
 pub fn app_routes() -> Router {
     Router::new()
         .route(
@@ -49,12 +45,6 @@ pub fn app_routes() -> Router {
         )
         .route("/explorer/", get(|| async { explorer_index() }))
         .route("/explorer/{*path}", get(explorer_asset))
-        .route(
-            "/lisa",
-            get(|| async { axum::response::Redirect::permanent("/lisa/") }),
-        )
-        .route("/lisa/", get(|| async { lisa_index() }))
-        .route("/lisa/{*path}", get(lisa_asset))
 }
 
 async fn explorer_asset(Path(path): Path<String>) -> Response {
@@ -67,38 +57,15 @@ async fn explorer_asset(Path(path): Path<String>) -> Response {
     }
 }
 
-async fn lisa_asset(Path(path): Path<String>) -> Response {
-    if !is_safe_asset_path(&path) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match LisaAssets::get(&path) {
-        Some(_) => embedded_app_asset_response::<LisaAssets>(&path),
-        None => lisa_index(),
-    }
-}
-
 fn explorer_index() -> Response {
     let Some(file) = ExplorerAssets::get("index.html") else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    embedded_index_response(file, None)
+    embedded_index_response(file)
 }
 
-fn lisa_index() -> Response {
-    let Some(file) = LisaAssets::get("index.html") else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let lisa_url = std::env::var("LISA_PUBLIC_URL").unwrap_or_default();
-    embedded_index_response(file, Some(lisa_url))
-}
-
-fn embedded_index_response(file: rust_embed::EmbeddedFile, lisa_url: Option<String>) -> Response {
-    let html = if let Some(lisa_url) = lisa_url {
-        let escaped_url = serde_json::to_string(&lisa_url).unwrap_or_else(|_| "\"\"".into());
-        String::from_utf8_lossy(&file.data).replace("\"__LISA_API_BASE_PATH__\"", &escaped_url)
-    } else {
-        String::from_utf8_lossy(&file.data).into_owned()
-    };
+fn embedded_index_response(file: rust_embed::EmbeddedFile) -> Response {
+    let html = String::from_utf8_lossy(&file.data).into_owned();
     (
         [
             (header::CONTENT_TYPE, content_type("index.html")),
@@ -244,30 +211,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn embeds_standalone_lisa_and_hashed_assets() {
-        let html = LisaAssets::get("index.html").expect("Lisa index must be embedded");
-        let html = String::from_utf8(html.data.to_vec()).unwrap();
-        assert!(html.contains("/lisa/assets/"));
-        assert!(html.contains("window.__LISA_API_BASE_PATH__"));
-        let asset = LisaAssets::iter()
-            .find(|path| path.starts_with("assets/") && path.ends_with(".js"))
-            .expect("Lisa JS bundle must be embedded");
-        assert_eq!(
-            content_type(asset.as_ref()),
-            "application/javascript; charset=utf-8"
-        );
-    }
-
     #[tokio::test]
     async fn explorer_routes_serve_index_assets_and_client_routes() {
         let router = app_routes();
-        for path in [
-            "/explorer/",
-            "/explorer/sessions/session-1",
-            "/lisa/",
-            "/lisa/activities/activity-1",
-        ] {
+        for path in ["/explorer/", "/explorer/sessions/session-1"] {
             let response = router
                 .clone()
                 .oneshot(
@@ -285,7 +232,7 @@ mod tests {
             );
         }
 
-        let response = app_routes()
+        let response = router
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/lisa/")
@@ -294,32 +241,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let html = String::from_utf8_lossy(&body);
-        assert!(!html.contains("=\"__LISA_API_BASE_PATH__\";"));
-        assert!(html.contains("window.__LISA_API_BASE_PATH__"));
-        assert!(!html.contains("__LISA_API_BASE_PATH__\";"));
-
-        let js_path = LisaAssets::iter()
-            .find(|path| path.starts_with("assets/") && path.ends_with(".js"))
-            .expect("built JS bundle");
-        let path = format!("/lisa/{js_path}");
-        let response = router
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(path)
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers()[header::CONTENT_TYPE],
-            "application/javascript; charset=utf-8"
-        );
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -482,10 +482,7 @@ def test_evaluate_session_judges_every_selected_policy_with_the_same_evidence(tm
     assert {item["id"] for item in result["selected_policies"]} == {rule.id, second_rule.id}
     assert len(client.get_calls) == 1
     assert len(triager.client.request["questions"]) == 2
-    assert {body["metadata"]["policy_id"] for _, body in client.posts} == {
-        rule.id,
-        second_rule.id,
-    }
+    assert client.posts == []
     assert len(judge_requests) == 2
     assert {request["policy"]["name"] for request in judge_requests} == {
         rule.name,

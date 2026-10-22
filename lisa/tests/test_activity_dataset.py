@@ -36,7 +36,7 @@ def _feed_row(activity_id, title, status="pending"):
 def test_activity_benchmark_release_has_frozen_cases_and_both_splits():
     manifest, cases, digest = load_activity_dataset(DATASET / "manifests/benchmark.json")
 
-    assert manifest.case_count == len(cases) == 33
+    assert manifest.case_count == len(cases) == 31
     tracking_cases = [
         case for case in cases
         if case.split == "benchmark" and case.case_id.startswith("activity_tracking_")
@@ -64,11 +64,11 @@ def test_activity_benchmark_release_has_frozen_cases_and_both_splits():
         "update",
         "continuity",
         "policy",
-        "followup",
         "evaluation",
         "request_resolution",
     }
     assert len({case.case_id for case in cases}) == len(cases)
+    assert any(case.category == "database" for case in cases)
 
 
 def test_activity_benchmark_can_select_new_heldout_tracking_cases_without_changing_manifest():
@@ -297,6 +297,69 @@ def test_activity_benchmark_checks_database_tool_arguments():
     )["passed"]
 
 
+def test_activity_benchmark_fails_unexpected_tool_errors():
+    turn = ActivityTurn(
+        chat="main",
+        text="Inspect the policy catalog",
+        require_tools=["lisa_db"],
+    )
+    result = {
+        "activities": [
+            {"kind": "tool", "tool_name": "lisa_db", "tool_call_id": "db-1"},
+            {
+                "kind": "evidence",
+                "tool_name": "lisa_db",
+                "tool_call_id": "db-1",
+                "is_error": True,
+                "detail": "Column archived_at is not available from an approved view",
+            },
+        ],
+        "messages": [{"role": "assistant", "text": "I could not read the policies."}],
+    }
+
+    scored = _score_turn(turn, result, {}, 1)
+
+    errors = next(check for check in scored["tool_checks"] if check["check"] == "tool_errors")
+    assert not errors["passed"]
+    assert errors["actual"] == ["lisa_db"]
+
+
+def test_activity_benchmark_allows_labeled_expected_tool_errors():
+    turn = ActivityTurn(
+        chat="main",
+        text="Evaluate a missing session",
+        expected_tool_errors=["evaluate_session"],
+    )
+    result = {
+        "activities": [
+            {
+                "kind": "evidence",
+                "tool_name": "evaluate_session",
+                "is_error": True,
+                "detail": "Session not found",
+            },
+        ],
+        "messages": [],
+    }
+
+    scored = _score_turn(turn, result, {}, 1)
+
+    assert next(check for check in scored["tool_checks"] if check["check"] == "tool_errors")["passed"]
+
+
+def test_activity_benchmark_includes_policy_catalog_schema_case():
+    _, cases, _ = load_activity_dataset(DATASET / "manifests/benchmark.json")
+    case = next(case for case in cases if case.case_id == "inspect_policy_catalog")
+
+    assert case.split == "benchmark"
+    assert case.turns[0].require_tools == ["lisa_db", "resolve_chat_activity"]
+    assert "archived_at" in case.turns[0].tool_arguments_must_not_include
+    assert {
+        "id", "scope", "target_agent_name", "name", "criteria", "approved",
+        "created_at", "updated_at",
+    } <= set(case.turns[0].tool_arguments_must_include)
+
+
 def test_activity_benchmark_requires_session_id_in_sql_filter():
     turn = ActivityTurn(
         chat="main",
@@ -432,7 +495,7 @@ def test_activity_benchmark_resolves_new_policy_id_before_scoring_same_turn():
             list_policy_records=lambda: [PolicyRecord("P1.3", "workspace", None, "Refund", "Review", False)]
         ),
         activity_store=SimpleNamespace(
-            list_activity_feed=lambda **_: [], list_activity_followups=lambda _: [],
+            list_activity_feed=lambda **_: [],
         ),
     )
     substitutions = {}
@@ -467,11 +530,14 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "resolve every request before the final reply" in prompt
     assert "never create a second activity just because the next action is approval" in prompt
     assert "keep a newly created or updated policy's activity in `waiting`" in prompt
-    assert "entire owner message" in prompt or "only that standalone owner command" in prompt
+    assert "when an authorized owner asks to approve a policy, call approve_policy with the policy id they named" in prompt
     assert "use list_policies and read_policy" in prompt
-    assert "never call lisa_db to inspect or change policy rows" in prompt
+    assert "for an explicit request to inspect policy catalog rows or run sql diagnostics, lisa_db may read lisa.policies" in prompt
+    assert "it has no archived_at column, and deletion removes the row" in prompt
+    assert "never use lisa_db to create, update, approve, or delete policies" in prompt
+    assert "never call lisa_db to inspect or change policy rows" not in prompt
     assert "same work item, including when it arrives in another chat" in prompt
-    assert "before acting on any approval command, verify the exact policy id and its current approval state with list_policies or read_policy" in prompt
+    assert "before calling approve_policy, verify the exact policy id and its current approval state with list_policies or read_policy" in prompt
     assert "if `activity_finalized`" in prompt
     assert "the service could not finalize the activity" in prompt
     assert "do not call `get_session`, `complete_activity`, or `set_activity_progress` again" in prompt
@@ -483,6 +549,8 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "retrieve lisa's recorded evaluation history" in database_schema
     assert "do not query lisa_db to find, create, update, or inspect activities" in database_schema
     assert "delete_policy" in database_schema
+    assert "there is no archived_at column" in database_schema
+    assert "truncated" in database_schema
 
     policy_skill = " ".join((
         Path(__file__).resolve().parents[1] / "skills/learn-agent-policy/SKILL.md"
@@ -505,7 +573,7 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "owners can request policy deletion in natural language" in evaluation_skill
     assert "historical evaluation rows retain the policy id, name, and criteria hash" in evaluation_skill
     assert "verify the exact policy ID and its current approval state with `list_policies` or `read_policy`" in policy_skill
-    assert "Approve policy: <policy_id>" in policy_skill
+    assert "call `approve_policy` with the policy ID they named" in policy_skill
     assert "update the existing row in place" in policy_skill
     assert "Keep the same policy ID" in policy_skill
     assert "updates that same row" in policy_skill
@@ -514,6 +582,7 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "allocates and returns the next" in policy_skill
     assert "do not call `write_policy`, `approve_policy`, or `delete_policy`" in policy_skill
     assert "Do not use `lisa_db` for normal policy work." in policy_skill
+    assert "it has no `archived_at`" in policy_skill
     assert 'set_activity_progress(status="waiting")' in policy_skill
 
 
@@ -526,24 +595,15 @@ def test_clarification_activity_can_be_set_waiting_but_not_changed_again_before_
     assert "set it to `waiting`, list the candidates, and ask which one the user means. After that, make no further activity changes until the user answers." in activity_skill
 
 
-def test_activity_labels_cover_timeline_evidence_and_exact_followup_contract():
+def test_activity_labels_cover_timeline_evidence():
     labels = ActivityLabels.model_validate(
         {
             "activity_count": 1,
             "activities": [
                 {
                     "title_contains": "Aspen",
-                        "status": "success",
+                    "status": "success",
                     "timeline_text_contains": ["same idempotency key", "retry worker"],
-                }
-            ],
-            "followups": [
-                {
-                    "activity_title_contains": "Aspen",
-                    "status": "pending",
-                    "count": 1,
-                    "trigger_event_type": "deployment_completed",
-                    "prompt_contains": ["review", "health"],
                 }
             ],
         }
@@ -561,13 +621,6 @@ def test_activity_labels_cover_timeline_evidence_and_exact_followup_contract():
                     }
                 ]
             },
-            list_activity_followups=lambda _: [
-                {
-                    "status": "pending",
-                    "trigger_event_type": "deployment_completed",
-                    "prompt": "Review deployment health once",
-                }
-            ],
         ),
         policy_service=SimpleNamespace(read_policy_records=list, list_policy_records=list),
     )
@@ -575,23 +628,6 @@ def test_activity_labels_cover_timeline_evidence_and_exact_followup_contract():
     checks = _score_state(services, labels.model_dump(exclude_unset=True))
 
     assert all(check["passed"] for check in checks)
-    services.activity_store.list_activity_followups = lambda _: [
-        {
-            "status": "pending",
-            "trigger_event_type": "deployment_completed",
-            "prompt": "Review deployment health once",
-        },
-        {
-            "status": "pending",
-            "trigger_event_type": "deployment_completed",
-            "prompt": "Review deployment health twice",
-        },
-    ]
-    assert not next(
-        check
-        for check in _score_state(services, labels.model_dump())
-        if check["check"].startswith("followup:")
-    )["passed"]
 
 
 def test_activity_count_expectation_is_optional_for_policy_state_cases():

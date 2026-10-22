@@ -572,63 +572,6 @@ class PostgresActivityStore:
                 connection, activity_id, "progress", row["title"], summary, "lisa"
             )
 
-    def create_activity_followup(
-        self, *, activity_id: str, due_at: str | None, trigger_event_type: str | None,
-        prompt: str, requested_by: str,
-    ) -> str:
-        followup_id = str(uuid4())
-        with self._connect() as connection, connection.transaction():
-            connection.execute(_sql("lock_activity_for_update.sql"), {
-                "activity_id": activity_id,
-            })
-            row = connection.execute(_sql("create_activity_followup.sql"), {
-                "id": followup_id, "activity_id": activity_id,
-                "due_at": due_at, "trigger_event_type": trigger_event_type,
-                "prompt": prompt, "requested_by": requested_by,
-            }).fetchone()
-            if row is None:
-                raise ValueError("Activity does not exist or is already complete")
-        return followup_id
-
-    def approve_activity_followup(self, followup_id: str) -> bool:
-        with self._connect() as connection, connection.transaction():
-            row = connection.execute(_sql("approve_activity_followup.sql"), {
-                "id": followup_id,
-            }).fetchone()
-            if row is not None:
-                self._append_activity_event(
-                    connection, str(row["activity_id"]), "followup_approved",
-                    "Follow-up approved", f"Follow-up {followup_id} was approved by the owner.", "owner",
-                )
-        return row is not None
-
-    def list_activity_followups(
-        self, activity_id: str, limit: int = 20,
-    ) -> list[dict[str, Any]]:
-        if not 1 <= limit <= 100:
-            raise ValueError("limit must be between 1 and 100")
-        with self._connect() as connection:
-            rows = connection.execute(_sql("list_activity_followups.sql"), {
-                "activity_id": activity_id, "limit": limit,
-            }).fetchall()
-        return [dict(row) for row in rows]
-
-    def claim_due_activity_followups(self, limit: int = 10) -> list[dict[str, Any]]:
-        with self._connect() as connection, connection.transaction():
-            connection.execute(_sql("cancel_terminal_activity_followups.sql"))
-            rows = connection.execute(_sql("claim_due_activity_followups.sql"), {
-                "limit": limit,
-            }).fetchall()
-        return [dict(row) for row in rows]
-
-    def finish_activity_followup(self, followup_id: str) -> None:
-        with self._connect() as connection, connection.transaction():
-            connection.execute(_sql("finish_activity_followup.sql"), {"id": followup_id})
-
-    def release_activity_followup(self, followup_id: str) -> None:
-        with self._connect() as connection, connection.transaction():
-            connection.execute(_sql("release_activity_followup.sql"), {"id": followup_id})
-
     def create_evaluation(
         self,
         *,
@@ -888,6 +831,18 @@ class PostgresActivityStore:
                 },
             )
             if finished.fetchone() is None:
+                return False
+            connection.execute(_sql("sync_activity_actions.sql"), {"activity_id": activity_id})
+            return True
+
+    def fail_exhausted_session_evaluation(self, activity_id: str, summary: str) -> bool:
+        """Fail one exhausted pushed-session evaluation after retryable runs are closed."""
+        with self._connect() as connection, connection.transaction():
+            finished = connection.execute(
+                _sql("fail_exhausted_session_evaluation.sql"),
+                {"activity_id": activity_id, "summary": summary},
+            ).fetchone()
+            if finished is None:
                 return False
             connection.execute(_sql("sync_activity_actions.sql"), {"activity_id": activity_id})
             return True
@@ -1186,7 +1141,7 @@ class PostgresActivityStore:
         actor: str,
         fencing_token: int,
     ) -> ScoreOutboxItem:
-        """Persist a score payload before submitting it to TheLake."""
+        """Journal the local score before completing the evaluation activity."""
         score_id = str(payload["score_id"])
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         payload_hash = sha256(encoded.encode("utf-8")).hexdigest()

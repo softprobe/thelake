@@ -41,7 +41,7 @@ OUTSIDER = "activity-benchmark-outsider"
 
 
 def _interpolate(text: str, values: dict[str, str]) -> str:
-    template = re.sub(r"\$(policy_id|followup_id)", r"{\1}", text)
+    template = re.sub(r"\$policy_id", r"{policy_id}", text)
     return template.format_map({key: value for key, value in values.items()})
 
 
@@ -49,14 +49,6 @@ def _update_substitutions(services, substitutions: dict[str, str]) -> None:
     pending = [row for row in services.policy_service.list_policy_records() if not row.approved]
     if pending:
         substitutions["policy_id"] = str(pending[0].id)
-    activities = services.activity_store.list_activity_feed(limit=100)
-    followups = [
-        followup
-        for activity in activities
-        for followup in services.activity_store.list_activity_followups(str(activity["id"]))
-    ]
-    if followups:
-        substitutions["followup_id"] = str(followups[0]["id"])
 
 
 def _score_state(
@@ -121,37 +113,6 @@ def _score_state(
                     "next_action": found.get("next_action"),
                     "timeline_summaries": timeline_summaries,
                 },
-            }
-        )
-    for label in expected.get("followups", []):
-        activity = next(
-            (
-                item
-                for item, title in lowered_feed
-                if label["activity_title_contains"].casefold() in title
-            ),
-            None,
-        )
-        followups = (
-            services.activity_store.list_activity_followups(str(activity["id"])) if activity else []
-        )
-        matching = [item for item in followups if item["status"] == label["status"]]
-        ok = bool(matching)
-        if label.get("count") is not None:
-            ok = ok and len(followups) == label["count"]
-        if label.get("trigger_event_type") is not None:
-            ok = ok and any(
-                item.get("trigger_event_type") == label["trigger_event_type"] for item in matching
-            )
-        if label.get("prompt_contains"):
-            prompt = "\n".join(str(item.get("prompt") or "") for item in matching).casefold()
-            ok = ok and all(phrase.casefold() in prompt for phrase in label["prompt_contains"])
-        checks.append(
-            {
-                "check": f"followup:{label['activity_title_contains']}:{label['status']}",
-                "passed": ok,
-                "actual_statuses": [item["status"] for item in followups],
-                "actual_count": len(followups),
             }
         )
     records = services.policy_service.list_policy_records()
@@ -390,6 +351,27 @@ def _score_turn(
                 "passed": phrase.casefold() in arguments.casefold(),
             }
         )
+    for template in turn.tool_arguments_must_not_include:
+        phrase = _interpolate(template, substitutions)
+        action_checks.append(
+            {
+                "check": f"tool_arguments_exclude:{phrase}",
+                "passed": phrase.casefold() not in arguments.casefold(),
+            }
+        )
+    actual_tool_errors = [
+        str(item.get("tool_name"))
+        for item in result["activities"]
+        if item.get("kind") == "evidence" and item.get("is_error")
+    ]
+    action_checks.append(
+        {
+            "check": "tool_errors",
+            "passed": sorted(actual_tool_errors) == sorted(turn.expected_tool_errors),
+            "expected": turn.expected_tool_errors,
+            "actual": actual_tool_errors,
+        }
+    )
     database_queries = []
     for call in calls:
         if call.get("tool_name") != "lisa_db":
@@ -523,11 +505,6 @@ def _run_case(
     from lisa.backends.openhands import OpenHandsBackend
     from lisa.bootstrap import build_services
     from lisa.context import WorkspaceContext
-    from lisa.runtime import (
-        confirmed_followup_id,
-        confirmed_policy_id,
-    )
-
     writer_url, reader_url = database.writer_url, database.reader_url
     data_dir = artifact_dir / "workspaces" / case.case_id
     os.environ.update(
@@ -580,8 +557,6 @@ def _run_case(
                 workspace,
                 text,
                 run_turn=OpenHandsBackend().run_turn,
-                confirmed_policy_id=confirmed_policy_id(text),
-                confirmed_followup_id=confirmed_followup_id(text),
                 turn_source=source,
                 actor_id=OWNER if turn.actor == "owner" else OUTSIDER,
                 slack_channel_id=channel,

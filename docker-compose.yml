@@ -86,8 +86,6 @@ services:
       - OTEL_GRPC_PORT=4317
       - SOFTPROBE_LISTEN_ADDR=0.0.0.0:8090
       - CONFIG_FILE=/app/config.yaml
-      - LISA_THELAKE_TOKEN=${LISA_THELAKE_TOKEN:-}
-      - LISA_PUBLIC_URL=${LISA_PUBLIC_URL:-http://127.0.0.1:${THELAKE_LISA_PUBLIC_PORT:-18083}/v1}
       - THELAKE_DEFAULT_WORKSPACE_ID=${THELAKE_DEFAULT_WORKSPACE_ID:-550e8400-e29b-41d4-a716-446655440000}
       - SOFTPROBE_LOCAL_ANONYMOUS=1
     volumes:
@@ -98,6 +96,28 @@ services:
       - "127.0.0.1:4317:4317"  # OTLP gRPC
       - "127.0.0.1:${THELAKE_DEV_PORT:-8090}:8090"  # Runtime HTTP API
 
+  lisa-postgres:
+    profiles: [lisa]
+    image: ghcr.io/pgmq/pg17-pgmq:v1.10.0
+    container_name: lisa-postgres
+    shm_size: 1gb
+    environment:
+      - POSTGRES_USER=lisa_admin
+      - POSTGRES_PASSWORD=${LISA_DATABASE_ADMIN_PASSWORD:?Run make dev-up to initialize local Lisa credentials}
+      - POSTGRES_DB=postgres
+    ports:
+      - "127.0.0.1:${THELAKE_LISA_POSTGRES_PORT:-55433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lisa_admin -p 5432 -d postgres"]
+      interval: 2s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+    networks:
+      - backend_net
+    volumes:
+      - lisa-postgres-data:/var/lib/postgresql/data
+
   lisa-provision:
     profiles: [lisa]
     build:
@@ -105,12 +125,12 @@ services:
       dockerfile: lisa/Dockerfile
     entrypoint: ["python", "/app/provision_lisa.py"]
     environment:
-      - LISA_DATABASE_PROVISION_URL=postgresql://ducklake:ducklake@ducklake-postgres:5432/lisa
+      - LISA_DATABASE_PROVISION_URL=postgresql://lisa_admin:${LISA_DATABASE_ADMIN_PASSWORD:?Run make dev-up to initialize local Lisa credentials}@lisa-postgres:5432/lisa
       - LISA_DATABASE_WRITER_PASSWORD=${LISA_DATABASE_WRITER_PASSWORD:?Run make dev-up to initialize local Lisa credentials}
       - LISA_DATABASE_READER_PASSWORD=${LISA_DATABASE_READER_PASSWORD:?Run make dev-up to initialize local Lisa credentials}
       - LISA_WORKSPACE_ID=${THELAKE_DEFAULT_WORKSPACE_ID:-550e8400-e29b-41d4-a716-446655440000}
     depends_on:
-      ducklake-postgres:
+      lisa-postgres:
         condition: service_healthy
     networks:
       - backend_net
@@ -122,8 +142,6 @@ services:
       context: .
       dockerfile: lisa/Dockerfile
     environment:
-      - LISA_THELAKE_TOKEN=${LISA_THELAKE_TOKEN:?Set LISA_THELAKE_TOKEN to enable Lisa}
-      - LISA_THELAKE_API_URL=http://otlp-backend:8090
       - LISA_SKILL_DIR=/app/skills
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
@@ -135,12 +153,13 @@ services:
       - LISA_BASE_URL=${LISA_BASE_URL:-}
       - LISA_API_KEY=${LISA_API_KEY:-}
       - LISA_DATA_DIR=/var/lib/lisa/workspaces
+      - LISA_AGENT_WORKSPACE_ROOT=/var/lib/lisa/agent-workspace
+      - LISA_EXPLORER_URL=${LISA_EXPLORER_URL-http://127.0.0.1:${THELAKE_DEV_PORT:-8090}/explorer/}
+      - LISA_MAX_SESSION_TRACE_BYTES=${LISA_MAX_SESSION_TRACE_BYTES:-16777216}
       - LISA_WORKSPACE_ID=${THELAKE_DEFAULT_WORKSPACE_ID:-550e8400-e29b-41d4-a716-446655440000}
-      - LISA_DATABASE_URL=postgresql://lisa_writer:${LISA_DATABASE_WRITER_PASSWORD:?Run make dev-up to initialize local Lisa credentials}@ducklake-postgres:5432/lisa
-      - LISA_DATABASE_READ_URL=postgresql://lisa_reader:${LISA_DATABASE_READER_PASSWORD:?Run make dev-up to initialize local Lisa credentials}@ducklake-postgres:5432/lisa
-      - LISA_QA_CRON=${LISA_QA_CRON:-0 * * * *}
-      - LISA_QA_ENABLED=${LISA_QA_ENABLED:-0}
-      - LISA_ACTIVITY_FOLLOWUPS_ENABLED=${LISA_ACTIVITY_FOLLOWUPS_ENABLED:-1}
+      - LISA_DATABASE_URL=postgresql://lisa_writer:${LISA_DATABASE_WRITER_PASSWORD:?Run make dev-up to initialize local Lisa credentials}@lisa-postgres:5432/lisa
+      - LISA_DATABASE_READ_URL=postgresql://lisa_reader:${LISA_DATABASE_READER_PASSWORD:?Run make dev-up to initialize local Lisa credentials}@lisa-postgres:5432/lisa
+      - LISA_SERVICE_TOKEN=${LISA_SERVICE_TOKEN:?Run make dev-up to initialize local Lisa credentials}
       - LISA_LOCAL_ANONYMOUS=1
       - LISA_CORS_ORIGINS=${LISA_CORS_ORIGINS:-http://127.0.0.1:8090,http://localhost:8090}
       - SOFTPROBE_ASSERTION_HMAC_SECRET=${SOFTPROBE_ASSERTION_HMAC_SECRET:-}
@@ -156,7 +175,7 @@ services:
     volumes:
       - lisa-data:/var/lib/lisa
     depends_on:
-      ducklake-postgres:
+      lisa-postgres:
         condition: service_healthy
       lisa-provision:
         condition: service_completed_successfully
@@ -188,4 +207,5 @@ services:
 volumes:
   grafana-storage:
   ducklake-postgres-data:
+  lisa-postgres-data:
   lisa-data:

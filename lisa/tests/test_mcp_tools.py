@@ -238,17 +238,16 @@ def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
             return policy_id
 
     policy_id = asyncio.run(create_and_find())
-    approved_services = build_services(replace(context, confirmed_policy_id=policy_id))
 
     async def approve():
-        async with Client(create_server(approved_services)) as client:
+        async with Client(create_server(services)) as client:
             return await client.call_tool("approve_policy", {"policy_id": policy_id})
 
     approved = asyncio.run(approve())
     assert not approved.is_error
     assert approved.data["policy_id"] == policy_id
     assert approved.data["approved"] is True
-    assert approved_services.policy_service.read_policy_records(
+    assert services.policy_service.read_policy_records(
         "agent", "billing-agent",
     )[0].approved is True
 
@@ -273,13 +272,13 @@ def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
     assert services.policy_service.approved_rules("billing-agent") == []
 
     async def approve_updated_policy():
-        async with Client(create_server(approved_services)) as client:
+        async with Client(create_server(services)) as client:
             return await client.call_tool("approve_policy", {"policy_id": policy_id})
 
     reapproved = asyncio.run(approve_updated_policy())
     assert reapproved.data["policy_id"] == policy_id
     assert reapproved.data["approved"] is True
-    assert [row.id for row in approved_services.policy_service.approved_rules("billing-agent")] == [policy_id]
+    assert [row.id for row in services.policy_service.approved_rules("billing-agent")] == [policy_id]
 
 
 def test_delete_policy_executes_for_authorized_owner(lisa_test_context):
@@ -313,8 +312,8 @@ def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, lisa_
     services = build_services(lisa_test_context())
     calls = []
 
-    def post(path, body):
-        calls.append((path, body))
+    def search(**body):
+        calls.append(body)
         return {
             "items": [
                 {
@@ -334,11 +333,10 @@ def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, lisa_
                 }
             ],
             "next_cursor": None,
-            "cursor_supported": True,
+            "cursor_supported": False,
         }
 
-    monkeypatch.setattr(services.client, "post", post)
-
+    monkeypatch.setattr(services.sessions, "search", search)
     async def call():
         async with Client(create_server(services)) as client:
             return await client.call_tool(
@@ -354,10 +352,9 @@ def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, lisa_
 
     result = asyncio.run(call())
     assert not result.is_error
-    assert calls[0][0] == "/v1/sessions/search"
-    assert calls[0][1] == {
-        "from": "2026-10-11T00:00:00Z",
-        "to": "2026-10-12T00:00:00Z",
+    assert calls[0] == {
+        "from_time": "2026-10-11T00:00:00Z",
+        "to_time": "2026-10-12T00:00:00Z",
         "has_errors": False,
         "user_id": None,
         "model_name": None,
@@ -387,7 +384,7 @@ def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, lisa_
             }
         ],
         "next_cursor": None,
-        "cursor_supported": True,
+        "cursor_supported": False,
     }
 
 
@@ -423,22 +420,18 @@ def test_mcp_get_session_returns_the_evaluators_compact_trajectory(monkeypatch, 
     assert json.loads(result.content[0].text) == trajectory
 
 
-def test_context_captures_workspace_and_approvals_once(monkeypatch, lisa_test_database):
+def test_context_captures_the_workspace_once(monkeypatch, lisa_test_database):
     monkeypatch.setenv("LISA_WORKSPACE_ID", "11111111-1111-4111-8111-111111111111")
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_ID", "Rule")
-    monkeypatch.setenv("LISA_THELAKE_TOKEN", "private-lake-token")
     monkeypatch.setenv("LISA_SLACK_BOT_TOKEN", "private-slack-token")
     database = lisa_test_database()
     monkeypatch.setenv("LISA_DATABASE_URL", database.writer_url)
     monkeypatch.setenv("LISA_DATABASE_READ_URL", database.reader_url)
     context = WorkspaceContext.from_environment()
     monkeypatch.setenv("LISA_WORKSPACE_ID", "22222222-2222-4222-8222-222222222222")
-    monkeypatch.delenv("LISA_CONFIRMED_POLICY_ID")
     services = build_services(context)
     seed_policy_document(services.policy_service, "## Rule\n\nConfirmed rule", "")
     assert context.workspace_id() == "11111111-1111-4111-8111-111111111111"
     assert "## P1.1 | Rule\napproved: no\n\nConfirmed rule" in read_policy(services)
-    assert "private-lake-token" not in repr(context)
     assert "private-slack-token" not in repr(context)
 
 
@@ -458,13 +451,24 @@ def test_lisa_database_tool_and_schema_resource_are_exposed(lisa_test_context):
 def test_evaluate_session_recovers_pending_scores_before_policy_or_telemetry_lookup(
     monkeypatch, lisa_test_context
 ):
-    from types import SimpleNamespace
-
-    services = build_services(lisa_test_context(turn_source="scheduled"))
-    services.evaluations.activities = SimpleNamespace(
-        find_pending_evaluations_for_session=lambda agent, session: (
+    context = replace(
+        lisa_test_context(
+            turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+        ),
+        chat_turn_id="recover-pending-turn",
+    )
+    services = build_services(context)
+    services.activity_store.resolve_chat_activity(
+        turn_id=context.chat_turn_id, request_key="recover_session",
+        disposition="create", source="web", title="Recover pending evaluation",
+        summary="Reuse the stored evaluation result.",
+    )
+    monkeypatch.setattr(
+        services.evaluations.activities,
+        "find_pending_evaluations_for_session",
+        lambda agent, session: (
             [("activity", "outbox")] if (agent, session) == ("agent", "session") else []
-        )
+        ),
     )
     monkeypatch.setattr(
         services.evaluations,
@@ -472,8 +476,8 @@ def test_evaluate_session_recovers_pending_scores_before_policy_or_telemetry_loo
         lambda activity, outbox: {"status": "pass", "activity_id": activity},
     )
     monkeypatch.setattr(
-        services.client,
-        "get",
+        services.sessions.traces,
+        "load",
         lambda _path: pytest.fail("Recovery must not fetch live telemetry"),
     )
     monkeypatch.setattr(

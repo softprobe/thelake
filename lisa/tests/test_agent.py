@@ -107,8 +107,7 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
 ):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("LISA_THELAKE_API_URL", "http://thelake:8090")
-    monkeypatch.setenv("LISA_THELAKE_TOKEN", "test-token")
+    monkeypatch.setenv("LISA_AGENT_WORKSPACE_ROOT", "/tmp/lisa-agent-workspace")
     monkeypatch.setenv("GOOGLE_API_KEY", "judge-test-key")
     monkeypatch.setenv("LISA_SLACK_BOT_TOKEN", "slack-test-token")
     monkeypatch.setenv("LISA_SLACK_CHANNEL_ID", "channel-test")
@@ -159,7 +158,8 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
     assert "For each distinct user request" in captured["system_prompt"]
     assert "Never resolve the same request twice in one turn" in captured["system_prompt"]
     assert "Keep the exact activity ID" in captured["system_prompt"]
-    assert "Approve policy: <policy_id>" in captured["system_prompt"]
+    assert "call approve_policy with" in captured["system_prompt"]
+    assert "LISA_CONFIRMED_POLICY_ID" not in lisa_mcp.env
     assert any(
         "Never resolve the same request twice in one turn" in skill.content
         for skill in captured["agent_context"].skills
@@ -176,7 +176,7 @@ def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(monkeypatch, lisa_t
     from lisa.controllers.mcp import create_server
 
     services = build_services(
-        lisa_test_context(api_url="http://thelake:8090", api_token="test-token")
+        lisa_test_context()
     )
     server = create_server(services)
 
@@ -192,7 +192,6 @@ def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(monkeypatch, lisa_t
         "write_policy",
         "approve_policy",
         "delete_policy",
-        "list_activity_followups",
         "search_sessions",
         "evaluate_session",
         "notify_evaluation_failure",

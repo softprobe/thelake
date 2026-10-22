@@ -35,9 +35,10 @@ benchmark harness seeds that isolated catalog directly; live policy changes
 still go through Lisa's owner-gated `write_policy` and `approve_policy` tools.
 A manifest's sparse pair list is scoring truth, never the candidate-policy
 source. The runner below uses a unique evaluation agent scope,
-reads approved candidates back from PostgreSQL, ingests dataset trajectories
-into local TheLake, and calls the production `EvaluationService.evaluate_session`
-through its normal session and policy services:
+reads approved candidates back from PostgreSQL, persists dataset trajectories
+in Lisa's local evidence directory, and calls the production
+`EvaluationService.evaluate_session` through its normal session and policy
+services:
 
 ```bash
 LISA_LLM_TRACE_ENABLED=1 uv run --project lisa --env-file .env \
@@ -49,19 +50,19 @@ LISA_LLM_TRACE_ENABLED=1 uv run --project lisa --env-file .env \
 
 Start the runner against a fresh local dogfood Compose project and workspace;
 do not use a user's existing Lisa database. The runner also checks that each
-complete dataset `session_id` is absent before seeding policies or ingesting;
+complete dataset `session_id` is absent before seeding policies or persisting;
 it stops if a session already exists, so repeated runs cannot append spans to
 old evidence. The runner uses the complete catalog
 from `evaluation.json` by default, even if the sample manifest references only
 one labeled policy per trajectory. It verifies that Lisa reads the full catalog
 from PostgreSQL and that the reconstructed sessions remain complete before
 making provider calls. `LISA_LLM_TRACE_ENABLED=1` records the actual Decisions
-and Gemini request/response artifacts under the isolated workspace data dir.
+and Gemini request/response artifacts under the isolated Lisa data directory.
 Keep them and the report private. Provider failures abort; they do not become
 healthy negatives.
 
 When the CLI exits, it removes only the run-owned Compose project, its volumes,
-and its DuckLake data directory, even when evaluation fails. The report remains
+and its local session evidence directory, even when evaluation fails. The report remains
 when produced, and `--data-dir` LLM recordings remain on disk. The runner refuses
 cleanup metadata that does not identify a `lisa-policy-eval-*` project and
 matching data directory.

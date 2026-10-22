@@ -14,18 +14,21 @@ DEFAULTS = {
     "THELAKE_DEV_PORT": "8090",
     "THELAKE_DEV_POSTGRES_PORT": "55432",
     "THELAKE_LISA_PUBLIC_PORT": "18083",
+    "THELAKE_LISA_POSTGRES_PORT": "55433",
     "LISA_LOCAL_ANONYMOUS": "1",
-    "LISA_QA_ENABLED": "0",
-    "LISA_ACTIVITY_FOLLOWUPS_ENABLED": "1",
     "LISA_OWNER_USER_IDS": "local",
-    "LISA_QA_CRON": "0 * * * *",
     "SOFTPROBE_LOCAL_ANONYMOUS": "1",
     "SOFTPROBE_GRPC_DISABLE": "1",
 }
 GENERATED = {
-    "LISA_THELAKE_TOKEN": lambda: secrets.token_urlsafe(32),
+    "LISA_DATABASE_ADMIN_PASSWORD": lambda: secrets.token_urlsafe(32),
     "LISA_DATABASE_WRITER_PASSWORD": lambda: secrets.token_urlsafe(32),
     "LISA_DATABASE_READER_PASSWORD": lambda: secrets.token_urlsafe(32),
+    "LISA_SERVICE_TOKEN": lambda: secrets.token_urlsafe(32),
+}
+OBSOLETE = {
+    "LISA_THELAKE_API_URL", "LISA_THELAKE_TOKEN", "LISA_PUBLIC_URL",
+    "LISA_QA_ENABLED", "LISA_QA_CRON", "LISA_ACTIVITY_FOLLOWUPS_ENABLED",
 }
 
 
@@ -50,9 +53,6 @@ def initialize(path: Path) -> None:
     lines, values = _read(path)
     updates: dict[str, str] = {}
     derived_defaults = {
-        "LISA_PUBLIC_URL": (
-            f"http://127.0.0.1:{values.get('THELAKE_LISA_PUBLIC_PORT', DEFAULTS['THELAKE_LISA_PUBLIC_PORT'])}/v1"
-        ),
         "LISA_CORS_ORIGINS": (
             "http://127.0.0.1:{port},http://localhost:{port}".format(
                 port=values.get("THELAKE_DEV_PORT", DEFAULTS["THELAKE_DEV_PORT"])
@@ -72,6 +72,8 @@ def initialize(path: Path) -> None:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.split("=", 1)[0].strip()
+            if key in OBSOLETE:
+                continue
             if key in updates:
                 output.append(f"{key}={updates[key]}")
                 written.add(key)

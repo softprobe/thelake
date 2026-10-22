@@ -21,7 +21,6 @@ def isolated_data_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("LISA_WORKSPACE_ID", "11111111-1111-4111-8111-111111111111")
     monkeypatch.setenv("LISA_TURN_SOURCE", "web")
-    monkeypatch.delenv("LISA_CONFIRMED_POLICY_ID", raising=False)
 
 
 @pytest.fixture
@@ -37,8 +36,6 @@ def test_policy_tools_scope_records_per_workspace(monkeypatch, lisa_test_databas
     services = build_services(WorkspaceContext.from_environment())
     current = read_policy(services)
     draft = "# Workspace policy\n\n## Refund Eligibility Policy\n\nCheck eligibility before refunding.\n"
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_ID", "Refund Eligibility Policy")
-    services = build_services(WorkspaceContext.from_environment())
 
     seed_policy_document(services.policy_service, draft, current)
 
@@ -56,9 +53,8 @@ def test_policy_tools_scope_records_per_workspace(monkeypatch, lisa_test_databas
 
 
 def test_policy_records_have_stable_string_ids_and_database_shaped_fields(
-    monkeypatch, policy_database
+    policy_database
 ):
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_ID", "Refund eligibility")
     context = WorkspaceContext.from_environment()
     services = build_services(context)
     seed_policy_document(services.policy_service,
@@ -334,8 +330,7 @@ def test_policy_page_at_maximum_offset_has_no_unreachable_successor():
     assert next_offset is None
 
 
-def test_policy_listing_explains_agent_specific_scope(monkeypatch, policy_database):
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_ID", "Refund eligibility")
+def test_policy_listing_explains_agent_specific_scope(policy_database):
     context = WorkspaceContext.from_environment()
     services = build_services(context)
     seed_policy_document(services.policy_service,
@@ -378,19 +373,53 @@ def test_policy_listing_orders_paragraph_ids_numerically(tmp_path):
     assert [item.split(" | ", 1)[0] for item in listing] == ["P1.1", "P1.2", "P1.3"]
 
 
-def test_policy_tools_redact_secrets_before_persisting_markdown(monkeypatch, policy_database):
+def test_policy_tools_redact_secrets_before_persisting_markdown(policy_database):
 
     services = build_services(WorkspaceContext.from_environment())
     current = read_policy(services)
     draft = '# Workspace policy\n\n## Support credential\n\nKeep credential data private. api_key="policy-secret-value"\n'
-    monkeypatch.setenv("LISA_CONFIRMED_POLICY_ID", "Support credential")
-    services = build_services(WorkspaceContext.from_environment())
 
     seed_policy_document(services.policy_service, draft, current)
     saved = read_policy(services)
 
     assert "policy-secret-value" not in saved
     assert "[REDACTED]" in saved
+
+
+def test_owner_approves_the_policy_named_by_the_tool(monkeypatch, policy_database):
+    monkeypatch.setenv("LISA_ACTOR_ID", "owner-1")
+    monkeypatch.setenv("LISA_OWNER_USER_IDS", "owner-1")
+    monkeypatch.setenv("LISA_TURN_SOURCE", "web")
+    service = build_services(WorkspaceContext.from_environment()).policy_service
+    first = service.write_policy(
+        scope="workspace", agent_name="", name="First rule", criteria="Follow the first rule."
+    )
+    second = service.write_policy(
+        scope="workspace", agent_name="", name="Second rule", criteria="Follow the second rule."
+    )
+
+    assert first.id != second.id
+    approved_first = service.approve_policy(first.id)
+    approved_second = service.approve_policy(second.id)
+    assert (approved_first.id, approved_first.approved) == (first.id, True)
+    assert (approved_second.id, approved_second.approved) == (second.id, True)
+    stored = {row.id: row.approved for row in service.list_policy_records()}
+    assert stored[first.id] is True and stored[second.id] is True
+    with pytest.raises(ValueError, match="human-readable policy ID"):
+        service.approve_policy("not-a-policy")
+    with pytest.raises(ValueError, match="Policy ID was not found"):
+        service.approve_policy("P1.9")
+
+    monkeypatch.setenv("LISA_TURN_SOURCE", "worker")
+    worker = build_services(WorkspaceContext.from_environment()).policy_service
+    with pytest.raises(ValueError, match="owner conversation"):
+        worker.approve_policy(first.id)
+
+    monkeypatch.setenv("LISA_TURN_SOURCE", "slack")
+    monkeypatch.setenv("LISA_ACTOR_ID", "guest")
+    guest = build_services(WorkspaceContext.from_environment()).policy_service
+    with pytest.raises(ValueError, match="authorized Lisa owner"):
+        guest.approve_policy(second.id)
 
 
 def test_policy_update_rejects_empty_rule_markdown(policy_database):

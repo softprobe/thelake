@@ -7,14 +7,14 @@ multi-turn task with chat provenance, owner identity, tool-action expectations,
 reply checks, ordered tool-use and exact call-count labels, and expected state
 labels. Owner chat turns require each newly linked user and assistant message on every resolved activity and check that runtime events link only to their resolved task. The request-resolution cases cover brief questions, greetings, independent asks, continuations, switches, and closed work.
 
-The 33-case curated release includes ten new held-out activity-tracking cases
+The curated release includes ten held-out activity-tracking cases
 across distinct user requests. Each uses the shared scorer to check feed shape,
 ordered detail actions, and evidence linkage. It also covers activity creation,
 lookup and resumption, duplicate prevention, ambiguity,
 evidence-backed completion, owner boundaries, one-turn questions, explicit
 greeting skips, separate activities for independent requests, continuation after
 closure, error outcomes, policy creation and lookup, exact-ID approval, in-place
-update, confirmed deletion, follow-up proposal/approval/deduplication, and
+update, confirmed deletion, and
 session lookup failure before the no-approved-policies shortcut. Evaluation
 lookup errors are recorded and close the resolved activity, so Lisa reports the
 error without a second lookup or completion attempt. Wrong policy IDs are
@@ -26,17 +26,19 @@ case database through Lisa's repositories; judge-run completion uses a
 parameterized benchmark SQL fixture that acknowledges the seeded score before
 the evaluation activity is marked successful. A later chat lookup is a new
 request activity, separate from that completed evaluation. State labels can inspect activity
-timeline text and follow-up count, event trigger, and prompt fields. Development
+timeline text. A held-out database case checks that the policy catalog query
+uses supported columns and reports the absence of archive state; all turns are
+also checked for unexpected MCP tool errors. Development
 and benchmark splits are disjoint by case. Use development cases for tuning and
 reserve benchmark cases for final measurement. The dataset is author-curated; it
 is not human-adjudicated and does not estimate production prevalence. The
 benchmark split is small, so report raw case and check counts with all rates.
 
 Every case currently starts with a user turn. Slack cases simulate conversation
-context only. This dataset does not measure scheduled QA, autonomous discovery,
-follow-up worker execution, or Slack message delivery. Those behaviors need a
-runner that invokes the real scheduled services and checks isolated telemetry
-and delivery receipts before they can be claimed as benchmark coverage.
+context only. This dataset does not measure pushed-session evaluation or Slack
+message delivery. Those behaviors need a runner that invokes the real services
+and checks isolated telemetry and delivery receipts before they can be claimed
+as benchmark coverage.
 
 Load and validate the frozen release with
 `datasets.activity_dataset.load_activity_dataset()` (offline harness under

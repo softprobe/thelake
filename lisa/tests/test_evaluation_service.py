@@ -18,7 +18,6 @@ from lisa.services import evaluations as evaluations_module
 def services(lisa_test_context):
     services = build_services(
         lisa_test_context(
-            confirmed_policy_id="Rule",
             slack_channel="original-channel",
             slack_thread="original-thread",
         )
@@ -164,7 +163,7 @@ def test_mixed_missing_timestamps_keep_the_same_order_across_builds():
     ],
 )
 def test_unusable_session_does_not_judge_or_store(services, monkeypatch, session, expected):
-    monkeypatch.setattr(services.client, "get", lambda path: {**session_detail(), **session})
+    monkeypatch.setattr(services.sessions.traces, "load", lambda path: {**session_detail(), **session})
     monkeypatch.setattr(services.evaluations, "judge", lambda r: pytest.fail("Must not judge"))
     result = services.evaluations._evaluate_session("agent", "Rule", "session")
     assert result["status"] == expected
@@ -253,7 +252,7 @@ def test_real_refund_trace_becomes_a_compact_judgment_trajectory(services, monke
     request = {}
 
     def get(path):
-        assert path == "/v1/sessions/session?limit=500"
+        assert path == "session"
         return {
             "session_id": "session",
             "span_count": len(spans),
@@ -262,8 +261,7 @@ def test_real_refund_trace_becomes_a_compact_judgment_trajectory(services, monke
             "spans": spans,
         }
 
-    monkeypatch.setattr(services.client, "get", get)
-    monkeypatch.setattr(services.client, "post", lambda *args, **kwargs: ({}, 201))
+    monkeypatch.setattr(services.sessions.traces, "load", get)
     monkeypatch.setattr(
         services.evaluations,
         "judge",
@@ -282,12 +280,12 @@ def test_bounded_public_session_detail_marks_partial_data_and_keeps_score_histor
 ):
     detail = {**session_detail(), "span_count": 501, "scores": [{"score_id": str(i)} for i in range(25)]}
     requested = []
-    monkeypatch.setattr(services.client, "get", lambda path: requested.append(path) or detail)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda path: requested.append(path) or detail)
 
     captured = services.evaluations._session_detail("session / one")
     trajectory = services.evaluations._trajectory(captured)
 
-    assert requested == ["/v1/sessions/session%20%2F%20one?limit=500"]
+    assert requested == ["session / one"]
     assert len(captured["scores"]) == 25
     assert trajectory["complete"] is False
     assert "span limit was reached" in trajectory["limitations"][0]
@@ -444,30 +442,24 @@ def test_list_shaped_assistant_message_preserves_nested_tool_calls():
 
 @pytest.mark.parametrize("status", ["pass", "fail", "uncertain", "insufficient_evidence"])
 def test_categorical_outcomes_are_stored_with_policy(services, monkeypatch, status):
-    writes = []
-
-    def post(path, body, *, include_status=False):
-        writes.append(body)
-        return ({}, 201)
-
-    monkeypatch.setattr(services.client, "get", lambda path: session_detail())
-    monkeypatch.setattr(services.client, "post", post)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda path: session_detail())
     monkeypatch.setattr(
         services.evaluations, "judge", lambda r: {"status": status, "rationale": "Explanation"}
     )
     result = services.evaluations._evaluate_session("agent", "Rule", "session")
     assert result["status"] == status
     assert result["stored"] is True
-    assert writes[0]["numeric_value"] is None
-    assert writes[0]["config_id"] is None
-    assert writes[0]["metadata"]["policy_id"]
-    assert writes[0]["metadata"]["criteria"]
+    outbox = services.evaluations.activities.get_score_outbox(result["evaluation_id"])
+    assert outbox is not None
+    assert outbox.score_payload["numeric_value"] is None
+    assert outbox.score_payload["config_id"] is None
+    assert outbox.score_payload["metadata"]["policy_id"]
+    assert outbox.score_payload["metadata"]["criteria"]
     assert bool(services.failures.repository.list_all()) == (status == "fail")
 
 
 def test_transient_judge_errors_leave_no_score_or_failure(services, monkeypatch):
-    monkeypatch.setattr(services.client, "get", lambda path: session_detail())
-    monkeypatch.setattr(services.client, "post", lambda *args, **kwargs: pytest.fail("No write"))
+    monkeypatch.setattr(services.sessions.traces, "load", lambda path: session_detail())
     monkeypatch.setattr(
         services.evaluations, "judge", lambda r: {"status": "error", "rationale": "Unavailable"}
     )
@@ -476,57 +468,38 @@ def test_transient_judge_errors_leave_no_score_or_failure(services, monkeypatch)
     assert services.failures.repository.list_all() == []
 
 
-def test_notification_requires_stored_failure_and_keeps_captured_destination(services, monkeypatch):
+def test_notification_uses_stored_failure_without_fetching_remote_score(services, monkeypatch):
     policy = services.evaluations._policy("agent", "Rule")
     services.failures.record(policy, "session", "trace", "Failure", None)
     calls = []
-    session = session_detail()
-    monkeypatch.setattr(services.client, "get", lambda path: session)
     monkeypatch.setattr(
         services.notifier, "notify", lambda *args: calls.append(args) or {"status": "sent"}
     )
-    assert (
-        services.evaluations.notify_evaluation_failure("agent", "Rule", "session")["status"]
-        == "not_a_stored_failure"
-    )
-    assert calls == []
-    session["scores"] = [
-        {
-            "trace_id": "trace",
-            "source": "evaluator",
-            "string_value": "fail",
-            "metadata": {"policy_hash": policy["policy_hash"]},
-        }
-    ]
-    services.evaluations.notify_evaluation_failure("agent", "Rule", "session")
+    result = services.evaluations.notify_evaluation_failure("agent", "Rule", "session")
+    assert result["status"] == "sent"
     assert calls[0][0]["slack_channel_id"] == "original-channel"
     assert calls[0][0]["slack_thread_ts"] == "original-thread"
 
 
-def test_queued_trace_is_verified_in_multi_trace_session(services, monkeypatch):
+def test_notification_uses_failure_receipt_without_loading_trace_bundle(services, monkeypatch):
     policy = services.evaluations._policy("agent", "Rule")
     services.failures.record(policy, "session", "trace-2", "Failure", None)
-    monkeypatch.setattr(services.client, "get", lambda path: session_detail())
-    assert (
-        services.evaluations.notify_evaluation_failure("agent", "Rule", "session")["status"]
-        == "trace_not_found"
+    monkeypatch.setattr(
+        services.sessions.traces,
+        "load",
+        lambda path: pytest.fail("notifications must use Lisa's durable failure receipt"),
     )
+    monkeypatch.setattr(
+        services.notifier, "notify", lambda *args: {"status": "sent"}
+    )
+    assert services.evaluations.notify_evaluation_failure("agent", "Rule", "session")["status"] == "sent"
 
 
 def test_policy_criteria_edit_permits_a_fresh_evaluation(services, monkeypatch):
     save_rule(services)
-    scores, runs = [], []
+    runs = []
 
-    def get(_path):
-        return {**session_detail(), "scores": list(scores)}
-
-    def post(path, body, *, include_status=False):
-        assert path == "/v1/scores"
-        scores.append(body)
-        return ({}, 201) if include_status else {}
-
-    monkeypatch.setattr(services.client, "get", get)
-    monkeypatch.setattr(services.client, "post", post)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: session_detail())
     monkeypatch.setattr(
         services.evaluations,
         "judge",
@@ -540,14 +513,16 @@ def test_policy_criteria_edit_permits_a_fresh_evaluation(services, monkeypatch):
             }
         ),
     )
-    services.evaluations._evaluate_session("agent", "Rule", "session")
+    first = services.evaluations._evaluate_session("agent", "Rule", "session")
     save_rule(services, text="Require a confirmation before refunding.")
     result = services.evaluations._evaluate_session("agent", "Rule", "session")
 
     assert result["status"] == "pass"
     assert len(runs) == 2
-    assert len(scores) == 2
-    assert scores[0]["metadata"]["policy_hash"] != scores[1]["metadata"]["policy_hash"]
+    first_outbox = services.evaluations.activities.get_score_outbox(first["evaluation_id"])
+    second_outbox = services.evaluations.activities.get_score_outbox(result["evaluation_id"])
+    assert first_outbox is not None and second_outbox is not None
+    assert first_outbox.score_payload["metadata"]["policy_hash"] != second_outbox.score_payload["metadata"]["policy_hash"]
 
 
 def test_remote_score_history_does_not_bypass_the_evaluation_ledger(services, monkeypatch):
@@ -562,8 +537,7 @@ def test_remote_score_history_does_not_bypass_the_evaluation_ledger(services, mo
             "slack_thread_ts": "historical-thread",
         },
     }
-    monkeypatch.setattr(services.client, "get", lambda path: {**session_detail(), "scores": [score]})
-    monkeypatch.setattr(services.client, "post", lambda *args, **kwargs: ({}, 201))
+    monkeypatch.setattr(services.sessions.traces, "load", lambda path: {**session_detail(), "scores": [score]})
     judged = []
     monkeypatch.setattr(
         services.evaluations,

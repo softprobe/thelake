@@ -1,22 +1,21 @@
 """Session search and trajectory use cases shared by tools and evaluation.
 
-Canonical Lisa terms are in ``docs/architecture/lisa-terms.md``: the TheLake
-session ID identifies the evaluation input; its trajectory is a projection,
-not a second identified object.
+Canonical Lisa terms are in ``docs/architecture/lisa-terms.md``: the session ID
+identifies the evaluation input; its trajectory is a projection, not a second
+identified object.
 """
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import quote
 
 from ..evaluation.trajectory import SESSION_SPAN_LIMIT, build_trajectory_events
 from ..security import redact_evidence
-from ..thelake_client import TheLakeClient
+from ..repositories.session_traces import SessionTraceStore
 
 
 class SessionService:
-    def __init__(self, client: TheLakeClient, build_events=build_trajectory_events):
-        self.client = client
+    def __init__(self, traces: SessionTraceStore, build_events=build_trajectory_events):
+        self.traces = traces
         self.build_events = build_events
 
     def search(
@@ -34,27 +33,65 @@ class SessionService:
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        now = datetime.now(UTC)
-        return self.client.post(
-            "/v1/sessions/search",
-            {
-                "from": from_time or (now - timedelta(days=7)).isoformat(),
-                "to": to_time or now.isoformat(),
-                "has_errors": has_errors,
-                "user_id": user_id,
-                "model_name": model_name,
-                "agent_name": agent_name,
-                "roots_only": roots_only,
-                "order_by": order_by,
-                "order": order,
-                "limit": limit,
-                "cursor": cursor,
-            },
+        if cursor:
+            raise ValueError("Session cursors are not supported by Lisa's local trace store")
+        start = _parse_time(from_time) if from_time else datetime.now(UTC) - timedelta(days=7)
+        end = _parse_time(to_time) if to_time else datetime.now(UTC)
+        summaries = []
+        for manifest in self.traces.list_manifests():
+            summary = manifest["summary"]
+            start_time = summary["start_time"] or manifest["received_at"]
+            start_at = _parse_time(start_time)
+            agent = str(manifest["agent_name"])
+            errors = summary["error_count"]
+            users = summary["user_ids"]
+            models = summary["models"]
+            if not start <= start_at <= end:
+                continue
+            if agent_name and agent_name != agent:
+                continue
+            if user_id and user_id not in users:
+                continue
+            if model_name and model_name not in models:
+                continue
+            if has_errors is not None and bool(errors) != has_errors:
+                continue
+            if roots_only and not summary["root_count"]:
+                continue
+            summaries.append(
+                {
+                    "session_id": manifest["session_id"],
+                    "start_time": start_time,
+                    "end_time": summary["end_time"],
+                    "trace_count": summary["trace_count"],
+                    "span_count": summary["span_count"],
+                    "error_count": errors,
+                    "input_tokens": summary["input_tokens"],
+                    "output_tokens": summary["output_tokens"],
+                    "total_tokens": summary["total_tokens"],
+                    "duration": summary["duration"],
+                    "total_cost": None,
+                    "agent_name": agent,
+                    "user_ids": users,
+                    "models": models,
+                }
+            )
+        if order_by not in {"start_time", "error_count", "duration", "total_tokens"}:
+            raise ValueError("Unsupported session order_by value")
+        if order not in {"asc", "desc"} or not 1 <= limit <= 500:
+            raise ValueError("Invalid session search limit or order")
+        summaries.sort(
+            key=lambda item: item.get(order_by) or ("" if order_by == "start_time" else 0),
+            reverse=order == "desc",
         )
+        return {"items": summaries[:limit], "next_cursor": None, "cursor_supported": False}
 
     def detail(self, session_id: str) -> dict[str, Any]:
-        path = f"/v1/sessions/{quote(session_id, safe='')}?limit={SESSION_SPAN_LIMIT}"
-        return redact_evidence(self.client.get(path))
+        detail = self.traces.load(session_id)
+        if len(detail["spans"]) > SESSION_SPAN_LIMIT:
+            detail["spans"] = detail["spans"][:SESSION_SPAN_LIMIT]
+            detail["evidence_limited"] = True
+        return redact_evidence(detail)
 
     def trajectory(self, session_detail: dict[str, Any]) -> dict[str, Any]:
         """Reduce raw session detail to the ordered evidence used for evaluation."""
@@ -89,3 +126,10 @@ class SessionService:
 
     def get_trajectory(self, session_id: str) -> dict[str, Any]:
         return self.trajectory(self.detail(session_id))
+
+
+def _parse_time(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Session search timestamps must be ISO-8601") from error

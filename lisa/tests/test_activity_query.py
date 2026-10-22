@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 from sql_cases import read_sql_case, read_sql_file
 
-from lisa.repositories.lisa_database import validate_read_query
+from lisa.repositories.lisa_database import VIEW_COLUMNS, validate_read_query
 
 
 @pytest.mark.parametrize(
@@ -41,6 +44,32 @@ def test_read_query_allows_the_policy_table_but_not_other_base_tables():
     assert "LIMIT 100" in sql
     with pytest.raises(ValueError, match="approved Lisa views or tables"):
         validate_read_query(read_sql_file("reject_activity_base_table"))
+
+
+def test_policy_database_allowlist_matches_the_actual_table_columns():
+    schema_path = Path(__file__).resolve().parents[1] / "src/lisa/sql/activities/schema.sql"
+    schema = schema_path.read_text(encoding="utf-8")
+    declaration = re.search(
+        r"CREATE TABLE lisa\.policies\s*\((.*?)\n\);", schema, re.DOTALL
+    )
+    assert declaration
+    database_columns = {
+        line.strip().split()[0].rstrip(",")
+        for line in declaration.group(1).splitlines()
+        if line.strip()
+        and not line.strip().split()[0].startswith("(")
+        and line.strip().split()[0].rstrip(",") not in {"CHECK", "UNIQUE", "CONSTRAINT", ")"}
+    }
+
+    assert VIEW_COLUMNS["policies"] == database_columns
+    assert "archived_at" not in VIEW_COLUMNS["policies"]
+
+
+def test_policy_database_query_rejects_unmodeled_archive_column():
+    with pytest.raises(ValueError, match="not an approved Lisa column"):
+        validate_read_query(
+            "SELECT id, archived_at FROM lisa.policies"
+        )
 
 
 @pytest.mark.parametrize(

@@ -41,10 +41,11 @@ row was approved, changing its name or criteria sets `approved: no` on that row
 until its owner approves the same ID again. `list_policies` and `read_policy`
 show the current rows and approval state.
 
-Approve the exact policy by sending `Approve policy: P1.x` as a standalone
-message. The authenticated owner check and exact-ID check are enforced by the
-runtime. Lisa sets that same row's `approved` value to true. Scheduled Lisa can read
-and evaluate but cannot create, update, approve, or delete policy. Policy rows and
+An authorized owner approves a pending row by asking Lisa to approve its
+readable ID. Lisa calls `approve_policy` with that ID and sets the same row's
+`approved` value to true. Pushed sessions are evaluated by the service
+worker. That worker is not an owner conversation and cannot create, update,
+approve, or delete policy. Policy rows and
 evaluation history live in Postgres. Updating a policy invalidates its cached
 triage decisions; saved evaluation results retain the criteria snapshot used
 when they were produced.
@@ -52,8 +53,8 @@ when they were produced.
 To delete a policy, an authorized owner can ask Lisa to delete it by ID. Lisa
 checks the exact current ID with `list_policies` or `read_policy`, then removes
 the policy row and cached triage decisions. Historical evaluation rows retain
-the policy ID, name, and criteria hash after deletion. Scheduled QA cannot
-delete policies. Substantive policy work is also recorded in Lisa's
+the policy ID, name, and criteria hash after deletion. The session evaluation
+worker cannot delete policies. Substantive policy work is also recorded in Lisa's
 activity workflow; the activity captures chat actions while the policy row
 remains the source of truth for policy state.
 
@@ -68,13 +69,16 @@ scopes. This keeps IDs unique across workspace and agent rules.
 
 ## Execution and findings
 
-Lisa's `search_sessions` tool uses the same date window, filters, cursor, and
-summary response as TheLake's session-search API. It returns summaries only;
-`get_session` loads one session and projects its spans into a compact sequence
-of user messages, tool calls and results, and assistant replies. Evaluation uses
-that same projection. Repeated system prompts, tool schemas, and model-usage
-metadata are omitted, while tool arguments, results, status, timestamps, and
-span references remain available to the judge.
+Lisa's `search_sessions` tool searches the session bundles pushed to Lisa's
+local trace store. Its default time window is the last seven days; it supports
+filters for agent, user, model, errors, root traces, bounded result count, and
+ordering. It does not support cursor pagination. `get_session` loads one local
+bundle, applies evidence redaction, and bounds the span list. Lisa then projects
+the spans into the ordered trajectory used by both policy triage and judging.
+Repeated system prompts, tool schemas, and model-usage metadata are omitted,
+while tool arguments, results, status, timestamps, and span references remain
+available as evidence. If ordering or evidence is incomplete or truncated, the
+trajectory carries limitations and Lisa gates it as insufficient evidence.
 
 For each eligible session, Lisa builds the production trajectory and sends one
 Decisions question for every approved candidate policy read from PostgreSQL.
@@ -88,10 +92,10 @@ activity. Incomplete or unordered trajectories are gated as
 `insufficient_evidence` before provider calls; provider or validation errors
 remain execution errors. No numeric threshold or uncertainty margin is used.
 
-TheLake stores each categorical score with the policy ID (for example, `P1.2`)
-and the criteria text used for that judgment. Policies live in `lisa.policies`;
-evaluation gets candidates through `PolicyService`, records triage decisions,
-and passes only escalated approved rules to the judge.
+Lisa stores each categorical score with the policy ID (for example, `P1.2`)
+and the criteria text used for that judgment in Lisa Postgres. Policies live in
+`lisa.policies`; evaluation gets candidates through `PolicyService`, records
+triage decisions, and passes only escalated approved rules to the judge.
 
 Lisa investigates stored failures and can send configured Slack alerts. Pending
 failure records preserve delivery destination across restart.
@@ -100,10 +104,11 @@ failure records preserve delivery destination across restart.
 
 The standard MCP tools are exposed from
 `lisa/src/lisa/controllers/mcp.py` and composed through
-`bootstrap.py`. `services/policies.py` validates owner writes and exact-ID
-approval; `repositories/policies.py` persists records with a Postgres
+`bootstrap.py`. `services/policies.py` validates owner writes, approvals, and
+deletions for a web or Slack turn. The policy ID is the `approve_policy`
+argument. `repositories/policies.py` persists records with a Postgres
 transaction and scope lock. Benchmark catalog seeding lives separately under
 `lisa/benchmark`. `services/evaluations.py` resolves approved candidates,
 calls `evaluation/policy_triage.py`, judges escalations, and stores scores. The
 tool package is independent of OpenHands; the backend supplies trusted
-workspace credentials and owner-confirmation context when launching it.
+workspace credentials when launching it.

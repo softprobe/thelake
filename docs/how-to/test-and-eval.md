@@ -114,7 +114,7 @@ or workflow, validate the actual consumer through a real end-to-end execution.
 Run the relevant labeled agent evaluation with its configured model and
 runtime; unit tests and mocked integration tests supplement this check and
 never replace it. Use the real production entrypoint for the behavior under
-evaluation, such as a scheduled service for scheduled behavior. Keep all state
+evaluation. Keep all state
 transient and run-owned under the rules above.
 
 A real agent execution means invoking the actual configured model and runtime

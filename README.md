@@ -75,11 +75,11 @@ cp .env.example .env
 make dev-up
 ```
 
-Open Explorer at `http://127.0.0.1:8090/explorer/` or Lisa at
-`http://127.0.0.1:8090/lisa/`. They are separate apps served by the same local
-TheLake host. The stack provisions Lisa's durable PostgreSQL policy database.
-Scheduled QA is disabled by default in this local environment; set
-`LISA_QA_ENABLED=1` to opt in.
+Open Explorer at `http://127.0.0.1:8090/explorer/` and Lisa at
+`http://127.0.0.1:18083/lisa/`. Explorer runs on TheLake; Lisa's Python server
+serves both Lisa's UI and API. Lisa has its own PostgreSQL database and durable
+agent-workspace directory. Push complete OTLP JSON sessions to Lisa's private
+`POST /internal/v1/session-traces` endpoint to enqueue evaluation.
 
 Stop the services without removing their data:
 
@@ -232,23 +232,23 @@ Wait for customer confirmation before submitting an eligible refund.
 Lisa stores each policy as one row with a readable section ID and an approval
 column. Every ID, including `P1.2.1`, names an independent policy section.
 Updating a policy requires its exact ID and changes that same row. If an
-approved policy changes, its approval becomes false until the owner sends the
-exact standalone command `Approve policy: <policy_id>`. Only approved policies
+approved policy changes, its approval becomes false until an authorized owner
+asks Lisa to approve that same ID. Only approved policies
 are evaluated.
 
-Configure Lisa with `LISA_WORKSPACE_ID`, `LISA_QA_CRON`, an OpenAI API key for
-Decisions triage, and Gemini credentials for judging escalated policies.
-The default cron runs `Lisa scheduled QA` hourly at minute 0 UTC and does not run
-on startup. Each complete, ordered trajectory is triaged against every approved
+Configure Lisa with `LISA_WORKSPACE_ID`, an OpenAI API key for Decisions triage,
+and Gemini credentials for judging escalated policies. Pushed sessions are
+persisted under Lisa's configured agent workspace and evaluated by a PGMQ
+worker. Each complete, ordered trajectory is triaged against every approved
 candidate policy through OpenAI Decisions. Decisions classify each policy as
 `suspected_violation`, `no_violation_found`, or `insufficient_evidence`; Lisa
 sends `suspected_violation` and `insufficient_evidence` decisions to the Gemini
 judge. Triage negatives do not create pass scores. Gemini returns `pass`, `fail`, or
 `uncertain` with rationale and span references. Verdicts do not use a numeric
 threshold.
-TheLake stores scores with the policy ID, criteria text, and policy hash so old
-findings stay explainable after edits. Lisa investigates failures and sends any
-configured Slack notification separately.
+Lisa stores triage decisions, judge results, and policy snapshots in her own
+PostgreSQL database so past evaluations remain explainable after edits. She
+investigates failures and sends any configured Slack notification separately.
 
 Lisa's recent-session sampling does not provide lossless coverage. An outage can
 let evidence age out before review. See the [Lisa QA design](docs/architecture/lisa-qa.md)

@@ -3,7 +3,7 @@
 The activity agent benchmark is the labeled dataset in
 [`lisa/datasets/activity_management`](../../lisa/datasets/activity_management/README.md).
 Each case defines a sequence of main-chat and Slack-context user turns, tool
-actions that must or must not occur, labeled final activity/policy/follow-up
+actions that must or must not occur, labeled final activity and policy
 state, and reply checks. The manifest pins the dataset bytes and the runner
 reports results by development/benchmark split and behavior category.
 
@@ -35,8 +35,11 @@ transient service is removed at exit. Reports and captured logs are kept under
 `target/test-artifacts/lisa-activity-benchmark/<run-id>/`.
 
 The runner deterministically scores database state and required/forbidden tool
-actions. State checks include activity timeline evidence and follow-up count,
-event type, and prompt text. Turns labeled as substantive also verify that the
+actions, rejects unexpected tool errors, and supports explicitly labeled
+expected failures. Its policy-catalog case verifies Lisa uses the actual
+`lisa.policies` columns and does not invent `archived_at`. State checks include
+activity timeline evidence.
+Turns labeled as substantive also verify that the
 selected activity links all newly recorded chat messages and runtime events.
 Tool checks can require ordered tool subsequences
 and exact per-turn call counts. Its separate communication rubric checks labeled
@@ -46,7 +49,7 @@ not a human-adjudicated production sample or a measure of production
 prevalence. Use development cases for iteration and reserve the benchmark split
 for final measurement. Inspect per-case evidence and raw support counts; do not rely
 on one aggregate score. Slack cases provide channel and thread context to
-Lisa's real runtime but do not exercise scheduled QA, follow-up workers, Slack
+Lisa's real runtime but do not exercise pushed-session evaluation, Slack
 event delivery, or message posting.
 
 The activity dataset also includes three historical-evaluation lookup cases.

@@ -56,10 +56,10 @@ def test_pending_score_accepts_stale_payload_policy_id():
 
 @pytest.fixture
 def evaluation_services(lisa_test_context, monkeypatch: pytest.MonkeyPatch):
-    context = lisa_test_context(WORKSPACE_ID, confirmed_policy_id="Rule")
+    context = lisa_test_context(WORKSPACE_ID)
     services = build_services(context)
     save_rule(services)
-    monkeypatch.setattr(services.client, "get", lambda _: session_detail())
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: session_detail())
     return services
 
 
@@ -70,7 +70,7 @@ def test_evaluate_session_persists_run_context_score_and_ordered_timeline(
     session_id = f"session-{uuid4()}"
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
-    monkeypatch.setattr(services.client, "get", lambda _: detail)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
     scores = []
     monkeypatch.setattr(
         services.evaluations,
@@ -88,7 +88,6 @@ def test_evaluate_session_persists_run_context_score_and_ordered_timeline(
         scores.append(payload)
         return ({}, 201) if include_status else {}
 
-    monkeypatch.setattr(services.client, "post", post)
     result = services.evaluations._evaluate_session("agent", "Rule", session_id)
 
     assert result["status"] == "pass"
@@ -99,10 +98,9 @@ def test_evaluate_session_persists_run_context_score_and_ordered_timeline(
     assert run is not None
     assert run.verdict == "pass"
     assert run.policy_id == services.policy_service.approved_rules("agent")[0].id
-    assert scores[0]["metadata"]["policy_id"] == run.policy_id
     outbox = store.get_score_outbox(run.id)
     assert outbox.status == "acknowledged"
-    assert run.score_id == outbox.score_id == scores[0]["score_id"]
+    assert run.score_id == outbox.score_id
     events = store.list_events(run.activity_id)
     assert [event.event_type for event in events] == [
         "accepted",
@@ -236,7 +234,7 @@ def test_missing_chat_session_finishes_activity_as_error_even_without_approved_p
     def missing_session(_path):
         raise LookupError("not found")
 
-    monkeypatch.setattr(services.client, "get", missing_session)
+    monkeypatch.setattr(services.sessions.traces, "load", missing_session)
 
     result = services.evaluations.evaluate_session(
         "billing-agent", "missing-session", activity_id=activity.id,
@@ -266,7 +264,7 @@ def test_missing_chat_session_reports_when_live_worker_owns_activity(
     def missing_session(_path):
         raise LookupError("not found")
 
-    monkeypatch.setattr(services.client, "get", missing_session)
+    monkeypatch.setattr(services.sessions.traces, "load", missing_session)
 
     result = services.evaluations.evaluate_session(
         "billing-agent", "missing-session", activity_id=activity.id,
@@ -291,7 +289,7 @@ def test_selected_chat_evaluation_finishes_activity_with_its_worker_claim(
     session_id = f"session-{uuid4()}"
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
-    monkeypatch.setattr(services.client, "get", lambda _: detail)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
     monkeypatch.setattr(
         services.evaluations,
         "judge",
@@ -299,11 +297,6 @@ def test_selected_chat_evaluation_finishes_activity_with_its_worker_claim(
             "status": "pass", "rationale": "The policy was followed.",
             "references": [], "limitations": [],
         },
-    )
-    monkeypatch.setattr(
-        services.client,
-        "post",
-        lambda *args, **kwargs: ({}, 201),
     )
     policy = services.policy_service.approved_rules("agent")[0]
     chat_activity = store.create_activity(
@@ -353,7 +346,7 @@ def test_mixed_chat_evaluation_results_never_return_activity_claim_tokens(
         "policy_triage_decisions",
         lambda _session, ids: {rule_id: "suspected_violation" for rule_id in ids},
     )
-    monkeypatch.setattr(services.client, "get", lambda _: session_detail())
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: session_detail())
 
     class SelectedTriager:
         model = "test-decisions-model"
@@ -437,7 +430,7 @@ def test_selected_pair_is_recorded_before_judging_and_filtered_afterward(
     session_id = f"session-{uuid4()}"
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
-    monkeypatch.setattr(services.client, "get", lambda _: detail)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
     policy = services.policy_service.approved_rules("agent")[0]
 
     class SelectedTriager:
@@ -475,13 +468,6 @@ def test_selected_pair_is_recorded_before_judging_and_filtered_afterward(
         }
 
     monkeypatch.setattr(services.evaluations, "judge", judge)
-    monkeypatch.setattr(
-        services.client,
-        "post",
-        lambda path, payload, *, include_status=False: ({}, 201)
-        if include_status
-        else {},
-    )
 
     first = services.evaluations.evaluate_session("agent", session_id)
     second = services.evaluations.evaluate_session("agent", session_id)
@@ -508,7 +494,7 @@ def test_one_inspectable_activity_records_triage_and_links_multiple_evaluations(
     session_id = f"session-{uuid4()}"
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
-    monkeypatch.setattr(services.client, "get", lambda _: detail)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
     services.evaluations.policy_triage = SimpleNamespace(
         model="test-decisions",
         triage=lambda trajectory, candidates: {
@@ -531,7 +517,6 @@ def test_one_inspectable_activity_records_triage_and_links_multiple_evaluations(
             "status": "pass", "rationale": "Reviewed.", "references": [], "limitations": []
         }),
     )
-    monkeypatch.setattr(services.client, "post", lambda *args, **kwargs: ({}, 201))
 
     result = services.evaluations.evaluate_session("agent", session_id)
 
@@ -567,7 +552,7 @@ def test_multi_policy_retry_finishes_the_activity_that_owns_the_run(evaluation_s
     session_id = f"session-{uuid4()}"
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
-    monkeypatch.setattr(services.client, "get", lambda _: detail)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
     services.evaluations.policy_triage = SimpleNamespace(
         model="test-decisions",
         triage=lambda trajectory, candidates: {
@@ -591,7 +576,6 @@ def test_multi_policy_retry_finishes_the_activity_that_owns_the_run(evaluation_s
         return {"status": "pass", "rationale": "Reviewed.", "references": [], "limitations": []}
 
     monkeypatch.setattr(services.evaluations, "judge", judge)
-    monkeypatch.setattr(services.client, "post", lambda *args, **kwargs: ({}, 201))
 
     first = services.evaluations.evaluate_session("agent", session_id)
     original_activity_id = first["activity_id"]
@@ -617,7 +601,7 @@ def test_selected_pair_retries_judge_without_repeating_triage(evaluation_service
     session_id = f"session-{uuid4()}"
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
-    monkeypatch.setattr(services.client, "get", lambda _: detail)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
     policy = services.policy_service.approved_rules("agent")[0]
 
     class SelectedTriager:
@@ -654,13 +638,6 @@ def test_selected_pair_retries_judge_without_repeating_triage(evaluation_service
         }
 
     monkeypatch.setattr(services.evaluations, "judge", judge)
-    monkeypatch.setattr(
-        services.client,
-        "post",
-        lambda path, payload, *, include_status=False: ({}, 201)
-        if include_status
-        else {},
-    )
 
     first = services.evaluations.evaluate_session("agent", session_id)
     second = services.evaluations.evaluate_session("agent", session_id)
@@ -671,77 +648,6 @@ def test_selected_pair_retries_judge_without_repeating_triage(evaluation_service
     assert len(judge_calls) == 2
 
 
-def test_retry_reuses_stored_trajectory_and_idempotent_score_payload(
-    evaluation_services, monkeypatch
-):
-    services = evaluation_services
-    session_id = f"session-{uuid4()}"
-    detail = session_detail()
-    detail["spans"][0]["trace_id"] = session_id
-    persisted_scores = []
-    judged = []
-    monkeypatch.setattr(
-        services.client,
-        "get",
-        lambda _: {**detail, "scores": list(persisted_scores)},
-    )
-    monkeypatch.setattr(
-        services.evaluations,
-        "judge",
-        lambda request: (
-            judged.append(request)
-            or {
-                "status": "pass",
-                "rationale": "The stored trajectory was evaluated.",
-                "references": [],
-                "limitations": [],
-            }
-        ),
-    )
-    lost_response = True
-    submitted = []
-
-    def post(path, payload, *, include_status=False):
-        nonlocal lost_response
-        assert path == "/v1/scores"
-        submitted.append(payload)
-        if lost_response:
-            lost_response = False
-            persisted_scores.append(payload)
-            raise RuntimeError("score response was lost")
-        return ({}, 200) if include_status else {}
-
-    monkeypatch.setattr(services.client, "post", post)
-    with pytest.raises(RuntimeError, match="response was lost"):
-        services.evaluations._evaluate_session("agent", "Rule", session_id)
-
-    detail["spans"][0]["input"] = "changed telemetry after the first attempt"
-    result = services.evaluations._evaluate_session("agent", "Rule", session_id)
-
-    assert result["status"] == "pass"
-    assert result["stored"] is True
-    assert len(judged) == 1
-    assert judged[0]["trajectory"]["events"][0]["content"] == "Refund my ticket"
-    assert submitted[0] == submitted[1]
-    store = PostgresActivityStore(services.context.database_url, WORKSPACE_ID)
-    pending = store.find_pending_evaluations_for_session("agent", session_id)
-    assert pending == []
-    run = store.get_evaluation(result["evaluation_id"])
-    assert run is not None
-    assert run.status == "succeeded"
-    assert store.find_pending_evaluations_for_session("agent", session_id) == []
-    assert [event.event_type for event in store.list_events(run.activity_id)] == [
-        "accepted",
-        "claimed",
-        "context_saved",
-        "judging_started",
-        "score_prepared",
-        "retryable_error",
-        "claimed",
-        "succeeded",
-    ]
-
-
 def test_changed_trajectory_gets_a_new_tracked_evaluation_despite_existing_score(
     evaluation_services, monkeypatch
 ):
@@ -749,12 +655,11 @@ def test_changed_trajectory_gets_a_new_tracked_evaluation_despite_existing_score
     session_id = f"session-{uuid4()}"
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
-    scores = []
     judged = []
     monkeypatch.setattr(
-        services.client,
-        "get",
-        lambda _: {**detail, "scores": list(scores)},
+        services.sessions.traces,
+        "load",
+        lambda _: detail,
     )
     monkeypatch.setattr(
         services.evaluations,
@@ -770,17 +675,12 @@ def test_changed_trajectory_gets_a_new_tracked_evaluation_despite_existing_score
         ),
     )
 
-    def post(path, payload, *, include_status=False):
-        scores.append(payload)
-        return ({}, 201) if include_status else {}
-
-    monkeypatch.setattr(services.client, "post", post)
     first = services.evaluations._evaluate_session("agent", "Rule", session_id)
     same = services.evaluations._evaluate_session("agent", "Rule", session_id)
 
     assert same["status"] == "already_evaluated"
     assert same["activity_id"] == first["activity_id"]
-    assert len(judged) == len(scores) == 1
+    assert len(judged) == 1
 
     detail["spans"].append(
         {
@@ -797,68 +697,8 @@ def test_changed_trajectory_gets_a_new_tracked_evaluation_despite_existing_score
 
     assert first["status"] == second["status"] == "pass"
     assert first["activity_id"] != second["activity_id"]
-    assert scores[0]["score_id"] != scores[1]["score_id"]
-    assert scores[0]["metadata"]["trajectory_hash"] != scores[1]["metadata"]["trajectory_hash"]
     assert len(judged) == 2
-
-
-def test_pending_score_recovers_after_policy_is_declined_and_telemetry_is_unavailable(
-    evaluation_services, monkeypatch
-):
-    services = evaluation_services
-    session_id = f"session-{uuid4()}"
-    policy = services.policy_service.approved_rules("agent")[0]
-    policy_id = policy.id
-    detail = session_detail()
-    detail["spans"][0]["trace_id"] = session_id
-    posts = []
-    monkeypatch.setattr(services.client, "get", lambda _: detail)
-    monkeypatch.setattr(
-        services.evaluations,
-        "judge",
-        lambda _: {
-            "status": "pass",
-            "rationale": "The stored trajectory was evaluated.",
-            "references": [],
-            "limitations": [],
-        },
-    )
-
-    def fail_first_score_write(path, payload, *, include_status=False):
-        posts.append(payload)
-        if len(posts) == 1:
-            raise RuntimeError("score response was lost")
-        return ({}, 200) if include_status else {}
-
-    monkeypatch.setattr(services.client, "post", fail_first_score_write)
-    with pytest.raises(RuntimeError, match="response was lost"):
-        services.evaluations._evaluate_session(
-            "agent", "Rule", session_id, policy_id
-        )
-
-    pending = PostgresActivityStore(
-        services.context.database_url, WORKSPACE_ID
-    ).find_pending_evaluations_for_session("agent", session_id)
-    assert len(pending) == 1
-    assert pending[0][0].policy_id == policy_id
-
-    save_rule(services, approved="no")
-    with pytest.raises(ValueError, match="does not match the pending policy"):
-        services.evaluations._evaluate_session(
-            "agent", "Wrong name", session_id, policy_id
-        )
-    monkeypatch.setattr(
-        services.client,
-        "get",
-        lambda _: (_ for _ in ()).throw(RuntimeError("telemetry unavailable")),
-    )
-    result = services.evaluations._evaluate_session(
-        "agent", "Rule", session_id, policy_id
-    )
-
-    assert result["status"] == "pass"
-    assert result["stored"] is True
-    assert posts[0] == posts[1]
+    assert first["evaluation_id"] != second["evaluation_id"]
 
 
 def test_evaluate_session_does_not_substitute_a_different_policy_for_selected_id(
@@ -875,50 +715,10 @@ def test_evaluate_session_does_not_substitute_a_different_policy_for_selected_id
         services.evaluations._evaluate_session("agent", "Rule", "session", "P1.999")
 
 
-def test_workspace_policy_pending_recovery_is_scoped_to_target_agent(
-    evaluation_services, monkeypatch
-):
-    services = evaluation_services
-    session_id = f"session-{uuid4()}"
-    policy = services.policy_service.approved_rules("agent")[0]
-    detail = session_detail()
-    detail["spans"][0]["trace_id"] = session_id
-    monkeypatch.setattr(services.client, "get", lambda _: detail)
-    monkeypatch.setattr(
-        services.evaluations,
-        "judge",
-        lambda _: {
-            "status": "pass",
-            "rationale": "The parent agent passed.",
-            "references": [],
-            "limitations": [],
-        },
-    )
-    posts = []
-
-    def interrupt_write(path, payload, *, include_status=False):
-        posts.append(payload)
-        raise RuntimeError("score response was lost")
-
-    monkeypatch.setattr(services.client, "post", interrupt_write)
-    with pytest.raises(RuntimeError, match="response was lost"):
-        services.evaluations._evaluate_session(
-            "agent", "Rule", session_id, policy.id
-        )
-
-    result = services.evaluations._evaluate_session(
-        "child-agent", "Rule", session_id, policy.id
-    )
-
-    assert result["status"] == "skipped_agent_mismatch"
-    assert len(posts) == 1
-
-
 def _tracked_service_with_saved_inputs(tmp_path, *, approved_rules):
     context = WorkspaceContext(
         workspace=WORKSPACE_ID,
         data_dir=tmp_path,
-        confirmed_policy_id="Rule",
     )
     activity_id = str(uuid4())
     evaluation_id = str(uuid4())
@@ -962,7 +762,6 @@ def _tracked_service_with_saved_inputs(tmp_path, *, approved_rules):
     policies.approved_rules.return_value = approved_rules
     service = EvaluationService(
         context=context,
-        client=MagicMock(),
         policies=policies,
         failures=MagicMock(),
         notifier=MagicMock(),
@@ -1018,7 +817,7 @@ def test_tracked_retry_judges_live_criteria_after_interrupt_before_outbox(
     session_id = f"session-{uuid4()}"
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
-    monkeypatch.setattr(services.client, "get", lambda _: detail)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
     old_policy_hash = services.evaluations._policy("agent", "Rule")["policy_hash"]
     judged = []
 
@@ -1034,15 +833,6 @@ def test_tracked_retry_judges_live_criteria_after_interrupt_before_outbox(
         }
 
     monkeypatch.setattr(services.evaluations, "judge", judge_once)
-    scores = []
-    monkeypatch.setattr(
-        services.client,
-        "post",
-        lambda path, payload, *, include_status=False: (
-            scores.append(payload) or (({}, 201) if include_status else {})
-        ),
-    )
-
     with pytest.raises(RuntimeError, match="judge interrupted"):
         services.evaluations._evaluate_session("agent", "Rule", session_id)
 
@@ -1053,8 +843,11 @@ def test_tracked_retry_judges_live_criteria_after_interrupt_before_outbox(
     assert result["status"] == "pass"
     assert len(judged) == 2
     assert judged[1]["policy"]["criteria"] == "Require confirmation before refunding."
-    assert scores[0]["metadata"]["criteria"] == "Require confirmation before refunding."
-    assert scores[0]["metadata"]["policy_hash"] == current_policy_hash
+    store = PostgresActivityStore(services.context.database_url, WORKSPACE_ID)
+    outbox = store.get_score_outbox(result["evaluation_id"])
+    assert outbox is not None
+    assert outbox.score_payload["metadata"]["criteria"] == "Require confirmation before refunding."
+    assert outbox.score_payload["metadata"]["policy_hash"] == current_policy_hash
     assert current_policy_hash != old_policy_hash
     store = PostgresActivityStore(services.context.database_url, WORKSPACE_ID)
     run = store.get_evaluation(result["evaluation_id"])
@@ -1070,7 +863,7 @@ def test_tracked_retry_releases_lease_when_policy_is_removed_after_interrupt(
     session_id = f"session-{uuid4()}"
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
-    monkeypatch.setattr(services.client, "get", lambda _: detail)
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
     created = []
     store = services.evaluations.activities
     create_evaluation = store.create_evaluation

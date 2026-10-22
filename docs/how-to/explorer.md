@@ -6,8 +6,9 @@ trajectory is derived from a session and has no separate ID.
 
 Explorer is the self-hosted session and trace UI for thelake. Source lives in
 [`packages/thelake-explorer`](../../packages/thelake-explorer/). `make build`
-embeds its SPA into the binary; thelake serves it at `/explorer/`. Lisa is a
-separate app served at `/lisa/` from its own embedded SPA bundle and chat shell.
+builds its SPA; thelake serves it at `/explorer/`. Lisa is an independent
+Python service that serves both its UI and API. The development Compose stack
+routes Lisa's `/lisa/` UI through Lisa's own port.
 
 The session browser follows the `sp-llm/apps/explorer` session area: the same
 Softprobe navigation, top bar, session table hierarchy, and two-pane detail
@@ -32,7 +33,7 @@ and provisions durable policy storage for Lisa.
 
 ```bash
 make setup    # Postgres (DuckLake catalog) + MinIO
-make build    # builds and embeds Explorer and Lisa SPAs into the binary
+make build    # builds Explorer's SPA and the TheLake binary
 ```
 
 ## Open the UI (local)
@@ -172,19 +173,19 @@ mismatched `data_path` fails attach / readiness.
 
 ### Lisa app
 
-**Lisa** is a model-backed workspace QA agent running in the `lisa`
-container. The current backend adapter uses the OpenHands SDK. Its reusable
+**Lisa** is a model-backed workspace QA agent running as an independent Python
+service. The current backend adapter uses the OpenHands SDK. Its reusable
 tools are exposed over local stdio MCP and its workflows use standard
 `SKILL.md` files, so another runtime can use the same tool and skill contract
 without importing OpenHands code. Lisa supports persistent multi-turn chats,
 workspace and agent policy records, bounded session-detail search,
-explicitly approved policy rules, and scheduled policy evaluation. She does
+explicitly approved policy rules, and push-triggered policy evaluation. She does
 not run shell commands or access a connected Git repository.
 
-Lisa's app has its own route at `/lisa/` and its own compiled entry point.
-Explorer remains the session and trace browser at `/explorer/`; the two apps
-share the TheLake host and API deployment but load independent front-end
-bundles.
+Lisa's app has its own route at `/lisa/` on the Python service, which serves its
+compiled frontend and backend APIs together. Explorer remains the session and
+trace browser at `/explorer/` on TheLake. The two apps have separate service
+boundaries and deployments; Lisa does not depend on TheLake at runtime.
 
 Lisa's app keeps the conversation visible beside a workspace panel with
 Activities, Rules, Triage / judges, and Identity tabs. Activities reuse Lisa's
@@ -212,31 +213,30 @@ viewport and device scale when changing this layout.
   without a separate checkbox. Lisa masks common credential patterns; general
   personal data is not redacted.
 - Ask Lisa to create a new policy or update an existing policy by its exact ID. She returns a
-  readable policy ID and approval state. Send `Approve policy: <policy_id>` as
-  a standalone owner message to approve that policy from chat.
+  readable policy ID and approval state. Ask Lisa to approve that ID.
   Approved rules are eligible immediately.
-  Lisa's schedule reads policy and bounded session detail, builds a compact
-  trajectory, then sends every approved candidate policy to OpenAI Decisions.
+  When Lisa receives a complete session through its unauthenticated, private-network-only push API, she
+  builds a compact trajectory and sends every approved candidate policy to OpenAI Decisions.
   Decisions classifies each policy as `suspected_violation`,
   `no_violation_found`, or `insufficient_evidence`; Lisa sends suspected and
   uncertain cases to Gemini for a categorical verdict. Triage negatives do not
-  create pass scores. Lisa stores judge scores with the policy ID and criteria
-  in TheLake, and records the action and its considered pairs as an inspectable
-  activity in Lisa's Postgres database.
-  `LISA_QA_CRON` is a five-field UTC cron expression, default hourly at minute 0;
-  the `Lisa scheduled QA` job does not run on startup.
+  create pass scores. Lisa stores evaluation results with the policy ID and
+  criteria in Lisa's Postgres database, and records the action and considered
+  policy pairs as an inspectable activity there.
+  Lisa evaluates only sessions pushed to her local evidence store or explicitly
+  requested by an owner; there is no scheduled QA job.
 - Conversations are stored in the runner's `lisa-data` volume, scoped by the
   authenticated workspace. One runtime service serves a deployment; this is
   not yet a separate VM per workspace or a multi-replica durable store. Delete
   a conversation from its header to remove its persisted OpenHands state.
 - Lisa uses the `GOOGLE_API_KEY` or `GEMINI_API_KEY` and `LISA_MODEL` settings
-  in the Lisa container. The separate `/lisa/` app connects directly to Lisa
-  using `LISA_PUBLIC_URL`. Lisa reads TheLake
-  using `LISA_THELAKE_API_URL` and `LISA_THELAKE_TOKEN`.
+  in the Lisa container. Her Python service serves both the UI and API at
+  `http://127.0.0.1:18083/lisa/` in local development.
 - Lisa's evaluation flow uses `OPENAI_API_KEY` for Decisions triage, and
   `GOOGLE_API_KEY` or `GEMINI_API_KEY` plus optional `GEMINI_MODEL_NAME` for the
-  judge. Lisa also needs a configured chat model and TheLake service credentials
-  to read sessions and write scores.
+  judge. Lisa also needs a configured chat model. Trace producers push complete
+  OTLP JSON sessions to her unauthenticated internal intake endpoint, which
+  must remain on a private network.
 
 ## Embed the React package
 
@@ -307,25 +307,25 @@ starts TheLake and Lisa together and provisions Lisa's durable database:
 make dev-up
 ```
 
-Open [Lisa at `/lisa/`](http://127.0.0.1:8090/lisa/) to chat, create and
+Open [Lisa at port 18083](http://127.0.0.1:18083/lisa/) to chat, create and
 confirm policies, and inspect activities. The Explorer session app remains at
-`/explorer/`. Rule text and approval live in Lisa's PostgreSQL policy table;
-missing approval means no. Scheduled QA is opt-in in local development; set
-`LISA_QA_ENABLED=1` when you want model-backed scheduled evaluation.
+`http://127.0.0.1:8090/explorer/`. Rule text and approval live in Lisa's
+PostgreSQL policy table; missing approval means no. Evaluation starts from
+pushed sessions, not a scheduled job.
 
 ## Verify
 
 ```bash
 make test-explorer-ui   # Playwright against a temporary thelake + embedded SPA
-make test-explorer-online-e2e  # Real Gemini agent + Lisa's local judge, no service mocks
+make test-explorer-online-e2e  # Real Lisa chat and policy lifecycle in its own Python service
 cd packages/thelake-explorer && npm test
 ```
 
-The online E2E requires Docker, `GOOGLE_API_KEY` (or `GEMINI_API_KEY`), and
-`OPENAI_API_KEY`. It makes real Gemini calls from the sample agent and judge,
-and OpenAI calls for policy triage, so provider usage may be billed. Its refund
-tool returns a local demo result; it does not connect
-to an external ticketing or payment system.
+The online E2E requires Docker and `GOOGLE_API_KEY` (or `GEMINI_API_KEY`). It
+starts a separate Lisa Python service with its own transient database and runs
+real chat requests through the browser, so provider usage may be billed. The
+labeled trace-evaluation path is covered by
+[`run-lisa-policy-evaluation`](../../.agents/skills/run-lisa-policy-evaluation/SKILL.md).
 
 ## Related
 

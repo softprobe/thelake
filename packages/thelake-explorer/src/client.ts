@@ -56,8 +56,7 @@ export type LisaMessage = {
   text: string;
   created_at?: string;
   sequence?: number;
-  turn_source?: "web" | "scheduled" | "slack";
-  hidden?: boolean;
+  turn_source?: "web" | "slack";
 };
 
 export type LisaActivity = {

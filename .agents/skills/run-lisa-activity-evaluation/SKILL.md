@@ -38,7 +38,7 @@ service and provision an isolated Lisa database plus conversation directory for
 every case. It drives Lisa's OpenHands conversation backend and registered MCP
 tools with the case's main-chat or Slack-context turns, then scores actual tool
 events (including required order and exact call counts), activity timeline text,
-follow-up fields, database state, and labeled reply checks. Teardown also goes
+database state, and labeled reply checks. Teardown also goes
 through `conftest`; reports, redacted stack logs, and local model recordings stay
 under `target/test-artifacts/lisa-activity-benchmark/<run-id>/`.
 

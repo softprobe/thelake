@@ -1,9 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
 
 const backend = process.env.THELAKE_E2E_URL ?? 'http://127.0.0.1:18090';
+const lisaBackend = process.env.THELAKE_LISA_E2E_URL ?? backend;
 const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 
 function otlpValue(value: string | number) {
@@ -72,23 +71,6 @@ async function sendLisaMessage(page: Page, text: string) {
   await response.finished();
   await expect(page.locator('.tle-lisa-working')).toHaveCount(0, { timeout: 30_000 });
   await expect(composer).toHaveValue('');
-}
-
-function runRefundAgent(agentName: string): string {
-  const composeFile = resolve(process.cwd(), '../../../../examples/lisa-dogfood/compose.yaml');
-  const project = process.env.THELAKE_E2E_COMPOSE_PROJECT;
-  const lakePort = process.env.THELAKE_E2E_LAKE_PORT;
-  expect(project, 'online E2E compose project must be configured').toBeTruthy();
-  expect(lakePort, 'online E2E lake port must be configured').toBeTruthy();
-  const agentApiHost = process.platform === 'linux' ? '127.0.0.1' : 'host.docker.internal';
-  const agentOutput = execFileSync('docker', [
-    'compose', '--project-name', project!, '--file', composeFile,
-    'run', '--rm', 'refund-agent', '--agent-name', agentName,
-    '--api-url', `http://${agentApiHost}:${lakePort}`,
-  ], { encoding: 'utf8', timeout: 150_000, env: process.env });
-  const sessionId = agentOutput.match(/session_id=([A-Za-z0-9._-]+)/)?.[1];
-  expect(sessionId, `real demo agent did not report a session ID:\n${agentOutput}`).toBeTruthy();
-  return sessionId!;
 }
 
 test('live thelake ingest, reducer, session filters, and trace detail render in Explorer', async ({ page, request }) => {
@@ -236,7 +218,7 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Lisa' })).toHaveAttribute('href', '/lisa/');
 
-  await page.goto(`${backend}/lisa/`);
+  await page.goto(`${lisaBackend}/lisa/`);
   const lisaChat = page.getByRole('log', { name: 'Lisa conversation' });
   await expect(lisaChat).toBeVisible();
   for (const tab of ['Activities', 'Rules', 'Triage / judges', 'Identity']) {
@@ -374,12 +356,12 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await expect(page.locator('.payload-grid').getByText('The customer is on the pro plan.', { exact: true })).toBeVisible();
 });
 
-test('approved policy in Lisa chat judges a live agent and stores the policy criteria', async ({ page, request }) => {
+test('Lisa creates, finds, approves, and updates a policy through standalone chat', async ({ page }) => {
   test.skip(process.env.THELAKE_EXPLORER_E2E_ONLINE !== '1', 'requires the real policy QA stack');
   test.setTimeout(900_000);
   const agentName = `refund-agent-e2e-${suffix}`;
   const policyName = `Refund eligibility ${suffix}`;
-  await page.goto(`${backend}/lisa/`);
+  await page.goto(`${lisaBackend}/lisa/`);
   await expect(page.getByRole('log', { name: 'Lisa conversation' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Activate', exact: true })).toHaveCount(0);
   await expect(page.getByText('Connected', { exact: true })).toBeVisible();
@@ -437,33 +419,6 @@ test('approved policy in Lisa chat judges a live agent and stores the policy cri
   policyTranscript = await page.getByRole('log', { name: 'Lisa conversation' }).innerText();
   expect(policyTranscript).toContain(policyId!);
   expect(policyTranscript).toMatch(/approved: no|not approved/i);
-
-  await sendLisaMessage(page, `Approve policy: ${policyId}`);
-  await expect(page.locator('.tle-lisa-tool summary').filter({ hasText: 'Approve policy' })).toHaveCount(2);
-  await expect(page.locator('.tle-lisa-activity-card').first()).toBeVisible({ timeout: 30_000 });
-
-  const sessionId = runRefundAgent(agentName);
-  type PolicyScore = { name: string; source?: string; string_value?: string; comment?: string;
-    config_id?: string | null; metadata?: Record<string, string> };
-  let scores: PolicyScore[] = [];
-  await expect.poll(async () => {
-    const response = await request.get(`${backend}/v1/sessions/${encodeURIComponent(sessionId)}`);
-    if (!response.ok()) return undefined;
-    scores = (await response.json()).scores ?? [];
-    return scores.find((score) => score.name === policyName && score.source === 'evaluator')?.string_value;
-  }, { timeout: 240_000, intervals: [1_000, 2_000, 4_000] }).toBe('fail');
-  const failure = scores.find((score) => score.name === policyName && score.string_value === 'fail')!;
-  expect(failure.config_id).toBeNull();
-  expect(failure.metadata?.policy_id).toBe(policyId);
-  expect(failure.metadata?.criteria).toMatch(/eligib/i);
-  expect(failure.comment).toMatch(/eligib/i);
-  expect(JSON.parse(failure.metadata?.references ?? '[]')).not.toHaveLength(0);
-
-  await page.getByRole('button', { name: 'Sessions', exact: true }).click();
-  await expect(page.getByRole('button', { name: new RegExp(sessionId) })).toBeVisible();
-  await page.getByRole('button', { name: new RegExp(sessionId) }).click();
-  await expect(page.getByRole('heading', { name: `Session ${sessionId}` })).toBeVisible();
-
 });
 
 test('Lisa deletes an existing agent policy from chat and confirms its absence', async ({ page }) => {
@@ -471,7 +426,7 @@ test('Lisa deletes an existing agent policy from chat and confirms its absence',
   test.setTimeout(300_000);
   const agentName = `delete-policy-agent-${suffix}`;
   const policyName = `Delete policy browser check ${suffix}`;
-  await page.goto(`${backend}/lisa/`);
+  await page.goto(`${lisaBackend}/lisa/`);
   await expect(page.getByRole('log', { name: 'Lisa conversation' })).toBeVisible();
   await expect(page.getByText('Connected', { exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Message Lisa' })).toBeEnabled({ timeout: 30_000 });
