@@ -279,6 +279,11 @@
 .tle-lisa-activity-dialog-summary { padding: 18px 40px; color: #171a1e; font-size: 13px; line-height: 1.45; }
 .tle-lisa-activity-dialog-summary h3 { margin-bottom: 7px; color: #171a1e; font-size: 18px; font-weight: 600; }
 .tle-lisa-activity-dialog-summary p { margin-bottom: 8px; }
+.tle-lisa-activity-references { margin-top: 18px; padding-top: 12px; border-top: 1px solid #e4e5e8; }
+.tle-lisa-activity-references h4 { margin: 0 0 8px; color: #555b63; font-size: 11px; font-weight: 600; }
+.tle-lisa-activity-references ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.tle-lisa-activity-references li { display: grid; grid-template-columns: 110px minmax(0, 1fr); align-items: start; gap: 10px; color: #777d86; font-size: 10px; }
+.tle-lisa-activity-references code { overflow-wrap: anywhere; color: #454b53; font: 10px/1.4 ui-monospace, monospace; }
 
 @media (max-width: 760px) {
   .tle-lisa { grid-template-columns: 44px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 320px; }

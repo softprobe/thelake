@@ -7,6 +7,12 @@ actions that must or must not occur, labeled final activity/policy/follow-up
 state, and reply checks. The manifest pins the dataset bytes and the runner
 reports results by development/benchmark split and behavior category.
 
+The activity benchmark also checks that each feed row has a renderable ID,
+kind, title, status, timestamps, and details object. For tracked turns it reads
+activity detail and checks ordered actions, current-turn message links, and
+activity-scoped runtime-event links. Live activity runs require the direct
+Gemini model path and record the provider in the report.
+
 Run the benchmark explicitly because every turn invokes Lisa's configured model
 and may incur provider charges:
 
@@ -15,8 +21,12 @@ uv run --project lisa python lisa/scripts/evaluate_activity_dataset.py \
   --live --split benchmark
 ```
 
-Provide `GOOGLE_API_KEY` or `GEMINI_API_KEY`, or `LISA_BASE_URL` and
-`LISA_API_KEY`, in the process environment. The runner uses the actual OpenHands
+For a focused live run against a labeled subset while retaining the pinned
+release manifest, add `--case-prefix activity_tracking_`.
+
+Provide `GOOGLE_API_KEY` or `GEMINI_API_KEY` in the process environment. The
+live activity runner uses a direct Gemini model path and rejects custom base
+URLs. It uses the actual OpenHands
 conversation backend and Lisa MCP tools. Disposable Postgres and per-case Lisa
 databases come only from [`lisa/conftest.py`](../../lisa/conftest.py)
 (`start_lisa_postgres` / `create_lisa_test_database` / `stop_lisa_postgres`).

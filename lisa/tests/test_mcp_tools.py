@@ -37,25 +37,30 @@ def test_mcp_public_policy_contract(lisa_test_context):
     assert asyncio.run(contract()) == expected
 
 
-def test_mcp_activity_tools_find_and_complete_owned_work(lisa_test_context):
+def test_mcp_activity_tools_defer_active_chat_completion(lisa_test_context):
     context = lisa_test_context(
         turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
     )
+    context = replace(context, chat_turn_id="test-turn-1")
     services = build_services(context)
     assert services.activity_store is not None
 
     async def workflow():
         async with Client(create_server(services)) as client:
             created = await client.call_tool(
-                "create_activity",
-                {"title": "Review session", "activity_type": "task_running", "source": "chat"},
+                "resolve_chat_activity",
+                {"disposition": "create", "request_key": "review", "title": "Review session",
+                 "summary": "Review the selected session."},
             )
             activity_id = created.data["activity_id"]
+            second = await client.call_tool(
+                "resolve_chat_activity",
+                {"disposition": "create", "request_key": "policy", "title": "Review policy",
+                 "summary": "Review the pending policy."},
+            )
+            second_activity_id = second.data["activity_id"]
             recent = await client.call_tool("list_recent_activities", {"limit": 10})
             assert any(item["activity_key"] == activity_id for item in recent.data)
-            attached = await client.call_tool(
-                "attach_chat_turn_to_activity", {"activity_id": activity_id},
-            )
             updated = await client.call_tool(
                 "update_activity",
                 {
@@ -64,22 +69,125 @@ def test_mcp_activity_tools_find_and_complete_owned_work(lisa_test_context):
                     "event_title": "Session reviewed",
                 },
             )
+            services.activity_store.update_activity_progress(
+                activity_id, status="waiting",
+                summary="Policy P1.2 is awaiting owner approval.",
+                next_action="Approve policy: P1.2",
+            )
             completed = await client.call_tool(
                 "complete_activity",
                 {"activity_id": activity_id, "status": "success", "summary": "No issue found."},
             )
+            current = services.activity_store.get_activity_thread(activity_id)
+            assert current["activity"]["status"] == "blocked"
+            assert current["activity"]["next_action"] == "Approve policy: P1.2"
+            assert services.activity_store.complete_chat_activity(
+                activity_id, "Policy workflow completed.",
+            )
+            assert services.activity_store.complete_chat_activity(
+                second_activity_id, "Policy workflow completed.",
+            )
+            services.activity_store.record_conversation_trajectory(
+                activity_id,
+                [{"id": "thread-user-message", "role": "user", "text": "Review session."}],
+                [{"id": "thread-runtime-event", "kind": "tool", "tool_name": "read_policy", "sequence": 2}],
+            )
             thread = await client.call_tool("get_activity_thread", {"activity_id": activity_id})
-            return activity_id, attached, updated, completed, thread
+            return activity_id, created, updated, completed, thread
 
-    activity_id, attached, updated, completed, thread = asyncio.run(workflow())
-    assert attached.data == {"activity_id": activity_id, "attached": True}
+    activity_id, created, updated, completed, thread = asyncio.run(workflow())
+    assert created.data == {
+        "disposition": "create", "activity_id": activity_id,
+        "created": True, "request_key": "review",
+    }
     assert not updated.is_error
-    assert completed.data["completed"] is True
+    assert completed.data == {
+        "activity_id": activity_id,
+        "status": "deferred",
+        "requested_status": "success",
+        "completed": False,
+        "summary": "The chat runtime will finalize this activity after Lisa's reply.",
+    }
     assert thread.data["thread"]["status"] == "success"
-    assert thread.data["thread"]["finish_message"] == "No issue found."
+    assert thread.data["thread"]["finish_message"] == "Policy workflow completed."
+    assert any(
+        action.get("reference_type") == "message"
+        and action.get("reference_id") == "thread-user-message"
+        for action in thread.data["actions"]
+    )
+    assert any(
+        action.get("reference_type") == "runtime_event"
+        and action.get("reference_id") == "thread-runtime-event"
+        for action in thread.data["actions"]
+    )
 
 
-def test_activity_chat_attachment_rejects_non_owner(lisa_test_context):
+def test_mcp_completion_resolves_activity_when_chat_resolver_was_omitted(lisa_test_context):
+    from lisa.runtime import selected_chat_activity_ids
+
+    context = replace(
+        lisa_test_context(
+            turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+        ),
+        chat_turn_id="test-turn-unresolved-completion",
+    )
+    services = build_services(context)
+    activity = services.activity_store.create_activity(
+        title="Continue policy review", source="web",
+    )
+
+    async def complete_without_resolving():
+        async with Client(create_server(services)) as client:
+            result = await client.call_tool(
+                "complete_activity",
+                {"activity_id": activity.id, "status": "success", "summary": "Done."},
+            )
+        return result
+
+    result = asyncio.run(complete_without_resolving())
+    assert result.data["status"] == "deferred"
+    assert services.activity_store.chat_activities_for_turn(context.chat_turn_id) == [activity.id]
+    assert selected_chat_activity_ids([{
+        "id": "complete-result", "kind": "evidence", "tool_name": "complete_activity",
+        "detail": json.dumps(result.data), "sequence": 1,
+    }]) == [activity.id]
+
+
+def test_chat_evaluation_receives_the_active_resolved_activity(lisa_test_context, monkeypatch):
+    context = replace(
+        lisa_test_context(
+            turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+        ),
+        chat_turn_id="evaluate-session-turn",
+    )
+    services = build_services(context)
+    resolved = services.activity_store.resolve_chat_activity(
+        turn_id=context.chat_turn_id, request_key="review_session",
+        disposition="create", source="web", title="Review billing-agent session",
+        summary="Evaluate the requested session.",
+    )
+    calls = []
+    monkeypatch.setattr(
+        services.evaluations, "evaluate_session",
+        lambda agent, session, *, activity_id=None: calls.append((agent, session, activity_id)) or {
+            "activity_id": activity_id,
+        },
+    )
+
+    async def evaluate():
+        async with Client(create_server(services)) as client:
+            return await client.call_tool(
+                "evaluate_session",
+                {"target_agent_name": "billing-agent", "session_id": "session-123"},
+            )
+
+    result = asyncio.run(evaluate())
+
+    assert calls == [("billing-agent", "session-123", resolved.id)]
+    assert result.data["activity_id"] == resolved.id
+
+
+def test_activity_chat_resolution_rejects_non_owner(lisa_test_context):
     context = lisa_test_context(
         turn_source="web", actor_id="outsider", owner_user_ids=frozenset({"owner-1"}),
     )
@@ -88,15 +196,15 @@ def test_activity_chat_attachment_rejects_non_owner(lisa_test_context):
         title="Private conversation", source="web",
     )
 
-    async def attach():
+    async def resolve():
         async with Client(create_server(services)) as client:
             return await client.call_tool(
-                "attach_chat_turn_to_activity",
-                {"activity_id": activity.id},
+                "resolve_chat_activity",
+                {"disposition": "continue", "request_key": "private", "activity_id": activity.id},
                 raise_on_error=False,
             )
 
-    result = asyncio.run(attach())
+    result = asyncio.run(resolve())
     assert result.is_error
     assert "authorized Lisa owner identity" in str(result.content)
 
@@ -174,7 +282,7 @@ def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
     assert [row.id for row in approved_services.policy_service.approved_rules("billing-agent")] == [policy_id]
 
 
-def test_delete_policy_requires_exact_owner_confirmation(lisa_test_context):
+def test_delete_policy_executes_for_authorized_owner(lisa_test_context):
     context = lisa_test_context(
         turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
     )
@@ -183,27 +291,19 @@ def test_delete_policy_requires_exact_owner_confirmation(lisa_test_context):
         scope="workspace", agent_name="", name="Retired rule", criteria="Do not use it."
     )
 
-    async def delete(confirmed_policy_deletion_id):
-        configured = build_services(replace(
-            context, confirmed_policy_deletion_id=confirmed_policy_deletion_id
-        ))
-        async with Client(create_server(configured)) as client:
+    async def delete():
+        async with Client(create_server(services)) as client:
             return await client.call_tool("delete_policy", {"policy_id": record.id})
-
-    with pytest.raises(ValueError, match="Delete policy"):
-        services.policy_service.delete_policy(record.id)
-    assert services.policy_service.list_policy_records() == [record]
 
     outsider = build_services(replace(
         context,
         actor_id="outsider",
-        confirmed_policy_deletion_id=record.id,
     ))
     with pytest.raises(ValueError, match="authorized Lisa owner"):
         outsider.policy_service.delete_policy(record.id)
     assert services.policy_service.list_policy_records() == [record]
 
-    deleted = asyncio.run(delete(record.id))
+    deleted = asyncio.run(delete())
     assert not deleted.is_error
     assert deleted.data == {"policy_id": record.id, "deleted": True}
     assert services.policy_service.list_policy_records() == []
@@ -360,7 +460,7 @@ def test_evaluate_session_recovers_pending_scores_before_policy_or_telemetry_loo
 ):
     from types import SimpleNamespace
 
-    services = build_services(lisa_test_context())
+    services = build_services(lisa_test_context(turn_source="scheduled"))
     services.evaluations.activities = SimpleNamespace(
         find_pending_evaluations_for_session=lambda agent, session: (
             [("activity", "outbox")] if (agent, session) == ("agent", "session") else []

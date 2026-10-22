@@ -19,6 +19,7 @@ GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_carrier_user_messages TO {
 GRANT SELECT ON lisa.readable_activity_monitor_links TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.approval_requests TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_followups TO {writer};
+GRANT SELECT, INSERT, UPDATE ON lisa.activity_chat_turns TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.score_outbox TO {writer};
 GRANT SELECT, INSERT, UPDATE, DELETE ON lisa.policies TO {writer};
 GRANT SELECT ON lisa.deployment TO {writer};

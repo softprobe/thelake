@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -57,6 +57,21 @@ async function openDetails(page: import('@playwright/test').Page, label: string)
   const summary = page.getByText(label, { exact: true });
   const details = summary.locator('xpath=..');
   if (!await details.evaluate((element) => (element as HTMLDetailsElement).open)) await summary.click();
+}
+
+async function sendLisaMessage(page: Page, text: string) {
+  const composer = page.getByRole('textbox', { name: 'Message Lisa' });
+  await composer.fill(text);
+  const responsePromise = page.waitForResponse((response) =>
+    response.request().method() === 'POST' && /\/v1\/conversations\/[^/]+\/messages$/.test(response.url()),
+    { timeout: 240_000 },
+  );
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  const response = await responsePromise;
+  expect(response.ok()).toBeTruthy();
+  await response.finished();
+  await expect(page.locator('.tle-lisa-working')).toHaveCount(0, { timeout: 30_000 });
+  await expect(composer).toHaveValue('');
 }
 
 function runRefundAgent(agentName: string): string {
@@ -200,6 +215,10 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
           { seq: 1, event_type: 'activity.started', title: 'Started', summary: 'Lisa began reviewing the fixture.', created_at: createdAt },
           { seq: 2, event_type: 'activity.updated', title: 'Checked workspace evidence', summary: 'The activity detail shows the selected timeline step.', created_at: createdAt },
         ],
+        references: [
+          { reference_type: 'message', reference_id: 'message-seed' },
+          { reference_type: 'runtime_event', reference_id: 'event-seed' },
+        ],
       } });
       return;
     }
@@ -262,7 +281,11 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await expect(activityDialog.locator('.tle-lisa-activity-step.latest')).toHaveCount(1);
   await activityDialog.getByRole('button', { name: 'Checked workspace evidence' }).click();
   await expect(activityDialog.getByRole('heading', { name: 'Checked workspace evidence' })).toBeVisible();
+  await expect(activityDialog.getByText('The activity detail shows the selected timeline step.')).toBeVisible();
   await expect(activityDialog.getByRole('button', { name: 'Checked workspace evidence' })).toHaveAttribute('aria-current', 'step');
+  const linkedEvidence = activityDialog.getByRole('region', { name: 'Linked evidence' });
+  await expect(linkedEvidence.getByText('message-seed')).toBeVisible();
+  await expect(linkedEvidence.getByText('event-seed')).toBeVisible();
   await activityDialog.getByRole('button', { name: 'Started' }).click();
   await expect(activityDialog.getByRole('heading', { name: 'Started' })).toBeVisible();
   await page.keyboard.press('Escape');
@@ -365,20 +388,7 @@ test('approved policy in Lisa chat judges a live agent and stores the policy cri
   const composer = page.getByRole('textbox', { name: 'Message Lisa' });
   await expect(composer).toBeEnabled({ timeout: 30_000 });
 
-  const send = async (text: string) => {
-    await composer.fill(text);
-    const responsePromise = page.waitForResponse((response) =>
-      response.request().method() === 'POST' && /\/v1\/conversations\/[^/]+\/messages$/.test(response.url()),
-      { timeout: 240_000 },
-    );
-    await page.getByRole('button', { name: 'Send', exact: true }).click();
-    const response = await responsePromise;
-    expect(response.ok()).toBeTruthy();
-    await response.finished();
-    await expect(page.locator('.tle-lisa-working')).toHaveCount(0, { timeout: 30_000 });
-    await expect(composer).toHaveValue('');
-  };
-  await send(`Create an unapproved agent policy named "${policyName}" for "${agentName}": ` +
+  await sendLisaMessage(page, `Create an unapproved agent policy named "${policyName}" for "${agentName}": ` +
     'check refund eligibility and wait for the result before issuing a refund. ' +
     'Use write_policy and show me its readable policy ID. Do not approve it yet.');
   const transcript = await page.getByRole('log', { name: 'Lisa conversation' }).innerText();
@@ -397,17 +407,17 @@ test('approved policy in Lisa chat judges a live agent and stores the policy cri
     .toContainText(policyName);
   await activityDialog.getByRole('button', { name: 'Close activity details' }).click();
 
-  await send(`Find the policy named "${policyName}" for "${agentName}". ` +
+  await sendLisaMessage(page, `Find the policy named "${policyName}" for "${agentName}". ` +
     'Use list_policies and read_policy, and report its readable ID, criteria, and approval state.');
   let policyTranscript = await page.getByRole('log', { name: 'Lisa conversation' }).innerText();
   expect(policyTranscript).toContain(policyId!);
   expect(policyTranscript).toMatch(/approved: no|not approved/i);
 
-  await send(`Approve policy: ${policyId}`);
+  await sendLisaMessage(page, `Approve policy: ${policyId}`);
   await expect(page.locator('.tle-lisa-tool summary').filter({ hasText: 'Approve policy' })).toBeVisible();
   await expect(page.locator('.tle-lisa-activity-card').first()).toBeVisible({ timeout: 30_000 });
 
-  await send(`Update the approved policy ${policyId} named "${policyName}" for "${agentName}". ` +
+  await sendLisaMessage(page, `Update the approved policy ${policyId} named "${policyName}" for "${agentName}". ` +
     'Add the requirement to record the customer\'s explicit confirmation before issuing a refund. ' +
     'Use write_policy to update this policy in place, leave it unapproved, and show its unchanged ID.');
   await expect(page.getByRole('log', { name: 'Lisa conversation' })).toContainText(policyId!, { timeout: 240_000 });
@@ -422,13 +432,13 @@ test('approved policy in Lisa chat judges a live agent and stores the policy cri
   await expect(activityDialog.locator('.tle-lisa-activity-dialog-summary p').first())
     .toContainText(policyId!);
   await activityDialog.getByRole('button', { name: 'Close activity details' }).click();
-  await send(`Find the policy named "${policyName}" for "${agentName}" again. ` +
+  await sendLisaMessage(page, `Find the policy named "${policyName}" for "${agentName}" again. ` +
     'Use list_policies and read_policy, and report its exact ID and approval state.');
   policyTranscript = await page.getByRole('log', { name: 'Lisa conversation' }).innerText();
   expect(policyTranscript).toContain(policyId!);
   expect(policyTranscript).toMatch(/approved: no|not approved/i);
 
-  await send(`Approve policy: ${policyId}`);
+  await sendLisaMessage(page, `Approve policy: ${policyId}`);
   await expect(page.locator('.tle-lisa-tool summary').filter({ hasText: 'Approve policy' })).toHaveCount(2);
   await expect(page.locator('.tle-lisa-activity-card').first()).toBeVisible({ timeout: 30_000 });
 
@@ -453,4 +463,38 @@ test('approved policy in Lisa chat judges a live agent and stores the policy cri
   await expect(page.getByRole('button', { name: new RegExp(sessionId) })).toBeVisible();
   await page.getByRole('button', { name: new RegExp(sessionId) }).click();
   await expect(page.getByRole('heading', { name: `Session ${sessionId}` })).toBeVisible();
+
+});
+
+test('Lisa deletes an existing agent policy from chat and confirms its absence', async ({ page }) => {
+  test.skip(process.env.THELAKE_EXPLORER_E2E_ONLINE !== '1', 'requires the real Lisa runtime');
+  test.setTimeout(300_000);
+  const agentName = `delete-policy-agent-${suffix}`;
+  const policyName = `Delete policy browser check ${suffix}`;
+  await page.goto(`${backend}/lisa/`);
+  await expect(page.getByRole('log', { name: 'Lisa conversation' })).toBeVisible();
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Message Lisa' })).toBeEnabled({ timeout: 30_000 });
+
+  await sendLisaMessage(page, `Create an unapproved agent policy named "${policyName}" for "${agentName}" with criterion "test-only deletion target". Leave it pending and tell me its policy ID.`);
+  const createTool = page.locator('.tle-lisa-tool').filter({ has: page.locator('summary').filter({ hasText: 'Write policy' }) }).last();
+  await expect(createTool).toBeVisible();
+  await createTool.locator('summary').click();
+  const policyId = (await createTool.locator('pre').last().innerText()).match(/"policy_id":\s*"([^"]+)"/)?.[1];
+  expect(policyId).toMatch(/^P1\.\d+(?:\.\d+)*$/);
+
+  await sendLisaMessage(page, `Delete policy ${policyId} for agent "${agentName}".`);
+  const deleteTool = page.locator('.tle-lisa-tool').filter({ has: page.locator('summary').filter({ hasText: 'Delete policy' }) }).last();
+  await expect(deleteTool).toBeVisible();
+  await deleteTool.locator('summary').click();
+  await expect(deleteTool.locator('pre').first()).toContainText(`"policy_id": "${policyId}"`);
+  await expect(deleteTool.locator('pre').last()).toHaveText(/"deleted"\s*:\s*true/);
+
+  await sendLisaMessage(page, `Use read_policy with scope=agent and agent_name="${agentName}" to verify whether policy ${policyId} remains.`);
+  const readTool = page.locator('.tle-lisa-tool').filter({ has: page.locator('summary').filter({ hasText: 'Read policy' }) }).last();
+  await expect(readTool).toBeVisible();
+  await readTool.locator('summary').click();
+  await expect(readTool.locator('pre').first()).toContainText('"scope": "agent"');
+  await expect(readTool.locator('pre').first()).toContainText(`"agent_name": "${agentName}"`);
+  await expect(readTool.locator('pre').last()).toContainText('No policy exists yet.');
 });

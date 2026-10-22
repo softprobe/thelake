@@ -5,17 +5,27 @@
 manifest deliberately whenever cases change. Each case is an ordered,
 multi-turn task with chat provenance, owner identity, tool-action expectations,
 reply checks, ordered tool-use and exact call-count labels, and expected state
-labels. Substantive activity and policy turns also require the selected
-activity's timeline to link each new chat message and runtime event.
+labels. Owner chat turns require each newly linked user and assistant message on every resolved activity and check that runtime events link only to their resolved task. The request-resolution cases cover brief questions, greetings, independent asks, continuations, switches, and closed work.
 
-The 17-case curated release covers activity creation, lookup and resumption,
-duplicate prevention, ambiguity, evidence-backed completion, owner boundaries,
-policy creation, lookup, exact-ID approval, in-place update, confirmed deletion,
-and follow-up proposal/approval/deduplication. Three cases check whether Lisa can
+The 33-case curated release includes ten new held-out activity-tracking cases
+across distinct user requests. Each uses the shared scorer to check feed shape,
+ordered detail actions, and evidence linkage. It also covers activity creation,
+lookup and resumption, duplicate prevention, ambiguity,
+evidence-backed completion, owner boundaries, one-turn questions, explicit
+greeting skips, separate activities for independent requests, continuation after
+closure, error outcomes, policy creation and lookup, exact-ID approval, in-place
+update, confirmed deletion, follow-up proposal/approval/deduplication, and
+session lookup failure before the no-approved-policies shortcut. Evaluation
+lookup errors are recorded and close the resolved activity, so Lisa reports the
+error without a second lookup or completion attempt. Wrong policy IDs are
+verified against the policy catalog before Lisa records the failed approval
+attempt. Three cases check whether Lisa can
 retrieve and report saved policy-triage decisions and judge verdicts without
 rerunning an evaluation. Synthetic history is seeded in each disposable Postgres
 case database through Lisa's repositories; judge-run completion uses a
-parameterized benchmark SQL fixture. State labels can inspect activity
+parameterized benchmark SQL fixture that acknowledges the seeded score before
+the evaluation activity is marked successful. A later chat lookup is a new
+request activity, separate from that completed evaluation. State labels can inspect activity
 timeline text and follow-up count, event trigger, and prompt fields. Development
 and benchmark splits are disjoint by case. Use development cases for tuning and
 reserve benchmark cases for final measurement. The dataset is author-curated; it

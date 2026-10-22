@@ -16,27 +16,16 @@ from .models.policies import is_policy_id
 class AgentTurn:
     messages: list[dict[str, Any]]
     activities: list[dict[str, Any]]
-    activity_id: str | None = None
+    failed: bool = False
 
 
-def selected_chat_activity_id(activities: list[dict[str, Any]]) -> str | None:
-    """Resolve the activity for a chat turn from explicit choice or activity work."""
+def selected_chat_activity_ids(activities: list[dict[str, Any]]) -> list[str]:
+    """Return the activities Lisa explicitly resolved for this chat turn."""
     ordered = sorted(activities, key=lambda item: item.get("sequence", 0))
 
     def tool_name(item: dict[str, Any]) -> str:
         raw = str(item.get("tool_name", "")).lower()
-        normalized = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
-        known = {
-            "attach_chat_turn_to_activity", "update_activity", "set_activity_progress",
-            "complete_activity", "set_activity_section", "link_activity_reference",
-            "propose_activity_followup", "list_activity_followups",
-            "approve_activity_followup", "get_activity_thread", "create_activity",
-            "find_activity",
-        }
-        return next(
-            (name for name in known if normalized == name or normalized.endswith(f"_{name}")),
-            normalized,
-        )
+        return re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
 
     def tool_arguments(item: dict[str, Any]) -> dict[str, Any]:
         value = item.get("arguments")
@@ -75,54 +64,341 @@ def selected_chat_activity_id(activities: list[dict[str, Any]]) -> str | None:
     def nonempty_id(value: Any) -> str | None:
         return value.strip() if isinstance(value, str) and value.strip() else None
 
-    explicit = [
-        item for item in ordered
-        if tool_name(item) == "attach_chat_turn_to_activity"
-        and nonempty_id(tool_arguments(item).get("activity_id")) is not None
-    ]
-    if explicit:
-        return nonempty_id(tool_arguments(explicit[-1]).get("activity_id"))
-
-    inferred_ids = {
-        nonempty_id(tool_arguments(item).get("activity_id"))
-        for item in ordered
-        if tool_name(item) in {
-            "update_activity", "set_activity_progress", "complete_activity",
-            "set_activity_section", "link_activity_reference",
-            "propose_activity_followup", "list_activity_followups",
-            "approve_activity_followup", "get_activity_thread",
-        }
-        and nonempty_id(tool_arguments(item).get("activity_id")) is not None
-    }
-    result_ids: list[str] = []
+    selected: list[str] = []
     for item in ordered:
-        name = tool_name(item)
-        if item.get("kind") != "evidence" or name not in {
-            "create_activity", "find_activity", "get_activity_thread",
-        }:
+        if item.get("kind") != "evidence":
             continue
         payload = tool_result(item)
-        if name == "create_activity" and isinstance(payload, dict):
-            candidate = payload.get("activity_id")
-            candidate = nonempty_id(candidate)
-            if candidate:
-                result_ids.append(candidate)
-        elif name == "get_activity_thread" and isinstance(payload, dict):
-            activity = payload.get("activity")
-            candidate = activity.get("id") if isinstance(activity, dict) else None
-            candidate = nonempty_id(candidate)
-            if candidate:
-                result_ids.append(candidate)
-        elif (
-            name == "find_activity" and isinstance(payload, list) and len(payload) == 1
-            and isinstance(payload[0], dict)
+        if not isinstance(payload, dict):
+            continue
+        name = tool_name(item)
+        if name.endswith("complete_activity") and payload.get("status") == "deferred":
+            candidate = nonempty_id(payload.get("activity_id"))
+            if candidate and candidate not in selected:
+                selected.append(candidate)
+            continue
+        if not name.endswith("resolve_chat_activity"):
+            continue
+        candidate = nonempty_id(payload.get("activity_id"))
+        if (
+            candidate
+            and payload.get("disposition") in {"create", "continue", "fallback"}
+            and candidate not in selected
         ):
-            candidate = nonempty_id(payload[0].get("id") or payload[0].get("activity_key"))
-            if candidate:
-                result_ids.append(candidate)
+            selected.append(candidate)
+    return selected
 
-    inferred_ids.update(result_ids)
-    return next(iter(inferred_ids)) if len(inferred_ids) == 1 else None
+
+def chat_activity_requested_status(activities: list[dict[str, Any]]) -> str | None:
+    """Return the requested terminal outcome from a deferred chat completion."""
+    for item in reversed(activities):
+        if item.get("kind") != "evidence":
+            continue
+        name = re.sub(r"[^a-z0-9]+", "_", str(item.get("tool_name", "")).lower()).strip("_")
+        if not name.endswith("complete_activity"):
+            continue
+        payload = _json_payload(item.get("detail"))
+        if not isinstance(payload, dict) or payload.get("status") != "deferred":
+            continue
+        requested = payload.get("requested_status")
+        return {"success": "succeeded", "error": "failed", "stopped": "cancelled"}.get(requested)
+    return None
+
+
+def chat_activity_was_skipped(activities: list[dict[str, Any]]) -> bool:
+    """Whether Lisa explicitly classified the whole turn as non-work chatter."""
+    return any(
+        item.get("kind") == "evidence"
+        and str(item.get("tool_name", "")).lower().endswith("skip_chat_activity_for_turn")
+        and isinstance(_json_payload(item.get("detail")), dict)
+        and _json_payload(item.get("detail")).get("skipped") is True
+        for item in activities
+    )
+
+
+def record_fallback_activity_resolution(
+    activities: list[dict[str, Any]], *, activity_id: str, turn_id: str,
+) -> None:
+    """Represent runtime recovery as the first trajectory event for this turn."""
+    first_sequence = min((item.get("sequence", 0) for item in activities), default=0)
+    activities.append({
+        "id": f"fallback-resolution:{turn_id}",
+        "kind": "evidence",
+        "label": "Activity routing fallback: Lisa provided no valid resolution for this request",
+        "tool_name": "resolve_chat_activity",
+        "detail": json.dumps({
+            "disposition": "fallback", "activity_id": activity_id,
+            "request_key": "fallback",
+        }),
+        "sequence": first_sequence - 1,
+    })
+
+
+def chat_activity_waiting_state(
+    activities: list[dict[str, Any]],
+) -> tuple[bool, str | None]:
+    """Return whether chat work is pending and the owner action, when known."""
+    waiting = False
+    next_action: str | None = None
+    pending_policies: set[str] = set()
+    unidentified_policy_pending = False
+    pending_followups: set[str] = set()
+    unidentified_followup_pending = False
+    approved_followups: set[str] = set()
+    ordered = sorted(activities, key=lambda item: item.get("sequence", 0))
+    for item in ordered:
+        name = re.sub(
+            r"[^a-z0-9]+", "_", str(item.get("tool_name", "")).lower()
+        ).strip("_")
+        if not name:
+            continue
+        if name.endswith("set_activity_progress"):
+            if item.get("kind") == "tool":
+                payload = item.get("arguments")
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except json.JSONDecodeError:
+                        payload = None
+            elif item.get("kind") == "evidence":
+                payload = _json_payload(item.get("detail"))
+            else:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            status = payload.get("status")
+            value = payload.get("next_action")
+            if status == "waiting" or (
+                status == "running" and isinstance(value, str) and value.strip()
+            ):
+                waiting = True
+                next_action = (
+                    value.strip()
+                    if isinstance(value, str) and value.strip()
+                    else next_action or "Continue the requested work"
+                )
+            elif item.get("kind") == "tool" and status in {"queued", "running"}:
+                waiting = False
+                next_action = None
+            continue
+        if item.get("kind") != "evidence":
+            continue
+        payload = _json_payload(item.get("detail"))
+        if not isinstance(payload, dict):
+            continue
+        if name.endswith("write_policy"):
+            policy_id = payload.get("policy_id")
+            if payload.get("approved") is False:
+                if isinstance(policy_id, str) and policy_id:
+                    pending_policies.add(policy_id)
+                else:
+                    unidentified_policy_pending = True
+                policy_id = payload.get("policy_id")
+                next_action = (
+                    f"Approve policy: {policy_id}"
+                    if isinstance(policy_id, str) and policy_id
+                    else None
+                )
+            elif payload.get("approved") is True:
+                if isinstance(policy_id, str):
+                    pending_policies.discard(policy_id)
+                else:
+                    unidentified_policy_pending = False
+                next_action = None
+        elif name.endswith("approve_policy") and payload.get("approved") is True:
+            policy_id = payload.get("policy_id")
+            if isinstance(policy_id, str):
+                pending_policies.discard(policy_id)
+            else:
+                unidentified_policy_pending = False
+            next_action = None
+        elif name.endswith("delete_policy") and payload.get("deleted") is True:
+            policy_id = payload.get("policy_id")
+            if isinstance(policy_id, str):
+                pending_policies.discard(policy_id)
+            else:
+                unidentified_policy_pending = False
+            next_action = None
+        elif name.endswith("propose_activity_followup"):
+            followup_id = payload.get("followup_id")
+            if payload.get("status") == "pending_confirmation":
+                if isinstance(followup_id, str) and followup_id:
+                    pending_followups.add(followup_id)
+                else:
+                    unidentified_followup_pending = True
+                followup_id = payload.get("followup_id")
+                next_action = (
+                    f"Confirm follow-up: {followup_id}"
+                    if isinstance(followup_id, str) and followup_id
+                    else None
+                )
+        elif name.endswith("approve_activity_followup") and payload.get("status") == "approved":
+            followup_id = payload.get("followup_id")
+            if isinstance(followup_id, str) and followup_id:
+                pending_followups.discard(followup_id)
+                approved_followups.add(followup_id)
+                next_action = "Wait for approved follow-up"
+            else:
+                unidentified_followup_pending = True
+                next_action = "Wait for approved follow-up"
+        elif name.endswith("decline_activity_followup") and payload.get("status") == "declined":
+            followup_id = payload.get("followup_id")
+            if isinstance(followup_id, str):
+                pending_followups.discard(followup_id)
+            else:
+                unidentified_followup_pending = False
+            next_action = None
+    waiting = waiting or bool(pending_policies) or unidentified_policy_pending
+    waiting = waiting or bool(pending_followups) or unidentified_followup_pending
+    waiting = waiting or bool(approved_followups)
+    if pending_policies and not next_action:
+        next_action = f"Approve policy: {sorted(pending_policies)[0]}"
+    if waiting and next_action is None:
+        next_action = "Continue the requested work"
+    return (
+        waiting,
+        next_action,
+    )
+
+
+def chat_activity_tool_failed(activities: list[dict[str, Any]]) -> bool:
+    """Whether a failed tool call lacks a successful retry with the same inputs."""
+    failures: set[tuple[str, str | None]] = set()
+    actions_by_id: dict[str, tuple[str, str | None]] = {}
+    for item in sorted(activities, key=lambda item: item.get("sequence", 0)):
+        name = re.sub(
+            r"[^a-z0-9]+", "_", str(item.get("tool_name", "")).lower()
+        ).strip("_")
+        if item.get("kind") == "tool":
+            arguments = item.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = None
+            signature = (
+                json.dumps(arguments, sort_keys=True, separators=(",", ":"))
+                if isinstance(arguments, dict) else None
+            )
+            call_id = item.get("tool_call_id")
+            if isinstance(call_id, str) and call_id:
+                actions_by_id[call_id] = (name, signature)
+            continue
+        if item.get("kind") != "evidence":
+            continue
+        detail = str(item.get("detail") or "")
+        call_id = item.get("tool_call_id")
+        signature = actions_by_id.get(call_id) if isinstance(call_id, str) else None
+        signature = signature or (name, None)
+        failed = bool(item.get("is_error")) or detail.lstrip().startswith(
+            "[An error occurred during execution.]"
+        ) or detail.lstrip().startswith("Error calling tool ")
+        if failed:
+            failures.add(signature)
+        else:
+            failures.discard(signature)
+    return bool(failures)
+
+
+def activity_events_for_target(
+    activities: list[dict[str, Any]], activity_ids: list[str], target_id: str,
+) -> list[dict[str, Any]]:
+    """Partition runtime events by Lisa's resolved activity scope."""
+    ordered = sorted(activities, key=lambda item: item.get("sequence", 0))
+    current_scope: str | None = None
+    pending_resolution: dict[str, Any] | None = None
+    pending_find: dict[str, Any] | None = None
+    pre_resolution_event_ids: list[str] = []
+    has_resolved_scope = False
+    matched: set[str] = set()
+
+    for item in ordered:
+        full_name = str(item.get("tool_name", "")).lower()
+        is_resolve = full_name.endswith("resolve_chat_activity")
+        if is_resolve and item.get("kind") == "tool":
+            pending_resolution = item
+            explicit = tool_activity_id(item)
+            if explicit == target_id:
+                matched.add(str(item.get("id", "")))
+            continue
+        if is_resolve and item.get("kind") == "evidence":
+            payload = _json_payload(item.get("detail"))
+            resolved = payload.get("activity_id") if isinstance(payload, dict) else None
+            if isinstance(resolved, str) and resolved in activity_ids:
+                current_scope = resolved
+                if not has_resolved_scope and resolved == target_id:
+                    matched.update(pre_resolution_event_ids)
+                has_resolved_scope = True
+                if resolved == target_id:
+                    matched.add(str(item.get("id", "")))
+                    if pending_resolution is not None:
+                        matched.add(str(pending_resolution.get("id", "")))
+            pending_resolution = None
+            continue
+
+        if not has_resolved_scope and item.get("id"):
+            pre_resolution_event_ids.append(str(item["id"]))
+
+        if full_name.endswith("find_activity") and item.get("kind") == "tool":
+            pending_find = item
+            continue
+
+        direct = tool_activity_id(item)
+        if direct is not None:
+            if direct == target_id:
+                matched.add(str(item.get("id", "")))
+            continue
+        if item.get("kind") == "evidence" and full_name.endswith("find_activity"):
+            payload = _json_payload(item.get("detail"))
+            rows = payload if isinstance(payload, list) else [payload]
+            if any(
+                isinstance(row, dict)
+                and (row.get("id") == target_id or row.get("activity_key") == target_id)
+                for row in rows
+            ):
+                matched.add(str(item.get("id", "")))
+                if pending_find is not None:
+                    matched.add(str(pending_find.get("id", "")))
+            pending_find = None
+            continue
+        if current_scope == target_id:
+            matched.add(str(item.get("id", "")))
+
+    return [item for item in ordered if str(item.get("id", "")) in matched]
+
+
+def tool_activity_id(item: dict[str, Any]) -> str | None:
+    arguments = item.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+    value = arguments.get("activity_id") if isinstance(arguments, dict) else None
+    if (
+        value is None
+        and item.get("kind") == "evidence"
+        and str(item.get("tool_name", "")).lower().endswith("complete_activity")
+    ):
+        payload = _json_payload(item.get("detail"))
+        if isinstance(payload, dict) and payload.get("status") == "deferred":
+            value = payload.get("activity_id")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _json_payload(detail: Any) -> Any:
+    if not isinstance(detail, str):
+        return None
+    decoder = json.JSONDecoder()
+    for start, marker in enumerate(detail):
+        if marker not in "{[":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(detail[start:])
+            return payload
+        except json.JSONDecodeError:
+            continue
+    return None
 
 
 class AgentBackend(Protocol):
@@ -138,10 +414,10 @@ class AgentBackend(Protocol):
         turn_source: str = "web",
         actor_id: str | None = None,
         confirmed_policy_id: str | None = None,
-        confirmed_policy_deletion_id: str | None = None,
         confirmed_followup_id: str | None = None,
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
+        chat_turn_id: str | None = None,
     ) -> AgentTurn: ...
 
 
@@ -178,14 +454,6 @@ def confirmed_policy_id(user_text: str) -> str | None:
     """Accept approval only as an exact, standalone human-readable policy command."""
     text = _owner_command_text(user_text)
     match = re.fullmatch(r"\s*approve policy:\s*(P1\.[1-9][0-9]*(?:\.[1-9][0-9]*)?)\s*", text, re.IGNORECASE)
-    identifier = match.group(1) if match else None
-    return identifier if identifier and is_policy_id(identifier) else None
-
-
-def confirmed_policy_deletion_id(user_text: str) -> str | None:
-    """Accept deletion only as an exact, standalone readable policy command."""
-    text = _owner_command_text(user_text)
-    match = re.fullmatch(r"\s*delete policy:\s*(P1\.[1-9][0-9]*(?:\.[1-9][0-9]*)?)\s*", text, re.IGNORECASE)
     identifier = match.group(1) if match else None
     return identifier if identifier and is_policy_id(identifier) else None
 

@@ -19,7 +19,7 @@ columns are available:
 - lisa.readable_evaluation_triage: session_id, policy_id, decision, created_at.
   Join to lisa.policies when the user specifies a policy name.
 - lisa.readable_activity_events: activity_id, seq, event_type, title, summary,
-  actor, created_at
+  actor, reference_type, reference_id, created_at
 - lisa.readable_activity_feed: activity_id, activity_type, is_goal, message_id,
   subtitle, status_title, task_label, agent_id, details, kind, status, title,
   summary, source, created_at, started_at, updated_at, finished_at, next_action,
@@ -28,9 +28,10 @@ columns are available:
 - lisa.readable_activity_monitor_threads: activity_id, icon, details, section_id,
   section_title, section_status, section_order
 - lisa.readable_activity_monitor_thread_actions: activity_id, seq, event_type,
-  title, summary, actor, status, created_at
+  title, summary, actor, reference_type, reference_id, status, created_at
 - lisa.readable_activity_monitor_links: activity_id, reference_type,
-  reference_id. Types are agent, message, runtime_work, and carrier_message.
+  reference_id. Types are agent, message, runtime_event, runtime_work, and
+  carrier_message.
 - lisa.readable_activity_context: id, activity_id, seq, kind, source_ref,
   content_hash, created_at
 - lisa.readable_approvals: id, activity_id, scope, status, request_summary,

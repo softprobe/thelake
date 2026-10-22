@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from ..repositories.conversations import ConversationNotFound, FileConversationRepository
+from ..runtime import (
+    chat_activity_was_skipped,
+    record_fallback_activity_resolution,
+    selected_chat_activity_ids,
+)
+from .chat_activities import record_chat_activity_trajectories
+
+logger = logging.getLogger(__name__)
 
 
 def tag_turn(
@@ -118,11 +127,11 @@ class ConversationService:
         slack_channel_id: str | None = None,
         slack_thread_ts: str | None = None,
         confirmed_policy_id: str | None = None,
-        confirmed_policy_deletion_id: str | None = None,
         confirmed_followup_id: str | None = None,
     ) -> dict[str, Any]:
         directory = self.repository.conversation_directory(workspace_id, conversation_id)
         metadata = self.repository.load_metadata(directory, workspace_id)
+        chat_turn_id = str(uuid4())
         async with self.repository.lock_for(directory):
             metadata = self.repository.load_metadata(directory, workspace_id)
             previous_messages = metadata.get("messages", [])
@@ -138,21 +147,51 @@ class ConversationService:
                     slack_channel_id=slack_channel_id,
                     slack_thread_ts=slack_thread_ts,
                     confirmed_policy_id=confirmed_policy_id,
-                    confirmed_policy_deletion_id=confirmed_policy_deletion_id,
                     confirmed_followup_id=confirmed_followup_id,
+                    chat_turn_id=chat_turn_id,
                 )
             except RuntimeError as error:
+                self._record_failed_chat_activity(
+                    chat_turn_id, turn_source, actor_id, text, error,
+                    conversation_id, slack_channel_id, slack_thread_ts,
+                )
                 raise ConversationTurnError(503, str(error)) from error
             except Exception as error:
+                self._record_failed_chat_activity(
+                    chat_turn_id, turn_source, actor_id, text, error,
+                    conversation_id, slack_channel_id, slack_thread_ts,
+                )
                 raise ConversationTurnError(502, "Lisa could not complete this turn") from error
+            activity_ids: list[str] = []
             if (
                 self.activity_store is not None
-                and turn.activity_id
                 and turn_source in {"web", "slack"}
                 and actor_id in self.owner_user_ids
-                and self.activity_store.activity_exists(turn.activity_id)
             ):
+                activity_ids = selected_chat_activity_ids(turn.activities)
                 previous_ids = {str(message.get("id")) for message in previous_messages}
+                if not activity_ids and not chat_activity_was_skipped(turn.activities):
+                    current_user_messages = [
+                        message for message in turn.messages
+                        if message.get("role") == "user"
+                        and str(message.get("id")) not in previous_ids
+                    ]
+                    user_message = current_user_messages[-1] if current_user_messages else {}
+                    activity = self.activity_store.create_chat_activity(
+                        turn_id=chat_turn_id,
+                        request_key="fallback",
+                        title=self._activity_title(text),
+                        summary=text,
+                        message_id=str(user_message.get("id") or "") or None,
+                        source=turn_source,
+                        origin_conversation_id=conversation_id,
+                        origin_slack_channel_id=slack_channel_id,
+                        origin_slack_thread_ts=slack_thread_ts,
+                    )
+                    activity_ids = [activity.id]
+                    record_fallback_activity_resolution(
+                        turn.activities, activity_id=activity.id, turn_id=chat_turn_id,
+                    )
                 new_messages = [
                     {
                         "id": str(message.get("id", "")),
@@ -164,9 +203,20 @@ class ConversationService:
                     if str(message.get("id")) not in previous_ids
                     and message.get("role") in {"user", "assistant"}
                 ]
-                if new_messages or turn.activities:
-                    self.activity_store.record_conversation_trajectory(
-                        turn.activity_id, new_messages, turn.activities,
+                if activity_ids or new_messages or turn.activities:
+                    final_summary = next(
+                        (
+                            str(message.get("text") or "").strip()
+                            for message in reversed(new_messages)
+                            if message.get("role") == "assistant"
+                            and str(message.get("text") or "").strip()
+                        ),
+                        "",
+                    )
+                    record_chat_activity_trajectories(
+                        self.activity_store, activity_ids=activity_ids,
+                        messages=new_messages, activities=turn.activities,
+                        final_summary=final_summary, turn_failed=turn.failed,
                     )
             if metadata["title"] == "Lisa conversation":
                 metadata["title"] = "Lisa"
@@ -190,7 +240,34 @@ class ConversationService:
                 "conversation_id": conversation_id,
                 "messages": messages,
                 "activities": activities,
+                "chat_activity_ids": activity_ids if self.activity_store is not None else [],
             }
+
+    @staticmethod
+    def _activity_title(text: str) -> str:
+        normalized = " ".join(text.split()).strip()
+        return normalized[:120] or "Lisa chat request"
+
+    def _record_failed_chat_activity(
+        self, turn_id: str, turn_source: str, actor_id: str | None,
+        text: str, error: Exception, conversation_id: str,
+        slack_channel_id: str | None, slack_thread_ts: str | None,
+    ) -> None:
+        if (
+            self.activity_store is None
+            or turn_source not in {"web", "slack"}
+            or actor_id not in self.owner_user_ids
+        ):
+            return
+        try:
+            self.activity_store.fail_chat_turn(
+                turn_id, text, str(error), source=turn_source,
+                origin_conversation_id=conversation_id,
+                origin_slack_channel_id=slack_channel_id,
+                origin_slack_thread_ts=slack_thread_ts,
+            )
+        except Exception:
+            logger.exception("Could not record failed Lisa chat activity")
 
     async def main_conversation(self, workspace_id: str) -> dict[str, Any]:
         """Return Lisa's durable workspace conversation, creating it when absent."""

@@ -10,14 +10,24 @@ from hashlib import sha256
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from ..repositories.conversations import FileConversationRepository
 from ..repositories.activities import PostgresActivityStore
+from ..repositories.conversations import FileConversationRepository
 from ..repositories.slack_events import SlackEventRepository
-from ..runtime import selected_chat_activity_id
+from ..runtime import (
+    chat_activity_was_skipped,
+    record_fallback_activity_resolution,
+    selected_chat_activity_ids,
+)
+from .chat_activities import record_chat_activity_trajectories
 from ..security import redact_text
 from ..slack import SlackClient
 
 logger = logging.getLogger(__name__)
+
+
+def _activity_title(text: str) -> str:
+    normalized = " ".join(text.split()).strip()
+    return normalized[:120] or "Lisa chat request"
 
 
 class SlackEventService:
@@ -67,7 +77,6 @@ class SlackEventService:
         run_turn: Callable,
         confirm_policy_id: Callable[[str], str | None],
         post_reply: Callable[[str, str, str], None],
-        confirm_policy_deletion_id: Callable[[str], str | None] | None = None,
         confirm_followup_id: Callable[[str], str | None] | None = None,
     ) -> None:
         async with self.conversations.lock_for(path):
@@ -116,23 +125,43 @@ class SlackEventService:
                         turn_source="slack",
                         actor_id=str(receipt.get("actor_id", "")),
                         confirmed_policy_id=confirm_policy_id(receipt["text"]),
-                        confirmed_policy_deletion_id=(confirm_policy_deletion_id or (lambda _text: None))(receipt["text"]),
                         confirmed_followup_id=(confirm_followup_id or (lambda _text: None))(receipt["text"]),
                         slack_channel_id=channel_id,
                         slack_thread_ts=thread_ts,
+                        chat_turn_id=str(receipt["event_id"]),
                     )
-                    activity_id = turn.activity_id or selected_chat_activity_id(turn.activities)
                     is_owner = str(receipt.get("actor_id", "")) in self.owner_user_ids
-                    if (
-                        is_owner
-                        and self.activity_store is not None
-                        and activity_id
-                        and self.activity_store.activity_exists(activity_id)
-                    ):
+                    if is_owner and self.activity_store is not None:
                         previous_ids = {
                             str(message.get("id"))
                             for message in metadata.get("messages", [])
                         }
+                        activity_ids = selected_chat_activity_ids(turn.activities)
+                        if not activity_ids and not chat_activity_was_skipped(turn.activities):
+                            user_message = next(
+                                (
+                                    message for message in reversed(turn.messages)
+                                    if message.get("role") == "user"
+                                    and str(message.get("id")) not in previous_ids
+                                ),
+                                {},
+                            )
+                            activity = self.activity_store.create_chat_activity(
+                                turn_id=str(receipt["event_id"]),
+                                request_key="fallback",
+                                title=_activity_title(receipt["text"]),
+                                summary=receipt["text"],
+                                message_id=str(user_message.get("id") or "") or None,
+                                source="slack",
+                                origin_conversation_id=conversation_id,
+                                origin_slack_channel_id=channel_id,
+                                origin_slack_thread_ts=thread_ts,
+                            )
+                            activity_ids = [activity.id]
+                            record_fallback_activity_resolution(
+                                turn.activities, activity_id=activity.id,
+                                turn_id=str(receipt["event_id"]),
+                            )
                         new_messages = [
                             {
                                 "id": str(message.get("id", "")),
@@ -144,8 +173,19 @@ class SlackEventService:
                             if str(message.get("id")) not in previous_ids
                             and message.get("role") in {"user", "assistant"}
                         ]
-                        self.activity_store.record_conversation_trajectory(
-                            activity_id, new_messages, turn.activities,
+                        final_summary = next(
+                            (
+                                str(message.get("text") or "").strip()
+                                for message in reversed(new_messages)
+                                if message.get("role") == "assistant"
+                                and str(message.get("text") or "").strip()
+                            ),
+                            "",
+                        )
+                        record_chat_activity_trajectories(
+                            self.activity_store, activity_ids=activity_ids,
+                            messages=new_messages, activities=turn.activities,
+                            final_summary=final_summary, turn_failed=turn.failed,
                         )
                     latest_reply = next(
                         (
@@ -168,6 +208,20 @@ class SlackEventService:
                 receipt.pop("text", None)
             except Exception as error:
                 logger.exception("Lisa Slack event processing failed")
+                if (
+                    self.activity_store is not None
+                    and str(receipt.get("actor_id", "")) in self.owner_user_ids
+                ):
+                    try:
+                        self.activity_store.fail_chat_turn(
+                            str(receipt["event_id"]), str(receipt.get("text", "")), str(error),
+                            source="slack",
+                            origin_conversation_id=conversation_id,
+                            origin_slack_channel_id=channel_id,
+                            origin_slack_thread_ts=thread_ts,
+                        )
+                    except Exception:
+                        logger.exception("Could not record failed Lisa Slack activity")
                 receipt["status"] = "failed"
                 receipt["error"] = redact_text(str(error))
             receipt["updated_at"] = datetime.now(UTC).isoformat()
@@ -183,14 +237,12 @@ class SlackEventWorker:
         run_turn: Callable,
         confirm_policy_id: Callable[[str], str | None],
         confirm_followup_id: Callable[[str], str | None] | None = None,
-        confirm_policy_deletion_id: Callable[[str], str | None] | None = None,
     ):
         self.events = events
         self.slack = slack
         self.run_turn = run_turn
         self.confirm_policy_id = confirm_policy_id
         self.confirm_followup_id = confirm_followup_id or (lambda _text: None)
-        self.confirm_policy_deletion_id = confirm_policy_deletion_id or (lambda _text: None)
         self._tasks: dict[str, asyncio.Task] = {}
 
     async def run_forever(self, workspace_id: str, interval: float = 1.0) -> None:
@@ -212,7 +264,6 @@ class SlackEventWorker:
             run_turn=self.run_turn,
             confirm_policy_id=self.confirm_policy_id,
             confirm_followup_id=self.confirm_followup_id,
-            confirm_policy_deletion_id=self.confirm_policy_deletion_id,
             post_reply=lambda channel, thread, text: self.slack.post_message(
                 channel, text, thread, timeout=15
             ),

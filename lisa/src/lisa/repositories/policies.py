@@ -367,10 +367,6 @@ class PostgresPolicyRepository:
             ).fetchone()
             if selected is None:
                 raise ValueError("Policy ID was not found")
-            if connection.execute(
-                _sql("policy_has_evaluation_history.sql"), {"policy_id": identifier}
-            ).fetchone()["has_history"]:
-                raise ValueError("Policy has evaluation history and cannot be deleted")
             connection.execute(_sql("invalidate_policy_triage.sql"), {"policy_id": identifier})
             deleted = connection.execute(
                 _sql("delete_policy.sql"),

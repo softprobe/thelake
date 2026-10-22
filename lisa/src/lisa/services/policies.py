@@ -100,6 +100,4 @@ class PolicyService:
             raise ValueError("This action requires an authorized Lisa owner identity")
         if not is_policy_id(policy_id):
             raise ValueError("Use a human-readable policy ID such as P1.2 or P1.2.1")
-        if self.context.confirmed_policy_deletion_id != policy_id:
-            raise ValueError(f"The owner must send exactly: Delete policy: {policy_id}")
         self.repository.delete_policy(policy_id)

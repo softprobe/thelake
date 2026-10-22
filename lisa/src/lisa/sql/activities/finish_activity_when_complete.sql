@@ -5,6 +5,14 @@ WITH finished AS (
         next_event_seq = next_event_seq + 1, version = version + 1
     WHERE activity.id = %(activity_id)s
       AND activity.status IN ('queued', 'running')
+      AND (
+          (activity.status = 'queued' AND activity.lease_owner IS NULL
+           AND %(actor)s::text IS NULL AND %(fencing_token)s::bigint IS NULL)
+          OR
+          (activity.status = 'running' AND activity.lease_owner = %(actor)s
+           AND activity.fencing_token = %(fencing_token)s
+           AND activity.lease_expires_at > clock_timestamp())
+      )
       AND NOT EXISTS (
           SELECT 1
           FROM lisa.evaluation_runs AS runs

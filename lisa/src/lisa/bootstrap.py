@@ -15,7 +15,6 @@ from .repositories.policies import InMemoryPolicyRepository, PostgresPolicyRepos
 from .repositories.slack_events import SlackEventRepository
 from .runtime import (
     confirmed_followup_id,
-    confirmed_policy_deletion_id,
     confirmed_policy_id,
     run_turn,
 )
@@ -78,7 +77,6 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         run_turn,
         confirmed_policy_id,
         confirmed_followup_id,
-        confirmed_policy_deletion_id,
     )
     scheduled_qa = ScheduledQAService(conversation_repository, conversations)
     if context.database_url:

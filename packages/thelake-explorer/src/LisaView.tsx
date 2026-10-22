@@ -164,6 +164,9 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
   const previousActivityFocus = useRef<HTMLElement | null>(null);
   const active = conversations.find((conversation) => conversation.conversation_id === activeId);
   const selectedAction = showActionDetail ? selectedActivity?.actions.find((action) => action.seq === selectedActionSeq) : undefined;
+  const selectedReferences = selectedAction?.reference_type && selectedAction.reference_id
+    ? [{ reference_type: selectedAction.reference_type, reference_id: selectedAction.reference_id }]
+    : selectedActivity?.references ?? [];
   const runtimeMessages = useMemo(
     () => lisaTimeline(active?.messages ?? [], active?.activities ?? [], sending),
     [active?.messages, active?.activities, sending],
@@ -557,6 +560,13 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
               {!selectedAction && selectedActivity.activity.next_action && <p><b>Next:</b> {selectedActivity.activity.next_action}{selectedActivity.activity.next_action_at ? ` · ${new Date(selectedActivity.activity.next_action_at).toLocaleString()}` : ""}</p>}
               {selectedAction && <time dateTime={selectedAction.created_at}>{new Date(selectedAction.created_at).toLocaleString()}</time>}
               {selectedActivity.thread.finish_message && <p>{selectedActivity.thread.finish_message}</p>}
+              {selectedReferences.length > 0 && <section className="tle-lisa-activity-references" aria-label="Linked evidence">
+                <h4>Linked evidence</h4>
+                <ul>{selectedReferences.map((reference) => <li key={`${reference.reference_type}:${reference.reference_id}`}>
+                  <span>{reference.reference_type.replaceAll("_", " ")}</span>
+                  <code>{reference.reference_id}</code>
+                </li>)}</ul>
+              </section>}
             </article>
           </div>
         </div>

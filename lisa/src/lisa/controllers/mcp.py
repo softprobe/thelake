@@ -53,33 +53,63 @@ def create_server(services: WorkspaceServices) -> FastMCP:
     @server.tool()
     def evaluate_session(target_agent_name: str, session_id: str) -> dict[str, Any]:
         """Triage approved policies for suspected violations and judge escalated policies."""
-        result = services.evaluations.evaluate_session(target_agent_name, session_id)
+        activity_id = None
+        if services.context.turn_source in {"web", "slack"}:
+            if services.activity_store is None or not services.context.chat_turn_id:
+                raise RuntimeError("Chat evaluation requires an active resolved activity")
+            activity_id = services.activity_store.active_chat_activity_for_turn(
+                services.context.chat_turn_id
+            )
+            if activity_id is None:
+                raise ValueError("Resolve the chat request before evaluating a session")
+        result = services.evaluations.evaluate_session(
+            target_agent_name, session_id, activity_id=activity_id,
+        )
         return hide_evaluation_ids(redact_evidence(result))
 
     @server.tool()
-    def create_activity(
-        title: str, activity_type: str, source: str,
-        subtitle: str | None = None, task_label: str | None = None,
-        is_goal: bool = False, agent_id: str | None = None,
-        message_id: str | None = None,
-        details: dict[str, Any] | None = None, parent_id: str | None = None,
+    def resolve_chat_activity(
+        disposition: Literal["create", "continue"],
+        request_key: str,
+        title: str | None = None,
+        summary: str | None = None,
+        activity_id: str | None = None,
     ) -> dict[str, Any]:
-        """Create a Lisa activity and its feed card and monitor thread."""
+        """Create or continue one user request and scope later tool events to it."""
         if services.activity_store is None:
             raise RuntimeError("Lisa activity storage is not configured")
-        activity = services.activity_store.create_activity(
-            title=title, kind=activity_type, activity_type=activity_type,
-            source=source, subtitle=subtitle, task_label=task_label,
-            is_goal=is_goal, agent_id=agent_id, message_id=message_id,
-            details=details,
-            parent_id=parent_id,
+        if services.context.turn_source not in {"web", "slack"}:
+            raise ValueError("Chat activities can only be resolved for web or Slack turns")
+        require_owner()
+        if not services.context.chat_turn_id:
+            raise RuntimeError("Chat turn identity is not configured")
+        activity = services.activity_store.resolve_chat_activity(
+            turn_id=services.context.chat_turn_id,
+            request_key=request_key,
+            disposition=disposition,
+            source=services.context.turn_source,
+            title=title or "",
+            summary=summary or "",
+            activity_id=activity_id,
             origin_conversation_id=services.context.conversation_id or None,
             origin_slack_channel_id=services.context.slack_channel or None,
             origin_slack_thread_ts=services.context.slack_thread or None,
-            slack_channel_id=services.context.activity_slack_channel or None,
-            slack_thread_ts=services.context.activity_slack_thread or None,
         )
-        return {"activity_id": activity.id, "context_path": activity.context_path}
+        return {
+            "disposition": disposition,
+            "activity_id": activity.id,
+            "created": activity.created,
+            "request_key": request_key,
+        }
+
+    @server.tool()
+    def skip_chat_activity_for_turn(reason: str) -> dict[str, bool]:
+        """Explicitly leave greetings and conversational filler out of the feed."""
+        if services.context.turn_source not in {"web", "slack"}:
+            raise ValueError("Chat activity skip is only valid for web or Slack turns")
+        if not reason.strip():
+            raise ValueError("A skip reason is required")
+        return {"skipped": True}
 
     @server.tool()
     def update_activity(
@@ -120,9 +150,34 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         status: Literal["success", "error", "stopped"],
         summary: str,
     ) -> dict[str, Any]:
-        """Finish a queued Lisa activity with its outcome and final summary."""
+        """Finish agent-owned work, deferring the current chat's activities."""
         if services.activity_store is None:
             raise RuntimeError("Lisa activity storage is not configured")
+        chat_turn = (
+            services.context.turn_source in {"web", "slack"}
+            and services.context.chat_turn_id
+            and services.context.actor_id in services.context.owner_user_ids
+        )
+        if chat_turn:
+            turn_id = services.context.chat_turn_id
+            if activity_id not in services.activity_store.chat_activities_for_turn(turn_id):
+                services.activity_store.resolve_chat_activity(
+                    turn_id=turn_id,
+                    request_key=f"complete_activity:{activity_id}",
+                    disposition="continue",
+                    source=services.context.turn_source,
+                    activity_id=activity_id,
+                    origin_conversation_id=services.context.conversation_id or None,
+                    origin_slack_channel_id=services.context.slack_channel or None,
+                    origin_slack_thread_ts=services.context.slack_thread or None,
+                )
+            return {
+                "activity_id": activity_id,
+                "status": "deferred",
+                "requested_status": status,
+                "completed": False,
+                "summary": "The chat runtime will finalize this activity after Lisa's reply.",
+            }
         terminal_status = {"success": "succeeded", "error": "failed", "stopped": "cancelled"}[status]
         finished = services.activity_store.complete_agent_activity(
             activity_id, summary, status=terminal_status,
@@ -154,18 +209,6 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         return services.activity_store.list_activity_feed(
             limit=limit, query=query, open_only=open_only,
         )
-
-    @server.tool()
-    def attach_chat_turn_to_activity(activity_id: str) -> dict[str, Any]:
-        """Link this web or Slack chat turn to the activity Lisa selected."""
-        if services.activity_store is None:
-            raise RuntimeError("Lisa activity storage is not configured")
-        if services.context.turn_source not in {"web", "slack"}:
-            raise ValueError("Only workspace owners can link chat turns to activities")
-        require_owner()
-        if not services.activity_store.activity_exists(activity_id):
-            raise ValueError("Activity does not exist")
-        return {"activity_id": activity_id, "attached": True}
 
     @server.tool()
     def propose_activity_followup(
@@ -249,13 +292,13 @@ def create_server(services: WorkspaceServices) -> FastMCP:
 
     @server.tool()
     def delete_policy(policy_id: str) -> dict[str, Any]:
-        """Delete a policy only after its exact ID is confirmed by an authorized owner."""
+        """Delete the policy with this exact ID for an authorized workspace owner."""
         services.policy_service.delete_policy(policy_id)
         return {"policy_id": policy_id, "deleted": True}
 
     @server.tool()
     def get_activity_thread(activity_id: str) -> dict[str, Any] | None:
-        """Read one activity monitor thread, including its sections and actions."""
+        """Read one activity thread, including ordered actions and their linked evidence IDs."""
         if services.activity_store is None:
             raise RuntimeError("Lisa activity storage is not configured")
         return services.activity_store.get_activity_thread(activity_id)

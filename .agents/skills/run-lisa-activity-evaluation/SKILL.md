@@ -23,11 +23,16 @@ uv run --project lisa python lisa/scripts/evaluate_activity_dataset.py \
   --live --split benchmark
 ```
 
+Use `--case-prefix activity_tracking_` to run the ten held-out activity
+tracking cases against the pinned full manifest. This focused run still records
+the release digest while selecting only the matching benchmark cases.
+
 Use `--split development` for prompt iteration. Use `--split all` only for a
 complete report after development is finished. Do not tune against the
 benchmark split and then present it as an independent result.
 
-The runner validates the manifest digest, then uses
+The live runner requires a direct Gemini model and Google or Gemini key, and
+rejects a custom base URL. It validates the manifest digest, then uses
 [`lisa/conftest.py`](../../../lisa/conftest.py) to start a run-owned Postgres
 service and provision an isolated Lisa database plus conversation directory for
 every case. It drives Lisa's OpenHands conversation backend and registered MCP

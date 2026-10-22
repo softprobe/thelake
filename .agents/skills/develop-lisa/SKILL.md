@@ -12,12 +12,31 @@ Use [`docs/architecture/lisa-activities.md`](../../../docs/architecture/lisa-act
 for Lisa's generic, user-inspectable activity and its links to evaluation runs.
 Use [`lisa-activities`](../lisa-activities/SKILL.md) for the feed and monitor MCP
 tool contract, including thread sections and linked references.
-Substantive web and Slack chat turns must select or create one activity; the
-runtime records redacted messages and tool calls/results in sequence, links
-their source IDs, and refreshes the Lisa feed and open detail view. Attaching
-chat content to shared activities requires a web or Slack turn from an actor in
-`LISA_OWNER_USER_IDS`. Verify the web and actual Slack receipt paths plus the
-real runtime benchmark when changing this behavior.
+Each distinct web or Slack request resolves its own activity; independent asks
+in one message may map to multiple activities. Clear continuations reuse an
+open activity, while task switches, uncertain continuations, and closed work
+start a new activity. Brief factual requests are included; greetings can be
+explicitly skipped. The runtime records redacted chat on every resolved
+activity and partitions tool events by activity scope. Missing dispositions
+recover to a visibly labeled fallback activity unless Lisa explicitly skips
+the turn. Treat fallback as evidence that the model failed to resolve the
+request, and investigate why the resolver was omitted or failed. After a
+successful chat reply the runtime completes any still-open chat activity,
+while tool evidence for an unresolved owner action leaves it in `waiting`.
+A `running` progress call with a non-empty `next_action` also leaves chat work
+open and waiting; parse the tool call arguments because the tool response does
+not repeat `next_action`.
+An explicit deferred `complete_activity` outcome finalizes its exact activity
+ID after the reply, including a previously waiting activity the owner confirms
+is complete. Partition tool and completion evidence by explicit activity ID;
+historical error strings nested in a successful thread read must not fail the
+current request.
+Approved follow-ups remain waiting while scheduled work is active, and failed
+continuations preserve a prior waiting action. Post-resolution failures affect
+only the activity whose work failed. Only owner turns link chat to the shared
+feed.
+Verify web and Slack receipt paths plus the real labeled runtime benchmark when
+changing this behavior.
 Lisa's packaged runtime skills live in [`lisa/skills/`](../../../lisa/skills/)
 and are copied into the Lisa image by `lisa/Dockerfile`; changes to those skills
 must be verified through `OpenHandsBackend`'s configured skill directory.
@@ -52,6 +71,10 @@ authorization contract for them.
 - Production evaluation enters through `EvaluationService`. It resolves the
   approved effective policy catalog for the exact agent and obtains the
   trajectory through `SessionService` / TheLake's normal session path.
+- `EvaluationService.evaluate_session` validates the session before the
+  no-approved-policies shortcut. For a resolved chat activity, a session lookup
+  failure is recorded and completed as an error by the service; the agent must
+  report that result without a second lookup or completion call.
 - `EvaluationService` filters candidates through `lisa.evaluation_triage`, keyed
   only by `(session_id, policy_id)`. It sends one Decisions question for each
   candidate pair with no stored triage decision and persists completed decisions
@@ -77,6 +100,9 @@ authorization contract for them.
   evaluation request identity and keep
   score outboxes keyed to evaluation results. Negative triage has no verdict or
   score; provider failures remain retryable.
+- Evaluation failure finalization may close an unleased queued or resumed
+  waiting activity. It must never override a live worker lease; worker-owned
+  completion requires the matching actor and fencing token.
 - Dataset annotations supply scoring truth only. Dataset catalog policies may
   seed the disposable test workspace through Lisa's policy-management service,
   but must never be passed directly into evaluation. A production quality run

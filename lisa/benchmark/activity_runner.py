@@ -15,7 +15,7 @@ import subprocess
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 
@@ -63,45 +63,50 @@ def _score_state(
     services, expected: dict, substitutions: dict[str, str] | None = None
 ) -> list[dict]:
     feed = services.activity_store.list_activity_feed(limit=100)
-    checks: list[dict] = []
-    wanted_count = expected["activity_count"]
-    checks.append(
-        {
-            "check": "activity_count",
-            "passed": len(feed) == wanted_count,
-            "expected": wanted_count,
-            "actual": len(feed),
-        }
-    )
+    checks: list[dict] = [_score_activity_integrity(feed)]
+    wanted_count = expected.get("activity_count")
+    if wanted_count is not None:
+        checks.append(
+            {
+                "check": "activity_count",
+                "passed": len(feed) == wanted_count,
+                "expected": wanted_count,
+                "actual": len(feed),
+            }
+        )
     lowered_feed = [(item, item["title"].casefold()) for item in feed]
     for label in expected.get("activities", []):
-        found = next(
-            (item for item, title in lowered_feed if label["title_contains"].casefold() in title),
-            None,
-        )
-        ok = found is not None
+        candidates = [
+            item
+            for item, title in lowered_feed
+            if label["title_contains"].casefold() in title
+        ]
+        found = None
         timeline_summaries: list[str] = []
-        if found is not None:
-            if label.get("status"):
-                ok = ok and found["status"] == label["status"]
-            if label.get("next_action_contains"):
-                ok = (
-                    ok
-                    and label["next_action_contains"].casefold()
-                    in (found.get("next_action") or "").casefold()
-                )
+        for candidate in candidates:
+            if label.get("status") and candidate["status"] != label["status"]:
+                continue
+            if label.get("next_action_contains") and label[
+                "next_action_contains"
+            ].casefold() not in (candidate.get("next_action") or "").casefold():
+                continue
             if label.get("min_timeline_actions", 0) or label.get("timeline_text_contains"):
-                detail = services.activity_store.get_activity_thread(str(found["id"]))
-                timeline_summaries = [
-                    str(action.get("summary") or "") for action in detail["actions"]
-                ]
-            if label.get("min_timeline_actions", 0):
-                ok = ok and len(detail["actions"]) >= label["min_timeline_actions"]
-            if label.get("timeline_text_contains"):
-                timeline = "\n".join(timeline_summaries).casefold()
-                ok = ok and all(
-                    phrase.casefold() in timeline for phrase in label["timeline_text_contains"]
-                )
+                detail = services.activity_store.get_activity_thread(str(candidate["id"]))
+                summaries = [str(action.get("summary") or "") for action in detail["actions"]]
+                if len(detail["actions"]) < label.get("min_timeline_actions", 0):
+                    continue
+                timeline = "\n".join(summaries).casefold()
+                if not all(
+                    phrase.casefold() in timeline
+                    for phrase in label.get("timeline_text_contains", [])
+                ):
+                    continue
+                timeline_summaries = summaries
+            found = candidate
+            break
+        ok = found is not None
+        if found is None and candidates:
+            found = candidates[0]
         checks.append(
             {
                 "check": f"activity:{label['title_contains']}",
@@ -211,34 +216,130 @@ def _score_state(
 
 
 def _score_trajectory_links(activity_store, result: dict, previous_message_ids: set[str]) -> dict:
-    """Check that every new chat and runtime ID appears in Lisa's activity links."""
-    from lisa.runtime import selected_chat_activity_id
+    """Check shared message links and per-request runtime-event links."""
+    from lisa.runtime import activity_events_for_target
 
-    activity_id = selected_chat_activity_id(result["activities"])
-    detail = activity_store.get_activity_thread(activity_id) if activity_id else None
-    references = {
-        (item["reference_type"], item["reference_id"])
-        for item in (detail or {}).get("references", [])
-    }
+    activity_ids = result.get("chat_activity_ids", [])
+    activity_ids = [item for item in activity_ids if isinstance(item, str)]
     message_ids = {
         str(message.get("id")) for message in result["messages"]
         if str(message.get("id")) not in previous_message_ids
         and message.get("role") in {"user", "assistant"}
     }
-    runtime_ids = {
-        str(item.get("id")) for item in result["activities"]
-        if item.get("id") and item.get("tool_name") != "attach_chat_turn_to_activity"
+    missing: list[tuple[str, str, str]] = []
+    unexpected: list[tuple[str, str, str]] = []
+    malformed_details: list[dict[str, str]] = []
+    turn_event_ids = {
+        str(item["id"]) for item in result["activities"] if item.get("id")
     }
-    expected = {
-        *(('message', item_id) for item_id in message_ids),
-        *(('runtime_event', item_id) for item_id in runtime_ids),
-    }
-    missing = sorted(expected - references)
+    for activity_id in activity_ids:
+        detail = activity_store.get_activity_thread(activity_id)
+        actions = detail.get("actions")
+        if not isinstance(actions, list) or not actions:
+            malformed_details.append({"activity_id": activity_id, "field": "actions"})
+        else:
+            sequences = [item.get("seq") for item in actions]
+            if (
+                any(not isinstance(sequence, int) for sequence in sequences)
+                or sequences != sorted(set(sequences))
+            ):
+                malformed_details.append({"activity_id": activity_id, "field": "action_order"})
+            for action in actions:
+                for field in ("event_type", "title", "created_at"):
+                    if not action.get(field):
+                        malformed_details.append({
+                            "activity_id": activity_id,
+                            "field": f"action.{field}",
+                        })
+            action_references = {
+                (item.get("reference_type"), item.get("reference_id"))
+                for item in actions
+                if item.get("reference_type") and item.get("reference_id")
+            }
+            for message_id in message_ids:
+                if ("message", message_id) not in action_references:
+                    missing.append((activity_id, "action_message", message_id))
+        references = {
+            (item["reference_type"], item["reference_id"])
+            for item in detail.get("references", [])
+        }
+        missing.extend(
+            (activity_id, "message", item_id)
+            for item_id in message_ids
+            if ("message", item_id) not in references
+        )
+        scoped_events = activity_events_for_target(
+            result["activities"], activity_ids, activity_id,
+        )
+        scoped_event_ids = {
+            str(item["id"]) for item in scoped_events if item.get("id")
+        }
+        missing.extend(
+            (activity_id, "runtime_event", str(item["id"]))
+            for item in scoped_events
+            if item.get("id") and ("runtime_event", str(item["id"])) not in references
+        )
+        action_references = {
+            (item.get("reference_type"), item.get("reference_id"))
+            for item in actions or []
+            if item.get("reference_type") and item.get("reference_id")
+        }
+        missing.extend(
+            (activity_id, "action_runtime_event", str(item["id"]))
+            for item in scoped_events
+            if item.get("id")
+            and ("runtime_event", str(item["id"])) not in action_references
+        )
+        unexpected.extend(
+            (activity_id, "runtime_event", reference_id)
+            for reference_type, reference_id in references
+            if reference_type == "runtime_event"
+            and reference_id in turn_event_ids
+            and reference_id not in scoped_event_ids
+        )
+        unexpected.extend(
+            (activity_id, "action_runtime_event", str(reference_id))
+            for reference_type, reference_id in action_references
+            if reference_type == "runtime_event"
+            and reference_id in turn_event_ids
+            and reference_id not in scoped_event_ids
+        )
     return {
-        "check": "activity_trajectory_links",
-        "passed": bool(activity_id) and not missing,
-        "activity_id": activity_id,
+        "check": "activity_trajectory_links_and_scopes",
+        "passed": bool(activity_ids) and not missing and not unexpected and not malformed_details,
+        "activity_ids": activity_ids,
         "missing_references": missing,
+        "unexpected_references": unexpected,
+        "malformed_details": malformed_details,
+    }
+
+
+def _score_activity_integrity(feed: list[dict]) -> dict:
+    """Reject feed rows that cannot render a stable, useful activity card."""
+    allowed_statuses = {"pending", "blocked", "success", "error", "stopped"}
+    required = ("id", "kind", "title", "status", "created_at", "updated_at")
+    issues: list[dict[str, str]] = []
+    for index, activity in enumerate(feed):
+        for field in required:
+            if not activity.get(field):
+                issues.append({"row": str(index), "field": field})
+        try:
+            UUID(str(activity.get("id", "")))
+        except (ValueError, TypeError, AttributeError):
+            issues.append({"row": str(index), "field": "id"})
+        if activity.get("status") and activity["status"] not in allowed_statuses:
+            issues.append({"row": str(index), "field": "status"})
+        if not isinstance(activity.get("details_json"), dict):
+            issues.append({"row": str(index), "field": "details_json"})
+        if activity.get("status") in {"success", "error", "stopped"} and not activity.get("finished_at"):
+            issues.append({"row": str(index), "field": "finished_at"})
+        if activity.get("status") == "blocked" and not activity.get("next_action"):
+            issues.append({"row": str(index), "field": "next_action"})
+    return {
+        "check": "activity_feed_well_formed",
+        "passed": not issues,
+        "activity_count": len(feed),
+        "issues": issues,
     }
 
 
@@ -383,13 +484,34 @@ def _seed_historical_evaluations(services, case: ActivityBenchmarkCase) -> None:
                 activity_id=activity.id,
             )
             fixture_sql = (Path(__file__).parent / "sql" / "complete_historical_evaluation.sql").read_text()
+            score_payload = {
+                "score_id": score_id,
+                "string_value": item.verdict,
+                "comment": f"Historical benchmark verdict for {item.session_id}.",
+                "timestamp": datetime.now(UTC).isoformat(),
+                "source": "activity-benchmark",
+            }
+            encoded_payload = json.dumps(score_payload, ensure_ascii=False, sort_keys=True)
             with psycopg.connect(services.context.database_url) as connection:
                 result = connection.execute(
                     fixture_sql,
-                    {"evaluation_id": run.id, "verdict": item.verdict, "score_id": score_id},
+                    {
+                        "evaluation_id": run.id,
+                        "verdict": item.verdict,
+                        "score_id": score_id,
+                        "outbox_id": str(uuid4()),
+                        "score_payload": encoded_payload,
+                        "payload_hash": sha256(encoded_payload.encode("utf-8")).hexdigest(),
+                    },
                 )
                 if result.rowcount != 1:
                     raise RuntimeError("Could not seed historical judge verdict")
+            if not services.activity_store.finish_activity_without_claim(
+                activity.id,
+                f"Historical evaluation for {item.session_id} completed with its saved verdict.",
+                status="succeeded",
+            ):
+                raise RuntimeError("Could not finish seeded historical evaluation activity")
 
 
 def _run_case(
@@ -403,7 +525,6 @@ def _run_case(
     from lisa.context import WorkspaceContext
     from lisa.runtime import (
         confirmed_followup_id,
-        confirmed_policy_deletion_id,
         confirmed_policy_id,
     )
 
@@ -460,7 +581,6 @@ def _run_case(
                 text,
                 run_turn=OpenHandsBackend().run_turn,
                 confirmed_policy_id=confirmed_policy_id(text),
-                confirmed_policy_deletion_id=confirmed_policy_deletion_id(text),
                 confirmed_followup_id=confirmed_followup_id(text),
                 turn_source=source,
                 actor_id=OWNER if turn.actor == "owner" else OUTSIDER,
@@ -468,7 +588,7 @@ def _run_case(
                 slack_thread_ts=thread,
             )
         )
-        if "attach_chat_turn_to_activity" in turn.require_tools:
+        if turn.track_activity and turn.actor == "owner":
             turns_check = _score_trajectory_links(
                 services.activity_store, result, previous_message_ids,
             )
@@ -507,11 +627,21 @@ def _rate(checks: list[dict]) -> float | None:
     return None if not checks else round(sum(item["passed"] for item in checks) / len(checks), 4)
 
 
-def run_benchmark(manifest_path: Path, split: str, output: Path) -> dict:
+def _select_cases(cases: list[ActivityBenchmarkCase], split: str, case_prefix: str | None) -> list[ActivityBenchmarkCase]:
+    return [
+        case for case in cases
+        if (split == "all" or case.split == split)
+        and (case_prefix is None or case.case_id.startswith(case_prefix))
+    ]
+
+
+def run_benchmark(
+    manifest_path: Path, split: str, output: Path, case_prefix: str | None = None,
+) -> dict:
     manifest, cases, manifest_digest = load_activity_dataset(manifest_path)
-    selected = [case for case in cases if split == "all" or case.split == split]
+    selected = _select_cases(cases, split, case_prefix)
     if not selected:
-        raise ValueError(f"No activity benchmark cases for split {split!r}")
+        raise ValueError(f"No activity benchmark cases for split {split!r} and prefix {case_prefix!r}")
     artifact_dir = output.parent
     artifact_dir.mkdir(parents=True, exist_ok=True)
     stack = start_lisa_postgres(suite="lisa-activity-benchmark", artifact_dir=artifact_dir)
@@ -541,7 +671,6 @@ def run_benchmark(manifest_path: Path, split: str, output: Path) -> dict:
                         "scores": {"state": None, "tool_use": None, "communication": None},
                     }
                 )
-                break
     finally:
         stop_lisa_postgres(stack)
     checks = [
@@ -574,6 +703,7 @@ def run_benchmark(manifest_path: Path, split: str, output: Path) -> dict:
         "dataset_digest": manifest_digest,
         "cases_digest": manifest.cases_sha256,
         "model": model,
+        "provider": "gemini" if model and model.startswith("gemini/") else None,
         "backend": "openhands",
         "git_commit": git_commit,
         "split": split,
@@ -612,6 +742,7 @@ def run_benchmark(manifest_path: Path, split: str, output: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument("--case-prefix", default=None)
     parser.add_argument(
         "--split", choices=("development", "benchmark", "all"), default="benchmark"
     )
@@ -622,13 +753,14 @@ def main() -> None:
     args = parser.parse_args()
     if not args.live:
         parser.error("--live is required because the benchmark invokes Lisa's configured model")
-    if not (
-        os.getenv("LISA_BASE_URL")
-        and os.getenv("LISA_API_KEY")
-        or os.getenv("GOOGLE_API_KEY")
-        or os.getenv("GEMINI_API_KEY")
-    ):
-        parser.error("Set the configured model credentials in the process environment")
+    if os.getenv("LISA_BASE_URL") or os.getenv("LISA_API_KEY"):
+        parser.error("The live activity benchmark requires the direct Gemini production path")
+    model = os.getenv("LISA_MODEL", "gemini/gemini-3.8-flash")
+    if not model.startswith("gemini/"):
+        parser.error("The live activity benchmark requires a Gemini model")
+    os.environ["LISA_MODEL"] = model
+    if not (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
+        parser.error("Set GOOGLE_API_KEY or GEMINI_API_KEY for the live Gemini benchmark")
     run_id = uuid4().hex[:12]
     artifact_dir = ARTIFACTS / run_id
     output = args.output or artifact_dir / "report.json"
@@ -639,7 +771,9 @@ def main() -> None:
         parser.error(
             f"Refusing to overwrite an existing benchmark artifact directory: {output.parent}"
         )
-    report = run_benchmark(args.manifest or DEFAULT_MANIFEST, args.split, output)
+    report = run_benchmark(
+        args.manifest or DEFAULT_MANIFEST, args.split, output, args.case_prefix,
+    )
     print(
         json.dumps(
             {

@@ -4,7 +4,6 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from threading import Barrier, Event
 
-import psycopg
 import pytest
 from policy_cases import list_policies, read_policy
 
@@ -23,7 +22,6 @@ def isolated_data_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("LISA_WORKSPACE_ID", "11111111-1111-4111-8111-111111111111")
     monkeypatch.setenv("LISA_TURN_SOURCE", "web")
     monkeypatch.delenv("LISA_CONFIRMED_POLICY_ID", raising=False)
-    monkeypatch.delenv("LISA_CONFIRMED_POLICY_DELETION_ID", raising=False)
 
 
 @pytest.fixture
@@ -275,7 +273,7 @@ def test_delete_policy_removes_catalog_row_and_cached_triage(policy_database):
         ).fetchall() == []
 
 
-def test_delete_policy_preserves_policy_with_evaluation_history(policy_database):
+def test_delete_policy_preserves_evaluation_snapshot_without_policy_row(policy_database):
     context = WorkspaceContext.from_environment()
     services = build_services(context)
     repository = services.policy_service.repository
@@ -300,9 +298,18 @@ def test_delete_policy_preserves_policy_with_evaluation_history(policy_database)
             },
         )
 
-    with pytest.raises(ValueError, match="evaluation history"):
-        repository.delete_policy(policy.id)
-    assert repository.list_all() == [policy]
+    repository.delete_policy(policy.id)
+    assert repository.list_all() == []
+    with repository._connect() as connection:
+        history = connection.execute(
+            (Path(__file__).parent / "sql/policies/read_evaluation_snapshot.sql")
+            .read_text(encoding="utf-8")
+        ).fetchone()
+    assert history == {
+        "policy_id": policy.id,
+        "policy_name": policy.name,
+        "policy_hash": hashlib.sha256(policy.criteria.encode()).hexdigest(),
+    }
 
 
 def test_policy_page_at_maximum_offset_has_no_unreachable_successor():

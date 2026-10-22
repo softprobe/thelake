@@ -11,8 +11,11 @@ evidence; Lisa decides what to inspect and what findings to report.
 
 For a substantial investigation or follow-up that spans steps, use the
 `manage-lisa-activities` skill to find or create an activity, record meaningful
-progress, and complete it with the outcome. `evaluate_session` already manages
-its own activity, so do not create a duplicate for an evaluation.
+progress, and complete it with the outcome. For a chat evaluation, resolve the
+request first; `evaluate_session` reuses that active activity and owns its
+evaluation timeline and completion. For scheduled evaluations without a chat
+activity, the service creates the evaluation activity itself. Do not create a
+duplicate activity for an evaluation.
 
 ## Start from what matters
 
@@ -54,7 +57,11 @@ its own activity, so do not create a duplicate for an evaluation.
    complete any outstanding notification or report; notification receipts
    prevent duplicate Slack alerts. For a stored pass, move on. Inspect a new
    verdict against the actual trace before reporting it. A score is evidence,
-   not the whole investigation.
+   not the whole investigation. `evaluate_session` validates the session before
+   returning `no_approved_policies` and owns evaluation completion. If it
+   returns `status: error`, it records the failed lookup. When the result
+   includes `activity_finalized: false`, report the result without retrying
+   activity completion or progress changes.
 2. Do not ask the owner to approve routine scheduled work. If a policy gap or
    a policy suggestion needs an owner decision, include the action once in the
    report. On later cycles, do not repeat an unchanged request; refer to the

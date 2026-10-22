@@ -34,7 +34,7 @@ from ..evaluation.scores import (
 )
 from ..evaluation.trajectory import build_trajectory_events, session_timestamp
 from ..llm_recording import recording_scope
-from ..models.activities import EvaluationRun, ScoreOutboxItem, ActivityClaim
+from ..models.activities import Activity, EvaluationRun, ScoreOutboxItem, ActivityClaim
 from ..repositories.evaluation_artifacts import EvaluationArtifactRepository
 from ..repositories.activities import PostgresActivityStore, StaleLeaseError
 from ..security import redact_evidence, redact_text
@@ -234,7 +234,9 @@ class EvaluationService:
             trajectory,
         )
 
-    def evaluate_session(self, target_agent_name: str, session_id: str) -> dict:
+    def evaluate_session(
+        self, target_agent_name: str, session_id: str, *, activity_id: str | None = None,
+    ) -> dict:
         """Investigate suspected violations and unresolved evidence in one session."""
         if self.activities:
             pending = self.activities.find_pending_evaluations_for_session(
@@ -242,28 +244,81 @@ class EvaluationService:
             )
             if pending:
                 recovered = [self._recover_pending_score(*item) for item in pending]
-                return {
+                result = {
                     "status": "recovered_pending_evaluations",
                     "session_id": session_id,
                     "target_agent_name": target_agent_name,
                     "evaluations": recovered,
                 }
+                if activity_id and self.activities:
+                    summary = "Recovered the pending evaluation result."
+                    self.activities.record_activity_event(
+                        activity_id, "evaluation_result_recovered",
+                        title="Evaluation result recovered", summary=summary,
+                    )
+                    result["activity_finalized"] = self.activities.finish_activity_without_claim(
+                        activity_id, summary
+                    )
+                    result["activity_id"] = activity_id
+                return result
+        try:
+            session_detail = self._session_detail(session_id)
+        except Exception as error:
+            if activity_id and self.activities:
+                summary = (
+                    f"Session lookup failed for {session_id} "
+                    f"({type(error).__name__})."
+                )
+                self.activities.record_activity_event(
+                    activity_id,
+                    "evaluation_session_lookup_failed",
+                    title="Session lookup failed",
+                    summary=summary,
+                )
+                activity_finalized = self.activities.finish_activity_without_claim(
+                    activity_id, summary, status="failed",
+                )
+                return {
+                    "status": "error",
+                    "session_id": session_id,
+                    "target_agent_name": target_agent_name,
+                    "message": "Session lookup failed.",
+                    "evaluations": [],
+                    "activity_id": activity_id,
+                    "activity_finalized": activity_finalized,
+                }
+            raise
         rules = self.policies.approved_rules(target_agent_name)
         if not rules:
-            return {
+            result = {
                 "status": "no_approved_policies",
                 "session_id": session_id,
                 "target_agent_name": target_agent_name,
                 "selected_policies": [],
                 "evaluations": [],
             }
-        session_detail = self._session_detail(session_id)
+            if activity_id and self.activities:
+                summary = "No approved policies apply to the requested session."
+                self.activities.record_activity_event(
+                    activity_id, "policy_review_completed",
+                    title="Policy review completed", summary=summary,
+                )
+                activity_finalized = self.activities.finish_activity_without_claim(
+                    activity_id, summary
+                )
+                result["activity_finalized"] = activity_finalized
+                result["activity_id"] = activity_id
+            return result
         activity = None
         if self.activities:
-            activity = self.activities.create_activity(
-                title=f"Evaluate {target_agent_name} session {session_id}",
-                source=self.context.turn_source,
-                kind="policy_evaluation",
+            activity = (
+                Activity(id=activity_id, created=False)
+                if activity_id
+                else self.activities.create_activity(
+                    title=f"Evaluate {target_agent_name} session {session_id}",
+                    source=self.context.turn_source,
+                    kind="policy_evaluation",
+                )
             )
         try:
             selection, trajectory = self._triage_policies_for_session(
@@ -307,10 +362,17 @@ class EvaluationService:
                     title="Policy review completed",
                     summary=summary,
                 )
-                self.activities.finish_activity_without_claim(
+                activity_finalized = self.activities.finish_activity_without_claim(
                     activity.id, summary,
                 )
-            return {**selection, "activity_id": activity.id if activity else None, "evaluations": []}
+            else:
+                activity_finalized = None
+            return {
+                **selection,
+                "activity_id": activity.id if activity else None,
+                "activity_finalized": activity_finalized,
+                "evaluations": [],
+            }
 
         rules_by_id = {rule.id: rule for rule in rules}
         selection_context = {
@@ -343,6 +405,11 @@ class EvaluationService:
                     _defer_activity_finish=True,
                 )
             )
+        finish_claims = {}
+        for item in evaluations:
+            fencing_token = item.pop("_activity_fencing_token", None)
+            if fencing_token is not None and item.get("activity_id"):
+                finish_claims[item["activity_id"]] = fencing_token
         evaluation_activity_ids = {activity.id} if activity else set()
         evaluation_activity_ids.update(
             item["activity_id"] for item in evaluations if item.get("activity_id")
@@ -352,7 +419,12 @@ class EvaluationService:
             for item in evaluations
         ):
             for evaluation_activity_id in evaluation_activity_ids:
-                self.activities.finish_activity_when_complete(evaluation_activity_id)
+                token = finish_claims.get(evaluation_activity_id)
+                self.activities.finish_activity_when_complete(
+                    evaluation_activity_id,
+                    actor="lisa-evaluation" if token is not None else None,
+                    fencing_token=token,
+                )
         return {
             **selection,
             "status": (
@@ -959,6 +1031,7 @@ class EvaluationService:
             "stored": True, "new_score": status_code == 201,
             "activity_id": activity_id,
             "evaluation_id": evaluation.id,
+            "_activity_fencing_token": claim.fencing_token,
         }
 
     def _score_payload(

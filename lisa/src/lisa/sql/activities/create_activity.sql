@@ -9,4 +9,6 @@ VALUES (
     %(next_action)s, %(next_action_at)s, %(origin_conversation_id)s,
     %(origin_slack_channel_id)s, %(origin_slack_thread_ts)s,
     %(slack_channel_id)s, %(slack_thread_ts)s
-);
+)
+ON CONFLICT (id) DO NOTHING
+RETURNING id;

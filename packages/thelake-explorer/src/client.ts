@@ -112,8 +112,10 @@ export type LisaFeedEntry = {
 
 export type LisaActivityDetail = {
   activity: LisaFeedEntry;
-  thread: { name: string; status: string; status_title?: string | null; finish_message?: string | null };
-  actions: Array<{ seq: number; event_type: string; title: string; summary?: string | null; created_at: string }>;
+  thread: { activity_thread_id: string; name: string; status: string; status_title?: string | null; details_json?: Record<string, unknown>; finish_message?: string | null };
+  actions: Array<{ seq: number; event_type: string; title: string; summary?: string | null; actor?: string; reference_type?: string | null; reference_id?: string | null; status?: string; created_at: string }>;
+  sections: Array<{ activity_thread_id: string; section_key: string; title: string; status: string; section_order: number; section_depth: number; parent_section_key?: string | null; ordinal_label?: string | null }>;
+  references: Array<{ reference_type: string; reference_id: string }>;
 };
 
 export type LisaPolicyRecord = {

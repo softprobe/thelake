@@ -23,11 +23,12 @@ distinction between a session ID, its derived trajectory, and a policy ID.
 - Load the dataset's complete policy catalog into the disposable evaluation
   database with the benchmark-only `lisa/benchmark/policy_seed.py` helper,
   marking the test target agent's rows approved. This helper exists only to
-  load a complete labeled-evaluation catalog; live policy changes still use
-  Lisa's owner-gated `write_policy`, `approve_policy`, and `delete_policy`
-  tools. Deletion requires a standalone `Delete policy: <policy_id>` command
-  and is refused when saved evaluation runs refer to the policy. Keep policy
-  state in `lisa.policies` and use `PolicyService` when evaluating sessions.
+  load a complete labeled-evaluation catalog; live policy changes use Lisa's
+  owner-authorized `write_policy`, `approve_policy`, and `delete_policy` tools.
+  Owners can request policy deletion in natural language; Lisa deletes the
+  policy by ID. Historical evaluation rows retain the policy ID, name, and
+  criteria hash after deletion. Keep policy state in `lisa.policies` and use
+  `PolicyService` when evaluating sessions.
   The evaluation run must own its transient database and workspace and clean
   them up automatically. Never reuse or modify a developer's running instance
   or pre-existing workspace data.

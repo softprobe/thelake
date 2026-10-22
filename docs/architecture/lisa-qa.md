@@ -42,11 +42,10 @@ and changes that same row.
 Changing an approved rule sets that row's `approved` column to false until the
 owner sends the exact standalone command `Approve policy: P1.2`. The
 authenticated owner and exact policy ID are supplied by the chat runtime.
-An owner can delete a rule with the exact standalone command
-`Delete policy: P1.2`. Deletion removes the policy row and cached triage
-decisions, but Lisa refuses when saved evaluation runs refer to that policy so
-historical results remain intact. Scheduled turns cannot write, approve, or
-delete policy.
+An authorized owner can ask Lisa to delete a rule by ID. Deletion removes the
+policy row and its cached triage decisions. Historical evaluation rows retain
+the policy ID, name, and criteria hash after deletion. Scheduled turns cannot
+write, approve, or delete policy.
 
 Traces show behavior, not business intent. Lisa never silently converts observed
 behavior into approved policy. Unapproved policies can be discussed in reports,

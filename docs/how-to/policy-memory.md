@@ -49,11 +49,11 @@ evaluation history live in Postgres. Updating a policy invalidates its cached
 triage decisions; saved evaluation results retain the criteria snapshot used
 when they were produced.
 
-To delete a policy, identify its exact ID from `list_policies` or `read_policy`,
-then send `Delete policy: P1.x` as a standalone owner message. Lisa removes the
-policy row and its cached triage decisions. If a saved evaluation run refers to
-the policy, deletion is refused so its history remains intact. Scheduled QA
-cannot delete policies. Substantive policy work is also recorded in Lisa's
+To delete a policy, an authorized owner can ask Lisa to delete it by ID. Lisa
+checks the exact current ID with `list_policies` or `read_policy`, then removes
+the policy row and cached triage decisions. Historical evaluation rows retain
+the policy ID, name, and criteria hash after deletion. Scheduled QA cannot
+delete policies. Substantive policy work is also recorded in Lisa's
 activity workflow; the activity captures chat actions while the policy row
 remains the source of truth for policy state.
 

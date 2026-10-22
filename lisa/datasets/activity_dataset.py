@@ -21,6 +21,7 @@ DEFAULT_MANIFEST = DATASET_ROOT / "manifests/benchmark.json"
 class ActivityTurn(StrictModel):
     chat: Literal["main", "slack"]
     text: str = Field(min_length=1)
+    track_activity: bool = True
     actor: Literal["owner", "other"] = "owner"
     channel: str = "C_ACTIVITY_BENCHMARK"
     thread: str = "1781000000.000100"
@@ -56,7 +57,7 @@ class PolicyExpectation(StrictModel):
 
 
 class ActivityLabels(StrictModel):
-    activity_count: int
+    activity_count: int | None = None
     activities: list[ActivityExpectation] = Field(default_factory=list)
     followups: list[FollowupExpectation] = Field(default_factory=list)
     policies: list[PolicyExpectation] = Field(default_factory=list)
@@ -77,7 +78,7 @@ class HistoricalEvaluationSeed(StrictModel):
 
 class ActivityBenchmarkCase(StrictModel):
     case_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]+$")
-    category: Literal["create", "update", "policy", "followup", "continuity", "evaluation"]
+    category: Literal["create", "update", "policy", "followup", "continuity", "evaluation", "request_resolution"]
     # Agentic held-out split is "benchmark", never "test" (reserved for pytest).
     split: Literal["development", "benchmark"]
     turns: list[ActivityTurn] = Field(min_length=1, max_length=12)

@@ -6,7 +6,7 @@ import json
 from hashlib import sha256
 from importlib.resources import files
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import psycopg
 from psycopg.errors import UniqueViolation
@@ -70,26 +70,211 @@ class PostgresActivityStore:
         activity_id = activity_id or str(uuid4())
         context_path = context_path or f"activities/{activity_id}"
         with self._connect() as connection, connection.transaction():
-            connection.execute(
-                _sql("create_activity.sql"),
-                {"id": activity_id, "kind": kind, "title": title,
-                 "source": source, "context_path": context_path,
-                 "parent_id": parent_id, "next_action": next_action,
-                 "next_action_at": next_action_at,
-                 "origin_conversation_id": origin_conversation_id,
-                 "origin_slack_channel_id": origin_slack_channel_id,
-                 "origin_slack_thread_ts": origin_slack_thread_ts,
-                 "slack_channel_id": slack_channel_id,
-                 "slack_thread_ts": slack_thread_ts},
+            return self._create_activity_on_connection(
+                connection, title=title, source=source, kind=kind,
+                activity_id=activity_id, context_path=context_path,
+                activity_type=activity_type, is_goal=is_goal, message_id=message_id,
+                subtitle=subtitle, task_label=task_label, agent_id=agent_id,
+                details=details, parent_id=parent_id, next_action=next_action,
+                next_action_at=next_action_at,
+                origin_conversation_id=origin_conversation_id,
+                slack_channel_id=slack_channel_id, slack_thread_ts=slack_thread_ts,
+                origin_slack_channel_id=origin_slack_channel_id,
+                origin_slack_thread_ts=origin_slack_thread_ts,
             )
-            self._append_activity_event(
-                connection, activity_id, "accepted", title, None, "lisa"
-            )
-            self._create_activity_presentation(
-                connection, activity_id, activity_type or kind, is_goal, message_id,
-                subtitle, task_label, agent_id, details or {},
-            )
+
+    def _create_activity_on_connection(
+        self, connection, *, title: str, source: str, kind: str = "action",
+        activity_id: str, context_path: str | None = None,
+        activity_type: str | None = None, is_goal: bool = False,
+        message_id: str | None = None, subtitle: str | None = None,
+        task_label: str | None = None, agent_id: str | None = None,
+        details: dict[str, Any] | None = None, parent_id: str | None = None,
+        next_action: str | None = None, next_action_at: str | None = None,
+        origin_conversation_id: str | None = None, slack_channel_id: str | None = None,
+        slack_thread_ts: str | None = None, origin_slack_channel_id: str | None = None,
+        origin_slack_thread_ts: str | None = None,
+    ) -> Activity:
+        context_path = context_path or f"activities/{activity_id}"
+        inserted = connection.execute(
+            _sql("create_activity.sql"),
+            {"id": activity_id, "kind": kind, "title": title,
+             "source": source, "context_path": context_path,
+             "parent_id": parent_id, "next_action": next_action,
+             "next_action_at": next_action_at,
+             "origin_conversation_id": origin_conversation_id,
+             "origin_slack_channel_id": origin_slack_channel_id,
+             "origin_slack_thread_ts": origin_slack_thread_ts,
+             "slack_channel_id": slack_channel_id,
+             "slack_thread_ts": slack_thread_ts},
+        ).fetchone()
+        if inserted is None:
+            return Activity(id=activity_id, created=False, context_path=context_path)
+        self._append_activity_event(connection, activity_id, "accepted", title, None, "lisa")
+        self._create_activity_presentation(
+            connection, activity_id, activity_type or kind, is_goal, message_id,
+            subtitle, task_label, agent_id, details or {},
+        )
         return Activity(id=activity_id, created=True, context_path=context_path)
+
+    def resolve_chat_activity(
+        self, *, turn_id: str, request_key: str, disposition: str,
+        source: str, title: str = "", summary: str = "",
+        activity_id: str | None = None, message_id: str | None = None,
+        origin_conversation_id: str | None = None,
+        origin_slack_channel_id: str | None = None,
+        origin_slack_thread_ts: str | None = None,
+    ) -> Activity:
+        """Resolve one chat intent and make retries return its canonical activity."""
+        normalized_turn = turn_id.strip()
+        normalized_key = request_key.strip()
+        if not normalized_turn or not normalized_key:
+            raise ValueError("Chat turn ID and request key must not be empty")
+        if disposition not in {"create", "continue", "fallback"}:
+            raise ValueError("Chat activity disposition must be create, continue, or fallback")
+
+        lock_key = f"{normalized_turn}:{normalized_key}"
+        with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("lock_chat_activity_turn.sql"), {"lock_key": lock_key})
+            existing = connection.execute(_sql("get_chat_activity_turn.sql"), {
+                "turn_id": normalized_turn, "request_key": normalized_key,
+            }).fetchone()
+            if existing is not None:
+                resolved_id = str(existing["activity_id"])
+                connection.execute(_sql("activate_chat_activity_turn.sql"), {
+                    "turn_id": normalized_turn, "request_key": normalized_key,
+                })
+                return Activity(id=resolved_id, created=False)
+
+            if disposition in {"create", "fallback"}:
+                if not title.strip():
+                    raise ValueError("A new chat activity requires a title")
+                safe_title = redact_text(title.strip())[:240]
+                safe_summary = redact_text(summary.strip())[:12_000]
+                resolved_id = str(uuid5(
+                    NAMESPACE_URL, f"lisa:chat:{normalized_turn}:{normalized_key}"
+                ))
+                activity = self._create_activity_on_connection(
+                    connection, title=safe_title, source=source, kind="chat_request",
+                    activity_id=resolved_id, activity_type="chat_request", message_id=message_id,
+                    subtitle=safe_summary[:500] or None,
+                    details={"request_summary": safe_summary} if safe_summary else {},
+                    origin_conversation_id=origin_conversation_id,
+                    origin_slack_channel_id=origin_slack_channel_id,
+                    origin_slack_thread_ts=origin_slack_thread_ts,
+                )
+            else:
+                if not activity_id or not activity_id.strip():
+                    raise ValueError("Continuing chat activity requires an activity ID")
+                resolved_id = activity_id.strip()
+                row = connection.execute(
+                    _sql("get_activity_status.sql"), {"activity_id": resolved_id}
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Activity does not exist")
+                if row["status"] not in {"queued", "running", "waiting", "waiting_approval"}:
+                    raise ValueError("Closed activities cannot be continued; create a new activity")
+                activity = Activity(id=resolved_id, created=False)
+
+            self._record_chat_activity_turn(
+                connection, turn_id=normalized_turn, request_key=normalized_key,
+                activity_id=resolved_id, disposition=disposition,
+            )
+            connection.execute(_sql("activate_chat_activity_turn.sql"), {
+                "turn_id": normalized_turn, "request_key": normalized_key,
+            })
+            return activity
+
+    @staticmethod
+    def _record_chat_activity_turn(
+        connection, *, turn_id: str, request_key: str, activity_id: str,
+        disposition: str,
+    ) -> None:
+        connection.execute(_sql("record_chat_activity_turn.sql"), {
+            "turn_id": turn_id, "request_key": request_key,
+            "activity_id": activity_id, "disposition": disposition,
+        })
+
+    def create_chat_activity(
+        self, *, turn_id: str, request_key: str, title: str, summary: str,
+        message_id: str | None = None, source: str,
+        origin_conversation_id: str | None = None,
+        origin_slack_channel_id: str | None = None,
+        origin_slack_thread_ts: str | None = None,
+    ) -> Activity:
+        return self.resolve_chat_activity(
+            turn_id=turn_id, request_key=request_key, disposition="fallback",
+            title=title, summary=summary, message_id=message_id, source=source,
+            origin_conversation_id=origin_conversation_id,
+            origin_slack_channel_id=origin_slack_channel_id,
+            origin_slack_thread_ts=origin_slack_thread_ts,
+        )
+
+    def chat_activities_for_turn(self, turn_id: str) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                _sql("list_chat_activities_for_turn.sql"), {"turn_id": turn_id}
+            ).fetchall()
+        return [str(row["activity_id"]) for row in rows]
+
+    def active_chat_activity_for_turn(self, turn_id: str) -> str | None:
+        with self._connect() as connection:
+            rows = connection.execute(
+                _sql("list_chat_activities_for_turn.sql"), {"turn_id": turn_id}
+            ).fetchall()
+        active = [row for row in rows if row["is_active"]]
+        if len(active) > 1:
+            raise RuntimeError("Chat turn has more than one active activity")
+        return str(active[0]["activity_id"]) if active else None
+
+    def fail_chat_turn(
+        self, turn_id: str, user_text: str, error_text: str, *, source: str = "web",
+        origin_conversation_id: str | None = None,
+        origin_slack_channel_id: str | None = None,
+        origin_slack_thread_ts: str | None = None,
+    ) -> None:
+        """Preserve a failed owner turn, including one that failed before resolution."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                _sql("list_chat_activities_for_turn.sql"), {"turn_id": turn_id}
+            ).fetchall()
+        if not rows:
+            normalized_title = " ".join(user_text.split()).strip()[:120]
+            self.create_chat_activity(
+                turn_id=turn_id,
+                request_key="failed-turn",
+                title=normalized_title or "Lisa chat request",
+                summary=user_text,
+                source=source,
+                origin_conversation_id=origin_conversation_id,
+                origin_slack_channel_id=origin_slack_channel_id,
+                origin_slack_thread_ts=origin_slack_thread_ts,
+            )
+            with self._connect() as connection:
+                rows = connection.execute(
+                    _sql("list_chat_activities_for_turn.sql"), {"turn_id": turn_id}
+                ).fetchall()
+            if not rows:
+                raise RuntimeError(f"Could not create failed activity for chat turn {turn_id}")
+        messages = [{
+            "id": f"lisa-chat-user:{turn_id}", "role": "user",
+            "text": user_text, "sequence": 1,
+        }]
+        error_event = {
+            "id": f"lisa-chat-error:{turn_id}", "kind": "evidence",
+            "tool_name": "chat_turn_error", "detail": redact_text(error_text),
+            "sequence": 2,
+        }
+        for row in rows:
+            activity_id = str(row["activity_id"])
+            events = [error_event] if row["is_active"] else []
+            if row["is_active"]:
+                self.record_chat_turn_trajectory(
+                    activity_id, messages, events,
+                    summary="Chat turn failed after activity work started.", status="failed",
+                )
+            else:
+                self.record_conversation_trajectory(activity_id, messages, events)
 
     def _create_activity_presentation(
         self, connection, activity_id, activity_type, is_goal, message_id,
@@ -255,63 +440,112 @@ class PostgresActivityStore:
         runtime_events: list[dict[str, Any]],
     ) -> int:
         """Append an idempotent, redacted chat and tool trace to an activity."""
-        recorded = 0
         with self._connect() as connection, connection.transaction():
-            timeline = [
-                {**item, "timeline_kind": "message"} for item in messages
-            ] + [
-                {**item, "timeline_kind": "runtime"} for item in runtime_events
-            ]
-            timeline.sort(key=lambda item: item.get("sequence", 0))
-            for item in timeline:
-                item_id = str(item.get("id", "")).strip()
-                if not item_id:
-                    continue
-                if item["timeline_kind"] == "message":
-                    role = item.get("role")
-                    text = item.get("text")
-                    if role not in {"user", "assistant"} or not isinstance(text, str):
-                        continue
-                    body = redact_text(text)[:12_000]
-                    if not body:
-                        continue
-                    inserted = connection.execute(_sql("link_message_thread.sql"), {
-                        "activity_id": activity_id, "external_id": item_id,
-                    }).rowcount
-                    if not inserted:
-                        continue
-                    speaker = "You" if role == "user" else "Lisa"
-                    preview = " ".join(body.split())[:96]
-                    self._append_activity_event(
-                        connection, activity_id,
-                        "chat.user" if role == "user" else "chat.assistant",
-                        f"{speaker}: {preview}" if role == "user" else "Lisa replied",
-                        body, "user" if role == "user" else "lisa",
-                    )
-                    recorded += 1
-                    continue
+            connection.execute(_sql("lock_activity_for_update.sql"), {
+                "activity_id": activity_id,
+            })
+            return self._record_conversation_trajectory(
+                connection, activity_id, messages, runtime_events,
+            )
 
-                if item.get("tool_name") == "attach_chat_turn_to_activity":
-                    continue
-                inserted = connection.execute(_sql("link_runtime_event_thread.sql"), {
-                    "activity_id": activity_id, "external_id": item_id,
-                }).rowcount
-                if not inserted:
-                    continue
-                name = str(item.get("tool_name", "tool"))[:120]
-                if item.get("kind") == "tool":
-                    arguments = json.dumps(item.get("arguments", {}), ensure_ascii=False)
-                    summary = redact_text(arguments)[:12_000]
-                    event_type, title, actor = "runtime.tool", f"Lisa used {name}", "lisa"
-                else:
-                    summary = redact_text(str(item.get("detail", "")))[:12_000]
-                    if not summary:
-                        summary = "Tool returned no additional detail."
-                    event_type, title, actor = "runtime.result", f"{name} returned evidence", "lisa"
+    def record_chat_turn_trajectory(
+        self, activity_id: str, messages: list[dict[str, Any]],
+        runtime_events: list[dict[str, Any]], *, summary: str, status: str,
+        next_action: str | None = None,
+    ) -> int:
+        """Persist a chat trajectory and its resulting lifecycle in one transaction."""
+        if status not in {"waiting", "succeeded", "failed", "cancelled"}:
+            raise ValueError("Unsupported chat turn lifecycle status")
+        if status == "waiting" and not (next_action or "").strip():
+            raise ValueError("A waiting chat activity requires its next action")
+        with self._connect() as connection, connection.transaction():
+            connection.execute(_sql("lock_activity_for_update.sql"), {
+                "activity_id": activity_id,
+            })
+            recorded = self._record_conversation_trajectory(
+                connection, activity_id, messages, runtime_events,
+            )
+            if status == "waiting":
+                row = connection.execute(_sql("update_activity_progress.sql"), {
+                    "activity_id": activity_id, "status": status,
+                    "next_action": next_action, "next_action_at": None,
+                }).fetchone()
+                if row is None:
+                    raise RuntimeError(f"Could not finalize chat activity {activity_id} as waiting")
                 self._append_activity_event(
-                    connection, activity_id, event_type, title, summary, actor,
+                    connection, activity_id, "progress", row["title"], summary, "lisa",
+                )
+            else:
+                finished = connection.execute(_sql("complete_agent_activity.sql"), {
+                    "activity_id": activity_id, "status": status,
+                    "title": f"Activity {status}", "summary": summary,
+                }).fetchone()
+                if finished is None:
+                    raise RuntimeError(f"Could not finalize chat activity {activity_id} as {status}")
+            connection.execute(_sql("sync_activity_actions.sql"), {"activity_id": activity_id})
+            return recorded
+
+    def _record_conversation_trajectory(
+        self, connection, activity_id: str, messages: list[dict[str, Any]],
+        runtime_events: list[dict[str, Any]],
+    ) -> int:
+        recorded = 0
+        timeline = [
+            {**item, "timeline_kind": "message"} for item in messages
+        ] + [
+            {**item, "timeline_kind": "runtime"} for item in runtime_events
+        ]
+        timeline.sort(key=lambda item: item.get("sequence", 0))
+        for item in timeline:
+            item_id = str(item.get("id", "")).strip()
+            if not item_id:
+                continue
+            reference_type = "message" if item["timeline_kind"] == "message" else "runtime_event"
+            existing = connection.execute(_sql("find_activity_event_reference.sql"), {
+                "activity_id": activity_id, "reference_type": reference_type,
+                "reference_id": item_id,
+            }).fetchone()
+            if existing is not None:
+                continue
+            if item["timeline_kind"] == "message":
+                role, text = item.get("role"), item.get("text")
+                if role not in {"user", "assistant"} or not isinstance(text, str):
+                    continue
+                body = redact_text(text)[:12_000]
+                if not body:
+                    continue
+                connection.execute(_sql("link_message_thread.sql"), {
+                    "activity_id": activity_id, "external_id": item_id,
+                })
+                speaker = "You" if role == "user" else "Lisa"
+                preview = " ".join(body.split())[:96]
+                self._append_activity_event(
+                    connection, activity_id,
+                    "chat.user" if role == "user" else "chat.assistant",
+                    f"{speaker}: {preview}" if role == "user" else "Lisa replied",
+                    body, "user" if role == "user" else "lisa",
+                    reference_type=reference_type, reference_id=item_id,
                 )
                 recorded += 1
+                continue
+            connection.execute(_sql("link_runtime_event_thread.sql"), {
+                "activity_id": activity_id, "external_id": item_id,
+            })
+            name = str(item.get("tool_name", "tool"))[:120]
+            if item.get("kind") == "tool":
+                arguments = json.dumps(item.get("arguments", {}), ensure_ascii=False)
+                summary = redact_text(arguments)[:12_000]
+                event_type, title, actor = "runtime.tool", f"Lisa used {name}", "lisa"
+            else:
+                summary = redact_text(str(item.get("detail", "")))[:12_000]
+                if not summary:
+                    summary = "Tool returned no additional detail."
+                event_type, title, actor = "runtime.result", f"{name} returned evidence", "lisa"
+            self._append_activity_event(
+                connection, activity_id, event_type, title, summary, actor,
+                reference_type=reference_type, reference_id=item_id,
+            )
+            recorded += 1
         return recorded
 
     def activity_exists(self, activity_id: str) -> bool:
@@ -658,12 +892,34 @@ class PostgresActivityStore:
             connection.execute(_sql("sync_activity_actions.sql"), {"activity_id": activity_id})
             return True
 
-    def finish_activity_when_complete(self, activity_id: str) -> None:
+    def complete_chat_activity(
+        self, activity_id: str, summary: str, *, status: str = "succeeded",
+    ) -> bool:
+        """Finish a replied-to chat request unless its trajectory leaves work pending."""
+        if status not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError("Chat activity status must be succeeded, failed, or cancelled")
+        return self.complete_agent_activity(activity_id, summary, status=status)
+
+    def finish_activity_when_complete(
+        self,
+        activity_id: str,
+        *,
+        actor: str | None = None,
+        fencing_token: int | None = None,
+    ) -> bool:
         with self._connect() as connection, connection.transaction():
-            connection.execute(
-                _sql("finish_activity_when_complete.sql"), {"activity_id": activity_id}
-            )
+            finished = connection.execute(
+                _sql("finish_activity_when_complete.sql"),
+                {
+                    "activity_id": activity_id,
+                    "actor": actor,
+                    "fencing_token": fencing_token,
+                },
+            ).fetchone()
+            if finished is None:
+                return False
             connection.execute(_sql("sync_activity_actions.sql"), {"activity_id": activity_id})
+            return True
 
     def get_evaluation(self, evaluation_id: str) -> EvaluationRun | None:
         with self._connect() as connection:
@@ -786,8 +1042,11 @@ class PostgresActivityStore:
             )
 
     def _append_activity_event(
-        self, connection, activity_id, event_type, title, summary, actor
+        self, connection, activity_id, event_type, title, summary, actor,
+        *, reference_type: str | None = None, reference_id: str | None = None,
     ) -> int:
+        if (reference_type is None) != (reference_id is None):
+            raise ValueError("Activity event reference type and ID must be supplied together")
         row = connection.execute(
             _sql("append_activity_event.sql"),
             {
@@ -796,6 +1055,8 @@ class PostgresActivityStore:
                 "title": title,
                 "summary": summary,
                 "actor": actor,
+                "reference_type": reference_type,
+                "reference_id": reference_id,
             },
         ).fetchone()
         return row["seq"]

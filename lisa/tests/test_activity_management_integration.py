@@ -13,7 +13,7 @@ import pytest
 from lisa.backends.openhands import OpenHandsBackend
 from lisa.bootstrap import build_services
 from lisa.repositories.conversations import FileConversationRepository
-from lisa.runtime import confirmed_followup_id, confirmed_policy_deletion_id, confirmed_policy_id
+from lisa.runtime import confirmed_followup_id, confirmed_policy_id
 from lisa.services.conversations import ConversationService
 
 LIVE_ENABLED = os.getenv("LISA_RUN_ACTIVITY_MANAGEMENT_INTEGRATION") == "1"
@@ -66,7 +66,6 @@ def _turn(conversations, context, conversation_id, text, *, source="web", channe
             text,
             run_turn=OpenHandsBackend().run_turn,
             confirmed_policy_id=confirmed_policy_id(text),
-            confirmed_policy_deletion_id=confirmed_policy_deletion_id(text),
             confirmed_followup_id=confirmed_followup_id(text),
             turn_source=source,
             actor_id="activity-eval-owner",

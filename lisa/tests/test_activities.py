@@ -209,17 +209,87 @@ def test_chat_messages_are_visible_and_idempotently_linked_to_activity(store):
     runtime_actions = [action for action in detail["actions"] if action["event_type"] == "runtime.tool"]
     assert len(runtime_actions) == 1
     assert runtime_actions[0]["title"] == "Lisa used write_policy"
+    assert {
+        (action.get("reference_type"), action.get("reference_id"))
+        for action in detail["actions"]
+    } >= {
+        ("message", "chat-user-1"),
+        ("message", "chat-assistant-1"),
+        ("runtime_event", "runtime-1"),
+        ("runtime_event", "runtime-2"),
+    }
     assert [action["event_type"] for action in detail["actions"][-4:]] == [
         "chat.user", "runtime.tool", "runtime.result",
         "chat.assistant",
     ]
-    assert {item["reference_id"] for item in detail["references"] if item["reference_type"] == "message"} == {
-        "chat-user-1", "chat-assistant-1",
-    }
-    assert any(
-        item["reference_type"] == "runtime_event" and item["reference_id"] == "runtime-1"
-        for item in detail["references"]
+
+
+def test_prelinked_chat_message_still_gets_one_ordered_timeline_action(store):
+    turn_id = str(uuid4())
+    activity = store.create_chat_activity(
+        turn_id=turn_id, request_key="fallback", title="Track a deployment issue",
+        summary="Check the rollout", message_id="current-user-message", source="web",
     )
+    messages = [{
+        "id": "current-user-message", "role": "user", "text": "Track a deployment issue.",
+        "sequence": 1,
+    }]
+
+    store.record_conversation_trajectory(activity.id, messages, [])
+    store.record_conversation_trajectory(activity.id, messages, [])
+
+    detail = store.get_activity_thread(activity.id)
+    chat_actions = [action for action in detail["actions"] if action["event_type"] == "chat.user"]
+    assert len(chat_actions) == 1
+    assert chat_actions[0]["summary"] == "Track a deployment issue."
+    assert chat_actions[0]["reference_type"] == "message"
+    assert chat_actions[0]["reference_id"] == "current-user-message"
+
+
+def test_chat_trajectory_and_finalization_commit_atomically(store):
+    activity = store.create_activity(title="Atomic chat turn", source="web")
+    store.create_activity_followup(
+        activity_id=activity.id, due_at=None, trigger_event_type="owner_confirmation",
+        prompt="Wait for confirmation", requested_by="owner",
+    )
+
+    with pytest.raises(RuntimeError, match="finalize"):
+        store.record_chat_turn_trajectory(
+            activity.id,
+            [{"id": "atomic-user", "role": "user", "text": "Please finish this", "sequence": 1}],
+            [], summary="Finished", status="succeeded",
+        )
+
+    detail = store.get_activity_thread(activity.id)
+    assert detail["activity"]["status"] == "pending"
+    assert not any(action.get("reference_id") == "atomic-user" for action in detail["actions"])
+
+
+def test_runtime_event_cannot_be_linked_to_two_activities(store):
+    first = store.create_activity(title="First scoped request", source="web")
+    second = store.create_activity(title="Second scoped request", source="web")
+    event = {"id": "single-scope-tool-event", "kind": "tool", "tool_name": "read_policy"}
+
+    store.record_conversation_trajectory(first.id, [], [event])
+    with pytest.raises(Exception):
+        store.record_conversation_trajectory(second.id, [], [event])
+
+    first_detail = store.get_activity_thread(first.id)
+    second_detail = store.get_activity_thread(second.id)
+    assert any(ref["reference_id"] == "single-scope-tool-event" for ref in first_detail["references"])
+    assert not any(ref["reference_id"] == "single-scope-tool-event" for ref in second_detail["references"])
+
+
+def test_runtime_event_reference_helper_cannot_cross_activity_scope(store):
+    first = store.create_activity(title="First linked request", source="web")
+    second = store.create_activity(title="Second linked request", source="web")
+    store.link_activity_reference(first.id, "runtime_event", "single-link-tool-event")
+    store.link_activity_reference(second.id, "runtime_event", "single-link-tool-event")
+
+    first_detail = store.get_activity_thread(first.id)
+    second_detail = store.get_activity_thread(second.id)
+    assert any(ref["reference_id"] == "single-link-tool-event" for ref in first_detail["references"])
+    assert not any(ref["reference_id"] == "single-link-tool-event" for ref in second_detail["references"])
 
 
 def test_activity_progress_search_and_next_action_are_durable(store):
@@ -362,6 +432,32 @@ def test_release_activity_updates_thread_action_projection(store):
     detail = store.get_activity_thread(activity.id)
     assert detail["actions"][-1]["event_type"] == "retryable_error"
     assert all(action["status"] == "pending" for action in detail["actions"])
+
+
+def test_unclaimed_completion_does_not_finish_a_claimed_activity(store):
+    activity = store.create_activity(
+        title="Chat policy review", source="web", kind="chat_request",
+    )
+    claim = store.claim_activity(activity.id, "lisa-evaluation", lease_seconds=60)
+    assert claim is not None
+
+    assert not store.finish_activity_without_claim(
+        activity.id, "A chat finalizer must not override the active evaluation lease.",
+        status="failed",
+    )
+
+    store.finish_activity_when_complete(activity.id)
+
+    continued_claim = store.claim_activity(activity.id, "lisa-evaluation", lease_seconds=60)
+    assert continued_claim is not None
+    assert continued_claim.fencing_token == claim.fencing_token
+    store.append_event(
+        activity.id,
+        "evaluation_continued",
+        title="Evaluation continued",
+        actor="lisa-evaluation",
+        fencing_token=claim.fencing_token,
+    )
 
 
 def test_evaluation_creation_is_idempotent_and_intentional_rerun_is_distinct(
@@ -746,3 +842,139 @@ def test_activity_records_generic_events_and_multiple_evaluations(store: Postgre
         "message_received",
         "report_prepared",
     ]
+
+
+def test_chat_activity_resolution_is_idempotent_per_request_and_separates_intents(store):
+    turn_id = str(uuid4())
+    first = store.resolve_chat_activity(
+        turn_id=turn_id, request_key="policy", disposition="create", source="web",
+        title="Update refund policy", summary="Update owner review criteria.",
+    )
+    repeated = store.resolve_chat_activity(
+        turn_id=turn_id, request_key="policy", disposition="create", source="web",
+        title="Update refund policy", summary="Update owner review criteria.",
+    )
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        concurrent = list(pool.map(lambda _: store.resolve_chat_activity(
+            turn_id=turn_id, request_key="policy", disposition="create", source="web",
+            title="Update refund policy", summary="Update owner review criteria.",
+        ), range(3)))
+    independent = store.resolve_chat_activity(
+        turn_id=turn_id, request_key="session", disposition="create", source="web",
+        title="Review billing session", summary="Find the latest billing session.",
+    )
+
+    assert repeated.id == first.id
+    assert repeated.created is False
+    assert all(item.id == first.id and not item.created for item in concurrent)
+    assert independent.id != first.id
+    assert set(store.chat_activities_for_turn(turn_id)) == {first.id, independent.id}
+    assert len([item for item in store.list_activity_feed(limit=100)
+                if item["id"] in {first.id, independent.id}]) == 2
+
+
+def test_chat_activity_creation_and_turn_mapping_roll_back_together(store, monkeypatch):
+    turn_id = str(uuid4())
+
+    def fail_mapping(*args, **kwargs):
+        raise RuntimeError("injected mapping failure")
+
+    monkeypatch.setattr(store, "_record_chat_activity_turn", fail_mapping)
+
+    with pytest.raises(RuntimeError, match="injected mapping failure"):
+        store.resolve_chat_activity(
+            turn_id=turn_id, request_key="policy", disposition="create", source="web",
+            title="Atomic policy update", summary="Update a policy atomically.",
+        )
+
+    assert store.chat_activities_for_turn(turn_id) == []
+    assert not any(
+        item["title"] == "Atomic policy update"
+        for item in store.list_activity_feed(limit=100)
+    )
+
+
+def test_closed_chat_activity_cannot_be_continued(store):
+    first = store.resolve_chat_activity(
+        turn_id=str(uuid4()), request_key="request", disposition="create", source="web",
+        title="Finished review", summary="The review is complete.",
+    )
+    assert store.complete_agent_activity(first.id, "Review complete.", status="succeeded")
+
+    with pytest.raises(ValueError, match="Closed activities cannot be continued"):
+        store.resolve_chat_activity(
+            turn_id=str(uuid4()), request_key="request", disposition="continue", source="web",
+            activity_id=first.id,
+        )
+
+
+def test_failed_chat_turn_marks_only_its_active_activity_failed(store):
+    turn_id = str(uuid4())
+    first = store.resolve_chat_activity(
+        turn_id=turn_id, request_key="policy", disposition="create", source="web",
+        title="Update policy", summary="Update the billing policy.",
+    )
+    second = store.resolve_chat_activity(
+        turn_id=turn_id, request_key="session", disposition="create", source="web",
+        title="Review session", summary="Review billing session.",
+    )
+
+    store.fail_chat_turn(turn_id, "Review policy and session.", "The session lookup failed.")
+
+    statuses = {item["title"]: item["status"] for item in store.list_activity_feed(limit=100)}
+    assert statuses["Update policy"] == "pending"
+    assert statuses["Review session"] == "error"
+    policy_thread = store.get_activity_thread(first.id)
+    session_thread = store.get_activity_thread(second.id)
+    assert any(action["event_type"] == "chat.user" for action in policy_thread["actions"])
+    assert any(action["title"].startswith("chat_turn_error returned")
+               for action in session_thread["actions"])
+
+
+def test_failed_chat_turn_rolls_back_trajectory_when_terminal_write_fails(store, monkeypatch):
+    turn_id = str(uuid4())
+    activity = store.resolve_chat_activity(
+        turn_id=turn_id, request_key="request", disposition="create", source="web",
+        title="Recover interrupted request", summary="Inspect the interrupted request.",
+    )
+    record_trajectory = store._record_conversation_trajectory
+
+    def fail_after_trajectory(connection, activity_id, messages, runtime_events):
+        record_trajectory(connection, activity_id, messages, runtime_events)
+        raise RuntimeError("simulated terminal write failure")
+
+    monkeypatch.setattr(store, "_record_conversation_trajectory", fail_after_trajectory)
+    with pytest.raises(RuntimeError, match="simulated terminal write failure"):
+        store.fail_chat_turn(turn_id, "Recover interrupted request.", "Backend failed")
+
+    detail = store.get_activity_thread(activity.id)
+    assert detail["activity"]["status"] == "pending"
+    assert not any(action["event_type"] == "chat.user" for action in detail["actions"])
+
+
+def test_failed_chat_turn_before_resolution_creates_visible_failed_activity(store):
+    turn_id = str(uuid4())
+
+    store.fail_chat_turn(
+        turn_id, "Investigate the missing invoice.", "The agent backend stopped before resolution.",
+    )
+
+    feed = store.list_activity_feed(query="Investigate the missing invoice")
+    assert len(feed) == 1
+    activity = feed[0]
+    assert activity["status"] == "error"
+    assert activity["title"] == "Investigate the missing invoice."
+    detail = store.get_activity_thread(activity["id"])
+    assert any(
+        reference["reference_type"] == "message"
+        and reference["reference_id"] == f"lisa-chat-user:{turn_id}"
+        for reference in detail["references"]
+    )
+    assert any(
+        action["event_type"] == "chat.user" for action in detail["actions"]
+    )
+    assert any(
+        action["event_type"] == "runtime.result"
+        and "backend stopped" in action["summary"]
+        for action in detail["actions"]
+    )

@@ -32,14 +32,17 @@ def test_build_conversation_uses_sdk_conversation_id_type(monkeypatch, tmp_path)
     assert captured["visualizer"] is None
 
 
-def test_openhands_turn_prefers_explicit_attachment_and_infers_unique_target():
-    assert agent.selected_chat_activity_id([
-        {"tool_name": "find_activity", "arguments": {"query": "refund"}},
-        {"tool_name": "attach_chat_turn_to_activity", "arguments": {"activity_id": "activity-1"}},
-    ]) == "activity-1"
-    assert agent.selected_chat_activity_id([
-        {"tool_name": "update_activity", "arguments": {"activity_id": "activity-1"}},
-    ]) == "activity-1"
+def test_openhands_turn_uses_explicit_activity_resolution():
+    from lisa.runtime import selected_chat_activity_ids
+
+    assert selected_chat_activity_ids([
+        {"kind": "evidence", "tool_name": "resolve_chat_activity",
+         "detail": '{"disposition":"continue","activity_id":"activity-1"}'},
+    ]) == ["activity-1"]
+    assert selected_chat_activity_ids([
+        {"kind": "tool", "tool_name": "update_activity",
+         "arguments": {"activity_id": "activity-1"}},
+    ]) == []
 
 
 def test_redacts_credentials_in_user_messages_before_they_are_persisted():
@@ -145,6 +148,7 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
     assert lisa_mcp.env["LISA_SLACK_ACTIVITY_THREAD_TS"].get_secret_value() == "12345.67"
     assert "lisa.readable_activities" in captured["system_prompt"]
     assert "readable_activity_events: activity_id, seq, event_type" in captured["system_prompt"]
+    assert "reference_type, reference_id, created_at" in captured["system_prompt"]
     skill_names = {skill.name for skill in captured["agent_context"].skills}
     assert {
         "learn-agent-policy",
@@ -152,10 +156,12 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
         "investigate-evaluator-failure",
         "manage-lisa-activities",
     } <= skill_names
-    assert "For every substantive user request" in captured["system_prompt"]
+    assert "For each distinct user request" in captured["system_prompt"]
+    assert "Never resolve the same request twice in one turn" in captured["system_prompt"]
+    assert "Keep the exact activity ID" in captured["system_prompt"]
     assert "Approve policy: <policy_id>" in captured["system_prompt"]
     assert any(
-        "find_activity" in skill.content
+        "Never resolve the same request twice in one turn" in skill.content
         for skill in captured["agent_context"].skills
         if skill.name == "manage-lisa-activities"
     )

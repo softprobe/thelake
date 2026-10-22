@@ -1,6 +1,7 @@
 WITH finished AS (
     UPDATE lisa.activities AS activity
     SET status = %(status)s, summary = %(summary)s,
+        next_action = NULL, next_action_at = NULL,
         updated_at = clock_timestamp(), finished_at = clock_timestamp(),
         next_event_seq = next_event_seq + 1, version = version + 1
     WHERE activity.id = %(activity_id)s

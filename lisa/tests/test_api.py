@@ -427,18 +427,17 @@ def test_explicit_chat_confirmation_is_bound_to_the_current_turn(client, monkeyp
     assert captured["confirmed_policy_id"] == "P1.2.1"
 
 
-def test_policy_approval_requires_exact_readable_policy_command():
-    from lisa.runtime import confirmed_followup_id, confirmed_policy_deletion_id, confirmed_policy_id
+def test_policy_approval_requires_exact_readable_standalone_form():
+    from lisa.runtime import (
+        confirmed_followup_id,
+        confirmed_policy_id,
+    )
 
     assert confirmed_policy_id("Approve policy: P1.2") == "P1.2"
     assert confirmed_policy_id("Approve policy: P1.2.1") == "P1.2.1"
     assert confirmed_policy_id("Please approve policy: P1.2") is None
     assert confirmed_policy_id("Approve policy: P1.2, thanks") is None
     assert confirmed_policy_id("Approve policy: 12345678-1234-4234-8234-123456789abc") is None
-    assert confirmed_policy_deletion_id("Delete policy: P1.2") == "P1.2"
-    assert confirmed_policy_deletion_id("<@U123> Delete policy: P1.2.1") == "P1.2.1"
-    assert confirmed_policy_deletion_id("Please delete policy: P1.2") is None
-    assert confirmed_policy_deletion_id("Delete policy: P1.2 after review") is None
     assert confirmed_followup_id("Confirm follow-up: 12345678-1234-4234-8234-123456789abc")
 
 def test_activity_feed_http_endpoints_use_workspace_database(
@@ -466,6 +465,11 @@ def test_activity_feed_http_endpoints_use_workspace_database(
             title="Evaluate refund session", source="web",
             kind="policy_evaluation",
         )
+        services.activity_store.record_conversation_trajectory(
+            activity.id,
+            [{"id": "api-message", "role": "user", "text": "Inspect refund session."}],
+            [{"id": "api-runtime-event", "kind": "tool", "tool_name": "find_activity", "sequence": 2}],
+        )
         listed = test_client.get("/v1/activities?open_only=true").json()
         evaluations = test_client.get(
             "/v1/activities?activity_type=policy_evaluation"
@@ -474,7 +478,12 @@ def test_activity_feed_http_endpoints_use_workspace_database(
     assert any(item["id"] == activity.id for item in listed)
     assert [item["id"] for item in evaluations] == [evaluation.id]
     assert detail["activity"]["title"] == "Inspect refund session"
-    assert detail["actions"][0]["title"] == "Inspect refund session"
+    assert [item["title"] for item in detail["actions"]] == [
+        "Inspect refund session", "You: Inspect refund session.", "Lisa used find_activity",
+    ]
+    assert {item["reference_id"] for item in detail["references"]} >= {
+        "api-message", "api-runtime-event",
+    }
 
 
 def test_user_policy_list_is_authenticated_and_bounded(

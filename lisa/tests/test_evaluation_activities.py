@@ -187,6 +187,212 @@ def test_completed_negative_triage_is_filtered_on_the_next_session_evaluation(
     ]
 
 
+def test_session_evaluation_reuses_the_resolved_chat_activity(evaluation_services):
+    services = evaluation_services
+    store = services.activity_store
+    session_id = f"session-{uuid4()}"
+    policy = services.policy_service.approved_rules("agent")[0]
+    chat_activity = store.create_activity(
+        title="Review billing agent session", source="web", kind="chat_request",
+    )
+
+    class NegativeTriager:
+        model = "test-decisions-model"
+
+        def triage(self, trajectory, rules):
+            return {
+                "selected_policies": [],
+                "policy_decisions": [
+                    {"id": policy.id, "name": policy.name, "scope": policy.scope,
+                     "decision": "no_violation_found"}
+                ],
+            }
+
+    services.evaluations.policy_triage = NegativeTriager()
+    result = services.evaluations.evaluate_session(
+        "agent", session_id, activity_id=chat_activity.id,
+    )
+
+    feed = store.list_activity_feed(limit=100)
+    assert [item["id"] for item in feed].count(chat_activity.id) == 1
+    assert result["activity_id"] == chat_activity.id
+    assert {event.event_type for event in store.list_events(chat_activity.id)} >= {
+        "policy_triage_decision", "policy_review_completed", "succeeded",
+    }
+
+
+def test_missing_chat_session_finishes_activity_as_error_even_without_approved_policies(
+    evaluation_services, monkeypatch,
+):
+    services = evaluation_services
+    activity = services.activity_store.create_activity(
+        title="Review missing session", source="web", kind="chat_request",
+    )
+    services.activity_store.update_activity_progress(
+        activity.id, status="waiting", summary="Waiting for session review.",
+    )
+    monkeypatch.setattr(services.policy_service, "approved_rules", lambda _: [])
+
+    def missing_session(_path):
+        raise LookupError("not found")
+
+    monkeypatch.setattr(services.client, "get", missing_session)
+
+    result = services.evaluations.evaluate_session(
+        "billing-agent", "missing-session", activity_id=activity.id,
+    )
+
+    assert result["status"] == "error"
+    assert result["activity_id"] == activity.id
+    thread = services.activity_store.get_activity_thread(activity.id)
+    assert thread["thread"]["status"] == "error"
+    assert any(
+        "missing-session" in (event.get("summary") or "")
+        for event in thread["actions"]
+    )
+
+
+def test_missing_chat_session_reports_when_live_worker_owns_activity(
+    evaluation_services, monkeypatch,
+):
+    services = evaluation_services
+    store = services.activity_store
+    activity = store.create_activity(
+        title="Review missing session", source="web", kind="chat_request",
+    )
+    claim = store.claim_activity(activity.id, "active-evaluator", lease_seconds=60)
+    assert claim is not None
+
+    def missing_session(_path):
+        raise LookupError("not found")
+
+    monkeypatch.setattr(services.client, "get", missing_session)
+
+    result = services.evaluations.evaluate_session(
+        "billing-agent", "missing-session", activity_id=activity.id,
+    )
+
+    assert result["status"] == "error"
+    assert result["activity_finalized"] is False
+    thread = store.get_activity_thread(activity.id)
+    assert thread["thread"]["status"] == "pending"
+    continued_claim = store.claim_activity(
+        activity.id, "active-evaluator", lease_seconds=60,
+    )
+    assert continued_claim is not None
+    assert continued_claim.fencing_token == claim.fencing_token
+
+
+def test_selected_chat_evaluation_finishes_activity_with_its_worker_claim(
+    evaluation_services, monkeypatch,
+):
+    services = evaluation_services
+    store = services.activity_store
+    session_id = f"session-{uuid4()}"
+    detail = session_detail()
+    detail["spans"][0]["trace_id"] = session_id
+    monkeypatch.setattr(services.client, "get", lambda _: detail)
+    monkeypatch.setattr(
+        services.evaluations,
+        "judge",
+        lambda _: {
+            "status": "pass", "rationale": "The policy was followed.",
+            "references": [], "limitations": [],
+        },
+    )
+    monkeypatch.setattr(
+        services.client,
+        "post",
+        lambda *args, **kwargs: ({}, 201),
+    )
+    policy = services.policy_service.approved_rules("agent")[0]
+    chat_activity = store.create_activity(
+        title="Review agent session", source="web", kind="chat_request",
+    )
+
+    class SelectedTriager:
+        model = "test-decisions-model"
+
+        def triage(self, trajectory, rules):
+            return {
+                "selected_policies": [
+                    {"id": policy.id, "name": policy.name, "scope": policy.scope}
+                ],
+                "policy_decisions": [
+                    {"id": policy.id, "name": policy.name, "scope": policy.scope,
+                     "decision": "suspected_violation"}
+                ],
+            }
+
+    services.evaluations.policy_triage = SelectedTriager()
+    result = services.evaluations.evaluate_session(
+        "agent", session_id, activity_id=chat_activity.id,
+    )
+
+    assert result["activity_id"] == chat_activity.id
+    assert result["evaluations"][0]["status"] == "pass"
+    assert "_activity_fencing_token" not in result["evaluations"][0]
+    assert store.get_activity_thread(chat_activity.id)["thread"]["status"] == "success"
+
+
+def test_mixed_chat_evaluation_results_never_return_activity_claim_tokens(
+    evaluation_services, monkeypatch,
+):
+    services = evaluation_services
+    store = services.activity_store
+    chat_activity = store.create_activity(
+        title="Review two policies", source="web", kind="chat_request",
+    )
+    first, second = services.policy_service.approved_rules("agent") * 2
+    second = SimpleNamespace(**{**first.__dict__, "id": "P1.99", "name": "Second policy"})
+    rules = [first, second]
+    monkeypatch.setattr(services.evaluations.policies, "approved_rules", lambda _: rules)
+    monkeypatch.setattr(services.activity_store, "record_policy_triage_decisions", lambda *_: None)
+    monkeypatch.setattr(
+        services.activity_store,
+        "policy_triage_decisions",
+        lambda _session, ids: {rule_id: "suspected_violation" for rule_id in ids},
+    )
+    monkeypatch.setattr(services.client, "get", lambda _: session_detail())
+
+    class SelectedTriager:
+        model = "test-decisions-model"
+
+        def triage(self, trajectory, candidates):
+            return {
+                "selected_policies": [
+                    {"id": rule.id, "name": rule.name, "scope": rule.scope}
+                    for rule in candidates
+                ],
+                "policy_decisions": [
+                    {"id": rule.id, "name": rule.name, "scope": rule.scope,
+                     "decision": "suspected_violation"}
+                    for rule in candidates
+                ],
+            }
+
+    services.evaluations.policy_triage = SelectedTriager()
+    evaluations = iter([
+        {
+            "status": "pass", "activity_id": chat_activity.id,
+            "_activity_fencing_token": 17,
+        },
+        {"status": "error", "activity_id": chat_activity.id},
+    ])
+    monkeypatch.setattr(
+        services.evaluations,
+        "_evaluate_session",
+        lambda *args, **kwargs: next(evaluations),
+    )
+
+    result = services.evaluations.evaluate_session(
+        "agent", f"session-{uuid4()}", activity_id=chat_activity.id,
+    )
+
+    assert result["status"] == "evaluation_error"
+    assert all("_activity_fencing_token" not in item for item in result["evaluations"])
+
+
 def test_incomplete_triage_response_is_recorded_as_a_failed_activity(
     evaluation_services, monkeypatch
 ):

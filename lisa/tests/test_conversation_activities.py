@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from lisa.repositories.conversations import FileConversationRepository
-from lisa.runtime import AgentTurn, selected_chat_activity_id
+from lisa.runtime import AgentTurn, selected_chat_activity_ids
 from lisa.services.conversations import ConversationService
 
 
@@ -12,6 +14,8 @@ class RecordingActivities:
     def __init__(self, known_ids=None):
         self.calls = []
         self.known_ids = known_ids
+        self.completion_result = True
+        self.final_status = "queued"
 
     def activity_exists(self, activity_id):
         return self.known_ids is None or activity_id in self.known_ids
@@ -22,6 +26,37 @@ class RecordingActivities:
             [dict(message) for message in messages],
             [dict(event) for event in runtime_events],
         ))
+
+    def record_chat_turn_trajectory(self, activity_id, messages, runtime_events, *, summary, status, next_action=None):
+        if status != "waiting" and not self.completion_result:
+            raise RuntimeError(f"Lisa chat activity {activity_id} remains queued after turn finalization")
+        self.record_conversation_trajectory(activity_id, messages, runtime_events)
+        self.finalized = (activity_id, summary, status, next_action)
+        if status == "waiting":
+            self.progress = (activity_id, {"status": status, "summary": summary, "next_action": next_action})
+        else:
+            self.completed = (activity_id, summary, status)
+        return len(messages) + len(runtime_events)
+
+    def complete_chat_activity(self, activity_id, summary, *, status="succeeded"):
+        self.completed = (activity_id, summary, status)
+        self.final_status = "success" if self.completion_result else "queued"
+        return self.completion_result
+
+    def get_activity_thread(self, activity_id):
+        return {"activity": {"id": activity_id, "status": self.final_status}}
+
+    def update_activity_progress(self, activity_id, **progress):
+        self.progress = (activity_id, progress)
+
+    def create_chat_activity(self, *, turn_id, title, summary, message_id=None, **_kwargs):
+        activity_id = f"fallback-{turn_id}"
+        self.known_ids = (self.known_ids or set()) | {activity_id}
+        self.created = (activity_id, title, summary, message_id)
+        return type("Activity", (), {"id": activity_id})()
+
+    def fail_chat_turn(self, *args, **kwargs):
+        self.failed = (args, kwargs)
 
 
 def test_user_turn_records_chat_messages_on_the_selected_activity(tmp_path):
@@ -36,12 +71,15 @@ def test_user_turn_records_chat_messages_on_the_selected_activity(tmp_path):
 
     def run_turn(**_kwargs):
         return AgentTurn(
-            activity_id="activity-1",
             messages=[
                 {"id": "user-1", "role": "user", "text": "Update the refund rule.", "sequence": 1},
                 {"id": "assistant-1", "role": "assistant", "text": "I updated the rule.", "sequence": 4},
             ],
-            activities=[{"id": "tool-1", "kind": "tool", "tool_name": "write_policy", "sequence": 2}],
+            activities=[
+                {"id": "resolve-1", "kind": "tool", "tool_name": "resolve_chat_activity", "arguments": {"disposition": "continue", "activity_id": "activity-1", "request_key": "policy"}, "sequence": 2},
+                {"id": "resolve-result-1", "kind": "evidence", "tool_name": "resolve_chat_activity", "detail": json.dumps({"activity_id": "activity-1", "disposition": "continue"}), "sequence": 3},
+                {"id": "tool-1", "kind": "tool", "tool_name": "write_policy", "sequence": 4},
+            ],
         )
 
     asyncio.run(service.run_user_turn(
@@ -55,146 +93,298 @@ def test_user_turn_records_chat_messages_on_the_selected_activity(tmp_path):
             {"id": "user-1", "role": "user", "text": "Update the refund rule.", "sequence": 1},
             {"id": "assistant-1", "role": "assistant", "text": "I updated the rule.", "sequence": 4},
         ],
-        [{"id": "tool-1", "kind": "tool", "tool_name": "write_policy", "sequence": 2}],
+        [
+            {"id": "resolve-1", "kind": "tool", "tool_name": "resolve_chat_activity", "arguments": {"disposition": "continue", "activity_id": "activity-1", "request_key": "policy"}, "sequence": 2},
+            {"id": "resolve-result-1", "kind": "evidence", "tool_name": "resolve_chat_activity", "detail": json.dumps({"activity_id": "activity-1", "disposition": "continue"}), "sequence": 3},
+            {"id": "tool-1", "kind": "tool", "tool_name": "write_policy", "sequence": 4},
+        ],
     )]
+    assert activities.completed == ("activity-1", "I updated the rule.", "succeeded")
 
 
-def test_activity_created_during_turn_is_selected_without_attach_tool():
-    activity_id = "activity-1"
-    events = [
+def test_pending_policy_activity_remains_open_after_chat_reply(tmp_path):
+    workspace_id = "11111111-1111-4111-8111-111111111111"
+    conversation_id = "22222222-2222-4222-8222-222222222222"
+    activities = RecordingActivities()
+    service = ConversationService(
+        FileConversationRepository(tmp_path), activities,
+        owner_user_ids=frozenset({"owner-1"}),
+    )
+    service.create_conversation(workspace_id, conversation_id)
+
+    def run_turn(**_kwargs):
+        return AgentTurn(
+            messages=[
+                {"id": "user-1", "role": "user", "text": "Add a policy."},
+                {"id": "assistant-1", "role": "assistant", "text": "Policy P1.2 is pending approval."},
+            ],
+            activities=[
+                {"id": "resolve", "kind": "evidence", "tool_name": "resolve_chat_activity",
+                 "detail": '{"disposition":"create","activity_id":"activity-1"}', "sequence": 1},
+                {"id": "write", "kind": "evidence", "tool_name": "write_policy",
+                 "detail": '{"policy_id":"P1.2","approved":false}', "sequence": 2},
+            ],
+        )
+
+    asyncio.run(service.run_user_turn(
+        conversation_id, workspace_id, "Add a policy.", run_turn=run_turn,
+        actor_id="owner-1",
+    ))
+
+    assert not hasattr(activities, "completed")
+    assert activities.progress == (
+        "activity-1",
         {
-            "id": "create-call", "kind": "tool", "tool_name": "create_activity",
-            "arguments": {"title": "Review refund policy"}, "sequence": 2,
+            "status": "waiting",
+            "summary": "Policy P1.2 is pending approval.",
+            "next_action": "Approve policy: P1.2",
+        },
+    )
+
+
+def test_failed_last_tool_result_closes_chat_activity_as_failed(tmp_path):
+    workspace_id = "11111111-1111-4111-8111-111111111111"
+    conversation_id = "22222222-2222-4222-8222-222222222222"
+    activities = RecordingActivities()
+    service = ConversationService(
+        FileConversationRepository(tmp_path), activities,
+        owner_user_ids=frozenset({"owner-1"}),
+    )
+    service.create_conversation(workspace_id, conversation_id)
+
+    def run_turn(**_kwargs):
+        return AgentTurn(
+            messages=[{"id": "assistant-1", "role": "assistant", "text": "The change failed."}],
+            failed=True,
+            activities=[
+                {"id": "resolve", "kind": "evidence", "tool_name": "resolve_chat_activity",
+                 "detail": '{"disposition":"create","activity_id":"activity-1"}', "sequence": 1},
+                {"id": "error", "kind": "evidence", "tool_name": "delete_policy",
+                 "detail": "[An error occurred during execution.] Error calling tool 'delete_policy': missing",
+                 "sequence": 2},
+            ],
+        )
+
+    asyncio.run(service.run_user_turn(
+        conversation_id, workspace_id, "Delete a policy.", run_turn=run_turn,
+        actor_id="owner-1",
+    ))
+
+    assert activities.completed == ("activity-1", "The change failed.", "failed")
+
+
+def test_unrelated_success_does_not_clear_failed_mutation():
+    from lisa.runtime import chat_activity_tool_failed
+
+    assert chat_activity_tool_failed([
+        {"kind": "tool", "tool_name": "write_policy", "arguments": {"policy_id": "P1.2"},
+         "tool_call_id": "write-1", "sequence": 1},
+        {"kind": "evidence", "tool_name": "write_policy", "tool_call_id": "write-1", "sequence": 2,
+         "is_error": True, "detail": "write failed"},
+        {"kind": "tool", "tool_name": "read_policy", "arguments": {"policy_id": "P1.2"},
+         "tool_call_id": "read-1", "sequence": 3},
+        {"kind": "evidence", "tool_name": "read_policy", "tool_call_id": "read-1", "sequence": 4,
+         "is_error": False, "detail": "current policy read successfully"},
+    ])
+
+
+def test_successful_retry_clears_same_tool_error():
+    from lisa.runtime import chat_activity_tool_failed
+
+    assert not chat_activity_tool_failed([
+        {"kind": "tool", "tool_name": "write_policy", "arguments": {"policy_id": "P1.2"},
+         "tool_call_id": "write-1", "sequence": 1},
+        {"kind": "evidence", "tool_name": "write_policy", "tool_call_id": "write-1", "sequence": 2,
+         "is_error": True, "detail": "write failed"},
+        {"kind": "tool", "tool_name": "write_policy", "arguments": {"policy_id": "P1.2"},
+         "tool_call_id": "write-2", "sequence": 3},
+        {"kind": "evidence", "tool_name": "write_policy", "tool_call_id": "write-2", "sequence": 4,
+         "is_error": False, "detail": "write succeeded"},
+    ])
+
+
+def test_nested_history_error_does_not_fail_read_activity():
+    from lisa.runtime import chat_activity_tool_failed
+
+    assert not chat_activity_tool_failed([
+        {
+            "kind": "tool", "tool_name": "get_activity_thread",
+            "tool_call_id": "thread-1", "sequence": 1,
+            "arguments": {"activity_id": "activity-1"},
         },
         {
-            "id": "create-result", "kind": "evidence", "tool_name": "create_activity",
-            "detail": json.dumps({"activity_id": activity_id}), "sequence": 3,
+            "kind": "evidence", "tool_name": "get_activity_thread",
+            "tool_call_id": "thread-1", "sequence": 2, "is_error": False,
+            "detail": (
+                '[Tool \'get_activity_thread\' executed.] '
+                '{"actions":[{"summary":"Error calling tool \'write_policy\': old failure"}]}'
+            ),
+        },
+    ])
+
+
+def test_waiting_activity_without_specific_next_action_stays_waiting():
+    from lisa.runtime import chat_activity_waiting_state
+
+    assert chat_activity_waiting_state([
+        {"kind": "evidence", "tool_name": "set_activity_progress", "sequence": 1,
+         "detail": '{"status":"waiting","updated":true}'},
+    ]) == (True, "Continue the requested work")
+
+
+def test_running_activity_with_next_action_remains_waiting_after_chat_turn():
+    from lisa.runtime import chat_activity_waiting_state
+
+    running_progress = [
+        {
+            "kind": "tool", "tool_name": "set_activity_progress", "sequence": 1,
+            "arguments": {
+                "activity_id": "activity-1", "status": "running",
+                "summary": "The worker is idle while holding the migration lock.",
+                "next_action": "Verify the worker can be safely stopped",
+            },
+        },
+        {
+            "kind": "evidence", "tool_name": "set_activity_progress", "sequence": 2,
+            "detail": '{"activity_id":"activity-1","status":"running","updated":true}',
+        },
+    ]
+    waiting_progress = [
+        {
+            "kind": "tool", "tool_name": "set_activity_progress", "sequence": 1,
+            "arguments": {
+                "activity_id": "activity-1", "status": "waiting",
+                "summary": "The investigation is waiting on the owner.",
+                "next_action": "Ask the owner to confirm the ledger entry",
+            },
+        },
+        {
+            "kind": "evidence", "tool_name": "set_activity_progress", "sequence": 2,
+            "detail": '{"activity_id":"activity-1","status":"waiting","updated":true}',
+        },
+    ]
+    assert chat_activity_waiting_state(running_progress) == (
+        True, "Verify the worker can be safely stopped"
+    )
+    assert chat_activity_waiting_state(waiting_progress) == (
+        True, "Ask the owner to confirm the ledger entry"
+    )
+
+
+def test_approving_one_policy_does_not_clear_another_pending_policy():
+    from lisa.runtime import chat_activity_waiting_state
+
+    assert chat_activity_waiting_state([
+        {"kind": "evidence", "tool_name": "write_policy", "sequence": 1,
+         "detail": '{"policy_id":"P1.2","approved":false}'},
+        {"kind": "evidence", "tool_name": "write_policy", "sequence": 2,
+         "detail": '{"policy_id":"P1.3","approved":false}'},
+        {"kind": "evidence", "tool_name": "approve_policy", "sequence": 3,
+         "detail": '{"policy_id":"P1.2","approved":true}'},
+        {"kind": "evidence", "tool_name": "complete_activity", "sequence": 4,
+         "detail": '{"completed":true,"status":"success"}'},
+    ]) == (True, "Approve policy: P1.3")
+
+
+def test_rejected_chat_completion_is_reported(caplog):
+    from lisa.services.chat_activities import record_chat_activity_trajectories
+
+    activities = RecordingActivities(known_ids={"activity-1"})
+    activities.completion_result = False
+    with pytest.raises(RuntimeError, match="remains queued"):
+        record_chat_activity_trajectories(
+            activities,
+            activity_ids=["activity-1"],
+            messages=[],
+            activities=[],
+            final_summary="Lisa replied.",
+        )
+
+    assert "Could not persist and finalize Lisa chat activity activity-1" in caplog.text
+
+
+def test_chat_finalization_errors_propagate_to_the_turn_boundary():
+    from lisa.services.chat_activities import record_chat_activity_trajectories
+
+    activities = RecordingActivities(known_ids={"activity-1"})
+
+    def fail_completion(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    activities.record_chat_turn_trajectory = fail_completion
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        record_chat_activity_trajectories(
+            activities,
+            activity_ids=["activity-1"],
+            messages=[],
+            activities=[],
+            final_summary="Lisa replied.",
+        )
+
+
+def test_missing_resolved_activity_is_a_tracking_failure():
+    from lisa.services.chat_activities import record_chat_activity_trajectories
+
+    activities = RecordingActivities(known_ids=set())
+    with pytest.raises(RuntimeError, match="does not exist"):
+        record_chat_activity_trajectories(
+            activities,
+            activity_ids=["deleted-activity"],
+            messages=[],
+            activities=[],
+            final_summary="Lisa replied.",
+        )
+
+
+def test_resolved_chat_activities_collects_multiple_dispositions():
+    events = [
+        {
+            "id": "first", "kind": "tool", "tool_name": "resolve_chat_activity",
+            "arguments": {"disposition": "continue", "activity_id": "activity-1", "request_key": "refund"}, "sequence": 2,
+        },
+        {
+            "id": "first-result", "kind": "evidence", "tool_name": "resolve_chat_activity",
+            "detail": json.dumps({"disposition": "continue", "activity_id": "activity-1"}), "sequence": 3,
+        },
+        {
+            "id": "second-result", "kind": "evidence", "tool_name": "mcp_lisa_resolve_chat_activity",
+            "detail": "[Tool 'resolve_chat_activity' executed.]\n" + json.dumps({"disposition": "create", "activity_id": "activity-2"}), "sequence": 4,
         },
     ]
 
-    assert selected_chat_activity_id(events) == activity_id
+    assert selected_chat_activity_ids(events) == ["activity-1", "activity-2"]
 
 
-def test_prefixed_openhands_tool_names_select_created_activity():
+def test_resolved_activity_accepts_prefixed_names_and_json_arguments():
     events = [
-        {
-            "id": "create-result", "kind": "evidence",
-            "tool_name": "mcp_lisa_create_activity",
-            "detail": "[Tool 'create_activity' executed.]\n"
-                      + json.dumps({"activity_id": "activity-1"}), "sequence": 2,
-        },
-        {
-            "id": "attach", "kind": "tool",
-            "tool_name": "mcp_lisa_attach_chat_turn_to_activity",
-            "arguments": json.dumps({"activity_id": "activity-1"}), "sequence": 3,
-        },
+        {"id": "result", "kind": "evidence", "tool_name": "mcp_lisa_resolve_chat_activity",
+         "detail": "[Tool 'resolve_chat_activity' executed.]\n" + json.dumps({"disposition": "continue", "activity_id": "activity-1"}), "sequence": 2},
     ]
 
-    assert selected_chat_activity_id(events) == "activity-1"
+    assert selected_chat_activity_ids(events) == ["activity-1"]
 
 
-def test_prefixed_find_activity_list_selects_single_matching_result():
-    events = [{
-        "id": "find-result", "kind": "evidence", "tool_name": "find_activity",
-        "detail": "[Tool 'find_activity' executed.]\n"
-                 + json.dumps([{"id": "activity-1", "title": "Refund policy review"}]),
-        "sequence": 2,
-    }]
+def test_activity_runtime_events_are_partitioned_by_resolved_request():
+    from lisa.runtime import activity_events_for_target
 
-    assert selected_chat_activity_id(events) == "activity-1"
-
-
-def test_find_activity_does_not_infer_from_multiple_or_malformed_results():
-    multiple = [{
-        "id": "find-result", "kind": "evidence", "tool_name": "find_activity",
-        "detail": json.dumps([{"id": "activity-1"}, {"id": "activity-2"}]),
-        "sequence": 2,
-    }]
-    malformed = [{
-        "id": "find-result", "kind": "evidence", "tool_name": "find_activity",
-        "detail": "[Tool 'find_activity' executed.]\n" + json.dumps([None]),
-        "sequence": 2,
-    }]
-
-    assert selected_chat_activity_id(multiple) is None
-    assert selected_chat_activity_id(malformed) is None
-
-
-def test_blank_activity_ids_are_ignored():
     events = [
-        {
-            "id": "attach", "kind": "tool", "tool_name": "attach_chat_turn_to_activity",
-            "arguments": json.dumps({"activity_id": "  "}), "sequence": 2,
-        },
-        {
-            "id": "create-result", "kind": "evidence", "tool_name": "create_activity",
-            "detail": "[Tool 'create_activity' executed.]\n"
-                     + json.dumps({"activity_id": "  "}), "sequence": 3,
-        },
+        {"id": "resolve-a", "kind": "tool", "tool_name": "resolve_chat_activity", "sequence": 1},
+        {"id": "result-a", "kind": "evidence", "tool_name": "resolve_chat_activity", "detail": '{"activity_id":"a","disposition":"create"}', "sequence": 2},
+        {"id": "tool-a", "kind": "tool", "tool_name": "read_policy", "sequence": 3},
+        {"id": "resolve-b", "kind": "tool", "tool_name": "resolve_chat_activity", "sequence": 4},
+        {"id": "result-b", "kind": "evidence", "tool_name": "resolve_chat_activity", "detail": '{"activity_id":"b","disposition":"create"}', "sequence": 5},
+        {"id": "tool-b", "kind": "tool", "tool_name": "evaluate_session", "sequence": 6},
     ]
 
-    assert selected_chat_activity_id(events) is None
+    assert [item["id"] for item in activity_events_for_target(events, ["a", "b"], "a")] == ["resolve-a", "result-a", "tool-a"]
+    assert [item["id"] for item in activity_events_for_target(events, ["a", "b"], "b")] == ["resolve-b", "result-b", "tool-b"]
 
 
-def test_activity_continuation_tool_selects_its_existing_activity():
-    events = [
-        {
-            "id": "progress-call", "kind": "tool", "tool_name": "update_activity",
-            "arguments": {"activity_id": "activity-1", "event_title": "Policy checked"},
-            "sequence": 2,
-        },
-    ]
+def test_explicit_skip_is_distinct_from_missing_disposition():
+    events = [{"id": "skip", "kind": "tool", "tool_name": "skip_chat_activity_for_turn",
+               "arguments": {"reason": "Greeting"}, "sequence": 2}]
 
-    assert selected_chat_activity_id(events) == "activity-1"
-
-
-def test_multiple_activity_targets_require_explicit_selection():
-    events = [
-        {
-            "id": "first", "kind": "tool", "tool_name": "update_activity",
-            "arguments": {"activity_id": "activity-1"}, "sequence": 2,
-        },
-        {
-            "id": "second", "kind": "tool", "tool_name": "complete_activity",
-            "arguments": {"activity_id": "activity-2"}, "sequence": 3,
-        },
-    ]
-
-    assert selected_chat_activity_id(events) is None
-
-
-def test_created_and_continued_activity_targets_are_ambiguous():
-    events = [
-        {
-            "id": "continued", "kind": "tool", "tool_name": "get_activity_thread",
-            "arguments": {"activity_id": "existing"}, "sequence": 2,
-        },
-        {
-            "id": "created", "kind": "evidence", "tool_name": "create_activity",
-            "detail": json.dumps({"activity_id": "new"}), "sequence": 3,
-        },
-    ]
-
-    assert selected_chat_activity_id(events) is None
-
-
-def test_explicit_activity_selection_overrides_tool_inference():
-    events = [
-        {
-            "id": "create-call", "kind": "tool", "tool_name": "create_activity",
-            "arguments": {}, "sequence": 2,
-        },
-        {
-            "id": "create-result", "kind": "evidence", "tool_name": "create_activity",
-            "detail": json.dumps({"activity_id": "created-activity"}), "sequence": 3,
-        },
-        {
-            "id": "attach", "kind": "tool", "tool_name": "attach_chat_turn_to_activity",
-            "arguments": {"activity_id": "selected-activity"}, "sequence": 4,
-        },
-    ]
-
-    assert selected_chat_activity_id(events) == "selected-activity"
+    assert selected_chat_activity_ids(events) == []
 
 
 def test_scheduled_turn_does_not_attach_internal_prompt_to_chat_activity(tmp_path):
@@ -209,7 +399,6 @@ def test_scheduled_turn_does_not_attach_internal_prompt_to_chat_activity(tmp_pat
 
     def run_turn(**_kwargs):
         return AgentTurn(
-            activity_id="activity-1",
             messages=[{"id": "scheduled-1", "role": "user", "text": "Internal prompt"}],
             activities=[],
         )
@@ -234,7 +423,6 @@ def test_non_owner_turn_does_not_copy_chat_into_shared_activity(tmp_path):
 
     def run_turn(**_kwargs):
         return AgentTurn(
-            activity_id="activity-1",
             messages=[{"id": "user-1", "role": "user", "text": "Private chat"}],
             activities=[],
         )
@@ -259,9 +447,9 @@ def test_missing_activity_target_does_not_break_chat_turn(tmp_path):
 
     def run_turn(**_kwargs):
         return AgentTurn(
-            activity_id="activity-no-longer-exists",
             messages=[{"id": "user-2", "role": "user", "text": "Continue."}],
-            activities=[],
+            failed=True,
+            activities=[{"id": "work", "kind": "tool", "tool_name": "read_policy", "sequence": 1}],
         )
 
     asyncio.run(service.run_user_turn(
@@ -269,4 +457,118 @@ def test_missing_activity_target_does_not_break_chat_turn(tmp_path):
         actor_id="owner-1",
     ))
 
+    assert len(activities.calls) == 1
+    assert activities.calls[0][0].startswith("fallback-")
+    assert activities.calls[0][2][0]["label"] == (
+        "Activity routing fallback: Lisa provided no valid resolution for this request"
+    )
+    assert activities.completed[2] == "failed"
+    assert activities.completed == (
+        activities.created[0],
+        "Lisa finished this request; see the timeline for recorded tool results.",
+        "failed",
+    )
+    assert [event["id"] for event in activities.calls[0][2]] == [
+        f"fallback-resolution:{activities.created[0].removeprefix('fallback-')}", "work",
+    ]
+
+
+def test_fallback_binds_the_current_user_message_after_historical_messages(tmp_path):
+    workspace_id = "11111111-1111-4111-8111-111111111111"
+    conversation_id = "22222222-2222-4222-8222-222222222222"
+    activities = RecordingActivities()
+    service = ConversationService(
+        FileConversationRepository(tmp_path), activities,
+        owner_user_ids=frozenset({"owner-1"}),
+    )
+    service.create_conversation(workspace_id, conversation_id)
+
+    def previous_turn(**_kwargs):
+        return AgentTurn(messages=[
+            {"id": "old-user", "role": "user", "text": "Old request."},
+            {"id": "old-assistant", "role": "assistant", "text": "Old reply."},
+        ], activities=[])
+
+    asyncio.run(service.run_user_turn(
+        conversation_id, workspace_id, "Old request.", run_turn=previous_turn,
+        actor_id="someone-else",
+    ))
+
+    def current_turn(**_kwargs):
+        return AgentTurn(messages=[
+            {"id": "old-user", "role": "user", "text": "Old request."},
+            {"id": "old-assistant", "role": "assistant", "text": "Old reply."},
+            {"id": "current-user", "role": "user", "text": "Track this request."},
+            {"id": "current-assistant", "role": "assistant", "text": "I tracked it."},
+        ], activities=[])
+
+    asyncio.run(service.run_user_turn(
+        conversation_id, workspace_id, "Track this request.", run_turn=current_turn,
+        actor_id="owner-1",
+    ))
+
+    assert activities.created[3] == "current-user"
+    assert [message["id"] for message in activities.calls[0][1]] == [
+        "current-user", "current-assistant",
+    ]
+
+
+def test_independent_requests_share_chat_but_keep_tool_events_scoped(tmp_path):
+    workspace_id = "11111111-1111-4111-8111-111111111111"
+    conversation_id = "22222222-2222-4222-8222-222222222222"
+    activities = RecordingActivities()
+    service = ConversationService(FileConversationRepository(tmp_path), activities,
+                                  owner_user_ids=frozenset({"owner-1"}))
+    service.create_conversation(workspace_id, conversation_id)
+
+    def run_turn(**_kwargs):
+        return AgentTurn(
+            messages=[{"id": "user", "role": "user", "text": "Check policy and session."}],
+            activities=[
+                {"id": "r1", "kind": "tool", "tool_name": "resolve_chat_activity", "arguments": {"request_key": "policy"}, "sequence": 1},
+                {"id": "rr1", "kind": "evidence", "tool_name": "resolve_chat_activity", "detail": '{"disposition":"create","activity_id":"a1"}', "sequence": 2},
+                {"id": "t1", "kind": "tool", "tool_name": "read_policy", "sequence": 3},
+                {"id": "r2", "kind": "tool", "tool_name": "resolve_chat_activity", "arguments": {"request_key": "session"}, "sequence": 4},
+                {"id": "rr2", "kind": "evidence", "tool_name": "resolve_chat_activity", "detail": '{"disposition":"create","activity_id":"a2"}', "sequence": 5},
+                {"id": "t2", "kind": "tool", "tool_name": "evaluate_session", "sequence": 6},
+            ],
+        )
+
+    asyncio.run(service.run_user_turn(conversation_id, workspace_id, "Check policy and session.",
+                                      run_turn=run_turn, actor_id="owner-1"))
+    assert [call[0] for call in activities.calls] == ["a1", "a2"]
+    assert all([message["id"] for message in call[1]] == ["user"] for call in activities.calls)
+    assert [event["id"] for event in activities.calls[0][2]] == ["r1", "rr1", "t1"]
+    assert [event["id"] for event in activities.calls[1][2]] == ["r2", "rr2", "t2"]
+
+
+def test_explicit_skip_creates_no_fallback_activity(tmp_path):
+    workspace_id = "11111111-1111-4111-8111-111111111111"
+    conversation_id = "22222222-2222-4222-8222-222222222222"
+    activities = RecordingActivities()
+    service = ConversationService(FileConversationRepository(tmp_path), activities,
+                                  owner_user_ids=frozenset({"owner-1"}))
+    service.create_conversation(workspace_id, conversation_id)
+    run_turn = lambda **_kwargs: AgentTurn(messages=[], activities=[
+        {"id": "skip", "kind": "evidence", "tool_name": "skip_chat_activity_for_turn",
+         "detail": '{"skipped":true}', "sequence": 1},
+    ])
+    asyncio.run(service.run_user_turn(conversation_id, workspace_id, "Hello.", run_turn=run_turn,
+                                      actor_id="owner-1"))
     assert activities.calls == []
+
+
+def test_failure_before_resolution_creates_visible_failed_fallback(tmp_path):
+    workspace_id = "11111111-1111-4111-8111-111111111111"
+    conversation_id = "22222222-2222-4222-8222-222222222222"
+    activities = RecordingActivities()
+    service = ConversationService(FileConversationRepository(tmp_path), activities,
+                                  owner_user_ids=frozenset({"owner-1"}))
+    service.create_conversation(workspace_id, conversation_id)
+    def fail(**_kwargs):
+        raise RuntimeError("backend unavailable")
+    with pytest.raises(Exception):
+        asyncio.run(service.run_user_turn(conversation_id, workspace_id, "Do work.",
+                                          run_turn=fail, actor_id="owner-1"))
+    assert activities.failed[0][1] == "Do work."
+    assert activities.failed[1]["source"] == "web"
