@@ -17,11 +17,11 @@ worktree is compared with HEAD^ so the command is useful after a local commit.
 
 from __future__ import annotations
 
-from collections import Counter
-from pathlib import Path
 import re
 import subprocess
 import sys
+from collections import Counter
+from pathlib import Path
 
 SELF = "scripts/check_sql_guardrails.py"
 CODE_SUFFIXES = {".rs", ".py", ".sh", ".bash", ".zsh", ".ts", ".tsx", ".js", ".jsx"}
@@ -31,23 +31,45 @@ FACT_SOURCE = re.compile(
     r"\"?(traces|logs)\"?\b",
     re.IGNORECASE,
 )
-LOWER_TIME_BOUND = re.compile(r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?timestamp\s*(?:>=|>)", re.IGNORECASE)
-UPPER_TIME_BOUND = re.compile(r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?timestamp\s*(?:<=|<)", re.IGNORECASE)
+LOWER_TIME_BOUND = re.compile(
+    r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?timestamp\s*(?:>=|>)", re.IGNORECASE
+)
+UPPER_TIME_BOUND = re.compile(
+    r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?timestamp\s*(?:<=|<)", re.IGNORECASE
+)
 BETWEEN_TIME_BOUND = re.compile(
     r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?timestamp\s+BETWEEN\b", re.IGNORECASE
 )
 
 SQL_PATTERNS = [
-    re.compile(r"\bSELECT\b[\s\S]*\b(?:FROM|WHERE|JOIN|UNION|GROUP\s+BY|ORDER\s+BY|LIMIT)\b", re.IGNORECASE),
-    re.compile(r"\b(?:FROM|JOIN)\s+(?:[A-Za-z_\"][A-Za-z0-9_\".]*\.)?\"?(?:traces|logs|scores)\"?\b", re.IGNORECASE),
+    re.compile(
+        r"\bSELECT\b[\s\S]*\b(?:FROM|WHERE|JOIN|UNION|GROUP\s+BY|ORDER\s+BY|LIMIT)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:FROM|JOIN)\s+(?:[A-Za-z_\"][A-Za-z0-9_\".]*\.)?\"?(?:traces|logs|scores)\"?\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bINSERT\s+INTO\b", re.IGNORECASE),
-    re.compile(r"\bUPDATE\b[\s\S]*\bSET\b", re.IGNORECASE),
+    re.compile(
+        r"\bUPDATE\s+(?:\"?[A-Za-z_][A-Za-z0-9_]*\"?\.)?"
+        r"\"?[A-Za-z_][A-Za-z0-9_]*\"?\s+SET\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bDELETE\s+FROM\b", re.IGNORECASE),
-    re.compile(r"\bCREATE\s+(?:(?:OR\s+REPLACE|TEMP(?:ORARY)?)\s+)?(?:TABLE|VIEW|SCHEMA)\b", re.IGNORECASE),
+    re.compile(
+        r"\bCREATE\s+(?:(?:OR\s+REPLACE|TEMP(?:ORARY)?)\s+)?(?:TABLE|VIEW|SCHEMA)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bALTER\s+TABLE\b", re.IGNORECASE),
     re.compile(r"\bDROP\s+(?:TABLE|VIEW|SCHEMA)\b", re.IGNORECASE),
     re.compile(
-        r"\b(?:ATTACH|DETACH)\s+(?:DATABASE\s+)?(?:'[^']+'|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_.]*)",
+        r"\bATTACH\s+(?:DATABASE\s+)?(?:'[^']+'|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_.]*)"
+        r"\s+AS\s+[A-Za-z_][A-Za-z0-9_]*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bDETACH\s+(?:DATABASE\s+)?(?:'[^']+'|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_.]*)",
         re.IGNORECASE,
     ),
     re.compile(
@@ -73,8 +95,7 @@ def git(*args: str, check: bool = True) -> str:
     result = subprocess.run(
         ["git", *args],
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if check and result.returncode != 0:
@@ -83,12 +104,15 @@ def git(*args: str, check: bool = True) -> str:
 
 
 def commit_exists(rev: str) -> bool:
-    return subprocess.run(
-        ["git", "cat-file", "-e", f"{rev}^{{commit}}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode == 0
+    return (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{rev}^{{commit}}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
 
 
 def choose_base() -> str:
@@ -102,7 +126,9 @@ def choose_base() -> str:
 def changed_paths(base: str) -> list[str]:
     # Include deletes and renames so moved SQL can be credited from the old path.
     paths: set[str] = set()
-    for line in git("diff", "--name-status", "-M", "--diff-filter=ACMRD", base, "--").splitlines():
+    for line in git(
+        "diff", "--name-status", "-M", "--diff-filter=ACMRD", base, "--"
+    ).splitlines():
         parts = [p.strip() for p in line.split("\t") if p.strip()]
         for p in parts[1:]:
             paths.add(p)
@@ -158,9 +184,7 @@ def skip_javascript_regex(text: str, i: int) -> int | None:
     if previous < 0:
         can_start = True
     elif (
-        text[previous] in "+-"
-        and previous > 0
-        and text[previous - 1] == text[previous]
+        text[previous] in "+-" and previous > 0 and text[previous - 1] == text[previous]
     ):
         # `n++ / value` and `n-- / value` are division expressions. A doubled
         # operator is postfix when the token before it already ends an
@@ -170,10 +194,7 @@ def skip_javascript_regex(text: str, i: int) -> int | None:
             before_operator -= 1
         can_start = not (
             before_operator >= 0
-            and (
-                text[before_operator].isalnum()
-                or text[before_operator] in "_$)]}\"'"
-            )
+            and (text[before_operator].isalnum() or text[before_operator] in "_$)]}\"'")
         )
     elif text[previous] in "=([{,:;!?&|+-*%^~<>":
         can_start = True
@@ -386,7 +407,9 @@ def is_sql_like(value: str) -> bool:
     return any(pattern.search(candidate) for pattern in SQL_PATTERNS)
 
 
-def path_sql_delta(base: str, path: str) -> tuple[Counter[str], list[tuple[str, int]]] | None:
+def path_sql_delta(
+    base: str, path: str
+) -> tuple[Counter[str], list[tuple[str, int]]] | None:
     """Return (removed_counts, new_literals_with_lines) for a changed code path."""
     if path == SELF:
         return None
@@ -464,7 +487,10 @@ def check_sql_template(path: str) -> list[str]:
 def main() -> int:
     base = choose_base()
     if not commit_exists(base):
-        print(f"SQL guardrail error: base commit {base!r} is not available", file=sys.stderr)
+        print(
+            f"SQL guardrail error: base commit {base!r} is not available",
+            file=sys.stderr,
+        )
         return 2
 
     paths = changed_paths(base)

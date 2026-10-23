@@ -15,13 +15,32 @@ from lisa.mcp_app import create_server
 from lisa.views.database import LISA_DATABASE_SCHEMA
 
 
+async def load_all_tool_namespaces(client):
+    for namespace in (
+        "activities",
+        "policies",
+        "sessions",
+        "evaluation",
+        "database",
+        "conversation",
+    ):
+        await client.call_tool("load_tool_namespace", {"namespace": namespace})
+
+
 def test_mcp_public_policy_contract(lisa_test_context):
-    server = create_server(
-        build_services(lisa_test_context())
-    )
+    server = create_server(build_services(lisa_test_context()))
 
     async def contract():
         async with Client(server) as client:
+            for namespace in (
+                "activities",
+                "policies",
+                "sessions",
+                "evaluation",
+                "database",
+                "conversation",
+            ):
+                await client.call_tool("load_tool_namespace", {"namespace": namespace})
             tools = await client.list_tools()
         return sorted(
             [
@@ -38,9 +57,54 @@ def test_mcp_public_policy_contract(lisa_test_context):
     assert asyncio.run(contract()) == expected
 
 
+def test_mcp_tool_namespaces_load_on_demand_and_persist(lisa_test_context):
+    import asyncio
+    from uuid import uuid4
+
+    conversation_id = str(uuid4())
+    services = build_services(lisa_test_context(conversation_id=conversation_id))
+    server = create_server(services)
+
+    async def workflow():
+        async with Client(server) as client:
+            initial = {tool.name for tool in await client.list_tools()}
+            assert initial == {"discover_tool_namespaces", "load_tool_namespace"}
+            found = await client.call_tool("discover_tool_namespaces", {"query": "policy approval"})
+            assert any(item["name"] == "policies" for item in found.data)
+            await client.call_tool("load_tool_namespace", {"namespace": "policies"})
+            loaded = {tool.name for tool in await client.list_tools()}
+            assert {"list_policies", "read_policy", "write_policy", "approve_policy"} <= loaded
+            assert "get_session" not in loaded
+            return services.conversation_repository.conversation_directory(
+                services.context.workspace_id(), conversation_id
+            )
+
+    directory = asyncio.run(workflow())
+    assert services.conversation_repository.context_repository(directory).loaded_namespaces() == {
+        "policies"
+    }
+
+
+def test_activity_tool_schemas_explain_turn_resolution_workflow(lisa_test_context):
+    services = build_services(lisa_test_context())
+
+    async def descriptions():
+        async with Client(create_server(services)) as client:
+            await client.call_tool("load_tool_namespace", {"namespace": "activities"})
+            return {tool.name: tool.description for tool in await client.list_tools()}
+
+    tools = asyncio.run(descriptions())
+
+    assert "find_activity first" in tools["find_activity"].casefold()
+    assert "before any task-specific tool work" in tools["resolve_chat_activity"].casefold()
+    assert "scope its later" in tools["resolve_chat_activity"].casefold()
+
+
 def test_mcp_activity_tools_defer_active_chat_completion(lisa_test_context):
     context = lisa_test_context(
-        turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+        turn_source="web",
+        actor_id="owner-1",
+        owner_user_ids=frozenset({"owner-1"}),
     )
     context = replace(context, chat_turn_id="test-turn-1")
     services = build_services(context)
@@ -48,16 +112,25 @@ def test_mcp_activity_tools_defer_active_chat_completion(lisa_test_context):
 
     async def workflow():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             created = await client.call_tool(
                 "resolve_chat_activity",
-                {"disposition": "create", "request_key": "review", "title": "Review session",
-                 "summary": "Review the selected session."},
+                {
+                    "disposition": "create",
+                    "request_key": "review",
+                    "title": "Review session",
+                    "summary": "Review the selected session.",
+                },
             )
             activity_id = created.data["activity_id"]
             second = await client.call_tool(
                 "resolve_chat_activity",
-                {"disposition": "create", "request_key": "policy", "title": "Review policy",
-                 "summary": "Review the pending policy."},
+                {
+                    "disposition": "create",
+                    "request_key": "policy",
+                    "title": "Review policy",
+                    "summary": "Review the pending policy.",
+                },
             )
             second_activity_id = second.data["activity_id"]
             recent = await client.call_tool("list_recent_activities", {"limit": 10})
@@ -71,7 +144,8 @@ def test_mcp_activity_tools_defer_active_chat_completion(lisa_test_context):
                 },
             )
             services.activity_store.update_activity_progress(
-                activity_id, status="waiting",
+                activity_id,
+                status="waiting",
                 summary="Policy P1.2 is awaiting owner approval.",
                 next_action="Approve policy: P1.2",
             )
@@ -83,23 +157,34 @@ def test_mcp_activity_tools_defer_active_chat_completion(lisa_test_context):
             assert current["activity"]["status"] == "blocked"
             assert current["activity"]["next_action"] == "Approve policy: P1.2"
             assert services.activity_store.complete_chat_activity(
-                activity_id, "Policy workflow completed.",
+                activity_id,
+                "Policy workflow completed.",
             )
             assert services.activity_store.complete_chat_activity(
-                second_activity_id, "Policy workflow completed.",
+                second_activity_id,
+                "Policy workflow completed.",
             )
             services.activity_store.record_conversation_trajectory(
                 activity_id,
                 [{"id": "thread-user-message", "role": "user", "text": "Review session."}],
-                [{"id": "thread-runtime-event", "kind": "tool", "tool_name": "read_policy", "sequence": 2}],
+                [
+                    {
+                        "id": "thread-runtime-event",
+                        "kind": "tool",
+                        "tool_name": "read_policy",
+                        "sequence": 2,
+                    }
+                ],
             )
             thread = await client.call_tool("get_activity_thread", {"activity_id": activity_id})
             return activity_id, created, updated, completed, thread
 
     activity_id, created, updated, completed, thread = asyncio.run(workflow())
     assert created.data == {
-        "disposition": "create", "activity_id": activity_id,
-        "created": True, "request_key": "review",
+        "disposition": "create",
+        "activity_id": activity_id,
+        "created": True,
+        "request_key": "review",
     }
     assert not updated.is_error
     assert completed.data == {
@@ -128,17 +213,21 @@ def test_mcp_completion_resolves_activity_when_chat_resolver_was_omitted(lisa_te
 
     context = replace(
         lisa_test_context(
-            turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+            turn_source="web",
+            actor_id="owner-1",
+            owner_user_ids=frozenset({"owner-1"}),
         ),
         chat_turn_id="test-turn-unresolved-completion",
     )
     services = build_services(context)
     activity = services.activity_store.create_activity(
-        title="Continue policy review", source="web",
+        title="Continue policy review",
+        source="web",
     )
 
     async def complete_without_resolving():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             result = await client.call_tool(
                 "complete_activity",
                 {"activity_id": activity.id, "status": "success", "summary": "Done."},
@@ -148,35 +237,52 @@ def test_mcp_completion_resolves_activity_when_chat_resolver_was_omitted(lisa_te
     result = asyncio.run(complete_without_resolving())
     assert result.data["status"] == "deferred"
     assert services.activity_store.chat_activities_for_turn(context.chat_turn_id) == [activity.id]
-    assert selected_chat_activity_ids([{
-        "id": "complete-result", "kind": "evidence", "tool_name": "complete_activity",
-        "detail": json.dumps(result.data), "sequence": 1,
-    }]) == [activity.id]
+    assert selected_chat_activity_ids(
+        [
+            {
+                "id": "complete-result",
+                "kind": "evidence",
+                "tool_name": "complete_activity",
+                "detail": json.dumps(result.data),
+                "sequence": 1,
+            }
+        ]
+    ) == [activity.id]
 
 
 def test_chat_evaluation_receives_the_active_resolved_activity(lisa_test_context, monkeypatch):
     context = replace(
         lisa_test_context(
-            turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+            turn_source="web",
+            actor_id="owner-1",
+            owner_user_ids=frozenset({"owner-1"}),
         ),
         chat_turn_id="evaluate-session-turn",
     )
     services = build_services(context)
     resolved = services.activity_store.resolve_chat_activity(
-        turn_id=context.chat_turn_id, request_key="review_session",
-        disposition="create", source="web", title="Review billing-agent session",
+        turn_id=context.chat_turn_id,
+        request_key="review_session",
+        disposition="create",
+        source="web",
+        title="Review billing-agent session",
         summary="Evaluate the requested session.",
     )
     calls = []
     monkeypatch.setattr(
-        services.evaluations, "evaluate_session",
-        lambda agent, session, *, activity_id=None: calls.append((agent, session, activity_id)) or {
-            "activity_id": activity_id,
-        },
+        services.evaluations,
+        "evaluate_session",
+        lambda agent, session, *, activity_id=None: (
+            calls.append((agent, session, activity_id))
+            or {
+                "activity_id": activity_id,
+            }
+        ),
     )
 
     async def evaluate():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             return await client.call_tool(
                 "evaluate_session",
                 {"target_agent_name": "billing-agent", "session_id": "session-123"},
@@ -190,15 +296,19 @@ def test_chat_evaluation_receives_the_active_resolved_activity(lisa_test_context
 
 def test_activity_chat_resolution_rejects_non_owner(lisa_test_context):
     context = lisa_test_context(
-        turn_source="web", actor_id="outsider", owner_user_ids=frozenset({"owner-1"}),
+        turn_source="web",
+        actor_id="outsider",
+        owner_user_ids=frozenset({"owner-1"}),
     )
     services = build_services(context)
     activity = services.activity_store.create_activity(
-        title="Private conversation", source="web",
+        title="Private conversation",
+        source="web",
     )
 
     async def resolve():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             return await client.call_tool(
                 "resolve_chat_activity",
                 {"disposition": "continue", "request_key": "private", "activity_id": activity.id},
@@ -212,27 +322,43 @@ def test_activity_chat_resolution_rejects_non_owner(lisa_test_context):
 
 def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
     context = lisa_test_context(
-        turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+        turn_source="web",
+        actor_id="owner-1",
+        owner_user_ids=frozenset({"owner-1"}),
     )
     services = build_services(context)
 
     async def create_and_find():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             tools = {tool.name for tool in await client.list_tools()}
-            assert {"write_policy", "approve_policy", "delete_policy", "list_policies", "read_policy"} <= tools
-            created = await client.call_tool("write_policy", {
-                "scope": "agent",
-                "agent_name": "billing-agent",
-                "name": "Billing changes",
-                "criteria": "Record the reason before changing billing details.",
-            })
+            assert {
+                "write_policy",
+                "approve_policy",
+                "delete_policy",
+                "list_policies",
+                "read_policy",
+            } <= tools
+            created = await client.call_tool(
+                "write_policy",
+                {
+                    "scope": "agent",
+                    "agent_name": "billing-agent",
+                    "name": "Billing changes",
+                    "criteria": "Record the reason before changing billing details.",
+                },
+            )
             assert not created.is_error
             policy_id = created.data["policy_id"]
             assert re.fullmatch(r"P1\.[1-9][0-9]*", policy_id)
             assert created.data["approved"] is False
-            found = await client.call_tool("read_policy", {
-                "scope": "agent", "agent_name": "billing-agent",
-            })
+            found = await client.call_tool(
+                "read_policy",
+                {
+                    "scope": "agent",
+                    "agent_name": "billing-agent",
+                },
+            )
             assert policy_id in found.data
             assert "approved: no" in found.data
             assert "Record the reason before changing billing details." in found.data
@@ -242,25 +368,34 @@ def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
 
     async def approve():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             return await client.call_tool("approve_policy", {"policy_id": policy_id})
 
     approved = asyncio.run(approve())
     assert not approved.is_error
     assert approved.data["policy_id"] == policy_id
     assert approved.data["approved"] is True
-    assert services.policy_service.read_policy_records(
-        "agent", "billing-agent",
-    )[0].approved is True
+    assert (
+        services.policy_service.read_policy_records(
+            "agent",
+            "billing-agent",
+        )[0].approved
+        is True
+    )
 
     async def update():
         async with Client(create_server(services)) as client:
-            return await client.call_tool("write_policy", {
-                "scope": "agent",
-                "agent_name": "billing-agent",
-                "policy_id": policy_id,
-                "name": "Billing changes",
-                "criteria": "Record and verify the reason before changing billing details.",
-            })
+            await load_all_tool_namespaces(client)
+            return await client.call_tool(
+                "write_policy",
+                {
+                    "scope": "agent",
+                    "agent_name": "billing-agent",
+                    "policy_id": policy_id,
+                    "name": "Billing changes",
+                    "criteria": "Record and verify the reason before changing billing details.",
+                },
+            )
 
     updated = asyncio.run(update())
     assert not updated.is_error
@@ -274,17 +409,22 @@ def test_policy_lifecycle_uses_only_human_readable_policy_id(lisa_test_context):
 
     async def approve_updated_policy():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             return await client.call_tool("approve_policy", {"policy_id": policy_id})
 
     reapproved = asyncio.run(approve_updated_policy())
     assert reapproved.data["policy_id"] == policy_id
     assert reapproved.data["approved"] is True
-    assert [row.id for row in services.policy_service.approved_rules("billing-agent")] == [policy_id]
+    assert [row.id for row in services.policy_service.approved_rules("billing-agent")] == [
+        policy_id
+    ]
 
 
 def test_delete_policy_executes_for_authorized_owner(lisa_test_context):
     context = lisa_test_context(
-        turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+        turn_source="web",
+        actor_id="owner-1",
+        owner_user_ids=frozenset({"owner-1"}),
     )
     services = build_services(context)
     record = services.policy_service.write_policy(
@@ -293,12 +433,15 @@ def test_delete_policy_executes_for_authorized_owner(lisa_test_context):
 
     async def delete():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             return await client.call_tool("delete_policy", {"policy_id": record.id})
 
-    outsider = build_services(replace(
-        context,
-        actor_id="outsider",
-    ))
+    outsider = build_services(
+        replace(
+            context,
+            actor_id="outsider",
+        )
+    )
     with pytest.raises(ValueError, match="authorized Lisa owner"):
         outsider.policy_service.delete_policy(record.id)
     assert services.policy_service.list_policy_records() == [record]
@@ -338,8 +481,10 @@ def test_mcp_delegates_to_scoped_services_and_redacts_results(monkeypatch, lisa_
         }
 
     monkeypatch.setattr(services.sessions, "search", search)
+
     async def call():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             return await client.call_tool(
                 "search_sessions",
                 {
@@ -414,6 +559,7 @@ def test_mcp_get_session_returns_the_evaluators_compact_trajectory(monkeypatch, 
 
     async def call():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             return await client.call_tool("get_session", {"session_id": "session"})
 
     result = asyncio.run(call())
@@ -441,6 +587,7 @@ def test_lisa_database_tool_and_schema_resource_are_exposed(lisa_test_context):
 
     async def inspect_server():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             tools = await client.list_tools()
             assert any(tool.name == "lisa_db" for tool in tools)
             resource = await client.read_resource("lisa://database/schema")
@@ -454,14 +601,19 @@ def test_evaluate_session_recovers_pending_scores_before_policy_or_telemetry_loo
 ):
     context = replace(
         lisa_test_context(
-            turn_source="web", actor_id="owner-1", owner_user_ids=frozenset({"owner-1"}),
+            turn_source="web",
+            actor_id="owner-1",
+            owner_user_ids=frozenset({"owner-1"}),
         ),
         chat_turn_id="recover-pending-turn",
     )
     services = build_services(context)
     services.activity_store.resolve_chat_activity(
-        turn_id=context.chat_turn_id, request_key="recover_session",
-        disposition="create", source="web", title="Recover pending evaluation",
+        turn_id=context.chat_turn_id,
+        request_key="recover_session",
+        disposition="create",
+        source="web",
+        title="Recover pending evaluation",
         summary="Reuse the stored evaluation result.",
     )
     monkeypatch.setattr(
@@ -489,6 +641,7 @@ def test_evaluate_session_recovers_pending_scores_before_policy_or_telemetry_loo
 
     async def call():
         async with Client(create_server(services)) as client:
+            await load_all_tool_namespaces(client)
             return await client.call_tool(
                 "evaluate_session",
                 {"target_agent_name": "agent", "session_id": "session"},

@@ -5,4 +5,6 @@ GRANT EXECUTE ON FUNCTION pgmq.archive(text, bigint) TO {writer};
 GRANT EXECUTE ON FUNCTION pgmq.delete(text, bigint) TO {writer};
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE pgmq.q_lisa_session_evaluations TO {writer};
 GRANT SELECT, INSERT, DELETE ON TABLE pgmq.a_lisa_session_evaluations TO {writer};
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE pgmq.q_lisa_conversation_checkpoints TO {writer};
+GRANT SELECT, INSERT, DELETE ON TABLE pgmq.a_lisa_conversation_checkpoints TO {writer};
 GRANT SELECT, INSERT ON TABLE lisa.session_evaluation_receipts TO {writer};

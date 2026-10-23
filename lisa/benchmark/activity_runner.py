@@ -12,14 +12,13 @@ import json
 import os
 import re
 import subprocess
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import psycopg
-
-from benchmark.policy_seed import seed_policy_document
 from conftest import (
     LisaTestDatabase,
     create_lisa_test_database,
@@ -32,6 +31,8 @@ from datasets.activity_dataset import (
     ActivityTurn,
     load_activity_dataset,
 )
+
+from benchmark.policy_seed import seed_policy_document
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILLS = ROOT / "lisa" / "skills"
@@ -82,7 +83,10 @@ def _score_state(
                 "next_action_contains"
             ].casefold() not in (candidate.get("next_action") or "").casefold():
                 continue
-            if label.get("min_timeline_actions", 0) or label.get("timeline_text_contains"):
+            if (
+                label.get("min_timeline_actions", 0)
+                or label.get("timeline_text_contains")
+            ):
                 detail = services.activity_store.get_activity_thread(str(candidate["id"]))
                 summaries = [str(action.get("summary") or "") for action in detail["actions"]]
                 if len(detail["actions"]) < label.get("min_timeline_actions", 0):
@@ -174,6 +178,64 @@ def _score_state(
             }
         )
     return checks
+
+
+def _activity_snapshot(
+    activity_store,
+    title_fragments: list[str],
+    *,
+    existing_snapshot: dict[str, list[dict]] | None = None,
+) -> dict[str, list[dict]]:
+    """Capture user-visible lifecycle state and timeline for named activities."""
+    feed = activity_store.list_activity_feed(limit=100)
+    snapshots: dict[str, list[dict]] = {}
+    for fragment in title_fragments:
+        if existing_snapshot is None:
+            matches = [
+                item for item in feed
+                if fragment.casefold() in str(item.get("title", "")).casefold()
+            ]
+        else:
+            candidate_ids = {
+                item["id"] for item in existing_snapshot.get(fragment, [])
+            }
+            matches = [item for item in feed if str(item.get("id")) in candidate_ids]
+        snapshots[fragment] = []
+        for item in sorted(matches, key=lambda row: str(row.get("id", ""))):
+            detail = activity_store.get_activity_thread(str(item["id"]))
+            snapshots[fragment].append(
+                {
+                    "id": str(item.get("id")),
+                    "title": item.get("title"),
+                    "status": item.get("status"),
+                    "summary": item.get("summary"),
+                    "next_action": item.get("next_action"),
+                    "details_json": item.get("details_json"),
+                    "actions": [
+                        {
+                            key: action.get(key)
+                            for key in (
+                                "seq", "event_type", "title", "summary", "actor",
+                                "reference_type", "reference_id", "status",
+                            )
+                        }
+                        for action in detail.get("actions", [])
+                    ],
+                }
+            )
+    return snapshots
+
+
+def _compare_activity_snapshots(before: dict[str, list[dict]], after: dict[str, list[dict]]) -> dict:
+    missing = [title for title, items in before.items() if not items]
+    passed = not missing and before == after
+    return {
+        "check": "unchanged_activities:" + ",".join(before),
+        "passed": passed,
+        "missing_before": missing,
+        "before": before,
+        "after": after,
+    }
 
 
 def _score_trajectory_links(activity_store, result: dict, previous_message_ids: set[str]) -> dict:
@@ -359,6 +421,22 @@ def _score_turn(
                 "passed": phrase.casefold() not in arguments.casefold(),
             }
         )
+    database_query_arguments = json.dumps(
+        [
+            item.get("arguments", {})
+            for item in calls
+            if item.get("tool_name") == "lisa_db"
+        ],
+        ensure_ascii=False,
+    )
+    for template in turn.tool_query_arguments_must_not_include:
+        phrase = _interpolate(template, substitutions)
+        action_checks.append(
+            {
+                "check": f"tool_query_arguments_exclude:{phrase}",
+                "passed": phrase.casefold() not in database_query_arguments.casefold(),
+            }
+        )
     actual_tool_errors = [
         str(item.get("tool_name"))
         for item in result["activities"]
@@ -421,6 +499,82 @@ def _score_turn(
         "reply": reply,
         "communication_checks": reply_checks,
     }
+
+
+def _transcript_excludes_checkpoint_summaries(
+    messages: list[dict], summaries: list[str]
+) -> bool:
+    """Check that private checkpoint text never appears in Lisa's visible transcript."""
+    if not messages or any(item.get("role") not in {"user", "assistant"} for item in messages):
+        return False
+    visible_text = [str(item.get("text", "")) for item in messages]
+    return all(
+        not summary.strip() or all(summary not in text for text in visible_text)
+        for summary in summaries
+    )
+
+
+def _activity_namespace_reloaded_before_use(turn: dict) -> bool:
+    """Require the activity namespace to be loaded before an activity tool call."""
+    calls = turn.get("tool_calls", [])
+    activity_tools = {
+        "find_activity",
+        "get_activity_thread",
+        "resolve_chat_activity",
+        "skip_chat_activity_for_turn",
+        "update_activity",
+        "set_activity_progress",
+        "complete_activity",
+        "list_recent_activities",
+        "set_activity_section",
+        "link_activity_reference",
+    }
+    first_activity = next(
+        (index for index, call in enumerate(calls) if call.get("name") in activity_tools), None
+    )
+    if first_activity is None:
+        return False
+
+    def arguments(call: dict) -> dict:
+        value = call.get("arguments")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+        return value if isinstance(value, dict) else {}
+
+    return any(
+        call.get("name") == "load_tool_namespace"
+        and arguments(call).get("namespace") == "activities"
+        for call in calls[:first_activity]
+    )
+
+
+def _checkpoint_namespaces_cleared(adoptions: list[dict]) -> bool:
+    return bool(adoptions) and all(not item.get("loaded_namespaces") for item in adoptions)
+
+
+def _checkpoint_cut_is_safe(view, prefix_event_ids: list[str]) -> bool:
+    """Require an exact event prefix and a cut allowed by the SDK's view invariants.
+
+    The prefix comparison rules out reordered or stale IDs. The manipulation-index
+    check keeps action/result pairs, parallel-call batches, and protected tool loops
+    intact according to the OpenHands SDK.
+    """
+    event_ids = [str(event.id) for event in view.events]
+    prefix_ids = [str(event_id) for event_id in prefix_event_ids]
+    cut = len(prefix_ids)
+    return prefix_ids == event_ids[:cut] and cut in view.manipulation_indices
+
+
+def _slack_threads_have_distinct_conversations(chat_ids: dict[str, str]) -> bool:
+    thread_ids = [
+        conversation_id
+        for key, conversation_id in chat_ids.items()
+        if key.startswith("slack:")
+    ]
+    return len(thread_ids) >= 2 and len(thread_ids) == len(set(thread_ids))
 
 
 def _seed_historical_evaluations(services, case: ActivityBenchmarkCase) -> None:
@@ -501,12 +655,20 @@ def _run_case(
     database: LisaTestDatabase,
     workspace: str,
     artifact_dir: Path,
+    *,
+    process_context_checkpoints: bool = False,
 ) -> dict:
     from lisa.backends.openhands import OpenHandsBackend
     from lisa.bootstrap import build_services
     from lisa.context import WorkspaceContext
     writer_url, reader_url = database.writer_url, database.reader_url
     data_dir = artifact_dir / "workspaces" / case.case_id
+    if process_context_checkpoints and case.case_id != "main_chat_interleaves_tasks_after_compaction":
+        # The isolation case uses Lisa's configured budget. Only the dedicated
+        # compaction case lowers it to make checkpointing quick.
+        os.environ.pop("LISA_CONTEXT_WINDOW_TOKENS", None)
+        os.environ.pop("LISA_CONTEXT_CHECKPOINT_TRIGGER_RATIO", None)
+        os.environ.pop("LISA_CONTEXT_RETAINED_TAIL_TOKENS", None)
     os.environ.update(
         {
             "LISA_WORKSPACE_ID": workspace,
@@ -534,52 +696,242 @@ def _run_case(
     chat_ids = {"main": main["conversation_id"]}
     substitutions: dict[str, str] = {}
     turns = []
-    for index, turn in enumerate(case.turns):
-        if turn.chat == "main":
-            conversation_id = chat_ids["main"]
-            source, channel, thread = "web", None, None
-        else:
-            key = f"slack:{turn.channel}:{turn.thread}"
-            if key not in chat_ids:
-                conversation_id = str(uuid4())
-                chat_ids[key] = conversation_id
-                conversations.create_conversation(workspace, conversation_id)
-            conversation_id = chat_ids[key]
-            source, channel, thread = "slack", turn.channel, turn.thread
-        text = _interpolate(turn.text, substitutions)
-        previous_message_ids = {
-            str(message.get("id"))
-            for message in conversations.get_conversation(workspace, conversation_id).get("messages", [])
-        }
-        result = asyncio.run(
-            conversations.run_user_turn(
-                conversation_id,
-                workspace,
-                text,
-                run_turn=OpenHandsBackend().run_turn,
-                turn_source=source,
-                actor_id=OWNER if turn.actor == "owner" else OUTSIDER,
-                slack_channel_id=channel,
-                slack_thread_ts=thread,
-            )
+    checkpoint_adoptions: list[dict] = []
+    checkpoint_cuts: list[dict] = []
+    current_turn_index = -1
+    if process_context_checkpoints:
+        from unittest.mock import patch
+
+        from lisa.backends import openhands as openhands_backend
+        from lisa.conversation_context import ConversationCheckpointCondenser
+
+        original_prepare = ConversationCheckpointCondenser.prepare_for_turn
+        original_checkpoint_request = openhands_backend.prepare_checkpoint_request
+
+        def record_checkpoint_adoption(condenser, events):
+            adopted = original_prepare(condenser, events)
+            if adopted:
+                context_repository = services.conversation_repository.context_repository(
+                    Path(condenser.directory)
+                )
+                checkpoint = context_repository.current_checkpoint(
+                    condenser.configuration_fingerprint
+                )
+                checkpoint_adoptions.append(
+                    {
+                        "request_id": checkpoint.get("request_id") if checkpoint else None,
+                        "event_count": len(events),
+                        "turn_index": current_turn_index,
+                        "summary": checkpoint.get("summary") if checkpoint else None,
+                        "loaded_namespaces": sorted(context_repository.loaded_namespaces()),
+                    }
+                )
+            return adopted
+
+        def record_checkpoint_cut(view, llm, repository, **kwargs):
+            request = original_checkpoint_request(view, llm, repository, **kwargs)
+            if request is not None:
+                request_id, payload = request
+                prefix_ids = payload.get("prefix_event_ids", [])
+                event_ids = [str(event.id) for event in view.events]
+                prefix_ids = [str(event_id) for event_id in prefix_ids]
+                # Check against the exact view used to capture this immutable prefix;
+                # later events can change the SDK's valid boundaries, especially for
+                # thought-enabled tool loops.
+                checkpoint_cuts.append(
+                    {
+                        "request_id": request_id,
+                        "prefix_event_count": len(prefix_ids),
+                        "event_count": len(event_ids),
+                        "matches_event_prefix": prefix_ids == event_ids[: len(prefix_ids)],
+                        "valid_sdk_boundary": len(prefix_ids) in view.manipulation_indices,
+                        "passed": _checkpoint_cut_is_safe(view, prefix_ids),
+                    }
+                )
+            return request
+
+        prepare_patch = patch.object(
+            ConversationCheckpointCondenser, "prepare_for_turn", record_checkpoint_adoption
         )
-        if turn.track_activity and turn.actor == "owner":
-            turns_check = _score_trajectory_links(
-                services.activity_store, result, previous_message_ids,
+        checkpoint_patch = patch.object(
+            openhands_backend, "prepare_checkpoint_request", record_checkpoint_cut
+        )
+    else:
+        prepare_patch = None
+        checkpoint_patch = None
+    published_checkpoints: list[str] = []
+    context_checks: list[dict] = []
+    with ExitStack() as patches:
+        if prepare_patch is not None:
+            patches.enter_context(prepare_patch)
+            patches.enter_context(checkpoint_patch)
+        for index, turn in enumerate(case.turns):
+            current_turn_index = index
+            if turn.chat == "main":
+                conversation_id = chat_ids["main"]
+                source, channel, thread = "web", None, None
+            else:
+                key = f"slack:{turn.channel}:{turn.thread}"
+                if key not in chat_ids:
+                    conversation_id = str(uuid4())
+                    chat_ids[key] = conversation_id
+                    conversations.create_conversation(workspace, conversation_id)
+                conversation_id = chat_ids[key]
+                source, channel, thread = "slack", turn.channel, turn.thread
+            text = _interpolate(turn.text, substitutions)
+            previous_message_ids = {
+                str(message.get("id"))
+                for message in conversations.get_conversation(
+                    workspace, conversation_id
+                ).get("messages", [])
+            }
+            unchanged_snapshot = _activity_snapshot(
+                services.activity_store, turn.unchanged_activities
             )
-        else:
-            turns_check = None
-        _update_substitutions(services, substitutions)
-        scored_turn = _score_turn(turn, result, substitutions, index)
-        if turns_check is not None:
-            scored_turn["tool_checks"].append(turns_check)
-        turns.append(scored_turn)
+            result = asyncio.run(
+                conversations.run_user_turn(
+                    conversation_id,
+                    workspace,
+                    text,
+                    run_turn=OpenHandsBackend().run_turn,
+                    turn_source=source,
+                    actor_id=OWNER if turn.actor == "owner" else OUTSIDER,
+                    slack_channel_id=channel,
+                    slack_thread_ts=thread,
+                )
+            )
+            if turn.track_activity and turn.actor == "owner":
+                turns_check = _score_trajectory_links(
+                    services.activity_store, result, previous_message_ids,
+                )
+            else:
+                turns_check = None
+            _update_substitutions(services, substitutions)
+            scored_turn = _score_turn(turn, result, substitutions, index)
+            if turn.unchanged_activities:
+                scored_turn["tool_checks"].append(
+                    _compare_activity_snapshots(
+                        unchanged_snapshot,
+                        _activity_snapshot(
+                            services.activity_store,
+                            turn.unchanged_activities,
+                            existing_snapshot=unchanged_snapshot,
+                        ),
+                    )
+                )
+            if turns_check is not None:
+                scored_turn["tool_checks"].append(turns_check)
+            turns.append(scored_turn)
+            if process_context_checkpoints and services.conversation_checkpoint_worker is not None:
+                message = services.conversation_checkpoint_queue.read_one()
+                if message is not None:
+                    request_id = str(message.get("message", {}).get("request_id", ""))
+                    services.conversation_checkpoint_worker._process(message)
+                    directory = conversations.repository.conversation_directory(
+                        workspace, chat_ids["main"]
+                    )
+                    checkpoint = conversations.repository.context_repository(directory).read_checkpoint(
+                        request_id
+                    )
+                    if checkpoint is not None:
+                        published_checkpoints.append(request_id)
     state_checks = _score_state(
         services, case.expected.model_dump(exclude_unset=True), substitutions
     )
+    if process_context_checkpoints:
+        visible_messages = [
+            message
+            for conversation_id in set(chat_ids.values())
+            for message in conversations.get_conversation(workspace, conversation_id).get(
+                "messages", []
+            )
+        ]
+        if case.case_id == "main_chat_interleaves_tasks_after_compaction":
+            context_checks.extend(
+                [
+                    {
+                        "check": "checkpoint_published",
+                        "passed": bool(published_checkpoints),
+                        "published_request_ids": published_checkpoints,
+                    },
+                    {
+                        "check": "checkpoint_adopted",
+                        "passed": bool(checkpoint_adoptions),
+                        "adoptions": checkpoint_adoptions,
+                    },
+                    {
+                        "check": "checkpoint_prefix_ends_at_safe_sdk_boundary",
+                        # Require at least one captured checkpoint and require every
+                        # captured prefix to match its view and end at a valid SDK cut.
+                        "passed": bool(checkpoint_cuts)
+                        and all(item["passed"] for item in checkpoint_cuts),
+                        "captures": checkpoint_cuts,
+                    },
+                    {
+                        "check": "checkpoint_clears_tool_namespaces",
+                        "passed": _checkpoint_namespaces_cleared(checkpoint_adoptions),
+                        "adoption_namespaces": [
+                            item.get("loaded_namespaces") for item in checkpoint_adoptions
+                        ],
+                    },
+                    {
+                        "check": "transcript_projection_has_no_checkpoint_content",
+                        "passed": _transcript_excludes_checkpoint_summaries(
+                            visible_messages,
+                            [
+                                item["summary"]
+                                for item in checkpoint_adoptions
+                                if isinstance(item.get("summary"), str)
+                            ],
+                        ),
+                        "message_count": len(visible_messages),
+                        "roles": sorted({str(item.get("role")) for item in visible_messages}),
+                    },
+                ]
+            )
+            adoption_turn_indexes = sorted(
+                {item["turn_index"] for item in checkpoint_adoptions}
+            )
+            context_checks.append(
+                {
+                    "check": "tool_namespace_reloaded_after_checkpoint",
+                    "passed": any(
+                        _activity_namespace_reloaded_before_use(turn_result)
+                        for turn_result in turns
+                        if turn_result["turn"] in adoption_turn_indexes
+                    ),
+                    "turns_with_load": [
+                        turn_result["turn"]
+                        for turn_result in turns
+                        if _activity_namespace_reloaded_before_use(turn_result)
+                    ],
+                    "adoption_turn_indexes": adoption_turn_indexes,
+                }
+            )
+        else:
+            context_checks.append(
+                {
+                    "check": "slack_threads_have_distinct_conversations",
+                    "passed": _slack_threads_have_distinct_conversations(chat_ids),
+                    "thread_conversation_ids": {
+                        key: conversation_id
+                        for key, conversation_id in chat_ids.items()
+                        if key.startswith("slack:")
+                    },
+                }
+            )
+            context_checks.append(
+                {
+                    "check": "separate_transcripts_contain_only_chat_roles",
+                    "passed": bool(visible_messages)
+                    and all(item.get("role") in {"user", "assistant"} for item in visible_messages),
+                    "message_count": len(visible_messages),
+                    "roles": sorted({str(item.get("role")) for item in visible_messages}),
+                }
+            )
     checks = [*state_checks, *(item for turn in turns for item in turn["tool_checks"])]
     communication = [item for turn in turns for item in turn["communication_checks"]]
-    checks.extend(communication)
+    checks.extend([*communication, *context_checks])
     passed = all(item["passed"] for item in checks)
     return {
         "case_id": case.case_id,
@@ -589,6 +941,7 @@ def _run_case(
         "state_checks": state_checks,
         "tool_checks": [item for turn in turns for item in turn["tool_checks"]],
         "communication_checks": communication,
+        "context_checks": context_checks,
         "turns": turns,
         "scores": {
             "state": _rate(state_checks),
@@ -602,6 +955,15 @@ def _rate(checks: list[dict]) -> float | None:
     return None if not checks else round(sum(item["passed"] for item in checks) / len(checks), 4)
 
 
+def _benchmark_status(case_results: list[dict], runtime_failures: list[dict]) -> str:
+    """Treat any failed labeled check as a failed live benchmark run."""
+    return (
+        "failed"
+        if runtime_failures or any(not case.get("passed", False) for case in case_results)
+        else "completed"
+    )
+
+
 def _select_cases(cases: list[ActivityBenchmarkCase], split: str, case_prefix: str | None) -> list[ActivityBenchmarkCase]:
     return [
         case for case in cases
@@ -611,7 +973,12 @@ def _select_cases(cases: list[ActivityBenchmarkCase], split: str, case_prefix: s
 
 
 def run_benchmark(
-    manifest_path: Path, split: str, output: Path, case_prefix: str | None = None,
+    manifest_path: Path,
+    split: str,
+    output: Path,
+    case_prefix: str | None = None,
+    *,
+    process_context_checkpoints: bool = False,
 ) -> dict:
     manifest, cases, manifest_digest = load_activity_dataset(manifest_path)
     selected = _select_cases(cases, split, case_prefix)
@@ -627,7 +994,15 @@ def run_benchmark(
             workspace = str(uuid4())
             database = create_lisa_test_database(stack.server_url, workspace)
             try:
-                case_results.append(_run_case(case, database, workspace, artifact_dir))
+                case_results.append(
+                    _run_case(
+                        case,
+                        database,
+                        workspace,
+                        artifact_dir,
+                        process_context_checkpoints=process_context_checkpoints,
+                    )
+                )
             except Exception as error:  # noqa: BLE001 - Save provider/runtime failures to the report.
                 runtime_failures.append(
                     {"case_id": case.case_id, "error_type": type(error).__name__}
@@ -642,6 +1017,7 @@ def run_benchmark(
                         "state_checks": [],
                         "tool_checks": [],
                         "communication_checks": [],
+                        "context_checks": [],
                         "turns": [],
                         "scores": {"state": None, "tool_use": None, "communication": None},
                     }
@@ -654,6 +1030,9 @@ def run_benchmark(
         for group in ("state_checks", "tool_checks", "communication_checks")
         for item in case[group]
     ]
+    checks.extend(
+        item for case in case_results for item in case.get("context_checks", [])
+    )
 
     def macro_score(key: str, category: str | None = None) -> float | None:
         values = [
@@ -707,7 +1086,10 @@ def run_benchmark(
         },
         "cases": case_results,
         "check_count": len(checks),
-        "status": "failed" if runtime_failures else "completed",
+        "context_checks": [
+            item for case in case_results for item in case.get("context_checks", [])
+        ],
+        "status": _benchmark_status(case_results, runtime_failures),
         "runtime_failures": runtime_failures,
     }
     output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

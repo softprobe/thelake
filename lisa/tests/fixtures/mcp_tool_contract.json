@@ -93,6 +93,38 @@
     }
   },
   {
+    "name": "discover_tool_namespaces",
+    "description": "Discover Lisa tool groups by searching their purpose and supported work.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "items": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object",
+      "x-fastmcp-wrap-result": true
+    }
+  },
+  {
     "name": "evaluate_session",
     "description": "Triage approved policies for suspected violations and judge escalated policies.",
     "inputSchema": {
@@ -118,7 +150,7 @@
   },
   {
     "name": "find_activity",
-    "description": "Find matching activity records before starting or resuming work.",
+    "description": "For continuations, call find_activity first with a short description, then inspect a matching thread before resolving it.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -557,6 +589,26 @@
     }
   },
   {
+    "name": "load_tool_namespace",
+    "description": "Load a tool group's full MCP schemas into the current model context.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    }
+  },
+  {
     "name": "notify_evaluation_failure",
     "description": "Notify Slack only after Lisa reviews a stored policy failure.",
     "inputSchema": {
@@ -620,7 +672,7 @@
   },
   {
     "name": "resolve_chat_activity",
-    "description": "Create or continue one user request and scope later tool events to it.",
+    "description": "Required before any task-specific tool work: create or continue one request, bind the current turn, and scope its later tool events. For continuations, call find_activity then get_activity_thread first, then resolve with disposition=\"continue\" and the matching activity_id. Without resolution, the runtime creates a separate fallback activity for this turn.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1039,8 +1091,77 @@
     }
   },
   {
+    "name": "todo_read",
+    "description": "Read the open items in Lisa's persistent main-chat checklist.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object",
+      "x-fastmcp-wrap-result": true
+    }
+  },
+  {
+    "name": "todo_write",
+    "description": "Replace the main-chat checklist; completed and cancelled items are removed.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "status": {
+                "default": "open",
+                "enum": [
+                  "open",
+                  "completed",
+                  "cancelled"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "text"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    }
+  },
+  {
     "name": "update_activity",
-    "description": "Update an activity card and optionally append a visible timeline action.",
+    "description": "Update a card; pass both event_type and event_title, or neither, for a timeline action.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

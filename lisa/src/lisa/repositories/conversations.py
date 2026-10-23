@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
+import os
 import re
 import shutil
 import threading
+from collections.abc import Iterator
+from contextlib import asynccontextmanager, contextmanager
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, ClassVar
 from uuid import UUID
+
+from .conversation_context import ConversationContextRepository
+from .conversation_lock import conversation_lock_path
 
 
 class ConversationStorageError(ValueError):
@@ -117,3 +124,64 @@ class FileConversationRepository:
         key = (str(self.data_dir), str(directory))
         with self._shared_locks_guard:
             return self._shared_locks.setdefault(key, asyncio.Lock())
+
+    def context_repository(self, directory: Path) -> ConversationContextRepository:
+        resolved = directory.resolve()
+        if not resolved.is_relative_to(self.data_dir):
+            raise InvalidConversationId
+        return ConversationContextRepository(
+            resolved,
+            lock_path=conversation_lock_path(resolved),
+            sidecar_lock_path=conversation_lock_path(resolved, "sidecars"),
+        )
+
+    @contextmanager
+    def process_lock(self, directory: Path) -> Iterator[None]:
+        resolved = directory.resolve()
+        if not resolved.is_relative_to(self.data_dir):
+            raise InvalidConversationId
+        lock_path = conversation_lock_path(resolved)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    @asynccontextmanager
+    async def locked(self, directory: Path):
+        """Serialize conversation work across asyncio tasks and local processes."""
+        async with self.lock_for(directory):
+            loop = asyncio.get_running_loop()
+            acquiring = loop.run_in_executor(None, self._acquire_process_lock, directory)
+            try:
+                descriptor = await asyncio.shield(acquiring)
+            except asyncio.CancelledError:
+                descriptor = await acquiring
+                await asyncio.to_thread(self._release_process_lock, descriptor)
+                raise
+            try:
+                yield
+            finally:
+                await asyncio.to_thread(self._release_process_lock, descriptor)
+
+    def _acquire_process_lock(self, directory: Path) -> int:
+        resolved = directory.resolve()
+        if not resolved.is_relative_to(self.data_dir):
+            raise InvalidConversationId
+        lock_path = conversation_lock_path(resolved)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _release_process_lock(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)

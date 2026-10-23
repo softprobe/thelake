@@ -9,6 +9,7 @@ import pytest
 
 from benchmark.activity_runner import (
     _interpolate,
+    _benchmark_status,
     _rate,
     _score_activity_integrity,
     _score_state,
@@ -23,6 +24,31 @@ from lisa.repositories.lisa_database import POLICY_COLUMNS
 from lisa.views.database import LISA_DATABASE_SCHEMA
 
 DATASET = Path(__file__).resolve().parents[1] / "datasets/activity_management"
+
+
+def test_live_benchmark_status_fails_for_labeled_case_failures():
+    assert _benchmark_status([{"passed": False}], []) == "failed"
+    assert _benchmark_status([{"passed": True}], []) == "completed"
+    assert _benchmark_status([{"passed": True}], [{"case_id": "case"}]) == "failed"
+
+
+def test_lisa_prompt_makes_activity_continuation_order_atomic():
+    prompt = " ".join(LISA_SYSTEM_PROMPT.split())
+    assert "find_activity -> get_activity_thread -> resolve_chat_activity" in prompt
+    assert "Do not call todo_read, todo_write, list_recent_activities, or any other tool between these calls." in prompt
+    assert "do not call get_activity_thread again just to" in prompt.lower()
+
+
+def test_lisa_prompt_uses_minimal_flow_for_explicit_new_activity_requests():
+    prompt = " ".join(LISA_SYSTEM_PROMPT.split()).lower()
+    assert "when the user explicitly asks to create or track a new activity, do not search first" in prompt
+    assert "only record that work in lisa's activity feed" in prompt
+    assert "words such as \"investigate\" or \"agent\" in an activity title do not authorize" in prompt
+
+
+def test_lisa_prompt_describes_paired_activity_timeline_fields():
+    prompt = " ".join(LISA_SYSTEM_PROMPT.split()).lower()
+    assert "pass both event_type and event_title to append a timeline action" in prompt
 
 
 def _feed_row(activity_id, title, status="pending"):
@@ -72,6 +98,25 @@ def test_activity_benchmark_release_has_frozen_cases_and_both_splits():
     assert any(case.category == "database" for case in cases)
 
 
+def test_context_benchmark_is_separate_and_covers_interleaving_threads_and_compaction():
+    manifest, cases, digest = load_activity_dataset(
+        DATASET.parent / "conversation_context" / "manifests" / "benchmark.json"
+    )
+
+    assert manifest.name == "lisa-conversation-context-agent-benchmark-2026-10"
+    assert len(cases) == manifest.case_count == 2
+    assert {case.case_id for case in cases} == {
+        "main_chat_interleaves_tasks_after_compaction",
+        "slack_threads_keep_context_separate",
+    }
+    assert all(case.split == "benchmark" for case in cases)
+    assert any(
+        len({turn.thread for turn in case.turns if turn.chat == "slack"}) > 1
+        for case in cases
+    )
+    assert digest
+
+
 def test_activity_benchmark_can_select_new_heldout_tracking_cases_without_changing_manifest():
     manifest, cases, _ = load_activity_dataset(DATASET / "manifests/benchmark.json")
     selected = _select_cases(cases, "benchmark", "activity_tracking_")
@@ -110,16 +155,21 @@ def test_activity_request_resolution_benchmark_covers_skip_split_failure_and_mul
     assert explicit_skip.expected.activity_count == 0
     independent = by_id["independent_requests_get_separate_activities"]
     assert independent.turns[0].tool_call_counts["resolve_chat_activity"] == 2
-    assert independent.turns[0].tool_order == [
-        "resolve_chat_activity", "complete_activity",
-        "resolve_chat_activity", "complete_activity",
-    ]
+    assert independent.turns[0].tool_call_counts.get("complete_activity", 0) == 0
+    assert independent.turns[0].tool_order == ["resolve_chat_activity", "resolve_chat_activity"]
     assert "lisa_db" not in independent.turns[0].require_tools
     assert independent.expected.activity_count == 2
+    assert [item.status for item in independent.expected.activities] == ["success", "success"]
+    timeout = by_id["activity_tracking_agent_timeout"].turns[1]
+    assert timeout.require_tools.count("complete_activity") == 1
+    assert timeout.tool_order[-1] == "complete_activity"
     assert by_id["independent_requests_get_separate_activities"].turns[0].tool_call_counts[
         "resolve_chat_activity"
     ] == 2
     assert by_id["clarify_ambiguous_activity_before_update"].expected.activity_count == 3
+    assert [item.status for item in by_id[
+        "clarify_ambiguous_activity_before_update"
+    ].expected.activities] == ["blocked", "blocked", "blocked"]
     clarification = by_id["clarify_ambiguous_activity_before_update"].turns[2]
     assert "set_activity_progress" in clarification.require_tools
     assert {"update_activity", "complete_activity"} <= set(clarification.forbid_tools)
@@ -131,6 +181,8 @@ def test_activity_request_resolution_benchmark_covers_skip_split_failure_and_mul
     assert failed.turns[0].tool_call_counts == {"resolve_chat_activity": 1, "set_activity_progress": 1}
     assert failed.turns[1].tool_call_counts == {"resolve_chat_activity": 1, "evaluate_session": 1}
     assert failed.turns[1].track_activity
+    non_owner = by_id["reject_non_owner_policy_approval"]
+    assert non_owner.turns[1].expected_tool_errors == ["resolve_chat_activity"]
 
 
 def test_development_activity_cases_exercise_user_choice_and_pending_clarification():
@@ -159,7 +211,7 @@ def test_pending_policy_activities_are_waiting_in_the_public_feed():
     by_id = {case.case_id: case for case in cases}
     for case_id in (
         "create_unapproved_policy",
-        "policy_approval_with_extra_text",
+            "policy_explicitly_deferred_approval",
         "wrong_policy_id_stays_unapproved",
     ):
         labels = by_id[case_id].expected.activities
@@ -325,6 +377,61 @@ def test_activity_benchmark_fails_unexpected_tool_errors():
     assert errors["actual"] == ["lisa_db"]
 
 
+def test_activity_benchmark_query_exclusion_ignores_non_query_tool_arguments():
+    turn = ActivityTurn(
+        chat="main",
+        text="Inspect policy schema",
+        tool_query_arguments_must_not_include=["archived_at"],
+    )
+    result = {
+        "activities": [
+            {
+                "kind": "tool",
+                "tool_name": "lisa_db",
+                "arguments": {"query": "SELECT id FROM lisa.policies"},
+            },
+            {
+                "kind": "tool",
+                "tool_name": "update_activity",
+                "arguments": {"details": {"archived_at_supported": False}},
+            },
+        ],
+        "messages": [],
+    }
+
+    scored = _score_turn(turn, result, {}, 1)
+
+    assert next(
+        check for check in scored["tool_checks"]
+        if check["check"] == "tool_query_arguments_exclude:archived_at"
+    )["passed"]
+
+
+def test_activity_benchmark_query_exclusion_rejects_column_probe():
+    turn = ActivityTurn(
+        chat="main",
+        text="Inspect policy schema",
+        tool_query_arguments_must_not_include=["archived_at"],
+    )
+    result = {
+        "activities": [
+            {
+                "kind": "tool",
+                "tool_name": "lisa_db",
+                "arguments": {"query": "SELECT archived_at FROM lisa.policies"},
+            }
+        ],
+        "messages": [],
+    }
+
+    scored = _score_turn(turn, result, {}, 1)
+
+    assert not next(
+        check for check in scored["tool_checks"]
+        if check["check"] == "tool_query_arguments_exclude:archived_at"
+    )["passed"]
+
+
 def test_activity_benchmark_allows_labeled_expected_tool_errors():
     turn = ActivityTurn(
         chat="main",
@@ -354,11 +461,46 @@ def test_activity_benchmark_includes_policy_catalog_schema_case():
 
     assert case.split == "benchmark"
     assert case.turns[0].require_tools == ["lisa_db", "resolve_chat_activity"]
-    assert "archived_at" in case.turns[0].tool_arguments_must_not_include
+    assert "archived_at" in case.turns[0].tool_query_arguments_must_not_include
     assert {
         "id", "scope", "target_agent_name", "name", "criteria", "approved",
         "created_at", "updated_at",
     } <= set(case.turns[0].tool_arguments_must_include)
+    assert set(case.turns[0].reply_must_include) >= {
+        "id", "scope", "target_agent_name", "name", "criteria", "approved",
+        "created_at", "updated_at", "archived_at", "not stored",
+    }
+
+
+def test_activity_benchmark_defers_policy_when_owner_explicitly_says_not_to_approve():
+    _, cases, _ = load_activity_dataset(DATASET / "manifests/benchmark.json")
+    case = next(case for case in cases if case.case_id == "policy_explicitly_deferred_approval")
+
+    assert "do not approve it yet" in case.turns[-1].text.casefold()
+    assert "approve_policy" in case.turns[-1].forbid_tools
+    assert case.expected.pending_policy_count == 1
+
+
+def test_ambiguous_activity_case_checks_candidates_unchanged_and_waits_for_choice():
+    _, cases, _ = load_activity_dataset(DATASET / "manifests/benchmark.json")
+    expected_choices = {
+        "clarify_ambiguous_activity_before_update": (
+            "Maple 244", "Maple 245", "Maple 244 or Maple 245"
+        ),
+        "ambiguous_update_waits_for_owner_choice": (
+            "Harbor 18", "Harbor 19", "Harbor 18 or Harbor 19"
+        ),
+    }
+    for case_id, (first_title, second_title, choice) in expected_choices.items():
+        case = next(case for case in cases if case.case_id == case_id)
+        expectations = {item.title_contains: item for item in case.expected.activities}
+        assert expectations[first_title].status == "blocked"
+        assert expectations[second_title].status == "blocked"
+        clarification = next(
+            item for title, item in expectations.items() if title.startswith("Clarify")
+        )
+        assert clarification.next_action_contains == choice
+        assert case.turns[-1].unchanged_activities == [first_title, second_title]
 
 
 def test_activity_benchmark_requires_session_id_in_sql_filter():
@@ -533,7 +675,9 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "keep a newly created or updated policy's activity in `waiting`" in prompt
     assert "when an authorized owner asks to approve a policy, call approve_policy with the policy id they named" in prompt
     assert "use list_policies and read_policy" in prompt
-    assert "for an explicit request to inspect policy catalog rows or run sql diagnostics, lisa_db may read lisa.policies" in prompt
+    assert "for an explicit request to inspect policy catalog rows or run sql diagnostics, lisa_db must read lisa.policies" in prompt
+    assert "verify using an explicit zero-row projection from `lisa.policies`" in prompt
+    assert "never probe a missing column by selecting it" in prompt
     assert "it has no archived_at column, and deletion removes the row" in prompt
     assert ", ".join(POLICY_COLUMNS) in prompt
     assert "never use lisa_db to create, update, approve, or delete policies" in prompt
@@ -552,9 +696,11 @@ def test_activity_workflow_uses_activity_tools_without_database_or_session_searc
     assert "do not query lisa_db to find, create, update, or inspect activities" in database_schema
     assert "delete_policy" in database_schema
     assert "there is no archived_at column" in database_schema
+    assert "do not probe absent columns by selecting them" in database_schema
     assert ", ".join(POLICY_COLUMNS) in database_schema
     assert "truncated" in database_schema
     assert "wildcard projections are rejected" in database_schema
+    assert "full ``lisa.<relation>`` name exactly as listed" in database_schema
 
     policy_skill = " ".join((
         Path(__file__).resolve().parents[1] / "skills/learn-agent-policy/SKILL.md"
@@ -666,3 +812,48 @@ def test_activity_label_matches_any_duplicate_title_that_satisfies_lifecycle():
     checks = _score_state(services, labels.model_dump(exclude_unset=True))
 
     assert all(check["passed"] for check in checks)
+
+
+def test_activity_snapshot_detects_lifecycle_or_timeline_changes():
+    from benchmark.activity_runner import _activity_snapshot, _compare_activity_snapshots
+
+    activity = _feed_row(
+        "00000000-0000-4000-8000-000000000006", "Maple 244 retry", "blocked"
+    )
+    actions = [{"seq": 1, "event_type": "accepted", "summary": "Opened"}]
+    store = SimpleNamespace(
+        list_activity_feed=lambda **_: [activity],
+        get_activity_thread=lambda _: {"actions": actions},
+    )
+    before = _activity_snapshot(store, ["Maple 244"])
+
+    assert _compare_activity_snapshots(before, _activity_snapshot(store, ["Maple 244"]))["passed"]
+
+    actions.append({"seq": 2, "event_type": "progress", "summary": "Changed"})
+    changed = _compare_activity_snapshots(before, _activity_snapshot(store, ["Maple 244"]))
+
+    assert not changed["passed"]
+
+
+def test_activity_snapshot_compares_original_candidate_ids_after_new_similar_activity():
+    from benchmark.activity_runner import _activity_snapshot, _compare_activity_snapshots
+
+    original = _feed_row(
+        "00000000-0000-4000-8000-000000000007", "Harbor 19 checkout retry failure", "blocked"
+    )
+    store = SimpleNamespace(
+        list_activity_feed=lambda **_: [original],
+        get_activity_thread=lambda _: {"actions": []},
+    )
+    before = _activity_snapshot(store, ["Harbor 19"])
+
+    clarification = _feed_row(
+        "00000000-0000-4000-8000-000000000008",
+        "Clarification: Harbor 18 vs Harbor 19 checkout retry failure",
+        "blocked",
+    )
+    store.list_activity_feed = lambda **_: [original, clarification]
+
+    after = _activity_snapshot(store, ["Harbor 19"], existing_snapshot=before)
+
+    assert _compare_activity_snapshots(before, after)["passed"]

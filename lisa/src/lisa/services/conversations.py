@@ -57,7 +57,9 @@ async def run_turn_without_releasing_lock_early(run_turn: Callable, **kwargs: An
 
 class ConversationService:
     def __init__(
-        self, repository: FileConversationRepository, activity_store=None,
+        self,
+        repository: FileConversationRepository,
+        activity_store=None,
         owner_user_ids: frozenset[str] = frozenset(),
     ):
         self.repository = repository
@@ -105,7 +107,7 @@ class ConversationService:
     async def delete_conversation(self, workspace_id: str, conversation_id: str) -> None:
         directory = self.repository.conversation_directory(workspace_id, conversation_id)
         self.repository.load_metadata(directory, workspace_id)
-        async with self.repository.lock_for(directory):
+        async with self.repository.locked(directory):
             self.repository.load_metadata(directory, workspace_id)
             await asyncio.to_thread(self.repository.delete_conversation, directory)
 
@@ -124,7 +126,7 @@ class ConversationService:
         directory = self.repository.conversation_directory(workspace_id, conversation_id)
         metadata = self.repository.load_metadata(directory, workspace_id)
         chat_turn_id = str(uuid4())
-        async with self.repository.lock_for(directory):
+        async with self.repository.locked(directory):
             metadata = self.repository.load_metadata(directory, workspace_id)
             previous_messages = metadata.get("messages", [])
             try:
@@ -142,14 +144,26 @@ class ConversationService:
                 )
             except RuntimeError as error:
                 self._record_failed_chat_activity(
-                    chat_turn_id, turn_source, actor_id, text, error,
-                    conversation_id, slack_channel_id, slack_thread_ts,
+                    chat_turn_id,
+                    turn_source,
+                    actor_id,
+                    text,
+                    error,
+                    conversation_id,
+                    slack_channel_id,
+                    slack_thread_ts,
                 )
                 raise ConversationTurnError(503, str(error)) from error
             except Exception as error:
                 self._record_failed_chat_activity(
-                    chat_turn_id, turn_source, actor_id, text, error,
-                    conversation_id, slack_channel_id, slack_thread_ts,
+                    chat_turn_id,
+                    turn_source,
+                    actor_id,
+                    text,
+                    error,
+                    conversation_id,
+                    slack_channel_id,
+                    slack_thread_ts,
                 )
                 raise ConversationTurnError(502, "Lisa could not complete this turn") from error
             activity_ids: list[str] = []
@@ -162,7 +176,8 @@ class ConversationService:
                 previous_ids = {str(message.get("id")) for message in previous_messages}
                 if not activity_ids and not chat_activity_was_skipped(turn.activities):
                     current_user_messages = [
-                        message for message in turn.messages
+                        message
+                        for message in turn.messages
                         if message.get("role") == "user"
                         and str(message.get("id")) not in previous_ids
                     ]
@@ -180,7 +195,9 @@ class ConversationService:
                     )
                     activity_ids = [activity.id]
                     record_fallback_activity_resolution(
-                        turn.activities, activity_id=activity.id, turn_id=chat_turn_id,
+                        turn.activities,
+                        activity_id=activity.id,
+                        turn_id=chat_turn_id,
                     )
                 new_messages = [
                     {
@@ -204,14 +221,20 @@ class ConversationService:
                         "",
                     )
                     record_chat_activity_trajectories(
-                        self.activity_store, activity_ids=activity_ids,
-                        messages=new_messages, activities=turn.activities,
-                        final_summary=final_summary, turn_failed=turn.failed,
+                        self.activity_store,
+                        activity_ids=activity_ids,
+                        messages=new_messages,
+                        activities=turn.activities,
+                        final_summary=final_summary,
+                        turn_failed=turn.failed,
                     )
             if metadata["title"] == "Lisa conversation":
                 metadata["title"] = "Lisa"
             messages, activities = tag_turn(
-                turn.messages, turn.activities, previous_messages, turn_source,
+                turn.messages,
+                turn.activities,
+                previous_messages,
+                turn_source,
             )
             now = datetime.now(UTC).isoformat()
             metadata["updated_at"] = now
@@ -232,9 +255,15 @@ class ConversationService:
         return normalized[:120] or "Lisa chat request"
 
     def _record_failed_chat_activity(
-        self, turn_id: str, turn_source: str, actor_id: str | None,
-        text: str, error: Exception, conversation_id: str,
-        slack_channel_id: str | None, slack_thread_ts: str | None,
+        self,
+        turn_id: str,
+        turn_source: str,
+        actor_id: str | None,
+        text: str,
+        error: Exception,
+        conversation_id: str,
+        slack_channel_id: str | None,
+        slack_thread_ts: str | None,
     ) -> None:
         if (
             self.activity_store is None
@@ -244,7 +273,10 @@ class ConversationService:
             return
         try:
             self.activity_store.fail_chat_turn(
-                turn_id, text, str(error), source=turn_source,
+                turn_id,
+                text,
+                str(error),
+                source=turn_source,
                 origin_conversation_id=conversation_id,
                 origin_slack_channel_id=slack_channel_id,
                 origin_slack_thread_ts=slack_thread_ts,
@@ -268,7 +300,8 @@ class ConversationService:
             if marked_id == conversation_id:
                 try:
                     item = self.repository.load_metadata(
-                        self.repository.conversation_directory(normalized, conversation_id), normalized
+                        self.repository.conversation_directory(normalized, conversation_id),
+                        normalized,
                     )
                     return self._transcript(item)
                 except ConversationNotFound:

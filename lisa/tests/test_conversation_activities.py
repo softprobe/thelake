@@ -271,6 +271,79 @@ def test_running_activity_with_next_action_remains_waiting_after_chat_turn():
     )
 
 
+def test_queued_activity_with_next_action_remains_open_after_chat_turn():
+    from lisa.runtime import chat_activity_waiting_state
+
+    queued_progress = [
+        {
+            "kind": "tool", "tool_name": "set_activity_progress", "sequence": 1,
+            "arguments": {
+                "activity_id": "activity-1", "status": "queued",
+                "summary": "The owner asked Lisa to track a future investigation.",
+                "next_action": "Inspect the worker trace and request ID",
+            },
+        },
+        {
+            "kind": "evidence", "tool_name": "set_activity_progress", "sequence": 2,
+            "detail": '{"activity_id":"activity-1","status":"queued","updated":true}',
+        },
+    ]
+
+    assert chat_activity_waiting_state(queued_progress) == (
+        True, "Inspect the worker trace and request ID"
+    )
+
+
+def test_finalized_evaluation_result_overrides_an_older_waiting_progress():
+    from lisa.runtime import chat_activity_requested_status
+
+    assert chat_activity_requested_status([
+        {
+            "kind": "evidence", "tool_name": "evaluate_session", "sequence": 1,
+            "detail": (
+                '[Tool \'evaluate_session\' executed.] '
+                '{"status":"error","activity_id":"activity-1",'
+                '"activity_finalized":true}'
+            ),
+        },
+    ]) == "failed"
+
+
+def test_evaluation_owned_activity_finalization_only_records_chat_trajectory():
+    from lisa.services.chat_activities import record_chat_activity_trajectories
+
+    activities = RecordingActivities(known_ids={"activity-1"})
+    runtime_events = [
+        {
+            "id": "resolve-result", "kind": "evidence",
+            "tool_name": "resolve_chat_activity", "sequence": 1,
+            "detail": '{"disposition":"continue","activity_id":"activity-1"}',
+        },
+        {
+            "id": "evaluation-result", "kind": "evidence",
+            "tool_name": "evaluate_session", "sequence": 2,
+        "detail": (
+            '[Tool \'evaluate_session\' executed.] '
+            '{"status":"error","activity_id":"activity-1",'
+            '"activity_finalized":true}'
+        ),
+        },
+    ]
+
+    record_chat_activity_trajectories(
+        activities,
+        activity_ids=["activity-1"],
+        messages=[{"id": "assistant-1", "role": "assistant", "text": "Done."}],
+        activities=runtime_events,
+        final_summary="The review failed because the session is missing.",
+    )
+
+    assert activities.calls == [("activity-1", [
+        {"id": "assistant-1", "role": "assistant", "text": "Done."},
+    ], runtime_events)]
+    assert not hasattr(activities, "finalized")
+
+
 def test_approving_one_policy_does_not_clear_another_pending_policy():
     from lisa.runtime import chat_activity_waiting_state
 

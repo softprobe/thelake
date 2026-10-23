@@ -53,6 +53,36 @@ uv run --project lisa --env-file .env \
 - Resources + loader: `lisa/datasets/activity_management/`, `datasets.activity_dataset`
 - Report: `target/test-artifacts/lisa-activity-benchmark/<run-id>/report.json`
 - Details: [`docs/how-to/lisa-activity-evaluation.md`](../../docs/how-to/lisa-activity-evaluation.md)
+- SQL-specific column restrictions use `tool_query_arguments_must_not_include`,
+  so activity updates can accurately explain why a field is unavailable without
+  being miscounted as a database column probe.
+- A turn may list `unchanged_activities` to snapshot matched activity fields and
+  timeline events before the turn and assert they remain identical afterward.
+
+## Conversation context benchmark
+
+```sh
+uv run --project lisa --env-file .env \
+  python lisa/scripts/evaluate_context_dataset.py --live --split benchmark
+```
+
+- Resources + loader: `lisa/datasets/conversation_context/`,
+  `datasets.activity_dataset`
+- Report: `target/test-artifacts/lisa-context-benchmark/<run-id>/report.json`
+- Covers interleaved tasks in the single main chat, Slack thread isolation,
+  real checkpoint queue generation and adoption, intact transcript projection,
+  and namespace reload after checkpoint adoption.
+- The checkpoint assertion checks that generated summary text is absent from
+  visible chat messages, and requires the `activities` namespace to be loaded
+  before an activity tool on an adopted turn.
+- At capture time, the runner checks that each saved checkpoint prefix exactly
+  matches the input view and ends at one of OpenHands' valid manipulation
+  boundaries, including tool-call, result, batch, and tool-loop constraints.
+- PGMQ keeps at most one pending checkpoint job per conversation; later
+  snapshots coalesce until that job is processed.
+- This runner sets a small context budget in its own process to make background
+  checkpointing observable with short cases. It runs the actual checkpoint
+  worker and configured Gemini model; it does not change deployment settings.
 
 ---
 

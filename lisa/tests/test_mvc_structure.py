@@ -105,9 +105,9 @@ def test_root_app_assembles_fastapi_while_http_controller_defines_routes():
 def test_models_do_not_depend_on_transport_or_presentation_layers():
     for path in (PACKAGE / "models").rglob("*.py"):
         imports = _imported_modules(path)
-        assert not any(
-            name.startswith(("lisa.controllers", "lisa.views")) for name in imports
-        ), f"Model module {path} must not depend on controllers or views"
+        assert not any(name.startswith(("lisa.controllers", "lisa.views")) for name in imports), (
+            f"Model module {path} must not depend on controllers or views"
+        )
 
 
 def test_conversation_storage_and_http_contracts_have_mvc_owners():

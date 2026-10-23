@@ -3,7 +3,6 @@ import pathlib
 import sys
 import unittest
 
-
 SCRIPT = pathlib.Path(__file__).parents[1] / "scripts" / "check_sql_guardrails.py"
 SPEC = importlib.util.spec_from_file_location("check_sql_guardrails", SCRIPT)
 CHECKER = importlib.util.module_from_spec(SPEC)
@@ -41,13 +40,29 @@ class SqlLiteralDetectionTests(unittest.TestCase):
         query = "SELECT * " + "FROM sessions WHERE " + "session_id " + "= ?"
         self.assertTrue(CHECKER.is_sql_like(query))
 
+    def test_update_statement_is_sql(self):
+        query = "UP" + "DATE sessions " + "SET status = 'done'"
+        self.assertTrue(CHECKER.is_sql_like(query))
+
+    def test_activity_instructions_are_not_sql(self):
+        self.assertFalse(
+            CHECKER.is_sql_like(
+                "Update an activity through its workflow. Do not attach chat manually; "
+                "set the next action when the owner needs to respond."
+            )
+        )
+
+    def test_attach_database_statement_is_sql(self):
+        query = "AT" + "TACH DATABASE 'archive.db' " + "AS archive"
+        self.assertTrue(CHECKER.is_sql_like(query))
+
     def test_sql_literal_extractor_keeps_inline_queries_visible(self):
         query = "SELECT * " + "FROM sessions WHERE " + "session_id " + "= ?"
         source = 'query = "' + query + '"'
         self.assertEqual(CHECKER.sql_literals(source, ".py"), [(query, 1)])
 
     def test_javascript_regex_does_not_hide_or_create_sql_literals(self):
-        regex = 'const pattern = /["\']SELECT * ' + "FROM sessions WHERE/;"
+        regex = "const pattern = /[\"']SELECT * " + "FROM sessions WHERE/;"
         self.assertEqual(CHECKER.sql_literals(regex, ".js"), [])
 
         query = 'const query = "SELECT * ' + 'FROM sessions WHERE id=?";'
@@ -56,11 +71,18 @@ class SqlLiteralDetectionTests(unittest.TestCase):
             [("SELECT * " + "FROM sessions WHERE id=?", 1)],
         )
 
-    def test_javascript_division_after_postfix_increment_or_decrement_keeps_strings_visible(self):
+    def test_javascript_division_after_postfix_increment_or_decrement_keeps_strings_visible(
+        self,
+    ):
         query = "SELECT * " + "FROM sessions"
         for operator in ("++", "--"):
             with self.subTest(operator=operator):
-                source = 'const q = n' + operator + ' / "SELECT * ' + 'FROM sessions" / count;'
+                source = (
+                    "const q = n"
+                    + operator
+                    + ' / "SELECT * '
+                    + 'FROM sessions" / count;'
+                )
                 self.assertEqual(
                     CHECKER.sql_literals(source, ".js"),
                     [(query, 1)],

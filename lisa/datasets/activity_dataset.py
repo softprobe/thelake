@@ -31,10 +31,12 @@ class ActivityTurn(StrictModel):
     tool_call_counts: dict[str, int] = Field(default_factory=dict)
     tool_arguments_must_include: list[str] = Field(default_factory=list)
     tool_arguments_must_not_include: list[str] = Field(default_factory=list)
+    tool_query_arguments_must_not_include: list[str] = Field(default_factory=list)
     tool_queries_must_filter_sessions: list[str] = Field(default_factory=list)
     expected_tool_errors: list[str] = Field(default_factory=list)
     reply_must_include: list[str] = Field(default_factory=list)
     reply_must_not_include: list[str] = Field(default_factory=list)
+    unchanged_activities: list[str] = Field(default_factory=list)
 
 
 class ActivityExpectation(StrictModel):

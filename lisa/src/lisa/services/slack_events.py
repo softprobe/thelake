@@ -18,9 +18,10 @@ from ..runtime import (
     record_fallback_activity_resolution,
     selected_chat_activity_ids,
 )
-from .chat_activities import record_chat_activity_trajectories
 from ..security import redact_text
 from ..slack import SlackClient
+from .chat_activities import record_chat_activity_trajectories
+from .conversations import run_turn_without_releasing_lock_early
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,6 @@ class SlackEventService:
             receipt["updated_at"] = datetime.now(UTC).isoformat()
             self.events.save(path, receipt)
 
-
             workspace_id = receipt["workspace_id"]
             channel_id = receipt["channel_id"]
             thread_ts = receipt["thread_ts"]
@@ -100,7 +100,7 @@ class SlackEventService:
             )
             directory = self.conversations.conversation_directory(workspace_id, conversation_id)
             try:
-                async with self.conversations.lock_for(directory):
+                async with self.conversations.locked(directory):
                     if self.conversations.metadata_exists(directory):
                         metadata = self.conversations.load_metadata(directory, workspace_id)
                     else:
@@ -114,7 +114,7 @@ class SlackEventService:
                             "created_at": now,
                             "updated_at": now,
                         }
-                    turn = await asyncio.to_thread(
+                    turn = await run_turn_without_releasing_lock_early(
                         run_turn,
                         conversation_id=conversation_id,
                         directory=str(directory),
@@ -129,14 +129,14 @@ class SlackEventService:
                     is_owner = str(receipt.get("actor_id", "")) in self.owner_user_ids
                     if is_owner and self.activity_store is not None:
                         previous_ids = {
-                            str(message.get("id"))
-                            for message in metadata.get("messages", [])
+                            str(message.get("id")) for message in metadata.get("messages", [])
                         }
                         activity_ids = selected_chat_activity_ids(turn.activities)
                         if not activity_ids and not chat_activity_was_skipped(turn.activities):
                             user_message = next(
                                 (
-                                    message for message in reversed(turn.messages)
+                                    message
+                                    for message in reversed(turn.messages)
                                     if message.get("role") == "user"
                                     and str(message.get("id")) not in previous_ids
                                 ),
@@ -155,7 +155,8 @@ class SlackEventService:
                             )
                             activity_ids = [activity.id]
                             record_fallback_activity_resolution(
-                                turn.activities, activity_id=activity.id,
+                                turn.activities,
+                                activity_id=activity.id,
                                 turn_id=str(receipt["event_id"]),
                             )
                         new_messages = [
@@ -179,9 +180,12 @@ class SlackEventService:
                             "",
                         )
                         record_chat_activity_trajectories(
-                            self.activity_store, activity_ids=activity_ids,
-                            messages=new_messages, activities=turn.activities,
-                            final_summary=final_summary, turn_failed=turn.failed,
+                            self.activity_store,
+                            activity_ids=activity_ids,
+                            messages=new_messages,
+                            activities=turn.activities,
+                            final_summary=final_summary,
+                            turn_failed=turn.failed,
                         )
                     latest_reply = next(
                         (
@@ -210,7 +214,9 @@ class SlackEventService:
                 ):
                     try:
                         self.activity_store.fail_chat_turn(
-                            str(receipt["event_id"]), str(receipt.get("text", "")), str(error),
+                            str(receipt["event_id"]),
+                            str(receipt.get("text", "")),
+                            str(error),
                             source="slack",
                             origin_conversation_id=conversation_id,
                             origin_slack_channel_id=channel_id,
@@ -222,6 +228,7 @@ class SlackEventService:
                 receipt["error"] = redact_text(str(error))
             receipt["updated_at"] = datetime.now(UTC).isoformat()
             self.events.save(path, receipt)
+
 
 class SlackEventWorker:
     """Poll queued receipts and own the in-process Slack event tasks."""

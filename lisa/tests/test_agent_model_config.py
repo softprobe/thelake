@@ -26,7 +26,7 @@ def configure_openhands(monkeypatch):
 
     monkeypatch.setattr(agent, "LLM", fake_llm)
     monkeypatch.setattr(agent, "Agent", fake_agent)
-    monkeypatch.setattr(agent, "Conversation", fake_conversation)
+    monkeypatch.setattr(agent, "LocalConversation", fake_conversation)
     return captured
 
 
@@ -134,36 +134,45 @@ def test_gemini_default_remains_available_without_custom_endpoint(monkeypatch, t
     }
 
 
-def test_policy_authority_is_explicit_in_the_turn_prompt(monkeypatch, tmp_path):
+def test_policy_authority_is_not_cached_in_the_persistent_prompt(monkeypatch, tmp_path):
     captured = configure_openhands(monkeypatch)
     monkeypatch.setenv("GOOGLE_API_KEY", "gemini-test-key")
     monkeypatch.setenv("LISA_OWNER_USER_IDS", "workspace-owner")
     monkeypatch.delenv("LISA_BASE_URL", raising=False)
 
     agent.build_conversation(
-        str(uuid4()), str(tmp_path), workspace_id=str(uuid4()),
-        turn_source="slack", actor_id="guest-user",
+        str(uuid4()),
+        str(tmp_path),
+        workspace_id=str(uuid4()),
+        turn_source="slack",
+        actor_id="guest-user",
     )
 
     prompt = captured["agent"]["system_prompt"]
-    assert "current requester is not an authorized Lisa workspace owner" in prompt
-    assert "Do not call write_policy, approve_policy, or delete_policy" in prompt
+    assert "Owner-only tools" in prompt
+    assert "current requester in Lisa's service" in prompt
+    assert "current requester is not an authorized Lisa workspace owner" not in prompt
     assert "guest-user" not in prompt
 
 
-def test_owner_policy_authority_is_explicit_without_disclosing_identity(monkeypatch, tmp_path):
+def test_owner_identity_is_sent_to_runtime_tools_without_prompt_caching(monkeypatch, tmp_path):
     captured = configure_openhands(monkeypatch)
     monkeypatch.setenv("GOOGLE_API_KEY", "gemini-test-key")
     monkeypatch.setenv("LISA_OWNER_USER_IDS", "workspace-owner")
     monkeypatch.delenv("LISA_BASE_URL", raising=False)
 
     agent.build_conversation(
-        str(uuid4()), str(tmp_path), workspace_id=str(uuid4()),
-        turn_source="web", actor_id="workspace-owner",
+        str(uuid4()),
+        str(tmp_path),
+        workspace_id=str(uuid4()),
+        turn_source="web",
+        actor_id="workspace-owner",
     )
 
     prompt = captured["agent"]["system_prompt"]
-    assert "current requester is an authorized Lisa workspace owner" in prompt
+    assert "Owner-only tools" in prompt
+    assert "current requester in Lisa's service" in prompt
+    assert "current requester is an authorized Lisa workspace owner" not in prompt
     assert "workspace-owner" not in prompt
     mcp_env = captured["agent"]["mcp_config"]["lisa"].env
     assert mcp_env["LISA_ACTOR_ID"].get_secret_value() == "workspace-owner"
@@ -181,9 +190,7 @@ def test_decisions_api_key_and_thinking_level_are_forwarded(monkeypatch, tmp_pat
 
     configured = captured["agent"]["mcp_config"]["lisa"].env["OPENAI_API_KEY"]
     assert configured.get_secret_value() == "decisions-test-key"
-    thinking_level = captured["agent"]["mcp_config"]["lisa"].env[
-        "LISA_GEMINI_THINKING_LEVEL"
-    ]
+    thinking_level = captured["agent"]["mcp_config"]["lisa"].env["LISA_GEMINI_THINKING_LEVEL"]
     assert thinking_level.get_secret_value() == "medium"
     assert captured["llm"]["api_key"] == "gemini-test-key"
 

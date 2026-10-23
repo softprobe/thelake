@@ -119,6 +119,9 @@ customer DuckLake.
 | `LISA_DATABASE_RECREATE` | Set to `1` to `DROP SCHEMA lisa CASCADE` and provision a fresh schema. Required when the schema shape changes; without it, an already-bound database is left untouched. |
 | `LISA_DATABASE_WRITER_ROLE` / `LISA_DATABASE_READER_ROLE` | Optional database role names to grant during schema provisioning; defaults are `lisa_writer` and `lisa_reader`. |
 | `LISA_LLM_TRACE_ENABLED` | Opt-in local recording of Lisa chat, policy-triage, and judge calls; defaults off. `1`, `true`, or `yes` enables redacted per-call JSONL files under the workspace home’s `llm-calls/`. Records expire after 30 days; cleanup runs at startup and hourly while HTTP/MCP is running. Existing OpenHands conversation state has separate persistence. |
+| `LISA_CONTEXT_WINDOW_TOKENS` | Explicit input-window cap for chat checkpoint thresholds. When unset, Lisa uses the configured OpenHands model's `effective_max_input_tokens`, or 128,000 if the SDK does not expose a model limit. |
+| `LISA_CONTEXT_CHECKPOINT_TRIGGER_RATIO` | Fraction of the input window that schedules a background checkpoint; defaults to `0.72`, accepted range `0.5`–`0.9`. Lisa uses a synchronous checkpoint at 90% if no matching checkpoint is ready. |
+| `LISA_CONTEXT_RETAINED_TAIL_TOKENS` | Approximate recent-history tail kept intact after a checkpoint; defaults to 20,000 tokens. OpenHands safe boundaries may retain more to keep tool exchanges whole. |
 | `LISA_LOCAL_ANONYMOUS` | `1` enables unauthenticated Lisa chat for the loopback-only local developer stack. Leave disabled in a shared deployment. |
 | `LISA_CORS_ORIGINS` | Comma-separated browser origins allowed to call Lisa directly. |
 | `SOFTPROBE_ASSERTION_HMAC_SECRET` | Shared edge assertion key Lisa uses to verify workspace-scoped browser requests. |

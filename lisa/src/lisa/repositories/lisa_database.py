@@ -13,54 +13,13 @@ import sqlglot
 from psycopg.rows import dict_row
 from sqlglot import exp
 
+from ..models.database import MAX_ROWS, POLICY_COLUMNS, RELATION_COLUMNS
+
+__all__ = ["MAX_ROWS", "POLICY_COLUMNS", "RELATION_COLUMNS"]
+
 MAX_QUERY_LENGTH = 5_000
-MAX_ROWS = 100
 MAX_RESPONSE_BYTES = 32_000
 STATEMENT_TIMEOUT_MS = 1_500
-
-POLICY_COLUMNS = (
-    "id", "scope", "target_agent_name", "name", "criteria", "approved",
-    "created_at", "updated_at",
-)
-
-# This ordered contract is shared by the query validator and the tool-facing
-# schema resource. Tests compare it with every view projection in schema.sql.
-RELATION_COLUMNS = {
-    "readable_activities": (
-        "id", "kind", "parent_id", "status", "title", "summary", "source",
-        "created_at", "started_at", "updated_at", "finished_at",
-    ),
-    "readable_evaluations": (
-        "activity_id", "session_id", "policy_id", "evaluation_id", "target_agent_name",
-        "policy_name", "verdict", "score_id", "started_at", "finished_at",
-    ),
-    "readable_evaluation_triage": ("session_id", "policy_id", "decision", "created_at"),
-    "readable_activity_events": (
-        "activity_id", "seq", "event_type", "title", "summary", "actor",
-        "reference_type", "reference_id", "created_at",
-    ),
-    "readable_activity_feed": (
-        "activity_id", "activity_type", "is_goal", "message_id", "subtitle",
-        "status_title", "task_label", "agent_id", "details", "kind", "status",
-        "title", "summary", "source", "created_at", "started_at", "updated_at",
-        "finished_at", "next_action", "next_action_at", "origin_conversation_id",
-        "origin_slack_channel_id", "origin_slack_thread_ts", "slack_channel_id",
-        "slack_thread_ts",
-    ),
-    "readable_activity_monitor_threads": (
-        "activity_id", "icon", "details", "section_id", "section_title",
-        "section_status", "section_order",
-    ),
-    "readable_activity_monitor_thread_actions": (
-        "activity_id", "seq", "event_type", "title", "summary", "actor",
-        "reference_type", "reference_id", "status", "created_at",
-    ),
-    "readable_activity_monitor_links": ("activity_id", "reference_type", "reference_id"),
-    "readable_activity_context": (
-        "id", "activity_id", "seq", "kind", "source_ref", "content_hash", "created_at",
-    ),
-    "policies": POLICY_COLUMNS,
-}
 
 # The view used to bind a reader connection is granted to the reader role but
 # deliberately unavailable to user-authored lisa_db queries.
@@ -68,8 +27,17 @@ INTERNAL_READER_RELATIONS = {"readable_deployment"}
 VIEW_COLUMNS = {name: set(columns) for name, columns in RELATION_COLUMNS.items()}
 
 ALLOWED_FUNCTIONS = {
-    "avg", "coalesce", "count", "date_trunc", "length", "lower", "max", "min",
-    "nullif", "sum", "upper",
+    "avg",
+    "coalesce",
+    "count",
+    "date_trunc",
+    "length",
+    "lower",
+    "max",
+    "min",
+    "nullif",
+    "sum",
+    "upper",
 }
 
 
@@ -90,7 +58,9 @@ def validate_read_query(query: str) -> str:
         tree.find(kind) is not None
         for kind in (exp.With, exp.Subquery, exp.Union, exp.Intersect, exp.Except, exp.Lock)
     ):
-        raise ValueError("CTEs, nested queries, set operations, and locking clauses are not allowed")
+        raise ValueError(
+            "CTEs, nested queries, set operations, and locking clauses are not allowed"
+        )
     if tree.args.get("into"):
         raise ValueError("SELECT INTO is not allowed")
 
@@ -120,6 +90,11 @@ def validate_read_query(query: str) -> str:
             raise ValueError(f"Column {name} is not an approved Lisa column")
 
     for function in tree.find_all(exp.Func):
+        # sqlglot models boolean predicates such as AND and OR as Func nodes too.
+        # They are SQL operators, not callable functions; validating them against
+        # the scalar function allowlist rejects ordinary filtered reads.
+        if isinstance(function, exp.Condition) and not isinstance(function, exp.Anonymous):
+            continue
         name = function.sql_name().lower()
         if isinstance(function, exp.Anonymous):
             name = function.name.lower()
@@ -156,11 +131,7 @@ def _workspace_fingerprint(workspace_id: str) -> str:
 
 
 def _sql(name: str) -> str:
-    return (
-        files("lisa")
-        .joinpath("sql", "activities", name)
-        .read_text(encoding="utf-8")
-    )
+    return files("lisa").joinpath("sql", "activities", name).read_text(encoding="utf-8")
 
 
 class LisaDatabaseReader:

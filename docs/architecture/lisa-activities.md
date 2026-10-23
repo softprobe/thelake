@@ -83,8 +83,8 @@ exists; evaluator-managed lifecycles are completed by `EvaluationService`.
 After a successful owner chat reply, the conversation runtime completes any
 still-open chat request. It leaves work in `waiting` when tool arguments or
 results record an outstanding next action, clarification, or policy approval.
-A `running` progress update with a non-empty
-`next_action` remains open in the feed with that action; an explicit terminal
+A `queued` or `running` progress update with a non-empty `next_action` remains
+open in the feed as `blocked` with that action; an explicit terminal
 `complete_activity` result closes it.
 An explicit deferred `complete_activity` outcome is applied to the activity ID
 in that call, including when that activity was waiting on an owner action that
@@ -107,7 +107,9 @@ The read-only `lisa_db` resource documents matching views. Lisa's own frontend
 renders its activity feed; MCP and database views are Lisa's inspection
 surfaces. TheLake Explorer remains a separate trace-inspection application and
 does not proxy Lisa workspace activity. Presentation updates cannot set
-lifecycle status.
+lifecycle status. The resource's relation and column list is authoritative for
+SQL diagnostics; do not probe unsupported fields by selecting them. Report a
+field as unavailable when it is absent from the documented schema.
 
 The main chat and each Slack thread keep independent transcripts but share
 activity IDs. Lisa serves its own activity and chat APIs from its standalone
@@ -171,6 +173,27 @@ creates a new activity for new work, task switches, uncertain continuation, or
 closed activities. Independent asks map to independent activities. Factual
 one-turn asks are included; `skip_chat_activity_for_turn` is reserved for
 greetings and conversational filler.
+When the owner explicitly asks to create or track new work, Lisa calls the
+resolver with `disposition="create"` without first searching or listing
+activities. It sets progress once if work remains and uses the activity's next
+action instead of creating a parallel checklist.
+If that is the requested outcome, Lisa records the work but does not perform
+the investigation itself. Words such as "investigation" or "agent" in the
+activity title do not authorize session, database, policy, or evaluation search.
+
+For a continuation, the model must complete the lookup as one sequence:
+`find_activity` → `get_activity_thread` → `resolve_chat_activity`. It must not
+read or write the checklist, list recent activities, or call another tool
+between those steps. A remembered activity ID does not replace the current
+lookup. Resolution binds the current turn's tool events to the matching work;
+without it, the runtime creates a separate fallback activity for the turn. The
+checklist is separate persistent context and is used after the relevant
+activity has been resolved.
+Successful activity write responses are the confirmation for those writes;
+Lisa does not reread the thread just to verify a successful update. It reads a
+thread for a continuation or when the owner asks for activity history.
+An `update_activity` call that appends a timeline action must provide both
+`event_type` and `event_title`; presentation-only updates omit both.
 
 The resolver call and its result begin the activity-scoped trajectory. The
 runtime links the turn's redacted user and assistant messages to every activity

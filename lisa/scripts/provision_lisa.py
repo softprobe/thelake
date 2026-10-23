@@ -106,6 +106,11 @@ def _apply_schema(
             encoding="utf-8"
         )
     )
+    connection.execute(
+        files("lisa").joinpath("sql", "queue", "create_conversation_checkpoints.sql").read_text(
+            encoding="utf-8"
+        )
+    )
     grants = pg_sql.SQL(_sql("grant_runtime_roles.sql")).format(
         writer=pg_sql.Identifier(writer_role),
         reader=pg_sql.Identifier(reader_role),

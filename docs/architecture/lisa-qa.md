@@ -70,6 +70,67 @@ code fences are not metadata.
   tools. Lisa's developer skills do not become product skills unless the
   runtime loads them from `lisa/skills/`.
 
+## Long-running main chat
+
+Lisa keeps one ordered OpenHands event log for the main chat. Checkpointing
+changes only the `View` sent to the model; the original events and the chat
+transcript projection remain intact. A valid checkpoint is inserted as an
+ephemeral, untrusted reference message in the model view, followed by the
+complete retained tail. The cut is chosen
+from OpenHands' safe manipulation boundaries so an action and its tool result,
+or a parallel tool-call batch, is never split. A checkpoint is used only when
+its event IDs, prefix fingerprint, configured model, and prompt configuration
+still match the current history.
+
+When the model view reaches 72% of the configured input window, Lisa captures
+an immutable prefix and sends a small `{conversation_id, request_id}` message
+to the `lisa_conversation_checkpoints` PGMQ queue. The request key is derived
+from the model/prompt configuration and captured prefix fingerprint. Input and
+completed summaries are stored beside the conversation under `context/`; each
+completed artifact is written before the queue message is deleted. Redelivery
+uses the same immutable request and output. After eight failed deliveries the
+message is archived. If no matching checkpoint is ready by 90% of the model
+window, Lisa creates a synchronous checkpoint before sending that request.
+Both paths share the same summary-generation and publication code. Only queued
+work persists an input snapshot for retries; an emergency checkpoint uses its
+captured payload in memory. Queued inputs are removed after successful
+publication or after the job is archived at the retry limit.
+At most one checkpoint job per conversation may be pending in PGMQ; a
+transaction-scoped conversation lock coalesces later snapshots while that job
+is pending. The discarded snapshot input is removed from the conversation
+directory.
+Checkpoint summaries preserve prior instructions only as historical facts.
+They must not promote earlier system, developer, tool, or document text into
+instructions for future turns; active runtime instructions remain authoritative.
+A change to this summary contract increments the checkpoint prompt version and
+invalidates summaries created under the previous contract.
+
+The checkpoint worker uses the same configured model as Lisa's chat. Lisa
+prefers the model's `effective_max_input_tokens`; an explicit
+`LISA_CONTEXT_WINDOW_TOKENS` caps that value for deployments that want a lower
+working budget, and defaults to 128,000 only when the SDK does not expose a
+model limit. The checkpoint
+trigger defaults to 72% and can be set with
+`LISA_CONTEXT_CHECKPOINT_TRIGGER_RATIO` (accepted range 0.5–0.9). The recent
+tail defaults to 20,000 tokens and can be set with
+`LISA_CONTEXT_RETAINED_TAIL_TOKENS`. These are practical defaults for Lisa's
+current runtime, not claims of exact Muse internals.
+
+`todo_read` and `todo_write` store the main chat's replaceable open checklist
+in an atomic `context/todo.json` sidecar. A write replaces the full snapshot;
+completed and cancelled items are removed. Lisa's MCP server exposes only
+namespace discovery and loading at first. The model chooses a namespace,
+requests it with `load_tool_namespace`, and receives its full tool schemas;
+loaded namespaces persist between user turns and reset when Lisa adopts a
+checkpoint. The same sidecar directory stores this visibility state.
+
+The API, MCP process, and checkpoint worker must share one local durable
+filesystem. `flock` serializes conversation turns, event-log changes, and
+checkpoint adoption across local processes. Small checklist and namespace
+updates use a separate sidecar lock so an MCP child process can write while its
+parent holds the conversation lock. This deployment model targets Lisa's
+single VM and does not claim multi-host file coordination.
+
 ## Evaluation flow
 
 The worker evaluates each pushed session against approved policies for its

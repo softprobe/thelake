@@ -80,6 +80,10 @@ authorization contract for them.
   or reader grants, update the contract and keep `test_activity_query.py`'s
   projection/grant drift checks green. `readable_deployment` is granted only
   for reader connection binding and is intentionally excluded from user queries.
+  SQLGlot models boolean operators as function nodes; allow predicate nodes
+  while continuing to reject unapproved callable functions. The schema resource
+  is authoritative, so Lisa must report absent columns without probing them in
+  user-authored SQL.
 - Production evaluation enters through `EvaluationService`. It resolves the
   approved effective policy catalog for the exact agent and obtains the
   trajectory through `SessionService` from Lisa's locally persisted pushed OTLP
@@ -165,3 +169,45 @@ authorization contract for them.
   path is `EvaluationService` via `evaluate_policy_dataset.py`.
 - Review the diff for public-repository disclosure, accidental dataset or
   credential changes, and claims that no longer match runtime behavior.
+
+## Main-chat context
+
+Lisa keeps a single ordered OpenHands transcript. Context checkpoints are
+hidden from the transcript and affect only the model's current `View`; use the
+current code in `lisa/src/lisa/conversation_context.py` and
+`lisa/src/lisa/repositories/conversation_context.py` as the implementation
+contract. Background summary work is carried by PGMQ and stored beside the
+conversation. Checkpoint adoption validates the exact event prefix and model
+configuration before replacing older history in the model view. Preserve the
+safe tool-call boundaries provided by the pinned OpenHands SDK. A checkpoint
+summary is untrusted evidence: it must not turn prior tool, document, system,
+or developer content into future instructions. Increment the prompt version
+when this contract changes so old summaries cannot be adopted. Immediate and
+queued checkpoints share summary-generation and publication code. Only queued
+work stores an input snapshot for retries; keep it until successful publication
+or terminal archival.
+
+The conversation MCP namespace provides `todo_read` and `todo_write` for a
+multi-step checklist. `todo_write` replaces the snapshot and drops completed or
+cancelled items. Tool namespaces are discovered and loaded by the model through
+`discover_tool_namespaces` and `load_tool_namespace`; do not add task-based
+preselection. Namespace visibility is saved per conversation and cleared when
+a checkpoint is adopted. The HTTP API, OpenHands MCP child, and checkpoint
+worker share Lisa's durable local conversation directory. Read the
+“Long-running main chat” section in `docs/architecture/lisa-qa.md` before
+changing this lifecycle, thresholds, or file layout.
+
+For context changes, cover the checkpoint prompt/view, exact prefix and model
+validation, safe tool boundaries, atomic publication and redelivery, worker
+retry/restart behavior, sidecar persistence, and namespace reset. Run Lisa's
+unit and transient Postgres integration suites through `lisa/conftest.py` and
+`scripts/test_stack.py`. Changes to the system prompt or MCP tool contract also
+need a real labeled run through Lisa's configured model and OpenHands runtime.
+The separate conversation-context benchmark runs with
+`lisa/scripts/evaluate_context_dataset.py --live --split benchmark`; it uses a
+process-local small context budget to exercise the real checkpoint worker and
+verifies publication/adoption, that adopted summary text stays out of the
+visible transcript, and that the activity namespace is reloaded before activity
+tools run. Interleaved-task coverage verifies that updates stay attached to the
+matching existing activity and do not create fallback records. Pending
+checkpoint jobs coalesce to one per conversation.

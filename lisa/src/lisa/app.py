@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from html import escape
 import mimetypes
 import os
 from contextlib import asynccontextmanager
+from html import escape
 from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, HTTPException
@@ -30,14 +30,17 @@ async def lifespan(_app: FastAPI):
     _app.state.workspace_services = services
     slack_worker_task = None
     evaluation_worker_task = None
+    checkpoint_worker_task = None
     if workspace_id:
         if services.session_evaluation_worker is not None:
             evaluation_worker_task = asyncio.create_task(
                 services.session_evaluation_worker.run_forever()
             )
-        slack_worker_task = asyncio.create_task(
-            services.slack_worker.run_forever(workspace_id)
-        )
+        if services.conversation_checkpoint_worker is not None:
+            checkpoint_worker_task = asyncio.create_task(
+                services.conversation_checkpoint_worker.run_forever()
+            )
+        slack_worker_task = asyncio.create_task(services.slack_worker.run_forever(workspace_id))
     async with recording_maintenance(services.context):
         yield
     if slack_worker_task is not None:
@@ -50,6 +53,12 @@ async def lifespan(_app: FastAPI):
         evaluation_worker_task.cancel()
         try:
             await evaluation_worker_task
+        except asyncio.CancelledError:
+            pass
+    if checkpoint_worker_task is not None:
+        checkpoint_worker_task.cancel()
+        try:
+            await checkpoint_worker_task
         except asyncio.CancelledError:
             pass
     await services.slack_worker.shutdown()
@@ -99,9 +108,7 @@ def _lisa_frontend_file(path: str, *, spa_fallback: bool) -> Response:
             raise HTTPException(status_code=404)
         candidate = root / "index.html"
     if candidate.name == "index.html":
-        html = candidate.read_text(encoding="utf-8").replace(
-            '"__LISA_API_BASE_PATH__"', '"/v1"'
-        )
+        html = candidate.read_text(encoding="utf-8").replace('"__LISA_API_BASE_PATH__"', '"/v1"')
         html = html.replace(
             "__LISA_EXPLORER_URL__",
             escape(os.getenv("LISA_EXPLORER_URL", "").strip(), quote=True),

@@ -46,6 +46,16 @@ def test_read_query_allows_approved_views_and_caps_rows():
     assert "LIMIT 100" in sql
 
 
+@pytest.mark.parametrize("operator", ["AND", "OR"])
+def test_read_query_allows_boolean_conditions(operator):
+    sql = validate_read_query(
+        "SELECT id FROM lisa.readable_activities "
+        f"WHERE status = 'open' {operator} status = 'pending'"
+    )
+
+    assert operator in sql
+
+
 def test_read_query_allows_the_policy_table_but_not_other_base_tables():
     sql = validate_read_query(read_sql_file("read_policy_columns"))
 

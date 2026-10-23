@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-import lisa.app as app
+from lisa import app
 
 
 def test_lifespan_starts_push_evaluation_without_a_scheduler(monkeypatch):
@@ -20,8 +20,11 @@ def test_lifespan_starts_push_evaluation_without_a_scheduler(monkeypatch):
             stopped.append(True)
 
     services = SimpleNamespace(
-        slack_worker=Worker(), context=object(), activity_store=object(),
+        slack_worker=Worker(),
+        context=object(),
+        activity_store=object(),
         session_evaluation_worker=None,
+        conversation_checkpoint_worker=None,
     )
     application = SimpleNamespace(state=SimpleNamespace())
 

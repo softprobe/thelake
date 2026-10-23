@@ -8,6 +8,7 @@ from typing import Any
 from ..runtime import (
     activity_events_for_target,
     chat_activity_tool_failed,
+    chat_activity_tool_finalized,
     chat_activity_waiting_state,
     chat_activity_requested_status,
 )
@@ -90,14 +91,22 @@ def record_chat_activity_trajectories(
             else requested_status or "succeeded"
         )
         try:
-            activity_store.record_chat_turn_trajectory(
-                activity_id,
-                messages,
-                runtime_events,
-                summary=summary,
-                status=status,
-                next_action=next_action or "Continue the requested work" if waiting else None,
-            )
+            if chat_activity_tool_finalized(runtime_events):
+                # Domain tools such as evaluate_session can finish their linked
+                # activity atomically. Record the chat evidence without trying
+                # to reopen or complete that terminal row a second time.
+                activity_store.record_conversation_trajectory(
+                    activity_id, messages, runtime_events,
+                )
+            else:
+                activity_store.record_chat_turn_trajectory(
+                    activity_id,
+                    messages,
+                    runtime_events,
+                    summary=summary,
+                    status=status,
+                    next_action=next_action or "Continue the requested work" if waiting else None,
+                )
         except Exception:
             logger.exception("Could not persist and finalize Lisa chat activity %s", activity_id)
             raise

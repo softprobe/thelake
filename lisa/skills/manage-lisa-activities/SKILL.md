@@ -11,6 +11,11 @@ or a record of every internal model step.
 
 ## Find or create work
 
+When the owner asks only to create or track an activity, record the requested
+work item and next action; do not perform the underlying investigation. A task
+title containing "investigation" or "agent" does not authorize searching
+sessions, databases, policies, or evaluations.
+
 - For activity-only requests, use the activity tools below. Do not inspect
   sessions or query `lisa_db` unless the user also asks about workspace
   telemetry or agent behavior.
@@ -29,6 +34,13 @@ or a record of every internal model step.
   before resolving or changing it. Inspect the thread even when the found
   record may be closed. Do not list recent activities after a matching record
   has already been found.
+- Keep continuation lookup atomic: `find_activity` → `get_activity_thread` →
+  `resolve_chat_activity`. Do not call checklist, recent-activity, or other
+  tools between those calls. Read or update the checklist only after resolving.
+- Do not use a remembered activity ID to skip this sequence or call
+  `get_activity_thread` directly. Resolution binds this turn's tool events to
+  the existing activity; without it, the runtime creates a separate fallback
+  activity for this request.
 - When `find_activity` returns a matching open record, continue with that
   record's ID. Do not call `create_activity` for work that is already tracked.
 - Apply that rule across chats too. If the user refers to an existing policy,
@@ -42,12 +54,22 @@ or a record of every internal model step.
 - For a progress update, use only the activity lookup, thread, and update tools
   needed to make and verify that change. Do not inspect policies, sessions,
   or evaluations unless the user asks for them.
-- Before starting substantial work you own, search open activities. Resume a
-  matching activity instead of creating a duplicate.
+- Treat a successful write response as confirmation. Do not read the activity
+  thread again just to verify the same write; read it for continuations or when
+  the user asks to inspect activity history.
+- When `update_activity` appends a timeline action, provide both `event_type`
+  and `event_title`. Omit both for a presentation-only update.
+- Before performing substantial work you own, search open activities and resume
+  a matching record. Do not search when the owner explicitly asks only to
+  create a new activity; follow the direct-create rule above.
 - Create an activity for meaningful investigation, multi-step work, or agreed
   follow-through. Give it a concrete title, accurate type/source, and useful
   context. The same activity is visible from either chat; transcripts stay
   separate.
+- If the owner explicitly asks to create or track a new activity, do not search
+  first. Call `resolve_chat_activity` once with `disposition="create"`; do not
+  list recent activities or read the new thread. Set progress once if work
+  remains. Use the activity's next action instead of a parallel checklist.
 - For each distinct user request in a web or Slack turn, resolve its activity
   before doing task-specific work with `resolve_chat_activity`. Use a stable,
   short `request_key` within the turn. If the user clearly continues open work,
@@ -102,7 +124,9 @@ or a record of every internal model step.
 - Use `update_activity` for presentation and timeline milestones.
 - Use `set_activity_progress` to set `queued`, `running`, or `waiting`, with a
   concise factual summary and the next action. Include a due time only when the
-  next check has a real date and time.
+  next check has a real date and time. A queued or running state with a next
+  action stays open after the chat turn; do not omit the next action to force
+  the activity closed.
 - When the user supplies evidence or a finding, record it in the activity's
   update or completion summary before closing the work. The final user reply
   does not replace the durable activity record.
@@ -110,8 +134,9 @@ or a record of every internal model step.
   to inspect. Link only references returned by workspace tools.
 - Record substantial work's result before closing it. For chat requests, the
   runtime completes any still-open activity after Lisa's final reply. A
-  non-empty `next_action` on a `running` progress update keeps that activity
-  open in `waiting` with the same action, so only include it when work remains.
+  non-empty `next_action` on a `queued` or `running` progress update keeps that
+  activity open in `waiting` with the same action, so only include it when work
+  remains.
   Tool evidence of a pending owner action also leaves it waiting. A failed
   continuation preserves an existing waiting action. Use `complete_activity`
   for agent-owned work outside that chat finalization path. Evaluation

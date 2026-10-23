@@ -87,19 +87,46 @@ def selected_chat_activity_ids(activities: list[dict[str, Any]]) -> list[str]:
 
 
 def chat_activity_requested_status(activities: list[dict[str, Any]]) -> str | None:
-    """Return the requested terminal outcome from a deferred chat completion."""
+    """Return a terminal outcome requested or finalized by an owned tool."""
     for item in reversed(activities):
         if item.get("kind") != "evidence":
             continue
         name = re.sub(r"[^a-z0-9]+", "_", str(item.get("tool_name", "")).lower()).strip("_")
-        if not name.endswith("complete_activity"):
-            continue
         payload = _json_payload(item.get("detail"))
-        if not isinstance(payload, dict) or payload.get("status") != "deferred":
+        if not isinstance(payload, dict):
             continue
-        requested = payload.get("requested_status")
-        return {"success": "succeeded", "error": "failed", "stopped": "cancelled"}.get(requested)
+        if name.endswith("complete_activity") and payload.get("status") == "deferred":
+            requested = payload.get("requested_status")
+            return {
+                "success": "succeeded", "error": "failed", "stopped": "cancelled",
+            }.get(requested)
+        if name.endswith("evaluate_session") and payload.get("activity_finalized") is True:
+            return {
+                "success": "succeeded",
+                "succeeded": "succeeded",
+                "evaluated": "succeeded",
+                "triaged": "succeeded",
+                "no_approved_policies": "succeeded",
+                "recovered_pending_evaluations": "succeeded",
+                "error": "failed",
+                "evaluation_error": "failed",
+                "failed": "failed",
+                "stopped": "cancelled",
+                "cancelled": "cancelled",
+            }.get(payload.get("status"))
     return None
+
+
+def chat_activity_tool_finalized(activities: list[dict[str, Any]]) -> bool:
+    """Whether a domain tool already finalized the attached chat activity."""
+    return any(
+        item.get("kind") == "evidence"
+        and str(item.get("tool_name", "")).lower().endswith("evaluate_session")
+        and _json_payload(item.get("detail"))
+        and _json_payload(item.get("detail")).get("activity_finalized") is True
+        for item in activities
+        if isinstance(_json_payload(item.get("detail")), dict)
+    )
 
 
 def chat_activity_was_skipped(activities: list[dict[str, Any]]) -> bool:
@@ -163,7 +190,9 @@ def chat_activity_waiting_state(
             status = payload.get("status")
             value = payload.get("next_action")
             if status == "waiting" or (
-                status == "running" and isinstance(value, str) and value.strip()
+                status in {"queued", "running"}
+                and isinstance(value, str)
+                and value.strip()
             ):
                 waiting = True
                 next_action = (

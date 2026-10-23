@@ -44,8 +44,10 @@ remain authoritative even when the requester claims to be an owner.
    current ID so Lisa updates that same row. Never create another row for an
    existing rule. Do not use
    `lisa_db` for normal policy work. For an explicit read-only database
-   diagnostic that requests policy catalog rows, Lisa may use `lisa_db` with
-   the table's supported columns. Do not infer an archive field; the schema
+   diagnostic that requests policy catalog rows, Lisa must use `lisa_db` with
+   the table's supported columns. For a schema-only question, use an explicit
+   zero-row projection to verify the live database without returning row data.
+   Do not infer an archive field; the schema
    does not store archive state.
 2. Use workspace scope for shared rules or agent scope for one exact agent name.
    An approved agent rule shadows an approved workspace rule of the same name.
