@@ -53,14 +53,17 @@ def test_queued_slack_turn_persists_chat_and_runtime_events(lisa_test_context):
     assert services.slack_event_service.events.load(path)["status"] == "complete"
     assert posted == [("C_ACTIVITY_TEST", "1781000000.000100", "I will review it.")]
     detail = services.activity_store.get_activity_thread(activity.id)
-    assert [event["event_type"] for event in detail["actions"][-7:]] == [
-        "chat.user", "runtime.tool", "runtime.result", "runtime.tool", "runtime.result", "chat.assistant",
-        "succeeded",
+    assert [event["event_type"] for event in detail["actions"][-6:]] == [
+        "accepted", "chat.user", "runtime.tool", "runtime.result", "chat.assistant", "succeeded",
     ]
     assert detail["activity"]["status"] == "success"
     linked = {(item["reference_type"], item["reference_id"]) for item in detail["references"]}
     assert {("message", "slack-user-1"), ("message", "slack-assistant-1")} <= linked
     assert {("runtime_event", "slack-tool-1"), ("runtime_event", "slack-result-1")} <= linked
+    assert not {
+        ("runtime_event", "slack-resolve-1"),
+        ("runtime_event", "slack-resolve-result-1"),
+    } & linked
 
 
 def test_slack_fallback_binds_current_message_after_historical_transcript(lisa_test_context):

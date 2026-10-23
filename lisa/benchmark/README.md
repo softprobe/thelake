@@ -84,6 +84,72 @@ uv run --project lisa --env-file .env \
   checkpointing observable with short cases. It runs the actual checkpoint
   worker and configured Gemini model; it does not change deployment settings.
 
+## Per-activity memory benchmark
+
+```sh
+uv run --project lisa --env-file .env \
+  python lisa/scripts/evaluate_activity_memory_dataset.py --live --split development
+
+uv run --project lisa --env-file .env \
+  python lisa/scripts/evaluate_activity_memory_dataset.py --live --split benchmark
+```
+
+- Dataset, source mapping, licenses, and limitations:
+  [`datasets/activity_memory/README.md`](../datasets/activity_memory/README.md)
+- Report: `target/test-artifacts/lisa-activity-memory-benchmark/<run-id>/report.json`
+- The 70 text-only Lisa cases adapt ten LongMemEval and LongMemEval-V2 memory
+  abilities, with three cases per ability in each split and five Lisa-specific
+  adversarial cases per split. They are not official upstream benchmark scores.
+- Each case interleaves task activities, forces global compaction before task
+  follow-up, and checks task resolution before activity-memory loading. Cases
+  cover ambiguity, corrected facts, completed-parent/child continuation,
+  pending snapshot fallback, and cross-activity isolation, including facts
+  placed in another activity's resolver summary and title. Domain-order checks
+  ignore OpenHands schema setup calls (`discover_tool_namespaces`,
+  `load_tool_namespace`, and `invoke_skill`) because those do not perform
+  activity work; actual tool errors remain separately scored.
+- The MCP server rejects task-specific policy, session, database, checklist,
+  evaluation, and activity write tools until the current activity memory is
+  loaded. When a turn resolves multiple activities, Lisa must record durable
+  facts separately in each activity's timeline or progress before moving on.
+- The live MCP path returns a bounded activity-thread projection (12 recent
+  actions, 1,200 characters per summary) while the persisted and user-visible
+  timeline remains complete; regression coverage verifies the serialized
+  response remains below the 32 KiB payload cap.
+- Reports separate answer success, activity selection, evidence-reference
+  integrity, abstention, verbatim repeat fidelity, tool-sequence adherence, and
+  tool-error-free rate. Reference integrity confirms citations resolve to
+  captured events; it does not prove semantic support for each summary claim or
+  final answer. Fact-anchor rubrics allow equivalent wording. Exact quote
+  fidelity is reported separately; it gates answer success only when the user
+  explicitly asks for verbatim or exact wording. A request to repeat a result
+  briefly is scored by its labeled facts, while quote fidelity remains a
+  diagnostic. Cases that request one of several mutually exclusive valid
+  explanations or actions use `reply_must_match_exactly_one_of`: exactly one
+  complete option must match, subject to its labeled contradiction anchors.
+  Final-answer leak checks use per-turn exclusions for facts
+  recorded only in another activity; abstention checks accept clear missing-
+  record statements, insufficient-information statements, and requests for
+  clarification, but fail if the reply includes a labeled forbidden fact.
+  `memory_evaluation.heldout_acceptance.correct_cases` counts cases whose answer
+  rubric, activity-memory selection, evidence references, isolation, and
+  applicable state/context checks all pass. Recoverable tool-call errors and
+  deviations from the prescribed lookup sequence are reported separately and
+  remain visible in strict per-case results; they do not erase an otherwise
+  correct, properly scoped answer. The held-out product gate requires at least
+  32/35 core-correct cases, valid evidence references for every memory result,
+  zero detected cross-task leaks, and zero writes to the wrong activity.
+- Evidence scoring reads the original OpenHands `load_activity_memory`
+  observation by event ID instead of the 4,000-character conversation activity
+  projection, which may cut valid JSON. The scorer accepts at most 32 KiB per
+  observation; larger results fail evidence integrity instead of being treated
+  as complete. The event file read is capped at 208 KiB, including worst-case
+  JSON escaping and event-envelope allowance, and oversized files are rejected
+  before parsing.
+- The runner applies a process-local context limit to force the real
+  OpenHands checkpoint worker. All benchmark databases and workspaces are
+  transient and run-owned; the limit does not change deployment settings.
+
 ---
 
 ## Policy production-path benchmark

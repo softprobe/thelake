@@ -236,6 +236,7 @@ class EvaluationService:
         *,
         activity_id: str | None = None,
         defer_activity_failure: bool = False,
+        defer_activity_finalization: bool = False,
     ) -> dict:
         """Investigate suspected violations and unresolved evidence in one local session."""
         if self.activities:
@@ -243,21 +244,50 @@ class EvaluationService:
                 target_agent_name, session_id
             )
             if pending:
-                recovered = [self._recover_pending_score(*item) for item in pending]
+                recovered = [
+                    self._recover_pending_score(
+                        *item, defer_activity_finish=defer_activity_finalization
+                    )
+                    for item in pending
+                ]
+                recovery_complete = all(item.get("stored") is True for item in recovered)
                 result = {
-                    "status": "recovered_pending_evaluations",
+                    "status": (
+                        "recovered_pending_evaluations"
+                        if recovery_complete
+                        else "evaluation_error"
+                    ),
                     "session_id": session_id,
                     "target_agent_name": target_agent_name,
                     "evaluations": recovered,
                 }
-                if activity_id and self.activities:
-                    summary = "Recovered the pending evaluation result."
-                    self.activities.record_activity_event(
-                        activity_id, "evaluation_result_recovered",
-                        title="Evaluation result recovered", summary=summary,
+                if not recovery_complete:
+                    result["message"] = (
+                        "At least one pending evaluation is still owned by another worker. "
+                        "Retry after that evaluation finishes."
                     )
-                    result["activity_finalized"] = self.activities.finish_activity_without_claim(
-                        activity_id, summary
+                if activity_id and self.activities:
+                    summary = (
+                        "Recovered the pending evaluation result."
+                        if recovery_complete
+                        else "Pending evaluation recovery is still in progress."
+                    )
+                    self.activities.record_activity_event(
+                        activity_id,
+                        "evaluation_result_recovered"
+                        if recovery_complete
+                        else "evaluation_recovery_pending",
+                        title=(
+                            "Evaluation result recovered"
+                            if recovery_complete
+                            else "Evaluation recovery is still in progress"
+                        ),
+                        summary=summary,
+                    )
+                    result["activity_finalized"] = (
+                        False
+                        if defer_activity_finalization or not recovery_complete
+                        else self.activities.finish_activity_without_claim(activity_id, summary)
                     )
                     result["activity_id"] = activity_id
                 return result
@@ -277,7 +307,7 @@ class EvaluationService:
                 )
                 activity_finalized = (
                     False
-                    if defer_activity_failure
+                    if defer_activity_failure or defer_activity_finalization
                     else self.activities.finish_activity_without_claim(
                         activity_id, summary, status="failed",
                     )
@@ -307,8 +337,10 @@ class EvaluationService:
                     activity_id, "policy_review_completed",
                     title="Policy review completed", summary=summary,
                 )
-                activity_finalized = self.activities.finish_activity_without_claim(
-                    activity_id, summary
+                activity_finalized = (
+                    False
+                    if defer_activity_finalization
+                    else self.activities.finish_activity_without_claim(activity_id, summary)
                 )
                 result["activity_finalized"] = activity_finalized
                 result["activity_id"] = activity_id
@@ -339,7 +371,7 @@ class EvaluationService:
                     title="Policy triage failed",
                     summary=f"Policy triage failed with {type(error).__name__}.",
                 )
-                if not defer_activity_failure:
+                if not defer_activity_failure and not defer_activity_finalization:
                     self.activities.finish_activity_without_claim(
                         activity.id, "Policy triage failed.", status="failed"
                     )
@@ -367,8 +399,10 @@ class EvaluationService:
                     title="Policy review completed",
                     summary=summary,
                 )
-                activity_finalized = self.activities.finish_activity_without_claim(
-                    activity.id, summary,
+                activity_finalized = (
+                    False
+                    if defer_activity_finalization
+                    else self.activities.finish_activity_without_claim(activity.id, summary)
                 )
             else:
                 activity_finalized = None
@@ -397,19 +431,26 @@ class EvaluationService:
                 raise RuntimeError(
                     f"Selected policy {decision['id']} is not in the approved candidate set"
                 )
-            evaluations.append(
-                self._evaluate_session(
-                    target_agent_name,
-                    rule.name,
-                    session_id,
-                    policy_id=rule.id,
-                    _session_detail=session_detail,
-                    _trajectory=trajectory,
-                    _selection=selection_context,
-                    _activity_id=activity.id if activity else None,
-                    _defer_activity_finish=True,
-                )
+            evaluation = self._evaluate_session(
+                target_agent_name,
+                rule.name,
+                session_id,
+                policy_id=rule.id,
+                _session_detail=session_detail,
+                _trajectory=trajectory,
+                _selection=selection_context,
+                _activity_id=activity.id if activity else None,
+                _defer_activity_finish=True,
             )
+            fencing_token = evaluation.get("_activity_fencing_token")
+            if defer_activity_finalization and fencing_token is not None:
+                evaluation.pop("_activity_fencing_token", None)
+                self.activities.release_chat_evaluation_claim(
+                    evaluation["activity_id"],
+                    actor="lisa-evaluation",
+                    fencing_token=fencing_token,
+                )
+            evaluations.append(evaluation)
         finish_claims = {}
         for item in evaluations:
             fencing_token = item.pop("_activity_fencing_token", None)
@@ -419,7 +460,7 @@ class EvaluationService:
         evaluation_activity_ids.update(
             item["activity_id"] for item in evaluations if item.get("activity_id")
         )
-        if activity and all(
+        if activity and not defer_activity_finalization and all(
             item.get("status") not in {"error", "already_running", "policy_unavailable"}
             for item in evaluations
         ):
@@ -430,7 +471,7 @@ class EvaluationService:
                     actor="lisa-evaluation" if token is not None else None,
                     fencing_token=token,
                 )
-        return {
+        result = {
             **selection,
             "status": (
                 "evaluation_error"
@@ -444,6 +485,9 @@ class EvaluationService:
             "activity_id": activity.id if activity else None,
             "evaluations": evaluations,
         }
+        if defer_activity_finalization and activity:
+            result["activity_finalized"] = False
+        return result
 
     def _policy(
         self,
@@ -508,7 +552,9 @@ class EvaluationService:
                 )
                 if pending:
                     self._validate_pending_identity(pending, target_agent_name, name, policy_id)
-                    return self._recover_pending_score(*pending)
+                    return self._recover_pending_score(
+                        *pending, defer_activity_finish=_defer_activity_finish
+                    )
             else:
                 policy = self._policy(target_agent_name, name)
                 pending = self.activities.find_pending_evaluation_for_policy(
@@ -517,7 +563,9 @@ class EvaluationService:
                     session_id,
                 )
                 if pending:
-                    return self._recover_pending_score(*pending)
+                    return self._recover_pending_score(
+                        *pending, defer_activity_finish=_defer_activity_finish
+                    )
         policy = policy or self._policy(target_agent_name, name, policy_id)
         if self.artifact_repository is None:
             raise RuntimeError("Evaluation artifact repository is not configured")
@@ -555,7 +603,9 @@ class EvaluationService:
         ):
             raise ValueError("The selected policy ID does not match the pending policy")
 
-    def _recover_pending_score(self, activity, outbox) -> dict:
+    def _recover_pending_score(
+        self, activity, outbox, *, defer_activity_finish: bool = False,
+    ) -> dict:
         assert self.activities is not None
         owner = "lisa-evaluation"
         claim = self.activities.claim_activity(activity.activity_id, owner, lease_seconds=300)
@@ -568,7 +618,10 @@ class EvaluationService:
                 "evaluation_id": activity.id,
             }
         with self._lease_heartbeat(activity.activity_id, owner, claim):
-            return self._recover_pending_score_claimed(activity, outbox, owner, claim)
+            return self._recover_pending_score_claimed(
+                activity, outbox, owner, claim,
+                defer_activity_finish=defer_activity_finish,
+            )
 
     def _recover_pending_score_claimed(
         self,
@@ -576,6 +629,8 @@ class EvaluationService:
         outbox: ScoreOutboxItem,
         owner: str,
         claim: ActivityClaim,
+        *,
+        defer_activity_finish: bool = False,
     ) -> dict:
         payload = outbox.score_payload
         result = self._result_from_score_payload(payload)
@@ -608,7 +663,14 @@ class EvaluationService:
             actor=owner,
             fencing_token=claim.fencing_token,
             summary=str(payload.get("comment") or payload["string_value"]),
+            auto_finish=not defer_activity_finish,
         )
+        if defer_activity_finish:
+            self.activities.release_chat_evaluation_claim(
+                activity.activity_id,
+                actor=owner,
+                fencing_token=claim.fencing_token,
+            )
         return {
             **result,
             "evaluation_name": payload["name"],

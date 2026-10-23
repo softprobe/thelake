@@ -6,8 +6,12 @@ import asyncio
 import logging
 import re
 
+from ..activity_memory import (
+    ACTIVITY_MEMORY_SYSTEM_PROMPT,
+    activity_memory_configuration_fingerprint,
+)
 from ..context import WorkspaceContext
-from ..conversation_context import generate_and_publish_checkpoint
+from ..conversation_context import generate_and_publish_checkpoint, generate_checkpoint_summary
 from ..llm_recording import recording_scope
 from ..repositories.conversation_checkpoint_queue import ConversationCheckpointQueue
 from ..repositories.conversations import FileConversationRepository
@@ -24,11 +28,13 @@ class ConversationCheckpointWorker:
         conversations: FileConversationRepository,
         llm_factory,
         context: WorkspaceContext,
+        activities=None,
     ):
         self.queue = queue
         self.conversations = conversations
         self.llm_factory = llm_factory
         self.context = context
+        self.activities = activities
 
     async def run_forever(self) -> None:
         while True:
@@ -46,6 +52,9 @@ class ConversationCheckpointWorker:
 
     def _process(self, message: dict) -> None:
         payload = message.get("message", {})
+        if payload.get("kind") == "activity_memory":
+            self._process_activity_memory(message, payload)
+            return
         message_id = int(message["msg_id"])
         conversation_id = str(payload.get("conversation_id", ""))
         request_id = str(payload.get("request_id", ""))
@@ -106,6 +115,59 @@ class ConversationCheckpointWorker:
                 )
             else:
                 logger.exception("Lisa conversation checkpoint will be retried")
+
+    def _process_activity_memory(self, message: dict, payload: dict) -> None:
+        message_id = int(message["msg_id"])
+        activity_id = str(payload.get("activity_id", ""))
+        watermark = payload.get("event_watermark")
+        terminal = payload.get("terminal") is True
+        archived = False
+        try:
+            if self.activities is None:
+                raise RuntimeError("Activity memory storage is not configured")
+            if not activity_id or not isinstance(watermark, int) or watermark < 0:
+                raise ValueError("Queued activity memory has an invalid capture boundary")
+            llm = self.llm_factory()
+            configuration = activity_memory_configuration_fingerprint(
+                str(getattr(llm, "model", ""))
+            )
+            existing = self.activities.get_activity_memory_artifact(
+                activity_id, watermark, configuration
+            )
+            if existing is not None:
+                self.queue.delete(message_id)
+                return
+            snapshot = self.activities.capture_activity_memory(
+                activity_id,
+                watermark,
+                configuration,
+                activity_title=payload.get("activity_title"),
+                activity_status=payload.get("activity_status"),
+                next_action=payload.get("next_action"),
+            )
+            summary = generate_checkpoint_summary(
+                snapshot,
+                llm,
+                system_prompt=ACTIVITY_MEMORY_SYSTEM_PROMPT,
+            )
+            self.activities.publish_activity_memory(
+                snapshot, summary, terminal=terminal
+            )
+            self.queue.delete(message_id)
+        except Exception:
+            if int(message.get("read_ct", 1)) >= MAX_DELIVERIES:
+                self.queue.archive(message_id)
+                archived = True
+                logger.exception(
+                    "Lisa archived activity memory for %s after %d attempts",
+                    activity_id or "an unknown activity",
+                    MAX_DELIVERIES,
+                )
+            else:
+                logger.exception("Lisa activity memory will be retried")
+        finally:
+            if archived:
+                logger.info("Activity memory job %s was archived", message_id)
 
     def _workspace_id(self) -> str:
         # The Lisa database and file repository are bound to one workspace per runtime.

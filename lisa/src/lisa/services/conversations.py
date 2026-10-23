@@ -222,6 +222,7 @@ class ConversationService:
                     )
                     record_chat_activity_trajectories(
                         self.activity_store,
+                        turn_id=chat_turn_id,
                         activity_ids=activity_ids,
                         messages=new_messages,
                         activities=turn.activities,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
 from lisa.repositories.evaluation_artifacts import EvaluationArtifactRepository
 from lisa.services.evaluations import EvaluationService
+from lisa.services.chat_activities import record_chat_activity_trajectories
 from lisa.models.activities import EvaluationRun, ScoreOutboxItem, ActivityClaim
 from lisa.repositories.lisa_database import LisaDatabaseReader
 from lisa.repositories.activities import PostgresActivityStore
@@ -219,6 +221,260 @@ def test_session_evaluation_reuses_the_resolved_chat_activity(evaluation_service
     }
 
 
+@pytest.mark.parametrize(
+    ("outcome", "expected_status"),
+    (("error", "error"), ("no_approved_policies", "success")),
+)
+def test_chat_evaluation_defers_terminal_write_until_trajectory_is_persisted(
+    evaluation_services, monkeypatch, outcome, expected_status,
+):
+    services = evaluation_services
+    store = services.activity_store
+    turn_id = f"evaluation-chat-turn-{uuid4()}"
+    activity = store.resolve_chat_activity(
+        turn_id=turn_id,
+        request_key="review-session",
+        disposition="create",
+        source="web",
+        title="Review missing session",
+        summary="Review the linked session.",
+    )
+
+    if outcome == "error":
+        def missing_session(_path):
+            raise LookupError("not found")
+
+        monkeypatch.setattr(services.sessions.traces, "load", missing_session)
+    else:
+        monkeypatch.setattr(services.policy_service, "approved_rules", lambda _: [])
+    result = services.evaluations.evaluate_session(
+        "billing-agent",
+        "missing-session",
+        activity_id=activity.id,
+        defer_activity_finalization=True,
+    )
+
+    assert result["status"] == outcome
+    assert result["activity_finalized"] is False
+    assert store.get_activity_thread(activity.id)["activity"]["status"] == "pending"
+    record_chat_activity_trajectories(
+        store,
+        activity_ids=[activity.id],
+        messages=[{
+            "id": "assistant-error-reply",
+            "role": "assistant",
+            "text": "I could not find that session.",
+        }],
+        activities=[
+            {
+                "id": "resolved-request-result",
+                "kind": "evidence",
+                "tool_name": "resolve_chat_activity",
+                "detail": json.dumps({
+                    "activity_id": activity.id,
+                    "disposition": "create",
+                }),
+                "sequence": 1,
+            },
+            {
+                "id": "evaluation-error-result",
+                "kind": "evidence",
+                "tool_name": "evaluate_session",
+                "detail": json.dumps(result),
+                "sequence": 2,
+            },
+        ],
+        final_summary="The requested session was not found.",
+        turn_id=turn_id,
+    )
+
+    detail = store.get_activity_thread(activity.id)
+    assert detail["activity"]["status"] == expected_status
+    assert any(
+        event.event_type == "chat.assistant"
+        for event in store.list_events(activity.id)
+    )
+
+
+def test_selected_chat_evaluation_finishes_after_its_final_trajectory(
+    evaluation_services, monkeypatch,
+):
+    services = evaluation_services
+    store = services.activity_store
+    session_id = f"session-{uuid4()}"
+    detail = session_detail()
+    detail["spans"][0]["trace_id"] = session_id
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
+    monkeypatch.setattr(
+        services.evaluations,
+        "judge",
+        lambda _: {
+            "status": "pass", "rationale": "The policy was followed.",
+            "references": [], "limitations": [],
+        },
+    )
+    policy = services.policy_service.approved_rules("agent")[0]
+    turn_id = f"selected-evaluation-chat-turn-{uuid4()}"
+    activity = store.resolve_chat_activity(
+        turn_id=turn_id,
+        request_key="review-session",
+        disposition="create",
+        source="web",
+        title="Review agent session",
+        summary="Evaluate the selected session.",
+    )
+
+    class SelectedTriager:
+        model = "test-decisions-model"
+
+        def triage(self, trajectory, rules):
+            return {
+                "selected_policies": [
+                    {"id": policy.id, "name": policy.name, "scope": policy.scope}
+                ],
+                "policy_decisions": [
+                    {"id": policy.id, "name": policy.name, "scope": policy.scope,
+                     "decision": "suspected_violation"}
+                ],
+            }
+
+    services.evaluations.policy_triage = SelectedTriager()
+    result = services.evaluations.evaluate_session(
+        "agent",
+        session_id,
+        activity_id=activity.id,
+        defer_activity_finalization=True,
+    )
+
+    assert result["status"] == "evaluated"
+    assert result["activity_finalized"] is False
+    assert store.get_activity_thread(activity.id)["activity"]["status"] == "pending"
+    record_chat_activity_trajectories(
+        store,
+        activity_ids=[activity.id],
+        messages=[{
+            "id": "assistant-evaluation-reply",
+            "role": "assistant",
+            "text": "The session passed the policy review.",
+        }],
+        activities=[
+            {
+                "id": "resolved-selected-request",
+                "kind": "evidence",
+                "tool_name": "resolve_chat_activity",
+                "detail": json.dumps({
+                    "activity_id": activity.id,
+                    "disposition": "create",
+                }),
+                "sequence": 1,
+            },
+            {
+                "id": "selected-evaluation-result",
+                "kind": "evidence",
+                "tool_name": "evaluate_session",
+                "detail": json.dumps(result),
+                "sequence": 2,
+            },
+        ],
+        final_summary="The session passed the policy review.",
+        turn_id=turn_id,
+    )
+
+    detail = store.get_activity_thread(activity.id)
+    assert detail["activity"]["status"] == "success"
+    assert any(
+        event.event_type == "chat.assistant"
+        for event in store.list_events(activity.id)
+    )
+
+
+def test_unavailable_pending_evaluation_claim_keeps_chat_activity_retryable(
+    evaluation_services, monkeypatch,
+):
+    services = evaluation_services
+    store = services.activity_store
+    turn_id = f"pending-evaluation-chat-turn-{uuid4()}"
+    activity = store.resolve_chat_activity(
+        turn_id=turn_id,
+        request_key="recover-pending-evaluation",
+        disposition="create",
+        source="web",
+        title="Recover pending evaluation",
+        summary="Finish the interrupted evaluation.",
+    )
+    policy = services.evaluations._policy("agent", "Rule")
+    run = store.create_evaluation(
+        title="Review session",
+        source="web",
+        target_agent_name="agent",
+        session_id="pending-session",
+        policy_name=policy["name"],
+        policy_id=policy["policy_id"],
+        policy_hash=policy["policy_hash"],
+        judge_config={},
+        request_key=str(uuid4()),
+    )
+    store.claim_activity(run.activity_id, "evaluation-worker", lease_seconds=300)
+    outbox = ScoreOutboxItem(
+        id=str(uuid4()),
+        evaluation_id=run.id,
+        status="pending",
+        score_payload={},
+        score_id=None,
+    )
+    monkeypatch.setattr(
+        store,
+        "find_pending_evaluations_for_session",
+        lambda _agent, _session: [(run, outbox)],
+    )
+
+    result = services.evaluations.evaluate_session(
+        "agent",
+        "pending-session",
+        activity_id=activity.id,
+        defer_activity_finalization=True,
+    )
+
+    assert result["status"] == "evaluation_error"
+    assert result["activity_finalized"] is False
+    record_chat_activity_trajectories(
+        store,
+        activity_ids=[activity.id],
+        messages=[{
+            "id": "assistant-pending-evaluation-reply",
+            "role": "assistant",
+            "text": "The evaluation is still running; I will retry it.",
+        }],
+        activities=[
+            {
+                "id": "resolved-pending-evaluation-request",
+                "kind": "evidence",
+                "tool_name": "resolve_chat_activity",
+                "detail": json.dumps({
+                    "activity_id": activity.id,
+                    "disposition": "create",
+                }),
+                "sequence": 1,
+            },
+            {
+                "id": "pending-evaluation-result",
+                "kind": "evidence",
+                "tool_name": "evaluate_session",
+                "detail": json.dumps(result),
+                "sequence": 2,
+            },
+        ],
+        final_summary="The evaluation is still running.",
+        turn_id=turn_id,
+    )
+
+    detail = store.get_activity_thread(activity.id)
+    assert detail["activity"]["status"] == "blocked"
+    assert detail["activity"]["next_action"] == "Retry the incomplete session evaluation"
+    # The other worker owns the still-open evaluation activity (presented as pending).
+    assert store.get_activity_thread(run.activity_id)["activity"]["status"] == "pending"
+
+
 def test_missing_chat_session_finishes_activity_as_error_even_without_approved_policies(
     evaluation_services, monkeypatch,
 ):
@@ -384,6 +640,77 @@ def test_mixed_chat_evaluation_results_never_return_activity_claim_tokens(
 
     assert result["status"] == "evaluation_error"
     assert all("_activity_fencing_token" not in item for item in result["evaluations"])
+
+
+def test_chat_evaluation_releases_each_policy_claim_for_chat_finalization(
+    evaluation_services, monkeypatch,
+):
+    services = evaluation_services
+    store = services.activity_store
+    chat_activity = store.create_activity(
+        title="Review two policies", source="web", kind="chat_request",
+    )
+    first, second = services.policy_service.approved_rules("agent") * 2
+    second = SimpleNamespace(**{**first.__dict__, "id": "P1.99", "name": "Second policy"})
+    rules = [first, second]
+    monkeypatch.setattr(services.evaluations.policies, "approved_rules", lambda _: rules)
+    monkeypatch.setattr(services.activity_store, "record_policy_triage_decisions", lambda *_: None)
+    monkeypatch.setattr(
+        services.activity_store,
+        "policy_triage_decisions",
+        lambda _session, ids: {rule_id: "suspected_violation" for rule_id in ids},
+    )
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: session_detail())
+
+    class SelectedTriager:
+        model = "test-decisions-model"
+
+        def triage(self, trajectory, candidates):
+            return {
+                "selected_policies": [
+                    {"id": rule.id, "name": rule.name, "scope": rule.scope}
+                    for rule in candidates
+                ],
+                "policy_decisions": [
+                    {"id": rule.id, "name": rule.name, "scope": rule.scope,
+                     "decision": "suspected_violation"}
+                    for rule in candidates
+                ],
+            }
+
+    services.evaluations.policy_triage = SelectedTriager()
+    evaluation_results = iter([
+        {"status": "pass", "activity_id": chat_activity.id, "_activity_fencing_token": 17},
+        {"status": "pass", "activity_id": chat_activity.id, "_activity_fencing_token": 18},
+    ])
+    order = []
+
+    def evaluate(*_args, **_kwargs):
+        result = next(evaluation_results)
+        order.append(("evaluate", result["_activity_fencing_token"]))
+        return result
+
+    def release(activity_id, *, actor, fencing_token):
+        assert activity_id == chat_activity.id
+        assert actor == "lisa-evaluation"
+        order.append(("release", fencing_token))
+
+    monkeypatch.setattr(services.evaluations, "_evaluate_session", evaluate)
+    monkeypatch.setattr(store, "release_chat_evaluation_claim", release)
+
+    result = services.evaluations.evaluate_session(
+        "agent",
+        f"session-{uuid4()}",
+        activity_id=chat_activity.id,
+        defer_activity_finalization=True,
+    )
+
+    assert result["status"] == "evaluated"
+    assert result["activity_finalized"] is False
+    assert order == [
+        ("evaluate", 17), ("release", 17),
+        ("evaluate", 18), ("release", 18),
+    ]
 
 
 def test_incomplete_triage_response_is_recorded_as_a_failed_activity(

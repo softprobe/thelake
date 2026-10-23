@@ -5,7 +5,7 @@ GRANT USAGE ON SCHEMA lisa TO {writer}, {reader};
 GRANT SELECT, INSERT, UPDATE ON lisa.activities TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.evaluation_runs TO {writer};
 GRANT SELECT, INSERT, DELETE ON lisa.evaluation_triage TO {writer};
-GRANT SELECT, INSERT ON lisa.activity_events TO {writer};
+GRANT SELECT, INSERT, UPDATE ON lisa.activity_events TO {writer};
 GRANT SELECT, INSERT ON lisa.activity_context TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_feed_entries TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_threads TO {writer};

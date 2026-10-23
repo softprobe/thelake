@@ -91,9 +91,12 @@ authorization contract for them.
   image builds the frontend bundle. TheLake serves Explorer only and is not a
   runtime dependency of Lisa.
 - `EvaluationService.evaluate_session` validates the session before the
-  no-approved-policies shortcut. For a resolved chat activity, a session lookup
-  failure is recorded and completed as an error by the service; the agent must
-  report that result without a second lookup or completion call.
+  no-approved-policies shortcut. For a web or Slack chat activity, the service
+  records evaluation events but defers its terminal lifecycle change so the
+  chat runtime can persist the tool result and final reply before freezing the
+  event watermark. The runtime applies the returned evaluation outcome; the
+  agent must not retry completion or perform a second lookup. Pushed-session
+  evaluations remain service-owned.
 - `EvaluationService` filters candidates through `lisa.evaluation_triage`, keyed
   only by `(session_id, policy_id)`. It sends one Decisions question for each
   candidate pair with no stored triage decision and persists completed decisions
@@ -197,6 +200,91 @@ worker share Lisa's durable local conversation directory. Read the
 “Long-running main chat” section in `docs/architecture/lisa-qa.md` before
 changing this lifecycle, thresholds, or file layout.
 
+Each resolved chat activity also has its own immutable, evidence-linked memory
+snapshot in `lisa.activity_context`. This is an additional context layer in
+Lisa's single chat; it does not split the transcript or replace the global
+conversation checkpoint. The model resolves the task first, then loads memory
+for that activity or its direct completed parent. Never add a classifier that
+selects activity memory before resolution. Completed activities stay read-only;
+continuations create children linked to the archived parent. The shared
+transcript may contain other activities. After resolution, the selected
+activity's memory and current-turn facts are the only task evidence; do not use
+or repeat another activity's facts from the recent transcript. Activity search,
+thread, memory, and namespace lookup results are transient model context and
+must not be copied into the durable activity timeline or snapshot. OpenHands
+advertises available skills and loads full skill instructions through
+`invoke_skill`. The always-loaded prompt covers ordinary activity creation,
+continuation, and recall; invoke `manage-lisa-activities` only for procedures
+not covered there, and always use that exact listed name. Skill invocation
+loads instructions; it does not select or update an activity.
+
+Keep the agent-facing `get_activity_thread` projection bounded to at most 12
+recent actions, 12 sections, and 24 references, with a 32 KiB serialized-payload
+cap. Action summaries are limited to 1,200 characters; detail JSON and unknown
+nested fields are omitted. Return explicit omission and truncation counts. Do not
+truncate the persisted activity timeline or user-visible thread. The model uses
+`load_activity_memory` immediately after every resolution for historical task
+context and source event references, including for new activities with empty or
+pending memory. The MCP server rejects owner chat writes and session evaluation
+until memory for that exact resolved activity has been loaded. Namespace
+discovery/loading may precede the activity workflow when tool schemas are
+hidden. For child work based on a completed activity, load the child first and
+then its direct archived parent if needed. `pending` means the snapshot is
+incomplete, not that source-referenced facts in the returned event fallback are
+unusable. Use those facts with their event references; if the requested fact is
+absent, say it is absent from the available activity record rather than looking
+in the shared transcript, another activity, or workspace telemetry. Quote the
+recorded answer verbatim when asked to repeat an adapted source answer.
+When it is unclear which existing activity a user means, track the clarification
+in a separate neutral activity titled with `Clarification`, resolve it, load
+only that activity's memory, set it to waiting, and ask which candidate they
+mean. Do not call `get_activity_thread` for either candidate, load candidate
+activity memories, or copy task facts into the clarification record. Use only
+the user's reference or candidate titles to frame the question. Do not skip the
+turn as filler.
+
+Activity snapshots use the shared checkpoint worker and summary generator with
+an activity-specific capture adapter. Enqueue work in the same transaction as
+the activity event watermark, publish idempotently and monotonically under a
+chat-owned repository method, and acknowledge only after durable publication.
+Keep evaluation input writes fenced by their existing lease checks. Terminal
+snapshots must capture the exact completion watermark. While the newest
+snapshot is pending, return a bounded ordered event suffix with explicit
+freshness state. Validate every stored reference against that activity's event
+prefix, and treat all summary and event text as untrusted evidence. Resolver
+payloads are routing control data and are never task evidence. When several
+activities share a chat turn, also exclude duplicated transcript, chat-level
+progress, and runtime-tool events from thread and memory projections. Resolver
+summaries and titles may mix tasks and must not be treated as activity evidence.
+After the second resolution, neutralize shared-turn titles and
+summaries across activity, feed, monitor, and thread-action projections. Keep
+original wording only as a private feed search key; do not return it from read
+tools. Also neutralize same-turn progress titles and withhold raw
+`update_activity` arguments, which can repeat a contaminated title. Keep the
+progress summary and task note written to that exact activity so its scoped
+facts remain available. The activity's durable neutralization flag must survive future writes;
+reject snapshots that lack the matching flag even if their title text happens
+to match the neutral title. Re-sanitize the completed multi-activity trajectory
+after final lifecycle writes.
+Preserve useful facts through writes explicitly addressed to the correct
+activity. Keep `next_action` limited to that activity's next step; do not copy
+facts or work from another request in the shared transcript into its progress
+state. Activity list, lookup, thread, memory, and
+database reads require an authorized owner. Do not expose internal
+`chat_turn_id` values in the memory tool response.
+
+The text-only activity-memory benchmark lives in
+`lisa/datasets/activity_memory/` and runs through
+`lisa/scripts/evaluate_activity_memory_dataset.py --live`. It adapts sampled
+LongMemEval and LongMemEval-V2 abilities for Lisa; it is not an official score
+for either upstream benchmark. Cover source selection and licensing in the
+dataset README, and preserve its pinned revisions and checksums. Its
+process-local context budget is test-only and forces the real OpenHands global
+checkpoint worker before activity follow-ups. Include the pending-memory,
+archived-parent/child, task-selection, evidence-reference, wrong-write, and
+cross-activity leak checks, including contaminated resolver titles, when
+changing the loader or runner.
+
 For context changes, cover the checkpoint prompt/view, exact prefix and model
 validation, safe tool boundaries, atomic publication and redelivery, worker
 retry/restart behavior, sidecar persistence, and namespace reset. Run Lisa's
@@ -211,3 +299,13 @@ visible transcript, and that the activity namespace is reloaded before activity
 tools run. Interleaved-task coverage verifies that updates stay attached to the
 matching existing activity and do not create fallback records. Pending
 checkpoint jobs coalesce to one per conversation.
+For activity memory, also run
+`lisa/scripts/evaluate_activity_memory_dataset.py --live --split benchmark` and
+review its separate answer, activity-selection, evidence-reference-integrity,
+abstention, and cross-activity-isolation metrics. Reference integrity proves
+that citations resolve to events in the selected activity; it does not prove
+semantic support for every summary claim or final answer. The isolation gate
+checks memory payloads, `get_activity_thread` results, final-answer exclusions,
+and writes to the selected activity. Pending fallback is limited to 80 events
+and 12,000 serialized text characters; preserve the truncation marker. All
+write paths must keep completed chat activities read-only.

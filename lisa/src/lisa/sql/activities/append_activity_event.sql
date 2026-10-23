@@ -7,9 +7,11 @@ WITH allocated AS (
     RETURNING next_event_seq - 1 AS seq
 ), inserted AS (
 INSERT INTO lisa.activity_events(
-    activity_id, seq, event_type, title, summary, actor, reference_type, reference_id
+    activity_id, seq, chat_turn_id, event_type, title, summary, actor,
+    reference_type, reference_id
 )
-SELECT %(activity_id)s, allocated.seq, %(event_type)s, %(title)s, %(summary)s,
+SELECT %(activity_id)s, allocated.seq, %(chat_turn_id)s, %(event_type)s,
+       %(title)s, %(summary)s,
        %(actor)s, %(reference_type)s, %(reference_id)s
 FROM allocated
 RETURNING activity_id, seq, event_type, title, summary, actor,

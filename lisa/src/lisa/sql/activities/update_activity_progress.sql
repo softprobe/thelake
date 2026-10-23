@@ -8,9 +8,12 @@ SET status = %(status)s,
 WHERE id = %(activity_id)s
   AND status IN ('queued', 'running', 'waiting', 'waiting_approval')
   AND kind <> 'policy_evaluation'
-  AND NOT EXISTS (
-      SELECT 1 FROM lisa.evaluation_runs AS evaluation
-      WHERE evaluation.activity_id = lisa.activities.id
+  AND (
+      lisa.activities.kind = 'chat_request'
+      OR NOT EXISTS (
+          SELECT 1 FROM lisa.evaluation_runs AS evaluation
+          WHERE evaluation.activity_id = lisa.activities.id
+      )
   )
   AND (lease_owner IS NULL OR lease_expires_at <= now())
 RETURNING title;

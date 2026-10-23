@@ -20,17 +20,24 @@ class RecordingActivities:
     def activity_exists(self, activity_id):
         return self.known_ids is None or activity_id in self.known_ids
 
-    def record_conversation_trajectory(self, activity_id, messages, runtime_events):
+    def record_conversation_trajectory(
+        self, activity_id, messages, runtime_events, *, chat_turn_id=None,
+    ):
         self.calls.append((
             activity_id,
             [dict(message) for message in messages],
             [dict(event) for event in runtime_events],
         ))
 
-    def record_chat_turn_trajectory(self, activity_id, messages, runtime_events, *, summary, status, next_action=None):
+    def record_chat_turn_trajectory(
+        self, activity_id, messages, runtime_events, *, summary, status,
+        next_action=None, chat_turn_id=None,
+    ):
         if status != "waiting" and not self.completion_result:
             raise RuntimeError(f"Lisa chat activity {activity_id} remains queued after turn finalization")
-        self.record_conversation_trajectory(activity_id, messages, runtime_events)
+        self.record_conversation_trajectory(
+            activity_id, messages, runtime_events, chat_turn_id=chat_turn_id,
+        )
         self.finalized = (activity_id, summary, status, next_action)
         if status == "waiting":
             self.progress = (activity_id, {"status": status, "summary": summary, "next_action": next_action})
@@ -94,8 +101,6 @@ def test_user_turn_records_chat_messages_on_the_selected_activity(tmp_path):
             {"id": "assistant-1", "role": "assistant", "text": "I updated the rule.", "sequence": 4},
         ],
         [
-            {"id": "resolve-1", "kind": "tool", "tool_name": "resolve_chat_activity", "arguments": {"disposition": "continue", "activity_id": "activity-1", "request_key": "policy"}, "sequence": 2},
-            {"id": "resolve-result-1", "kind": "evidence", "tool_name": "resolve_chat_activity", "detail": json.dumps({"activity_id": "activity-1", "disposition": "continue"}), "sequence": 3},
             {"id": "tool-1", "kind": "tool", "tool_name": "write_policy", "sequence": 4},
         ],
     )]
@@ -309,6 +314,26 @@ def test_finalized_evaluation_result_overrides_an_older_waiting_progress():
     ]) == "failed"
 
 
+def test_retryable_chat_evaluation_keeps_activity_open_with_a_retry_action():
+    from lisa.runtime import chat_activity_requested_status, chat_activity_waiting_state
+
+    events = [{
+        "kind": "evidence",
+        "tool_name": "evaluate_session",
+        "sequence": 1,
+        "detail": json.dumps({
+            "status": "evaluation_error",
+            "activity_id": "activity-1",
+            "activity_finalized": False,
+        }),
+    }]
+
+    assert chat_activity_requested_status(events) is None
+    assert chat_activity_waiting_state(events) == (
+        True, "Retry the incomplete session evaluation"
+    )
+
+
 def test_evaluation_owned_activity_finalization_only_records_chat_trajectory():
     from lisa.services.chat_activities import record_chat_activity_trajectories
 
@@ -340,7 +365,7 @@ def test_evaluation_owned_activity_finalization_only_records_chat_trajectory():
 
     assert activities.calls == [("activity-1", [
         {"id": "assistant-1", "role": "assistant", "text": "Done."},
-    ], runtime_events)]
+    ], [runtime_events[1]])]
     assert not hasattr(activities, "finalized")
 
 
@@ -449,8 +474,97 @@ def test_activity_runtime_events_are_partitioned_by_resolved_request():
         {"id": "tool-b", "kind": "tool", "tool_name": "evaluate_session", "sequence": 6},
     ]
 
-    assert [item["id"] for item in activity_events_for_target(events, ["a", "b"], "a")] == ["resolve-a", "result-a", "tool-a"]
-    assert [item["id"] for item in activity_events_for_target(events, ["a", "b"], "b")] == ["resolve-b", "result-b", "tool-b"]
+    assert [item["id"] for item in activity_events_for_target(events, ["a", "b"], "a")] == ["tool-a"]
+    assert [item["id"] for item in activity_events_for_target(events, ["a", "b"], "b")] == ["tool-b"]
+
+
+def test_activity_context_lookups_are_not_copied_into_the_next_activity():
+    from lisa.runtime import activity_events_for_target
+
+    events = [
+        {
+            "id": "find-a", "kind": "tool", "tool_name": "find_activity",
+            "tool_call_id": "find-a-call", "sequence": 1,
+        },
+        {
+            "id": "find-a-result", "kind": "evidence", "tool_name": "find_activity",
+            "tool_call_id": "find-a-call",
+            "detail": '[{"id":"activity-a","title":"Orchid"},{"id":"activity-b","title":"Maple"}]',
+            "sequence": 2,
+        },
+        {
+            "id": "thread-a", "kind": "tool", "tool_name": "get_activity_thread",
+            "tool_call_id": "thread-a-call", "arguments": {"activity_id": "activity-a"},
+            "sequence": 3,
+        },
+        {
+            "id": "thread-a-result", "kind": "evidence", "tool_name": "get_activity_thread",
+            "tool_call_id": "thread-a-call", "detail": "Orchid-only history: ORCHID-SECRET",
+            "sequence": 4,
+        },
+        {
+            "id": "resolve-b", "kind": "tool", "tool_name": "resolve_chat_activity",
+            "sequence": 5,
+        },
+        {
+            "id": "resolve-b-result", "kind": "evidence",
+            "tool_name": "resolve_chat_activity",
+            "detail": '{"activity_id":"activity-b","disposition":"continue"}',
+            "sequence": 6,
+        },
+        {
+            "id": "memory-b", "kind": "tool", "tool_name": "load_activity_memory",
+            "arguments": {"activity_id": "activity-b"}, "sequence": 7,
+        },
+        {
+            "id": "memory-b-result", "kind": "evidence",
+            "tool_name": "load_activity_memory",
+            "detail": "Generated task summary and source references",
+            "sequence": 8,
+        },
+        {
+            "id": "write-b", "kind": "tool", "tool_name": "set_activity_progress",
+            "arguments": {"activity_id": "activity-b"}, "sequence": 9,
+        },
+    ]
+
+    target_b = activity_events_for_target(events, ["activity-b"], "activity-b")
+    assert [item["id"] for item in target_b] == ["write-b"]
+
+
+def test_mixed_resolver_payload_is_not_persisted_as_activity_evidence():
+    from lisa.runtime import activity_events_for_target
+
+    events = [
+        {
+            "id": "resolve", "kind": "tool", "tool_name": "resolve_chat_activity",
+            "arguments": {
+                "activity_id": "activity-b",
+                "summary": "Maple work uses MAPLE-SECRET; Orchid uses ORCHID-SECRET",
+            },
+            "sequence": 1,
+        },
+        {
+            "id": "resolve-result", "kind": "evidence",
+            "tool_name": "resolve_chat_activity",
+            "detail": json.dumps({
+                "activity_id": "activity-b",
+                "disposition": "continue",
+                "summary": "Maple's fact is MAPLE-SECRET; Orchid's fact is ORCHID-SECRET",
+            }),
+            "sequence": 2,
+        },
+        {
+            "id": "write-b", "kind": "tool", "tool_name": "set_activity_progress",
+            "arguments": {"activity_id": "activity-b", "summary": "Maple update"},
+            "sequence": 3,
+        },
+    ]
+
+    target_b = activity_events_for_target(events, ["activity-b"], "activity-b")
+
+    assert [item["id"] for item in target_b] == ["write-b"]
+    assert "ORCHID-SECRET" not in json.dumps(target_b)
 
 
 def test_explicit_skip_is_distinct_from_missing_disposition():
@@ -587,8 +701,8 @@ def test_independent_requests_share_chat_but_keep_tool_events_scoped(tmp_path):
                                       run_turn=run_turn, actor_id="owner-1"))
     assert [call[0] for call in activities.calls] == ["a1", "a2"]
     assert all([message["id"] for message in call[1]] == ["user"] for call in activities.calls)
-    assert [event["id"] for event in activities.calls[0][2]] == ["r1", "rr1", "t1"]
-    assert [event["id"] for event in activities.calls[1][2]] == ["r2", "rr2", "t2"]
+    assert [event["id"] for event in activities.calls[0][2]] == ["t1"]
+    assert [event["id"] for event in activities.calls[1][2]] == ["t2"]
 
 
 def test_explicit_skip_creates_no_fallback_activity(tmp_path):

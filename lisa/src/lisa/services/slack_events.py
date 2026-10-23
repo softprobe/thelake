@@ -181,6 +181,7 @@ class SlackEventService:
                         )
                         record_chat_activity_trajectories(
                             self.activity_store,
+                            turn_id=str(receipt["event_id"]),
                             activity_ids=activity_ids,
                             messages=new_messages,
                             activities=turn.activities,

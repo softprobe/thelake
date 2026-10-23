@@ -25,6 +25,9 @@ CREATE TABLE lisa.activities (
     status text NOT NULL DEFAULT 'queued'
         CHECK (status IN ('queued', 'running', 'waiting_approval', 'waiting', 'succeeded', 'failed', 'cancelled')),
     title text NOT NULL,
+    -- Once a shared chat turn has made the public title neutral, later title
+    -- and card writes must preserve that privacy boundary.
+    title_neutralized boolean NOT NULL DEFAULT false,
     summary text,
     source text NOT NULL,
     next_action text,
@@ -114,6 +117,7 @@ CREATE TABLE lisa.evaluation_triage (
 CREATE TABLE lisa.activity_events (
     activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
     seq bigint NOT NULL,
+    chat_turn_id text,
     event_type text NOT NULL,
     title text NOT NULL,
     summary text,
@@ -138,6 +142,7 @@ CREATE UNIQUE INDEX activity_events_runtime_reference_unique
 CREATE TABLE lisa.activity_feed_entries (
     activity_id uuid PRIMARY KEY REFERENCES lisa.activities(id) ON DELETE CASCADE,
     activity_type text NOT NULL,
+    search_title text NOT NULL,
     is_goal boolean NOT NULL DEFAULT false,
     message_id text,
     subtitle text,
@@ -241,9 +246,23 @@ CREATE TABLE lisa.activity_context (
     content jsonb NOT NULL,
     source_ref text,
     content_hash text NOT NULL,
+    source_event_seq bigint,
+    configuration_fingerprint text,
+    -- A neutralized snapshot is a distinct immutable privacy generation. This
+    -- lets a safe replacement publish at the same event watermark.
+    title_neutralized boolean NOT NULL DEFAULT false,
+    is_terminal boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (activity_id, seq)
+    UNIQUE (activity_id, seq),
+    CHECK (source_event_seq IS NULL OR source_event_seq >= 0),
+    CHECK ((kind = 'chat_activity_memory') =
+           (source_event_seq IS NOT NULL AND configuration_fingerprint IS NOT NULL))
 );
+CREATE UNIQUE INDEX activity_context_chat_memory_identity_idx
+    ON lisa.activity_context(
+        activity_id, source_event_seq, configuration_fingerprint, title_neutralized
+    )
+    WHERE kind = 'chat_activity_memory';
 
 -- Lisa-owned write-ahead journal for idempotent local result recovery.
 CREATE TABLE lisa.score_outbox (

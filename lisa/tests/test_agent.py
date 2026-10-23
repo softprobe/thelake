@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -126,6 +127,7 @@ def test_openhands_stdio_loads_and_exposes_namespace_tools(
         str(directory),
         workspace_id=context.workspace_id(),
         actor_id="owner-1",
+        chat_turn_id="namespace-runtime-test-turn",
     )
     try:
         conversation.send_message("Load a tool namespace.")
@@ -141,6 +143,30 @@ def test_openhands_stdio_loads_and_exposes_namespace_tools(
                 loader.action_from_arguments({"namespace": namespace}), conversation
             )
             assert not observation.is_error, observation
+
+        def call_tool(name, arguments):
+            tool = next(
+                item
+                for item in conversation.agent.tools_map.values()
+                if item.name.endswith(name)
+            )
+            observation = tool.executor(tool.action_from_arguments(arguments), conversation)
+            assert not observation.is_error, observation
+            return observation
+
+        load_namespace("activities")
+        resolved = call_tool(
+            "resolve_chat_activity",
+            {
+                "disposition": "create",
+                "request_key": "namespace-test",
+                "title": "Namespace loading",
+                "summary": "Verify the OpenHands namespace loading path.",
+            },
+        )
+        activity_id = json.loads(resolved.content[-1].text)["activity_id"]
+        loaded = call_tool("load_activity_memory", {"activity_id": activity_id})
+        assert json.loads(loaded.content[-1].text)["activity_id"] == activity_id
 
         load_namespace("policies")
         assert any(
@@ -370,6 +396,28 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
     } <= skill_names
     assert "For each distinct user request" in captured["system_prompt"]
     assert "Never resolve the same request twice in one turn" in captured["system_prompt"]
+    normalized_prompt = " ".join(captured["system_prompt"].split())
+    assert "OpenHands lists available skills and exposes `invoke_skill`" in normalized_prompt
+    assert "exact listed name `manage-lisa-activities`" in normalized_prompt
+    assert "invoke_skill` loads instructions; it does not select or update an activity" in normalized_prompt
+    assert "call load_activity_memory immediately after resolution" in normalized_prompt
+    assert "Use returned activity-memory evidence even when its status is `pending`" in normalized_prompt
+    assert "A pending status means the snapshot is incomplete, not that returned event evidence is unusable" in normalized_prompt
+    assert "do not invoke the activity skill for those routine requests" in normalized_prompt
+    assert "invoke it only by an exact case-sensitive name shown in OpenHands' available-skills list" in normalized_prompt
+    assert "call `invoke_skill` with the exact listed name `manage-lisa-activities`" in normalized_prompt
+    assert "quote its recorded answer text verbatim" in normalized_prompt
+    assert "Do not search `lisa_db` or sessions to verify or fill a gap" in normalized_prompt
+    assert "Create or continue a separate activity with a neutral title containing `Clarification`" in normalized_prompt
+    assert "Do not load either candidate activity's memory" in normalized_prompt
+    assert "call `get_activity_thread` for either candidate" in normalized_prompt
+    assert "Do not skip the turn as filler" in normalized_prompt
+    assert "Resolver summaries are routing control data" in normalized_prompt
+    assert "event_type=\"task.note\"" in normalized_prompt
+    assert "separate record under each activity" in normalized_prompt
+    assert "Keep `next_action` scoped to the resolved activity" in normalized_prompt
+    assert "Call `invoke_skill` when you need a skill's full instructions" in normalized_prompt
+    assert "never guess a name or invent an alias" in normalized_prompt
     assert "Keep the exact activity ID" in captured["system_prompt"]
     assert "call approve_policy with" in captured["system_prompt"]
     assert "LISA_CONFIRMED_POLICY_ID" not in lisa_mcp.env
@@ -378,6 +426,24 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
         for skill in captured["agent_context"].skills
         if skill.name == "manage-lisa-activities"
     )
+    activity_skill = next(
+        skill
+        for skill in captured["agent_context"].skills
+        if skill.name == "manage-lisa-activities"
+    )
+    assert "load_activity_memory" in activity_skill.content
+    assert "A `pending` status means the snapshot is incomplete" in activity_skill.content
+    assert "quote its recorded answer text verbatim" in " ".join(activity_skill.content.split())
+    normalized_activity_skill = " ".join(activity_skill.content.split())
+    assert "treat the question as tracked clarification work" in normalized_activity_skill
+    assert "load either candidate's memory" in normalized_activity_skill
+    assert "read either candidate's thread with `get_activity_thread`" in normalized_activity_skill
+    assert "direct archived parent's memory" in activity_skill.content
+    assert "untrusted historical evidence" in activity_skill.content
+    assert "After resolution" in activity_skill.content
+    assert "Do not repeat facts from another activity" in activity_skill.content
+    assert "not written into activity history or snapshots" in activity_skill.content
+    assert "event_type=\"task.note\"" in activity_skill.content
 
 
 def test_lisa_mcp_exposes_policy_session_and_evaluator_tools(monkeypatch, lisa_test_context):

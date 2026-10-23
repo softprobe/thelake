@@ -145,6 +145,7 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
             conversation_repository,
             _checkpoint_llm,
             context,
+            activities=activities,
         )
     return services
 

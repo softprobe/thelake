@@ -876,12 +876,16 @@ def test_failed_chat_turn_marks_only_its_active_activity_failed(store):
 
     store.fail_chat_turn(turn_id, "Review policy and session.", "The session lookup failed.")
 
-    statuses = {item["title"]: item["status"] for item in store.list_activity_feed(limit=100)}
-    assert statuses["Update policy"] == "pending"
-    assert statuses["Review session"] == "error"
+    statuses = {
+        item["id"]: item["status"] for item in store.list_activity_feed(limit=100)
+    }
+    assert statuses[first.id] == "pending"
+    assert statuses[second.id] == "error"
     policy_thread = store.get_activity_thread(first.id)
     session_thread = store.get_activity_thread(second.id)
-    assert any(action["event_type"] == "chat.user" for action in policy_thread["actions"])
+    assert not any(action["event_type"] == "chat.user" for action in policy_thread["actions"])
+    # Request summaries may mix asks once this turn resolves multiple activities.
+    assert not any(action["event_type"] == "chat.request" for action in policy_thread["actions"])
     assert any(action["title"].startswith("chat_turn_error returned")
                for action in session_thread["actions"])
 
@@ -894,8 +898,13 @@ def test_failed_chat_turn_rolls_back_trajectory_when_terminal_write_fails(store,
     )
     record_trajectory = store._record_conversation_trajectory
 
-    def fail_after_trajectory(connection, activity_id, messages, runtime_events):
-        record_trajectory(connection, activity_id, messages, runtime_events)
+    def fail_after_trajectory(
+        connection, activity_id, messages, runtime_events, *, chat_turn_id=None,
+    ):
+        record_trajectory(
+            connection, activity_id, messages, runtime_events,
+            chat_turn_id=chat_turn_id,
+        )
         raise RuntimeError("simulated terminal write failure")
 
     monkeypatch.setattr(store, "_record_conversation_trajectory", fail_after_trajectory)

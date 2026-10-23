@@ -1,4 +1,6 @@
-SELECT activity_id, request_key, disposition, is_active
-FROM lisa.activity_chat_turns
-WHERE turn_id = %(turn_id)s
-ORDER BY is_active DESC, request_key;
+SELECT turn.activity_id, turn.request_key, turn.disposition, turn.is_active,
+       activity.kind, activity.status
+FROM lisa.activity_chat_turns AS turn
+JOIN lisa.activities AS activity ON activity.id = turn.activity_id
+WHERE turn.turn_id = %(turn_id)s
+ORDER BY turn.is_active DESC, turn.request_key;

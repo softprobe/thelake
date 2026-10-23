@@ -208,14 +208,18 @@ def prepare_checkpoint_request(
     return request_id, payload
 
 
-def generate_checkpoint_summary(payload: dict[str, Any], llm: LLM) -> str:
-    """Summarize a captured prefix using Lisa's configured model."""
+def generate_checkpoint_summary(
+    payload: dict[str, Any], llm: LLM, *, system_prompt: str = CHECKPOINT_SYSTEM_PROMPT
+) -> str:
+    """Summarize one captured history using the shared model-call implementation."""
     history = payload.get("messages", [])
     base_summary = payload.get("base_summary")
     transcript = []
     if isinstance(base_summary, str) and base_summary.strip():
         transcript.append(f"Existing checkpoint:\n{base_summary}")
-    for item in history:
+    if isinstance(history, str) and history.strip():
+        transcript.append(history)
+    for item in history if isinstance(history, list) else []:
         if not isinstance(item, dict):
             continue
         role = str(item.get("role", "unknown"))
@@ -234,7 +238,7 @@ def generate_checkpoint_summary(payload: dict[str, Any], llm: LLM) -> str:
         raise ValueError("Cannot checkpoint an empty conversation prefix")
     response = llm.completion(
         [
-            Message(role="system", content=[TextContent(text=CHECKPOINT_SYSTEM_PROMPT)]),
+            Message(role="system", content=[TextContent(text=system_prompt)]),
             Message(role="user", content=[TextContent(text=prompt)]),
         ],
         max_tokens=4096,

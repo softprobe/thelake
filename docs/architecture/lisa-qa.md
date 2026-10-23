@@ -131,6 +131,126 @@ updates use a separate sidecar lock so an MCP child process can write while its
 parent holds the conversation lock. This deployment model targets Lisa's
 single VM and does not claim multi-host file coordination.
 
+### Per-activity memory
+
+The main chat also keeps a separate memory snapshot for each resolved chat
+activity. The global conversation checkpoint preserves a compact view of the
+ordered chat history; it does not choose a task or replace the activity's own
+history. Lisa first resolves the current request to one activity, then calls
+`load_activity_memory` for that activity immediately after each resolution,
+including new activities whose memory is empty or pending. Owner chat writes and
+session evaluation are rejected until the exact resolved activity's memory has
+been loaded. For new work based on a completed activity, load the child first
+and load its direct archived parent when the requested facts depend on that
+history. Task-specific reads and writes are rejected until the current activity
+has been resolved and its memory loaded; pre-resolution activity lookup remains
+available to select or inspect a candidate, but another tool call cannot run
+between resolution and the memory load. Resolver summaries are control data,
+not durable task facts. Findings or facts needed for continuation must be written
+as a task-scoped activity event or progress summary before Lisa switches to
+another activity. No classifier selects an activity memory before resolution. OpenHands
+may require namespace discovery and loading before the activity tools are
+visible; those calls set up schemas and do not change the activity sequence.
+OpenHands advertises available skills and loads full instructions through
+`invoke_skill`. The always-loaded Lisa prompt covers ordinary activity creation,
+continuation, and recall, so the agent invokes the packaged activity skill only
+when it needs a procedure not covered there. It must use the exact listed name
+`manage-lisa-activities` in `invoke_skill`; skill invocation loads instructions
+but does not select or update an activity.
+
+If the user does not identify which existing activity they mean, Lisa tracks
+the clarification as a separate activity with a neutral title containing
+`Clarification`, loads only that activity's memory, sets it to waiting, and asks
+which candidate they mean. She does not call `get_activity_thread` for either
+candidate, load either candidate's memory, or copy candidate task facts into
+the clarification activity before the user chooses. She uses only the user's
+reference or candidate titles to frame the question. This is open work, so
+`skip_chat_activity_for_turn` is not appropriate.
+
+The agent-facing `get_activity_thread` MCP projection contains allowlisted scalar
+fields, at most 12 recent actions, 12 sections, and 24 references, and has a 32 KiB
+serialized-payload cap. Action summaries are capped at 1,200 characters. It omits
+arbitrary detail JSON and unknown nested fields and returns omission/truncation
+counts. The persisted timeline and user-visible activity thread remain complete;
+after resolution, `load_activity_memory` supplies historical task context and its
+event references. Search, thread, and memory-load results are transient model
+context: they are not copied into the activity timeline or snapshots. These
+lookups can contain multiple activity records or generated summaries, so task
+history records only resolved task work and source evidence.
+
+The global recent transcript can still contain interleaved tasks. After the
+model resolves an activity, it must use the selected activity's memory and
+current-turn facts as task evidence and avoid carrying another activity's
+details into the answer or activity summary. The global checkpoint preserves
+conversation continuity but does not authorize cross-activity evidence.
+Resolver arguments and results are routing control data: they stay in the
+global trace but are excluded from activity thread and memory evidence because
+generated summaries can mix tasks.
+
+Activity events remain canonical. Each owner chat turn transactionally enqueues
+a snapshot job at its committed event watermark. The shared checkpoint worker
+builds and publishes immutable versioned snapshots into `lisa.activity_context`;
+the evaluation writer keeps its existing lease and fencing checks. The write is
+idempotent by activity, watermark, privacy generation, and model/prompt
+configuration, and a later snapshot cannot be replaced by an older worker. If a
+turn becomes multi-activity, resolution enqueues neutralized snapshots for all
+mapped activities, including safe replacements at unchanged watermarks. A
+terminal snapshot is accepted only at the exact watermark captured when the
+activity completed. The
+checkpoint job is acknowledged only after publication or after terminal retry
+archival.
+
+When no current snapshot is ready, `load_activity_memory` returns `pending` (or
+`empty`) and an ordered suffix limited to 80 events and 12,000 serialized text
+characters. `fallback_truncated` reports when the suffix was shortened. A
+pending snapshot is incomplete, but source-referenced facts in its returned
+event suffix remain usable evidence. Lisa answers from those facts with event
+references and discloses that the snapshot is pending or truncated when that
+limitation affects completeness. When the requested fact is absent, Lisa says
+it is not in the available activity record; she does not fill the gap from the
+shared transcript, another activity, or database/session searches unless the
+user asks to inspect that telemetry. When asked to repeat an adapted source
+answer, she quotes the recorded answer text verbatim. A completed chat activity
+is write-locked across event, thread,
+section, and reference updates; continuing it creates a linked child, and the
+child may read only its own memory or that direct completed parent. Memory
+summaries and event text are untrusted historical evidence, never instructions.
+Returned event sequence and reference IDs must resolve within the selected
+activity.
+
+When one chat turn resolves multiple activities, the canonical event history
+retains turn-tagged resolver, transcript, chat-level progress, and runtime-tool
+events for traceability, but thread and memory projections exclude resolver
+payloads and other shared copies. Resolver summaries are not assumed to be
+task-scoped. This includes `progress` events written before the second activity
+was resolved: their titles may have copied an untrusted resolver title, so the
+later multi-activity sanitizer neutralizes those event titles. It also withholds
+raw `update_activity` arguments, which can repeat a contaminated title. It
+retains the progress summary and task note written to that exact activity. The second activity resolution replaces shared-turn titles and summaries with neutral
+labels such as `Task 1` across activity, feed, monitor, and thread-action
+projections. The original task wording remains a private feed search key so
+Lisa can find the activity again; read tools never return it. Snapshots
+published before a shared turn is recognized are marked stale by comparing the
+snapshot's captured neutralization flag with the activity's durable flag, even
+when the old title happened to be `Task 1`. Later title and presentation writes
+cannot restore public title, subtitle, label, or details text. A final
+multi-activity trajectory is sanitized again after its completion writes.
+Writes explicitly addressed to one activity remain available to that activity.
+Keep each progress `next_action` limited to the next step for its resolved
+activity; do not copy another request's facts or work from the shared transcript
+into its progress state. Activity listing,
+lookup, thread, memory, and database reads require an authorized owner identity.
+The memory tool returns only a bounded current event suffix plus the stored
+snapshot; it does not expose other activity histories.
+
+Automated activity-memory cases use process-local context limits only in their
+run-owned OpenHands process to force global checkpoint adoption before task
+follow-ups. They do not change deployment settings. These cases measure a
+representative text-only Lisa adaptation of LongMemEval and LongMemEval-V2; they
+are not official upstream scores. See
+[`lisa-activity-memory`](../../lisa/datasets/activity_memory/README.md) for
+source revisions, selection, licensing, and limitations.
+
 ## Evaluation flow
 
 The worker evaluates each pushed session against approved policies for its

@@ -100,7 +100,10 @@ def chat_activity_requested_status(activities: list[dict[str, Any]]) -> str | No
             return {
                 "success": "succeeded", "error": "failed", "stopped": "cancelled",
             }.get(requested)
-        if name.endswith("evaluate_session") and payload.get("activity_finalized") is True:
+        if name.endswith("evaluate_session") and (
+            payload.get("activity_finalized") is True
+            or bool(payload.get("activity_id"))
+        ):
             return {
                 "success": "succeeded",
                 "succeeded": "succeeded",
@@ -109,7 +112,6 @@ def chat_activity_requested_status(activities: list[dict[str, Any]]) -> str | No
                 "no_approved_policies": "succeeded",
                 "recovered_pending_evaluations": "succeeded",
                 "error": "failed",
-                "evaluation_error": "failed",
                 "failed": "failed",
                 "stopped": "cancelled",
                 "cancelled": "cancelled",
@@ -235,6 +237,9 @@ def chat_activity_waiting_state(
             else:
                 unidentified_policy_pending = False
             next_action = None
+        elif name.endswith("evaluate_session") and payload.get("status") == "evaluation_error":
+            waiting = True
+            next_action = "Retry the incomplete session evaluation"
         elif name.endswith("delete_policy") and payload.get("deleted") is True:
             policy_id = payload.get("policy_id")
             if isinstance(policy_id, str):
@@ -295,63 +300,61 @@ def chat_activity_tool_failed(activities: list[dict[str, Any]]) -> bool:
 def activity_events_for_target(
     activities: list[dict[str, Any]], activity_ids: list[str], target_id: str,
 ) -> list[dict[str, Any]]:
-    """Partition runtime events by Lisa's resolved activity scope."""
+    """Partition task work while excluding transient routing and lookup context."""
     ordered = sorted(activities, key=lambda item: item.get("sequence", 0))
     current_scope: str | None = None
-    pending_resolution: dict[str, Any] | None = None
-    pending_find: dict[str, Any] | None = None
-    pre_resolution_event_ids: list[str] = []
-    has_resolved_scope = False
+    direct_scope_by_call: dict[str, str] = {}
+    context_lookup_tools = {
+        "find_activity",
+        "get_activity_thread",
+        "load_activity_memory",
+        "discover_tool_namespaces",
+        "load_tool_namespace",
+        "invoke_skill",
+    }
     matched: set[str] = set()
 
     for item in ordered:
         full_name = str(item.get("tool_name", "")).lower()
+        normalized_name = re.sub(r"[^a-z0-9]+", "_", full_name).strip("_")
+        if any(normalized_name.endswith(name) for name in context_lookup_tools):
+            # These results are temporary model context. Activity lookup can
+            # return several records, and a memory load contains generated
+            # summaries; persisting either result can copy another task's data
+            # into this activity or recursively summarize a prior snapshot.
+            continue
         is_resolve = full_name.endswith("resolve_chat_activity")
         if is_resolve and item.get("kind") == "tool":
-            pending_resolution = item
-            explicit = tool_activity_id(item)
-            if explicit == target_id:
-                matched.add(str(item.get("id", "")))
+            # Resolution payloads may contain generated titles or summaries
+            # that mention several tasks. Use them only to scope this turn;
+            # never persist those control-plane details as task evidence.
             continue
         if is_resolve and item.get("kind") == "evidence":
             payload = _json_payload(item.get("detail"))
             resolved = payload.get("activity_id") if isinstance(payload, dict) else None
+            current_scope = None
             if isinstance(resolved, str) and resolved in activity_ids:
                 current_scope = resolved
-                if not has_resolved_scope and resolved == target_id:
-                    matched.update(pre_resolution_event_ids)
-                has_resolved_scope = True
-                if resolved == target_id:
+                if (
+                    resolved == target_id
+                    and str(item.get("id", "")).startswith("fallback-resolution:")
+                ):
+                    # Runtime-created fallback receipts contain only a safe
+                    # routing explanation and the generated activity ID.
                     matched.add(str(item.get("id", "")))
-                    if pending_resolution is not None:
-                        matched.add(str(pending_resolution.get("id", "")))
-            pending_resolution = None
-            continue
-
-        if not has_resolved_scope and item.get("id"):
-            pre_resolution_event_ids.append(str(item["id"]))
-
-        if full_name.endswith("find_activity") and item.get("kind") == "tool":
-            pending_find = item
             continue
 
         direct = tool_activity_id(item)
         if direct is not None:
+            call_id = item.get("tool_call_id")
+            if item.get("kind") == "tool" and isinstance(call_id, str) and call_id:
+                direct_scope_by_call[call_id] = direct
             if direct == target_id:
                 matched.add(str(item.get("id", "")))
             continue
-        if item.get("kind") == "evidence" and full_name.endswith("find_activity"):
-            payload = _json_payload(item.get("detail"))
-            rows = payload if isinstance(payload, list) else [payload]
-            if any(
-                isinstance(row, dict)
-                and (row.get("id") == target_id or row.get("activity_key") == target_id)
-                for row in rows
-            ):
-                matched.add(str(item.get("id", "")))
-                if pending_find is not None:
-                    matched.add(str(pending_find.get("id", "")))
-            pending_find = None
+        call_id = item.get("tool_call_id")
+        if isinstance(call_id, str) and direct_scope_by_call.get(call_id) == target_id:
+            matched.add(str(item.get("id", "")))
             continue
         if current_scope == target_id:
             matched.add(str(item.get("id", "")))

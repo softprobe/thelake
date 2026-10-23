@@ -24,6 +24,7 @@ def record_chat_activity_trajectories(
     activities: list[dict[str, Any]],
     final_summary: str,
     turn_failed: bool = False,
+    turn_id: str | None = None,
 ) -> None:
     """Store each request's scoped evidence and close or wait it from tool results."""
     for activity_id in activity_ids:
@@ -97,6 +98,7 @@ def record_chat_activity_trajectories(
                 # to reopen or complete that terminal row a second time.
                 activity_store.record_conversation_trajectory(
                     activity_id, messages, runtime_events,
+                    chat_turn_id=turn_id,
                 )
             else:
                 activity_store.record_chat_turn_trajectory(
@@ -106,6 +108,7 @@ def record_chat_activity_trajectories(
                     summary=summary,
                     status=status,
                     next_action=next_action or "Continue the requested work" if waiting else None,
+                    chat_turn_id=turn_id,
                 )
         except Exception:
             logger.exception("Could not persist and finalize Lisa chat activity %s", activity_id)
