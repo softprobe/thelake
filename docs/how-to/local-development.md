@@ -36,6 +36,16 @@ integrated stack uses its own `softprobe_dev` catalog schema and object-store
 prefix; the existing `softprobe` catalog is left untouched because its stored
 schema predates the current workspace-scoped catalog contract.
 
+To start Lisa and its dedicated Postgres/provisioner without starting TheLake,
+MinIO, DuckLake Postgres, or auth-mock, run:
+
+```bash
+make dev-lisa-up
+```
+
+This starts only Lisa's Compose dependency chain. It does not stop any of those
+services if they were already running.
+
 To populate Explorer with synthetic telemetry for browsing, run:
 
 ```bash
@@ -55,6 +65,20 @@ MinIO, and auth-mock:
 ```bash
 make dev-down
 ```
+
+To discard Lisa's local data and recreate its database and home directory, run:
+
+```bash
+make dev-reprovision-lisa
+```
+
+This deletes the current Compose project's `lisa-postgres-data` and `lisa-data`
+volumes, then runs the normal `dev-up` workflow. It removes Lisa's local
+activities, policies, queued jobs, conversations, and agent workspace. It keeps
+the `.env` file and its existing credential values; normal environment
+initialization may add generated settings or refresh defaults. DuckLake data,
+MinIO's warehouse, and TheLake's telemetry remain intact. Lisa and the rest of
+the local stack are running when the command completes.
 
 ## Rust backend development
 

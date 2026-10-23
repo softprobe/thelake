@@ -18,7 +18,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run dev-up dev-down \
+.PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run dev-up dev-lisa-up _dev-lisa-up dev-down dev-reprovision-lisa \
 	clean clean-cache build build-release package publish test-publish-tags \
 	contracts-test lint check-sql-guardrails fmt check-fmt \
 	test _test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff _test-lease-pg \
@@ -149,7 +149,7 @@ help:
 	@echo "Test:     test | test-e2e | test-perf"
 	@echo "Gates:    ci | release"
 	@echo "Infra:    setup | teardown | doctor"
-	@echo "Local UI: dev-up | dev-down  (TheLake + Lisa + durable Lisa policies)"
+	@echo "Local UI: dev-up | dev-lisa-up | dev-down | dev-reprovision-lisa  (destructive Lisa-only reset)"
 	@echo "Stress:   stress BACKEND=local|r2|gcs"
 	@echo "LLM bench: seed-lake | bench-llm-seeded | test-perf-helpers"
 	@echo "Extras:   duckdb-shell | demo-session | drop-tables | generate-telemetry | test-deploy | telemetrygen"
@@ -212,13 +212,30 @@ dev-up:
 	$(MAKE) --no-print-directory _ensure-dev-dist
 	$(COMPOSE) --profile lisa up --detach ducklake-postgres lisa-postgres minio auth-mock
 	$(MAKE) --no-print-directory _minio-bucket
-	$(COMPOSE) --profile lisa up --detach --build otlp-backend lisa
+	$(COMPOSE) --profile lisa up --detach --build otlp-backend
+	$(MAKE) --no-print-directory _dev-lisa-up
 	@echo "Explorer and TheLake API use the first address. Lisa runs independently at the second address with /lisa/."
 	@$(COMPOSE) --profile lisa port otlp-backend 8090
+
+# Start Lisa's service dependency chain without starting TheLake or its storage.
+dev-lisa-up:
+	python3 scripts/dev_env.py init --env-file .env --require-model
+	$(MAKE) --no-print-directory _dev-lisa-up
+
+_dev-lisa-up:
+	$(COMPOSE) --profile lisa up --detach --build lisa
+	@echo "Lisa is available at the address below with /lisa/."
 	@$(COMPOSE) --profile lisa port lisa 8082
 
 dev-down:
 	$(COMPOSE) --profile lisa stop lisa otlp-backend lisa-postgres
+
+# Destructively reset Lisa's database and home volumes, then start the normal
+# local stack again. Other services and their data volumes are preserved.
+dev-reprovision-lisa:
+	python3 scripts/dev_env.py init --env-file .env --require-model
+	python3 scripts/dev_reprovision_lisa.py --compose "$(COMPOSE)"
+	$(MAKE) --no-print-directory dev-up
 
 # Host release → dist/. On non-linux/amd64, TARGET_PLATFORM=linux/amd64 re-enters via docker.
 build-release: ensure-cache explorer-assets
