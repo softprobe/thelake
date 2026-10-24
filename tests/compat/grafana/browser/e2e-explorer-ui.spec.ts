@@ -159,15 +159,20 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await page.addInitScript(() => {
     Object.defineProperty(window, '__LISA_API_BASE_PATH__', { value: '/lisa/v1' });
   });
+  const longSqlMessage = {
+    id: 'assistant-code-seed', role: 'assistant',
+    text: `Here is the query:\n\n\`\`\`sql\nSELECT ${Array.from({ length: 48 }, (_, index) => `policy_column_${index}`).join(', ')} FROM lisa.readable_evaluations\n\`\`\``,
+    created_at: new Date().toISOString(),
+  };
   let activityFeedRequests = 0;
   await page.route('**/lisa/v1/**', async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === '/lisa/v1/conversations') {
-      await route.fulfill({ json: [{ conversation_id: 'lisa-ui-seed', title: 'Lisa demo', messages: [], activities: [] }] });
+      await route.fulfill({ json: [{ conversation_id: 'lisa-ui-seed', title: 'Lisa demo', messages: [longSqlMessage], activities: [] }] });
       return;
     }
     if (url.pathname === '/lisa/v1/conversations/lisa-ui-seed') {
-      await route.fulfill({ json: { conversation_id: 'lisa-ui-seed', title: 'Lisa demo', messages: [], activities: [] } });
+      await route.fulfill({ json: { conversation_id: 'lisa-ui-seed', title: 'Lisa demo', messages: [longSqlMessage], activities: [] } });
       return;
     }
     if (url.pathname === '/lisa/v1/activities') {
@@ -226,6 +231,24 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await page.goto(`${lisaBackend}/lisa/`);
   const lisaChat = page.getByRole('log', { name: 'Lisa conversation' });
   await expect(lisaChat).toBeVisible();
+  const codeMessage = page.locator('.tle-lisa-message.tle-lisa-assistant').filter({ has: page.locator('.tle-lisa-markdown pre') }).first();
+  const codeBlock = codeMessage.locator('.tle-lisa-markdown pre');
+  await expect(codeBlock).toBeVisible();
+  const codeBlockBounds = await page.evaluate(() => {
+    const message = document.querySelector('.tle-lisa-message.tle-lisa-assistant')!;
+    const pre = message.querySelector('.tle-lisa-markdown pre')!;
+    const transcript = document.querySelector('.tle-lisa-transcript')!;
+    return {
+      messageRight: message.getBoundingClientRect().right,
+      preRight: pre.getBoundingClientRect().right,
+      transcriptRight: transcript.getBoundingClientRect().right,
+      preScrollWidth: pre.scrollWidth,
+      preClientWidth: pre.clientWidth,
+    };
+  });
+  expect(codeBlockBounds.preRight).toBeLessThanOrEqual(codeBlockBounds.messageRight + 1);
+  expect(codeBlockBounds.messageRight).toBeLessThanOrEqual(codeBlockBounds.transcriptRight + 1);
+  expect(codeBlockBounds.preScrollWidth).toBeGreaterThan(codeBlockBounds.preClientWidth);
   for (const tab of ['Activities', 'Rules', 'Recent evaluations', 'Findings', 'Identity']) {
     await expect(page.getByRole('tab', { name: tab })).toBeVisible();
   }
