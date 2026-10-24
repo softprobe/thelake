@@ -1,6 +1,7 @@
 WITH finished AS (
     UPDATE lisa.activities AS activity
-    SET status = 'succeeded', finished_at = clock_timestamp(),
+    SET status = 'succeeded', summary = COALESCE(%(summary)s::text, activity.summary),
+        finished_at = clock_timestamp(),
         updated_at = clock_timestamp(), lease_owner = NULL, lease_expires_at = NULL,
         next_event_seq = next_event_seq + 1, version = version + 1
     WHERE activity.id = %(activity_id)s
@@ -26,6 +27,6 @@ WITH finished AS (
 )
 INSERT INTO lisa.activity_events(activity_id, seq, event_type, title, summary, actor)
 SELECT finished.id, finished.seq, 'succeeded', 'Activity completed',
-       'All evaluations for this activity are complete.', 'lisa'
+       COALESCE(%(summary)s::text, 'All evaluations for this activity are complete.'), 'lisa'
 FROM finished
 RETURNING activity_id;

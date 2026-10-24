@@ -1,5 +1,9 @@
 SELECT action.seq, action.event_type, action.title, action.summary, action.actor,
-       action.reference_type, action.reference_id, action.status, action.created_at
+       CASE WHEN action.reference_type = 'session_evaluation_attempt'
+            THEN NULL ELSE action.reference_type END AS reference_type,
+       CASE WHEN action.reference_type = 'session_evaluation_attempt'
+            THEN NULL ELSE action.reference_id END AS reference_id,
+       action.status, action.created_at
 FROM lisa.activity_monitor_thread_actions AS action
 LEFT JOIN lisa.activity_events AS event
   ON event.activity_id = action.activity_id AND event.seq = action.seq

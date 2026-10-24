@@ -4,12 +4,12 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from policy_cases import session_detail, save_rule
+from policy_cases import save_rule, session_detail
 
 from lisa.bootstrap import build_services
 from lisa.evaluation.contracts import EvaluationRequest
 from lisa.evaluation.scores import evaluation_run_identity
-from lisa.evaluation.trajectory import build_trajectory_events
+from lisa.evaluation.trajectory import build_trajectory_events, session_timestamp
 from lisa.models.activities import ActivityClaim
 from lisa.services import evaluations as evaluations_module
 
@@ -64,6 +64,13 @@ def test_evaluation_run_identity_tracks_evidence_and_evaluator_versions():
     ) != first
 
 
+def test_session_timestamp_uses_current_time_when_spans_have_no_timestamps():
+    timestamp = session_timestamp([{}])
+
+    assert timestamp.endswith("Z")
+    assert datetime.fromisoformat(timestamp).tzinfo is not None
+
+
 @pytest.mark.parametrize("raise_error", [False, True])
 def test_lease_heartbeat_stops_when_lease_scope_exits(monkeypatch, raise_error):
     real_thread = threading.Thread
@@ -85,11 +92,13 @@ def test_lease_heartbeat_stops_when_lease_scope_exits(monkeypatch, raise_error):
     )
 
     if raise_error:
-        with pytest.raises(RuntimeError, match="operation failed"):
-            with service._lease_heartbeat("activity-1", "lisa-evaluation", claim):
-                assert len(threads) == 1
-                assert threads[0].is_alive()
-                raise RuntimeError("operation failed")
+        with (
+            pytest.raises(RuntimeError, match="operation failed"),
+            service._lease_heartbeat("activity-1", "lisa-evaluation", claim),
+        ):
+            assert len(threads) == 1
+            assert threads[0].is_alive()
+            raise RuntimeError("operation failed")
     else:
         with service._lease_heartbeat("activity-1", "lisa-evaluation", claim):
             assert len(threads) == 1

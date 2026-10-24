@@ -75,9 +75,12 @@
 .tle-lisa-activity-icon { display: grid; place-items: center; }
 .tle-lisa-activity-icon.status-pending, .tle-lisa-activity-icon.status-running { background: #fff5e6; color: #b77823; }
 .tle-lisa-activity-icon.status-error, .tle-lisa-activity-icon.status-failed { background: #fff0ef; color: #b23c36; }
+.tle-lisa-activity-icon.status-finding { background: #fff0ef; color: #b23c36; }
 .tle-lisa-activity-icon.status-stopped { background: #efedf2; color: #686371; }
 .tle-lisa-activity-card-copy { display: grid; min-width: 0; }
 .tle-lisa-activity-subtitle, .tle-lisa-activity-next { overflow: hidden; text-overflow: ellipsis; }
+.tle-lisa-evaluation-finding { width: fit-content; padding: 3px 7px; border-radius: 20px; background: #fff0ef; color: #a83430; font-size: 10px; font-weight: 600; line-height: 1.2; }
+.tle-lisa-activity-subtitle.tle-lisa-evaluation-finding-summary { color: #8f302b; font-weight: 500; }
 .tle-lisa-activity-meta { min-width: 0; align-items: center; }
 .tle-lisa-activity-status { width: fit-content; padding: 3px 7px; border-radius: 20px; background: #f0eef3; color: #625e6a; font-size: 10px; line-height: 1.15; }
 .tle-lisa-activity-status.status-completed, .tle-lisa-activity-status.status-success, .tle-lisa-activity-status.status-approved { background: #eaf5ee; color: #27744f; }
@@ -235,9 +238,9 @@
 .tle-lisa-connected-mark { display: inline-grid; place-items: center; width: 13px; height: 13px; margin-right: 4px; border-radius: 50%; background: #168b3f; color: #fff; font-size: 9px; font-weight: 700; line-height: 1; }
 .tle-lisa-connected-mark.unavailable { background: #8b929b; }
 .tle-lisa-panel-header { gap: 0; }
-.tle-lisa-panel-tabs { grid-template-columns: repeat(4, 1fr); min-height: 38px; padding: 3px; gap: 0; border-radius: 22px; background: #eceef2; }
-.tle-lisa-panel-tabs button { min-height: 32px; border-radius: 20px; color: #777d86; font-size: 11px; }
-.tle-lisa-panel-tabs button span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+.tle-lisa-panel-tabs { grid-template-columns: repeat(5, 1fr); min-height: 38px; padding: 3px; gap: 0; border-radius: 22px; background: #eceef2; }
+.tle-lisa-panel-tabs button { grid-template-rows: 16px auto; gap: 2px; min-height: 38px; border-radius: 20px; color: #777d86; font-size: 11px; }
+.tle-lisa-panel-tabs button span { position: static; width: auto; height: auto; overflow: visible; clip: auto; color: inherit; font-size: 9px; line-height: 1; white-space: nowrap; }
 .tle-lisa-panel-tabs svg { display: block; }
 .tle-lisa-panel-tabs button[aria-selected="true"] { border-color: transparent; background: #fff; color: #525861; box-shadow: 0 1px 4px #00000014; font-weight: 500; }
 .tle-lisa-panel-refresh { display: none; }
@@ -276,6 +279,8 @@
 .tle-lisa-step-icon.start svg { width: 10px; height: 10px; }
 .tle-lisa-step-icon.completed { border-color: #969da5; background: #eef0f3; color: #606872; }
 .tle-lisa-activity-step.selected .tle-lisa-step-icon, .tle-lisa-activity-step.latest .tle-lisa-step-icon { border-color: #111519; background: #111519; color: #fff; }
+.tle-lisa-step-icon.failed { border-color: #b23c36; background: #fff0ef; color: #b23c36; }
+.tle-lisa-activity-step.selected .tle-lisa-step-icon.failed, .tle-lisa-activity-step.latest .tle-lisa-step-icon.failed { border-color: #b23c36; background: #b23c36; color: #fff; }
 .tle-lisa-activity-dialog-summary { padding: 18px 40px; color: #171a1e; font-size: 13px; line-height: 1.45; }
 .tle-lisa-activity-dialog-summary h3 { margin-bottom: 7px; color: #171a1e; font-size: 18px; font-weight: 600; }
 .tle-lisa-activity-dialog-summary p { margin-bottom: 8px; }

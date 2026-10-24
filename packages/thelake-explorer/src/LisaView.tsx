@@ -17,9 +17,9 @@ import { lisaTimeline, toolActionLabel } from "./LisaTimeline";
 import "./LisaView.css";
 
 type ConversationView = LisaConversation & { activities: LisaActivity[] };
-type ActivityPanel = "activities" | "triage";
+type ActivityPanel = "activities" | "triage" | "findings";
 type FeedStatus = { loading: boolean; error?: string };
-type LisaPanelTab = "activities" | "rules" | "triage" | "identity";
+type LisaPanelTab = "activities" | "rules" | "triage" | "findings" | "identity";
 
 function LisaIcon({ name, size = 18 }: { name: LisaPanelTab | "refresh" | "check" | "clock" | "alert" | "stop" | "close" | "edit" | "dot" | "chat" | "search" | "documents" | "bulb" | "tasks" | "apps" | "analytics" | "theme" | "download" | "menu" | "gift" | "microphone"; size?: number }) {
   const museIcon = name === "activities"
@@ -136,6 +136,10 @@ function activityTime(value: string): string {
     : `${date.toLocaleDateString([], { month: "short", day: "numeric" })} · ${time}`;
 }
 
+function policyFindingSummary(entry: Pick<LisaFeedEntry, "summary" | "subtitle">): string | undefined {
+  return [entry.summary, entry.subtitle].find((value) => /^Policy violations? found:\s*.+$/i.test(value || "")) || undefined;
+}
+
 export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSessions?: () => void }) {
   const [conversations, setConversations] = useState<ConversationView[]>([]);
   const [activeId, setActiveId] = useState<string>();
@@ -145,20 +149,20 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
   const [hasDraft, setHasDraft] = useState(false);
   const [error, setError] = useState<string>();
   const [panelOpen, setPanelOpen] = useState(true);
-  const [activePanel, setActivePanel] = useState<"activities" | "rules" | "triage" | "identity">("activities");
-  const [activityFeeds, setActivityFeeds] = useState<Record<ActivityPanel, LisaFeedEntry[]>>({ activities: [], triage: [] });
+  const [activePanel, setActivePanel] = useState<LisaPanelTab>("activities");
+  const [activityFeeds, setActivityFeeds] = useState<Record<ActivityPanel, LisaFeedEntry[]>>({ activities: [], triage: [], findings: [] });
   const [policies, setPolicies] = useState<LisaPolicyRecord[]>([]);
   const [selectedActivity, setSelectedActivity] = useState<LisaActivityDetail>();
   const [selectedActionSeq, setSelectedActionSeq] = useState<number>();
   const [showActionDetail, setShowActionDetail] = useState(false);
   const [feedStatus, setFeedStatus] = useState<Record<ActivityPanel, FeedStatus>>({
-    activities: { loading: false }, triage: { loading: false },
+    activities: { loading: false }, triage: { loading: false }, findings: { loading: false },
   });
   const [policiesLoading, setPoliciesLoading] = useState(false);
   const [policiesError, setPoliciesError] = useState<string>();
   const [nextPolicyOffset, setNextPolicyOffset] = useState<number | null>(null);
   const loadedConversations = useRef(new Set<string>());
-  const feedRequestIds = useRef<Record<ActivityPanel, number>>({ activities: 0, triage: 0 });
+  const feedRequestIds = useRef<Record<ActivityPanel, number>>({ activities: 0, triage: 0, findings: 0 });
   const activityDetailRequestId = useRef(0);
   const activityDialogRef = useRef<HTMLDivElement>(null);
   const previousActivityFocus = useRef<HTMLElement | null>(null);
@@ -172,12 +176,23 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
     [active?.messages, active?.activities, sending],
   );
 
-  const refreshFeed = useCallback(async (activityType?: string) => {
-    const panel: ActivityPanel = activityType === "policy_evaluation" ? "triage" : "activities";
+  const refreshFeed = useCallback(async (panel: ActivityPanel = "activities") => {
     const requestId = ++feedRequestIds.current[panel];
     setFeedStatus((current) => ({ ...current, [panel]: { loading: true, error: undefined } }));
     try {
-      const rows = await api.listLisaActivities({ limit: 100, activityType });
+      const activityTypes = panel === "activities" ? [undefined] : ["policy_evaluation", "session_evaluation"];
+      const pages = await Promise.all(activityTypes.map((type) => api.listLisaActivities({
+        limit: 100,
+        activityType: type,
+        query: panel === "findings" ? "Policy violation" : undefined,
+      })));
+      const allRows = [...new Map(pages.flat().map((row) => [row.id, row])).values()]
+        .sort((left, right) => Date.parse(right.finished_at || right.updated_at || right.created_at)
+          - Date.parse(left.finished_at || left.updated_at || left.created_at))
+        .slice(0, 100);
+      const rows = panel === "findings"
+        ? allRows.filter((row) => policyFindingSummary(row))
+        : allRows;
       if (requestId !== feedRequestIds.current[panel]) return;
       setActivityFeeds((current) => ({ ...current, [panel]: rows }));
     } catch (cause) {
@@ -206,8 +221,7 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
   }, [api]);
 
   const refreshPanel = useCallback(() => {
-    if (activePanel === "activities") void refreshFeed();
-    if (activePanel === "triage") void refreshFeed("policy_evaluation");
+    if (activePanel === "activities" || activePanel === "triage" || activePanel === "findings") void refreshFeed(activePanel);
     if (activePanel === "rules") void refreshPolicies();
   }, [activePanel, refreshFeed, refreshPolicies]);
 
@@ -217,12 +231,19 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
       setSelectedActivity(undefined);
     }
     setActivePanel(tab);
-    if (tab === "activities") void refreshFeed();
-    if (tab === "triage") void refreshFeed("policy_evaluation");
+    if (tab === "activities" || tab === "triage" || tab === "findings") void refreshFeed(tab);
     if (tab === "rules") void refreshPolicies();
   }, [activePanel, refreshFeed, refreshPolicies]);
 
   useEffect(() => { void refreshFeed(); }, [refreshFeed]);
+
+  useEffect(() => {
+    if (activePanel !== "activities" && activePanel !== "triage" && activePanel !== "findings") return;
+    const timer = window.setInterval(() => {
+      void refreshFeed(activePanel);
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [activePanel, refreshFeed]);
 
   const openActivity = useCallback(async (activityId: string) => {
     const requestId = ++activityDetailRequestId.current;
@@ -233,11 +254,11 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
       setSelectedActivity(detail);
       setSelectedActionSeq(detail.actions.at(-1)?.seq);
       setShowActionDetail(false);
-      const panel: ActivityPanel = activePanel === "triage" ? "triage" : "activities";
+      const panel: ActivityPanel = activePanel === "triage" || activePanel === "findings" ? activePanel : "activities";
       setFeedStatus((current) => ({ ...current, [panel]: { ...current[panel], error: undefined } }));
     } catch (cause) {
       if (requestId !== activityDetailRequestId.current) return;
-      const panel: ActivityPanel = activePanel === "triage" ? "triage" : "activities";
+      const panel: ActivityPanel = activePanel === "triage" || activePanel === "findings" ? activePanel : "activities";
       setFeedStatus((current) => ({ ...current, [panel]: { ...current[panel], error: `Could not load activity: ${String(cause)}` } }));
     }
   }, [activePanel, api]);
@@ -260,6 +281,15 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
       // Keep the last rendered detail visible; the next open retries the request.
     }
   }, [api, showActionDetail]);
+
+  useEffect(() => {
+    const activityId = selectedActivity?.activity.id;
+    if (!activityId) return;
+    const timer = window.setInterval(() => {
+      void refreshActivityDetail(activityId);
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [refreshActivityDetail, selectedActivity?.activity.id]);
 
   useEffect(() => {
     if (!selectedActivity) return;
@@ -467,18 +497,18 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
           </div>
           <div className="tle-lisa-panel-header">
             <div className="tle-lisa-panel-tabs" role="tablist" aria-label="Lisa workspace">
-            {(["activities", "rules", "triage", "identity"] as const).map((tab) => <button
+            {(["activities", "rules", "triage", "findings", "identity"] as const).map((tab) => <button
               key={tab}
               id={`tle-lisa-tab-${tab}`}
               role="tab"
               tabIndex={activePanel === tab ? 0 : -1}
-              aria-label={tab === "triage" ? "Triage / judges" : tab === "activities" ? "Activities" : tab[0].toUpperCase() + tab.slice(1)}
-              title={tab === "triage" ? "Triage / judges" : tab[0].toUpperCase() + tab.slice(1)}
+              aria-label={tab === "triage" ? "Recent evaluations" : tab === "activities" ? "Activities" : tab[0].toUpperCase() + tab.slice(1)}
+              title={tab === "triage" ? "Recent evaluations" : tab[0].toUpperCase() + tab.slice(1)}
               aria-selected={activePanel === tab}
               aria-controls="tle-lisa-panel-content"
               onClick={() => selectPanel(tab)}
               onKeyDown={(event) => {
-                const tabs = ["activities", "rules", "triage", "identity"] as const;
+                const tabs = ["activities", "rules", "triage", "findings", "identity"] as const;
                 const currentIndex = tabs.indexOf(tab);
                 const nextIndex = event.key === "ArrowRight" ? (currentIndex + 1) % tabs.length
                   : event.key === "ArrowLeft" ? (currentIndex + tabs.length - 1) % tabs.length
@@ -491,31 +521,42 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
                 }
               }}
             >
-              <LisaIcon name={tab} size={16} />
-              <span>{tab === "activities" ? "Activity" : tab === "triage" ? "Triage" : tab[0].toUpperCase() + tab.slice(1)}</span>
+              <LisaIcon name={tab === "findings" ? "alert" : tab} size={16} />
+              <span>{tab === "activities" ? "Activity" : tab === "triage" ? "Evaluations" : tab[0].toUpperCase() + tab.slice(1)}</span>
             </button>)}
             </div>
-            {activePanel !== "identity" && <button className="tle-lisa-panel-refresh" aria-label="Refresh panel" title="Refresh" onClick={refreshPanel} disabled={(activePanel === "rules" ? policiesLoading : feedStatus[activePanel].loading)}><LisaIcon name="refresh" size={15} /></button>}
+            {activePanel !== "identity" && <button className="tle-lisa-panel-refresh" aria-label="Refresh panel" title="Refresh" onClick={refreshPanel} disabled={(activePanel === "rules" ? policiesLoading : activePanel === "activities" || activePanel === "triage" || activePanel === "findings" ? feedStatus[activePanel].loading : false)}><LisaIcon name="refresh" size={15} /></button>}
           </div>
         </div>
         <div className="tle-lisa-panel-content" id="tle-lisa-panel-content" role="tabpanel" tabIndex={0} aria-labelledby={`tle-lisa-tab-${activePanel}`}>
-          {(activePanel === "activities" || activePanel === "triage") && <>
-            <h3 className="tle-lisa-panel-section-title">{activePanel === "triage" ? "Recent evaluations" : "Today"}</h3>
-            {feedStatus[activePanel].loading && <p className="tle-lisa-panel-message">Loading {activePanel === "triage" ? "evaluations" : "activities"}…</p>}
+          {(activePanel === "activities" || activePanel === "triage" || activePanel === "findings") && <>
+            <h3 className="tle-lisa-panel-section-title">{activePanel === "triage" ? "Recent evaluations" : activePanel === "findings" ? "Policy findings" : "Today"}</h3>
+            {feedStatus[activePanel].loading && <p className="tle-lisa-panel-message">Loading {activePanel === "triage" ? "evaluations" : activePanel === "findings" ? "findings" : "activities"}…</p>}
             {feedStatus[activePanel].error && <p className="tle-lisa-error" role="alert">{feedStatus[activePanel].error}</p>}
-            {!feedStatus[activePanel].loading && !feedStatus[activePanel].error && activityFeeds[activePanel].length === 0 && <p className="tle-lisa-panel-message">{activePanel === "triage" ? "No evaluation activity has been recorded yet." : "No activities yet."}</p>}
-            <div className="tle-lisa-activity-list" aria-label={activePanel === "triage" ? "Lisa evaluations" : "Lisa activities"}>
-              {activityFeeds[activePanel].map((item) => <button key={item.id} className="tle-lisa-activity-card" onClick={() => void openActivity(item.id)}>
-                <span className={`tle-lisa-activity-icon status-${item.status}`} aria-hidden="true"><LisaIcon name={/error|fail/i.test(item.status) ? "alert" : /stopped/i.test(item.status) ? "stop" : /success|complete|approved/i.test(item.status) ? "check" : "clock"} size={15} /></span>
-                <span className="tle-lisa-activity-card-copy">
-                  <span className="tle-lisa-activity-card-title">{item.title}</span>
-                  {(item.subtitle || item.summary) && <span className="tle-lisa-activity-subtitle">{item.subtitle || item.summary}</span>}
-                  {item.next_action && <span className="tle-lisa-activity-next">Next: {item.next_action}</span>}
-                  <span className="tle-lisa-activity-meta"><span className={`tle-lisa-activity-status status-${item.status}`}>{item.status_title || item.status}</span><time dateTime={item.updated_at || item.created_at}>{activityTime(item.updated_at || item.created_at)}</time></span>
-                </span>
-              </button>)}
+            {!feedStatus[activePanel].loading && !feedStatus[activePanel].error && activityFeeds[activePanel].length === 0 && <p className="tle-lisa-panel-message">{activePanel === "triage" ? "No evaluation activity has been recorded yet." : activePanel === "findings" ? "No policy findings have been recorded." : "No activities yet."}</p>}
+            <div className="tle-lisa-activity-list" aria-label={activePanel === "triage" ? "Lisa evaluations" : activePanel === "findings" ? "Lisa policy findings" : "Lisa activities"}>
+              {activityFeeds[activePanel].map((item) => {
+                const findingSummary = policyFindingSummary(item);
+                const finding = activePanel === "triage" || activePanel === "findings"
+                  ? findingSummary?.match(/^Policy violations? found:\s*(.+)$/i)
+                  : null;
+                const resultSummary = findingSummary || item.subtitle || item.summary || "";
+                const findingLabel = finding && /^Policy violations/i.test(finding[0])
+                  ? "Policy violations found"
+                  : "Policy violation found";
+                return <button key={item.id} className={`tle-lisa-activity-card ${finding ? "has-finding" : ""}`} onClick={() => void openActivity(item.id)}>
+                  <span className={`tle-lisa-activity-icon status-${finding ? "finding" : item.status}`} aria-hidden="true"><LisaIcon name={finding || /error|fail/i.test(item.status) ? "alert" : /stopped/i.test(item.status) ? "stop" : /success|complete|approved/i.test(item.status) ? "check" : "clock"} size={15} /></span>
+                  <span className="tle-lisa-activity-card-copy">
+                    {finding && <span className="tle-lisa-evaluation-finding">{findingLabel}</span>}
+                    <span className="tle-lisa-activity-card-title">{item.title}</span>
+                    {resultSummary && <span className={`tle-lisa-activity-subtitle ${finding ? "tle-lisa-evaluation-finding-summary" : ""}`}>{finding ? finding[1] : resultSummary}</span>}
+                    {item.next_action && <span className="tle-lisa-activity-next">Next: {item.next_action}</span>}
+                    <span className="tle-lisa-activity-meta"><span className={`tle-lisa-activity-status status-${item.status}`}>{item.status_title || item.status}</span><time dateTime={item.updated_at || item.created_at}>{activityTime(item.updated_at || item.created_at)}</time></span>
+                  </span>
+                </button>;
+              })}
             </div>
-            {activePanel === "triage" && <p className="tle-lisa-panel-note">Triage routes evidence to review; it is not a pass/fail verdict. Judge results and provider errors appear in each evaluation timeline.</p>}
+            {activePanel === "triage" && <p className="tle-lisa-panel-note">Evaluation status shows whether Lisa completed the run. Policy findings are listed separately.</p>}
           </>}
           {activePanel === "rules" && <>
             {policiesLoading && <p className="tle-lisa-panel-message">Loading rules…</p>}
@@ -547,10 +588,13 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
             <nav className="tle-lisa-activity-dialog-timeline" aria-label="Activity timeline">
               <div className="tle-lisa-activity-steps">{selectedActivity.actions.length === 0
                 ? <button className="tle-lisa-activity-step selected" aria-current="step" onClick={() => { setSelectedActionSeq(undefined); setShowActionDetail(false); }}><span className="tle-lisa-step-icon"><LisaIcon name="check" size={14} /></span><span>Summary</span></button>
-                : selectedActivity.actions.map((action, index) => <button key={action.seq} className={`tle-lisa-activity-step ${showActionDetail ? action.seq === selectedActionSeq ? "selected" : "" : index === selectedActivity.actions.length - 1 ? "latest" : ""}`} aria-current={showActionDetail && action.seq === selectedActionSeq ? "step" : undefined} onClick={() => { setSelectedActionSeq(action.seq); setShowActionDetail(true); }}>
-                  <span className={`tle-lisa-step-icon ${index === 0 ? "start" : /success|complete|approved/i.test(selectedActivity.activity.status) ? "completed" : ""}`}><LisaIcon name={index === 0 ? "dot" : "check"} size={14} /></span>
-                  <span>{action.title}</span>
-                </button>)}</div>
+                : selectedActivity.actions.map((action, index) => {
+                  const failedAction = /error|fail/i.test(`${action.event_type} ${action.title}`);
+                  return <button key={action.seq} className={`tle-lisa-activity-step ${showActionDetail ? action.seq === selectedActionSeq ? "selected" : "" : index === selectedActivity.actions.length - 1 ? "latest" : ""}`} aria-current={showActionDetail && action.seq === selectedActionSeq ? "step" : undefined} onClick={() => { setSelectedActionSeq(action.seq); setShowActionDetail(true); }}>
+                    <span className={`tle-lisa-step-icon ${failedAction ? "failed" : index === 0 ? "start" : /success|complete|approved/i.test(selectedActivity.activity.status) ? "completed" : ""}`}><LisaIcon name={failedAction ? "alert" : index === 0 ? "dot" : "check"} size={14} /></span>
+                    <span>{action.title}</span>
+                  </button>;
+                })}</div>
             </nav>
             <article className="tle-lisa-activity-dialog-summary" aria-live="polite">
               <h3>{selectedAction?.title ?? "Summary"}</h3>

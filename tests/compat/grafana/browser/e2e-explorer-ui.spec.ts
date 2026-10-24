@@ -171,21 +171,26 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
       return;
     }
     if (url.pathname === '/lisa/v1/activities') {
-      const evaluation = url.searchParams.get('activity_type') === 'policy_evaluation';
-      if (!evaluation && ++activityFeedRequests === 3) {
+      const activityType = url.searchParams.get('activity_type');
+      if (!activityType && ++activityFeedRequests === 3) {
         await route.fulfill({ status: 503, json: { detail: 'Temporary preview feed error' } });
         return;
       }
-      if (!evaluation) await new Promise((resolve) => setTimeout(resolve, 800));
-      await route.fulfill({ json: evaluation ? [{
+      if (!activityType) await new Promise((resolve) => setTimeout(resolve, 800));
+      const rows = activityType === 'policy_evaluation' ? [{
         id: 'evaluation-seed', title: 'Evaluation from the policy dataset', kind: 'policy_evaluation',
         status: 'success', status_title: 'Evaluation complete', summary: 'Triage escalated this case to the judge.',
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      }] : activityType === 'session_evaluation' ? [{
+        id: 'session-evaluation-seed', title: 'Evaluation from a pushed session', kind: 'session_evaluation',
+        status: 'success', status_title: 'Evaluation complete', summary: 'Policy violation found: Refund eligibility.',
         created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
       }] : [{
         id: 'activity-seed', title: 'Review a seeded activity', kind: 'action',
         status: 'pending', status_title: 'In progress', summary: 'Activity fixture for the Lisa panel.',
         created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-      }] });
+      }];
+      await route.fulfill({ json: rows });
       return;
     }
     if (url.pathname === '/lisa/v1/activities/activity-seed') {
@@ -221,7 +226,7 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await page.goto(`${lisaBackend}/lisa/`);
   const lisaChat = page.getByRole('log', { name: 'Lisa conversation' });
   await expect(lisaChat).toBeVisible();
-  for (const tab of ['Activities', 'Rules', 'Triage / judges', 'Identity']) {
+  for (const tab of ['Activities', 'Rules', 'Recent evaluations', 'Findings', 'Identity']) {
     await expect(page.getByRole('tab', { name: tab })).toBeVisible();
   }
   const activityTab = page.getByRole('tab', { name: 'Activities' });
@@ -233,19 +238,30 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await expect(page.getByRole('tab', { name: 'Identity' })).toBeFocused();
   await expect(page.getByRole('tab', { name: 'Identity' })).toHaveAttribute('aria-selected', 'true');
   await page.getByRole('tab', { name: 'Identity' }).press('ArrowLeft');
-  await expect(page.getByRole('tab', { name: 'Triage / judges' })).toBeFocused();
-  await expect(page.getByRole('tab', { name: 'Triage / judges' })).toHaveAttribute('aria-selected', 'true');
-  await page.getByRole('tab', { name: 'Triage / judges' }).click();
+  await expect(page.getByRole('tab', { name: 'Findings' })).toBeFocused();
+  await expect(page.getByRole('tab', { name: 'Findings' })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: 'Findings' }).click();
+  const finding = page.getByRole('button', { name: /Evaluation from a pushed session/ });
+  await expect(finding).toBeVisible();
+  await expect(finding).toContainText('Policy violation found');
+  await expect(finding).toContainText('Refund eligibility.');
+  await expect(page.getByRole('button', { name: /Evaluation from the policy dataset/ })).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Recent evaluations' }).click();
   await expect(page.getByRole('button', { name: /Evaluation from the policy dataset/ })).toBeVisible();
+  const pushedEvaluation = page.getByRole('button', { name: /Evaluation from a pushed session/ });
+  await expect(pushedEvaluation).toBeVisible();
+  await expect(pushedEvaluation).toContainText('Policy violation found');
+  await expect(pushedEvaluation).toContainText('Refund eligibility.');
   await page.waitForTimeout(900);
   await expect(page.getByRole('button', { name: /Evaluation from the policy dataset/ })).toBeVisible();
+  await expect(pushedEvaluation).toContainText('Policy violation found');
   await expect(page.getByRole('button', { name: /Review a seeded activity/ })).toHaveCount(0);
   await page.getByRole('tab', { name: 'Activities' }).click();
   await expect(page.getByRole('button', { name: /Review a seeded activity/ })).toBeVisible();
   const detailRequest = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith('/activities/activity-seed'));
   await page.getByRole('button', { name: /Review a seeded activity/ }).click();
   await detailRequest;
-  await page.getByRole('tab', { name: 'Triage / judges' }).click();
+  await page.getByRole('tab', { name: 'Recent evaluations' }).click();
   await page.waitForTimeout(900);
   await expect(page.getByRole('dialog', { name: 'Review a seeded activity' })).toHaveCount(0);
   await page.getByRole('tab', { name: 'Activities' }).click();
@@ -452,4 +468,84 @@ test('Lisa deletes an existing agent policy from chat and confirms its absence',
   await expect(readTool.locator('pre').first()).toContainText('"scope": "agent"');
   await expect(readTool.locator('pre').first()).toContainText(`"agent_name": "${agentName}"`);
   await expect(readTool.locator('pre').last()).toContainText('No policy exists yet.');
+});
+
+test('Lisa shows a retryable evaluation failure as the activity updates', async ({ page }) => {
+  const activityId = 'retryable-evaluation-seed';
+  const title = 'Evaluate a pushed session';
+  const failureSummary = 'Evaluation attempt 1 of 8 failed: Judge timed out. Lisa will retry.';
+  const createdAt = new Date().toISOString();
+  let failureRecorded = false;
+
+  await page.addInitScript(() => {
+    Object.defineProperty(window, '__LISA_API_BASE_PATH__', { value: '/lisa/v1' });
+  });
+  await page.route('**/lisa/v1/**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/lisa/v1/conversations') {
+      await route.fulfill({ json: [{ conversation_id: 'retry-seed', title: 'Lisa demo', messages: [], activities: [] }] });
+      return;
+    }
+    if (url.pathname === '/lisa/v1/conversations/retry-seed') {
+      await route.fulfill({ json: { conversation_id: 'retry-seed', title: 'Lisa demo', messages: [], activities: [] } });
+      return;
+    }
+    if (url.pathname === '/lisa/v1/activities') {
+      await route.fulfill({ json: [{
+        id: activityId,
+        title,
+        kind: 'session_evaluation',
+        status: 'pending',
+        status_title: 'In progress',
+        summary: failureRecorded ? failureSummary : 'Evaluation is queued.',
+        created_at: createdAt,
+        updated_at: createdAt,
+      }] });
+      return;
+    }
+    if (url.pathname === `/lisa/v1/activities/${activityId}`) {
+      const actions = [
+        { seq: 1, event_type: 'activity.started', title: 'Evaluation started', summary: 'Lisa started the evaluation.', created_at: createdAt },
+      ];
+      if (failureRecorded) {
+        actions.push({
+          seq: 2,
+          event_type: 'session_evaluation_attempt_failed',
+          title: 'Evaluation attempt 1 of 8 failed',
+          summary: failureSummary,
+          created_at: createdAt,
+        });
+      }
+      await route.fulfill({ json: {
+        activity: {
+          id: activityId,
+          title,
+          status: 'pending',
+          status_title: 'In progress',
+          summary: failureRecorded ? failureSummary : 'Evaluation is queued.',
+        },
+        thread: { name: title, status: 'pending' },
+        actions,
+        references: [],
+      } });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { detail: 'Unknown Lisa retry visibility test route' } });
+  });
+
+  await page.goto(`${lisaBackend}/lisa/`);
+  const activityCard = page.getByRole('button', { name: new RegExp(title) });
+  await expect(activityCard).toContainText('Evaluation is queued.');
+  await activityCard.click();
+  const dialog = page.getByRole('dialog', { name: title });
+  await expect(dialog.getByText('Evaluation is queued.')).toBeVisible();
+
+  failureRecorded = true;
+  await expect(activityCard).toContainText(failureSummary, { timeout: 20_000 });
+  const timeline = dialog.getByRole('navigation', { name: 'Activity timeline' });
+  const failureStep = timeline.getByRole('button', { name: /Evaluation attempt 1 of 8 failed/ });
+  await expect(failureStep).toBeVisible({ timeout: 20_000 });
+  await expect(failureStep.locator('.tle-lisa-step-icon')).toHaveClass(/failed/);
+  await failureStep.click();
+  await expect(dialog.getByText(/Judge timed out\. Lisa will retry\./)).toBeVisible();
 });

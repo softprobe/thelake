@@ -34,6 +34,13 @@ remains visible in the event timeline and does not create a pass score.
 Decisions provider attempts are linked to the same activity record, and a
 failed attempt is recorded there without creating a cache entry.
 
+The completed activity summary is the user-facing aggregate outcome. It names
+every policy whose judge result is `fail`, while `evaluation_runs` remains the
+source for each policy's verdict and rationale. If no judge finds a violation,
+the summary distinguishes reviewed policies, policies cleared by triage,
+insufficient evidence, and the absence of approved policies. Activity success
+describes completed processing; the summary carries the policy finding.
+
 | Relation | Responsibility | Identity |
 |---|---|---|
 | `lisa.activities` | Inspectable Lisa action and overall lifecycle | `id` |
@@ -104,6 +111,20 @@ it records a failed timeline event and returns `activity_finalized: false`;
 the conversation runtime stores the tool result and reply, then finalizes the
 request as failed. The agent must not retry completion or perform a second
 lookup. Non-chat evaluations continue to finalize through `EvaluationService`.
+Pushed-session evaluation failures remain retryable until the queue exhausts its
+delivery limit. Each failed delivery updates the activity summary and exposes a
+bounded, redacted error in its timeline while the activity remains pending. The
+worker tags service-written failures with the delivery key and enriches the same
+event, avoiding a second failure entry; failures outside the evaluator receive
+one idempotent delivery event. A later successful retry replaces the current
+retry warning with a recovery summary. Exhaustion records the last redacted
+reason and marks the activity failed only when no live evaluation lease or
+pending score outbox owns it. Lisa's activity card shows the retry error before
+the owner opens its timeline; an open activity panel and selected timeline
+refresh every ten seconds so new failures appear without a manual refresh. If
+activity storage is unavailable, the worker keeps queue custody and reports the
+persistence failure in its service log; the UI can display it after the activity
+write succeeds.
 Unclaimed finalization can close queued or resumed waiting work, but only when
 no live worker lease owns it; an active evaluator must finish with its fencing
 token. This preserves one lifecycle owner across chat continuations and worker
@@ -111,10 +132,18 @@ retries.
 The read-only `lisa_db` resource documents matching views. Lisa's own frontend
 renders its activity feed; MCP and database views are Lisa's inspection
 surfaces. TheLake Explorer remains a separate trace-inspection application and
-does not proxy Lisa workspace activity. Presentation updates cannot set
-lifecycle status. The resource's relation and column list is authoritative for
-SQL diagnostics; do not probe unsupported fields by selecting them. Report a
-field as unavailable when it is absent from the documented schema.
+does not proxy Lisa workspace activity. Its Lisa panel's Recent evaluations
+list combines policy-evaluation activities with pushed-session evaluation
+activities from the bounded activity feed. A separate Policy findings tab
+searches those evaluation activities for policy-violation summaries before the
+feed limit, then filters to reported findings;
+finding cards name the policy and use an alert treatment. Evaluation cards also
+show a finding badge when applicable. The activity's `success` status means
+processing completed and does not mean the policy passed. Presentation updates
+cannot set lifecycle status. The resource's relation and column list is
+authoritative for SQL
+diagnostics; do not probe unsupported fields by selecting them. Report a field
+as unavailable when it is absent from the documented schema.
 
 The main chat and each Slack thread keep independent transcripts but share
 activity IDs. Lisa serves its own activity and chat APIs from its standalone

@@ -1144,6 +1144,15 @@ class PostgresActivityStore:
             if (pending := self._pending_evaluation_from_row(row)) is not None
         ]
 
+    def list_activity_evaluation_results(self, activity_id: str) -> list[dict[str, Any]]:
+        """Return policy names and verdicts linked to one aggregate activity."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                _sql("list_activity_evaluation_results.sql"),
+                {"activity_id": activity_id},
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def find_pending_evaluation_for_policy(
         self,
         policy_id: str,
@@ -1282,6 +1291,7 @@ class PostgresActivityStore:
 
     def fail_exhausted_session_evaluation(self, activity_id: str, summary: str) -> bool:
         """Fail one exhausted pushed-session evaluation after retryable runs are closed."""
+        summary = redact_text(summary.strip())[:2400]
         with self._connect() as connection, connection.transaction():
             finished = connection.execute(
                 _sql("fail_exhausted_session_evaluation.sql"),
@@ -1291,6 +1301,102 @@ class PostgresActivityStore:
                 return False
             connection.execute(_sql("sync_activity_actions.sql"), {"activity_id": activity_id})
             return True
+
+    def record_session_evaluation_attempt_failure(
+        self,
+        activity_id: str,
+        *,
+        attempt: int,
+        max_attempts: int,
+        error: str,
+        delivery_key: str,
+    ) -> int | None:
+        """Expose a retry failure without changing the activity's lease or status.
+
+        If EvaluationService already wrote the failure for this queue delivery,
+        enrich that event instead of adding a second timeline entry. A deterministic
+        event reference makes retries of the same delivery idempotent.
+        """
+        if attempt < 1 or max_attempts < 1 or attempt > max_attempts:
+            raise ValueError("Evaluation delivery attempt is outside its retry limit")
+        if not delivery_key.strip():
+            raise ValueError("Evaluation delivery key must not be empty")
+        reason = redact_text(error.strip())[:1200] or "Unknown evaluation error"
+        title = f"Evaluation attempt {attempt} of {max_attempts} failed"
+        if attempt < max_attempts:
+            next_step = "Lisa will retry."
+        else:
+            next_step = "Lisa is attempting to finalize this evaluation as failed."
+        visible_summary = (
+            f"Evaluation attempt {attempt} of {max_attempts} failed: {reason}. {next_step}"
+        )
+        with self._connect() as connection, connection.transaction():
+            activity = connection.execute(
+                _sql("get_session_evaluation_activity.sql"),
+                {"activity_id": activity_id},
+            ).fetchone()
+            if activity is None:
+                return None
+            if activity["source"] != "session_push" or activity["kind"] != "session_evaluation":
+                raise ValueError("Activity is not a pushed-session evaluation")
+            if activity["status"] not in {
+                "queued", "running", "waiting", "waiting_approval",
+            }:
+                return None
+
+            existing = connection.execute(
+                _sql("get_session_evaluation_attempt_failure.sql"),
+                {"activity_id": activity_id, "delivery_key": delivery_key},
+            ).fetchone()
+            if (
+                existing is not None
+                and existing["event_type"] == "session_evaluation_attempt_failed"
+            ):
+                sequence = int(existing["seq"])
+                update_activity_summary = False
+            elif existing is not None:
+                update_activity_summary = True
+                prior_summary = redact_text(existing["summary"] or "").strip()
+                event_summary = " ".join(part for part in (prior_summary, visible_summary) if part)
+                event_summary = event_summary[:2400]
+                sequence = int(existing["seq"])
+                connection.execute(
+                    _sql("update_evaluation_retry_event.sql"),
+                    {
+                        "activity_id": activity_id,
+                        "seq": sequence,
+                        "title": title,
+                        "summary": event_summary,
+                        "reference_id": existing["reference_id"],
+                    },
+                )
+            else:
+                update_activity_summary = True
+                sequence = self._append_activity_event(
+                    connection,
+                    activity_id,
+                    "session_evaluation_attempt_failed",
+                    title,
+                    visible_summary,
+                    "lisa-session-evaluation-worker",
+                    reference_type="session_evaluation_attempt",
+                    reference_id=delivery_key,
+                )
+            if update_activity_summary:
+                connection.execute(_sql("update_session_evaluation_retry_summary.sql"), {
+                    "activity_id": activity_id,
+                    "summary": visible_summary,
+                })
+            return sequence
+
+    def clear_session_evaluation_retry_summary(self, activity_id: str) -> bool:
+        """Replace a retry warning after the pushed-session activity succeeds."""
+        with self._connect() as connection, connection.transaction():
+            row = connection.execute(
+                _sql("clear_session_evaluation_retry_summary.sql"),
+                {"activity_id": activity_id},
+            ).fetchone()
+        return row is not None
 
     def complete_chat_activity(
         self, activity_id: str, summary: str, *, status: str = "succeeded",
@@ -1309,7 +1415,10 @@ class PostgresActivityStore:
         *,
         actor: str | None = None,
         fencing_token: int | None = None,
+        summary: str | None = None,
     ) -> bool:
+        if summary is not None:
+            summary = redact_text(summary.strip())[:1200]
         with self._connect() as connection, connection.transaction():
             finished = connection.execute(
                 _sql("finish_activity_when_complete.sql"),
@@ -1317,6 +1426,7 @@ class PostgresActivityStore:
                     "activity_id": activity_id,
                     "actor": actor,
                     "fencing_token": fencing_token,
+                    "summary": summary,
                 },
             ).fetchone()
             if finished is None:
@@ -1435,13 +1545,16 @@ class PostgresActivityStore:
         title: str,
         summary: str | None = None,
         actor: str = "lisa",
+        reference_type: str | None = None,
+        reference_id: str | None = None,
     ) -> int:
         """Append a user-inspectable event to an open activity."""
         if not event_type.strip() or not title.strip() or not actor.strip():
             raise ValueError("Activity events require an event type, title, and actor")
         with self._connect() as connection, connection.transaction():
             return self._append_activity_event(
-                connection, activity_id, event_type, title, summary, actor
+                connection, activity_id, event_type, title, summary, actor,
+                reference_type=reference_type, reference_id=reference_id,
             )
 
     def _append_activity_event(
@@ -1735,8 +1848,10 @@ class PostgresActivityStore:
         actor: str,
         fencing_token: int,
         reason: str,
+        failure_reference_id: str | None = None,
     ) -> None:
         """Return a retryable run to the queue while preserving its inputs."""
+        reason = redact_text(reason.strip())[:1200] or "Activity failed and will retry."
         with self._connect() as connection, connection.transaction():
             row = connection.execute(
                 _sql("release_activity.sql"),
@@ -1748,6 +1863,10 @@ class PostgresActivityStore:
                     "event_type": "retryable_error",
                     "title": "Activity will retry",
                     "actor": actor,
+                    "reference_type": (
+                        "session_evaluation_attempt" if failure_reference_id else None
+                    ),
+                    "reference_id": failure_reference_id,
                 },
             ).fetchone()
             if row is not None:
@@ -1755,13 +1874,13 @@ class PostgresActivityStore:
         if row is None:
             raise StaleLeaseError("Activity lease expired or was superseded")
 
-    def release_chat_evaluation_claim(
+    def release_evaluation_claim(
         self, activity_id: str, *, actor: str, fencing_token: int,
     ) -> None:
-        """Release a finished chat evaluation for final transcript persistence."""
+        """Release a finished evaluation claim before its aggregate is finalized."""
         with self._connect() as connection, connection.transaction():
             row = connection.execute(
-                _sql("release_chat_evaluation_claim.sql"),
+                _sql("release_evaluation_claim.sql"),
                 {
                     "activity_id": activity_id,
                     "owner": actor,
@@ -1769,7 +1888,7 @@ class PostgresActivityStore:
                 },
             ).fetchone()
         if row is None:
-            raise StaleLeaseError("Chat evaluation lease expired or was superseded")
+            raise StaleLeaseError("Evaluation lease expired or was superseded")
 
     def _lock_activity(self, connection, activity_id, actor, fencing_token) -> bool:
         row = connection.execute(

@@ -1,25 +1,25 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from policy_cases import session_detail, save_rule
+from policy_cases import save_rule, session_detail
 from sql_cases import read_sql_case
 
 from lisa.bootstrap import build_services
 from lisa.context import WorkspaceContext
-from lisa.repositories.evaluation_artifacts import EvaluationArtifactRepository
-from lisa.services.evaluations import EvaluationService
-from lisa.services.chat_activities import record_chat_activity_trajectories
-from lisa.models.activities import EvaluationRun, ScoreOutboxItem, ActivityClaim
-from lisa.repositories.lisa_database import LisaDatabaseReader
+from lisa.models.activities import ActivityClaim, EvaluationRun, ScoreOutboxItem
 from lisa.repositories.activities import PostgresActivityStore
+from lisa.repositories.evaluation_artifacts import EvaluationArtifactRepository
+from lisa.repositories.lisa_database import LisaDatabaseReader
 from lisa.repositories.policies import PostgresPolicyRepository
+from lisa.services.chat_activities import record_chat_activity_trajectories
+from lisa.services.evaluations import EvaluationService
 from lisa.views.evaluations import render_evaluation_context
 
 WORKSPACE_ID = "11111111-1111-4111-8111-111111111111"
@@ -185,6 +185,13 @@ def test_completed_negative_triage_is_filtered_on_the_next_session_evaluation(
     assert [event.event_type for event in events] == [
         "accepted", "policy_triage_decision", "policy_review_completed", "succeeded"
     ]
+    feed_entry = next(
+        item for item in services.activity_store.list_activity_feed(limit=100)
+        if item["id"] == first["activity_id"]
+    )
+    assert feed_entry["summary"] == (
+        "No violations were suspected by triage across 1 approved policy; no judge runs were needed."
+    )
 
 
 def test_session_evaluation_reuses_the_resolved_chat_activity(evaluation_services):
@@ -219,6 +226,173 @@ def test_session_evaluation_reuses_the_resolved_chat_activity(evaluation_service
     assert {event.event_type for event in store.list_events(chat_activity.id)} >= {
         "policy_triage_decision", "policy_review_completed", "succeeded",
     }
+
+
+def test_pushed_session_summary_surfaces_policy_violation(evaluation_services, monkeypatch):
+    services = evaluation_services
+    store = services.activity_store
+    session_id = f"session-{uuid4()}"
+    policy = services.policy_service.approved_rules("agent")[0]
+    detail = session_detail()
+    detail["spans"][0]["trace_id"] = session_id
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
+    services.evaluations.policy_triage = SimpleNamespace(
+        model="test-decisions",
+        triage=lambda trajectory, candidates: {
+            "selected_policies": [
+                {"id": rule.id, "name": rule.name, "scope": rule.scope}
+                for rule in candidates
+            ],
+            "policy_decisions": [
+                {"id": rule.id, "name": rule.name, "scope": rule.scope,
+                 "decision": "suspected_violation"}
+                for rule in candidates
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        services.evaluations,
+        "judge",
+        lambda request: {
+            "status": "fail",
+            "rationale": "The agent skipped the required check.",
+            "references": [],
+            "limitations": [],
+        },
+    )
+    activity = store.create_activity(
+        title=f"Evaluate session {session_id} for agent",
+        source="session_push",
+        kind="session_evaluation",
+    )
+
+    result = services.evaluations.evaluate_session(
+        "agent", session_id, activity_id=activity.id,
+    )
+
+    assert result["status"] == "evaluated"
+    feed_entry = next(
+        item for item in store.list_activity_feed(limit=100)
+        if item["id"] == activity.id
+    )
+    assert feed_entry["summary"] == f"Policy violation found: {policy.name}."
+    detail = store.get_activity_thread(activity.id)
+    assert detail["activity"]["summary"] == feed_entry["summary"]
+    assert detail["actions"][-1]["summary"] == feed_entry["summary"]
+
+
+def test_pending_score_recovery_keeps_aggregate_policy_findings(evaluation_services, monkeypatch):
+    services = evaluation_services
+    store = services.activity_store
+    session_id = f"session-{uuid4()}"
+    activity = store.create_activity(
+        title="Recover a pushed session evaluation",
+        source="session_push",
+        kind="session_evaluation",
+    )
+    repository = PostgresPolicyRepository(services.context.database_url, WORKSPACE_ID)
+    current = repository.list_scope("workspace", "")
+    repository.seed_scope(
+        "workspace",
+        "",
+        [{"name": rule.name, "criteria": rule.criteria, "approved": rule.approved}
+         for rule in current],
+        [{"name": rule.name, "criteria": rule.criteria, "approved": rule.approved}
+         for rule in current]
+        + [{"name": "Refund eligibility", "criteria": "Check refund eligibility.", "approved": True}],
+    )
+    policies = [
+        services.evaluations._policy("agent", rule.name, rule.id)
+        for rule in services.policy_service.approved_rules("agent")
+    ]
+    for policy in policies:
+        verdict = "fail" if policy["name"] == "Refund eligibility" else "pass"
+        run = store.create_evaluation(
+            title=f"Review {policy['name']}",
+            source="session_push",
+            target_agent_name="agent",
+            session_id=session_id,
+            policy_name=policy["name"],
+            policy_id=policy["policy_id"],
+            policy_hash=policy["policy_hash"],
+            judge_config={},
+            request_key=str(uuid4()),
+            activity_id=activity.id,
+        )
+        claim = store.claim_activity(activity.id, "lisa-evaluation", lease_seconds=300)
+        payload = services.evaluations._score_payload(
+            policy,
+            session_id,
+            f"trace-{session_id}",
+            run.id,
+            "2026-10-23T12:00:00Z",
+            {"status": verdict, "rationale": f"Policy {verdict} result."},
+            [],
+        )
+        outbox = store.prepare_score_outbox(
+            run.id,
+            payload,
+            actor="lisa-evaluation",
+            fencing_token=claim.fencing_token,
+        )
+        if verdict == "pass":
+            store.acknowledge_score(
+                activity.id,
+                run.id,
+                outbox.id,
+                score_id=payload["score_id"],
+                verdict=verdict,
+                actor="lisa-evaluation",
+                fencing_token=claim.fencing_token,
+                auto_finish=False,
+            )
+        store.release_activity(
+            activity.id,
+            actor="lisa-evaluation",
+            fencing_token=claim.fencing_token,
+            reason="Preparing pending score recovery.",
+        )
+    monkeypatch.setattr(services.evaluations.failures, "record", lambda *_args, **_kwargs: None)
+    retry_events_before = [
+        event for event in store.list_events(activity.id)
+        if event.event_type == "retryable_error"
+    ]
+
+    result = services.evaluations.evaluate_session(
+        "agent", session_id, activity_id=activity.id,
+    )
+
+    assert result["summary"] == "Policy violation found: Refund eligibility."
+    detail = store.get_activity_thread(activity.id)
+    assert detail["activity"]["status"] == "success"
+    assert detail["activity"]["summary"] == result["summary"]
+    assert detail["actions"][-1]["summary"] == result["summary"]
+    assert [
+        event for event in store.list_events(activity.id)
+        if event.event_type == "retryable_error"
+    ] == retry_events_before
+
+
+def test_session_summary_reports_incomplete_selected_evaluations(evaluation_services):
+    summary = evaluation_services.evaluations._session_evaluation_summary(
+        {"status": "evaluated", "candidate_count": 2},
+        [{"status": "error"}, {"status": "policy_unavailable"}],
+    )
+    finding_with_incomplete = evaluation_services.evaluations._session_evaluation_summary(
+        {"status": "evaluated", "candidate_count": 2},
+        [
+            {"status": "fail", "evaluation_name": "Refund eligibility"},
+            {"status": "already_running"},
+        ],
+    )
+
+    assert summary == (
+        "Policy evaluation is incomplete for 2 policies; no finding is available yet."
+    )
+    assert finding_with_incomplete == (
+        "Policy violation found: Refund eligibility. "
+        "Evaluation is incomplete for 1 additional policy."
+    )
 
 
 @pytest.mark.parametrize(
@@ -696,7 +870,7 @@ def test_chat_evaluation_releases_each_policy_claim_for_chat_finalization(
         order.append(("release", fencing_token))
 
     monkeypatch.setattr(services.evaluations, "_evaluate_session", evaluate)
-    monkeypatch.setattr(store, "release_chat_evaluation_claim", release)
+    monkeypatch.setattr(store, "release_evaluation_claim", release)
 
     result = services.evaluations.evaluate_session(
         "agent",
@@ -788,8 +962,8 @@ def test_selected_pair_is_recorded_before_judging_and_filtered_afterward(
         ) == {policy.id: "suspected_violation"}
         judged.append(True)
         return {
-            "status": "pass",
-            "rationale": "The required check was completed.",
+            "status": "fail",
+            "rationale": "The required check was missed.",
             "references": [],
             "limitations": [],
         }
@@ -799,8 +973,10 @@ def test_selected_pair_is_recorded_before_judging_and_filtered_afterward(
     first = services.evaluations.evaluate_session("agent", session_id)
     second = services.evaluations.evaluate_session("agent", session_id)
 
-    assert first["evaluations"][0]["status"] == "pass"
+    assert first["evaluations"][0]["status"] == "fail"
     assert second["evaluations"][0]["status"] == "already_evaluated"
+    assert second["evaluations"][0]["evaluation_name"] == policy.name
+    assert second["summary"] == f"Policy violation found: {policy.name}."
     assert triager.calls == len(judged) == 1
 
 
@@ -841,7 +1017,8 @@ def test_one_inspectable_activity_records_triage_and_links_multiple_evaluations(
         services.evaluations,
         "judge",
         lambda request: (judged.append(request) or {
-            "status": "pass", "rationale": "Reviewed.", "references": [], "limitations": []
+            "status": "fail" if request["policy"]["name"] == "Second rule" else "pass",
+            "rationale": "Reviewed.", "references": [], "limitations": []
         }),
     )
 
@@ -860,6 +1037,12 @@ def test_one_inspectable_activity_records_triage_and_links_multiple_evaluations(
     ]
     assert {run.policy_id for run in runs} == {rule.id for rule in rules}
     assert {run.activity_id for run in runs} == {activity_id}
+    assert result["summary"] == "Policy violation found: Second rule."
+    feed_entry = next(
+        item for item in services.activity_store.list_activity_feed(limit=100)
+        if item["id"] == activity_id
+    )
+    assert feed_entry["summary"] == result["summary"]
 
 
 def test_multi_policy_retry_finishes_the_activity_that_owns_the_run(evaluation_services, monkeypatch):
@@ -875,7 +1058,6 @@ def test_multi_policy_retry_finishes_the_activity_that_owns_the_run(evaluation_s
          for rule in current]
         + [{"name": "Second rule", "criteria": "Check the second rule.", "approved": True}],
     )
-    rules = services.policy_service.approved_rules("agent")
     session_id = f"session-{uuid4()}"
     detail = session_detail()
     detail["spans"][0]["trace_id"] = session_id
@@ -1053,7 +1235,7 @@ def _tracked_service_with_saved_inputs(tmp_path, *, approved_rules):
         activity_id=activity_id,
         owner="lisa-evaluation",
         fencing_token=1,
-        lease_expires_at=datetime.now(timezone.utc),
+        lease_expires_at=datetime.now(UTC),
     )
     activity = EvaluationRun(
         id=evaluation_id,
@@ -1181,6 +1363,76 @@ def test_tracked_retry_judges_live_criteria_after_interrupt_before_outbox(
     assert run is not None
     assert run.status == "succeeded"
     assert store.get_context_item_for_activity(run.activity_id, f"evaluation_inputs_{run.policy_id}") is not None
+
+
+def test_pushed_session_retry_enriches_the_service_failure_event(
+    evaluation_services, monkeypatch
+):
+    services = evaluation_services
+    session_id = f"session-{uuid4()}"
+    detail = session_detail()
+    detail["spans"][0]["trace_id"] = session_id
+    monkeypatch.setattr(services.sessions.traces, "load", lambda _: detail)
+    policy = services.policy_service.approved_rules("agent")[0]
+
+    class SelectedTriager:
+        model = "test-decisions-model"
+
+        def triage(self, trajectory, rules):
+            return {
+                "selected_policies": [
+                    {"id": policy.id, "name": policy.name, "scope": policy.scope}
+                ],
+                "policy_decisions": [
+                    {
+                        "id": policy.id,
+                        "name": policy.name,
+                        "scope": policy.scope,
+                        "decision": "suspected_violation",
+                    }
+                ],
+            }
+
+    services.evaluations.policy_triage = SelectedTriager()
+    monkeypatch.setattr(
+        services.evaluations,
+        "judge",
+        lambda _: (_ for _ in ()).throw(RuntimeError("judge interrupted before outbox")),
+    )
+    activity = services.activity_store.create_activity(
+        title="Evaluate a pushed session",
+        source="session_push",
+        kind="session_evaluation",
+        activity_id=str(uuid4()),
+    )
+
+    with pytest.raises(RuntimeError, match="judge interrupted"):
+        services.evaluations.evaluate_session(
+            "agent",
+            session_id,
+            activity_id=activity.id,
+            failure_delivery_key="delivery-1",
+            defer_activity_failure=True,
+            defer_activity_finalization=True,
+        )
+
+    services.activity_store.record_session_evaluation_attempt_failure(
+        activity.id,
+        attempt=1,
+        max_attempts=8,
+        error="judge interrupted before outbox",
+        delivery_key="delivery-1",
+    )
+    actions = services.activity_store.get_activity_thread(activity.id)["actions"]
+    failures = [
+        action for action in actions
+        if action["event_type"] == "session_evaluation_attempt_failed"
+    ]
+
+    assert len(failures) == 1
+    assert "Judge call interrupted" in failures[0]["summary"]
+    assert "judge interrupted before outbox" in failures[0]["summary"]
+    assert failures[0]["reference_id"] is None
 
 
 def test_tracked_retry_releases_lease_when_policy_is_removed_after_interrupt(

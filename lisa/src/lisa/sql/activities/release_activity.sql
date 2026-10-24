@@ -14,7 +14,10 @@ WITH released AS (
       AND lease_expires_at > clock_timestamp()
     RETURNING id, next_event_seq - 1 AS seq
 )
-INSERT INTO lisa.activity_events(activity_id, seq, event_type, title, summary, actor)
-SELECT released.id, released.seq, %(event_type)s, %(title)s, %(summary)s, %(actor)s
+INSERT INTO lisa.activity_events(
+    activity_id, seq, event_type, title, summary, actor, reference_type, reference_id
+)
+SELECT released.id, released.seq, %(event_type)s, %(title)s, %(summary)s, %(actor)s,
+       %(reference_type)s, %(reference_id)s
 FROM released
 RETURNING activity_id;

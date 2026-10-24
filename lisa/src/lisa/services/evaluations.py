@@ -32,9 +32,9 @@ from ..evaluation.scores import (
 )
 from ..evaluation.trajectory import build_trajectory_events, session_timestamp
 from ..llm_recording import recording_scope
-from ..models.activities import Activity, EvaluationRun, ScoreOutboxItem, ActivityClaim
-from ..repositories.evaluation_artifacts import EvaluationArtifactRepository
+from ..models.activities import Activity, ActivityClaim, EvaluationRun, ScoreOutboxItem
 from ..repositories.activities import PostgresActivityStore, StaleLeaseError
+from ..repositories.evaluation_artifacts import EvaluationArtifactRepository
 from ..security import redact_evidence, redact_text
 from .failures import FailureService
 from .notifications import SlackNotifier
@@ -235,6 +235,7 @@ class EvaluationService:
         session_id: str,
         *,
         activity_id: str | None = None,
+        failure_delivery_key: str | None = None,
         defer_activity_failure: bool = False,
         defer_activity_finalization: bool = False,
     ) -> dict:
@@ -246,7 +247,7 @@ class EvaluationService:
             if pending:
                 recovered = [
                     self._recover_pending_score(
-                        *item, defer_activity_finish=defer_activity_finalization
+                        *item, defer_activity_finish=True
                     )
                     for item in pending
                 ]
@@ -267,11 +268,38 @@ class EvaluationService:
                         "Retry after that evaluation finishes."
                     )
                 if activity_id and self.activities:
-                    summary = (
-                        "Recovered the pending evaluation result."
-                        if recovery_complete
-                        else "Pending evaluation recovery is still in progress."
+                    related_activity_ids = {activity_id}
+                    related_activity_ids.update(
+                        item[0].activity_id for item in pending
+                        if getattr(item[0], "activity_id", None)
                     )
+                    activity_results_by_id = {}
+                    for related_activity_id in related_activity_ids:
+                        for item in self.activities.list_activity_evaluation_results(
+                            related_activity_id
+                        ):
+                            evaluation_id = item.get("evaluation_id")
+                            if evaluation_id:
+                                activity_results_by_id[evaluation_id] = item
+                    unkeyed_results = []
+                    for item in recovered:
+                        evaluation_id = item.get("evaluation_id")
+                        if evaluation_id:
+                            activity_results_by_id[evaluation_id] = {
+                                **activity_results_by_id.get(evaluation_id, {}),
+                                **item,
+                            }
+                        else:
+                            unkeyed_results.append(item)
+                    activity_results = [
+                        *activity_results_by_id.values(), *unkeyed_results
+                    ]
+                    summary = self._session_evaluation_summary(
+                        {"status": "evaluated", "candidate_count": len(activity_results)},
+                        activity_results,
+                    )
+                    if not recovery_complete and not activity_results:
+                        summary = "Pending evaluation recovery is still in progress."
                     self.activities.record_activity_event(
                         activity_id,
                         "evaluation_result_recovered"
@@ -283,13 +311,33 @@ class EvaluationService:
                             else "Evaluation recovery is still in progress"
                         ),
                         summary=summary,
+                        reference_type=(
+                            "session_evaluation_attempt" if failure_delivery_key else None
+                        ),
+                        reference_id=failure_delivery_key,
                     )
-                    result["activity_finalized"] = (
-                        False
-                        if defer_activity_finalization or not recovery_complete
-                        else self.activities.finish_activity_without_claim(activity_id, summary)
-                    )
+                    finalized_activity = False
+                    if recovery_complete and not defer_activity_finalization:
+                        finalized_activity = self.activities.finish_activity_without_claim(
+                            activity_id, summary
+                        )
+                        for related_activity_id in related_activity_ids - {activity_id}:
+                            related_results = self.activities.list_activity_evaluation_results(
+                                related_activity_id
+                            )
+                            related_summary = self._session_evaluation_summary(
+                                {
+                                    "status": "evaluated",
+                                    "candidate_count": len(related_results),
+                                },
+                                related_results or recovered,
+                            )
+                            self.activities.finish_activity_without_claim(
+                                related_activity_id, related_summary
+                            )
+                    result["activity_finalized"] = finalized_activity
                     result["activity_id"] = activity_id
+                    result["summary"] = summary
                 return result
         try:
             session_detail = self._session_detail(session_id)
@@ -304,6 +352,10 @@ class EvaluationService:
                     "evaluation_session_lookup_failed",
                     title="Session lookup failed",
                     summary=summary,
+                    reference_type=(
+                        "session_evaluation_attempt" if failure_delivery_key else None
+                    ),
+                    reference_id=failure_delivery_key,
                 )
                 activity_finalized = (
                     False
@@ -344,6 +396,7 @@ class EvaluationService:
                 )
                 result["activity_finalized"] = activity_finalized
                 result["activity_id"] = activity_id
+                result["summary"] = summary
             return result
         activity = None
         if self.activities:
@@ -370,6 +423,10 @@ class EvaluationService:
                     "policy_triage_failed",
                     title="Policy triage failed",
                     summary=f"Policy triage failed with {type(error).__name__}.",
+                    reference_type=(
+                        "session_evaluation_attempt" if failure_delivery_key else None
+                    ),
+                    reference_id=failure_delivery_key,
                 )
                 if not defer_activity_failure and not defer_activity_finalization:
                     self.activities.finish_activity_without_claim(
@@ -387,12 +444,7 @@ class EvaluationService:
                 )
         if not selected:
             if activity:
-                status = selection.get("status", "triaged")
-                summary = (
-                    "Triage completed; no policies required judging."
-                    if status == "triaged"
-                    else f"Policy evaluation ended with status {status}."
-                )
+                summary = self._session_evaluation_summary(selection, [])
                 self.activities.record_activity_event(
                     activity.id,
                     "policy_review_completed",
@@ -410,6 +462,7 @@ class EvaluationService:
                 **selection,
                 "activity_id": activity.id if activity else None,
                 "activity_finalized": activity_finalized,
+                "summary": summary,
                 "evaluations": [],
             }
 
@@ -441,11 +494,15 @@ class EvaluationService:
                 _selection=selection_context,
                 _activity_id=activity.id if activity else None,
                 _defer_activity_finish=True,
+                _failure_delivery_key=(
+                    f"{failure_delivery_key}:policy-{rule.id}"
+                    if failure_delivery_key else None
+                ),
             )
             fencing_token = evaluation.get("_activity_fencing_token")
             if defer_activity_finalization and fencing_token is not None:
                 evaluation.pop("_activity_fencing_token", None)
-                self.activities.release_chat_evaluation_claim(
+                self.activities.release_evaluation_claim(
                     evaluation["activity_id"],
                     actor="lisa-evaluation",
                     fencing_token=fencing_token,
@@ -456,6 +513,7 @@ class EvaluationService:
             fencing_token = item.pop("_activity_fencing_token", None)
             if fencing_token is not None and item.get("activity_id"):
                 finish_claims[item["activity_id"]] = fencing_token
+        summary = self._session_evaluation_summary(selection, evaluations)
         evaluation_activity_ids = {activity.id} if activity else set()
         evaluation_activity_ids.update(
             item["activity_id"] for item in evaluations if item.get("activity_id")
@@ -470,6 +528,7 @@ class EvaluationService:
                     evaluation_activity_id,
                     actor="lisa-evaluation" if token is not None else None,
                     fencing_token=token,
+                    summary=summary if evaluation_activity_id == activity.id else None,
                 )
         result = {
             **selection,
@@ -483,11 +542,74 @@ class EvaluationService:
                 else "evaluated"
             ),
             "activity_id": activity.id if activity else None,
+            "summary": summary,
             "evaluations": evaluations,
         }
         if defer_activity_finalization and activity:
             result["activity_finalized"] = False
         return result
+
+    @staticmethod
+    def _session_evaluation_summary(selection: dict, evaluations: list[dict]) -> str:
+        """Summarize policy findings for the user-visible session activity."""
+        violations = []
+        needs_review = 0
+        judged = 0
+        incomplete = 0
+        for evaluation in evaluations:
+            verdict = evaluation.get("verdict")
+            status = evaluation.get("status")
+            if status in {"pass", "fail", "uncertain", "insufficient_evidence"}:
+                verdict = status
+            if verdict in {"pass", "fail", "uncertain", "insufficient_evidence"}:
+                judged += 1
+            if verdict == "fail":
+                name = str(evaluation.get("evaluation_name") or "an approved policy")
+                if name not in violations:
+                    violations.append(name)
+            elif verdict in {"uncertain", "insufficient_evidence"}:
+                needs_review += 1
+            elif verdict != "pass":
+                incomplete += 1
+
+        if violations:
+            label = "Policy violation found" if len(violations) == 1 else "Policy violations found"
+            summary = f"{label}: {', '.join(violations)}."
+            if incomplete:
+                summary += f" Evaluation is incomplete for {incomplete} additional {('policy' if incomplete == 1 else 'policies')}."
+            if needs_review:
+                summary += f" {needs_review} additional policy result(s) need review."
+            return redact_text(summary)[:1200]
+
+        if incomplete:
+            return (
+                f"Policy evaluation is incomplete for {incomplete} "
+                f"{('policy' if incomplete == 1 else 'policies')}; no finding is available yet."
+            )
+        if needs_review:
+            return (
+                f"No policy violations were confirmed; {needs_review} policy result(s) need review."
+            )
+        if judged:
+            return f"No policy violations found in {judged} judged {('policy' if judged == 1 else 'policies')}."
+
+        candidate_count = selection.get("candidate_count", 0)
+        status = selection.get("status")
+        if status == "no_approved_policies":
+            return "No approved policies apply to this session."
+        if status == "insufficient_evidence":
+            if candidate_count:
+                return f"Evaluation needs review: insufficient session evidence for {candidate_count} approved policies."
+            return "Evaluation needs review: insufficient session evidence to assess approved policies."
+        if status == "skipped_agent_mismatch":
+            return "Evaluation skipped because the session agent did not match the target agent."
+        if not candidate_count:
+            return "No approved policies apply to this session."
+        policy_label = "approved policy" if candidate_count == 1 else "approved policies"
+        return (
+            f"No violations were suspected by triage across {candidate_count} {policy_label}; "
+            "no judge runs were needed."
+        )
 
     def _policy(
         self,
@@ -542,6 +664,7 @@ class EvaluationService:
         _selection: dict | None = None,
         _activity_id: str | None = None,
         _defer_activity_finish: bool = False,
+        _failure_delivery_key: str | None = None,
     ) -> dict:
         """Evaluate one approved named policy against a session and store its verdict."""
         policy = None
@@ -578,6 +701,7 @@ class EvaluationService:
                 selection=_selection,
                 activity_id=_activity_id,
                 defer_activity_finish=_defer_activity_finish,
+                failure_delivery_key=_failure_delivery_key,
             )
 
     @staticmethod
@@ -666,7 +790,7 @@ class EvaluationService:
             auto_finish=not defer_activity_finish,
         )
         if defer_activity_finish:
-            self.activities.release_chat_evaluation_claim(
+            self.activities.release_evaluation_claim(
                 activity.activity_id,
                 actor=owner,
                 fencing_token=claim.fencing_token,
@@ -691,6 +815,7 @@ class EvaluationService:
         selection: dict | None = None,
         activity_id: str | None = None,
         defer_activity_finish: bool = False,
+        failure_delivery_key: str | None = None,
     ) -> dict:
         # The local session service returns bounded span evidence. Redact secrets
         # before building the trajectory and forwarding anything to a provider.
@@ -744,6 +869,7 @@ class EvaluationService:
             return {
                 "status": "already_evaluated",
                 "verdict": existing.verdict,
+                "evaluation_name": policy["name"],
                 "session_id": session_id,
                 "stored": True,
                 "activity_id": activity_id or existing.activity_id,
@@ -774,6 +900,7 @@ class EvaluationService:
                 selection,
                 activity_id,
                 defer_activity_finish,
+                failure_delivery_key,
             )
 
         return self._evaluate_untracked(
@@ -812,7 +939,7 @@ class EvaluationService:
             }
         limitations.extend(result.get("limitations", []))
         timestamp = session_timestamp(spans)
-        payload = self._score_payload(
+        self._score_payload(
             policy, session_id, trace_id, run_id, timestamp, result, limitations
         )
         # Save the failure and score payload before the remote write. Recovery can
@@ -848,6 +975,7 @@ class EvaluationService:
         selection: dict | None = None,
         requested_activity_id: str | None = None,
         defer_activity_finish: bool = False,
+        failure_delivery_key: str | None = None,
     ) -> dict:
         assert self.activities is not None
         if self.artifact_repository is None or self.render_context is None:
@@ -917,6 +1045,7 @@ class EvaluationService:
                 owner,
                 claim,
                 run_dir,
+                failure_delivery_key,
             )
 
     def _evaluate_tracked_claimed(
@@ -936,6 +1065,7 @@ class EvaluationService:
         owner: str,
         claim: ActivityClaim,
         run_dir: Path,
+        failure_delivery_key: str | None,
     ) -> dict:
         assert self.activities is not None
 
@@ -967,6 +1097,10 @@ class EvaluationService:
         self.artifact_repository.save_inputs(
             run_dir, inputs, self.render_context(inputs), artifact_key=policy["policy_id"]
         )
+        failure_reference_id = (
+            f"{failure_delivery_key}:policy-{policy['policy_id']}"
+            if failure_delivery_key else None
+        )
 
         if outbox is None:
             trajectory_hash = policy.get("trajectory_hash")
@@ -976,7 +1110,9 @@ class EvaluationService:
                 )
                 policy["trajectory_hash"] = trajectory_hash
             except ValueError as error:
-                self._release_retryable(activity_id, owner, claim, str(error))
+                self._release_retryable(
+                    activity_id, owner, claim, str(error), failure_reference_id
+                )
                 return {
                     "status": "policy_unavailable", "rationale": str(error),
                     "session_id": session_id, "stored": False,
@@ -995,11 +1131,17 @@ class EvaluationService:
                     )
                 )
             except Exception:
-                self._release_retryable(activity_id, owner, claim, "Judge call interrupted")
+                self._release_retryable(
+                    activity_id, owner, claim, "Judge call interrupted", failure_reference_id
+                )
                 raise
             if result.get("status") == "error":
                 self._release_retryable(
-                    activity_id, owner, claim, str(result.get("rationale") or "Judge unavailable")
+                    activity_id,
+                    owner,
+                    claim,
+                    str(result.get("rationale") or "Judge unavailable"),
+                    failure_reference_id,
                 )
                 return {
                     **result, "evaluation_name": policy["name"], "session_id": session_id,
@@ -1126,7 +1268,12 @@ class EvaluationService:
         }
 
     def _release_retryable(
-        self, activity_id: str, owner: str, claim: ActivityClaim, reason: str
+        self,
+        activity_id: str,
+        owner: str,
+        claim: ActivityClaim,
+        reason: str,
+        failure_reference_id: str | None = None,
     ) -> None:
         if self.activities:
             try:
@@ -1135,6 +1282,7 @@ class EvaluationService:
                     actor=owner,
                     fencing_token=claim.fencing_token,
                     reason=reason,
+                    failure_reference_id=failure_reference_id,
                 )
             except StaleLeaseError:
                 # The lease may have expired; recovery can reclaim it by fencing token.

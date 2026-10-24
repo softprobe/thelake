@@ -41,9 +41,15 @@ and are copied into the Lisa image by `lisa/Dockerfile`; changes to those skills
 must be verified through `OpenHandsBackend`'s configured skill directory.
 
 The Explorer Lisa view keeps chat visible beside Activities, Rules,
-Triage / judges, and Identity tabs. Selecting an activity opens a keyboard-
+Triage / judges, Findings, and Identity tabs. Selecting an activity opens a keyboard-
 dismissible detail dialog that opens on the activity summary; selecting a
 timeline event opens its detail.
+The Recent evaluations list includes policy-evaluation and pushed-session
+evaluation activities. The Findings list searches those activities for
+policy-violation summaries before the feed limit, then filters to reported
+policy violations. Finding cards name the policy and use an alert treatment;
+evaluation cards also show a finding badge. The activity's successful
+lifecycle status means evaluation completed and does not mean policies passed.
 Keep the shell aligned to Muse's visible layout: 72px navigation rail, 360px
 right panel, and centered 960×700px activity dialog at the 1610×1505 desktop
 reference viewport. Reuse the profile, segmented tabs, activity rows, modal,
@@ -123,6 +129,14 @@ authorization contract for them.
   evaluation request identity and keep
   score outboxes keyed to evaluation results. Negative triage has no verdict or
   score; provider failures remain retryable.
+- Pushed-session retries must be visible while still retryable: update the
+  activity-card summary and timeline with a bounded, redacted error for each
+  delivery. Tag evaluator-written failures with the queue delivery key so the
+  worker enriches that event instead of duplicating it. A successful retry
+  replaces the current retry warning; exhausted retries expose the last reason
+  only when no live lease or pending score outbox prevents terminal failure.
+  Preserve queue custody if the activity write fails, and log that persistence
+  failure for operators.
 - Evaluation failure finalization may close an unleased queued or resumed
   waiting activity. It must never override a live worker lease; worker-owned
   completion requires the matching actor and fencing token.

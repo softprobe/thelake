@@ -75,8 +75,11 @@ npm test
   agent. Lisa evaluates pushed sessions against active checks; configure the runner in
   Lisa's environment.
 - **Lisa** — a separate workspace app served at `/lisa/`, with persistent chat
-  and an adjacent panel for Activities, Rules, Triage / judges, and Identity.
-  Rules and evaluation history are read-only in the panel; policy changes go
-  through Lisa's owner-confirmed chat workflow. Standalone `SOUL.md` and
-  `MEMORY.md` files are not configured yet. See the
+  and an adjacent panel for Activities, Rules, Triage / judges, Findings, and Identity.
+  The Recent evaluations list includes policy evaluations and pushed-session
+  evaluations; the separate Findings list highlights results that report a
+  policy violation. Rules and
+  evaluation history are read-only in the panel; policy changes go through
+  Lisa's owner-confirmed chat workflow. Standalone
+  `SOUL.md` and `MEMORY.md` files are not configured yet. See the
   [local development guide](../../docs/how-to/local-development.md).

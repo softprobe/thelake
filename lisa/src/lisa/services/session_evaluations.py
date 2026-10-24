@@ -8,6 +8,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from ..repositories.session_evaluation_queue import SessionEvaluationQueue
 from ..repositories.session_traces import SessionTraceStore
+from ..security import redact_text
 
 logger = logging.getLogger(__name__)
 MAX_DELIVERIES = 8
@@ -29,8 +30,12 @@ class SessionEvaluationWorker:
                 await self._process(message)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception("Lisa session evaluation queue poll failed")
+            except Exception as error:  # noqa: BLE001 - keep the queue worker alive on poll errors.
+                logger.error(
+                    "Lisa session evaluation queue poll failed (%s): %s",
+                    type(error).__name__,
+                    self._failure_reason(error),
+                )
                 await asyncio.sleep(2)
 
     async def _process(self, message: dict) -> None:
@@ -40,6 +45,8 @@ class SessionEvaluationWorker:
         agent_name = str(payload.get("agent_name", ""))
         workspace_id = self.services.context.workspace_id()
         activity_id = str(uuid5(NAMESPACE_URL, f"lisa:pushed-session:{workspace_id}:{session_id}"))
+        delivery_attempt = min(max(int(message.get("read_ct", 1)), 1), MAX_DELIVERIES)
+        delivery_key = f"delivery-{delivery_attempt}"
         try:
             existing = self.services.activity_store.get_activity_thread(activity_id)
             if existing and existing.get("activity", {}).get("status") in {
@@ -66,12 +73,42 @@ class SessionEvaluationWorker:
                 agent_name,
                 session_id,
                 activity_id=activity_id,
+                failure_delivery_key=delivery_key,
                 defer_activity_failure=True,
             )
             if result.get("status") in {"error", "evaluation_error"}:
-                raise RuntimeError("Policy evaluation returned a retryable error")
+                raise RuntimeError(self._evaluation_failure_reason(result))
+            try:
+                self.services.activity_store.clear_session_evaluation_retry_summary(activity_id)
+            except Exception as error:  # noqa: BLE001 - a notice-clear error must not replay success.
+                logger.error(
+                    "Lisa completed session evaluation but could not clear its retry notice "
+                    "for %s (%s): %s",
+                    session_id,
+                    type(error).__name__,
+                    self._failure_reason(error),
+                )
             self.queue.delete(message_id)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - every attempt failure must remain retryable.
+            failure_reason = self._failure_reason(error)
+            try:
+                self.services.activity_store.record_session_evaluation_attempt_failure(
+                    activity_id,
+                    attempt=delivery_attempt,
+                    max_attempts=MAX_DELIVERIES,
+                    error=failure_reason,
+                    delivery_key=delivery_key,
+                )
+            except Exception as record_error:  # noqa: BLE001 - preserve queue custody on any DB error.
+                # Preserve queue retry if the activity database is temporarily
+                # unavailable; the sanitized reason remains in the worker log.
+                logger.error(
+                    "Lisa could not record the failed evaluation attempt for %s "
+                    "(%s): %s",
+                    session_id,
+                    type(record_error).__name__,
+                    self._failure_reason(record_error),
+                )
             if int(message.get("read_ct", 1)) >= MAX_DELIVERIES:
                 activity_id = str(uuid5(
                     NAMESPACE_URL,
@@ -79,7 +116,8 @@ class SessionEvaluationWorker:
                 ))
                 failed = self.services.activity_store.fail_exhausted_session_evaluation(
                     activity_id,
-                    f"Lisa could not evaluate session {session_id} after {MAX_DELIVERIES} attempts ({type(error).__name__}).",
+                    f"Lisa could not evaluate session {session_id} after {MAX_DELIVERIES} attempts. "
+                    f"Last error: {failure_reason}",
                 )
                 if failed:
                     self.queue.archive(message_id)
@@ -90,4 +128,37 @@ class SessionEvaluationWorker:
                         session_id,
                     )
             else:
-                logger.exception("Lisa session evaluation will be retried for %s", session_id)
+                logger.error(
+                    "Lisa session evaluation attempt %d/%d failed for %s; it will be retried: %s",
+                    delivery_attempt,
+                    MAX_DELIVERIES,
+                    session_id,
+                    failure_reason,
+                )
+
+    @staticmethod
+    def _failure_reason(error: Exception) -> str:
+        reason = redact_text(str(error)).strip()
+        if not reason:
+            reason = type(error).__name__
+        return reason[:1200]
+
+    @classmethod
+    def _evaluation_failure_reason(cls, result: dict) -> str:
+        message = result.get("message")
+        if message:
+            return cls._failure_reason(RuntimeError(str(message)))
+        failures = []
+        for evaluation in result.get("evaluations", []):
+            if evaluation.get("status") not in {"error", "already_running", "policy_unavailable"}:
+                continue
+            reason = evaluation.get("rationale") or evaluation.get("message")
+            label = evaluation.get("evaluation_name") or evaluation.get("policy_id")
+            if reason:
+                failures.append(f"{label}: {reason}" if label else str(reason))
+            else:
+                failures.append(f"{label}: {evaluation['status']}" if label else evaluation["status"])
+        if failures:
+            return cls._failure_reason(RuntimeError("; ".join(failures)))
+        status = result.get("status", "unknown")
+        return f"Policy evaluation returned {status}."
