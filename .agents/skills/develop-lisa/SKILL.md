@@ -44,6 +44,12 @@ The Explorer Lisa view keeps chat visible beside Activities, Rules,
 Triage / judges, Findings, and Identity tabs. Selecting an activity opens a keyboard-
 dismissible detail dialog that opens on the activity summary; selecting a
 timeline event opens its detail.
+In chat, consecutive tool calls and results are grouped into a collapsed “Lisa’s
+work” disclosure; opening it shows calls and results at their recorded event
+positions, paired by tool-call ID. Explicit assistant messages remain visible
+in the transcript.
+Never expose OpenHands `think` actions or provider-internal reasoning blocks as
+user-facing thoughts.
 The Recent evaluations list includes policy-evaluation and pushed-session
 evaluation activities. The Findings list searches those activities for
 policy-violation summaries before the feed limit, then filters to reported

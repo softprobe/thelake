@@ -53,29 +53,70 @@ describe("Lisa timeline", () => {
     ]);
   });
 
-  it("groups tool events into one ordered activity record with each result paired to its call", () => {
+  it("keeps out-of-order tool results at their recorded event positions", () => {
     const messages: LisaMessage[] = [
       { id: "user", role: "user", text: "Review refunds", sequence: 1 },
       { id: "answer", role: "assistant", text: "I found a violation.", sequence: 6 },
     ];
     const activities: LisaActivity[] = [
       { id: "call-1", kind: "tool", label: "Lisa used search_sessions", tool_call_id: "tool-1", tool_name: "search_sessions", arguments: "{\"agent\":\"refund-agent\"}", sequence: 2 },
-      { id: "result-1", kind: "evidence", label: "search_sessions returned evidence", tool_call_id: "tool-1", detail: "{\"sessions\":[{\"id\":\"s1\"}]}", sequence: 3 },
-      { id: "call-2", kind: "tool", label: "Lisa used search_sessions", tool_call_id: "tool-2", tool_name: "search_sessions", arguments: "{\"agent\":\"travel-agent\"}", sequence: 4 },
-      { id: "result-2", kind: "evidence", label: "search_sessions returned evidence", tool_call_id: "tool-2", detail: "{\"sessions\":[{\"id\":\"s2\"},{\"id\":\"s3\"}]}", sequence: 5 },
+      { id: "call-2", kind: "tool", label: "Lisa used search_sessions", tool_call_id: "tool-2", tool_name: "search_sessions", arguments: "{\"agent\":\"travel-agent\"}", sequence: 3 },
+      { id: "result-2", kind: "evidence", label: "search_sessions returned evidence", tool_call_id: "tool-2", detail: "{\"sessions\":[{\"id\":\"s2\"},{\"id\":\"s3\"}]}", sequence: 4 },
+      { id: "result-1", kind: "evidence", label: "search_sessions returned evidence", tool_call_id: "tool-1", detail: "{\"sessions\":[{\"id\":\"s1\"}]}", sequence: 5 },
     ];
 
     const timeline = lisaTimeline(messages, activities);
     expect(timeline.map((message) => message.id)).toEqual(["user", "activity-record-call-1", "answer"]);
-    expect(timeline[1].content.every((part) => part.type === "tool-call")).toBe(true);
-    const calls = timeline[1].content.filter((part) => part.type === "tool-call");
-    expect(calls.map((call) => call.type === "tool-call" ? call.toolName : "")).toEqual([
-      "search_sessions",
-      "search_sessions",
+    const orderedEvents = timeline[1].content.map((part) => part.type === "tool-call"
+      ? `call:${part.toolCallId}`
+      : part.type === "text" ? part.text : "unexpected");
+    expect(orderedEvents[0]).toBe("call:tool-1");
+    expect(orderedEvents[1]).toBe("call:tool-2");
+    expect(orderedEvents[2]).toContain('"toolCallId":"tool-2"');
+    expect(orderedEvents[2]).toContain("s2");
+    expect(orderedEvents[3]).toContain('"toolCallId":"tool-1"');
+    expect(orderedEvents[3]).toContain("s1");
+  });
+
+  it("keeps a tool result after assistant text that arrived before the result", () => {
+    const timeline = lisaTimeline([
+      { id: "user", role: "user", text: "Search", sequence: 1 },
+      { id: "progress", role: "assistant", text: "I am checking the result.", sequence: 4 },
+    ], [
+      { id: "call", kind: "tool", label: "Lisa used search_sessions", tool_call_id: "tool-1", tool_name: "search_sessions", sequence: 2 },
+      { id: "result", kind: "evidence", label: "search_sessions returned evidence", tool_call_id: "tool-1", detail: "found it", sequence: 5 },
     ]);
-    expect(calls.map((call) => call.type === "tool-call" ? call.result : "")).toEqual([
-      "{\n  \"sessions\": [\n    {\n      \"id\": \"s1\"\n    }\n  ]\n}",
-      "{\n  \"sessions\": [\n    {\n      \"id\": \"s2\"\n    },\n    {\n      \"id\": \"s3\"\n    }\n  ]\n}",
+
+    expect(timeline.map((message) => message.id)).toEqual([
+      "user", "activity-record-call", "progress", "activity-record-result",
     ]);
+    expect(timeline[3].content[0].type === "text" && timeline[3].content[0].text).toContain("found it");
+  });
+
+  it("keeps tool failure state alongside its paired result", () => {
+    const timeline = lisaTimeline([], [
+      { id: "call", kind: "tool", label: "Lisa used get_session", tool_call_id: "tool-1", tool_name: "get_session", sequence: 1 },
+      { id: "result", kind: "evidence", label: "get_session returned evidence", tool_call_id: "tool-1", detail: "not found", is_error: true, sequence: 2 },
+    ]);
+    const [call] = timeline[0].content;
+
+    expect(call.type).toBe("tool-call");
+    if (call.type === "tool-call") expect(call.isError).toBe(true);
+  });
+
+  it("keeps recorded assistant messages as visible narrative while excluding private think actions", () => {
+    const messages: LisaMessage[] = [
+      { id: "user", role: "user", text: "Review this", sequence: 1 },
+      { id: "progress", role: "assistant", text: "I am checking the policy and trace evidence.", sequence: 2 },
+      { id: "answer", role: "assistant", text: "I found a violation.", sequence: 5 },
+    ];
+    const activities: LisaActivity[] = [
+      { id: "tool", kind: "tool", label: "Lisa used search_sessions", tool_call_id: "call", tool_name: "search_sessions", sequence: 3 },
+    ];
+
+    expect(lisaTimeline(messages, activities).map((message) => message.id)).toEqual([
+      "user", "progress", "activity-record-tool", "answer",
+    ]);
+    expect(lisaTimeline(messages, activities).some((message) => JSON.stringify(message).includes("private think"))).toBe(false);
   });
 });

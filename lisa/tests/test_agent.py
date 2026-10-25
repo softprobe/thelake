@@ -121,6 +121,61 @@ def test_backend_resets_checkpoint_tools_before_sending_turn(monkeypatch, tmp_pa
     assert result.messages[0]["text"] == "Done."
 
 
+def test_conversation_content_preserves_full_visible_history_and_hides_private_think(monkeypatch):
+    class MessageEvent:
+        pass
+
+    class ActionEvent:
+        pass
+
+    class ObservationEvent:
+        pass
+
+    monkeypatch.setattr(agent, "MessageEvent", MessageEvent)
+    monkeypatch.setattr(agent, "ActionEvent", ActionEvent)
+    monkeypatch.setattr(agent, "ObservationEvent", ObservationEvent)
+
+    events = []
+    for index in range(205):
+        message = MessageEvent()
+        message.id = f"message-{index}"
+        message.source = "agent"
+        message.timestamp = f"2026-10-25T00:{index // 60:02d}:{index % 60:02d}Z"
+        message.llm_message = SimpleNamespace(content=f"Visible note {index}")
+        events.append(message)
+
+    private_thought = ActionEvent()
+    private_thought.tool_name = "think"
+    private_thought.id = "private-thought"
+    private_thought.timestamp = "2026-10-25T00:03:00Z"
+    private_thought.tool_call_id = "private-call"
+    private_thought.tool_call = SimpleNamespace(arguments={"thought": "private reasoning"})
+    events.append(private_thought)
+    private_observation = ObservationEvent()
+    private_observation.tool_name = "think"
+    private_observation.id = "private-observation"
+    private_observation.timestamp = "2026-10-25T00:03:01Z"
+    private_observation.tool_call_id = "private-call"
+    private_observation.observation = SimpleNamespace(to_llm_content="private thought result", is_error=False)
+    events.append(private_observation)
+
+    for index in range(125):
+        action = ActionEvent()
+        action.id = f"call-{index}"
+        action.tool_name = "search_sessions"
+        action.timestamp = f"2026-10-25T00:{index // 60:02d}:{index % 60:02d}Z"
+        action.tool_call_id = f"call-id-{index}"
+        action.tool_call = SimpleNamespace(arguments={"index": index})
+        events.append(action)
+
+    messages, activities = agent.conversation_content(SimpleNamespace(state=SimpleNamespace(events=events)))
+
+    assert len(messages) == 205
+    assert len(activities) == 125
+    assert messages[0]["id"] == "message-0"
+    assert all("private" not in str(item) for item in messages + activities)
+
+
 def test_openhands_stdio_loads_and_exposes_namespace_tools(
     monkeypatch, tmp_path, lisa_test_context
 ):

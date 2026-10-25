@@ -107,6 +107,31 @@ def test_user_turn_records_chat_messages_on_the_selected_activity(tmp_path):
     assert activities.completed == ("activity-1", "I updated the rule.", "succeeded")
 
 
+def test_conversation_reload_preserves_more_than_one_hundred_tool_activities(tmp_path):
+    workspace_id = "11111111-1111-4111-8111-111111111111"
+    conversation_id = "22222222-2222-4222-8222-222222222222"
+    service = ConversationService(FileConversationRepository(tmp_path))
+    service.create_conversation(workspace_id, conversation_id)
+
+    def run_turn(**_kwargs):
+        return AgentTurn(
+            messages=[{"id": "answer", "role": "assistant", "text": "Done.", "sequence": 241}],
+            activities=[
+                {"id": f"tool-{index}", "kind": "tool", "tool_name": "search_sessions", "sequence": index}
+                for index in range(120)
+            ],
+        )
+
+    asyncio.run(service.run_user_turn(
+        conversation_id, workspace_id, "Search many sessions.", run_turn=run_turn,
+    ))
+
+    reloaded = service.get_conversation(workspace_id, conversation_id)
+    assert len(reloaded["activities"]) == 120
+    assert reloaded["activities"][0]["id"] == "tool-0"
+    assert reloaded["activities"][-1]["id"] == "tool-119"
+
+
 def test_pending_policy_activity_remains_open_after_chat_reply(tmp_path):
     workspace_id = "11111111-1111-4111-8111-111111111111"
     conversation_id = "22222222-2222-4222-8222-222222222222"

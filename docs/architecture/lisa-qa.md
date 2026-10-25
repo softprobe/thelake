@@ -105,6 +105,15 @@ or a parallel tool-call batch, is never split. A checkpoint is used only when
 its event IDs, prefix fingerprint, configured model, and prompt configuration
 still match the current history.
 
+The Lisa chat transcript displays explicit user and assistant messages in
+event order. Consecutive tool calls and observations appear under one collapsed
+“Lisa’s work” disclosure; expanding it shows recorded arguments and observations
+at their original event positions, paired by tool-call ID. The chat projection includes the complete captured user-visible
+transcript and tool activity rather than truncating it to a fixed number of
+messages or tool activities. OpenHands
+`think` actions and provider-internal reasoning blocks are not displayed as
+thoughts. Only explicit assistant messages are user-visible narrative.
+
 When the model view reaches 72% of the configured input window, Lisa captures
 an immutable prefix and sends a small `{conversation_id, request_id}` message
 to the `lisa_conversation_checkpoints` PGMQ queue. The request key is derived

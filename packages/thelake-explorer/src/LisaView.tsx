@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AssistantRuntimeProvider,
   ComposerPrimitive,
@@ -10,10 +10,11 @@ import {
   type TextMessagePartProps,
   type ThreadMessageLike,
   type ToolCallMessagePartProps,
+  type PartState,
 } from "@assistant-ui/react";
 import type { ExplorerApi, LisaActivity, LisaActivityDetail, LisaConversation, LisaFeedEntry, LisaMessage, LisaPolicyRecord } from "./client";
 import { LisaMessageContent } from "./LisaMessageContent";
-import { lisaTimeline, toolActionLabel } from "./LisaTimeline";
+import { lisaTimeline, parseLisaToolResult, toolActionLabel } from "./LisaTimeline";
 import "./LisaView.css";
 
 type ConversationView = LisaConversation & { activities: LisaActivity[] };
@@ -63,43 +64,46 @@ function LisaTextPart({ text }: TextMessagePartProps) {
   return <LisaMessageContent content={text} />;
 }
 
-function toolResultSummary(result: unknown, isError = false): string {
-  if (isError) return "The tool reported an error";
-  if (result === undefined || result === null || result === "") return "No result was recorded";
-  if (typeof result === "string") {
-    try {
-      const parsed: unknown = JSON.parse(result);
-      if (Array.isArray(parsed)) return `Returned ${parsed.length} items`;
-      if (parsed && typeof parsed === "object") {
-        const record = parsed as Record<string, unknown>;
-        if (typeof record.error === "string") return `Error returned: ${record.error.slice(0, 90)}`;
-        const array = Object.entries(record).find(([, value]) => Array.isArray(value));
-        if (array) return `${array[0]}: ${(array[1] as unknown[]).length} items`;
-      }
-    } catch {
-      // Plain-text results are shown as a short, literal excerpt below.
-    }
-    const excerpt = result
-      .replace(/^\[Tool '[^']+' executed\.\]\s*/, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    return excerpt.length > 110 ? `${excerpt.slice(0, 107)}…` : excerpt;
-  }
-  return "Result captured";
-}
-
-function LisaToolCall({ toolName, argsText, args, result, isError }: ToolCallMessagePartProps) {
+function LisaToolCall({ toolName, argsText, args, isError, toolCallId }: ToolCallMessagePartProps) {
   return (
-    <details className="tle-lisa-tool">
-      <summary><b>{toolActionLabel(toolName)}</b><span>{toolResultSummary(result, isError)}</span></summary>
+    <section className={`tle-lisa-tool${isError ? " tle-lisa-tool--error" : ""}`} aria-label={`${toolActionLabel(toolName)} tool call${isError ? ", failed" : ""}`}>
+      <div className="tle-lisa-tool-heading"><b>{toolActionLabel(toolName)}</b><span>{isError ? "Call failed" : "Call"} · {toolCallId}</span></div>
       <div className="tle-lisa-tool-content">
         <b>Input</b>
         <pre>{argsText || JSON.stringify(args, null, 2)}</pre>
-        {result !== undefined && <><b>{isError ? "Error" : "Result"}</b><pre>{typeof result === "string" ? result : JSON.stringify(result, null, 2)}</pre></>}
       </div>
+    </section>
+  );
+}
+
+function LisaToolResult({ toolCallId, toolName, detail, isError }: NonNullable<ReturnType<typeof parseLisaToolResult>>) {
+  return (
+    <section className={`tle-lisa-tool${isError ? " tle-lisa-tool--error" : ""}`} aria-label={`${toolActionLabel(toolName)} tool result${isError ? ", error" : ""}`}>
+      <div className="tle-lisa-tool-heading"><b>{isError ? "Error" : "Result"} · {toolActionLabel(toolName)}</b><span>{toolCallId}</span></div>
+      <div className="tle-lisa-tool-content"><pre>{detail || "No result was recorded"}</pre></div>
+    </section>
+  );
+}
+
+export function LisaToolTrajectory({ count, failed = false, children }: { count: number; failed?: boolean; children: ReactNode }) {
+  return (
+    <details className={`tle-lisa-trajectory${failed ? " tle-lisa-trajectory--error" : ""}`}>
+      <summary>Lisa’s work · {count} {count === 1 ? "step" : "steps"}{failed ? " · includes an error" : ""} <span>View full trajectory</span></summary>
+      <div className="tle-lisa-trajectory-content">{children}</div>
     </details>
   );
 }
+
+const groupLisaToolCalls = (part: PartState) => {
+  if (part.type === "tool-call") {
+    return [part.isError ? "group-tool-errors" : "group-tool-trajectory"] as const;
+  }
+  if (part.type === "text") {
+    const result = parseLisaToolResult(part.text);
+    if (result) return [result.isError ? "group-tool-errors" : "group-tool-trajectory"] as const;
+  }
+  return [];
+};
 
 function LisaEmptyPart({ status }: EmptyMessagePartProps) {
   return status.type === "running" ? (
@@ -111,11 +115,21 @@ function LisaRuntimeMessage({ role }: { role: string }) {
   const user = role === "user";
   return (
     <MessagePrimitive.Root className={`tle-lisa-message ${user ? "tle-lisa-user" : "tle-lisa-assistant"}`}>
-      <MessagePrimitive.Content components={{
-        Text: LisaTextPart,
-        Empty: LisaEmptyPart,
-        tools: { Fallback: LisaToolCall },
-      }} />
+      <MessagePrimitive.GroupedParts groupBy={groupLisaToolCalls}>
+        {({ part, children }) => {
+          if (part.type === "group-tool-trajectory" || part.type === "group-tool-errors") {
+            return <LisaToolTrajectory count={part.indices.length} failed={part.type === "group-tool-errors"}>{children}</LisaToolTrajectory>;
+          }
+          if (part.type === "tool-call") return <LisaToolCall {...part} />;
+          if (part.type === "text") {
+            const result = parseLisaToolResult(part.text);
+            if (result) return <LisaToolResult {...result} />;
+            return <LisaTextPart text={part.text} />;
+          }
+          if (part.type === "indicator") return <LisaEmptyPart status={{ type: "running" }} />;
+          return null;
+        }}
+      </MessagePrimitive.GroupedParts>
     </MessagePrimitive.Root>
   );
 }

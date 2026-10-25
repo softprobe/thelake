@@ -8,6 +8,31 @@ type TimedMessage = {
   message: ThreadMessageLike;
 };
 
+const toolResultPrefix = "\u0000lisa-tool-result:";
+
+export type LisaToolResultEvent = {
+  toolCallId: string;
+  toolName: string;
+  detail: string;
+  isError: boolean;
+};
+
+function encodeToolResult(result: LisaToolResultEvent): string {
+  return `${toolResultPrefix}${JSON.stringify(result)}`;
+}
+
+export function parseLisaToolResult(value: string): LisaToolResultEvent | undefined {
+  if (!value.startsWith(toolResultPrefix)) return undefined;
+  try {
+    const parsed = JSON.parse(value.slice(toolResultPrefix.length)) as Partial<LisaToolResultEvent>;
+    if (typeof parsed.toolCallId !== "string" || typeof parsed.toolName !== "string"
+      || typeof parsed.detail !== "string" || typeof parsed.isError !== "boolean") return undefined;
+    return parsed as LisaToolResultEvent;
+  } catch {
+    return undefined;
+  }
+}
+
 function messageTime(value?: string): number {
   if (!value) return Number.POSITIVE_INFINITY;
   const timestamp = Date.parse(value);
@@ -72,32 +97,44 @@ function toolCall(item: TimedMessage): ToolCallMessagePart | undefined {
   return typeof part === "object" && part?.type === "tool-call" ? part : undefined;
 }
 
+function isToolTrajectoryPart(item: TimedMessage): boolean {
+  if (toolCall(item)) return true;
+  const content = item.message.content;
+  if (!Array.isArray(content)) return false;
+  const part = content[0];
+  return typeof part === "object" && part?.type === "text"
+    && typeof part.text === "string" && parseLisaToolResult(part.text) !== undefined;
+}
+
 function groupRecordedActions(items: TimedMessage[]): TimedMessage[] {
   const grouped: TimedMessage[] = [];
   for (let index = 0; index < items.length;) {
-    if (!toolCall(items[index])) {
+    if (!isToolTrajectoryPart(items[index])) {
       grouped.push(items[index]);
       index += 1;
       continue;
     }
 
     const first = items[index];
-    const calls: ToolCallMessagePart[] = [];
+    const content: Array<ToolCallMessagePart | { type: "text"; text: string }> = [];
     while (index < items.length) {
-      const part = toolCall(items[index]);
-      if (!part) break;
-      calls.push(part);
+      if (!isToolTrajectoryPart(items[index])) break;
+      const part = items[index].message.content;
+      if (Array.isArray(part) && part[0]?.type === "tool-call") {
+        content.push(part[0]);
+      } else if (Array.isArray(part) && part[0]?.type === "text") {
+        content.push(part[0]);
+      }
       index += 1;
     }
-    // assistant-ui can render several tool parts in one assistant message.
-    // Keep each invocation and paired result as its own native tool part;
-    // the tool name and result summary already explain what each record is.
+    // Preserve tool call and observation positions inside one disclosure.
+    // A result remains its own event so parallel completions stay in order.
     grouped.push({
       ...first,
       message: {
         id: `activity-record-${String(first.message.id)}`,
         role: "assistant",
-        content: calls,
+        content,
       },
     });
   }
@@ -112,6 +149,11 @@ export function lisaTimeline(
   const observations = new Map(
     activities
       .filter((activity) => activity.kind === "evidence" && activity.tool_call_id)
+      .map((activity) => [activity.tool_call_id!, activity]),
+  );
+  const toolCalls = new Map(
+    activities
+      .filter((activity) => activity.kind === "tool" && activity.tool_call_id)
       .map((activity) => [activity.tool_call_id!, activity]),
   );
   const timeline: TimedMessage[] = messages.map((message, order) => ({
@@ -144,7 +186,8 @@ export function lisaTimeline(
             toolName,
             args: redactInternalToolFields(parseArguments(activity.arguments)) as Record<string, any>,
             argsText: displayToolText(activity.arguments),
-            result: displayToolText(observation?.detail),
+            result: undefined,
+            isError: observation?.is_error,
           }],
           createdAt: activity.created_at ? new Date(activity.created_at) : undefined,
         },
@@ -152,7 +195,33 @@ export function lisaTimeline(
       return;
     }
 
-    if (activity.kind === "evidence" && activity.tool_call_id && activities.some((item) => item.kind === "tool" && item.tool_call_id === activity.tool_call_id)) return;
+    if (activity.kind === "evidence" && activity.tool_call_id) {
+      const call = toolCalls.get(activity.tool_call_id);
+      if (call) {
+        const toolName = activity.tool_name ?? call.tool_name ?? call.label.replace(/^Lisa used /, "");
+        const toolCallId = activity.tool_call_id;
+        timeline.push({
+          order: messages.length + index,
+          timestamp: messageTime(activity.created_at),
+          sequence: activity.sequence,
+          message: {
+            id: activity.id,
+            role: "assistant",
+            content: [{
+              type: "text",
+              text: encodeToolResult({
+                toolCallId,
+                toolName,
+                detail: displayToolText(activity.detail),
+                isError: Boolean(activity.is_error),
+              }),
+            }],
+            createdAt: activity.created_at ? new Date(activity.created_at) : undefined,
+          },
+        });
+        return;
+      }
+    }
 
     const detail = activity.detail ? `\n\n\`\`\`text\n${activity.detail}\n\`\`\`` : "";
     timeline.push({

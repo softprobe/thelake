@@ -724,8 +724,9 @@ def conversation_content(conversation) -> tuple[list[dict[str, str]], list[dict[
 
     User and agent message events become chat messages. Tool calls other than
     ``think`` become ``tool`` activities, and their observations become
-    ``evidence`` activities. The result keeps the newest 200 messages and 100
-    activities.
+    ``evidence`` activities. The projection includes every user-visible
+    message and non-private tool activity in the event log. Private ``think``
+    actions and their observations are omitted.
 
     Args:
         conversation: OpenHands conversation whose ``state.events`` are read.
@@ -766,7 +767,7 @@ def conversation_content(conversation) -> tuple[list[dict[str, str]], list[dict[
                     "arguments": event.tool_call.arguments,
                 }
             )
-        elif isinstance(event, ObservationEvent):
+        elif isinstance(event, ObservationEvent) and event.tool_name != "think":
             activities.append(
                 {
                     "id": str(event.id),
@@ -780,7 +781,7 @@ def conversation_content(conversation) -> tuple[list[dict[str, str]], list[dict[
                     "tool_name": event.tool_name,
                 }
             )
-    return messages[-200:], activities[-100:]
+    return messages, activities
 
 
 def content_text(content: Any) -> str:

@@ -70,6 +70,7 @@ export type LisaActivity = {
   tool_call_id?: string;
   tool_name?: string;
   arguments?: string;
+  is_error?: boolean;
 };
 
 export type LisaConversation = {

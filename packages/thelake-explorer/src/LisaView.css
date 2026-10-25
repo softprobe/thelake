@@ -30,10 +30,19 @@
 .tle-lisa-working { display: flex; align-items: center; gap: 8px; color: #625d6c; font-size: 12px; }
 .tle-lisa-spinner { width: 13px; height: 13px; border: 2px solid #e4dcef; border-top-color: var(--lisa-violet); border-radius: 50%; animation: tle-lisa-spin .8s linear infinite; }
 @keyframes tle-lisa-spin { to { transform: rotate(360deg); } }
-.tle-lisa-tool { width: min(100%, 680px); margin-top: 6px; border: 1px solid var(--lisa-line); border-radius: 10px; background: #fff; color: #625f6b; font-size: 12px; }
-.tle-lisa-tool summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 10px 12px; cursor: pointer; }
-.tle-lisa-tool summary b { color: #3f3b49; font-weight: 600; }
-.tle-lisa-tool summary span { color: var(--lisa-muted); }
+.tle-lisa-trajectory { width: min(100%, 680px); margin-top: 6px; border: 1px solid var(--lisa-line); border-radius: 10px; background: #fff; color: #625f6b; font-size: 12px; }
+.tle-lisa-trajectory > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 10px 12px; cursor: pointer; }
+.tle-lisa-trajectory > summary::marker { color: var(--lisa-violet); }
+.tle-lisa-trajectory > summary span { margin-left: auto; color: var(--lisa-violet-strong); font-size: 11px; }
+.tle-lisa-trajectory--error { border-color: #e8b8b4; background: #fffafa; }
+.tle-lisa-trajectory--error > summary { color: #a23d37; }
+.tle-lisa-trajectory-content { display: grid; gap: 8px; padding: 0 10px 10px; }
+.tle-lisa-tool { min-width: 0; border: 1px solid var(--lisa-line); border-radius: 9px; background: #fff; color: #625f6b; font-size: 12px; }
+.tle-lisa-tool--error { border-color: #e8b8b4; background: #fffafa; }
+.tle-lisa-tool-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 9px 10px; }
+.tle-lisa-tool-heading b { color: #3f3b49; font-weight: 600; }
+.tle-lisa-tool-heading span { color: var(--lisa-muted); }
+.tle-lisa-tool--error .tle-lisa-tool-heading span { color: #a23d37; font-weight: 600; }
 .tle-lisa-tool-content { display: grid; gap: 6px; padding: 10px 11px; border-top: 1px solid var(--lisa-line); }
 .tle-lisa-tool-content b { color: #3f3b49; font-size: 11px; }
 .tle-lisa-tool-content pre { max-height: 260px; overflow: auto; margin: 0; padding: 10px; border-radius: 8px; background: #211d29; color: #f4f1f7; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.45 ui-monospace, monospace; }

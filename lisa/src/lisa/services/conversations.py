@@ -241,7 +241,7 @@ class ConversationService:
             metadata["updated_at"] = now
             metadata["provider_consent_at"] = now
             metadata["messages"] = messages
-            metadata["activities"] = [*metadata.get("activities", []), *activities][-100:]
+            metadata["activities"] = [*metadata.get("activities", []), *activities]
             self.repository.save_metadata(directory, metadata)
             return {
                 "conversation_id": conversation_id,

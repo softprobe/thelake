@@ -199,9 +199,7 @@ class SlackEventService:
                     metadata["event_source"] = "slack"
                     metadata["updated_at"] = datetime.now(UTC).isoformat()
                     metadata["messages"] = turn.messages
-                    metadata["activities"] = [*metadata.get("activities", []), *turn.activities][
-                        -100:
-                    ]
+                    metadata["activities"] = [*metadata.get("activities", []), *turn.activities]
                     self.conversations.save_metadata(directory, metadata)
                 await asyncio.to_thread(post_reply, channel_id, thread_ts, latest_reply)
                 receipt["status"] = "complete"
