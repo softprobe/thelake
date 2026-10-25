@@ -25,8 +25,15 @@ from .services.failures import FailureService
 from .services.notifications import SlackNotifier
 from .services.policies import PolicyService
 from .services.session_evaluations import SessionEvaluationWorker
+from .services.session_trace_intake import SessionTraceIntake
 from .services.sessions import SessionService
 from .services.slack_events import SlackEventService, SlackEventWorker
+from .services.thelake_sampling import (
+    TheLakeClient,
+    TheLakeConfiguration,
+    TheLakeSamplingWorker,
+    TheLakeSessionSampler,
+)
 from .slack import SlackClient
 from .views.evaluations import render_evaluation_context
 
@@ -48,11 +55,15 @@ class WorkspaceServices:
     slack_event_service: SlackEventService
     slack_worker: SlackEventWorker
     session_traces: SessionTraceStore
+    session_trace_intake: SessionTraceIntake
     session_evaluation_queue: SessionEvaluationQueue | None = None
     session_evaluation_worker: SessionEvaluationWorker | None = None
     conversation_checkpoint_queue: ConversationCheckpointQueue | None = None
     conversation_checkpoint_worker: ConversationCheckpointWorker | None = None
     activity_store: PostgresActivityStore | None = None
+    thelake_client: TheLakeClient | None = None
+    thelake_sampler: TheLakeSessionSampler | None = None
+    thelake_sampling_worker: TheLakeSamplingWorker | None = None
 
 
 def build_services(context: WorkspaceContext) -> WorkspaceServices:
@@ -115,6 +126,15 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         render_context=render_evaluation_context,
     )
     queue = SessionEvaluationQueue(context.database_url) if context.database_url else None
+    intake = SessionTraceIntake(session_traces, queue)
+    thelake_configuration = TheLakeConfiguration.from_values(
+        context.thelake_url, context.thelake_bearer_token
+    )
+    thelake_client = (
+        TheLakeClient(thelake_configuration)
+        if thelake_configuration is not None and queue is not None
+        else None
+    )
     checkpoint_queue = (
         ConversationCheckpointQueue(context.database_url) if context.database_url else None
     )
@@ -131,14 +151,24 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         slack_event_service=slack_event_service,
         slack_worker=slack_worker,
         session_traces=session_traces,
+        session_trace_intake=intake,
         session_evaluation_queue=queue,
         activity_store=activities,
         conversation_checkpoint_queue=checkpoint_queue,
+        thelake_client=thelake_client,
     )
     if queue is not None:
         services.session_evaluation_worker = SessionEvaluationWorker(
             queue, session_traces, services
         )
+        if thelake_client is not None:
+            services.thelake_sampler = TheLakeSessionSampler(thelake_client, intake)
+            if context.thelake_sampling_interval_seconds:
+                services.thelake_sampling_worker = TheLakeSamplingWorker(
+                    context,
+                    context.thelake_sampling_interval_seconds,
+                    run_turn,
+                )
     if checkpoint_queue is not None:
         services.conversation_checkpoint_worker = ConversationCheckpointWorker(
             checkpoint_queue,

@@ -232,11 +232,12 @@ For a policy change, use learn-agent-policy and read_policy. Return the policy
 ID and its approval state. Substantive policy work uses the same activity
 workflow as other Lisa-owned work; the activity records the chat actions while
 the policy row remains the source of truth for policy state.
-Lisa has no autonomous QA cron. Pushed sessions enter a durable evaluation
-queue and are handled by Lisa's service worker; this is not a model conversation.
-For an owner-requested session review, use the own-agent-qa skill and inspect
-only sessions available in Lisa's local session store. Never imply complete
-coverage of sessions that have not been pushed.
+Pushed sessions enter Lisa's durable evaluation queue and are handled by her
+service worker. For an owner-requested session review, use the own-agent-qa
+skill and inspect sessions available in Lisa's local evidence store. When the
+optional TheLake connection is configured, scheduled sampling uses the
+sample-recent-sessions skill and Lisa's TheLake tool; do not imply that sampled
+sessions represent complete workspace coverage.
 For activity management tasks, use the activity tools to find, update, and
 inspect activity records. Resolve new chat work with resolve_chat_activity and
 provide a concise summary containing only that request's intent and facts. If
@@ -448,6 +449,13 @@ def build_conversation(
         *knowledge_skills.values(),
         *agent_skills.values(),
     ]
+    thelake_enabled = bool(
+        os.getenv("LISA_THELAKE_URL", "").strip()
+        and os.getenv("LISA_THELAKE_BEARER_TOKEN", "").strip()
+        and os.getenv("LISA_DATABASE_URL", "").strip()
+    )
+    if not thelake_enabled:
+        skills = [skill for skill in skills if skill.name != "sample-recent-sessions"]
     mcp_env = {
         "LISA_WORKSPACE_ID": workspace_id,
         "LISA_LLM_TRACE_ENABLED": os.getenv("LISA_LLM_TRACE_ENABLED", ""),
@@ -459,6 +467,11 @@ def build_conversation(
         ),
         "LISA_DATABASE_URL": os.getenv("LISA_DATABASE_URL", ""),
         "LISA_DATABASE_READ_URL": os.getenv("LISA_DATABASE_READ_URL", ""),
+        "LISA_THELAKE_URL": os.getenv("LISA_THELAKE_URL", ""),
+        "LISA_THELAKE_BEARER_TOKEN": os.getenv("LISA_THELAKE_BEARER_TOKEN", ""),
+        "LISA_THELAKE_SAMPLING_INTERVAL_SECONDS": os.getenv(
+            "LISA_THELAKE_SAMPLING_INTERVAL_SECONDS", "3600"
+        ),
         "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY", ""),
         "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY", ""),
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
@@ -478,6 +491,20 @@ def build_conversation(
         if mcp_env["LISA_DATABASE_READ_URL"]
         else LISA_SYSTEM_PROMPT
     )
+    if thelake_enabled:
+        system_prompt += (
+            "\n\nTheLake sampling is enabled. For a scheduled QA wakeup, invoke the "
+            "sample-recent-sessions skill and follow it exactly. For an owner request "
+            "to sample recent sessions, use that same skill. The sampling tool selects "
+            "and queues evidence; do not read or quote raw session payloads in the run report."
+        )
+    if turn_source == "scheduler" and thelake_enabled:
+        system_prompt += (
+            "\n\nThis is an internal scheduled QA turn, not a user chat. Do not resolve, "
+            "create, skip, update, or complete a chat activity, and do not load the "
+            "activities namespace. Invoke only the sample-recent-sessions skill and "
+            "the TheLake sampling tool, then return a concise count summary."
+        )
     skill_prompt = "\n\n".join(f"{skill.name}\n{skill.content}" for skill in skills)
     context_configuration = context_configuration_fingerprint(
         model_name,

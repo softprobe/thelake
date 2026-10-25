@@ -8,7 +8,6 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
-from pathlib import Path
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
@@ -17,6 +16,7 @@ from fastapi.testclient import TestClient
 from lisa.app import app
 from lisa.controllers import http as api
 from lisa.repositories.session_traces import SessionTraceStore
+from lisa.services.session_trace_intake import SessionTraceIntake
 
 
 @pytest.fixture
@@ -126,6 +126,9 @@ def test_pushed_session_is_persisted_before_it_is_enqueued(client, tmp_path):
     services = client.app.state.workspace_services
     services.session_traces = SessionTraceStore(tmp_path)
     services.session_evaluation_queue = Queue()
+    services.session_trace_intake = SessionTraceIntake(
+        services.session_traces, services.session_evaluation_queue
+    )
 
     response = client.post(
         "/internal/v1/session-traces", json=_otlp_session()

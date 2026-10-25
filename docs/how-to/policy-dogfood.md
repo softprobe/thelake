@@ -72,7 +72,10 @@ calls `EvaluationService` against Lisa's local evidence. Metrics and limits:
 
 ## 3. Push-triggered online evaluation
 
-Lisa does not schedule trace sampling or depend on TheLake for trace reads.
+This isolated dogfood procedure evaluates locally stored Lisa evidence and does
+not require TheLake. Lisa can optionally sample TheLake through its own
+authenticated scheduler and packaged skill when that integration is configured;
+sampled bundles use the same durable intake as direct pushes.
 The telemetry producer submits a complete OTLP session to Lisa's unauthenticated
 `POST /internal/v1/session-traces` endpoint, which must remain on a private
 network. Lisa atomically writes the session bundle under its configured

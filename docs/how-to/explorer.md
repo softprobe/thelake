@@ -179,13 +179,14 @@ tools are exposed over local stdio MCP and its workflows use standard
 `SKILL.md` files, so another runtime can use the same tool and skill contract
 without importing OpenHands code. Lisa supports persistent multi-turn chats,
 workspace and agent policy records, bounded session-detail search,
-explicitly approved policy rules, and push-triggered policy evaluation. She does
+explicitly approved policy rules, and intake-triggered policy evaluation. She does
 not run shell commands or access a connected Git repository.
 
 Lisa's app has its own route at `/lisa/` on the Python service, which serves its
 compiled frontend and backend APIs together. Explorer remains the session and
 trace browser at `/explorer/` on TheLake. The two apps have separate service
-boundaries and deployments; Lisa does not depend on TheLake at runtime.
+boundaries and deployments; Lisa runs without TheLake unless its optional
+authenticated session-sampling integration is configured.
 
 Lisa's app keeps the conversation visible beside a workspace panel with
 Activities, Rules, Triage / judges, and Identity tabs. Activities reuse Lisa's
@@ -223,8 +224,9 @@ viewport and device scale when changing this layout.
   create pass scores. Lisa stores evaluation results with the policy ID and
   criteria in Lisa's Postgres database, and records the action and considered
   policy pairs as an inspectable activity there.
-  Lisa evaluates only sessions pushed to her local evidence store or explicitly
-  requested by an owner; there is no scheduled QA job.
+  Lisa evaluates sessions delivered to her local evidence store by direct push
+  or, when configured, her own scheduled TheLake sampler. Users can also ask
+  Lisa to run a manual sample.
 - Conversations are stored in the runner's `lisa-data` volume, scoped by the
   authenticated workspace. One runtime service serves a deployment; this is
   not yet a separate VM per workspace or a multi-replica durable store. Delete
@@ -311,7 +313,7 @@ Open [Lisa at port 18083](http://127.0.0.1:18083/lisa/) to chat, create and
 confirm policies, and inspect activities. The Explorer session app remains at
 `http://127.0.0.1:8090/explorer/`. Rule text and approval live in Lisa's
 PostgreSQL policy table; missing approval means no. Evaluation starts from
-pushed sessions, not a scheduled job.
+pushed sessions or Lisa's optional configured sampling job.
 
 ## Verify
 

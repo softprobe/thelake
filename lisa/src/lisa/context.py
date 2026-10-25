@@ -26,6 +26,9 @@ class WorkspaceContext:
     slack_thread: str = ""
     activity_slack_channel: str = ""
     activity_slack_thread: str = ""
+    thelake_url: str = ""
+    thelake_bearer_token: str = field(default="", repr=False)
+    thelake_sampling_interval_seconds: int = 3600
 
     @classmethod
     def from_environment(cls) -> WorkspaceContext:
@@ -50,6 +53,9 @@ class WorkspaceContext:
             slack_thread=os.getenv("LISA_SLACK_THREAD_TS", "").strip(),
             activity_slack_channel=os.getenv("LISA_SLACK_ACTIVITY_CHANNEL_ID", "").strip(),
             activity_slack_thread=os.getenv("LISA_SLACK_ACTIVITY_THREAD_TS", "").strip(),
+            thelake_url=os.getenv("LISA_THELAKE_URL", "").strip(),
+            thelake_bearer_token=os.getenv("LISA_THELAKE_BEARER_TOKEN", ""),
+            thelake_sampling_interval_seconds=_sampling_interval(),
         )
 
     def workspace_id(self) -> str:
@@ -65,3 +71,14 @@ class WorkspaceContext:
         if home.is_symlink() or not home.resolve().is_relative_to(data_dir):
             raise ValueError("Lisa policy home escapes its workspace data directory")
         return home
+
+
+def _sampling_interval() -> int:
+    raw = os.getenv("LISA_THELAKE_SAMPLING_INTERVAL_SECONDS", "3600")
+    try:
+        interval = int(raw)
+    except ValueError as error:
+        raise ValueError("LISA_THELAKE_SAMPLING_INTERVAL_SECONDS must be an integer") from error
+    if interval != 0 and interval < 60:
+        raise ValueError("The TheLake sampling interval must be 0 or at least 60 seconds")
+    return interval

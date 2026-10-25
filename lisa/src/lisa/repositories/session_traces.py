@@ -131,6 +131,18 @@ class SessionTraceStore:
             results.append(self._read_manifest(directory))
         return sorted(results, key=lambda item: item.get("received_at", ""), reverse=True)
 
+    def has_manifest(self, session_id: str) -> bool:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", session_id):
+            return False
+        root = self._trace_root()
+        if not root.exists():
+            return False
+        target = root / session_id
+        self._check_path(root, target)
+        if not target.is_dir():
+            return False
+        return self._read_manifest(target).get("session_id") == session_id
+
     def _trace_root(self) -> Path:
         root = self.workspace_root / "session_traces"
         if root.is_symlink() or not root.resolve().is_relative_to(self.workspace_root):

@@ -31,6 +31,7 @@ async def lifespan(_app: FastAPI):
     slack_worker_task = None
     evaluation_worker_task = None
     checkpoint_worker_task = None
+    thelake_sampling_task = None
     if workspace_id:
         if services.session_evaluation_worker is not None:
             evaluation_worker_task = asyncio.create_task(
@@ -39,6 +40,10 @@ async def lifespan(_app: FastAPI):
         if services.conversation_checkpoint_worker is not None:
             checkpoint_worker_task = asyncio.create_task(
                 services.conversation_checkpoint_worker.run_forever()
+            )
+        if services.thelake_sampling_worker is not None:
+            thelake_sampling_task = asyncio.create_task(
+                services.thelake_sampling_worker.run_forever()
             )
         slack_worker_task = asyncio.create_task(services.slack_worker.run_forever(workspace_id))
     async with recording_maintenance(services.context):
@@ -61,7 +66,15 @@ async def lifespan(_app: FastAPI):
             await checkpoint_worker_task
         except asyncio.CancelledError:
             pass
+    if thelake_sampling_task is not None:
+        thelake_sampling_task.cancel()
+        try:
+            await thelake_sampling_task
+        except asyncio.CancelledError:
+            pass
     await services.slack_worker.shutdown()
+    if services.thelake_client is not None:
+        await asyncio.to_thread(services.thelake_client.close)
 
 
 app = FastAPI(title="Lisa Agent Runtime", version="0.1.0", lifespan=lifespan)

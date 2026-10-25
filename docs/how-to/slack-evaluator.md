@@ -49,8 +49,8 @@ Lisa evaluates sessions pushed to its unauthenticated
 network. The producer sends one complete OTLP JSON bundle; there is no bearer
 credential on this endpoint. Lisa validates and atomically writes the session
 bundle locally, then commits the receipt and durable PGMQ job together in
-Lisa's PostgreSQL database. No TheLake API, workspace lookup, or scheduled QA
-job is involved. A successful response confirms receipt and queue insertion,
+Lisa's PostgreSQL database. This Slack evaluation path uses the pushed bundle;
+the optional Lisa-owned TheLake sampler is not involved. A successful response confirms receipt and queue insertion,
 not evaluation completion or a cross-store transaction.
 
 OpenAI Decisions triages approved candidate policies. Gemini judges suspected

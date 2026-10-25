@@ -11,8 +11,9 @@ separate ID.
 
 Lisa is an independently deployable Python service. It serves its own frontend
 and API, stores policy/evaluation state in its own PostgreSQL database, and
-stores pushed OTLP evidence in its durable agent workspace. It has no runtime
-dependency on TheLake and does not schedule trace sampling.
+stores OTLP evidence in its durable agent workspace. TheLake sampling is an
+optional Lisa-owned integration; the isolated evaluation procedure below uses
+local evidence and does not require TheLake.
 
 ## Verification levels
 

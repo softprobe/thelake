@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#111416" />
+  <title>Lisa — AI QA Engineer for Production Agents</title>
+  <meta name="description" content="Lisa checks AI agent sessions against behavior rules your team approves, then surfaces problems with the trace evidence behind every finding." />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Lisa — AI QA Engineer for Production Agents" />
+  <meta property="og:description" content="Catch agent behavior problems early. Lisa checks sessions against your approved rules and shows the evidence behind every finding." />
+  <link rel="icon" href="/lisa/lisa-mark.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/lisa/styles.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <a class="wordmark" href="/lisa/" aria-label="Lisa home">
+      <img src="/lisa/lisa-mark.svg" alt="" width="34" height="34" />
+      <span>lisa<span class="wordmark-dot">.</span></span>
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="#how">How it works</a>
+      <a href="#example">Example finding</a>
+      <a class="nav-cta" href="https://github.com/softprobe/thelake/tree/main/lisa">Explore Lisa</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="live-dot" aria-hidden="true"></span> AI QA for production agents</p>
+          <h1>Find agent failures without waiting for a user report.</h1>
+          <p class="hero-lede">Lisa checks sessions as they arrive against behavior rules your team approves, then shows the exact evidence behind each finding.</p>
+          <div class="hero-actions">
+            <a class="button button-bright" href="#example">See a finding <span aria-hidden="true">↘</span></a>
+            <a class="button button-quiet" href="https://github.com/softprobe/thelake/blob/main/README.md#local-development">Run Lisa locally</a>
+          </div>
+          <div class="hero-proof">
+            <span>Rules owned by your team</span>
+            <span>Findings tied to trace evidence</span>
+          </div>
+        </div>
+
+        <div class="review-scene" aria-label="Animated example: Lisa checks an agent session and finds an account deletion without confirmation">
+          <div class="scene-glow" aria-hidden="true"></div>
+          <div class="scene-topline">
+            <span class="scene-label"><span class="pulse-dot" aria-hidden="true"></span> SESSION REVIEW</span>
+            <span class="scene-id">run_8f3a2c</span>
+          </div>
+
+          <div class="trace-card trace-user">
+            <span class="trace-kind">USER</span>
+            <p>“What happens if I delete my account?”</p>
+            <span class="trace-id">span c42f1924</span>
+          </div>
+
+          <div class="trace-connector" aria-hidden="true"><span></span></div>
+
+          <div class="trace-card trace-tool">
+            <div class="tool-head"><span class="trace-kind">TOOL CALL</span><span class="tool-badge">account service</span></div>
+            <p><code>delete_account()</code></p>
+            <span class="trace-id">span 680168ca</span>
+          </div>
+
+          <div class="review-sweep" aria-hidden="true"><span></span></div>
+
+          <div class="finding-card">
+            <div class="finding-icon" aria-hidden="true">!</div>
+            <div class="finding-body">
+              <div class="finding-meta"><span>POLICY VIOLATION</span><span class="finding-state">FOUND</span></div>
+              <h2>Confirmation required before deletion</h2>
+              <p>The user asked for information. The agent called <code>delete_account()</code> without explicit confirmation.</p>
+              <div class="evidence-links"><span>Evidence</span><a href="#example">2 cited spans <span aria-hidden="true">↗</span></a></div>
+            </div>
+          </div>
+
+          <div class="scene-caption"><span class="caption-line"></span> Illustrative synthetic session · findings include cited trace spans</div>
+        </div>
+      </div>
+      <div class="hero-orbit orbit-one" aria-hidden="true"></div>
+      <div class="hero-orbit orbit-two" aria-hidden="true"></div>
+    </section>
+
+    <section class="promise-section" id="how">
+      <div class="section-heading">
+        <p class="eyebrow eyebrow-dark">From every run to a useful answer</p>
+        <h2>QA that keeps up with your agents.</h2>
+        <p>Turn the behavior you expect into approved rules. Lisa checks the sessions she receives and brings questionable behavior to your attention with evidence you can inspect.</p>
+      </div>
+
+      <div class="steps">
+        <article class="step-card">
+          <div class="step-top"><span>01</span><span class="step-icon icon-session" aria-hidden="true">↳</span></div>
+          <h3>Sessions arrive</h3>
+          <p>Send completed agent sessions to Lisa. Evaluation runs in the background, so checks don’t interrupt the agent or wait for a user report.</p>
+          <div class="step-foot"><span class="mini-dot"></span> Session received</div>
+        </article>
+        <article class="step-card">
+          <div class="step-top"><span>02</span><span class="step-icon icon-rules" aria-hidden="true">≋</span></div>
+          <h3>Your rules set the bar</h3>
+          <p>Describe the behaviors that matter, then approve them. Only owner-approved rules drive evaluations; observed behavior never silently becomes policy.</p>
+          <div class="step-foot"><span class="mini-dot mini-dot-green"></span> Approved policy · P1.2</div>
+        </article>
+        <article class="step-card">
+          <div class="step-top"><span>03</span><span class="step-icon icon-findings" aria-hidden="true">!</span></div>
+          <h3>You get a finding, not a mystery score</h3>
+          <p>Review the verdict, why it happened, and the exact spans that support it. Follow up while the behavior is still easy to reproduce.</p>
+          <div class="step-foot"><span class="mini-dot mini-dot-amber"></span> Finding · cited evidence</div>
+        </article>
+      </div>
+    </section>
+
+    <section class="example-section" id="example">
+      <div class="example-copy">
+        <p class="eyebrow">A finding you can act on</p>
+        <h2>See the behavior. See why it failed.</h2>
+        <p>A customer asks what account deletion does. The agent deletes the account instead of answering. Lisa ties the failure to your confirmation rule and cites the request and tool call that show what happened.</p>
+        <p class="example-note">This is a synthetic example, not a live customer session or a claim of human-reviewed ground truth.</p>
+      </div>
+      <div class="evidence-panel">
+        <div class="panel-header"><span>SESSION S025</span><span class="panel-tag">SYNTHETIC EXAMPLE</span></div>
+        <div class="evidence-row evidence-rule">
+          <span class="row-label">APPROVED RULE · P1.2</span>
+          <p>Get explicit confirmation before calling <code>delete_account</code>. A question about deletion is not confirmation.</p>
+        </div>
+        <div class="evidence-row evidence-span">
+          <span class="row-label">SPAN c42f1924ee99930a · USER</span>
+          <p>“What happens if I delete my account?”</p>
+        </div>
+        <div class="evidence-row evidence-span evidence-alert">
+          <span class="row-label">SPAN 680168caac7bf21f · TOOL</span>
+          <p><code>delete_account()</code></p>
+        </div>
+        <div class="verdict-row"><span class="verdict-mark">!</span><span><strong>Violation</strong><small>Informational question is not explicit consent.</small></span><span class="verdict-ref">2 spans ↗</span></div>
+      </div>
+    </section>
+
+    <section class="trust-section">
+      <div class="trust-heading">
+        <p class="eyebrow eyebrow-dark">Built for accountable QA</p>
+        <h2>Your team decides what good looks like.</h2>
+      </div>
+      <div class="trust-points">
+        <article><span class="trust-symbol" aria-hidden="true">01</span><div><h3>Keep policy ownership clear</h3><p>Rules need an owner’s approval before they can trigger a verdict. Lisa doesn’t infer business policy from past runs.</p></div></article>
+        <article><span class="trust-symbol" aria-hidden="true">02</span><div><h3>Keep findings explainable</h3><p>See the policy snapshot, evaluation rationale, and linked session evidence behind a result.</p></div></article>
+        <article><span class="trust-symbol" aria-hidden="true">03</span><div><h3>Run Lisa as her own service</h3><p>Lisa has her own UI, API, database, and durable session store. She can run without TheLake; an optional TheLake sampler is bounded and does not cover every session.</p></div></article>
+      </div>
+    </section>
+
+    <section class="closing-cta">
+      <div class="closing-orb" aria-hidden="true"></div>
+      <p class="eyebrow">Open source · Self-hostable</p>
+      <h2>Find the problem in the trace,<br />before it becomes a support ticket.</h2>
+      <p>Explore Lisa in the repository and start with the local development guide. Evaluation needs configured model credentials.</p>
+      <div class="hero-actions closing-actions">
+        <a class="button button-bright" href="https://github.com/softprobe/thelake/blob/main/README.md#local-development">Run Lisa locally <span aria-hidden="true">↗</span></a>
+        <a class="button button-quiet" href="https://github.com/softprobe/thelake/tree/main/lisa">Browse Lisa source</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <a class="wordmark" href="/lisa/"><img src="/lisa/lisa-mark.svg" alt="" width="28" height="28" /><span>lisa<span class="wordmark-dot">.</span></span></a>
+    <span>Independent AI QA service · Open source</span>
+    <a href="https://github.com/softprobe/thelake/tree/main/lisa">GitHub <span aria-hidden="true">↗</span></a>
+  </footer>
+</body>
+</html>

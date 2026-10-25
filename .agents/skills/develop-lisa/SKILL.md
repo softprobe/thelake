@@ -103,6 +103,13 @@ authorization contract for them.
   event watermark. The runtime applies the returned evaluation outcome; the
   agent must not retry completion or perform a second lookup. Pushed-session
   evaluations remain service-owned.
+- The optional TheLake sampler is Lisa-owned. It is configured only when both
+  `LISA_THELAKE_URL` and `LISA_THELAKE_BEARER_TOKEN` are present, reads complete
+  sessions through TheLake's generic APIs, and submits them through the same
+  `SessionTraceIntake` as the HTTP push endpoint. Its packaged
+  `sample-recent-sessions` skill and MCP tool must be hidden when the connection
+  is absent. The scheduled wakeup must run the actual Lisa runtime and skill;
+  a deterministic helper call alone does not validate agent behavior.
 - `EvaluationService` filters candidates through `lisa.evaluation_triage`, keyed
   only by `(session_id, policy_id)`. It sends one Decisions question for each
   candidate pair with no stored triage decision and persists completed decisions

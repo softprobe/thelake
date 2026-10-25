@@ -29,6 +29,7 @@ from lisa.security import redact_text
 from lisa.services.conversations import (
     ConversationTurnError,
 )
+from lisa.services.session_trace_intake import SessionTraceQueueUnavailable
 from lisa.views.conversations import conversation_summary
 
 router = APIRouter()
@@ -137,9 +138,7 @@ async def push_session_traces(request: Request) -> dict[str, str]:
     if content_type != "application/json":
         raise HTTPException(status_code=415, detail="Expected application/json OTLP JSON")
     services = _services(request)
-    queue = services.session_evaluation_queue
-    if queue is None:
-        raise HTTPException(status_code=503, detail="Lisa evaluation queue is not configured")
+    intake = services.session_trace_intake
     try:
         max_bytes = int(os.getenv("LISA_MAX_SESSION_TRACE_BYTES", str(16 * 1024 * 1024)))
     except ValueError:
@@ -162,21 +161,17 @@ async def push_session_traces(request: Request) -> dict[str, str]:
         chunks.append(chunk)
     try:
         bundle = json.loads(b"".join(chunks))
-        stored = services.session_traces.persist(bundle)
+        receipt = intake.accept(bundle)
     except SessionTraceConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except SessionTraceQueueUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    try:
-        enqueued = queue.send(stored.session_id, stored.agent_name, stored.payload_hash)
     except Exception as error:
         logger.exception("Failed to enqueue pushed session for evaluation")
         raise HTTPException(status_code=503, detail="Lisa could not queue the session evaluation") from error
-    return {
-        "session_id": stored.session_id,
-        "agent_name": stored.agent_name,
-        "status": "queued" if enqueued else "already_queued",
-    }
+    return receipt
 
 
 @router.get("/v1/conversations")

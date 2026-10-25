@@ -61,6 +61,9 @@ def test_session_bundle_is_stored_under_readable_session_path_and_loaded(tmp_pat
     manifest = json.loads((expected_dir / "manifest.json").read_text())
     assert manifest["session_id"] == "session-with-safe-id"
     assert manifest["agent_name"] == "checkout-agent"
+    assert store.has_manifest("session-with-safe-id")
+    assert not store.has_manifest("missing-session")
+    assert not store.has_manifest("../unsafe")
     assert store.load("session-with-safe-id")["session_id"] == "session-with-safe-id"
 
 

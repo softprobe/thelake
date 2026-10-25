@@ -12,14 +12,14 @@
   <a href="https://thelake.softprobe.ai/">thelake.softprobe.ai</a>
 </p>
 
-> **Open source AI evidence lake on DuckDB.** thelake preserves production AI
-> traces and recordings as customer-controlled data assets — durable, SQL
-> queryable, and reusable across investigation, evaluation, regression,
-> governance, and continuous improvement.
+> **Open-source AI tracing and evidence lake.** TheLake preserves production
+> traces as customer-controlled, durable, SQL-queryable evidence for
+> investigation, evaluation, and improvement.
 
-Rust service for authenticated OTLP ingestion, workspace-scoped DuckLake
-storage, DuckDB queries, and telemetry search. Softprobe builds hosted
-products on thelake; this repository is the open-source runtime.
+The Rust runtime provides authenticated OTLP ingestion, workspace-scoped
+DuckLake storage, DuckDB queries, and telemetry search. This checkout also
+contains Explorer and Lisa, a separate, optional agent QA service. Softprobe
+offers a managed product built on this evidence foundation.
 
 Traditional software telemetry is often retained only for a short incident
 window. AI traces have lasting value: today's production recording can become
@@ -32,8 +32,27 @@ Product goals: [`docs/architecture/goals.md`](docs/architecture/goals.md).
 Architecture: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 Full index: [`docs/README.md`](docs/README.md).
 
-For the full local Explorer and Lisa chat environment, see
-[Local Lisa development](docs/how-to/local-development.md).
+## Projects in this checkout
+
+- **TheLake** is the core project: it receives OTLP traces and logs, stores
+  them in DuckLake, and exposes SQL and telemetry query APIs.
+- **Explorer** is an optional UI for inspecting stored sessions and traces.
+- **Lisa** is a separate, independently deployable QA service. It evaluates
+  sessions delivered to her against owner-approved policies and records the
+  verdict, rationale, and evidence references.
+
+TheLake runs without Lisa. Lisa can run without TheLake and can receive
+sessions directly; an optional integration lets her sample TheLake's session
+APIs. That scheduled sampler is bounded and does not guarantee lossless
+coverage. See the [Lisa QA design and coverage limits](docs/architecture/lisa-qa.md).
+
+This repository contains the self-hostable services and local development
+stack. [Softprobe Agent QA](https://www.softprobe.ai/) is the managed product
+built on the same evidence foundation.
+
+Start with [TheLake by itself](#run). To run the optional Lisa and Explorer
+integration stack, see the [full local development guide](docs/how-to/local-development.md);
+Lisa requires model credentials for evaluation.
 
 ## Architecture
 
@@ -67,11 +86,13 @@ Prerequisites:
 - Docker and Docker Compose
 - a dynamic DuckDB library (`DUCKDB_DOWNLOAD_LIB=1` lets the build fetch it)
 
-Start the complete Explorer + TheLake + Lisa environment:
+Start the complete Explorer + TheLake + Lisa environment. This is the local
+path for trying policy-based session evaluation; it uses Docker and model
+credentials (OpenAI for policy triage and Gemini for judging escalated cases):
 
 ```bash
 cp .env.example .env
-# Set GEMINI_API_KEY or GOOGLE_API_KEY in .env.
+# Set OpenAI and Gemini credentials as described in the local guide.
 make dev-up
 ```
 

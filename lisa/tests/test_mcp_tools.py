@@ -116,6 +116,41 @@ def test_mcp_tool_namespaces_load_on_demand_and_persist(lisa_test_context):
     }
 
 
+def test_thelake_namespace_and_tool_are_optional(lisa_test_context):
+    import asyncio
+    from dataclasses import replace
+
+    services = build_services(lisa_test_context())
+
+    async def unavailable():
+        async with Client(create_server(services)) as client:
+            found = await client.call_tool("discover_tool_namespaces", {"query": "TheLake sample"})
+            assert all(item["name"] != "thelake" for item in found.data)
+            await client.call_tool("load_tool_namespace", {"namespace": "thelake"}, raise_on_error=False)
+            return {tool.name for tool in await client.list_tools()}
+
+    assert asyncio.run(unavailable()) == {"discover_tool_namespaces", "load_tool_namespace"}
+
+    class Sampler:
+        def sample_recent_sessions(self, **kwargs):
+            return {"queued_count": kwargs["max_sessions"]}
+
+    services.context = replace(services.context, turn_source="scheduler")
+    services.thelake_sampler = Sampler()
+
+    async def available():
+        async with Client(create_server(services)) as client:
+            found = await client.call_tool("discover_tool_namespaces", {"query": "TheLake sample"})
+            assert any(item["name"] == "thelake" for item in found.data)
+            await client.call_tool("load_tool_namespace", {"namespace": "thelake"})
+            tools = {tool.name for tool in await client.list_tools()}
+            assert "sample_recent_sessions" in tools
+            result = await client.call_tool("sample_recent_sessions", {"max_sessions": 3})
+            assert result.data == {"queued_count": 3}
+
+    asyncio.run(available())
+
+
 def test_activity_tool_schemas_explain_turn_resolution_workflow(lisa_test_context):
     services = build_services(lisa_test_context())
 

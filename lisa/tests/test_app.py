@@ -25,6 +25,8 @@ def test_lifespan_starts_push_evaluation_without_a_scheduler(monkeypatch):
         activity_store=object(),
         session_evaluation_worker=None,
         conversation_checkpoint_worker=None,
+        thelake_sampling_worker=None,
+        thelake_client=None,
     )
     application = SimpleNamespace(state=SimpleNamespace())
 
@@ -44,8 +46,7 @@ def test_lifespan_starts_push_evaluation_without_a_scheduler(monkeypatch):
     asyncio.run(exercise_lifespan())
     source = Path(app.__file__).read_text(encoding="utf-8")
     assert stopped == [True]
-    assert "apscheduler" not in source
-    assert "scheduled" not in source
+    assert services.thelake_sampling_worker is None
     assert "LISA_ACTIVITY_FOLLOWUPS_ENABLED" not in source
 
 

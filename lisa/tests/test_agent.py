@@ -56,6 +56,29 @@ def test_agent_prompt_does_not_cache_per_turn_owner_authorization(monkeypatch, t
     assert "Owner-only tools" in captured[0]["system_prompt"]
 
 
+def test_scheduler_prompt_keeps_sampling_out_of_chat_activity_workflow(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("LISA_THELAKE_URL", "https://lake.example")
+    monkeypatch.setenv("LISA_THELAKE_BEARER_TOKEN", "lake-test-token")
+    monkeypatch.setenv("LISA_DATABASE_URL", "postgresql://writer:test@postgres/lisa")
+    captured = {}
+    monkeypatch.setattr(agent, "LLM", lambda **kwargs: object())
+    monkeypatch.setattr(agent, "Agent", lambda **kwargs: captured.update(kwargs) or object())
+    monkeypatch.setattr(agent, "LocalConversation", lambda **kwargs: object())
+
+    agent.build_conversation(
+        "be3c93b1-d225-4ce7-8dff-06ac2924289f",
+        str(tmp_path / "scheduler"),
+        workspace_id="11111111-1111-4111-8111-111111111111",
+        turn_source="scheduler",
+    )
+
+    prompt = captured["system_prompt"]
+    assert "This is an internal scheduled QA turn, not a user chat" in prompt
+    assert "Do not resolve, create, skip, update, or complete a chat activity" in prompt
+    assert "the activities namespace" in prompt
+
+
 def test_backend_resets_checkpoint_tools_before_sending_turn(monkeypatch, tmp_path):
     calls = []
 
@@ -339,8 +362,9 @@ def test_redacts_json_credentials_embedded_in_prose():
 
 
 @pytest.mark.parametrize("use_configured_skill_dir", [True, False])
+@pytest.mark.parametrize("thelake_mode", ["disabled", "configured", "no_database"])
 def test_lisa_agent_uses_openhands_skills_and_mcp_config(
-    monkeypatch, tmp_path, use_configured_skill_dir
+    monkeypatch, tmp_path, use_configured_skill_dir, thelake_mode
 ):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path / "data"))
@@ -351,6 +375,16 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
     monkeypatch.setenv("LISA_SLACK_ACTIVITY_CHANNEL_ID", "activity-channel-test")
     monkeypatch.setenv("LISA_SLACK_ACTIVITY_THREAD_TS", "12345.67")
     monkeypatch.setenv("LISA_DATABASE_READ_URL", "postgresql://reader:test@postgres/lisa")
+    if thelake_mode != "disabled":
+        monkeypatch.setenv("LISA_THELAKE_URL", "https://lake.example")
+        monkeypatch.setenv("LISA_THELAKE_BEARER_TOKEN", "lake-test-token")
+    else:
+        monkeypatch.delenv("LISA_THELAKE_URL", raising=False)
+        monkeypatch.delenv("LISA_THELAKE_BEARER_TOKEN", raising=False)
+    if thelake_mode == "configured":
+        monkeypatch.setenv("LISA_DATABASE_URL", "postgresql://writer:test@postgres/lisa")
+    else:
+        monkeypatch.delenv("LISA_DATABASE_URL", raising=False)
     configured_skill_dir = (
         Path(__file__).parents[1] / "skills"
         if use_configured_skill_dir
@@ -378,6 +412,12 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
         == "11111111-1111-4111-8111-111111111111"
     )
     assert lisa_mcp.env["GOOGLE_API_KEY"].get_secret_value() == "judge-test-key"
+    if thelake_mode != "disabled":
+        assert lisa_mcp.env["LISA_THELAKE_URL"].get_secret_value() == "https://lake.example"
+        assert lisa_mcp.env["LISA_THELAKE_BEARER_TOKEN"].get_secret_value() == "lake-test-token"
+    else:
+        assert "LISA_THELAKE_URL" not in lisa_mcp.env
+        assert "LISA_THELAKE_BEARER_TOKEN" not in lisa_mcp.env
     assert lisa_mcp.env["LISA_SLACK_BOT_TOKEN"].get_secret_value() == "slack-test-token"
     assert lisa_mcp.env["LISA_SLACK_CHANNEL_ID"].get_secret_value() == "channel-test"
     assert (
@@ -388,6 +428,12 @@ def test_lisa_agent_uses_openhands_skills_and_mcp_config(
     assert "readable_activity_events: activity_id, seq, event_type" in captured["system_prompt"]
     assert "reference_type, reference_id, created_at" in captured["system_prompt"]
     skill_names = {skill.name for skill in captured["agent_context"].skills}
+    if thelake_mode == "configured":
+        assert "sample-recent-sessions" in skill_names
+        assert "TheLake sampling is enabled" in captured["system_prompt"]
+    else:
+        assert "sample-recent-sessions" not in skill_names
+        assert "TheLake sampling is enabled" not in captured["system_prompt"]
     assert {
         "learn-agent-policy",
         "review-agent-policy",

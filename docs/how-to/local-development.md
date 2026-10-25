@@ -8,8 +8,9 @@ local environment for chatting with Lisa.
 
 ## Start the stack
 
-Copy `.env.example` to `.env`, then set `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
-OpenAI credentials are needed for policy triage of pushed sessions.
+Copy `.env.example` to `.env`, then set `GEMINI_API_KEY` or
+`GOOGLE_API_KEY`. Set `OPENAI_API_KEY` too to run policy triage on sessions
+delivered to Lisa; the Gemini judge handles cases triage escalates.
 
 ```bash
 cp .env.example .env
@@ -56,8 +57,20 @@ This sends a small batch of sample traces and logs to the local stack. The
 generator defaults to the local OTLP/HTTP endpoint on port `8090` and accepts
 `OTLP_ENDPOINT` when the service uses another address.
 
-Lisa does not run scheduled QA. Evaluation starts when a complete OTLP session
-is pushed to its private-network `POST /internal/v1/session-traces` endpoint.
+By default, the local stack does not connect Lisa to TheLake for scheduled
+sampling. Evaluation starts when a complete OTLP session is pushed to Lisa's
+private-network `POST /internal/v1/session-traces` endpoint. The generated
+Explorer telemetry above is for browsing and is not automatically submitted
+to Lisa.
+
+To enable Lisa's optional scheduled sampler, configure both
+`LISA_THELAKE_URL` and `LISA_THELAKE_BEARER_TOKEN` for the intended local
+workspace. The token must authorize that workspace's TheLake session APIs; see
+the [configuration reference](../reference/config.md#deployment-runtime-environment).
+Lisa samples at most five eligible sessions per hourly window by default, so
+this is not lossless coverage. Set `LISA_THELAKE_SAMPLING_INTERVAL_SECONDS=0`
+to disable scheduled wakeups. Lisa can still be asked to sample manually when
+the integration is configured.
 
 Stop Lisa and TheLake while preserving local state, both Postgres services,
 MinIO, and auth-mock:

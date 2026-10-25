@@ -1,8 +1,8 @@
 """Expose workspace domain services through the Model Context Protocol."""
 
-from contextlib import asynccontextmanager
 import json
 import os
+from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
@@ -10,8 +10,8 @@ from fastmcp.server.context import Context
 from fastmcp.server.transforms.visibility import Visibility
 from pydantic import BaseModel, Field
 
-from ..bootstrap import WorkspaceServices
 from ..activity_memory import activity_memory_configuration_fingerprint
+from ..bootstrap import WorkspaceServices
 from ..llm_recording import recording_maintenance
 from ..security import redact_evidence
 from ..views.database import LISA_DATABASE_SCHEMA
@@ -27,6 +27,7 @@ NAMESPACE_TAGS = {
     "evaluation": "lisa:evaluation",
     "database": "lisa:database",
     "conversation": "lisa:conversation",
+    "thelake": "lisa:thelake",
 }
 TOOL_NAMESPACES = {
     "activities": {
@@ -52,6 +53,10 @@ TOOL_NAMESPACES = {
     "conversation": {
         "description": "Read or replace Lisa's persistent checklist for this main chat.",
         "keywords": "checklist todo todos plan next actions remember list",
+    },
+    "thelake": {
+        "description": "Sample recent TheLake sessions and submit selected evidence to Lisa.",
+        "keywords": "TheLake lake telemetry sample recent sessions traces QA",
     },
 }
 _AGENT_ACTIVITY_THREAD_ACTION_LIMIT = 12
@@ -534,6 +539,8 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         terms = {part.lower() for part in query.split() if len(part) > 1}
         ranked = []
         for name, details in TOOL_NAMESPACES.items():
+            if name == "thelake" and services.thelake_sampler is None:
+                continue
             searchable = f"{name} {details['description']} {details['keywords']}".lower()
             score = sum(term in searchable for term in terms)
             if not terms or score:
@@ -547,6 +554,8 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         tag = NAMESPACE_TAGS.get(namespace)
         if tag is None:
             raise ValueError(f"Unknown Lisa tool namespace: {namespace}")
+        if namespace == "thelake" and services.thelake_sampler is None:
+            raise ValueError("TheLake session sampling is not configured")
         # Namespaces expose tools and, for database access, schema resources.
         await ctx.enable_components(tags={tag}, components={"tool", "resource"})
         if conversation_context is not None:
@@ -978,6 +987,21 @@ def create_server(services: WorkspaceServices) -> FastMCP:
             hide_evaluation_ids(redact_evidence(result))
         ).model_dump(exclude_none=True)
 
+    if services.thelake_sampler is not None:
+        @server.tool(tags={NAMESPACE_TAGS["thelake"]})
+        def sample_recent_sessions(
+            lookback_hours: Annotated[int, Field(ge=1, le=168)] = 24,
+            max_sessions: Annotated[int, Field(ge=1, le=5)] = 5,
+        ) -> dict[str, int]:
+            """Sample complete, quiet TheLake sessions and queue them for Lisa evaluation."""
+            if services.context.turn_source in {"web", "slack"}:
+                require_owner()
+                require_task_activity_memory()
+            return services.thelake_sampler.sample_recent_sessions(
+                lookback_hours=lookback_hours,
+                max_sessions=max_sessions,
+            )
+
     @server.tool(tags={NAMESPACE_TAGS["conversation"]})
     def todo_read() -> list[dict[str, Any]]:
         """Read the open items in Lisa's persistent main-chat checklist."""
@@ -1031,4 +1055,5 @@ _NAMESPACE_TOOL_NAMES = {
     },
     "database": {"lisa_db"},
     "conversation": {"todo_read", "todo_write"},
+    "thelake": {"sample_recent_sessions"},
 }
