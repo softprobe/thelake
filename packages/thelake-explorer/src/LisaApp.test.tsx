@@ -16,8 +16,9 @@ describe("LisaApp", () => {
     expect(html).toContain("Rules");
     expect(html).toContain("Evaluations");
     expect(html).toContain("Findings");
+    expect(html).toContain('aria-label="Policy suggestions"');
     expect(html).toContain("Identity");
-    expect(html.match(/role="tab"/g)).toHaveLength(5);
+    expect(html.match(/role="tab"/g)).toHaveLength(6);
     expect(html).not.toContain('aria-label="Sessions"');
   });
 

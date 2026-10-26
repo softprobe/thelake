@@ -238,6 +238,7 @@ class EvaluationService:
         failure_delivery_key: str | None = None,
         defer_activity_failure: bool = False,
         defer_activity_finalization: bool = False,
+        policy_discovery_enabled: bool = False,
     ) -> dict:
         """Investigate suspected violations and unresolved evidence in one local session."""
         if self.activities:
@@ -478,6 +479,7 @@ class EvaluationService:
             },
         }
         evaluations = []
+        policy_gap_signal_seen = False
         for decision in selected:
             rule = rules_by_id.get(decision["id"])
             if rule is None:
@@ -498,7 +500,9 @@ class EvaluationService:
                     f"{failure_delivery_key}:policy-{rule.id}"
                     if failure_delivery_key else None
                 ),
+                _discover_policy_gaps=policy_discovery_enabled and not policy_gap_signal_seen,
             )
+            policy_gap_signal_seen = policy_gap_signal_seen or evaluation.get("policy_gap_signal") is not None
             fencing_token = evaluation.get("_activity_fencing_token")
             if defer_activity_finalization and fencing_token is not None:
                 evaluation.pop("_activity_fencing_token", None)
@@ -665,6 +669,7 @@ class EvaluationService:
         _activity_id: str | None = None,
         _defer_activity_finish: bool = False,
         _failure_delivery_key: str | None = None,
+        _discover_policy_gaps: bool = False,
     ) -> dict:
         """Evaluate one approved named policy against a session and store its verdict."""
         policy = None
@@ -702,6 +707,7 @@ class EvaluationService:
                 activity_id=_activity_id,
                 defer_activity_finish=_defer_activity_finish,
                 failure_delivery_key=_failure_delivery_key,
+                discover_policy_gaps=_discover_policy_gaps,
             )
 
     @staticmethod
@@ -816,6 +822,7 @@ class EvaluationService:
         activity_id: str | None = None,
         defer_activity_finish: bool = False,
         failure_delivery_key: str | None = None,
+        discover_policy_gaps: bool = False,
     ) -> dict:
         # The local session service returns bounded span evidence. Redact secrets
         # before building the trajectory and forwarding anything to a provider.
@@ -901,10 +908,12 @@ class EvaluationService:
                 activity_id,
                 defer_activity_finish,
                 failure_delivery_key,
+                discover_policy_gaps,
             )
 
         return self._evaluate_untracked(
-            policy, session_id, trace_id, spans, trajectory, run_id, selection
+            policy, session_id, trace_id, spans, trajectory, run_id, selection,
+            discover_policy_gaps=discover_policy_gaps,
         )
 
     def _run_judge(self, request: dict, *, session_id: str, activity_id: str | None = None):
@@ -920,12 +929,18 @@ class EvaluationService:
         trajectory: dict,
         run_id: str,
         selection: dict | None = None,
+        *,
+        discover_policy_gaps: bool = False,
     ) -> dict:
         limitations = list(trajectory["limitations"])
         limitations.extend((selection or {}).get("limitations", []))
         result = redact_evidence(
             self._run_judge(
-                self._judge_request(run_id, policy, trajectory, trace_id), session_id=session_id
+                self._judge_request(
+                    run_id, policy, trajectory, trace_id,
+                    discover_policy_gaps=discover_policy_gaps,
+                ),
+                session_id=session_id,
             )
         )
         # Provider/validation errors are not verdicts. Leave the ledger unchanged
@@ -976,6 +991,7 @@ class EvaluationService:
         requested_activity_id: str | None = None,
         defer_activity_finish: bool = False,
         failure_delivery_key: str | None = None,
+        discover_policy_gaps: bool = False,
     ) -> dict:
         assert self.activities is not None
         if self.artifact_repository is None or self.render_context is None:
@@ -1046,6 +1062,7 @@ class EvaluationService:
                 claim,
                 run_dir,
                 failure_delivery_key,
+                discover_policy_gaps,
             )
 
     def _evaluate_tracked_claimed(
@@ -1066,6 +1083,7 @@ class EvaluationService:
         claim: ActivityClaim,
         run_dir: Path,
         failure_delivery_key: str | None,
+        discover_policy_gaps: bool,
     ) -> dict:
         assert self.activities is not None
 
@@ -1126,7 +1144,10 @@ class EvaluationService:
             try:
                 result = redact_evidence(
                     self._run_judge(
-                        self._judge_request(run_id, policy, trajectory, trace_id),
+                        self._judge_request(
+                            run_id, policy, trajectory, trace_id,
+                            discover_policy_gaps=discover_policy_gaps,
+                        ),
                         session_id=session_id, activity_id=activity_id,
                     )
                 )
@@ -1229,7 +1250,10 @@ class EvaluationService:
             },
         }
 
-    def _judge_request(self, run_id: str, policy: dict, trajectory: dict, trace_id: str) -> dict:
+    def _judge_request(
+        self, run_id: str, policy: dict, trajectory: dict, trace_id: str,
+        *, discover_policy_gaps: bool = False,
+    ) -> dict:
         return {
             "run_id": run_id,
             "policy": {
@@ -1247,6 +1271,7 @@ class EvaluationService:
                 "message_order_certain": trajectory["message_order_certain"],
                 "limitations": trajectory["limitations"],
             },
+            "discover_policy_gaps": discover_policy_gaps,
         }
 
     def _result_from_score_payload(self, payload: dict) -> dict:

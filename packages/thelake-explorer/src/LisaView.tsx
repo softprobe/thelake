@@ -12,7 +12,7 @@ import {
   type ToolCallMessagePartProps,
   type PartState,
 } from "@assistant-ui/react";
-import type { ExplorerApi, LisaActivity, LisaActivityDetail, LisaConversation, LisaFeedEntry, LisaMessage, LisaPolicyRecord } from "./client";
+import type { ExplorerApi, LisaActivity, LisaActivityDetail, LisaConversation, LisaFeedEntry, LisaMessage, LisaPolicyRecord, LisaPolicySuggestion } from "./client";
 import { LisaMessageContent } from "./LisaMessageContent";
 import { lisaTimeline, parseLisaToolResult, toolActionLabel } from "./LisaTimeline";
 import "./LisaView.css";
@@ -20,7 +20,7 @@ import "./LisaView.css";
 type ConversationView = LisaConversation & { activities: LisaActivity[] };
 type ActivityPanel = "activities" | "triage" | "findings";
 type FeedStatus = { loading: boolean; error?: string };
-type LisaPanelTab = "activities" | "rules" | "triage" | "findings" | "identity";
+type LisaPanelTab = "activities" | "rules" | "suggestions" | "triage" | "findings" | "identity";
 
 function LisaIcon({ name, size = 18 }: { name: LisaPanelTab | "refresh" | "check" | "clock" | "alert" | "stop" | "close" | "edit" | "dot" | "chat" | "search" | "documents" | "bulb" | "tasks" | "apps" | "analytics" | "theme" | "download" | "menu" | "gift" | "microphone"; size?: number }) {
   const museIcon = name === "activities"
@@ -161,11 +161,21 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
   const [apiConnected, setApiConnected] = useState<boolean>();
   const [sending, setSending] = useState(false);
   const [hasDraft, setHasDraft] = useState(false);
+  const [draftText, setDraftText] = useState("");
   const [error, setError] = useState<string>();
   const [panelOpen, setPanelOpen] = useState(true);
   const [activePanel, setActivePanel] = useState<LisaPanelTab>("activities");
   const [activityFeeds, setActivityFeeds] = useState<Record<ActivityPanel, LisaFeedEntry[]>>({ activities: [], triage: [], findings: [] });
   const [policies, setPolicies] = useState<LisaPolicyRecord[]>([]);
+  const [suggestions, setSuggestions] = useState<LisaPolicySuggestion[]>([]);
+  const [canReviewSuggestions, setCanReviewSuggestions] = useState(false);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [suggestionsError, setSuggestionsError] = useState<string>();
+  const [suggestionActionError, setSuggestionActionError] = useState<string>();
+  const [editingSuggestionId, setEditingSuggestionId] = useState<string>();
+  const [editingSuggestionName, setEditingSuggestionName] = useState("");
+  const [editingSuggestionCriteria, setEditingSuggestionCriteria] = useState("");
+  const [suggestionActionId, setSuggestionActionId] = useState<string>();
   const [selectedActivity, setSelectedActivity] = useState<LisaActivityDetail>();
   const [selectedActionSeq, setSelectedActionSeq] = useState<number>();
   const [showActionDetail, setShowActionDetail] = useState(false);
@@ -179,6 +189,7 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
   const feedRequestIds = useRef<Record<ActivityPanel, number>>({ activities: 0, triage: 0, findings: 0 });
   const activityDetailRequestId = useRef(0);
   const activityDialogRef = useRef<HTMLDivElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const previousActivityFocus = useRef<HTMLElement | null>(null);
   const active = conversations.find((conversation) => conversation.conversation_id === activeId);
   const selectedAction = showActionDetail ? selectedActivity?.actions.find((action) => action.seq === selectedActionSeq) : undefined;
@@ -234,10 +245,25 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
     }
   }, [api]);
 
+  const refreshSuggestions = useCallback(async () => {
+    setSuggestionsLoading(true);
+    setSuggestionsError(undefined);
+    try {
+      const page = await api.listLisaPolicySuggestions({ status: "pending", limit: 100 });
+      setSuggestions(page.items);
+      setCanReviewSuggestions(page.can_review);
+    } catch (cause) {
+      setSuggestionsError(`Lisa policy suggestions could not load: ${String(cause)}`);
+    } finally {
+      setSuggestionsLoading(false);
+    }
+  }, [api]);
+
   const refreshPanel = useCallback(() => {
     if (activePanel === "activities" || activePanel === "triage" || activePanel === "findings") void refreshFeed(activePanel);
     if (activePanel === "rules") void refreshPolicies();
-  }, [activePanel, refreshFeed, refreshPolicies]);
+    if (activePanel === "suggestions") void refreshSuggestions();
+  }, [activePanel, refreshFeed, refreshPolicies, refreshSuggestions]);
 
   const selectPanel = useCallback((tab: LisaPanelTab) => {
     if (tab !== activePanel) {
@@ -247,7 +273,53 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
     setActivePanel(tab);
     if (tab === "activities" || tab === "triage" || tab === "findings") void refreshFeed(tab);
     if (tab === "rules") void refreshPolicies();
-  }, [activePanel, refreshFeed, refreshPolicies]);
+    if (tab === "suggestions") void refreshSuggestions();
+  }, [activePanel, refreshFeed, refreshPolicies, refreshSuggestions]);
+
+  const approveSuggestion = useCallback(async (suggestion: LisaPolicySuggestion, edited = false) => {
+    setSuggestionActionId(suggestion.id);
+    setSuggestionActionError(undefined);
+    try {
+      await api.approveLisaPolicySuggestion(suggestion.id, edited ? {
+        name: editingSuggestionName,
+        criteria: editingSuggestionCriteria,
+      } : {});
+      setEditingSuggestionId(undefined);
+      await Promise.all([refreshSuggestions(), refreshPolicies()]);
+    } catch (cause) {
+      setSuggestionActionError(`Could not approve this suggestion: ${String(cause)}`);
+    } finally {
+      setSuggestionActionId(undefined);
+    }
+  }, [api, editingSuggestionCriteria, editingSuggestionName, refreshPolicies, refreshSuggestions]);
+
+  const dismissSuggestion = useCallback(async (suggestionId: string) => {
+    setSuggestionActionId(suggestionId);
+    setSuggestionActionError(undefined);
+    try {
+      await api.dismissLisaPolicySuggestion(suggestionId);
+      await refreshSuggestions();
+    } catch (cause) {
+      setSuggestionActionError(`Could not dismiss this suggestion: ${String(cause)}`);
+    } finally {
+      setSuggestionActionId(undefined);
+    }
+  }, [api, refreshSuggestions]);
+
+  const discussSuggestion = useCallback((suggestion: LisaPolicySuggestion) => {
+    let remainingCitations = 8;
+    const evidence = suggestion.evidence.map((source) => {
+      const spans = source.evidence.slice(0, remainingCitations).map((item) =>
+        `${item.kind} span ${item.span_id}: ${item.content || JSON.stringify(item.payload || item.name || "")}`
+      ).join("\n");
+      remainingCitations -= Math.min(source.evidence.length, remainingCitations);
+      if (!spans) return "";
+      return `Session ${source.session_id} · agent ${source.agent_name} · evaluation activity ${source.activity_id}\n${spans}`;
+    }).filter(Boolean).join("\n\n");
+    setDraftText(`Please review policy suggestion ${suggestion.id} with me. Explain whether the evidence supports it and help refine the wording without approving it yet.\n\nSuggested policy: ${suggestion.name}\n${suggestion.criteria}\n\nLisa's rationale: ${suggestion.rationale}\n\nCited trace evidence:\n${evidence}`);
+    setHasDraft(true);
+    composerInputRef.current?.focus();
+  }, []);
 
   useEffect(() => { void refreshFeed(); }, [refreshFeed]);
 
@@ -429,6 +501,8 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
           updated_at: new Date().toISOString(),
         }
         : item));
+      setDraftText("");
+      setHasDraft(false);
       void refreshFeed();
       void refreshFeed("policy_evaluation");
       if (selectedActivity) void refreshActivityDetail(selectedActivity.activity.id);
@@ -494,7 +568,7 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
               <p className="tle-lisa-disclosure" id="tle-lisa-data-disclosure">Messages and recent workspace evidence are sent to your configured model provider. Common credentials are masked; personal data may remain.</p>
               <div className="tle-lisa-composer-field">
                 <button className="tle-lisa-composer-add" aria-label="Add attachment" type="button" disabled><span aria-hidden="true">+</span></button>
-                <ComposerPrimitive.Input aria-label="Message Lisa" aria-describedby="tle-lisa-data-disclosure" placeholder="Ask Lisa about agent behavior or a session…" disabled={!active || loading} onChange={(event) => setHasDraft(event.currentTarget.value.trim().length > 0)} />
+                <ComposerPrimitive.Input ref={composerInputRef} value={draftText} aria-label="Message Lisa" aria-describedby="tle-lisa-data-disclosure" placeholder="Ask Lisa about agent behavior or a session…" disabled={!active || loading} onChange={(event) => { setDraftText(event.currentTarget.value); setHasDraft(event.currentTarget.value.trim().length > 0); }} />
                 <ComposerPrimitive.Send className="tle-lisa-send" aria-label="Send" disabled={!active || loading || sending}>{sending ? "…" : hasDraft ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg> : <LisaIcon name="microphone" size={17} />}</ComposerPrimitive.Send>
               </div>
             </ComposerPrimitive.Root>
@@ -511,18 +585,18 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
           </div>
           <div className="tle-lisa-panel-header">
             <div className="tle-lisa-panel-tabs" role="tablist" aria-label="Lisa workspace">
-            {(["activities", "rules", "triage", "findings", "identity"] as const).map((tab) => <button
+            {(["activities", "rules", "suggestions", "triage", "findings", "identity"] as const).map((tab) => <button
               key={tab}
               id={`tle-lisa-tab-${tab}`}
               role="tab"
               tabIndex={activePanel === tab ? 0 : -1}
-              aria-label={tab === "triage" ? "Recent evaluations" : tab === "activities" ? "Activities" : tab[0].toUpperCase() + tab.slice(1)}
-              title={tab === "triage" ? "Recent evaluations" : tab[0].toUpperCase() + tab.slice(1)}
+              aria-label={tab === "triage" ? "Recent evaluations" : tab === "suggestions" ? "Policy suggestions" : tab === "activities" ? "Activities" : tab[0].toUpperCase() + tab.slice(1)}
+              title={tab === "triage" ? "Recent evaluations" : tab === "suggestions" ? "Policy suggestions" : tab[0].toUpperCase() + tab.slice(1)}
               aria-selected={activePanel === tab}
               aria-controls="tle-lisa-panel-content"
               onClick={() => selectPanel(tab)}
               onKeyDown={(event) => {
-                const tabs = ["activities", "rules", "triage", "findings", "identity"] as const;
+                const tabs = ["activities", "rules", "suggestions", "triage", "findings", "identity"] as const;
                 const currentIndex = tabs.indexOf(tab);
                 const nextIndex = event.key === "ArrowRight" ? (currentIndex + 1) % tabs.length
                   : event.key === "ArrowLeft" ? (currentIndex + tabs.length - 1) % tabs.length
@@ -535,11 +609,11 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
                 }
               }}
             >
-              <LisaIcon name={tab === "findings" ? "alert" : tab} size={16} />
-              <span>{tab === "activities" ? "Activity" : tab === "triage" ? "Evaluations" : tab[0].toUpperCase() + tab.slice(1)}</span>
+              <LisaIcon name={tab === "findings" ? "alert" : tab === "suggestions" ? "bulb" : tab} size={16} />
+              <span>{tab === "activities" ? "Activity" : tab === "triage" ? "Evaluations" : tab === "suggestions" ? "Policy suggestions" : tab[0].toUpperCase() + tab.slice(1)}</span>
             </button>)}
             </div>
-            {activePanel !== "identity" && <button className="tle-lisa-panel-refresh" aria-label="Refresh panel" title="Refresh" onClick={refreshPanel} disabled={(activePanel === "rules" ? policiesLoading : activePanel === "activities" || activePanel === "triage" || activePanel === "findings" ? feedStatus[activePanel].loading : false)}><LisaIcon name="refresh" size={15} /></button>}
+            {activePanel !== "identity" && <button className="tle-lisa-panel-refresh" aria-label="Refresh panel" title="Refresh" onClick={refreshPanel} disabled={(activePanel === "rules" ? policiesLoading : activePanel === "suggestions" ? suggestionsLoading : activePanel === "activities" || activePanel === "triage" || activePanel === "findings" ? feedStatus[activePanel].loading : false)}><LisaIcon name="refresh" size={15} /></button>}
           </div>
         </div>
         <div className="tle-lisa-panel-content" id="tle-lisa-panel-content" role="tabpanel" tabIndex={0} aria-labelledby={`tle-lisa-tab-${activePanel}`}>
@@ -572,6 +646,58 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
             </div>
             {activePanel === "triage" && <p className="tle-lisa-panel-note">Evaluation status shows whether Lisa completed the run. Policy findings are listed separately.</p>}
           </>}
+          {activePanel === "suggestions" && <section className="tle-lisa-suggestions" aria-label="Lisa policy suggestions">
+            <h3 className="tle-lisa-panel-section-title">Policy suggestions</h3>
+            <p className="tle-lisa-panel-note">Lisa reviews a limited sample of recent sessions. Suggestions stay inactive until an owner approves them.</p>
+            {suggestionsLoading && <p className="tle-lisa-panel-message" role="status">Loading policy suggestions…</p>}
+            {suggestionsError && <p className="tle-lisa-error" role="alert">{suggestionsError}</p>}
+            {suggestionActionError && <p className="tle-lisa-error" role="alert">{suggestionActionError}</p>}
+            {!suggestionsLoading && !suggestionsError && suggestions.length === 0 && <p className="tle-lisa-panel-message">No policy suggestions are waiting for review.</p>}
+            {suggestions.map((suggestion) => {
+              const editing = editingSuggestionId === suggestion.id;
+              const busy = suggestionActionId === suggestion.id;
+              return <article className="tle-lisa-suggestion-card" key={suggestion.id}>
+                <div className="tle-lisa-suggestion-heading"><span className="tle-lisa-suggestion-state">Needs review</span><small>{suggestion.signal_count} supporting {suggestion.signal_count === 1 ? "session" : "sessions"}</small></div>
+                {editing ? <>
+                  <label>Policy name<input value={editingSuggestionName} onChange={(event) => setEditingSuggestionName(event.currentTarget.value)} maxLength={200} /></label>
+                  <label>Policy criteria<textarea value={editingSuggestionCriteria} onChange={(event) => setEditingSuggestionCriteria(event.currentTarget.value)} maxLength={20_000} rows={5} /></label>
+                </> : <>
+                  <h4>{suggestion.name}</h4>
+                  <p className="tle-lisa-suggestion-criteria">{suggestion.criteria}</p>
+                </>}
+                <p className="tle-lisa-suggestion-rationale">{suggestion.rationale}</p>
+                <p className="tle-lisa-suggestion-scope">{suggestion.scope === "agent" ? `Suggested for ${suggestion.target_agent_name}` : "Suggested for this workspace"}</p>
+                {suggestion.overlaps.length > 0 && <section className="tle-lisa-suggestion-overlaps" aria-label="Possible policy overlaps">
+                  <b>Check existing policies</b>
+                  {suggestion.overlaps.map((overlap) => <p key={`${overlap.policy_id}-${overlap.relation}`}><code>{overlap.policy_id}</code> · {overlap.relation}: {overlap.rationale}</p>)}
+                </section>}
+                <details className="tle-lisa-suggestion-evidence">
+                  <summary>Trace evidence · {suggestion.evidence.reduce((count, item) => count + item.evidence.length, 0)} cited spans</summary>
+                  {suggestion.evidence.map((signal) => <section key={signal.signal_id}>
+                    <p className="tle-lisa-suggestion-evidence-summary">{signal.summary}</p>
+                    {signal.evidence.map((evidence) => <article key={`${signal.signal_id}-${evidence.span_id}`}>
+                      <header><span>{evidence.kind.replaceAll("_", " ")}{evidence.name ? ` · ${evidence.name}` : ""}</span><code>{evidence.span_id}</code></header>
+                      <pre>{evidence.content || (evidence.payload == null ? evidence.status || "No text captured" : typeof evidence.payload === "string" ? evidence.payload : JSON.stringify(evidence.payload, null, 2))}</pre>
+                      <small>Session {signal.session_id} · agent {signal.agent_name}</small>
+                    </article>)}
+                    <button className="tle-lisa-suggestion-source" type="button" onClick={() => void openActivity(signal.activity_id)}>Open evaluation activity</button>
+                  </section>)}
+                </details>
+                <div className="tle-lisa-suggestion-actions">
+                  {!canReviewSuggestions && <span className="tle-lisa-suggestion-owner-note">Only Lisa owners can review suggestions.</span>}
+                  {editing ? <>
+                    <button type="button" disabled={!canReviewSuggestions || busy || !editingSuggestionName.trim() || !editingSuggestionCriteria.trim()} onClick={() => void approveSuggestion(suggestion, true)}>{busy ? "Approving…" : "Approve edited policy"}</button>
+                    <button type="button" disabled={busy} onClick={() => setEditingSuggestionId(undefined)}>Cancel</button>
+                  </> : <>
+                    <button type="button" disabled={!canReviewSuggestions || busy} onClick={() => void approveSuggestion(suggestion)}>{busy ? "Approving…" : "Approve policy"}</button>
+                    <button type="button" disabled={!canReviewSuggestions || busy} onClick={() => { setEditingSuggestionId(suggestion.id); setEditingSuggestionName(suggestion.name); setEditingSuggestionCriteria(suggestion.criteria); }}>Edit</button>
+                    <button type="button" disabled={!canReviewSuggestions || busy} onClick={() => void dismissSuggestion(suggestion.id)}>Dismiss</button>
+                  </>}
+                  <button type="button" className="tle-lisa-suggestion-chat" onClick={() => discussSuggestion(suggestion)}>Discuss with Lisa</button>
+                </div>
+              </article>;
+            })}
+          </section>}
           {activePanel === "rules" && <>
             {policiesLoading && <p className="tle-lisa-panel-message">Loading rules…</p>}
             {policiesError && <p className="tle-lisa-error" role="alert">{policiesError}</p>}

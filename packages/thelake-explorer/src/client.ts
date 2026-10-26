@@ -133,6 +133,49 @@ export type LisaPolicyPage = {
   next_offset: number | null;
 };
 
+export type LisaPolicySuggestionEvidence = {
+  signal_id?: string;
+  session_id: string;
+  activity_id: string;
+  agent_name: string;
+  summary?: string;
+  span_id: string;
+  kind: string;
+  name?: string | null;
+  content?: string | null;
+  payload?: unknown;
+  status?: string | null;
+};
+
+export type LisaPolicySuggestion = {
+  id: string;
+  name: string;
+  criteria: string;
+  scope: "workspace" | "agent";
+  target_agent_name: string;
+  rationale: string;
+  signal_count: number;
+  evidence: Array<{
+    signal_id: string;
+    session_id: string;
+    activity_id: string;
+    agent_name: string;
+    summary: string;
+    span_ids: string[];
+    evidence: LisaPolicySuggestionEvidence[];
+  }>;
+  overlaps: Array<{ policy_id: string; relation: string; rationale: string }>;
+  status: "pending" | "approved" | "dismissed";
+  policy_id?: string | null;
+  created_at: string;
+  reviewed_at?: string | null;
+};
+
+export type LisaPolicySuggestionPage = {
+  items: LisaPolicySuggestion[];
+  can_review: boolean;
+};
+
 export class ExplorerApi {
   constructor(readonly config: ExplorerConfig) {}
 
@@ -251,6 +294,29 @@ export class ExplorerApi {
     if (params.limit != null) query.set("limit", String(params.limit));
     if (params.offset != null) query.set("offset", String(params.offset));
     return this.requestLisa(`/policies?${query.toString()}`);
+  }
+
+  listLisaPolicySuggestions(params: { status?: string; limit?: number } = {}): Promise<LisaPolicySuggestionPage> {
+    if (!this.config.lisaApiBasePath) throw new Error("Lisa's direct API URL is not configured");
+    const query = new URLSearchParams();
+    if (params.status) query.set("status", params.status);
+    if (params.limit != null) query.set("limit", String(params.limit));
+    return this.requestLisa(`/policy-suggestions?${query.toString()}`);
+  }
+
+  approveLisaPolicySuggestion(
+    suggestionId: string,
+    body: { name?: string; criteria?: string } = {},
+  ): Promise<{ suggestion: LisaPolicySuggestion; policy: LisaPolicyRecord }> {
+    return this.requestLisa(`/policy-suggestions/${encodeURIComponent(suggestionId)}/approve`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+  }
+
+  dismissLisaPolicySuggestion(suggestionId: string): Promise<LisaPolicySuggestion> {
+    return this.requestLisa(`/policy-suggestions/${encodeURIComponent(suggestionId)}/dismiss`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    });
   }
 
   getLisaActivity(activityId: string): Promise<LisaActivityDetail> {

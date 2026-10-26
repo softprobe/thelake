@@ -309,6 +309,31 @@ Evaluation identity includes session evidence, approved policy content,
 triage/judge configuration, and pipeline version so retries reuse the right
 result while changed inputs can produce a new run.
 
+## Policy discovery and owner review
+
+Policy-gap discovery is independent from policy triage and judge verdicts. A
+workspace-scoped hourly sampler selects at most five pushed sessions by default.
+Selected sessions reuse a Gemini judge request for an optional gap signal when
+one is already being made; other selected sessions go through a gap-only
+provider. The signal is stored separately and cannot change an evaluation
+verdict. At most one consolidation attempt runs per day, and only when new
+signals exist. It compares against approved policies and prior owner decisions
+and persists suggestions
+with source session, activity, and cited span evidence.
+
+The gap analyzer and suggestion synthesizer are injected provider callables so
+their model implementations can change without changing storage, sampling, or
+approval contracts. The policy MCP namespace makes suggestions discoverable and
+readable to Lisa through the same lazy tool-loading mechanism used by the other
+capabilities. The Explorer feed provides structured evidence and owner review.
+Suggestion list and cited evidence detail are owner-only because spans may
+contain user and tool data. Each successful consolidation marks its full sampled
+batch processed, including signals that did not yield a suggestion, so later
+daily runs can progress without resending old evidence. Failed model attempts
+retain pending signals for the next day instead of retrying hourly.
+Only the authenticated owner path can create an approved policy; background
+model work cannot approve, dismiss, or edit a suggestion.
+
 ## Activities, failures, and notifications
 
 Each pushed session creates one stable activity keyed from the configured Lisa

@@ -32,6 +32,7 @@ async def lifespan(_app: FastAPI):
     evaluation_worker_task = None
     checkpoint_worker_task = None
     thelake_sampling_task = None
+    policy_discovery_task = None
     if workspace_id:
         if services.session_evaluation_worker is not None:
             evaluation_worker_task = asyncio.create_task(
@@ -44,6 +45,10 @@ async def lifespan(_app: FastAPI):
         if services.thelake_sampling_worker is not None:
             thelake_sampling_task = asyncio.create_task(
                 services.thelake_sampling_worker.run_forever()
+            )
+        if services.policy_discovery_worker is not None:
+            policy_discovery_task = asyncio.create_task(
+                services.policy_discovery_worker.run_forever()
             )
         slack_worker_task = asyncio.create_task(services.slack_worker.run_forever(workspace_id))
     async with recording_maintenance(services.context):
@@ -70,6 +75,12 @@ async def lifespan(_app: FastAPI):
         thelake_sampling_task.cancel()
         try:
             await thelake_sampling_task
+        except asyncio.CancelledError:
+            pass
+    if policy_discovery_task is not None:
+        policy_discovery_task.cancel()
+        try:
+            await policy_discovery_task
         except asyncio.CancelledError:
             pass
     await services.slack_worker.shutdown()

@@ -11,6 +11,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from ..models.policy_discovery import PolicyGapSignal
+
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
 BoundedText = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20_000)
@@ -48,7 +50,7 @@ class Trajectory(StrictModel):
     limitations: list[str] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
-    def bound_serialized_trajectory(self) -> "Trajectory":
+    def bound_serialized_trajectory(self) -> Trajectory:
         # Bound the full serialized payload as well as individual fields. `payload`
         # may contain nested tool arguments/results that field-length limits miss.
         encoded = json.dumps(self.model_dump(mode="json"), ensure_ascii=False)
@@ -79,6 +81,7 @@ class EvaluationRequest(StrictModel):
     run_id: Identifier
     policy: PolicySpec
     trajectory: Trajectory
+    discover_policy_gaps: bool = False
 
 
 class SpanReference(StrictModel):
@@ -93,6 +96,7 @@ class JudgeVerdict(StrictModel):
     status: Literal["pass", "fail", "uncertain"]
     rationale: BoundedText
     span_ids: list[Identifier] = Field(default_factory=list, max_length=1000)
+    policy_gap_signal: PolicyGapSignal | None = None
 
 
 class EvaluationResponse(StrictModel):
@@ -104,3 +108,4 @@ class EvaluationResponse(StrictModel):
     references: list[SpanReference] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     framework: str = "gemini"
+    policy_gap_signal: PolicyGapSignal | None = None

@@ -71,6 +71,27 @@ class PolicyService:
         if not self.context.actor_id or self.context.actor_id not in self.context.owner_user_ids:
             raise ValueError("This action requires an authorized Lisa owner identity")
 
+    def require_owner_actor(self, actor_id: str) -> None:
+        """Authorize an authenticated web action using the same owner allowlist."""
+        if not actor_id or actor_id not in self.context.owner_user_ids:
+            raise ValueError("This action requires an authorized Lisa owner identity")
+
+    def approve_discovery_suggestion(
+        self, *, connection, actor_id: str, scope: str, agent_name: str,
+        name: str, criteria: str,
+    ) -> PolicyRecord:
+        """Create an active rule through the policy repository in a caller transaction."""
+        self.require_owner_actor(actor_id)
+        target = self._scope(scope, agent_name)
+        name = redact_text(name).strip()
+        criteria = redact_text(criteria).strip()
+        if not name or len(name) > 200 or not criteria or len(criteria) > 20_000:
+            raise ValueError("Policy name and criteria must be non-empty and within size limits")
+        return self.repository.create_approved_in_transaction(
+            connection, scope=scope, target_agent_name=target,
+            name=name, criteria=criteria,
+        )
+
     def write_policy(
         self, *, scope: str, agent_name: str, name: str, criteria: str,
         policy_id: str | None = None,

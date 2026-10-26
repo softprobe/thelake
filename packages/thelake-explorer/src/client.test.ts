@@ -2,6 +2,29 @@ import { describe, expect, it, vi } from "vitest";
 import { ExplorerApi } from "./client";
 
 describe("ExplorerApi", () => {
+  it("reads and reviews policy suggestions through authenticated endpoints", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify({ items: [], can_review: true }), { status: 200 });
+    };
+    const api = new ExplorerApi({
+      apiBasePath: "/v1",
+      lisaApiBasePath: "http://lisa.local/v1",
+      auth: { headers: () => ({ "X-Softprobe-Assertion": "signed" }) },
+      fetch: fetcher as typeof fetch,
+    });
+    await api.listLisaPolicySuggestions({ status: "pending", limit: 10 });
+    await api.approveLisaPolicySuggestion("suggestion-1", { name: "Confirm first", criteria: "Ask before deleting." });
+    await api.dismissLisaPolicySuggestion("suggestion-2");
+
+    expect(calls[0].url).toBe("http://lisa.local/v1/policy-suggestions?status=pending&limit=10");
+    expect(calls[0].init?.headers).toMatchObject({ "X-Softprobe-Assertion": "signed" });
+    expect(calls[1].url).toBe("http://lisa.local/v1/policy-suggestions/suggestion-1/approve");
+    expect(calls[1].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ name: "Confirm first", criteria: "Ask before deleting." });
+    expect(calls[2].url).toBe("http://lisa.local/v1/policy-suggestions/suggestion-2/dismiss");
+  });
   it("deletes a Lisa conversation through the authenticated API", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ deleted: true }), { status: 200 }));
     const api = new ExplorerApi({ apiBasePath: "/v1", lisaApiBasePath: "http://127.0.0.1:18082/v1", auth: { headers: () => ({ Authorization: "Bearer workspace-token" }) }, fetch: fetcher as typeof fetch });

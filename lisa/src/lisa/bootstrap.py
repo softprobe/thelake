@@ -1,5 +1,6 @@
 """Compose workspace services independently of an agent backend or protocol."""
 
+import os
 from dataclasses import dataclass
 from threading import Lock
 
@@ -13,6 +14,7 @@ from .repositories.failures import FailureRepository
 from .repositories.lisa_database import LisaDatabaseReader
 from .repositories.notifications import NotificationReceiptRepository
 from .repositories.policies import InMemoryPolicyRepository, PostgresPolicyRepository
+from .repositories.policy_discovery import PolicyDiscoveryRepository
 from .repositories.session_evaluation_queue import SessionEvaluationQueue
 from .repositories.session_traces import SessionTraceStore
 from .repositories.slack_events import SlackEventRepository
@@ -24,6 +26,7 @@ from .services.evaluations import EvaluationService
 from .services.failures import FailureService
 from .services.notifications import SlackNotifier
 from .services.policies import PolicyService
+from .services.policy_discovery import PolicyDiscoveryService, PolicyDiscoveryWorker
 from .services.session_evaluations import SessionEvaluationWorker
 from .services.session_trace_intake import SessionTraceIntake
 from .services.sessions import SessionService
@@ -64,6 +67,8 @@ class WorkspaceServices:
     thelake_client: TheLakeClient | None = None
     thelake_sampler: TheLakeSessionSampler | None = None
     thelake_sampling_worker: TheLakeSamplingWorker | None = None
+    policy_discovery: PolicyDiscoveryService | None = None
+    policy_discovery_worker: PolicyDiscoveryWorker | None = None
 
 
 def build_services(context: WorkspaceContext) -> WorkspaceServices:
@@ -113,6 +118,18 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
     )
     session_traces = SessionTraceStore(context.agent_workspace_root)
     sessions = SessionService(session_traces)
+    discovery_service = None
+    discovery_worker = None
+    if context.database_url and activities:
+        try:
+            hourly_limit = int(os.getenv("LISA_POLICY_DISCOVERY_SAMPLES_PER_HOUR", "5"))
+        except ValueError as error:
+            raise ValueError("LISA_POLICY_DISCOVERY_SAMPLES_PER_HOUR must be an integer") from error
+        discovery_service = PolicyDiscoveryService(
+            PolicyDiscoveryRepository(context.database_url), policy_service, sessions,
+            hourly_sample_limit=hourly_limit,
+        )
+        discovery_worker = PolicyDiscoveryWorker(discovery_service)
     database_inspection = DatabaseInspectionService(database_reader)
     evaluations = EvaluationService(
         context,
@@ -156,10 +173,12 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         activity_store=activities,
         conversation_checkpoint_queue=checkpoint_queue,
         thelake_client=thelake_client,
+        policy_discovery=discovery_service,
+        policy_discovery_worker=discovery_worker,
     )
     if queue is not None:
         services.session_evaluation_worker = SessionEvaluationWorker(
-            queue, session_traces, services
+            queue, session_traces, services, policy_discovery=discovery_service
         )
         if thelake_client is not None:
             services.thelake_sampler = TheLakeSessionSampler(thelake_client, intake)

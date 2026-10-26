@@ -656,6 +656,86 @@ def test_user_policy_list_is_authenticated_and_bounded(
         assert test_client.get("/v1/policies").status_code == 401
 
 
+def test_policy_suggestion_feed_owner_approval_and_dismissal(
+    lisa_test_database, monkeypatch, tmp_path
+):
+    from fastapi.testclient import TestClient
+
+    from lisa.app import app
+    from lisa.models.policy_discovery import PolicySuggestionDraft
+
+    workspace_id = str(uuid4())
+    database = lisa_test_database(workspace_id)
+    monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
+    monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
+    monkeypatch.setenv("LISA_LOCAL_ACTOR_ID", "owner-1")
+    monkeypatch.setenv("LISA_OWNER_USER_IDS", "owner-1")
+    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LISA_DATABASE_URL", database.writer_url)
+    monkeypatch.setenv("LISA_DATABASE_READ_URL", database.reader_url)
+    with TestClient(app) as test_client:
+        discovery = test_client.app.state.workspace_services.policy_discovery
+        signal_rows = []
+        for session_id in ("source-1", "source-2"):
+            activity = test_client.app.state.workspace_services.activity_store.create_activity(
+                title=f"Review {session_id}", source="session_push",
+                kind="session_evaluation",
+            )
+            discovery.repository.save_signal(
+                session_id=session_id, activity_id=activity.id, agent_name="agent",
+                summary="A destructive action lacked confirmation.",
+                span_ids=[f"span-{session_id}"],
+                evidence=[{"span_id": f"span-{session_id}", "kind": "user_message", "content": "Delete my account"}],
+            )
+        signal_rows = discovery.repository.pending_signals(limit=10)
+        drafts = [PolicySuggestionDraft(
+            scope="workspace", name="Confirm destructive actions",
+            criteria="Ask for explicit confirmation before irreversible actions.",
+            rationale="The cited user requests and tool action show no confirmation step.",
+            signal_ids=[str(row["id"]) for row in signal_rows],
+        )]
+        created = discovery.repository.create_suggestions(
+            drafts=drafts, signal_rows=signal_rows, overlaps_by_draft=[[]]
+        )
+        suggestion_id = created[0]["id"]
+
+        feed = test_client.get("/v1/policy-suggestions")
+        assert feed.status_code == 200
+        assert feed.json()["can_review"] is True
+        assert feed.json()["items"][0]["id"] == suggestion_id
+        detail = test_client.get(f"/v1/policy-suggestions/{suggestion_id}")
+        assert detail.status_code == 200
+        cited = {
+            evidence["span_id"]
+            for source in detail.json()["evidence"]
+            for evidence in source["evidence"]
+        }
+        assert cited == {"span-source-1", "span-source-2"}
+        approved = test_client.post(
+            f"/v1/policy-suggestions/{suggestion_id}/approve",
+            json={"name": "Confirm before irreversible actions", "criteria": "Ask the user for explicit confirmation before irreversible actions."},
+        )
+        assert approved.status_code == 200
+        assert approved.json()["policy"]["approved"] is True
+
+        second = discovery.repository.create_suggestions(
+            drafts=[drafts[0].model_copy(update={"name": "Confirm before export"})],
+            signal_rows=signal_rows, overlaps_by_draft=[[]],
+        )[0]
+        monkeypatch.setenv("LISA_LOCAL_ACTOR_ID", "not-an-owner")
+        assert test_client.post(
+            f"/v1/policy-suggestions/{second['id']}/approve", json={}
+        ).status_code == 403
+        assert test_client.get("/v1/policy-suggestions").status_code == 403
+        assert test_client.get(f"/v1/policy-suggestions/{second['id']}").status_code == 403
+        monkeypatch.setenv("LISA_LOCAL_ACTOR_ID", "owner-1")
+        dismissed = test_client.post(
+            f"/v1/policy-suggestions/{second['id']}/dismiss", json={}
+        )
+        assert dismissed.status_code == 200
+        assert dismissed.json()["status"] == "dismissed"
+
+
 def test_lisa_closes_openhands_conversation_when_run_fails(client, monkeypatch):
     workspace_id = str(uuid4())
     conversation_id = str(uuid4())

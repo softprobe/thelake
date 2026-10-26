@@ -130,6 +130,13 @@ authorization contract for them.
   score. Incomplete or unordered trajectories are gated before provider calls.
 - Keep triage decisions, judge verdicts, execution errors, and capture gates
   distinct. Provider or validation errors must not become healthy negatives.
+- Policy discovery is a separate, bounded capability. Its gap analyzer and
+  cross-session synthesizer are injected provider callables, independent of the
+  judge verdict and replaceable without changing sampling, storage, or review.
+  The policy MCP namespace exposes suggestion read tools through the same lazy
+  tool-loading path as policy operations. Only an authenticated owner action
+  can turn a suggestion into an active policy. See
+  [`policy-memory.md`](../../../docs/how-to/policy-memory.md).
 - For tracked runs, deduplicate through Lisa's Postgres evaluation request
   identity, derived from session, approved policy hash, sanitized trajectory,
   triage/judge configuration, and pipeline version. Lisa's Postgres is the

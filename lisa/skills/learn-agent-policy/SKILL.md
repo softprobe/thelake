@@ -13,6 +13,15 @@ policies. Its columns are `id`, `scope`, `target_agent_name`, `name`,
 column. Deletion removes the policy row. Use `list_policies`, `read_policy`, `write_policy`,
 `approve_policy`, and `delete_policy`.
 
+Lisa also exposes `list_policy_suggestions` and `read_policy_suggestion` in the
+same lazily loaded policy tool namespace. Suggestions are evidence-backed review
+items, not active rules. Suggestion list and evidence tools require an owner
+identity. Read cited spans and compare them with current policy before
+discussing whether to adopt them. The workspace feed supports
+owner-only approve, edit-and-approve, and dismiss actions. Never claim a
+suggestion was approved unless the owner action succeeds; a model or background
+worker cannot activate a policy.
+
 ## Policy display
 
 ```md

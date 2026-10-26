@@ -104,7 +104,10 @@ def test_mcp_tool_namespaces_load_on_demand_and_persist(lisa_test_context):
             assert any(item["name"] == "policies" for item in found.data)
             await client.call_tool("load_tool_namespace", {"namespace": "policies"})
             loaded = {tool.name for tool in await client.list_tools()}
-            assert {"list_policies", "read_policy", "write_policy", "approve_policy"} <= loaded
+            assert {
+                "list_policies", "read_policy", "write_policy", "approve_policy",
+                "list_policy_suggestions", "read_policy_suggestion",
+            } <= loaded
             assert "get_session" not in loaded
             return services.conversation_repository.conversation_directory(
                 services.context.workspace_id(), conversation_id

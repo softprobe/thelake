@@ -27,5 +27,14 @@ class UserSendMessage(StrictModel):
     consent: bool
 
 
+class ApprovePolicySuggestion(StrictModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    criteria: str | None = Field(default=None, min_length=1, max_length=20_000)
+
+
+class DismissPolicySuggestion(StrictModel):
+    pass
+
+
 class EmptyRequest(StrictModel):
     pass

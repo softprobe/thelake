@@ -628,3 +628,65 @@ def test_failure_record_write_error_keeps_message_queued_and_redacts_operator_lo
     assert "database-secret" not in caplog.text
     assert "provider-secret" not in caplog.text
     assert "token=[REDACTED]" in caplog.text
+
+
+def test_sampled_push_enables_optional_gap_signal_without_changing_evaluation_result():
+    class Queue:
+        def __init__(self):
+            self.deleted = []
+
+        def delete(self, message_id):
+            self.deleted.append(message_id)
+
+    class ActivityStore:
+        def get_activity_thread(self, _activity_id):
+            return None
+
+        def create_activity(self, **_activity):
+            return None
+
+        def clear_session_evaluation_retry_summary(self, _activity_id):
+            pass
+
+    class Traces:
+        def load(self, session_id):
+            return {"agent_names": ["agent"], "payload_hash": "hash"}
+
+    class Evaluations:
+        def evaluate_session(self, *_args, **kwargs):
+            assert kwargs["policy_discovery_enabled"] is True
+            return {"status": "completed", "evaluations": [{"status": "pass"}]}
+
+    class Repository:
+        def __init__(self):
+            self.completed = []
+
+        def complete_sample_evaluation(self, session_id, *, gap_reviewed):
+            self.completed.append((session_id, gap_reviewed))
+
+    class Discovery:
+        def __init__(self):
+            self.repository = Repository()
+
+        def reserve_sample(self, **_kwargs):
+            return True
+
+        def record_judge_signal(self, **_kwargs):
+            return False
+
+    queue, discovery = Queue(), Discovery()
+    worker = SessionEvaluationWorker(
+        queue,
+        Traces(),
+        SimpleNamespace(
+            context=SimpleNamespace(workspace_id=lambda: "workspace"),
+            activity_store=ActivityStore(), evaluations=Evaluations(),
+        ),
+        policy_discovery=discovery,
+    )
+    asyncio.run(worker._process({
+        "msg_id": 11, "read_ct": 1,
+        "message": {"session_id": "session-1", "agent_name": "agent", "payload_hash": "hash"},
+    }))
+    assert queue.deleted == [11]
+    assert discovery.repository.completed == [("session-1", False)]

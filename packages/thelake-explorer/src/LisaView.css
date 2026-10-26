@@ -124,6 +124,36 @@
 .tle-lisa-rule-card h3 { margin: 0; color: #302d37; font-size: 12px; line-height: 1.4; }
 .tle-lisa-rule-card p { color: #777580; font-size: 11px; line-height: 1.5; white-space: pre-wrap; }
 .tle-lisa-rule-card small { color: #706d78; font-size: 10px; }
+.tle-lisa-suggestions > .tle-lisa-panel-note { margin: 0 0 12px; }
+.tle-lisa-suggestion-card { margin-bottom: 10px; padding: 13px; border: 1px solid #e8e2ef; border-radius: 14px; background: #fff; box-shadow: 0 2px 8px #2c17430a; }
+.tle-lisa-suggestion-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.tle-lisa-suggestion-state { color: #7956a4; font-size: 9px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+.tle-lisa-suggestion-heading small, .tle-lisa-suggestion-scope { color: #777580; font-size: 10px; }
+.tle-lisa-suggestion-card h4 { margin: 0 0 7px; color: #302d37; font-size: 13px; line-height: 1.4; }
+.tle-lisa-suggestion-criteria, .tle-lisa-suggestion-rationale { margin: 6px 0; color: #55515d; font-size: 11px; line-height: 1.55; white-space: pre-wrap; }
+.tle-lisa-suggestion-rationale { color: #777580; }
+.tle-lisa-suggestion-scope { margin: 8px 0; }
+.tle-lisa-suggestion-overlaps { margin: 9px 0; padding: 9px; border-radius: 9px; color: #73521c; background: #fff7e7; font-size: 10px; line-height: 1.5; }
+.tle-lisa-suggestion-overlaps p { margin: 5px 0 0; }
+.tle-lisa-suggestion-evidence { margin: 9px 0; border-top: 1px solid #f0edf3; padding-top: 8px; }
+.tle-lisa-suggestion-evidence summary { cursor: pointer; color: #514b5a; font-size: 10px; font-weight: 650; }
+.tle-lisa-suggestion-evidence > section { margin-top: 9px; }
+.tle-lisa-suggestion-evidence-summary { color: #777580; font-size: 10px; line-height: 1.4; }
+.tle-lisa-suggestion-evidence article { margin: 7px 0; padding: 8px; border: 1px solid #eeebf2; border-radius: 8px; background: #faf9fb; }
+.tle-lisa-suggestion-evidence article header { display: flex; justify-content: space-between; gap: 8px; color: #635d6b; font-size: 9px; }
+.tle-lisa-suggestion-evidence article code, .tle-lisa-suggestion-overlaps code { color: #655283; font-size: 9px; overflow-wrap: anywhere; }
+.tle-lisa-suggestion-evidence pre { max-height: 180px; overflow: auto; margin: 7px 0; color: #393641; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tle-lisa-suggestion-evidence article small { color: #8a8790; font-size: 9px; }
+.tle-lisa-suggestion-source { border: 0; padding: 4px 0 8px; background: transparent; color: #5273c7; cursor: pointer; font: inherit; font-size: 12px; }
+.tle-lisa-suggestion-card label { display: block; margin: 8px 0; color: #625d69; font-size: 10px; font-weight: 650; }
+.tle-lisa-suggestion-card input, .tle-lisa-suggestion-card textarea { display: block; width: 100%; margin-top: 4px; padding: 8px; border: 1px solid #ded8e6; border-radius: 8px; color: #302d37; font: inherit; font-size: 11px; }
+.tle-lisa-suggestion-card textarea { resize: vertical; }
+.tle-lisa-suggestion-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.tle-lisa-suggestion-actions button { padding: 6px 9px; border: 1px solid #ded8e6; border-radius: 8px; color: #554c61; background: white; font-size: 10px; font-weight: 650; cursor: pointer; }
+.tle-lisa-suggestion-actions button:first-child { border-color: #79609b; color: white; background: #79609b; }
+.tle-lisa-suggestion-actions button:disabled { opacity: .55; cursor: default; }
+.tle-lisa-suggestion-actions .tle-lisa-suggestion-chat { border-color: transparent; color: #706d78; }
+.tle-lisa-suggestion-owner-note { align-self: center; color: #837e89; font-size: 9px; }
 .tle-lisa-approval { flex: none; padding: 4px 7px; border-radius: 20px; font-size: 10px; }
 .tle-lisa-approval.approved { background: #eaf5ee; color: #27744f; }
 .tle-lisa-approval.pending { background: #fff4e2; color: #9b681c; }

@@ -14,7 +14,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from lisa.bootstrap import WorkspaceServices
 from lisa.models.contracts import (
+    ApprovePolicySuggestion,
     CreateConversation,
+    DismissPolicySuggestion,
     EmptyRequest,
     SendMessage,
     UserSendMessage,
@@ -295,6 +297,87 @@ async def user_list_policies(
         ],
         "next_offset": next_offset,
     }
+
+
+@router.get("/v1/policy-suggestions")
+async def user_list_policy_suggestions(
+    request: Request, status: str | None = "pending", limit: int = 50
+) -> dict[str, Any]:
+    user_workspace(request)
+    service = _services(request).policy_discovery
+    if service is None:
+        raise HTTPException(status_code=503, detail="Policy discovery is not configured")
+    actor_id = _user_actor_id(request)
+    try:
+        service.policy_service.require_owner_actor(actor_id)
+        return {
+            "items": service.list_suggestions(status=status, limit=limit),
+            "can_review": actor_id in _services(request).context.owner_user_ids,
+        }
+    except ValueError as error:
+        if "authorized Lisa owner" in str(error):
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/v1/policy-suggestions/{suggestion_id}")
+async def user_get_policy_suggestion(suggestion_id: str, request: Request) -> dict[str, Any]:
+    user_workspace(request)
+    service = _services(request).policy_discovery
+    if service is None:
+        raise HTTPException(status_code=503, detail="Policy discovery is not configured")
+    try:
+        service.policy_service.require_owner_actor(_user_actor_id(request))
+        return service.get_suggestion(suggestion_id)
+    except ValueError as error:
+        if "authorized Lisa owner" in str(error):
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        status = 404 if "not found" in str(error).lower() else 400
+        raise HTTPException(status_code=status, detail=str(error)) from error
+
+
+@router.post("/v1/policy-suggestions/{suggestion_id}/approve")
+async def user_approve_policy_suggestion(
+    suggestion_id: str, request: Request, body: ApprovePolicySuggestion
+) -> dict[str, Any]:
+    user_workspace(request)
+    services = _services(request)
+    service = services.policy_discovery
+    if service is None:
+        raise HTTPException(status_code=503, detail="Policy discovery is not configured")
+    actor_id = _user_actor_id(request)
+    if actor_id not in services.context.owner_user_ids:
+        raise HTTPException(status_code=403, detail="This action requires an authorized Lisa owner")
+    try:
+        return service.approve(
+            suggestion_id=suggestion_id, actor_id=actor_id,
+            name=body.name, criteria=body.criteria,
+        )
+    except ValueError as error:
+        message = str(error)
+        status = 404 if "not found" in message.lower() else 409 if "already exists" in message.lower() or "changed" in message.lower() else 400
+        raise HTTPException(status_code=status, detail=message) from error
+
+
+@router.post("/v1/policy-suggestions/{suggestion_id}/dismiss")
+async def user_dismiss_policy_suggestion(
+    suggestion_id: str, request: Request, body: DismissPolicySuggestion
+) -> dict[str, Any]:
+    del body
+    user_workspace(request)
+    services = _services(request)
+    service = services.policy_discovery
+    if service is None:
+        raise HTTPException(status_code=503, detail="Policy discovery is not configured")
+    actor_id = _user_actor_id(request)
+    if actor_id not in services.context.owner_user_ids:
+        raise HTTPException(status_code=403, detail="This action requires an authorized Lisa owner")
+    try:
+        return service.dismiss(suggestion_id=suggestion_id, actor_id=actor_id)
+    except ValueError as error:
+        message = str(error)
+        status = 404 if "not found" in message.lower() else 409 if "only a pending" in message.lower() else 400
+        raise HTTPException(status_code=status, detail=message) from error
 
 
 def _slack_signature_valid(secret: str, timestamp: str, signature: str, body: bytes) -> bool:

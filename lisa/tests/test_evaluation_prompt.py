@@ -5,15 +5,15 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
-from datasets.policy_dataset import load_dataset
-from tests.policy_fakes import FakeDecisionsClient
 
+from datasets.policy_dataset import load_dataset
 from lisa.evaluation import evaluator
 from lisa.evaluation.contracts import EvaluationRequest
 from lisa.evaluation.policy_triage import OpenAIPolicyTriager
 from lisa.evaluation.prompt import format_trajectory_for_llm
 from lisa.models.policies import PolicyRule
 from lisa.security import redact_evidence
+from tests.policy_fakes import FakeDecisionsClient
 
 DATA = load_dataset()
 PAIRS = [p for p in DATA.pairs() if p.trajectory.provenance["source"] == "state_bench"]
@@ -136,3 +136,36 @@ def test_evaluation_transcript_reaches_both_provider_boundaries(pair, monkeypatc
     assert not any("truncated" in limitation for limitation in result.limitations)
     assert closed == [True]
     assert pair == original
+
+
+def test_optional_policy_gap_signal_cites_source_spans_without_changing_verdict(monkeypatch):
+    pair = PAIRS[0]
+    trajectory = pair.request()["trajectory"]
+    view = format_trajectory_for_llm(trajectory["events"])
+    alias = next(iter(view.span_id_map))
+    monkeypatch.setattr(
+        evaluator,
+        "create_judge_client",
+        lambda: SimpleNamespace(
+            models=SimpleNamespace(generate_content=lambda **kwargs: SimpleNamespace(parsed={
+                "status": "fail",
+                "rationale": "The action was unsafe.",
+                "span_ids": [alias],
+                "policy_gap_signal": {
+                    "detected": True,
+                    "summary": "The action lacked a confirmation step.",
+                    "span_ids": [alias],
+                },
+            })),
+            close=lambda: None,
+        ),
+    )
+    request = EvaluationRequest.model_validate({
+        **pair.request(), "discover_policy_gaps": True,
+    })
+
+    result = evaluator.evaluate(request)
+
+    assert result.status == "fail"
+    assert result.policy_gap_signal is not None
+    assert result.policy_gap_signal.span_ids == [view.span_id_map[alias]]

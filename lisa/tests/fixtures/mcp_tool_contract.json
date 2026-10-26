@@ -507,6 +507,46 @@
     }
   },
   {
+    "name": "list_policy_suggestions",
+    "description": "List Lisa's evidence-backed policy suggestions for owner review.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "default": "pending",
+          "enum": [
+            "pending",
+            "approved",
+            "dismissed",
+            "all"
+          ],
+          "type": "string"
+        },
+        "limit": {
+          "default": 20,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object",
+      "x-fastmcp-wrap-result": true
+    }
+  },
+  {
     "name": "list_recent_activities",
     "description": "For an authorized owner, list recent feed cards, optionally filtered by goal or type.",
     "inputSchema": {
@@ -688,6 +728,26 @@
       ],
       "type": "object",
       "x-fastmcp-wrap-result": true
+    }
+  },
+  {
+    "name": "read_policy_suggestion",
+    "description": "Read one suggestion with its source session and cited evidence spans.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "suggestion_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "suggestion_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
     }
   },
   {

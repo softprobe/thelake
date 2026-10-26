@@ -35,8 +35,8 @@ TOOL_NAMESPACES = {
         "keywords": "activity activities work item task feed thread continue update progress",
     },
     "policies": {
-        "description": "Find, create, update, approve, and delete workspace policies.",
-        "keywords": "policy policies rule criteria approval approve create update delete",
+        "description": "Review policy suggestions, and find, create, update, approve, or delete workspace policies.",
+        "keywords": "policy policies suggestions recommendation rule criteria approval approve create update delete",
     },
     "sessions": {
         "description": "Search Lisa's locally stored agent sessions and inspect a trajectory.",
@@ -603,6 +603,26 @@ def create_server(services: WorkspaceServices) -> FastMCP:
         records = services.policy_service.read_policy_records(scope, agent_name)
         return render_policy_records(records, scope)
 
+    @server.tool(tags={NAMESPACE_TAGS["policies"]})
+    def list_policy_suggestions(status: Literal["pending", "approved", "dismissed", "all"] = "pending", limit: int = 20) -> list[dict[str, Any]]:
+        """List Lisa's evidence-backed policy suggestions for owner review."""
+        require_owner()
+        require_task_activity_memory()
+        if services.policy_discovery is None:
+            raise RuntimeError("Policy discovery is not configured")
+        return services.policy_discovery.list_suggestions(
+            status=None if status == "all" else status, limit=max(1, min(limit, 50))
+        )
+
+    @server.tool(tags={NAMESPACE_TAGS["policies"]})
+    def read_policy_suggestion(suggestion_id: str) -> dict[str, Any]:
+        """Read one suggestion with its source session and cited evidence spans."""
+        require_owner()
+        require_task_activity_memory()
+        if services.policy_discovery is None:
+            raise RuntimeError("Policy discovery is not configured")
+        return services.policy_discovery.get_suggestion(suggestion_id)
+
     @server.tool(tags={NAMESPACE_TAGS["evaluation"]})
     def evaluate_session(target_agent_name: str, session_id: str) -> dict[str, Any]:
         """Triage approved policies for suspected violations and judge escalated policies."""
@@ -1045,7 +1065,7 @@ _NAMESPACE_TOOL_NAMES = {
         "set_activity_section",
         "link_activity_reference",
     },
-    "policies": {"list_policies", "read_policy", "write_policy", "approve_policy", "delete_policy"},
+    "policies": {"list_policies", "read_policy", "write_policy", "approve_policy", "delete_policy", "list_policy_suggestions", "read_policy_suggestion"},
     "sessions": {"search_sessions", "get_session"},
     "evaluation": {
         "list_pending_evaluation_failures",

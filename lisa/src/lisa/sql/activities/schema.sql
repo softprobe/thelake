@@ -346,3 +346,66 @@ FROM lisa.evaluation_triage;
 
 CREATE VIEW lisa.readable_deployment AS
 SELECT workspace_fingerprint FROM lisa.deployment;
+
+-- Bounded, evidence-linked policy discovery. These records are private service
+-- state and are exposed only through Lisa's purpose-built API projections.
+CREATE TABLE lisa.policy_discovery_samples (
+    session_id text PRIMARY KEY,
+    agent_name text NOT NULL,
+    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    sampled_hour timestamptz NOT NULL,
+    evaluation_complete boolean NOT NULL DEFAULT false,
+    gap_reviewed boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX policy_discovery_samples_hour_idx
+    ON lisa.policy_discovery_samples(sampled_hour);
+CREATE INDEX policy_discovery_samples_pending_idx
+    ON lisa.policy_discovery_samples(sampled_hour)
+    WHERE evaluation_complete AND NOT gap_reviewed;
+
+CREATE TABLE lisa.policy_discovery_signals (
+    id uuid PRIMARY KEY,
+    session_id text NOT NULL UNIQUE,
+    activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    agent_name text NOT NULL,
+    summary text NOT NULL,
+    span_ids jsonb NOT NULL,
+    evidence jsonb NOT NULL,
+    state text NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'synthesized', 'reviewed', 'dismissed')),
+    suggestion_id uuid,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX policy_discovery_signals_pending_idx
+    ON lisa.policy_discovery_signals(created_at) WHERE state = 'pending';
+
+CREATE TABLE lisa.policy_suggestions (
+    id uuid PRIMARY KEY,
+    candidate_hash text NOT NULL UNIQUE,
+    name text NOT NULL,
+    criteria text NOT NULL,
+    scope text NOT NULL CHECK (scope IN ('workspace', 'agent')),
+    target_agent_name text NOT NULL DEFAULT '',
+    rationale text NOT NULL,
+    signal_ids jsonb NOT NULL,
+    evidence jsonb NOT NULL,
+    overlap_details jsonb NOT NULL DEFAULT '[]'::jsonb,
+    status text NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'dismissed')),
+    policy_id text REFERENCES lisa.policies(id),
+    reviewed_by text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    reviewed_at timestamptz,
+    CHECK ((scope = 'workspace' AND target_agent_name = '') OR
+           (scope = 'agent' AND target_agent_name <> ''))
+);
+CREATE INDEX policy_suggestions_pending_idx
+    ON lisa.policy_suggestions(created_at DESC) WHERE status = 'pending';
+
+CREATE TABLE lisa.policy_discovery_schedule (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    last_synthesis_at timestamptz,
+    lease_until timestamptz
+);
+INSERT INTO lisa.policy_discovery_schedule(singleton) VALUES (true);

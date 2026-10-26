@@ -70,6 +70,42 @@ New policy IDs are allocated by reading the greatest numeric ID in
 `lisa.policies` while holding a transaction advisory lock shared across policy
 scopes. This keeps IDs unique across workspace and agent rules.
 
+## Policy discovery and owner review
+
+Pushed-session policy-gap discovery is a separate capability from triage and
+judgment. By default it reserves at most five sessions per workspace per hour
+for review; deployments can change this with
+`LISA_POLICY_DISCOVERY_SAMPLES_PER_HOUR` (valid range 1–100). Where a selected session already reaches the Gemini judge, an
+optional gap signal can be returned alongside the verdict; otherwise the
+discovery worker invokes the configured gap analyzer. The signal never changes
+the verdict. Replaceable analyzer and synthesizer callables keep model choice
+separate from sampling, persistence, and review contracts.
+
+Lisa stores cited signals and suggestions in dedicated Postgres tables, not in
+`lisa.policies` or rebuildable activity metadata. A scheduled consolidation
+compares gathered signals with approved policy and prior owner decisions. The
+Policy suggestions feed and policy MCP tools expose evidence and source session
+context. Chat may discuss a suggestion, but only an authenticated owner action
+from the feed or an owner-authorized policy tool creates an active rule.
+Approval, edits, and dismissal are retained as discovery decisions so later
+consolidations can avoid repeating rejected or already adopted suggestions.
+Every successful daily consolidation records its whole input batch as reviewed,
+including signals that produced no suggestion, so old evidence is not submitted
+again and newer signals are not starved. Suggestion list and evidence reads are
+owner-only because cited spans may contain user and tool data.
+The worker makes at most one consolidation attempt per day when signals exist;
+provider failures leave signals pending for the next day's attempt.
+
+The labeled policy-discovery evaluation under
+`lisa/datasets/policy_discovery/` covers trace-gap detection and proposal
+consolidation. Its consolidation cases measure exact and semantic duplicate
+suppression, conflict suppression, compatible-overlap reporting, repeated
+signal consolidation, and prior owner approvals or dismissals. The set is a
+small synthetic diagnostic benchmark. Positive proposals are also checked for
+expected scope, target agent, policy behavior concepts, cited signal coverage,
+and overlap relation. See its README for the live evaluation command and
+cost-bounded call count; these cases are not a production-quality estimate.
+
 ## Execution and findings
 
 Lisa's `search_sessions` tool searches the session bundles pushed to Lisa's

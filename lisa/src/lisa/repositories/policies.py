@@ -206,6 +206,27 @@ class PostgresPolicyRepository:
             updated_at=row.get("updated_at"),
         )
 
+    def create_approved_in_transaction(
+        self, connection, *, scope: str, target_agent_name: str,
+        name: str, criteria: str,
+    ) -> PolicyRecord:
+        """Create an approved policy using the caller's transaction."""
+        lock_key = f"{scope}:{target_agent_name}"
+        connection.execute(_sql("lock_policy_scope.sql"), {"lock_key": lock_key})
+        existing = connection.execute(_sql("list_policy_scope.sql"), {
+            "scope": scope, "target_agent_name": target_agent_name,
+        }).fetchall()
+        if any(row["name"] == name for row in existing):
+            raise ValueError("A policy with this name already exists in this scope")
+        connection.execute(_sql("lock_policy_id_allocation.sql"))
+        ordinal = connection.execute(_sql("next_policy_ordinal.sql")).fetchone()["ordinal"]
+        row = connection.execute(_sql("create_approved_policy.sql"), {
+            "id": format_policy_id(ordinal), "scope": scope,
+            "target_agent_name": target_agent_name, "name": name,
+            "criteria": criteria,
+        }).fetchone()
+        return self._record(row)
+
     def list_scope(self, scope: str, target_agent_name: str = "") -> list[PolicyRecord]:
         with self._connect() as connection:
             rows = connection.execute(

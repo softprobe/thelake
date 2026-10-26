@@ -15,10 +15,14 @@ MAX_DELIVERIES = 8
 
 
 class SessionEvaluationWorker:
-    def __init__(self, queue: SessionEvaluationQueue, traces: SessionTraceStore, services):
+    def __init__(
+        self, queue: SessionEvaluationQueue, traces: SessionTraceStore, services,
+        *, policy_discovery=None,
+    ):
         self.queue = queue
         self.traces = traces
         self.services = services
+        self.policy_discovery = policy_discovery
 
     async def run_forever(self) -> None:
         while True:
@@ -68,6 +72,12 @@ class SessionEvaluationWorker:
                 or stored.get("payload_hash") != payload.get("payload_hash")
             ):
                 raise ValueError("Queued evaluation does not match immutable session evidence")
+            discovery_selected = bool(
+                self.policy_discovery
+                and self.policy_discovery.reserve_sample(
+                    session_id=session_id, agent_name=agent_name, activity_id=activity_id
+                )
+            )
             result = await asyncio.to_thread(
                 self.services.evaluations.evaluate_session,
                 agent_name,
@@ -75,9 +85,26 @@ class SessionEvaluationWorker:
                 activity_id=activity_id,
                 failure_delivery_key=delivery_key,
                 defer_activity_failure=True,
+                policy_discovery_enabled=discovery_selected,
             )
             if result.get("status") in {"error", "evaluation_error"}:
                 raise RuntimeError(self._evaluation_failure_reason(result))
+            if discovery_selected:
+                signal_was_returned = False
+                for item in result.get("evaluations", []):
+                    if "policy_gap_signal" not in item or item.get("policy_gap_signal") is None:
+                        continue
+                    signal_was_returned = self.policy_discovery.record_judge_signal(
+                        session_id=session_id,
+                        activity_id=activity_id,
+                        agent_name=agent_name,
+                        signal=item["policy_gap_signal"],
+                    )
+                    if signal_was_returned:
+                        break
+                self.policy_discovery.repository.complete_sample_evaluation(
+                    session_id, gap_reviewed=signal_was_returned
+                )
             try:
                 self.services.activity_store.clear_session_evaluation_retry_summary(activity_id)
             except Exception as error:  # noqa: BLE001 - a notice-clear error must not replay success.
