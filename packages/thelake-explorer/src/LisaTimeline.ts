@@ -1,5 +1,5 @@
 import type { ThreadMessageLike, ToolCallMessagePart } from "@assistant-ui/react";
-import type { LisaActivity, LisaMessage, LisaProactiveUpdate, LisaPolicySuggestion, LisaFeedEntry } from "./client";
+import type { LisaActivity, LisaMessage, LisaProactiveUpdate, LisaPolicySuggestion, LisaFeedEntry, LisaQaObservation } from "./client";
 
 type TimedMessage = {
   order: number;
@@ -15,6 +15,7 @@ export type LisaTimelineUpdate = {
   update: LisaProactiveUpdate;
   suggestion?: LisaPolicySuggestion;
   activity?: LisaFeedEntry;
+  observation?: LisaQaObservation;
 };
 
 export function parseLisaProactiveUpdate(value: string): LisaTimelineUpdate | undefined {

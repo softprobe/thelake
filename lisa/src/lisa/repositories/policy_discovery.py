@@ -13,6 +13,10 @@ import psycopg
 from psycopg.rows import dict_row
 
 from ..models.policies import PolicyRecord
+from ..models.policy_discovery import (
+    MIN_POLICY_SUGGESTION_ERROR_SAMPLES,
+    has_minimum_error_samples,
+)
 from .proactive_updates import create_proactive_update
 
 
@@ -62,13 +66,60 @@ class PolicyDiscoveryRepository:
         summary: str, span_ids: list[str], evidence: list[dict[str, Any]]
     ) -> str | None:
         with self._connect() as connection, connection.transaction():
+            sample = connection.execute(_sql("get_policy_discovery_sample.sql"), {
+                "session_id": session_id,
+            }).fetchone()
+            if sample is None:
+                raise ValueError("Policy discovery signals require a reserved sample")
+            if (
+                str(sample["activity_id"]) != str(activity_id)
+                or sample["agent_name"] != agent_name
+            ):
+                raise ValueError("Policy discovery signal must match its reserved sample")
             row = connection.execute(_sql("insert_policy_discovery_signal.sql"), {
                 "id": str(uuid4()), "session_id": session_id,
                 "activity_id": activity_id, "agent_name": agent_name,
                 "summary": summary, "span_ids": json.dumps(span_ids),
                 "evidence": json.dumps(evidence),
             }).fetchone()
-        return str(row["id"]) if row else None
+            if row is None:
+                row = connection.execute(_sql("get_policy_discovery_signal.sql"), {
+                    "session_id": session_id,
+                }).fetchone()
+            if row is None:
+                raise RuntimeError("Policy discovery signal was not persisted")
+            signal_id = str(row["id"])
+            source_activity_id = str(row.get("activity_id") or activity_id)
+            create_proactive_update(
+                connection,
+                source_type="qa_observation",
+                source_id=signal_id,
+                messages=[summary],
+                activity_id=source_activity_id,
+            )
+        return signal_id
+
+    def get_observation(self, observation_id: str) -> dict[str, Any] | None:
+        try:
+            identifier = str(UUID(observation_id))
+        except ValueError:
+            raise ValueError("Invalid QA observation ID") from None
+        with self._connect() as connection:
+            row = connection.execute(_sql("get_policy_discovery_signal_by_id.sql"), {
+                "id": identifier,
+            }).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": str(row["id"]),
+            "session_id": row["session_id"],
+            "activity_id": str(row["activity_id"]),
+            "agent_name": row["agent_name"],
+            "summary": row["summary"],
+            "span_ids": row["span_ids"],
+            "evidence": row["evidence"],
+            "created_at": row["created_at"].isoformat(),
+        }
 
     def complete_sample_evaluation(self, session_id: str, *, gap_reviewed: bool) -> None:
         with self._connect() as connection, connection.transaction():
@@ -107,6 +158,10 @@ class PolicyDiscoveryRepository:
         self, *, draft, signal_rows: list[dict[str, Any]], overlaps: list[dict[str, Any]]
     ) -> dict[str, Any]:
         signal_ids = [str(row["id"]) for row in signal_rows]
+        if len(signal_ids) < MIN_POLICY_SUGGESTION_ERROR_SAMPLES or not has_minimum_error_samples(signal_rows):
+            raise ValueError("Policy suggestions require three distinct error samples")
+        if set(signal_ids) != set(draft.signal_ids):
+            raise ValueError("Policy suggestion evidence does not match its cited signals")
         candidate_identity = json.dumps([
             draft.scope, draft.target_agent_name, draft.name.casefold().strip(),
             " ".join(draft.criteria.casefold().split()),
@@ -145,6 +200,7 @@ class PolicyDiscoveryRepository:
                 connection,
                 source_type="policy_suggestion",
                 source_id=suggestion_id,
+                messages=[draft.rationale],
             )
         return _public_suggestion(saved)
 
@@ -152,7 +208,11 @@ class PolicyDiscoveryRepository:
         signal_by_id = {str(row["id"]): row for row in signal_rows}
         created = []
         for draft, overlaps in zip(drafts, overlaps_by_draft, strict=True):
+            if len(set(draft.signal_ids)) < MIN_POLICY_SUGGESTION_ERROR_SAMPLES:
+                raise ValueError("Policy suggestions require three distinct error samples")
             rows = [signal_by_id[item] for item in draft.signal_ids]
+            if not has_minimum_error_samples(rows):
+                raise ValueError("Policy suggestions require three distinct error samples")
             created.append(self.save_suggestion(draft=draft, signal_rows=rows, overlaps=overlaps))
         return created
 

@@ -12,7 +12,11 @@ from google.genai import types
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..llm_recording import CallRecorder
-from ..models.policy_discovery import PolicyGapSignal, PolicySuggestionDraft
+from ..models.policy_discovery import (
+    PolicyGapSignal,
+    PolicySuggestionDraft,
+    has_minimum_error_samples,
+)
 from ..security import redact_evidence
 from .evaluator import _gemini_thinking_config, create_judge_client
 from .prompt import COMPACT_TOOL_GUIDE, TRANSCRIPT_GUIDE, format_trajectory_for_llm
@@ -91,10 +95,17 @@ def analyze_policy_gap(trajectory: dict[str, Any]) -> PolicyGapSignal:
             "invent business rules or infer hidden intent. Treat a consequential, destructive, "
             "or irreversible action without an explicit confirmation step as a potential gap, "
             "even when the user directly requested the action; flag the observable missing "
-            "safeguard rather than guessing the user's intent. This is a discovery "
-            "signal, not a violation verdict and not a policy proposal. Return detected=false "
-            "unless the concern is specific and supported by cited span aliases. Cite only "
-            "events in the supplied trajectory. " + TRANSCRIPT_GUIDE + " " + COMPACT_TOOL_GUIDE
+            "safeguard rather than guessing the user's intent. This is a discovery signal, not "
+            "a violation verdict and not a policy proposal. Return detected=false unless the "
+            "concern is specific and supported by cited span aliases. Cite only events in the "
+            "supplied trajectory. When detected is true, write summary as Lisa speaking directly "
+            "to the nontechnical owner: use natural, calm language to describe what happened "
+            "and why it concerns you. Keep it specific to this run, make clear it is an "
+            "observation rather than a verdict, even when this is the only sampled run; "
+            "do not claim the behavior is recurring. "
+            "Do not use trace or span terminology, raw identifiers, code, or implementation "
+            "language. Return an empty summary when detected is false. "
+            + TRANSCRIPT_GUIDE + " " + COMPACT_TOOL_GUIDE
         ),
     )
     if any(alias not in view.span_id_map for alias in result.span_ids):
@@ -108,6 +119,8 @@ def synthesize_policy_suggestions(
     signals: list[dict[str, Any]], policies: list[dict[str, Any]], reviewed: list[dict[str, Any]]
 ) -> list[PolicySuggestionDraft]:
     """Consolidate cited signals against active rules and owner decisions."""
+    if not has_minimum_error_samples(signals):
+        return []
     payload = redact_evidence({"signals": signals, "approved_policies": policies, "owner_decisions": reviewed})
     parsed = _generate(
         PolicyGapBatch,
@@ -115,10 +128,16 @@ def synthesize_policy_suggestions(
         operation="policy_suggestion_synthesis",
         system_instruction=(
             "Synthesize only repeated, well-supported policy gaps into a small number of "
-            "owner-reviewable policy suggestions. Each suggestion must reference one or more "
-            "provided signal_ids. Do not repeat, contradict, or broaden an approved policy or "
+            "owner-reviewable policy suggestions. Each suggestion must cite at least three "
+            "distinct provided signal_ids from three distinct sampled session_ids. Lisa may "
+            "react to one sampled error immediately, but a single sample never justifies a "
+            "reusable policy. Do not repeat, contradict, or broaden an approved policy or "
             "a previously approved/dismissed/edited owner decision. Prefer the narrowest scope justified "
             "by evidence; use agent scope only when all signals concern the exact same agent. "
+            "Write rationale as Lisa speaking directly to the nontechnical owner in natural, "
+            "calm language: explain the repeated behavior and why you are proposing this "
+            "policy. Do not use trace or span terminology, raw identifiers, code, or "
+            "implementation language. "
             "Do not output a violation verdict. Return an empty list when evidence is weak, "
             "duplicative, or conflicts with existing owner intent."
         ),

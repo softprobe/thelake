@@ -165,7 +165,6 @@
 .tle-lisa-suggestion-actions button { padding: 6px 9px; border: 1px solid #ded8e6; border-radius: 8px; color: #554c61; background: white; font-size: 10px; font-weight: 650; cursor: pointer; }
 .tle-lisa-suggestion-actions button:first-child { border-color: #79609b; color: white; background: #79609b; }
 .tle-lisa-suggestion-actions button:disabled { opacity: .55; cursor: default; }
-.tle-lisa-suggestion-actions .tle-lisa-suggestion-chat { border-color: transparent; color: #706d78; }
 .tle-lisa-suggestion-owner-note { align-self: center; color: #837e89; font-size: 9px; }
 .tle-lisa-approval { flex: none; padding: 4px 7px; border-radius: 20px; font-size: 10px; }
 .tle-lisa-approval.approved { background: #eaf5ee; color: #27744f; }
@@ -261,19 +260,16 @@
 .tle-lisa-recommendation-card .tle-lisa-suggestion-actions button:first-child { border-color: #30353b; background: #30353b; color: #fff; }
 .tle-lisa-recommendation-card .tle-lisa-suggestion-actions button:hover:not(:disabled) { border-color: #aeb3ba; background: #f0f2f4; color: #24282d; }
 .tle-lisa-recommendation-card .tle-lisa-suggestion-actions button:first-child:hover:not(:disabled) { border-color: #16191d; background: #16191d; color: #fff; }
-.tle-lisa-recommendation-card .tle-lisa-suggestion-actions .tle-lisa-suggestion-chat { border-color: transparent; background: transparent; color: #686f78; }
 .tle-lisa-proactive-message { width: min(100%, 680px); margin: 8px 0 16px; }
 .tle-lisa-proactive-voice { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 10px; color: #30343a; }
 .tle-lisa-proactive-voice > div { min-width: 0; }
 .tle-lisa-proactive-voice b { display: block; margin: 1px 0 4px; font-size: 12px; }
 .tle-lisa-proactive-voice p { margin: 0; color: #555c65; font-size: 12px; line-height: 1.6; }
+.tle-lisa-proactive-voice p + p { margin-top: 8px; }
 .tle-lisa-avatar { display: grid; width: 27px; height: 27px; flex: 0 0 27px; place-items: center; border-radius: 50%; background: #20242a; color: #fff; font-size: 11px; font-weight: 700; }
-.tle-lisa-finding-update { margin-left: 37px; padding: 14px 16px; border: 1px solid #f0d3cf; border-radius: 13px; background: #fffafa; }
-.tle-lisa-finding-update > span { color: #9b443a; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-.tle-lisa-finding-update p { margin: 7px 0 12px; color: #373a3e; font-size: 12px; line-height: 1.55; }
-.tle-lisa-finding-update div { display: flex; flex-wrap: wrap; gap: 8px; }
-.tle-lisa-finding-update button { padding: 7px 10px; border: 1px solid #dedfe2; border-radius: 8px; background: #fff; color: #34383e; font: inherit; font-size: 10px; cursor: pointer; }
-.tle-lisa-finding-update button:hover { background: #f7f5f4; }
+.tle-lisa-proactive-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 11px 0 0 37px; }
+.tle-lisa-proactive-actions button { padding: 7px 10px; border: 1px solid #d9dce0; border-radius: 8px; background: #fff; color: #454b53; font: inherit; font-size: 10px; cursor: pointer; }
+.tle-lisa-proactive-actions button:hover { background: #f1f2f4; }
 .tle-lisa-panel-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .tle-lisa-panel-tabs button span { white-space: nowrap; }
 

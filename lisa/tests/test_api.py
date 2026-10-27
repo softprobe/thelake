@@ -699,10 +699,12 @@ def test_policy_suggestion_feed_owner_approval_and_dismissal(
     with TestClient(app) as test_client:
         discovery = test_client.app.state.workspace_services.policy_discovery
         signal_rows = []
-        for session_id in ("source-1", "source-2"):
+        for session_id in ("source-1", "source-2", "source-3"):
             activity = test_client.app.state.workspace_services.activity_store.create_activity(
-                title=f"Review {session_id}", source="session_push",
-                kind="session_evaluation",
+                title=f"Review {session_id}", source="session_push", kind="session_evaluation",
+            )
+            assert discovery.reserve_sample(
+                session_id=session_id, agent_name="agent", activity_id=activity.id,
             )
             discovery.repository.save_signal(
                 session_id=session_id, activity_id=activity.id, agent_name="agent",
@@ -710,6 +712,17 @@ def test_policy_suggestion_feed_owner_approval_and_dismissal(
                 span_ids=[f"span-{session_id}"],
                 evidence=[{"span_id": f"span-{session_id}", "kind": "user_message", "content": "Delete my account"}],
             )
+        observation_update = next(
+            item for item in test_client.get("/v1/proactive-updates?limit=10").json()["items"]
+            if item["source_type"] == "qa_observation"
+        )
+        assert observation_update["messages"] == ["A destructive action lacked confirmation."]
+        observation = test_client.get(
+            f"/v1/qa-observations/{observation_update['source_id']}"
+        )
+        assert observation.status_code == 200
+        assert observation.json()["session_id"] in {"source-1", "source-2", "source-3"}
+        assert observation.json()["evidence"][0]["span_id"].startswith("span-source-")
         signal_rows = discovery.repository.pending_signals(limit=10)
         drafts = [PolicySuggestionDraft(
             scope="workspace", name="Confirm destructive actions",
@@ -738,6 +751,9 @@ def test_policy_suggestion_feed_owner_approval_and_dismissal(
         ]
         assert len(suggestion_updates) == 1
         assert suggestion_updates[0]["source_id"] == suggestion_id
+        assert suggestion_updates[0]["messages"] == [
+            "The cited user requests and tool action show no confirmation step."
+        ]
         update_id = suggestion_updates[0]["id"]
         detail = test_client.get(f"/v1/policy-suggestions/{suggestion_id}")
         assert detail.status_code == 200
@@ -746,7 +762,7 @@ def test_policy_suggestion_feed_owner_approval_and_dismissal(
             for source in detail.json()["evidence"]
             for evidence in source["evidence"]
         }
-        assert cited == {"span-source-1", "span-source-2"}
+        assert cited == {"span-source-1", "span-source-2", "span-source-3"}
         approved = test_client.post(
             f"/v1/policy-suggestions/{suggestion_id}/approve",
             json={"name": "Confirm before irreversible actions", "criteria": "Ask the user for explicit confirmation before irreversible actions."},
@@ -771,6 +787,9 @@ def test_policy_suggestion_feed_owner_approval_and_dismissal(
         assert test_client.get("/v1/policy-suggestions").status_code == 403
         assert test_client.get(f"/v1/policy-suggestions/{second['id']}").status_code == 403
         assert test_client.get("/v1/proactive-updates").status_code == 403
+        assert test_client.get(
+            f"/v1/qa-observations/{observation_update['source_id']}"
+        ).status_code == 403
         monkeypatch.setenv("LISA_LOCAL_ACTOR_ID", "owner-1")
         dismissed = test_client.post(
             f"/v1/policy-suggestions/{second['id']}/dismiss", json={}

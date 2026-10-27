@@ -6,17 +6,22 @@ destructive action or a read-only task. `consolidation_cases.jsonl` checks
 whether synthesis suppresses exact and semantic duplicates, rejects proposals
 that conflict with an approved rule, respects previous owner approvals and
 dismissals, reports compatible overlaps, and consolidates recurring signals
-into one proposal. Positive cases also check policy scope, target agent,
-required behavior concepts in the criteria, and coverage of the supporting
-signals. Scored behavior checks verify confirmation before destructive actions,
-fee disclosure and customer acceptance before commitment, and cost comparison
-before booking changes; unsafe inversions do not pass those checks.
+into one proposal. A reusable proposal requires three distinct error samples
+from three sessions; a clear error in one sampled run is handled as an immediate
+QA observation outside this consolidation benchmark. Cases with only one or two
+samples test that the recurrence threshold prevents a recommendation. Eligible
+positive cases also check policy scope, target agent, required behavior concepts
+in the criteria, and coverage of the supporting signals. Scored behavior checks
+verify confirmation before destructive actions, fee disclosure and customer
+acceptance before commitment, and cost comparison before booking changes;
+unsafe inversions do not pass those checks.
 Expected outcomes are scorer-only and are never sent to Gemini.
 
 The consolidation set also contains four cases adapted from Microsoft
-[STATE-Bench](https://github.com/microsoft/STATE-Bench): two recurring policy
-gaps, one correctly handled control, and one existing-policy duplicate
-control. STATE-Bench describes its trajectories as synthetically generated;
+[STATE-Bench](https://github.com/microsoft/STATE-Bench): two policy-gap examples
+that each have only two samples and therefore do not qualify for a proposal,
+one correctly handled control, and one existing-policy duplicate control.
+STATE-Bench describes its trajectories as synthetically generated;
 these are realistic simulated cases, not production customer traces. The
 dataset keeps short, paraphrased evidence summaries and links to the exact
 source files rather than copying full conversations. `message_indices_zero_based`
@@ -38,8 +43,9 @@ uv run --project lisa --env-file .env python lisa/scripts/evaluate_policy_discov
 The runner reports per-case detection and cited-span validity, then scores
 proposal counts and expected overlap relations for each consolidation case.
 It reports accuracy by check category, duplicate proposals, suggestions, and
-recorded token usage. A live run currently makes four gap-review calls and
-eleven consolidation calls. It does not mutate Lisa's policy catalog. Owner
+recorded token usage. The current dataset makes four gap-review calls and at
+most seven consolidation calls; cases below the recurrence threshold skip the
+synthesis call. It does not mutate Lisa's policy catalog. Owner
 approval, edits, and dismissal authorization are covered by transient
 Postgres/API integration tests; the consolidation dataset separately tests
 whether prior owner outcomes affect new proposals.

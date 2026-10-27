@@ -9,7 +9,11 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from ..evaluation.policy_discovery import analyze_policy_gap, synthesize_policy_suggestions
-from ..models.policy_discovery import PolicyGapSignal, PolicySuggestionDraft
+from ..models.policy_discovery import (
+    PolicyGapSignal,
+    PolicySuggestionDraft,
+    has_minimum_error_samples,
+)
 from ..repositories.policy_discovery import PolicyDiscoveryRepository
 from ..security import redact_text
 
@@ -110,15 +114,21 @@ class PolicyDiscoveryService:
         ]
         for item in evidence:
             if item.get("content"):
-                item["content"] = str(item["content"])[:2_000]
+                item["content"] = redact_text(str(item["content"]))[:2_000]
             if item.get("payload") is not None:
                 encoded = json.dumps(item["payload"], ensure_ascii=False)
-                item["payload"] = encoded[:2_000]
+                item["payload"] = redact_text(encoded)[:2_000]
         return self.repository.save_signal(
             session_id=session_id, activity_id=activity_id, agent_name=agent_name,
             summary=redact_text(signal.summary)[:2_000], span_ids=signal.span_ids,
             evidence=evidence,
         )
+
+    def get_observation(self, observation_id: str):
+        result = self.repository.get_observation(observation_id)
+        if result is None:
+            raise ValueError("QA observation was not found")
+        return result
 
     @staticmethod
     def validate_references(references: list[str], known: set[str]) -> None:
@@ -130,7 +140,7 @@ class PolicyDiscoveryService:
             return []
         try:
             signals = self.repository.pending_signals(limit=20)
-            if not signals:
+            if not has_minimum_error_samples(signals):
                 self.repository.release_daily_synthesis()
                 return []
             policies = [
@@ -145,10 +155,20 @@ class PolicyDiscoveryService:
             reviewed = self.repository.reviewed_decisions(limit=50)
             drafts = self.synthesizer(signals, policies, reviewed)
             known_ids = {str(item["id"]) for item in signals}
+            signal_sessions = {
+                str(item["id"]): str(item["session_id"]) for item in signals
+            }
             known_policy_ids = {item["id"] for item in policies}
             for draft in drafts:
                 if any(signal_id not in known_ids for signal_id in draft.signal_ids):
                     raise ValueError("Policy suggestion referenced a signal outside the batch")
+                if not has_minimum_error_samples([
+                    {"session_id": signal_sessions[signal_id]}
+                    for signal_id in draft.signal_ids
+                ]):
+                    raise ValueError(
+                        "Policy suggestions must be supported by three distinct sampled sessions"
+                    )
                 if any(overlap.policy_id not in known_policy_ids for overlap in draft.overlaps):
                     raise ValueError("Policy suggestion referenced an unknown policy overlap")
             suggestions = self.repository.create_suggestions(

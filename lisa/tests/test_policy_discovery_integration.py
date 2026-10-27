@@ -50,29 +50,37 @@ def test_runtime_reads_evidence_backed_suggestion_without_approving(
         monkeypatch.setenv(name, value)
 
     services = build_services(context)
-    activity = services.activity_store.create_activity(
-        title="Policy discovery source evidence",
-        source="session_push",
-        kind="session_evaluation",
-    )
-    signal_id = services.policy_discovery.repository.save_signal(
-        session_id="synthetic-deletion-session",
-        activity_id=activity.id,
-        agent_name="account-agent",
-        summary="A destructive account deletion followed a request without confirmation.",
-        span_ids=["user-span-17", "tool-span-18"],
-        evidence=[
-            {"span_id": "user-span-17", "kind": "user_message", "content": "Delete my account."},
-            {"span_id": "tool-span-18", "kind": "tool_call", "name": "delete_account", "content": "Deleted account."},
-        ],
-    )
+    signal_ids = []
+    for index in range(3):
+        activity = services.activity_store.create_activity(
+            title=f"Policy discovery source evidence {index + 1}",
+            source="session_push",
+            kind="session_evaluation",
+        )
+        session_id = f"synthetic-deletion-session-{index}"
+        assert services.policy_discovery.reserve_sample(
+            session_id=session_id,
+            agent_name="account-agent",
+            activity_id=activity.id,
+        )
+        signal_ids.append(services.policy_discovery.repository.save_signal(
+            session_id=session_id,
+            activity_id=activity.id,
+            agent_name="account-agent",
+            summary="A destructive account deletion followed a request without confirmation.",
+            span_ids=[f"user-span-{index}", f"tool-span-{index}"],
+            evidence=[
+                {"span_id": f"user-span-{index}", "kind": "user_message", "content": "Delete my account."},
+                {"span_id": f"tool-span-{index}", "kind": "tool_call", "name": "delete_account", "content": "Deleted account."},
+            ],
+        ))
     draft = PolicySuggestionDraft.model_validate({
         "name": "Confirm irreversible account actions",
         "criteria": "Before deleting an account, explain the consequence and obtain explicit confirmation.",
         "scope": "agent",
         "target_agent_name": "account-agent",
         "rationale": "The cited trace shows an irreversible action without a confirmation step.",
-        "signal_ids": [signal_id],
+        "signal_ids": signal_ids,
     })
     suggestion = services.policy_discovery.repository.create_suggestions(
         drafts=[draft],

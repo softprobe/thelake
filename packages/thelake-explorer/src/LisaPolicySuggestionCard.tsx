@@ -15,7 +15,6 @@ type LisaPolicySuggestionCardProps = {
   onCancelEdit: () => void;
   onChangeName: (value: string) => void;
   onChangeCriteria: (value: string) => void;
-  onDiscuss: () => void;
   onOpenActivity: (activityId: string) => void;
 };
 
@@ -33,7 +32,6 @@ export function LisaPolicySuggestionCard({
   onCancelEdit,
   onChangeName,
   onChangeCriteria,
-  onDiscuss,
   onOpenActivity,
 }: LisaPolicySuggestionCardProps) {
   const citationCount = suggestion.evidence.reduce((count, item) => count + item.evidence.length, 0);
@@ -49,14 +47,13 @@ export function LisaPolicySuggestionCard({
       <h4>{suggestion.name}</h4>
       <p className="tle-lisa-suggestion-criteria">{suggestion.criteria}</p>
     </>}
-    <p className="tle-lisa-suggestion-rationale">{suggestion.rationale}</p>
     <p className="tle-lisa-suggestion-scope">{suggestion.scope === "agent" ? `Suggested for ${suggestion.target_agent_name}` : "Suggested for this workspace"}</p>
     {suggestion.overlaps.length > 0 && <section className="tle-lisa-suggestion-overlaps" aria-label="Possible policy overlaps">
       <b>Check existing policies</b>
       {suggestion.overlaps.map((overlap) => <p key={`${overlap.policy_id}-${overlap.relation}`}><code>{overlap.policy_id}</code> · {overlap.relation}: {overlap.rationale}</p>)}
     </section>}
     <details className="tle-lisa-suggestion-evidence">
-      <summary>Trace evidence · {citationCount} cited {citationCount === 1 ? "span" : "spans"}</summary>
+      <summary>Supporting run evidence · {citationCount} cited {citationCount === 1 ? "span" : "spans"}</summary>
       {suggestion.evidence.map((signal) => <section key={signal.signal_id}>
         <p className="tle-lisa-suggestion-evidence-summary">{signal.summary}</p>
         {signal.evidence.map((evidence) => <article key={`${signal.signal_id}-${evidence.span_id}`}>
@@ -69,7 +66,7 @@ export function LisaPolicySuggestionCard({
     </details>
     {actionError && <p className="tle-lisa-error" role="alert">{actionError}</p>}
     {suggestion.status === "pending" && <p className="tle-lisa-recommendation-disclosure">This recommendation stays inactive until an owner approves it.</p>}
-    {suggestion.status === "approved" ? <div className="tle-lisa-suggestion-actions"><p className="tle-lisa-recommendation-disclosure">You approved this policy. Lisa will keep checking new runs against it.</p><button type="button" className="tle-lisa-suggestion-chat" onClick={onDiscuss}>Discuss with Lisa</button></div> : suggestion.status === "dismissed" ? <p className="tle-lisa-recommendation-disclosure">You dismissed this recommendation. It remains here for reference.</p> : <div className="tle-lisa-suggestion-actions">
+    {suggestion.status === "approved" ? <div className="tle-lisa-suggestion-actions"><p className="tle-lisa-recommendation-disclosure">You approved this policy. Lisa will keep checking new runs against it.</p></div> : suggestion.status === "dismissed" ? <p className="tle-lisa-recommendation-disclosure">You dismissed this recommendation. It remains here for reference.</p> : <div className="tle-lisa-suggestion-actions">
       {!canReview && <span className="tle-lisa-suggestion-owner-note">Only Lisa owners can review suggestions.</span>}
       {editing ? <>
         <button type="button" disabled={!canReview || busy || !editName.trim() || !editCriteria.trim()} onClick={() => onApprove(true)}>{busy ? "Approving…" : "Approve edited policy"}</button>
@@ -79,7 +76,6 @@ export function LisaPolicySuggestionCard({
         <button type="button" disabled={!canReview || busy} onClick={onEdit}>Edit</button>
         <button type="button" disabled={!canReview || busy} onClick={onDismiss}>{busy ? "Saving…" : "Dismiss"}</button>
       </>}
-      <button type="button" className="tle-lisa-suggestion-chat" onClick={onDiscuss}>Discuss with Lisa</button>
     </div>}
   </article>;
 }

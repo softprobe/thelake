@@ -12,13 +12,13 @@ describe("LisaApp", () => {
     expect(html).toContain('aria-label="Lisa conversation"');
     expect(html).toContain('aria-label="Message Lisa"');
     expect(html).toContain('aria-label="Lisa workspace panel"');
-    expect(html).toContain("Activity");
-    expect(html).toContain("Rules");
+    expect(html).toContain("Activities");
+    expect(html).toContain("Policies");
     expect(html).toContain("Evaluations");
     expect(html).toContain("Findings");
     expect(html).toContain('aria-label="Policy suggestions"');
     expect(html).toContain("Identity");
-    expect(html.match(/role="tab"/g)).toHaveLength(6);
+    expect(html.match(/role="tab"/g)).toHaveLength(2);
     expect(html).not.toContain('aria-label="Sessions"');
   });
 

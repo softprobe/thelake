@@ -78,8 +78,12 @@ for review; deployments can change this with
 `LISA_POLICY_DISCOVERY_SAMPLES_PER_HOUR` (valid range 1–100). Where a selected session already reaches the Gemini judge, an
 optional gap signal can be returned alongside the verdict; otherwise the
 discovery worker invokes the configured gap analyzer. The signal never changes
-the verdict. Replaceable analyzer and synthesizer callables keep model choice
-separate from sampling, persistence, and review contracts.
+the verdict. When Lisa detects a clear error in one sampled run, she reacts
+immediately in the main chat with the cited evidence from that run. A reusable
+policy recommendation is held until at least three distinct sampled sessions
+show the same kind of error, and it must cite three distinct sessions.
+Replaceable analyzer and synthesizer callables keep model choice separate from
+sampling, persistence, and review contracts.
 
 Lisa stores cited signals and suggestions in dedicated Postgres tables, not in
 `lisa.policies` or rebuildable activity metadata. A scheduled consolidation
@@ -92,16 +96,23 @@ discuss a suggestion, but only an authenticated owner action from a chat card,
 the feed, or an owner-authorized policy tool creates an active rule.
 Approval, edits, and dismissal are retained as discovery decisions so later
 consolidations can avoid repeating rejected or already adopted suggestions.
-The chat's durable proactive-update table stores references to suggestions and
-completed pushed-session findings. It is a UI projection, not a transcript turn
-or activity event. The bounded owner-only update endpoint returns stable
-source references; the Explorer loads linked details through the existing
-suggestion and activity endpoints. The same suggestion card remains visible
-after approval with its active policy ID, while dismissed suggestions stay in
-review history and leave the chat timeline. A finding appears only after a
-pushed-session evaluation completes successfully with a failed policy verdict;
-missing, failed, incomplete, and passing evaluations do not create a finding
-update. Questions from either card still go through Lisa's normal chat runtime.
+The chat's durable proactive-update table stores references to immediate
+sampled-run QA observations, suggestions, and completed pushed-session
+findings. The source model call supplies each update's user-facing message:
+the gap analyzer writes the immediate observation, the synthesizer writes the
+recommendation rationale, and the judge writes a later finding. Explorer renders
+those messages as supplied and does not build Lisa's words from trace fields.
+The projection is not a transcript turn or activity event. The
+bounded owner-only update endpoint returns stable source references; the
+Explorer loads suggestions and findings through the existing suggestion and
+activity endpoints, and sampled observations through the owner-only
+`GET /v1/qa-observations/{id}` endpoint. The same suggestion card remains
+visible after approval with its active policy ID, while dismissed suggestions
+stay in review history and leave the chat timeline. A finding appears only
+after a pushed-session evaluation completes successfully with a failed policy
+verdict; missing, failed, incomplete, and passing evaluations do not create a
+finding update. Questions from these cards still go through Lisa's normal chat
+runtime.
 Every successful daily consolidation records its whole input batch as reviewed,
 including signals that produced no suggestion, so old evidence is not submitted
 again and newer signals are not starved. Suggestion list and evidence reads are

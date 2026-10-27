@@ -9,7 +9,7 @@ def _proposal(overlaps=()):
         "scope": "agent",
         "target_agent_name": "cleanup-agent",
         "rationale": "Repeated traces show deletion without confirmation.",
-        "signal_ids": ["signal-1"],
+        "signal_ids": ["signal-1", "signal-2", "signal-3"],
         "overlaps": list(overlaps),
     })
 
@@ -29,7 +29,7 @@ def test_benchmark_requires_compatible_overlap_to_be_reported_as_overlap():
             "scope": "agent",
             "target_agent_name": "cleanup-agent",
             "criteria_concepts": [["confirm", "confirmation"], ["delete", "deleting"]],
-            "signal_ids": ["signal-1"],
+            "signal_ids": ["signal-1", "signal-2", "signal-3"],
         },
         "checks": ["compatible_overlap_reporting"],
     }
@@ -52,13 +52,13 @@ def test_positive_proposal_must_be_relevant_scoped_and_grounded_in_signals():
             "scope": "agent",
             "target_agent_name": "cleanup-agent",
             "criteria_concepts": [["confirm", "confirmation"], ["delete", "deleting"]],
-            "signal_ids": ["signal-1"],
+            "signal_ids": ["signal-1", "signal-2", "signal-3"],
         },
     }
     unrelated = PolicySuggestionDraft.model_validate({
         **_proposal().model_dump(),
         "criteria": "Check whether the itinerary is available before booking.",
-        "signal_ids": ["other-signal"],
+        "signal_ids": ["other-signal-1", "other-signal-2", "other-signal-3"],
     })
     assert not score_policy_consolidation_case(expected, [unrelated])["correct"]
 
@@ -71,7 +71,7 @@ def test_benchmark_rejects_negated_confirmation_rule_and_accepts_safe_condition(
             "target_agent_name": "cleanup-agent",
             "criteria_concepts": [["delete", "deleting", "deletion"]],
             "requires_confirmation_before_action": True,
-            "signal_ids": ["signal-1"],
+            "signal_ids": ["signal-1", "signal-2", "signal-3"],
         },
     }
     negated = _proposal().model_copy(update={
@@ -95,7 +95,7 @@ def test_benchmark_requires_fee_disclosure_and_acceptance_before_commit():
             "scope": "workspace",
             "target_agent_name": "",
             "criteria_concepts": [["fee", "charge"], ["disclose", "disclosure", "show", "present"], ["accept", "acceptance", "confirm"]],
-            "signal_ids": ["cost-1", "cost-2"],
+            "signal_ids": ["cost-1", "cost-2", "cost-3"],
             "requires_cost_acceptance_before_commit": True,
         },
     }
@@ -104,7 +104,7 @@ def test_benchmark_requires_fee_disclosure_and_acceptance_before_commit():
         "scope": "workspace",
         "target_agent_name": "",
         "criteria": "Disclose any cancellation fee and get the customer's acceptance before committing the cancellation.",
-        "signal_ids": ["cost-1", "cost-2"],
+        "signal_ids": ["cost-1", "cost-2", "cost-3"],
     })
     unsafe = good.model_copy(update={
         "criteria": "Commit the cancellation, then disclose the fee and ask whether the customer accepts it."
@@ -144,7 +144,7 @@ def test_benchmark_requires_comparison_before_committing_booking_change():
             "scope": "workspace",
             "target_agent_name": "",
             "criteria_concepts": [["compare", "evaluate"], ["options", "alternatives"], ["booking", "book"]],
-            "signal_ids": ["travel-1", "travel-2"],
+            "signal_ids": ["travel-1", "travel-2", "travel-3"],
             "requires_compare_before_commit": True,
         },
     }
@@ -153,7 +153,7 @@ def test_benchmark_requires_comparison_before_committing_booking_change():
         "scope": "workspace",
         "target_agent_name": "",
         "criteria": "Compare available booking options and their costs before committing a booking change.",
-        "signal_ids": ["travel-1", "travel-2"],
+        "signal_ids": ["travel-1", "travel-2", "travel-3"],
     })
     unsafe = good.model_copy(update={
         "criteria": "Commit the booking change before comparing available options and their costs."

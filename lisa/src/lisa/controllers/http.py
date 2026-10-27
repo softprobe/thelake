@@ -364,6 +364,23 @@ async def user_get_policy_suggestion(suggestion_id: str, request: Request) -> di
         raise HTTPException(status_code=status, detail=str(error)) from error
 
 
+@router.get("/v1/qa-observations/{observation_id}")
+async def user_get_qa_observation(observation_id: str, request: Request) -> dict[str, Any]:
+    """Return cited single-run QA evidence to an authorized Lisa workspace owner."""
+    user_workspace(request)
+    service = _services(request).policy_discovery
+    if service is None:
+        raise HTTPException(status_code=503, detail="Lisa QA review is not configured")
+    try:
+        service.policy_service.require_owner_actor(_user_actor_id(request))
+        return service.get_observation(observation_id)
+    except ValueError as error:
+        if "authorized Lisa owner" in str(error):
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        status = 404 if "not found" in str(error).lower() else 400
+        raise HTTPException(status_code=status, detail=str(error)) from error
+
+
 @router.post("/v1/policy-suggestions/{suggestion_id}/approve")
 async def user_approve_policy_suggestion(
     suggestion_id: str, request: Request, body: ApprovePolicySuggestion

@@ -25,6 +25,22 @@ describe("ExplorerApi", () => {
     expect(JSON.parse(String(calls[1].init?.body))).toEqual({ name: "Confirm first", criteria: "Ask before deleting." });
     expect(calls[2].url).toBe("http://lisa.local/v1/policy-suggestions/suggestion-2/dismiss");
   });
+  it("loads a cited single-run QA observation through the authenticated Lisa API", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify({ id: "observation-1", session_id: "run-1" }), { status: 200 });
+    };
+    const api = new ExplorerApi({
+      apiBasePath: "/v1", lisaApiBasePath: "http://lisa.local/v1",
+      auth: { headers: () => ({ "X-Softprobe-Assertion": "signed" }) },
+      fetch: fetcher as typeof fetch,
+    });
+    const observation = await api.getLisaQaObservation("observation-1");
+    expect(observation.session_id).toBe("run-1");
+    expect(calls[0].url).toBe("http://lisa.local/v1/qa-observations/observation-1");
+    expect(calls[0].init?.headers).toMatchObject({ "X-Softprobe-Assertion": "signed" });
+  });
   it("deletes a Lisa conversation through the authenticated API", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ deleted: true }), { status: 200 }));
     const api = new ExplorerApi({ apiBasePath: "/v1", lisaApiBasePath: "http://127.0.0.1:18082/v1", auth: { headers: () => ({ Authorization: "Bearer workspace-token" }) }, fetch: fetcher as typeof fetch });

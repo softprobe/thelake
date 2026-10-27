@@ -51,7 +51,6 @@ describe("LisaPolicySuggestionCard", () => {
       onCancelEdit: vi.fn(),
       onChangeName: vi.fn(),
       onChangeCriteria: vi.fn(),
-      onDiscuss: vi.fn(),
       onOpenActivity: vi.fn(),
     }));
 
@@ -59,6 +58,7 @@ describe("LisaPolicySuggestionCard", () => {
     expect(html).toContain("Confirm before deleting an account");
     expect(html).toContain("3 supporting sessions");
     expect(html).toContain("Only Lisa owners can review suggestions.");
+    expect(html).not.toContain("Discuss with Lisa");
     expect(html).toContain('disabled=""');
     expect(approve).not.toHaveBeenCalled();
     expect(dismiss).not.toHaveBeenCalled();
@@ -69,10 +69,11 @@ describe("LisaPolicySuggestionCard", () => {
       suggestion: { ...suggestion, status: "approved", policy_id: "P1.1" },
       canReview: true, editing: false, editName: suggestion.name, editCriteria: suggestion.criteria,
       busy: false, onApprove: vi.fn(), onDismiss: vi.fn(), onEdit: vi.fn(), onCancelEdit: vi.fn(),
-      onChangeName: vi.fn(), onChangeCriteria: vi.fn(), onDiscuss: vi.fn(), onOpenActivity: vi.fn(),
+      onChangeName: vi.fn(), onChangeCriteria: vi.fn(), onOpenActivity: vi.fn(),
     }));
     expect(html).toContain("Active policy · P1.1");
     expect(html).toContain("You approved this policy");
     expect(html).not.toContain("Approve policy");
+    expect(html).not.toContain("Discuss with Lisa");
   });
 });

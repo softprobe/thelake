@@ -315,11 +315,16 @@ Policy-gap discovery is independent from policy triage and judge verdicts. A
 workspace-scoped hourly sampler selects at most five pushed sessions by default.
 Selected sessions reuse a Gemini judge request for an optional gap signal when
 one is already being made; other selected sessions go through a gap-only
-provider. The signal is stored separately and cannot change an evaluation
-verdict. At most one consolidation attempt runs per day, and only when new
-signals exist. It compares against approved policies and prior owner decisions
-and persists suggestions
-with source session, activity, and cited span evidence.
+provider. When Lisa detects a clear gap in one sampled session, she creates an
+immediate, evidence-linked QA observation in the main chat. Its update reference
+is persisted with the signal and the cited spans come from that same run. This
+reaction does not wait for a repeated pattern and does not change an evaluation
+verdict. Lisa only synthesizes a reusable policy recommendation after at least
+three distinct sampled sessions have signals; the proposed policy must cite
+signals from three distinct sessions. At most one consolidation attempt runs per
+day. It compares eligible signals against approved policies and prior owner
+decisions, then persists suggestions with source session, activity, and cited
+span evidence.
 
 The gap analyzer and suggestion synthesizer are injected provider callables so
 their model implementations can change without changing storage, sampling, or
@@ -342,17 +347,24 @@ inactive until an owner approves it from the chat card or suggestions feed.
 The main chat's proactive items are a UI projection stored in
 `lisa.proactive_updates`, separate from the OpenHands conversation transcript
 and `lisa.activity_events`. Each row has a stable ID and a unique source
-reference: one policy suggestion, or one completed pushed-session activity
-that contains at least one failed policy evaluation. Suggestion creation and
-its update reference share a transaction; evaluation completion and its finding
-reference also share a transaction. Passing, incomplete, missing-evidence, or
-failed evaluations do not create finding updates. The owner-only, bounded
-`GET /v1/proactive-updates` returns references; the Explorer resolves each
-reference through the existing suggestion and activity APIs. Approval updates
-the same recommendation in chat with its active policy ID. Dismissal remains
-in the suggestions history and is omitted from the main chat. Chat replies use
-the normal Lisa runtime and are never synthesized into the transcript from an
-update record.
+reference: one policy suggestion, one sampled QA observation, or one completed
+pushed-session activity that contains at least one failed policy evaluation.
+Each update stores one or more user-facing messages authored by the relevant
+Lisa model call: the single-run gap review, the repeated-gap synthesizer, or the
+policy judge. Explorer renders those messages as supplied and keeps evidence
+links and owner actions as separate controls; it does not compose Lisa's words
+from trace fields or activity summaries.
+Signal creation and its sampled-run observation reference share a transaction;
+suggestion creation and its update reference share a transaction; evaluation
+completion and its finding reference also share a transaction. Passing,
+incomplete, missing-evidence, or failed evaluations do not create finding
+updates. The owner-only, bounded `GET /v1/proactive-updates` returns references.
+The Explorer resolves suggestions and findings through the existing suggestion
+and activity APIs, and sampled QA observations through the owner-only
+`GET /v1/qa-observations/{id}`. Approval updates the same recommendation in
+chat with its active policy ID. Dismissal remains in the suggestions history
+and is omitted from the main chat. Chat replies use the normal Lisa runtime and
+are never synthesized into the transcript from an update record.
 
 ## Activities, failures, and notifications
 

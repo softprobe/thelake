@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from importlib.resources import files
 from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.rows import dict_row
+
+from ..security import redact_text
 
 
 def _sql(name: str) -> str:
@@ -18,10 +21,11 @@ def create_proactive_update(
     *,
     source_type: str,
     source_id: str,
+    messages: list[str],
     activity_id: str | None = None,
 ) -> None:
-    """Create one update inside the source record's transaction."""
-    if source_type not in {"policy_suggestion", "policy_finding"}:
+    """Create one source-linked, model-authored chat update transactionally."""
+    if source_type not in {"policy_suggestion", "policy_finding", "qa_observation"}:
         raise ValueError("Unsupported proactive update source")
     try:
         source_id = str(UUID(source_id))
@@ -30,12 +34,16 @@ def create_proactive_update(
         raise ValueError("Proactive update source IDs must be UUIDs") from None
     if (source_type == "policy_suggestion" and activity_id is not None) or (
         source_type == "policy_finding" and activity_id != source_id
-    ):
+    ) or (source_type == "qa_observation" and activity_id is None):
         raise ValueError("Proactive update source reference does not match its type")
+    if not messages or any(not message.strip() for message in messages):
+        raise ValueError("Proactive updates require model-authored messages")
+    safe_messages = [redact_text(message)[:4_000] for message in messages]
     connection.execute(_sql("create_proactive_update.sql"), {
         "id": str(uuid4()),
         "source_type": source_type,
         "source_id": source_id,
+        "messages": json.dumps(safe_messages),
         "activity_id": activity_id,
     })
 
@@ -61,6 +69,7 @@ class ProactiveUpdateRepository:
                 "id": str(row["id"]),
                 "source_type": row["source_type"],
                 "source_id": row["source_id"],
+                "messages": row["messages"],
                 "activity_id": str(row["activity_id"]) if row["activity_id"] else None,
                 "created_at": row["created_at"].isoformat(),
             }

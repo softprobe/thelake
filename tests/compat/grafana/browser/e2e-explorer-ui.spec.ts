@@ -7,18 +7,39 @@ const lisaBackend = process.env.THELAKE_LISA_E2E_URL ?? backend;
 const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 test.use({ video: 'on' });
 
-test('Lisa keeps a recommendation in chat through approval and brings a later finding back', async ({ page }) => {
+test('Lisa flags one run immediately, recommends a rule from repeated runs, and reports later findings', async ({ page }) => {
   test.setTimeout(120_000);
   page.on('pageerror', (error) => console.error(`Lisa story page error: ${error.stack ?? error.message}`));
   page.on('requestfailed', (request) => console.error(`Lisa story request failed: ${request.url()} ${request.failure()?.errorText}`));
+  await page.setViewportSize({ width: 1600, height: 1000 });
   const createdAt = new Date().toISOString();
+  const userReactionAt = new Date(Date.parse(createdAt) + 1000).toISOString();
+  const userReaction = {
+    id: 'user-reacts-to-run', role: 'user',
+    text: 'I see what you mean. Can you show me what led to that action?', created_at: userReactionAt,
+  };
+  const observationMessage = 'I noticed the agent permanently deleted the account without first asking the user to confirm. I can’t tell from this run whether the user intended that action, so I’m flagging it for your review.';
+  const findingMessage = 'I checked a new run against the active policy. The account was deleted without asking the user to confirm first.';
   let status: 'pending' | 'approved' | 'dismissed' = 'pending';
+  let recommendationVisible = false;
   let findingVisible = false;
+  const observation = {
+    id: 'observation-story', session_id: 'synthetic-account-17', activity_id: 'activity-run-17',
+    agent_name: 'account-agent',
+    summary: 'The agent permanently deleted account acct-demo-17 without asking the user to confirm.',
+    span_ids: ['span-request-17', 'span-delete-17', 'span-result-17'],
+    evidence: [
+      { span_id: 'span-request-17', kind: 'user_message', name: 'message', content: 'I need help with my account.' },
+      { span_id: 'span-delete-17', kind: 'tool_call', name: 'delete_account', content: 'delete_account(account_id="acct-demo-17")' },
+      { span_id: 'span-result-17', kind: 'tool_result', name: 'delete_account', status: 'ok', content: '{"status":"deleted","account_id":"acct-demo-17"}' },
+    ],
+    created_at: createdAt,
+  };
   const recommendation = {
     id: 'suggestion-story', name: 'Confirm before deleting an account',
     criteria: 'Before permanently deleting an account, confirm that the user explicitly requested deletion.',
     scope: 'agent', target_agent_name: 'account-agent',
-    rationale: 'Three separate runs reached permanent deletion without a clear confirmation.',
+    rationale: 'The same missing confirmation appeared in three separate runs.',
     signal_count: 3, overlaps: [], status, policy_id: status === 'approved' ? 'P1.1' : null,
     created_at: createdAt, reviewed_at: status === 'approved' ? createdAt : null,
     evidence: [1, 2, 3].map((run) => {
@@ -38,21 +59,23 @@ test('Lisa keeps a recommendation in chat through approval and brings a later fi
     }),
   };
   const updates = () => [
-    { id: 'update-recommendation', source_type: 'policy_suggestion', source_id: 'suggestion-story', activity_id: 'discovery-activity', created_at: createdAt },
-    ...(findingVisible ? [{ id: 'update-finding', source_type: 'policy_finding', source_id: 'evaluation-story', activity_id: 'evaluation-story', created_at: new Date(Date.now() + 1000).toISOString() }] : []),
+    { id: 'update-observation', source_type: 'qa_observation', source_id: 'observation-story', messages: [observationMessage], activity_id: 'activity-run-17', created_at: createdAt },
+    ...(recommendationVisible ? [{ id: 'update-recommendation', source_type: 'policy_suggestion', source_id: 'suggestion-story', messages: [recommendation.rationale], activity_id: null, created_at: new Date(Date.parse(createdAt) + 60_000).toISOString() }] : []),
+    ...(findingVisible ? [{ id: 'update-finding', source_type: 'policy_finding', source_id: 'evaluation-story', messages: [findingMessage], activity_id: 'evaluation-story', created_at: new Date(Date.parse(createdAt) + 120_000).toISOString() }] : []),
   ];
   await page.addInitScript(() => Object.defineProperty(window, '__LISA_API_BASE_PATH__', { value: '/lisa/v1' }));
   await page.route('**/lisa/v1/**', async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === '/lisa/v1/conversations') {
-      await route.fulfill({ json: [{ conversation_id: 'story-chat', title: 'Lisa', messages: [], activities: [] }] }); return;
+      await route.fulfill({ json: [{ conversation_id: 'story-chat', title: 'Lisa', messages: [userReaction], activities: [] }] }); return;
     }
     if (url.pathname === '/lisa/v1/conversations/story-chat') {
-      await route.fulfill({ json: { conversation_id: 'story-chat', title: 'Lisa', messages: [], activities: [] } }); return;
+      await route.fulfill({ json: { conversation_id: 'story-chat', title: 'Lisa', messages: [userReaction], activities: [] } }); return;
     }
     if (url.pathname === '/lisa/v1/proactive-updates') { await route.fulfill({ json: { items: updates() } }); return; }
+    if (url.pathname === '/lisa/v1/qa-observations/observation-story') { await route.fulfill({ json: observation }); return; }
     if (url.pathname === '/lisa/v1/policy-suggestions') {
-      const rows = status === url.searchParams.get('status') || (url.searchParams.get('status') === 'pending' && status === 'pending') ? [{ ...recommendation, status, policy_id: status === 'approved' ? 'P1.1' : null }] : [];
+      const rows = recommendationVisible && (status === url.searchParams.get('status') || (url.searchParams.get('status') === 'pending' && status === 'pending')) ? [{ ...recommendation, status, policy_id: status === 'approved' ? 'P1.1' : null }] : [];
       await route.fulfill({ json: { items: rows, can_review: true } }); return;
     }
     if (url.pathname === '/lisa/v1/policy-suggestions/suggestion-story/approve') {
@@ -65,34 +88,58 @@ test('Lisa keeps a recommendation in chat through approval and brings a later fi
     if (url.pathname === '/lisa/v1/activities/evaluation-story') {
       await route.fulfill({ json: { activity: { id: 'evaluation-story', title: 'New account run · policy evaluation', kind: 'session_evaluation', status: 'success', status_title: 'Evaluation complete', summary: 'Policy violation found: explicit confirmation before deletion.', created_at: createdAt }, thread: { name: 'New account run · policy evaluation', status: 'success' }, actions: [], references: [{ reference_type: 'session', reference_id: 'synthetic-account-4' }] } }); return;
     }
+    if (url.pathname === '/lisa/v1/activities/activity-run-17') {
+      await route.fulfill({ json: { activity: { id: 'activity-run-17', title: 'Account run · QA review', kind: 'session_evaluation', status: 'success', status_title: 'Run reviewed', summary: observation.summary, created_at: createdAt }, thread: { name: 'Account run · QA review', status: 'success' }, actions: [], references: [{ reference_type: 'session', reference_id: observation.session_id }] } }); return;
+    }
     if (url.pathname === '/lisa/v1/activities') { await route.fulfill({ json: [] }); return; }
     await route.fulfill({ status: 404, json: { detail: 'Unknown Lisa story fixture route' } });
   });
 
   await page.goto(`${lisaBackend}/lisa/`);
   const chat = page.getByRole('log', { name: 'Lisa conversation' });
-  await expect(chat.getByText('Three separate runs reached permanent deletion without a clear confirmation.')).toBeVisible();
   const captureDir = resolve(process.cwd(), '../../../../target/lisa-policy-story');
-  await page.screenshot({ path: resolve(captureDir, '05-chat-recommendation.png'), fullPage: true });
-  await chat.getByText(/Trace evidence/).click();
-  await expect(chat.getByText(/delete_account\(account_id="acct-demo-/).first()).toBeVisible();
-  await page.locator('.tle-lisa-transcript').evaluate((element) => { element.scrollTop = 0; });
-  await page.screenshot({ path: resolve(captureDir, '06-chat-trace-evidence.png'), fullPage: true });
-  await page.waitForTimeout(16_000);
+  await expect(chat.getByText(userReaction.text)).toBeVisible();
+  await expect(chat.getByText(observationMessage)).toBeVisible();
+  await expect(chat.getByRole('button', { name: 'Open run details' })).toBeVisible();
+  await expect(chat.getByRole('button', { name: 'Ask Lisa about this' })).toHaveCount(0);
+  await expect(chat.getByRole('button', { name: 'Discuss with Lisa' })).toHaveCount(0);
+  const reactionBounds = await chat.getByText(userReaction.text).boundingBox();
+  const observationBounds = await chat.locator('.tle-lisa-proactive-message').first().boundingBox();
+  if (!reactionBounds || !observationBounds || observationBounds.y >= reactionBounds.y) {
+    throw new Error('Lisa should surface the sampled-run observation before the owner responds');
+  }
+  const chatCrop = {
+    x: Math.max(0, Math.floor(Math.min(reactionBounds.x, observationBounds.x) - 24)),
+    y: Math.max(0, Math.floor(Math.min(reactionBounds.y, observationBounds.y) - 24)),
+    width: Math.ceil(Math.max(reactionBounds.x + reactionBounds.width, observationBounds.x + observationBounds.width) - Math.min(reactionBounds.x, observationBounds.x) + 48),
+    height: Math.ceil(Math.max(reactionBounds.y + reactionBounds.height, observationBounds.y + observationBounds.height) - Math.min(reactionBounds.y, observationBounds.y) + 48),
+  };
+  await page.screenshot({ path: resolve(captureDir, '05-chat-single-run-observation.png'), clip: chatCrop });
+  await page.screenshot({ path: resolve(captureDir, '05-chat-single-run-observation-full.png'), fullPage: true });
+  await chat.locator('.tle-lisa-proactive-message').first().screenshot({ path: resolve(captureDir, '06-chat-lisa-observation.png') });
+
+  await page.waitForTimeout(11_000);
+  recommendationVisible = true;
+  await page.waitForTimeout(11_000);
+  await expect(chat.getByText('The same missing confirmation appeared in three separate runs.')).toBeVisible();
+  await chat.locator('.tle-lisa-proactive-message').nth(1).screenshot({ path: resolve(captureDir, '07-chat-recommendation-detail.png') });
+  await page.screenshot({ path: resolve(captureDir, '07-chat-recommendation.png'), fullPage: true });
+  await page.waitForTimeout(11_000);
   await chat.getByRole('button', { name: 'Approve policy' }).click();
   await expect(chat.getByText('Active policy · P1.1')).toBeVisible();
   await expect(chat.getByText('You approved this policy. Lisa will keep checking new runs against it.')).toBeVisible();
-  await page.screenshot({ path: resolve(captureDir, '07-chat-approved-policy.png'), fullPage: true });
-  await page.waitForTimeout(16_000);
+  await chat.locator('.tle-lisa-proactive-message').nth(1).screenshot({ path: resolve(captureDir, '08-chat-approved-policy-detail.png') });
+  await page.screenshot({ path: resolve(captureDir, '08-chat-approved-policy.png'), fullPage: true });
+  await page.waitForTimeout(11_000);
   findingVisible = true;
-  await expect.poll(async () => chat.getByText(/I checked a new run against the policy/).count()).toBe(1, { timeout: 10_000 });
+  await expect(chat.getByText(findingMessage)).toBeVisible();
   await expect(chat.getByRole('button', { name: 'Open evaluation evidence' })).toBeVisible();
-  await page.screenshot({ path: resolve(captureDir, '08-chat-later-finding.png'), fullPage: true });
-  await page.waitForTimeout(16_000);
-  await chat.getByRole('button', { name: 'Ask Lisa about this' }).click();
-  await expect(page.getByRole('textbox', { name: 'Message Lisa' })).toHaveValue(/evaluation-story/);
-  await page.screenshot({ path: resolve(captureDir, '09-chat-discuss-finding.png'), fullPage: true });
-  await page.waitForTimeout(16_000);
+  await chat.locator('.tle-lisa-proactive-message').nth(2).screenshot({ path: resolve(captureDir, '09-chat-later-finding-detail.png') });
+  await page.screenshot({ path: resolve(captureDir, '09-chat-later-finding.png'), fullPage: true });
+  await page.waitForTimeout(11_000);
+  const video = page.video();
+  await page.close();
+  if (video) await video.saveAs(resolve(captureDir, 'lisa-proactive-policy-story.webm'));
 });
 
 function otlpValue(value: string | number) {

@@ -53,7 +53,9 @@ card. After approval, the same item shows its active policy ID. A completed
 pushed-session violation appears as Lisa's follow-up with a link to its
 evaluation activity. Dismissed suggestions remain in suggestions history and
 leave the chat. These items are UI projections, never transcript messages or
-activity events; discussion replies use the normal Lisa chat runtime. Keep
+activity events. The source model call writes each proactive update's
+user-facing message; Explorer renders it without composing Lisa's words from
+trace data. Discussion replies use the normal Lisa chat runtime. Keep
 approval owner-authorized; pending recommendations never become active
 automatically.
 In chat, consecutive tool calls and results are grouped into a collapsed “Lisa’s
@@ -142,9 +144,13 @@ authorization contract for them.
   score. Incomplete or unordered trajectories are gated before provider calls.
 - Keep triage decisions, judge verdicts, execution errors, and capture gates
   distinct. Provider or validation errors must not become healthy negatives.
-- Policy discovery is a separate, bounded capability. Its gap analyzer and
-  cross-session synthesizer are injected provider callables, independent of the
-  judge verdict and replaceable without changing sampling, storage, or review.
+- Policy discovery uses the existing bounded workspace sampler (five runs per
+  hour by default). React in the main chat as soon as one sampled run contains
+  a clear, cited error. Do not wait for recurrence to surface that observation.
+  Do not recommend a reusable policy until at least three distinct sampled
+  sessions show the same error pattern, and cite all three. The gap analyzer
+  and cross-session synthesizer are injected provider callables, independent of
+  the judge verdict and replaceable without changing sampling or storage.
   The policy MCP namespace exposes suggestion read tools through the same lazy
   tool-loading path as policy operations. Only an authenticated owner action
   can turn a suggestion into an active policy. See

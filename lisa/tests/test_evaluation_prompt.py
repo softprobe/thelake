@@ -132,6 +132,9 @@ def test_evaluation_transcript_reaches_both_provider_boundaries(pair, monkeypatc
         criteria_line = client.request["input"].split(rule.name + "\n", 1)[1].splitlines()[0]
         assert json.loads('"' + criteria_line + '"') == rule.criteria
     assert result.status == expected_status
+    judge_instruction = captures[0]["config"].system_instruction.casefold()
+    assert "speaking directly to a nontechnical owner" in judge_instruction
+    assert "avoid trace terminology" in judge_instruction
     assert result.references[0].span_id == supporting_span
     assert not any("truncated" in limitation for limitation in result.limitations)
     assert closed == [True]
@@ -143,20 +146,26 @@ def test_optional_policy_gap_signal_cites_source_spans_without_changing_verdict(
     trajectory = pair.request()["trajectory"]
     view = format_trajectory_for_llm(trajectory["events"])
     alias = next(iter(view.span_id_map))
+    captures = []
+
+    def generate(**kwargs):
+        captures.append(kwargs)
+        return SimpleNamespace(parsed={
+            "status": "fail",
+            "rationale": "The action was unsafe.",
+            "span_ids": [alias],
+            "policy_gap_signal": {
+                "detected": True,
+                "summary": "I noticed that the action happened without the safeguard.",
+                "span_ids": [alias],
+            },
+        })
+
     monkeypatch.setattr(
         evaluator,
         "create_judge_client",
         lambda: SimpleNamespace(
-            models=SimpleNamespace(generate_content=lambda **kwargs: SimpleNamespace(parsed={
-                "status": "fail",
-                "rationale": "The action was unsafe.",
-                "span_ids": [alias],
-                "policy_gap_signal": {
-                    "detected": True,
-                    "summary": "The action lacked a confirmation step.",
-                    "span_ids": [alias],
-                },
-            })),
+            models=SimpleNamespace(generate_content=generate),
             close=lambda: None,
         ),
     )
@@ -169,3 +178,6 @@ def test_optional_policy_gap_signal_cites_source_spans_without_changing_verdict(
     assert result.status == "fail"
     assert result.policy_gap_signal is not None
     assert result.policy_gap_signal.span_ids == [view.span_id_map[alias]]
+    instruction = captures[0]["config"].system_instruction.casefold()
+    assert "policy_gap_signal.summary as lisa speaking directly to the nontechnical owner" in instruction
+    assert "without implying recurrence" in instruction

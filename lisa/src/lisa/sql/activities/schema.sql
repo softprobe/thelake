@@ -366,7 +366,8 @@ CREATE INDEX policy_discovery_samples_pending_idx
 
 CREATE TABLE lisa.policy_discovery_signals (
     id uuid PRIMARY KEY,
-    session_id text NOT NULL UNIQUE,
+    session_id text NOT NULL UNIQUE
+        REFERENCES lisa.policy_discovery_samples(session_id) ON DELETE CASCADE,
     activity_id uuid NOT NULL REFERENCES lisa.activities(id) ON DELETE CASCADE,
     agent_name text NOT NULL,
     summary text NOT NULL,
@@ -407,14 +408,16 @@ CREATE INDEX policy_suggestions_pending_idx
 -- They are not OpenHands transcript messages or activity events.
 CREATE TABLE lisa.proactive_updates (
     id uuid PRIMARY KEY,
-    source_type text NOT NULL CHECK (source_type IN ('policy_suggestion', 'policy_finding')),
+    source_type text NOT NULL CHECK (source_type IN ('policy_suggestion', 'policy_finding', 'qa_observation')),
     source_id text NOT NULL,
+    messages jsonb NOT NULL CHECK (jsonb_typeof(messages) = 'array' AND jsonb_array_length(messages) > 0),
     activity_id uuid REFERENCES lisa.activities(id) ON DELETE CASCADE,
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (source_type, source_id),
     CHECK (
         (source_type = 'policy_suggestion' AND activity_id IS NULL) OR
-        (source_type = 'policy_finding' AND activity_id IS NOT NULL AND source_id = activity_id::text)
+        (source_type = 'policy_finding' AND activity_id IS NOT NULL AND source_id = activity_id::text) OR
+        (source_type = 'qa_observation' AND activity_id IS NOT NULL)
     )
 );
 CREATE INDEX proactive_updates_recent_idx

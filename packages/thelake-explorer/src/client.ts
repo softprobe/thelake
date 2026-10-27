@@ -178,9 +178,28 @@ export type LisaPolicySuggestionPage = {
 
 export type LisaProactiveUpdate = {
   id: string;
-  source_type: "policy_suggestion" | "policy_finding";
+  source_type: "policy_suggestion" | "policy_finding" | "qa_observation";
   source_id: string;
+  messages: string[];
   activity_id?: string | null;
+  created_at: string;
+};
+
+export type LisaQaObservation = {
+  id: string;
+  session_id: string;
+  activity_id: string;
+  agent_name: string;
+  summary: string;
+  span_ids: string[];
+  evidence: Array<{
+    span_id: string;
+    kind: string;
+    name?: string | null;
+    content?: string | null;
+    payload?: unknown;
+    status?: string | null;
+  }>;
   created_at: string;
 };
 
@@ -314,6 +333,10 @@ export class ExplorerApi {
 
   listLisaProactiveUpdates(limit = 50): Promise<{ items: LisaProactiveUpdate[] }> {
     return this.requestLisa(`/proactive-updates?limit=${encodeURIComponent(String(limit))}`);
+  }
+
+  getLisaQaObservation(observationId: string): Promise<LisaQaObservation> {
+    return this.requestLisa(`/qa-observations/${encodeURIComponent(observationId)}`);
   }
 
   approveLisaPolicySuggestion(

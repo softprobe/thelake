@@ -42,12 +42,33 @@ describe("Lisa timeline", () => {
       { id: "answer-1", role: "assistant", text: "I reviewed the evidence.", sequence: 2, created_at: "2026-10-13T12:00:02Z" },
     ], [], false, [{ update: {
       id: "update-1", source_type: "policy_suggestion", source_id: "suggestion-1",
+      messages: ["I found a repeated behavior worth discussing."],
       created_at: "2026-10-13T12:00:01Z",
     } }]);
 
     expect(timeline.map((message) => message.id)).toEqual(["user-1", "proactive-update-1", "answer-1"]);
     expect(timeline[1].content[0]).toMatchObject({ type: "text" });
     expect(timeline[0].content).toEqual([{ type: "text", text: "Check recent sessions" }]);
+  });
+
+  it("places a single-run QA observation directly in Lisa's chat timeline", () => {
+    const observation = {
+      id: "observation-1", session_id: "run-1", activity_id: "activity-1",
+      agent_name: "account-agent", summary: "Deleted the account without confirmation.",
+      span_ids: ["delete-span"], evidence: [], created_at: "2026-10-13T12:00:01Z",
+    };
+    const timeline = lisaTimeline([], [], false, [{
+      update: {
+        id: "update-1", source_type: "qa_observation", source_id: "observation-1",
+        activity_id: "activity-1", messages: ["I noticed a concern in this run."],
+        created_at: "2026-10-13T12:00:01Z",
+      },
+      observation,
+    }]);
+
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0].id).toBe("proactive-update-1");
+    expect(timeline[0].content[0]).toMatchObject({ type: "text" });
   });
 
   it("gives mixed unsequenced, sequenced, and optimistic items a deterministic order", () => {

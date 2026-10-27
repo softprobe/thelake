@@ -287,6 +287,7 @@ def test_pushed_session_summary_surfaces_policy_violation(evaluation_services, m
     assert len(finding_updates) == 1
     assert finding_updates[0]["source_id"] == activity.id
     assert finding_updates[0]["activity_id"] == activity.id
+    assert finding_updates[0]["messages"] == ["The agent skipped the required check."]
 
 
 def test_failed_or_missing_pushed_evaluation_does_not_create_proactive_finding(evaluation_services):

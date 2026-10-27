@@ -12,8 +12,9 @@ import {
   type ToolCallMessagePartProps,
   type PartState,
 } from "@assistant-ui/react";
-import type { ExplorerApi, LisaActivity, LisaActivityDetail, LisaConversation, LisaFeedEntry, LisaMessage, LisaPolicyRecord, LisaPolicySuggestion, LisaProactiveUpdate } from "./client";
+import type { ExplorerApi, LisaActivity, LisaActivityDetail, LisaConversation, LisaFeedEntry, LisaMessage, LisaPolicyRecord, LisaPolicySuggestion, LisaProactiveUpdate, LisaQaObservation } from "./client";
 import { LisaMessageContent } from "./LisaMessageContent";
+import { LisaProactiveVoice } from "./LisaProactiveVoice";
 import { LisaPolicySuggestionCard } from "./LisaPolicySuggestionCard";
 import { lisaTimeline, parseLisaProactiveUpdate, parseLisaToolResult, toolActionLabel, type LisaTimelineUpdate } from "./LisaTimeline";
 import "./LisaView.css";
@@ -115,12 +116,11 @@ function LisaEmptyPart({ status }: EmptyMessagePartProps) {
   ) : null;
 }
 
-function LisaRuntimeMessage({ message, onApprove, onDismiss, onEdit, onDiscuss, onOpenActivity, editingId, editName, editCriteria, busyId, actionError, canReview, onCancelEdit, onChangeName, onChangeCriteria, onAskAboutFinding }: {
+function LisaRuntimeMessage({ message, onApprove, onDismiss, onEdit, onOpenActivity, editingId, editName, editCriteria, busyId, actionError, canReview, onCancelEdit, onChangeName, onChangeCriteria }: {
   message: ThreadMessageLike;
   onApprove: (suggestion: LisaPolicySuggestion, edited: boolean) => void;
   onDismiss: (id: string) => void;
   onEdit: (suggestion: LisaPolicySuggestion) => void;
-  onDiscuss: (suggestion: LisaPolicySuggestion) => void;
   onOpenActivity: (id: string) => void;
   editingId?: string;
   editName: string;
@@ -131,32 +131,34 @@ function LisaRuntimeMessage({ message, onApprove, onDismiss, onEdit, onDiscuss, 
   onCancelEdit: () => void;
   onChangeName: (value: string) => void;
   onChangeCriteria: (value: string) => void;
-  onAskAboutFinding: (activity: LisaFeedEntry) => void;
 }) {
   const marker = Array.isArray(message.content) && message.content[0]?.type === "text"
     ? parseLisaProactiveUpdate(message.content[0].text)
     : undefined;
   if (marker) {
-    const { update, suggestion, activity } = marker;
+    const { update, suggestion, activity, observation } = marker;
     if (suggestion && suggestion.status !== "dismissed") return <section className="tle-lisa-proactive-message" aria-label="Lisa message">
-      <div className="tle-lisa-proactive-voice"><span className="tle-lisa-avatar">L</span><div><b>Lisa</b><p>{suggestion.status === "approved"
-        ? `I turned the pattern I found into policy ${suggestion.policy_id || ""}. I’ll keep checking for it.`
-        : `I noticed the same behavior across ${suggestion.signal_count} sessions. I drafted a policy so we can decide how to handle it.`}</p></div></div>
+      <LisaProactiveVoice messages={update.messages} />
       <LisaPolicySuggestionCard
         suggestion={suggestion} canReview={canReview && suggestion.status === "pending"}
         editing={editingId === suggestion.id && suggestion.status === "pending"} editName={editName} editCriteria={editCriteria}
         busy={busyId === suggestion.id} actionError={actionError} onApprove={(edited) => onApprove(suggestion, edited)}
         onDismiss={() => onDismiss(suggestion.id)} onEdit={() => onEdit(suggestion)} onCancelEdit={onCancelEdit}
-        onChangeName={onChangeName} onChangeCriteria={onChangeCriteria} onDiscuss={() => onDiscuss(suggestion)}
+        onChangeName={onChangeName} onChangeCriteria={onChangeCriteria}
         onOpenActivity={onOpenActivity}
       />
     </section>;
+    if (observation) return <section className="tle-lisa-proactive-message" aria-label="Lisa run observation">
+      <LisaProactiveVoice messages={update.messages} />
+      <div className="tle-lisa-proactive-actions">
+        <button type="button" onClick={() => onOpenActivity(observation.activity_id)}>Open run details</button>
+      </div>
+    </section>;
     if (activity) return <section className="tle-lisa-proactive-message" aria-label="Lisa message">
-      <div className="tle-lisa-proactive-voice"><span className="tle-lisa-avatar">L</span><div><b>Lisa</b><p>I checked a new run against the policy and found a violation: {policyFindingSummary(activity) || activity.summary || "the required behavior was missed."}</p></div></div>
-      <div className="tle-lisa-finding-update"><span>Policy finding</span><p>{activity.subtitle || activity.summary}</p><div>
+      <LisaProactiveVoice messages={update.messages} />
+      <div className="tle-lisa-proactive-actions">
         {update.activity_id && <button type="button" onClick={() => onOpenActivity(update.activity_id!)}>Open evaluation evidence</button>}
-        <button type="button" onClick={() => onAskAboutFinding(activity)}>Ask Lisa about this</button>
-      </div></div>
+      </div>
     </section>;
   }
   const role = message.role;
@@ -220,6 +222,7 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
   const [suggestionHistory, setSuggestionHistory] = useState<LisaPolicySuggestion[]>([]);
   const [proactiveTimeline, setProactiveTimeline] = useState<LisaTimelineUpdate[]>([]);
   const proactiveActivityCache = useRef(new Map<string, LisaFeedEntry>());
+  const proactiveObservationCache = useRef(new Map<string, LisaQaObservation>());
   const [canReviewSuggestions, setCanReviewSuggestions] = useState(false);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState<string>();
@@ -336,17 +339,31 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
       ]);
       const suggestionsById = new Map(suggestionPages.flatMap((page) => page.items).map((item) => [item.id, item]));
       const findingActivityIds = [...new Set(updatesPage.items
-        .filter((item) => item.source_type === "policy_finding" && item.activity_id)
+        .filter((item) => (item.source_type === "policy_finding" || item.source_type === "qa_observation") && item.activity_id)
         .map((item) => item.activity_id!))];
+      const observationIds = [...new Set(updatesPage.items
+        .filter((item) => item.source_type === "qa_observation")
+        .map((item) => item.source_id))];
       const missingActivityIds = findingActivityIds.filter((id) => !proactiveActivityCache.current.has(id));
-      const activityDetails = await Promise.allSettled(missingActivityIds.map((id) => api.getLisaActivity(id)));
+      const missingObservationIds = observationIds.filter((id) => !proactiveObservationCache.current.has(id));
+      const [activityDetails, observationDetails] = await Promise.all([
+        Promise.allSettled(missingActivityIds.map((id) => api.getLisaActivity(id))),
+        Promise.allSettled(missingObservationIds.map((id) => api.getLisaQaObservation(id))),
+      ]);
       activityDetails.forEach((result) => {
         if (result.status === "fulfilled") proactiveActivityCache.current.set(result.value.activity.id, result.value.activity);
+      });
+      observationDetails.forEach((result) => {
+        if (result.status === "fulfilled") proactiveObservationCache.current.set(result.value.id, result.value);
       });
       const resolved: LisaTimelineUpdate[] = updatesPage.items.flatMap((update: LisaProactiveUpdate) => {
         if (update.source_type === "policy_suggestion") {
           const suggestion = suggestionsById.get(update.source_id);
           return suggestion && suggestion.status !== "dismissed" ? [{ update, suggestion }] : [];
+        }
+        if (update.source_type === "qa_observation") {
+          const observation = proactiveObservationCache.current.get(update.source_id);
+          return observation ? [{ update, observation }] : [];
         }
         const activity = update.activity_id ? proactiveActivityCache.current.get(update.activity_id) : undefined;
         return activity ? [{ update, activity }] : [];
@@ -413,28 +430,6 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
       setSuggestionActionId(undefined);
     }
   }, [api, refreshProactiveTimeline, refreshSuggestions]);
-
-  const discussSuggestion = useCallback((suggestion: LisaPolicySuggestion) => {
-    let remainingCitations = 8;
-    const evidence = suggestion.evidence.map((source) => {
-      const spans = source.evidence.slice(0, remainingCitations).map((item) =>
-        `${item.kind} span ${item.span_id}: ${item.content || JSON.stringify(item.payload || item.name || "")}`
-      ).join("\n");
-      remainingCitations -= Math.min(source.evidence.length, remainingCitations);
-      if (!spans) return "";
-      return `Session ${source.session_id} · agent ${source.agent_name} · evaluation activity ${source.activity_id}\n${spans}`;
-    }).filter(Boolean).join("\n\n");
-    setDraftText(`Please review policy suggestion ${suggestion.id} with me. Explain whether the evidence supports it and help refine the wording without approving it yet.\n\nSuggested policy: ${suggestion.name}\n${suggestion.criteria}\n\nLisa's rationale: ${suggestion.rationale}\n\nCited trace evidence:\n${evidence}`);
-    setHasDraft(true);
-    setActiveWorkspaceView("chat");
-    window.requestAnimationFrame(() => composerInputRef.current?.focus());
-  }, []);
-
-  const askAboutFinding = useCallback((activity: LisaFeedEntry) => {
-    setDraftText(`Lisa, can you walk me through finding activity ${activity.id} and its evidence?\n\n${activity.summary || activity.subtitle || ""}`.trim());
-    setHasDraft(true);
-    window.requestAnimationFrame(() => composerInputRef.current?.focus());
-  }, []);
 
   useEffect(() => { void refreshFeed(); }, [refreshFeed]);
 
@@ -700,8 +695,8 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
                   editName={editingSuggestionName} editCriteria={editingSuggestionCriteria} busyId={suggestionActionId}
                   actionError={suggestionActionError} onApprove={(suggestion, edited) => void approveSuggestion(suggestion, edited)}
                   onDismiss={(id) => void dismissSuggestion(id)} onEdit={(suggestion) => { setEditingSuggestionId(suggestion.id); setEditingSuggestionName(suggestion.name); setEditingSuggestionCriteria(suggestion.criteria); }}
-                  onDiscuss={discussSuggestion} onOpenActivity={(id) => void openActivity(id)} onCancelEdit={() => setEditingSuggestionId(undefined)}
-                  onChangeName={setEditingSuggestionName} onChangeCriteria={setEditingSuggestionCriteria} onAskAboutFinding={askAboutFinding} />}
+                  onOpenActivity={(id) => void openActivity(id)} onCancelEdit={() => setEditingSuggestionId(undefined)}
+                  onChangeName={setEditingSuggestionName} onChangeCriteria={setEditingSuggestionCriteria} />}
               </ThreadPrimitive.Messages>
               {suggestionsLoading && suggestions.length === 0 && <p className="tle-lisa-recommendation-status" role="status">Checking for policy recommendations…</p>}
               {suggestionsError && <p className="tle-lisa-recommendation-error" role="alert">
@@ -744,7 +739,7 @@ export function LisaView({ api, onShowSessions }: { api: ExplorerApi; onShowSess
               onApprove={(edited) => void approveSuggestion(suggestion, edited)} onDismiss={() => void dismissSuggestion(suggestion.id)}
               onEdit={() => { setEditingSuggestionId(suggestion.id); setEditingSuggestionName(suggestion.name); setEditingSuggestionCriteria(suggestion.criteria); }}
               onCancelEdit={() => setEditingSuggestionId(undefined)} onChangeName={setEditingSuggestionName} onChangeCriteria={setEditingSuggestionCriteria}
-              onDiscuss={() => discussSuggestion(suggestion)} onOpenActivity={(activityId) => void openActivity(activityId)}
+              onOpenActivity={(activityId) => void openActivity(activityId)}
             />)}
           </section>}
           {(activeWorkspaceView === "evaluations" || activeWorkspaceView === "findings") && (() => {

@@ -1967,5 +1967,6 @@ class PostgresActivityStore:
                 connection,
                 source_type="policy_finding",
                 source_id=activity_id,
+                messages=finding["messages"],
                 activity_id=activity_id,
             )
