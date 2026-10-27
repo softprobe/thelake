@@ -126,6 +126,19 @@
 .tle-lisa-rule-card small { color: #706d78; font-size: 10px; }
 .tle-lisa-suggestions > .tle-lisa-panel-note { margin: 0 0 12px; }
 .tle-lisa-suggestion-card { margin-bottom: 10px; padding: 13px; border: 1px solid #e8e2ef; border-radius: 14px; background: #fff; box-shadow: 0 2px 8px #2c17430a; }
+.tle-lisa-chat-recommendations { display: grid; gap: 10px; width: min(100%, 680px); margin: 4px 0 8px; }
+.tle-lisa-recommendation-card { margin: 0; padding: 18px; border-color: #d9c9ff; background: linear-gradient(145deg, #fff 0%, #fcfaff 100%); box-shadow: 0 8px 24px #5530a20d; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-heading { justify-content: flex-start; flex-wrap: wrap; margin-bottom: 10px; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-state { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 999px; background: #f0eaff; color: #6633df; font-size: 10px; letter-spacing: 0; text-transform: none; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-state::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; content: ""; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-heading small { margin-left: auto; }
+.tle-lisa-recommendation-card h4 { font-size: 15px; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-criteria { color: #393641; font-size: 12px; }
+.tle-lisa-recommendation-disclosure { margin: 10px 0 0; color: #777580; font-size: 10px; line-height: 1.45; }
+.tle-lisa-recommendation-status { width: min(100%, 680px); margin: 4px 0; color: #716b7b; font-size: 12px; }
+.tle-lisa-recommendation-error { width: min(100%, 680px); box-sizing: border-box; margin: 4px 0; padding: 10px 12px; border: 1px solid #f2d4d4; border-radius: 10px; background: #fff8f7; color: #913e38; font-size: 12px; }
+.tle-lisa-recommendation-error button { margin-left: 7px; padding: 0; border: 0; background: transparent; color: #6633df; font: inherit; font-weight: 650; text-decoration: underline; cursor: pointer; }
+.tle-lisa-suggestion-count { display: inline-grid; min-width: 17px; height: 17px; place-items: center; padding: 0 4px; border-radius: 10px; background: #fff0ef; color: #a83430; font-size: 9px; font-weight: 700; line-height: 1; }
 .tle-lisa-suggestion-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .tle-lisa-suggestion-state { color: #7956a4; font-size: 9px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
 .tle-lisa-suggestion-heading small, .tle-lisa-suggestion-scope { color: #777580; font-size: 10px; }
@@ -205,6 +218,77 @@
 
 @media (prefers-reduced-motion: reduce) {
   .tle-lisa *, .tle-lisa *::before, .tle-lisa *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* Lisa destinations use the same quiet surfaces as the chat and workspace inspector. */
+.tle-lisa-rail { overflow: visible; }
+.tle-lisa-rail button { position: relative; flex: none; width: 40px; height: 40px; cursor: pointer; }
+.tle-lisa-rail button:disabled { cursor: default; }
+.tle-lisa-rail button[aria-current="page"] { border-color: #e3e5e8; background: #f0f1f3; color: #171a1e; }
+.tle-lisa-rail button:focus-visible { outline: 2px solid #6d747d; outline-offset: 2px; }
+.tle-lisa-rail button[data-tooltip]::after { position: absolute; z-index: 40; top: 50%; left: calc(100% + 8px); width: max-content; max-width: 220px; padding: 6px 9px; transform: translateY(-50%); border: 1px solid #e4e5e8; border-radius: 7px; background: #202328; color: #fff; content: attr(data-tooltip); font-size: 11px; font-weight: 500; line-height: 1.25; opacity: 0; pointer-events: none; transition: opacity .12s ease; }
+.tle-lisa-rail button[data-tooltip]:hover::after, .tle-lisa-rail button[data-tooltip]:focus-visible::after { opacity: 1; }
+.tle-lisa-rail-badge { position: absolute; top: 5px; right: 4px; display: grid; min-width: 15px; height: 15px; place-items: center; padding: 0 3px; border: 1px solid #fff; border-radius: 10px; background: #c4423a; color: #fff; font-size: 9px; font-weight: 700; line-height: 1; }
+.tle-lisa-workspace-heading { display: flex; min-width: 0; align-items: center; gap: 14px; }
+.tle-lisa-workspace-heading h1 { overflow: hidden; margin: 0; color: #171a1e; font-size: 15px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.tle-lisa-back-chat { display: inline-flex; flex: none; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid #e1e3e7; border-radius: 9px; background: #fff; color: #555c65; font-size: 11px; cursor: pointer; }
+.tle-lisa-header .tle-lisa-back-chat { display: inline-flex; width: auto; min-width: max-content; height: auto; white-space: nowrap; }
+.tle-lisa-back-chat:hover { background: #f5f6f7; color: #171a1e; }
+.tle-lisa-back-chat:focus-visible, .tle-lisa-workspace-content button:focus-visible { outline: 2px solid #717983; outline-offset: 2px; }
+.tle-lisa-workspace-content { min-width: 0; min-height: 0; overflow: auto; padding: clamp(20px, 4vw, 52px); background: #fff; }
+.tle-lisa-workspace-content > :first-child { margin-top: 0; }
+.tle-lisa-workspace-intro { max-width: 760px; margin: 0 0 22px; color: #6d737c; font-size: 13px; line-height: 1.55; }
+.tle-lisa-workspace-empty { max-width: 760px; padding: 26px; border: 1px dashed #d9dce0; border-radius: 13px; background: #fafbfc; color: #6d737c; font-size: 13px; text-align: center; }
+.tle-lisa-policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); gap: 12px; max-width: 1120px; }
+.tle-lisa-workspace-content .tle-lisa-rule-card { margin: 0; padding: 18px; border-color: #e3e5e8; border-radius: 12px; background: #fafbfc; box-shadow: none; }
+.tle-lisa-workspace-content .tle-lisa-rule-card h2 { margin: 0; color: #23272c; font-size: 14px; font-weight: 600; line-height: 1.4; }
+.tle-lisa-workspace-content .tle-lisa-rule-card p { color: #525961; font-size: 12px; }
+.tle-lisa-workspace-content .tle-lisa-rule-card small { color: #7a8088; font-size: 10px; }
+.tle-lisa-workspace-content .tle-lisa-load-more { max-width: 1120px; border-color: #dfe2e6; color: #40464e; }
+.tle-lisa-workspace-content .tle-lisa-panel-note { max-width: 1120px; border-color: #e3e5e8; background: #f7f8fa; }
+.tle-lisa-workspace-content .tle-lisa-suggestions { max-width: 900px; }
+.tle-lisa-workspace-content .tle-lisa-chat-recommendations { width: 100%; max-width: 900px; }
+.tle-lisa-recommendation-card { border-color: #e1e3e7; background: #f7f8fa; box-shadow: none; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-state { padding: 0; border-radius: 0; background: transparent; color: #555c65; font-size: 11px; font-weight: 600; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-state::before { background: #757c85; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-heading small { color: #757c85; font-size: 10px; }
+.tle-lisa-recommendation-card h4 { color: #202429; font-size: 15px; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-criteria { color: #40464e; font-size: 12px; }
+.tle-lisa-recommendation-disclosure { color: #777e87; }
+.tle-lisa-recommendation-error { border-color: #e5c9c6; background: #fff8f7; color: #813c36; }
+.tle-lisa-recommendation-error button { color: #555c65; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-actions button { border-color: #d9dce0; color: #454b53; background: #fff; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-actions button:first-child { border-color: #30353b; background: #30353b; color: #fff; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-actions button:hover:not(:disabled) { border-color: #aeb3ba; background: #f0f2f4; color: #24282d; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-actions button:first-child:hover:not(:disabled) { border-color: #16191d; background: #16191d; color: #fff; }
+.tle-lisa-recommendation-card .tle-lisa-suggestion-actions .tle-lisa-suggestion-chat { border-color: transparent; background: transparent; color: #686f78; }
+.tle-lisa-proactive-message { width: min(100%, 680px); margin: 8px 0 16px; }
+.tle-lisa-proactive-voice { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 10px; color: #30343a; }
+.tle-lisa-proactive-voice > div { min-width: 0; }
+.tle-lisa-proactive-voice b { display: block; margin: 1px 0 4px; font-size: 12px; }
+.tle-lisa-proactive-voice p { margin: 0; color: #555c65; font-size: 12px; line-height: 1.6; }
+.tle-lisa-avatar { display: grid; width: 27px; height: 27px; flex: 0 0 27px; place-items: center; border-radius: 50%; background: #20242a; color: #fff; font-size: 11px; font-weight: 700; }
+.tle-lisa-finding-update { margin-left: 37px; padding: 14px 16px; border: 1px solid #f0d3cf; border-radius: 13px; background: #fffafa; }
+.tle-lisa-finding-update > span { color: #9b443a; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.tle-lisa-finding-update p { margin: 7px 0 12px; color: #373a3e; font-size: 12px; line-height: 1.55; }
+.tle-lisa-finding-update div { display: flex; flex-wrap: wrap; gap: 8px; }
+.tle-lisa-finding-update button { padding: 7px 10px; border: 1px solid #dedfe2; border-radius: 8px; background: #fff; color: #34383e; font: inherit; font-size: 10px; cursor: pointer; }
+.tle-lisa-finding-update button:hover { background: #f7f5f4; }
+.tle-lisa-panel-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tle-lisa-panel-tabs button span { white-space: nowrap; }
+
+@media (max-width: 760px) {
+  .tle-lisa-rail { padding-top: 10px; }
+  .tle-lisa-workspace-content { padding: 20px 14px; }
+  .tle-lisa-workspace-heading { gap: 8px; }
+  .tle-lisa-workspace-heading h1 { font-size: 13px; }
+  .tle-lisa-back-chat { padding: 6px; font-size: 0; }
+  .tle-lisa-back-chat svg { width: 17px; height: 17px; }
+  .tle-lisa-recommendation-card { padding: 14px; }
+}
+
+@media (max-height: 620px) {
+  .tle-lisa-rail { overflow-y: auto; overflow-x: hidden; }
 }
 .thelake-explorer:has(.tle-lisa) { min-height: 100vh; background: #fff; color: #111; font-family: Arial, Helvetica, sans-serif; }
 .thelake-explorer:has(.tle-lisa), html:has(.tle-lisa), body:has(.tle-lisa) { overflow: hidden; }

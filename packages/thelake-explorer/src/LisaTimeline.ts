@@ -1,5 +1,5 @@
 import type { ThreadMessageLike, ToolCallMessagePart } from "@assistant-ui/react";
-import type { LisaActivity, LisaMessage } from "./client";
+import type { LisaActivity, LisaMessage, LisaProactiveUpdate, LisaPolicySuggestion, LisaFeedEntry } from "./client";
 
 type TimedMessage = {
   order: number;
@@ -9,6 +9,23 @@ type TimedMessage = {
 };
 
 const toolResultPrefix = "\u0000lisa-tool-result:";
+const proactiveUpdatePrefix = "\u0000lisa-proactive-update:";
+
+export type LisaTimelineUpdate = {
+  update: LisaProactiveUpdate;
+  suggestion?: LisaPolicySuggestion;
+  activity?: LisaFeedEntry;
+};
+
+export function parseLisaProactiveUpdate(value: string): LisaTimelineUpdate | undefined {
+  if (!value.startsWith(proactiveUpdatePrefix)) return undefined;
+  try {
+    const parsed = JSON.parse(value.slice(proactiveUpdatePrefix.length)) as LisaTimelineUpdate;
+    return parsed?.update?.id && parsed.update.source_type ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export type LisaToolResultEvent = {
   toolCallId: string;
@@ -145,6 +162,7 @@ export function lisaTimeline(
   messages: LisaMessage[],
   activities: LisaActivity[],
   running = false,
+  proactiveUpdates: LisaTimelineUpdate[] = [],
 ): ThreadMessageLike[] {
   const observations = new Map(
     activities
@@ -237,6 +255,17 @@ export function lisaTimeline(
     });
   });
 
+  const proactiveTimeline = proactiveUpdates.map(({ update, ...detail }, index) => ({
+      order: messages.length + activities.length + index,
+      timestamp: messageTime(update.created_at),
+      message: {
+        id: `proactive-${update.id}`,
+        role: "assistant",
+        content: [{ type: "text", text: `${proactiveUpdatePrefix}${JSON.stringify({ update, ...detail })}` }],
+        createdAt: update.created_at ? new Date(update.created_at) : undefined,
+      },
+    }));
+
   // Persisted sequenced events belong to OpenHands' exact event stream.
   // Unsequenced events have timestamps only, so place that older history first;
   // optimistic messages have no server sequence and stay after persisted work.
@@ -262,6 +291,20 @@ export function lisaTimeline(
     if (isOptimistic(left) !== isOptimistic(right)) return isOptimistic(left) ? 1 : -1;
     return compareTimeline(left, right);
   });
+  for (const update of proactiveTimeline.sort(compareTimeline)) {
+    const sequencedStart = timeline.findIndex((item) => item.sequence !== undefined);
+    const start = sequencedStart < 0 ? 0 : sequencedStart;
+    const pendingIndex = timeline.findIndex(isOptimistic);
+    const end = pendingIndex < 0 ? timeline.length : pendingIndex;
+    let insertAt = end;
+    for (let index = start; index < end; index += 1) {
+      if (timeline[index].timestamp > update.timestamp) {
+        insertAt = index;
+        break;
+      }
+    }
+    timeline.splice(insertAt, 0, update);
+  }
   const result = groupRecordedActions(timeline).map(({ message }) => message);
   if (running) {
     result.push({

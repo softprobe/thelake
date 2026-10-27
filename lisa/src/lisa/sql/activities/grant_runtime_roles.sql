@@ -8,6 +8,7 @@ GRANT SELECT, INSERT, DELETE ON lisa.evaluation_triage TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_events TO {writer};
 GRANT SELECT, INSERT ON lisa.activity_context TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_feed_entries TO {writer};
+GRANT SELECT, INSERT ON lisa.proactive_updates TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_threads TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_thread_sections TO {writer};
 GRANT SELECT, INSERT, UPDATE ON lisa.activity_monitor_thread_actions TO {writer};

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import date, datetime
 from typing import Any
+from uuid import UUID
 
 from google.genai import types
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,6 +21,14 @@ from .prompt import COMPACT_TOOL_GUIDE, TRANSCRIPT_GUIDE, format_trajectory_for_
 class PolicyGapBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     suggestions: list[PolicySuggestionDraft] = Field(default_factory=list, max_length=10)
+
+
+def _serialize_persisted_value(value: Any) -> str:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _response_schema(model: type) -> dict[str, Any]:
@@ -101,7 +111,7 @@ def synthesize_policy_suggestions(
     payload = redact_evidence({"signals": signals, "approved_policies": policies, "owner_decisions": reviewed})
     parsed = _generate(
         PolicyGapBatch,
-        contents=json.dumps(payload, ensure_ascii=False),
+        contents=json.dumps(payload, ensure_ascii=False, default=_serialize_persisted_value),
         operation="policy_suggestion_synthesis",
         system_instruction=(
             "Synthesize only repeated, well-supported policy gaps into a small number of "

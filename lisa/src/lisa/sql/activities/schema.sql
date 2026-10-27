@@ -403,6 +403,23 @@ CREATE TABLE lisa.policy_suggestions (
 CREATE INDEX policy_suggestions_pending_idx
     ON lisa.policy_suggestions(created_at DESC) WHERE status = 'pending';
 
+-- Durable UI timeline updates link to canonical discovery/evaluation records.
+-- They are not OpenHands transcript messages or activity events.
+CREATE TABLE lisa.proactive_updates (
+    id uuid PRIMARY KEY,
+    source_type text NOT NULL CHECK (source_type IN ('policy_suggestion', 'policy_finding')),
+    source_id text NOT NULL,
+    activity_id uuid REFERENCES lisa.activities(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (source_type, source_id),
+    CHECK (
+        (source_type = 'policy_suggestion' AND activity_id IS NULL) OR
+        (source_type = 'policy_finding' AND activity_id IS NOT NULL AND source_id = activity_id::text)
+    )
+);
+CREATE INDEX proactive_updates_recent_idx
+    ON lisa.proactive_updates(created_at DESC, id);
+
 CREATE TABLE lisa.policy_discovery_schedule (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     last_synthesis_at timestamptz,

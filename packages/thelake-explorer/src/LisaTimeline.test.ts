@@ -36,6 +36,20 @@ describe("Lisa timeline", () => {
     ]);
   });
 
+  it("places durable proactive updates in chronological chat order without changing transcript messages", () => {
+    const timeline = lisaTimeline([
+      { id: "user-1", role: "user", text: "Check recent sessions", sequence: 1, created_at: "2026-10-13T12:00:00Z" },
+      { id: "answer-1", role: "assistant", text: "I reviewed the evidence.", sequence: 2, created_at: "2026-10-13T12:00:02Z" },
+    ], [], false, [{ update: {
+      id: "update-1", source_type: "policy_suggestion", source_id: "suggestion-1",
+      created_at: "2026-10-13T12:00:01Z",
+    } }]);
+
+    expect(timeline.map((message) => message.id)).toEqual(["user-1", "proactive-update-1", "answer-1"]);
+    expect(timeline[1].content[0]).toMatchObject({ type: "text" });
+    expect(timeline[0].content).toEqual([{ type: "text", text: "Check recent sessions" }]);
+  });
+
   it("gives mixed unsequenced, sequenced, and optimistic items a deterministic order", () => {
     const messages: LisaMessage[] = [
       { id: "seq-2", role: "assistant", text: "Later event", sequence: 2, created_at: "2026-10-13T12:00:01Z" },

@@ -36,6 +36,34 @@ def test_suggestion_must_cite_spans_from_the_selected_session():
     PolicyDiscoveryService.validate_references(["span-1"], {"span-1"})
 
 
+def test_suggestion_synthesis_serializes_persisted_postgres_values(monkeypatch):
+    from lisa.evaluation import policy_discovery
+
+    captured = {}
+
+    def capture(model, *, contents, **_kwargs):
+        captured["payload"] = json.loads(contents)
+        return model.model_validate({"suggestions": []})
+
+    monkeypatch.setattr(policy_discovery, "_generate", capture)
+    signal_id = uuid4()
+    created_at = datetime(2026, 10, 25, 10, 15, tzinfo=UTC)
+
+    assert policy_discovery.synthesize_policy_suggestions(
+        signals=[{
+            "id": signal_id,
+            "session_id": "benchmark-session",
+            "created_at": created_at,
+            "evidence": [],
+        }],
+        policies=[],
+        reviewed=[],
+    ) == []
+
+    assert captured["payload"]["signals"][0]["id"] == str(signal_id)
+    assert captured["payload"]["signals"][0]["created_at"] == created_at.isoformat()
+
+
 def test_hourly_discovery_limit_is_bounded_and_configured_per_workspace():
     service = PolicyDiscoveryService(
         repository=None,

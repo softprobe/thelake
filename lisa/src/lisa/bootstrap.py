@@ -15,6 +15,7 @@ from .repositories.lisa_database import LisaDatabaseReader
 from .repositories.notifications import NotificationReceiptRepository
 from .repositories.policies import InMemoryPolicyRepository, PostgresPolicyRepository
 from .repositories.policy_discovery import PolicyDiscoveryRepository
+from .repositories.proactive_updates import ProactiveUpdateRepository
 from .repositories.session_evaluation_queue import SessionEvaluationQueue
 from .repositories.session_traces import SessionTraceStore
 from .repositories.slack_events import SlackEventRepository
@@ -64,6 +65,7 @@ class WorkspaceServices:
     conversation_checkpoint_queue: ConversationCheckpointQueue | None = None
     conversation_checkpoint_worker: ConversationCheckpointWorker | None = None
     activity_store: PostgresActivityStore | None = None
+    proactive_updates: ProactiveUpdateRepository | None = None
     thelake_client: TheLakeClient | None = None
     thelake_sampler: TheLakeSessionSampler | None = None
     thelake_sampling_worker: TheLakeSamplingWorker | None = None
@@ -171,6 +173,9 @@ def build_services(context: WorkspaceContext) -> WorkspaceServices:
         session_trace_intake=intake,
         session_evaluation_queue=queue,
         activity_store=activities,
+        proactive_updates=(
+            ProactiveUpdateRepository(context.database_url) if context.database_url else None
+        ),
         conversation_checkpoint_queue=checkpoint_queue,
         thelake_client=thelake_client,
         policy_discovery=discovery_service,

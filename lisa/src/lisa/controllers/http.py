@@ -119,6 +119,14 @@ def _user_actor_id(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Workspace authentication required")
 
 
+def _require_owner_actor(services: WorkspaceServices, actor_id: str) -> None:
+    """Apply Lisa's owner boundary to user-facing activity and evidence reads."""
+    try:
+        services.policy_service.require_owner_actor(actor_id)
+    except ValueError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
 @router.get("/health")
 async def health() -> dict[str, bool]:
     base_url = os.getenv("LISA_BASE_URL")
@@ -242,7 +250,9 @@ async def user_list_activities(
     due_only: bool = False,
 ) -> list[dict[str, Any]]:
     user_workspace(request)
-    store = _services(request).activity_store
+    services = _services(request)
+    _require_owner_actor(services, _user_actor_id(request))
+    store = services.activity_store
     if store is None:
         raise HTTPException(status_code=503, detail="Lisa activity storage is not configured")
     try:
@@ -257,7 +267,9 @@ async def user_list_activities(
 @router.get("/v1/activities/{activity_id}")
 async def user_get_activity(activity_id: str, request: Request) -> dict[str, Any]:
     user_workspace(request)
-    store = _services(request).activity_store
+    services = _services(request)
+    _require_owner_actor(services, _user_actor_id(request))
+    store = services.activity_store
     if store is None:
         raise HTTPException(status_code=503, detail="Lisa activity storage is not configured")
     try:
@@ -314,6 +326,22 @@ async def user_list_policy_suggestions(
             "items": service.list_suggestions(status=status, limit=limit),
             "can_review": actor_id in _services(request).context.owner_user_ids,
         }
+    except ValueError as error:
+        if "authorized Lisa owner" in str(error):
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/v1/proactive-updates")
+async def user_list_proactive_updates(request: Request, limit: int = 20) -> dict[str, Any]:
+    """Return bounded references to Lisa's workspace-level chat updates."""
+    user_workspace(request)
+    services = _services(request)
+    if services.proactive_updates is None:
+        raise HTTPException(status_code=503, detail="Lisa proactive updates are not configured")
+    try:
+        services.policy_service.require_owner_actor(_user_actor_id(request))
+        return {"items": services.proactive_updates.list(limit=limit)}
     except ValueError as error:
         if "authorized Lisa owner" in str(error):
             raise HTTPException(status_code=403, detail=str(error)) from error

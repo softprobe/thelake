@@ -577,6 +577,7 @@ def test_activity_feed_http_endpoints_use_workspace_database(
     workspace_id = "11111111-1111-4111-8111-111111111111"
     monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
     monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
+    monkeypatch.setenv("LISA_OWNER_USER_IDS", "local")
     monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("LISA_DATABASE_URL", database.writer_url)
     monkeypatch.setenv("LISA_DATABASE_READ_URL", database.reader_url)
@@ -610,6 +611,28 @@ def test_activity_feed_http_endpoints_use_workspace_database(
     assert {item["reference_id"] for item in detail["references"]} >= {
         "api-message", "api-runtime-event",
     }
+
+
+def test_activity_feed_and_detail_require_an_authorized_owner(
+    monkeypatch, lisa_test_database, tmp_path
+):
+    workspace_id = "11111111-1111-4111-8111-111111111111"
+    database = lisa_test_database(workspace_id)
+    monkeypatch.setenv("LISA_WORKSPACE_ID", workspace_id)
+    monkeypatch.setenv("LISA_LOCAL_ANONYMOUS", "1")
+    monkeypatch.setenv("LISA_LOCAL_ACTOR_ID", "workspace-member")
+    monkeypatch.setenv("LISA_OWNER_USER_IDS", "workspace-owner")
+    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LISA_DATABASE_URL", database.writer_url)
+    monkeypatch.setenv("LISA_DATABASE_READ_URL", database.reader_url)
+    with TestClient(app) as test_client:
+        services = test_client.app.state.workspace_services
+        activity = services.activity_store.create_activity(
+            title="Private policy evidence", source="web", kind="policy_evaluation",
+        )
+
+        assert test_client.get("/v1/activities").status_code == 403
+        assert test_client.get(f"/v1/activities/{activity.id}").status_code == 403
 
 
 def test_user_policy_list_is_authenticated_and_bounded(
@@ -698,11 +721,24 @@ def test_policy_suggestion_feed_owner_approval_and_dismissal(
             drafts=drafts, signal_rows=signal_rows, overlaps_by_draft=[[]]
         )
         suggestion_id = created[0]["id"]
+        duplicate = discovery.repository.create_suggestions(
+            drafts=drafts, signal_rows=signal_rows, overlaps_by_draft=[[]]
+        )
+        assert duplicate[0]["id"] == suggestion_id
 
         feed = test_client.get("/v1/policy-suggestions")
         assert feed.status_code == 200
         assert feed.json()["can_review"] is True
         assert feed.json()["items"][0]["id"] == suggestion_id
+        updates = test_client.get("/v1/proactive-updates?limit=10")
+        assert updates.status_code == 200
+        suggestion_updates = [
+            item for item in updates.json()["items"]
+            if item["source_type"] == "policy_suggestion"
+        ]
+        assert len(suggestion_updates) == 1
+        assert suggestion_updates[0]["source_id"] == suggestion_id
+        update_id = suggestion_updates[0]["id"]
         detail = test_client.get(f"/v1/policy-suggestions/{suggestion_id}")
         assert detail.status_code == 200
         cited = {
@@ -717,6 +753,12 @@ def test_policy_suggestion_feed_owner_approval_and_dismissal(
         )
         assert approved.status_code == 200
         assert approved.json()["policy"]["approved"] is True
+        approved_updates = test_client.get("/v1/proactive-updates?limit=10")
+        assert approved_updates.status_code == 200
+        assert next(
+            item for item in approved_updates.json()["items"]
+            if item["source_id"] == suggestion_id
+        )["id"] == update_id
 
         second = discovery.repository.create_suggestions(
             drafts=[drafts[0].model_copy(update={"name": "Confirm before export"})],
@@ -728,12 +770,16 @@ def test_policy_suggestion_feed_owner_approval_and_dismissal(
         ).status_code == 403
         assert test_client.get("/v1/policy-suggestions").status_code == 403
         assert test_client.get(f"/v1/policy-suggestions/{second['id']}").status_code == 403
+        assert test_client.get("/v1/proactive-updates").status_code == 403
         monkeypatch.setenv("LISA_LOCAL_ACTOR_ID", "owner-1")
         dismissed = test_client.post(
             f"/v1/policy-suggestions/{second['id']}/dismiss", json={}
         )
         assert dismissed.status_code == 200
         assert dismissed.json()["status"] == "dismissed"
+        assert test_client.get("/v1/policy-suggestions?status=dismissed").json()["items"][0]["id"] == second["id"]
+        update_refs = test_client.get("/v1/proactive-updates?limit=10").json()["items"]
+        assert len([item for item in update_refs if item["source_id"] == second["id"]]) == 1
 
 
 def test_lisa_closes_openhands_conversation_when_run_fails(client, monkeypatch):

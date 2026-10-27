@@ -325,14 +325,34 @@ The gap analyzer and suggestion synthesizer are injected provider callables so
 their model implementations can change without changing storage, sampling, or
 approval contracts. The policy MCP namespace makes suggestions discoverable and
 readable to Lisa through the same lazy tool-loading mechanism used by the other
-capabilities. The Explorer feed provides structured evidence and owner review.
+capabilities. Pending suggestions are polled into the main Lisa chat as
+reviewable recommendation cards with the proposal, rationale, scope, cited
+evidence, and owner actions. Policy suggestions is also the full review feed
+in Lisa's central workspace. The right inspector remains focused on activities
+and identity.
 Suggestion list and cited evidence detail are owner-only because spans may
 contain user and tool data. Each successful consolidation marks its full sampled
 batch processed, including signals that did not yield a suggestion, so later
 daily runs can progress without resending old evidence. Failed model attempts
 retain pending signals for the next day instead of retrying hourly.
 Only the authenticated owner path can create an approved policy; background
-model work cannot approve, dismiss, or edit a suggestion.
+model work cannot approve, dismiss, or edit a suggestion. A recommendation stays
+inactive until an owner approves it from the chat card or suggestions feed.
+
+The main chat's proactive items are a UI projection stored in
+`lisa.proactive_updates`, separate from the OpenHands conversation transcript
+and `lisa.activity_events`. Each row has a stable ID and a unique source
+reference: one policy suggestion, or one completed pushed-session activity
+that contains at least one failed policy evaluation. Suggestion creation and
+its update reference share a transaction; evaluation completion and its finding
+reference also share a transaction. Passing, incomplete, missing-evidence, or
+failed evaluations do not create finding updates. The owner-only, bounded
+`GET /v1/proactive-updates` returns references; the Explorer resolves each
+reference through the existing suggestion and activity APIs. Approval updates
+the same recommendation in chat with its active policy ID. Dismissal remains
+in the suggestions history and is omitted from the main chat. Chat replies use
+the normal Lisa runtime and are never synthesized into the transcript from an
+update record.
 
 ## Activities, failures, and notifications
 

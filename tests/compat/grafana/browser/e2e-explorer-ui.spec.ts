@@ -1,9 +1,99 @@
 import { expect, test, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 
 const backend = process.env.THELAKE_E2E_URL ?? 'http://127.0.0.1:18090';
 const lisaBackend = process.env.THELAKE_LISA_E2E_URL ?? backend;
 const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+test.use({ video: 'on' });
+
+test('Lisa keeps a recommendation in chat through approval and brings a later finding back', async ({ page }) => {
+  test.setTimeout(120_000);
+  page.on('pageerror', (error) => console.error(`Lisa story page error: ${error.stack ?? error.message}`));
+  page.on('requestfailed', (request) => console.error(`Lisa story request failed: ${request.url()} ${request.failure()?.errorText}`));
+  const createdAt = new Date().toISOString();
+  let status: 'pending' | 'approved' | 'dismissed' = 'pending';
+  let findingVisible = false;
+  const recommendation = {
+    id: 'suggestion-story', name: 'Confirm before deleting an account',
+    criteria: 'Before permanently deleting an account, confirm that the user explicitly requested deletion.',
+    scope: 'agent', target_agent_name: 'account-agent',
+    rationale: 'Three separate runs reached permanent deletion without a clear confirmation.',
+    signal_count: 3, overlaps: [], status, policy_id: status === 'approved' ? 'P1.1' : null,
+    created_at: createdAt, reviewed_at: status === 'approved' ? createdAt : null,
+    evidence: [1, 2, 3].map((run) => {
+      const sessionId = `synthetic-account-${run}`;
+      const spans = [
+        { span_id: `span-agent-${run}`, kind: 'agent', name: 'account-agent', content: 'Started an account support run.' },
+        { span_id: `span-request-${run}`, kind: 'user_input', name: 'user_message', content: 'I need help with my account.' },
+        { span_id: `span-delete-${run}`, kind: 'tool', name: 'delete_account', content: `delete_account(account_id="acct-demo-${run}")` },
+        { span_id: `span-result-${run}`, kind: 'tool_result', name: 'delete_account', content: '{"status":"deleted"}' },
+      ];
+      return {
+        signal_id: `signal-${run}`, session_id: sessionId, activity_id: 'discovery-activity', agent_name: 'account-agent',
+        summary: `Run ${run}: the account was permanently deleted without confirming the user's intent.`,
+        span_ids: spans.map((item) => item.span_id),
+        evidence: spans.map((item) => ({ ...item, session_id: sessionId, activity_id: 'discovery-activity', agent_name: 'account-agent' })),
+      };
+    }),
+  };
+  const updates = () => [
+    { id: 'update-recommendation', source_type: 'policy_suggestion', source_id: 'suggestion-story', activity_id: 'discovery-activity', created_at: createdAt },
+    ...(findingVisible ? [{ id: 'update-finding', source_type: 'policy_finding', source_id: 'evaluation-story', activity_id: 'evaluation-story', created_at: new Date(Date.now() + 1000).toISOString() }] : []),
+  ];
+  await page.addInitScript(() => Object.defineProperty(window, '__LISA_API_BASE_PATH__', { value: '/lisa/v1' }));
+  await page.route('**/lisa/v1/**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/lisa/v1/conversations') {
+      await route.fulfill({ json: [{ conversation_id: 'story-chat', title: 'Lisa', messages: [], activities: [] }] }); return;
+    }
+    if (url.pathname === '/lisa/v1/conversations/story-chat') {
+      await route.fulfill({ json: { conversation_id: 'story-chat', title: 'Lisa', messages: [], activities: [] } }); return;
+    }
+    if (url.pathname === '/lisa/v1/proactive-updates') { await route.fulfill({ json: { items: updates() } }); return; }
+    if (url.pathname === '/lisa/v1/policy-suggestions') {
+      const rows = status === url.searchParams.get('status') || (url.searchParams.get('status') === 'pending' && status === 'pending') ? [{ ...recommendation, status, policy_id: status === 'approved' ? 'P1.1' : null }] : [];
+      await route.fulfill({ json: { items: rows, can_review: true } }); return;
+    }
+    if (url.pathname === '/lisa/v1/policy-suggestions/suggestion-story/approve') {
+      status = 'approved'; await route.fulfill({ json: { ...recommendation, status, policy_id: 'P1.1' } }); return;
+    }
+    if (url.pathname === '/lisa/v1/policy-suggestions/suggestion-story/dismiss') {
+      status = 'dismissed'; await route.fulfill({ json: { ...recommendation, status } }); return;
+    }
+    if (url.pathname === '/lisa/v1/policies') { await route.fulfill({ json: { items: status === 'approved' ? [{ id: 'P1.1', name: recommendation.name, criteria: recommendation.criteria, approved: true }] : [], next_offset: null } }); return; }
+    if (url.pathname === '/lisa/v1/activities/evaluation-story') {
+      await route.fulfill({ json: { activity: { id: 'evaluation-story', title: 'New account run · policy evaluation', kind: 'session_evaluation', status: 'success', status_title: 'Evaluation complete', summary: 'Policy violation found: explicit confirmation before deletion.', created_at: createdAt }, thread: { name: 'New account run · policy evaluation', status: 'success' }, actions: [], references: [{ reference_type: 'session', reference_id: 'synthetic-account-4' }] } }); return;
+    }
+    if (url.pathname === '/lisa/v1/activities') { await route.fulfill({ json: [] }); return; }
+    await route.fulfill({ status: 404, json: { detail: 'Unknown Lisa story fixture route' } });
+  });
+
+  await page.goto(`${lisaBackend}/lisa/`);
+  const chat = page.getByRole('log', { name: 'Lisa conversation' });
+  await expect(chat.getByText('Three separate runs reached permanent deletion without a clear confirmation.')).toBeVisible();
+  const captureDir = resolve(process.cwd(), '../../../../target/lisa-policy-story');
+  await page.screenshot({ path: resolve(captureDir, '05-chat-recommendation.png'), fullPage: true });
+  await chat.getByText(/Trace evidence/).click();
+  await expect(chat.getByText(/delete_account\(account_id="acct-demo-/).first()).toBeVisible();
+  await page.locator('.tle-lisa-transcript').evaluate((element) => { element.scrollTop = 0; });
+  await page.screenshot({ path: resolve(captureDir, '06-chat-trace-evidence.png'), fullPage: true });
+  await page.waitForTimeout(16_000);
+  await chat.getByRole('button', { name: 'Approve policy' }).click();
+  await expect(chat.getByText('Active policy · P1.1')).toBeVisible();
+  await expect(chat.getByText('You approved this policy. Lisa will keep checking new runs against it.')).toBeVisible();
+  await page.screenshot({ path: resolve(captureDir, '07-chat-approved-policy.png'), fullPage: true });
+  await page.waitForTimeout(16_000);
+  findingVisible = true;
+  await expect.poll(async () => chat.getByText(/I checked a new run against the policy/).count()).toBe(1, { timeout: 10_000 });
+  await expect(chat.getByRole('button', { name: 'Open evaluation evidence' })).toBeVisible();
+  await page.screenshot({ path: resolve(captureDir, '08-chat-later-finding.png'), fullPage: true });
+  await page.waitForTimeout(16_000);
+  await chat.getByRole('button', { name: 'Ask Lisa about this' }).click();
+  await expect(page.getByRole('textbox', { name: 'Message Lisa' })).toHaveValue(/evaluation-story/);
+  await page.screenshot({ path: resolve(captureDir, '09-chat-discuss-finding.png'), fullPage: true });
+  await page.waitForTimeout(16_000);
+});
 
 function otlpValue(value: string | number) {
   return typeof value === 'number'
@@ -164,7 +254,7 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
     text: `Here is the query:\n\n\`\`\`sql\nSELECT ${Array.from({ length: 48 }, (_, index) => `policy_column_${index}`).join(', ')} FROM lisa.readable_evaluations\n\`\`\``,
     created_at: new Date().toISOString(),
   };
-  let activityFeedRequests = 0;
+  let failNextActivityFeedRequest = false;
   await page.route('**/lisa/v1/**', async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === '/lisa/v1/conversations') {
@@ -177,7 +267,8 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
     }
     if (url.pathname === '/lisa/v1/activities') {
       const activityType = url.searchParams.get('activity_type');
-      if (!activityType && ++activityFeedRequests === 3) {
+      if (!activityType && failNextActivityFeedRequest) {
+        failNextActivityFeedRequest = false;
         await route.fulfill({ status: 503, json: { detail: 'Temporary preview feed error' } });
         return;
       }
@@ -249,47 +340,43 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   expect(codeBlockBounds.preRight).toBeLessThanOrEqual(codeBlockBounds.messageRight + 1);
   expect(codeBlockBounds.messageRight).toBeLessThanOrEqual(codeBlockBounds.transcriptRight + 1);
   expect(codeBlockBounds.preScrollWidth).toBeGreaterThan(codeBlockBounds.preClientWidth);
-  for (const tab of ['Activities', 'Rules', 'Recent evaluations', 'Findings', 'Identity']) {
+  for (const tab of ['Activities', 'Identity']) {
     await expect(page.getByRole('tab', { name: tab })).toBeVisible();
   }
   const activityTab = page.getByRole('tab', { name: 'Activities' });
   await activityTab.focus();
   await activityTab.press('ArrowRight');
-  await expect(page.getByRole('tab', { name: 'Rules' })).toBeFocused();
-  await expect(page.getByRole('tab', { name: 'Rules' })).toHaveAttribute('aria-selected', 'true');
-  await page.getByRole('tab', { name: 'Rules' }).press('End');
   await expect(page.getByRole('tab', { name: 'Identity' })).toBeFocused();
   await expect(page.getByRole('tab', { name: 'Identity' })).toHaveAttribute('aria-selected', 'true');
   await page.getByRole('tab', { name: 'Identity' }).press('ArrowLeft');
-  await expect(page.getByRole('tab', { name: 'Findings' })).toBeFocused();
-  await expect(page.getByRole('tab', { name: 'Findings' })).toHaveAttribute('aria-selected', 'true');
-  await page.getByRole('tab', { name: 'Findings' }).click();
+  await expect(activityTab).toBeFocused();
+  await page.getByRole('button', { name: 'Findings' }).click();
   const finding = page.getByRole('button', { name: /Evaluation from a pushed session/ });
   await expect(finding).toBeVisible();
-  await expect(finding).toContainText('Policy violation found');
+  await expect(finding).toContainText('Policy violations found');
   await expect(finding).toContainText('Refund eligibility.');
   await expect(page.getByRole('button', { name: /Evaluation from the policy dataset/ })).toHaveCount(0);
-  await page.getByRole('tab', { name: 'Recent evaluations' }).click();
+  await page.getByRole('button', { name: 'Evaluations' }).click();
   await expect(page.getByRole('button', { name: /Evaluation from the policy dataset/ })).toBeVisible();
   const pushedEvaluation = page.getByRole('button', { name: /Evaluation from a pushed session/ });
   await expect(pushedEvaluation).toBeVisible();
-  await expect(pushedEvaluation).toContainText('Policy violation found');
+  await expect(pushedEvaluation).toContainText('Policy violations found');
   await expect(pushedEvaluation).toContainText('Refund eligibility.');
   await page.waitForTimeout(900);
   await expect(page.getByRole('button', { name: /Evaluation from the policy dataset/ })).toBeVisible();
-  await expect(pushedEvaluation).toContainText('Policy violation found');
-  await expect(page.getByRole('button', { name: /Review a seeded activity/ })).toHaveCount(0);
-  await page.getByRole('tab', { name: 'Activities' }).click();
+  await expect(pushedEvaluation).toContainText('Policy violations found');
+  await activityTab.click();
   await expect(page.getByRole('button', { name: /Review a seeded activity/ })).toBeVisible();
   const detailRequest = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith('/activities/activity-seed'));
   await page.getByRole('button', { name: /Review a seeded activity/ }).click();
   await detailRequest;
-  await page.getByRole('tab', { name: 'Recent evaluations' }).click();
+  await page.getByRole('button', { name: 'Evaluations' }).click();
   await page.waitForTimeout(900);
   await expect(page.getByRole('dialog', { name: 'Review a seeded activity' })).toHaveCount(0);
-  await page.getByRole('tab', { name: 'Activities' }).click();
+  failNextActivityFeedRequest = true;
+  await activityTab.click();
   await expect(page.getByRole('alert')).toContainText('activity feed could not load');
-  await page.getByRole('tab', { name: 'Activities' }).click();
+  await activityTab.click();
   await expect(page.getByText('Loading activities…')).toBeVisible();
   await expect(page.getByText('Loading activities…')).toHaveCount(0);
   await expect(page.getByRole('alert')).toHaveCount(0);
@@ -312,7 +399,7 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await page.keyboard.press('Escape');
   await expect(activityDialog).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Review a seeded activity/ })).toBeFocused();
-  await page.getByRole('tab', { name: 'Rules' }).click();
+  await page.getByRole('button', { name: 'Policies' }).click();
   await expect(page.getByText('Refund eligibility before refund', { exact: true })).toBeVisible();
   await page.getByRole('tab', { name: 'Identity' }).click();
   await expect(page.getByText('SOUL.md', { exact: true })).toBeVisible();
@@ -325,6 +412,7 @@ test('live thelake ingest, reducer, session filters, and trace detail render in 
   await expect(page.getByRole('complementary', { name: 'Lisa workspace panel' })).toBeVisible();
   await expect.poll(async () => (await chatPanel.boundingBox())!.width).toBe(panelOpenWidth);
   await expect(page.getByText('MEMORY.md', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Back to Lisa' }).click();
   await expect(lisaChat).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });

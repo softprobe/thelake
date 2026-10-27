@@ -103,6 +103,7 @@ def test_evaluate_session_persists_run_context_score_and_ordered_timeline(
     outbox = store.get_score_outbox(run.id)
     assert outbox.status == "acknowledged"
     assert run.score_id == outbox.score_id
+    assert services.proactive_updates.list(limit=10) == []
     events = store.list_events(run.activity_id)
     assert [event.event_type for event in events] == [
         "accepted",
@@ -279,6 +280,50 @@ def test_pushed_session_summary_surfaces_policy_violation(evaluation_services, m
     detail = store.get_activity_thread(activity.id)
     assert detail["activity"]["summary"] == feed_entry["summary"]
     assert detail["actions"][-1]["summary"] == feed_entry["summary"]
+    finding_updates = [
+        item for item in services.proactive_updates.list(limit=10)
+        if item["source_type"] == "policy_finding"
+    ]
+    assert len(finding_updates) == 1
+    assert finding_updates[0]["source_id"] == activity.id
+    assert finding_updates[0]["activity_id"] == activity.id
+
+
+def test_failed_or_missing_pushed_evaluation_does_not_create_proactive_finding(evaluation_services):
+    services = evaluation_services
+    activity = services.activity_store.create_activity(
+        title="Evaluate unavailable pushed session",
+        source="session_push",
+        kind="session_evaluation",
+    )
+    assert services.activity_store.finish_activity_without_claim(
+        activity.id, "Session evidence was unavailable.", status="failed"
+    )
+    assert services.proactive_updates.list(limit=10) == []
+
+
+def test_exhausted_pushed_evaluation_with_prior_failure_does_not_notify(evaluation_services):
+    store = evaluation_services.activity_store
+    activity = store.create_activity(
+        title="Retry an interrupted pushed evaluation",
+        source="session_push",
+        kind="session_evaluation",
+    )
+    policy = evaluation_services.policy_service.approved_rules("agent")[0]
+    evaluation = store.create_evaluation(
+        title="Check prior result", source="session_push", target_agent_name="agent",
+        session_id=f"session-{uuid4()}", policy_name=policy.name, policy_id=policy.id,
+        policy_hash="synthetic-policy-hash", judge_config={}, request_key=str(uuid4()),
+        activity_id=activity.id,
+    )
+    with store._connect() as connection, connection.transaction():
+        connection.execute(
+            (Path(__file__).parent / "sql" / "set_evaluation_verdict.sql").read_text(),
+            {"evaluation_id": evaluation.id, "verdict": "fail"},
+        )
+
+    assert store.fail_exhausted_session_evaluation(activity.id, "Provider retries exhausted.")
+    assert evaluation_services.proactive_updates.list(limit=10) == []
 
 
 def test_pending_score_recovery_keeps_aggregate_policy_findings(evaluation_services, monkeypatch):

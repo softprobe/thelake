@@ -28,6 +28,7 @@ from ..models.activities import (
     ScoreOutboxItem,
 )
 from ..security import redact_text
+from .proactive_updates import create_proactive_update
 
 
 class DeploymentBindingError(RuntimeError):
@@ -1261,6 +1262,7 @@ class PostgresActivityStore:
             if finished.fetchone() is None:
                 return False
             connection.execute(_sql("sync_activity_actions.sql"), {"activity_id": activity_id})
+            self._create_proactive_finding_if_needed(connection, activity_id, status)
             return True
 
     def complete_agent_activity(
@@ -1432,6 +1434,7 @@ class PostgresActivityStore:
             if finished is None:
                 return False
             connection.execute(_sql("sync_activity_actions.sql"), {"activity_id": activity_id})
+            self._create_proactive_finding_if_needed(connection, activity_id, "succeeded")
             return True
 
     def get_evaluation(self, evaluation_id: str) -> EvaluationRun | None:
@@ -1950,3 +1953,19 @@ class PostgresActivityStore:
                     )
             raise StaleLeaseError("Activity lease expired or was superseded")
         connection.execute(_sql("sync_activity_actions.sql"), {"activity_id": activity_id})
+        self._create_proactive_finding_if_needed(connection, activity_id, status)
+
+    @staticmethod
+    def _create_proactive_finding_if_needed(connection, activity_id: str, status: str) -> None:
+        if status != "succeeded":
+            return
+        finding = connection.execute(
+            _sql("has_proactive_finding.sql"), {"activity_id": activity_id}
+        ).fetchone()
+        if finding and finding["source"] == "session_push" and finding["has_finding"]:
+            create_proactive_update(
+                connection,
+                source_type="policy_finding",
+                source_id=activity_id,
+                activity_id=activity_id,
+            )

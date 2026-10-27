@@ -40,10 +40,22 @@ Lisa's packaged runtime skills live in [`lisa/skills/`](../../../lisa/skills/)
 and are copied into the Lisa image by `lisa/Dockerfile`; changes to those skills
 must be verified through `OpenHandsBackend`'s configured skill directory.
 
-The Explorer Lisa view keeps chat visible beside Activities, Rules,
-Triage / judges, Findings, and Identity tabs. Selecting an activity opens a keyboard-
-dismissible detail dialog that opens on the activity summary; selecting a
-timeline event opens its detail.
+The Explorer Lisa view opens on chat. Policies, Policy suggestions,
+Evaluations, and Findings are central workspace destinations on the icon-only
+left rail; each icon has a hover and keyboard-focus tooltip. The right
+workspace inspector contains only Activities and Identity. Selecting an
+activity opens a keyboard-dismissible detail dialog on the activity summary;
+selecting a timeline event opens its detail.
+Owner-authorized durable proactive-update references are polled into the main
+chat and resolved through the existing suggestion/activity APIs. A pending
+policy recommendation appears as Lisa's evidence-backed message and review
+card. After approval, the same item shows its active policy ID. A completed
+pushed-session violation appears as Lisa's follow-up with a link to its
+evaluation activity. Dismissed suggestions remain in suggestions history and
+leave the chat. These items are UI projections, never transcript messages or
+activity events; discussion replies use the normal Lisa chat runtime. Keep
+approval owner-authorized; pending recommendations never become active
+automatically.
 In chat, consecutive tool calls and results are grouped into a collapsed “Lisa’s
 work” disclosure; opening it shows calls and results at their recorded event
 positions, paired by tool-call ID. Explicit assistant messages remain visible
@@ -57,13 +69,13 @@ policy violations. Finding cards name the policy and use an alert treatment;
 evaluation cards also show a finding badge. The activity's successful
 lifecycle status means evaluation completed and does not mean policies passed.
 Keep the shell aligned to Muse's visible layout: 72px navigation rail, 360px
-right panel, and centered 960×700px activity dialog at the 1610×1505 desktop
+right inspector, and centered 960×700px activity dialog at the 1610×1505 desktop
 reference viewport. Reuse the profile, segmented tabs, activity rows, modal,
 timeline, and typography treatment; put Lisa-specific data inside those slots.
 Check the rendered page against Muse at the same viewport and device scale.
 Browser routes must reuse the authenticated
-workspace binding and expose only bounded, purpose-built projections. Rules are
-read-only in the panel. Policy writes, approvals, and deletions require an
+workspace binding and expose only bounded, purpose-built projections. Policies are
+read-only in their central workspace view. Policy writes, approvals, and deletions require an
 authorized owner on a web or Slack turn, and the policy ID is the tool argument.
 Evaluation activity timelines distinguish routing decisions,
 judge verdicts, and failures. The current runtime identity is configured by

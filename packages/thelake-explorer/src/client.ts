@@ -176,6 +176,14 @@ export type LisaPolicySuggestionPage = {
   can_review: boolean;
 };
 
+export type LisaProactiveUpdate = {
+  id: string;
+  source_type: "policy_suggestion" | "policy_finding";
+  source_id: string;
+  activity_id?: string | null;
+  created_at: string;
+};
+
 export class ExplorerApi {
   constructor(readonly config: ExplorerConfig) {}
 
@@ -302,6 +310,10 @@ export class ExplorerApi {
     if (params.status) query.set("status", params.status);
     if (params.limit != null) query.set("limit", String(params.limit));
     return this.requestLisa(`/policy-suggestions?${query.toString()}`);
+  }
+
+  listLisaProactiveUpdates(limit = 50): Promise<{ items: LisaProactiveUpdate[] }> {
+    return this.requestLisa(`/proactive-updates?limit=${encodeURIComponent(String(limit))}`);
   }
 
   approveLisaPolicySuggestion(

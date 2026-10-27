@@ -13,6 +13,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from ..models.policies import PolicyRecord
+from .proactive_updates import create_proactive_update
 
 
 def _sql(name: str) -> str:
@@ -140,6 +141,11 @@ class PolicyDiscoveryRepository:
                 _sql("get_policy_suggestion.sql"),
                 {"id": suggestion_id},
             ).fetchone()
+            create_proactive_update(
+                connection,
+                source_type="policy_suggestion",
+                source_id=suggestion_id,
+            )
         return _public_suggestion(saved)
 
     def create_suggestions(self, *, drafts, signal_rows, overlaps_by_draft):

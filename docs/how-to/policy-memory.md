@@ -84,11 +84,24 @@ separate from sampling, persistence, and review contracts.
 Lisa stores cited signals and suggestions in dedicated Postgres tables, not in
 `lisa.policies` or rebuildable activity metadata. A scheduled consolidation
 compares gathered signals with approved policy and prior owner decisions. The
-Policy suggestions feed and policy MCP tools expose evidence and source session
-context. Chat may discuss a suggestion, but only an authenticated owner action
-from the feed or an owner-authorized policy tool creates an active rule.
+main Lisa chat shows pending recommendations with their rationale, scope,
+supporting-session count, and cited trace evidence. The Policy suggestions feed
+remains the full review view; both it and the chat card provide owner review
+actions. Policy MCP tools expose evidence and source session context. Chat may
+discuss a suggestion, but only an authenticated owner action from a chat card,
+the feed, or an owner-authorized policy tool creates an active rule.
 Approval, edits, and dismissal are retained as discovery decisions so later
 consolidations can avoid repeating rejected or already adopted suggestions.
+The chat's durable proactive-update table stores references to suggestions and
+completed pushed-session findings. It is a UI projection, not a transcript turn
+or activity event. The bounded owner-only update endpoint returns stable
+source references; the Explorer loads linked details through the existing
+suggestion and activity endpoints. The same suggestion card remains visible
+after approval with its active policy ID, while dismissed suggestions stay in
+review history and leave the chat timeline. A finding appears only after a
+pushed-session evaluation completes successfully with a failed policy verdict;
+missing, failed, incomplete, and passing evaluations do not create a finding
+update. Questions from either card still go through Lisa's normal chat runtime.
 Every successful daily consolidation records its whole input batch as reviewed,
 including signals that produced no suggestion, so old evidence is not submitted
 again and newer signals are not starved. Suggestion list and evidence reads are
