@@ -15,16 +15,19 @@ A user belongs to one or more workspaces. Each workspace binds to exactly one
 physical scope (a `WorkspaceContext`). There is no `lake_scope_id`, product
 `tenant` identity, or assertion `tenant_key`.
 
-## Shared mode (weak bind)
+## Shared mode
 
-Process config owns the single physical scope. `workspace_for(workspace_id)` uses
-that default without requiring `workspace_scope_binding`. Row filters and
-temp views use `workspace_id = <uuid>`.
+Process config owns the single physical scope. `workspace_for(workspace_id)`
+requires a `workspace_scope_binding` row and then uses that default warehouse.
+An unknown UUID is `unknown scope`. Ingest rejects it before writing traces or
+`session_summary_dirty`. Row filters and temp views use `workspace_id = <uuid>`.
 
-`workspace_scope_binding` is not on the shared request path (`engine_for`).
-Admin `POST /v1/workspaces` still records workspace UUID → default physical so
-maintenance can list provisioned workspace keys. Isolated mode uses the
-registry for workspace UUID → physical scope on every resolve.
+Admin `POST /v1/workspaces` records workspace UUID → default physical scope.
+The same lookup serves the provision exists-check, ingest, and the session
+reducer. The reducer lists workspace ids from `workspace_scope_binding` only.
+Isolated mode uses the same binding row to select that workspace's own
+physical scope. An empty workspace id remains the process default warehouse
+(`_default`) and is not a provisioned workspace.
 
 ## Assertion
 

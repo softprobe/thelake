@@ -94,9 +94,8 @@ impl MaintenanceEngine {
 
     pub(crate) async fn resolve_scope(&self, scope_key: &str) -> Result<MaintenanceScope> {
         let scope_key = crate::workspace_scope::effective_workspace_id(scope_key).to_string();
-        // Shared mode weakly binds any workspace to the process default physical
-        // scope. Isolated mode is fail-closed on the durable registry. The
-        // synthetic `_default` key always maps to the process default warehouse.
+        // `_default` is the process warehouse. Every other key requires a
+        // `workspace_scope_binding` row.
         let physical = if scope_key == DEFAULT_WORKSPACE_ID {
             self.default_physical.clone()
         } else {

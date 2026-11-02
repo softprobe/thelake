@@ -658,9 +658,9 @@ RETURNING physical_scope_id;"#,
 
     /// Resolve a workspace binding.
     ///
-    /// Shared mode weakly binds every workspace to the process default physical
-    /// scope (no `workspace_scope_binding` lookup). Isolated mode is
-    /// fail-closed on the durable registry.
+    /// An empty id is the process default warehouse, used before any workspace
+    /// exists. Every other id requires a `workspace_scope_binding` row in both
+    /// shared and isolated mode.
     pub async fn resolve_or_create_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
         if workspace_id.trim().is_empty() {
             return WorkspaceBinding::new(
@@ -670,16 +670,7 @@ RETURNING physical_scope_id;"#,
             )
             .map_err(Into::into);
         }
-        if self.workspace_scope_mode == WorkspaceScopeMode::Shared {
-            return WorkspaceBinding::new(
-                workspace_id,
-                self.default_physical_scope.clone(),
-                WorkspaceScopeMode::Shared,
-            )
-            .map_err(Into::into);
-        }
-        let binding = self.resolve_binding(workspace_id).await?;
-        Ok(binding)
+        self.resolve_binding(workspace_id).await
     }
 
     async fn resolve_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
@@ -707,7 +698,7 @@ RETURNING physical_scope_id;"#,
     }
 
     async fn resolve_scope_legacy(&self, scope_id: &str) -> Result<PhysicalScope> {
-        if scope_id.trim().is_empty() || self.workspace_scope_mode == WorkspaceScopeMode::Shared {
+        if scope_id.trim().is_empty() {
             return Ok(self.default_physical_scope.clone());
         }
         Ok(
@@ -752,9 +743,8 @@ RETURNING physical_scope_id;"#,
         request: ScopeProvisioningRequest,
         scope: PhysicalScope,
     ) -> Result<PhysicalScope> {
-        // Shared mode still records workspace_scope_binding → default physical so
-        // maintenance can list provisioned workspace keys. engine_for keeps the
-        // weak bind (no binding lookup) on the request path.
+        // Records workspace_scope_binding. Shared mode points the row at the
+        // process default warehouse. Request resolution reads this row.
         let mut client = self.pool.get().await?;
         let physical = scope.clone();
         let transaction = client.transaction().await?;
