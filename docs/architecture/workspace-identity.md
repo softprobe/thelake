@@ -15,7 +15,7 @@
 
 Process config owns the single physical scope. `workspace_for(workspace_id)` requires a `workspace_scope_binding` row and then uses that default warehouse. An unknown UUID is `unknown scope`. Ingest rejects it before writing traces or `session_summary_dirty`.
 
-Admin `POST /v1/workspaces` records workspace UUID → default physical scope. The same lookup serves the provision exists-check, ingest, and the session reducer. The reducer lists workspace ids from `workspace_scope_binding` only. Isolated mode uses the same binding row to select that workspace's own physical scope. An empty workspace id is not a workspace.
+Admin `POST /v1/workspaces` records workspace UUID → default physical scope. The same lookup serves the provision exists-check, ingest, and the session reducer. The reducer lists workspace ids from `workspace_scope_binding` only. Isolated mode uses the same binding row to select that workspace's own physical scope. Startup records the configured lake as `_default` so readiness can open it. An empty caller id uses that row. It is not a customer workspace, and data routes still require authentication.
 
 ## Caller identity
 

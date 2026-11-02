@@ -335,7 +335,9 @@ impl WorkspaceManager {
         let bound_workspace_id = effective_workspace_id(workspace_id);
 
         let resolver = &self.scope_registry;
-        let binding = resolver.resolve_or_create_binding(workspace_id).await?;
+        let binding = resolver
+            .resolve_or_create_binding(bound_workspace_id)
+            .await?;
         let physical = DuckLakeAccess::Workspace(binding.clone())
             .physical_scope()
             .clone();

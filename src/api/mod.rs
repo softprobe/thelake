@@ -115,6 +115,17 @@ pub async fn create_router(
         workspaces: workspace_manager,
     };
 
+    let ducklake = &state.workspaces.config().ducklake;
+    state
+        .workspaces
+        .provision_scope(crate::workspace::ScopeProvisioningRequest {
+            scope_id: crate::workspace_scope::DEFAULT_WORKSPACE_ID.to_string(),
+            metadata_schema: ducklake.metadata_schema.clone(),
+            data_path: ducklake.data_path.clone(),
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("configured lake binding: {error}"))?;
+
     if shared_mode {
         state
             .workspaces
