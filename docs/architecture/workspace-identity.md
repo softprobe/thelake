@@ -15,7 +15,7 @@
 
 Process config owns the single physical scope. `workspace_for(workspace_id)` requires a `workspace_scope_binding` row and then uses that default warehouse. An unknown UUID is `unknown scope`. Ingest rejects it before writing traces or `session_summary_dirty`.
 
-Admin `POST /v1/workspaces` records workspace UUID → default physical scope. The same lookup serves the provision exists-check, ingest, and the session reducer. The reducer lists workspace ids from `workspace_scope_binding` only. Isolated mode uses the same binding row to select that workspace's own physical scope. An empty workspace id remains the process default warehouse (`_default`) and is not a provisioned workspace. Local anonymous mode cannot call `POST /v1/workspaces`, so its configured workspace uses that same warehouse.
+Admin `POST /v1/workspaces` records workspace UUID → default physical scope. The same lookup serves the provision exists-check, ingest, and the session reducer. The reducer lists workspace ids from `workspace_scope_binding` only. Isolated mode uses the same binding row to select that workspace's own physical scope. An empty workspace id is not a workspace. When `SOFTPROBE_LOCAL_ANONYMOUS=1`, startup calls `provision_scope` for `THELAKE_DEFAULT_WORKSPACE_ID` on the configured physical scope. That mode does not expose `POST /v1/workspaces`.
 
 ## Caller identity
 
@@ -37,7 +37,7 @@ Data routes take `workspace_id` from the authenticated caller. TheLake checks th
 }
 ```
 
-`workspaceId` must be a UUID. Both storage hints are required. In shared mode the stored row points at the process warehouse. `"status": "created"` is the first binding. `"status": "exists"` means that UUID is already bound to the same warehouse. Hints that name a different warehouse return `409` `workspace_scope_conflict`. The reserved id `thelake-ops` cannot be provisioned.
+`workspaceId` must be a UUID. Both storage hints are required. In shared mode the stored row points at the configured physical scope. `"status": "created"` is the first binding. `"status": "exists"` means that UUID is already bound to the same warehouse. Hints that name a different warehouse return `409` `workspace_scope_conflict`. The reserved id `thelake-ops` cannot be provisioned.
 
 ## Row and API rules
 

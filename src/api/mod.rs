@@ -118,7 +118,7 @@ pub async fn create_router(
     if shared_mode {
         state
             .workspaces
-            .workspace_for("")
+            .open_configured_lake()
             .await
             .map_err(|error| anyhow::anyhow!("shared DuckLake startup gate: {error}"))?;
         state

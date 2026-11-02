@@ -18,9 +18,7 @@ use crate::promotion::{
 };
 use crate::query::{self as query_mod, QueryEngine};
 use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
-use crate::workspace_scope::{
-    effective_workspace_id, WorkspaceBinding, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID,
-};
+use crate::workspace_scope::{effective_workspace_id, WorkspaceBinding, WorkspaceScopeMode};
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -34,19 +32,6 @@ use tokio_postgres::NoTls;
 pub type WorkspaceId = String;
 
 const POSTGRES_IDENTIFIER_MAX_BYTES: usize = 63;
-
-/// Empty, `_default`, and the local-anonymous workspace share the process warehouse.
-/// Anonymous mode cannot call `POST /v1/workspaces`.
-fn uses_process_warehouse(workspace_id: &str) -> bool {
-    let workspace_id = workspace_id.trim();
-    if workspace_id.is_empty() || workspace_id == DEFAULT_WORKSPACE_ID {
-        return true;
-    }
-    std::env::var("SOFTPROBE_LOCAL_ANONYMOUS").as_deref() == Ok("1")
-        && std::env::var("THELAKE_DEFAULT_WORKSPACE_ID")
-            .map(|value| value.trim() == workspace_id)
-            .unwrap_or(false)
-}
 
 fn validate_metadata_schema_name(schema: &str) -> Result<()> {
     if schema.len() > POSTGRES_IDENTIFIER_MAX_BYTES {
@@ -182,6 +167,13 @@ impl WorkspaceManager {
 
     pub fn config(&self) -> &Config {
         self.config.as_ref()
+    }
+
+    /// Open the physical lake from process config. Shared mode has one lake;
+    /// this prepares it before any workspace is bound.
+    pub async fn open_configured_lake(&self) -> Result<()> {
+        self.ensure_scope_tables_locked(self.scope_registry.default_physical_scope())
+            .await
     }
 
     /// Postgres lease store for the process catalog registry.
@@ -669,26 +661,8 @@ RETURNING physical_scope_id;"#,
         Ok(())
     }
 
-    /// Resolve a workspace binding.
-    ///
-    /// An empty id and `_default` are the process warehouse, used before any
-    /// workspace exists. Local anonymous mode has no provision API, so its
-    /// configured workspace uses that same warehouse. Every other id requires
-    /// a `workspace_scope_binding` row in both shared and isolated mode.
+    /// Resolve a workspace binding. Every id requires a `workspace_scope_binding` row.
     pub async fn resolve_or_create_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
-        if uses_process_warehouse(workspace_id) {
-            let id = if workspace_id.trim().is_empty() {
-                DEFAULT_WORKSPACE_ID
-            } else {
-                workspace_id.trim()
-            };
-            return WorkspaceBinding::new(
-                id,
-                self.default_physical_scope.clone(),
-                self.workspace_scope_mode,
-            )
-            .map_err(Into::into);
-        }
         self.resolve_binding(workspace_id).await
     }
 
@@ -717,9 +691,6 @@ RETURNING physical_scope_id;"#,
     }
 
     async fn resolve_scope_legacy(&self, scope_id: &str) -> Result<PhysicalScope> {
-        if uses_process_warehouse(scope_id) {
-            return Ok(self.default_physical_scope.clone());
-        }
         Ok(
             DuckLakeAccess::Workspace(self.resolve_binding(scope_id).await?)
                 .physical_scope()
@@ -763,7 +734,7 @@ RETURNING physical_scope_id;"#,
         scope: PhysicalScope,
     ) -> Result<PhysicalScope> {
         // Records workspace_scope_binding. Shared mode points the row at the
-        // process default warehouse. Request resolution reads this row.
+        // configured physical scope. Request resolution reads this row.
         let mut client = self.pool.get().await?;
         let physical = scope.clone();
         let transaction = client.transaction().await?;

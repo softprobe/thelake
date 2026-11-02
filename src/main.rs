@@ -45,12 +45,23 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
-    local_anonymous_workspace_id().map_err(|status| {
+    let anonymous_workspace = local_anonymous_workspace_id().map_err(|status| {
         anyhow::anyhow!("invalid SOFTPROBE_LOCAL_ANONYMOUS configuration: {status}")
     })?;
     let control_plane = control_plane_runtime_from_env()?;
 
     let (app, state) = api::create_router(config.clone(), Some(control_plane.clone())).await?;
+    if let Some(workspace_id) = anonymous_workspace {
+        let ducklake = &state.workspaces.config().ducklake;
+        state
+            .workspaces
+            .provision_scope(softprobe_runtime::workspace::ScopeProvisioningRequest {
+                scope_id: workspace_id,
+                metadata_schema: ducklake.metadata_schema.clone(),
+                data_path: ducklake.data_path.clone(),
+            })
+            .await?;
+    }
 
     // The router construction is the shared-mode startup gate. Do not start
     // maintenance or any secondary storage path until it has completed schema

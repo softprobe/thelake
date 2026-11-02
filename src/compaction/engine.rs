@@ -94,8 +94,8 @@ impl MaintenanceEngine {
 
     pub(crate) async fn resolve_scope(&self, scope_key: &str) -> Result<MaintenanceScope> {
         let scope_key = crate::workspace_scope::effective_workspace_id(scope_key).to_string();
-        // `_default` is the process warehouse. Every other key requires a
-        // `workspace_scope_binding` row, except the local-anonymous workspace.
+        // `_default` names the configured physical scope when no workspace
+        // binding points at it yet.
         let physical = if scope_key == DEFAULT_WORKSPACE_ID {
             self.default_physical.clone()
         } else {
@@ -188,22 +188,12 @@ impl MaintenanceEngine {
 
     /// Workspace ids for per-tenant jobs (session_summary). Not warehouse-deduped.
     pub async fn workspace_scope_keys(&self) -> Result<Vec<String>> {
-        let mut keys: Vec<String> = self
+        let keys: Vec<String> = self
             .workspace_scopes()
             .await?
             .into_iter()
             .map(|(id, _)| id)
             .collect();
-        // Local anonymous mode intentionally has no workspace registry or
-        // provisioning API. Its configured workspace still needs per-workspace
-        // jobs (session-summary reduction/rebuild) to consume its dirty rows.
-        if let Some(workspace_id) = crate::api::auth::local_anonymous_workspace_id()
-            .map_err(|status| anyhow!("invalid local anonymous workspace: {status}"))?
-        {
-            if !keys.contains(&workspace_id) {
-                keys.push(workspace_id);
-            }
-        }
         Ok(keys)
     }
 
