@@ -105,5 +105,4 @@ customer DuckLake.
 | `SOFTPROBE_GRPC_DISABLE` | `1` disables gRPC listener |
 | `SOFTPROBE_AUTH_URL` | External assertion auth base URL |
 | `SOFTPROBE_ADMIN_API_KEY` | Bearer for `POST /v1/workspaces` |
-| `SOFTPROBE_LOCAL_ANONYMOUS` | Local single-workspace mode (see root README) |
-| `THELAKE_DEFAULT_WORKSPACE_ID` | Workspace UUID used with local anonymous mode |
+| `THELAKE_DEFAULT_WORKSPACE_ID` | Alias of `SOFTPROBE_DEFAULT_WORKSPACE_ID` |

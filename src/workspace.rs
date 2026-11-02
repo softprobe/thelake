@@ -18,9 +18,7 @@ use crate::promotion::{
 };
 use crate::query::{self as query_mod, QueryEngine};
 use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
-use crate::workspace_scope::{
-    effective_workspace_id, WorkspaceBinding, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID,
-};
+use crate::workspace_scope::{effective_workspace_id, WorkspaceBinding, WorkspaceScopeMode};
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -169,6 +167,13 @@ impl WorkspaceManager {
 
     pub fn config(&self) -> &Config {
         self.config.as_ref()
+    }
+
+    /// Open the physical lake from process config. Shared mode has one lake;
+    /// this prepares it before any workspace is bound.
+    pub async fn open_configured_lake(&self) -> Result<()> {
+        self.ensure_scope_tables_locked(self.scope_registry.default_physical_scope())
+            .await
     }
 
     /// Postgres lease store for the process catalog registry.
@@ -330,7 +335,9 @@ impl WorkspaceManager {
         let bound_workspace_id = effective_workspace_id(workspace_id);
 
         let resolver = &self.scope_registry;
-        let binding = resolver.resolve_or_create_binding(workspace_id).await?;
+        let binding = resolver
+            .resolve_or_create_binding(bound_workspace_id)
+            .await?;
         let physical = DuckLakeAccess::Workspace(binding.clone())
             .physical_scope()
             .clone();
@@ -656,30 +663,9 @@ RETURNING physical_scope_id;"#,
         Ok(())
     }
 
-    /// Resolve a workspace binding.
-    ///
-    /// Shared mode weakly binds every workspace to the process default physical
-    /// scope (no `workspace_scope_binding` lookup). Isolated mode is
-    /// fail-closed on the durable registry.
+    /// Resolve a workspace binding. Every id requires a `workspace_scope_binding` row.
     pub async fn resolve_or_create_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
-        if workspace_id.trim().is_empty() {
-            return WorkspaceBinding::new(
-                DEFAULT_WORKSPACE_ID,
-                self.default_physical_scope.clone(),
-                self.workspace_scope_mode,
-            )
-            .map_err(Into::into);
-        }
-        if self.workspace_scope_mode == WorkspaceScopeMode::Shared {
-            return WorkspaceBinding::new(
-                workspace_id,
-                self.default_physical_scope.clone(),
-                WorkspaceScopeMode::Shared,
-            )
-            .map_err(Into::into);
-        }
-        let binding = self.resolve_binding(workspace_id).await?;
-        Ok(binding)
+        self.resolve_binding(workspace_id).await
     }
 
     async fn resolve_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
@@ -707,9 +693,6 @@ RETURNING physical_scope_id;"#,
     }
 
     async fn resolve_scope_legacy(&self, scope_id: &str) -> Result<PhysicalScope> {
-        if scope_id.trim().is_empty() || self.workspace_scope_mode == WorkspaceScopeMode::Shared {
-            return Ok(self.default_physical_scope.clone());
-        }
         Ok(
             DuckLakeAccess::Workspace(self.resolve_binding(scope_id).await?)
                 .physical_scope()
@@ -752,9 +735,8 @@ RETURNING physical_scope_id;"#,
         request: ScopeProvisioningRequest,
         scope: PhysicalScope,
     ) -> Result<PhysicalScope> {
-        // Shared mode still records workspace_scope_binding → default physical so
-        // maintenance can list provisioned workspace keys. engine_for keeps the
-        // weak bind (no binding lookup) on the request path.
+        // Records workspace_scope_binding. Shared mode points the row at the
+        // configured physical scope. Request resolution reads this row.
         let mut client = self.pool.get().await?;
         let physical = scope.clone();
         let transaction = client.transaction().await?;

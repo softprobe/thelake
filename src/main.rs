@@ -1,6 +1,6 @@
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
-use softprobe_runtime::api::auth::{local_anonymous_workspace_id, runtime_auth_middleware};
+use softprobe_runtime::api::auth::runtime_auth_middleware;
 use softprobe_runtime::api::{self, ControlPlaneRuntime};
 use softprobe_runtime::authn::Resolver;
 use softprobe_runtime::config::Config;
@@ -45,9 +45,6 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
-    local_anonymous_workspace_id().map_err(|status| {
-        anyhow::anyhow!("invalid SOFTPROBE_LOCAL_ANONYMOUS configuration: {status}")
-    })?;
     let control_plane = control_plane_runtime_from_env()?;
 
     let (app, state) = api::create_router(config.clone(), Some(control_plane.clone())).await?;

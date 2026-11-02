@@ -17,17 +17,6 @@ pub async fn runtime_auth_middleware(
     if req.method() == Method::OPTIONS {
         return Ok(next.run(req).await);
     }
-    let local_anonymous_enabled = std::env::var("SOFTPROBE_LOCAL_ANONYMOUS").as_deref() == Ok("1");
-    if local_anonymous_enabled && path.starts_with("/v1/") {
-        let workspace_id = local_anonymous_workspace_id()?.ok_or(StatusCode::UNAUTHORIZED)?;
-        if !is_local_anonymous_data_plane(req.method(), path) {
-            return Err(StatusCode::FORBIDDEN);
-        }
-        let info = crate::softprobe_assertion::workspace_auth_for_default_lake(&workspace_id)
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        req.extensions_mut().insert(info);
-        return Ok(next.run(req).await);
-    }
     if !requires_runtime_auth(req.method(), path) {
         return Ok(next.run(req).await);
     }
@@ -97,43 +86,6 @@ pub async fn runtime_auth_middleware(
 
     req.extensions_mut().insert(info);
     Ok(next.run(req).await)
-}
-
-/// Returns the configured local anonymous workspace, validating it whenever
-/// the feature is enabled. Startup calls this once so bad configuration fails
-/// before the listener accepts traffic; middleware calls it to bind requests.
-pub fn local_anonymous_workspace_id() -> Result<Option<String>, StatusCode> {
-    if std::env::var("SOFTPROBE_LOCAL_ANONYMOUS").as_deref() != Ok("1") {
-        return Ok(None);
-    }
-    let raw = std::env::var("THELAKE_DEFAULT_WORKSPACE_ID")
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let workspace_id = crate::softprobe_assertion::parse_workspace_id(&raw)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    if crate::self_monitoring::is_reserved_workspace_id(&workspace_id) {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    Ok(Some(workspace_id))
-}
-
-pub fn is_local_anonymous_data_plane(method: &Method, path: &str) -> bool {
-    match (method, path) {
-        (&Method::POST, "/v1/traces")
-        | (&Method::POST, "/v1/logs")
-        | (&Method::POST, "/v1/scores")
-        | (&Method::POST, "/v1/spans/search")
-        | (&Method::POST, "/v1/sessions/search")
-        | (&Method::GET, "/v1/score-configs") => true,
-        (&Method::GET, p) if is_single_resource_path(p, "/v1/spans/") => true,
-        (&Method::GET, p) if is_single_resource_path(p, "/v1/traces/") => true,
-        (&Method::GET, p) if is_single_resource_path(p, "/v1/sessions/") => true,
-        _ => false,
-    }
-}
-
-fn is_single_resource_path(path: &str, prefix: &str) -> bool {
-    path.strip_prefix(prefix)
-        .is_some_and(|resource_id| !resource_id.is_empty() && !resource_id.contains('/'))
 }
 
 pub fn requires_runtime_auth(method: &Method, path: &str) -> bool {
@@ -246,73 +198,5 @@ mod tests {
         assert!(!crate::self_monitoring::is_reserved_workspace_id(
             "softprobe-local"
         ));
-    }
-
-    #[test]
-    fn local_anonymous_allowlist_excludes_control_plane() {
-        assert!(is_local_anonymous_data_plane(&Method::POST, "/v1/traces"));
-        assert!(is_local_anonymous_data_plane(
-            &Method::POST,
-            "/v1/sessions/search"
-        ));
-        assert!(is_local_anonymous_data_plane(&Method::POST, "/v1/scores"));
-        assert!(!is_local_anonymous_data_plane(
-            &Method::POST,
-            "/v1/workspaces"
-        ));
-        assert!(!is_local_anonymous_data_plane(&Method::GET, "/v1/meta"));
-        assert!(!is_local_anonymous_data_plane(
-            &Method::POST,
-            "/v1/promotions/apply"
-        ));
-        assert!(!is_local_anonymous_data_plane(
-            &Method::POST,
-            "/v1/score-configs"
-        ));
-        assert!(is_local_anonymous_data_plane(
-            &Method::GET,
-            "/v1/sessions/session-1"
-        ));
-        assert!(!is_local_anonymous_data_plane(
-            &Method::GET,
-            "/v1/sessions/session-1/recording"
-        ));
-    }
-
-    #[test]
-    fn explicit_local_anonymous_mode_requires_a_valid_workspace_uuid() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
-        let previous_mode = std::env::var("SOFTPROBE_LOCAL_ANONYMOUS").ok();
-        let previous_workspace = std::env::var("THELAKE_DEFAULT_WORKSPACE_ID").ok();
-
-        std::env::set_var("SOFTPROBE_LOCAL_ANONYMOUS", "1");
-        std::env::remove_var("THELAKE_DEFAULT_WORKSPACE_ID");
-        assert_eq!(
-            local_anonymous_workspace_id(),
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        );
-        std::env::set_var("THELAKE_DEFAULT_WORKSPACE_ID", "not-a-uuid");
-        assert_eq!(
-            local_anonymous_workspace_id(),
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        );
-        std::env::set_var(
-            "THELAKE_DEFAULT_WORKSPACE_ID",
-            "550e8400-e29b-41d4-a716-446655440000",
-        );
-        assert_eq!(
-            local_anonymous_workspace_id().unwrap().as_deref(),
-            Some("550e8400-e29b-41d4-a716-446655440000")
-        );
-
-        match previous_mode {
-            Some(value) => std::env::set_var("SOFTPROBE_LOCAL_ANONYMOUS", value),
-            None => std::env::remove_var("SOFTPROBE_LOCAL_ANONYMOUS"),
-        }
-        match previous_workspace {
-            Some(value) => std::env::set_var("THELAKE_DEFAULT_WORKSPACE_ID", value),
-            None => std::env::remove_var("THELAKE_DEFAULT_WORKSPACE_ID"),
-        }
     }
 }

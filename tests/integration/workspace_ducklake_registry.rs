@@ -48,26 +48,17 @@ async fn resolve_scope_is_registry_strict_and_idempotent() {
     let metadata_schema = format!("tenant_registry_scope_{suffix}");
     let data_path = format!("./target/registry-test-data/{workspace_id}/");
 
-    // Isolated mode is fail-closed on the registry. Shared mode weakly binds
-    // to the process default physical scope without a binding lookup.
-    if manager.config().ducklake.workspace_scope_mode
-        == softprobe_runtime::workspace_scope::WorkspaceScopeMode::Isolated
-    {
-        let unknown = manager
-            .workspace_for(&workspace_id)
-            .await
-            .err()
-            .expect("unknown scopes must not be lazily provisioned");
-        assert!(
-            unknown.to_string().contains("unknown scope"),
-            "unexpected unknown scope error: {unknown}"
-        );
-    } else {
-        manager
-            .workspace_for(&workspace_id)
-            .await
-            .expect("shared mode resolves without registry binding");
-    }
+    // Both modes require a workspace_scope_binding row. Shared mode still
+    // stores that row against the process default physical scope.
+    let unknown = manager
+        .workspace_for(&workspace_id)
+        .await
+        .err()
+        .expect("unknown scopes must not be lazily provisioned");
+    assert!(
+        unknown.to_string().contains("unknown scope"),
+        "unexpected unknown scope error: {unknown}"
+    );
 
     let request = ScopeProvisioningRequest {
         scope_id: workspace_id.clone(),

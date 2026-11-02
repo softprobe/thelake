@@ -6,51 +6,43 @@
 
 | Concept | Meaning |
 |---------|---------|
-| `workspace_id` | UUID; only logical tenancy key (assertion, engine cache, row column) |
-| `physical_scope` | catalog DSN + `metadata_schema` + `catalog_alias` + `data_path` |
-| `shared` | many workspaces → one physical scope; isolate with `workspace_id` on rows |
-| `isolated` | one workspace → its own physical scope |
+| `workspace_id` | UUID. The only logical tenancy key on the caller token, the engine cache, and fact-table rows. |
+| `physical_scope` | Catalog DSN + `metadata_schema` + `catalog_alias` + `data_path` |
+| `shared` | Many workspaces use one physical scope. Row filters and temp views use `workspace_id = <uuid>`. |
+| `isolated` | One workspace uses its own physical scope. |
 
-A user belongs to one or more workspaces. Each workspace binds to exactly one
-physical scope (a `WorkspaceContext`). There is no `lake_scope_id`, product
-`tenant` identity, or assertion `tenant_key`.
+## Shared mode
 
-## Shared mode (weak bind)
+Process config owns the single physical scope. `workspace_for(workspace_id)` requires a `workspace_scope_binding` row and then uses that default warehouse. An unknown UUID is `unknown scope`. Ingest rejects it before writing traces or `session_summary_dirty`.
 
-Process config owns the single physical scope. `workspace_for(workspace_id)` uses
-that default without requiring `workspace_scope_binding`. Row filters and
-temp views use `workspace_id = <uuid>`.
+Admin `POST /v1/workspaces` records workspace UUID → default physical scope. The same lookup serves the provision exists-check, ingest, and the session reducer. The reducer lists workspace ids from `workspace_scope_binding` only. Isolated mode uses the same binding row to select that workspace's own physical scope. Startup records the configured lake as `_default` so readiness can open it. An empty caller id uses that row. It is not a customer workspace, and data routes still require authentication.
 
-`workspace_scope_binding` is not on the shared request path (`engine_for`).
-Admin `POST /v1/workspaces` still records workspace UUID → default physical so
-maintenance can list provisioned workspace keys. Isolated mode uses the
-registry for workspace UUID → physical scope on every resolve.
+## Caller identity
 
-## Assertion
+Data routes take `workspace_id` from the authenticated caller. TheLake checks that UUID against `workspace_scope_binding`. It does not read membership or display names. See [authentication](../compat/auth.md).
+
+`POST /v1/workspaces` rejects a non-UUID `workspaceId` (same `parse_workspace_id` contract as auth). Dedicated Grafana and seed harnesses must provision the fixture UUIDs returned by auth mocks (`tests/util/workspace_ids.rs`).
+
+## Provision
+
+`POST /v1/workspaces` checks `Authorization: Bearer <SOFTPROBE_ADMIN_API_KEY>`.
 
 ```json
 {
-  "iss": "softprobe-edge",
-  "aud": "sp-backend",
-  "sub": "<user or key subject>",
-  "workspace_id": "<workspaces.id uuid>",
-  "roles": ["member"]
+  "workspaceId": "11111111-1111-4111-8111-111111111111",
+  "storageHints": {
+    "ducklakeMetadataSchema": "thelake",
+    "ducklakeDataPath": "gs://bucket/prefix/"
+  }
 }
 ```
 
-thelake binds from `workspace_id` only.
-
-`POST /v1/workspaces` rejects non-UUID `workspaceId` (same
-`parse_workspace_id` contract as auth). Dedicated Grafana / seed harnesses
-must provision the fixture UUIDs returned by auth mocks
-(`tests/util/workspace_ids.rs`).
+`workspaceId` must be a UUID. Both storage hints are required. In shared mode the stored row points at the configured physical scope. `"status": "created"` is the first binding. `"status": "exists"` means that UUID is already bound to the same warehouse. Hints that name a different warehouse return `409` `workspace_scope_conflict`. The reserved id `thelake-ops` cannot be provisioned.
 
 ## Row and API rules
 
 - Fact tables use a `workspace_id` column (see `src/sql/schema/`).
-- Operational APIs do not accept arbitrary workspace selectors after auth
-  binding; identity comes from the bearer assertion (or local anonymous mode).
-- Reserved id `thelake-ops` cannot be provisioned via `POST /v1/workspaces`.
+- Operational APIs do not accept a workspace selector after auth binding. Identity comes from the authenticated caller.
+- `session_summary` and `session_summary_dirty` are keyed by `(workspace_id, session_id)`. List reads `session_summary`. The reducer loads workspace ids from `workspace_scope_binding` only.
 
-See also [DuckLake access inventory](ducklake-access.md) and
-[async jobs](../how-to/async-jobs.md).
+See also [DuckLake access inventory](ducklake-access.md) and [async jobs](../how-to/async-jobs.md).
