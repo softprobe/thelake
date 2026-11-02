@@ -35,6 +35,19 @@ pub type WorkspaceId = String;
 
 const POSTGRES_IDENTIFIER_MAX_BYTES: usize = 63;
 
+/// Empty, `_default`, and the local-anonymous workspace share the process warehouse.
+/// Anonymous mode cannot call `POST /v1/workspaces`.
+fn uses_process_warehouse(workspace_id: &str) -> bool {
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() || workspace_id == DEFAULT_WORKSPACE_ID {
+        return true;
+    }
+    std::env::var("SOFTPROBE_LOCAL_ANONYMOUS").as_deref() == Ok("1")
+        && std::env::var("THELAKE_DEFAULT_WORKSPACE_ID")
+            .map(|value| value.trim() == workspace_id)
+            .unwrap_or(false)
+}
+
 fn validate_metadata_schema_name(schema: &str) -> Result<()> {
     if schema.len() > POSTGRES_IDENTIFIER_MAX_BYTES {
         bail!(
@@ -658,13 +671,19 @@ RETURNING physical_scope_id;"#,
 
     /// Resolve a workspace binding.
     ///
-    /// An empty id is the process default warehouse, used before any workspace
-    /// exists. Every other id requires a `workspace_scope_binding` row in both
-    /// shared and isolated mode.
+    /// An empty id and `_default` are the process warehouse, used before any
+    /// workspace exists. Local anonymous mode has no provision API, so its
+    /// configured workspace uses that same warehouse. Every other id requires
+    /// a `workspace_scope_binding` row in both shared and isolated mode.
     pub async fn resolve_or_create_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
-        if workspace_id.trim().is_empty() {
+        if uses_process_warehouse(workspace_id) {
+            let id = if workspace_id.trim().is_empty() {
+                DEFAULT_WORKSPACE_ID
+            } else {
+                workspace_id.trim()
+            };
             return WorkspaceBinding::new(
-                DEFAULT_WORKSPACE_ID,
+                id,
                 self.default_physical_scope.clone(),
                 self.workspace_scope_mode,
             )
@@ -698,7 +717,7 @@ RETURNING physical_scope_id;"#,
     }
 
     async fn resolve_scope_legacy(&self, scope_id: &str) -> Result<PhysicalScope> {
-        if scope_id.trim().is_empty() {
+        if uses_process_warehouse(scope_id) {
             return Ok(self.default_physical_scope.clone());
         }
         Ok(

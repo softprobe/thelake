@@ -95,7 +95,7 @@ impl MaintenanceEngine {
     pub(crate) async fn resolve_scope(&self, scope_key: &str) -> Result<MaintenanceScope> {
         let scope_key = crate::workspace_scope::effective_workspace_id(scope_key).to_string();
         // `_default` is the process warehouse. Every other key requires a
-        // `workspace_scope_binding` row.
+        // `workspace_scope_binding` row, except the local-anonymous workspace.
         let physical = if scope_key == DEFAULT_WORKSPACE_ID {
             self.default_physical.clone()
         } else {

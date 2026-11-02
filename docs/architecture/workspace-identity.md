@@ -15,7 +15,7 @@
 
 Process config owns the single physical scope. `workspace_for(workspace_id)` requires a `workspace_scope_binding` row and then uses that default warehouse. An unknown UUID is `unknown scope`. Ingest rejects it before writing traces or `session_summary_dirty`.
 
-Admin `POST /v1/workspaces` records workspace UUID → default physical scope. The same lookup serves the provision exists-check, ingest, and the session reducer. The reducer lists workspace ids from `workspace_scope_binding` only. Isolated mode uses the same binding row to select that workspace's own physical scope. An empty workspace id remains the process default warehouse (`_default`) and is not a provisioned workspace.
+Admin `POST /v1/workspaces` records workspace UUID → default physical scope. The same lookup serves the provision exists-check, ingest, and the session reducer. The reducer lists workspace ids from `workspace_scope_binding` only. Isolated mode uses the same binding row to select that workspace's own physical scope. An empty workspace id remains the process default warehouse (`_default`) and is not a provisioned workspace. Local anonymous mode cannot call `POST /v1/workspaces`, so its configured workspace uses that same warehouse.
 
 ## Caller identity
 

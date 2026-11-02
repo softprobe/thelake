@@ -33,9 +33,12 @@ replica.
 After a successful DuckLake trace commit, ingest writes one batched dirty
 upsert for the distinct session IDs in that commit. It does not write dirty
 state per span. Failed lake commits do not mark sessions dirty. Ingest rejects
-a workspace UUID that has no `workspace_scope_binding` row, so a dirty row
-cannot exist for a workspace the reducer will never visit. The reducer loads
-workspace ids from that table only.
+a workspace UUID that has no `workspace_scope_binding` row. The local-anonymous
+workspace is the exception: it uses the process warehouse, and the reducer
+already visits that configured id. Every other unbound UUID is rejected, so a
+dirty row cannot exist for a workspace the reducer will never visit. The
+reducer loads workspace ids from that table, plus the local-anonymous id when
+that mode is on.
 
 The reducer aggregates claimed sessions from `traces` within the dirty time
 bounds, updates `session_summary`, then acknowledges the matching dirty-row

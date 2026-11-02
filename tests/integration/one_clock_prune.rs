@@ -448,14 +448,21 @@ async fn typed_query_gate_covers_traces_and_logs() {
     let pipeline = IngestEngine::bound_default(&config)
         .await
         .expect("pipeline");
+    let now = Utc::now();
+    let mut trace = span(10, "gate");
+    trace.timestamp = now;
+    trace.end_timestamp = Some(now + chrono::Duration::seconds(1));
+    for event in &mut trace.events {
+        event.timestamp = now;
+    }
+    let mut entry = log(10, "gate");
+    entry.timestamp = now;
+    entry.observed_timestamp = Some(now);
     pipeline
-        .add_spans(vec![span(10, "gate")], 0)
+        .add_spans(vec![trace], 0)
         .await
         .expect("trace seed");
-    pipeline
-        .add_logs(vec![log(10, "gate")], 0)
-        .await
-        .expect("log seed");
+    pipeline.add_logs(vec![entry], 0).await.expect("log seed");
 
     let query = softprobe_runtime::query::create_query_engine(&config)
         .await
