@@ -10,6 +10,9 @@ export default defineConfig({
   reporter: 'list',
   use: {
     baseURL: 'http://127.0.0.1:4173',
+    extraHTTPHeaders: process.env.THELAKE_E2E_ASSERTION
+      ? { 'X-Softprobe-Assertion': process.env.THELAKE_E2E_ASSERTION }
+      : {},
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',

@@ -296,7 +296,6 @@ See the [configuration reference](../reference/config.md). Canonical example:
 - `/v1/*` operational routes require authentication (assertion header or
   Bearer), except `OPTIONS` CORS preflight and workspace provisioning
   (`POST /v1/workspaces`), which validates an admin bearer in the handler.
-  Local anonymous mode uses a fixed data-plane allowlist (see root README).
 - Auth wiring uses `SOFTPROBE_AUTH_URL` (defaults to a local auth stub URL).
 
 The HTTP product contract is

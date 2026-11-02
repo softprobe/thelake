@@ -104,20 +104,14 @@ GitHub Actions (Make-only; cache under `~/.cache/thelake` via
 
 ```bash
 export CONFIG_FILE=config.yaml
-export SOFTPROBE_LOCAL_ANONYMOUS=1
-export THELAKE_DEFAULT_WORKSPACE_ID=550e8400-e29b-41d4-a716-446655440000
+export SOFTPROBE_ADMIN_API_KEY=dev-admin
+export SOFTPROBE_ASSERTION_HMAC_SECRET=dev-assertion
 make run
 ```
 
-Open the session and trace UI at `http://127.0.0.1:8090/explorer/`. Local
-anonymous mode (`SOFTPROBE_LOCAL_ANONYMOUS=1`) binds a fixed allowlist of
-`/v1/*` data-plane routes (OTLP ingest, scores POST, span/session search,
-score-config GET, and single span/trace/session GET) to
-`THELAKE_DEFAULT_WORKSPACE_ID` without a bearer. Other `/v1/*` routes
-(including recording, promotions, SQL, and workspaces) return 403. Anyone who
-can reach the listener can exercise that allowlist. Leave this mode disabled
-when the listener is reachable by untrusted users; assertion/Bearer auth
-remains the default.
+Open the session and trace UI at `http://127.0.0.1:8090/explorer/`. Bind a
+workspace with `POST /v1/workspaces` and the admin key, then call `/v1` data
+routes with `X-Softprobe-Assertion` for that workspace UUID.
 
 Defaults:
 

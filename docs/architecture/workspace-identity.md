@@ -15,7 +15,7 @@
 
 Process config owns the single physical scope. `workspace_for(workspace_id)` requires a `workspace_scope_binding` row and then uses that default warehouse. An unknown UUID is `unknown scope`. Ingest rejects it before writing traces or `session_summary_dirty`.
 
-Admin `POST /v1/workspaces` records workspace UUID → default physical scope. The same lookup serves the provision exists-check, ingest, and the session reducer. The reducer lists workspace ids from `workspace_scope_binding` only. Isolated mode uses the same binding row to select that workspace's own physical scope. An empty workspace id is not a workspace. When `SOFTPROBE_LOCAL_ANONYMOUS=1`, startup calls `provision_scope` for `THELAKE_DEFAULT_WORKSPACE_ID` on the configured physical scope. That mode does not expose `POST /v1/workspaces`.
+Admin `POST /v1/workspaces` records workspace UUID → default physical scope. The same lookup serves the provision exists-check, ingest, and the session reducer. The reducer lists workspace ids from `workspace_scope_binding` only. Isolated mode uses the same binding row to select that workspace's own physical scope. An empty workspace id is not a workspace.
 
 ## Caller identity
 
@@ -42,7 +42,7 @@ Data routes take `workspace_id` from the authenticated caller. TheLake checks th
 ## Row and API rules
 
 - Fact tables use a `workspace_id` column (see `src/sql/schema/`).
-- Operational APIs do not accept a workspace selector after auth binding. Identity comes from the authenticated caller, or from local anonymous mode.
+- Operational APIs do not accept a workspace selector after auth binding. Identity comes from the authenticated caller.
 - `session_summary` and `session_summary_dirty` are keyed by `(workspace_id, session_id)`. List reads `session_summary`. The reducer loads workspace ids from `workspace_scope_binding` only.
 
 See also [DuckLake access inventory](ducklake-access.md) and [async jobs](../how-to/async-jobs.md).
