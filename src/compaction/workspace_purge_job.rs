@@ -3,7 +3,8 @@ use crate::workspace::WorkspaceManager;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tracing::info;
 
 pub(crate) const SHARED_WORKSPACE_PURGE_JOB: &str = "shared_workspace_purge";
 
@@ -37,8 +38,16 @@ impl Job for WorkspacePurgeJob {
     }
 
     async fn run(&self, workspace_id: &str) -> Result<()> {
+        let started = Instant::now();
+        info!(workspace_id, "shared workspace purge started");
         self.workspaces
             .process_shared_workspace_deletion(workspace_id)
-            .await
+            .await?;
+        info!(
+            workspace_id,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "shared workspace purge completed"
+        );
+        Ok(())
     }
 }

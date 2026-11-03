@@ -407,7 +407,7 @@ impl MaintenanceEngine {
     }
 
     async fn lookup_physical_scope(&self, scope_key: &str) -> Result<PhysicalScope> {
-        Ok(self.resolve_scope(scope_key).await?.physical)
+        physical_scope_for_key(self.physical_scopes().await?, scope_key)
     }
 
     /// Resolve by maintenance key, then run one SQL maintenance pass.
@@ -575,9 +575,21 @@ pub(crate) fn deduplicate_physical_scopes(
     physical
 }
 
+fn physical_scope_for_key(
+    scopes: Vec<(String, PhysicalScope)>,
+    scope_key: &str,
+) -> Result<PhysicalScope> {
+    scopes
+        .into_iter()
+        .find_map(|(key, scope)| (key == scope_key).then_some(scope))
+        .ok_or_else(|| anyhow!("unknown maintenance scope"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::wait_for_workspace_reader_safety_grace;
+    use super::{physical_scope_for_key, wait_for_workspace_reader_safety_grace};
+    use crate::config::Config;
+    use crate::workspace::physical_scope_from_config;
     use std::time::Duration;
 
     #[tokio::test]
@@ -586,5 +598,24 @@ mod tests {
         let started = std::time::Instant::now();
         wait_for_workspace_reader_safety_grace(grace).await;
         assert!(started.elapsed() >= grace);
+    }
+
+    #[test]
+    fn maintenance_scope_keys_resolve_without_treating_them_as_workspace_ids() {
+        let scope = physical_scope_from_config(&Config::default());
+        let key = scope.id().registry_token().to_string();
+        let resolved = physical_scope_for_key(vec![(key.clone(), scope.clone())], &key)
+            .expect("physical maintenance key resolves");
+        assert!(resolved.id().registry_token() == scope.id().registry_token());
+        assert!(resolved.pg_namespace() == scope.pg_namespace());
+    }
+
+    #[test]
+    fn unknown_maintenance_scope_errors_do_not_include_scope_keys() {
+        let scope = physical_scope_from_config(&Config::default());
+        let key = scope.id().registry_token().to_string();
+        let error = physical_scope_for_key(Vec::new(), &key).expect_err("unknown key");
+        assert_eq!(error.to_string(), "unknown maintenance scope");
+        assert!(!error.to_string().contains("password="));
     }
 }
