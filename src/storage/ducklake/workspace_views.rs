@@ -54,21 +54,21 @@ fn has_workspace_id_column(
     Ok(false)
 }
 
-/// Remove one workspace's rows from the physical tables in the shared catalog,
-/// then physically clear deleted versions from the shared warehouse.
-pub(crate) fn purge_workspace_rows(
+/// Build the fenced per-table purge statements for one workspace.
+pub(crate) fn workspace_purge_statements(
     conn: &Connection,
     scope: &PhysicalScope,
     workspace_id: &str,
-) -> Result<()> {
-    let catalog = super::util::escape_sql_literal(scope.attach_alias());
-    let schema = super::util::escape_sql_literal(scope.pg_namespace());
-    let workspace_id = super::util::escape_sql_literal(workspace_id);
-
+    registry_schema: &str,
+    scope_key: &str,
+    holder_id: &str,
+    lease_epoch: i64,
+) -> Result<(Vec<String>, bool)> {
+    let mut statements = Vec::new();
+    let mut has_rows_to_purge = false;
     for table in ["traces", "logs", "scores", "score_configs"] {
         let exists: i64 = conn.query_row(
-            "SELECT count(*) FROM duckdb_tables() \
-             WHERE database_name = ? AND schema_name = ? AND table_name = ?;",
+            crate::sql::maintenance::workspace_purge::workspace_table_exists_sql(),
             duckdb::params![scope.attach_alias(), scope.pg_namespace(), table],
             |row| row.get(0),
         )?;
@@ -79,22 +79,31 @@ pub(crate) fn purge_workspace_rows(
             anyhow::bail!("shared workspace table {table} has no workspace_id column");
         }
         let physical_table = ducklake_qualified_table_name(scope, table);
-        conn.execute_batch(&format!(
-            "DELETE FROM {physical_table} WHERE workspace_id = '{workspace_id}';\
-             CALL ducklake_rewrite_data_files('{catalog}', '{table}', schema => '{schema}', delete_threshold => 0);"
-        ))
-        .with_context(|| format!("purge shared workspace rows from {table}"))?;
+        let has_rows: bool = conn.query_row(
+            &crate::sql::maintenance::workspace_purge::render_workspace_table_has_rows_sql(
+                &physical_table,
+            ),
+            duckdb::params![workspace_id],
+            |row| row.get(0),
+        )?;
+        if !has_rows {
+            continue;
+        }
+        has_rows_to_purge = true;
+        let sql = crate::sql::maintenance::workspace_purge::render_workspace_table_purge_sql(
+            &physical_table,
+            workspace_id,
+            scope.attach_alias(),
+            table,
+            scope.pg_namespace(),
+            registry_schema,
+            scope_key,
+            holder_id,
+            lease_epoch,
+        );
+        statements.push(sql);
     }
-
-    // DuckLake snapshots are catalog-scoped, so expiration also removes time
-    // travel history for other workspaces in this same environment. Current
-    // rows in their tables are retained.
-    conn.execute_batch(&format!(
-        "CALL ducklake_expire_snapshots('{catalog}', older_than => now());\
-         CALL ducklake_cleanup_old_files('{catalog}', cleanup_all => true);"
-    ))
-    .context("remove expired workspace data files")?;
-    Ok(())
+    Ok((statements, has_rows_to_purge))
 }
 
 /// Verify that every physical table required by shared workspace access carries

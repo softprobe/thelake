@@ -28,6 +28,8 @@ pub mod workspace_otlp_isolation;
 #[cfg(feature = "integration-e2e")]
 pub mod workspace_promotion_specs;
 #[cfg(feature = "integration-e2e")]
+pub mod workspace_purge;
+#[cfg(feature = "integration-e2e")]
 pub mod workspace_shared_scope;
 
 #[cfg(feature = "integration-e2e")]

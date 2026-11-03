@@ -17,9 +17,7 @@ use crate::promotion::{
     PromotionSpecLoadError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
-use crate::storage::ducklake::{
-    DuckLakeAccess, DuckLakeSessionFactory, DuckLakeSessionKind, PhysicalScope,
-};
+use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
 use crate::workspace_scope::{effective_workspace_id, WorkspaceBinding, WorkspaceScopeMode};
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
@@ -302,14 +300,38 @@ impl WorkspaceManager {
         self.workspaces.remove(workspace_id);
     }
 
+    /// Hold a shared registry-row lock for the lifetime of a tenant request.
+    /// Workspace deletion takes an exclusive update lock on the same row, so
+    /// it drains requests on every replica before changing the binding state.
+    pub async fn with_active_workspace_access<T>(
+        &self,
+        workspace_id: &str,
+        action: impl Future<Output = T>,
+    ) -> Result<T> {
+        let mut client = self.scope_registry.request_access_pool.get().await?;
+        let transaction = client.transaction().await?;
+        let access_sql = crate::sql::maintenance::workspace_purge::workspace_binding_access_sql(
+            self.scope_registry.registry_schema(),
+        );
+        if transaction
+            .query_opt(&access_sql, &[&workspace_id])
+            .await?
+            .is_none()
+        {
+            bail!("workspace is not active: {workspace_id}");
+        }
+        let response = action.await;
+        transaction.commit().await?;
+        Ok(response)
+    }
+
     /// Permanently remove one workspace from the shared catalog.
     ///
-    /// Staging and production use one shared DuckLake catalog per environment,
-    /// so row deletion is scoped by `workspace_id`. DuckLake time travel keeps
-    /// old row versions until snapshots are expired; expiration is catalog-wide.
-    /// This operation therefore removes historical snapshots for every
-    /// workspace in this environment before cleaning up their unreferenced
-    /// files. Current rows belonging to other workspaces remain intact.
+    /// The binding is retained as a durable tombstone. Its status update waits
+    /// for request transactions on every replica that hold the binding FOR
+    /// SHARE, and future requests/provisioning cannot revive a tombstoned id.
+    /// Physical row/file cleanup uses the shared maintenance lease and the
+    /// configured reader safety grace before expiring snapshots.
     pub async fn delete_shared_workspace_data(&self, workspace_id: &str) -> Result<()> {
         if self.config.ducklake.workspace_scope_mode != WorkspaceScopeMode::Shared {
             bail!("workspace data deletion requires shared workspace scope mode");
@@ -320,48 +342,48 @@ impl WorkspaceManager {
         let lock = self.scope_lock(lock_token);
         let _scope_hold = lock.lock().await;
 
-        // Remove the binding first. New workspace-scoped requests now fail
-        // closed while the lake purge runs. A retry still purges the shared
-        // tables even though the binding is already gone.
+        // Transition the binding to a durable tombstone first. The upsert
+        // waits for in-flight request locks across replicas, and makes retries
+        // safe even if a prior purge stopped halfway through.
         {
             let mut client = self.scope_registry.pool.get().await?;
             let transaction = client.transaction().await?;
+            let physical_scope_id = self
+                .scope_registry
+                .insert_physical_scope(&transaction, &scope)
+                .await?;
+            let tombstone_sql =
+                crate::sql::maintenance::workspace_purge::workspace_binding_tombstone_sql(
+                    self.scope_registry.registry_schema(),
+                );
             transaction
-                .execute(
-                    &format!(
-                        "DELETE FROM {}.workspace_scope_binding WHERE workspace_id = $1;",
-                        quote_pg_ident(self.scope_registry.registry_schema())
-                    ),
-                    &[&workspace_id],
-                )
+                .execute(&tombstone_sql, &[&workspace_id, &physical_scope_id])
                 .await?;
             transaction.commit().await?;
         }
         self.invalidate(workspace_id);
 
-        let access = DuckLakeAccess::Physical(scope.clone());
-        let factory = DuckLakeSessionFactory::new(self.config.as_ref());
-        let connection = factory.open(&access, DuckLakeSessionKind::Maintenance)?;
-        factory.attach(&connection, &access)?;
-        crate::storage::ducklake::workspace_views::purge_workspace_rows(
-            &connection,
-            &scope,
-            workspace_id,
-        )?;
+        let maintenance = self.maintenance_engine().await?;
+        maintenance.purge_shared_workspace(workspace_id).await?;
 
         // Session search has a Postgres summary index alongside DuckLake.
         // Keep its cleanup in the same operation and make retries harmless.
-        let quoted_schema = quote_pg_ident(scope.pg_namespace());
         let mut client = self.scope_registry.pool.get().await?;
         let transaction = client.transaction().await?;
         for table in ["session_summary", "session_summary_dirty"] {
-            transaction
-                .execute(
-                    &format!("DELETE FROM {quoted_schema}.{table} WHERE workspace_id = $1;"),
-                    &[&workspace_id],
-                )
-                .await?;
+            let delete_sql = crate::sql::maintenance::workspace_purge::workspace_summary_delete_sql(
+                scope.pg_namespace(),
+                table,
+            );
+            transaction.execute(&delete_sql, &[&workspace_id]).await?;
         }
+        let mark_deleted_sql =
+            crate::sql::maintenance::workspace_purge::workspace_binding_mark_deleted_sql(
+                self.scope_registry.registry_schema(),
+            );
+        transaction
+            .execute(&mark_deleted_sql, &[&workspace_id])
+            .await?;
         transaction.commit().await?;
 
         Ok(())
@@ -560,6 +582,7 @@ fn path_requires_object_store_creds(data_path: &str) -> bool {
 #[derive(Clone)]
 pub(crate) struct DuckLakeScopeResolver {
     pool: Pool,
+    request_access_pool: Pool,
     default_physical_scope: PhysicalScope,
     workspace_scope_mode: WorkspaceScopeMode,
 }
@@ -597,10 +620,15 @@ impl DuckLakeScopeResolver {
         let mgr_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
-        let mgr = Manager::from_config(pg, NoTls, mgr_config);
+        let mgr = Manager::from_config(pg.clone(), NoTls, mgr_config.clone());
         let pool = Pool::builder(mgr).max_size(8).build()?;
+        // Long-lived request locks must not consume connections needed by
+        // handlers using the registry pool (for example, sessions search).
+        let access_mgr = Manager::from_config(pg, NoTls, mgr_config);
+        let request_access_pool = Pool::builder(access_mgr).max_size(8).build()?;
         Ok(Self {
             pool,
+            request_access_pool,
             default_physical_scope: PhysicalScope::from_ducklake(dl),
             workspace_scope_mode: dl.workspace_scope_mode,
         })
@@ -737,20 +765,10 @@ RETURNING physical_scope_id;"#,
 
     async fn resolve_binding(&self, workspace_id: &str) -> Result<WorkspaceBinding> {
         let client = self.pool.get().await?;
-        let row = client
-            .query_opt(
-                &format!(
-                    "SELECT ps.metadata_path, ps.ducklake_metadata_schema, ps.data_path, \
-                            ps.catalog_alias \
-                     FROM {}.workspace_scope_binding wb \
-                     JOIN {}.physical_scope ps ON ps.physical_scope_id = wb.physical_scope_id \
-                     WHERE wb.workspace_id = $1;",
-                    quote_pg_ident(self.registry_schema()),
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[&workspace_id],
-            )
-            .await?;
+        let sql = crate::sql::maintenance::workspace_purge::workspace_binding_resolve_sql(
+            self.registry_schema(),
+        );
+        let row = client.query_opt(&sql, &[&workspace_id]).await?;
         let Some(row) = row else {
             bail!("unknown scope: {workspace_id}");
         };
@@ -808,21 +826,12 @@ RETURNING physical_scope_id;"#,
         let physical = scope.clone();
         let transaction = client.transaction().await?;
         let physical_scope_id = self.insert_physical_scope(&transaction, &physical).await?;
+        let provision_sql =
+            crate::sql::maintenance::workspace_purge::workspace_binding_provision_sql(
+                self.registry_schema(),
+            );
         let row = transaction
-            .query_opt(
-                &format!(
-                    r#"INSERT INTO {}.workspace_scope_binding
-  (workspace_id, physical_scope_id)
-VALUES ($1, $2)
-ON CONFLICT (workspace_id) DO UPDATE SET
-  updated_at = NOW()
-WHERE {}.workspace_scope_binding.physical_scope_id = EXCLUDED.physical_scope_id
-RETURNING workspace_id;"#,
-                    quote_pg_ident(self.registry_schema()),
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[&request.scope_id, &physical_scope_id],
-            )
+            .query_opt(&provision_sql, &[&request.scope_id, &physical_scope_id])
             .await?;
         if row.is_none() {
             bail!("scope conflict for scope {}", request.scope_id);
@@ -836,20 +845,10 @@ RETURNING workspace_id;"#,
     /// Returns `(scope_id, scope)` — `scope_id` is the tenant id used for ops labels.
     pub async fn list_scopes(&self) -> Result<Vec<(String, PhysicalScope)>> {
         let client = self.pool.get().await?;
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT wb.workspace_id, ps.metadata_path, \
-                            ps.ducklake_metadata_schema, ps.data_path, ps.catalog_alias \
-                     FROM {}.workspace_scope_binding wb \
-                     JOIN {}.physical_scope ps ON ps.physical_scope_id = wb.physical_scope_id \
-                     ORDER BY wb.workspace_id;",
-                    quote_pg_ident(self.registry_schema()),
-                    quote_pg_ident(self.registry_schema())
-                ),
-                &[],
-            )
-            .await?;
+        let list_sql = crate::sql::maintenance::workspace_purge::workspace_binding_list_sql(
+            self.registry_schema(),
+        );
+        let rows = client.query(&list_sql, &[]).await?;
         Ok(rows
             .into_iter()
             .map(|row| {
@@ -1132,7 +1131,7 @@ pub(crate) fn quote_pg_ident(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::validate_metadata_schema_name;
-    use super::{AdminEngine, IngestEngine, QueryEngine, WorkspaceContext};
+    use super::{quote_pg_ident, AdminEngine, IngestEngine, QueryEngine, WorkspaceContext};
     use std::sync::Arc;
 
     #[test]
@@ -1148,5 +1147,89 @@ mod tests {
         assert!(validate_metadata_schema_name(&"a".repeat(63)).is_ok());
         assert!(validate_metadata_schema_name(&"a".repeat(64)).is_err());
         assert!(validate_metadata_schema_name(&"é".repeat(32)).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ducklake-postgres; make test-lease-pg"]
+    async fn postgres_workspace_delete_lock_fences_requests_across_connections() {
+        use std::time::Duration;
+        use tokio_postgres::NoTls;
+
+        let mut config = tokio_postgres::Config::new();
+        config
+            .host("localhost")
+            .port(5432)
+            .dbname("ducklake")
+            .user("ducklake")
+            .password("ducklake");
+
+        async fn connect(config: &tokio_postgres::Config) -> tokio_postgres::Client {
+            let (client, connection) = config.connect(NoTls).await.expect("Postgres connection");
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            client
+        }
+
+        let mut client_a = connect(&config).await;
+        let client_b = connect(&config).await;
+        let schema = format!("workspace_delete_{}", uuid::Uuid::new_v4().simple());
+        let quoted_schema = quote_pg_ident(&schema);
+        client_a
+            .batch_execute(&format!(
+                "CREATE SCHEMA {quoted_schema};\
+                 CREATE TABLE {quoted_schema}.physical_scope (physical_scope_id TEXT PRIMARY KEY);\
+                 CREATE TABLE {quoted_schema}.workspace_scope_binding (\
+                   workspace_id TEXT PRIMARY KEY,\
+                   physical_scope_id TEXT NOT NULL REFERENCES {quoted_schema}.physical_scope(physical_scope_id),\
+                   lifecycle_status TEXT NOT NULL DEFAULT 'active',\
+                   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\
+                 );\
+                 INSERT INTO {quoted_schema}.physical_scope VALUES ('physical');\
+                 INSERT INTO {quoted_schema}.workspace_scope_binding (workspace_id, physical_scope_id)\
+                   VALUES ('workspace-a', 'physical');"
+            ))
+            .await
+            .expect("create isolated workspace binding fixture");
+
+        let access_sql =
+            crate::sql::maintenance::workspace_purge::workspace_binding_access_sql(&schema);
+        let tombstone_sql =
+            crate::sql::maintenance::workspace_purge::workspace_binding_tombstone_sql(&schema);
+        let access_tx = client_a.transaction().await.expect("request transaction");
+        assert!(access_tx
+            .query_opt(&access_sql, &[&"workspace-a"])
+            .await
+            .expect("active workspace access")
+            .is_some());
+
+        let mut tombstone = tokio::spawn(async move {
+            client_b
+                .execute(&tombstone_sql, &[&"workspace-a", &"physical"])
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut tombstone)
+                .await
+                .is_err(),
+            "deletion must wait while a request holds FOR SHARE on the binding"
+        );
+
+        access_tx.commit().await.expect("release request lock");
+        tokio::time::timeout(Duration::from_secs(2), &mut tombstone)
+            .await
+            .expect("deletion should continue when the request finishes")
+            .expect("deletion task")
+            .expect("tombstone update");
+
+        assert!(client_a
+            .query_opt(&access_sql, &[&"workspace-a"])
+            .await
+            .expect("post-delete workspace access")
+            .is_none());
+        client_a
+            .batch_execute(&format!("DROP SCHEMA {quoted_schema} CASCADE"))
+            .await
+            .expect("drop isolated workspace binding fixture");
     }
 }

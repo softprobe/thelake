@@ -1,5 +1,6 @@
 //! Physical-scope maintenance facade.
 
+use crate::async_jobs::LeaseStore;
 use crate::compaction::maint_conn_pool::MaintenanceConnPool;
 use crate::config::Config;
 use crate::storage::ducklake::PhysicalScope;
@@ -17,6 +18,20 @@ fn ensure_maintenance_lease_active(lease_lost: &watch::Receiver<bool>) -> Result
         anyhow::bail!("maintenance lease lost")
     }
     Ok(())
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl AbortOnDrop {
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Full ordered maintenance table list (traces / logs / scores).
@@ -73,6 +88,164 @@ impl MaintenanceEngine {
 
     pub async fn run_once(&self) -> Result<()> {
         self.run_pass().await
+    }
+
+    /// Purge one workspace from the shared catalog under the same distributed
+    /// lease used by scheduled maintenance. The durable binding tombstone is
+    /// installed by WorkspaceManager before this method is called.
+    pub(crate) async fn purge_shared_workspace(&self, workspace_id: &str) -> Result<()> {
+        if self.config.ducklake.workspace_scope_mode
+            != crate::workspace_scope::WorkspaceScopeMode::Shared
+        {
+            anyhow::bail!("workspace purge requires shared workspace scope mode");
+        }
+
+        let physical = self.default_physical.clone();
+        let scope_key = physical.id().registry_token().to_string();
+        let holder_id = format!("workspace-purge-{}", uuid::Uuid::new_v4());
+        let lease_ttl =
+            std::time::Duration::from_secs(self.config.async_jobs.lease_ttl_seconds.max(1));
+        let leases = crate::async_jobs::PostgresLeaseStore::from_resolver(&self.scope_registry);
+        let token = loop {
+            if let Some(token) = leases
+                .acquire_lease(
+                    crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB,
+                    &scope_key,
+                    &holder_id,
+                    lease_ttl,
+                )
+                .await?
+            {
+                break token;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        };
+
+        let (lost_tx, lost_rx) = watch::channel(false);
+        let heartbeat_every =
+            std::time::Duration::from_secs(self.config.async_jobs.heartbeat_seconds.max(1));
+        let heartbeat_leases = leases.clone();
+        let heartbeat_job = crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB.to_string();
+        let heartbeat_scope = scope_key.clone();
+        let heartbeat_token = token.clone();
+        let heartbeat = AbortOnDrop(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(heartbeat_every);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if heartbeat_leases
+                    .heartbeat_lease(
+                        &heartbeat_job,
+                        &heartbeat_scope,
+                        &heartbeat_token,
+                        lease_ttl,
+                    )
+                    .await
+                    .is_err()
+                {
+                    let _ = lost_tx.send(true);
+                    break;
+                }
+            }
+        }));
+
+        let result = self
+            .purge_shared_workspace_under_lease(
+                workspace_id,
+                &scope_key,
+                &physical,
+                &token,
+                lost_rx,
+            )
+            .await;
+        heartbeat.abort();
+        let release = leases
+            .release_lease(
+                crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB,
+                &scope_key,
+                &token,
+            )
+            .await;
+        result?;
+        release?;
+        Ok(())
+    }
+
+    async fn purge_shared_workspace_under_lease(
+        &self,
+        workspace_id: &str,
+        scope_key: &str,
+        physical: &PhysicalScope,
+        token: &crate::async_jobs::LeaseToken,
+        lease_lost: watch::Receiver<bool>,
+    ) -> Result<()> {
+        ensure_maintenance_lease_active(&lease_lost)?;
+        let lease_job = crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB;
+        let registry_schema = self.scope_registry.registry_schema();
+        let holder_id = token.holder_id.as_str();
+        let lease_epoch = token.epoch;
+        let (has_rows_to_purge, cold, open_elapsed) =
+            self.conn_pool.with_conn(physical, |conn| {
+                conn.execute(
+                    &crate::sql::maintenance::scope_config_upsert_sql(registry_schema),
+                    duckdb::params![
+                        scope_key,
+                        physical.attach_alias(),
+                        physical.pg_namespace(),
+                        self.config.maintenance.enabled,
+                        self.config.maintenance.metadata_enabled,
+                        self.config.maintenance.reader_safety_grace_seconds as i64,
+                        Some(lease_job),
+                        Some(holder_id),
+                        lease_epoch,
+                    ],
+                )?;
+                let (statements, has_rows_to_purge) =
+                    crate::storage::ducklake::workspace_views::workspace_purge_statements(
+                        conn,
+                        physical,
+                        workspace_id,
+                        registry_schema,
+                        scope_key,
+                        holder_id,
+                        lease_epoch,
+                    )?;
+                for sql in statements {
+                    ensure_maintenance_lease_active(&lease_lost)?;
+                    execute_maintenance_script(conn, &sql, Some(&lease_lost))?;
+                }
+                Ok(has_rows_to_purge)
+            })?;
+        crate::self_monitoring::record_maintenance_step(
+            scope_key,
+            if cold {
+                crate::self_monitoring::maintenance_step::OPEN_ATTACH
+            } else {
+                crate::self_monitoring::maintenance_step::OPEN_ATTACH_WARM
+            },
+            None,
+            open_elapsed,
+        );
+
+        // A workspace's delete snapshot is immediately retired only after the
+        // same reader grace used by normal maintenance has elapsed. Keep the
+        // distributed lease heartbeating throughout the wait.
+        let grace =
+            std::time::Duration::from_secs(self.config.maintenance.reader_safety_grace_seconds);
+        if has_rows_to_purge && !grace.is_zero() {
+            tokio::time::sleep(grace + std::time::Duration::from_secs(1)).await;
+        }
+
+        let mut ensure_active = || ensure_maintenance_lease_active(&lease_lost);
+        self.run_physical_scope_pass_with_fence(
+            scope_key,
+            physical,
+            Some(token),
+            Some(lease_lost.clone()),
+            &mut ensure_active,
+        )
+        .await
     }
 
     /// Run the SQL maintenance script for each physical scope.
