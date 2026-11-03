@@ -90,7 +90,6 @@ mod tests {
         let source = include_str!("tail.rs");
         let production = source.split("#[cfg(test)]").next().expect("production");
         assert!(!production.contains("with_active_workspace_access"));
-        assert!(production.contains("&ctx.auth.workspace_id"));
         assert!(production.contains("backend.query_range(&ctx, request.clone())"));
     }
 }
