@@ -59,9 +59,10 @@ A crashed reducer's rows become claimable after `dirty_claim_ttl_seconds`. The r
 The admin-only `DELETE /v1/workspaces/{workspace_id}` commits a durable
 `deleting` binding and returns `202 Accepted`. The shared job runner discovers
 that binding after startup and retries the physical purge under its workspace
-lease. The purge retains the full configured reader safety grace and the
-physical maintenance lease; request cancellation or process restart therefore
-does not lose the work or shorten the grace period.
+lease. The purge retains the configured reader safety grace before expiring
+snapshots, then waits another grace so the files scheduled by snapshot expiry
+are eligible for physical cleanup. Request cancellation or process restart
+therefore does not lose the work or shorten either grace period.
 
 Admin-only `GET /v1/workspaces/{workspace_id}/deletion` returns the current
 `deleting` or `deleted` state. The caller may remove its control-plane workspace
@@ -69,12 +70,14 @@ record only after observing `deleted`. A completed tombstone is permanent and
 cannot be revived by a repeated delete or provisioning request.
 
 Shared workspaces use one DuckLake catalog and its snapshot history is
-catalog-wide. After the reader grace, deleting one workspace expires snapshots
-and removes scheduled files for the shared catalog, even when ordinary metadata
-maintenance is disabled. This permanently removes the target workspace's old
-versions while preserving the current rows and files of other workspaces; it
-also removes their historical snapshot versions. Isolated workspaces have their
-own catalog and do not affect another workspace's snapshot history.
+catalog-wide. After the first reader grace, deleting one workspace expires
+snapshots for the shared catalog. Once the second reader grace elapses, the
+purge removes the files scheduled by that expiration, even when ordinary
+metadata maintenance is disabled. This permanently removes the target
+workspace's old versions while preserving the current rows and files of other
+workspaces; it also removes their historical snapshot versions. Isolated
+workspaces have their own catalog and do not affect another workspace's
+snapshot history.
 
 PostgreSQL lease durations use whole seconds (`max(1)`); configure `lease_ttl_seconds` well above `heartbeat_seconds` and typical pass duration. The dirty claim TTL should exceed normal p99 reduce batch duration.
 

@@ -492,10 +492,12 @@ async fn admin_workspace_delete_purges_target_and_preserves_other_workspace() {
         let status: String = outcome.get(1);
         let files_processed: i64 = outcome.get(2);
         assert_eq!(status, "completed", "workspace purge {action} must run");
-        assert!(
-            files_processed > 0,
-            "workspace purge {action} must physically remove snapshot/file records"
-        );
+        if action == "cleanup_scheduled_files" {
+            assert!(
+                files_processed > 0,
+                "workspace purge {action} must physically remove snapshot/file records; reported {files_processed}"
+            );
+        }
     }
     for path in &workspace_a_files {
         assert!(

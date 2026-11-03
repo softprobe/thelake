@@ -226,16 +226,38 @@ impl MaintenanceEngine {
             open_elapsed,
         );
 
-        // A workspace's delete snapshot is immediately retired only after the
-        // same reader grace used by normal maintenance has elapsed. Keep the
-        // distributed lease heartbeating throughout the wait. The final pass
-        // also forces catalog snapshot/file cleanup even when periodic metadata
-        // maintenance is disabled; shared snapshot history is catalog-wide.
+        // A workspace's delete snapshot is retired only after the same reader
+        // grace used by normal maintenance has elapsed. Expiring that snapshot
+        // schedules its old files for deletion, and DuckLake applies the same
+        // grace to those scheduled entries. Keep the distributed lease
+        // heartbeating through both waits so the final pass can remove the
+        // files before the durable workspace tombstone is completed. The
+        // passes also force catalog snapshot/file cleanup when periodic
+        // metadata maintenance is disabled; shared snapshot history is
+        // catalog-wide.
         let grace =
             std::time::Duration::from_secs(self.config.maintenance.reader_safety_grace_seconds);
         wait_for_workspace_reader_safety_grace(grace).await;
 
         let mut ensure_active = || ensure_maintenance_lease_active(&lease_lost);
+        self.run_physical_scope_pass_with_fence(
+            scope_key,
+            physical,
+            Some(token),
+            Some(lease_lost.clone()),
+            true,
+            &mut ensure_active,
+        )
+        .await?;
+
+        // Snapshot expiration above can enqueue files only at the end of its
+        // maintenance pass. Give readers that began before expiration the
+        // configured grace window, then run maintenance again so cleanup_old_files
+        // can safely remove those newly scheduled files before deletion is
+        // acknowledged as complete. If the worker stops during this wait, its
+        // durable tombstone makes the next attempt repeat this idempotently.
+        wait_for_workspace_reader_safety_grace(grace).await;
+        ensure_active()?;
         self.run_physical_scope_pass_with_fence(
             scope_key,
             physical,
