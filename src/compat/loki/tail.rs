@@ -59,8 +59,15 @@ pub async fn run(
         request.limit = params.limit;
         request.direction = LogDirection::Forward;
 
-        match backend.query_range(&ctx, request.clone()).await {
-            Ok(hits) if !hits.is_empty() => {
+        let hits = state
+            .workspaces
+            .with_active_workspace_access(
+                &ctx.auth.workspace_id,
+                backend.query_range(&ctx, request.clone()),
+            )
+            .await;
+        match hits {
+            Ok(Ok(hits)) if !hits.is_empty() => {
                 if let Some(last_ts) = hits.iter().map(|hit| hit.timestamp_ns).max() {
                     cursor_ns = last_ts.saturating_add(1);
                 }
@@ -72,12 +79,24 @@ pub async fn run(
                     break;
                 }
             }
-            Ok(_) => {}
-            Err(_) => break,
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => break,
         }
 
         tokio::time::sleep(delay + TAIL_POLL_INTERVAL).await;
     }
 
     let _ = sender.close().await;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tail_rechecks_active_workspace_binding_for_each_poll() {
+        let source = include_str!("tail.rs");
+        let production = source.split("#[cfg(test)]").next().expect("production");
+        assert!(production.contains("with_active_workspace_access"));
+        assert!(production.contains("&ctx.auth.workspace_id"));
+        assert!(production.contains("backend.query_range(&ctx, request.clone())"));
+    }
 }

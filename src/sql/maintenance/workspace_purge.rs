@@ -5,6 +5,10 @@ const WORKSPACE_SUMMARY_DELETE_SQL: &str = include_str!("workspace_summary_delet
 const WORKSPACE_BINDING_ACCESS_SQL: &str = include_str!("workspace_binding_access.sql");
 const WORKSPACE_BINDING_TOMBSTONE_SQL: &str = include_str!("workspace_binding_tombstone.sql");
 const WORKSPACE_BINDING_MARK_DELETED_SQL: &str = include_str!("workspace_binding_mark_deleted.sql");
+const WORKSPACE_BINDING_DELETION_STATUS_SQL: &str =
+    include_str!("workspace_binding_deletion_status.sql");
+const WORKSPACE_BINDING_PENDING_DELETIONS_SQL: &str =
+    include_str!("workspace_binding_pending_deletions.sql");
 const WORKSPACE_BINDING_RESOLVE_SQL: &str = include_str!("workspace_binding_resolve.sql");
 const WORKSPACE_BINDING_PROVISION_SQL: &str = include_str!("workspace_binding_provision.sql");
 const WORKSPACE_BINDING_LIST_SQL: &str = include_str!("workspace_binding_list.sql");
@@ -17,16 +21,20 @@ pub(crate) fn render_workspace_table_has_rows_sql(physical_table: &str) -> Strin
     WORKSPACE_TABLE_HAS_ROWS_SQL.replace("{{physical_table}}", physical_table)
 }
 
+pub(crate) struct WorkspaceTablePurgeFence<'a> {
+    pub(crate) registry_schema: &'a str,
+    pub(crate) scope_key: &'a str,
+    pub(crate) holder_id: &'a str,
+    pub(crate) lease_epoch: i64,
+}
+
 pub(crate) fn render_workspace_table_purge_sql(
     physical_table: &str,
     workspace_id: &str,
     catalog: &str,
     table: &str,
     schema: &str,
-    registry_schema: &str,
-    scope_key: &str,
-    holder_id: &str,
-    lease_epoch: i64,
+    fence: &WorkspaceTablePurgeFence<'_>,
 ) -> String {
     WORKSPACE_TABLE_PURGE_SQL
         .replace("{{physical_table}}", physical_table)
@@ -41,14 +49,17 @@ pub(crate) fn render_workspace_table_purge_sql(
         .replace("{{table}}", &crate::sql::literal::sql_string_literal(table))
         .replace(
             "{{scope_key}}",
-            &crate::sql::literal::sql_string_literal(scope_key),
+            &crate::sql::literal::sql_string_literal(fence.scope_key),
         )
         .replace(
             "{{holder_id}}",
-            &crate::sql::literal::sql_string_literal(holder_id),
+            &crate::sql::literal::sql_string_literal(fence.holder_id),
         )
-        .replace("{{lease_epoch}}", &lease_epoch.to_string())
-        .replace("{{registry_schema}}", &quote_identifier(registry_schema))
+        .replace("{{lease_epoch}}", &fence.lease_epoch.to_string())
+        .replace(
+            "{{registry_schema}}",
+            &quote_identifier(fence.registry_schema),
+        )
         .replace(
             "{{schema}}",
             &crate::sql::literal::sql_string_literal(schema),
@@ -66,6 +77,16 @@ pub(crate) fn workspace_binding_tombstone_sql(registry_schema: &str) -> String {
 
 pub(crate) fn workspace_binding_mark_deleted_sql(registry_schema: &str) -> String {
     WORKSPACE_BINDING_MARK_DELETED_SQL
+        .replace("{{registry_schema}}", &quote_identifier(registry_schema))
+}
+
+pub(crate) fn workspace_binding_deletion_status_sql(registry_schema: &str) -> String {
+    WORKSPACE_BINDING_DELETION_STATUS_SQL
+        .replace("{{registry_schema}}", &quote_identifier(registry_schema))
+}
+
+pub(crate) fn workspace_binding_pending_deletions_sql(registry_schema: &str) -> String {
+    WORKSPACE_BINDING_PENDING_DELETIONS_SQL
         .replace("{{registry_schema}}", &quote_identifier(registry_schema))
 }
 
@@ -108,10 +129,12 @@ mod tests {
             "softprobe",
             "traces",
             "shared",
-            "registry",
-            "scope-key",
-            "holder'42",
-            7,
+            &WorkspaceTablePurgeFence {
+                registry_schema: "registry",
+                scope_key: "scope-key",
+                holder_id: "holder'42",
+                lease_epoch: 7,
+            },
         );
         let sql = normalize_sql(&sql);
 
@@ -127,14 +150,19 @@ mod tests {
         let access = workspace_binding_access_sql("registry\"schema");
         let tombstone = workspace_binding_tombstone_sql("registry\"schema");
         let deleted = workspace_binding_mark_deleted_sql("registry\"schema");
+        let deletion_status = workspace_binding_deletion_status_sql("registry\"schema");
+        let pending_deletions = workspace_binding_pending_deletions_sql("registry\"schema");
         let resolve = workspace_binding_resolve_sql("registry\"schema");
         let provision = workspace_binding_provision_sql("registry\"schema");
         let list = workspace_binding_list_sql("registry\"schema");
         let summary = workspace_summary_delete_sql("workspace_staging", "session_summary_dirty");
 
         assert!(normalize_sql(&access).contains("SELECT workspace_id FROM \"registry\"\"schema\".workspace_scope_binding WHERE workspace_id = $1 AND lifecycle_status = 'active' FOR SHARE;"));
-        assert!(normalize_sql(&tombstone).contains("INSERT INTO \"registry\"\"schema\".workspace_scope_binding (workspace_id, physical_scope_id, lifecycle_status) VALUES ($1, $2, 'deleting') ON CONFLICT (workspace_id) DO UPDATE SET lifecycle_status = 'deleting', updated_at = NOW();"));
+        assert!(normalize_sql(&tombstone).contains("lifecycle_status <> 'deleted';"));
         assert!(normalize_sql(&deleted).contains("UPDATE \"registry\"\"schema\".workspace_scope_binding SET lifecycle_status = 'deleted', updated_at = NOW() WHERE workspace_id = $1 AND lifecycle_status = 'deleting';"));
+        assert!(normalize_sql(&deletion_status).contains("WHERE workspace_id = $1;"));
+        assert!(normalize_sql(&pending_deletions)
+            .contains("lifecycle_status = 'deleting' ORDER BY updated_at, workspace_id;"));
         assert!(normalize_sql(&summary).contains(
             "DELETE FROM \"workspace_staging\".\"session_summary_dirty\" WHERE workspace_id = $1;"
         ));

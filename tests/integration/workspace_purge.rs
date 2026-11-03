@@ -52,7 +52,7 @@ fn test_config(temp: &TempDir) -> Config {
         "host=localhost port=5432 dbname=ducklake user=ducklake password=ducklake".to_string();
     config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Shared;
     config.ducklake.data_inlining_row_limit = Some(0);
-    config.maintenance.reader_safety_grace_seconds = 0;
+    config.maintenance.reader_safety_grace_seconds = 1;
     config
 }
 
@@ -172,6 +172,44 @@ fn workspace_row_count(config: &Config, table: &str, workspace_id: &str) -> i64 
     .expect("count shared catalog workspace rows")
 }
 
+fn active_data_files(config: &Config) -> Vec<std::path::PathBuf> {
+    let conn = open_attached_from_config(&config.ducklake, config.ducklake.data_inlining_row_limit);
+    let metadata_catalog = format!("__ducklake_metadata_{}", config.ducklake.catalog_alias);
+    let sql = include_str!("../fixtures/workspace_purge_active_files.sql")
+        .replace("{{metadata_catalog}}", &metadata_catalog)
+        .replace("{{schema}}", &config.ducklake.metadata_schema);
+    let mut statement = conn
+        .prepare(&sql)
+        .expect("prepare active workspace data files");
+    statement
+        .query_map([], |row| {
+            let file_path: String = row.get(0)?;
+            let file_relative: bool = row.get(1)?;
+            let table_path: String = row.get(2)?;
+            let table_relative: bool = row.get(3)?;
+            let schema_path: String = row.get(4)?;
+            let schema_relative: bool = row.get(5)?;
+            let schema_base = if schema_relative {
+                std::path::Path::new(&config.ducklake.data_path).join(schema_path)
+            } else {
+                std::path::PathBuf::from(schema_path)
+            };
+            let table_base = if table_relative {
+                schema_base.join(table_path)
+            } else {
+                std::path::PathBuf::from(table_path)
+            };
+            Ok(if file_relative {
+                table_base.join(file_path)
+            } else {
+                std::path::PathBuf::from(file_path)
+            })
+        })
+        .expect("read active workspace data files")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode active workspace data file paths")
+}
+
 async fn delete_workspace(router: &axum::Router, workspace_id: &str) -> (StatusCode, Value) {
     let request = Request::builder()
         .method("DELETE")
@@ -180,6 +218,26 @@ async fn delete_workspace(router: &axum::Router, workspace_id: &str) -> (StatusC
         .body(Body::empty())
         .expect("workspace delete request");
     json_response(router.clone().oneshot(request).await.expect("delete route")).await
+}
+
+async fn workspace_deletion_status(
+    router: &axum::Router,
+    workspace_id: &str,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/workspaces/{workspace_id}/deletion"))
+        .header(header::AUTHORIZATION, "Bearer workspace-purge-test-key")
+        .body(Body::empty())
+        .expect("workspace deletion status request");
+    json_response(
+        router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("workspace deletion status route"),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -251,6 +309,11 @@ async fn admin_workspace_delete_purges_target_and_preserves_other_workspace() {
         )])
         .await
         .expect("seed workspace A score");
+    let workspace_a_files = active_data_files(&config);
+    assert!(
+        !workspace_a_files.is_empty(),
+        "workspace A must create data files"
+    );
 
     workspace_b_context
         .ingest()
@@ -277,6 +340,15 @@ async fn admin_workspace_delete_purges_target_and_preserves_other_workspace() {
         )])
         .await
         .expect("seed workspace B score");
+    let all_workspace_files = active_data_files(&config);
+    let workspace_b_files: Vec<_> = all_workspace_files
+        .into_iter()
+        .filter(|path| !workspace_a_files.contains(path))
+        .collect();
+    assert!(
+        !workspace_b_files.is_empty(),
+        "workspace B must create data files"
+    );
 
     for table in ["traces", "logs", "scores", "score_configs"] {
         assert!(workspace_row_count(&config, table, &workspace_a) > 0);
@@ -296,9 +368,44 @@ async fn admin_workspace_delete_purges_target_and_preserves_other_workspace() {
     assert_eq!(unauthorized_response.status(), StatusCode::UNAUTHORIZED);
 
     let _admin_key = RestoreEnv::set("SOFTPROBE_ADMIN_API_KEY", "workspace-purge-test-key");
-    let (status, response) = delete_workspace(&router, &workspace_a).await;
-    assert_eq!(status, StatusCode::OK, "delete workspace A: {response}");
-    assert_eq!(response["status"], "deleted");
+    let (access_started_tx, access_started_rx) = tokio::sync::oneshot::channel();
+    let (release_access_tx, release_access_rx) = tokio::sync::oneshot::channel();
+    let guarded_workspaces = state.workspaces.clone();
+    let guarded_workspace_id = workspace_a.clone();
+    let access_task = tokio::spawn(async move {
+        guarded_workspaces
+            .with_active_workspace_access(&guarded_workspace_id, async move {
+                let _ = access_started_tx.send(());
+                let _ = release_access_rx.await;
+            })
+            .await
+    });
+    access_started_rx
+        .await
+        .expect("workspace access lock acquired");
+    let delete_router = router.clone();
+    let delete_workspace_id = workspace_a.clone();
+    let delete_task =
+        tokio::spawn(async move { delete_workspace(&delete_router, &delete_workspace_id).await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !delete_task.is_finished(),
+        "workspace tombstone must wait for in-flight access to release its row lock"
+    );
+    release_access_tx
+        .send(())
+        .expect("release workspace access");
+    access_task
+        .await
+        .expect("workspace access task")
+        .expect("workspace access lock release");
+    let (status, response) = delete_task.await.expect("workspace delete request");
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "delete workspace A: {response}"
+    );
+    assert_eq!(response["status"], "deleting");
     assert!(workspaces.workspace_for(&workspace_a).await.is_err());
     assert!(workspaces
         .with_active_workspace_access(&workspace_a, async {})
@@ -306,9 +413,102 @@ async fn admin_workspace_delete_purges_target_and_preserves_other_workspace() {
         .is_err());
     assert!(workspaces.workspace_for(&workspace_b).await.is_ok());
 
+    let (pending_status, pending_response) = workspace_deletion_status(&router, &workspace_a).await;
+    assert_eq!(pending_status, StatusCode::OK);
+    assert_eq!(pending_response["status"], "deleting");
+    assert!(workspaces
+        .pending_shared_workspace_deletions()
+        .await
+        .expect("durable purge queue")
+        .contains(&workspace_a));
+    let restarted_workspaces =
+        softprobe_runtime::workspace::WorkspaceManager::connect(Arc::new(config.clone()), None)
+            .await
+            .expect("restarted workspace manager");
+    assert!(restarted_workspaces
+        .pending_shared_workspace_deletions()
+        .await
+        .expect("durable purge queue after restart")
+        .contains(&workspace_a));
+    assert!(workspace_row_count(&config, "traces", &workspace_a) > 0);
+
+    let lake = open_attached_from_config(&config.ducklake, config.ducklake.data_inlining_row_limit);
+    let partial_delete = include_str!("../fixtures/workspace_purge_partial_delete.sql")
+        .replace("{{catalog}}", &config.ducklake.catalog_alias)
+        .replace("{{schema}}", &config.ducklake.metadata_schema)
+        .replace("{{workspace_id}}", &workspace_a);
+    lake.execute_batch(&partial_delete)
+        .expect("simulate interruption after row deletion but before rewrite");
+    drop(lake);
+    let purge_started = std::time::Instant::now();
+    let runner = softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
+        state.workspaces.clone(),
+    )
+    .await
+    .expect("start shared job runner")
+    .expect("workspace purge runner");
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let (_, response) = workspace_deletion_status(&router, &workspace_a).await;
+            if response["status"] == "deleted" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("durable runner should finish workspace purge");
+    runner.abort();
+    assert!(
+        purge_started.elapsed() >= std::time::Duration::from_secs(2),
+        "a retry with no visible rows must still honor the reader grace"
+    );
+    let (completed_status, completed_response) =
+        workspace_deletion_status(&router, &workspace_a).await;
+    assert_eq!(completed_status, StatusCode::OK);
+    assert_eq!(completed_response["status"], "deleted");
+    assert!(!workspaces
+        .pending_shared_workspace_deletions()
+        .await
+        .expect("completed purge leaves queue")
+        .contains(&workspace_a));
+
     for table in ["traces", "logs", "scores", "score_configs"] {
         assert_eq!(workspace_row_count(&config, table, &workspace_a), 0);
         assert!(workspace_row_count(&config, table, &workspace_b) > 0);
+    }
+    let (registry, registry_connection) =
+        tokio_postgres::connect(&config.ducklake.metadata_path, tokio_postgres::NoTls)
+            .await
+            .expect("connect workspace purge registry");
+    tokio::spawn(async move {
+        let _ = registry_connection.await;
+    });
+    let cleanup_sql = include_str!("../fixtures/workspace_purge_cleanup_outcomes.sql")
+        .replace("{{schema}}", &config.ducklake.metadata_schema);
+    let cleanup_outcomes = registry
+        .query(&cleanup_sql, &[])
+        .await
+        .expect("read purge snapshot and file cleanup outcomes");
+    assert_eq!(cleanup_outcomes.len(), 2);
+    for outcome in cleanup_outcomes {
+        let action: String = outcome.get(0);
+        let status: String = outcome.get(1);
+        let files_processed: i64 = outcome.get(2);
+        assert_eq!(status, "completed", "workspace purge {action} must run");
+        assert!(
+            files_processed > 0,
+            "workspace purge {action} must physically remove snapshot/file records"
+        );
+    }
+    for path in &workspace_a_files {
+        assert!(
+            !path.exists(),
+            "deleted workspace file remains on disk: {path:?}"
+        );
+    }
+    for path in &workspace_b_files {
+        assert!(path.exists(), "other workspace file was removed: {path:?}");
     }
 
     let (retry_status, retry_response) = delete_workspace(&router, &workspace_a).await;
@@ -320,9 +520,27 @@ async fn admin_workspace_delete_purges_target_and_preserves_other_workspace() {
     let (cleanup_status, cleanup_response) = delete_workspace(&router, &workspace_b).await;
     assert_eq!(
         cleanup_status,
-        StatusCode::OK,
+        StatusCode::ACCEPTED,
         "delete workspace B test data: {cleanup_response}"
     );
+    let runner = softprobe_runtime::compaction::scheduler::start_maintenance_scheduler(
+        state.workspaces.clone(),
+    )
+    .await
+    .expect("restart shared job runner")
+    .expect("workspace purge runner");
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let (_, response) = workspace_deletion_status(&router, &workspace_b).await;
+            if response["status"] == "deleted" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("durable runner should finish workspace B cleanup");
+    runner.abort();
     for table in ["traces", "logs", "scores", "score_configs"] {
         assert_eq!(workspace_row_count(&config, table, &workspace_b), 0);
     }

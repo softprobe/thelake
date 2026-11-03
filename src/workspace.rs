@@ -325,14 +325,12 @@ impl WorkspaceManager {
         Ok(response)
     }
 
-    /// Permanently remove one workspace from the shared catalog.
+    /// Mark one workspace for deletion without waiting for physical cleanup.
     ///
-    /// The binding is retained as a durable tombstone. Its status update waits
-    /// for request transactions on every replica that hold the binding FOR
-    /// SHARE, and future requests/provisioning cannot revive a tombstoned id.
-    /// Physical row/file cleanup uses the shared maintenance lease and the
-    /// configured reader safety grace before expiring snapshots.
-    pub async fn delete_shared_workspace_data(&self, workspace_id: &str) -> Result<()> {
+    /// The durable registry tombstone is also the purge queue. A background
+    /// leased job completes the physical purge after the configured reader
+    /// safety grace, including after a process restart.
+    pub async fn request_shared_workspace_deletion(&self, workspace_id: &str) -> Result<String> {
         if self.config.ducklake.workspace_scope_mode != WorkspaceScopeMode::Shared {
             bail!("workspace data deletion requires shared workspace scope mode");
         }
@@ -362,6 +360,65 @@ impl WorkspaceManager {
             transaction.commit().await?;
         }
         self.invalidate(workspace_id);
+
+        self.shared_workspace_deletion_status(workspace_id)
+            .await?
+            .ok_or_else(|| anyhow!("workspace deletion tombstone was not recorded: {workspace_id}"))
+    }
+
+    /// Durable lifecycle status for a shared workspace deletion.
+    pub async fn shared_workspace_deletion_status(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<String>> {
+        if self.config.ducklake.workspace_scope_mode != WorkspaceScopeMode::Shared {
+            bail!("workspace deletion status requires shared workspace scope mode");
+        }
+        let client = self.scope_registry.pool.get().await?;
+        let status_sql =
+            crate::sql::maintenance::workspace_purge::workspace_binding_deletion_status_sql(
+                self.scope_registry.registry_schema(),
+            );
+        let row = client.query_opt(&status_sql, &[&workspace_id]).await?;
+        Ok(row.map(|row| row.get::<_, String>(0)))
+    }
+
+    /// Workspaces whose tombstones still need background physical cleanup.
+    pub async fn pending_shared_workspace_deletions(&self) -> Result<Vec<String>> {
+        if self.config.ducklake.workspace_scope_mode != WorkspaceScopeMode::Shared {
+            return Ok(Vec::new());
+        }
+        let client = self.scope_registry.pool.get().await?;
+        let pending_sql =
+            crate::sql::maintenance::workspace_purge::workspace_binding_pending_deletions_sql(
+                self.scope_registry.registry_schema(),
+            );
+        Ok(client
+            .query(&pending_sql, &[])
+            .await?
+            .into_iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect())
+    }
+
+    /// Finish the physical and summary-index cleanup for a durable tombstone.
+    /// Safe to retry after process interruption; the tombstone is only marked
+    /// deleted after every cleanup step succeeds.
+    pub async fn process_shared_workspace_deletion(&self, workspace_id: &str) -> Result<()> {
+        if self.config.ducklake.workspace_scope_mode != WorkspaceScopeMode::Shared {
+            bail!("workspace data deletion requires shared workspace scope mode");
+        }
+        let scope = self.scope_registry.default_physical_scope.clone();
+        let status = self
+            .shared_workspace_deletion_status(workspace_id)
+            .await?
+            .ok_or_else(|| anyhow!("workspace deletion was not requested: {workspace_id}"))?;
+        if status == "deleted" {
+            return Ok(());
+        }
+        if status != "deleting" {
+            bail!("workspace is not pending deletion: {workspace_id}");
+        }
 
         let maintenance = self.maintenance_engine().await?;
         maintenance.purge_shared_workspace(workspace_id).await?;

@@ -169,7 +169,7 @@ async fn v1_provision_scope(
     })))
 }
 
-/// `DELETE /v1/workspaces/:workspace_id` — admin-only, idempotent data purge.
+/// `DELETE /v1/workspaces/:workspace_id` — admin-only, durable purge request.
 async fn v1_delete_workspace(
     State(state): State<AppState>,
     Path(raw_workspace_id): Path<String>,
@@ -211,9 +211,9 @@ async fn v1_delete_workspace(
         ));
     }
 
-    state
+    let status = state
         .workspaces
-        .delete_shared_workspace_data(&workspace_id)
+        .request_shared_workspace_deletion(&workspace_id)
         .await
         .map_err(|error| {
             (
@@ -222,10 +222,76 @@ async fn v1_delete_workspace(
             )
         })?;
 
+    let http_status = if status == "deleted" {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((
+        http_status,
+        Json(json!({
+            "version": 1,
+            "workspaceId": workspace_id,
+            "status": status
+        })),
+    ))
+}
+
+/// `GET /v1/workspaces/:workspace_id/deletion` — admin-only purge status.
+async fn v1_workspace_deletion_status(
+    State(state): State<AppState>,
+    Path(raw_workspace_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"code": "unauthorized", "message": "Authorization header required"}})),
+        ))?;
+    let token = parse_bearer(auth).ok_or((
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": {"code": "unauthorized", "message": "Bearer token required"}})),
+    ))?;
+    if !admin_provision_token_matches(&token) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({"error": {"code": "admin_required", "message": "admin API key required for workspace deletion status"}}),
+            ),
+        ));
+    }
+
+    let workspace_id =
+        crate::softprobe_assertion::parse_workspace_id(&raw_workspace_id).map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"code": "invalid_request", "message": err.to_string()}})),
+            )
+        })?;
+    let status = state
+        .workspaces
+        .shared_workspace_deletion_status(&workspace_id)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"code": "workspace_status_failed", "message": error.to_string()}})),
+            )
+        })?;
+    let Some(status) = status else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(
+                json!({"error": {"code": "workspace_not_found", "message": "workspace deletion was not requested"}}),
+            ),
+        ));
+    };
     Ok(Json(json!({
         "version": 1,
         "workspaceId": workspace_id,
-        "status": "deleted"
+        "status": status
     })))
 }
 
@@ -241,6 +307,10 @@ pub fn runtime_control_routes() -> Router<AppState> {
     Router::new()
         .route("/v1/workspaces", post(v1_provision_scope))
         .route("/v1/workspaces/{workspace_id}", delete(v1_delete_workspace))
+        .route(
+            "/v1/workspaces/{workspace_id}/deletion",
+            get(v1_workspace_deletion_status),
+        )
         .route("/v1/meta", get(v1_meta))
         .route("/v1/data/ducklake-connection", get(v1_ducklake_connection))
         .route("/v1/promotions/apply", post(v1_promotions_apply))

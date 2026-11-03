@@ -1,5 +1,5 @@
 use crate::async_jobs::{self, Job};
-use crate::compaction::PhysicalScopeMaintenanceJob;
+use crate::compaction::{PhysicalScopeMaintenanceJob, WorkspacePurgeJob};
 use crate::session_summary::SessionSummaryRebuildJob;
 use crate::workspace::WorkspaceManager;
 use anyhow::Result;
@@ -29,7 +29,12 @@ pub async fn start_maintenance_scheduler(
 
     jobs.push(Arc::new(SessionSummaryRebuildJob::new(
         maintenance.clone(),
+        workspaces.clone(),
         config,
+    )));
+    jobs.push(Arc::new(WorkspacePurgeJob::new(
+        workspaces.clone(),
+        Duration::from_secs(5),
     )));
 
     if jobs.is_empty() {

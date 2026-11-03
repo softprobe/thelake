@@ -115,11 +115,20 @@ pub fn requires_runtime_auth(method: &Method, path: &str) -> bool {
     if *method == Method::DELETE && is_workspace_deletion_route(path) {
         return false;
     }
+    if *method == Method::GET && is_workspace_deletion_status_route(path) {
+        return false;
+    }
     is_authenticated_api_prefix(path)
 }
 
 fn is_workspace_deletion_route(path: &str) -> bool {
     path.strip_prefix("/v1/workspaces/")
+        .is_some_and(|workspace_id| !workspace_id.is_empty() && !workspace_id.contains('/'))
+}
+
+fn is_workspace_deletion_status_route(path: &str) -> bool {
+    path.strip_prefix("/v1/workspaces/")
+        .and_then(|suffix| suffix.strip_suffix("/deletion"))
         .is_some_and(|workspace_id| !workspace_id.is_empty() && !workspace_id.contains('/'))
 }
 
@@ -216,6 +225,13 @@ mod tests {
                 "/v1/workspaces/550e8400-e29b-41d4-a716-446655440000"
             ),
             "workspace deletion uses admin Bearer validated in-handler"
+        );
+        assert!(
+            !requires_runtime_auth(
+                &Method::GET,
+                "/v1/workspaces/550e8400-e29b-41d4-a716-446655440000/deletion"
+            ),
+            "workspace deletion status uses admin Bearer validated in-handler"
         );
         assert!(requires_runtime_auth(
             &Method::GET,

@@ -185,38 +185,36 @@ impl MaintenanceEngine {
         let registry_schema = self.scope_registry.registry_schema();
         let holder_id = token.holder_id.as_str();
         let lease_epoch = token.epoch;
-        let (has_rows_to_purge, cold, open_elapsed) =
-            self.conn_pool.with_conn(physical, |conn| {
-                conn.execute(
-                    &crate::sql::maintenance::scope_config_upsert_sql(registry_schema),
-                    duckdb::params![
-                        scope_key,
-                        physical.attach_alias(),
-                        physical.pg_namespace(),
-                        self.config.maintenance.enabled,
-                        self.config.maintenance.metadata_enabled,
-                        self.config.maintenance.reader_safety_grace_seconds as i64,
-                        Some(lease_job),
-                        Some(holder_id),
-                        lease_epoch,
-                    ],
-                )?;
-                let (statements, has_rows_to_purge) =
-                    crate::storage::ducklake::workspace_views::workspace_purge_statements(
-                        conn,
-                        physical,
-                        workspace_id,
-                        registry_schema,
-                        scope_key,
-                        holder_id,
-                        lease_epoch,
-                    )?;
-                for sql in statements {
-                    ensure_maintenance_lease_active(&lease_lost)?;
-                    execute_maintenance_script(conn, &sql, Some(&lease_lost))?;
-                }
-                Ok(has_rows_to_purge)
-            })?;
+        let ((), cold, open_elapsed) = self.conn_pool.with_conn(physical, |conn| {
+            conn.execute(
+                &crate::sql::maintenance::scope_config_upsert_sql(registry_schema),
+                duckdb::params![
+                    scope_key,
+                    physical.attach_alias(),
+                    physical.pg_namespace(),
+                    self.config.maintenance.enabled,
+                    self.config.maintenance.metadata_enabled,
+                    self.config.maintenance.reader_safety_grace_seconds as i64,
+                    Some(lease_job),
+                    Some(holder_id),
+                    lease_epoch,
+                ],
+            )?;
+            let statements = crate::storage::ducklake::workspace_views::workspace_purge_statements(
+                conn,
+                physical,
+                workspace_id,
+                registry_schema,
+                scope_key,
+                holder_id,
+                lease_epoch,
+            )?;
+            for sql in statements {
+                ensure_maintenance_lease_active(&lease_lost)?;
+                execute_maintenance_script(conn, &sql, Some(&lease_lost))?;
+            }
+            Ok(())
+        })?;
         crate::self_monitoring::record_maintenance_step(
             scope_key,
             if cold {
@@ -230,12 +228,12 @@ impl MaintenanceEngine {
 
         // A workspace's delete snapshot is immediately retired only after the
         // same reader grace used by normal maintenance has elapsed. Keep the
-        // distributed lease heartbeating throughout the wait.
+        // distributed lease heartbeating throughout the wait. The final pass
+        // also forces catalog snapshot/file cleanup even when periodic metadata
+        // maintenance is disabled; shared snapshot history is catalog-wide.
         let grace =
             std::time::Duration::from_secs(self.config.maintenance.reader_safety_grace_seconds);
-        if has_rows_to_purge && !grace.is_zero() {
-            tokio::time::sleep(grace + std::time::Duration::from_secs(1)).await;
-        }
+        wait_for_workspace_reader_safety_grace(grace).await;
 
         let mut ensure_active = || ensure_maintenance_lease_active(&lease_lost);
         self.run_physical_scope_pass_with_fence(
@@ -243,6 +241,7 @@ impl MaintenanceEngine {
             physical,
             Some(token),
             Some(lease_lost.clone()),
+            true,
             &mut ensure_active,
         )
         .await
@@ -258,6 +257,7 @@ impl MaintenanceEngine {
                 &physical,
                 None,
                 None,
+                false,
                 &mut ensure_active,
             )
             .await?;
@@ -397,6 +397,7 @@ impl MaintenanceEngine {
             &physical,
             None,
             None,
+            false,
             &mut ensure_active,
         )
         .await
@@ -418,6 +419,7 @@ impl MaintenanceEngine {
             &physical,
             Some(lease_token),
             Some(script_lease_lost),
+            false,
             &mut ensure_active,
         )
         .await
@@ -430,6 +432,7 @@ impl MaintenanceEngine {
         physical: &PhysicalScope,
         lease_token: Option<&crate::async_jobs::LeaseToken>,
         lease_lost: Option<watch::Receiver<bool>>,
+        force_metadata_cleanup: bool,
         ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
     ) -> Result<()> {
         let started = std::time::Instant::now();
@@ -454,7 +457,7 @@ impl MaintenanceEngine {
                     physical.attach_alias(),
                     physical.pg_namespace(),
                     self.config.maintenance.enabled,
-                    self.config.maintenance.metadata_enabled,
+                    self.config.maintenance.metadata_enabled || force_metadata_cleanup,
                     self.config.maintenance.reader_safety_grace_seconds as i64,
                     lease_job,
                     lease_holder,
@@ -482,6 +485,12 @@ impl MaintenanceEngine {
             started.elapsed(),
         );
         Ok(())
+    }
+}
+
+async fn wait_for_workspace_reader_safety_grace(grace: std::time::Duration) {
+    if !grace.is_zero() {
+        tokio::time::sleep(grace + std::time::Duration::from_secs(1)).await;
     }
 }
 
@@ -542,4 +551,18 @@ pub(crate) fn deduplicate_physical_scopes(
         }
     }
     physical
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_workspace_reader_safety_grace;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn workspace_purge_retries_wait_for_reader_safety_grace() {
+        let grace = Duration::from_millis(25);
+        let started = std::time::Instant::now();
+        wait_for_workspace_reader_safety_grace(grace).await;
+        assert!(started.elapsed() >= grace);
+    }
 }

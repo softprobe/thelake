@@ -775,6 +775,77 @@ paths:
           description: Admin API key required
         "409":
           description: Workspace exists with a different storage scope
+  /v1/workspaces/{workspace_id}:
+    delete:
+      tags: [control]
+      summary: Request deletion of a shared workspace
+      description: |
+        Admin-only. Requires `Authorization: Bearer` matching
+        `SOFTPROBE_ADMIN_API_KEY`. The workspace is tombstoned immediately and
+        physical cleanup continues under a durable leased job, preserving the
+        configured reader safety grace. Shared-workspace cleanup expires
+        snapshots and removes scheduled files for the whole shared DuckLake
+        catalog, even when ordinary metadata maintenance is disabled. Current
+        data for other workspaces remains, but its historical snapshot versions
+        are removed too. Isolated workspace deletion does not affect other
+        workspaces' snapshot history.
+      operationId: deleteWorkspace
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Workspace purge was already complete
+        "202":
+          description: Workspace purge was durably queued
+        "400":
+          description: Invalid or reserved workspace id
+        "401":
+          description: Missing bearer token
+        "403":
+          description: Admin API key required
+  /v1/workspaces/{workspace_id}/deletion:
+    get:
+      tags: [control]
+      summary: Read shared workspace deletion status
+      description: Admin-only. Requires the `SOFTPROBE_ADMIN_API_KEY` bearer token.
+      operationId: getWorkspaceDeletionStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Current workspace lifecycle status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workspaceId, status]
+                properties:
+                  workspaceId:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    enum: [active, deleting, deleted]
+        "401":
+          description: Missing bearer token
+        "403":
+          description: Admin API key required
+        "404":
+          description: Workspace binding was not found
   /v1/meta:
     get:
       tags: [control]

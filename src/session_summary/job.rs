@@ -6,6 +6,7 @@ use crate::config::{Config, SessionSummaryConfig};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -16,12 +17,20 @@ pub async fn start_session_summary_reducer(
     workspaces: std::sync::Arc<crate::workspace::WorkspaceManager>,
 ) -> Result<JoinHandle<()>> {
     let maintenance = workspaces.maintenance_engine().await?;
-    Ok(spawn_reduce_loop(maintenance, workspaces.config()))
+    Ok(spawn_reduce_loop(
+        maintenance,
+        workspaces.clone(),
+        workspaces.config(),
+    ))
 }
 
 /// Drain durable dirty rows without taking a workspace lease. PostgreSQL row
 /// claims distribute batches across replicas; failures back off until next tick.
-fn spawn_reduce_loop(maintenance: MaintenanceEngine, config: &Config) -> JoinHandle<()> {
+fn spawn_reduce_loop(
+    maintenance: MaintenanceEngine,
+    workspaces: Arc<crate::workspace::WorkspaceManager>,
+    config: &Config,
+) -> JoinHandle<()> {
     let cfg = config.session_summary.clone();
     let interval = Duration::from_millis(cfg.reducer_interval_ms.max(50));
     tokio::spawn(async move {
@@ -37,10 +46,23 @@ fn spawn_reduce_loop(maintenance: MaintenanceEngine, config: &Config) -> JoinHan
             let mut worked = false;
             let mut failed = false;
             for scope in scopes {
-                match maintenance
-                    .reduce_session_summary_for_key(&scope, cfg.max_sessions_per_reduce)
-                    .await
-                {
+                let reduction = if scope == crate::workspace_scope::DEFAULT_WORKSPACE_ID {
+                    maintenance
+                        .reduce_session_summary_for_key(&scope, cfg.max_sessions_per_reduce)
+                        .await
+                } else {
+                    workspaces
+                        .with_active_workspace_access(
+                            &scope,
+                            maintenance.reduce_session_summary_for_key(
+                                &scope,
+                                cfg.max_sessions_per_reduce,
+                            ),
+                        )
+                        .await
+                        .and_then(|result| result)
+                };
+                match reduction {
                     Ok(n) => worked |= n > 0,
                     Err(err) => {
                         failed = true;
@@ -58,16 +80,22 @@ fn spawn_reduce_loop(maintenance: MaintenanceEngine, config: &Config) -> JoinHan
 /// Leased rebuild: window `[now - max_reduce_span, now]` → lake aggregate → UPSERT.
 pub struct SessionSummaryRebuildJob {
     maintenance: MaintenanceEngine,
+    workspaces: Arc<crate::workspace::WorkspaceManager>,
     cfg: SessionSummaryConfig,
     interval: Duration,
 }
 
 impl SessionSummaryRebuildJob {
-    pub(crate) fn new(maintenance: MaintenanceEngine, config: &Config) -> Self {
+    pub(crate) fn new(
+        maintenance: MaintenanceEngine,
+        workspaces: Arc<crate::workspace::WorkspaceManager>,
+        config: &Config,
+    ) -> Self {
         let cfg = config.session_summary.clone();
         let interval = Duration::from_millis(cfg.rebuild_interval_ms.max(50));
         Self {
             maintenance,
+            workspaces,
             cfg,
             interval,
         }
@@ -94,9 +122,20 @@ impl Job for SessionSummaryRebuildJob {
         // the healthy steady state when this job should still re-aggregate.
         let to = Utc::now();
         let from = to - ChronoDuration::seconds(self.cfg.max_reduce_span_seconds as i64);
-        self.maintenance
-            .rebuild_session_summary_for_key(scope_key, from, to, self.cfg.max_reduce_span_seconds)
-            .await?;
+        let rebuild = self.maintenance.rebuild_session_summary_for_key(
+            scope_key,
+            from,
+            to,
+            self.cfg.max_reduce_span_seconds,
+        );
+        let result = if scope_key == crate::workspace_scope::DEFAULT_WORKSPACE_ID {
+            rebuild.await
+        } else {
+            self.workspaces
+                .with_active_workspace_access(scope_key, rebuild)
+                .await?
+        };
+        result?;
         Ok(())
     }
 }
@@ -125,8 +164,9 @@ mod tests {
         assert!(
             production.contains("reduce_session_summary_for_key")
                 && production.contains("rebuild_session_summary_for_key")
-                && production.contains("workspace_scope_keys"),
-            "jobs must use MaintenanceEngine key façades only"
+                && production.contains("workspace_scope_keys")
+                && production.contains("with_active_workspace_access"),
+            "jobs must use MaintenanceEngine key façades and fence publication against deletion"
         );
     }
 }

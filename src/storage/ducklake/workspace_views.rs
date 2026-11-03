@@ -63,9 +63,8 @@ pub(crate) fn workspace_purge_statements(
     scope_key: &str,
     holder_id: &str,
     lease_epoch: i64,
-) -> Result<(Vec<String>, bool)> {
+) -> Result<Vec<String>> {
     let mut statements = Vec::new();
-    let mut has_rows_to_purge = false;
     for table in ["traces", "logs", "scores", "score_configs"] {
         let exists: i64 = conn.query_row(
             crate::sql::maintenance::workspace_purge::workspace_table_exists_sql(),
@@ -89,21 +88,22 @@ pub(crate) fn workspace_purge_statements(
         if !has_rows {
             continue;
         }
-        has_rows_to_purge = true;
         let sql = crate::sql::maintenance::workspace_purge::render_workspace_table_purge_sql(
             &physical_table,
             workspace_id,
             scope.attach_alias(),
             table,
             scope.pg_namespace(),
-            registry_schema,
-            scope_key,
-            holder_id,
-            lease_epoch,
+            &crate::sql::maintenance::workspace_purge::WorkspaceTablePurgeFence {
+                registry_schema,
+                scope_key,
+                holder_id,
+                lease_epoch,
+            },
         );
         statements.push(sql);
     }
-    Ok((statements, has_rows_to_purge))
+    Ok(statements)
 }
 
 /// Verify that every physical table required by shared workspace access carries
