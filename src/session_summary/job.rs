@@ -37,15 +37,9 @@ fn spawn_reduce_loop(maintenance: MaintenanceEngine, config: &Config) -> JoinHan
             let mut worked = false;
             let mut failed = false;
             for scope in scopes {
-                let reduction = if scope == crate::workspace_scope::DEFAULT_WORKSPACE_ID {
-                    maintenance
-                        .reduce_session_summary_for_key(&scope, cfg.max_sessions_per_reduce)
-                        .await
-                } else {
-                    maintenance
-                        .reduce_session_summary_for_key(&scope, cfg.max_sessions_per_reduce)
-                        .await
-                };
+                let reduction = maintenance
+                    .reduce_session_summary_for_key(&scope, cfg.max_sessions_per_reduce)
+                    .await;
                 match reduction {
                     Ok(n) => worked |= n > 0,
                     Err(err) => {

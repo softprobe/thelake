@@ -1156,7 +1156,7 @@ pub(crate) fn quote_pg_ident(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::validate_metadata_schema_name;
-    use super::{quote_pg_ident, AdminEngine, IngestEngine, QueryEngine, WorkspaceContext};
+    use super::{AdminEngine, IngestEngine, QueryEngine, WorkspaceContext};
     use std::sync::Arc;
 
     #[test]
