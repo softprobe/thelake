@@ -160,16 +160,12 @@ async fn json_response(response: axum::response::Response<Body>) -> (StatusCode,
 
 fn workspace_row_count(config: &Config, table: &str, workspace_id: &str) -> i64 {
     let conn = open_attached_from_config(&config.ducklake, config.ducklake.data_inlining_row_limit);
-    let qualified_table = format!(
-        "{}.{}.{}",
-        config.ducklake.catalog_alias, config.ducklake.metadata_schema, table
-    );
-    conn.query_row(
-        &format!("SELECT count(*) FROM {qualified_table} WHERE workspace_id = ?"),
-        [workspace_id],
-        |row| row.get(0),
-    )
-    .expect("count shared catalog workspace rows")
+    let sql = include_str!("../fixtures/workspace_purge_row_count.sql")
+        .replace("{{catalog}}", &config.ducklake.catalog_alias)
+        .replace("{{schema}}", &config.ducklake.metadata_schema)
+        .replace("{{table}}", table);
+    conn.query_row(&sql, [workspace_id], |row| row.get(0))
+        .expect("count shared catalog workspace rows")
 }
 
 fn active_data_files(config: &Config) -> Vec<std::path::PathBuf> {
