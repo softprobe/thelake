@@ -2,7 +2,6 @@ const WORKSPACE_TABLE_EXISTS_SQL: &str = include_str!("workspace_table_exists.sq
 const WORKSPACE_TABLE_HAS_ROWS_SQL: &str = include_str!("workspace_table_has_rows.sql");
 const WORKSPACE_TABLE_PURGE_SQL: &str = include_str!("workspace_table_purge.sql");
 const WORKSPACE_SUMMARY_DELETE_SQL: &str = include_str!("workspace_summary_delete.sql");
-const WORKSPACE_BINDING_ACCESS_SQL: &str = include_str!("workspace_binding_access.sql");
 const WORKSPACE_BINDING_TOMBSTONE_SQL: &str = include_str!("workspace_binding_tombstone.sql");
 const WORKSPACE_BINDING_MARK_DELETED_SQL: &str = include_str!("workspace_binding_mark_deleted.sql");
 const WORKSPACE_BINDING_DELETION_STATUS_SQL: &str =
@@ -64,10 +63,6 @@ pub(crate) fn render_workspace_table_purge_sql(
             "{{schema}}",
             &crate::sql::literal::sql_string_literal(schema),
         )
-}
-
-pub(crate) fn workspace_binding_access_sql(registry_schema: &str) -> String {
-    WORKSPACE_BINDING_ACCESS_SQL.replace("{{registry_schema}}", &quote_identifier(registry_schema))
 }
 
 pub(crate) fn workspace_binding_tombstone_sql(registry_schema: &str) -> String {
@@ -147,7 +142,6 @@ mod tests {
 
     #[test]
     fn workspace_control_plane_sql_is_parameterized_and_schema_qualified() {
-        let access = workspace_binding_access_sql("registry\"schema");
         let tombstone = workspace_binding_tombstone_sql("registry\"schema");
         let deleted = workspace_binding_mark_deleted_sql("registry\"schema");
         let deletion_status = workspace_binding_deletion_status_sql("registry\"schema");
@@ -157,7 +151,6 @@ mod tests {
         let list = workspace_binding_list_sql("registry\"schema");
         let summary = workspace_summary_delete_sql("workspace_staging", "session_summary_dirty");
 
-        assert!(normalize_sql(&access).contains("SELECT workspace_id FROM \"registry\"\"schema\".workspace_scope_binding WHERE workspace_id = $1 AND lifecycle_status = 'active' FOR SHARE;"));
         assert!(normalize_sql(&tombstone).contains("lifecycle_status <> 'deleted';"));
         assert!(normalize_sql(&deleted).contains("UPDATE \"registry\"\"schema\".workspace_scope_binding SET lifecycle_status = 'deleted', updated_at = NOW() WHERE workspace_id = $1 AND lifecycle_status = 'deleting';"));
         assert!(normalize_sql(&deletion_status).contains("WHERE workspace_id = $1;"));

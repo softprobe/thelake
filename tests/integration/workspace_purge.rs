@@ -1,5 +1,5 @@
-//! Workspace deletion drains authenticated requests, removes one tenant's
-//! shared DuckLake rows, and leaves other tenants' rows available.
+//! Workspace deletion queues an asynchronous DuckLake purge, removes the
+//! target workspace's rows and files, and preserves other workspaces' data.
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -364,38 +364,7 @@ async fn admin_workspace_delete_purges_target_and_preserves_other_workspace() {
     assert_eq!(unauthorized_response.status(), StatusCode::UNAUTHORIZED);
 
     let _admin_key = RestoreEnv::set("SOFTPROBE_ADMIN_API_KEY", "workspace-purge-test-key");
-    let (access_started_tx, access_started_rx) = tokio::sync::oneshot::channel();
-    let (release_access_tx, release_access_rx) = tokio::sync::oneshot::channel();
-    let guarded_workspaces = state.workspaces.clone();
-    let guarded_workspace_id = workspace_a.clone();
-    let access_task = tokio::spawn(async move {
-        guarded_workspaces
-            .with_active_workspace_access(&guarded_workspace_id, async move {
-                let _ = access_started_tx.send(());
-                let _ = release_access_rx.await;
-            })
-            .await
-    });
-    access_started_rx
-        .await
-        .expect("workspace access lock acquired");
-    let delete_router = router.clone();
-    let delete_workspace_id = workspace_a.clone();
-    let delete_task =
-        tokio::spawn(async move { delete_workspace(&delete_router, &delete_workspace_id).await });
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert!(
-        !delete_task.is_finished(),
-        "workspace tombstone must wait for in-flight access to release its row lock"
-    );
-    release_access_tx
-        .send(())
-        .expect("release workspace access");
-    access_task
-        .await
-        .expect("workspace access task")
-        .expect("workspace access lock release");
-    let (status, response) = delete_task.await.expect("workspace delete request");
+    let (status, response) = delete_workspace(&router, &workspace_a).await;
     assert_eq!(
         status,
         StatusCode::ACCEPTED,
@@ -403,10 +372,6 @@ async fn admin_workspace_delete_purges_target_and_preserves_other_workspace() {
     );
     assert_eq!(response["status"], "deleting");
     assert!(workspaces.workspace_for(&workspace_a).await.is_err());
-    assert!(workspaces
-        .with_active_workspace_access(&workspace_a, async {})
-        .await
-        .is_err());
     assert!(workspaces.workspace_for(&workspace_b).await.is_ok());
 
     let (pending_status, pending_response) = workspace_deletion_status(&router, &workspace_a).await;

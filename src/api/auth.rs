@@ -35,7 +35,7 @@ pub async fn runtime_auth_middleware(
             .map_err(|_| StatusCode::UNAUTHORIZED)?;
         let info = crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
             .map_err(|_| StatusCode::FORBIDDEN)?;
-        return run_tenant_request(state, req, next, info).await;
+        return Ok(run_workspace_request(req, next, info).await);
     }
 
     let auth = req
@@ -57,7 +57,7 @@ pub async fn runtime_auth_middleware(
             {
                 if let Ok(info) = crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
                 {
-                    return run_tenant_request(state, req, next, info).await;
+                    return Ok(run_workspace_request(req, next, info).await);
                 }
             }
         }
@@ -68,7 +68,7 @@ pub async fn runtime_auth_middleware(
     if let Some(default_key) = crate::softprobe_assertion::default_workspace_id_from_env() {
         let info = crate::softprobe_assertion::workspace_auth_for_default_lake(&default_key)
             .map_err(|_| StatusCode::FORBIDDEN)?;
-        return run_tenant_request(state, req, next, info).await;
+        return Ok(run_workspace_request(req, next, info).await);
     }
 
     let control_plane = state
@@ -81,25 +81,16 @@ pub async fn runtime_auth_middleware(
         .await
         .map_err(|_| StatusCode::FORBIDDEN)?;
 
-    run_tenant_request(state, req, next, info).await
+    Ok(run_workspace_request(req, next, info).await)
 }
 
-async fn run_tenant_request(
-    state: AppState,
+async fn run_workspace_request(
     mut req: Request,
     next: Next,
     info: crate::authn::WorkspaceAuth,
-) -> Result<Response, StatusCode> {
-    let workspace_id = info.workspace_id.clone();
+) -> Response {
     req.extensions_mut().insert(info);
-    state
-        .workspaces
-        .with_active_workspace_access(&workspace_id, next.run(req))
-        .await
-        .map_err(|error| {
-            tracing::warn!(workspace_id, "workspace binding is not active: {error}");
-            StatusCode::FORBIDDEN
-        })
+    next.run(req).await
 }
 
 pub fn requires_runtime_auth(method: &Method, path: &str) -> bool {
@@ -132,7 +123,7 @@ fn is_workspace_deletion_status_route(path: &str) -> bool {
         .is_some_and(|workspace_id| !workspace_id.is_empty() && !workspace_id.contains('/'))
 }
 
-/// Paths that require Bearer → tenant resolution (OTLP/control + compatibility stubs).
+/// Paths that require Bearer → workspace resolution (OTLP/control + compatibility stubs).
 pub fn is_authenticated_api_prefix(path: &str) -> bool {
     path.starts_with("/v1/")
         || path.starts_with("/loki/api/v1/")

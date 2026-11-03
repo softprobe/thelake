@@ -64,10 +64,19 @@ snapshots, then waits another grace so the files scheduled by snapshot expiry
 are eligible for physical cleanup. Request cancellation or process restart
 therefore does not lose the work or shorten either grace period.
 
+Workspace requests do not acquire per-request registry locks. Deletion does not
+wait for in-flight requests to drain; another replica may continue using a
+cached workspace context while the asynchronous purge runs. The purge can
+therefore race with late writes, so `deleted` records completion of the purge
+attempt rather than a strict fence against every cached client. A tombstoned
+workspace cannot be newly resolved or provisioned from the registry.
+
 Admin-only `GET /v1/workspaces/{workspace_id}/deletion` returns the current
-`deleting` or `deleted` state. The caller may remove its control-plane workspace
-record only after observing `deleted`. A completed tombstone is permanent and
-cannot be revived by a repeated delete or provisioning request.
+`deleting` or `deleted` state for monitoring. Since the durable purge is queued
+before `DELETE` returns, callers may remove their control-plane workspace record
+after receiving `202 Accepted`; they do not need to wait for physical cleanup.
+A completed tombstone is permanent and cannot be revived by a repeated delete
+or provisioning request.
 
 Shared workspaces use one DuckLake catalog and its snapshot history is
 catalog-wide. After the first reader grace, deleting one workspace expires

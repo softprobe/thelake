@@ -6,7 +6,6 @@ use crate::config::{Config, SessionSummaryConfig};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -17,20 +16,12 @@ pub async fn start_session_summary_reducer(
     workspaces: std::sync::Arc<crate::workspace::WorkspaceManager>,
 ) -> Result<JoinHandle<()>> {
     let maintenance = workspaces.maintenance_engine().await?;
-    Ok(spawn_reduce_loop(
-        maintenance,
-        workspaces.clone(),
-        workspaces.config(),
-    ))
+    Ok(spawn_reduce_loop(maintenance, workspaces.config()))
 }
 
 /// Drain durable dirty rows without taking a workspace lease. PostgreSQL row
 /// claims distribute batches across replicas; failures back off until next tick.
-fn spawn_reduce_loop(
-    maintenance: MaintenanceEngine,
-    workspaces: Arc<crate::workspace::WorkspaceManager>,
-    config: &Config,
-) -> JoinHandle<()> {
+fn spawn_reduce_loop(maintenance: MaintenanceEngine, config: &Config) -> JoinHandle<()> {
     let cfg = config.session_summary.clone();
     let interval = Duration::from_millis(cfg.reducer_interval_ms.max(50));
     tokio::spawn(async move {
@@ -51,16 +42,9 @@ fn spawn_reduce_loop(
                         .reduce_session_summary_for_key(&scope, cfg.max_sessions_per_reduce)
                         .await
                 } else {
-                    workspaces
-                        .with_active_workspace_access(
-                            &scope,
-                            maintenance.reduce_session_summary_for_key(
-                                &scope,
-                                cfg.max_sessions_per_reduce,
-                            ),
-                        )
+                    maintenance
+                        .reduce_session_summary_for_key(&scope, cfg.max_sessions_per_reduce)
                         .await
-                        .and_then(|result| result)
                 };
                 match reduction {
                     Ok(n) => worked |= n > 0,
@@ -80,22 +64,16 @@ fn spawn_reduce_loop(
 /// Leased rebuild: window `[now - max_reduce_span, now]` → lake aggregate → UPSERT.
 pub struct SessionSummaryRebuildJob {
     maintenance: MaintenanceEngine,
-    workspaces: Arc<crate::workspace::WorkspaceManager>,
     cfg: SessionSummaryConfig,
     interval: Duration,
 }
 
 impl SessionSummaryRebuildJob {
-    pub(crate) fn new(
-        maintenance: MaintenanceEngine,
-        workspaces: Arc<crate::workspace::WorkspaceManager>,
-        config: &Config,
-    ) -> Self {
+    pub(crate) fn new(maintenance: MaintenanceEngine, config: &Config) -> Self {
         let cfg = config.session_summary.clone();
         let interval = Duration::from_millis(cfg.rebuild_interval_ms.max(50));
         Self {
             maintenance,
-            workspaces,
             cfg,
             interval,
         }
@@ -128,14 +106,7 @@ impl Job for SessionSummaryRebuildJob {
             to,
             self.cfg.max_reduce_span_seconds,
         );
-        let result = if scope_key == crate::workspace_scope::DEFAULT_WORKSPACE_ID {
-            rebuild.await
-        } else {
-            self.workspaces
-                .with_active_workspace_access(scope_key, rebuild)
-                .await?
-        };
-        result?;
+        rebuild.await?;
         Ok(())
     }
 }
@@ -165,8 +136,8 @@ mod tests {
             production.contains("reduce_session_summary_for_key")
                 && production.contains("rebuild_session_summary_for_key")
                 && production.contains("workspace_scope_keys")
-                && production.contains("with_active_workspace_access"),
-            "jobs must use MaintenanceEngine key façades and fence publication against deletion"
+                && !production.contains("with_active_workspace_access"),
+            "jobs must use MaintenanceEngine key façades without per-request lifecycle locks"
         );
     }
 }

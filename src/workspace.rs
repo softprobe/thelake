@@ -300,31 +300,6 @@ impl WorkspaceManager {
         self.workspaces.remove(workspace_id);
     }
 
-    /// Hold a shared registry-row lock for the lifetime of a tenant request.
-    /// Workspace deletion takes an exclusive update lock on the same row, so
-    /// it drains requests on every replica before changing the binding state.
-    pub async fn with_active_workspace_access<T>(
-        &self,
-        workspace_id: &str,
-        action: impl Future<Output = T>,
-    ) -> Result<T> {
-        let mut client = self.scope_registry.request_access_pool.get().await?;
-        let transaction = client.transaction().await?;
-        let access_sql = crate::sql::maintenance::workspace_purge::workspace_binding_access_sql(
-            self.scope_registry.registry_schema(),
-        );
-        if transaction
-            .query_opt(&access_sql, &[&workspace_id])
-            .await?
-            .is_none()
-        {
-            bail!("workspace is not active: {workspace_id}");
-        }
-        let response = action.await;
-        transaction.commit().await?;
-        Ok(response)
-    }
-
     /// Mark one workspace for deletion without waiting for physical cleanup.
     ///
     /// The durable registry tombstone is also the purge queue. A background
@@ -340,9 +315,8 @@ impl WorkspaceManager {
         let lock = self.scope_lock(lock_token);
         let _scope_hold = lock.lock().await;
 
-        // Transition the binding to a durable tombstone first. The upsert
-        // waits for in-flight request locks across replicas, and makes retries
-        // safe even if a prior purge stopped halfway through.
+        // Transition the binding to a durable tombstone first. This makes
+        // retries safe even if a prior purge stopped halfway through.
         {
             let mut client = self.scope_registry.pool.get().await?;
             let transaction = client.transaction().await?;
@@ -639,7 +613,6 @@ fn path_requires_object_store_creds(data_path: &str) -> bool {
 #[derive(Clone)]
 pub(crate) struct DuckLakeScopeResolver {
     pool: Pool,
-    request_access_pool: Pool,
     default_physical_scope: PhysicalScope,
     workspace_scope_mode: WorkspaceScopeMode,
 }
@@ -679,13 +652,8 @@ impl DuckLakeScopeResolver {
         };
         let mgr = Manager::from_config(pg.clone(), NoTls, mgr_config.clone());
         let pool = Pool::builder(mgr).max_size(8).build()?;
-        // Long-lived request locks must not consume connections needed by
-        // handlers using the registry pool (for example, sessions search).
-        let access_mgr = Manager::from_config(pg, NoTls, mgr_config);
-        let request_access_pool = Pool::builder(access_mgr).max_size(8).build()?;
         Ok(Self {
             pool,
-            request_access_pool,
             default_physical_scope: PhysicalScope::from_ducklake(dl),
             workspace_scope_mode: dl.workspace_scope_mode,
         })
@@ -1204,89 +1172,5 @@ mod tests {
         assert!(validate_metadata_schema_name(&"a".repeat(63)).is_ok());
         assert!(validate_metadata_schema_name(&"a".repeat(64)).is_err());
         assert!(validate_metadata_schema_name(&"é".repeat(32)).is_err());
-    }
-
-    #[tokio::test]
-    #[ignore = "requires ducklake-postgres; make test-lease-pg"]
-    async fn postgres_workspace_delete_lock_fences_requests_across_connections() {
-        use std::time::Duration;
-        use tokio_postgres::NoTls;
-
-        let mut config = tokio_postgres::Config::new();
-        config
-            .host("localhost")
-            .port(5432)
-            .dbname("ducklake")
-            .user("ducklake")
-            .password("ducklake");
-
-        async fn connect(config: &tokio_postgres::Config) -> tokio_postgres::Client {
-            let (client, connection) = config.connect(NoTls).await.expect("Postgres connection");
-            tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            client
-        }
-
-        let mut client_a = connect(&config).await;
-        let client_b = connect(&config).await;
-        let schema = format!("workspace_delete_{}", uuid::Uuid::new_v4().simple());
-        let quoted_schema = quote_pg_ident(&schema);
-        client_a
-            .batch_execute(&format!(
-                "CREATE SCHEMA {quoted_schema};\
-                 CREATE TABLE {quoted_schema}.physical_scope (physical_scope_id TEXT PRIMARY KEY);\
-                 CREATE TABLE {quoted_schema}.workspace_scope_binding (\
-                   workspace_id TEXT PRIMARY KEY,\
-                   physical_scope_id TEXT NOT NULL REFERENCES {quoted_schema}.physical_scope(physical_scope_id),\
-                   lifecycle_status TEXT NOT NULL DEFAULT 'active',\
-                   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\
-                 );\
-                 INSERT INTO {quoted_schema}.physical_scope VALUES ('physical');\
-                 INSERT INTO {quoted_schema}.workspace_scope_binding (workspace_id, physical_scope_id)\
-                   VALUES ('workspace-a', 'physical');"
-            ))
-            .await
-            .expect("create isolated workspace binding fixture");
-
-        let access_sql =
-            crate::sql::maintenance::workspace_purge::workspace_binding_access_sql(&schema);
-        let tombstone_sql =
-            crate::sql::maintenance::workspace_purge::workspace_binding_tombstone_sql(&schema);
-        let access_tx = client_a.transaction().await.expect("request transaction");
-        assert!(access_tx
-            .query_opt(&access_sql, &[&"workspace-a"])
-            .await
-            .expect("active workspace access")
-            .is_some());
-
-        let mut tombstone = tokio::spawn(async move {
-            client_b
-                .execute(&tombstone_sql, &[&"workspace-a", &"physical"])
-                .await
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(150), &mut tombstone)
-                .await
-                .is_err(),
-            "deletion must wait while a request holds FOR SHARE on the binding"
-        );
-
-        access_tx.commit().await.expect("release request lock");
-        tokio::time::timeout(Duration::from_secs(2), &mut tombstone)
-            .await
-            .expect("deletion should continue when the request finishes")
-            .expect("deletion task")
-            .expect("tombstone update");
-
-        assert!(client_a
-            .query_opt(&access_sql, &[&"workspace-a"])
-            .await
-            .expect("post-delete workspace access")
-            .is_none());
-        client_a
-            .batch_execute(&format!("DROP SCHEMA {quoted_schema} CASCADE"))
-            .await
-            .expect("drop isolated workspace binding fixture");
     }
 }

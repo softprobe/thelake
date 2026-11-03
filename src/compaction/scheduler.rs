@@ -37,7 +37,6 @@ pub async fn start_maintenance_scheduler(
 
     jobs.push(Arc::new(SessionSummaryRebuildJob::new(
         maintenance.clone(),
-        workspaces.clone(),
         config,
     )));
 
