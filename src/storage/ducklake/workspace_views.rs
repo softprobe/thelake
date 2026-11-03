@@ -54,6 +54,58 @@ fn has_workspace_id_column(
     Ok(false)
 }
 
+/// Build the fenced per-table purge statements for one workspace.
+pub(crate) fn workspace_purge_statements(
+    conn: &Connection,
+    scope: &PhysicalScope,
+    workspace_id: &str,
+    registry_schema: &str,
+    scope_key: &str,
+    holder_id: &str,
+    lease_epoch: i64,
+) -> Result<Vec<String>> {
+    let mut statements = Vec::new();
+    for table in ["traces", "logs", "scores", "score_configs"] {
+        let exists: i64 = conn.query_row(
+            crate::sql::maintenance::workspace_purge::workspace_table_exists_sql(),
+            duckdb::params![scope.attach_alias(), scope.pg_namespace(), table],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            continue;
+        }
+        if !has_workspace_id_column(conn, scope, table)? {
+            anyhow::bail!("shared workspace table {table} has no workspace_id column");
+        }
+        let physical_table = ducklake_qualified_table_name(scope, table);
+        let has_rows: bool = conn.query_row(
+            &crate::sql::maintenance::workspace_purge::render_workspace_table_has_rows_sql(
+                &physical_table,
+            ),
+            duckdb::params![workspace_id],
+            |row| row.get(0),
+        )?;
+        if !has_rows {
+            continue;
+        }
+        let sql = crate::sql::maintenance::workspace_purge::render_workspace_table_purge_sql(
+            &physical_table,
+            workspace_id,
+            scope.attach_alias(),
+            table,
+            scope.pg_namespace(),
+            &crate::sql::maintenance::workspace_purge::WorkspaceTablePurgeFence {
+                registry_schema,
+                scope_key,
+                holder_id,
+                lease_epoch,
+            },
+        );
+        statements.push(sql);
+    }
+    Ok(statements)
+}
+
 /// Verify that every physical table required by shared workspace access carries
 /// the ownership column before any filtered view can be trusted.
 pub(crate) fn validate_shared_workspace_schema(

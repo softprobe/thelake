@@ -1,5 +1,6 @@
 //! Physical-scope maintenance facade.
 
+use crate::async_jobs::LeaseStore;
 use crate::compaction::maint_conn_pool::MaintenanceConnPool;
 use crate::config::Config;
 use crate::storage::ducklake::PhysicalScope;
@@ -17,6 +18,20 @@ fn ensure_maintenance_lease_active(lease_lost: &watch::Receiver<bool>) -> Result
         anyhow::bail!("maintenance lease lost")
     }
     Ok(())
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl AbortOnDrop {
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Full ordered maintenance table list (traces / logs / scores).
@@ -75,6 +90,185 @@ impl MaintenanceEngine {
         self.run_pass().await
     }
 
+    /// Purge one workspace from the shared catalog under the same distributed
+    /// lease used by scheduled maintenance. The durable binding tombstone is
+    /// installed by WorkspaceManager before this method is called.
+    pub(crate) async fn purge_shared_workspace(&self, workspace_id: &str) -> Result<()> {
+        if self.config.ducklake.workspace_scope_mode
+            != crate::workspace_scope::WorkspaceScopeMode::Shared
+        {
+            anyhow::bail!("workspace purge requires shared workspace scope mode");
+        }
+
+        let physical = self.default_physical.clone();
+        let scope_key = physical.id().registry_token().to_string();
+        let holder_id = format!("workspace-purge-{}", uuid::Uuid::new_v4());
+        let lease_ttl =
+            std::time::Duration::from_secs(self.config.async_jobs.lease_ttl_seconds.max(1));
+        let leases = crate::async_jobs::PostgresLeaseStore::from_resolver(&self.scope_registry);
+        let token = loop {
+            if let Some(token) = leases
+                .acquire_lease(
+                    crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB,
+                    &scope_key,
+                    &holder_id,
+                    lease_ttl,
+                )
+                .await?
+            {
+                break token;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        };
+
+        let (lost_tx, lost_rx) = watch::channel(false);
+        let heartbeat_every =
+            std::time::Duration::from_secs(self.config.async_jobs.heartbeat_seconds.max(1));
+        let heartbeat_leases = leases.clone();
+        let heartbeat_job = crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB.to_string();
+        let heartbeat_scope = scope_key.clone();
+        let heartbeat_token = token.clone();
+        let heartbeat = AbortOnDrop(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(heartbeat_every);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if heartbeat_leases
+                    .heartbeat_lease(
+                        &heartbeat_job,
+                        &heartbeat_scope,
+                        &heartbeat_token,
+                        lease_ttl,
+                    )
+                    .await
+                    .is_err()
+                {
+                    let _ = lost_tx.send(true);
+                    break;
+                }
+            }
+        }));
+
+        let result = self
+            .purge_shared_workspace_under_lease(
+                workspace_id,
+                &scope_key,
+                &physical,
+                &token,
+                lost_rx,
+            )
+            .await;
+        heartbeat.abort();
+        let release = leases
+            .release_lease(
+                crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB,
+                &scope_key,
+                &token,
+            )
+            .await;
+        result?;
+        release?;
+        Ok(())
+    }
+
+    async fn purge_shared_workspace_under_lease(
+        &self,
+        workspace_id: &str,
+        scope_key: &str,
+        physical: &PhysicalScope,
+        token: &crate::async_jobs::LeaseToken,
+        lease_lost: watch::Receiver<bool>,
+    ) -> Result<()> {
+        ensure_maintenance_lease_active(&lease_lost)?;
+        let lease_job = crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB;
+        let registry_schema = self.scope_registry.registry_schema();
+        let holder_id = token.holder_id.as_str();
+        let lease_epoch = token.epoch;
+        let ((), cold, open_elapsed) = self.conn_pool.with_conn(physical, |conn| {
+            conn.execute(
+                &crate::sql::maintenance::scope_config_upsert_sql(registry_schema),
+                duckdb::params![
+                    scope_key,
+                    physical.attach_alias(),
+                    physical.pg_namespace(),
+                    self.config.maintenance.enabled,
+                    self.config.maintenance.metadata_enabled,
+                    self.config.maintenance.reader_safety_grace_seconds as i64,
+                    Some(lease_job),
+                    Some(holder_id),
+                    lease_epoch,
+                ],
+            )?;
+            let statements = crate::storage::ducklake::workspace_views::workspace_purge_statements(
+                conn,
+                physical,
+                workspace_id,
+                registry_schema,
+                scope_key,
+                holder_id,
+                lease_epoch,
+            )?;
+            for sql in statements {
+                ensure_maintenance_lease_active(&lease_lost)?;
+                execute_maintenance_script(conn, &sql, Some(&lease_lost))?;
+            }
+            Ok(())
+        })?;
+        crate::self_monitoring::record_maintenance_step(
+            scope_key,
+            if cold {
+                crate::self_monitoring::maintenance_step::OPEN_ATTACH
+            } else {
+                crate::self_monitoring::maintenance_step::OPEN_ATTACH_WARM
+            },
+            None,
+            open_elapsed,
+        );
+
+        // A workspace's delete snapshot is retired only after the same reader
+        // grace used by normal maintenance has elapsed. Expiring that snapshot
+        // schedules its old files for deletion, and DuckLake applies the same
+        // grace to those scheduled entries. Keep the distributed lease
+        // heartbeating through both waits so the final pass can remove the
+        // files before the durable workspace tombstone is completed. The
+        // passes also force catalog snapshot/file cleanup when periodic
+        // metadata maintenance is disabled; shared snapshot history is
+        // catalog-wide.
+        let grace =
+            std::time::Duration::from_secs(self.config.maintenance.reader_safety_grace_seconds);
+        wait_for_workspace_reader_safety_grace(grace).await;
+
+        let mut ensure_active = || ensure_maintenance_lease_active(&lease_lost);
+        self.run_physical_scope_pass_with_fence(
+            scope_key,
+            physical,
+            Some(token),
+            Some(lease_lost.clone()),
+            true,
+            &mut ensure_active,
+        )
+        .await?;
+
+        // Snapshot expiration above can enqueue files only at the end of its
+        // maintenance pass. Give readers that began before expiration the
+        // configured grace window, then run maintenance again so cleanup_old_files
+        // can safely remove those newly scheduled files before deletion is
+        // acknowledged as complete. If the worker stops during this wait, its
+        // durable tombstone makes the next attempt repeat this idempotently.
+        wait_for_workspace_reader_safety_grace(grace).await;
+        ensure_active()?;
+        self.run_physical_scope_pass_with_fence(
+            scope_key,
+            physical,
+            Some(token),
+            Some(lease_lost.clone()),
+            true,
+            &mut ensure_active,
+        )
+        .await
+    }
+
     /// Run the SQL maintenance script for each physical scope.
     pub async fn run_pass(&self) -> Result<()> {
         crate::self_monitoring::record_maintenance();
@@ -85,6 +279,7 @@ impl MaintenanceEngine {
                 &physical,
                 None,
                 None,
+                false,
                 &mut ensure_active,
             )
             .await?;
@@ -212,7 +407,7 @@ impl MaintenanceEngine {
     }
 
     async fn lookup_physical_scope(&self, scope_key: &str) -> Result<PhysicalScope> {
-        Ok(self.resolve_scope(scope_key).await?.physical)
+        physical_scope_for_key(self.physical_scopes().await?, scope_key)
     }
 
     /// Resolve by maintenance key, then run one SQL maintenance pass.
@@ -224,6 +419,7 @@ impl MaintenanceEngine {
             &physical,
             None,
             None,
+            false,
             &mut ensure_active,
         )
         .await
@@ -245,6 +441,7 @@ impl MaintenanceEngine {
             &physical,
             Some(lease_token),
             Some(script_lease_lost),
+            false,
             &mut ensure_active,
         )
         .await
@@ -257,6 +454,7 @@ impl MaintenanceEngine {
         physical: &PhysicalScope,
         lease_token: Option<&crate::async_jobs::LeaseToken>,
         lease_lost: Option<watch::Receiver<bool>>,
+        force_metadata_cleanup: bool,
         ensure_active: &mut (dyn FnMut() -> Result<()> + Send),
     ) -> Result<()> {
         let started = std::time::Instant::now();
@@ -281,7 +479,7 @@ impl MaintenanceEngine {
                     physical.attach_alias(),
                     physical.pg_namespace(),
                     self.config.maintenance.enabled,
-                    self.config.maintenance.metadata_enabled,
+                    self.config.maintenance.metadata_enabled || force_metadata_cleanup,
                     self.config.maintenance.reader_safety_grace_seconds as i64,
                     lease_job,
                     lease_holder,
@@ -309,6 +507,12 @@ impl MaintenanceEngine {
             started.elapsed(),
         );
         Ok(())
+    }
+}
+
+async fn wait_for_workspace_reader_safety_grace(grace: std::time::Duration) {
+    if !grace.is_zero() {
+        tokio::time::sleep(grace + std::time::Duration::from_secs(1)).await;
     }
 }
 
@@ -369,4 +573,49 @@ pub(crate) fn deduplicate_physical_scopes(
         }
     }
     physical
+}
+
+fn physical_scope_for_key(
+    scopes: Vec<(String, PhysicalScope)>,
+    scope_key: &str,
+) -> Result<PhysicalScope> {
+    scopes
+        .into_iter()
+        .find_map(|(key, scope)| (key == scope_key).then_some(scope))
+        .ok_or_else(|| anyhow!("unknown maintenance scope"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{physical_scope_for_key, wait_for_workspace_reader_safety_grace};
+    use crate::config::Config;
+    use crate::workspace::physical_scope_from_config;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn workspace_purge_retries_wait_for_reader_safety_grace() {
+        let grace = Duration::from_millis(25);
+        let started = std::time::Instant::now();
+        wait_for_workspace_reader_safety_grace(grace).await;
+        assert!(started.elapsed() >= grace);
+    }
+
+    #[test]
+    fn maintenance_scope_keys_resolve_without_treating_them_as_workspace_ids() {
+        let scope = physical_scope_from_config(&Config::default());
+        let key = scope.id().registry_token().to_string();
+        let resolved = physical_scope_for_key(vec![(key.clone(), scope.clone())], &key)
+            .expect("physical maintenance key resolves");
+        assert!(resolved.id().registry_token() == scope.id().registry_token());
+        assert!(resolved.pg_namespace() == scope.pg_namespace());
+    }
+
+    #[test]
+    fn unknown_maintenance_scope_errors_do_not_include_scope_keys() {
+        let scope = physical_scope_from_config(&Config::default());
+        let key = scope.id().registry_token().to_string();
+        let error = physical_scope_for_key(Vec::new(), &key).expect_err("unknown key");
+        assert_eq!(error.to_string(), "unknown maintenance scope");
+        assert!(!error.to_string().contains("password="));
+    }
 }

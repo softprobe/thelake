@@ -48,6 +48,10 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
+          if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
+            echo "This is a container prerelease for staging; skipping npm publication."
+            exit 0
+          fi
           if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
             echo "NPM_TOKEN is not set; skipping npm publish. The Docker image publish still runs."
             exit 0

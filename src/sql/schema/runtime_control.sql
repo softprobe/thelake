@@ -13,9 +13,26 @@ CREATE TABLE IF NOT EXISTS {{schema}}.physical_scope (
 CREATE TABLE IF NOT EXISTS {{schema}}.workspace_scope_binding (
   workspace_id TEXT PRIMARY KEY,
   physical_scope_id TEXT NOT NULL REFERENCES {{schema}}.physical_scope(physical_scope_id),
+  lifecycle_status TEXT NOT NULL DEFAULT 'active'
+    CHECK (lifecycle_status IN ('active', 'deleting', 'deleted')),
   provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE {{schema}}.workspace_scope_binding
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'active';
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'workspace_scope_binding_lifecycle_status_check'
+      AND conrelid = '{{schema}}.workspace_scope_binding'::regclass
+  ) THEN
+    ALTER TABLE {{schema}}.workspace_scope_binding
+      ADD CONSTRAINT workspace_scope_binding_lifecycle_status_check
+      CHECK (lifecycle_status IN ('active', 'deleting', 'deleted'));
+  END IF;
+END
+$$;
 CREATE TABLE IF NOT EXISTS {{schema}}.thelake_job_lease (
   job_name TEXT NOT NULL,
   scope_key TEXT NOT NULL,

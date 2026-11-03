@@ -37,10 +37,10 @@ fn spawn_reduce_loop(maintenance: MaintenanceEngine, config: &Config) -> JoinHan
             let mut worked = false;
             let mut failed = false;
             for scope in scopes {
-                match maintenance
+                let reduction = maintenance
                     .reduce_session_summary_for_key(&scope, cfg.max_sessions_per_reduce)
-                    .await
-                {
+                    .await;
+                match reduction {
                     Ok(n) => worked |= n > 0,
                     Err(err) => {
                         failed = true;
@@ -94,9 +94,13 @@ impl Job for SessionSummaryRebuildJob {
         // the healthy steady state when this job should still re-aggregate.
         let to = Utc::now();
         let from = to - ChronoDuration::seconds(self.cfg.max_reduce_span_seconds as i64);
-        self.maintenance
-            .rebuild_session_summary_for_key(scope_key, from, to, self.cfg.max_reduce_span_seconds)
-            .await?;
+        let rebuild = self.maintenance.rebuild_session_summary_for_key(
+            scope_key,
+            from,
+            to,
+            self.cfg.max_reduce_span_seconds,
+        );
+        rebuild.await?;
         Ok(())
     }
 }
@@ -125,8 +129,9 @@ mod tests {
         assert!(
             production.contains("reduce_session_summary_for_key")
                 && production.contains("rebuild_session_summary_for_key")
-                && production.contains("workspace_scope_keys"),
-            "jobs must use MaintenanceEngine key façades only"
+                && production.contains("workspace_scope_keys")
+                && !production.contains("with_active_workspace_access"),
+            "jobs must use MaintenanceEngine key façades without per-request lifecycle locks"
         );
     }
 }

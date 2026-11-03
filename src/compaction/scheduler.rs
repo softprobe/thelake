@@ -1,5 +1,5 @@
 use crate::async_jobs::{self, Job};
-use crate::compaction::PhysicalScopeMaintenanceJob;
+use crate::compaction::{PhysicalScopeMaintenanceJob, WorkspacePurgeJob};
 use crate::session_summary::SessionSummaryRebuildJob;
 use crate::workspace::WorkspaceManager;
 use anyhow::Result;
@@ -18,6 +18,14 @@ pub async fn start_maintenance_scheduler(
     let compaction_enabled = config.maintenance.enabled;
     let mut jobs: Vec<Arc<dyn Job>> = Vec::new();
     let maintenance = workspaces.maintenance_engine().await?;
+
+    // Workspace deletion has a user-visible lifecycle deadline. Run its
+    // tombstone queue before maintenance and summary rebuilds, which can be
+    // slow or repeatedly fail on unrelated workspace scopes.
+    jobs.push(Arc::new(WorkspacePurgeJob::new(
+        workspaces.clone(),
+        Duration::from_secs(5),
+    )));
 
     if metadata_enabled || compaction_enabled {
         let wake = Duration::from_secs(config.maintenance.interval_seconds.max(1));
@@ -79,5 +87,21 @@ mod tests {
         );
         let main = include_str!("../main.rs");
         assert!(main.contains("start_session_summary_reducer("));
+    }
+
+    #[test]
+    fn workspace_purge_runs_before_maintenance_jobs() {
+        let src = include_str!("scheduler.rs");
+        let production = src.split("#[cfg(test)]").next().expect("production");
+        let purge = production
+            .find("WorkspacePurgeJob::new(")
+            .expect("workspace purge job");
+        let physical = production
+            .find("PhysicalScopeMaintenanceJob::new(")
+            .expect("physical maintenance job");
+        let summary = production
+            .find("SessionSummaryRebuildJob::new(")
+            .expect("summary rebuild job");
+        assert!(purge < physical && purge < summary);
     }
 }

@@ -138,7 +138,7 @@ pub fn spawn_runner(
                 let scopes = match job.scope_keys().await {
                     Ok(s) => s,
                     Err(err) => {
-                        warn!(job = job.name(), "scope_keys failed: {err}");
+                        warn!(job = job.name(), "scope_keys failed: {}", safe_error(&err));
                         // Sentinel scope label (not a tenant_id) — filter in dashboards.
                         self_monitoring::record_job_error(job.name(), "_scopes");
                         continue;
@@ -167,8 +167,9 @@ pub fn spawn_runner(
                         Err(err) => {
                             warn!(
                                 job = job.name(),
-                                scope = %scope,
-                                "lease acquire failed: {err}"
+                                scope = %safe_scope(&scope),
+                                "lease acquire failed: {}",
+                                safe_error(&err)
                             );
                             self_monitoring::record_lease_acquire(job.name(), &scope, "error");
                             continue;
@@ -197,8 +198,9 @@ pub fn spawn_runner(
                                     {
                                         warn!(
                                             job = %hb_job,
-                                            scope = %hb_scope,
-                                            "lease heartbeat failed: {err}"
+                                            scope = %safe_scope(&hb_scope),
+                                            "lease heartbeat failed: {}",
+                                            safe_error(&err)
                                         );
                                         self_monitoring::record_lease_heartbeat_failure(
                                             &hb_job, &hb_scope,
@@ -241,12 +243,17 @@ pub fn spawn_runner(
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
                             due.clear(job.name(), &scope);
-                            warn!(job = job.name(), scope = %scope, "job failed: {err}");
+                            warn!(
+                                job = job.name(),
+                                scope = %safe_scope(&scope),
+                                "job failed: {}",
+                                safe_error(err)
+                            );
                             self_monitoring::record_job_error(job.name(), &scope);
                         }
                         Err(_) => {
                             due.clear(job.name(), &scope);
-                            warn!(job = job.name(), scope = %scope, "job panicked");
+                            warn!(job = job.name(), scope = %safe_scope(&scope), "job panicked");
                             self_monitoring::record_job_error(job.name(), &scope);
                         }
                     }
@@ -259,8 +266,9 @@ pub fn spawn_runner(
                     if let Err(err) = leases.release_lease(job.name(), &scope, &token).await {
                         warn!(
                             job = job.name(),
-                            scope = %scope,
-                            "lease release failed: {err}"
+                            scope = %safe_scope(&scope),
+                            "lease release failed: {}",
+                            safe_error(&err)
                         );
                     }
                 }
@@ -271,9 +279,17 @@ pub fn spawn_runner(
     Some(handle)
 }
 
+fn safe_scope(scope: &str) -> String {
+    crate::self_monitoring::metrics_scope_label(scope)
+}
+
+fn safe_error(error: &impl std::fmt::Display) -> String {
+    crate::self_monitoring::metrics_scope_label(&error.to_string())
+}
+
 #[cfg(test)]
 mod due_tracker_tests {
-    use super::DueTracker;
+    use super::{safe_error, safe_scope, DueTracker};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -326,5 +342,12 @@ mod due_tracker_tests {
         due.mark_attempt("j", "s", Instant::now());
         due.clear("j", "s");
         assert!(due.is_due("j", "s", Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn scope_and_error_diagnostics_redact_catalog_passwords() {
+        let raw = "ducklake:20:host=db password=private-value sslmode=disable";
+        assert!(!safe_scope(raw).contains("private-value"));
+        assert!(!safe_error(&anyhow::anyhow!(raw)).contains("private-value"));
     }
 }

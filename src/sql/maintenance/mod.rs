@@ -1,5 +1,7 @@
 //! SQL-owned DuckLake compaction, watermark, and cleanup pass.
 
+pub(crate) mod workspace_purge;
+
 use crate::sql::literal::sql_string_literal;
 
 const MAINTENANCE_SQL: &str = include_str!("maintenance.sql");

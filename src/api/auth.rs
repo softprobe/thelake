@@ -10,7 +10,7 @@ use axum::{
 /// then optional `SOFTPROBE_DEFAULT_WORKSPACE_ID`, then Softprobe auth service.
 pub async fn runtime_auth_middleware(
     State(state): State<AppState>,
-    mut req: Request,
+    req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path();
@@ -35,8 +35,7 @@ pub async fn runtime_auth_middleware(
             .map_err(|_| StatusCode::UNAUTHORIZED)?;
         let info = crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
             .map_err(|_| StatusCode::FORBIDDEN)?;
-        req.extensions_mut().insert(info);
-        return Ok(next.run(req).await);
+        return Ok(run_workspace_request(req, next, info).await);
     }
 
     let auth = req
@@ -58,8 +57,7 @@ pub async fn runtime_auth_middleware(
             {
                 if let Ok(info) = crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
                 {
-                    req.extensions_mut().insert(info);
-                    return Ok(next.run(req).await);
+                    return Ok(run_workspace_request(req, next, info).await);
                 }
             }
         }
@@ -70,8 +68,7 @@ pub async fn runtime_auth_middleware(
     if let Some(default_key) = crate::softprobe_assertion::default_workspace_id_from_env() {
         let info = crate::softprobe_assertion::workspace_auth_for_default_lake(&default_key)
             .map_err(|_| StatusCode::FORBIDDEN)?;
-        req.extensions_mut().insert(info);
-        return Ok(next.run(req).await);
+        return Ok(run_workspace_request(req, next, info).await);
     }
 
     let control_plane = state
@@ -84,8 +81,16 @@ pub async fn runtime_auth_middleware(
         .await
         .map_err(|_| StatusCode::FORBIDDEN)?;
 
+    Ok(run_workspace_request(req, next, info).await)
+}
+
+async fn run_workspace_request(
+    mut req: Request,
+    next: Next,
+    info: crate::authn::WorkspaceAuth,
+) -> Response {
     req.extensions_mut().insert(info);
-    Ok(next.run(req).await)
+    next.run(req).await
 }
 
 pub fn requires_runtime_auth(method: &Method, path: &str) -> bool {
@@ -98,10 +103,27 @@ pub fn requires_runtime_auth(method: &Method, path: &str) -> bool {
     if path == "/v1/workspaces" && *method == Method::POST {
         return false;
     }
+    if *method == Method::DELETE && is_workspace_deletion_route(path) {
+        return false;
+    }
+    if *method == Method::GET && is_workspace_deletion_status_route(path) {
+        return false;
+    }
     is_authenticated_api_prefix(path)
 }
 
-/// Paths that require Bearer → tenant resolution (OTLP/control + compatibility stubs).
+fn is_workspace_deletion_route(path: &str) -> bool {
+    path.strip_prefix("/v1/workspaces/")
+        .is_some_and(|workspace_id| !workspace_id.is_empty() && !workspace_id.contains('/'))
+}
+
+fn is_workspace_deletion_status_route(path: &str) -> bool {
+    path.strip_prefix("/v1/workspaces/")
+        .and_then(|suffix| suffix.strip_suffix("/deletion"))
+        .is_some_and(|workspace_id| !workspace_id.is_empty() && !workspace_id.contains('/'))
+}
+
+/// Paths that require Bearer → workspace resolution (OTLP/control + compatibility stubs).
 pub fn is_authenticated_api_prefix(path: &str) -> bool {
     path.starts_with("/v1/")
         || path.starts_with("/loki/api/v1/")
@@ -188,6 +210,28 @@ mod tests {
             !requires_runtime_auth(&Method::POST, "/v1/workspaces"),
             "POST /v1/workspaces uses admin Bearer validated in-handler, not tenant middleware"
         );
+        assert!(
+            !requires_runtime_auth(
+                &Method::DELETE,
+                "/v1/workspaces/550e8400-e29b-41d4-a716-446655440000"
+            ),
+            "workspace deletion uses admin Bearer validated in-handler"
+        );
+        assert!(
+            !requires_runtime_auth(
+                &Method::GET,
+                "/v1/workspaces/550e8400-e29b-41d4-a716-446655440000/deletion"
+            ),
+            "workspace deletion status uses admin Bearer validated in-handler"
+        );
+        assert!(requires_runtime_auth(
+            &Method::GET,
+            "/v1/workspaces/550e8400-e29b-41d4-a716-446655440000"
+        ));
+        assert!(requires_runtime_auth(
+            &Method::DELETE,
+            "/v1/workspaces/550e8400-e29b-41d4-a716-446655440000/nested"
+        ));
     }
 
     #[test]

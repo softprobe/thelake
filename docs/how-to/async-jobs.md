@@ -7,6 +7,7 @@ Every replica ingests. Ingest does not acquire a job lease. After trace commit, 
 | Work | Coordination | Why |
 |---|---|---|
 | Physical-scope SQL maintenance (compaction, snapshot expiration, scheduled-file cleanup) | Registry PostgreSQL lease with epoch fencing | Concurrent physical maintenance is unsafe |
+| Shared workspace deletion purge | Durable `deleting` binding plus a per-workspace registry lease; physical cleanup also takes the maintenance-scope lease | The HTTP request must return before the reader safety grace expires; a tombstone must survive process restarts |
 | Workspace session-summary rebuild | Registry PostgreSQL lease with epoch fencing | Periodic heavy scan should run once per workspace |
 | Session-summary reduce | Dirty-row claims with `FOR UPDATE SKIP LOCKED` and a claim TTL | UPSERT is repeatable; independent replicas can drain disjoint batches |
 | Ingest and dirty UPSERT | No lease | Ingest must not wait for job coordination |
@@ -24,6 +25,7 @@ The runner passes the acquired token to the job and cancels the job future after
 Leased jobs are:
 
 - `physical_scope_maintenance`, keyed by the maintenance scope key.
+- `shared_workspace_purge`, keyed by workspace ID; it retries every durable `deleting` binding. The purge separately acquires `physical_scope_maintenance` before touching DuckLake.
 - `workspace_session_summary_rebuild`, keyed by workspace.
 
 `workspace_session_summary_reduce` does not acquire a registry lease.
@@ -51,6 +53,40 @@ A crashed reducer's rows become claimable after `dirty_claim_ttl_seconds`. The r
 | Ingest updates a claimed row | Dirty bounds merge; generation ack preserves the newer update |
 | An old claim token acknowledges after reclaim | Delete and claim-clear affect zero rows |
 | Dirty UPSERT fails | Ingest remains successful; the periodic summary rebuild can repair the projection |
+
+## Shared workspace deletion
+
+The admin-only `DELETE /v1/workspaces/{workspace_id}` commits a durable
+`deleting` binding and returns `202 Accepted`. The shared job runner discovers
+that binding after startup and retries the physical purge under its workspace
+lease. The purge retains the configured reader safety grace before expiring
+snapshots, then waits another grace so the files scheduled by snapshot expiry
+are eligible for physical cleanup. Request cancellation or process restart
+therefore does not lose the work or shorten either grace period.
+
+Workspace requests do not acquire per-request registry locks. Deletion does not
+wait for in-flight requests to drain; another replica may continue using a
+cached workspace context while the asynchronous purge runs. The purge can
+therefore race with late writes, so `deleted` records completion of the purge
+attempt rather than a strict fence against every cached client. A tombstoned
+workspace cannot be newly resolved or provisioned from the registry.
+
+Admin-only `GET /v1/workspaces/{workspace_id}/deletion` returns the current
+`deleting` or `deleted` state for monitoring. Since the durable purge is queued
+before `DELETE` returns, callers may remove their control-plane workspace record
+after receiving `202 Accepted`; they do not need to wait for physical cleanup.
+A completed tombstone is permanent and cannot be revived by a repeated delete
+or provisioning request.
+
+Shared workspaces use one DuckLake catalog and its snapshot history is
+catalog-wide. After the first reader grace, deleting one workspace expires
+snapshots for the shared catalog. Once the second reader grace elapses, the
+purge removes the files scheduled by that expiration, even when ordinary
+metadata maintenance is disabled. This permanently removes the target
+workspace's old versions while preserving the current rows and files of other
+workspaces; it also removes their historical snapshot versions. Isolated
+workspaces have their own catalog and do not affect another workspace's
+snapshot history.
 
 PostgreSQL lease durations use whole seconds (`max(1)`); configure `lease_ttl_seconds` well above `heartbeat_seconds` and typical pass duration. The dirty claim TTL should exceed normal p99 reduce batch duration.
 
