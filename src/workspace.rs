@@ -17,7 +17,9 @@ use crate::promotion::{
     PromotionSpecLoadError, TelemetryColumnsManifest,
 };
 use crate::query::{self as query_mod, QueryEngine};
-use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
+use crate::storage::ducklake::{
+    DuckLakeAccess, DuckLakeSessionFactory, DuckLakeSessionKind, PhysicalScope,
+};
 use crate::workspace_scope::{effective_workspace_id, WorkspaceBinding, WorkspaceScopeMode};
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
@@ -298,6 +300,71 @@ impl WorkspaceManager {
     /// Drop cached workspace context (e.g. after provisioning changes scope).
     pub fn invalidate(&self, workspace_id: &str) {
         self.workspaces.remove(workspace_id);
+    }
+
+    /// Permanently remove one workspace from the shared catalog.
+    ///
+    /// Staging and production use one shared DuckLake catalog per environment,
+    /// so row deletion is scoped by `workspace_id`. DuckLake time travel keeps
+    /// old row versions until snapshots are expired; expiration is catalog-wide.
+    /// This operation therefore removes historical snapshots for every
+    /// workspace in this environment before cleaning up their unreferenced
+    /// files. Current rows belonging to other workspaces remain intact.
+    pub async fn delete_shared_workspace_data(&self, workspace_id: &str) -> Result<()> {
+        if self.config.ducklake.workspace_scope_mode != WorkspaceScopeMode::Shared {
+            bail!("workspace data deletion requires shared workspace scope mode");
+        }
+
+        let scope = self.scope_registry.default_physical_scope.clone();
+        let lock_token = scope.id().registry_token().to_string();
+        let lock = self.scope_lock(lock_token);
+        let _scope_hold = lock.lock().await;
+
+        // Remove the binding first. New workspace-scoped requests now fail
+        // closed while the lake purge runs. A retry still purges the shared
+        // tables even though the binding is already gone.
+        {
+            let mut client = self.scope_registry.pool.get().await?;
+            let transaction = client.transaction().await?;
+            transaction
+                .execute(
+                    &format!(
+                        "DELETE FROM {}.workspace_scope_binding WHERE workspace_id = $1;",
+                        quote_pg_ident(self.scope_registry.registry_schema())
+                    ),
+                    &[&workspace_id],
+                )
+                .await?;
+            transaction.commit().await?;
+        }
+        self.invalidate(workspace_id);
+
+        let access = DuckLakeAccess::Physical(scope.clone());
+        let factory = DuckLakeSessionFactory::new(self.config.as_ref());
+        let connection = factory.open(&access, DuckLakeSessionKind::Maintenance)?;
+        factory.attach(&connection, &access)?;
+        crate::storage::ducklake::workspace_views::purge_workspace_rows(
+            &connection,
+            &scope,
+            workspace_id,
+        )?;
+
+        // Session search has a Postgres summary index alongside DuckLake.
+        // Keep its cleanup in the same operation and make retries harmless.
+        let quoted_schema = quote_pg_ident(scope.pg_namespace());
+        let mut client = self.scope_registry.pool.get().await?;
+        let transaction = client.transaction().await?;
+        for table in ["session_summary", "session_summary_dirty"] {
+            transaction
+                .execute(
+                    &format!("DELETE FROM {quoted_schema}.{table} WHERE workspace_id = $1;"),
+                    &[&workspace_id],
+                )
+                .await?;
+        }
+        transaction.commit().await?;
+
+        Ok(())
     }
 
     #[cfg(test)]

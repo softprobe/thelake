@@ -54,6 +54,49 @@ fn has_workspace_id_column(
     Ok(false)
 }
 
+/// Remove one workspace's rows from the physical tables in the shared catalog,
+/// then physically clear deleted versions from the shared warehouse.
+pub(crate) fn purge_workspace_rows(
+    conn: &Connection,
+    scope: &PhysicalScope,
+    workspace_id: &str,
+) -> Result<()> {
+    let catalog = super::util::escape_sql_literal(scope.attach_alias());
+    let schema = super::util::escape_sql_literal(scope.pg_namespace());
+    let workspace_id = super::util::escape_sql_literal(workspace_id);
+
+    for table in ["traces", "logs", "scores", "score_configs"] {
+        let exists: i64 = conn.query_row(
+            "SELECT count(*) FROM duckdb_tables() \
+             WHERE database_name = ? AND schema_name = ? AND table_name = ?;",
+            duckdb::params![scope.attach_alias(), scope.pg_namespace(), table],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            continue;
+        }
+        if !has_workspace_id_column(conn, scope, table)? {
+            anyhow::bail!("shared workspace table {table} has no workspace_id column");
+        }
+        let physical_table = ducklake_qualified_table_name(scope, table);
+        conn.execute_batch(&format!(
+            "DELETE FROM {physical_table} WHERE workspace_id = '{workspace_id}';\
+             CALL ducklake_rewrite_data_files('{catalog}', '{table}', schema => '{schema}', delete_threshold => 0);"
+        ))
+        .with_context(|| format!("purge shared workspace rows from {table}"))?;
+    }
+
+    // DuckLake snapshots are catalog-scoped, so expiration also removes time
+    // travel history for other workspaces in this same environment. Current
+    // rows in their tables are retained.
+    conn.execute_batch(&format!(
+        "CALL ducklake_expire_snapshots('{catalog}', older_than => now());\
+         CALL ducklake_cleanup_old_files('{catalog}', cleanup_all => true);"
+    ))
+    .context("remove expired workspace data files")?;
+    Ok(())
+}
+
 /// Verify that every physical table required by shared workspace access carries
 /// the ownership column before any filtered view can be trusted.
 pub(crate) fn validate_shared_workspace_schema(
