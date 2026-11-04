@@ -5,6 +5,7 @@ mod test_support;
 pub mod api;
 pub mod async_jobs;
 pub mod authn;
+pub mod capture_correlation;
 pub mod compaction;
 pub mod compat;
 pub mod config;

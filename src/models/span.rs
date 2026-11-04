@@ -246,6 +246,7 @@ impl Span {
         let session_id = attributes
             .get(crate::models::attr_keys::sp::SESSION_ID)
             .or_else(|| attributes.get("sp_session_id"))
+            .or_else(|| attributes.get("session.id"))
             .or_else(|| attributes.get("gen_ai.conversation.id"))
             .cloned()
             .unwrap_or_else(|| trace_id.clone());
@@ -534,6 +535,34 @@ mod tests {
                 .expect("from_otlp")
                 .session_id,
             "conv-only"
+        );
+    }
+
+    #[test]
+    fn from_otlp_normalizes_otel_session_id() {
+        use opentelemetry_proto::tonic::common::v1::any_value;
+        use opentelemetry_proto::tonic::trace::v1::Span as OtlpSpan;
+
+        let resource = HashMap::new();
+        let otlp = OtlpSpan {
+            trace_id: vec![8; 16],
+            span_id: vec![3; 8],
+            start_time_unix_nano: 1_000_000_000,
+            end_time_unix_nano: 2_000_000_000,
+            attributes: vec![KeyValue {
+                key: "session.id".into(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::StringValue("browser-session".into())),
+                }),
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            Span::from_otlp(otlp, &resource)
+                .expect("from_otlp")
+                .session_id,
+            "browser-session"
         );
     }
 

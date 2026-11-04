@@ -142,6 +142,23 @@ pub struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
+    #[cfg(test)]
+    pub(crate) fn for_auth_middleware_test() -> Self {
+        let config = Arc::new(Config::default());
+        let scope_registry = DuckLakeScopeResolver::build_pool(&config.ducklake)
+            .expect("test PostgreSQL config should build without connecting");
+        Self {
+            config,
+            workspaces: DashMap::new(),
+            creation_locks: DashMap::new(),
+            scope_locks: DashMap::new(),
+            scope_initialization_lock: Mutex::new(()),
+            control_plane: None,
+            scope_registry,
+            build_counter: AtomicUsize::new(0),
+        }
+    }
+
     /// Connect the catalog registry and build the process-wide workspace cache.
     pub async fn connect(
         config: Arc<Config>,

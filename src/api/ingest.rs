@@ -1,6 +1,7 @@
 use crate::api::AppState;
 use crate::authn::WorkspaceAuth;
 use crate::models::{Log as LogData, Span as SpanData};
+use crate::softprobe_assertion::CaptureProfileContext;
 use anyhow::Result;
 use axum::extract::{Extension, State};
 use axum::http::{header::CONTENT_TYPE, HeaderMap, StatusCode};
@@ -56,12 +57,14 @@ pub(crate) fn record_ingest_decode_failure(
 pub async fn ingest_traces(
     State(state): State<AppState>,
     tenant: Option<Extension<WorkspaceAuth>>,
+    capture_scope: Option<Extension<CaptureProfileContext>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let start = Instant::now();
     let body_size = body.len();
     let tenant_info = tenant.map(|t| t.0);
+    let trusted_capture_id = capture_scope.map(|scope| scope.0.capture_id);
     let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -71,7 +74,15 @@ pub async fn ingest_traces(
     if content_type.contains("protobuf") || content_type.contains("application/x-protobuf") {
         match prost::Message::decode(body.as_ref()) {
             Ok(request) => {
-                match process_traces(state, request, body_size, tenant_info.clone()).await {
+                match process_traces_with_capture(
+                    state,
+                    request,
+                    body_size,
+                    tenant_info.clone(),
+                    trusted_capture_id.clone(),
+                )
+                .await
+                {
                     Ok(count) => Json(IngestResponse {
                         success: true,
                         ingested_count: count,
@@ -93,7 +104,15 @@ pub async fn ingest_traces(
     } else {
         match serde_json::from_slice::<ExportTraceServiceRequest>(&body) {
             Ok(request) => {
-                match process_traces(state, request, body_size, tenant_info.clone()).await {
+                match process_traces_with_capture(
+                    state,
+                    request,
+                    body_size,
+                    tenant_info.clone(),
+                    trusted_capture_id.clone(),
+                )
+                .await
+                {
                     Ok(count) => Json(IngestResponse {
                         success: true,
                         ingested_count: count,
@@ -184,12 +203,23 @@ pub async fn process_traces(
     body_size: usize,
     auth_tenant: Option<WorkspaceAuth>,
 ) -> Result<usize> {
+    process_traces_with_capture(state, request, body_size, auth_tenant, None).await
+}
+
+async fn process_traces_with_capture(
+    state: AppState,
+    request: ExportTraceServiceRequest,
+    body_size: usize,
+    auth_tenant: Option<WorkspaceAuth>,
+    trusted_capture_id: Option<String>,
+) -> Result<usize> {
     let start = std::time::Instant::now();
     let tid_hint = auth_tenant
         .as_ref()
         .map(|t| t.workspace_id.clone())
         .unwrap_or_default();
-    let result = process_traces_inner(state, request, body_size, auth_tenant).await;
+    let result =
+        process_traces_inner(state, request, body_size, auth_tenant, trusted_capture_id).await;
     if crate::self_monitoring::instrument_customer_workspace(&tid_hint) {
         let (ok, app) = match &result {
             Ok((_, app)) => (true, app.clone()),
@@ -212,6 +242,7 @@ async fn process_traces_inner(
     request: ExportTraceServiceRequest,
     body_size: usize,
     auth_tenant: Option<WorkspaceAuth>,
+    trusted_capture_id: Option<String>,
 ) -> Result<(usize, Option<String>)> {
     let mut spans = Vec::new();
     let mut app: Option<String> = None;
@@ -261,6 +292,12 @@ async fn process_traces_inner(
         span.agent_id = agent_id.clone();
         span.agent_name = agent_name.clone();
     }
+
+    crate::capture_correlation::validate_capture_batch(
+        &spans,
+        &tid,
+        trusted_capture_id.as_deref(),
+    )?;
 
     let span_count = spans.len();
 

@@ -26,6 +26,27 @@ without those claims leave the columns NULL. `POST /v1/sessions/search`
 can filter by `agent_name`, derived as persisted column, then `sp.agent.name`,
 then the agent span name.
 
+## Agent ingest capability
+
+Explorer resolves each opaque `spk_…` key to its registered Agent and mints a
+short-lived assertion with `agent_id`, `agent_name`, and
+`capabilities: ["ingest"]`. Agent is the identity for an agentic app in this
+scope; there is no separate App registry. TheLake enforces the capability
+before dispatching to authenticated data, control, and compatibility routes.
+
+The allowed Agent assertion routes are exactly `POST /v1/traces`,
+`POST /v1/logs`, and `POST /v1/scores`. Queries, score configuration, control,
+administrative, Loki, and Tempo routes are denied. Ordinary workspace-user
+assertions without Agent/capability claims retain their existing route access.
+Admin provisioning remains separately guarded by `SOFTPROBE_ADMIN_API_KEY`.
+OTLP `app_id` is caller-supplied metadata, not the authorization owner. See
+the [cross-repo design and verification map](../../../sp-llm/docs/specs/agent-api-key-authorization.md).
+
+Opaque Agent `spk_…` keys are resolved by Explorer's HTTP gateway. Direct
+TheLake OTLP/gRPC does not accept that key or carry its Agent capability and
+capture-profile assertion; Agent capture exporters must use the Explorer HTTP
+ingest path until equivalent gRPC enforcement is implemented.
+
 ### Bearer API key
 
 Machine clients (Grafana datasources, some OTLP ingest paths) may send:
@@ -40,17 +61,19 @@ Resolution order when `X-Softprobe-Assertion` is absent:
    DuckLake scope from `workspace_id` (Explorer workspace ingest keys use this).
 2. Else if **`SOFTPROBE_DEFAULT_WORKSPACE_ID`** (alias
    `THELAKE_DEFAULT_WORKSPACE_ID`) is set to a non-empty workspace UUID (must not
-   be reserved `thelake-ops`): require a non-empty Bearer, then bind that default
-   lake **without** calling the Softprobe auth service.
+   be reserved `thelake-ops`): reject opaque Explorer `spk_…` keys; otherwise
+   require a non-empty Bearer, then bind that default lake **without** calling
+   the Softprobe auth service.
 3. Otherwise resolve through `SOFTPROBE_AUTH_URL`. The auth response
    `workspaceId` must be a UUID; non-UUID values are rejected.
 
 When both the assertion header and Authorization are present, **assertion wins**.
 
 Default-lake fallback still requires `Authorization: Bearer …` (any non-empty
-token). It does **not** open anonymous ingest. Prefer assertion or Explorer
-gateway (`/api/thelake`) for new clients; keep the default workspace id temporary
-and workspace-specific.
+token except an opaque Explorer `spk_…` key). It does **not** open anonymous
+ingest. Prefer assertion or Explorer gateway (`/api/thelake`) for new clients;
+keep the default workspace id temporary and workspace-specific. A direct
+`spk_…` request is rejected with `401` because only Explorer resolves that key.
 
 Admin provisioning stays admin-key only: `POST /v1/workspaces` with
 `SOFTPROBE_ADMIN_API_KEY`.
@@ -96,7 +119,9 @@ header is denied.
 |-----------|-------------|
 | Missing assertion and Authorization | `401` |
 | Invalid / expired assertion | `401` |
-| Assertion without valid UUID `workspace_id` | `403` |
+| Verified assertion without valid UUID `workspace_id` | `403`; do not fall through to default workspace |
+| Agent assertion without owner/capability or used outside the exact ingest routes | `403` |
+| Opaque Explorer `spk_…` Bearer sent directly to TheLake | `401` |
 | Malformed Bearer | `401` |
 | Unknown / rejected API key | `403` |
 | Auth response `workspaceId` not a UUID | `403` |

@@ -25,6 +25,9 @@ pub struct SoftprobeAssertionClaims {
     pub workspace_id: String,
     #[serde(default)]
     pub roles: Option<Vec<String>>,
+    /// Capabilities granted to a machine assertion by its trusted issuer.
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
     #[serde(default)]
     pub email: Option<String>,
     #[serde(default)]
@@ -35,6 +38,15 @@ pub struct SoftprobeAssertionClaims {
     /// Softprobe agent display name when minted for an agent API key.
     #[serde(default)]
     pub agent_name: Option<String>,
+    /// Capture profile identity after Explorer validates Agent/workspace ownership.
+    #[serde(default)]
+    pub capture_id: Option<String>,
+}
+
+/// Verified capture scope copied from a signed assertion into request extensions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureProfileContext {
+    pub capture_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -211,6 +223,9 @@ pub fn workspace_auth_for_default_lake(workspace_id: &str) -> Result<WorkspaceAu
 }
 
 #[cfg(test)]
+pub(crate) static AUTH_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use hmac::{Hmac, Mac};
@@ -262,6 +277,8 @@ mod tests {
                 "workspace_id": WS,
                 "agent_id": "support-refund-agent",
                 "agent_name": "Support Refund Agent",
+                "capabilities": ["ingest"],
+                "capture_id": "550e8400-e29b-41d4-a716-446655440099",
                 "exp": now + 300
             }),
             "test-secret",
@@ -269,6 +286,14 @@ mod tests {
         let claims = verify_softprobe_assertion(&token, "test-secret", now).expect("ok");
         assert_eq!(claims.agent_id.as_deref(), Some("support-refund-agent"));
         assert_eq!(claims.agent_name.as_deref(), Some("Support Refund Agent"));
+        assert_eq!(
+            claims.capture_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440099")
+        );
+        assert_eq!(
+            claims.capabilities.as_deref(),
+            Some(&["ingest".to_string()][..])
+        );
         let info = workspace_auth_from_assertion(&claims).unwrap();
         assert_eq!(info.agent_id.as_deref(), Some("support-refund-agent"));
         assert_eq!(info.agent_name.as_deref(), Some("Support Refund Agent"));
@@ -324,6 +349,7 @@ mod tests {
 
     #[test]
     fn default_workspace_id_from_env_reads_primary_and_alias() {
+        let _env_lock = AUTH_ENV_TEST_LOCK.blocking_lock();
         let prev_primary = std::env::var("SOFTPROBE_DEFAULT_WORKSPACE_ID").ok();
         let prev_alias = std::env::var("THELAKE_DEFAULT_WORKSPACE_ID").ok();
         std::env::remove_var("SOFTPROBE_DEFAULT_WORKSPACE_ID");
