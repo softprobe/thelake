@@ -220,12 +220,13 @@ pub async fn get_session_recording(
         return Err(bad_request("missing session_id".to_string()));
     }
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
-    let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
+    let (summary_from, summary_to) =
+        resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
     // Recording batches can be emitted before the first application request or
     // after the last one, so the session-summary bounds are not sufficient.
-    let (from, to) = recording_query_window(from, to);
+    let (query_from, query_to) = recording_query_window(summary_from, summary_to);
     let limit = clamp_limit(params.limit, DEFAULT_RECORDING_LIMIT);
-    let sql = session_recording(&session_id, from, to, limit).map_err(bad_request)?;
+    let sql = session_recording(&session_id, query_from, query_to, limit).map_err(bad_request)?;
     let ws = resolve_workspace(&state, tenant_ref).await?;
     let result =
         map_execute_result(ws.query().execute_trusted(sql).await).map_err(storage_error)?;
@@ -256,8 +257,8 @@ pub async fn get_session_recording(
 
     Ok(Json(SessionRecording {
         session_id,
-        from,
-        to,
+        from: summary_from,
+        to: summary_to,
         truncated,
         batches,
         events,

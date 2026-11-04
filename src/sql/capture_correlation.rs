@@ -45,4 +45,17 @@ mod tests {
         assert!(ddl.contains("\"capture\"\"catalog\".capture_session_mappings"));
         assert!(ddl.contains("\"capture\"\"catalog\".pending_capture_spans"));
     }
+
+    #[test]
+    fn capture_correlation_schema_ddl_creates_catalog_schema_before_tables() {
+        let ddl = schema_ddl("tenant_a");
+        let create_schema = ddl
+            .find("CREATE SCHEMA IF NOT EXISTS \"tenant_a\";")
+            .expect("create tenant schema");
+        let create_table = ddl
+            .find("CREATE TABLE IF NOT EXISTS \"tenant_a\".capture_session_mappings")
+            .expect("create capture session mappings");
+
+        assert!(create_schema < create_table);
+    }
 }

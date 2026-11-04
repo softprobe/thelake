@@ -1,3 +1,5 @@
+CREATE SCHEMA IF NOT EXISTS {{schema}};
+
 CREATE TABLE IF NOT EXISTS {{schema}}.capture_session_mappings (
   workspace_id TEXT NOT NULL,
   capture_id TEXT NOT NULL,
