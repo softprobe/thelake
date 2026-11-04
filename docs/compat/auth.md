@@ -43,9 +43,12 @@ OTLP `app_id` is caller-supplied metadata, not the authorization owner. See
 the [cross-repo design and verification map](../../../sp-llm/docs/specs/agent-api-key-authorization.md).
 
 Opaque Agent `spk_…` keys are resolved by Explorer's HTTP gateway. Direct
-TheLake OTLP/gRPC does not accept that key or carry its Agent capability and
-capture-profile assertion; Agent capture exporters must use the Explorer HTTP
-ingest path until equivalent gRPC enforcement is implemented.
+TheLake OTLP/gRPC does not accept that key or carry its Agent capability
+assertion; Agent capture exporters must use the Explorer HTTP ingest path until
+equivalent gRPC enforcement is implemented. For browser and OBI session capture,
+TheLake joins on the trusted `(workspace_id, agent_id)` assertion scope and
+`trace_id`. The browser span supplies `session.id`. No capture ID is needed or
+accepted as an authorization claim.
 
 ### Bearer API key
 

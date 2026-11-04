@@ -75,7 +75,7 @@ impl WorkspaceContext {
         &self,
         spans: Vec<crate::models::Span>,
         request_size: usize,
-        capture_id: &str,
+        agent_id: &str,
     ) -> Result<()> {
         let store = crate::capture_correlation::CaptureCorrelationStore::new(
             self.catalog_pool.clone(),
@@ -83,7 +83,7 @@ impl WorkspaceContext {
             &self.workspace_id,
         );
         store
-            .ingest(&self.ingest, spans, request_size, capture_id)
+            .ingest(&self.ingest, spans, request_size, agent_id)
             .await
     }
 

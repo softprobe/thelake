@@ -38,15 +38,6 @@ pub struct SoftprobeAssertionClaims {
     /// Softprobe agent display name when minted for an agent API key.
     #[serde(default)]
     pub agent_name: Option<String>,
-    /// Capture profile identity after Explorer validates Agent/workspace ownership.
-    #[serde(default)]
-    pub capture_id: Option<String>,
-}
-
-/// Verified capture scope copied from a signed assertion into request extensions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CaptureProfileContext {
-    pub capture_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -278,7 +269,6 @@ mod tests {
                 "agent_id": "support-refund-agent",
                 "agent_name": "Support Refund Agent",
                 "capabilities": ["ingest"],
-                "capture_id": "550e8400-e29b-41d4-a716-446655440099",
                 "exp": now + 300
             }),
             "test-secret",
@@ -286,10 +276,6 @@ mod tests {
         let claims = verify_softprobe_assertion(&token, "test-secret", now).expect("ok");
         assert_eq!(claims.agent_id.as_deref(), Some("support-refund-agent"));
         assert_eq!(claims.agent_name.as_deref(), Some("Support Refund Agent"));
-        assert_eq!(
-            claims.capture_id.as_deref(),
-            Some("550e8400-e29b-41d4-a716-446655440099")
-        );
         assert_eq!(
             claims.capabilities.as_deref(),
             Some(&["ingest".to_string()][..])

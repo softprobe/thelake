@@ -6,7 +6,7 @@ use crate::models::Span;
 use crate::sql::capture_correlation as sql;
 use anyhow::{bail, Context, Result};
 use deadpool_postgres::Pool;
-use tracing::warn;
+use tracing::{info, warn};
 
 const MAX_STAGED_SPANS: i64 = 256;
 const MAX_STAGED_BYTES: i64 = 16 * 1024 * 1024;
@@ -66,23 +66,29 @@ impl CaptureCorrelationStore {
         ingest: &IngestEngine,
         spans: Vec<Span>,
         request_size: usize,
-        capture_id: &str,
+        agent_id: &str,
     ) -> Result<()> {
         let mut direct_spans = Vec::new();
         let mut mappings = Vec::new();
         let mut backend_spans = Vec::new();
 
         for span in spans {
-            match classify_capture_span(&span, &self.workspace_id, Some(capture_id))? {
+            match classify_capture_span(&span, &self.workspace_id, Some(agent_id))? {
                 Some(CaptureObservation::BrowserMapping { key, session_id }) => {
                     mappings.push((key, session_id));
                     direct_spans.push(span);
                 }
                 Some(CaptureObservation::BackendSpan { key }) => backend_spans.push((key, span)),
                 Some(CaptureObservation::Recording) => direct_spans.push(span),
-                None => bail!("capture ingest contains a span without a capture classification"),
+                None => direct_spans.push(span),
             }
         }
+        info!(
+            direct_span_count = direct_spans.len(),
+            browser_mapping_count = mappings.len(),
+            backend_span_count = backend_spans.len(),
+            "Classified capture span batch"
+        );
         let advisory_lock = sql::render(sql::ADVISORY_LOCK, &self.metadata_schema);
         let expire_mappings = sql::render(sql::EXPIRE_MAPPINGS, &self.metadata_schema);
         let expire_pending = sql::render(sql::EXPIRE_PENDING, &self.metadata_schema);
@@ -91,44 +97,34 @@ impl CaptureCorrelationStore {
         let find_mapping = sql::render(sql::FIND_MAPPING, &self.metadata_schema);
         let insert_pending = sql::render(sql::INSERT_PENDING, &self.metadata_schema);
         let find_pending = sql::render(sql::FIND_PENDING, &self.metadata_schema);
-        let profile_usage = sql::render(sql::PROFILE_USAGE, &self.metadata_schema);
+        let agent_usage = sql::render(sql::AGENT_USAGE, &self.metadata_schema);
         let mapping_count = sql::render(sql::MAPPING_COUNT, &self.metadata_schema);
 
         {
             let mut client = self.pool.get().await.context("capture correlation pool")?;
             let transaction = client.transaction().await?;
-            let lock_key = format!("{}:{}", self.workspace_id, capture_id);
+            let lock_key = format!("{}:{}", self.workspace_id, agent_id);
             transaction.query_one(&advisory_lock, &[&lock_key]).await?;
             transaction
-                .execute(&expire_mappings, &[&self.workspace_id, &capture_id])
+                .execute(&expire_mappings, &[&self.workspace_id, &agent_id])
                 .await?;
             transaction
-                .execute(&expire_pending, &[&self.workspace_id, &capture_id])
+                .execute(&expire_pending, &[&self.workspace_id, &agent_id])
                 .await?;
             for (key, session_id) in &mappings {
                 let row = transaction
                     .query_opt(
                         &upsert_mapping,
-                        &[
-                            &key.workspace_id,
-                            &key.capture_id,
-                            &key.trace_id,
-                            session_id,
-                        ],
+                        &[&key.workspace_id, &key.agent_id, &key.trace_id, session_id],
                     )
                     .await?;
                 if row.is_none() {
-                    bail!("conflicting browser session mapping for capture trace");
+                    bail!("conflicting browser session mapping for Agent trace");
                 }
                 transaction
                     .execute(
                         &map_pending,
-                        &[
-                            &key.workspace_id,
-                            &key.capture_id,
-                            &key.trace_id,
-                            session_id,
-                        ],
+                        &[&key.workspace_id, &key.agent_id, &key.trace_id, session_id],
                     )
                     .await?;
             }
@@ -136,7 +132,7 @@ impl CaptureCorrelationStore {
                 let mapping = transaction
                     .query_opt(
                         &find_mapping,
-                        &[&key.workspace_id, &key.capture_id, &key.trace_id],
+                        &[&key.workspace_id, &key.agent_id, &key.trace_id],
                     )
                     .await?
                     .map(|row| row.get::<_, String>(0));
@@ -147,7 +143,7 @@ impl CaptureCorrelationStore {
                         &insert_pending,
                         &[
                             &key.workspace_id,
-                            &key.capture_id,
+                            &key.agent_id,
                             &key.trace_id,
                             &span.span_id,
                             &mapping,
@@ -161,7 +157,7 @@ impl CaptureCorrelationStore {
                         &find_pending,
                         &[
                             &key.workspace_id,
-                            &key.capture_id,
+                            &key.agent_id,
                             &key.trace_id,
                             &span.span_id,
                         ],
@@ -175,7 +171,7 @@ impl CaptureCorrelationStore {
             }
 
             let usage = transaction
-                .query_one(&profile_usage, &[&self.workspace_id, &capture_id])
+                .query_one(&agent_usage, &[&self.workspace_id, &agent_id])
                 .await?;
             let staged_count: i64 = usage.get(0);
             let staged_bytes: i64 = usage.get(1);
@@ -184,7 +180,7 @@ impl CaptureCorrelationStore {
             }
 
             let mapping_count: i64 = transaction
-                .query_one(&mapping_count, &[&self.workspace_id, &capture_id])
+                .query_one(&mapping_count, &[&self.workspace_id, &agent_id])
                 .await?
                 .get(0);
             if mapping_count > MAX_MAPPINGS {
@@ -206,7 +202,7 @@ impl CaptureCorrelationStore {
                     &claim_ready,
                     &[
                         &self.workspace_id,
-                        &capture_id,
+                        &agent_id,
                         &claim_token,
                         &CLAIM_BATCH_SIZE,
                     ],
@@ -234,21 +230,27 @@ impl CaptureCorrelationStore {
         let claimed_spans = match claimed_spans {
             Ok(spans) => spans,
             Err(error) => {
-                self.release_claim(capture_id, &claim_token).await;
+                self.release_claim(agent_id, &claim_token).await;
                 return Err(error);
             }
         };
         let has_lake_writes = !direct_spans.is_empty() || !claimed_spans.is_empty();
         if has_lake_writes {
+            let direct_span_count = direct_spans.len();
+            let correlated_span_count = claimed_spans.len();
             direct_spans.extend(claimed_spans);
             let write_result = async {
                 ingest.add_spans(direct_spans, request_size).await?;
                 ingest.force_flush_spans().await?;
+                info!(
+                    direct_span_count,
+                    correlated_span_count, "Flushed capture spans to DuckLake"
+                );
                 Ok::<(), anyhow::Error>(())
             }
             .await;
             if let Err(error) = write_result {
-                self.release_claim(capture_id, &claim_token).await;
+                self.release_claim(agent_id, &claim_token).await;
                 return Err(error).context("flush correlated capture spans to DuckLake");
             }
         }
@@ -261,7 +263,7 @@ impl CaptureCorrelationStore {
                 .await
                 .context("capture correlation ack pool")?;
             let updated = client
-                .execute(&ack, &[&self.workspace_id, &capture_id, &claim_token])
+                .execute(&ack, &[&self.workspace_id, &agent_id, &claim_token])
                 .await?;
             if updated != claimed.len() as u64 {
                 warn!(
@@ -275,11 +277,11 @@ impl CaptureCorrelationStore {
         Ok(())
     }
 
-    async fn release_claim(&self, capture_id: &str, claim_token: &str) {
+    async fn release_claim(&self, agent_id: &str, claim_token: &str) {
         let release = sql::render(sql::RELEASE_CLAIM, &self.metadata_schema);
         let result: Result<u64> = match self.pool.get().await {
             Ok(client) => client
-                .execute(&release, &[&self.workspace_id, &capture_id, &claim_token])
+                .execute(&release, &[&self.workspace_id, &agent_id, &claim_token])
                 .await
                 .map_err(Into::into),
             Err(error) => Err(error.into()),

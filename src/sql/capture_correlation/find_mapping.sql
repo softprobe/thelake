@@ -1,3 +1,3 @@
 SELECT session_id
 FROM {{schema}}.capture_session_mappings
-WHERE workspace_id = $1 AND capture_id = $2 AND trace_id = $3 AND expires_at > NOW();
+WHERE workspace_id = $1 AND agent_id = $2 AND trace_id = $3 AND expires_at > NOW();

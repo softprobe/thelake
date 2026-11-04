@@ -11,12 +11,6 @@ fn authorize_agent_assertion_request(
     method: &Method,
     path: &str,
 ) -> Result<(), StatusCode> {
-    if claims.capture_id.is_some() && (claims.agent_id.is_none() || claims.capabilities.is_none()) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    if claims.capture_id.is_some() && (*method != Method::POST || path != "/v1/traces") {
-        return Err(StatusCode::FORBIDDEN);
-    }
     let has_agent_owner = claims
         .agent_id
         .as_deref()
@@ -49,7 +43,7 @@ fn authorize_agent_assertion_request(
 /// then optional `SOFTPROBE_DEFAULT_WORKSPACE_ID`, then Softprobe auth service.
 pub async fn runtime_auth_middleware(
     State(state): State<AppState>,
-    mut req: Request,
+    req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path();
@@ -73,13 +67,6 @@ pub async fn runtime_auth_middleware(
         let claims = crate::softprobe_assertion::verify_softprobe_assertion(raw, &secret, now)
             .map_err(|_| StatusCode::UNAUTHORIZED)?;
         authorize_agent_assertion_request(&claims, req.method(), path)?;
-        if let Some(capture_id) = claims.capture_id.as_deref() {
-            let capture_id = uuid::Uuid::parse_str(capture_id)
-                .map_err(|_| StatusCode::FORBIDDEN)?
-                .to_string();
-            req.extensions_mut()
-                .insert(crate::softprobe_assertion::CaptureProfileContext { capture_id });
-        }
         let info = crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
             .map_err(|_| StatusCode::FORBIDDEN)?;
         return Ok(run_workspace_request(req, next, info).await);
@@ -103,13 +90,6 @@ pub async fn runtime_auth_middleware(
                 crate::softprobe_assertion::verify_softprobe_assertion(&token, &secret, now)
             {
                 authorize_agent_assertion_request(&claims, req.method(), path)?;
-                if let Some(capture_id) = claims.capture_id.as_deref() {
-                    let capture_id = uuid::Uuid::parse_str(capture_id)
-                        .map_err(|_| StatusCode::FORBIDDEN)?
-                        .to_string();
-                    req.extensions_mut()
-                        .insert(crate::softprobe_assertion::CaptureProfileContext { capture_id });
-                }
                 let info = crate::softprobe_assertion::workspace_auth_from_assertion(&claims)
                     .map_err(|_| StatusCode::FORBIDDEN)?;
                 return Ok(run_workspace_request(req, next, info).await);
@@ -244,14 +224,17 @@ mod tests {
         StatusCode::NO_CONTENT
     }
 
-    async fn capture_scope_probe(
-        capture: Option<axum::Extension<crate::softprobe_assertion::CaptureProfileContext>>,
+    async fn agent_scope_probe(
+        auth: Option<axum::Extension<crate::authn::WorkspaceAuth>>,
     ) -> axum::response::Response {
         let mut response = StatusCode::NO_CONTENT.into_response();
-        if let Some(axum::Extension(capture)) = capture {
+        if let Some(axum::Extension(auth)) = auth {
             response.headers_mut().insert(
-                "x-test-capture-id",
-                capture.capture_id.parse().expect("valid header value"),
+                "x-test-agent-id",
+                auth.agent_id
+                    .unwrap_or_default()
+                    .parse()
+                    .expect("valid header value"),
             );
         }
         response
@@ -264,7 +247,7 @@ mod tests {
             ),
         };
         Router::new()
-            .route("/v1/traces", post(capture_scope_probe).options(probe))
+            .route("/v1/traces", post(agent_scope_probe).options(probe))
             .route("/v1/logs", post(probe))
             .route("/v1/scores", post(probe))
             .route("/v1/sessions/search", post(probe))
@@ -280,7 +263,6 @@ mod tests {
         workspace_id: &str,
         agent_id: Option<&str>,
         capabilities: Option<&[&str]>,
-        capture_id: Option<&str>,
     ) -> String {
         let mut payload = serde_json::json!({
             "iss": "softprobe-edge",
@@ -294,9 +276,6 @@ mod tests {
         }
         if let Some(capabilities) = capabilities {
             payload["capabilities"] = serde_json::json!(capabilities);
-        }
-        if let Some(capture_id) = capture_id {
-            payload["capture_id"] = serde_json::json!(capture_id);
         }
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
         let payload = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
@@ -360,7 +339,6 @@ mod tests {
             agent_id: agent_id.map(str::to_string),
             agent_name: agent_id.map(|_| "Capture Agent".to_string()),
             capabilities: capabilities.map(|items| items.into_iter().map(str::to_string).collect()),
-            capture_id: None,
         }
     }
 
@@ -453,7 +431,6 @@ mod tests {
             TEST_WORKSPACE,
             Some("agent-1"),
             Some(&["ingest"]),
-            None,
         );
 
         for path in ["/v1/traces", "/v1/logs", "/v1/scores"] {
@@ -525,7 +502,7 @@ mod tests {
             );
         }
 
-        let user = signed_assertion(TEST_SECRET, TEST_WORKSPACE, None, None, None);
+        let user = signed_assertion(TEST_SECRET, TEST_WORKSPACE, None, None);
         assert_eq!(
             response_status(
                 app.clone(),
@@ -540,7 +517,7 @@ mod tests {
         );
 
         let ownerless_capability =
-            signed_assertion(TEST_SECRET, TEST_WORKSPACE, None, Some(&["ingest"]), None);
+            signed_assertion(TEST_SECRET, TEST_WORKSPACE, None, Some(&["ingest"]));
         assert_eq!(
             response_status(
                 app.clone(),
@@ -562,7 +539,6 @@ mod tests {
             "workspace-is-not-a-uuid",
             Some("agent-1"),
             Some(&["ingest"]),
-            None,
         );
         assert_eq!(
             response_status(
@@ -578,7 +554,7 @@ mod tests {
         );
 
         let bad_workspace_user =
-            signed_assertion(TEST_SECRET, "workspace-is-not-a-uuid", None, None, None);
+            signed_assertion(TEST_SECRET, "workspace-is-not-a-uuid", None, None);
         assert_eq!(
             response_status(
                 app.clone(),
@@ -658,16 +634,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn middleware_carries_verified_capture_profile_scope_to_ingest_handler() {
+    async fn middleware_carries_verified_agent_scope_to_ingest_handler() {
         let _env_lock = crate::softprobe_assertion::AUTH_ENV_TEST_LOCK.lock().await;
         let _env = configure_auth_environment();
-        let capture_id = "550e8400-e29b-41d4-a716-446655440099";
         let assertion = signed_assertion(
             TEST_SECRET,
             TEST_WORKSPACE,
             Some("agent-1"),
             Some(&["ingest"]),
-            Some(capture_id),
         );
         let response = middleware_test_router()
             .oneshot(
@@ -681,7 +655,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(response.headers()["x-test-capture-id"], capture_id);
+        assert_eq!(response.headers()["x-test-agent-id"], "agent-1");
     }
 
     #[test]
