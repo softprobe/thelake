@@ -63,6 +63,11 @@ async fn async_main(config: Arc<Config>) -> anyhow::Result<()> {
         softprobe_runtime::session_summary::start_session_summary_reducer(state.workspaces.clone())
             .await?;
     info!("Session-summary reducer started");
+    let _capture_expiry_sweeper =
+        softprobe_runtime::capture_correlation::start_capture_expiry_sweeper(
+            state.workspaces.clone(),
+        );
+    info!("Capture-correlation expiry sweeper started");
 
     // CorsLayer must be outermost: browsers send OPTIONS preflight without
     // Authorization. If auth wraps CORS, preflight 401s and SPA OTLP never runs;

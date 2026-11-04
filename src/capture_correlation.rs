@@ -7,6 +7,11 @@
 use crate::models::Span;
 use anyhow::{bail, Result};
 
+mod store;
+pub(crate) use store::CaptureCorrelationStore;
+mod job;
+pub use job::start_capture_expiry_sweeper;
+
 pub const CAPTURE_SOURCE_ATTRIBUTE: &str = "sp.capture.source";
 pub const OBSERVATION_TYPE_ATTRIBUTE: &str = "sp.observation.type";
 pub const CAPTURE_ID_ATTRIBUTE: &str = "sp.capture.id";
@@ -63,7 +68,7 @@ pub enum CaptureObservation {
         key: CaptureTraceKey,
         session_id: String,
     },
-    /// OBI spans require a durable browser mapping before they are persisted.
+    /// OBI spans are staged durably until a browser mapping is available.
     BackendSpan { key: CaptureTraceKey },
     /// Recording observations carry session data but do not map request traces.
     Recording,
@@ -113,14 +118,22 @@ pub fn classify_capture_span(
                 session_id: session_id.to_owned(),
             }))
         }
-        "obi" => Ok(Some(CaptureObservation::BackendSpan { key })),
+        "obi" => {
+            if span_session_id(span).is_some()
+                || span.resource_attributes.contains_key("session.id")
+                || span.resource_attributes.contains_key("sp.session.id")
+            {
+                bail!("OBI capture spans cannot supply a browser session mapping");
+            }
+            Ok(Some(CaptureObservation::BackendSpan { key }))
+        }
         other => bail!("unsupported capture span source: {other}"),
     }
 }
 
 /// Validate capture classification before the generic session-id fallback can
-/// reach persistence. Backend spans fail closed until the durable join store is
-/// wired into ingest.
+/// reach persistence. The durable join store stages OBI spans and assigns a
+/// browser session before writing them to the lake.
 pub fn validate_capture_batch(
     spans: &[Span],
     workspace_id: &str,
@@ -140,9 +153,7 @@ pub fn validate_capture_batch(
                 }
             }
             Some(CaptureObservation::BrowserMapping { .. }) => {}
-            Some(CaptureObservation::BackendSpan { .. }) => {
-                bail!("OBI capture span rejected: durable browser session mapping is unavailable")
-            }
+            Some(CaptureObservation::BackendSpan { .. }) => {}
         }
     }
     Ok(())
@@ -320,13 +331,16 @@ mod tests {
     }
 
     #[test]
-    fn capture_batch_rejects_unmatched_obi_before_persistence() {
+    fn capture_batch_accepts_unmatched_obi_for_durable_staging() {
         let obi = span("obi", "trace-a");
-        let error = validate_capture_batch(&[obi], "workspace-a", Some("capture-a"))
-            .expect_err("unmatched OBI span must not use trace_id as session_id");
-        assert!(error
-            .to_string()
-            .contains("durable browser session mapping"));
+        validate_capture_batch(&[obi], "workspace-a", Some("capture-a"))
+            .expect("unmatched OBI is accepted by validation for durable staging");
+    }
+
+    #[test]
+    fn unmatched_obi_batch_can_be_accepted_for_durable_staging() {
+        let obi = span("obi", "trace-a");
+        assert!(validate_capture_batch(&[obi], "workspace-a", Some("capture-a")).is_ok());
     }
 
     #[test]
@@ -350,10 +364,15 @@ mod tests {
             .insert(CAPTURE_SOURCE_ATTRIBUTE.into(), "obi".into());
         obi.resource_attributes
             .insert(CAPTURE_ID_ATTRIBUTE.into(), "capture-a".into());
-        let error = validate_capture_batch(&[obi], "workspace-a", Some("capture-a"))
-            .expect_err("backend spans still wait for a durable mapping");
-        assert!(error
-            .to_string()
-            .contains("durable browser session mapping"));
+        validate_capture_batch(&[obi], "workspace-a", Some("capture-a"))
+            .expect("resource-marked OBI spans are eligible for durable staging");
+    }
+
+    #[test]
+    fn obi_capture_span_cannot_supply_its_own_session_mapping() {
+        let mut obi = span("obi", "trace-a");
+        obi.attributes
+            .insert("session.id".into(), "claimed-session".into());
+        assert!(validate_capture_batch(&[obi], "workspace-a", Some("capture-a")).is_err());
     }
 }

@@ -221,6 +221,9 @@ pub async fn get_session_recording(
     }
     let tenant_ref = tenant.as_ref().map(|extension| &extension.0);
     let (from, to) = resolve_session_lake_window(&state, tenant_ref, &session_id).await?;
+    // Recording batches can be emitted before the first application request or
+    // after the last one, so the session-summary bounds are not sufficient.
+    let (from, to) = recording_query_window(from, to);
     let limit = clamp_limit(params.limit, DEFAULT_RECORDING_LIMIT);
     let sql = session_recording(&session_id, from, to, limit).map_err(bad_request)?;
     let ws = resolve_workspace(&state, tenant_ref).await?;
@@ -259,6 +262,14 @@ pub async fn get_session_recording(
         batches,
         events,
     }))
+}
+
+fn recording_query_window(
+    from: chrono::DateTime<chrono::Utc>,
+    to: chrono::DateTime<chrono::Utc>,
+) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    let padding = chrono::Duration::minutes(5);
+    (from - padding, to + padding)
 }
 
 fn map_recording_batch(columns: &[String], row: &[Value]) -> Option<RecordingBatch> {
@@ -547,4 +558,19 @@ fn map_session_scores(columns: &[String], row: &[Value]) -> Vec<Score> {
         }
     }
     serde_json::from_value::<Vec<Score>>(Value::Array(items)).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod recording_window_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn recording_query_window_includes_events_outside_session_summary_bounds() {
+        let from = Utc.with_ymd_and_hms(2026, 11, 4, 12, 0, 0).unwrap();
+        let to = from + chrono::Duration::seconds(2);
+        let (recording_from, recording_to) = recording_query_window(from, to);
+        assert_eq!(recording_from, from - chrono::Duration::minutes(5));
+        assert_eq!(recording_to, to + chrono::Duration::minutes(5));
+    }
 }
