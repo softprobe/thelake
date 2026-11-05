@@ -42,12 +42,17 @@ fn writer_constructor_takes_binding_only() {
         "/src/storage/ducklake/writer.rs"
     ));
     assert!(
-        writer.contains("pub async fn new(config: &Config, binding: WorkspaceBinding)"),
-        "DuckLakeWriter::new must take WorkspaceBinding"
+        writer.contains("pub(crate) fn new(binding: WorkspaceBinding, pool: Arc<CatalogPool>)"),
+        "DuckLakeWriter::new must take WorkspaceBinding and the shared CatalogPool"
     );
     assert!(
-        !writer.contains("pub async fn new(config: &Config, access:"),
+        !writer.contains("fn new(config: &Config, access:")
+            && !writer.contains("fn new(binding: WorkspaceBinding, access:"),
         "DuckLakeWriter must not take DuckLakeAccess at construction"
+    );
+    assert!(
+        !writer.contains("writer_pools"),
+        "DuckLakeWriter must borrow writer sessions from the shared CatalogPool"
     );
 }
 

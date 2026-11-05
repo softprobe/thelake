@@ -24,17 +24,6 @@ pub(crate) fn create_view_sql(
     )
 }
 
-fn create_fail_closed_view_sql(
-    scope: &PhysicalScope,
-    logical_name: &str,
-    physical_name: &str,
-) -> String {
-    let physical_table = ducklake_qualified_table_name(scope, physical_name);
-    format!(
-        "CREATE OR REPLACE TEMP VIEW {logical_name} AS SELECT * FROM {physical_table} WHERE 1 = 0;"
-    )
-}
-
 fn has_workspace_id_column(
     conn: &Connection,
     scope: &PhysicalScope,
@@ -126,17 +115,18 @@ pub(crate) fn validate_shared_workspace_schema(
     Ok(())
 }
 
+/// Point the four logical names at one workspace. Ownership columns are
+/// verified once per pool by [`validate_shared_workspace_schema`], so a rebind
+/// is exactly these statements.
 pub(crate) fn install(conn: &Connection, scope: &PhysicalScope, workspace_id: &str) -> Result<()> {
     for (logical_name, physical_name) in WORKSPACE_TABLES {
-        // Until the shared schema migration adds ownership columns, expose an
-        // empty view rather than risking an unfiltered physical-table read.
-        let sql = if has_workspace_id_column(conn, scope, physical_name)? {
-            create_view_sql(scope, logical_name, physical_name, workspace_id)
-        } else {
-            create_fail_closed_view_sql(scope, logical_name, physical_name)
-        };
-        conn.execute_batch(&sql)
-            .with_context(|| format!("create shared workspace view {logical_name}"))?;
+        conn.execute_batch(&create_view_sql(
+            scope,
+            logical_name,
+            physical_name,
+            workspace_id,
+        ))
+        .with_context(|| format!("create shared workspace view {logical_name}"))?;
     }
     Ok(())
 }
@@ -170,14 +160,6 @@ mod tests {
         assert!(WORKSPACE_TABLES.contains(&("logs", "logs")));
         assert!(WORKSPACE_TABLES.contains(&("scores", "scores")));
         assert!(WORKSPACE_TABLES.contains(&("score_configs", "score_configs")));
-    }
-
-    #[test]
-    fn missing_ownership_columns_use_a_fail_closed_view() {
-        let scope = PhysicalScope::default();
-        let sql = create_fail_closed_view_sql(&scope, "logs", "logs");
-        assert!(sql.contains("WHERE 1 = 0"));
-        assert!(!sql.contains("workspace_id"));
     }
 
     #[test]

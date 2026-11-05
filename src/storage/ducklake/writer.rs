@@ -1,18 +1,14 @@
-#[cfg(test)]
-use super::physical_scope::DEFAULT_WORKSPACE_ID;
+use super::catalog_pool::{CatalogPool, DevReset, WriterPool};
 use super::{
     DuckLakeAccess, PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceBinding,
     WorkspaceScopeMode,
 };
-use crate::config::Config;
 use crate::promotion::{BusinessTableManifest, TelemetryColumnsManifest, TelemetryTable};
 use crate::sql::schema::{
     base_table_ddl, insert_order_by, is_otlp_table, LOGS, SCORES, SCORE_CONFIGS, TRACES,
 };
 use crate::storage::schema::attribute_map::parquet_select_for_table;
 use crate::storage::schema::otlp_layout::ensure_otlp_table_partition_sort;
-#[cfg(test)]
-use crate::storage::schema::tables::TraceTable;
 use crate::storage::schema::tables::{ScoreConfigTable, ScoreTable};
 use ::arrow::datatypes::Schema;
 use ::arrow::record_batch::RecordBatch;
@@ -23,112 +19,22 @@ use parquet::file::properties::WriterProperties;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::info;
 
-static RESET_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+/// Serializes dev resets per physical catalog across pools in one process.
+static RESET_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
 use super::attach::ducklake_qualified_table_name;
 use super::util::escape_sql_literal;
 
-pub(super) struct TableReadinessRegistry {
-    ready_tables: RwLock<HashSet<String>>,
-}
-
-impl TableReadinessRegistry {
-    pub(super) fn new() -> Self {
-        Self {
-            ready_tables: RwLock::new(HashSet::new()),
-        }
-    }
-
-    pub(super) fn is_ready(&self, table_name: &str) -> bool {
-        self.ready_tables
-            .read()
-            .map(|r| r.contains(table_name))
-            .unwrap_or(false)
-    }
-
-    pub(super) fn mark_ready(&self, table_name: &str) {
-        if let Ok(mut w) = self.ready_tables.write() {
-            w.insert(table_name.to_string());
-        }
-    }
-
-    pub(super) fn clear(&self) {
-        if let Ok(mut w) = self.ready_tables.write() {
-            w.clear();
-        }
-    }
-}
-
-pub(super) struct WriterPool {
-    conns: Vec<Mutex<Connection>>,
-    next: AtomicUsize,
-    registry: TableReadinessRegistry,
-    table_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-}
-
-impl WriterPool {
-    pub(super) fn new(conns: Vec<Mutex<Connection>>) -> Self {
-        Self {
-            conns,
-            next: AtomicUsize::new(0),
-            registry: TableReadinessRegistry::new(),
-            table_locks: Mutex::new(HashMap::new()),
-        }
-    }
-
-    pub(super) fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
-        let n = self.conns.len();
-        if n == 0 {
-            return Err(anyhow!("DuckLake writer pool is empty"));
-        }
-        let start = self.next.fetch_add(1, Ordering::Relaxed) % n;
-        for i in 0..n {
-            let idx = (start + i) % n;
-            if let Ok(guard) = self.conns[idx].try_lock() {
-                return f(&guard);
-            }
-        }
-        let guard = self.conns[start]
-            .lock()
-            .map_err(|_| anyhow!("DuckLake writer connection lock poisoned"))?;
-        f(&guard)
-    }
-
-    pub(super) fn is_table_ready(&self, table_name: &str) -> bool {
-        self.registry.is_ready(table_name)
-    }
-
-    pub(super) fn mark_table_ready(&self, table_name: &str) {
-        self.registry.mark_ready(table_name);
-    }
-
-    pub(super) fn clear_ready(&self) {
-        self.registry.clear();
-    }
-
-    pub(super) fn table_lock(&self, table_name: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut map = self
-            .table_locks
-            .lock()
-            .map_err(|_| anyhow!("table locks map lock poisoned"))
-            .unwrap();
-        map.entry(table_name.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    }
-}
-
 pub(crate) struct DuckLakeWriter {
-    pub(super) config: Config,
     /// Single write-path identity token (workspace + physical scope + mode).
     pub(super) binding: WorkspaceBinding,
     /// ATTACH capability built once from [`Self::binding`] at construction.
     pub(super) access: DuckLakeAccess,
-    /// Per catalog-scope pools of reused ATTACH'd DuckDB connections.
-    pub(super) writer_pools: Mutex<HashMap<String, Arc<WriterPool>>>,
+    /// Shared catalog sessions; the writer lane serves every workspace.
+    pub(super) pool: Arc<CatalogPool>,
 }
 
 impl DuckLakeWriter {
@@ -169,82 +75,69 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    /// Construct a writer permanently bound to one [`WorkspaceBinding`].
-    ///
-    /// Warms the writer pool. Dev reset (`SPLAKE_RESET_DUCKLAKE=1`) is not performed
-    /// here — callers load manifests then invoke [`Self::apply_dev_reset_if_requested`].
-    pub async fn new(config: &Config, binding: WorkspaceBinding) -> Result<Self> {
+    /// Construct a writer permanently bound to one [`WorkspaceBinding`] over a
+    /// catalog pool that already attached that binding's physical scope.
+    pub(crate) fn new(binding: WorkspaceBinding, pool: Arc<CatalogPool>) -> Result<Self> {
         let access = DuckLakeAccess::Workspace(binding.clone());
-        let writer = Self {
-            config: config.clone(),
+        if access.physical_scope() != pool.scope() {
+            return Err(anyhow!(
+                "workspace {} is bound to a different physical scope than the catalog pool",
+                binding.workspace_id
+            ));
+        }
+        info!(
+            "DuckLake writer initialized (workspace_id={})",
+            binding.workspace_id
+        );
+        Ok(Self {
             binding,
             access,
-            writer_pools: Mutex::new(HashMap::new()),
-        };
-        let _ = writer.get_or_create_pool(writer.physical_scope())?;
-        info!(
-            "DuckLake writer initialized (workspace_id={}, writer_pool_size={})",
-            writer.binding.workspace_id,
-            writer.config.ducklake.effective_writer_pool_size()
-        );
-        Ok(writer)
+            pool,
+        })
     }
 
-    /// Under `SPLAKE_RESET_DUCKLAKE=1`, atomically wipe tables, ensure traces/logs,
-    /// and reapply the provided promotion manifests (all under the per-scope reset lock).
-    pub async fn apply_dev_reset_if_requested(
-        &self,
-        telemetry: &[TelemetryColumnsManifest],
-        business: &[BusinessTableManifest],
+    /// Wipe the lake tables, recreate traces/logs, and replay the promotion
+    /// manifests. Runs once, while the catalog pool is being created.
+    pub(super) fn reset_lake(
+        writers: &WriterPool,
+        scope: &PhysicalScope,
+        reset: &DevReset,
     ) -> Result<()> {
-        if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() != Some("1") {
-            return Ok(());
-        }
-        let scope = self.physical_scope();
-        let reset_lock = RESET_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-        let reset_lock = {
-            let mut locks = reset_lock
+        let lock = {
+            let mut locks = RESET_LOCKS
+                .get_or_init(|| Mutex::new(HashMap::new()))
                 .lock()
                 .map_err(|_| anyhow!("DuckLake reset lock map poisoned"))?;
             locks
-                .entry(Self::conn_cache_key(scope))
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .entry(scope.writer_pool_key())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        let _reset_guard = reset_lock.lock().await;
-        let pool = self.get_or_create_pool(scope)?;
-        pool.with_conn(|conn| self.reset_tables_for_dev(conn))?;
-        self.warm_pool(&pool, scope)?;
-        for table in [TelemetryTable::Traces, TelemetryTable::Logs] {
-            self.ensure_telemetry_table_for(&table).await?;
+        let _reset_guard = lock
+            .lock()
+            .map_err(|_| anyhow!("DuckLake reset lock poisoned"))?;
+        writers.with_conn(|conn| Self::drop_lake_tables(conn, scope))?;
+        writers.clear_ready();
+        for table_name in ["traces", "logs"] {
+            writers
+                .with_conn(|conn| Self::ensure_table_with_conn(conn, scope, table_name, None))?;
+            writers.mark_table_ready(table_name);
         }
-        // Same pool map entry as above; reapply stays under `_reset_guard`.
-        self.reapply_promotions(telemetry, business).await?;
-        Ok(())
+        Self::reapply_promotions(writers, scope, &reset.telemetry, &reset.business)
     }
 
-    pub(crate) async fn reapply_promotions(
-        &self,
+    fn reapply_promotions(
+        writers: &WriterPool,
+        scope: &PhysicalScope,
         telemetry: &[TelemetryColumnsManifest],
         business: &[BusinessTableManifest],
     ) -> Result<()> {
-        let pool = self.get_or_create_pool(self.physical_scope())?;
-        self.reapply_promotions_on_pool(&pool, telemetry, business)
-            .await
-    }
-
-    async fn reapply_promotions_on_pool(
-        &self,
-        pool: &WriterPool,
-        telemetry: &[TelemetryColumnsManifest],
-        business: &[BusinessTableManifest],
-    ) -> Result<()> {
-        let prefix = self.physical_scope().catalog_prefix();
+        let prefix = scope.catalog_prefix();
         for manifest in telemetry {
             for ddl in crate::promotion::telemetry_column_add_ddls(&prefix, manifest)
                 .map_err(|err| anyhow!("failed to rebuild telemetry promotion: {err}"))?
             {
-                pool.with_conn(|conn| {
+                writers.with_conn(|conn| {
                     conn.execute_batch(&ddl)
                         .map_err(|err| anyhow!("failed to rebuild telemetry promotion: {err}"))
                 })?;
@@ -254,58 +147,12 @@ impl DuckLakeWriter {
             let ddls = crate::promotion::business_table_create_ddls(&prefix, manifest)
                 .map_err(|err| anyhow!("failed to rebuild business promotion: {err}"))?;
             for ddl in ddls {
-                pool.with_conn(|conn| {
+                writers.with_conn(|conn| {
                     conn.execute_batch(&ddl)
                         .map_err(|err| anyhow!("failed to rebuild business promotion: {err}"))
                 })?;
             }
         }
-        Ok(())
-    }
-
-    pub(super) fn conn_cache_key(scope: &PhysicalScope) -> String {
-        scope.writer_pool_key()
-    }
-
-    pub(super) fn get_or_create_pool(&self, scope: &PhysicalScope) -> Result<Arc<WriterPool>> {
-        let key = Self::conn_cache_key(scope);
-        let (pool, is_new) = {
-            let mut guard = self
-                .writer_pools
-                .lock()
-                .map_err(|_| anyhow!("DuckLake writer pool map lock poisoned"))?;
-            if let Some(pool) = guard.get(&key) {
-                (Arc::clone(pool), false)
-            } else {
-                let size = self.config.ducklake.effective_writer_pool_size();
-                let mut conns = Vec::with_capacity(size);
-                // Attach sequentially: the first connection initializes DuckLake metadata tables; later
-                // pool members ATTACH the already-initialized Postgres schema (with retry on races).
-                for _ in 0..size {
-                    let conn = self.open_connection_for(scope)?;
-                    self.attach_ducklake_for(&conn, scope)?;
-                    self.ensure_schema_for(&conn, scope)?;
-                    conns.push(Mutex::new(conn));
-                }
-                let pool = Arc::new(WriterPool::new(conns));
-                guard.insert(key, Arc::clone(&pool));
-                (pool, true)
-            }
-        };
-
-        if is_new {
-            // Warm tables outside the global writer_pools lock so other scopes are never blocked.
-            self.warm_pool(&pool, scope)?;
-        }
-        Ok(pool)
-    }
-
-    pub(super) fn warm_pool(&self, pool: &WriterPool, scope: &PhysicalScope) -> Result<()> {
-        // Do not ensure/mark OTLP tables ready here. First write must call
-        // `ensure_table_with_conn` with the write-time Arrow schema so promotion
-        // columns (and other evolution) are ADDed before INSERT. Marking ready
-        // with the base schema skips that evolution (see promotion_telemetry_ingest).
-        let _ = (pool, scope);
         Ok(())
     }
 
@@ -434,17 +281,15 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    /// Borrow one connection from the bound writer's pool (short map lock; pool slot for SQL).
+    /// Borrow one writer-lane session of the shared catalog pool.
     pub(super) fn with_attached_conn<R>(
         &self,
         f: impl FnOnce(&Connection) -> Result<R>,
     ) -> Result<R> {
-        let pool = self.get_or_create_pool(self.physical_scope())?;
-        pool.with_conn(f)
+        self.pool.with_writer(f)
     }
 
     pub(super) async fn ensure_telemetry_table_for(&self, table: &TelemetryTable) -> Result<()> {
-        let pool = self.get_or_create_pool(self.physical_scope())?;
         let table_name = match table {
             TelemetryTable::Traces => "traces",
             TelemetryTable::Logs => "logs",
@@ -452,12 +297,12 @@ impl DuckLakeWriter {
         let scope = self.physical_scope().clone();
         let table_name_owned = table_name.to_string();
         tokio::task::spawn_blocking({
-            let pool = pool.clone();
+            let pool = Arc::clone(&self.pool);
             move || {
-                pool.with_conn(|conn| {
+                pool.with_writer(|conn| {
                     Self::ensure_table_with_conn(conn, &scope, &table_name_owned, None)
                 })?;
-                pool.mark_table_ready(&table_name_owned);
+                pool.writers().mark_table_ready(&table_name_owned);
                 Ok::<(), anyhow::Error>(())
             }
         })
@@ -466,48 +311,31 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    /// Create the complete shared physical schema before shared workers install
-    /// workspace-filtered views. Base columns come from SQL DDL; active manifests
-    /// add only their declared promotion columns.
-    pub(crate) async fn ensure_shared_schema(&self) -> Result<()> {
-        let pool = self.get_or_create_pool(self.physical_scope())?;
-        let scope = self.physical_scope().clone();
-        tokio::task::spawn_blocking(move || {
-            pool.with_conn(|conn| {
-                for table_name in ["traces", "logs", "scores", "score_configs"] {
-                    let qualified_table = ducklake_qualified_table_name(&scope, table_name);
-                    match crate::storage::schema::describe_table_columns(conn, &qualified_table) {
-                        Ok(columns) if !columns.contains_key("workspace_id") => {
-                            return Err(anyhow::anyhow!(
-                                "{}: table {table_name} is missing workspace_id; recreate it during clean cutover",
-                                SharedScopeError::new(
-                                    SharedScopeErrorCode::SchemaIncompatible,
-                                    format!("shared workspace table {table_name} has no ownership column"),
-                                )
-                            ));
-                        }
-                        Ok(_) => {}
-                        Err(error) if error.to_string().contains("does not exist") => {}
-                        Err(error) => return Err(error),
+    /// Create the complete shared physical schema before query slots install
+    /// workspace-filtered views. Base columns come from SQL DDL; active
+    /// manifests add only their declared promotion columns.
+    pub(super) fn ensure_shared_schema(writers: &WriterPool, scope: &PhysicalScope) -> Result<()> {
+        writers.with_conn(|conn| {
+            for table_name in ["traces", "logs", "scores", "score_configs"] {
+                let qualified_table = ducklake_qualified_table_name(scope, table_name);
+                match crate::storage::schema::describe_table_columns(conn, &qualified_table) {
+                    Ok(columns) if !columns.contains_key("workspace_id") => {
+                        return Err(anyhow::anyhow!(
+                            "{}: table {table_name} is missing workspace_id; recreate it during clean cutover",
+                            SharedScopeError::new(
+                                SharedScopeErrorCode::SchemaIncompatible,
+                                format!("shared workspace table {table_name} has no ownership column"),
+                            )
+                        ));
                     }
-                    Self::ensure_table_with_conn(
-                        conn,
-                        &scope,
-                        table_name,
-                        None,
-                    )?;
+                    Ok(_) => {}
+                    Err(error) if error.to_string().contains("does not exist") => {}
+                    Err(error) => return Err(error),
                 }
-                crate::storage::ducklake::validate_shared_workspace_schema(conn, &scope)
-            })
+                Self::ensure_table_with_conn(conn, scope, table_name, None)?;
+            }
+            crate::storage::ducklake::validate_shared_workspace_schema(conn, scope)
         })
-        .await
-        .map_err(|error| anyhow!("shared schema initialization task failed: {error}"))??;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub async fn spans_schema(&self) -> Result<Arc<Schema>> {
-        Ok(Arc::new(TraceTable::schema()))
     }
 
     pub(super) async fn write_record_batches_internal_with_ducklake(
@@ -521,20 +349,20 @@ impl DuckLakeWriter {
             return Ok(());
         }
 
-        let pool = self.get_or_create_pool(scope)?;
+        let pool = Arc::clone(&self.pool);
         let qualified_table = ducklake_qualified_table_name(scope, table_name);
 
         // Process-local table readiness gate: cold first touch ensures once and marks ready.
-        if !pool.is_table_ready(table_name) {
-            let lock = pool.table_lock(table_name);
+        if !pool.writers().is_table_ready(table_name) {
+            let lock = pool.writers().table_lock(table_name);
             let _guard = lock.lock().await;
-            if !pool.is_table_ready(table_name) {
+            if !pool.writers().is_table_ready(table_name) {
                 let scope = scope.clone();
                 let table_name_owned = table_name.to_string();
                 let schema_ref = record_batches[0].schema();
-                let pool_clone = pool.clone();
+                let pool_clone = Arc::clone(&pool);
                 tokio::task::spawn_blocking(move || {
-                    pool_clone.with_conn(|conn| {
+                    pool_clone.with_writer(|conn| {
                         Self::ensure_table_with_conn(
                             conn,
                             &scope,
@@ -545,7 +373,7 @@ impl DuckLakeWriter {
                 })
                 .await
                 .map_err(|e| anyhow!("table ensure join failed: {e}"))??;
-                pool.mark_table_ready(table_name);
+                pool.writers().mark_table_ready(table_name);
             }
         }
 
@@ -570,7 +398,7 @@ impl DuckLakeWriter {
         let order_clause_owned = order_clause.to_string();
 
         let write_result = tokio::task::spawn_blocking(move || {
-            pool.with_conn(|conn| {
+            pool.with_writer(|conn| {
                 super::layout::apply_otlp_writer_session(conn, &table_name_owned)?;
                 crate::sql::execute_batch_checked(conn, "BEGIN TRANSACTION;")?;
                 let insert_result = (|| {
@@ -658,23 +486,7 @@ impl DuckLakeWriter {
         Ok(temp_path)
     }
 
-    pub(super) fn open_connection_for(&self, scope: &PhysicalScope) -> Result<Connection> {
-        let _ = scope;
-        super::attach::DuckLakeSessionFactory::new(&self.config)
-            .open(&self.access, super::attach::DuckLakeSessionKind::Writer)
-    }
-
-    pub(super) fn attach_ducklake_for(
-        &self,
-        conn: &Connection,
-        scope: &PhysicalScope,
-    ) -> Result<()> {
-        let _ = scope;
-        super::attach::DuckLakeSessionFactory::new(&self.config).attach(conn, &self.access)?;
-        Ok(())
-    }
-
-    pub(super) fn ensure_schema_for(&self, conn: &Connection, scope: &PhysicalScope) -> Result<()> {
+    pub(super) fn ensure_schema_for(conn: &Connection, scope: &PhysicalScope) -> Result<()> {
         conn.execute_batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS {}.{};",
             scope.attach_alias(),
@@ -683,33 +495,14 @@ impl DuckLakeWriter {
         Ok(())
     }
 
-    pub(super) fn qualified_table_name(&self, table_name: &str) -> String {
-        self.qualified_table_name_for(table_name, self.physical_scope())
-    }
-
-    pub(super) fn qualified_table_name_for(
-        &self,
-        table_name: &str,
-        scope: &PhysicalScope,
-    ) -> String {
-        ducklake_qualified_table_name(scope, table_name)
-    }
-
     pub(super) fn insert_order_clause(&self, table_name: &str) -> &'static str {
         insert_order_by(table_name)
     }
 
-    pub(super) fn reset_tables_for_dev(&self, conn: &Connection) -> Result<()> {
-        let scope = self.physical_scope();
+    fn drop_lake_tables(conn: &Connection, scope: &PhysicalScope) -> Result<()> {
         for table in [TRACES.name, LOGS.name, SCORES.name, SCORE_CONFIGS.name] {
-            let qualified = self.qualified_table_name(table);
+            let qualified = ducklake_qualified_table_name(scope, table);
             conn.execute_batch(&format!("DROP TABLE IF EXISTS {qualified};"))?;
-        }
-        let key = Self::conn_cache_key(scope);
-        if let Ok(guard) = self.writer_pools.lock() {
-            if let Some(pool) = guard.get(&key) {
-                pool.clear_ready();
-            }
         }
         info!("DuckLake tables reset because SPLAKE_RESET_DUCKLAKE=1");
         Ok(())
@@ -727,7 +520,6 @@ fn normalize_duck_type(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, DuckLakeConfig};
     use crate::models::Log;
     use crate::storage::schema::arrow;
     use crate::storage::schema::OtlpLogsTable;
@@ -774,33 +566,9 @@ mod tests {
         let _ = TimeUnit::Nanosecond;
     }
 
-    #[tokio::test]
-    async fn spans_schema_has_no_process_global_promoted_columns() {
-        let config = Config::default();
-        let binding = WorkspaceBinding::new(
-            DEFAULT_WORKSPACE_ID,
-            PhysicalScope::from_ducklake(&DuckLakeConfig {
-                metadata_path: config.ducklake.metadata_path.clone(),
-                data_path: "/tmp/unused".to_string(),
-                catalog_alias: "softprobe".to_string(),
-                metadata_schema: "main".to_string(),
-                extension_path: config.ducklake.extension_path.clone(),
-                workspace_scope_mode: WorkspaceScopeMode::Isolated,
-                data_inlining_row_limit: None,
-                writer_pool_size: 1,
-            }),
-            WorkspaceScopeMode::Isolated,
-        )
-        .expect("binding");
-        let access = DuckLakeAccess::Workspace(binding.clone());
-        let writer = DuckLakeWriter {
-            config: config.clone(),
-            binding,
-            access,
-            writer_pools: Mutex::new(HashMap::new()),
-        };
-
-        let schema = writer.spans_schema().await.expect("schema");
+    #[test]
+    fn base_trace_schema_has_no_process_global_promoted_columns() {
+        let schema = crate::storage::schema::tables::TraceTable::schema();
         assert!(
             schema.field_with_name("division_name").is_err(),
             "promoted telemetry columns come from runtime-scoped promotion apply, not process config"

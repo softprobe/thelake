@@ -3,9 +3,9 @@
 //! Reducers are maintenance work, not a second application-facing DuckDB
 //! access mode. Only `MaintenanceEngine` reaches these helpers.
 
-use crate::compaction::MaintenanceConnPool;
 use crate::config::Config;
 use crate::session_summary::SummaryRow;
+use crate::storage::ducklake::CatalogPool;
 use crate::storage::ducklake::PhysicalScope;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -85,9 +85,9 @@ fn aggregate_sql(
     }
 }
 
-/// Execute the promoted-only session aggregate via the shared maintenance pool.
+/// Execute the promoted-only session aggregate on the catalog pool's maintenance session.
 pub(crate) fn aggregate_sessions_from_lake_pooled(
-    pool: &MaintenanceConnPool,
+    pool: &CatalogPool,
     _config: &Config,
     scope: &PhysicalScope,
     session_ids: Option<&[String]>,
@@ -96,7 +96,7 @@ pub(crate) fn aggregate_sessions_from_lake_pooled(
     to: DateTime<Utc>,
 ) -> Result<Vec<SummaryRow>> {
     let sql = aggregate_sql(scope, session_ids, workspace_id, from, to)?;
-    let (rows, _cold, _elapsed) = pool.with_conn(scope, |conn| {
+    let (rows, _cold, _elapsed) = pool.with_maintenance(|conn| {
         let mut stmt = crate::sql::prepare_checked(conn, &sql).context("prepare aggregate SQL")?;
         stmt.query_map([], map_duck_row)
             .context("query aggregate")?

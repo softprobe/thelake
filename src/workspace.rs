@@ -7,6 +7,7 @@
 //! Per-workspace [`WorkspaceContext`] cache and lifecycle management.
 
 use crate::authn::WorkspaceAuth;
+use crate::catalog_sessions::CatalogSessions;
 use crate::config::{Config, DuckLakeConfig};
 use crate::control_plane::{AdminEngine, ControlPlaneRuntime};
 use crate::ingest::IngestEngine;
@@ -16,7 +17,7 @@ use crate::promotion::{
     telemetry_spec_activation, BusinessApplyError, BusinessTableManifest, PromotionSpecActivation,
     PromotionSpecLoadError, TelemetryColumnsManifest,
 };
-use crate::query::{self as query_mod, QueryEngine};
+use crate::query::QueryEngine;
 use crate::storage::ducklake::{DuckLakeAccess, PhysicalScope};
 use crate::workspace_scope::{effective_workspace_id, WorkspaceBinding, WorkspaceScopeMode};
 use anyhow::{anyhow, bail, Context, Result};
@@ -156,6 +157,7 @@ pub struct WorkspaceManager {
     scope_initialization_lock: Mutex<()>,
     control_plane: Option<ControlPlaneRuntime>,
     scope_registry: DuckLakeScopeResolver,
+    catalog_sessions: CatalogSessions,
     #[cfg(test)]
     build_counter: AtomicUsize,
 }
@@ -167,6 +169,7 @@ impl WorkspaceManager {
         let scope_registry = DuckLakeScopeResolver::build_pool(&config.ducklake)
             .expect("test PostgreSQL config should build without connecting");
         Self {
+            catalog_sessions: CatalogSessions::new(Arc::clone(&config), scope_registry.clone()),
             config,
             workspaces: DashMap::new(),
             creation_locks: DashMap::new(),
@@ -185,6 +188,7 @@ impl WorkspaceManager {
     ) -> Result<Self> {
         let scope_registry = DuckLakeScopeResolver::connect(config.as_ref()).await?;
         Ok(Self {
+            catalog_sessions: CatalogSessions::new(Arc::clone(&config), scope_registry.clone()),
             config,
             workspaces: DashMap::new(),
             creation_locks: DashMap::new(),
@@ -219,7 +223,11 @@ impl WorkspaceManager {
 
     /// Construct the process maintenance façade (owns a registry clone).
     pub async fn maintenance_engine(&self) -> Result<crate::compaction::MaintenanceEngine> {
-        crate::compaction::MaintenanceEngine::new(self.config(), self.scope_registry.clone()).await
+        Ok(crate::compaction::MaintenanceEngine::new(
+            self.config(),
+            self.scope_registry.clone(),
+            self.catalog_sessions.clone(),
+        ))
     }
 
     /// Idempotently create or verify a workspace → physical-scope binding.
@@ -496,6 +504,16 @@ impl WorkspaceManager {
         Ok(deleted)
     }
 
+    #[doc(hidden)]
+    pub fn catalog_pool_count_for_test(&self) -> usize {
+        self.catalog_sessions.pool_count_for_test()
+    }
+
+    #[doc(hidden)]
+    pub fn catalog_session_count_for_test(&self) -> usize {
+        self.catalog_sessions.session_count_for_test()
+    }
+
     #[cfg(test)]
     pub fn build_count(&self) -> usize {
         self.build_counter.load(Ordering::Relaxed)
@@ -543,19 +561,18 @@ impl WorkspaceManager {
             resolver.ensure_scope_tables(&physical).await?;
             let counts_toward_liveness = true;
 
-            let ingest =
-                IngestEngine::bound(self.config.as_ref(), resolver.clone(), binding.clone())
-                    .await?;
-            ingest.ensure_shared_schema().await?;
-            let query = Arc::new(
-                query_mod::create_query_engine_for_scope_with_liveness(
-                    self.config.as_ref(),
-                    &physical,
-                    counts_toward_liveness,
-                    bound_workspace_id,
-                )
-                .await?,
-            );
+            let pool = self.catalog_sessions.pool_for(&physical).await?;
+            let ingest = IngestEngine::bound(
+                self.config.as_ref(),
+                resolver.clone(),
+                binding.clone(),
+                Arc::clone(&pool),
+            )?;
+            let query = Arc::new(QueryEngine::bind(
+                pool,
+                bound_workspace_id,
+                counts_toward_liveness,
+            )?);
             let admin = Arc::new(AdminEngine::new(
                 ingest.writer_handle().clone(),
                 resolver.clone(),
@@ -1238,7 +1255,10 @@ pub(crate) fn quote_pg_ident(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::validate_metadata_schema_name;
-    use super::{AdminEngine, IngestEngine, QueryEngine, WorkspaceContext};
+    use super::{AdminEngine, DuckLakeScopeResolver, IngestEngine, QueryEngine, WorkspaceContext};
+    use crate::catalog_sessions::CatalogSessions;
+    use crate::config::Config;
+    use crate::workspace_scope::WorkspaceScopeMode;
     use std::sync::Arc;
 
     #[test]
@@ -1254,5 +1274,30 @@ mod tests {
         assert!(validate_metadata_schema_name(&"a".repeat(63)).is_ok());
         assert!(validate_metadata_schema_name(&"a".repeat(64)).is_err());
         assert!(validate_metadata_schema_name(&"é".repeat(32)).is_err());
+    }
+
+    #[tokio::test]
+    async fn shared_sessions_refuse_a_second_physical_catalog_without_opening_one() {
+        let mut config = Config::default();
+        config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Shared;
+        let resolver = DuckLakeScopeResolver::build_pool(&config.ducklake)
+            .expect("default postgres config parses");
+        let sessions = CatalogSessions::new(Arc::new(config), resolver.clone());
+        let foreign = resolver
+            .default_physical_scope()
+            .with_catalog_dsn("host=other dbname=other user=other");
+        assert_ne!(foreign.id(), resolver.default_physical_scope().id());
+
+        let error = match sessions.pool_for(&foreign).await {
+            Ok(_) => panic!("a second physical catalog is not a shared-mode pool"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(
+            error.contains("one physical scope"),
+            "callers must see the shared-catalog refusal, got {error}"
+        );
+        assert_eq!(sessions.pool_count_for_test(), 0);
+        assert_eq!(sessions.session_count_for_test(), 0);
     }
 }

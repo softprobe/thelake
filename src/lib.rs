@@ -6,6 +6,7 @@ pub mod api;
 pub mod async_jobs;
 pub mod authn;
 pub mod capture_correlation;
+mod catalog_sessions;
 pub mod compaction;
 pub mod compat;
 pub mod config;

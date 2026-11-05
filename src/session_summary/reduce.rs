@@ -527,7 +527,7 @@ pub(crate) async fn rebuild_workspace_window(
     metadata_schema: &str,
     config: &Config,
     scope: &PhysicalScope,
-    duck_pool: std::sync::Arc<crate::compaction::MaintenanceConnPool>,
+    catalog_pool: std::sync::Arc<crate::storage::ducklake::CatalogPool>,
     workspace_id: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
@@ -542,7 +542,7 @@ pub(crate) async fn rebuild_workspace_window(
     let rows = tokio::task::spawn_blocking(move || {
         let workspace_filter = workspace_scoped.then_some(workspace_id_for_lake.as_str());
         crate::compaction::session_summary_access::aggregate_sessions_from_lake_pooled(
-            &duck_pool,
+            &catalog_pool,
             &config,
             &scope,
             None,
@@ -569,7 +569,7 @@ pub(crate) async fn reduce_workspace(
     workspace_id: &str,
     config: &Config,
     scope: &PhysicalScope,
-    duck_pool: std::sync::Arc<crate::compaction::MaintenanceConnPool>,
+    catalog_pool: std::sync::Arc<crate::storage::ducklake::CatalogPool>,
     max_sessions: u64,
 ) -> Result<usize> {
     let reduce_started = std::time::Instant::now();
@@ -640,7 +640,7 @@ pub(crate) async fn reduce_workspace(
     let rows = tokio::task::spawn_blocking(move || {
         let workspace_filter = workspace_scoped.then_some(tenant_id_for_lake.as_str());
         crate::compaction::session_summary_access::aggregate_sessions_from_lake_pooled(
-            &duck_pool,
+            &catalog_pool,
             &config,
             &scope,
             Some(&ids_for_lake),

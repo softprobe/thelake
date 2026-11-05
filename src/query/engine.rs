@@ -4,26 +4,23 @@ use crate::sql::lake_reads::{LogCountFilter, TraceCountFilter};
 use crate::sql::trusted::TrustedSql;
 use crate::sql::QueryWindow;
 use crate::storage::duckdb::cache::CacheSettings;
-use crate::storage::duckdb::cache::{cache_httpfs_disabled_by_env, wrap_one, WrapAttempt};
-use crate::storage::ducklake::workspace_views;
-use crate::storage::ducklake::{
-    ducklake_qualified_table_name, DuckLakeSessionFactory, DuckLakeSessionKind,
-};
-use crate::storage::ducklake::{DuckLakeAccess, WorkspaceScopeMode};
 #[cfg(test)]
-use crate::storage::ducklake::{PhysicalScope, WorkspaceBinding};
+use crate::storage::ducklake::PhysicalScope;
+use crate::storage::ducklake::{
+    ducklake_qualified_table_name, CatalogPool, DuckLakeAccess, QueryCaller, QuerySession,
+    QuerySlot, WorkspaceBinding, WorkspaceScopeMode,
+};
 use crate::workspace_scope::{SharedScopeError, SharedScopeErrorCode};
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use duckdb::types::Value as DuckValue;
-use duckdb::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 /// Query result containing columns and rows
@@ -54,15 +51,10 @@ type InflightWaiters = Vec<oneshot::Sender<Result<QueryResult>>>;
 type InflightMap = HashMap<u64, InflightWaiters>;
 
 struct QueryEngineInner {
-    _shared_connection: Arc<Mutex<Connection>>,
-    workers: Vec<WorkerHandle>,
-    next_worker: AtomicUsize,
-    config: Config,
-    access: DuckLakeAccess,
+    pool: Arc<CatalogPool>,
+    core: Arc<DuckDBCore>,
     /// In-flight identical SQL shares one worker (Grafana panel stampede), not a result TTL.
     inflight: Arc<Mutex<InflightMap>>,
-    workspace_id: String,
-    counts_toward_liveness: bool,
 }
 
 fn is_sql_ident_char(c: char) -> bool {
@@ -235,10 +227,7 @@ fn sql_needs_softprobe_txn_wrap(sql: &str) -> bool {
 }
 
 use once_cell::sync::Lazy;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
-
-static CACHE_HTTPFS_CONFIG_WARNED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
 /// Self-heal bookkeeping for poisoned worker connections. Process-global on
 /// purpose: /health must answer "is self-heal failing" across every tenant
@@ -336,18 +325,15 @@ fn poison_kind(message: &str) -> Poison {
     Poison::None
 }
 
-fn rebuild_worker_state(core: &DuckDBCore, index: usize) -> Option<ConnectionState> {
-    match core
-        .open_connection()
-        .and_then(|conn| core.init_connection_state_with(conn))
-    {
-        Ok(state) => {
+fn recover_slot(core: &DuckDBCore, slot: &mut QuerySlot, caller: &QueryCaller) -> bool {
+    match slot.recover(caller) {
+        Ok(()) => {
             if core.counts_toward_liveness {
                 SELF_HEAL.rebuilds.fetch_add(1, Ordering::Relaxed);
                 SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
             }
-            info!("DuckDB query worker {index} rebuilt its connection after a fatal engine error or stale DuckLake catalog attachment");
-            Some(state)
+            info!("DuckDB query slot rebuilt its connection after a fatal engine error or stale DuckLake catalog attachment");
+            true
         }
         Err(err) => {
             // Counted so /health can turn "self-heal keeps failing" into an
@@ -359,21 +345,10 @@ fn rebuild_worker_state(core: &DuckDBCore, index: usize) -> Option<ConnectionSta
                     .consecutive_failures
                     .fetch_add(1, Ordering::Relaxed);
             }
-            warn!("DuckDB query worker {index} failed to rebuild its poisoned connection: {err}");
-            None
+            warn!("DuckDB query slot failed to rebuild its poisoned connection: {err}");
+            false
         }
     }
-}
-
-struct WorkerHandle {
-    sender: Option<mpsc::Sender<QueryRequest>>,
-    join: Option<std::thread::JoinHandle<()>>,
-}
-
-struct QueryRequest {
-    sql: String,
-    enqueued_at: std::time::Instant,
-    respond_to: oneshot::Sender<QueryWorkerResponse>,
 }
 
 struct QueryWorkerResponse {
@@ -384,14 +359,6 @@ struct QueryWorkerResponse {
     run_elapsed: std::time::Duration,
 }
 
-struct ConnectionState {
-    conn: Connection,
-    cache_httpfs_wrap_supported: bool,
-    cache_httpfs_wrapped_s3: bool,
-    cache_httpfs_wrapped_httpfs: bool,
-}
-
-#[derive(Clone)]
 struct DuckDBCore {
     config: Config,
     access: DuckLakeAccess,
@@ -465,269 +432,20 @@ impl Drop for InflightLease {
 }
 
 impl QueryEngineInner {
-    /// `counts_toward_liveness=false` for ops/self-monitoring engines so rebuild
-    /// failures never trip process `/health` liveness.
-    pub(crate) async fn new_with_liveness(
-        config: &Config,
-        access: DuckLakeAccess,
-        counts_toward_liveness: bool,
-        workspace_id: &str,
-    ) -> Result<Self> {
-        let core = DuckDBCore {
-            config: config.clone(),
-            access: access.clone(),
-            cache: CacheSettings::new(config),
-            counts_toward_liveness,
-            workspace_id: workspace_id.to_string(),
-        };
-        crate::self_monitoring::gauge_store::QUERY_WORKERS.store(
-            std::cmp::max(1, config.query.max_connections),
-            Ordering::Relaxed,
-        );
-        let worker_count = std::cmp::max(1, config.query.max_connections);
-        let mut workers = Vec::with_capacity(worker_count);
-        // Workers report startup outcome so a failed one cannot stay in the pool.
-        // Previously a worker that could not open its connection just logged a
-        // warning and returned; its channel closed, but round-robin dispatch kept
-        // handing queries to that dead slot. Every request landing there failed
-        // with "worker channel closed", which the API layer flattened into a bare
-        // 503 -- a fixed fraction of requests failing while looking like a random
-        // outage.
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<usize, String>>();
-        for index in 0..worker_count {
-            let (tx, mut rx) = mpsc::channel::<QueryRequest>(32);
-            let core = core.clone();
-            let ready_tx = ready_tx.clone();
-            let join = std::thread::Builder::new()
-                .name("softprobe-duckdb-query-worker".to_string())
-                .spawn(move || {
-                    // Each worker gets its own independent connection (not cloned)
-                    let connection = match core.open_connection() {
-                        Ok(conn) => conn,
-                        Err(err) => {
-                            let _ = ready_tx
-                                .send(Err(format!("worker {index} open_connection: {err}")));
-                            return;
-                        }
-                    };
-                    let mut state = match core.init_connection_state_with(connection) {
-                        Ok(state) => state,
-                        Err(err) => {
-                            let _ = ready_tx
-                                .send(Err(format!("worker {index} init_connection: {err}")));
-                            return;
-                        }
-                    };
-                    if ready_tx.send(Ok(index)).is_err() {
-                        return; // engine construction already aborted
-                    }
-                    drop(ready_tx);
-                    while let Some(request) = rx.blocking_recv() {
-                        let queue_wait = request.enqueued_at.elapsed();
-                        let sql_kind = crate::self_monitoring::classify_sql_kind(&request.sql);
-                        if core.counts_toward_liveness {
-                            crate::self_monitoring::record_query_queue_wait(
-                                &core.workspace_id,
-                                sql_kind,
-                                queue_wait,
-                            );
-                        }
-                        crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY
-                            .fetch_add(1, Ordering::Relaxed);
-                        let exec_start = std::time::Instant::now();
-                        let mut timed = core.execute_query_on_state(&mut state, &request.sql);
-                        let mut result = timed.result;
-                        let mut gate_elapsed = timed.gate_elapsed;
-                        let mut run_elapsed = timed.run_elapsed;
-                        if let Err(err) = &result {
-                            let kind = poison_kind(&err.to_string());
-                            if kind != Poison::None {
-                                // This worker's in-memory database is dead; every
-                                // future statement would fail with the same FATAL
-                                // error. Rebuild before touching the next request.
-                                if let Some(fresh) = rebuild_worker_state(&core, index) {
-                                    state = fresh;
-                                    if kind == Poison::Collateral {
-                                        timed =
-                                            core.execute_query_on_state(&mut state, &request.sql);
-                                        result = timed.result;
-                                        gate_elapsed = timed.gate_elapsed;
-                                        run_elapsed = timed.run_elapsed;
-                                        if let Err(retry_err) = &result {
-                                            if poison_kind(&retry_err.to_string()) != Poison::None {
-                                                // The retry poisoned the fresh connection
-                                                // too; rebuild again so the next request
-                                                // does not inherit a dead one.
-                                                if let Some(fresh) =
-                                                    rebuild_worker_state(&core, index)
-                                                {
-                                                    state = fresh;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        let exec_elapsed = exec_start.elapsed();
-                        crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY
-                            .fetch_sub(1, Ordering::Relaxed);
-                        if core.counts_toward_liveness {
-                            crate::self_monitoring::record_query(
-                                &core.workspace_id,
-                                sql_kind,
-                                exec_elapsed,
-                            );
-                            crate::self_monitoring::record_query_stage(
-                                &core.workspace_id,
-                                sql_kind,
-                                crate::self_monitoring::query_stage::SQL_GATE,
-                                gate_elapsed,
-                            );
-                            crate::self_monitoring::record_query_stage(
-                                &core.workspace_id,
-                                sql_kind,
-                                crate::self_monitoring::query_stage::SQL_EXEC,
-                                run_elapsed,
-                            );
-                        }
-                        if result.is_ok() {
-                            // Any *customer* success clears the global streak --
-                            // see SelfHealCounters. Ops engines must not clear
-                            // (or they can hide a dead customer plane behind
-                            // healthy Grafana traffic).
-                            if core.counts_toward_liveness {
-                                SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
-                            }
-                        }
-                        let _ = request.respond_to.send(QueryWorkerResponse {
-                            result,
-                            queue_wait,
-                            exec_elapsed,
-                            gate_elapsed,
-                            run_elapsed,
-                        });
-                    }
-                })
-                .map_err(|err| anyhow!("DuckDB worker spawn failed: {}", err))?;
-            workers.push(WorkerHandle {
-                sender: Some(tx),
-                join: Some(join),
-            });
-        }
-        drop(ready_tx);
-
-        // Fail fast: one unusable worker means a fixed slice of every future
-        // request would fail, which is far harder to diagnose than not starting.
-        //
-        // Bounded wait. This is a blocking recv on a Tokio worker thread, and
-        // `engine_for` holds the per-tenant build mutex across it, so an
-        // unbounded wait would park a runtime thread and the tenant lock
-        // forever whenever a worker wedges inside ATTACH -- a Postgres host
-        // that completes the TCP handshake and then goes silent (firewall
-        // blackhole, saturated pooler) does exactly that. On the startup path
-        // that hangs before `axum::serve` binds: no /health, never ready, and
-        // nothing in the logs. A timeout turns that into a clear failure.
-        const WORKER_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        let mut failures = Vec::new();
-        let mut wedged = false;
-        for _ in 0..worker_count {
-            match ready_rx.recv_timeout(WORKER_READY_TIMEOUT) {
-                Ok(Ok(_)) => {}
-                Ok(Err(msg)) => failures.push(msg),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    failures.push(format!(
-                        "worker did not report readiness within {}s",
-                        WORKER_READY_TIMEOUT.as_secs()
-                    ));
-                    // Remaining workers cannot be waited on either: a wedged
-                    // worker holds the channel open, so every further recv
-                    // would burn another full timeout.
-                    wedged = true;
-                    break;
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    failures.push("worker exited before reporting readiness".to_string());
-                    break;
-                }
-            }
-        }
-        if !failures.is_empty() {
-            warn!(
-                "DuckDB query engine: {}/{} workers failed to start",
-                failures.len(),
-                worker_count
-            );
-            // `Drop for QueryEngineInner` is the only place workers are
-            // joined, and it cannot run here because `Self` was never
-            // constructed -- so simply dropping `workers` detaches threads
-            // holding live DuckDB connections, which is what that Drop impl
-            // exists to prevent. Since `engine_for` does not cache failures,
-            // every client retry would leak another full pool.
-            //
-            // Only safe to join when no worker is wedged: a worker stuck
-            // inside ATTACH never reaches `blocking_recv`, so closing its
-            // channel does not release it and `join` would block forever --
-            // trading a leak for a hang. In that case leak deliberately and
-            // say so; the timeout above is what makes the failure visible.
-            for worker in &mut workers {
-                worker.sender.take();
-            }
-            if wedged {
-                warn!(
-                    "leaving {} DuckDB worker thread(s) detached: at least one is wedged in \
-                     startup and would never observe a closed channel",
-                    workers.len()
-                );
-            } else {
-                for worker in &mut workers {
-                    if let Some(join) = worker.join.take() {
-                        if let Err(err) = join.join() {
-                            warn!(
-                                "DuckDB query worker panicked during startup abort: {:?}",
-                                err
-                            );
-                        }
-                    }
-                }
-            }
-            return Err(anyhow!(
-                "DuckDB query engine failed to start {} of {} workers: {}",
-                failures.len(),
-                worker_count,
-                failures.join("; ")
-            ));
-        }
-
-        // Keep a dummy connection for the _shared_connection field (for compatibility)
-        let dummy_conn = core.open_connection()?;
-
-        Ok(Self {
-            _shared_connection: Arc::new(Mutex::new(dummy_conn)),
-            workers,
-            next_worker: AtomicUsize::new(0),
-            config: config.clone(),
-            access,
-            inflight: Arc::new(Mutex::new(HashMap::new())),
-            workspace_id: core.workspace_id.clone(),
-            counts_toward_liveness: core.counts_toward_liveness,
-        })
-    }
-
     /// Catalog alias for `__ducklake_metadata_<alias>` / `{alias}.promotion_specs`.
     pub(crate) fn catalog_alias(&self) -> &str {
-        self.access.physical_scope().attach_alias()
+        self.core.access.physical_scope().attach_alias()
     }
 
     pub(crate) fn workspace_scope_mode(&self) -> WorkspaceScopeMode {
-        self.config.ducklake.workspace_scope_mode
+        self.core.config.ducklake.workspace_scope_mode
     }
 
     pub(crate) async fn execute_trusted(
         &self,
         query: crate::sql::trusted::TrustedSql,
     ) -> Result<QueryResult> {
-        let scope = self.access.physical_scope();
+        let scope = self.core.access.physical_scope();
         query
             .validate_for_scope(scope)
             .map_err(|error| anyhow!(error))?;
@@ -766,25 +484,15 @@ impl QueryEngineInner {
     }
 
     async fn dispatch_query(&self, query: &str) -> Result<QueryResult> {
-        let index = self.next_worker.fetch_add(1, Ordering::Relaxed);
-        let worker = &self.workers[index % self.workers.len()];
-        let sender = worker
-            .sender
-            .as_ref()
-            .ok_or_else(|| anyhow!("DuckDB worker channel closed"))?;
-        let (tx, rx) = oneshot::channel();
-        let request = QueryRequest {
-            sql: query.to_string(),
-            enqueued_at: std::time::Instant::now(),
-            respond_to: tx,
-        };
-        sender
-            .send(request)
-            .await
-            .map_err(|_| anyhow!("DuckDB worker channel closed"))?;
-        let response = rx
-            .await
-            .map_err(|_| anyhow!("DuckDB worker dropped response"))?;
+        let enqueued_at = std::time::Instant::now();
+        let core = Arc::clone(&self.core);
+        let sql = query.to_string();
+        let response = self
+            .pool
+            .with_query(&self.core.workspace_id, move |slot, caller| {
+                run_query_job(&core, slot, caller, &sql, enqueued_at)
+            })
+            .await?;
         let elapsed = response.queue_wait + response.exec_elapsed;
         if elapsed >= std::time::Duration::from_millis(200) {
             let preview: String = query.chars().take(160).collect();
@@ -797,99 +505,141 @@ impl QueryEngineInner {
                 sql = %preview,
                 "slow DuckDB query (queue + execute)"
             );
-            if self.counts_toward_liveness {
-                crate::self_monitoring::record_slow_query(&self.workspace_id, sql_kind);
+            if self.core.counts_toward_liveness {
+                crate::self_monitoring::record_slow_query(&self.core.workspace_id, sql_kind);
             }
         }
         response.result
     }
 
-    /// One-shot metadata SQL on a dedicated connection (no worker pool, no
-    /// self-monitoring instruments). Used by inventory scrapes.
+    /// One-shot metadata SQL on a borrowed query slot (no self-monitoring
+    /// instruments). Used by inventory scrapes.
     pub(crate) async fn execute_query_uninstrumented(&self, query: &str) -> Result<QueryResult> {
         let mut rows = self.execute_queries_uninstrumented(vec![query]).await?;
         rows.pop()
             .ok_or_else(|| anyhow!("inventory query returned no result"))?
     }
 
-    /// Run several metadata SQLs on one open+attach connection (inventory).
+    /// Run several metadata SQLs on one borrowed query slot (inventory).
     pub(crate) async fn execute_queries_uninstrumented(
         &self,
         queries: Vec<&str>,
     ) -> Result<Vec<Result<QueryResult>>> {
-        let core = DuckDBCore {
-            config: self.config.clone(),
-            access: self.access.clone(),
-            cache: CacheSettings::new(&self.config),
-            counts_toward_liveness: false,
-            workspace_id: self.workspace_id.clone(),
-        };
+        let core = Arc::clone(&self.core);
         let sqls: Vec<String> = queries.iter().map(|s| (*s).to_string()).collect();
-        tokio::task::spawn_blocking(move || {
-            let conn = core.open_connection()?;
-            let mut state = core.init_connection_state_with(conn)?;
-            let mut out = Vec::with_capacity(sqls.len());
-            for sql in sqls {
-                out.push(core.execute_query_on_state(&mut state, &sql).result);
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|e| anyhow!("inventory query join: {e}"))?
+        self.pool
+            .with_query(&self.core.workspace_id, move |slot, _| {
+                sqls.iter()
+                    .map(|sql| core.execute_on_slot(slot, sql).result)
+                    .collect()
+            })
+            .await
     }
 }
 
-impl Drop for QueryEngineInner {
-    fn drop(&mut self) {
-        // DuckDB/extension connections are not safe to leave on detached threads while the process
-        // or test binary is exiting. Close every worker channel first so all workers can break out
-        // of `blocking_recv`, then join them before this engine releases its final shared state.
-        for worker in &mut self.workers {
-            worker.sender.take();
-        }
-        for worker in &mut self.workers {
-            if let Some(join) = worker.join.take() {
-                if let Err(err) = join.join() {
-                    warn!("DuckDB query worker panicked during shutdown: {:?}", err);
+/// Run one request on a slot already bound to `caller`, rebuilding the slot
+/// when the engine reports a poisoned database.
+fn run_query_job(
+    core: &DuckDBCore,
+    slot: &mut QuerySlot,
+    caller: &QueryCaller,
+    sql: &str,
+    enqueued_at: std::time::Instant,
+) -> QueryWorkerResponse {
+    let queue_wait = enqueued_at.elapsed();
+    let sql_kind = crate::self_monitoring::classify_sql_kind(sql);
+    if core.counts_toward_liveness {
+        crate::self_monitoring::record_query_queue_wait(&core.workspace_id, sql_kind, queue_wait);
+    }
+    crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY.fetch_add(1, Ordering::Relaxed);
+    let exec_start = std::time::Instant::now();
+    let mut timed = core.execute_on_slot(slot, sql);
+    let mut result = timed.result;
+    let mut gate_elapsed = timed.gate_elapsed;
+    let mut run_elapsed = timed.run_elapsed;
+    if let Err(err) = &result {
+        let kind = poison_kind(&err.to_string());
+        if kind != Poison::None {
+            // This slot's in-memory database is dead; every future statement
+            // would fail with the same FATAL error. Rebuild before touching
+            // the next request.
+            if recover_slot(core, slot, caller) && kind == Poison::Collateral {
+                timed = core.execute_on_slot(slot, sql);
+                result = timed.result;
+                gate_elapsed = timed.gate_elapsed;
+                run_elapsed = timed.run_elapsed;
+                if let Err(retry_err) = &result {
+                    if poison_kind(&retry_err.to_string()) != Poison::None {
+                        // The retry poisoned the fresh connection too; rebuild
+                        // again so the next request does not inherit a dead one.
+                        recover_slot(core, slot, caller);
+                    }
                 }
             }
         }
     }
+    let exec_elapsed = exec_start.elapsed();
+    crate::self_monitoring::gauge_store::QUERY_WORKERS_BUSY.fetch_sub(1, Ordering::Relaxed);
+    if core.counts_toward_liveness {
+        crate::self_monitoring::record_query(&core.workspace_id, sql_kind, exec_elapsed);
+        crate::self_monitoring::record_query_stage(
+            &core.workspace_id,
+            sql_kind,
+            crate::self_monitoring::query_stage::SQL_GATE,
+            gate_elapsed,
+        );
+        crate::self_monitoring::record_query_stage(
+            &core.workspace_id,
+            sql_kind,
+            crate::self_monitoring::query_stage::SQL_EXEC,
+            run_elapsed,
+        );
+        if result.is_ok() {
+            // Any *customer* success clears the global streak -- see
+            // SelfHealCounters. Ops engines must not clear (or they can hide
+            // a dead customer plane behind healthy Grafana traffic).
+            SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
+        }
+    }
+    QueryWorkerResponse {
+        result,
+        queue_wait,
+        exec_elapsed,
+        gate_elapsed,
+        run_elapsed,
+    }
 }
 
 impl QueryEngine {
-    pub(crate) async fn new_with_scope(
-        config: &Config,
-        scope: &crate::storage::ducklake::PhysicalScope,
-        counts_toward_liveness: bool,
+    /// Bind a workspace-facing query surface to a shared catalog pool. The
+    /// engine owns no sessions; it only carries the workspace identity and the
+    /// in-flight collapse map.
+    pub(crate) fn bind(
+        pool: Arc<CatalogPool>,
         workspace_id: &str,
+        counts_toward_liveness: bool,
     ) -> Result<Self> {
-        let binding = crate::workspace_scope::WorkspaceBinding::new(
+        let config = pool.config().clone();
+        let binding = WorkspaceBinding::new(
             workspace_id,
-            scope.clone(),
+            pool.scope().clone(),
             config.ducklake.workspace_scope_mode,
         )
         .map_err(|error| anyhow!(error))?;
-        let access = DuckLakeAccess::Workspace(binding);
-        Self::new_with_liveness(config, access, counts_toward_liveness, workspace_id).await
-    }
-
-    pub(crate) async fn new_with_liveness(
-        config: &Config,
-        access: DuckLakeAccess,
-        counts_toward_liveness: bool,
-        workspace_id: &str,
-    ) -> Result<Self> {
-        let inner = Arc::new(
-            QueryEngineInner::new_with_liveness(
-                config,
-                access,
-                counts_toward_liveness,
-                workspace_id,
-            )
-            .await?,
-        );
-        Ok(Self { inner })
+        let core = Arc::new(DuckDBCore {
+            cache: CacheSettings::new(&config),
+            config,
+            access: DuckLakeAccess::Workspace(binding),
+            counts_toward_liveness,
+            workspace_id: workspace_id.to_string(),
+        });
+        Ok(Self {
+            inner: Arc::new(QueryEngineInner {
+                pool,
+                core,
+                inflight: Arc::new(Mutex::new(HashMap::new())),
+            }),
+        })
     }
 
     pub(crate) fn catalog_alias(&self) -> &str {
@@ -897,7 +647,7 @@ impl QueryEngine {
     }
 
     pub fn workspace_id(&self) -> &str {
-        &self.inner.workspace_id
+        &self.inner.core.workspace_id
     }
 
     pub fn workspace_scope_mode(&self) -> WorkspaceScopeMode {
@@ -1134,44 +884,18 @@ fn map_attributes_row(result: &QueryResult) -> Option<Value> {
 }
 
 impl DuckDBCore {
-    fn open_connection(&self) -> Result<Connection> {
-        let access = self.session_access();
-        DuckLakeSessionFactory::new(&self.config).open(&access, DuckLakeSessionKind::Query)
-    }
-
-    fn init_connection_state_with(&self, conn: Connection) -> Result<ConnectionState> {
-        self.init_connection_state_with_options(conn, true)
-    }
-
-    fn init_connection_state_with_options(
-        &self,
-        conn: Connection,
-        attach_catalog: bool,
-    ) -> Result<ConnectionState> {
-        self.configure_connection(&conn)?;
-        if attach_catalog {
-            self.attach_catalog_if_needed(&conn)?;
+    fn execute_on_slot(&self, slot: &mut QuerySlot, query: &str) -> TimedExecute {
+        match slot.session() {
+            Ok(session) => self.execute_query_on_state(session, query),
+            Err(err) => TimedExecute {
+                result: Err(err),
+                gate_elapsed: std::time::Duration::ZERO,
+                run_elapsed: std::time::Duration::ZERO,
+            },
         }
-        if self.config.ducklake.workspace_scope_mode == WorkspaceScopeMode::Shared {
-            workspace_views::install(&conn, self.access.physical_scope(), &self.workspace_id)?;
-        }
-        Ok(ConnectionState {
-            conn,
-            cache_httpfs_wrap_supported: true,
-            cache_httpfs_wrapped_s3: false,
-            cache_httpfs_wrapped_httpfs: false,
-        })
     }
 
-    #[cfg(test)]
-    fn init_connection_state_for_prepared_catalog(
-        &self,
-        conn: Connection,
-    ) -> Result<ConnectionState> {
-        self.init_connection_state_with_options(conn, false)
-    }
-
-    fn execute_query_on_state(&self, state: &mut ConnectionState, query: &str) -> TimedExecute {
+    fn execute_query_on_state(&self, state: &mut QuerySession, query: &str) -> TimedExecute {
         // Catalog visibility: Postgres metadata is visible without reconnect.
         // is handled by DuckLake (WAL + busy timeout / ATTACH behavior). Softprobe does not
         // reattach or mem::forget connections after writes.
@@ -1203,7 +927,7 @@ impl DuckDBCore {
             let trimmed = query_run.trim().trim_end_matches(';');
             let batch = format!("BEGIN TRANSACTION;\n{trimmed};\nCOMMIT;");
             let query_start = std::time::Instant::now();
-            self.try_wrap_cache_httpfs_filesystems(state);
+            state.try_wrap_cache_httpfs_filesystems(&self.cache);
             let result = state
                 .conn
                 .execute_batch(&batch)
@@ -1226,7 +950,7 @@ impl DuckDBCore {
             // CALL / other mutating non-wrap path (expire, merge, cleanup, set_option).
             let trimmed = query_run.trim().trim_end_matches(';');
             let query_start = std::time::Instant::now();
-            self.try_wrap_cache_httpfs_filesystems(state);
+            state.try_wrap_cache_httpfs_filesystems(&self.cache);
             let result = state
                 .conn
                 .execute_batch(trimmed)
@@ -1246,9 +970,9 @@ impl DuckDBCore {
             };
         }
 
-        let run_once = |state: &mut ConnectionState| -> Result<QueryResult> {
+        let run_once = |state: &mut QuerySession| -> Result<QueryResult> {
             let query_start = std::time::Instant::now();
-            self.try_wrap_cache_httpfs_filesystems(state);
+            state.try_wrap_cache_httpfs_filesystems(&self.cache);
             // duckdb-rs requires Statement for multi-row fetch. Preparing the
             // full SQL every request with inlined literals gets no reuse.
             // TODO(#114): parameterized SQL + per-worker Statement cache.
@@ -1310,71 +1034,6 @@ impl DuckDBCore {
         }
     }
 
-    fn try_wrap_cache_httpfs_filesystems(&self, state: &mut ConnectionState) {
-        if self.cache.cache_dir.is_none() || cache_httpfs_disabled_by_env() {
-            return;
-        }
-        if !state.cache_httpfs_wrap_supported {
-            return;
-        }
-
-        if !state.cache_httpfs_wrapped_s3 {
-            match wrap_one(&state.conn, "s3") {
-                Ok(WrapAttempt::Wrapped) => {
-                    state.cache_httpfs_wrapped_s3 = true;
-                    info!("cache_httpfs wrapped filesystem: s3");
-                }
-                Ok(WrapAttempt::NotReady) => {}
-                Ok(WrapAttempt::Unsupported) => {
-                    state.cache_httpfs_wrap_supported = false;
-                    warn!(
-                        "cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused"
-                    );
-                }
-                Err(err) => {
-                    if !CACHE_HTTPFS_CONFIG_WARNED.swap(true, Ordering::Relaxed) {
-                        warn!("Failed to wrap cache_httpfs filesystem s3: {err}");
-                    }
-                }
-            }
-        }
-
-        if !state.cache_httpfs_wrapped_httpfs && state.cache_httpfs_wrap_supported {
-            match wrap_one(&state.conn, "httpfs") {
-                Ok(WrapAttempt::Wrapped) => {
-                    state.cache_httpfs_wrapped_httpfs = true;
-                    info!("cache_httpfs wrapped filesystem: httpfs");
-                }
-                Ok(WrapAttempt::NotReady) => {}
-                Ok(WrapAttempt::Unsupported) => {
-                    state.cache_httpfs_wrap_supported = false;
-                    warn!(
-                        "cache_httpfs wrap function not available in this DuckDB build; disk cache will remain unused"
-                    );
-                }
-                Err(err) => {
-                    if !CACHE_HTTPFS_CONFIG_WARNED.swap(true, Ordering::Relaxed) {
-                        warn!("Failed to wrap cache_httpfs filesystem httpfs: {err}");
-                    }
-                }
-            }
-        }
-    }
-
-    fn configure_connection(&self, conn: &Connection) -> Result<()> {
-        // Extension INSTALL/LOAD, resource caps, version guessing, query tuning, and
-        // cache_httpfs SETs live in duckdb_init.sql (applied by SessionFactory).
-        // Only filesystem wrapping remains here — it is lazy/best-effort until S3/httpfs
-        // registers after first real I/O.
-        if let Err(err) = self.cache.wrap_filesystems(conn) {
-            if !CACHE_HTTPFS_CONFIG_WARNED.swap(true, Ordering::Relaxed) {
-                warn!("Failed to wrap cache_httpfs filesystems: {}", err);
-            }
-        }
-
-        Ok(())
-    }
-
     /// Must match [`crate::storage::ducklake::ducklake_qualified_table_name`]
     /// (`catalog.schema.table`, including when schema is `main`).
     fn ducklake_qualified_table(&self, table: &str) -> String {
@@ -1396,17 +1055,6 @@ impl DuckDBCore {
             &self.ducklake_qualified_table("scores"),
             &self.ducklake_qualified_table("score_configs"),
         )
-    }
-
-    fn attach_catalog_if_needed(&self, conn: &Connection) -> Result<()> {
-        let access = self.session_access();
-        DuckLakeSessionFactory::new(&self.config)
-            .attach(conn, &access)
-            .map(|_| ())
-    }
-
-    fn session_access(&self) -> DuckLakeAccess {
-        self.access.clone()
     }
 }
 
@@ -1492,6 +1140,8 @@ fn duck_value_to_json(value: DuckValue) -> Value {
 mod tests {
     use super::*;
 
+    use crate::storage::ducklake::workspace_views;
+    use duckdb::Connection;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::sync::oneshot;
@@ -1712,37 +1362,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shared_connection_initializer_recreates_filtered_views_for_each_connection() {
-        for workspace_id in ["workspace-a", "workspace-b"] {
-            let mut config = Config::default();
-            config.ducklake.catalog_alias = "softprobe".to_string();
-            config.ducklake.metadata_schema = "main".to_string();
-            config.ducklake.workspace_scope_mode = WorkspaceScopeMode::Shared;
-            let scope = PhysicalScope::from_ducklake(&config.ducklake);
-            let access = DuckLakeAccess::Workspace(
-                WorkspaceBinding::new(workspace_id, scope, config.ducklake.workspace_scope_mode)
-                    .expect("binding"),
-            );
-            let core = DuckDBCore {
-                cache: CacheSettings::new(&config),
-                config,
-                access,
-                counts_toward_liveness: false,
-                workspace_id: workspace_id.to_string(),
-            };
-            let state = core
-                .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
-                .unwrap();
-
-            let visible_id: String = state
-                .conn
-                .query_row("SELECT id FROM traces", [], |row| row.get(0))
-                .unwrap();
-            assert_eq!(visible_id, format!("{workspace_id}-row"));
-        }
-    }
-
     fn prepared_catalog_connection() -> Connection {
         let conn = Connection::open_in_memory().expect("open prepared catalog connection");
         conn.execute_batch(
@@ -1763,6 +1382,17 @@ mod tests {
         )
         .expect("seed prepared catalog");
         conn
+    }
+
+    fn prepared_session(core: &DuckDBCore) -> QuerySession {
+        let session = QuerySession::new(prepared_catalog_connection());
+        workspace_views::install(
+            &session.conn,
+            core.access.physical_scope(),
+            &core.workspace_id,
+        )
+        .expect("install filtered views");
+        session
     }
 
     fn test_core(sql_gate: bool) -> DuckDBCore {
@@ -1788,9 +1418,7 @@ mod tests {
     #[test]
     fn sql_gate_false_skips_gate_and_runs() {
         let core = test_core(false);
-        let mut state = core
-            .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
-            .unwrap();
+        let mut state = prepared_session(&core);
         let timed = core.execute_query_on_state(&mut state, "SELECT id FROM traces LIMIT 1");
         let result = timed.result.expect("sql_gate false must skip gate and run");
         assert_eq!(result.columns, vec!["id".to_string()]);
@@ -1799,9 +1427,7 @@ mod tests {
     #[test]
     fn sql_gate_false_still_runs_explain_result_sets() {
         let core = test_core(false);
-        let mut state = core
-            .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
-            .unwrap();
+        let mut state = prepared_session(&core);
         let timed =
             core.execute_query_on_state(&mut state, "EXPLAIN SELECT id FROM traces LIMIT 1");
         let result = timed
@@ -1813,9 +1439,7 @@ mod tests {
     #[test]
     fn sql_gate_true_rejects_unbounded_fact_scan() {
         let core = test_core(true);
-        let mut state = core
-            .init_connection_state_for_prepared_catalog(prepared_catalog_connection())
-            .unwrap();
+        let mut state = prepared_session(&core);
         let timed = core.execute_query_on_state(&mut state, "SELECT id FROM traces LIMIT 1");
         let err = timed
             .result

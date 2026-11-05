@@ -516,7 +516,7 @@ mod tests {
             "src/storage/duckdb/cache.rs",
             "src/storage/ducklake/workspace_views.rs",
             "src/compaction/engine.rs",
-            "src/compaction/maint_conn_pool.rs",
+            "src/storage/ducklake/catalog_pool.rs",
             "src/compaction/session_summary_access.rs",
             "src/sql/maintenance/mod.rs",
             "src/session_summary/reduce.rs",
