@@ -276,16 +276,17 @@ async fn process_traces_inner(
     }
 
     crate::capture_correlation::validate_capture_batch(&spans, &tid, agent_id.as_deref())?;
-    let has_capture_spans = crate::capture_correlation::has_capture_markers(&spans);
+    let uses_capture_correlation =
+        crate::capture_correlation::uses_capture_correlation(&spans, agent_id.as_deref());
 
     let span_count = spans.len();
 
     let ws = state.workspace_for_id(&tid).await?;
     let write_start = std::time::Instant::now();
-    if has_capture_spans {
-        let agent_id = agent_id
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("capture spans require an authenticated Agent"))?;
+    if uses_capture_correlation {
+        let agent_id = agent_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Agent telemetry correlation requires a trusted Agent")
+        })?;
         ws.ingest_capture_spans(spans, body_size, agent_id).await?;
     } else {
         ws.ingest().add_spans(spans, body_size).await?;

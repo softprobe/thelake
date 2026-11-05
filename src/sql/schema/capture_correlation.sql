@@ -25,27 +25,6 @@ CREATE TABLE IF NOT EXISTS {{schema}}.pending_capture_spans (
   PRIMARY KEY (workspace_id, agent_id, trace_id, span_id)
 );
 
--- Pending rows from the old capture-ID schema cannot be mapped to an Agent.
--- Drop those short-lived joins once, then reuse the renamed key column.
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = '{{schema}}' AND table_name = 'capture_session_mappings' AND column_name = 'capture_id'
-  ) THEN
-    TRUNCATE {{schema}}.capture_session_mappings;
-    ALTER TABLE {{schema}}.capture_session_mappings RENAME COLUMN capture_id TO agent_id;
-  END IF;
-
-  IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = '{{schema}}' AND table_name = 'pending_capture_spans' AND column_name = 'capture_id'
-  ) THEN
-    TRUNCATE {{schema}}.pending_capture_spans;
-    ALTER TABLE {{schema}}.pending_capture_spans RENAME COLUMN capture_id TO agent_id;
-  END IF;
-END $$;
-
 CREATE INDEX IF NOT EXISTS pending_capture_spans_ready_idx
   ON {{schema}}.pending_capture_spans (workspace_id, agent_id, expires_at)
   WHERE delivered_at IS NULL;

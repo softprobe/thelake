@@ -1,4 +1,4 @@
-//! Durable, workspace-bound staging for browser/OBI session correlation.
+//! Durable, workspace-bound staging for trace-to-session correlation.
 
 use super::{assign_session_id, classify_capture_span, CaptureObservation};
 use crate::ingest::IngestEngine;
@@ -57,10 +57,10 @@ impl CaptureCorrelationStore {
         Ok(mappings + pending)
     }
 
-    /// Persist browser spans directly and stage OBI spans until a trusted
-    /// browser mapping for their trace arrives. The DB lease is acknowledged
-    /// only after DuckLake flush succeeds; a crash in the narrow lake-write /
-    /// ack window may cause an at-least-once duplicate.
+    /// Persist recordings and mapped trace spans directly. Stage unmapped
+    /// trace spans until a Session ID for their trace arrives. The DB lease is
+    /// acknowledged only after DuckLake flush succeeds; a crash in the narrow
+    /// lake-write / ack window may cause an at-least-once duplicate.
     pub(crate) async fn ingest(
         &self,
         ingest: &IngestEngine,
@@ -70,24 +70,30 @@ impl CaptureCorrelationStore {
     ) -> Result<()> {
         let mut direct_spans = Vec::new();
         let mut mappings = Vec::new();
-        let mut backend_spans = Vec::new();
+        let mut unmapped_spans = Vec::new();
 
         for span in spans {
             match classify_capture_span(&span, &self.workspace_id, Some(agent_id))? {
-                Some(CaptureObservation::BrowserMapping { key, session_id }) => {
+                Some(CaptureObservation::Trace {
+                    key,
+                    session_id: Some(session_id),
+                }) => {
                     mappings.push((key, session_id));
                     direct_spans.push(span);
                 }
-                Some(CaptureObservation::BackendSpan { key }) => backend_spans.push((key, span)),
+                Some(CaptureObservation::Trace {
+                    key,
+                    session_id: None,
+                }) => unmapped_spans.push((key, span)),
                 Some(CaptureObservation::Recording) => direct_spans.push(span),
                 None => direct_spans.push(span),
             }
         }
         info!(
             direct_span_count = direct_spans.len(),
-            browser_mapping_count = mappings.len(),
-            backend_span_count = backend_spans.len(),
-            "Classified capture span batch"
+            session_mapping_count = mappings.len(),
+            unmapped_trace_count = unmapped_spans.len(),
+            "Classified Agent telemetry batch"
         );
         let advisory_lock = sql::render(sql::ADVISORY_LOCK, &self.metadata_schema);
         let expire_mappings = sql::render(sql::EXPIRE_MAPPINGS, &self.metadata_schema);
@@ -119,7 +125,7 @@ impl CaptureCorrelationStore {
                     )
                     .await?;
                 if row.is_none() {
-                    bail!("conflicting browser session mapping for Agent trace");
+                    bail!("conflicting session mapping for Agent trace");
                 }
                 transaction
                     .execute(
@@ -128,7 +134,7 @@ impl CaptureCorrelationStore {
                     )
                     .await?;
             }
-            for (key, span) in &backend_spans {
+            for (key, span) in &unmapped_spans {
                 let mapping = transaction
                     .query_opt(
                         &find_mapping,
@@ -166,7 +172,7 @@ impl CaptureCorrelationStore {
                 let stored_json: String = stored.get(0);
                 let stored_bytes: i64 = stored.get(1);
                 if stored_json != span_json || stored_bytes != byte_size {
-                    bail!("conflicting duplicate OBI span in capture correlation staging");
+                    bail!("conflicting duplicate trace span in session correlation staging");
                 }
             }
 
@@ -216,11 +222,11 @@ impl CaptureCorrelationStore {
                 let json: String = row.get(0);
                 let session_id: String = row.get(1);
                 let mut span: Span = serde_json::from_str(&json)
-                    .context("decode staged OBI span before lake write")?;
+                    .context("decode staged trace span before lake write")?;
                 if span.trace_id != row.get::<_, String>(2)
                     || span.span_id != row.get::<_, String>(3)
                 {
-                    bail!("staged OBI span identity changed before lake write");
+                    bail!("staged trace span identity changed before lake write");
                 }
                 assign_session_id(&mut span, &session_id)?;
                 spans.push(span);
@@ -244,7 +250,7 @@ impl CaptureCorrelationStore {
                 ingest.force_flush_spans().await?;
                 info!(
                     direct_span_count,
-                    correlated_span_count, "Flushed capture spans to DuckLake"
+                    correlated_span_count, "Flushed Agent spans to DuckLake"
                 );
                 Ok::<(), anyhow::Error>(())
             }

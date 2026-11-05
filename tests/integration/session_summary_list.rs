@@ -17,9 +17,12 @@ use opentelemetry_proto::tonic::trace::v1::{span, ResourceSpans, ScopeSpans, Spa
 use prost::Message;
 use serde_json::{json, Value};
 use softprobe_runtime::api::AppState;
+use softprobe_runtime::authn::WorkspaceAuth;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::attr_keys::{gen_ai, resource, sp};
 use softprobe_runtime::session_summary::ensure_session_summary_tables;
+use softprobe_runtime::workspace::ScopeProvisioningRequest;
+use softprobe_runtime::workspace_scope::{WorkspaceScopeMode, DEFAULT_WORKSPACE_ID};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -133,9 +136,40 @@ async fn ingest(router: &Router, req: ExportTraceServiceRequest) {
     );
 }
 
+fn test_workspace_auth(workspace_id: &str, agent_id: Option<&str>) -> WorkspaceAuth {
+    WorkspaceAuth {
+        workspace_id: workspace_id.to_string(),
+        bucket_name: "capture-test".to_string(),
+        dataset_id: "capture-test".to_string(),
+        agent_id: agent_id.map(str::to_string),
+        agent_name: agent_id.map(|_| "Agent A".to_string()),
+    }
+}
+
+async fn ingest_as_agent(router: &Router, workspace_id: &str, req: ExportTraceServiceRequest) {
+    let mut buf = Vec::new();
+    req.encode(&mut buf).unwrap();
+    let mut http = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header(header::CONTENT_TYPE, "application/x-protobuf")
+        .body(Body::from(buf))
+        .unwrap();
+    http.extensions_mut()
+        .insert(test_workspace_auth(workspace_id, Some("agent-a")));
+    let response = router.clone().oneshot(http).await.unwrap();
+    let status = response.status();
+    let body = response_json(response).await;
+    assert_eq!(status, StatusCode::OK, "Agent OTLP ingest: {body}");
+}
+
 async fn flush(state: &AppState) {
+    flush_for_workspace(state, "").await;
+}
+
+async fn flush_for_workspace(state: &AppState, workspace_id: &str) {
     state
-        .workspace_for_id("")
+        .workspace_for_id(workspace_id)
         .await
         .expect("workspace context")
         .ingest()
@@ -146,6 +180,10 @@ async fn flush(state: &AppState) {
 
 /// Run the same pipeline the leased job runs (claim dirty → lake agg → UPSERT).
 async fn run_reduce(state: &AppState) -> usize {
+    run_reduce_for_workspace(state, DEFAULT_WORKSPACE_ID).await
+}
+
+async fn run_reduce_for_workspace(state: &AppState, workspace_id: &str) -> usize {
     let cfg = &state.workspaces.config().session_summary;
     let maintenance = state
         .workspaces
@@ -153,10 +191,7 @@ async fn run_reduce(state: &AppState) -> usize {
         .await
         .expect("maintenance engine");
     maintenance
-        .reduce_session_summary_for_key(
-            softprobe_runtime::workspace_scope::DEFAULT_WORKSPACE_ID,
-            cfg.max_sessions_per_reduce,
-        )
+        .reduce_session_summary_for_key(workspace_id, cfg.max_sessions_per_reduce)
         .await
         .expect("reduce_session_summary")
 }
@@ -178,6 +213,22 @@ async fn search(router: &Router, body: Value) -> Value {
     let (status, v) = search_raw(router, body.clone()).await;
     assert_eq!(status, StatusCode::OK, "{body} → {v}");
     v
+}
+
+async fn search_as_workspace(router: &Router, body: Value, workspace_id: &str) -> Value {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/v1/sessions/search")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    req.extensions_mut()
+        .insert(test_workspace_auth(workspace_id, None));
+    let resp = router.clone().oneshot(req).await.expect("search");
+    let status = resp.status();
+    let value = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body} → {value}");
+    value
 }
 
 async fn search_raw(router: &Router, body: Value) -> (StatusCode, Value) {
@@ -977,10 +1028,44 @@ fn recording_batch_span(
 async fn http_session_recording_uses_summary_window() {
     let suffix = Uuid::new_v4().to_string().replace('-', "_");
     let schema = format!("thelake_ss_http_rec_{suffix}");
-    let Some((router, state, _temp, _schema)) = build_summary_router(schema).await else {
+    let Some((router, state, temp, schema)) = build_summary_router(schema).await else {
         eprintln!("skip: ducklake-postgres not reachable");
         return;
     };
+    let workspace_id = Uuid::new_v4().to_string();
+    let ducklake = state.workspaces.config().ducklake.clone();
+    let agent_schema = if ducklake.workspace_scope_mode == WorkspaceScopeMode::Isolated {
+        format!("{schema}_agent")
+    } else {
+        schema.clone()
+    };
+    let agent_data_path = if ducklake.workspace_scope_mode == WorkspaceScopeMode::Isolated {
+        temp.path()
+            .join("agent_data")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        ducklake.data_path.clone()
+    };
+    state
+        .workspaces
+        .provision_scope(ScopeProvisioningRequest {
+            scope_id: workspace_id.clone(),
+            metadata_schema: agent_schema.clone(),
+            data_path: agent_data_path,
+        })
+        .await
+        .expect("provision Agent workspace");
+    let (client, connection) =
+        tokio_postgres::connect(&ducklake.metadata_path, tokio_postgres::NoTls)
+            .await
+            .expect("connect Agent workspace catalog");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    ensure_session_summary_tables(&client, &agent_schema)
+        .await
+        .expect("ensure Agent workspace summary tables");
 
     // Generation span creates session_summary (recording is excluded from reduce).
     // Window must cover recording batch timestamps below.
@@ -996,9 +1081,10 @@ async fn http_session_recording_uses_summary_window() {
         tokens: 10,
         cost: 0.01,
     };
-    ingest(&router, llm_span(&gen)).await;
-    ingest(
+    ingest_as_agent(&router, &workspace_id, llm_span(&gen)).await;
+    ingest_as_agent(
         &router,
+        &workspace_id,
         recording_batch_span(
             "rec-sess",
             0xe2,
@@ -1008,8 +1094,9 @@ async fn http_session_recording_uses_summary_window() {
         ),
     )
     .await;
-    ingest(
+    ingest_as_agent(
         &router,
+        &workspace_id,
         recording_batch_span(
             "rec-sess",
             0xe3,
@@ -1019,10 +1106,30 @@ async fn http_session_recording_uses_summary_window() {
         ),
     )
     .await;
-    flush(&state).await;
-    assert!(run_reduce(&state).await >= 1);
+    flush_for_workspace(&state, &workspace_id).await;
+    assert!(
+        dirty_count(&state, &agent_schema).await > 0,
+        "Agent trace ingest should mark the session summary dirty"
+    );
 
-    let list = search(&router, window()).await;
+    let mut unreduced = Request::builder()
+        .method("GET")
+        .uri("/v1/sessions/rec-sess/recording")
+        .body(Body::empty())
+        .unwrap();
+    unreduced
+        .extensions_mut()
+        .insert(test_workspace_auth(&workspace_id, None));
+    let unreduced_resp = router
+        .clone()
+        .oneshot(unreduced)
+        .await
+        .expect("unreduced recording");
+    assert_eq!(unreduced_resp.status(), StatusCode::NOT_FOUND);
+
+    assert!(run_reduce_for_workspace(&state, &workspace_id).await >= 1);
+
+    let list = search_as_workspace(&router, window(), &workspace_id).await;
     let item = list["items"]
         .as_array()
         .unwrap()
@@ -1032,11 +1139,13 @@ async fn http_session_recording_uses_summary_window() {
     let summary_from = item["start_time"].as_str().unwrap().to_string();
     let summary_to = item["end_time"].as_str().unwrap().to_string();
 
-    let req = Request::builder()
+    let mut req = Request::builder()
         .method("GET")
         .uri("/v1/sessions/rec-sess/recording")
         .body(Body::empty())
         .unwrap();
+    req.extensions_mut()
+        .insert(test_workspace_auth(&workspace_id, None));
     let resp = router.clone().oneshot(req).await.expect("recording");
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
@@ -1063,15 +1172,18 @@ async fn http_session_recording_uses_summary_window() {
         tokens: 10,
         cost: 0.01,
     };
-    ingest(&router, llm_span(&empty_sess)).await;
-    flush(&state).await;
-    assert!(run_reduce(&state).await >= 1);
+    ingest_as_agent(&router, &workspace_id, llm_span(&empty_sess)).await;
+    flush_for_workspace(&state, &workspace_id).await;
+    assert!(run_reduce_for_workspace(&state, &workspace_id).await >= 1);
 
-    let empty = Request::builder()
+    let mut empty = Request::builder()
         .method("GET")
         .uri("/v1/sessions/rec-empty/recording")
         .body(Body::empty())
         .unwrap();
+    empty
+        .extensions_mut()
+        .insert(test_workspace_auth(&workspace_id, None));
     let empty_resp = router
         .clone()
         .oneshot(empty)
@@ -1082,11 +1194,14 @@ async fn http_session_recording_uses_summary_window() {
     assert_eq!(empty_body["batches"].as_array().unwrap().len(), 0);
     assert_eq!(empty_body["events"].as_array().unwrap().len(), 0);
 
-    let missing = Request::builder()
+    let mut missing = Request::builder()
         .method("GET")
         .uri("/v1/sessions/no-rec-session/recording")
         .body(Body::empty())
         .unwrap();
+    missing
+        .extensions_mut()
+        .insert(test_workspace_auth(&workspace_id, None));
     let missing_resp = router.oneshot(missing).await.expect("missing recording");
     assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
 }

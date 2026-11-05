@@ -1,10 +1,10 @@
-//! Capture span classification and correlation identity.
+//! Agent trace and recording classification and correlation identity.
 //!
 //! This module deliberately contains no process-local join state. Runtime
 //! correlation must be backed by durable, bounded storage before ingest calls
 //! these helpers; an in-memory map would lose either arrival order on restart.
 
-use crate::models::Span;
+use crate::models::{attr_keys::sp::OBSERVATION_TYPE, Span};
 use anyhow::{bail, Result};
 
 mod store;
@@ -12,11 +12,9 @@ pub(crate) use store::CaptureCorrelationStore;
 mod job;
 pub use job::start_capture_expiry_sweeper;
 
-pub const CAPTURE_SOURCE_ATTRIBUTE: &str = "sp.capture.source";
-pub const OBSERVATION_TYPE_ATTRIBUTE: &str = "sp.observation.type";
-const LEGACY_CAPTURE_ID_ATTRIBUTE: &str = "sp.capture.id";
+const RECORDING_OBSERVATION_TYPE: &str = "recording";
 
-fn capture_attribute<'a>(span: &'a Span, key: &str) -> Option<&'a String> {
+fn observation_attribute<'a>(span: &'a Span, key: &str) -> Option<&'a String> {
     span.attributes
         .get(key)
         .or_else(|| span.resource_attributes.get(key))
@@ -63,118 +61,78 @@ impl CaptureTraceKey {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureObservation {
-    /// Browser session mappings label backend spans that share this trace id.
-    BrowserMapping {
+    /// Any trace span with a Session ID maps other spans with the same trace.
+    Trace {
         key: CaptureTraceKey,
-        session_id: String,
+        session_id: Option<String>,
     },
-    /// OBI spans are staged durably until a browser mapping is available.
-    BackendSpan { key: CaptureTraceKey },
-    /// Recording observations carry session data but do not map request traces.
+    /// RRWeb recordings are persisted directly and do not map trace spans.
     Recording,
 }
 
-/// Interpret only capture source markers. Ordinary telemetry remains on the
-/// existing ingest path. `trusted_agent_id` comes from verified Agent auth.
+/// Classify the two Agent-authenticated telemetry shapes: trace spans and
+/// rrweb recordings. `trusted_agent_id` comes from verified Agent auth.
 pub fn classify_capture_span(
     span: &Span,
     workspace_id: &str,
     trusted_agent_id: Option<&str>,
 ) -> Result<Option<CaptureObservation>> {
-    let recording = capture_attribute(span, OBSERVATION_TYPE_ATTRIBUTE)
-        .is_some_and(|value| value == "recording");
-    let source = capture_attribute(span, CAPTURE_SOURCE_ATTRIBUTE);
-    if capture_attribute(span, LEGACY_CAPTURE_ID_ATTRIBUTE).is_some() {
-        bail!("sp.capture.id is not supported");
-    }
-    if source.is_none() && !recording {
-        return Ok(None);
-    }
-
-    let agent_id = trusted_agent_id
-        .filter(|id| !id.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("capture span requires a trusted Agent assertion"))?;
+    let recording = observation_attribute(span, OBSERVATION_TYPE)
+        .is_some_and(|value| value == RECORDING_OBSERVATION_TYPE);
     if recording {
-        if source.map(String::as_str) != Some("browser") {
-            bail!("capture recording requires browser source");
-        }
+        trusted_agent_id
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("recording requires a trusted Agent assertion"))?;
+        span_session_id(span)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("recording requires a real session.id"))?;
         return Ok(Some(CaptureObservation::Recording));
     }
-    let Some(source) = source else {
-        bail!("capture span requires an explicit source or recording marker");
+    let Some(agent_id) = trusted_agent_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(None);
     };
     let key = CaptureTraceKey::new(workspace_id, agent_id, span.trace_id.clone())?;
-
-    match source.as_str() {
-        "browser" => {
-            let session_id = span_session_id(span)
-                .map(String::as_str)
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("browser capture span requires session.id"))?;
-            Ok(Some(CaptureObservation::BrowserMapping {
-                key,
-                session_id: session_id.to_owned(),
-            }))
-        }
-        "obi" => {
-            if span_session_id(span).is_some()
-                || span.resource_attributes.contains_key("session.id")
-                || span.resource_attributes.contains_key("sp.session.id")
-            {
-                bail!("OBI capture spans cannot supply a browser session mapping");
-            }
-            Ok(Some(CaptureObservation::BackendSpan { key }))
-        }
-        other => bail!("unsupported capture span source: {other}"),
-    }
+    let session_id = span_session_id(span)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+    Ok(Some(CaptureObservation::Trace { key, session_id }))
 }
 
-/// Validate capture classification before the generic session-id fallback can
-/// reach persistence. The durable join store stages OBI spans and assigns a
-/// browser session before writing them to the lake.
+/// Validate Agent trace and recording spans before the generic session-id
+/// fallback can reach persistence. The durable join store stages trace spans
+/// until a span in the same trace supplies a Session ID.
 pub fn validate_capture_batch(
     spans: &[Span],
     workspace_id: &str,
     trusted_agent_id: Option<&str>,
 ) -> Result<()> {
     for span in spans {
-        match classify_capture_span(span, workspace_id, trusted_agent_id)? {
-            None => {}
-            Some(CaptureObservation::Recording) => {
-                let has_session =
-                    span_session_id(span).is_some_and(|session_id| !session_id.trim().is_empty());
-                if !has_session {
-                    bail!("capture recording requires a real session id before persistence");
-                }
-            }
-            Some(CaptureObservation::BrowserMapping { .. }) => {}
-            Some(CaptureObservation::BackendSpan { .. }) => {}
-        }
+        classify_capture_span(span, workspace_id, trusted_agent_id)?;
     }
     Ok(())
 }
 
-pub fn has_capture_markers(spans: &[Span]) -> bool {
-    spans.iter().any(|span| {
-        capture_attribute(span, CAPTURE_SOURCE_ATTRIBUTE).is_some()
-            || capture_attribute(span, OBSERVATION_TYPE_ATTRIBUTE)
-                .is_some_and(|value| value == "recording")
-    })
+pub fn uses_capture_correlation(spans: &[Span], trusted_agent_id: Option<&str>) -> bool {
+    trusted_agent_id.is_some_and(|id| !id.trim().is_empty())
+        || spans.iter().any(|span| {
+            observation_attribute(span, OBSERVATION_TYPE)
+                .is_some_and(|value| value == RECORDING_OBSERVATION_TYPE)
+        })
 }
 
-/// Apply a browser mapping immediately before a correlated OBI span is written.
+/// Assign the correlated Session ID immediately before a trace span is written.
 /// Callers must reject the span when no durable mapping is available.
 pub fn assign_session_id(span: &mut Span, session_id: &str) -> Result<()> {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         bail!("capture session mapping cannot be empty");
     }
-    if capture_attribute(span, CAPTURE_SOURCE_ATTRIBUTE).map(String::as_str) != Some("obi") {
-        bail!("session mappings may only be assigned to OBI capture spans");
-    }
-    if span.attributes.contains_key("sp.session.id") || span.attributes.contains_key("session.id") {
-        bail!("OBI capture spans must not supply a browser session mapping");
+    if span_session_id(span).is_some_and(|id| !id.trim().is_empty()) {
+        bail!("trace span already has a session.id");
     }
     span.session_id = session_id.to_owned();
     Ok(())
@@ -185,9 +143,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn span(source: &str, trace_id: &str) -> Span {
-        let mut attributes = HashMap::new();
-        attributes.insert(CAPTURE_SOURCE_ATTRIBUTE.into(), source.into());
+    fn span(trace_id: &str) -> Span {
         Span {
             session_id: trace_id.into(),
             trace_id: trace_id.into(),
@@ -202,7 +158,7 @@ mod tests {
             span_kind: None,
             timestamp: chrono::Utc::now(),
             end_timestamp: None,
-            attributes,
+            attributes: HashMap::new(),
             resource_attributes: HashMap::new(),
             events: Vec::new(),
             status_code: None,
@@ -235,80 +191,64 @@ mod tests {
     }
 
     #[test]
-    fn browser_mapping_uses_trusted_agent_scope_and_session_id() {
-        let mut browser = span("browser", "trace-a");
-        browser
+    fn trace_session_id_supplies_mapping_with_trusted_agent_scope() {
+        let mut mapped = span("trace-a");
+        mapped
             .attributes
             .insert("session.id".into(), "session-a".into());
 
         assert_eq!(
-            classify_capture_span(&browser, "workspace-a", Some("agent-a")).unwrap(),
-            Some(CaptureObservation::BrowserMapping {
+            classify_capture_span(&mapped, "workspace-a", Some("agent-a")).unwrap(),
+            Some(CaptureObservation::Trace {
                 key: CaptureTraceKey::new("workspace-a", "agent-a", "trace-a").unwrap(),
-                session_id: "session-a".into(),
+                session_id: Some("session-a".into()),
             })
         );
-        assert!(classify_capture_span(&browser, "workspace-a", None).is_err());
-        browser
-            .attributes
-            .insert("sp.capture.id".into(), "untrusted-span-capture".into());
-        assert!(classify_capture_span(&browser, "workspace-a", Some("agent-a")).is_err());
+        assert!(classify_capture_span(&mapped, "workspace-a", None)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn obi_span_needs_a_mapping_assignment_before_persistence() {
-        let mut obi = span("obi", "trace-a");
+    fn trace_without_session_id_waits_for_mapping_before_persistence() {
+        let mut trace = span("trace-a");
         assert!(matches!(
-            classify_capture_span(&obi, "workspace-a", Some("agent-a")).unwrap(),
-            Some(CaptureObservation::BackendSpan { .. })
+            classify_capture_span(&trace, "workspace-a", Some("agent-a")).unwrap(),
+            Some(CaptureObservation::Trace {
+                session_id: None,
+                ..
+            })
         ));
-        assert_eq!(obi.session_id, "trace-a"); // model's generic fallback is not accepted as correlation.
-        assign_session_id(&mut obi, "session-a").unwrap();
-        assert_eq!(obi.session_id, "session-a");
-        assert!(assign_session_id(&mut obi, "").is_err());
+        assert_eq!(trace.session_id, "trace-a");
+        assign_session_id(&mut trace, "session-a").unwrap();
+        assert_eq!(trace.session_id, "session-a");
+        assert!(assign_session_id(&mut trace, "").is_err());
     }
 
     #[test]
-    fn obi_session_mapping_accepts_resource_source_marker() {
-        let mut obi = span("obi", "trace-a");
-        obi.attributes.remove(CAPTURE_SOURCE_ATTRIBUTE);
-        obi.resource_attributes
-            .insert(CAPTURE_SOURCE_ATTRIBUTE.into(), "obi".into());
-
-        assign_session_id(&mut obi, "session-a").unwrap();
-        assert_eq!(obi.session_id, "session-a");
-    }
-
-    #[test]
-    fn recording_observations_do_not_create_trace_mappings() {
-        let mut recording = span("browser", "trace-a");
+    fn recording_type_identifies_rrweb_and_requires_session_and_agent() {
+        let mut recording = span("trace-a");
         recording
             .attributes
-            .insert(OBSERVATION_TYPE_ATTRIBUTE.into(), "recording".into());
+            .insert(OBSERVATION_TYPE.into(), "recording".into());
+        recording
+            .attributes
+            .insert("sp.session.id".into(), "session-a".into());
         assert_eq!(
             classify_capture_span(&recording, "workspace-a", Some("agent-a")).unwrap(),
             Some(CaptureObservation::Recording)
         );
         assert!(classify_capture_span(&recording, "workspace-a", None).is_err());
-    }
-
-    #[test]
-    fn obi_span_cannot_bypass_correlation_by_claiming_recording_type() {
-        let mut obi = span("obi", "trace-a");
-        obi.attributes
-            .insert(OBSERVATION_TYPE_ATTRIBUTE.into(), "recording".into());
-        obi.attributes
-            .insert("sp.session.id".into(), "forged-session".into());
-
-        assert!(validate_capture_batch(&[obi], "workspace-a", Some("agent-a")).is_err());
+        recording.attributes.remove("sp.session.id");
+        assert!(classify_capture_span(&recording, "workspace-a", Some("agent-a")).is_err());
     }
 
     #[test]
     fn recording_requires_a_span_level_session_id() {
-        let mut recording = span("browser", "trace-a");
+        let mut recording = span("trace-a");
         recording
             .attributes
-            .insert(OBSERVATION_TYPE_ATTRIBUTE.into(), "recording".into());
+            .insert(OBSERVATION_TYPE.into(), "recording".into());
         recording
             .resource_attributes
             .insert("session.id".into(), "resource-session".into());
@@ -317,57 +257,37 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_agent_telemetry_stays_on_generic_ingest_path() {
-        let mut ordinary = span("browser", "trace-a");
-        ordinary.attributes.remove(CAPTURE_SOURCE_ATTRIBUTE);
+    fn all_agent_trace_spans_use_correlation_without_producer_markers() {
+        let ordinary = span("trace-a");
         assert_eq!(
             classify_capture_span(&ordinary, "workspace-a", Some("agent-a")).unwrap(),
-            None
+            Some(CaptureObservation::Trace {
+                key: CaptureTraceKey::new("workspace-a", "agent-a", "trace-a").unwrap(),
+                session_id: None,
+            })
         );
-        assert!(validate_capture_batch(&[ordinary], "workspace-a", Some("agent-a")).is_ok());
+        assert!(classify_capture_span(&ordinary, "workspace-a", None)
+            .unwrap()
+            .is_none());
+        assert!(!uses_capture_correlation(
+            std::slice::from_ref(&ordinary),
+            None
+        ));
+        assert!(uses_capture_correlation(&[ordinary], Some("agent-a")));
     }
 
     #[test]
-    fn capture_batch_accepts_unmatched_obi_for_durable_staging() {
-        let obi = span("obi", "trace-a");
-        validate_capture_batch(&[obi], "workspace-a", Some("agent-a"))
-            .expect("unmatched OBI is accepted by validation for durable staging");
-    }
-
-    #[test]
-    fn unmatched_obi_batch_can_be_accepted_for_durable_staging() {
-        let obi = span("obi", "trace-a");
-        assert!(validate_capture_batch(&[obi], "workspace-a", Some("agent-a")).is_ok());
-    }
-
-    #[test]
-    fn capture_batch_requires_trusted_agent_and_rejects_legacy_capture_ids() {
-        let mut browser = span("browser", "trace-a");
-        browser
+    fn non_recording_observation_types_are_trace_spans() {
+        let mut trace = span("trace-a");
+        trace
             .attributes
-            .insert("sp.session.id".into(), "session-a".into());
-        browser
-            .attributes
-            .insert(LEGACY_CAPTURE_ID_ATTRIBUTE.into(), "legacy-id".into());
-        assert!(validate_capture_batch(&[browser.clone()], "workspace-a", None).is_err());
-        assert!(validate_capture_batch(&[browser], "workspace-a", Some("agent-a")).is_err());
-    }
-
-    #[test]
-    fn obi_capture_markers_can_come_from_resource_attributes() {
-        let mut obi = span("obi", "trace-a");
-        obi.attributes.remove(CAPTURE_SOURCE_ATTRIBUTE);
-        obi.resource_attributes
-            .insert(CAPTURE_SOURCE_ATTRIBUTE.into(), "obi".into());
-        validate_capture_batch(&[obi], "workspace-a", Some("agent-a"))
-            .expect("resource-marked OBI spans are eligible for durable staging");
-    }
-
-    #[test]
-    fn obi_capture_span_cannot_supply_its_own_session_mapping() {
-        let mut obi = span("obi", "trace-a");
-        obi.attributes
-            .insert("session.id".into(), "claimed-session".into());
-        assert!(validate_capture_batch(&[obi], "workspace-a", Some("agent-a")).is_err());
+            .insert(OBSERVATION_TYPE.into(), "generation".into());
+        assert!(matches!(
+            classify_capture_span(&trace, "workspace-a", Some("agent-a")).unwrap(),
+            Some(CaptureObservation::Trace {
+                session_id: None,
+                ..
+            })
+        ));
     }
 }
