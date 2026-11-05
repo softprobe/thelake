@@ -1,7 +1,6 @@
 //! Claim dirty → full session bounds → lake aggregate → UPSERT → ack.
 
 use crate::config::Config;
-use crate::sql::session_summary::compile_session_summary_upsert_sql;
 use crate::storage::ducklake::PhysicalScope;
 use crate::workspace::quote_pg_ident;
 use anyhow::{anyhow, Context, Result};
@@ -221,21 +220,17 @@ pub async fn load_summary_bounds(
     }
     let client = pool.get().await.context("load summary bounds")?;
     let schema = quote_pg_ident(metadata_schema);
-    // Build IN list with params.
-    let mut sql = format!(
-        "SELECT session_id, start_time_ns, end_time_ns FROM {schema}.session_summary WHERE session_id IN ("
+    let sql = format!(
+        "SELECT session_id, start_time_ns, end_time_ns FROM {schema}.session_summary \
+         WHERE session_id = ANY($1::text[])"
     );
-    let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
-    for (i, id) in session_ids.iter().enumerate() {
-        if i > 0 {
-            sql.push(',');
-        }
-        sql.push_str(&format!("${}", i + 1));
-        params.push(id);
-    }
-    sql.push(')');
+    let ids = session_ids.to_vec();
+    let statement = client
+        .prepare_cached(&sql)
+        .await
+        .context("prepare load summary bounds")?;
     let rows = client
-        .query(&sql, &params[..])
+        .query(&statement, &[&ids])
         .await
         .context("load summary bounds")?;
     for r in rows {
@@ -256,25 +251,17 @@ pub async fn load_summary_bounds_for_workspace(
     }
     let client = pool.get().await.context("load workspace summary bounds")?;
     let schema = quote_pg_ident(metadata_schema);
-    let mut sql = format!(
-        "SELECT session_id, start_time_ns, end_time_ns FROM {schema}.session_summary WHERE workspace_id = $1 AND session_id IN ("
+    let sql = format!(
+        "SELECT session_id, start_time_ns, end_time_ns FROM {schema}.session_summary \
+         WHERE workspace_id = $1 AND session_id = ANY($2::text[])"
     );
-    let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
-        vec![Box::new(workspace_id.to_string())];
-    for (i, id) in session_ids.iter().enumerate() {
-        if i > 0 {
-            sql.push(',');
-        }
-        sql.push_str(&format!("${}", i + 2));
-        params.push(Box::new(id.clone()));
-    }
-    sql.push(')');
-    let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
-        .iter()
-        .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-        .collect();
+    let ids = session_ids.to_vec();
+    let statement = client
+        .prepare_cached(&sql)
+        .await
+        .context("prepare load workspace summary bounds")?;
     for row in client
-        .query(&sql, &refs[..])
+        .query(&statement, &[&workspace_id, &ids])
         .await
         .context("load workspace summary bounds")?
     {
@@ -396,7 +383,7 @@ pub async fn upsert_summary_rows_for_workspace(
     upsert_summary_rows_on(&client, metadata_schema, Some(workspace_id), rows).await
 }
 
-async fn upsert_summary_rows_on<C>(
+pub(super) async fn upsert_summary_rows_on<C>(
     client: &C,
     metadata_schema: &str,
     workspace_id: Option<&str>,
@@ -410,38 +397,52 @@ where
     }
     let schema = quote_pg_ident(metadata_schema);
     let sql = match workspace_id {
-        Some(_) => crate::sql::session_summary::compile_session_summary_upsert_sql_for_workspace(
-            &schema,
-            rows.len(),
-        ),
-        None => compile_session_summary_upsert_sql(&schema, rows.len()),
+        Some(_) => {
+            crate::sql::session_summary::compile_session_summary_upsert_sql_for_workspace(&schema)
+        }
+        None => crate::sql::session_summary::compile_session_summary_upsert_sql(&schema),
     };
     let now = Utc::now();
-    let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
-    for r in rows {
-        if let Some(workspace_id) = workspace_id {
-            params.push(Box::new(workspace_id.to_string()));
-        }
-        params.push(Box::new(r.session_id.clone()));
-        params.push(Box::new(r.start_time_ns));
-        params.push(Box::new(r.end_time_ns));
-        params.push(Box::new(r.observation_count));
-        params.push(Box::new(r.error_count));
-        params.push(Box::new(r.input_tokens));
-        params.push(Box::new(r.output_tokens));
-        params.push(Box::new(r.total_tokens));
-        params.push(Box::new(r.total_cost));
-        params.push(Box::new(r.agent_name.clone()));
-        params.push(Box::new(r.user_id.clone()));
-        params.push(Box::new(r.model_name.clone()));
-        params.push(Box::new(now));
+    let session_ids: Vec<String> = rows.iter().map(|row| row.session_id.clone()).collect();
+    let start_time_ns: Vec<i64> = rows.iter().map(|row| row.start_time_ns).collect();
+    let end_time_ns: Vec<Option<i64>> = rows.iter().map(|row| row.end_time_ns).collect();
+    let observation_count: Vec<i64> = rows.iter().map(|row| row.observation_count).collect();
+    let error_count: Vec<i64> = rows.iter().map(|row| row.error_count).collect();
+    let input_tokens: Vec<Option<i64>> = rows.iter().map(|row| row.input_tokens).collect();
+    let output_tokens: Vec<Option<i64>> = rows.iter().map(|row| row.output_tokens).collect();
+    let total_tokens: Vec<Option<i64>> = rows.iter().map(|row| row.total_tokens).collect();
+    let total_cost: Vec<Option<f64>> = rows.iter().map(|row| row.total_cost).collect();
+    let agent_names: Vec<Option<String>> = rows.iter().map(|row| row.agent_name.clone()).collect();
+    let user_ids: Vec<Option<String>> = rows.iter().map(|row| row.user_id.clone()).collect();
+    let model_names: Vec<Option<String>> = rows.iter().map(|row| row.model_name.clone()).collect();
+    let updated_at = vec![now; rows.len()];
+    let workspace_id_value = workspace_id.map(str::to_owned);
+
+    let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::with_capacity(14);
+    if let Some(workspace_id) = workspace_id_value.as_ref() {
+        params.push(workspace_id as &(dyn tokio_postgres::types::ToSql + Sync));
     }
-    let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
-        .iter()
-        .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-        .collect();
+    params.extend([
+        &session_ids as &(dyn tokio_postgres::types::ToSql + Sync),
+        &start_time_ns,
+        &end_time_ns,
+        &observation_count,
+        &error_count,
+        &input_tokens,
+        &output_tokens,
+        &total_tokens,
+        &total_cost,
+        &agent_names,
+        &user_ids,
+        &model_names,
+        &updated_at,
+    ]);
+    let statement = client
+        .prepare_cached(&sql)
+        .await
+        .context("prepare session_summary UPSERT")?;
     client
-        .execute(&sql, &param_refs[..])
+        .execute(&statement, &params)
         .await
         .context("session_summary UPSERT")?;
     Ok(())

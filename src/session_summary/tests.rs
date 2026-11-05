@@ -5,7 +5,7 @@ use super::*;
 use crate::ingest::maybe_after_traces_commit;
 use crate::session_summary::reduce::{
     ack_dirty, claim_dirty, dirty_depth, publish_claimed_summary_rows, upsert_summary_rows,
-    SummaryRow,
+    upsert_summary_rows_on, SummaryRow,
 };
 use crate::session_summary::test_span::span_at;
 use chrono::{TimeZone, Utc};
@@ -434,6 +434,57 @@ async fn postgres_upsert_summary_absolute_replace_all_fields() {
     assert_eq!(r.get::<_, Option<i64>>(8), Some(22));
     assert_eq!(r.get::<_, i64>(9), 100_000_000_000);
     assert_eq!(r.get::<_, Option<i64>>(10), Some(200_000_000_000));
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_session_summary_upsert_reuses_cached_statements_across_batch_sizes() {
+    let schema = "thelake_ss_upsert_cache";
+    let pool = try_pg_pool(schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let client = pool.get().await.expect("client");
+
+    for batch_size in 1..=16 {
+        let rows: Vec<SummaryRow> = (0..batch_size)
+            .map(|row| SummaryRow {
+                session_id: format!("batch-{batch_size}-row-{row}"),
+                start_time_ns: 1_000 + row as i64,
+                end_time_ns: Some(2_000 + row as i64),
+                observation_count: 1,
+                error_count: 0,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                total_cost: None,
+                agent_name: None,
+                user_id: None,
+                model_name: None,
+            })
+            .collect();
+        upsert_summary_rows_on(&client, schema, None, &rows)
+            .await
+            .expect("dedicated summary upsert");
+        upsert_summary_rows_on(&client, schema, Some("workspace-1"), &rows)
+            .await
+            .expect("workspace summary upsert");
+    }
+
+    let statement_count: i64 = client
+        .query_one(
+            "SELECT count(*)::bigint FROM pg_prepared_statements WHERE statement LIKE $1",
+            &[&format!(
+                "INSERT INTO {}.session_summary%",
+                crate::workspace::quote_pg_ident(schema)
+            )],
+        )
+        .await
+        .expect("count cached summary upsert statements")
+        .get(0);
+    assert_eq!(
+        statement_count, 2,
+        "batch size changes must reuse one prepared statement for each ownership scope"
+    );
 }
 
 #[tokio::test]
