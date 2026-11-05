@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Result};
 use duckdb::Connection;
+use std::thread;
+use std::time::Duration;
 
 use super::{ducklake_set_option_scope_for_qualified, PhysicalScope};
 use crate::sql::schema::{is_otlp_table, OTLP_LAYOUT_SQL};
@@ -97,8 +99,32 @@ pub(crate) fn apply_otlp_layout_profile(
         ),
         format!("CALL {alias}.set_option('hive_file_pattern', true, {option_scope});"),
     ];
-    conn.execute_batch(&statements.join("\n"))
-        .map_err(|error| anyhow!("failed to apply canonical OTLP layout to {qualified}: {error}"))
+    let sql = statements.join("\n");
+    // Two writers can set the same catalog options at once. Postgres then
+    // aborts one serializable UPDATE. The options are the same values, so
+    // repeating the batch converges.
+    let mut attempt = 0;
+    loop {
+        match conn.execute_batch(&sql) {
+            Ok(()) => return Ok(()),
+            Err(error) if is_serialization_conflict(&error) && attempt < 4 => {
+                attempt += 1;
+                let _ = conn.execute_batch("ROLLBACK;");
+                thread::sleep(Duration::from_millis(20 * attempt));
+            }
+            Err(error) => {
+                return Err(anyhow!(
+                    "failed to apply canonical OTLP layout to {qualified}: {error}"
+                ));
+            }
+        }
+    }
+}
+
+fn is_serialization_conflict(error: &duckdb::Error) -> bool {
+    error
+        .to_string()
+        .contains("could not serialize access due to concurrent update")
 }
 
 /// Apply the DuckDB session prerequisite for byte-sized row groups.

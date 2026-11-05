@@ -12,7 +12,8 @@ use softprobe_runtime::authn::WorkspaceAuth;
 use softprobe_runtime::config::Config;
 use softprobe_runtime::models::{Log, Score, ScoreConfig, ScoreDataType, ScoreSource, Span};
 use softprobe_runtime::promotion::{parse_promotion_manifest, PromotionManifest};
-use softprobe_runtime::workspace::{ScopeProvisioningRequest, WorkspaceManager};
+use softprobe_runtime::query::TraceCountFilter;
+use softprobe_runtime::workspace::{ScopeProvisioningRequest, WorkspaceContext, WorkspaceManager};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -799,4 +800,340 @@ columns:
         connection_body["error"]["code"],
         "shared_scope_connection_unavailable"
     );
+}
+
+struct ResetEnvGuard(Option<std::ffi::OsString>);
+
+impl ResetEnvGuard {
+    fn set() -> Self {
+        let previous = std::env::var_os("SPLAKE_RESET_DUCKLAKE");
+        std::env::set_var("SPLAKE_RESET_DUCKLAKE", "1");
+        Self(previous)
+    }
+}
+
+impl Drop for ResetEnvGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(value) => std::env::set_var("SPLAKE_RESET_DUCKLAKE", value),
+            None => std::env::remove_var("SPLAKE_RESET_DUCKLAKE"),
+        }
+    }
+}
+
+async fn provision_shared_pair(manager: &WorkspaceManager, config: &Config) -> (String, String) {
+    let ids = provision_shared(manager, config, 2).await;
+    (ids[0].clone(), ids[1].clone())
+}
+
+async fn provision_shared(
+    manager: &WorkspaceManager,
+    config: &Config,
+    count: usize,
+) -> Vec<String> {
+    let mut ids = Vec::with_capacity(count);
+    for _ in 0..count {
+        let workspace = Uuid::new_v4().to_string();
+        manager
+            .provision_scope(ScopeProvisioningRequest {
+                scope_id: workspace.clone(),
+                metadata_schema: config.ducklake.metadata_schema.clone(),
+                data_path: config.ducklake.data_path.clone(),
+            })
+            .await
+            .expect("provision shared workspace");
+        ids.push(workspace);
+    }
+    ids
+}
+
+fn trace_id_for(index: usize, suffix: &str) -> String {
+    format!("{index:x}{}", &suffix[..31])
+}
+
+async fn write_private_spans(
+    contexts: &[Arc<WorkspaceContext>],
+    ids: &[String],
+    suffix: &str,
+    session: &str,
+) -> Vec<String> {
+    let mut traces = Vec::with_capacity(ids.len());
+    for (index, (workspace_id, workspace)) in ids.iter().zip(contexts).enumerate() {
+        let trace_id = trace_id_for(index, suffix);
+        workspace
+            .ingest()
+            .add_spans(vec![span(workspace_id, &trace_id, session)], 0)
+            .await
+            .expect("write private span");
+        traces.push(trace_id);
+    }
+    for (workspace, trace_id) in contexts.iter().zip(&traces) {
+        wait_until_visible(workspace, trace_id).await;
+    }
+    traces
+}
+
+async fn assert_spans_stay_private(contexts: &[Arc<WorkspaceContext>], traces: &[String]) {
+    for (reader_index, reader) in contexts.iter().enumerate() {
+        for (writer_index, trace_id) in traces.iter().enumerate() {
+            let expected = u64::from(reader_index == writer_index);
+            assert_eq!(
+                visible_span_count(reader, trace_id).await,
+                expected,
+                "workspace {reader_index} reading span {writer_index}"
+            );
+        }
+    }
+}
+
+async fn visible_span_count(workspace: &WorkspaceContext, trace_id: &str) -> u64 {
+    workspace
+        .query()
+        .count_traces(TraceCountFilter {
+            time_window: crate::util::query_window(),
+            session_id: None,
+            app_id: None,
+            span_id: Some(format!("span-{trace_id}")),
+        })
+        .await
+        .expect("typed span count")
+}
+
+async fn wait_until_visible(workspace: &WorkspaceContext, trace_id: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while visible_span_count(workspace, trace_id).await != 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "span {trace_id} never became visible to its own workspace"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn shared_workspaces_share_one_catalog_pool_and_rebind_one_query_slot() {
+    let temp = TempDir::new().expect("tempdir");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let mut config = shared_config(&temp, format!("shared_pool_contract_{suffix}"));
+    config.ducklake.writer_pool_size = 1;
+    config.query.max_connections = 1;
+    let manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
+        .await
+        .expect("workspace manager");
+    let (workspace_a, workspace_b) = provision_shared_pair(&manager, &config).await;
+
+    let ws_a = manager.workspace_for(&workspace_a).await.expect("A");
+    let ws_b = manager.workspace_for(&workspace_b).await.expect("B");
+
+    assert_eq!(
+        manager.catalog_pool_count_for_test(),
+        1,
+        "two shared workspaces must share one CatalogPool"
+    );
+    assert_eq!(
+        manager.catalog_session_count_for_test(),
+        1 + 1 + 1,
+        "sessions = writer slots + query slots + one maintenance session"
+    );
+
+    let trace_a = format!("a{}", &suffix[..31]);
+    let trace_b = format!("b{}", &suffix[..31]);
+    let session = format!("pool-session-{suffix}");
+    ws_a.ingest()
+        .add_spans(vec![span(&workspace_a, &trace_a, &session)], 0)
+        .await
+        .expect("write A");
+    ws_b.ingest()
+        .add_spans(vec![span(&workspace_b, &trace_b, &session)], 0)
+        .await
+        .expect("write B");
+    wait_until_visible(&ws_a, &trace_a).await;
+    wait_until_visible(&ws_b, &trace_b).await;
+
+    for round in 0..3 {
+        assert_eq!(
+            visible_span_count(&ws_a, &trace_a).await,
+            1,
+            "round {round}"
+        );
+        assert_eq!(
+            visible_span_count(&ws_a, &trace_b).await,
+            0,
+            "A must not read B's span on the shared slot (round {round})"
+        );
+        assert_eq!(
+            visible_span_count(&ws_b, &trace_b).await,
+            1,
+            "round {round}"
+        );
+        assert_eq!(
+            visible_span_count(&ws_b, &trace_a).await,
+            0,
+            "B must not read A's span on the shared slot (round {round})"
+        );
+    }
+    assert_eq!(
+        manager.catalog_session_count_for_test(),
+        1 + 1 + 1,
+        "rebinding the query slot must not open sessions"
+    );
+}
+
+#[tokio::test]
+async fn dev_reset_wipes_once_when_the_shared_pool_is_created() {
+    let _reset = ResetEnvGuard::set();
+    let temp = TempDir::new().expect("tempdir");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let mut config = shared_config(&temp, format!("shared_reset_contract_{suffix}"));
+    config.ducklake.writer_pool_size = 1;
+    config.query.max_connections = 1;
+    let manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
+        .await
+        .expect("workspace manager");
+    let (workspace_a, workspace_b) = provision_shared_pair(&manager, &config).await;
+
+    let ws_a = manager.workspace_for(&workspace_a).await.expect("A");
+    let trace_a = format!("a{}", &suffix[..31]);
+    let trace_b = format!("b{}", &suffix[..31]);
+    let session = format!("reset-session-{suffix}");
+    ws_a.ingest()
+        .add_spans(vec![span(&workspace_a, &trace_a, &session)], 0)
+        .await
+        .expect("write A before B is built");
+    wait_until_visible(&ws_a, &trace_a).await;
+
+    let ws_b = manager.workspace_for(&workspace_b).await.expect("B");
+    assert_eq!(
+        visible_span_count(&ws_a, &trace_a).await,
+        1,
+        "building a second workspace must not wipe the lake"
+    );
+    ws_b.ingest()
+        .add_spans(vec![span(&workspace_b, &trace_b, &session)], 0)
+        .await
+        .expect("write B");
+    wait_until_visible(&ws_b, &trace_b).await;
+    assert_eq!(visible_span_count(&ws_a, &trace_a).await, 1);
+    assert_eq!(visible_span_count(&ws_b, &trace_a).await, 0);
+}
+
+#[tokio::test]
+async fn shared_pool_session_count_stays_fixed_as_workspaces_grow() {
+    let temp = TempDir::new().expect("tempdir");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let mut config = shared_config(&temp, format!("shared_pool_growth_{suffix}"));
+    config.ducklake.writer_pool_size = 2;
+    config.query.max_connections = 3;
+    let manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
+        .await
+        .expect("workspace manager");
+    let ids = provision_shared(&manager, &config, 4).await;
+    let mut contexts = Vec::with_capacity(ids.len());
+    for id in &ids {
+        contexts.push(manager.workspace_for(id).await.expect("workspace"));
+    }
+
+    assert_eq!(manager.catalog_pool_count_for_test(), 1);
+    assert_eq!(
+        manager.catalog_session_count_for_test(),
+        2 + 3 + 1,
+        "four workspaces still use writer slots + query slots + one maintenance session"
+    );
+
+    let traces = write_private_spans(
+        &contexts,
+        &ids,
+        &suffix,
+        &format!("growth-session-{suffix}"),
+    )
+    .await;
+    assert_spans_stay_private(&contexts, &traces).await;
+    assert_eq!(manager.catalog_pool_count_for_test(), 1);
+    assert_eq!(manager.catalog_session_count_for_test(), 2 + 3 + 1);
+}
+
+#[tokio::test]
+async fn one_query_slot_serves_two_workspaces_concurrently_without_cross_read() {
+    let temp = TempDir::new().expect("tempdir");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let mut config = shared_config(&temp, format!("shared_pool_concurrent_{suffix}"));
+    config.ducklake.writer_pool_size = 1;
+    config.query.max_connections = 1;
+    let manager = WorkspaceManager::connect(Arc::new(config.clone()), None)
+        .await
+        .expect("workspace manager");
+    let ids = provision_shared(&manager, &config, 2).await;
+    let contexts = vec![
+        manager.workspace_for(&ids[0]).await.expect("A"),
+        manager.workspace_for(&ids[1]).await.expect("B"),
+    ];
+    let traces = write_private_spans(
+        &contexts,
+        &ids,
+        &suffix,
+        &format!("concurrent-session-{suffix}"),
+    )
+    .await;
+
+    let (a_own, a_other, b_own, b_other) = tokio::join!(
+        visible_span_count(&contexts[0], &traces[0]),
+        visible_span_count(&contexts[0], &traces[1]),
+        visible_span_count(&contexts[1], &traces[1]),
+        visible_span_count(&contexts[1], &traces[0]),
+    );
+    assert_eq!((a_own, a_other, b_own, b_other), (1, 0, 1, 0));
+    assert_eq!(manager.catalog_pool_count_for_test(), 1);
+    assert_eq!(manager.catalog_session_count_for_test(), 1 + 1 + 1);
+}
+
+#[tokio::test]
+async fn isolated_workspaces_keep_separate_pools_and_separate_rows() {
+    let temp = TempDir::new().expect("tempdir");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let mut config = shared_config(&temp, format!("iso_pool_reg_{suffix}"));
+    config.ducklake.workspace_scope_mode =
+        softprobe_runtime::workspace_scope::WorkspaceScopeMode::Isolated;
+    config.ducklake.writer_pool_size = 1;
+    config.query.max_connections = 1;
+    let manager = WorkspaceManager::connect(Arc::new(config), None)
+        .await
+        .expect("workspace manager");
+    let ids = [Uuid::new_v4().to_string(), Uuid::new_v4().to_string()];
+    let schemas = [format!("iso_a_{suffix}"), format!("iso_b_{suffix}")];
+    for (index, id) in ids.iter().enumerate() {
+        manager
+            .provision_scope(ScopeProvisioningRequest {
+                scope_id: id.clone(),
+                metadata_schema: schemas[index].clone(),
+                data_path: temp
+                    .path()
+                    .join(format!("isolated-{index}"))
+                    .to_string_lossy()
+                    .into(),
+            })
+            .await
+            .expect("provision isolated workspace");
+    }
+    let contexts = vec![
+        manager.workspace_for(&ids[0]).await.expect("A"),
+        manager.workspace_for(&ids[1]).await.expect("B"),
+    ];
+
+    assert_eq!(
+        manager.catalog_pool_count_for_test(),
+        2,
+        "isolated workspaces keep a pool per physical catalog"
+    );
+    assert_eq!(manager.catalog_session_count_for_test(), 2 * (1 + 1 + 1));
+
+    let traces = write_private_spans(
+        &contexts,
+        &ids,
+        &suffix,
+        &format!("isolated-session-{suffix}"),
+    )
+    .await;
+    assert_spans_stay_private(&contexts, &traces).await;
+    assert_eq!(manager.catalog_pool_count_for_test(), 2);
+    assert_eq!(manager.catalog_session_count_for_test(), 2 * (1 + 1 + 1));
 }

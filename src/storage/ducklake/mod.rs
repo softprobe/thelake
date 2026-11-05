@@ -6,6 +6,7 @@
 // ============================================================================
 
 mod attach;
+mod catalog_pool;
 pub(crate) mod layout;
 mod object_store;
 mod otlp;
@@ -16,6 +17,7 @@ mod util;
 pub(crate) mod workspace_views;
 mod writer;
 
+pub(crate) use catalog_pool::{CatalogPool, DevReset, QueryCaller, QuerySession, QuerySlot};
 pub(crate) use physical_scope::{
     DuckLakeAccess, PhysicalScope, SharedScopeError, SharedScopeErrorCode, WorkspaceBinding,
     WorkspaceScopeMode,

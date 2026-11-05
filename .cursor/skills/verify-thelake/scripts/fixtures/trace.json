@@ -1,0 +1,35 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": { "stringValue": "checkout-api" }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "softprobe.verify" },
+          "spans": [
+            {
+              "traceId": "0102030405060708090a0b0c0d0e0f10",
+              "spanId": "1122334455667788",
+              "name": "POST /api/checkout",
+              "kind": 2,
+              "startTimeUnixNano": "1777802600000000000",
+              "endTimeUnixNano": "1777802601500000000",
+              "attributes": [
+                {
+                  "key": "sp.session.id",
+                  "value": { "stringValue": "verify-session" }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

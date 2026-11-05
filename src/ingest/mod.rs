@@ -5,10 +5,11 @@
 
 mod coalesce;
 
+use crate::catalog_sessions::CatalogSessions;
 use crate::config::{resolve_write_timeout_seconds, Config};
 use crate::models::{Log, Score, ScoreConfig, Span};
 use crate::session_summary::{DirtyHint, SessionSummaryDirty};
-use crate::storage::ducklake::DuckLakeWriter;
+use crate::storage::ducklake::{CatalogPool, DuckLakeWriter};
 use crate::workspace::DuckLakeScopeResolver;
 use crate::workspace_scope::{WorkspaceBinding, WorkspaceScopeMode, DEFAULT_WORKSPACE_ID};
 use anyhow::{anyhow, Result};
@@ -44,29 +45,16 @@ where
 }
 
 impl IngestEngine {
-    /// Bind ingest to one workspace: create the writer, optional atomic dev reset,
-    /// and coalesce flush workers that load promotion manifests before each write.
-    pub(crate) async fn bound(
+    /// Bind ingest to one workspace over a shared catalog pool, with coalesce
+    /// flush workers that load promotion manifests before each write.
+    pub(crate) fn bound(
         config: &Config,
         resolver: DuckLakeScopeResolver,
         binding: WorkspaceBinding,
+        pool: Arc<CatalogPool>,
     ) -> Result<Arc<Self>> {
         let workspace_id = binding.workspace_id.clone();
-        let writer = Arc::new(DuckLakeWriter::new(config, binding).await?);
-
-        if std::env::var("SPLAKE_RESET_DUCKLAKE").ok().as_deref() == Some("1") {
-            let schema = writer.metadata_schema();
-            let telemetry = resolver
-                .load_active_telemetry_columns_manifests_for_scope(schema)
-                .await?;
-            let business = resolver
-                .load_active_business_table_manifests_for_scope(schema)
-                .await?;
-            writer
-                .apply_dev_reset_if_requested(&telemetry, &business)
-                .await?;
-        }
-
+        let writer = Arc::new(DuckLakeWriter::new(binding, pool)?);
         let dirty =
             session_summary_dirty_for(config, &resolver, &workspace_id, writer.metadata_schema());
         Ok(Arc::new(Self::from_writer(
@@ -83,17 +71,17 @@ impl IngestEngine {
     /// Test/default helper: connect the registry and bind [`DEFAULT_WORKSPACE_ID`].
     pub async fn bound_default(config: &Config) -> Result<Arc<Self>> {
         let resolver = DuckLakeScopeResolver::connect(config).await?;
+        let scope = resolver.default_physical_scope().clone();
         let binding = WorkspaceBinding::new(
             DEFAULT_WORKSPACE_ID,
-            resolver.default_physical_scope().clone(),
+            scope.clone(),
             config.ducklake.workspace_scope_mode,
         )
         .map_err(|error| anyhow!(error))?;
-        let ingest = Self::bound(config, resolver, binding).await?;
-        // Match former IngestPipeline::new: ensure physical schema before any
-        // query worker or leftover-table fail-fast checks attach the catalog.
-        ingest.ensure_shared_schema().await?;
-        Ok(ingest)
+        let pool = CatalogSessions::new(Arc::new(config.clone()), resolver.clone())
+            .pool_for(&scope)
+            .await?;
+        Self::bound(config, resolver, binding, pool)
     }
 
     fn from_writer(
@@ -236,10 +224,6 @@ impl IngestEngine {
 
     pub fn flush_interval_seconds(&self) -> u64 {
         self.flush_interval_seconds
-    }
-
-    pub(crate) async fn ensure_shared_schema(&self) -> Result<()> {
-        self.writer.ensure_shared_schema().await
     }
 
     /// Add scores through the authenticated workspace write path.

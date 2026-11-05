@@ -4,13 +4,11 @@
 //! SQL recipes live in [`crate::sql::maintenance`].
 
 mod engine;
-pub(crate) mod maint_conn_pool;
 mod maintenance_job;
 pub mod scheduler;
 pub(crate) mod session_summary_access;
 mod workspace_purge_job;
 
 pub use engine::{maintenance_table_names, MaintenanceEngine};
-pub(crate) use maint_conn_pool::MaintenanceConnPool;
 pub use maintenance_job::{PhysicalScopeMaintenanceJob, PHYSICAL_SCOPE_MAINTENANCE_JOB};
 pub(crate) use workspace_purge_job::WorkspacePurgeJob;

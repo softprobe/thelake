@@ -1,7 +1,7 @@
 //! Physical-scope maintenance facade.
 
 use crate::async_jobs::LeaseStore;
-use crate::compaction::maint_conn_pool::MaintenanceConnPool;
+use crate::catalog_sessions::CatalogSessions;
 use crate::config::Config;
 use crate::storage::ducklake::PhysicalScope;
 use crate::workspace::DuckLakeScopeResolver;
@@ -10,7 +10,6 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use deadpool_postgres::Pool;
 use duckdb::Connection;
-use std::sync::Arc;
 use tokio::sync::watch;
 
 fn ensure_maintenance_lease_active(lease_lost: &watch::Receiver<bool>) -> Result<()> {
@@ -48,7 +47,7 @@ pub struct MaintenanceEngine {
     config: Config,
     default_physical: PhysicalScope,
     scope_registry: DuckLakeScopeResolver,
-    conn_pool: Arc<MaintenanceConnPool>,
+    sessions: CatalogSessions,
 }
 
 /// Opaque physical scope selected by `MaintenanceEngine`.
@@ -60,27 +59,33 @@ pub(crate) struct MaintenanceScope {
 }
 
 impl MaintenanceEngine {
-    pub(crate) fn from_config(config: &Config, scope_registry: DuckLakeScopeResolver) -> Self {
+    pub(crate) fn new(
+        config: &Config,
+        scope_registry: DuckLakeScopeResolver,
+        sessions: CatalogSessions,
+    ) -> Self {
         Self {
             config: config.clone(),
             default_physical: scope_registry.default_physical_scope().clone(),
             scope_registry,
-            conn_pool: Arc::new(MaintenanceConnPool::new(config)),
+            sessions,
         }
     }
 
-    pub(crate) async fn new(
-        config: &Config,
-        scope_registry: DuckLakeScopeResolver,
-    ) -> Result<Self> {
-        Ok(Self::from_config(config, scope_registry))
+    /// Borrow the maintenance session of a physical scope's catalog pool.
+    async fn with_maintenance_conn<R>(
+        &self,
+        physical: &PhysicalScope,
+        f: impl FnOnce(&Connection) -> Result<R>,
+    ) -> Result<(R, bool, std::time::Duration)> {
+        self.sessions.pool_for(physical).await?.with_maintenance(f)
     }
 
     /// Validate every physical scope before the service reports readiness.
     pub(crate) async fn validate_startup(&self) -> Result<()> {
         for (scope_key, physical) in self.physical_scopes().await? {
-            self.conn_pool
-                .with_conn(&physical, validate_newer_than_extension)
+            self.with_maintenance_conn(&physical, validate_newer_than_extension)
+                .await
                 .map_err(|error| anyhow!("maintenance open failed for {scope_key}: {error}"))?;
         }
         Ok(())
@@ -185,36 +190,39 @@ impl MaintenanceEngine {
         let registry_schema = self.scope_registry.registry_schema();
         let holder_id = token.holder_id.as_str();
         let lease_epoch = token.epoch;
-        let ((), cold, open_elapsed) = self.conn_pool.with_conn(physical, |conn| {
-            conn.execute(
-                &crate::sql::maintenance::scope_config_upsert_sql(registry_schema),
-                duckdb::params![
-                    scope_key,
-                    physical.attach_alias(),
-                    physical.pg_namespace(),
-                    self.config.maintenance.enabled,
-                    self.config.maintenance.metadata_enabled,
-                    self.config.maintenance.reader_safety_grace_seconds as i64,
-                    Some(lease_job),
-                    Some(holder_id),
-                    lease_epoch,
-                ],
-            )?;
-            let statements = crate::storage::ducklake::workspace_views::workspace_purge_statements(
-                conn,
-                physical,
-                workspace_id,
-                registry_schema,
-                scope_key,
-                holder_id,
-                lease_epoch,
-            )?;
-            for sql in statements {
-                ensure_maintenance_lease_active(&lease_lost)?;
-                execute_maintenance_script(conn, &sql, Some(&lease_lost))?;
-            }
-            Ok(())
-        })?;
+        let ((), cold, open_elapsed) = self
+            .with_maintenance_conn(physical, |conn| {
+                conn.execute(
+                    &crate::sql::maintenance::scope_config_upsert_sql(registry_schema),
+                    duckdb::params![
+                        scope_key,
+                        physical.attach_alias(),
+                        physical.pg_namespace(),
+                        self.config.maintenance.enabled,
+                        self.config.maintenance.metadata_enabled,
+                        self.config.maintenance.reader_safety_grace_seconds as i64,
+                        Some(lease_job),
+                        Some(holder_id),
+                        lease_epoch,
+                    ],
+                )?;
+                let statements =
+                    crate::storage::ducklake::workspace_views::workspace_purge_statements(
+                        conn,
+                        physical,
+                        workspace_id,
+                        registry_schema,
+                        scope_key,
+                        holder_id,
+                        lease_epoch,
+                    )?;
+                for sql in statements {
+                    ensure_maintenance_lease_active(&lease_lost)?;
+                    execute_maintenance_script(conn, &sql, Some(&lease_lost))?;
+                }
+                Ok(())
+            })
+            .await?;
         crate::self_monitoring::record_maintenance_step(
             scope_key,
             if cold {
@@ -338,7 +346,7 @@ impl MaintenanceEngine {
             &scope.scope_key,
             &self.config,
             &scope.physical,
-            Arc::clone(&self.conn_pool),
+            self.sessions.pool_for(&scope.physical).await?,
             max_sessions,
         )
         .await
@@ -356,7 +364,7 @@ impl MaintenanceEngine {
             scope.physical.pg_namespace(),
             &self.config,
             &scope.physical,
-            Arc::clone(&self.conn_pool),
+            self.sessions.pool_for(&scope.physical).await?,
             &scope.scope_key,
             from,
             to,
@@ -467,28 +475,31 @@ impl MaintenanceEngine {
                 lease_epoch,
             },
         );
-        let ((), cold, open_elapsed) = self.conn_pool.with_conn(physical, |conn| {
-            let lease_job = lease_token.map(|_| crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB);
-            let lease_holder = lease_token.map(|token| token.holder_id.as_str());
-            conn.execute(
-                &crate::sql::maintenance::scope_config_upsert_sql(
-                    self.scope_registry.registry_schema(),
-                ),
-                duckdb::params![
-                    scope_key,
-                    physical.attach_alias(),
-                    physical.pg_namespace(),
-                    self.config.maintenance.enabled,
-                    self.config.maintenance.metadata_enabled || force_metadata_cleanup,
-                    self.config.maintenance.reader_safety_grace_seconds as i64,
-                    lease_job,
-                    lease_holder,
-                    lease_epoch,
-                ],
-            )?;
-            execute_maintenance_script(conn, &sql, lease_lost.as_ref())?;
-            Ok(())
-        })?;
+        let ((), cold, open_elapsed) = self
+            .with_maintenance_conn(physical, |conn| {
+                let lease_job =
+                    lease_token.map(|_| crate::compaction::PHYSICAL_SCOPE_MAINTENANCE_JOB);
+                let lease_holder = lease_token.map(|token| token.holder_id.as_str());
+                conn.execute(
+                    &crate::sql::maintenance::scope_config_upsert_sql(
+                        self.scope_registry.registry_schema(),
+                    ),
+                    duckdb::params![
+                        scope_key,
+                        physical.attach_alias(),
+                        physical.pg_namespace(),
+                        self.config.maintenance.enabled,
+                        self.config.maintenance.metadata_enabled || force_metadata_cleanup,
+                        self.config.maintenance.reader_safety_grace_seconds as i64,
+                        lease_job,
+                        lease_holder,
+                        lease_epoch,
+                    ],
+                )?;
+                execute_maintenance_script(conn, &sql, lease_lost.as_ref())?;
+                Ok(())
+            })
+            .await?;
         crate::self_monitoring::record_maintenance_step(
             scope_key,
             if cold {
