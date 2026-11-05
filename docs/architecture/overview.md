@@ -77,7 +77,9 @@ DuckLake data inlining decides where committed rows live:
 - larger writes become Parquet files under `ducklake.data_path`.
 
 Both forms are committed DuckLake data and are queried through the same
-attached catalog.
+attached catalog. Periodic maintenance flushes accumulated inlined rows to
+Parquet before merging adjacent files, keeping PostgreSQL's catalog tables
+from becoming an unbounded long-term data store.
 
 ## Storage and catalog
 

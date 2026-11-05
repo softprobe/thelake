@@ -81,6 +81,7 @@ mod tests {
         ));
         assert!(sql.contains("SET VARIABLE thelake_otlp_row_group_size_bytes = 8388608"));
         assert_eq!(sql.matches("ducklake_merge_adjacent_files(").count(), 1);
+        assert_eq!(sql.matches("ducklake_flush_inlined_data(").count(), 1);
         assert_eq!(sql.matches("newer_than =>").count(), 1);
         assert!(sql.contains("VALUES ('traces'), ('logs'), ('scores')"));
         assert!(sql.contains("LEFT JOIN __thelake_registry.\"softprobe\".compaction_watermark"));
@@ -121,6 +122,10 @@ mod tests {
                 < sql
                     .find("INSERT INTO __thelake_registry.\"softprobe\".compaction_watermark")
                     .unwrap()
+        );
+        assert!(
+            sql.find("ducklake_flush_inlined_data(").unwrap()
+                < sql.find("ducklake_merge_adjacent_files(").unwrap()
         );
         assert!(
             sql.find("INSERT INTO __thelake_registry.\"softprobe\".compaction_watermark")

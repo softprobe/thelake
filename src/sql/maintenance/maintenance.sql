@@ -85,6 +85,19 @@ WHERE config.scope_key = getvariable('thelake_maintenance_scope_key')
       AND lease.lease_until > now()
   );
 
+-- PostgreSQL is both the catalog and the temporary store for small DuckLake
+-- writes. Flush accumulated inline rows before compaction so repeated reads do
+-- not keep copying an ever-growing inline table through Postgres.
+CREATE OR REPLACE TEMP TABLE thelake_flushed_inlined_data AS
+SELECT schema_name, table_name, sum(rows_flushed)::BIGINT AS rows_flushed
+FROM ducklake_flush_inlined_data(
+  getvariable('thelake_catalog_alias'),
+  schema_name => getvariable('thelake_metadata_schema'))
+GROUP BY schema_name, table_name;
+INSERT INTO thelake_maintenance_result
+SELECT table_name, 'flush_inlined_data', 'completed', rows_flushed, 0
+FROM thelake_flushed_inlined_data;
+
 SET VARIABLE thelake_merge_sql = (
   SELECT coalesce(string_agg(
     format(
