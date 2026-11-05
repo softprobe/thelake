@@ -442,11 +442,24 @@ async fn postgres_upsert_summary_absolute_replace_all_fields() {
 #[tokio::test]
 #[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
 async fn postgres_session_summary_upsert_reuses_cached_statements_across_batch_sizes() {
-    let schema = "thelake_ss_upsert_cache";
-    let pool = try_pg_pool(schema)
+    let dedicated_schema = "thelake_ss_upsert_cache_dedicated";
+    let shared_schema = "thelake_ss_upsert_cache_shared";
+    let pool = try_pg_pool(dedicated_schema)
         .await
         .expect("ducklake-postgres required (make setup)");
     let client = pool.get().await.expect("client");
+
+    crate::session_summary::ensure_shared_session_summary_tables(&client, shared_schema)
+        .await
+        .expect("shared summary DDL");
+    let shared_q = crate::workspace::quote_pg_ident(shared_schema);
+    client
+        .execute(
+            &format!("TRUNCATE {shared_q}.session_summary, {shared_q}.session_summary_dirty"),
+            &[],
+        )
+        .await
+        .expect("truncate shared summary tables");
 
     for batch_size in 1..=16 {
         let rows: Vec<SummaryRow> = (0..batch_size)
@@ -465,26 +478,39 @@ async fn postgres_session_summary_upsert_reuses_cached_statements_across_batch_s
                 model_name: None,
             })
             .collect();
-        upsert_summary_rows_on(&client, schema, None, &rows)
+        upsert_summary_rows_on(&client, dedicated_schema, None, &rows)
             .await
             .expect("dedicated summary upsert");
-        upsert_summary_rows_on(&client, schema, Some("workspace-1"), &rows)
+        upsert_summary_rows_on(&client, shared_schema, Some("workspace-1"), &rows)
             .await
             .expect("workspace summary upsert");
     }
 
-    let session_summary_fragment = format!(
+    let dedicated_summary_fragment = format!(
         "{}.session_summary",
-        crate::workspace::quote_pg_ident(schema)
+        crate::workspace::quote_pg_ident(dedicated_schema)
     );
-    let statement_count: i64 = client
-        .query_one(PREPARED_STATEMENT_COUNT_SQL, &[&session_summary_fragment])
+    let dedicated_statement_count: i64 = client
+        .query_one(PREPARED_STATEMENT_COUNT_SQL, &[&dedicated_summary_fragment])
         .await
-        .expect("count cached summary upsert statements")
+        .expect("count cached dedicated summary upsert statements")
+        .get(0);
+    let shared_summary_fragment = format!(
+        "{}.session_summary",
+        crate::workspace::quote_pg_ident(shared_schema)
+    );
+    let shared_statement_count: i64 = client
+        .query_one(PREPARED_STATEMENT_COUNT_SQL, &[&shared_summary_fragment])
+        .await
+        .expect("count cached shared summary upsert statements")
         .get(0);
     assert_eq!(
-        statement_count, 2,
-        "batch size changes must reuse one prepared statement for each ownership scope"
+        dedicated_statement_count, 1,
+        "batch size changes must reuse one dedicated prepared statement"
+    );
+    assert_eq!(
+        shared_statement_count, 1,
+        "batch size changes must reuse one shared prepared statement"
     );
 }
 
