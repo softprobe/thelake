@@ -4,9 +4,6 @@ use chrono::Utc;
 use softprobe_runtime::ingest::IngestEngine;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::query;
-use softprobe_runtime::storage::schema::attribute_map::{
-    attribute_map_varchar, prefer_attr_varchar,
-};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -199,7 +196,6 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     use softprobe_runtime::sql::telemetry::{
         compile_details_sql, TelemetryDetailsTarget, TelemetryTimeRange,
     };
-    use softprobe_runtime::storage::schema::attribute_map::prefer_attr_try_cast;
 
     let temp = TempDir::new().expect("tempdir");
     let mut config = file_backed_test_config(&temp);
@@ -336,53 +332,6 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     }
 
     // 1) Prefer-promoted projections against MAP bags (columns NULL → bag fallback).
-    let _proj_sql = format!(
-        "SELECT \
-            COALESCE({obs}, 'span') AS observation_type, \
-            {model} AS model_name, \
-            {provider} AS model_provider, \
-            COALESCE({user}, {enduser}) AS user_id, \
-            {input} AS input_tokens, \
-            {output} AS output_tokens, \
-            {total} AS total_tokens, \
-            {cost} AS total_cost, \
-            {capture} AS capture_label \
-         FROM traces \
-         WHERE session_id = '{sess}' AND span_id = 'vk-span-1' \
-           AND {bound}",
-        obs = prefer_attr_varchar(
-            Some("observation_type"),
-            "attributes",
-            "sp.observation.type"
-        ),
-        model = prefer_attr_varchar(Some("model_name"), "attributes", "gen_ai.request.model"),
-        provider =
-            prefer_attr_varchar(Some("model_provider"), "attributes", "gen_ai.provider.name"),
-        user = prefer_attr_varchar(Some("user_id"), "attributes", "sp.user.id"),
-        enduser = attribute_map_varchar("attributes", "enduser.id"),
-        input = prefer_attr_try_cast(
-            Some("input_tokens"),
-            "attributes",
-            "gen_ai.usage.input_tokens",
-            "BIGINT"
-        ),
-        output = prefer_attr_try_cast(
-            Some("output_tokens"),
-            "attributes",
-            "gen_ai.usage.output_tokens",
-            "BIGINT"
-        ),
-        total = prefer_attr_try_cast(
-            Some("total_tokens"),
-            "attributes",
-            "gen_ai.usage.total_tokens",
-            "BIGINT"
-        ),
-        cost = prefer_attr_try_cast(Some("total_cost"), "attributes", "sp.cost.total", "DOUBLE"),
-        capture = attribute_map_varchar("attributes", "test.capture.label"),
-        sess = session_id.replace('\'', "''"),
-        bound = crate::util::query_window().timestamp_filter_sql(""),
-    );
     let projected = query_engine
         .trace_attributes_for_span("vk-span-1", crate::util::query_window())
         .await
