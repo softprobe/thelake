@@ -351,7 +351,8 @@ WHERE CAST(attributes['sp.user.id'] AS VARCHAR) = 'user-123';
 
 This reduces object-store I/O when bodies are large. DuckLake may instead keep
 small committed batches inline in its metadata catalog, depending on
-`ducklake.data_inlining_row_limit`. For Parquet-level attribute storage
+`ducklake.data_inlining_row_limit`; periodic maintenance flushes those rows to
+Parquet before merging adjacent files. For Parquet-level attribute storage
 measurements, set `DATA_INLINING_ROW_LIMIT 0` so data lands in Parquet files.
 
 ## Best Practices

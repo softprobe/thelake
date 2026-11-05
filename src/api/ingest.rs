@@ -71,7 +71,9 @@ pub async fn ingest_traces(
     if content_type.contains("protobuf") || content_type.contains("application/x-protobuf") {
         match prost::Message::decode(body.as_ref()) {
             Ok(request) => {
-                match process_traces(state, request, body_size, tenant_info.clone()).await {
+                match process_traces_with_capture(state, request, body_size, tenant_info.clone())
+                    .await
+                {
                     Ok(count) => Json(IngestResponse {
                         success: true,
                         ingested_count: count,
@@ -93,7 +95,9 @@ pub async fn ingest_traces(
     } else {
         match serde_json::from_slice::<ExportTraceServiceRequest>(&body) {
             Ok(request) => {
-                match process_traces(state, request, body_size, tenant_info.clone()).await {
+                match process_traces_with_capture(state, request, body_size, tenant_info.clone())
+                    .await
+                {
                     Ok(count) => Json(IngestResponse {
                         success: true,
                         ingested_count: count,
@@ -184,6 +188,15 @@ pub async fn process_traces(
     body_size: usize,
     auth_tenant: Option<WorkspaceAuth>,
 ) -> Result<usize> {
+    process_traces_with_capture(state, request, body_size, auth_tenant).await
+}
+
+async fn process_traces_with_capture(
+    state: AppState,
+    request: ExportTraceServiceRequest,
+    body_size: usize,
+    auth_tenant: Option<WorkspaceAuth>,
+) -> Result<usize> {
     let start = std::time::Instant::now();
     let tid_hint = auth_tenant
         .as_ref()
@@ -262,11 +275,22 @@ async fn process_traces_inner(
         span.agent_name = agent_name.clone();
     }
 
+    crate::capture_correlation::validate_capture_batch(&spans, &tid, agent_id.as_deref())?;
+    let uses_capture_correlation =
+        crate::capture_correlation::uses_capture_correlation(&spans, agent_id.as_deref());
+
     let span_count = spans.len();
 
     let ws = state.workspace_for_id(&tid).await?;
     let write_start = std::time::Instant::now();
-    ws.ingest().add_spans(spans, body_size).await?;
+    if uses_capture_correlation {
+        let agent_id = agent_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Agent telemetry correlation requires a trusted Agent")
+        })?;
+        ws.ingest_capture_spans(spans, body_size, agent_id).await?;
+    } else {
+        ws.ingest().add_spans(spans, body_size).await?;
+    }
     if crate::self_monitoring::instrument_customer_workspace(&tid) {
         crate::self_monitoring::record_write(&tid, "traces", app.as_deref(), write_start.elapsed());
     }

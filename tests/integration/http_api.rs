@@ -95,59 +95,6 @@ fn llm_generation_request(
     }
 }
 
-fn web_recording_request(
-    session_id: &str,
-    trace_id: [u8; 16],
-    span_id: [u8; 8],
-    batch_index: i64,
-    events_json: &str,
-) -> ExportTraceServiceRequest {
-    let recording = Span {
-        trace_id: trace_id.to_vec(),
-        span_id: span_id.to_vec(),
-        parent_span_id: vec![],
-        name: "softprobe.web.recording".to_string(),
-        kind: span::SpanKind::Internal as i32,
-        start_time_unix_nano: 1_721_349_720_000_000_000 + (batch_index as u64) * 1_000_000_000,
-        end_time_unix_nano: 1_721_349_720_500_000_000 + (batch_index as u64) * 1_000_000_000,
-        attributes: vec![
-            string_kv("sp.session.id", session_id),
-            string_kv("sp.observation.type", "recording"),
-            int_kv("sp.recording.batch_index", batch_index),
-            string_kv("_sp_browser", "Chrome"),
-        ],
-        events: vec![span::Event {
-            time_unix_nano: 1_721_349_720_400_000_000 + (batch_index as u64) * 1_000_000_000,
-            name: "sp.recording.batch".to_string(),
-            attributes: vec![string_kv("sp.recording.events", events_json)],
-            dropped_attributes_count: 0,
-        }],
-        status: Some(Status {
-            code: 1,
-            message: String::new(),
-        }),
-        ..Default::default()
-    };
-
-    ExportTraceServiceRequest {
-        resource_spans: vec![ResourceSpans {
-            resource: Some(Resource {
-                attributes: vec![string_kv("service.name", "softprobe-web")],
-                ..Default::default()
-            }),
-            scope_spans: vec![ScopeSpans {
-                scope: Some(InstrumentationScope {
-                    name: "softprobe.web.record".to_string(),
-                    ..Default::default()
-                }),
-                spans: vec![recording],
-                schema_url: String::new(),
-            }],
-            schema_url: String::new(),
-        }],
-    }
-}
-
 fn telemetry_trace_request(session_id: &str, trace_id: [u8; 16]) -> ExportTraceServiceRequest {
     let root = Span {
         trace_id: trace_id.to_vec(),
@@ -1382,65 +1329,6 @@ async fn inlined_data_stays_readable_across_maintenance() {
         2,
         "post-maintenance inlined write not visible: {obs}"
     );
-}
-
-/// Session recording lookup requires a reduced `session_summary` row; the
-/// registry itself is always present (mandatory Postgres catalog), so a
-/// missing/unreduced session is a plain 404, never a registry-availability
-/// error.
-#[tokio::test]
-async fn session_recording_requires_session_summary_row() {
-    let (router, state, _t) = build_router_and_state().await;
-    let session_id = "sess-web-recording-1";
-    let trace_a: [u8; 16] = [0x11; 16];
-    let span_a: [u8; 8] = [0xaa; 8];
-    let trace_b: [u8; 16] = [0x22; 16];
-    let span_b: [u8; 8] = [0xbb; 8];
-
-    let batch0 = web_recording_request(
-        session_id,
-        trace_a,
-        span_a,
-        0,
-        r#"[{"type":4,"timestamp":1000,"eventIndex":1},{"type":2,"timestamp":1100,"isCompressed":true,"eventIndex":2}]"#,
-    );
-    let batch1 = web_recording_request(
-        session_id,
-        trace_b,
-        span_b,
-        1,
-        r#"[{"type":3,"timestamp":2000,"eventIndex":3}]"#,
-    );
-
-    for payload in [batch0, batch1] {
-        let ingest = Request::builder()
-            .method("POST")
-            .uri("/v1/traces")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_string(&payload).unwrap()))
-            .unwrap();
-        let resp = router.clone().oneshot(ingest).await.expect("ingest");
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    let ws = state.workspace_for_id("").await.expect("workspace context");
-    ws.ingest().force_flush_spans().await.expect("flush spans");
-
-    let empty = Request::builder()
-        .uri("/v1/sessions/sess-no-recording/recording")
-        .body(Body::empty())
-        .unwrap();
-    let empty_resp = router.clone().oneshot(empty).await.expect("empty");
-    assert_eq!(empty_resp.status(), StatusCode::NOT_FOUND);
-
-    // Even the session with real ingested spans has no session_summary row
-    // yet (no reduce has run), so it is also a 404, not a server error.
-    let req = Request::builder()
-        .uri(format!("/v1/sessions/{session_id}/recording"))
-        .body(Body::empty())
-        .unwrap();
-    let resp = router.oneshot(req).await.expect("recording");
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

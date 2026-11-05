@@ -4,9 +4,6 @@ use chrono::Utc;
 use softprobe_runtime::ingest::IngestEngine;
 use softprobe_runtime::models::{Log as LogData, Span as SpanData};
 use softprobe_runtime::query;
-use softprobe_runtime::storage::schema::attribute_map::{
-    attribute_map_varchar, prefer_attr_varchar,
-};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -199,7 +196,6 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     use softprobe_runtime::sql::telemetry::{
         compile_details_sql, TelemetryDetailsTarget, TelemetryTimeRange,
     };
-    use softprobe_runtime::storage::schema::attribute_map::prefer_attr_try_cast;
 
     let temp = TempDir::new().expect("tempdir");
     let mut config = file_backed_test_config(&temp);
@@ -214,11 +210,11 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
 
     let now = Utc::now();
     let session_id = format!("vk-sess-{}", uuid::Uuid::new_v4());
-    let capture_id = format!("cap-{}", uuid::Uuid::new_v4());
+    let capture_label = format!("capture-{}", uuid::Uuid::new_v4());
     let workspace_id = "tenant-attribute-map-keys";
     let trace_id = "vk-trace-1";
 
-    // Span with full LLM hot-key set + capture id.
+    // Span with full LLM hot-key set + a generic test attribute.
     let mut attrs = HashMap::new();
     attrs.insert("sp.observation.type".into(), "generation".into());
     attrs.insert("gen_ai.request.model".into(), "gpt-4o-mini".into());
@@ -228,7 +224,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     attrs.insert("gen_ai.usage.output_tokens".into(), "22".into());
     attrs.insert("gen_ai.usage.total_tokens".into(), "33".into());
     attrs.insert("sp.cost.total".into(), "0.42".into());
-    attrs.insert("sp.capture.id".into(), capture_id.clone());
+    attrs.insert("test.capture.label".into(), capture_label.clone());
     let span = SpanData {
         session_id: session_id.clone(),
         trace_id: trace_id.to_string(),
@@ -336,53 +332,6 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     }
 
     // 1) Prefer-promoted projections against MAP bags (columns NULL → bag fallback).
-    let _proj_sql = format!(
-        "SELECT \
-            COALESCE({obs}, 'span') AS observation_type, \
-            {model} AS model_name, \
-            {provider} AS model_provider, \
-            COALESCE({user}, {enduser}) AS user_id, \
-            {input} AS input_tokens, \
-            {output} AS output_tokens, \
-            {total} AS total_tokens, \
-            {cost} AS total_cost, \
-            {capture} AS capture_id \
-         FROM traces \
-         WHERE session_id = '{sess}' AND span_id = 'vk-span-1' \
-           AND {bound}",
-        obs = prefer_attr_varchar(
-            Some("observation_type"),
-            "attributes",
-            "sp.observation.type"
-        ),
-        model = prefer_attr_varchar(Some("model_name"), "attributes", "gen_ai.request.model"),
-        provider =
-            prefer_attr_varchar(Some("model_provider"), "attributes", "gen_ai.provider.name"),
-        user = prefer_attr_varchar(Some("user_id"), "attributes", "sp.user.id"),
-        enduser = attribute_map_varchar("attributes", "enduser.id"),
-        input = prefer_attr_try_cast(
-            Some("input_tokens"),
-            "attributes",
-            "gen_ai.usage.input_tokens",
-            "BIGINT"
-        ),
-        output = prefer_attr_try_cast(
-            Some("output_tokens"),
-            "attributes",
-            "gen_ai.usage.output_tokens",
-            "BIGINT"
-        ),
-        total = prefer_attr_try_cast(
-            Some("total_tokens"),
-            "attributes",
-            "gen_ai.usage.total_tokens",
-            "BIGINT"
-        ),
-        cost = prefer_attr_try_cast(Some("total_cost"), "attributes", "sp.cost.total", "DOUBLE"),
-        capture = attribute_map_varchar("attributes", "sp.capture.id"),
-        sess = session_id.replace('\'', "''"),
-        bound = crate::util::query_window().timestamp_filter_sql(""),
-    );
     let projected = query_engine
         .trace_attributes_for_span("vk-span-1", crate::util::query_window())
         .await
@@ -396,7 +345,7 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     assert_eq!(projected["gen_ai.usage.input_tokens"], "11");
     assert_eq!(projected["gen_ai.usage.output_tokens"], "22");
     assert_eq!(projected["gen_ai.usage.total_tokens"], "33");
-    assert_eq!(projected["sp.capture.id"], capture_id);
+    assert_eq!(projected["test.capture.label"], capture_label);
 
     // 2) COALESCE default + enduser.id fallback.
     let fallback = query_engine
@@ -471,25 +420,21 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
     let miss_result = query_engine.search_spans(&miss).await.expect("run miss");
     assert_eq!(miss_result.row_count, 0);
 
-    // 5) Nested MAP capture-id key (SoftProbe capture_export removed with Redis).
-    //
-    // `IngestEngine::bound_default` always stamps writes with its own bound workspace id
-    // (anti-spoofing; see `bind_spans_to_workspace`), so the capture id (already
-    // globally unique) is what disambiguates this row rather than `workspace_id`.
+    // 5) Nested MAP test attribute lookup.
     let capture_result = query_engine
         .trace_attributes_by_attribute(
             &session_id,
-            "sp.capture.id",
-            &capture_id,
+            "test.capture.label",
+            &capture_label,
             crate::util::query_window(),
         )
         .await
-        .expect("capture id filter")
-        .expect("capture span");
+        .expect("capture label filter")
+        .expect("capture label span");
     let attrs_obj = attributes_object(&capture_result);
     assert_eq!(
-        attrs_obj.get("sp.capture.id").and_then(|v| v.as_str()),
-        Some(capture_id.as_str())
+        attrs_obj.get("test.capture.label").and_then(|v| v.as_str()),
+        Some(capture_label.as_str())
     );
 
     let details_range = TelemetryTimeRange {

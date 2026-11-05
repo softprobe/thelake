@@ -5,13 +5,16 @@ use super::*;
 use crate::ingest::maybe_after_traces_commit;
 use crate::session_summary::reduce::{
     ack_dirty, claim_dirty, dirty_depth, publish_claimed_summary_rows, upsert_summary_rows,
-    SummaryRow,
+    upsert_summary_rows_on, SummaryRow,
 };
 use crate::session_summary::test_span::span_at;
 use chrono::{TimeZone, Utc};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use std::time::Duration;
 use tokio_postgres::NoTls;
+
+const PREPARED_STATEMENT_COUNT_SQL: &str =
+    include_str!("../sql/session_summary/prepared_statement_count.sql");
 
 async fn try_pg_pool(schema: &str) -> Option<Pool> {
     let mut pg = tokio_postgres::Config::new();
@@ -434,6 +437,81 @@ async fn postgres_upsert_summary_absolute_replace_all_fields() {
     assert_eq!(r.get::<_, Option<i64>>(8), Some(22));
     assert_eq!(r.get::<_, i64>(9), 100_000_000_000);
     assert_eq!(r.get::<_, Option<i64>>(10), Some(200_000_000_000));
+}
+
+#[tokio::test]
+#[ignore = "requires ducklake-postgres; make test-lease-pg / make test-e2e"]
+async fn postgres_session_summary_upsert_reuses_cached_statements_across_batch_sizes() {
+    let dedicated_schema = "thelake_ss_upsert_cache_dedicated";
+    let shared_schema = "thelake_ss_upsert_cache_shared";
+    let pool = try_pg_pool(dedicated_schema)
+        .await
+        .expect("ducklake-postgres required (make setup)");
+    let client = pool.get().await.expect("client");
+
+    crate::session_summary::ensure_shared_session_summary_tables(&client, shared_schema)
+        .await
+        .expect("shared summary DDL");
+    let shared_q = crate::workspace::quote_pg_ident(shared_schema);
+    client
+        .execute(
+            &format!("TRUNCATE {shared_q}.session_summary, {shared_q}.session_summary_dirty"),
+            &[],
+        )
+        .await
+        .expect("truncate shared summary tables");
+
+    for batch_size in 1..=16 {
+        let rows: Vec<SummaryRow> = (0..batch_size)
+            .map(|row| SummaryRow {
+                session_id: format!("batch-{batch_size}-row-{row}"),
+                start_time_ns: 1_000 + row as i64,
+                end_time_ns: Some(2_000 + row as i64),
+                observation_count: 1,
+                error_count: 0,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                total_cost: None,
+                agent_name: None,
+                user_id: None,
+                model_name: None,
+            })
+            .collect();
+        upsert_summary_rows_on(&client, dedicated_schema, None, &rows)
+            .await
+            .expect("dedicated summary upsert");
+        upsert_summary_rows_on(&client, shared_schema, Some("workspace-1"), &rows)
+            .await
+            .expect("workspace summary upsert");
+    }
+
+    let dedicated_summary_fragment = format!(
+        "{}.session_summary",
+        crate::workspace::quote_pg_ident(dedicated_schema)
+    );
+    let dedicated_statement_count: i64 = client
+        .query_one(PREPARED_STATEMENT_COUNT_SQL, &[&dedicated_summary_fragment])
+        .await
+        .expect("count cached dedicated summary upsert statements")
+        .get(0);
+    let shared_summary_fragment = format!(
+        "{}.session_summary",
+        crate::workspace::quote_pg_ident(shared_schema)
+    );
+    let shared_statement_count: i64 = client
+        .query_one(PREPARED_STATEMENT_COUNT_SQL, &[&shared_summary_fragment])
+        .await
+        .expect("count cached shared summary upsert statements")
+        .get(0);
+    assert_eq!(
+        dedicated_statement_count, 1,
+        "batch size changes must reuse one dedicated prepared statement"
+    );
+    assert_eq!(
+        shared_statement_count, 1,
+        "batch size changes must reuse one shared prepared statement"
+    );
 }
 
 #[tokio::test]

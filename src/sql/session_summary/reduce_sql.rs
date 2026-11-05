@@ -178,75 +178,84 @@ pub fn compile_session_summary_rebuild_sql_for_workspace(
     compile_session_summary_aggregate_sql_for_workspace(from_table, None, workspace_id, from, to)
 }
 
-/// Build `($1, $2, …), ($n, …)` for a multi-row INSERT.
-fn multi_row_values_placeholders(row_count: usize, cols_per_row: usize) -> String {
-    (0..row_count)
-        .map(|row| {
-            let base = row * cols_per_row;
-            let slots = (1..=cols_per_row)
-                .map(|col| format!("${}", base + col))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("({slots})")
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+const SESSION_SUMMARY_UPSERT_ARRAY_TYPES: &[&str] = &[
+    "text[]",
+    "bigint[]",
+    "bigint[]",
+    "bigint[]",
+    "bigint[]",
+    "bigint[]",
+    "bigint[]",
+    "bigint[]",
+    "double precision[]",
+    "text[]",
+    "text[]",
+    "text[]",
+    "timestamptz[]",
+];
+const SESSION_SUMMARY_UPSERT_SQL: &str = include_str!("summary_upsert.sql");
 
-/// Absolute UPSERT into catalog Postgres `session_summary` (one shared SQL builder).
+/// Absolute UPSERT into catalog Postgres `session_summary`.
 ///
-/// Column list / bind arity come from [`SESSION_SUMMARY_UPSERT_COLUMNS`] — do not
-/// hard-code a column count elsewhere.
-pub fn compile_session_summary_upsert_sql(schema_quoted: &str, row_count: usize) -> String {
-    let cols = SESSION_SUMMARY_UPSERT_COLUMNS;
-    let col_list = cols.join(", ");
-    let values = multi_row_values_placeholders(row_count, cols.len());
-    let set_list = cols
-        .iter()
-        .filter(|c| **c != "session_id")
-        .map(|c| format!("{c} = EXCLUDED.{c}"))
-        .collect::<Vec<_>>()
-        .join(",\n           ");
-    format!(
-        "INSERT INTO {schema_quoted}.session_summary ({col_list}) VALUES {values} \
-         ON CONFLICT (session_id) DO UPDATE SET \
-           {set_list}"
-    )
+/// Keep this SQL independent of the batch length. A VALUES list creates a new
+/// prepared statement for every batch size, and PostgreSQL retains each plan on
+/// the pooled connection. Parallel typed arrays keep both the SQL and cached
+/// plan bounded.
+pub fn compile_session_summary_upsert_sql(schema_quoted: &str) -> String {
+    compile_session_summary_upsert_sql_for_scope(schema_quoted, false)
 }
 
-pub fn compile_session_summary_upsert_sql_for_workspace(
-    schema_quoted: &str,
-    row_count: usize,
-) -> String {
-    let cols = [
-        "workspace_id",
-        "session_id",
-        "start_time_ns",
-        "end_time_ns",
-        "observation_count",
-        "error_count",
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "total_cost",
-        "agent_name",
-        "user_id",
-        "model_name",
-        "updated_at",
-    ];
-    let values = multi_row_values_placeholders(row_count, cols.len());
-    let set_list = cols
+pub fn compile_session_summary_upsert_sql_for_workspace(schema_quoted: &str) -> String {
+    compile_session_summary_upsert_sql_for_scope(schema_quoted, true)
+}
+
+fn compile_session_summary_upsert_sql_for_scope(schema_quoted: &str, workspace: bool) -> String {
+    let mut columns =
+        Vec::with_capacity(SESSION_SUMMARY_UPSERT_COLUMNS.len() + usize::from(workspace));
+    if workspace {
+        columns.push("workspace_id");
+    }
+    columns.extend_from_slice(SESSION_SUMMARY_UPSERT_COLUMNS);
+
+    let array_placeholders = SESSION_SUMMARY_UPSERT_ARRAY_TYPES
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| format!("${}::{ty}", index + 1 + usize::from(workspace)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let selected_columns = SESSION_SUMMARY_UPSERT_COLUMNS
+        .iter()
+        .map(|column| format!("input.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select = if workspace {
+        format!("$1::text, {selected_columns}")
+    } else {
+        selected_columns
+    };
+    let keys = if workspace {
+        "workspace_id, session_id"
+    } else {
+        "session_id"
+    };
+    let set_list = columns
         .iter()
         .filter(|column| **column != "workspace_id" && **column != "session_id")
         .map(|column| format!("{column} = EXCLUDED.{column}"))
         .collect::<Vec<_>>()
         .join(",\n           ");
-    format!(
-        "INSERT INTO {schema_quoted}.session_summary ({}) VALUES {values} \
-         ON CONFLICT (workspace_id, session_id) DO UPDATE SET \
-           {set_list}",
-        cols.join(", ")
-    )
+
+    SESSION_SUMMARY_UPSERT_SQL
+        .replace("{{schema_quoted}}", schema_quoted)
+        .replace("{{insert_columns}}", &columns.join(", "))
+        .replace("{{select_columns}}", &select)
+        .replace("{{array_placeholders}}", &array_placeholders)
+        .replace(
+            "{{input_columns}}",
+            &SESSION_SUMMARY_UPSERT_COLUMNS.join(", "),
+        )
+        .replace("{{conflict_keys}}", keys)
+        .replace("{{set_list}}", &set_list)
 }
 
 #[cfg(test)]
@@ -319,13 +328,12 @@ mod tests {
 
     #[test]
     fn upsert_sql_is_absolute_replace() {
-        let cols = SESSION_SUMMARY_UPSERT_COLUMNS.len();
-        let sql = compile_session_summary_upsert_sql("\"meta\"", 2);
+        let sql = compile_session_summary_upsert_sql("\"meta\"");
         assert!(sql.contains("ON CONFLICT (session_id) DO UPDATE SET"));
         assert!(sql.contains("observation_count = EXCLUDED.observation_count"));
         assert!(
-            sql.contains(&format!("${}", 2 * cols)),
-            "2 rows × {cols} params; last placeholder missing in {sql}"
+            sql.contains("$13::timestamptz[]"),
+            "fixed array parameters missing in {sql}"
         );
         assert!(sql.contains(SESSION_SUMMARY_UPSERT_COLUMNS.join(", ").as_str()));
     }
@@ -343,8 +351,18 @@ mod tests {
         .expect("workspace reduce SQL");
         assert!(reduce.contains("workspace_id = 'workspace''42'"));
 
-        let upsert = compile_session_summary_upsert_sql_for_workspace("\"meta\"", 1);
+        let upsert = compile_session_summary_upsert_sql_for_workspace("\"meta\"");
         assert!(upsert.contains("(workspace_id, session_id) DO UPDATE"));
         assert!(upsert.contains("INSERT INTO \"meta\".session_summary (workspace_id, session_id"));
+        assert!(upsert.contains("FROM UNNEST($2::text[], $3::bigint[]"));
+        assert!(!upsert.contains("VALUES ("));
+    }
+
+    #[test]
+    fn summary_upsert_sql_is_constant_size_and_uses_typed_arrays() {
+        let sql = compile_session_summary_upsert_sql("\"meta\"");
+        assert!(sql.contains("FROM UNNEST($1::text[], $2::bigint[]"));
+        assert!(sql.contains("$13::timestamptz[]"));
+        assert!(!sql.contains("VALUES ("));
     }
 }

@@ -22,6 +22,7 @@ use crate::workspace_scope::{effective_workspace_id, WorkspaceBinding, Workspace
 use anyhow::{anyhow, bail, Context, Result};
 use dashmap::DashMap;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use std::collections::HashSet;
 use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -66,6 +67,24 @@ impl WorkspaceContext {
     /// Stable logical identity of this workspace-bound context.
     pub fn workspace_id(&self) -> &str {
         &self.workspace_id
+    }
+
+    /// Persist capture browser spans and durably correlate OBI spans before
+    /// either reaches DuckLake.
+    pub(crate) async fn ingest_capture_spans(
+        &self,
+        spans: Vec<crate::models::Span>,
+        request_size: usize,
+        agent_id: &str,
+    ) -> Result<()> {
+        let store = crate::capture_correlation::CaptureCorrelationStore::new(
+            self.catalog_pool.clone(),
+            self.physical.pg_namespace(),
+            &self.workspace_id,
+        );
+        store
+            .ingest(&self.ingest, spans, request_size, agent_id)
+            .await
     }
 
     pub fn ingest(&self) -> &Arc<IngestEngine> {
@@ -142,6 +161,23 @@ pub struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
+    #[cfg(test)]
+    pub(crate) fn for_auth_middleware_test() -> Self {
+        let config = Arc::new(Config::default());
+        let scope_registry = DuckLakeScopeResolver::build_pool(&config.ducklake)
+            .expect("test PostgreSQL config should build without connecting");
+        Self {
+            config,
+            workspaces: DashMap::new(),
+            creation_locks: DashMap::new(),
+            scope_locks: DashMap::new(),
+            scope_initialization_lock: Mutex::new(()),
+            control_plane: None,
+            scope_registry,
+            build_counter: AtomicUsize::new(0),
+        }
+    }
+
     /// Connect the catalog registry and build the process-wide workspace cache.
     pub async fn connect(
         config: Arc<Config>,
@@ -401,6 +437,20 @@ impl WorkspaceManager {
         // Keep its cleanup in the same operation and make retries harmless.
         let mut client = self.scope_registry.pool.get().await?;
         let transaction = client.transaction().await?;
+        let mapping_delete = crate::sql::capture_correlation::render(
+            crate::sql::capture_correlation::DELETE_WORKSPACE_MAPPINGS,
+            scope.pg_namespace(),
+        );
+        let pending_delete = crate::sql::capture_correlation::render(
+            crate::sql::capture_correlation::DELETE_WORKSPACE_PENDING,
+            scope.pg_namespace(),
+        );
+        transaction
+            .execute(&mapping_delete, &[&workspace_id])
+            .await?;
+        transaction
+            .execute(&pending_delete, &[&workspace_id])
+            .await?;
         for table in ["session_summary", "session_summary_dirty"] {
             let delete_sql = crate::sql::maintenance::workspace_purge::workspace_summary_delete_sql(
                 scope.pg_namespace(),
@@ -418,6 +468,32 @@ impl WorkspaceManager {
         transaction.commit().await?;
 
         Ok(())
+    }
+
+    /// Delete expired correlation rows in bounded batches from each physical
+    /// catalog. Expired mappings cannot label spans before the cleanup runs.
+    pub(crate) async fn sweep_expired_capture_correlations(&self) -> Result<u64> {
+        let mut scopes = self.scope_registry.list_scopes().await?;
+        if scopes.is_empty() {
+            scopes.push((
+                crate::workspace_scope::DEFAULT_WORKSPACE_ID.to_string(),
+                self.scope_registry.default_physical_scope.clone(),
+            ));
+        }
+        let mut schemas = HashSet::new();
+        let mut deleted = 0;
+        for (_, physical) in scopes {
+            let schema = physical.pg_namespace();
+            if schemas.insert(schema.to_owned()) {
+                deleted +=
+                    crate::capture_correlation::CaptureCorrelationStore::sweep_expired_schema(
+                        self.scope_registry.pool(),
+                        schema,
+                    )
+                    .await?;
+            }
+        }
+        Ok(deleted)
     }
 
     #[cfg(test)]
@@ -757,6 +833,12 @@ RETURNING physical_scope_id;"#,
 
     async fn ensure_scope_tables(&self, scope: &PhysicalScope) -> Result<()> {
         let client = self.pool.get().await?;
+        crate::capture_correlation::CaptureCorrelationStore::ensure_tables(
+            &client,
+            scope.pg_namespace(),
+        )
+        .await
+        .context("failed to initialize capture correlation tables")?;
         ensure_promotion_metadata_tables(&client, scope.pg_namespace())
             .await
             .context("failed to initialize promotion metadata tables")?;

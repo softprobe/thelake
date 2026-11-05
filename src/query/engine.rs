@@ -307,8 +307,8 @@ enum Poison {
     /// This query tripped the fatal error itself. Deterministic -- retrying
     /// would just poison the fresh connection too, so only rebuild.
     Triggered,
-    /// This query landed on a connection an earlier query had poisoned.
-    /// Innocent -- retry it once on the rebuilt connection.
+    /// This query landed on an invalidated connection or a stale DuckLake
+    /// catalog attachment. Retry it once on a rebuilt connection.
     Collateral,
 }
 
@@ -328,7 +328,9 @@ fn poison_kind(message: &str) -> Poison {
     // Stale ATTACH after inlined catalog table rename (e.g. optional external
     // flush). Rebuild + retry picks up the new name — required now that default
     // inlining is 500.
-    if head.starts_with("Catalog Error: Failed to read inlined data from DuckLake") {
+    if head.starts_with("Catalog Error: Failed to read inlined data from DuckLake")
+        || head.starts_with("Invalid Error: Failed to read inlined data from DuckLake")
+    {
         return Poison::Collateral;
     }
     Poison::None
@@ -344,7 +346,7 @@ fn rebuild_worker_state(core: &DuckDBCore, index: usize) -> Option<ConnectionSta
                 SELF_HEAL.rebuilds.fetch_add(1, Ordering::Relaxed);
                 SELF_HEAL.consecutive_failures.store(0, Ordering::Relaxed);
             }
-            info!("DuckDB query worker {index} rebuilt its connection after a fatal engine error");
+            info!("DuckDB query worker {index} rebuilt its connection after a fatal engine error or stale DuckLake catalog attachment");
             Some(state)
         }
         Err(err) => {
@@ -1942,6 +1944,13 @@ mod tests {
                  ducklake_inlined_data_28_28 does not exist!\n\
                  Did you mean \"ducklake_inlined_data_28_29\"?\n\n\
                  LINE 3: FROM \"__ducklake_metadata_softprobe\".\"main\".ducklake_inlined_dat..."
+            ),
+            Poison::Collateral
+        );
+        assert_eq!(
+            poison_kind(
+                "Invalid Error: Failed to read inlined data from DuckLake: Failed to prepare COPY \
+                 \"COPY (SELECT ... FROM \\\"__ducklake_metadata_softprobe\\\".\\\"ducklake_inlined_data_8_8\\\") TO STDOUT\""
             ),
             Poison::Collateral
         );

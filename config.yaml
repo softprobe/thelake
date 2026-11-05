@@ -27,8 +27,8 @@ ducklake:
   catalog_alias: "softprobe"
   metadata_schema: "softprobe"
   extension_path: "./dist/ducklake.duckdb_extension"
-  # Default 500 (DuckLake-aligned). Set 0 only for fixtures that need
-  # Parquet-per-batch.
+  # Default 500 (DuckLake-aligned). Periodic maintenance flushes accumulated
+  # inline rows to Parquet before merging adjacent files.
   data_inlining_row_limit: 500
   # Per-scope DuckDB writer connections (1..=16). Default 4.
   writer_pool_size: 4

@@ -8,6 +8,10 @@ use deadpool_postgres::Pool;
 use std::collections::HashMap;
 use tracing::warn;
 
+const DIRTY_UPSERT_SQL: &str = include_str!("../sql/session_summary/dirty_upsert.sql");
+const WORKSPACE_DIRTY_UPSERT_SQL: &str =
+    include_str!("../sql/session_summary/dirty_upsert_workspace.sql");
+
 /// One dirty-queue row hint from a flush batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirtyHint {
@@ -132,61 +136,31 @@ impl SessionSummaryDirty {
             .await
             .map_err(|e| anyhow!("session_summary dirty pool get: {e}"))?;
         let schema = quote_pg_ident(&self.metadata_schema);
-        let columns = if self.workspace_scoped {
-            "workspace_id, session_id, min_ts_ns, max_ts_ns, updated_at"
+        let template = if self.workspace_scoped {
+            WORKSPACE_DIRTY_UPSERT_SQL
         } else {
-            "session_id, min_ts_ns, max_ts_ns, updated_at"
+            DIRTY_UPSERT_SQL
         };
-        let arity = if self.workspace_scoped { 4 } else { 3 };
-        let mut sql = format!("INSERT INTO {schema}.session_summary_dirty ({columns}) VALUES ");
-        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
-        for (i, h) in hints.iter().enumerate() {
-            if i > 0 {
-                sql.push(',');
-            }
-            let base = i * arity;
-            if self.workspace_scoped {
-                sql.push_str(&format!(
-                    "(${}, ${}, ${}, ${}, clock_timestamp())",
-                    base + 1,
-                    base + 2,
-                    base + 3,
-                    base + 4
-                ));
-                params.push(Box::new(self.workspace_id.clone()));
-            } else {
-                sql.push_str(&format!(
-                    "(${}, ${}, ${}, clock_timestamp())",
-                    base + 1,
-                    base + 2,
-                    base + 3
-                ));
-            }
-            params.push(Box::new(h.session_id.clone()));
-            params.push(Box::new(h.min_ts_ns));
-            params.push(Box::new(h.max_ts_ns));
-        }
+        let sql = template.replace("{{schema_quoted}}", &schema);
+        let session_ids: Vec<String> = hints.iter().map(|hint| hint.session_id.clone()).collect();
+        let min_ts_ns: Vec<i64> = hints.iter().map(|hint| hint.min_ts_ns).collect();
+        let max_ts_ns: Vec<i64> = hints.iter().map(|hint| hint.max_ts_ns).collect();
+        let workspace_id = self.workspace_id.clone();
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::with_capacity(4);
         if self.workspace_scoped {
-            sql.push_str(
-                " ON CONFLICT (workspace_id, session_id) DO UPDATE SET \
-                 min_ts_ns = LEAST(session_summary_dirty.min_ts_ns, EXCLUDED.min_ts_ns), \
-                 max_ts_ns = GREATEST(session_summary_dirty.max_ts_ns, EXCLUDED.max_ts_ns), \
-                 updated_at = EXCLUDED.updated_at",
-            );
-        } else {
-            sql.push_str(
-                " ON CONFLICT (session_id) DO UPDATE SET \
-                 min_ts_ns = LEAST(session_summary_dirty.min_ts_ns, EXCLUDED.min_ts_ns), \
-                 max_ts_ns = GREATEST(session_summary_dirty.max_ts_ns, EXCLUDED.max_ts_ns), \
-                 updated_at = EXCLUDED.updated_at",
-            );
+            params.push(&workspace_id as &(dyn tokio_postgres::types::ToSql + Sync));
         }
-        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
-            .iter()
-            .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-            .collect();
+        params.extend([
+            &session_ids as &(dyn tokio_postgres::types::ToSql + Sync),
+            &min_ts_ns,
+            &max_ts_ns,
+        ]);
+        let statement = client
+            .prepare_cached(&sql)
+            .await
+            .context("prepare session_summary dirty UPSERT")?;
         client
-            .execute(&sql, &param_refs[..])
+            .execute(&statement, &params)
             .await
             .context("session_summary dirty UPSERT")?;
         Ok(())

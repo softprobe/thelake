@@ -17,6 +17,28 @@ use crate::test_support::local_router_and_state;
 use crate::workspace::ScopeProvisioningRequest;
 use std::sync::Arc;
 
+struct RestoredEnvVar {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl RestoredEnvVar {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, previous }
+    }
+}
+
+impl Drop for RestoredEnvVar {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
+
 fn test_auth() -> WorkspaceAuth {
     WorkspaceAuth {
         workspace_id: "11111111-1111-1111-1111-111111111111".to_string(),
@@ -386,7 +408,8 @@ async fn unit_query_sql_invalid_returns_500() {
 
 #[tokio::test]
 async fn unit_provision_rejects_non_uuid_workspace_id() {
-    std::env::set_var("SOFTPROBE_ADMIN_API_KEY", "unit-admin-key");
+    let _env_lock = crate::softprobe_assertion::AUTH_ENV_TEST_LOCK.lock().await;
+    let _admin_key = RestoredEnvVar::set("SOFTPROBE_ADMIN_API_KEY", "unit-admin-key");
     let (router, _state, _t) = local_router_and_state().await.expect("router");
     let req = Request::builder()
         .method("POST")

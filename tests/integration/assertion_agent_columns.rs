@@ -166,6 +166,18 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
             "workspace_id": workspace_id,
             "agent_id": agent_id,
             "agent_name": agent_name,
+            "capabilities": ["ingest"],
+            "exp": now + 600
+        }),
+        secret,
+    );
+    let user_token = mint_assertion(
+        json!({
+            "iss": "softprobe-edge",
+            "aud": "sp-backend",
+            "sub": "workspace-user",
+            "workspace_id": workspace_id,
+            "roles": ["member"],
             "exp": now + 600
         }),
         secret,
@@ -236,7 +248,7 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .method("POST")
         .uri("/v1/sessions/details")
         .header(header::CONTENT_TYPE, "application/json")
-        .header(ASSERTION_HEADER, &token)
+        .header(ASSERTION_HEADER, &user_token)
         .body(Body::from(
             json!({
                 "version": 1,
@@ -267,7 +279,7 @@ async fn assertion_jwt_stamps_agent_columns_on_traces_and_logs() {
         .method("POST")
         .uri("/v1/sessions/search")
         .header(header::CONTENT_TYPE, "application/json")
-        .header(ASSERTION_HEADER, &token)
+        .header(ASSERTION_HEADER, &user_token)
         .body(Body::from(
             json!({
                 "from": (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
