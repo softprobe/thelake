@@ -13,6 +13,9 @@ use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use std::time::Duration;
 use tokio_postgres::NoTls;
 
+const PREPARED_STATEMENT_COUNT_SQL: &str =
+    include_str!("../sql/session_summary/prepared_statement_count.sql");
+
 async fn try_pg_pool(schema: &str) -> Option<Pool> {
     let mut pg = tokio_postgres::Config::new();
     pg.host("localhost");
@@ -470,14 +473,12 @@ async fn postgres_session_summary_upsert_reuses_cached_statements_across_batch_s
             .expect("workspace summary upsert");
     }
 
+    let session_summary_fragment = format!(
+        "{}.session_summary",
+        crate::workspace::quote_pg_ident(schema)
+    );
     let statement_count: i64 = client
-        .query_one(
-            "SELECT count(*)::bigint FROM pg_prepared_statements WHERE statement LIKE $1",
-            &[&format!(
-                "INSERT INTO {}.session_summary%",
-                crate::workspace::quote_pg_ident(schema)
-            )],
-        )
+        .query_one(PREPARED_STATEMENT_COUNT_SQL, &[&session_summary_fragment])
         .await
         .expect("count cached summary upsert statements")
         .get(0);

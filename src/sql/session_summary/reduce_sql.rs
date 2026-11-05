@@ -193,6 +193,7 @@ const SESSION_SUMMARY_UPSERT_ARRAY_TYPES: &[&str] = &[
     "text[]",
     "timestamptz[]",
 ];
+const SESSION_SUMMARY_UPSERT_SQL: &str = include_str!("summary_upsert.sql");
 
 /// Absolute UPSERT into catalog Postgres `session_summary`.
 ///
@@ -244,13 +245,17 @@ fn compile_session_summary_upsert_sql_for_scope(schema_quoted: &str, workspace: 
         .collect::<Vec<_>>()
         .join(",\n           ");
 
-    format!(
-        "INSERT INTO {schema_quoted}.session_summary ({}) \
-         SELECT {select} FROM UNNEST({array_placeholders}) AS input ({}) \
-         ON CONFLICT ({keys}) DO UPDATE SET {set_list}",
-        columns.join(", "),
-        SESSION_SUMMARY_UPSERT_COLUMNS.join(", "),
-    )
+    SESSION_SUMMARY_UPSERT_SQL
+        .replace("{{schema_quoted}}", schema_quoted)
+        .replace("{{insert_columns}}", &columns.join(", "))
+        .replace("{{select_columns}}", &select)
+        .replace("{{array_placeholders}}", &array_placeholders)
+        .replace(
+            "{{input_columns}}",
+            &SESSION_SUMMARY_UPSERT_COLUMNS.join(", "),
+        )
+        .replace("{{conflict_keys}}", keys)
+        .replace("{{set_list}}", &set_list)
 }
 
 #[cfg(test)]

@@ -8,6 +8,11 @@ use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use tracing::warn;
 
+const LOAD_SUMMARY_BOUNDS_SQL: &str =
+    include_str!("../sql/session_summary/load_summary_bounds.sql");
+const LOAD_WORKSPACE_SUMMARY_BOUNDS_SQL: &str =
+    include_str!("../sql/session_summary/load_workspace_summary_bounds.sql");
+
 /// One claimed dirty row with its PostgreSQL-maintained acknowledgement generation.
 #[derive(Debug, Clone)]
 pub struct DirtyClaim {
@@ -220,10 +225,7 @@ pub async fn load_summary_bounds(
     }
     let client = pool.get().await.context("load summary bounds")?;
     let schema = quote_pg_ident(metadata_schema);
-    let sql = format!(
-        "SELECT session_id, start_time_ns, end_time_ns FROM {schema}.session_summary \
-         WHERE session_id = ANY($1::text[])"
-    );
+    let sql = LOAD_SUMMARY_BOUNDS_SQL.replace("{{schema_quoted}}", &schema);
     let ids = session_ids.to_vec();
     let statement = client
         .prepare_cached(&sql)
@@ -251,10 +253,7 @@ pub async fn load_summary_bounds_for_workspace(
     }
     let client = pool.get().await.context("load workspace summary bounds")?;
     let schema = quote_pg_ident(metadata_schema);
-    let sql = format!(
-        "SELECT session_id, start_time_ns, end_time_ns FROM {schema}.session_summary \
-         WHERE workspace_id = $1 AND session_id = ANY($2::text[])"
-    );
+    let sql = LOAD_WORKSPACE_SUMMARY_BOUNDS_SQL.replace("{{schema_quoted}}", &schema);
     let ids = session_ids.to_vec();
     let statement = client
         .prepare_cached(&sql)

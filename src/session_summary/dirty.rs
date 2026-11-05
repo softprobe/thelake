@@ -8,6 +8,10 @@ use deadpool_postgres::Pool;
 use std::collections::HashMap;
 use tracing::warn;
 
+const DIRTY_UPSERT_SQL: &str = include_str!("../sql/session_summary/dirty_upsert.sql");
+const WORKSPACE_DIRTY_UPSERT_SQL: &str =
+    include_str!("../sql/session_summary/dirty_upsert_workspace.sql");
+
 /// One dirty-queue row hint from a flush batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirtyHint {
@@ -132,31 +136,12 @@ impl SessionSummaryDirty {
             .await
             .map_err(|e| anyhow!("session_summary dirty pool get: {e}"))?;
         let schema = quote_pg_ident(&self.metadata_schema);
-        let sql = if self.workspace_scoped {
-            format!(
-                "INSERT INTO {schema}.session_summary_dirty \
-                 (workspace_id, session_id, min_ts_ns, max_ts_ns, updated_at) \
-                 SELECT $1::text, input.session_id, input.min_ts_ns, input.max_ts_ns, clock_timestamp() \
-                 FROM UNNEST($2::text[], $3::bigint[], $4::bigint[]) \
-                 AS input(session_id, min_ts_ns, max_ts_ns) \
-                 ON CONFLICT (workspace_id, session_id) DO UPDATE SET \
-                 min_ts_ns = LEAST(session_summary_dirty.min_ts_ns, EXCLUDED.min_ts_ns), \
-                 max_ts_ns = GREATEST(session_summary_dirty.max_ts_ns, EXCLUDED.max_ts_ns), \
-                 updated_at = EXCLUDED.updated_at"
-            )
+        let template = if self.workspace_scoped {
+            WORKSPACE_DIRTY_UPSERT_SQL
         } else {
-            format!(
-                "INSERT INTO {schema}.session_summary_dirty \
-                 (session_id, min_ts_ns, max_ts_ns, updated_at) \
-                 SELECT input.session_id, input.min_ts_ns, input.max_ts_ns, clock_timestamp() \
-                 FROM UNNEST($1::text[], $2::bigint[], $3::bigint[]) \
-                 AS input(session_id, min_ts_ns, max_ts_ns) \
-                 ON CONFLICT (session_id) DO UPDATE SET \
-                 min_ts_ns = LEAST(session_summary_dirty.min_ts_ns, EXCLUDED.min_ts_ns), \
-                 max_ts_ns = GREATEST(session_summary_dirty.max_ts_ns, EXCLUDED.max_ts_ns), \
-                 updated_at = EXCLUDED.updated_at"
-            )
+            DIRTY_UPSERT_SQL
         };
+        let sql = template.replace("{{schema_quoted}}", &schema);
         let session_ids: Vec<String> = hints.iter().map(|hint| hint.session_id.clone()).collect();
         let min_ts_ns: Vec<i64> = hints.iter().map(|hint| hint.min_ts_ns).collect();
         let max_ts_ns: Vec<i64> = hints.iter().map(|hint| hint.max_ts_ns).collect();
