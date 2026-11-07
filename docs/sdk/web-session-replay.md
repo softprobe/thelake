@@ -23,12 +23,13 @@ aggregates and conversation traces; use
 `GET …/sessions/{id}/recording` for replay.
 
 The package embeds the official OpenTelemetry browser SDK, Fetch/XHR
-instrumentation, and OTLP exporter. The host app imports only `RecordSdk` from
-`@softprobe/web-record`; OTel owns browser HTTP spans, W3C context propagation,
-batching, and export. Softprobe adds route-scoped JSON body capture through the
-instrumentation hooks and emits captured bodies on
-`softprobe.http.body.capture` child spans. Browser spans carry OTel's
-`session.id` and Softprobe's compatibility alias `sp.session.id`.
+instrumentation, and OTLP exporter. `RecordSdk.init()` configures those official
+components internally; the host app imports only `RecordSdk` from
+`@softprobe/web-record`. OTel owns browser HTTP spans, W3C context propagation,
+batching, and export. Softprobe's extensions are route-scoped JSON body capture,
+implemented with the instrumentation hooks, and the `sp.session.id`
+compatibility alias alongside OTel's standard `session.id`. Captured bodies are
+emitted on `softprobe.http.body.capture` child spans.
 
 | Layer | Repo / package | Role |
 | --- | --- | --- |
