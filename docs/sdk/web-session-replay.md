@@ -9,20 +9,30 @@ and the explorer **Web replay** tab plays them next to the conversation.
 ```text
 softprobe-code SPA
   → @softprobe/web-record (rrweb)
-  → POST {baseUrl}/v1/traces   (OTLP JSON, Bearer publicKey)
+  → POST {baseUrl}/v1/traces   (OTLP protobuf, Bearer Agent API key)
   → thelake DuckLake
   → GET /v1/sessions/{session_id}/recording?from=&to=
   → sp-llm explorer WebReplayPane (rrweb-player)
 ```
 
-**Correlation:** OpenCode chat `ses_*` id → `sp.session.id` on recording spans
-(same attribute as LLM telemetry). Recording spans are **excluded** from LLM
-session list/detail aggregates and conversation traces; use
+**Correlation:** OpenCode chat `ses_*` id → `session.id` and `sp.session.id` on
+recording spans. `@softprobe/web-record` uses the official OpenTelemetry browser
+SDK internally and mirrors the standard session attribute to Softprobe's product
+attribute. Recording spans are **excluded** from LLM session list/detail
+aggregates and conversation traces; use
 `GET …/sessions/{id}/recording` for replay.
+
+The package embeds the official OpenTelemetry browser SDK, Fetch/XHR
+instrumentation, and OTLP exporter. The host app imports only `RecordSdk` from
+`@softprobe/web-record`; OTel owns browser HTTP spans, W3C context propagation,
+batching, and export. Softprobe adds route-scoped JSON body capture through the
+instrumentation hooks and emits captured bodies on
+`softprobe.http.body.capture` child spans. Browser spans carry OTel's
+`session.id` and Softprobe's compatibility alias `sp.session.id`.
 
 | Layer | Repo / package | Role |
 | --- | --- | --- |
-| Producer | [`@softprobe/web-record`](https://github.com/softprobe/softprobe-js/tree/main/packages/web-record) | rrweb capture → OTLP |
+| Producer | [`@softprobe/web-record`](https://github.com/softprobe/softprobe-js/tree/main/packages/web-record) | rrweb capture and OpenTelemetry browser spans → OTLP |
 | Host SPA | [`softprobe-code`](https://github.com/softprobe/softprobe-code) `web-record-boot.ts` | Boot after `ses_*` is in the URL |
 | Store / query | [`thelake`](https://github.com/softprobe/thelake) | Ingest + `GET …/recording` |
 | Player | [`sp-llm` Explorer](https://github.com/softprobe/sp-llm/tree/main/apps/explorer) | Conversation / Web replay tabs |
@@ -36,6 +46,7 @@ Merge order for the feature PRs: softprobe-js → thelake → softprobe-code →
 | span name | `softprobe.web.recording` |
 | `sp.observation.type` | `recording` |
 | `sp.session.id` | OpenCode / LLM session id |
+| `session.id` | same session id (OpenTelemetry browser SDK attribute) |
 | `sp.recording.batch_index` | monotonic batch counter |
 | event | `sp.recording.batch` |
 | event attr `sp.recording.events` | JSON rrweb events (FullSnapshots may be `isCompressed`) |
@@ -91,8 +102,9 @@ dev and strips `Origin` for hosted thelake quirks.
   `packages/app/package.json`.
 - Recording query hard-caps at 200 batches; UI surfaces empty / truncated data
   but does not paginate yet.
-- HTTP `x-sp-session-id` injection from the web-record interceptor is
-  **same-origin only** (avoids leaking session ids to third-party CDNs).
+- Browser HTTP trace context uses W3C `traceparent` / `tracestate` propagation
+  only for exact origins configured in `apiOrigins`; the SDK does not inject an
+  `x-sp-session-id` header.
 
 ## Related docs
 
