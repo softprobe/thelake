@@ -104,8 +104,9 @@ dev and strips `Origin` for hosted thelake quirks.
 - Recording query hard-caps at 200 batches; UI surfaces empty / truncated data
   but does not paginate yet.
 - Browser HTTP trace context uses W3C `traceparent` / `tracestate` propagation
-  only for exact origins configured in `apiOrigins`; the SDK does not inject an
-  `x-sp-session-id` header.
+  for same-origin requests (`window.location.origin`), any origin declared in
+  `httpBodyCapture.routes`, and any optional `apiOrigins` override; the SDK does
+  not inject an `x-sp-session-id` header.
 
 ## Related docs
 
