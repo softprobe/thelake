@@ -12,7 +12,8 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   echo "already running pid $(cat "$PID_FILE")"
   exit 0
 fi
-if ss -ltn | awk '{print $4}' | grep -q ":${PORT}$"; then
+if (command -v ss >/dev/null 2>&1 && ss -ltn | awk '{print $4}' | grep -q ":${PORT}$") || \
+   (command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1); then
   echo "port ${PORT} is in use by a process this script did not start" >&2
   exit 1
 fi

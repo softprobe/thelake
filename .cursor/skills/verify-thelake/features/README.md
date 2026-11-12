@@ -32,3 +32,4 @@ Each feature file has an H1, one paragraph, then four H2 sections in order. `Sub
 - [Health](./health.md) covers `GET /health` and `GET /ready`.
 - [Provision a workspace](./provision-workspace.md) covers `POST /v1/workspaces`.
 - [Search traces](./search-traces.md) covers JSON OTLP ingest and `POST /v1/traces/search`.
+- [LLM OTel GenAI sessions and traces](./llm-otel-genai-sessions.md) covers multi-standard GenAI classification without `sp.*`, `service_name` and `span_kind` projection, clean JSON attributes without `sp.json:`, optional `from` and `to` detail bounds, and usage-leaf token rollups.
