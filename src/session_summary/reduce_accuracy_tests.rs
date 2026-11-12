@@ -8,26 +8,8 @@ use chrono::{TimeZone, Utc};
 use duckdb::Connection;
 
 fn setup_traces(conn: &Connection) {
-    conn.execute_batch(
-        "CREATE TABLE traces (
-           session_id VARCHAR,
-           span_id VARCHAR,
-           timestamp TIMESTAMP_NS,
-           end_timestamp TIMESTAMP_NS,
-           status_code VARCHAR,
-           message_type VARCHAR,
-           agent_name VARCHAR,
-           observation_type VARCHAR,
-           input_tokens BIGINT,
-           output_tokens BIGINT,
-           total_tokens BIGINT,
-           total_cost DOUBLE,
-           user_id VARCHAR,
-           model_name VARCHAR,
-           record_date DATE
-         );",
-    )
-    .expect("create traces");
+    conn.execute_batch(include_str!("test_traces_fixture.sql"))
+        .expect("create traces");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -76,14 +58,23 @@ fn insert(
         .unwrap()
         .date_naive()
         .format("%Y-%m-%d");
-    conn.execute_batch(&format!(
-        "INSERT INTO traces VALUES (
-           '{session_id}', '{span_id}', {ts}, {end}, '{status}', '{message_type}',
-           {agent}, '{observation_type}', {in_tok}, {out_tok}, {tot_tok}, {cost},
-           {user_id}, {model}, DATE '{day}'
-         );"
-    ))
-    .expect("insert");
+    let sql = include_str!("test_traces_insert.sql")
+        .replace("{{session_id}}", session_id)
+        .replace("{{span_id}}", span_id)
+        .replace("{{ts}}", &ts)
+        .replace("{{end}}", &end)
+        .replace("{{status}}", status)
+        .replace("{{message_type}}", message_type)
+        .replace("{{agent}}", &agent)
+        .replace("{{observation_type}}", observation_type)
+        .replace("{{in_tok}}", &in_tok)
+        .replace("{{out_tok}}", &out_tok)
+        .replace("{{tot_tok}}", &tot_tok)
+        .replace("{{cost}}", &cost)
+        .replace("{{user_id}}", &user_id)
+        .replace("{{model}}", &model)
+        .replace("{{day}}", &day.to_string());
+    conn.execute_batch(&sql).expect("insert");
 }
 
 #[derive(Debug)]
@@ -760,27 +751,8 @@ fn map_only_attrs_do_not_fill_typed_aggregates() {
 
     let conn = Connection::open_in_memory().unwrap();
     // Richer table than reduce reads — bag is deliberately populated.
-    conn.execute_batch(
-        "CREATE TABLE traces (
-           session_id VARCHAR,
-           span_id VARCHAR,
-           timestamp TIMESTAMP_NS,
-           end_timestamp TIMESTAMP_NS,
-           status_code VARCHAR,
-           message_type VARCHAR,
-           agent_name VARCHAR,
-           observation_type VARCHAR,
-           input_tokens BIGINT,
-           output_tokens BIGINT,
-           total_tokens BIGINT,
-           total_cost DOUBLE,
-           user_id VARCHAR,
-           model_name VARCHAR,
-           record_date DATE,
-           attributes MAP(VARCHAR, VARCHAR)
-         );",
-    )
-    .expect("create");
+    conn.execute_batch(include_str!("test_traces_with_bag_fixture.sql"))
+        .expect("create");
     let day = Utc
         .timestamp_opt(100, 0)
         .unwrap()
@@ -797,14 +769,10 @@ fn map_only_attrs_do_not_fill_typed_aggregates() {
         tot = gen_ai::USAGE_TOTAL_TOKENS,
         cost = sp::COST_TOTAL,
     );
-    conn.execute_batch(&format!(
-        "INSERT INTO traces VALUES (
-           'bag-only', 'a', epoch_ms(100000), NULL, 'OK', 'IgnoredName',
-           NULL, 'generation', NULL, NULL, NULL, NULL, NULL, NULL,
-           DATE '{day}', {bag}
-         );"
-    ))
-    .expect("insert bag row");
+    let insert_sql = include_str!("test_traces_bag_insert.sql")
+        .replace("{{day}}", &day.to_string())
+        .replace("{{bag}}", &bag);
+    conn.execute_batch(&insert_sql).expect("insert bag row");
 
     let rows = run_reduce(&conn, &["bag-only"], 0, 1000);
     assert_full_fields(

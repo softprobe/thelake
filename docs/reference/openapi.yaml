@@ -1305,9 +1305,12 @@ components:
         session_id: { type: string }
         name: { type: string }
         span_type: { type: string }
+        service_name: { type: string }
+        span_kind: { type: string }
         start_time: { type: string, format: date-time }
         end_time: { type: string, format: date-time }
         status_code: { type: string }
+        status_message: { type: string }
         model_name: { type: string }
         model_provider: { type: string }
         user_id: { type: string }
@@ -1331,7 +1334,13 @@ components:
         - type: object
           required: [attributes, events]
           properties:
+            app_id:
+              type: string
             attributes:
+              type: object
+              additionalProperties:
+                type: string
+            resource_attributes:
               type: object
               additionalProperties:
                 type: string

@@ -116,6 +116,14 @@ pub fn map_string_map(value: Option<&Value>) -> HashMap<String, String> {
     value
         .map(attribute_map_json_to_string_map)
         .unwrap_or_default()
+        .into_iter()
+        .map(|(k, v)| {
+            let cleaned = crate::models::strip_nested_json_prefix(&v)
+                .map(str::to_owned)
+                .unwrap_or(v);
+            (k, cleaned)
+        })
+        .collect()
 }
 
 pub fn map_events(value: Option<&Value>) -> Vec<Value> {

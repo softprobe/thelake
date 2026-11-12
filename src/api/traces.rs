@@ -23,14 +23,43 @@ pub use crate::sql::llm::search::{
     SpanDetail, SpanSearchRequest, SpanSearchResponse, SpanSummary, Trace, TraceDetail,
 };
 
+const DEFAULT_DETAIL_LOOKBACK_DAYS: i64 = 90;
+const DEFAULT_DETAIL_FUTURE_SKEW_MINUTES: i64 = 5;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetailQuery {
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
     /// When set, only return spans belonging to this product session.
     pub session_id: Option<String>,
+}
+
+async fn resolve_detail_window(
+    ws: &WorkspaceContext,
+    params: &DetailQuery,
+) -> (DateTime<Utc>, DateTime<Utc>) {
+    let lookback = chrono::Duration::days(DEFAULT_DETAIL_LOOKBACK_DAYS);
+    match (params.from, params.to) {
+        (Some(from), Some(to)) => (from, to),
+        (None, Some(to)) => (to - lookback, to),
+        (Some(from), None) => (from, from + lookback),
+        (None, None) => {
+            if let Some(session_id) = params
+                .session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if let Ok(Some(window)) = ws.lookup_session_summary_window(session_id).await {
+                    return window;
+                }
+            }
+            let to = Utc::now() + chrono::Duration::minutes(DEFAULT_DETAIL_FUTURE_SKEW_MINUTES);
+            (to - lookback, to)
+        }
+    }
 }
 
 pub async fn search_spans(
@@ -66,16 +95,17 @@ pub async fn get_span(
     if span_id.trim().is_empty() {
         return Err(bad_request("missing span_id".to_string()));
     }
-    let sql = span_detail(&span_id, params.from, params.to).map_err(bad_request)?;
     let auth_ref = tenant.as_ref().map(|extension| &extension.0);
     let ws = resolve_workspace(&state, auth_ref).await?;
+    let (from, to) = resolve_detail_window(&ws, &params).await;
+    let sql = span_detail(&span_id, from, to).map_err(bad_request)?;
     let result =
         map_execute_result(ws.query().execute_trusted(sql).await).map_err(storage_error)?;
     let row = result.rows.first().ok_or_else(not_found)?;
     let mut detail = map_span_detail(&result.columns, row).ok_or_else(not_found)?;
     detail.scores = query_scores(
         &ws,
-        scores_for_span(&span_id, params.from, params.to).map_err(bad_request)?,
+        scores_for_span(&span_id, from, to).map_err(bad_request)?,
     )
     .await?;
     Ok(Json(detail))
@@ -92,13 +122,9 @@ pub async fn get_trace(
     }
     let auth_ref = tenant.as_ref().map(|extension| &extension.0);
     let ws = resolve_workspace(&state, auth_ref).await?;
-    let summary_sql = trace_summary(
-        &trace_id,
-        params.from,
-        params.to,
-        params.session_id.as_deref(),
-    )
-    .map_err(bad_request)?;
+    let (from, to) = resolve_detail_window(&ws, &params).await;
+    let summary_sql =
+        trace_summary(&trace_id, from, to, params.session_id.as_deref()).map_err(bad_request)?;
     let summary_result =
         map_execute_result(ws.query().execute_trusted(summary_sql).await).map_err(storage_error)?;
     let summary_row = summary_result.rows.first().ok_or_else(not_found)?;
@@ -107,8 +133,8 @@ pub async fn get_trace(
     let limit = clamp_limit(params.limit, DEFAULT_TRACE_LIMIT);
     let spans_sql = trace_spans(
         &trace_id,
-        params.from,
-        params.to,
+        from,
+        to,
         limit,
         params.cursor.as_deref(),
         params.session_id.as_deref(),
@@ -125,7 +151,7 @@ pub async fn get_trace(
 
     let scores = query_scores(
         &ws,
-        scores_for_trace(&trace_id, params.from, params.to).map_err(bad_request)?,
+        scores_for_trace(&trace_id, from, to).map_err(bad_request)?,
     )
     .await?;
 
@@ -171,9 +197,12 @@ pub(crate) fn map_span_summary(columns: &[String], row: &[Value]) -> Option<Span
         session_id: optional_string(columns, row, "session_id"),
         name: required_string(columns, row, "name").unwrap_or_default(),
         span_type: required_string(columns, row, "span_type").unwrap_or_else(|| "span".to_string()),
+        service_name: optional_string(columns, row, "service_name"),
+        span_kind: optional_string(columns, row, "span_kind"),
         start_time: required_timestamp(columns, row, "start_time")?,
         end_time: optional_timestamp(columns, row, "end_time"),
         status_code: optional_string(columns, row, "status_code"),
+        status_message: optional_string(columns, row, "status_message"),
         model_name: optional_string(columns, row, "model_name"),
         model_provider: optional_string(columns, row, "model_provider"),
         user_id: optional_string(columns, row, "user_id"),
@@ -188,7 +217,9 @@ pub(crate) fn map_span_detail(columns: &[String], row: &[Value]) -> Option<SpanD
     let summary = map_span_summary(columns, row)?;
     Some(SpanDetail {
         summary,
+        app_id: optional_string(columns, row, "app_id"),
         attributes: map_string_map(column_value(columns, row, "attributes")),
+        resource_attributes: map_string_map(column_value(columns, row, "resource_attributes")),
         events: map_events(column_value(columns, row, "events")),
         scores: Vec::new(),
     })

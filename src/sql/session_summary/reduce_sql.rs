@@ -95,35 +95,25 @@ pub fn compile_session_summary_aggregate_sql_for_workspace(
     let model_name = promo.model_name;
 
     // Predicate order: identity → timestamp (one clock) → observation filter.
+    let where_prefix = if ownership_pred.is_empty() {
+        format!("{session_pred} AND ")
+    } else {
+        format!("{ownership_pred} AND {session_pred} AND ")
+    };
     Ok(window
         .scan_with_timestamp_filter("", |bound| {
-            let where_sql = if ownership_pred.is_empty() {
-                format!(
-                    "{session_pred} AND {bound} AND COALESCE({observation_type}, '') <> 'recording'"
-                )
-            } else {
-                format!(
-                    "{ownership_pred} AND {session_pred} AND {bound} AND COALESCE({observation_type}, '') <> 'recording'"
-                )
-            };
-            format!(
-                "SELECT \
-                   session_id, \
-                   epoch_ns(MIN(timestamp))::BIGINT AS start_time_ns, \
-                   epoch_ns(MAX(COALESCE(end_timestamp, timestamp)))::BIGINT AS end_time_ns, \
-                   COUNT(DISTINCT span_id)::BIGINT AS observation_count, \
-                   SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END)::BIGINT AS error_count, \
-                   SUM({input_tokens})::BIGINT AS input_tokens, \
-                   SUM({output_tokens})::BIGINT AS output_tokens, \
-                   SUM({total_tokens})::BIGINT AS total_tokens, \
-                   SUM({total_cost}) AS total_cost, \
-                   {agent_expr} AS agent_name, \
-                   arg_min({user_id}, timestamp) FILTER (WHERE NULLIF({user_id}, '') IS NOT NULL) AS user_id, \
-                   arg_min({model_name}, timestamp) FILTER (WHERE NULLIF({model_name}, '') IS NOT NULL) AS model_name \
-                 FROM {from_table} \
-                 WHERE {where_sql} \
-                 GROUP BY session_id"
-            )
+            SESSION_SUMMARY_AGGREGATE_SQL
+                .replace("{{from_table}}", from_table)
+                .replace("{{where_prefix}}", &where_prefix)
+                .replace("{{timestamp_filter}}", bound)
+                .replace("{{observation_type}}", observation_type)
+                .replace("{{input_tokens}}", input_tokens)
+                .replace("{{output_tokens}}", output_tokens)
+                .replace("{{total_tokens}}", total_tokens)
+                .replace("{{total_cost}}", total_cost)
+                .replace("{{user_id}}", user_id)
+                .replace("{{model_name}}", model_name)
+                .replace("{{agent_expr}}", &agent_expr)
         })
         .into_sql())
 }
@@ -193,6 +183,7 @@ const SESSION_SUMMARY_UPSERT_ARRAY_TYPES: &[&str] = &[
     "text[]",
     "timestamptz[]",
 ];
+const SESSION_SUMMARY_AGGREGATE_SQL: &str = include_str!("session_summary_aggregate.sql");
 const SESSION_SUMMARY_UPSERT_SQL: &str = include_str!("summary_upsert.sql");
 
 /// Absolute UPSERT into catalog Postgres `session_summary`.
@@ -364,5 +355,99 @@ mod tests {
         assert!(sql.contains("FROM UNNEST($1::text[], $2::bigint[]"));
         assert!(sql.contains("$13::timestamptz[]"));
         assert!(!sql.contains("VALUES ("));
+    }
+
+    #[test]
+    fn reduce_sql_deduplicates_usage_leaf_tokens_excludes_http_body_and_handles_cycles() {
+        let conn = duckdb::Connection::open_in_memory().expect("duckdb");
+        conn.execute_batch(include_str!("../schema/traces.sql"))
+            .expect("create traces");
+        conn.execute_batch(
+            "INSERT INTO traces (
+               session_id, trace_id, span_id, parent_span_id, app_id, message_type,
+               timestamp, end_timestamp, status_code, observation_type,
+               input_tokens, output_tokens, total_tokens, total_cost, user_id, model_name
+             ) VALUES
+             ('s_otel', 'tr_1', 'sp_agent', NULL, 'travel-agent', 'concierge',
+              TIMESTAMP_NS '2024-01-01 10:00:00', TIMESTAMP_NS '2024-01-01 10:00:05', 'OK', 'agent',
+              25854, 2447, 29000, 0.05, 'u_1', NULL),
+             ('s_otel', 'tr_1', 'sp_gen', 'sp_agent', 'travel-agent', 'chat',
+              TIMESTAMP_NS '2024-01-01 10:00:01', TIMESTAMP_NS '2024-01-01 10:00:04', 'OK', 'generation',
+              25854, 2447, 29000, 0.05, NULL, 'gemini-2.5-flash'),
+             ('s_otel', 'tr_1', 'sp_tool', 'sp_agent', 'travel-agent', 'execute_tool',
+              TIMESTAMP_NS '2024-01-01 10:00:02', TIMESTAMP_NS '2024-01-01 10:00:03', 'OK', 'tool',
+              NULL, NULL, NULL, NULL, NULL, NULL),
+             ('s_otel', 'tr_1', 'sp_body', 'sp_tool', 'travel-agent', 'softprobe.http.body.capture',
+              TIMESTAMP_NS '2024-01-01 10:00:03', TIMESTAMP_NS '2024-01-01 10:00:06', 'OK', 'http_body',
+              NULL, NULL, NULL, NULL, NULL, NULL),
+             ('s_cyc', 'tr_c', 'c1', 'c2', 'app', 'agent',
+              TIMESTAMP_NS '2024-01-01 10:00:00', NULL, 'OK', 'agent',
+              NULL, NULL, NULL, NULL, NULL, NULL),
+             ('s_cyc', 'tr_c', 'c2', 'c1', 'app', 'chat',
+              TIMESTAMP_NS '2024-01-01 10:00:01', NULL, 'OK', 'generation',
+              40, 10, NULL, NULL, NULL, 'gpt-4o');",
+        )
+        .expect("insert");
+
+        let (from, to) = sample_window();
+        let sql = compile_session_summary_reduce_sql(
+            "traces",
+            &["s_otel".into(), "s_cyc".into()],
+            from,
+            to,
+        )
+        .expect("reduce sql");
+        assert_aggregate_invariants(&sql);
+        crate::sql::ensure_fact_scan_uses_timestamp_pruning(&conn, &sql)
+            .expect("reduce pruning gate");
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct ReducedSessionRow {
+            session_id: String,
+            observation_count: i64,
+            input_tokens: Option<i64>,
+            output_tokens: Option<i64>,
+            total_tokens: Option<i64>,
+        }
+
+        let mut stmt = conn.prepare(&sql).expect("prepare");
+        let mut rows: Vec<ReducedSessionRow> = stmt
+            .query_map([], |row| {
+                Ok(ReducedSessionRow {
+                    session_id: row.get("session_id")?,
+                    observation_count: row.get("observation_count")?,
+                    input_tokens: row.get("input_tokens")?,
+                    output_tokens: row.get("output_tokens")?,
+                    total_tokens: row.get("total_tokens")?,
+                })
+            })
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        rows.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            ReducedSessionRow {
+                session_id: "s_cyc".into(),
+                observation_count: 2,
+                input_tokens: Some(40),
+                output_tokens: Some(10),
+                total_tokens: Some(50),
+            },
+            "cycle terminates and computes missing total_tokens = input + output"
+        );
+        assert_eq!(
+            rows[1],
+            ReducedSessionRow {
+                session_id: "s_otel".into(),
+                observation_count: 3,
+                input_tokens: Some(25854),
+                output_tokens: Some(2447),
+                total_tokens: Some(29000),
+            },
+            "usage-leaf deduplicates parent agent rollup, preserves reasoning total_tokens, and excludes http_body from observation_count"
+        );
     }
 }
