@@ -388,9 +388,9 @@ async fn map_key_queries_cover_llm_telemetry_and_capture_paths() {
         obs_pos < bag_pos,
         "prefer-promoted: observation_type must lead bag access"
     );
-    assert!(search_sql.contains("COALESCE(observation_type,"));
-    assert!(search_sql.contains("COALESCE(model_name,"));
-    assert!(search_sql.contains("COALESCE(user_id,"));
+    assert!(search_sql.contains("COALESCE(NULLIF(TRIM(observation_type), ''),"));
+    assert!(search_sql.contains("COALESCE(NULLIF(TRIM(model_name), ''),"));
+    assert!(search_sql.contains("COALESCE(NULLIF(TRIM(user_id), ''),"));
     let search_result = query_engine
         .search_spans(&search)
         .await

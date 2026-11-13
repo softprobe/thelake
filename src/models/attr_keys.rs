@@ -1,9 +1,6 @@
-//! Softprobe / GenAI OTLP attribute keys — single source for ingest, SQL, tests.
-//!
-//! Prefer these over string literals so a typo cannot silently break promotion,
-//! dirty fold, reduce, or list filters.
+//! Softprobe and GenAI OTLP attribute keys, precedence slices, and canonical observation mappings.
 
-/// Softprobe product keys (`sp.*`).
+/// Softprobe product keys and internal span constants.
 pub mod sp {
     pub const SESSION_ID: &str = "sp.session.id";
     pub const SESSION_ID_UNDERSCORE: &str = "sp_session_id";
@@ -68,6 +65,16 @@ pub mod vercel_ai {
     pub const USAGE_OUTPUT_TOKENS: &str = "ai.usage.outputTokens";
     pub const USAGE_COMPLETION_TOKENS: &str = "ai.usage.completionTokens";
     pub const USAGE_TOTAL_TOKENS: &str = "ai.usage.totalTokens";
+    pub const TOOL_CALL_OPERATION: &str = "ai.toolCall";
+    pub const EMBED_OPERATION_PREFIX: &str = "ai.embed";
+    pub const DO_STREAM_SUFFIX: &str = ".doStream";
+    pub const DO_GENERATE_SUFFIX: &str = ".doGenerate";
+    pub const GENERATION_OPERATIONS: &[&str] = &[
+        "ai.streamText",
+        "ai.generateText",
+        "ai.streamObject",
+        "ai.generateObject",
+    ];
 }
 
 /// Resource attribute keys.
@@ -79,3 +86,101 @@ pub mod resource {
 pub mod enduser {
     pub const ID: &str = "enduser.id";
 }
+
+/// Ordered attribute fallback keys for canonical `session_id` resolution.
+pub const SESSION_ID_PRECEDENCE: &[&str] = &[
+    sp::SESSION_ID,
+    sp::SESSION_ID_UNDERSCORE,
+    otel::SESSION_ID,
+    gen_ai::CONVERSATION_ID,
+    vercel_ai::SESSION_ID,
+    vercel_ai::CONVERSATION_ID,
+    traceloop::SESSION_ID,
+];
+
+/// Ordered attribute fallback keys for canonical `user_id` resolution.
+pub const USER_ID_PRECEDENCE: &[&str] = &[
+    sp::USER_ID,
+    otel::USER_ID,
+    enduser::ID,
+    vercel_ai::USER_ID,
+    traceloop::USER_ID,
+];
+
+/// Ordered attribute fallback keys for explicit `agent_name` resolution.
+pub const AGENT_NAME_PRECEDENCE: &[&str] = &[gen_ai::AGENT_NAME, sp::AGENT_NAME];
+
+/// Ordered attribute fallback keys for canonical `model_name` resolution.
+pub const MODEL_NAME_PRECEDENCE: &[&str] = &[
+    gen_ai::REQUEST_MODEL,
+    gen_ai::RESPONSE_MODEL,
+    openinference::LLM_MODEL_NAME,
+    vercel_ai::MODEL_ID,
+];
+
+/// Ordered attribute fallback keys for canonical `model_provider` resolution.
+pub const MODEL_PROVIDER_PRECEDENCE: &[&str] = &[
+    gen_ai::PROVIDER_NAME,
+    gen_ai::SYSTEM,
+    openinference::LLM_PROVIDER,
+    openinference::LLM_SYSTEM,
+    vercel_ai::MODEL_PROVIDER,
+];
+
+/// Ordered attribute fallback keys for canonical `input_tokens` resolution.
+pub const INPUT_TOKENS_PRECEDENCE: &[&str] = &[
+    gen_ai::USAGE_INPUT_TOKENS,
+    gen_ai::USAGE_PROMPT_TOKENS,
+    openinference::TOKEN_COUNT_PROMPT,
+    vercel_ai::USAGE_INPUT_TOKENS,
+    vercel_ai::USAGE_PROMPT_TOKENS,
+];
+
+/// Ordered attribute fallback keys for canonical `output_tokens` resolution.
+pub const OUTPUT_TOKENS_PRECEDENCE: &[&str] = &[
+    gen_ai::USAGE_OUTPUT_TOKENS,
+    gen_ai::USAGE_COMPLETION_TOKENS,
+    openinference::TOKEN_COUNT_COMPLETION,
+    vercel_ai::USAGE_OUTPUT_TOKENS,
+    vercel_ai::USAGE_COMPLETION_TOKENS,
+];
+
+/// Ordered attribute fallback keys for canonical `total_tokens` resolution.
+pub const TOTAL_TOKENS_PRECEDENCE: &[&str] = &[
+    gen_ai::USAGE_TOTAL_TOKENS,
+    openinference::TOKEN_COUNT_TOTAL,
+    vercel_ai::USAGE_TOTAL_TOKENS,
+];
+
+/// Lowercase `gen_ai.operation.name` to canonical `observation_type` mapping.
+pub const GEN_AI_OPERATION_TO_OBS_TYPE: &[(&str, &str)] = &[
+    ("chat", "generation"),
+    ("generate_content", "generation"),
+    ("text_completion", "generation"),
+    ("embeddings", "embedding"),
+    ("execute_tool", "tool"),
+    ("invoke_agent", "agent"),
+    ("create_agent", "agent"),
+    ("invoke_workflow", "agent"),
+];
+
+/// Uppercase `openinference.span.kind` to canonical `observation_type` mapping.
+pub const OPENINFERENCE_KIND_TO_OBS_TYPE: &[(&str, &str)] = &[
+    ("LLM", "generation"),
+    ("EMBEDDING", "embedding"),
+    ("TOOL", "tool"),
+    ("AGENT", "agent"),
+    ("CHAIN", "chain"),
+    ("RETRIEVER", "retriever"),
+    ("RERANKER", "retriever"),
+    ("GUARDRAIL", "guardrail"),
+    ("EVALUATOR", "evaluator"),
+];
+
+/// Lowercase `traceloop.span.kind` to canonical `observation_type` mapping.
+pub const TRACELOOP_KIND_TO_OBS_TYPE: &[(&str, &str)] = &[
+    ("agent", "agent"),
+    ("tool", "tool"),
+    ("workflow", "chain"),
+    ("task", "chain"),
+];

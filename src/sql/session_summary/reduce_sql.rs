@@ -93,8 +93,8 @@ pub fn compile_session_summary_aggregate_sql_for_workspace(
     let total_cost = promo.total_cost;
     let user_id = promo.user_id;
     let model_name = promo.model_name;
+    let usage_leaf_ctes = crate::sql::render_usage_leaf_ctes("session_id", "timestamp");
 
-    // Predicate order: identity → timestamp (one clock) → observation filter.
     let where_prefix = if ownership_pred.is_empty() {
         format!("{session_pred} AND ")
     } else {
@@ -106,6 +106,7 @@ pub fn compile_session_summary_aggregate_sql_for_workspace(
                 .replace("{{from_table}}", from_table)
                 .replace("{{where_prefix}}", &where_prefix)
                 .replace("{{timestamp_filter}}", bound)
+                .replace("{{usage_leaf_ctes}}", &usage_leaf_ctes)
                 .replace("{{observation_type}}", observation_type)
                 .replace("{{input_tokens}}", input_tokens)
                 .replace("{{output_tokens}}", output_tokens)

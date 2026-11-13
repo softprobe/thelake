@@ -255,7 +255,9 @@ pub fn rows_to_objects(columns: &[String], rows: &[Vec<Value>]) -> Vec<Value> {
             for (idx, column) in columns.iter().enumerate() {
                 let raw = row.get(idx).cloned().unwrap_or(Value::Null);
                 let value = match column.as_str() {
-                    "attributes" | "resource_attributes" => parse_projected_json_value(raw),
+                    "attributes" | "resource_attributes" => {
+                        strip_projected_attribute_map_prefixes(parse_projected_json_value(raw))
+                    }
                     _ => raw,
                 };
                 object.insert(column.clone(), value);
@@ -263,6 +265,28 @@ pub fn rows_to_objects(columns: &[String], rows: &[Vec<Value>]) -> Vec<Value> {
             Value::Object(object)
         })
         .collect()
+}
+
+fn strip_projected_attribute_map_prefixes(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| {
+                    let cleaned = match v {
+                        Value::String(text) => {
+                            match crate::models::strip_nested_json_prefix(&text) {
+                                Some(stripped) => Value::String(stripped.to_owned()),
+                                None => Value::String(text),
+                            }
+                        }
+                        other => other,
+                    };
+                    (k, cleaned)
+                })
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 fn rows_to_search_response(
@@ -379,4 +403,45 @@ fn is_error_span(row: &Value) -> bool {
             .get("http_response_status_code")
             .and_then(Value::as_i64)
             .is_some_and(|status| status >= 500)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_to_objects_strips_nested_json_prefixes_on_attribute_maps() {
+        let columns = vec![
+            "span_id".to_string(),
+            "attributes".to_string(),
+            "resource_attributes".to_string(),
+        ];
+        let rows = vec![vec![
+            Value::String("sp_1".to_string()),
+            Value::String(
+                r#"{"gen_ai.response.finish_reasons":"sp.json:[\"stop\"]","plain":"{\"a\":1}"}"#
+                    .to_string(),
+            ),
+            Value::String(
+                r#"{"service.name":"travel-agent","process.command_args":"sp.json:[\"node\"]"}"#
+                    .to_string(),
+            ),
+        ]];
+
+        let objects = rows_to_objects(&columns, &rows);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(
+            objects[0]["attributes"]["gen_ai.response.finish_reasons"],
+            "[\"stop\"]"
+        );
+        assert_eq!(objects[0]["attributes"]["plain"], "{\"a\":1}");
+        assert_eq!(
+            objects[0]["resource_attributes"]["process.command_args"],
+            "[\"node\"]"
+        );
+        assert_eq!(
+            objects[0]["resource_attributes"]["service.name"],
+            "travel-agent"
+        );
+    }
 }

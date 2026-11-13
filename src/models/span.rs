@@ -184,7 +184,6 @@ impl Span {
         let canonical =
             canonicalize_multi_standard_llm_attributes(&otlp_span.name, &mut attributes);
 
-        // Extract events
         let events = otlp_span
             .events
             .iter()
@@ -385,11 +384,10 @@ fn first_non_empty<'a>(attrs: &'a HashMap<String, String>, keys: &[&str]) -> Opt
         .find_map(|key| attrs.get(*key).map(|v| v.trim()).filter(|v| !v.is_empty()))
 }
 
-fn populate_if_absent(
-    attrs: &mut HashMap<String, String>,
-    target_key: &str,
-    candidate_keys: &[&str],
-) {
+fn populate_if_absent(attrs: &mut HashMap<String, String>, precedence: &[&str]) {
+    let Some((&target_key, candidate_keys)) = precedence.split_first() else {
+        return;
+    };
     if first_non_empty(attrs, &[target_key]).is_some() {
         return;
     }
@@ -398,71 +396,85 @@ fn populate_if_absent(
     }
 }
 
+fn populate_int64_if_absent(attrs: &mut HashMap<String, String>, precedence: &[&str]) {
+    let Some((&target_key, candidate_keys)) = precedence.split_first() else {
+        return;
+    };
+    if let Some(existing) = first_non_empty(attrs, &[target_key]) {
+        if let Ok(parsed) = existing.parse::<i64>() {
+            let normalized = parsed.to_string();
+            if attrs.get(target_key).map(String::as_str) != Some(normalized.as_str()) {
+                attrs.insert(target_key.to_string(), normalized);
+            }
+        }
+        return;
+    }
+    for key in candidate_keys {
+        if let Some(parsed) = attrs
+            .get(*key)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            attrs.insert(target_key.to_string(), parsed.to_string());
+            return;
+        }
+    }
+}
+
 fn derive_canonical_observation_type(
     span_name: &str,
     attrs: &HashMap<String, String>,
 ) -> Option<&'static str> {
-    use crate::models::attr_keys::{gen_ai, openinference, sp, traceloop, vercel_ai};
+    use crate::models::attr_keys::{
+        gen_ai, openinference, sp, traceloop, vercel_ai, GEN_AI_OPERATION_TO_OBS_TYPE,
+        OPENINFERENCE_KIND_TO_OBS_TYPE, TRACELOOP_KIND_TO_OBS_TYPE,
+    };
 
     if span_name.trim() == sp::HTTP_BODY_CAPTURE_SPAN_NAME {
         return Some("http_body");
     }
 
     if let Some(op) = first_non_empty(attrs, &[gen_ai::OPERATION_NAME]) {
-        let mapped = match op.to_ascii_lowercase().as_str() {
-            "chat" | "generate_content" | "text_completion" => Some("generation"),
-            "embeddings" => Some("embedding"),
-            "execute_tool" => Some("tool"),
-            "invoke_agent" | "create_agent" | "invoke_workflow" => Some("agent"),
-            _ => None,
-        };
-        if mapped.is_some() {
-            return mapped;
+        let lower = op.to_ascii_lowercase();
+        if let Some((_, mapped)) = GEN_AI_OPERATION_TO_OBS_TYPE
+            .iter()
+            .find(|(candidate, _)| *candidate == lower)
+        {
+            return Some(*mapped);
         }
     }
 
     if let Some(kind) = first_non_empty(attrs, &[openinference::SPAN_KIND]) {
-        let mapped = match kind.to_ascii_uppercase().as_str() {
-            "LLM" => Some("generation"),
-            "EMBEDDING" => Some("embedding"),
-            "TOOL" => Some("tool"),
-            "AGENT" => Some("agent"),
-            "CHAIN" => Some("chain"),
-            "RETRIEVER" | "RERANKER" => Some("retriever"),
-            "GUARDRAIL" => Some("guardrail"),
-            "EVALUATOR" => Some("evaluator"),
-            _ => None,
-        };
-        if mapped.is_some() {
-            return mapped;
+        let upper = kind.to_ascii_uppercase();
+        if let Some((_, mapped)) = OPENINFERENCE_KIND_TO_OBS_TYPE
+            .iter()
+            .find(|(candidate, _)| *candidate == upper)
+        {
+            return Some(*mapped);
         }
     }
 
     if let Some(kind) = first_non_empty(attrs, &[traceloop::SPAN_KIND]) {
-        let mapped = match kind.to_ascii_lowercase().as_str() {
-            "agent" => Some("agent"),
-            "tool" => Some("tool"),
-            "workflow" | "task" => Some("chain"),
-            _ => None,
-        };
-        if mapped.is_some() {
-            return mapped;
+        let lower = kind.to_ascii_lowercase();
+        if let Some((_, mapped)) = TRACELOOP_KIND_TO_OBS_TYPE
+            .iter()
+            .find(|(candidate, _)| *candidate == lower)
+        {
+            return Some(*mapped);
         }
     }
 
     if let Some(op_id) = first_non_empty(attrs, &[vercel_ai::OPERATION_ID]) {
-        if op_id == "ai.toolCall" {
+        if op_id == vercel_ai::TOOL_CALL_OPERATION {
             return Some("tool");
         }
-        if op_id.starts_with("ai.embed") {
+        if op_id.starts_with(vercel_ai::EMBED_OPERATION_PREFIX) {
             return Some("embedding");
         }
-        if op_id.ends_with(".doStream")
-            || op_id.ends_with(".doGenerate")
-            || matches!(
-                op_id,
-                "ai.streamText" | "ai.generateText" | "ai.streamObject" | "ai.generateObject"
-            )
+        if op_id.ends_with(vercel_ai::DO_STREAM_SUFFIX)
+            || op_id.ends_with(vercel_ai::DO_GENERATE_SUFFIX)
+            || vercel_ai::GENERATION_OPERATIONS.contains(&op_id)
         {
             return Some("generation");
         }
@@ -478,7 +490,9 @@ fn canonicalize_multi_standard_llm_attributes(
     attrs: &mut HashMap<String, String>,
 ) -> CanonicalIngestFields {
     use crate::models::attr_keys::{
-        enduser, gen_ai, openinference, otel, sp, traceloop, vercel_ai,
+        sp, traceloop, AGENT_NAME_PRECEDENCE, INPUT_TOKENS_PRECEDENCE, MODEL_NAME_PRECEDENCE,
+        MODEL_PROVIDER_PRECEDENCE, OUTPUT_TOKENS_PRECEDENCE, SESSION_ID_PRECEDENCE,
+        TOTAL_TOKENS_PRECEDENCE, USER_ID_PRECEDENCE,
     };
 
     let resolved_obs_type = match first_non_empty(attrs, &[sp::OBSERVATION_TYPE]) {
@@ -489,84 +503,21 @@ fn canonicalize_multi_standard_llm_attributes(
         }),
     };
 
-    let session_id = first_non_empty(
-        attrs,
-        &[
-            sp::SESSION_ID,
-            sp::SESSION_ID_UNDERSCORE,
-            otel::SESSION_ID,
-            gen_ai::CONVERSATION_ID,
-            vercel_ai::SESSION_ID,
-            vercel_ai::CONVERSATION_ID,
-            traceloop::SESSION_ID,
-        ],
-    )
-    .map(str::to_owned);
+    let session_id = first_non_empty(attrs, SESSION_ID_PRECEDENCE).map(str::to_owned);
     if let Some(ref sid) = session_id {
         if first_non_empty(attrs, &[sp::SESSION_ID]).is_none() {
             attrs.insert(sp::SESSION_ID.to_string(), sid.clone());
         }
     }
 
-    populate_if_absent(
-        attrs,
-        sp::USER_ID,
-        &[
-            otel::USER_ID,
-            enduser::ID,
-            vercel_ai::USER_ID,
-            traceloop::USER_ID,
-        ],
-    );
-    populate_if_absent(
-        attrs,
-        gen_ai::REQUEST_MODEL,
-        &[
-            gen_ai::RESPONSE_MODEL,
-            openinference::LLM_MODEL_NAME,
-            vercel_ai::MODEL_ID,
-        ],
-    );
-    populate_if_absent(
-        attrs,
-        gen_ai::PROVIDER_NAME,
-        &[
-            gen_ai::SYSTEM,
-            openinference::LLM_PROVIDER,
-            openinference::LLM_SYSTEM,
-            vercel_ai::MODEL_PROVIDER,
-        ],
-    );
-    populate_if_absent(
-        attrs,
-        gen_ai::USAGE_INPUT_TOKENS,
-        &[
-            gen_ai::USAGE_PROMPT_TOKENS,
-            openinference::TOKEN_COUNT_PROMPT,
-            vercel_ai::USAGE_INPUT_TOKENS,
-            vercel_ai::USAGE_PROMPT_TOKENS,
-        ],
-    );
-    populate_if_absent(
-        attrs,
-        gen_ai::USAGE_OUTPUT_TOKENS,
-        &[
-            gen_ai::USAGE_COMPLETION_TOKENS,
-            openinference::TOKEN_COUNT_COMPLETION,
-            vercel_ai::USAGE_OUTPUT_TOKENS,
-            vercel_ai::USAGE_COMPLETION_TOKENS,
-        ],
-    );
-    populate_if_absent(
-        attrs,
-        gen_ai::USAGE_TOTAL_TOKENS,
-        &[
-            openinference::TOKEN_COUNT_TOTAL,
-            vercel_ai::USAGE_TOTAL_TOKENS,
-        ],
-    );
+    populate_if_absent(attrs, USER_ID_PRECEDENCE);
+    populate_if_absent(attrs, MODEL_NAME_PRECEDENCE);
+    populate_if_absent(attrs, MODEL_PROVIDER_PRECEDENCE);
+    populate_int64_if_absent(attrs, INPUT_TOKENS_PRECEDENCE);
+    populate_int64_if_absent(attrs, OUTPUT_TOKENS_PRECEDENCE);
+    populate_int64_if_absent(attrs, TOTAL_TOKENS_PRECEDENCE);
 
-    let agent_name = first_non_empty(attrs, &[gen_ai::AGENT_NAME, sp::AGENT_NAME])
+    let agent_name = first_non_empty(attrs, AGENT_NAME_PRECEDENCE)
         .map(str::to_owned)
         .or_else(|| {
             if resolved_obs_type.as_deref() == Some("agent") {
@@ -1427,6 +1378,103 @@ mod tests {
         assert!(
             !plain_http.attributes.contains_key("sp.session.id"),
             "trace_id fallback must not synthesize sp.session.id"
+        );
+    }
+
+    #[test]
+    fn from_otlp_validates_and_trims_int64_vendor_token_strings() {
+        let resource = HashMap::new();
+
+        let trimmed = Span::from_otlp(
+            otlp_span_with_attrs(
+                "ai.streamText.doStream",
+                vec![
+                    str_kv("ai.operationId", "ai.streamText.doStream"),
+                    str_kv("ai.usage.promptTokens", " 120 "),
+                    str_kv("ai.usage.completionTokens", " 35\n"),
+                    str_kv("ai.usage.totalTokens", "\t155 "),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp trimmed");
+        assert_eq!(
+            trimmed
+                .attributes
+                .get("gen_ai.usage.input_tokens")
+                .map(String::as_str),
+            Some("120")
+        );
+        assert_eq!(
+            trimmed
+                .attributes
+                .get("gen_ai.usage.output_tokens")
+                .map(String::as_str),
+            Some("35")
+        );
+        assert_eq!(
+            trimmed
+                .attributes
+                .get("gen_ai.usage.total_tokens")
+                .map(String::as_str),
+            Some("155")
+        );
+
+        let invalid_vendor = Span::from_otlp(
+            otlp_span_with_attrs(
+                "ai.streamText.doStream",
+                vec![
+                    str_kv("ai.operationId", "ai.streamText.doStream"),
+                    str_kv("ai.usage.promptTokens", "120.5"),
+                    str_kv("llm.token_count.completion", "unknown"),
+                    str_kv("ai.usage.totalTokens", "NaN"),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp invalid vendor");
+        assert!(!invalid_vendor
+            .attributes
+            .contains_key("gen_ai.usage.input_tokens"));
+        assert!(!invalid_vendor
+            .attributes
+            .contains_key("gen_ai.usage.output_tokens"));
+        assert!(!invalid_vendor
+            .attributes
+            .contains_key("gen_ai.usage.total_tokens"));
+        assert_eq!(
+            invalid_vendor
+                .attributes
+                .get("ai.usage.promptTokens")
+                .map(String::as_str),
+            Some("120.5")
+        );
+        assert_eq!(
+            invalid_vendor
+                .attributes
+                .get("llm.token_count.completion")
+                .map(String::as_str),
+            Some("unknown")
+        );
+
+        let fallback = Span::from_otlp(
+            otlp_span_with_attrs(
+                "ai.streamText.doStream",
+                vec![
+                    str_kv("ai.operationId", "ai.streamText.doStream"),
+                    str_kv("ai.usage.inputTokens", "120.5"),
+                    str_kv("ai.usage.promptTokens", " 95 "),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp fallback");
+        assert_eq!(
+            fallback
+                .attributes
+                .get("gen_ai.usage.input_tokens")
+                .map(String::as_str),
+            Some("95")
         );
     }
 }

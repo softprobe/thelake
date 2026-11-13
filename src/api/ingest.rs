@@ -514,7 +514,14 @@ fn normalize_otlp_logs_json(root: &mut serde_json::Value) {
                         let Some(lr_obj) = lr.as_object_mut() else {
                             continue;
                         };
-                        if let Some(body) = lr_obj.get_mut("body") {
+                        let empty_body = match lr_obj.get("body") {
+                            Some(serde_json::Value::Null) => true,
+                            Some(serde_json::Value::Object(map)) => map.is_empty(),
+                            _ => false,
+                        };
+                        if empty_body {
+                            lr_obj.remove("body");
+                        } else if let Some(body) = lr_obj.get_mut("body") {
                             normalize_otlp_any_value(
                                 body,
                                 ProtoJsonAnyValueEncoding::CustomDeserializer,
@@ -535,10 +542,38 @@ fn normalize_otlp_key_values(attrs: &mut serde_json::Value) {
         return;
     };
     for item in items {
-        if let Some(val) = item.as_object_mut().and_then(|o| o.get_mut("value")) {
+        let Some(kv_obj) = item.as_object_mut() else {
+            continue;
+        };
+        let empty_value = match kv_obj.get("value") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::Object(map)) => map.is_empty(),
+            _ => false,
+        };
+        if empty_value {
+            kv_obj.insert(
+                "value".to_string(),
+                serde_json::json!({ "stringValue": "" }),
+            );
+            continue;
+        }
+        if let Some(val) = kv_obj.get_mut("value") {
             normalize_otlp_any_value(val, ProtoJsonAnyValueEncoding::CustomDeserializer);
         }
     }
+}
+
+fn decode_otlp_base64_bytes(encoded: &str) -> Option<Vec<u8>> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    use base64::Engine;
+
+    let trimmed = encoded.trim();
+    STANDARD
+        .decode(trimmed)
+        .or_else(|_| STANDARD_NO_PAD.decode(trimmed))
+        .or_else(|_| URL_SAFE.decode(trimmed))
+        .or_else(|_| URL_SAFE_NO_PAD.decode(trimmed))
+        .ok()
 }
 
 fn normalize_otlp_any_value(val: &mut serde_json::Value, encoding: ProtoJsonAnyValueEncoding) {
@@ -601,6 +636,18 @@ fn normalize_otlp_any_value_variant(
                         *int_val = serde_json::Value::Number(n.into());
                     }
                 }
+            }
+        }
+    }
+    if let Some(bytes_val) = map.get_mut("bytesValue") {
+        if let Some(encoded) = bytes_val.as_str() {
+            if let Some(decoded) = decode_otlp_base64_bytes(encoded) {
+                *bytes_val = serde_json::Value::Array(
+                    decoded
+                        .into_iter()
+                        .map(|byte| serde_json::Value::Number(byte.into()))
+                        .collect(),
+                );
             }
         }
     }
@@ -718,6 +765,131 @@ mod tests {
         assert_eq!(
             attr_map.get("tags").map(String::as_str),
             Some("sp.json:[\"llm\"]")
+        );
+    }
+
+    #[test]
+    fn decode_otlp_json_normalizes_empty_null_omitted_any_values_and_base64_bytes() {
+        let trace_payload = serde_json::json!({
+            "resourceSpans": [{
+                "resource": {
+                    "attributes": [
+                        {"key": "empty_obj", "value": {}},
+                        {"key": "null_val", "value": null},
+                        {"key": "omitted_val"},
+                        {"key": "raw_bytes", "value": {"bytesValue": "AQID"}}
+                    ]
+                },
+                "scopeSpans": [{
+                    "spans": [{
+                        "traceId": "0102030405060708090a0b0c0d0e0f10",
+                        "spanId": "0102030405060708",
+                        "name": "chat",
+                        "startTimeUnixNano": "1000",
+                        "endTimeUnixNano": "2000",
+                        "attributes": [
+                            {
+                                "key": "nested_kv",
+                                "value": {
+                                    "kvlistValue": {
+                                        "values": [
+                                            {"key": "empty_child", "value": {}},
+                                            {"key": "null_child", "value": null},
+                                            {"key": "omitted_child"},
+                                            {"key": "child_bytes", "value": {"bytesValue": "AQID"}}
+                                        ]
+                                    }
+                                }
+                            },
+                            {
+                                "key": "bytes_array",
+                                "value": {
+                                    "arrayValue": {
+                                        "values": [{"bytesValue": "AQID"}]
+                                    }
+                                }
+                            }
+                        ]
+                    }]
+                }]
+            }]
+        });
+
+        let decoded_traces =
+            decode_otlp_traces_json(trace_payload.to_string().as_bytes()).expect("decode traces");
+        let rs = &decoded_traces.resource_spans[0];
+        let res_map = key_values_to_map(&rs.resource.as_ref().unwrap().attributes);
+        assert_eq!(res_map.get("empty_obj").map(String::as_str), Some(""));
+        assert_eq!(res_map.get("null_val").map(String::as_str), Some(""));
+        assert_eq!(res_map.get("omitted_val").map(String::as_str), Some(""));
+        assert_eq!(res_map.get("raw_bytes").map(String::as_str), Some("AQID"));
+
+        let span = &rs.scope_spans[0].spans[0];
+        let span_map = key_values_to_map(&span.attributes);
+        let nested_kv: serde_json::Value = serde_json::from_str(
+            crate::models::strip_nested_json_prefix(span_map.get("nested_kv").unwrap()).unwrap(),
+        )
+        .expect("nested_kv json");
+        assert_eq!(
+            nested_kv,
+            serde_json::json!({
+                "empty_child": "",
+                "null_child": "",
+                "omitted_child": "",
+                "child_bytes": "AQID"
+            })
+        );
+        assert_eq!(
+            span_map.get("bytes_array").map(String::as_str),
+            Some("sp.json:[\"AQID\"]")
+        );
+
+        let log_payload = serde_json::json!({
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [
+                        {
+                            "timeUnixNano": "1000",
+                            "observedTimeUnixNano": "1000",
+                            "body": {},
+                            "attributes": [{"key": "empty_attr", "value": {}}]
+                        },
+                        {
+                            "timeUnixNano": "2000",
+                            "observedTimeUnixNano": "2000",
+                            "body": null,
+                            "attributes": [{"key": "omitted_attr"}]
+                        },
+                        {
+                            "timeUnixNano": "3000",
+                            "observedTimeUnixNano": "3000",
+                            "body": {"bytesValue": "AQID"}
+                        }
+                    ]
+                }]
+            }]
+        });
+
+        let decoded_logs =
+            decode_otlp_logs_json(log_payload.to_string().as_bytes()).expect("decode logs");
+        let records = &decoded_logs.resource_logs[0].scope_logs[0].log_records;
+        assert!(records[0].body.is_none());
+        assert_eq!(
+            key_values_to_map(&records[0].attributes)
+                .get("empty_attr")
+                .map(String::as_str),
+            Some("")
+        );
+        assert!(records[1].body.is_none());
+        assert_eq!(
+            key_values_to_map(&records[1].attributes)
+                .get("omitted_attr")
+                .map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            crate::models::any_value::any_value_to_json(records[2].body.as_ref().unwrap()),
+            Some(serde_json::json!("AQID"))
         );
     }
 }

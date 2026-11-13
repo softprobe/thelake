@@ -1595,6 +1595,7 @@ async fn otel_genai_hierarchy_serves_canonical_types_leaf_tokens_clean_json_and_
     );
 
     let trace_resp = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1607,9 +1608,131 @@ async fn otel_genai_hierarchy_serves_canonical_types_leaf_tokens_clean_json_and_
     assert_eq!(trace_resp.status(), StatusCode::OK);
     let trace_json = response_json(trace_resp).await;
     assert_eq!(trace_json["trace"]["trace_id"], trace_hex);
+    assert_eq!(trace_json["trace"]["span_count"], 3);
     assert_eq!(trace_json["trace"]["input_tokens"], 25854);
     assert_eq!(trace_json["trace"]["output_tokens"], 2447);
     assert_eq!(trace_json["trace"]["total_tokens"], 29000);
+
+    let log_body = json!({
+        "resourceLogs": [{
+            "resource": {
+                "attributes": [
+                    {"key": "service.name", "value": {"stringValue": "travel-agent"}},
+                    {
+                        "key": "process.command_args",
+                        "value": {"arrayValue": {"values": [{"stringValue": "node"}]}}
+                    }
+                ]
+            },
+            "scopeLogs": [{
+                "logRecords": [{
+                    "timeUnixNano": (start_ns + 1_000_000_000).to_string(),
+                    "observedTimeUnixNano": (start_ns + 1_000_000_000).to_string(),
+                    "traceId": trace_hex,
+                    "spanId": gen_hex,
+                    "body": {},
+                    "attributes": [
+                        {"key": "sp.session.id", "value": {"stringValue": session_id}},
+                        {"key": "empty_meta", "value": {}}
+                    ]
+                }]
+            }]
+        }]
+    });
+    let log_ingest_resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/logs")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(log_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("ingest correlated log");
+    assert_eq!(log_ingest_resp.status(), StatusCode::OK);
+    state
+        .workspace_for_id("")
+        .await
+        .expect("workspace context")
+        .ingest()
+        .force_flush_logs()
+        .await
+        .expect("flush logs");
+
+    let from_z = (chrono::Utc::now() - chrono::Duration::minutes(10))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let to_z = (chrono::Utc::now() + chrono::Duration::minutes(5))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let bounded_session_resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/sessions/{session_id}?from={from_z}&to={to_z}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("get bounded session details");
+    assert_eq!(bounded_session_resp.status(), StatusCode::OK);
+    let bounded_session_json = response_json(bounded_session_resp).await;
+    let bounded_gen = bounded_session_json["spans"]
+        .as_array()
+        .expect("bounded session spans")
+        .iter()
+        .find(|s| s["span_id"] == gen_hex)
+        .expect("bounded gen span");
+    assert_eq!(
+        bounded_gen["attributes"]["gen_ai.response.finish_reasons"],
+        "[\"stop\"]"
+    );
+    let bounded_log = &bounded_session_json["logs"]
+        .as_array()
+        .expect("bounded session logs")[0];
+    assert_eq!(
+        bounded_log["resource_attributes"]["process.command_args"],
+        "[\"node\"]"
+    );
+    assert_eq!(bounded_log["attributes"]["empty_meta"], "");
+
+    let trace_details_resp = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/traces/details")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "traceId": trace_hex,
+                        "timeRange": { "from": from_z, "to": to_z }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("post trace details");
+    assert_eq!(trace_details_resp.status(), StatusCode::OK);
+    let trace_details_json = response_json(trace_details_resp).await;
+    let details_gen = trace_details_json["spans"]
+        .as_array()
+        .expect("trace details spans")
+        .iter()
+        .find(|s| s["span_id"] == gen_hex)
+        .expect("trace details gen span");
+    assert_eq!(
+        details_gen["attributes"]["gen_ai.response.finish_reasons"],
+        "[\"stop\"]"
+    );
+    let details_log = &trace_details_json["logs"]
+        .as_array()
+        .expect("trace details logs")[0];
+    assert_eq!(
+        details_log["resource_attributes"]["process.command_args"],
+        "[\"node\"]"
+    );
 }
 
 #[tokio::test]
@@ -1761,4 +1884,157 @@ async fn otlp_json_ingest_preserves_array_kvlist_and_int_attributes() {
     assert_eq!(trace_json["trace"]["input_tokens"], 120);
     assert_eq!(trace_json["trace"]["output_tokens"], 30);
     assert_eq!(trace_json["trace"]["total_tokens"], 150);
+}
+
+#[tokio::test]
+async fn invalid_vendor_token_strings_do_not_reject_promoted_otlp_ingest_batch() {
+    use crate::util::promotion_file_backed::{
+        apply_promotion_yaml, ingest_otlp_protobuf, setup_file_backed_promotion_env,
+    };
+
+    let env = setup_file_backed_promotion_env().await;
+    let hot_attrs_yaml = include_str!("../../docs/promotion/traces-query-hot-attrs.yaml");
+    apply_promotion_yaml(&env.router, hot_attrs_yaml).await;
+
+    let trace_bytes = [0x51u8; 16];
+    let trimmed_bytes = [0x61u8; 8];
+    let float_bytes = [0x62u8; 8];
+    let unknown_bytes = [0x63u8; 8];
+    let trimmed_hex = hex::encode(trimmed_bytes);
+    let float_hex = hex::encode(float_bytes);
+    let unknown_hex = hex::encode(unknown_bytes);
+    let start_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap() as u64;
+
+    let payload = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![string_kv("service.name", "vercel-agent")],
+                dropped_attributes_count: 0,
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: "ai".to_string(),
+                    ..Default::default()
+                }),
+                spans: vec![
+                    Span {
+                        trace_id: trace_bytes.to_vec(),
+                        span_id: trimmed_bytes.to_vec(),
+                        name: "ai.streamText.doStream".to_string(),
+                        kind: span::SpanKind::Client as i32,
+                        start_time_unix_nano: start_ns,
+                        end_time_unix_nano: start_ns + 500_000_000,
+                        attributes: vec![
+                            string_kv("ai.operationId", "ai.streamText.doStream"),
+                            string_kv("ai.telemetry.metadata.sessionId", "ses_promo_tokens"),
+                            string_kv("ai.usage.promptTokens", " 120 "),
+                            string_kv("ai.usage.completionTokens", " 30 "),
+                            string_kv("ai.usage.totalTokens", " 150 "),
+                        ],
+                        ..Default::default()
+                    },
+                    Span {
+                        trace_id: trace_bytes.to_vec(),
+                        span_id: float_bytes.to_vec(),
+                        name: "ai.streamText.doStream".to_string(),
+                        kind: span::SpanKind::Client as i32,
+                        start_time_unix_nano: start_ns + 600_000_000,
+                        end_time_unix_nano: start_ns + 900_000_000,
+                        attributes: vec![
+                            string_kv("ai.operationId", "ai.streamText.doStream"),
+                            string_kv("ai.telemetry.metadata.sessionId", "ses_promo_tokens"),
+                            string_kv("ai.usage.promptTokens", "120.5"),
+                        ],
+                        ..Default::default()
+                    },
+                    Span {
+                        trace_id: trace_bytes.to_vec(),
+                        span_id: unknown_bytes.to_vec(),
+                        name: "ai.streamText.doStream".to_string(),
+                        kind: span::SpanKind::Client as i32,
+                        start_time_unix_nano: start_ns + 1_000_000_000,
+                        end_time_unix_nano: start_ns + 1_200_000_000,
+                        attributes: vec![
+                            string_kv("ai.operationId", "ai.streamText.doStream"),
+                            string_kv("ai.telemetry.metadata.sessionId", "ses_promo_tokens"),
+                            string_kv("ai.usage.promptTokens", "unknown"),
+                        ],
+                        ..Default::default()
+                    },
+                ],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    };
+
+    let mut encoded = Vec::new();
+    payload.encode(&mut encoded).expect("encode");
+    ingest_otlp_protobuf(env.router.clone(), encoded).await;
+
+    let trimmed_resp = env
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/spans/{trimmed_hex}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("get trimmed span");
+    assert_eq!(trimmed_resp.status(), StatusCode::OK);
+    let trimmed_json = response_json(trimmed_resp).await;
+    assert_eq!(trimmed_json["input_tokens"], 120);
+    assert_eq!(trimmed_json["output_tokens"], 30);
+    assert_eq!(trimmed_json["total_tokens"], 150);
+    assert_eq!(
+        trimmed_json["attributes"]["gen_ai.usage.input_tokens"],
+        "120"
+    );
+
+    let float_resp = env
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/spans/{float_hex}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("get float span");
+    assert_eq!(float_resp.status(), StatusCode::OK);
+    let float_json = response_json(float_resp).await;
+    assert!(
+        float_json["attributes"]
+            .get("gen_ai.usage.input_tokens")
+            .is_none(),
+        "float vendor string must not populate int64 promotion source key: {float_json}"
+    );
+    assert_eq!(float_json["attributes"]["ai.usage.promptTokens"], "120.5");
+
+    let unknown_resp = env
+        .router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/spans/{unknown_hex}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("get unknown span");
+    assert_eq!(unknown_resp.status(), StatusCode::OK);
+    let unknown_json = response_json(unknown_resp).await;
+    assert!(unknown_json["attributes"]
+        .get("gen_ai.usage.input_tokens")
+        .is_none());
+    assert_eq!(unknown_json["input_tokens"], Value::Null);
+    assert_eq!(
+        unknown_json["attributes"]["ai.usage.promptTokens"],
+        "unknown"
+    );
 }

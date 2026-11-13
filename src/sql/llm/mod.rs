@@ -172,10 +172,10 @@ pub fn compile_session_search_sql(
 
     let observation_type = format!("COALESCE({}, 'span')", expr_observation_type());
     // Legacy OpenCode child sessions stamped their own ses_* as session_id and
-    // marked the turn with parentSessionID. Drop those from the default list;
-    // holistic (new) sessions keep a root agent turn without that metadata.
-    // COALESCE inside arg_min matters: DuckDB arg_min skips NULLs, so a later
-    // nested turn's parentSessionID would otherwise "win" over an earlier root.
+    // marked the turn with parentSessionID. Holistic sessions keep a root agent
+    // turn without that metadata. `session_search.sql` coalesces `parent_session_id`
+    // to `''` before `arg_min` because DuckDB `arg_min` skips NULL values and would
+    // otherwise pick a later nested turn's `parentSessionID` over an earlier root.
     if request.roots_only {
         having.push(
             "COALESCE(arg_min(parent_session_id, timestamp) FILTER (WHERE obs_type = 'agent'), '') = ''"
@@ -210,6 +210,7 @@ pub fn compile_session_search_sql(
     let total_cost = expr_total_cost();
     let user_id = expr_user_id();
     let model_name = expr_model_name();
+    let usage_leaf_ctes = crate::sql::render_usage_leaf_ctes("resolved_session_id", "timestamp");
 
     Ok(window
         .scan_with_timestamp_filter("", |bound| {
@@ -225,6 +226,7 @@ pub fn compile_session_search_sql(
                 .replace("{{model_name_expr}}", &model_name)
                 .replace("{{identity_sql}}", &identity_sql)
                 .replace("{{timestamp_filter}}", bound)
+                .replace("{{usage_leaf_ctes}}", &usage_leaf_ctes)
                 .replace("{{having_sql}}", &having_sql)
                 .replace("{{cursor_sql}}", &cursor_sql)
                 .replace("{{order_sql}}", &order_sql)
@@ -405,7 +407,10 @@ pub fn compile_trace_summary_sql(
 ) -> Result<String, String> {
     let window = QueryWindow::try_new(from, to)?;
     let session_id_expr = expr_session_id();
-    let mut identity = vec![format!("trace_id = {}", sql_string_literal(trace_id))];
+    let mut identity = vec![
+        format!("trace_id = {}", sql_string_literal(trace_id)),
+        exclude_recording_observation_sql(),
+    ];
     if let Some(session_id) = session_id.map(str::trim).filter(|v| !v.is_empty()) {
         identity.push(format!(
             "{session_id_expr} = {}",
@@ -413,15 +418,18 @@ pub fn compile_trace_summary_sql(
         ));
     }
     let identity_sql = identity.join(" AND ");
+    let obs_type = expr_observation_type();
     let input_tokens = expr_input_tokens();
     let output_tokens = expr_output_tokens();
     let total_tokens = expr_total_tokens();
     let total_cost = expr_total_cost();
     let user_id = expr_user_id();
+    let usage_leaf_ctes = crate::sql::render_usage_leaf_ctes("trace_id", "timestamp");
     Ok(window
         .scan_with_timestamp_filter("", |bound| {
             TRACE_SUMMARY_SQL
                 .replace("{{session_id_expr}}", &session_id_expr)
+                .replace("{{obs_type_expr}}", &obs_type)
                 .replace("{{input_tokens_expr}}", &input_tokens)
                 .replace("{{output_tokens_expr}}", &output_tokens)
                 .replace("{{total_tokens_expr}}", &total_tokens)
@@ -429,6 +437,7 @@ pub fn compile_trace_summary_sql(
                 .replace("{{user_id_expr}}", &user_id)
                 .replace("{{identity_sql}}", &identity_sql)
                 .replace("{{timestamp_filter}}", bound)
+                .replace("{{usage_leaf_ctes}}", &usage_leaf_ctes)
         })
         .into_sql())
 }
@@ -486,6 +495,7 @@ pub fn compile_session_detail_sql(
     let exclude = exclude_recording_observation_sql();
     let projection = observation_projection(true);
     let scores_proj = score_columns("CAST(metadata AS JSON)");
+    let usage_leaf_ctes = crate::sql::render_usage_leaf_ctes("session_id", "start_time");
     Ok(window
         .scan_with_timestamp_filter("", |bound| {
             SESSION_DETAIL_SQL
@@ -493,6 +503,7 @@ pub fn compile_session_detail_sql(
                 .replace("{{session_predicate}}", &session_predicate)
                 .replace("{{exclude_recording}}", &exclude)
                 .replace("{{timestamp_filter}}", bound)
+                .replace("{{usage_leaf_ctes}}", &usage_leaf_ctes)
                 .replace("{{score_columns}}", &scores_proj)
                 .replace("{{session_id_literal}}", &sid)
         })
@@ -616,23 +627,63 @@ fn expr_span_kind() -> String {
         .to_string()
 }
 
+fn coalesce_promoted_varchar(col: &str, keys: &[&str]) -> String {
+    let mut exprs = Vec::with_capacity(keys.len() + 1);
+    exprs.push(non_empty_col(col));
+    for key in keys {
+        exprs.push(non_empty_attr("attributes", key));
+    }
+    coalesce_exprs(&exprs)
+}
+
+fn coalesce_promoted_bigint(col: &str, keys: &[&str]) -> String {
+    let Some((&primary_key, fallback_keys)) = keys.split_first() else {
+        return col.to_string();
+    };
+    let mut exprs = Vec::with_capacity(keys.len());
+    exprs.push(prefer_attr_try_cast(
+        Some(col),
+        "attributes",
+        primary_key,
+        "BIGINT",
+    ));
+    for key in fallback_keys {
+        exprs.push(attribute_map_try_cast("attributes", key, "BIGINT"));
+    }
+    coalesce_exprs(&exprs)
+}
+
+fn sql_case_mapping(scrutinee: &str, pairs: &[(&str, &str)]) -> String {
+    let arms = pairs
+        .iter()
+        .map(|(from, to)| {
+            format!(
+                "WHEN {} THEN {}",
+                sql_string_literal(from),
+                sql_string_literal(to)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("CASE {scrutinee} {arms} ELSE NULL END")
+}
+
 pub(crate) fn expr_session_id() -> String {
-    use crate::models::attr_keys::{gen_ai, otel, sp, traceloop, vercel_ai};
-    coalesce_exprs(&[
-        "NULLIF(session_attr_id, '')".to_string(),
-        non_empty_attr("attributes", sp::SESSION_ID),
-        non_empty_attr("attributes", sp::SESSION_ID_UNDERSCORE),
-        non_empty_attr("attributes", otel::SESSION_ID),
-        non_empty_attr("attributes", gen_ai::CONVERSATION_ID),
-        non_empty_attr("attributes", vercel_ai::SESSION_ID),
-        non_empty_attr("attributes", vercel_ai::CONVERSATION_ID),
-        non_empty_attr("attributes", traceloop::SESSION_ID),
-        non_empty_col("session_id"),
-    ])
+    use crate::models::attr_keys::SESSION_ID_PRECEDENCE;
+    let mut exprs = Vec::with_capacity(SESSION_ID_PRECEDENCE.len() + 2);
+    exprs.push(non_empty_col("session_attr_id"));
+    for key in SESSION_ID_PRECEDENCE {
+        exprs.push(non_empty_attr("attributes", key));
+    }
+    exprs.push(non_empty_col("session_id"));
+    coalesce_exprs(&exprs)
 }
 
 pub(crate) fn expr_observation_type() -> String {
-    use crate::models::attr_keys::{gen_ai, openinference, sp, traceloop, vercel_ai};
+    use crate::models::attr_keys::{
+        gen_ai, openinference, sp, traceloop, vercel_ai, GEN_AI_OPERATION_TO_OBS_TYPE,
+        OPENINFERENCE_KIND_TO_OBS_TYPE, TRACELOOP_KIND_TO_OBS_TYPE,
+    };
     let gen_ai_op = format!(
         "LOWER(COALESCE({}, ''))",
         non_empty_attr("attributes", gen_ai::OPERATION_NAME)
@@ -649,153 +700,97 @@ pub(crate) fn expr_observation_type() -> String {
         "COALESCE({}, '')",
         non_empty_attr("attributes", vercel_ai::OPERATION_ID)
     );
+    let ai_gen_ops = vercel_ai::GENERATION_OPERATIONS
+        .iter()
+        .map(|op| sql_string_literal(op))
+        .collect::<Vec<_>>()
+        .join(", ");
     // Split across CONCAT so TrustedSql::validate_for_scope does not mistake the
     // OBI span-name literal for the default `softprobe` catalog or schema identifier.
-    let body_name = "CONCAT('soft', 'probe.http.body.capture')";
+    let (body_prefix, body_rest) = sp::HTTP_BODY_CAPTURE_SPAN_NAME.split_at(4);
+    let body_name = format!(
+        "CONCAT({}, {})",
+        sql_string_literal(body_prefix),
+        sql_string_literal(body_rest)
+    );
 
     coalesce_exprs(&[
-        llm_promo().observation_type.to_string(),
+        non_empty_col(llm_promo().observation_type),
         non_empty_attr("attributes", sp::OBSERVATION_TYPE),
         format!("CASE WHEN TRIM(message_type) = {body_name} THEN 'http_body' ELSE NULL END"),
-        format!(
-            "CASE {gen_ai_op} \
-               WHEN 'chat' THEN 'generation' \
-               WHEN 'generate_content' THEN 'generation' \
-               WHEN 'text_completion' THEN 'generation' \
-               WHEN 'embeddings' THEN 'embedding' \
-               WHEN 'execute_tool' THEN 'tool' \
-               WHEN 'invoke_agent' THEN 'agent' \
-               WHEN 'create_agent' THEN 'agent' \
-               WHEN 'invoke_workflow' THEN 'agent' \
-               ELSE NULL END"
-        ),
-        format!(
-            "CASE {oi_kind} \
-               WHEN 'LLM' THEN 'generation' \
-               WHEN 'EMBEDDING' THEN 'embedding' \
-               WHEN 'TOOL' THEN 'tool' \
-               WHEN 'AGENT' THEN 'agent' \
-               WHEN 'CHAIN' THEN 'chain' \
-               WHEN 'RETRIEVER' THEN 'retriever' \
-               WHEN 'RERANKER' THEN 'retriever' \
-               WHEN 'GUARDRAIL' THEN 'guardrail' \
-               WHEN 'EVALUATOR' THEN 'evaluator' \
-               ELSE NULL END"
-        ),
-        format!(
-            "CASE {tl_kind} \
-               WHEN 'agent' THEN 'agent' \
-               WHEN 'tool' THEN 'tool' \
-               WHEN 'workflow' THEN 'chain' \
-               WHEN 'task' THEN 'chain' \
-               ELSE NULL END"
-        ),
+        sql_case_mapping(&gen_ai_op, GEN_AI_OPERATION_TO_OBS_TYPE),
+        sql_case_mapping(&oi_kind, OPENINFERENCE_KIND_TO_OBS_TYPE),
+        sql_case_mapping(&tl_kind, TRACELOOP_KIND_TO_OBS_TYPE),
         format!(
             "CASE \
-               WHEN {ai_op} = 'ai.toolCall' THEN 'tool' \
-               WHEN starts_with({ai_op}, 'ai.embed') THEN 'embedding' \
-               WHEN ends_with({ai_op}, '.doStream') OR ends_with({ai_op}, '.doGenerate') THEN 'generation' \
-               WHEN {ai_op} IN ('ai.streamText', 'ai.generateText', 'ai.streamObject', 'ai.generateObject') THEN 'generation' \
-               ELSE NULL END"
+               WHEN {ai_op} = {tool_op} THEN 'tool' \
+               WHEN starts_with({ai_op}, {embed_prefix}) THEN 'embedding' \
+               WHEN ends_with({ai_op}, {stream_suffix}) OR ends_with({ai_op}, {gen_suffix}) THEN 'generation' \
+               WHEN {ai_op} IN ({ai_gen_ops}) THEN 'generation' \
+               ELSE NULL END",
+            tool_op = sql_string_literal(vercel_ai::TOOL_CALL_OPERATION),
+            embed_prefix = sql_string_literal(vercel_ai::EMBED_OPERATION_PREFIX),
+            stream_suffix = sql_string_literal(vercel_ai::DO_STREAM_SUFFIX),
+            gen_suffix = sql_string_literal(vercel_ai::DO_GENERATE_SUFFIX),
         ),
     ])
 }
 
 fn expr_model_name() -> String {
-    use crate::models::attr_keys::{gen_ai, openinference, vercel_ai};
-    coalesce_exprs(&[
-        llm_promo().model_name.to_string(),
-        non_empty_attr("attributes", gen_ai::REQUEST_MODEL),
-        non_empty_attr("attributes", gen_ai::RESPONSE_MODEL),
-        non_empty_attr("attributes", openinference::LLM_MODEL_NAME),
-        non_empty_attr("attributes", vercel_ai::MODEL_ID),
-    ])
+    coalesce_promoted_varchar(
+        llm_promo().model_name,
+        crate::models::attr_keys::MODEL_NAME_PRECEDENCE,
+    )
 }
 
 fn expr_model_provider() -> String {
-    use crate::models::attr_keys::{gen_ai, openinference, vercel_ai};
-    coalesce_exprs(&[
-        llm_promo().model_provider.to_string(),
-        non_empty_attr("attributes", gen_ai::PROVIDER_NAME),
-        non_empty_attr("attributes", gen_ai::SYSTEM),
-        non_empty_attr("attributes", openinference::LLM_PROVIDER),
-        non_empty_attr("attributes", openinference::LLM_SYSTEM),
-        non_empty_attr("attributes", vercel_ai::MODEL_PROVIDER),
-    ])
+    coalesce_promoted_varchar(
+        llm_promo().model_provider,
+        crate::models::attr_keys::MODEL_PROVIDER_PRECEDENCE,
+    )
 }
 
 fn expr_user_id() -> String {
-    use crate::models::attr_keys::{enduser, otel, sp, traceloop, vercel_ai};
-    coalesce_exprs(&[
-        llm_promo().user_id.to_string(),
-        non_empty_attr("attributes", sp::USER_ID),
-        non_empty_attr("attributes", otel::USER_ID),
-        non_empty_attr("attributes", enduser::ID),
-        non_empty_attr("attributes", vercel_ai::USER_ID),
-        non_empty_attr("attributes", traceloop::USER_ID),
-    ])
+    coalesce_promoted_varchar(
+        llm_promo().user_id,
+        crate::models::attr_keys::USER_ID_PRECEDENCE,
+    )
 }
 
 fn expr_agent_name_attr() -> String {
-    use crate::models::attr_keys::{gen_ai, sp, traceloop};
+    use crate::models::attr_keys::{traceloop, AGENT_NAME_PRECEDENCE};
     let obs = expr_observation_type();
     let entity = non_empty_attr("attributes", traceloop::ENTITY_NAME);
-    coalesce_exprs(&[
-        "NULLIF(TRIM(agent_name), '')".to_string(),
-        non_empty_attr("attributes", gen_ai::AGENT_NAME),
-        non_empty_attr("attributes", sp::AGENT_NAME),
-        format!("CASE WHEN COALESCE({obs}, '') = 'agent' THEN {entity} ELSE NULL END"),
-    ])
+    let mut exprs = Vec::with_capacity(AGENT_NAME_PRECEDENCE.len() + 2);
+    exprs.push(non_empty_col("agent_name"));
+    for key in AGENT_NAME_PRECEDENCE {
+        exprs.push(non_empty_attr("attributes", key));
+    }
+    exprs.push(format!(
+        "CASE WHEN COALESCE({obs}, '') = 'agent' THEN {entity} ELSE NULL END"
+    ));
+    coalesce_exprs(&exprs)
 }
 
 fn expr_input_tokens() -> String {
-    use crate::models::attr_keys::{gen_ai, openinference, vercel_ai};
-    coalesce_exprs(&[
-        prefer_attr_try_cast(
-            Some(llm_promo().input_tokens),
-            "attributes",
-            gen_ai::USAGE_INPUT_TOKENS,
-            "BIGINT",
-        ),
-        attribute_map_try_cast("attributes", gen_ai::USAGE_PROMPT_TOKENS, "BIGINT"),
-        attribute_map_try_cast("attributes", openinference::TOKEN_COUNT_PROMPT, "BIGINT"),
-        attribute_map_try_cast("attributes", vercel_ai::USAGE_INPUT_TOKENS, "BIGINT"),
-        attribute_map_try_cast("attributes", vercel_ai::USAGE_PROMPT_TOKENS, "BIGINT"),
-    ])
+    coalesce_promoted_bigint(
+        llm_promo().input_tokens,
+        crate::models::attr_keys::INPUT_TOKENS_PRECEDENCE,
+    )
 }
 
 fn expr_output_tokens() -> String {
-    use crate::models::attr_keys::{gen_ai, openinference, vercel_ai};
-    coalesce_exprs(&[
-        prefer_attr_try_cast(
-            Some(llm_promo().output_tokens),
-            "attributes",
-            gen_ai::USAGE_OUTPUT_TOKENS,
-            "BIGINT",
-        ),
-        attribute_map_try_cast("attributes", gen_ai::USAGE_COMPLETION_TOKENS, "BIGINT"),
-        attribute_map_try_cast(
-            "attributes",
-            openinference::TOKEN_COUNT_COMPLETION,
-            "BIGINT",
-        ),
-        attribute_map_try_cast("attributes", vercel_ai::USAGE_OUTPUT_TOKENS, "BIGINT"),
-        attribute_map_try_cast("attributes", vercel_ai::USAGE_COMPLETION_TOKENS, "BIGINT"),
-    ])
+    coalesce_promoted_bigint(
+        llm_promo().output_tokens,
+        crate::models::attr_keys::OUTPUT_TOKENS_PRECEDENCE,
+    )
 }
 
 fn expr_total_tokens() -> String {
-    use crate::models::attr_keys::{gen_ai, openinference, vercel_ai};
-    coalesce_exprs(&[
-        prefer_attr_try_cast(
-            Some(llm_promo().total_tokens),
-            "attributes",
-            gen_ai::USAGE_TOTAL_TOKENS,
-            "BIGINT",
-        ),
-        attribute_map_try_cast("attributes", openinference::TOKEN_COUNT_TOTAL, "BIGINT"),
-        attribute_map_try_cast("attributes", vercel_ai::USAGE_TOTAL_TOKENS, "BIGINT"),
-    ])
+    coalesce_promoted_bigint(
+        llm_promo().total_tokens,
+        crate::models::attr_keys::TOTAL_TOKENS_PRECEDENCE,
+    )
 }
 
 fn expr_total_cost() -> String {
@@ -1060,16 +1055,22 @@ mod tests {
             compile_trace_summary_sql("t_hist_1", from, to, None).expect("trace summary sql");
         crate::sql::ensure_fact_scan_uses_timestamp_pruning(&conn, &trace_sql)
             .expect("trace summary pruning gate");
-        let trace_tokens: (Option<i64>, Option<i64>, Option<i64>) = conn
+        let trace_summary_row: (i64, i64, Option<i64>, Option<i64>, Option<i64>) = conn
             .query_row(&trace_sql, [], |row| {
                 Ok((
+                    row.get("span_count")?,
+                    row.get("error_count")?,
                     row.get("input_tokens")?,
                     row.get("output_tokens")?,
                     row.get("total_tokens")?,
                 ))
             })
             .expect("trace summary row");
-        assert_eq!(trace_tokens, (Some(25854), Some(2447), Some(28301)));
+        assert_eq!(
+            trace_summary_row,
+            (2, 1, Some(25854), Some(2447), Some(28301)),
+            "trace_summary excludes http_body from span_count and error_count"
+        );
     }
 
     #[test]
@@ -1119,5 +1120,117 @@ mod tests {
             })
             .expect("cycle session detail");
         assert_eq!(cyc_totals, (Some(10), Some(5), Some(18)));
+    }
+
+    #[test]
+    fn retried_duplicate_span_chains_and_recording_exclusion_stay_one_x_across_queries() {
+        let conn = open_duckdb_with_traces_and_scores();
+        for _retry in 0..3 {
+            conn.execute_batch(
+                "INSERT INTO traces (
+                   session_id, trace_id, span_id, parent_span_id, app_id, message_type,
+                   timestamp, status_code, observation_type, input_tokens, output_tokens, total_tokens, total_cost
+                 ) VALUES
+                 ('ses_retry', 'tr_retry', 'sp_root', NULL, 'app', 'agent.run',
+                  TIMESTAMP_NS '2026-07-18 12:10:00', 'OK', 'agent', 200, 50, 270, 0.10),
+                 ('ses_retry', 'tr_retry', 'sp_mid', 'sp_root', 'app', 'workflow.step',
+                  TIMESTAMP_NS '2026-07-18 12:10:01', 'OK', 'chain', 200, 50, 270, 0.00),
+                 ('ses_retry', 'tr_retry', 'sp_leaf', 'sp_mid', 'app', 'chat',
+                  TIMESTAMP_NS '2026-07-18 12:10:02', 'ERROR', 'generation', 200, 50, 270, 0.05),
+                 ('ses_retry', 'tr_retry', 'sp_body', 'sp_mid', 'app', 'softprobe.http.body.capture',
+                  TIMESTAMP_NS '2026-07-18 12:10:03', 'ERROR', 'http_body', NULL, NULL, NULL, NULL),
+                 ('ses_retry', 'tr_retry', 'sp_rec', NULL, 'app', 'rrweb.batch',
+                  TIMESTAMP_NS '2026-07-18 12:10:04', 'ERROR', 'recording', 999, 999, 1998, 9.99);",
+            )
+            .expect("insert retried batch");
+        }
+
+        let from = Utc.with_ymd_and_hms(2026, 7, 18, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 7, 19, 0, 0, 0).unwrap();
+
+        struct DetailRow {
+            session_span_count: i64,
+            session_input_tokens: Option<i64>,
+            session_output_tokens: Option<i64>,
+            session_total_tokens: Option<i64>,
+        }
+
+        let detail_sql = compile_session_detail_sql("ses_retry", from, to).expect("detail sql");
+        crate::sql::ensure_fact_scan_uses_timestamp_pruning(&conn, &detail_sql)
+            .expect("detail pruning gate");
+        let mut stmt = conn.prepare(&detail_sql).expect("prepare detail");
+        let detail_rows: Vec<DetailRow> = stmt
+            .query_map([], |row| {
+                Ok(DetailRow {
+                    session_span_count: row.get("session_span_count")?,
+                    session_input_tokens: row.get("session_input_tokens")?,
+                    session_output_tokens: row.get("session_output_tokens")?,
+                    session_total_tokens: row.get("session_total_tokens")?,
+                })
+            })
+            .expect("query detail")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect detail");
+        assert_eq!(
+            detail_rows.len(),
+            4,
+            "3 non-recording spans + 1 http_body span deduplicated from 15 raw rows"
+        );
+        assert_eq!(
+            detail_rows[0].session_span_count, 3,
+            "session_span_count is 1.0x and excludes recording and http_body"
+        );
+        assert_eq!(
+            (
+                detail_rows[0].session_input_tokens,
+                detail_rows[0].session_output_tokens,
+                detail_rows[0].session_total_tokens,
+            ),
+            (Some(200), Some(50), Some(270))
+        );
+
+        let search_req = SessionSearchRequest {
+            from,
+            to,
+            user_id: None,
+            agent_name: None,
+            model_name: None,
+            has_errors: None,
+            roots_only: false,
+            order_by: SessionOrderBy::StartTime,
+            order: SortDirection::Desc,
+            limit: Some(10),
+            cursor: None,
+        };
+        let search_sql = compile_session_search_sql(&search_req, 10).expect("search sql");
+        let search_row: (i64, i64, Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(&search_sql, [], |row| {
+                Ok((
+                    row.get("observation_count")?,
+                    row.get("error_count")?,
+                    row.get("input_tokens")?,
+                    row.get("output_tokens")?,
+                    row.get("total_tokens")?,
+                ))
+            })
+            .expect("search row");
+        assert_eq!(search_row, (3, 1, Some(200), Some(50), Some(270)));
+
+        let trace_sql =
+            compile_trace_summary_sql("tr_retry", from, to, None).expect("trace summary sql");
+        crate::sql::ensure_fact_scan_uses_timestamp_pruning(&conn, &trace_sql)
+            .expect("trace summary pruning gate");
+        let trace_row: (i64, i64, Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(&trace_sql, [], |row| {
+                Ok((
+                    row.get("span_count")?,
+                    row.get("error_count")?,
+                    row.get("input_tokens")?,
+                    row.get("output_tokens")?,
+                    row.get("total_tokens")?,
+                ))
+            })
+            .expect("trace row");
+        assert_eq!(trace_row, (3, 1, Some(200), Some(50), Some(270)));
     }
 }
