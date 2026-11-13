@@ -89,5 +89,11 @@ raise SystemExit(completed)
 PY
 fi
 
-echo "ERROR: no GNU timeout/gtimeout or Python interpreter is available" >&2
+for candidate in timeout gtimeout gnutimeout; do
+	if command -v "$candidate" >/dev/null 2>&1 && "$candidate" --version 2>&1 | grep -Eq 'GNU coreutils|uutils coreutils'; then
+		exec "$candidate" --kill-after=2s "${duration}s" "$@"
+	fi
+done
+
+echo "ERROR: no GNU/uutils timeout or Python interpreter is available" >&2
 exit 127

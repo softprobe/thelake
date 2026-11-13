@@ -551,7 +551,7 @@ test-grafana-static: check-compat-reference-pins
 		GRAFANA_SKIP_STATIC_CONTRACTS=1 bash "$$path"; \
 	done
 
-# Grafana integration deterministic compose system lane. The shell harness owns G1-G3 and
+# Grafana integration deterministic compose system lane. The shell harness owns G1-G8 and
 # writes structured outcome evidence; compose lifecycle evidence is collected
 # here so cleanup runs for both harness failures and successful runs.
 test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
@@ -564,7 +564,7 @@ test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
 	if ! docker info >/dev/null 2>&1; then \
 		skip_environment "Docker unavailable"; \
 	fi; \
-	timeout_ok=0; for candidate in timeout gtimeout; do if command -v "$$candidate" >/dev/null 2>&1 && "$$candidate" --version 2>&1 | grep -q 'GNU coreutils'; then timeout_ok=1; break; fi; done; \
+	timeout_ok=0; if command -v python3 >/dev/null 2>&1; then timeout_ok=1; else for candidate in timeout gtimeout gnutimeout; do if command -v "$$candidate" >/dev/null 2>&1 && "$$candidate" --version 2>&1 | grep -Eq 'GNU coreutils|uutils coreutils'; then timeout_ok=1; break; fi; done; fi; \
 	if [ "$$timeout_ok" -ne 1 ]; then skip_environment "GNU timeout unavailable"; fi; \
 	SOFTPROBE_BUILDER_IMAGE="$(SOFTPROBE_BUILDER_IMAGE)" \
 	GRAFANA_COMPOSE_IMAGE="$(GRAFANA_COMPOSE_IMAGE)" \
