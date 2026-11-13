@@ -20,7 +20,7 @@ SHELL := /bin/bash
 
 .PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run \
 	clean clean-cache build build-release package publish test-publish-tags \
-	contracts-test lint check-sql-guardrails fmt check-fmt \
+	contracts-test lint check-no-subrepo-skills check-sql-guardrails fmt check-fmt \
 	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
@@ -313,10 +313,16 @@ test-publish-tags:
 	echo "$$args" | grep -Fq -- 'linux/amd64'; \
 	echo "publish tag plan ok"
 
+check-no-subrepo-skills:
+	@if [ -d .agents/skills ] || [ -d .cursor/skills ] || [ -d .agent/skills ]; then \
+		echo "ERROR: never put skills in subrepos like thelake; move all skills to .agents/skills/ in the softprobe/dev root repo" >&2; \
+		exit 1; \
+	fi
+
 check-sql-guardrails:
 	@python3 scripts/check_sql_guardrails.py ${SQL_GUARDRAIL_BASE:-}
 
-lint: ensure-cache check-sql-guardrails
+lint: ensure-cache check-no-subrepo-skills check-sql-guardrails
 	cargo clippy $(CARGO_PROFILE_FLAG) --all-targets -- -D warnings
 
 fmt:
