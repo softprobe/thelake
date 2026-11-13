@@ -111,3 +111,9 @@ columns:
     source:
       from: resource_attribute
       key: service.version
+  - name: service_name
+    type: string
+    nullable: true
+    source:
+      from: resource_attribute
+      key: service.name

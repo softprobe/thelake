@@ -124,10 +124,11 @@ The dependency gate has exactly two permitted skips:
 
 1. If `docker info` cannot run, record `SKIP: Docker unavailable` and exit the
    Grafana lane successfully without running G1–G8.
-2. If a GNU `timeout` executable is unavailable (or `timeout --version` does
-   not identify GNU coreutils), record `SKIP: GNU timeout unavailable` and exit
-   the Grafana lane successfully without running G1–G8. BSD `timeout` is not a
-   substitute; install GNU coreutils or use the documented skip.
+2. If no compatible timeout runner is available (`python3` for
+   `scripts/compat/run-with-timeout`, or `timeout`, `gtimeout`, or `gnutimeout`
+   identifying `GNU coreutils` or `uutils coreutils`), record `SKIP: GNU timeout
+   unavailable` and exit the Grafana lane successfully without running G1–G8.
+   BSD `timeout` alone is not a substitute.
 
 Any compose failure, health timeout, protocol mismatch, dashboard load error,
 or test timeout after the dependency gate is a `FAIL`, not a skip. A skip must

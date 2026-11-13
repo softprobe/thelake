@@ -1697,3 +1697,233 @@ async fn rebuild_reads_parquet_from_minio_object_store() {
     assert!(after_ids.contains(&"sess-ok"), "{after}");
     assert!(after_ids.contains(&"sess-err"), "{after}");
 }
+
+#[tokio::test]
+async fn http_otel_genai_hierarchy_reduces_leaf_tokens_and_serves_session_detail() {
+    use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, ArrayValue, KeyValue};
+
+    let schema = format!("ss_otel_genai_{}", Uuid::new_v4().simple());
+    let Some((router, state, _temp, schema)) = build_summary_router(schema).await else {
+        eprintln!("skip: ducklake-postgres not reachable");
+        return;
+    };
+
+    let now_ns = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+    let start_ns = now_ns - 60_000_000_000;
+    let trace_bytes = [0xcd; 16];
+    let agent_bytes = [0x11; 8];
+    let gen_bytes = [0x22; 8];
+    let tool_bytes = [0x33; 8];
+    let body_bytes = [0x44; 8];
+    let trace_hex = hex::encode(trace_bytes);
+    let gen_hex = hex::encode(gen_bytes);
+    let session_id = "ses_otel_genai_reduced";
+
+    let finish_reasons = KeyValue {
+        key: "gen_ai.response.finish_reasons".to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::ArrayValue(ArrayValue {
+                values: vec![AnyValue {
+                    value: Some(any_value::Value::StringValue("tool_calls".to_string())),
+                }],
+            })),
+        }),
+    };
+
+    let req = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![string_kv(resource::SERVICE_NAME, "travel-agent")],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: "otel.genai".to_string(),
+                    ..Default::default()
+                }),
+                spans: vec![
+                    Span {
+                        trace_id: trace_bytes.to_vec(),
+                        span_id: agent_bytes.to_vec(),
+                        parent_span_id: vec![],
+                        name: "invoke_agent concierge".to_string(),
+                        kind: span::SpanKind::Internal as i32,
+                        start_time_unix_nano: start_ns,
+                        end_time_unix_nano: start_ns + 4_000_000_000,
+                        attributes: vec![
+                            string_kv("gen_ai.operation.name", "invoke_agent"),
+                            string_kv("gen_ai.agent.name", "concierge"),
+                            string_kv("gen_ai.conversation.id", session_id),
+                            string_kv("user.id", "usr_otel_42"),
+                            int_kv(gen_ai::USAGE_INPUT_TOKENS, 25854),
+                            int_kv(gen_ai::USAGE_OUTPUT_TOKENS, 2447),
+                            int_kv(gen_ai::USAGE_TOTAL_TOKENS, 29000),
+                        ],
+                        status: Some(Status {
+                            code: 1,
+                            message: String::new(),
+                        }),
+                        ..Default::default()
+                    },
+                    Span {
+                        trace_id: trace_bytes.to_vec(),
+                        span_id: gen_bytes.to_vec(),
+                        parent_span_id: agent_bytes.to_vec(),
+                        name: "chat gemini-2.5-flash".to_string(),
+                        kind: span::SpanKind::Client as i32,
+                        start_time_unix_nano: start_ns + 500_000_000,
+                        end_time_unix_nano: start_ns + 3_000_000_000,
+                        attributes: vec![
+                            string_kv("gen_ai.operation.name", "chat"),
+                            string_kv("gen_ai.conversation.id", session_id),
+                            string_kv("user.id", "usr_otel_42"),
+                            string_kv(gen_ai::REQUEST_MODEL, "gemini-2.5-flash"),
+                            string_kv(gen_ai::PROVIDER_NAME, "gcp.vertex.agent"),
+                            int_kv(gen_ai::USAGE_INPUT_TOKENS, 25854),
+                            int_kv(gen_ai::USAGE_OUTPUT_TOKENS, 2447),
+                            int_kv(gen_ai::USAGE_TOTAL_TOKENS, 29000),
+                            finish_reasons,
+                        ],
+                        status: Some(Status {
+                            code: 1,
+                            message: "reasoning budget applied".to_string(),
+                        }),
+                        ..Default::default()
+                    },
+                    Span {
+                        trace_id: trace_bytes.to_vec(),
+                        span_id: tool_bytes.to_vec(),
+                        parent_span_id: agent_bytes.to_vec(),
+                        name: "execute_tool travel_search".to_string(),
+                        kind: span::SpanKind::Internal as i32,
+                        start_time_unix_nano: start_ns + 3_100_000_000,
+                        end_time_unix_nano: start_ns + 3_800_000_000,
+                        attributes: vec![
+                            string_kv("gen_ai.operation.name", "execute_tool"),
+                            string_kv("gen_ai.conversation.id", session_id),
+                            string_kv("gen_ai.tool.name", "travel_search"),
+                        ],
+                        ..Default::default()
+                    },
+                    Span {
+                        trace_id: trace_bytes.to_vec(),
+                        span_id: body_bytes.to_vec(),
+                        parent_span_id: tool_bytes.to_vec(),
+                        name: "softprobe.http.body.capture".to_string(),
+                        kind: span::SpanKind::Unspecified as i32,
+                        start_time_unix_nano: start_ns + 3_900_000_000,
+                        end_time_unix_nano: start_ns + 4_500_000_000,
+                        attributes: vec![string_kv("gen_ai.conversation.id", session_id)],
+                        ..Default::default()
+                    },
+                ],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    };
+
+    ingest(&router, req).await;
+    flush(&state).await;
+    assert!(dirty_count(&state, &schema).await >= 1);
+    assert_eq!(run_reduce(&state).await, 1);
+
+    let list = search(&router, window()).await;
+    let item = list["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|item| item["session_id"] == session_id)
+        .expect("session summary row");
+    assert_eq!(item["agent_name"], "concierge");
+    assert_eq!(item["user_ids"], json!(["usr_otel_42"]));
+    assert_eq!(item["models"], json!(["gemini-2.5-flash"]));
+    assert_eq!(
+        item["span_count"], 3,
+        "http_body excluded from observation_count: {item}"
+    );
+    assert_eq!(item["input_tokens"], 25854);
+    assert_eq!(item["output_tokens"], 2447);
+    assert_eq!(item["total_tokens"], 29000);
+
+    let detail_resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/sessions/{session_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("session detail");
+    let detail_status = detail_resp.status();
+    let detail = response_json(detail_resp).await;
+    assert_eq!(detail_status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["session_id"], session_id);
+    assert_eq!(detail["user_ids"], json!(["usr_otel_42"]));
+    assert_eq!(
+        detail["span_count"], 3,
+        "http_body excluded from session_span_count: {detail}"
+    );
+    assert_eq!(detail["input_tokens"], 25854);
+    assert_eq!(detail["output_tokens"], 2447);
+    assert_eq!(detail["total_tokens"], 29000);
+    let spans = detail["spans"].as_array().expect("detail spans");
+    assert_eq!(
+        spans.len(),
+        4,
+        "SessionDetail.spans still returns trailing http_body row for Explorer body coalescing"
+    );
+    let gen_span = spans
+        .iter()
+        .find(|s| s["span_id"] == gen_hex)
+        .expect("generation span in session detail");
+    assert_eq!(gen_span["span_type"], "generation");
+    assert_eq!(gen_span["service_name"], "travel-agent");
+    assert_eq!(gen_span["span_kind"], "CLIENT");
+    assert_eq!(gen_span["status_message"], "reasoning budget applied");
+    assert_eq!(gen_span["app_id"], "travel-agent");
+    assert_eq!(
+        gen_span["attributes"]["gen_ai.response.finish_reasons"],
+        "[\"tool_calls\"]"
+    );
+    assert_eq!(
+        gen_span["resource_attributes"]["service.name"],
+        "travel-agent"
+    );
+
+    let session_param = "session_id";
+    let trace_resp = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/v1/traces/{trace_hex}?{session_param}={session_id}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("trace detail via session summary window");
+    assert_eq!(trace_resp.status(), StatusCode::OK);
+    let trace_detail = response_json(trace_resp).await;
+    assert_eq!(trace_detail["trace"]["input_tokens"], 25854);
+    assert_eq!(trace_detail["trace"]["output_tokens"], 2447);
+    assert_eq!(trace_detail["trace"]["total_tokens"], 29000);
+    let gen_detail = trace_detail["spans"]
+        .as_array()
+        .expect("trace spans")
+        .iter()
+        .find(|s| s["span_id"] == gen_hex)
+        .expect("generation detail");
+    assert_eq!(
+        gen_detail["attributes"]["gen_ai.response.finish_reasons"],
+        "[\"tool_calls\"]"
+    );
+    assert_eq!(
+        gen_detail["resource_attributes"]["service.name"],
+        "travel-agent"
+    );
+    assert_eq!(gen_detail["app_id"], "travel-agent");
+}

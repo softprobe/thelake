@@ -43,6 +43,14 @@ pub use schema::{
     LOGS, OTLP_TABLES, SCORES, SCORE_CONFIGS, TRACES,
 };
 
+const USAGE_LEAF_CTE_SQL: &str = include_str!("usage_leaf_cte.sql");
+
+pub(crate) fn render_usage_leaf_ctes(scope_col: &str, dedup_order_col: &str) -> String {
+    USAGE_LEAF_CTE_SQL
+        .replace("{{scope_col}}", scope_col)
+        .replace("{{dedup_order_col}}", dedup_order_col)
+}
+
 #[cfg(test)]
 mod locality_tests {
     use std::fs;

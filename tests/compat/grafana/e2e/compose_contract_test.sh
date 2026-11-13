@@ -66,6 +66,7 @@ grep -Fq 'GRAFANA_REFERENCE_DIGEST=' "$ROOT_DIR/Makefile"
 grep -Fq 'GRAFANA_COMPOSE_IMAGE=' "$ROOT_DIR/Makefile"
 grep -Fq 'Docker unavailable' "$ROOT_DIR/Makefile"
 grep -Fq 'GNU timeout unavailable' "$ROOT_DIR/Makefile"
+grep -Fq 'uutils coreutils' "$ROOT_DIR/Makefile"
 
 grep -Fq '"uid": "softprobe-loki-a"' "$ROOT_DIR/tests/compat/grafana/dashboards/smoke/softprobe-cross-signal.json"
 

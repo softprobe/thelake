@@ -20,7 +20,7 @@ SHELL := /bin/bash
 
 .PHONY: help ensure-cache doctor setup teardown check-infra explorer-deps explorer-assets run \
 	clean clean-cache build build-release package publish test-publish-tags \
-	contracts-test lint check-sql-guardrails fmt check-fmt \
+	contracts-test lint check-no-subrepo-skills check-sql-guardrails fmt check-fmt \
 	test test-e2e test-perf ci release _release test-loki-diff test-tempo-diff \
 	check-compat-reference-pins check-grafana-reference-pin \
 	compat-reference-image compat-reference-version compat-builder-image grafana-reference-version grafana-reference-image grafana-reference-digest \
@@ -313,10 +313,16 @@ test-publish-tags:
 	echo "$$args" | grep -Fq -- 'linux/amd64'; \
 	echo "publish tag plan ok"
 
+check-no-subrepo-skills:
+	@if [ -d .agents/skills ] || [ -d .cursor/skills ] || [ -d .agent/skills ]; then \
+		echo "ERROR: never put skills in subrepos like thelake; move all skills to .agents/skills/ in the softprobe/dev root repo" >&2; \
+		exit 1; \
+	fi
+
 check-sql-guardrails:
 	@python3 scripts/check_sql_guardrails.py ${SQL_GUARDRAIL_BASE:-}
 
-lint: ensure-cache check-sql-guardrails
+lint: ensure-cache check-no-subrepo-skills check-sql-guardrails
 	cargo clippy $(CARGO_PROFILE_FLAG) --all-targets -- -D warnings
 
 fmt:
@@ -545,7 +551,7 @@ test-grafana-static: check-compat-reference-pins
 		GRAFANA_SKIP_STATIC_CONTRACTS=1 bash "$$path"; \
 	done
 
-# Grafana integration deterministic compose system lane. The shell harness owns G1-G3 and
+# Grafana integration deterministic compose system lane. The shell harness owns G1-G8 and
 # writes structured outcome evidence; compose lifecycle evidence is collected
 # here so cleanup runs for both harness failures and successful runs.
 test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
@@ -558,7 +564,7 @@ test-grafana-system: ensure-cache check-compat-reference-pins ducklake-extension
 	if ! docker info >/dev/null 2>&1; then \
 		skip_environment "Docker unavailable"; \
 	fi; \
-	timeout_ok=0; for candidate in timeout gtimeout; do if command -v "$$candidate" >/dev/null 2>&1 && "$$candidate" --version 2>&1 | grep -q 'GNU coreutils'; then timeout_ok=1; break; fi; done; \
+	timeout_ok=0; if command -v python3 >/dev/null 2>&1; then timeout_ok=1; else for candidate in timeout gtimeout gnutimeout; do if command -v "$$candidate" >/dev/null 2>&1 && "$$candidate" --version 2>&1 | grep -Eq 'GNU coreutils|uutils coreutils'; then timeout_ok=1; break; fi; done; fi; \
 	if [ "$$timeout_ok" -ne 1 ]; then skip_environment "GNU timeout unavailable"; fi; \
 	SOFTPROBE_BUILDER_IMAGE="$(SOFTPROBE_BUILDER_IMAGE)" \
 	GRAFANA_COMPOSE_IMAGE="$(GRAFANA_COMPOSE_IMAGE)" \

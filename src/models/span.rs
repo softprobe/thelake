@@ -180,9 +180,10 @@ impl Span {
                 event.time_unix_nano
             );
         }
-        let attributes = crate::models::key_values_to_map(&otlp_span.attributes);
+        let mut attributes = crate::models::key_values_to_map(&otlp_span.attributes);
+        let canonical =
+            canonicalize_multi_standard_llm_attributes(&otlp_span.name, &mut attributes);
 
-        // Extract events
         let events = otlp_span
             .events
             .iter()
@@ -242,14 +243,7 @@ impl Span {
 
         let trace_id = hex::encode(&otlp_span.trace_id);
 
-        // Extract session_id: Softprobe product session, OTel conversation alias, else trace_id
-        let session_id = attributes
-            .get(crate::models::attr_keys::sp::SESSION_ID)
-            .or_else(|| attributes.get("sp_session_id"))
-            .or_else(|| attributes.get("session.id"))
-            .or_else(|| attributes.get("gen_ai.conversation.id"))
-            .cloned()
-            .unwrap_or_else(|| trace_id.clone());
+        let session_id = canonical.session_id.unwrap_or_else(|| trace_id.clone());
 
         let mut span = Self {
             session_id,
@@ -264,7 +258,7 @@ impl Span {
             organization_id: resource_attributes.get("sp.organization.id").cloned(),
             workspace_id: resource_attributes.get("sp.tenant.id").cloned(),
             agent_id: None,
-            agent_name: None,
+            agent_name: canonical.agent_name,
             message_type: otlp_span.name.clone(),
             span_kind: Some(format!("{:?}", otlp_span.kind())),
             timestamp,
@@ -377,6 +371,165 @@ impl Span {
         } else if let Some(status_code_str) = self.attributes.get("http.status_code") {
             self.http_response_status_code = status_code_str.parse::<i32>().ok();
         }
+    }
+}
+
+struct CanonicalIngestFields {
+    session_id: Option<String>,
+    agent_name: Option<String>,
+}
+
+fn first_non_empty<'a>(attrs: &'a HashMap<String, String>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| attrs.get(*key).map(|v| v.trim()).filter(|v| !v.is_empty()))
+}
+
+fn populate_if_absent(attrs: &mut HashMap<String, String>, precedence: &[&str]) {
+    let Some((&target_key, candidate_keys)) = precedence.split_first() else {
+        return;
+    };
+    if first_non_empty(attrs, &[target_key]).is_some() {
+        return;
+    }
+    if let Some(value) = first_non_empty(attrs, candidate_keys).map(str::to_owned) {
+        attrs.insert(target_key.to_string(), value);
+    }
+}
+
+fn populate_int64_if_absent(attrs: &mut HashMap<String, String>, precedence: &[&str]) {
+    let Some((&target_key, candidate_keys)) = precedence.split_first() else {
+        return;
+    };
+    if let Some(existing) = first_non_empty(attrs, &[target_key]) {
+        if let Ok(parsed) = existing.parse::<i64>() {
+            let normalized = parsed.to_string();
+            if attrs.get(target_key).map(String::as_str) != Some(normalized.as_str()) {
+                attrs.insert(target_key.to_string(), normalized);
+            }
+        }
+        return;
+    }
+    for key in candidate_keys {
+        if let Some(parsed) = attrs
+            .get(*key)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            attrs.insert(target_key.to_string(), parsed.to_string());
+            return;
+        }
+    }
+}
+
+fn derive_canonical_observation_type(
+    span_name: &str,
+    attrs: &HashMap<String, String>,
+) -> Option<&'static str> {
+    use crate::models::attr_keys::{
+        gen_ai, openinference, sp, traceloop, vercel_ai, GEN_AI_OPERATION_TO_OBS_TYPE,
+        OPENINFERENCE_KIND_TO_OBS_TYPE, TRACELOOP_KIND_TO_OBS_TYPE,
+    };
+
+    if span_name.trim() == sp::HTTP_BODY_CAPTURE_SPAN_NAME {
+        return Some("http_body");
+    }
+
+    if let Some(op) = first_non_empty(attrs, &[gen_ai::OPERATION_NAME]) {
+        let lower = op.to_ascii_lowercase();
+        if let Some((_, mapped)) = GEN_AI_OPERATION_TO_OBS_TYPE
+            .iter()
+            .find(|(candidate, _)| *candidate == lower)
+        {
+            return Some(*mapped);
+        }
+    }
+
+    if let Some(kind) = first_non_empty(attrs, &[openinference::SPAN_KIND]) {
+        let upper = kind.to_ascii_uppercase();
+        if let Some((_, mapped)) = OPENINFERENCE_KIND_TO_OBS_TYPE
+            .iter()
+            .find(|(candidate, _)| *candidate == upper)
+        {
+            return Some(*mapped);
+        }
+    }
+
+    if let Some(kind) = first_non_empty(attrs, &[traceloop::SPAN_KIND]) {
+        let lower = kind.to_ascii_lowercase();
+        if let Some((_, mapped)) = TRACELOOP_KIND_TO_OBS_TYPE
+            .iter()
+            .find(|(candidate, _)| *candidate == lower)
+        {
+            return Some(*mapped);
+        }
+    }
+
+    if let Some(op_id) = first_non_empty(attrs, &[vercel_ai::OPERATION_ID]) {
+        if op_id == vercel_ai::TOOL_CALL_OPERATION {
+            return Some("tool");
+        }
+        if op_id.starts_with(vercel_ai::EMBED_OPERATION_PREFIX) {
+            return Some("embedding");
+        }
+        if op_id.ends_with(vercel_ai::DO_STREAM_SUFFIX)
+            || op_id.ends_with(vercel_ai::DO_GENERATE_SUFFIX)
+            || vercel_ai::GENERATION_OPERATIONS.contains(&op_id)
+        {
+            return Some("generation");
+        }
+    }
+
+    None
+}
+
+/// Populate promotion source keys only when absent so DuckLake promoted columns and
+/// promoted-only `session_summary` compaction read non-`sp.*` spans.
+fn canonicalize_multi_standard_llm_attributes(
+    span_name: &str,
+    attrs: &mut HashMap<String, String>,
+) -> CanonicalIngestFields {
+    use crate::models::attr_keys::{
+        sp, traceloop, AGENT_NAME_PRECEDENCE, INPUT_TOKENS_PRECEDENCE, MODEL_NAME_PRECEDENCE,
+        MODEL_PROVIDER_PRECEDENCE, OUTPUT_TOKENS_PRECEDENCE, SESSION_ID_PRECEDENCE,
+        TOTAL_TOKENS_PRECEDENCE, USER_ID_PRECEDENCE,
+    };
+
+    let resolved_obs_type = match first_non_empty(attrs, &[sp::OBSERVATION_TYPE]) {
+        Some(existing) => Some(existing.to_owned()),
+        None => derive_canonical_observation_type(span_name, attrs).map(|derived| {
+            attrs.insert(sp::OBSERVATION_TYPE.to_string(), derived.to_string());
+            derived.to_string()
+        }),
+    };
+
+    let session_id = first_non_empty(attrs, SESSION_ID_PRECEDENCE).map(str::to_owned);
+    if let Some(ref sid) = session_id {
+        if first_non_empty(attrs, &[sp::SESSION_ID]).is_none() {
+            attrs.insert(sp::SESSION_ID.to_string(), sid.clone());
+        }
+    }
+
+    populate_if_absent(attrs, USER_ID_PRECEDENCE);
+    populate_if_absent(attrs, MODEL_NAME_PRECEDENCE);
+    populate_if_absent(attrs, MODEL_PROVIDER_PRECEDENCE);
+    populate_int64_if_absent(attrs, INPUT_TOKENS_PRECEDENCE);
+    populate_int64_if_absent(attrs, OUTPUT_TOKENS_PRECEDENCE);
+    populate_int64_if_absent(attrs, TOTAL_TOKENS_PRECEDENCE);
+
+    let agent_name = first_non_empty(attrs, AGENT_NAME_PRECEDENCE)
+        .map(str::to_owned)
+        .or_else(|| {
+            if resolved_obs_type.as_deref() == Some("agent") {
+                first_non_empty(attrs, &[traceloop::ENTITY_NAME]).map(str::to_owned)
+            } else {
+                None
+            }
+        });
+
+    CanonicalIngestFields {
+        session_id,
+        agent_name,
     }
 }
 
@@ -827,5 +980,501 @@ mod tests {
 
         assert_eq!(span2.http_request_body.as_deref(), Some("legacy-req-ev"));
         assert_eq!(span2.http_response_body.as_deref(), Some("legacy-res-ev"));
+    }
+
+    fn str_kv(key: &str, value: &str) -> KeyValue {
+        use opentelemetry_proto::tonic::common::v1::any_value;
+        KeyValue {
+            key: key.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(value.to_string())),
+            }),
+        }
+    }
+
+    fn i64_kv(key: &str, value: i64) -> KeyValue {
+        use opentelemetry_proto::tonic::common::v1::any_value;
+        KeyValue {
+            key: key.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::IntValue(value)),
+            }),
+        }
+    }
+
+    fn otlp_span_with_attrs(
+        name: &str,
+        attributes: Vec<KeyValue>,
+    ) -> opentelemetry_proto::tonic::trace::v1::Span {
+        opentelemetry_proto::tonic::trace::v1::Span {
+            trace_id: vec![0xaa; 16],
+            span_id: vec![0xbb; 8],
+            name: name.to_string(),
+            start_time_unix_nano: 1_721_349_720_000_000_000,
+            end_time_unix_nano: 1_721_349_721_000_000_000,
+            attributes,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn from_otlp_canonicalizes_otel_genai_conventions() {
+        let resource = HashMap::new();
+        for (op, expected) in [
+            ("chat", "generation"),
+            ("generate_content", "generation"),
+            ("text_completion", "generation"),
+            ("embeddings", "embedding"),
+            ("execute_tool", "tool"),
+            ("invoke_agent", "agent"),
+            ("create_agent", "agent"),
+            ("invoke_workflow", "agent"),
+        ] {
+            let span = Span::from_otlp(
+                otlp_span_with_attrs(op, vec![str_kv("gen_ai.operation.name", op)]),
+                &resource,
+            )
+            .expect("from_otlp");
+            assert_eq!(
+                span.attributes
+                    .get("sp.observation.type")
+                    .map(String::as_str),
+                Some(expected),
+                "op={op}"
+            );
+        }
+
+        let span = Span::from_otlp(
+            otlp_span_with_attrs(
+                "chat gemini-2.5-flash",
+                vec![
+                    str_kv("gen_ai.operation.name", "chat"),
+                    str_kv("gen_ai.conversation.id", "ses_otel_1"),
+                    str_kv("user.id", "usr_otel_9"),
+                    str_kv("gen_ai.response.model", "gemini-2.5-flash-001"),
+                    str_kv("gen_ai.system", "gcp.vertex.agent"),
+                    i64_kv("gen_ai.usage.prompt_tokens", 120),
+                    i64_kv("gen_ai.usage.completion_tokens", 35),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp");
+
+        assert_eq!(span.session_id, "ses_otel_1");
+        assert_eq!(
+            span.attributes.get("sp.session.id").map(String::as_str),
+            Some("ses_otel_1")
+        );
+        assert_eq!(
+            span.attributes.get("sp.user.id").map(String::as_str),
+            Some("usr_otel_9")
+        );
+        assert_eq!(
+            span.attributes
+                .get("gen_ai.request.model")
+                .map(String::as_str),
+            Some("gemini-2.5-flash-001")
+        );
+        assert_eq!(
+            span.attributes
+                .get("gen_ai.provider.name")
+                .map(String::as_str),
+            Some("gcp.vertex.agent")
+        );
+        assert_eq!(
+            span.attributes
+                .get("gen_ai.usage.input_tokens")
+                .map(String::as_str),
+            Some("120")
+        );
+        assert_eq!(
+            span.attributes
+                .get("gen_ai.usage.output_tokens")
+                .map(String::as_str),
+            Some("35")
+        );
+    }
+
+    #[test]
+    fn from_otlp_canonicalizes_openinference_conventions() {
+        let resource = HashMap::new();
+        for (kind, expected) in [
+            ("LLM", "generation"),
+            ("llm", "generation"),
+            ("EMBEDDING", "embedding"),
+            ("Tool", "tool"),
+            ("AGENT", "agent"),
+            ("chain", "chain"),
+            ("RETRIEVER", "retriever"),
+            ("Reranker", "retriever"),
+            ("GUARDRAIL", "guardrail"),
+            ("evaluator", "evaluator"),
+        ] {
+            let span = Span::from_otlp(
+                otlp_span_with_attrs("oi", vec![str_kv("openinference.span.kind", kind)]),
+                &resource,
+            )
+            .expect("from_otlp");
+            assert_eq!(
+                span.attributes
+                    .get("sp.observation.type")
+                    .map(String::as_str),
+                Some(expected),
+                "kind={kind}"
+            );
+        }
+
+        let span = Span::from_otlp(
+            otlp_span_with_attrs(
+                "ChatOpenAI",
+                vec![
+                    str_kv("openinference.span.kind", "LLM"),
+                    str_kv("enduser.id", "oi_user_1"),
+                    str_kv("llm.model_name", "claude-sonnet-4"),
+                    str_kv("llm.provider", "anthropic"),
+                    i64_kv("llm.token_count.prompt", 400),
+                    i64_kv("llm.token_count.completion", 80),
+                    i64_kv("llm.token_count.total", 510),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp");
+
+        assert_eq!(
+            span.attributes.get("sp.user.id").map(String::as_str),
+            Some("oi_user_1")
+        );
+        assert_eq!(
+            span.attributes
+                .get("gen_ai.request.model")
+                .map(String::as_str),
+            Some("claude-sonnet-4")
+        );
+        assert_eq!(
+            span.attributes
+                .get("gen_ai.provider.name")
+                .map(String::as_str),
+            Some("anthropic")
+        );
+        assert_eq!(
+            span.attributes
+                .get("gen_ai.usage.input_tokens")
+                .map(String::as_str),
+            Some("400")
+        );
+        assert_eq!(
+            span.attributes
+                .get("gen_ai.usage.output_tokens")
+                .map(String::as_str),
+            Some("80")
+        );
+        assert_eq!(
+            span.attributes
+                .get("gen_ai.usage.total_tokens")
+                .map(String::as_str),
+            Some("510")
+        );
+    }
+
+    #[test]
+    fn from_otlp_canonicalizes_openllmetry_and_vercel_ai_conventions() {
+        let resource = HashMap::new();
+        for (kind, expected) in [
+            ("agent", "agent"),
+            ("TOOL", "tool"),
+            ("Workflow", "chain"),
+            ("task", "chain"),
+        ] {
+            let span = Span::from_otlp(
+                otlp_span_with_attrs("tl", vec![str_kv("traceloop.span.kind", kind)]),
+                &resource,
+            )
+            .expect("from_otlp");
+            assert_eq!(
+                span.attributes
+                    .get("sp.observation.type")
+                    .map(String::as_str),
+                Some(expected),
+                "traceloop kind={kind}"
+            );
+        }
+
+        let tl = Span::from_otlp(
+            otlp_span_with_attrs(
+                "planner.agent",
+                vec![
+                    str_kv("traceloop.span.kind", "agent"),
+                    str_kv("traceloop.association.properties.session_id", "ses_tl_7"),
+                    str_kv("traceloop.association.properties.user_id", "usr_tl_7"),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp");
+        assert_eq!(tl.session_id, "ses_tl_7");
+        assert_eq!(
+            tl.attributes.get("sp.session.id").map(String::as_str),
+            Some("ses_tl_7")
+        );
+        assert_eq!(
+            tl.attributes.get("sp.user.id").map(String::as_str),
+            Some("usr_tl_7")
+        );
+
+        for (op_id, expected) in [
+            ("ai.toolCall", "tool"),
+            ("ai.embed", "embedding"),
+            ("ai.embedMany.doEmbed", "embedding"),
+            ("ai.streamText.doStream", "generation"),
+            ("ai.generateText.doGenerate", "generation"),
+            ("ai.streamText", "generation"),
+            ("ai.generateText", "generation"),
+            ("ai.streamObject", "generation"),
+            ("ai.generateObject", "generation"),
+        ] {
+            let span = Span::from_otlp(
+                otlp_span_with_attrs(op_id, vec![str_kv("ai.operationId", op_id)]),
+                &resource,
+            )
+            .expect("from_otlp");
+            assert_eq!(
+                span.attributes
+                    .get("sp.observation.type")
+                    .map(String::as_str),
+                Some(expected),
+                "ai.operationId={op_id}"
+            );
+        }
+
+        let vercel = Span::from_otlp(
+            otlp_span_with_attrs(
+                "ai.streamText.doStream",
+                vec![
+                    str_kv("ai.operationId", "ai.streamText.doStream"),
+                    str_kv("ai.telemetry.metadata.sessionId", "ses_ai_3"),
+                    str_kv("ai.telemetry.metadata.userId", "usr_ai_3"),
+                    str_kv("ai.model.id", "gpt-4.1"),
+                    str_kv("ai.model.provider", "openai.responses"),
+                    i64_kv("ai.usage.inputTokens", 50),
+                    i64_kv("ai.usage.outputTokens", 15),
+                    i64_kv("ai.usage.totalTokens", 80),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp");
+        assert_eq!(vercel.session_id, "ses_ai_3");
+        assert_eq!(
+            vercel
+                .attributes
+                .get("gen_ai.request.model")
+                .map(String::as_str),
+            Some("gpt-4.1")
+        );
+        assert_eq!(
+            vercel
+                .attributes
+                .get("gen_ai.provider.name")
+                .map(String::as_str),
+            Some("openai.responses")
+        );
+        assert_eq!(
+            vercel
+                .attributes
+                .get("gen_ai.usage.input_tokens")
+                .map(String::as_str),
+            Some("50")
+        );
+        assert_eq!(
+            vercel
+                .attributes
+                .get("gen_ai.usage.output_tokens")
+                .map(String::as_str),
+            Some("15")
+        );
+        assert_eq!(
+            vercel
+                .attributes
+                .get("gen_ai.usage.total_tokens")
+                .map(String::as_str),
+            Some("80")
+        );
+    }
+
+    #[test]
+    fn from_otlp_preserves_explicit_sp_attrs_and_leaves_plain_http_unclassified() {
+        let resource = HashMap::new();
+
+        let body_capture = Span::from_otlp(
+            otlp_span_with_attrs("softprobe.http.body.capture", vec![]),
+            &resource,
+        )
+        .expect("from_otlp");
+        assert_eq!(
+            body_capture
+                .attributes
+                .get("sp.observation.type")
+                .map(String::as_str),
+            Some("http_body")
+        );
+
+        let preserved = Span::from_otlp(
+            otlp_span_with_attrs(
+                "custom-span",
+                vec![
+                    str_kv("sp.observation.type", "recording"),
+                    str_kv("gen_ai.operation.name", "chat"),
+                    str_kv("sp.user.id", "explicit-user"),
+                    str_kv("user.id", "other-user"),
+                    str_kv("gen_ai.request.model", "explicit-model"),
+                    str_kv("llm.model_name", "other-model"),
+                    i64_kv("gen_ai.usage.input_tokens", 10),
+                    i64_kv("llm.token_count.prompt", 999),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp");
+        assert_eq!(
+            preserved
+                .attributes
+                .get("sp.observation.type")
+                .map(String::as_str),
+            Some("recording")
+        );
+        assert_eq!(
+            preserved.attributes.get("sp.user.id").map(String::as_str),
+            Some("explicit-user")
+        );
+        assert_eq!(
+            preserved
+                .attributes
+                .get("gen_ai.request.model")
+                .map(String::as_str),
+            Some("explicit-model")
+        );
+        assert_eq!(
+            preserved
+                .attributes
+                .get("gen_ai.usage.input_tokens")
+                .map(String::as_str),
+            Some("10")
+        );
+
+        let plain_http = Span::from_otlp(
+            otlp_span_with_attrs(
+                "GET /api/flights",
+                vec![str_kv("http.request.method", "GET")],
+            ),
+            &resource,
+        )
+        .expect("from_otlp");
+        assert!(
+            !plain_http.attributes.contains_key("sp.observation.type"),
+            "ordinary HTTP spans must not be tagged with sp.observation.type at ingest"
+        );
+        assert!(
+            !plain_http.attributes.contains_key("sp.session.id"),
+            "trace_id fallback must not synthesize sp.session.id"
+        );
+    }
+
+    #[test]
+    fn from_otlp_validates_and_trims_int64_vendor_token_strings() {
+        let resource = HashMap::new();
+
+        let trimmed = Span::from_otlp(
+            otlp_span_with_attrs(
+                "ai.streamText.doStream",
+                vec![
+                    str_kv("ai.operationId", "ai.streamText.doStream"),
+                    str_kv("ai.usage.promptTokens", " 120 "),
+                    str_kv("ai.usage.completionTokens", " 35\n"),
+                    str_kv("ai.usage.totalTokens", "\t155 "),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp trimmed");
+        assert_eq!(
+            trimmed
+                .attributes
+                .get("gen_ai.usage.input_tokens")
+                .map(String::as_str),
+            Some("120")
+        );
+        assert_eq!(
+            trimmed
+                .attributes
+                .get("gen_ai.usage.output_tokens")
+                .map(String::as_str),
+            Some("35")
+        );
+        assert_eq!(
+            trimmed
+                .attributes
+                .get("gen_ai.usage.total_tokens")
+                .map(String::as_str),
+            Some("155")
+        );
+
+        let invalid_vendor = Span::from_otlp(
+            otlp_span_with_attrs(
+                "ai.streamText.doStream",
+                vec![
+                    str_kv("ai.operationId", "ai.streamText.doStream"),
+                    str_kv("ai.usage.promptTokens", "120.5"),
+                    str_kv("llm.token_count.completion", "unknown"),
+                    str_kv("ai.usage.totalTokens", "NaN"),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp invalid vendor");
+        assert!(!invalid_vendor
+            .attributes
+            .contains_key("gen_ai.usage.input_tokens"));
+        assert!(!invalid_vendor
+            .attributes
+            .contains_key("gen_ai.usage.output_tokens"));
+        assert!(!invalid_vendor
+            .attributes
+            .contains_key("gen_ai.usage.total_tokens"));
+        assert_eq!(
+            invalid_vendor
+                .attributes
+                .get("ai.usage.promptTokens")
+                .map(String::as_str),
+            Some("120.5")
+        );
+        assert_eq!(
+            invalid_vendor
+                .attributes
+                .get("llm.token_count.completion")
+                .map(String::as_str),
+            Some("unknown")
+        );
+
+        let fallback = Span::from_otlp(
+            otlp_span_with_attrs(
+                "ai.streamText.doStream",
+                vec![
+                    str_kv("ai.operationId", "ai.streamText.doStream"),
+                    str_kv("ai.usage.inputTokens", "120.5"),
+                    str_kv("ai.usage.promptTokens", " 95 "),
+                ],
+            ),
+            &resource,
+        )
+        .expect("from_otlp fallback");
+        assert_eq!(
+            fallback
+                .attributes
+                .get("gen_ai.usage.input_tokens")
+                .map(String::as_str),
+            Some("95")
+        );
     }
 }

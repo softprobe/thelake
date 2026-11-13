@@ -37,9 +37,15 @@ pub struct SpanSummary {
     pub session_id: Option<String>,
     pub name: String,
     pub span_type: String,
+    #[serde(default)]
+    pub service_name: Option<String>,
+    #[serde(default)]
+    pub span_kind: Option<String>,
     pub start_time: DateTime<Utc>,
     pub end_time: Option<DateTime<Utc>>,
     pub status_code: Option<String>,
+    #[serde(default)]
+    pub status_message: Option<String>,
     pub model_name: Option<String>,
     pub model_provider: Option<String>,
     pub user_id: Option<String>,
@@ -54,7 +60,11 @@ pub struct SpanDetail {
     #[serde(flatten)]
     pub summary: SpanSummary,
     #[serde(default)]
+    pub app_id: Option<String>,
+    #[serde(default)]
     pub attributes: HashMap<String, String>,
+    #[serde(default)]
+    pub resource_attributes: HashMap<String, String>,
     #[serde(default)]
     pub events: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

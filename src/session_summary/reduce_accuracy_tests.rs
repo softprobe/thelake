@@ -8,26 +8,8 @@ use chrono::{TimeZone, Utc};
 use duckdb::Connection;
 
 fn setup_traces(conn: &Connection) {
-    conn.execute_batch(
-        "CREATE TABLE traces (
-           session_id VARCHAR,
-           span_id VARCHAR,
-           timestamp TIMESTAMP_NS,
-           end_timestamp TIMESTAMP_NS,
-           status_code VARCHAR,
-           message_type VARCHAR,
-           agent_name VARCHAR,
-           observation_type VARCHAR,
-           input_tokens BIGINT,
-           output_tokens BIGINT,
-           total_tokens BIGINT,
-           total_cost DOUBLE,
-           user_id VARCHAR,
-           model_name VARCHAR,
-           record_date DATE
-         );",
-    )
-    .expect("create traces");
+    conn.execute_batch(include_str!("test_traces_fixture.sql"))
+        .expect("create traces");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -35,6 +17,48 @@ fn insert(
     conn: &Connection,
     session_id: &str,
     span_id: &str,
+    ts_secs: i64,
+    end_secs: Option<i64>,
+    status: &str,
+    observation_type: &str,
+    message_type: &str,
+    agent: Option<&str>,
+    in_tok: Option<i64>,
+    out_tok: Option<i64>,
+    tot_tok: Option<i64>,
+    cost: Option<f64>,
+    user_id: Option<&str>,
+    model: Option<&str>,
+) {
+    let default_trace_id = format!("tr_{session_id}");
+    insert_hierarchy(
+        conn,
+        session_id,
+        &default_trace_id,
+        span_id,
+        None,
+        ts_secs,
+        end_secs,
+        status,
+        observation_type,
+        message_type,
+        agent,
+        in_tok,
+        out_tok,
+        tot_tok,
+        cost,
+        user_id,
+        model,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_hierarchy(
+    conn: &Connection,
+    session_id: &str,
+    trace_id: &str,
+    span_id: &str,
+    parent_span_id: Option<&str>,
     ts_secs: i64,
     end_secs: Option<i64>,
     status: &str,
@@ -71,19 +95,33 @@ fn insert(
     let model = model
         .map(|m| format!("'{m}'"))
         .unwrap_or_else(|| "NULL".into());
+    let parent_span_id = parent_span_id
+        .map(|p| format!("'{p}'"))
+        .unwrap_or_else(|| "NULL".into());
     let day = Utc
         .timestamp_opt(ts_secs, 0)
         .unwrap()
         .date_naive()
         .format("%Y-%m-%d");
-    conn.execute_batch(&format!(
-        "INSERT INTO traces VALUES (
-           '{session_id}', '{span_id}', {ts}, {end}, '{status}', '{message_type}',
-           {agent}, '{observation_type}', {in_tok}, {out_tok}, {tot_tok}, {cost},
-           {user_id}, {model}, DATE '{day}'
-         );"
-    ))
-    .expect("insert");
+    let sql = include_str!("test_traces_insert.sql")
+        .replace("{{session_id}}", session_id)
+        .replace("{{span_id}}", span_id)
+        .replace("{{ts}}", &ts)
+        .replace("{{end}}", &end)
+        .replace("{{status}}", status)
+        .replace("{{message_type}}", message_type)
+        .replace("{{agent}}", &agent)
+        .replace("{{observation_type}}", observation_type)
+        .replace("{{in_tok}}", &in_tok)
+        .replace("{{out_tok}}", &out_tok)
+        .replace("{{tot_tok}}", &tot_tok)
+        .replace("{{cost}}", &cost)
+        .replace("{{user_id}}", &user_id)
+        .replace("{{model}}", &model)
+        .replace("{{day}}", &day.to_string())
+        .replace("{{trace_id}}", trace_id)
+        .replace("{{parent_span_id}}", &parent_span_id);
+    conn.execute_batch(&sql).expect("insert");
 }
 
 #[derive(Debug)]
@@ -405,22 +443,105 @@ fn duplicate_span_id_uses_count_distinct() {
         Some("m"),
     );
     let rows = run_reduce(&conn, &["s1"], 0, 1000);
-    // COUNT(DISTINCT span_id)=1 but SUM still includes both rows.
     assert_full_fields(
         &rows[0],
         &Agg {
             session_id: "s1".into(),
-            start_ns: 100_000_000_000,
+            start_ns: 101_000_000_000,
             end_ns: 101_000_000_000,
             observation_count: 1,
             error_count: 0,
-            input_tokens: Some(2),
-            output_tokens: Some(2),
-            total_tokens: Some(4),
-            total_cost: Some(0.2),
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            total_tokens: Some(2),
+            total_cost: Some(0.1),
             agent_name: Some("ag".into()),
             user_id: Some("u".into()),
             model_name: Some("m".into()),
+        },
+    );
+}
+
+#[test]
+fn retried_duplicate_hierarchy_deduplicates_traversal_and_leaf_tokens() {
+    let conn = Connection::open_in_memory().unwrap();
+    setup_traces(&conn);
+    for _retry in 0..3 {
+        insert_hierarchy(
+            &conn,
+            "s_retry",
+            "tr_retry",
+            "sp_agent",
+            None,
+            100,
+            Some(105),
+            "OK",
+            "agent",
+            "concierge",
+            Some("concierge"),
+            Some(120),
+            Some(30),
+            Some(165),
+            Some(0.05),
+            Some("u_retry"),
+            None,
+        );
+        insert_hierarchy(
+            &conn,
+            "s_retry",
+            "tr_retry",
+            "sp_chain",
+            Some("sp_agent"),
+            101,
+            Some(104),
+            "OK",
+            "chain",
+            "step",
+            None,
+            Some(120),
+            Some(30),
+            Some(165),
+            None,
+            None,
+            None,
+        );
+        insert_hierarchy(
+            &conn,
+            "s_retry",
+            "tr_retry",
+            "sp_gen",
+            Some("sp_chain"),
+            102,
+            Some(103),
+            "ERROR",
+            "generation",
+            "chat",
+            None,
+            Some(120),
+            Some(30),
+            Some(165),
+            Some(0.05),
+            None,
+            Some("gemini-2.5-flash"),
+        );
+    }
+    let rows = run_reduce(&conn, &["s_retry"], 0, 1000);
+    assert_eq!(rows.len(), 1);
+    assert_full_fields(
+        &rows[0],
+        &Agg {
+            session_id: "s_retry".into(),
+            start_ns: 100_000_000_000,
+            end_ns: 105_000_000_000,
+            observation_count: 3,
+            error_count: 1,
+            input_tokens: Some(120),
+            output_tokens: Some(30),
+            total_tokens: Some(165),
+            total_cost: Some(0.10),
+            agent_name: Some("concierge".into()),
+            user_id: Some("u_retry".into()),
+            model_name: Some("gemini-2.5-flash".into()),
         },
     );
 }
@@ -760,27 +881,8 @@ fn map_only_attrs_do_not_fill_typed_aggregates() {
 
     let conn = Connection::open_in_memory().unwrap();
     // Richer table than reduce reads — bag is deliberately populated.
-    conn.execute_batch(
-        "CREATE TABLE traces (
-           session_id VARCHAR,
-           span_id VARCHAR,
-           timestamp TIMESTAMP_NS,
-           end_timestamp TIMESTAMP_NS,
-           status_code VARCHAR,
-           message_type VARCHAR,
-           agent_name VARCHAR,
-           observation_type VARCHAR,
-           input_tokens BIGINT,
-           output_tokens BIGINT,
-           total_tokens BIGINT,
-           total_cost DOUBLE,
-           user_id VARCHAR,
-           model_name VARCHAR,
-           record_date DATE,
-           attributes MAP(VARCHAR, VARCHAR)
-         );",
-    )
-    .expect("create");
+    conn.execute_batch(include_str!("test_traces_with_bag_fixture.sql"))
+        .expect("create");
     let day = Utc
         .timestamp_opt(100, 0)
         .unwrap()
@@ -797,14 +899,10 @@ fn map_only_attrs_do_not_fill_typed_aggregates() {
         tot = gen_ai::USAGE_TOTAL_TOKENS,
         cost = sp::COST_TOTAL,
     );
-    conn.execute_batch(&format!(
-        "INSERT INTO traces VALUES (
-           'bag-only', 'a', epoch_ms(100000), NULL, 'OK', 'IgnoredName',
-           NULL, 'generation', NULL, NULL, NULL, NULL, NULL, NULL,
-           DATE '{day}', {bag}
-         );"
-    ))
-    .expect("insert bag row");
+    let insert_sql = include_str!("test_traces_bag_insert.sql")
+        .replace("{{day}}", &day.to_string())
+        .replace("{{bag}}", &bag);
+    conn.execute_batch(&insert_sql).expect("insert bag row");
 
     let rows = run_reduce(&conn, &["bag-only"], 0, 1000);
     assert_full_fields(
