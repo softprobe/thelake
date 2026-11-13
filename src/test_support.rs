@@ -8,6 +8,26 @@ use axum::Router;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+#[cfg(test)]
+mod agent_skill_placement_tests {
+    use std::path::Path;
+
+    #[test]
+    fn developer_skills_live_in_the_central_workspace() {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let local_skill_directories = [".agents/skills", ".cursor/skills", ".agent/skills"];
+        let present_directories: Vec<_> = local_skill_directories
+            .iter()
+            .filter(|relative_path| repository_root.join(relative_path).exists())
+            .collect();
+
+        assert!(
+            present_directories.is_empty(),
+            "Developer skills must live in the central mono repo softprobe/dev at .agents/skills/ because agents run from that workspace. Remove: {present_directories:?}"
+        );
+    }
+}
+
 /// File-backed DuckLake under `temp`; compaction/metadata off; test-sized pools
 /// via [`Config::shrink_pools_for_tests`].
 pub fn file_backed_test_config(temp: &TempDir) -> Config {
