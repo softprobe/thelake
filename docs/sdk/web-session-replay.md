@@ -9,7 +9,7 @@ and the explorer **Web replay** tab plays them next to the conversation.
 ```text
 softprobe-code SPA
   → @softprobe/web-record (rrweb)
-  → POST {baseUrl}/v1/traces   (OTLP protobuf, Bearer Agent API key)
+  → POST {baseUrl}/v1/traces   (OTLP protobuf, Bearer Ingestion Key)
   → thelake DuckLake
   → GET /v1/sessions/{session_id}/recording?from=&to=
   → sp-llm explorer WebReplayPane (rrweb-player)

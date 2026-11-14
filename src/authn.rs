@@ -11,7 +11,7 @@ pub struct WorkspaceAuth {
     pub workspace_id: String,
     pub bucket_name: String,
     pub dataset_id: String,
-    /// Softprobe agent id from assertion JWT (agent API key path).
+    /// Softprobe agent id from assertion JWT (Ingestion Key path).
     pub agent_id: Option<String>,
     /// Softprobe agent display name from assertion JWT.
     pub agent_name: Option<String>,
