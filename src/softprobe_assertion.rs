@@ -32,10 +32,10 @@ pub struct SoftprobeAssertionClaims {
     pub email: Option<String>,
     #[serde(default)]
     pub exp: Option<i64>,
-    /// Softprobe agent id when the assertion was minted for an agent API key.
+    /// Softprobe agent id when the assertion was minted for an Ingestion Key.
     #[serde(default)]
     pub agent_id: Option<String>,
-    /// Softprobe agent display name when minted for an agent API key.
+    /// Softprobe agent display name when minted for an Ingestion Key.
     #[serde(default)]
     pub agent_name: Option<String>,
 }
